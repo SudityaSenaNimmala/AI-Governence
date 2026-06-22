@@ -1,0 +1,33 @@
+{
+  "name": "@cloudfuze/ai-governance-server",
+  "version": "0.1.0",
+  "description": "CloudFuze AI & Agent Governance — ingest API and storage",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.js",
+    "start": "tsx src/index.js",
+    "test": "node --test tests/",
+    "migrate:governance": "tsx src/governance/migrate.ts"
+  },
+  "dependencies": {
+    "@cloudfuze/ai-governance-agent": "file:../agent",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/pg": "^8.20.0",
+    "@types/uuid": "^10.0.0",
+    "better-sqlite3": "^11.5.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.21.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongodb": "^7.3.0",
+    "pg": "^8.13.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "uuid": "^14.0.0"
+  }
+}

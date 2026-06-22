@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';">
+  <title>CloudFuze AI Governance</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Sidebar navigation -->
+  <nav id="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <img src="../assets/icon.png" width="32" height="32" alt="CloudFuze" class="logo-icon">
+        <span class="logo-text">CloudFuze</span>
+      </div>
+      <span class="subtitle">AI Governance</span>
+    </div>
+    <ul class="nav-items">
+      <li class="nav-item active" data-tab="dashboard">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        Dashboard
+      </li>
+      <li class="nav-item" data-tab="settings">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        Settings
+      </li>
+      <li class="nav-item" data-tab="extension">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+        Browser Extension
+      </li>
+      <li class="nav-item" data-tab="injection">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        Desktop Hooks
+      </li>
+    </ul>
+    <div class="sidebar-footer">
+      <div id="status-badge" class="status-badge stopped">
+        <span class="status-dot"></span>
+        <span id="status-text">Stopped</span>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Main content area -->
+  <main id="content">
+    <!-- ═══ Dashboard Tab ═══ -->
+    <section id="tab-dashboard" class="tab-content active">
+      <div class="page-header">
+        <h1>Monitoring Dashboard</h1>
+        <div class="header-actions">
+          <button id="btn-toggle-monitor" class="btn btn-primary">Start Monitoring</button>
+          <button id="btn-run-scan" class="btn btn-secondary">Run Scan</button>
+          <button id="btn-open-dashboard" class="btn btn-ghost">Open Web Dashboard</button>
+        </div>
+      </div>
+
+      <!-- Status cards -->
+      <div class="card-grid">
+        <div class="card">
+          <div class="card-label">Monitor Status</div>
+          <div id="card-monitor-status" class="card-value status-stopped">Stopped</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Enrollment</div>
+          <div id="card-enrollment" class="card-value">Checking...</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Server</div>
+          <div id="card-server" class="card-value text-muted">--</div>
+        </div>
+        <div class="card">
+          <div class="card-label">DLP Events</div>
+          <div id="card-events" class="card-value">0</div>
+        </div>
+      </div>
+
+      <!-- What's monitored -->
+      <div class="section">
+        <h2>Active Monitors</h2>
+        <div class="monitor-grid" id="monitor-grid">
+          <div class="monitor-item" data-monitor="clipboard">
+            <span class="monitor-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
+            </span>
+            <span class="monitor-label">Clipboard DLP</span>
+            <span class="monitor-status" id="mon-clipboard">--</span>
+          </div>
+          <div class="monitor-item" data-monitor="fileDialogs">
+            <span class="monitor-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            </span>
+            <span class="monitor-label">File Dialogs</span>
+            <span class="monitor-status" id="mon-fileDialogs">--</span>
+          </div>
+          <div class="monitor-item" data-monitor="typedPrompts">
+            <span class="monitor-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+            </span>
+            <span class="monitor-label">Typed Prompts</span>
+            <span class="monitor-status" id="mon-typedPrompts">--</span>
+          </div>
+          <div class="monitor-item" data-monitor="attachments">
+            <span class="monitor-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            </span>
+            <span class="monitor-label">Attachments</span>
+            <span class="monitor-status" id="mon-attachments">--</span>
+          </div>
+          <div class="monitor-item" data-monitor="enforcer">
+            <span class="monitor-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            </span>
+            <span class="monitor-label">Send Blocker</span>
+            <span class="monitor-status" id="mon-enforcer">--</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent alerts -->
+      <div class="section">
+        <h2>Recent Alerts</h2>
+        <div id="alerts-container" class="alerts-list">
+          <div class="empty-state">No alerts yet. Start monitoring to see DLP events.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ Settings Tab ═══ -->
+    <section id="tab-settings" class="tab-content">
+      <div class="page-header">
+        <h1>Settings</h1>
+      </div>
+
+      <!-- Server connection -->
+      <div class="section">
+        <h2>Server Connection</h2>
+        <div class="form-group">
+          <label for="input-server-url">Server URL</label>
+          <input type="url" id="input-server-url" placeholder="http://localhost:8787" class="input">
+        </div>
+        <div class="form-group">
+          <label for="input-enroll-secret">Enrollment Secret</label>
+          <div class="input-row">
+            <input type="password" id="input-enroll-secret" placeholder="Enter enrollment secret" class="input">
+            <button id="btn-enroll" class="btn btn-primary">Enroll</button>
+          </div>
+          <p class="form-hint">Only needed for first-time enrollment. Once enrolled, the token is cached locally.</p>
+        </div>
+        <div id="enroll-status" class="form-status"></div>
+      </div>
+
+      <!-- Monitor toggles -->
+      <div class="section">
+        <h2>Monitoring</h2>
+        <div class="toggle-group">
+          <label class="toggle-row">
+            <span>Start monitoring on launch</span>
+            <input type="checkbox" id="toggle-startOnLaunch" class="toggle">
+          </label>
+          <label class="toggle-row">
+            <span>Clipboard DLP scanning</span>
+            <input type="checkbox" id="toggle-clipboard" class="toggle">
+          </label>
+          <label class="toggle-row">
+            <span>File dialog watching</span>
+            <input type="checkbox" id="toggle-fileDialogs" class="toggle">
+          </label>
+          <label class="toggle-row">
+            <span>Typed prompt scanning</span>
+            <input type="checkbox" id="toggle-typedPrompts" class="toggle">
+          </label>
+          <label class="toggle-row">
+            <span>Attachment watching</span>
+            <input type="checkbox" id="toggle-attachments" class="toggle">
+          </label>
+          <label class="toggle-row">
+            <span>Send blocker (keystroke enforcement)</span>
+            <input type="checkbox" id="toggle-enforcer" class="toggle">
+          </label>
+        </div>
+      </div>
+
+      <!-- Auto-start -->
+      <div class="section">
+        <h2>System</h2>
+        <div class="toggle-group">
+          <label class="toggle-row">
+            <span>Start on Windows boot</span>
+            <input type="checkbox" id="toggle-autoStart" class="toggle">
+          </label>
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button id="btn-save-settings" class="btn btn-primary">Save Settings</button>
+        <span id="save-status" class="form-status"></span>
+      </div>
+    </section>
+
+    <!-- ═══ Browser Extension Tab ═══ -->
+    <section id="tab-extension" class="tab-content">
+      <div class="page-header">
+        <h1>Browser Extension</h1>
+      </div>
+
+      <div class="section">
+        <p class="intro-text">
+          The CloudFuze browser extension intercepts sensitive data in web-based AI services
+          (ChatGPT, Claude.ai, Gemini, and more). It scans prompts and file uploads before they
+          leave the browser and reports violations to the governance server.
+        </p>
+      </div>
+
+      <div class="section">
+        <h2>Installation Guide</h2>
+        <div class="steps">
+          <div class="step">
+            <div class="step-number">1</div>
+            <div class="step-content">
+              <h3>Download the extension</h3>
+              <p>Click below to save the extension folder to your computer. You'll pick where to save it.</p>
+              <button id="btn-download-ext" class="btn btn-primary">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Download Extension
+              </button>
+              <span id="download-ext-status" class="form-status"></span>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-number">2</div>
+            <div class="step-content">
+              <h3>Open Chrome Extensions page</h3>
+              <p>Navigate to <code>chrome://extensions</code> in your Chrome or Edge browser.</p>
+              <p>Or click: <a href="#" id="link-chrome-ext">Open Chrome Extensions</a></p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-number">3</div>
+            <div class="step-content">
+              <h3>Enable Developer Mode</h3>
+              <p>Toggle the <strong>"Developer mode"</strong> switch in the top-right corner of the extensions page.</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-number">4</div>
+            <div class="step-content">
+              <h3>Load the extension</h3>
+              <p>Click <strong>"Load unpacked"</strong> and select the <code>CloudFuze-Extension</code> folder you downloaded in step 1.</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-number">5</div>
+            <div class="step-content">
+              <h3>Configure the extension</h3>
+              <p>Click the CloudFuze extension icon in the toolbar and set the server URL to match your governance server
+                 (default: <code>http://localhost:8787</code>).</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-number">6</div>
+            <div class="step-content">
+              <h3>Verify it's working</h3>
+              <p>Visit <a href="#" id="link-chatgpt">ChatGPT</a> or <a href="#" id="link-claude">Claude.ai</a>.
+                 You should see the CloudFuze shield icon indicating the extension is active. Try pasting a test
+                 secret like <code>AKIA1234567890ABCDEF</code> to trigger a detection.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Supported AI Services</h2>
+        <div class="services-grid">
+          <span class="service-badge">ChatGPT</span>
+          <span class="service-badge">Claude.ai</span>
+          <span class="service-badge">Gemini</span>
+          <span class="service-badge">Perplexity</span>
+          <span class="service-badge">Copilot</span>
+          <span class="service-badge">Poe</span>
+          <span class="service-badge">HuggingFace Chat</span>
+          <span class="service-badge">Mistral</span>
+          <span class="service-badge">Groq</span>
+          <span class="service-badge">You.com</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ Desktop Hooks (ASAR Injection) Tab ═══ -->
+    <section id="tab-injection" class="tab-content">
+      <div class="page-header">
+        <h1>Desktop App Hooks</h1>
+      </div>
+
+      <div class="section">
+        <div class="callout callout-warning">
+          <strong>Requires Administrator.</strong> ASAR injection modifies the Electron app bundle of AI desktop
+          apps (Cursor, older Claude Desktop builds). Apps that enforce ASAR integrity (current Claude Desktop)
+          will break — use the OS monitor + proxy for those instead.
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Inject DLP hooks into desktop AI apps</h2>
+        <p>This scans for installed Electron-based AI apps and injects a DOM-level hook that intercepts
+           sensitive data before it's sent. The hook reports violations to the governance server.</p>
+        <p>Supported apps: <strong>Cursor</strong>, <strong>Claude Desktop</strong> (non-Store builds),
+           <strong>ChatGPT Desktop</strong>, <strong>GitHub Copilot</strong>.</p>
+
+        <div class="form-actions">
+          <button id="btn-inject" class="btn btn-warning">Run ASAR Injection (Admin)</button>
+        </div>
+
+        <div id="inject-output" class="output-box" style="display:none;">
+          <pre id="inject-output-text"></pre>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Alternative: OS Monitor + Proxy</h2>
+        <p>For apps that enforce ASAR integrity, the OS-level monitor (clipboard, typed prompts, file dialogs)
+           and the HTTPS DLP proxy provide full coverage without modifying the app bundle.</p>
+        <ul>
+          <li><strong>OS Monitor</strong> — detects sensitive content pasted or typed into any AI app (active when monitoring is running)</li>
+          <li><strong>HTTPS Proxy</strong> — network-level interception that blocks requests containing secrets (run via CLI: <code>ai-gov-agent --proxy</code>)</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

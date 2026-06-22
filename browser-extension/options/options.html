@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>CloudFuze AI Governance — Settings</title>
+<link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <h1>CloudFuze AI Governance</h1>
+      <p class="sub">Privacy-respecting AI usage monitoring. Reports go only to your CloudFuze governance server.</p>
+    </header>
+
+    <section>
+      <h2>Server</h2>
+      <label>
+        Governance server URL
+        <input id="serverUrl" type="url" placeholder="https://aigov.cloudfuze.com" />
+      </label>
+      <label>
+        Enrollment secret <span class="hint">(one-time, from IT)</span>
+        <input id="enrollSecret" type="password" />
+      </label>
+      <button id="save">Save & enroll</button>
+      <p id="status" class="status"></p>
+    </section>
+
+    <section>
+      <h2>What this extension does</h2>
+      <ul>
+        <li>Watches AI service prompt inputs for <strong>secrets and PII</strong>.</li>
+        <li>Reports <strong>metadata only</strong> — site, pattern names, length buckets.</li>
+        <li><strong>Never</strong> reads or transmits the actual content of your prompts.</li>
+        <li>Pauses when extension is disabled.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Pending queue</h2>
+      <p id="queueStat" class="status">—</p>
+      <button id="flush">Flush now</button>
+      <button id="reset" class="danger">Reset extension state</button>
+    </section>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>

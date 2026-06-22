@@ -1,0 +1,144 @@
+{
+  "manifest_version": 3,
+  "name": "CloudFuze AI Governance",
+  "version": "0.4.0",
+  "description": "Detects sensitive data flowing into AI services. Reports to CloudFuze governance, never to third parties.",
+  "permissions": ["storage", "alarms", "tabs", "notifications", "scripting", "webNavigation"],
+  "host_permissions": [
+    "http://localhost/*",
+    "http://localhost:*/*",
+    "http://127.0.0.1/*",
+    "http://127.0.0.1:*/*",
+    "<all_urls>",
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://claude.ai/*",
+    "https://gemini.google.com/*",
+    "https://aistudio.google.com/*",
+    "https://perplexity.ai/*",
+    "https://www.perplexity.ai/*",
+    "https://copilot.microsoft.com/*",
+    "https://github.com/copilot/*",
+    "https://poe.com/*",
+    "https://you.com/*",
+    "https://huggingface.co/chat/*",
+    "https://mistral.ai/chat/*",
+    "https://chat.mistral.ai/*",
+    "https://groq.com/*",
+    "https://*.cloudfuze.com/*",
+    "https://salesforce.com/*",
+    "https://*.salesforce.com/*",
+    "https://*.force.com/*",
+    "https://*.lightning.force.com/*",
+    "https://*.my.salesforce.com/*",
+    "https://*.salesforceliveagent.com/*",
+    "https://*.lwr.salesforceliveagent.com/*",
+    "https://*.salesforce-experience.com/*",
+    "https://*.salesforce-sites.com/*",
+    "https://*.intercom.io/*",
+    "https://*.intercom.com/*",
+    "https://*.drift.com/*",
+    "https://*.driftt.com/*",
+    "https://*.zendesk.com/*",
+    "https://*.zopim.com/*",
+    "https://*.hubspot.com/*",
+    "https://*.hs-scripts.com/*",
+    "https://*.livechatinc.com/*",
+    "https://*.crisp.chat/*",
+    "https://*.tawk.to/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://aistudio.google.com/*",
+        "https://perplexity.ai/*",
+        "https://www.perplexity.ai/*",
+        "https://copilot.microsoft.com/*",
+        "https://github.com/copilot/*",
+        "https://poe.com/*",
+        "https://you.com/*",
+        "https://huggingface.co/chat/*",
+        "https://mistral.ai/chat/*",
+        "https://chat.mistral.ai/*",
+        "https://groq.com/*",
+        "https://salesforce.com/*",
+        "https://*.salesforce.com/*",
+        "https://*.force.com/*",
+        "https://*.lightning.force.com/*",
+        "https://*.my.salesforce.com/*",
+        "https://*.salesforceliveagent.com/*",
+        "https://*.lwr.salesforceliveagent.com/*",
+        "https://*.salesforce-experience.com/*",
+        "https://*.salesforce-sites.com/*",
+        "https://*.intercom.io/*",
+        "https://*.intercom.com/*",
+        "https://*.drift.com/*",
+        "https://*.driftt.com/*",
+        "https://*.zendesk.com/*",
+        "https://*.zopim.com/*",
+        "https://*.hubspot.com/*",
+        "https://*.hs-scripts.com/*",
+        "https://*.livechatinc.com/*",
+        "https://*.crisp.chat/*",
+        "https://*.tawk.to/*"
+      ],
+      "js": [
+        "vendor/pdf.js",
+        "vendor/mammoth.min.js",
+        "vendor/xlsx.min.js",
+        "vendor/jszip.min.js",
+        "vendor/tesseract/tesseract.min.js",
+        "content/patterns.js",
+        "content/content.js"
+      ],
+      "css": ["content/content.css"],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/fingerprint.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "content/fetch-blocker.js",
+        "vendor/pdf.worker.js",
+        "vendor/tesseract/worker.min.js",
+        "vendor/tesseract/tesseract-core.wasm",
+        "vendor/tesseract/tesseract-core.wasm.js",
+        "vendor/tesseract/tesseract-core-simd.wasm",
+        "vendor/tesseract/tesseract-core-simd.wasm.js",
+        "vendor/tesseract/tesseract-core-lstm.wasm",
+        "vendor/tesseract/tesseract-core-lstm.wasm.js",
+        "vendor/tesseract/tesseract-core-simd-lstm.wasm",
+        "vendor/tesseract/tesseract-core-simd-lstm.wasm.js",
+        "vendor/tesseract/eng.traineddata.gz"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "options_page": "options/options.html",
+  "action": {
+    "default_title": "CloudFuze AI Governance",
+    "default_popup": "options/options.html"
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  }
+}

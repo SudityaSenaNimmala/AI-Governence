@@ -1,0 +1,27 @@
+# CloudFuze AI Governance — auditd rules for AI model-weight file loads.
+#
+# Installed at /etc/audit/rules.d/cloudfuze-aigov-models.rules by install.sh.
+# Activated via `augenrules --load`.
+#
+# All rules are tagged key=cloudfuze-aigov-models — the server-monitor daemon
+# only consumes records matching that tag, so other auditd users on the host
+# are unaffected.
+#
+# Coverage strategy: we attach watches to the directories that hold most
+# real-world model weights. Per-suffix matching is done in user space by the
+# daemon when reading the audit records. We watch on read access ("r") to
+# trigger when an agent actually loads weight bytes (open + read).
+
+# Common HuggingFace cache locations
+-w /root/.cache/huggingface/ -p r -k cloudfuze-aigov-models
+-w /home/                    -p r -k cloudfuze-aigov-models
+
+# Standard llama.cpp / ollama model dirs
+-w /usr/share/ollama/        -p r -k cloudfuze-aigov-models
+-w /var/lib/ollama/          -p r -k cloudfuze-aigov-models
+-w /opt/                     -p r -k cloudfuze-aigov-models
+
+# Don't follow symlinks into /proc, /sys, /dev — those generate noise.
+# auditd doesn't have an exclude-path directive in v3.x, so we rely on the
+# daemon's path filtering instead (it ignores anything not ending in a
+# known weight suffix).

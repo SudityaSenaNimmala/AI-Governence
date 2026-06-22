@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v4 source for the CloudFuze AI Governance Agent MSI.
+
+  Build:
+    wix build aigov.wxs -arch x64 -o ai-gov-agent.msi
+    signtool sign /tr http://timestamp.digicert.com /td sha256 /fd sha256 \
+      /a ai-gov-agent.msi
+
+  Install (silent, MDM-pushed):
+    msiexec /i ai-gov-agent.msi /qn ^
+      SERVERURL=https://aigov.cloudfuze.com ^
+      ENROLLSECRET=<secret-from-MDM>
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="CloudFuze AI Governance Agent"
+           Manufacturer="CloudFuze, Inc."
+           Version="0.1.0"
+           UpgradeCode="9F2C3E4B-1AAA-4BBB-9CCC-2DDDDEEEEFFF"
+           InstallerVersion="500"
+           Scope="perMachine">
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="SERVERURL"    Secure="yes" />
+    <Property Id="ENROLLSECRET" Secure="yes" Hidden="yes" />
+    <Property Id="RUNDAILY"     Value="09:00" Secure="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="CompanyFolder" Name="CloudFuze">
+        <Directory Id="INSTALLDIR" Name="AIGovAgent">
+          <Component Id="AgentExe" Guid="A1A1A1A1-2B2B-3C3C-4D4D-5E5E5E5E5E5E">
+            <File Id="AgentExeFile" Source="ai-gov-agent.exe" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="AI Governance Agent" Level="1">
+      <ComponentRef Id="AgentExe" />
+    </Feature>
+
+    <!-- After install: write config + run enrollment + register scheduled task -->
+    <CustomAction Id="PostInstall" Directory="INSTALLDIR" Impersonate="no" Execute="deferred" Return="check"
+                  ExeCommand="powershell.exe -ExecutionPolicy Bypass -NoProfile -File [#PostInstallScript] -ServerUrl &quot;[SERVERURL]&quot; -EnrollSecret &quot;[ENROLLSECRET]&quot; -RunDaily &quot;[RUNDAILY]&quot;" />
+
+    <InstallExecuteSequence>
+      <Custom Action="PostInstall" After="InstallFiles" Condition="NOT Installed" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

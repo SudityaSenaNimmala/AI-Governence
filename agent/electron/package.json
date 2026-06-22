@@ -1,0 +1,71 @@
+{
+  "name": "cloudfuze-ai-governance",
+  "version": "0.1.0",
+  "description": "CloudFuze AI Governance — Desktop Agent",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.0"
+  },
+  "build": {
+    "appId": "com.cloudfuze.ai-governance",
+    "productName": "CloudFuze AI Governance",
+    "copyright": "Copyright © 2026 CloudFuze",
+    "directories": {
+      "output": "../build/electron-dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../src",
+        "to": "agent-src",
+        "filter": ["**/*", "!**/node_modules/**"]
+      },
+      {
+        "from": "../../browser-extension",
+        "to": "browser-extension",
+        "filter": ["**/*", "!**/node_modules/**"]
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CloudFuze AI Governance",
+      "include": "installer.nsh"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.utilities"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets",
+      "category": "Utility"
+    }
+  }
+}
