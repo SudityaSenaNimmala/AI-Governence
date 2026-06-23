@@ -22,10 +22,9 @@ import { Enforcer } from './enforcer.js';
 import { Reporter } from './reporter.js';
 
 // How long after firing a toast for a (clipboardSeq, processName) pair we
-// suppress re-firing for the same pair. 30s is long enough to prevent focus-
-// thrash spam, short enough that returning to an AI surface after a break
-// re-warns the user.
-const FIRE_DEDUP_TTL_MS = 30_000;
+// suppress re-firing for the same pair. 10s prevents rapid-fire spam while
+// still re-warning on repeated paste attempts.
+const FIRE_DEDUP_TTL_MS = 10_000;
 
 // Clipboard scrubbing was removed on 2026-06-15: the clipboard path now fires
 // on the actual paste gesture, so the content is already in the app and

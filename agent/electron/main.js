@@ -108,20 +108,17 @@ function startMonitor() {
     return;
   }
 
-  const agentEntry = path.join(AGENT_SRC, 'index.js');
-  if (!fs.existsSync(agentEntry)) {
-    sendToRenderer('monitor-error', `Agent source not found at ${agentEntry}`);
+  // Use the lightweight monitor runner that starts the OsMonitor directly,
+  // bypassing the full machine scan. The agent CLI's --monitor requires a
+  // scan + server upload to succeed first, so it fails when the server is down.
+  const monitorRunner = path.join(__dirname, 'monitor-runner.mjs');
+  if (!fs.existsSync(monitorRunner)) {
+    sendToRenderer('monitor-error', `Monitor runner not found at ${monitorRunner}`);
     return;
   }
 
-  const args = [
-    agentEntry,
-    '--monitor',
-    '--server', creds.serverUrl,
-  ];
-
-  monitorProcess = spawn(process.execPath.includes('electron') ? 'node' : process.execPath, args, {
-    cwd: AGENT_SRC,
+  monitorProcess = spawn('node', [monitorRunner], {
+    cwd: path.join(__dirname, '..'),  // agent/ dir so relative imports work
     env: { ...process.env, NODE_NO_WARNINGS: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

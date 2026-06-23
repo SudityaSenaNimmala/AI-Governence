@@ -74,6 +74,10 @@ public static class CfaiEnforcer
     static extern short GetAsyncKeyState(int vKey);
     [DllImport("user32.dll")]
     static extern short GetKeyState(int nVirtKey);
+    [DllImport("user32.dll")]
+    static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    [StructLayout(LayoutKind.Sequential)]
+    struct RECT { public int Left, Top, Right, Bottom; }
 
     [StructLayout(LayoutKind.Sequential)]
     struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam; public IntPtr lParam; public uint time; public int x; public int y; }
@@ -119,15 +123,40 @@ public static class CfaiEnforcer
     static string _typedPatterns = "";
     static readonly StringBuilder _typed = new StringBuilder();
     static uint _typedOwnerPid = 0;
+    // Timestamp of the last keystroke that triggered a pattern match.
+    // Used to expire the block: in multi-panel apps (Cursor), keystrokes
+    // in the editor can pollute the buffer, so we expire after 60s of
+    // no new matching keystrokes — the user moved on to something else.
+    static long _typedBlockTicks = 0;
+    static readonly long TYPED_BLOCK_TTL = TimeSpan.FromSeconds(60).Ticks;
 
-    // UIA block (bonus / menu-paste coverage) — written only by the poll thread.
+    // UIA block — used ONLY for send-button rect detection (tells us a
+    // block is active so we should look for the button), NOT for the
+    // Enter-to-send decision.  UIA reads from whatever element has focus,
+    // which in multi-panel apps (Cursor) can be the editor, terminal, or
+    // AI response panel — all of which routinely contain displayed API
+    // keys, JWTs, etc.  Using it for Enter would false-block every
+    // keystroke in the entire IDE.
     static volatile bool _blockUia = false;
     static string _uiaPatterns = "";
 
     // Clipboard/paste block — written only by the poll thread.
     static volatile bool _blockPaste = false;
 
+    // Timestamp of last Ctrl+V press.  Clipboard is only checked in the
+    // Enter decision within a short window after a paste — long enough for
+    // the user to paste and immediately hit Enter, short enough that stale
+    // clipboard from minutes ago doesn't false-block.
+    static long _lastPasteTicks = 0;
+    static readonly long PASTE_WINDOW = TimeSpan.FromSeconds(5).Ticks;
+
     static HashSet<string> _aiProcs;
+    // IDE-type apps where UIA reads code/terminal/output, not just the AI
+    // prompt.  For these, UIA is excluded from the Enter-block decision to
+    // avoid false positives.  Pure chat apps (Claude, ChatGPT, Gemini) keep
+    // UIA in the Enter check because the focused element IS the composer.
+    static readonly HashSet<string> _ideApps = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { "Cursor", "Code", "VSCode", "Copilot" };
     static List<KeyValuePair<string, Regex>> _regexes;
     static readonly object _emitLock = new object();
 
@@ -168,9 +197,31 @@ public static class CfaiEnforcer
 
     static bool Down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
-    static bool BlockActive() { return _blockTyped || _blockUia; }
+    // Is the typed-buffer block still fresh? Expires after 60s of no new
+    // matching keystrokes so stale buffers from editor typing don't
+    // permanently block sends in a different panel.
+    static bool TypedBlockFresh()
+    {
+        return _blockTyped && (DateTime.UtcNow.Ticks - _typedBlockTicks) < TYPED_BLOCK_TTL;
+    }
 
-    static string ActivePatterns() { return _blockTyped ? _typedPatterns : _uiaPatterns; }
+    // Block is active for Enter/send decisions: typed-buffer (fresh) or
+    // paste-in-session.  UIA is intentionally excluded — see comment above.
+    static bool BlockActiveForSend(bool pastedThisSession, bool clipBlock)
+    {
+        return TypedBlockFresh() || (pastedThisSession && clipBlock);
+    }
+
+    // Block is active for mouse-hook send-button detection: includes UIA
+    // and the paste-window clipboard check so pasted secrets also block
+    // the send button click.
+    static bool BlockActiveForMouse()
+    {
+        bool recentPaste = (DateTime.UtcNow.Ticks - _lastPasteTicks) < PASTE_WINDOW;
+        return TypedBlockFresh() || _blockUia || (recentPaste && _blockPaste);
+    }
+
+    static string ActivePatterns() { return _blockTyped ? _typedPatterns : _blockUia ? _uiaPatterns : ""; }
 
     // Mouse hook — swallows a click on the send button while a block is active.
     // Only acts on left-button down/up that land inside the cached send-button
@@ -185,7 +236,7 @@ public static class CfaiEnforcer
                 int msg = wParam.ToInt32();
                 if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP)
                 {
-                    if (_fgIsAi && BlockActive() && _hasRect)
+                    if (_fgIsAi && BlockActiveForMouse() && _hasRect)
                     {
                         int x = Marshal.ReadInt32(lParam);        // MSLLHOOKSTRUCT.pt.x
                         int y = Marshal.ReadInt32(lParam, 4);     // MSLLHOOKSTRUCT.pt.y
@@ -227,18 +278,31 @@ public static class CfaiEnforcer
                             _blockTyped = false; _typedPatterns = "";
                         }
 
-                        // Ctrl+V paste of a blocked clipboard → swallow.
-                        if (vk == VK_V && ctrl && !alt && _blockPaste)
+                        // Track Ctrl+V — record timestamp so clipboard is checked
+                        // in the Enter decision only within a short window.
+                        if (vk == VK_V && ctrl && !alt)
                         {
-                            Emit("block", _app, _pastePatterns(), "paste");
-                            return (IntPtr)1;
+                            _lastPasteTicks = DateTime.UtcNow.Ticks;
                         }
 
                         // Enter-to-send decision.
+                        //   1. Typed buffer — user typed a secret (fresh 60s).
+                        //   2. UIA focused element — for pure chat apps only
+                        //      (Claude Desktop, ChatGPT, Gemini). Excluded for
+                        //      IDEs (Cursor) where UIA reads code/terminal.
+                        //   3. Clipboard — ONLY within 5s of a Ctrl+V press.
+                        //      Prevents stale clipboard from false-blocking
+                        //      while still catching paste-then-Enter.
                         if (vk == VK_RETURN && !shift)
                         {
-                            bool block = _blockTyped || _blockUia;
-                            string pats = _blockTyped ? _typedPatterns : _uiaPatterns;
+                            bool isIde = _ideApps.Contains(_app);
+                            bool uiaBlock = !isIde && _blockUia;
+                            bool recentPaste = (DateTime.UtcNow.Ticks - _lastPasteTicks) < PASTE_WINDOW;
+                            bool clipBlock = recentPaste && _blockPaste;
+                            bool block = TypedBlockFresh() || uiaBlock || clipBlock;
+                            string pats = TypedBlockFresh() ? _typedPatterns
+                                        : uiaBlock ? _uiaPatterns
+                                        : _pastePatterns();
                             if (block)
                             {
                                 if (ctrl && alt) { Emit("override", _app, pats, ""); }  // allow, logged
@@ -283,7 +347,9 @@ public static class CfaiEnforcer
     {
         string hits = ScanNames(_typed.ToString());
         _typedPatterns = hits;
+        bool wasBlocked = _blockTyped;
         _blockTyped = hits.Length > 0;
+        if (_blockTyped) _typedBlockTicks = DateTime.UtcNow.Ticks;
     }
 
     // Manual VK -> char mapping for the charset our secret patterns use:
@@ -335,45 +401,75 @@ public static class CfaiEnforcer
         else { _fgIsAi = false; }
     }
 
-    // When a block is active, find the send button in the foreground AI window
-    // and cache its screen rectangle so the mouse hook can swallow clicks on it.
-    // Matches buttons whose Name/AutomationId/HelpText mentions send/submit
-    // (Claude/ChatGPT expose the composer send control with an aria-label that
-    // surfaces as the UIA Name). Cleared when no block is active so normal
-    // clicks are never swallowed.
+    // When a block is active, locate the send button so the mouse hook can
+    // swallow clicks on it.  Strategy:
+    //   1. Try UIA — look for a Button/Custom/Image with a send-related label.
+    //   2. Fallback — Electron/Chromium apps don't expose DOM buttons to UIA,
+    //      so use a heuristic: the bottom-right 120x80 px of the window is
+    //      where every AI chat app puts its send button.
+    // Cleared when no block is active so normal clicks are never swallowed.
     static void UpdateSendRect()
     {
-        if (!_fgIsAi || !BlockActive()) { _hasRect = false; return; }
+        if (!_fgIsAi || !BlockActiveForMouse()) { _hasRect = false; return; }
         try
         {
             IntPtr fg = GetForegroundWindow();
             if (fg == IntPtr.Zero) { _hasRect = false; return; }
-            AutomationElement win = AutomationElement.FromHandle(fg);
-            if (win == null) { _hasRect = false; return; }
-            var cond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button);
-            AutomationElementCollection btns = win.FindAll(TreeScope.Descendants, cond);
-            foreach (AutomationElement b in btns)
+
+            // --- Attempt 1: UIA button search ---
+            try
             {
-                string name = "", aid = "", help = "";
-                try { name = b.Current.Name ?? ""; } catch { }
-                try { aid = b.Current.AutomationId ?? ""; } catch { }
-                try { help = b.Current.HelpText ?? ""; } catch { }
-                string hay = (name + " " + aid + " " + help).ToLowerInvariant();
-                if (hay.Contains("send") || hay.Contains("submit"))
+                AutomationElement win = AutomationElement.FromHandle(fg);
+                if (win != null)
                 {
-                    try
+                    var cond = new OrCondition(
+                        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
+                        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Custom)
+                    );
+                    AutomationElementCollection btns = win.FindAll(TreeScope.Descendants, cond);
+                    foreach (AutomationElement b in btns)
                     {
-                        System.Windows.Rect r = b.Current.BoundingRectangle;
-                        if (!r.IsEmpty && r.Width > 0 && r.Height > 0)
+                        string name = "", aid = "", help = "";
+                        try { name = b.Current.Name ?? ""; } catch { }
+                        try { aid = b.Current.AutomationId ?? ""; } catch { }
+                        try { help = b.Current.HelpText ?? ""; } catch { }
+                        string hay = (name + " " + aid + " " + help).ToLowerInvariant();
+                        if (hay.Contains("send") || hay.Contains("submit"))
                         {
-                            _rx = (int)r.Left; _ry = (int)r.Top;
-                            _rw = (int)r.Width; _rh = (int)r.Height;
-                            _hasRect = true;
-                            return;
+                            System.Windows.Rect r = b.Current.BoundingRectangle;
+                            if (!r.IsEmpty && r.Width > 0 && r.Height > 0)
+                            {
+                                _rx = (int)r.Left; _ry = (int)r.Top;
+                                _rw = (int)r.Width; _rh = (int)r.Height;
+                                _hasRect = true;
+                                return;
+                            }
                         }
                     }
-                    catch { }
                 }
+            }
+            catch { /* UIA failed — fall through to heuristic */ }
+
+            // --- Attempt 2: heuristic bottom-right zone ---
+            // Every major AI chat app (Claude, ChatGPT, Gemini, Cursor,
+            // Copilot) places the send button in the bottom-right corner
+            // of the window, inside the composer area.  Block a generous
+            // zone there.  This is the ONLY way to catch send-button
+            // clicks in Electron apps where UIA sees the whole web view
+            // as one opaque element.
+            RECT wr;
+            if (GetWindowRect(fg, out wr))
+            {
+                int winW = wr.Right - wr.Left;
+                int winH = wr.Bottom - wr.Top;
+                // Bottom-right zone: 150px wide, 100px tall from the
+                // bottom-right corner, offset 10px from the edge.
+                _rx = wr.Right - 160;
+                _ry = wr.Bottom - 110;
+                _rw = 150;
+                _rh = 100;
+                _hasRect = true;
+                return;
             }
             _hasRect = false;
         }
