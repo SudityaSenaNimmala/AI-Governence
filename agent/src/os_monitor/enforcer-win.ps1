@@ -119,31 +119,13 @@ public static class CfaiEnforcer
     static string _typedPatterns = "";
     static readonly StringBuilder _typed = new StringBuilder();
     static uint _typedOwnerPid = 0;
-    // Timestamp of the last keystroke that triggered a pattern match.
-    // Used to expire the block: in multi-panel apps (Cursor), keystrokes
-    // in the editor can pollute the buffer, so we expire after 60s of
-    // no new matching keystrokes — the user moved on to something else.
-    static long _typedBlockTicks = 0;
-    static readonly long TYPED_BLOCK_TTL = TimeSpan.FromSeconds(60).Ticks;
 
-    // UIA block — used ONLY for send-button rect detection (tells us a
-    // block is active so we should look for the button), NOT for the
-    // Enter-to-send decision.  UIA reads from whatever element has focus,
-    // which in multi-panel apps (Cursor) can be the editor, terminal, or
-    // AI response panel — all of which routinely contain displayed API
-    // keys, JWTs, etc.  Using it for Enter would false-block every
-    // keystroke in the entire IDE.
+    // UIA block (bonus / menu-paste coverage) — written only by the poll thread.
     static volatile bool _blockUia = false;
     static string _uiaPatterns = "";
 
     // Clipboard/paste block — written only by the poll thread.
     static volatile bool _blockPaste = false;
-
-    // Did the user actually paste (Ctrl+V) into this prompt session?  Only
-    // then do we include the clipboard check in the Enter decision.  Without
-    // this gate, stale clipboard contents from hours ago false-block Enter in
-    // apps like Cursor where the foreground process is always an AI surface.
-    static volatile bool _pastedThisSession = false;
 
     static HashSet<string> _aiProcs;
     static List<KeyValuePair<string, Regex>> _regexes;
@@ -186,27 +168,9 @@ public static class CfaiEnforcer
 
     static bool Down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
-    // Is the typed-buffer block still fresh? Expires after 60s of no new
-    // matching keystrokes so stale buffers from editor typing don't
-    // permanently block sends in a different panel.
-    static bool TypedBlockFresh()
-    {
-        return _blockTyped && (DateTime.UtcNow.Ticks - _typedBlockTicks) < TYPED_BLOCK_TTL;
-    }
+    static bool BlockActive() { return _blockTyped || _blockUia; }
 
-    // Block is active for Enter/send decisions: typed-buffer (fresh) or
-    // paste-in-session.  UIA is intentionally excluded — see comment above.
-    static bool BlockActiveForSend(bool pastedThisSession, bool clipBlock)
-    {
-        return TypedBlockFresh() || (pastedThisSession && clipBlock);
-    }
-
-    // Block is active for mouse-hook send-button detection: includes UIA
-    // as a secondary signal since clicking a send button is a deliberate
-    // action (lower false-positive cost than blocking every Enter).
-    static bool BlockActiveForMouse() { return TypedBlockFresh() || _blockUia; }
-
-    static string ActivePatterns() { return _blockTyped ? _typedPatterns : _blockUia ? _uiaPatterns : ""; }
+    static string ActivePatterns() { return _blockTyped ? _typedPatterns : _uiaPatterns; }
 
     // Mouse hook — swallows a click on the send button while a block is active.
     // Only acts on left-button down/up that land inside the cached send-button
@@ -221,7 +185,7 @@ public static class CfaiEnforcer
                 int msg = wParam.ToInt32();
                 if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP)
                 {
-                    if (_fgIsAi && BlockActiveForMouse() && _hasRect)
+                    if (_fgIsAi && BlockActive() && _hasRect)
                     {
                         int x = Marshal.ReadInt32(lParam);        // MSLLHOOKSTRUCT.pt.x
                         int y = Marshal.ReadInt32(lParam, 4);     // MSLLHOOKSTRUCT.pt.y
@@ -261,29 +225,20 @@ public static class CfaiEnforcer
                         {
                             _typed.Length = 0; _typedOwnerPid = _fgPid;
                             _blockTyped = false; _typedPatterns = "";
-                            _pastedThisSession = false;
                         }
 
-                        // Track Ctrl+V — mark that a paste happened in this prompt
-                        // session so we can include clipboard in the Enter check.
-                        if (vk == VK_V && ctrl && !alt)
+                        // Ctrl+V paste of a blocked clipboard → swallow.
+                        if (vk == VK_V && ctrl && !alt && _blockPaste)
                         {
-                            _pastedThisSession = true;
+                            Emit("block", _app, _pastePatterns(), "paste");
+                            return (IntPtr)1;
                         }
 
                         // Enter-to-send decision.
-                        // Only block if the user actually TYPED a pattern (fresh)
-                        // or PASTED one this session.  UIA is excluded — it reads
-                        // from whatever element has focus, which in IDEs like
-                        // Cursor can be code/terminal/AI-response text full of
-                        // displayed patterns that have nothing to do with the
-                        // current prompt.
                         if (vk == VK_RETURN && !shift)
                         {
-                            bool clipBlock = _pastedThisSession && _blockPaste;
-                            bool block = TypedBlockFresh() || clipBlock;
-                            string pats = TypedBlockFresh() ? _typedPatterns
-                                        : _pastePatterns();
+                            bool block = _blockTyped || _blockUia;
+                            string pats = _blockTyped ? _typedPatterns : _uiaPatterns;
                             if (block)
                             {
                                 if (ctrl && alt) { Emit("override", _app, pats, ""); }  // allow, logged
@@ -293,13 +248,11 @@ public static class CfaiEnforcer
                             {
                                 // Clean send — reset the buffer for the next prompt.
                                 _typed.Length = 0; _blockTyped = false; _typedPatterns = "";
-                                _pastedThisSession = false;
                             }
                         }
                         else if (vk == VK_ESCAPE)
                         {
                             _typed.Length = 0; _blockTyped = false; _typedPatterns = "";
-                            _pastedThisSession = false;
                         }
                         else if (vk == VK_BACK)
                         {
@@ -330,9 +283,7 @@ public static class CfaiEnforcer
     {
         string hits = ScanNames(_typed.ToString());
         _typedPatterns = hits;
-        bool wasBlocked = _blockTyped;
         _blockTyped = hits.Length > 0;
-        if (_blockTyped) _typedBlockTicks = DateTime.UtcNow.Ticks;
     }
 
     // Manual VK -> char mapping for the charset our secret patterns use:
@@ -392,7 +343,7 @@ public static class CfaiEnforcer
     // clicks are never swallowed.
     static void UpdateSendRect()
     {
-        if (!_fgIsAi || !BlockActiveForMouse()) { _hasRect = false; return; }
+        if (!_fgIsAi || !BlockActive()) { _hasRect = false; return; }
         try
         {
             IntPtr fg = GetForegroundWindow();
@@ -408,13 +359,7 @@ public static class CfaiEnforcer
                 try { aid = b.Current.AutomationId ?? ""; } catch { }
                 try { help = b.Current.HelpText ?? ""; } catch { }
                 string hay = (name + " " + aid + " " + help).ToLowerInvariant();
-                // Match send/submit buttons across AI apps: Cursor uses "ask"
-                // or "chat", ChatGPT/Claude use "send message", Copilot uses
-                // "submit". Also match generic arrow icons via common IDs.
-                if (hay.Contains("send") || hay.Contains("submit")
-                    || hay.Contains("ask ") || hay.Contains("ask\t") || hay == "ask"
-                    || hay.Contains("chat") || hay.Contains("run ")
-                    || hay.Contains("composer") || hay.Contains("generate"))
+                if (hay.Contains("send") || hay.Contains("submit"))
                 {
                     try
                     {
