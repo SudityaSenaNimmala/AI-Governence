@@ -1383,4 +1383,121 @@
     if (/tawk\.to/.test(host))               return 'Tawk AI';
     return host;
   }
+
+  // ── Blocked Agent Enforcement ──────────────────────────────────────────────
+  // Maps platform types to the hostnames where those agents are accessed via
+  // browser. When a blocked agent is detected on the current page, we inject
+  // a full-page overlay that prevents all interaction.
+
+  const PLATFORM_TO_HOSTS = {
+    copilot_studio:     [/copilot\.microsoft/, /powerva\.ms/, /copilotstudio/],
+    personal_agent:     [/copilot\.microsoft/],
+    teams_chat_agent:   [/teams\.microsoft/],
+    openai_assistant:   [/chatgpt\.com/, /chat\.openai\.com/],
+    custom_gpt:         [/chatgpt\.com/, /chat\.openai\.com/],
+    claude_ai_project:  [/claude\.ai/],
+    gemini:             [/gemini\.google/, /aistudio\.google/],
+    gemini_enterprise:  [/gemini\.google/, /discoveryengine/],
+    vertex_ai:          [/console\.cloud\.google/],
+    azure_foundry:      [/portal\.azure/, /ai\.azure/],
+  };
+
+  let _blockedOverlay = null;
+
+  function checkBlockedAgents(blockedList) {
+    if (!blockedList || blockedList.length === 0) {
+      removeBlockOverlay();
+      return;
+    }
+    const host = location.hostname;
+    const pageText = (document.title + ' ' + document.body?.innerText?.slice(0, 5000)).toLowerCase();
+
+    for (const agent of blockedList) {
+      // Check if this page hosts the agent's platform
+      const hostPatterns = PLATFORM_TO_HOSTS[agent.platform] || [];
+      const hostMatch = hostPatterns.some(rx => rx.test(host));
+      if (!hostMatch) continue;
+
+      // Check if the agent name appears on the page
+      const name = (agent.agent_name || '').toLowerCase();
+      if (name && name.length > 2 && pageText.includes(name)) {
+        showBlockOverlay(agent);
+        return;
+      }
+    }
+    removeBlockOverlay();
+  }
+
+  function showBlockOverlay(agent) {
+    if (_blockedOverlay) return; // already showing
+    _blockedOverlay = document.createElement('div');
+    _blockedOverlay.id = 'cfai-block-overlay';
+    _blockedOverlay.innerHTML = `
+      <div style="
+        position:fixed; inset:0; z-index:2147483647;
+        background:rgba(0,0,0,0.85); display:flex; align-items:center;
+        justify-content:center; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+      ">
+        <div style="
+          background:#1c1c1e; border:1px solid #ef4444; border-radius:16px;
+          padding:40px 48px; max-width:480px; text-align:center; color:#fff;
+        ">
+          <div style="font-size:48px; margin-bottom:16px;">&#128683;</div>
+          <h2 style="font-size:20px; font-weight:700; margin:0 0 8px; color:#ef4444;">
+            Agent Blocked
+          </h2>
+          <p style="font-size:15px; color:#ccc; margin:0 0 16px; line-height:1.6;">
+            <strong>${agent.agent_name || 'This agent'}</strong> has been blocked by your organization's AI governance policy.
+          </p>
+          <p style="font-size:12px; color:#888; margin:0 0 20px;">
+            ${agent.reason || 'Contact your administrator for access.'}
+          </p>
+          <div style="
+            display:inline-flex; align-items:center; gap:8px; padding:8px 16px;
+            background:#ef44441a; border:1px solid #ef444433; border-radius:8px;
+            font-size:12px; color:#f87171;
+          ">
+            <span>CloudFuze AI Governance</span>
+          </div>
+        </div>
+      </div>
+    `;
+    document.documentElement.appendChild(_blockedOverlay);
+    // Block all keyboard and mouse input
+    const blocker = (e) => { e.stopPropagation(); e.preventDefault(); };
+    _blockedOverlay.addEventListener('keydown', blocker, true);
+    _blockedOverlay.addEventListener('click', blocker, true);
+    console.info('[cfai] Agent blocked:', agent.agent_name, agent.platform);
+  }
+
+  function removeBlockOverlay() {
+    if (_blockedOverlay) {
+      _blockedOverlay.remove();
+      _blockedOverlay = null;
+    }
+  }
+
+  // Request blocked list from background on load
+  try {
+    chrome.runtime.sendMessage({ type: 'cfai-get-blocked' }, (resp) => {
+      if (resp?.blocked) checkBlockedAgents(resp.blocked);
+    });
+  } catch {}
+
+  // Listen for real-time blocked list updates from background
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.type === 'cfai-blocked-update') {
+      checkBlockedAgents(msg.blocked || []);
+    }
+  });
+
+  // Re-check periodically (page content changes as user navigates SPAs)
+  setInterval(() => {
+    try {
+      chrome.runtime.sendMessage({ type: 'cfai-get-blocked' }, (resp) => {
+        if (resp?.blocked) checkBlockedAgents(resp.blocked);
+      });
+    } catch {}
+  }, 15000);
+
 })();

@@ -118,6 +118,25 @@ public static class CfaiEnforcer
     static volatile uint _fgPid = 0;
     static string _app = "";
 
+    // Blocked agents — the foreground process is fully blocked (all Enter +
+    // send button swallowed) when it matches a platform in the blocklist.
+    // Updated every 30s by reading ~/.cloudfuze-aigov/blocked-agents.json.
+    static volatile bool _fgIsBlocked = false;
+    static string _blockedReason = "";
+    static string _blockedAgentFile = "";
+    static long _lastBlockedCheck = 0;
+    static readonly long BLOCKED_CHECK_INTERVAL = TimeSpan.FromSeconds(10).Ticks;
+    // Platform → process name mapping for desktop enforcement.
+    static readonly Dictionary<string, HashSet<string>> PLATFORM_PROCS = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase) {
+        { "copilot_studio",    new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Copilot", "M365Copilot" } },
+        { "personal_agent",    new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Copilot", "M365Copilot" } },
+        { "openai_assistant",  new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ChatGPT" } },
+        { "custom_gpt",        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ChatGPT" } },
+        { "claude_ai_project", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Claude" } },
+        { "gemini",            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Gemini" } },
+        { "vertex_ai",         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Gemini" } },
+    };
+
     // Typed-buffer block — written only by the hook thread.
     static volatile bool _blockTyped = false;
     static string _typedPatterns = "";
@@ -163,6 +182,9 @@ public static class CfaiEnforcer
     public static void Start(string[] aiProcs, string[] patNames, string[] patSources)
     {
         try { SetProcessDPIAware(); } catch { }   // align UIA rect with hook screen coords
+        _blockedAgentFile = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".cloudfuze-aigov", "blocked-agents.json");
         _aiProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var p in aiProcs) { if (!string.IsNullOrEmpty(p)) _aiProcs.Add(p.Replace(".exe", "")); }
         _regexes = new List<KeyValuePair<string, Regex>>();
@@ -218,7 +240,7 @@ public static class CfaiEnforcer
     static bool BlockActiveForMouse()
     {
         bool recentPaste = (DateTime.UtcNow.Ticks - _lastPasteTicks) < PASTE_WINDOW;
-        return TypedBlockFresh() || _blockUia || (recentPaste && _blockPaste);
+        return _fgIsBlocked || TypedBlockFresh() || _blockUia || (recentPaste && _blockPaste);
     }
 
     static string ActivePatterns() { return _blockTyped ? _typedPatterns : _blockUia ? _uiaPatterns : ""; }
@@ -299,8 +321,9 @@ public static class CfaiEnforcer
                             bool uiaBlock = !isIde && _blockUia;
                             bool recentPaste = (DateTime.UtcNow.Ticks - _lastPasteTicks) < PASTE_WINDOW;
                             bool clipBlock = recentPaste && _blockPaste;
-                            bool block = TypedBlockFresh() || uiaBlock || clipBlock;
-                            string pats = TypedBlockFresh() ? _typedPatterns
+                            bool block = _fgIsBlocked || TypedBlockFresh() || uiaBlock || clipBlock;
+                            string pats = _fgIsBlocked ? _blockedReason
+                                        : TypedBlockFresh() ? _typedPatterns
                                         : uiaBlock ? _uiaPatterns
                                         : _pastePatterns();
                             if (block)
@@ -378,10 +401,84 @@ public static class CfaiEnforcer
     {
         while (true)
         {
-            try { UpdateForeground(); UpdatePaste(); UpdateUia(); UpdateSendRect(); }
+            try { UpdateForeground(); UpdateBlockedAgents(); UpdatePaste(); UpdateUia(); UpdateSendRect(); }
             catch { }
             Thread.Sleep(150);
         }
+    }
+
+    // Read blocked-agents.json and check if the foreground process matches
+    // a blocked platform. Updated every 10s (file I/O is cheap).
+    static List<Dictionary<string, string>> _blockedList = new List<Dictionary<string, string>>();
+
+    static void UpdateBlockedAgents()
+    {
+        // Only re-read the file every 10s
+        long now = DateTime.UtcNow.Ticks;
+        if (now - _lastBlockedCheck < BLOCKED_CHECK_INTERVAL) {
+            // Just re-check foreground against cached list
+            CheckFgBlocked();
+            return;
+        }
+        _lastBlockedCheck = now;
+        try {
+            if (!System.IO.File.Exists(_blockedAgentFile)) { _blockedList.Clear(); _fgIsBlocked = false; return; }
+            string json = System.IO.File.ReadAllText(_blockedAgentFile);
+            // Minimal JSON parse — extract platform and agent_name fields
+            var list = new List<Dictionary<string, string>>();
+            // Simple parse: the file is an array of {agent_id, agent_name, platform, reason}
+            json = json.Trim();
+            if (json.StartsWith("[")) {
+                // Split by },{ pattern
+                foreach (string item in SplitJsonArray(json)) {
+                    var d = new Dictionary<string, string>();
+                    d["platform"] = ExtractJsonString(item, "platform");
+                    d["agent_name"] = ExtractJsonString(item, "agent_name");
+                    d["reason"] = ExtractJsonString(item, "reason");
+                    if (!string.IsNullOrEmpty(d["platform"])) list.Add(d);
+                }
+            }
+            _blockedList = list;
+        } catch { }
+        CheckFgBlocked();
+    }
+
+    static void CheckFgBlocked()
+    {
+        if (!_fgIsAi || _blockedList.Count == 0) { _fgIsBlocked = false; return; }
+        foreach (var agent in _blockedList) {
+            HashSet<string> procs;
+            if (PLATFORM_PROCS.TryGetValue(agent["platform"], out procs)) {
+                if (procs.Contains(_app)) {
+                    _fgIsBlocked = true;
+                    _blockedReason = "Blocked agent: " + (agent["agent_name"] ?? agent["platform"]);
+                    return;
+                }
+            }
+        }
+        _fgIsBlocked = false;
+    }
+
+    static string ExtractJsonString(string json, string key)
+    {
+        string search = "\"" + key + "\":\"";
+        int i = json.IndexOf(search, StringComparison.OrdinalIgnoreCase);
+        if (i < 0) return "";
+        int start = i + search.Length;
+        int end = json.IndexOf("\"", start);
+        if (end < 0) return "";
+        return json.Substring(start, end - start);
+    }
+
+    static List<string> SplitJsonArray(string json)
+    {
+        var items = new List<string>();
+        int depth = 0; int start = -1;
+        for (int i = 0; i < json.Length; i++) {
+            if (json[i] == '{') { if (depth == 0) start = i; depth++; }
+            else if (json[i] == '}') { depth--; if (depth == 0 && start >= 0) { items.Add(json.Substring(start, i - start + 1)); start = -1; } }
+        }
+        return items;
     }
 
     static string ProcName(uint pid)

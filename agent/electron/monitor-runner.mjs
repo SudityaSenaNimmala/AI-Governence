@@ -47,6 +47,32 @@ const monitor = new OsMonitor({
 monitor.start();
 log.info('Monitor running. Ctrl+C to stop.');
 
+// ── Blocked agents poller ──────────────────────────────────────────────────
+// Polls the server's blocked-agents list and writes it to a local JSON file.
+// The enforcer PowerShell reads this file to know which desktop app processes
+// to fully block (all input swallowed when a blocked agent's app is foreground).
+import { writeFileSync, mkdirSync } from 'node:fs';
+
+const BLOCKED_PATH = join(homedir(), '.cloudfuze-aigov', 'blocked-agents.json');
+
+async function refreshBlockedAgents() {
+  try {
+    const res = await fetch(`${creds.serverUrl}/api/lifecycle/blocked-agents`);
+    if (!res.ok) return;
+    const list = await res.json();
+    mkdirSync(join(homedir(), '.cloudfuze-aigov'), { recursive: true });
+    writeFileSync(BLOCKED_PATH, JSON.stringify(list), 'utf8');
+    log.info(`blocked-agents: synced ${list.length} blocked agent(s)`);
+  } catch (err) {
+    log.warn(`blocked-agents: sync failed — ${err.message}`);
+  }
+}
+
+// Poll every 30 seconds
+refreshBlockedAgents();
+const blockedInterval = setInterval(refreshBlockedAgents, 30_000);
+blockedInterval.unref();
+
 const shutdown = async (sig) => {
   log.info(`Received ${sig} — shutting down…`);
   monitor.stop();
