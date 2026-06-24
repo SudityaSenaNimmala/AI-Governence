@@ -131,10 +131,48 @@ router.get("/run", async (req, res) => {
       googleProjectId,
     });
 
+    // Persist discovered agents so the dashboard survives a page refresh.
+    // Upsert each agent by its id + tenant to avoid duplicates across runs.
+    if (result.agents && result.agents.length > 0) {
+      const col = db.collection("discovered_agents");
+      for (const agent of result.agents) {
+        const key = agent.id || agent.botId || agent.name;
+        await col.updateOne(
+          { agent_key: key, tenant_id: tenantId || "default" },
+          { $set: { ...agent, agent_key: key, tenant_id: tenantId || "default", oauth_key_id: oauthKeyId, updated_at: new Date() } },
+          { upsert: true },
+        );
+      }
+      console.log(`[Discovery] Persisted ${result.agents.length} agents to discovered_agents`);
+    }
+
     res.json(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Discovery failed";
     console.error("Discovery error:", message);
+    res.status(500).json({ error: message });
+  }
+});
+
+/**
+ * GET /api/discovery/agents — Return persisted discovered agents.
+ * The dashboard calls this on load so data survives page refresh.
+ */
+router.get("/agents", async (req, res) => {
+  try {
+    const db = getDb();
+    const oauthKeyId = req.query.oauth_key_id as string | undefined;
+    const filter: any = {};
+    if (oauthKeyId) filter.oauth_key_id = oauthKeyId;
+    const agents = await db.collection("discovered_agents")
+      .find(filter)
+      .sort({ updated_at: -1 })
+      .toArray();
+    // Strip MongoDB _id
+    const clean = agents.map(({ _id, ...rest }: any) => rest);
+    res.json({ agents: clean, warnings: [] });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to load agents";
     res.status(500).json({ error: message });
   }
 });

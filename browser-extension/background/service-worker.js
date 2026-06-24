@@ -9,6 +9,8 @@ const STORAGE = {
   QUEUE:     'cfai.queue',
   PLATFORMS: 'cfai.platforms',         // mirror of GET /api/v1/ai-platforms
   PLATFORMS_AT: 'cfai.platforms_at',   // timestamp of last refresh
+  BLOCKED:   'cfai.blocked',          // blocked agents list from governance
+  BLOCKED_AT:'cfai.blocked_at',
 };
 
 const FLUSH_ALARM = 'cfai-flush';
@@ -17,6 +19,9 @@ const BATCH_SIZE = 50;
 
 const PLATFORMS_ALARM = 'cfai-platforms-refresh';
 const PLATFORMS_REFRESH_MIN = 10;   // how often to pull the registry
+
+const BLOCKED_ALARM = 'cfai-blocked-refresh';
+const BLOCKED_REFRESH_MIN = 2;     // poll blocked agents every 2 min
 
 // --- helpers ---
 
@@ -373,14 +378,44 @@ function showNativeWarning(msg) {
 
 chrome.alarms.create(FLUSH_ALARM, { periodInMinutes: FLUSH_INTERVAL_MIN });
 chrome.alarms.create(PLATFORMS_ALARM, { periodInMinutes: PLATFORMS_REFRESH_MIN });
+chrome.alarms.create(BLOCKED_ALARM, { periodInMinutes: BLOCKED_REFRESH_MIN });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === FLUSH_ALARM)     flushQueue();
   if (alarm.name === PLATFORMS_ALARM) refreshPlatforms();
+  if (alarm.name === BLOCKED_ALARM)   refreshBlockedAgents();
 });
 
 // Refresh once at startup too — alarm fires on its own schedule, not at boot.
 // Best-effort: if the worker is unenrolled or offline, no-op.
 refreshPlatforms().catch(() => {});
+refreshBlockedAgents().catch(() => {});
+
+// --- blocked agents sync ---
+
+async function refreshBlockedAgents() {
+  const config = await getConfig();
+  if (!config.serverUrl) return;
+  try {
+    const res = await fetch(`${config.serverUrl}/api/lifecycle/blocked-agents`);
+    if (!res.ok) return;
+    const list = await res.json();
+    await setStored(STORAGE.BLOCKED, list);
+    await setStored(STORAGE.BLOCKED_AT, Date.now());
+    // Notify all content scripts so they can enforce immediately
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      try { chrome.tabs.sendMessage(tab.id, { type: 'cfai-blocked-update', blocked: list }); } catch {}
+    }
+  } catch {}
+}
+
+// Respond to content script requests for the blocked list
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === 'cfai-get-blocked') {
+    getStored(STORAGE.BLOCKED, []).then(list => sendResponse({ blocked: list }));
+    return true; // async response
+  }
+});
 
 // Pull the admin-editable AI platforms registry from /api/v1/ai-platforms
 // and mirror it into chrome.storage.local. Content scripts (fingerprint.js)

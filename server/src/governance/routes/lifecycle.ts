@@ -426,4 +426,69 @@ router.delete("/clear-token-cache", async (_req, res) => {
   res.json({ deleted: result.deletedCount, message: "Graph token cache cleared" });
 });
 
+// ── Block / Unblock agents ──────────────────────────────────────────────────
+// Stores a blocklist in MongoDB. The browser extension and OS monitor poll
+// GET /api/blocked-agents to enforce blocks at runtime.
+
+router.post("/block", async (req, res) => {
+  try {
+    const { agent_id, agent_name, platform, reason } = req.body;
+    if (!agent_id) {
+      res.status(400).json({ error: "agent_id is required" });
+      return;
+    }
+    const db = getDb();
+    await db.collection("blocked_agents").updateOne(
+      { agent_id },
+      {
+        $set: {
+          agent_id,
+          agent_name: agent_name || null,
+          platform: platform || null,
+          reason: reason || "Blocked by admin",
+          blocked: true,
+          blocked_at: new Date(),
+          unblocked_at: null,
+        },
+      },
+      { upsert: true },
+    );
+    res.json({ ok: true, agent_id, status: "blocked" });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Block failed" });
+  }
+});
+
+router.post("/unblock", async (req, res) => {
+  try {
+    const { agent_id } = req.body;
+    if (!agent_id) {
+      res.status(400).json({ error: "agent_id is required" });
+      return;
+    }
+    const db = getDb();
+    await db.collection("blocked_agents").updateOne(
+      { agent_id },
+      { $set: { blocked: false, unblocked_at: new Date() } },
+    );
+    res.json({ ok: true, agent_id, status: "unblocked" });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Unblock failed" });
+  }
+});
+
+// Public endpoint — no auth required so the browser extension can poll it.
+router.get("/blocked-agents", async (_req, res) => {
+  try {
+    const db = getDb();
+    const list = await db.collection("blocked_agents")
+      .find({ blocked: true })
+      .project({ _id: 0, agent_id: 1, agent_name: 1, platform: 1, reason: 1, blocked_at: 1 })
+      .toArray();
+    res.json(list);
+  } catch (err) {
+    res.json([]);
+  }
+});
+
 export default router;

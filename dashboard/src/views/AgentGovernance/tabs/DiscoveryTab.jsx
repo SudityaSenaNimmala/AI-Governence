@@ -1242,6 +1242,7 @@ function AgentTableView() {
   const [lifecycleLoading, setLifecycleLoading] = useState(false);
   const [lifecycleFeedback, setLifecycleFeedback] = useState({}); // agentId → { ok, msg }
   const [deletedAgents, setDeletedAgents] = useState(new Set()); // agent IDs removed from platform
+  const [blockedAgents, setBlockedAgents] = useState(new Set()); // agent IDs blocked via CloudFuze
 
   const result = state.discoveryResult;
   const scopeLabel = state.selectedScope !== "all" ? SCOPE_LABELS[state.selectedScope] : "";
@@ -1320,7 +1321,32 @@ function AgentTableView() {
     agentGovernanceApi.getLifecycleStatuses()
       .then((data) => setLifecycleStatuses(data.statuses || {}))
       .catch(() => {});
+    agentGovernanceApi.getBlockedAgents()
+      .then((list) => setBlockedAgents(new Set((list || []).map(b => b.agent_id))))
+      .catch(() => {});
   }, []);
+
+  const handleBlockToggle = async (agent) => {
+    const isBlocked = blockedAgents.has(agent.id);
+    try {
+      if (isBlocked) {
+        await agentGovernanceApi.unblockAgent({ agent_id: agent.id });
+        setBlockedAgents(prev => { const n = new Set(prev); n.delete(agent.id); return n; });
+        showFeedback(agent.id, true, "Agent unblocked");
+      } else {
+        await agentGovernanceApi.blockAgent({
+          agent_id: agent.id,
+          agent_name: agent.name,
+          platform: agent.platform,
+          reason: "Blocked by admin from governance dashboard",
+        });
+        setBlockedAgents(prev => new Set([...prev, agent.id]));
+        showFeedback(agent.id, true, "Agent blocked — enforced via extension & monitor");
+      }
+    } catch (err) {
+      showFeedback(agent.id, false, err.message || "Block/unblock failed");
+    }
+  };
 
   const handleApprovalChange = async (botId, status, name) => {
     setApprovalStatuses((prev) => ({ ...prev, [botId]: status }));
@@ -1616,6 +1642,20 @@ function AgentTableView() {
                                 <Ban size={11} /> Archive
                               </button>
                             )}
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleBlockToggle(a); }}
+                              title={blockedAgents.has(a.id) ? "Unblock this agent" : "Block this agent via extension & monitor"}
+                              style={{
+                                display: "inline-flex", alignItems: "center", gap: 4,
+                                padding: "4px 10px", borderRadius: 6,
+                                border: blockedAgents.has(a.id) ? "1px solid #22c55e44" : "1px solid #ef444444",
+                                background: blockedAgents.has(a.id) ? "#f0fdf4" : "#fef2f2",
+                                color: blockedAgents.has(a.id) ? "#16a34a" : "#dc2626",
+                                fontSize: 11, fontWeight: 600, cursor: "pointer",
+                              }}
+                            >
+                              {blockedAgents.has(a.id) ? <><RotateCcw size={11} /> Unblock</> : <><Lock size={11} /> Block</>}
+                            </button>
                             <ApprovalDropdown
                               agentId={a.id}
                               agentName={a.name}

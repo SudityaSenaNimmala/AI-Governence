@@ -71,6 +71,24 @@ export const agentGovernanceApi = {
     });
   },
 
+  async blockAgent(data) {
+    return request("/lifecycle/block", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async unblockAgent(data) {
+    return request("/lifecycle/unblock", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async getBlockedAgents() {
+    return request("/lifecycle/blocked-agents");
+  },
+
   async listPolicies() {
     return request("/policies");
   },

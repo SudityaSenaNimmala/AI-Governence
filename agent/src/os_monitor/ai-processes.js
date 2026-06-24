@@ -47,9 +47,11 @@ export const AI_PROCESSES = [
   // for API calls). No scrub.
   { match: /^cursor$/i,          product: 'Cursor',            vendor: 'Anysphere',  useAttachmentWatcher: false, unhookableSandbox: false },
 
-  // Microsoft Copilot standalone — Store-distributed, almost certainly pins
-  // like ChatGPT. Scrub.
+  // Microsoft Copilot standalone — Store-distributed, pins TLS. Scrub.
   { match: /^copilot$/i,         product: 'Microsoft Copilot', vendor: 'Microsoft',  useAttachmentWatcher: true,  unhookableSandbox: true  },
+
+  // Microsoft 365 Copilot — M365 app variant, same behavior.
+  { match: /^m365copilot$/i,     product: 'Microsoft Copilot', vendor: 'Microsoft',  useAttachmentWatcher: true,  unhookableSandbox: true  },
 
   // Perplexity Comet — browser-style desktop, mostly bridges. Comet doesn't
   // pin our CA in observed traffic. Skip scrub.

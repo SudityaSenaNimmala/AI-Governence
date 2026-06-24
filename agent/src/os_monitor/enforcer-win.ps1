@@ -34,7 +34,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
 $WarningPreference     = 'SilentlyContinue'
 
-$aiProcs = if ($env:CFAI_AI_PROCESSES) { $env:CFAI_AI_PROCESSES } else { 'ChatGPT,Claude,Cursor,Copilot,Comet,Gemini,Poe' }
+$aiProcs = if ($env:CFAI_AI_PROCESSES) { $env:CFAI_AI_PROCESSES } else { 'ChatGPT,Claude,Cursor,Copilot,M365Copilot,Comet,Gemini,Poe' }
 # CFAI_BLOCK_PATTERNS is a JSON array of {name, source}. Parse to two parallel
 # arrays we can hand to the C# enforcer.
 $patNames   = New-Object System.Collections.ArrayList

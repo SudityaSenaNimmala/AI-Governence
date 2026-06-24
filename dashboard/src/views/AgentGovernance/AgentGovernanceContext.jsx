@@ -1,4 +1,4 @@
-import { createContext, useContext, useReducer, useState, useCallback } from "react";
+import { createContext, useContext, useReducer, useState, useCallback, useEffect } from "react";
 import { agentGovernanceApi } from "./AgentGovernanceActions/AgentGovernanceActions";
 
 const STORAGE_KEY = "ag_oauth_key_id";
@@ -247,6 +247,23 @@ export function AgentGovernanceProvider({ children }) {
   const [authError, setAuthError] = useState(null);
 
   const isAuthenticated = !!oauthKeyId;
+
+  // Load persisted agents on mount so the dashboard survives page refresh.
+  useEffect(() => {
+    if (!oauthKeyId) return;
+    (async () => {
+      try {
+        const res = await fetch(`/api/discovery/agents?oauth_key_id=${oauthKeyId}`, {
+          headers: { "Content-Type": "application/json" },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.agents && data.agents.length > 0) {
+          govDispatch({ type: "DISCOVERY_SUCCESS", result: data });
+        }
+      } catch { /* silently fail — no persisted data yet */ }
+    })();
+  }, [oauthKeyId]);
 
   const connect = useCallback(async (data) => {
     setIsConnecting(true);
