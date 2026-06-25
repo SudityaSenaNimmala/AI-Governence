@@ -1344,7 +1344,41 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
   const [error, setError] = useState(null);
   const [expandedBot, setExpandedBot] = useState(null);
 
+  const [blockedAgents, setBlockedAgents] = useState(new Set());
+  const [blockFeedback, setBlockFeedback] = useState({});
+
   const isCopilotStudio = application === "copilot_studio";
+
+  // Load blocked agents on mount
+  useEffect(() => {
+    agentGovernanceApi.getBlockedAgents()
+      .then((list) => setBlockedAgents(new Set((list || []).map(b => b.agent_id))))
+      .catch(() => {});
+  }, []);
+
+  const handleBlockToggle = async (agent) => {
+    const agentId = agent.botId || agent.id;
+    const isBlocked = blockedAgents.has(agentId);
+    try {
+      if (isBlocked) {
+        await agentGovernanceApi.unblockAgent({ agent_id: agentId });
+        setBlockedAgents(prev => { const n = new Set(prev); n.delete(agentId); return n; });
+        setBlockFeedback(prev => ({ ...prev, [agentId]: { ok: true, msg: "Unblocked" } }));
+      } else {
+        await agentGovernanceApi.blockAgent({
+          agent_id: agentId,
+          agent_name: agent.botName || agent.name,
+          platform: agent.platform || application,
+          reason: "Blocked by admin from Risk Management",
+        });
+        setBlockedAgents(prev => new Set([...prev, agentId]));
+        setBlockFeedback(prev => ({ ...prev, [agentId]: { ok: true, msg: "Blocked" } }));
+      }
+    } catch (err) {
+      setBlockFeedback(prev => ({ ...prev, [agentId]: { ok: false, msg: err.message } }));
+    }
+    setTimeout(() => setBlockFeedback(prev => { const n = { ...prev }; delete n[agentId]; return n; }), 3000);
+  };
 
   const loadRisk = async () => {
     if (!oauthKeyId) return;
@@ -1527,6 +1561,7 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                   <th style={thStyle}>Activity</th>
                   <th style={thStyle}>Renewal</th>
                   <th style={thStyle}>Risk Factors</th>
+                  <th style={thStyle}>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1640,12 +1675,38 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                             <div style={{ fontSize: 9, color: "#6366f1", marginTop: 2 }}>{isExpanded ? "Click to collapse" : "Click for full breakdown"}</div>
                           </div>
                         </td>
+                        <td style={{ padding: "10px 8px" }} onClick={(e) => e.stopPropagation()}>
+                          {(() => {
+                            const agentId = agent.botId || agent.id;
+                            const fb = blockFeedback[agentId];
+                            if (fb) {
+                              return <span style={{ fontSize: 10, fontWeight: 600, color: fb.ok ? "#16a34a" : "#dc2626" }}>{fb.msg}</span>;
+                            }
+                            const isBlocked = blockedAgents.has(agentId);
+                            return (
+                              <button
+                                onClick={() => handleBlockToggle(agent)}
+                                title={isBlocked ? "Unblock this agent" : "Block this agent for all users"}
+                                style={{
+                                  display: "inline-flex", alignItems: "center", gap: 4,
+                                  padding: "4px 10px", borderRadius: 6, fontSize: 11, fontWeight: 600,
+                                  cursor: "pointer", fontFamily: "inherit",
+                                  border: isBlocked ? "1px solid #22c55e44" : "1px solid #ef444444",
+                                  background: isBlocked ? "#f0fdf4" : "#fef2f2",
+                                  color: isBlocked ? "#16a34a" : "#dc2626",
+                                }}
+                              >
+                                <Lock size={11} /> {isBlocked ? "Unblock" : "Block"}
+                              </button>
+                            );
+                          })()}
+                        </td>
                       </tr>
 
                       {/* Expanded Risk Breakdown */}
                       {isExpanded && (
                         <tr key={`${agent.botId}-breakdown`} style={{ borderBottom: "2px solid var(--ag-border)" }}>
-                          <td colSpan={8} style={{ padding: 0 }}>
+                          <td colSpan={9} style={{ padding: 0 }}>
                             <div style={{ padding: "12px 16px", background: "#f8f9fb", borderTop: "1px dashed var(--ag-border)" }}>
                               <div style={{ fontWeight: 700, fontSize: 12, color: "#4338ca", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
                                 <ShieldAlert size={14} /> Full Risk Breakdown — {agent.botName}

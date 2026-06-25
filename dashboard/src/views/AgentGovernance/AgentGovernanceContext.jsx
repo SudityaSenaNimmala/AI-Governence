@@ -259,11 +259,21 @@ export function AgentGovernanceProvider({ children }) {
         if (!res.ok) return;
         const data = await res.json();
         if (data.agents && data.agents.length > 0) {
-          govDispatch({ type: "DISCOVERY_SUCCESS", result: data });
+          // Wrap in the full result shape the UI expects
+          govDispatch({ type: "DISCOVERY_SUCCESS", result: {
+            tenant: { id: tenantId || "cached", name: "Agent Governance", domain: "cached", license: "N/A" },
+            agents: data.agents,
+            warnings: data.warnings || [],
+            scanTimestamp: data.agents[0]?.updated_at || new Date().toISOString(),
+            scanDuration: 0,
+            totalServicePrincipals: 0,
+            totalUsers: 0,
+            totalEnvironments: 0,
+          }});
         }
-      } catch { /* silently fail — no persisted data yet */ }
+      } catch (e) { /* silently fail — no persisted data yet */ }
     })();
-  }, [oauthKeyId]);
+  }, [oauthKeyId, tenantId]);
 
   const connect = useCallback(async (data) => {
     setIsConnecting(true);
