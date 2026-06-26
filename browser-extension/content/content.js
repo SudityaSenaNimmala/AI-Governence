@@ -6,9 +6,9 @@
 (function () {
   console.info('[cfai] content script v2 loaded on', location.hostname);
 
-  // Inject fetch blocker into the PAGE's main world so it can intercept
-  // the actual fetch() calls that React makes. Content scripts run in an
-  // isolated world and cannot patch the page's fetch.
+  // Inject fetch blocker IMMEDIATELY (synchronous) so it patches fetch()
+  // before any page JS fires. The blocked list arrives shortly after via
+  // postMessage from the cached storage read.
   try {
     const script = document.createElement('script');
     script.src = chrome.runtime.getURL('content/fetch-blocker.js');
@@ -17,6 +17,14 @@
   } catch (e) {
     console.warn('[cfai] could not inject fetch blocker:', e);
   }
+
+  // Load blocked list from cache and send to fetch-blocker immediately
+  try {
+    chrome.storage.local.get(['cfai.blocked'], (result) => {
+      const cached = result['cfai.blocked'] || [];
+      if (cached.length > 0) applyBlockedList(cached);
+    });
+  } catch (e) {}
 
   // Listen for blocked fetch events from the injected script
   window.addEventListener('cfai-fetch-blocked', (e) => {
@@ -1366,7 +1374,7 @@
     if (/claude/.test(host)) return 'Claude';
     if (/gemini|aistudio|bard/.test(host)) return 'Gemini';
     if (/perplexity/.test(host)) return 'Perplexity';
-    if (/copilot/.test(host)) return 'Microsoft Copilot';
+    if (/copilot|m365\.cloud\.microsoft/.test(host)) return 'Microsoft Copilot';
     if (/poe/.test(host)) return 'Poe';
     if (/huggingface/.test(host)) return 'HuggingFace Chat';
     if (/mistral/.test(host)) return 'Mistral';
@@ -1390,8 +1398,8 @@
   // a full-page overlay that prevents all interaction.
 
   const PLATFORM_TO_HOSTS = {
-    copilot_studio:     [/copilot\.microsoft/, /powerva\.ms/, /copilotstudio/],
-    personal_agent:     [/copilot\.microsoft/],
+    copilot_studio:     [/copilot\.microsoft/, /m365\.cloud\.microsoft/, /powerva\.ms/, /copilotstudio/],
+    personal_agent:     [/copilot\.microsoft/, /m365\.cloud\.microsoft/],
     teams_chat_agent:   [/teams\.microsoft/],
     openai_assistant:   [/chatgpt\.com/, /chat\.openai\.com/],
     custom_gpt:         [/chatgpt\.com/, /chat\.openai\.com/],
@@ -1402,102 +1410,186 @@
     azure_foundry:      [/portal\.azure/, /ai\.azure/],
   };
 
-  let _blockedOverlay = null;
+  // ── Blocked Agent Enforcement (DOM-level) ─────────────────────────────────
+  // Copilot uses SignalR/WebSocket events for chat, not fetch(). The only
+  // way to block sends is at the DOM level: disable the input field and
+  // intercept Enter/click before the app's event handlers fire.
+  //
+  // This runs in the CONTENT SCRIPT (has chrome.storage.local access)
+  // so there's no postMessage delay.
 
-  function checkBlockedAgents(blockedList) {
-    if (!blockedList || blockedList.length === 0) {
-      removeBlockOverlay();
-      return;
+  let _blockedList = [];
+  let _blockEnforcerInstalled = false;
+  let _blockCheckInterval = null;
+
+  function applyBlockedList(list) {
+    _blockedList = list || [];
+    // Also forward to fetch-blocker for platforms that DO use fetch (ChatGPT, Claude)
+    window.postMessage({ type: 'cfai-blocked-agents', blocked: list }, '*');
+    // Start DOM-level enforcement
+    if (!_blockCheckInterval && _blockedList.length > 0) {
+      enforceBlockedAgent();
+      _blockCheckInterval = setInterval(enforceBlockedAgent, 500);
     }
+  }
+
+  // Get the current agent name from ONLY the top header bar / breadcrumb.
+  // This is the single reliable indicator of which agent is active.
+  // Do NOT scan chat body or main content — that causes false positives
+  // from agent names appearing in sidebar, suggestions, or chat history.
+  function getHeaderAgentText() {
+    const parts = [];
+
+    // 1. document.title — "AgentName | M365 Copilot" or "AgentName > ChatTitle | M365 Copilot"
+    parts.push(document.title || '');
+
+    // 2. The top breadcrumb/header bar — the strip at the very top showing
+    //    "Gemini Conversation Agent 1" or "Agent > Conversation Title"
+    //    Target the FIRST text element in the top bar area.
+    //    Copilot's header is usually the first child of the page layout.
+    const headerCandidates = document.querySelectorAll(
+      // Breadcrumb-style elements
+      '[class*="readcrumb"], [class*="eader"] a, [class*="eader"] span,' +
+      // Generic top-bar text — first few elements only
+      '[class*="opBar"] span, [class*="op-bar"] span'
+    );
+    for (const el of headerCandidates) {
+      if (el.closest('nav, [class*="sidebar"], [class*="Sidebar"], [role="navigation"]')) continue;
+      const text = (el.textContent || '').trim();
+      if (text.length > 2 && text.length < 80) parts.push(text);
+    }
+
+    return parts.join(' ').toLowerCase();
+  }
+
+  function isBlockedAgentActive() {
+    if (!_blockedList.length) return null;
     const host = location.hostname;
-    const pageText = (document.title + ' ' + document.body?.innerText?.slice(0, 5000)).toLowerCase();
+    const headerText = getHeaderAgentText();
 
-    for (const agent of blockedList) {
-      // Check if this page hosts the agent's platform
+    for (const agent of _blockedList) {
       const hostPatterns = PLATFORM_TO_HOSTS[agent.platform] || [];
-      const hostMatch = hostPatterns.some(rx => rx.test(host));
-      if (!hostMatch) continue;
+      if (!hostPatterns.some(rx => rx.test(host))) continue;
 
-      // Check if the agent name appears on the page
       const name = (agent.agent_name || '').toLowerCase();
-      if (name && name.length > 2 && pageText.includes(name)) {
-        showBlockOverlay(agent);
-        return;
+      if (!name || name.length < 2) continue;
+
+      // Exact full name match only — no partial matching.
+      // "gemini agent 1" must NOT match "gemini agent".
+      if (headerText.includes(name)) return agent;
+    }
+    return null;
+  }
+
+  function enforceBlockedAgent() {
+    const blocked = isBlockedAgentActive();
+    const inputs = document.querySelectorAll(
+      'textarea, [contenteditable="true"], [role="textbox"], [class*="textbox"]'
+    );
+
+    if (blocked) {
+      // Disable all input fields
+      inputs.forEach(el => {
+        if (!el.dataset.cfaiBlocked) {
+          el.dataset.cfaiBlocked = '1';
+          el.dataset.cfaiOrigPointerEvents = el.style.pointerEvents || '';
+        }
+        el.style.pointerEvents = 'none';
+        el.style.opacity = '0.4';
+        el.setAttribute('aria-disabled', 'true');
+        // Clear any typed text
+        if (el.textContent && el.textContent.trim()) {
+          // Don't clear placeholder text
+        }
+      });
+
+      // Install Enter/click blocker once
+      if (!_blockEnforcerInstalled) {
+        _blockEnforcerInstalled = true;
+
+        // Block Enter key at capture phase (before app sees it)
+        document.addEventListener('keydown', function(e) {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            const activeBlocked = isBlockedAgentActive();
+            if (activeBlocked) {
+              e.preventDefault();
+              e.stopPropagation();
+              e.stopImmediatePropagation();
+              showWarning(
+                [{ pattern: 'Blocked agent: ' + activeBlocked.agent_name, severity: 'critical', count: 1 }],
+                'Agent blocked by organization policy'
+              );
+              return false;
+            }
+          }
+        }, true); // capture phase
+
+        // Block send button clicks — ONLY buttons inside/near the input area
+        document.addEventListener('click', function(e) {
+          const activeBlocked = isBlockedAgentActive();
+          if (!activeBlocked) return;
+
+          // Only block clicks on buttons that are inside the composer/input area
+          // (not sidebar nav, not header buttons, not chat history)
+          const btn = e.target.closest('button, [role="button"]');
+          if (!btn) return;
+
+          // Check if button is near an input/textbox (within the same container)
+          const inputArea = btn.closest('[class*="composer"], [class*="input-area"], [class*="ChatInput"], [class*="prompt"]');
+          const nearTextbox = btn.parentElement?.querySelector('[role="textbox"], textarea, [contenteditable]');
+          const isInInputZone = inputArea || nearTextbox;
+          if (!isInInputZone) return; // not a send button — let click through
+
+          const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+          if (/send|submit/.test(label) || isInInputZone) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            showWarning(
+              [{ pattern: 'Blocked agent: ' + activeBlocked.agent_name, severity: 'critical', count: 1 }],
+              'Agent blocked by organization policy'
+            );
+            return false;
+          }
+        }, true); // capture phase
       }
-    }
-    removeBlockOverlay();
-  }
-
-  function showBlockOverlay(agent) {
-    if (_blockedOverlay) return; // already showing
-    _blockedOverlay = document.createElement('div');
-    _blockedOverlay.id = 'cfai-block-overlay';
-    _blockedOverlay.innerHTML = `
-      <div style="
-        position:fixed; inset:0; z-index:2147483647;
-        background:rgba(0,0,0,0.85); display:flex; align-items:center;
-        justify-content:center; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-      ">
-        <div style="
-          background:#1c1c1e; border:1px solid #ef4444; border-radius:16px;
-          padding:40px 48px; max-width:480px; text-align:center; color:#fff;
-        ">
-          <div style="font-size:48px; margin-bottom:16px;">&#128683;</div>
-          <h2 style="font-size:20px; font-weight:700; margin:0 0 8px; color:#ef4444;">
-            Agent Blocked
-          </h2>
-          <p style="font-size:15px; color:#ccc; margin:0 0 16px; line-height:1.6;">
-            <strong>${agent.agent_name || 'This agent'}</strong> has been blocked by your organization's AI governance policy.
-          </p>
-          <p style="font-size:12px; color:#888; margin:0 0 20px;">
-            ${agent.reason || 'Contact your administrator for access.'}
-          </p>
-          <div style="
-            display:inline-flex; align-items:center; gap:8px; padding:8px 16px;
-            background:#ef44441a; border:1px solid #ef444433; border-radius:8px;
-            font-size:12px; color:#f87171;
-          ">
-            <span>CloudFuze AI Governance</span>
-          </div>
-        </div>
-      </div>
-    `;
-    document.documentElement.appendChild(_blockedOverlay);
-    // Block all keyboard and mouse input
-    const blocker = (e) => { e.stopPropagation(); e.preventDefault(); };
-    _blockedOverlay.addEventListener('keydown', blocker, true);
-    _blockedOverlay.addEventListener('click', blocker, true);
-    console.info('[cfai] Agent blocked:', agent.agent_name, agent.platform);
-  }
-
-  function removeBlockOverlay() {
-    if (_blockedOverlay) {
-      _blockedOverlay.remove();
-      _blockedOverlay = null;
+    } else {
+      // Restore inputs when not on a blocked agent
+      inputs.forEach(el => {
+        if (el.dataset.cfaiBlocked) {
+          el.style.pointerEvents = el.dataset.cfaiOrigPointerEvents || '';
+          el.style.opacity = '';
+          el.removeAttribute('aria-disabled');
+          delete el.dataset.cfaiBlocked;
+          delete el.dataset.cfaiOrigPointerEvents;
+        }
+      });
     }
   }
 
-  // Request blocked list from background on load
+  // Load blocked list from cache IMMEDIATELY (no postMessage delay)
+  try {
+    chrome.storage.local.get(['cfai.blocked'], (result) => {
+      const cached = result['cfai.blocked'] || [];
+      if (cached.length > 0) {
+        console.info('[cfai] blocked agents from cache:', cached.map(a => a.agent_name).join(', '));
+        applyBlockedList(cached);
+      }
+    });
+  } catch (e) {}
+
+  // Also request from background (gets fresh data from server)
   try {
     chrome.runtime.sendMessage({ type: 'cfai-get-blocked' }, (resp) => {
-      if (resp?.blocked) checkBlockedAgents(resp.blocked);
+      if (resp?.blocked) applyBlockedList(resp.blocked);
     });
   } catch {}
 
-  // Listen for real-time blocked list updates from background
+  // Listen for real-time updates from background
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'cfai-blocked-update') {
-      checkBlockedAgents(msg.blocked || []);
+      applyBlockedList(msg.blocked || []);
     }
   });
-
-  // Re-check periodically (page content changes as user navigates SPAs)
-  setInterval(() => {
-    try {
-      chrome.runtime.sendMessage({ type: 'cfai-get-blocked' }, (resp) => {
-        if (resp?.blocked) checkBlockedAgents(resp.blocked);
-      });
-    } catch {}
-  }, 15000);
 
 })();

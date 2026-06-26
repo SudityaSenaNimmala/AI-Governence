@@ -117,6 +117,10 @@ public static class CfaiEnforcer
     static volatile bool _fgIsAi = false;
     static volatile uint _fgPid = 0;
     static string _app = "";
+    // Sticky timer: when focus leaves an AI app, keep _fgIsAi true for 3s
+    // so toast-dismiss-then-quick-send can't bypass the block.
+    static long _fgLeftAiTicks = 0;
+    static readonly long FG_STICKY_TTL = TimeSpan.FromSeconds(3).Ticks;
 
     // Blocked agents — the foreground process is fully blocked (all Enter +
     // send button swallowed) when it matches a platform in the blocklist.
@@ -162,12 +166,15 @@ public static class CfaiEnforcer
     // Clipboard/paste block — written only by the poll thread.
     static volatile bool _blockPaste = false;
 
-    // Timestamp of last Ctrl+V press.  Clipboard is only checked in the
-    // Enter decision within a short window after a paste — long enough for
-    // the user to paste and immediately hit Enter, short enough that stale
-    // clipboard from minutes ago doesn't false-block.
+    // Timestamp of last Ctrl+V press.
     static long _lastPasteTicks = 0;
     static readonly long PASTE_WINDOW = TimeSpan.FromSeconds(5).Ticks;
+
+    // Block cooldown: once a block fires, keep blocking for 30s so the
+    // user can't dismiss the toast and immediately re-send.
+    static long _lastBlockFiredTicks = 0;
+    static string _lastBlockPatterns = "";
+    static readonly long BLOCK_COOLDOWN = TimeSpan.FromSeconds(30).Ticks;
 
     static HashSet<string> _aiProcs;
     // IDE-type apps where UIA reads code/terminal/output, not just the AI
@@ -240,7 +247,8 @@ public static class CfaiEnforcer
     static bool BlockActiveForMouse()
     {
         bool recentPaste = (DateTime.UtcNow.Ticks - _lastPasteTicks) < PASTE_WINDOW;
-        return _fgIsBlocked || TypedBlockFresh() || _blockUia || (recentPaste && _blockPaste);
+        bool cooldown = (DateTime.UtcNow.Ticks - _lastBlockFiredTicks) < BLOCK_COOLDOWN;
+        return _fgIsBlocked || TypedBlockFresh() || _blockUia || (recentPaste && _blockPaste) || cooldown;
     }
 
     static string ActivePatterns() { return _blockTyped ? _typedPatterns : _blockUia ? _uiaPatterns : ""; }
@@ -321,13 +329,18 @@ public static class CfaiEnforcer
                             bool uiaBlock = !isIde && _blockUia;
                             bool recentPaste = (DateTime.UtcNow.Ticks - _lastPasteTicks) < PASTE_WINDOW;
                             bool clipBlock = recentPaste && _blockPaste;
-                            bool block = _fgIsBlocked || TypedBlockFresh() || uiaBlock || clipBlock;
+                            // Cooldown: if a block fired recently, keep blocking
+                            bool cooldown = (DateTime.UtcNow.Ticks - _lastBlockFiredTicks) < BLOCK_COOLDOWN;
+                            bool block = _fgIsBlocked || TypedBlockFresh() || uiaBlock || clipBlock || cooldown;
                             string pats = _fgIsBlocked ? _blockedReason
                                         : TypedBlockFresh() ? _typedPatterns
                                         : uiaBlock ? _uiaPatterns
+                                        : cooldown ? _lastBlockPatterns
                                         : _pastePatterns();
                             if (block)
                             {
+                                _lastBlockFiredTicks = DateTime.UtcNow.Ticks;
+                                _lastBlockPatterns = pats;
                                 if (ctrl && alt) { Emit("override", _app, pats, ""); }  // allow, logged
                                 else { Emit("block", _app, pats, "send"); return (IntPtr)1; }  // swallow
                             }
@@ -490,12 +503,33 @@ public static class CfaiEnforcer
     static void UpdateForeground()
     {
         IntPtr fg = GetForegroundWindow();
-        if (fg == IntPtr.Zero) { _fgIsAi = false; return; }
+        if (fg == IntPtr.Zero) return; // don't change state on null window
         uint pid; GetWindowThreadProcessId(fg, out pid);
         string proc = ProcName(pid);
         _fgPid = pid;
-        if (proc != null && _aiProcs.Contains(proc)) { _fgIsAi = true; _app = proc; }
-        else { _fgIsAi = false; }
+        if (proc != null && _aiProcs.Contains(proc))
+        {
+            _fgIsAi = true;
+            _app = proc;
+            _fgLeftAiTicks = 0; // reset sticky timer
+        }
+        else
+        {
+            // Focus left the AI app — start sticky timer instead of
+            // immediately clearing. This prevents toast notifications
+            // from creating a bypass window.
+            if (_fgIsAi && _fgLeftAiTicks == 0)
+            {
+                _fgLeftAiTicks = DateTime.UtcNow.Ticks;
+            }
+            // Only clear after the sticky TTL expires
+            if (_fgLeftAiTicks > 0 && (DateTime.UtcNow.Ticks - _fgLeftAiTicks) > FG_STICKY_TTL)
+            {
+                _fgIsAi = false;
+                _fgLeftAiTicks = 0;
+            }
+            // During the sticky window, _fgIsAi stays true
+        }
     }
 
     // When a block is active, locate the send button so the mouse hook can

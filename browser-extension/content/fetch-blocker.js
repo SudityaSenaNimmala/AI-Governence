@@ -1,6 +1,10 @@
 // Injected into the PAGE's main world (not the content script's isolated world).
 // Monkey-patches window.fetch to block any AI chat API call that contains
 // sensitive data patterns. This is React-proof.
+//
+// Agent blocking is handled by the content script at the DOM level (Enter/click
+// interception + input disabling) — NOT here. Copilot uses SignalR, not fetch,
+// for chat sends, so fetch-level agent blocking doesn't work there.
 
 (function () {
   'use strict';
@@ -26,28 +30,22 @@
     return found;
   }
 
-  // ChatGPT sends POST to /backend-api/conversation with JSON body
-  // containing { messages: [{ content: { parts: ["user text"] } }] }
-  // We need to deep-scan the entire JSON body string for patterns.
   function isChatPost(url, method) {
     if (method && method.toUpperCase() !== 'POST') return false;
     const s = typeof url === 'string' ? url : url?.toString?.() || '';
-    // ChatGPT endpoints (including new ces/v1/* paths)
     if (/chatgpt\.com/.test(s)) return true;
     if (/chat\.openai\.com/.test(s)) return true;
-    // Other AI services
     if (/api\.openai\.com\/v1\/chat\/completions/.test(s)) return true;
     if (/api\.anthropic\.com\/v1\/messages/.test(s)) return true;
     if (/claude\.ai\/api\//.test(s)) return true;
     if (/generativelanguage\.googleapis\.com/.test(s)) return true;
     if (/copilot\.microsoft\.com/.test(s)) return true;
+    if (/m365\.cloud\.microsoft/.test(s)) return true;
     if (/gemini\.google\.com/.test(s)) return true;
     return false;
   }
 
   const originalFetch = window.fetch;
-  let _lastBlockTime = 0;
-  let _lastBlockNotify = 0;
 
   window.fetch = function (input, init) {
     try {
@@ -58,22 +56,15 @@
 
       if (isChatPost(url, method)) {
         let bodyText = '';
-        if (typeof init?.body === 'string') {
-          bodyText = init.body;
-        }
+        if (typeof init?.body === 'string') bodyText = init.body;
 
         if (bodyText) {
           const matches = scanText(bodyText);
           if (matches.length > 0) {
-            const now = Date.now();
-            _lastBlockTime = now;
-            if (now - _lastBlockNotify > 3000) {
-              _lastBlockNotify = now;
-              console.warn('[cfai] FETCH BLOCKED — sensitive data:', matches.join(', '), '→', url.slice(0, 80));
-              window.dispatchEvent(new CustomEvent('cfai-fetch-blocked', {
-                detail: { url, matches }
-              }));
-            }
+            console.warn('[cfai] FETCH BLOCKED — sensitive data:', matches.join(', '));
+            window.dispatchEvent(new CustomEvent('cfai-fetch-blocked', {
+              detail: { url, matches }
+            }));
             return Promise.reject(new DOMException(
               'Blocked by CloudFuze AI Governance',
               'AbortError'
@@ -81,7 +72,7 @@
           }
         }
 
-        // Async body check — if body is not a string, read it and check
+        // Async body check
         if (!bodyText && init?.body && typeof init.body !== 'string') {
           const origBody = init.body;
           return new Promise(async (resolve, reject) => {
@@ -103,20 +94,14 @@
                 let offset = 0;
                 for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.length; }
                 text = new TextDecoder().decode(combined);
-                // Reconstruct body since we consumed the stream
                 init = { ...init, body: text };
               }
               const asyncMatches = scanText(text);
               if (asyncMatches.length > 0) {
-                const now = Date.now();
-                _lastBlockTime = now;
-                if (now - _lastBlockNotify > 3000) {
-                  _lastBlockNotify = now;
-                  console.warn('[cfai] FETCH BLOCKED (async) — sensitive data:', asyncMatches.join(', '));
-                  window.dispatchEvent(new CustomEvent('cfai-fetch-blocked', {
-                    detail: { url, matches: asyncMatches }
-                  }));
-                }
+                console.warn('[cfai] FETCH BLOCKED (async) — sensitive data:', asyncMatches.join(', '));
+                window.dispatchEvent(new CustomEvent('cfai-fetch-blocked', {
+                  detail: { url, matches: asyncMatches }
+                }));
                 reject(new DOMException('Blocked by CloudFuze AI Governance', 'AbortError'));
               } else {
                 resolve(originalFetch.call(window, input, init));
@@ -134,7 +119,7 @@
     return originalFetch.apply(this, arguments);
   };
 
-  // Also patch XMLHttpRequest for older AI services
+  // Also patch XMLHttpRequest
   const origXhrOpen = XMLHttpRequest.prototype.open;
   const origXhrSend = XMLHttpRequest.prototype.send;
 
@@ -149,7 +134,7 @@
       if (isChatPost(this._cfaiUrl, this._cfaiMethod) && typeof body === 'string') {
         const matches = scanText(body);
         if (matches.length > 0) {
-          console.warn('[cfai] XHR BLOCKED — sensitive data:', matches.join(', '), '→', this._cfaiUrl);
+          console.warn('[cfai] XHR BLOCKED — sensitive data:', matches.join(', '));
           window.dispatchEvent(new CustomEvent('cfai-fetch-blocked', {
             detail: { url: this._cfaiUrl, matches }
           }));
@@ -157,24 +142,17 @@
           return;
         }
       }
-    } catch (e) {
-      console.warn('[cfai] xhr blocker error:', e);
-    }
+    } catch (e) {}
     return origXhrSend.apply(this, arguments);
   };
 
   // After a blocked fetch, remove the optimistically-rendered user message
-  // from ChatGPT's UI and restore the text to the input.
   window.addEventListener('cfai-fetch-blocked', () => {
     setTimeout(() => {
-      // ChatGPT renders user messages as [data-message-author-role="user"]
-      // or inside elements with specific classes. Find and remove the last one.
       const userMsgs = document.querySelectorAll(
-        '[data-message-author-role="user"], ' +
-        '.text-message [data-message-author-role="user"]'
+        '[data-message-author-role="user"], .text-message [data-message-author-role="user"]'
       );
       if (userMsgs.length > 0) {
-        // Walk up to the full message container and remove it
         const lastMsg = userMsgs[userMsgs.length - 1];
         const container = lastMsg.closest('[data-testid^="conversation-turn"]')
           || lastMsg.closest('article')
@@ -188,5 +166,5 @@
     }, 200);
   });
 
-  console.info('[cfai] fetch blocker installed — sensitive data will be blocked from AI APIs');
+  console.info('[cfai] fetch blocker installed — sensitive data will be intercepted');
 })();
