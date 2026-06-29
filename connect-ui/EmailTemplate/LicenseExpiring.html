@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap"
+      rel="stylesheet"
+    />
+    <title>CloudFuze Invite</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        font-weight: 400;
+        line-height: 1.8;
+        box-sizing: border-box;
+        font-family: "Poppins", Arial, sans-serif;
+      }
+
+      .cf_emailContent_Header {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        padding: 1rem 0 1rem 0;
+        border-bottom: 2px solid #00227033;
+      }
+      .cf_emailContent_Header img {
+        width: 90px;
+      }
+      .cf_emailContent_Body {
+        padding-top: 1rem;
+        display: flex;
+        flex-direction: column;
+      }
+      .cf_emailContent_Instance {
+        gap: 10px;
+        display: flex;
+        flex-direction: column;
+      }
+      .cf_emailContent_Instance h1 {
+        font-size: 30px;
+        font-weight: 500;
+      }
+      .cf_emailContent_Instance p {
+        font-size: 14px;
+        color: #1b1b1b;
+        text-align: justify;
+      }
+      .cf_Footer p {
+        font-size: 12px;
+        color: #64748b;
+      }
+      .cf_Footer {
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 2px solid #00227033;
+      }
+      /* box-shadow: rgba(99, 99, 99, 0.2) 0px 2px 8px 0px; */
+    </style>
+  </head>
+  <body>
+    <div class="cf_emailContainer">
+      <div
+        class="cf_emailContent_container"
+        style="
+          width: 670px;
+          display: flex;
+          padding: 10px 20px;
+          border-radius: 8px;
+          height: calc(100% - 50px);
+          flex-direction: column;
+          background-color: #fff;
+        "
+      >
+        <div class="cf_emailContent_Header">
+          <img
+            src="https://cloudfuzehost.com/emailasserts/CF_LOGO.png"
+            alt="CloudFuze"
+          />
+        </div>
+        <div class="cf_emailContent_Body">
+          <div class="cf_emailContent_Instance">
+            <p>Dear [Customer Name],</p>
+            <p>
+              This is an automated notification from CloudFuze Manage. Your
+              [License Name] license is scheduled to expire on [Expiration
+              Date].
+            </p>
+            <p>
+              To ensure uninterrupted access to [Service], please renew your
+              license before the expiration date. You can renew your license
+              online by clicking on the following link:
+            </p>
+            <a
+              href="[Renewal Link]"
+              target="_blank"
+              style="
+                width: fit-content;
+                text-decoration: none;
+                background-color: #0062ff;
+                font-weight: 500;
+                color: #fff;
+                font-size: 14px;
+                padding: 8px;
+                font-size: 12px;
+                border-radius: 4px;
+              "
+            >
+              [Renewal Link]
+            </a>
+          </div>
+          <div class="cf_Footer">
+            <p>Thank you for being a valued customer.</p>
+            <p>Sincerely,</p>
+            <p>CloudFuze Manage Team</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

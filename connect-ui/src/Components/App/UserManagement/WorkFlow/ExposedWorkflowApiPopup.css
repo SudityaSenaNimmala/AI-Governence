@@ -1,0 +1,94 @@
+.exposed-api-popup {
+    padding: 0 4px 12px;
+    text-align: left;
+}
+
+.exposed-api-popup__intro {
+    margin: 0 0 16px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: #475569;
+}
+
+.exposed-api-popup__intro code {
+    font-size: 12px;
+    background: #f1f5f9;
+    padding: 1px 6px;
+    border-radius: 4px;
+}
+
+.exposed-api-popup__block {
+    margin-bottom: 16px;
+}
+
+.exposed-api-popup__block-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.exposed-api-popup__label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #0f172a;
+}
+
+.exposed-api-popup__copy-btn {
+    min-width: auto !important;
+    padding: 4px 8px !important;
+    height: auto !important;
+    background: #f8fafc !important;
+    border: 1px solid #e2e8f0 !important;
+    border-radius: 6px !important;
+}
+
+.exposed-api-popup__code {
+    margin: 0;
+    padding: 12px;
+    font-size: 12px;
+    line-height: 1.45;
+    background: #0f172a;
+    color: #e2e8f0;
+    border-radius: 8px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.exposed-api-popup__code--small {
+    font-size: 11px;
+}
+
+.exposed-api-popup__code--scroll {
+    max-height: 220px;
+    overflow: auto;
+    white-space: pre;
+    word-break: normal;
+}
+
+.exposed-api-popup__hint {
+    margin: 8px 0 0;
+    font-size: 11px;
+    color: #64748b;
+    line-height: 1.45;
+}
+
+.exposed-api-popup__settings-link {
+    color: #2563eb;
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.exposed-api-popup__settings-link:hover {
+    color: #1d4ed8;
+}
+
+.exposed-api-popup__hint code {
+    font-size: 10px;
+    background: #f1f5f9;
+    padding: 0 4px;
+    border-radius: 3px;
+}

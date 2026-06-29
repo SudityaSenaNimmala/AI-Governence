@@ -1,0 +1,174 @@
+/* User Details Card */
+.cf_user_details_card {
+  width: 100%;
+  display: flex;
+  gap: 16px;
+  padding: 18px;
+  border-radius: 8px;
+  background-color: #f9fafb;
+  border: 1px solid #e5e7eb;
+  margin: 12px 0;
+  align-items: center;
+}
+
+.cf_user_avatar {
+  width: 60px;
+  height: 60px;
+  min-width: 60px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  font-weight: 700;
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.25);
+}
+
+.cf_user_info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cf_user_info h3 {
+  margin: 0;
+  color: #1f2937;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.cf_user_email {
+  margin: 0;
+  color: #6b7280;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.cf_user_meta {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.cf_user_meta span {
+  color: #4b5563;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.cf_user_meta strong {
+  color: #111827;
+  font-weight: 700;
+}
+
+/* Groups Section */
+.cf_groups_section {
+  width: 100%;
+  margin: 16px 0;
+}
+
+.cf_groups_section h4 {
+  color: #1f2937;
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 10px 0;
+}
+
+.cf_search_wrapper {
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+.cf_search_wrapper .cf_search_container {
+  width: 100% !important;
+  height: 42px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.cf_search_wrapper .cf_open_search_container {
+  width: 100% !important;
+}
+
+.cf_search_wrapper .cf_search_container:focus-within {
+  border-color: #0062ff;
+  box-shadow: 0 0 0 2px rgba(0, 98, 255, 0.1);
+}
+
+.cf_search_wrapper .cf_open_search_input {
+  font-size: 13px;
+  color: #1f2937;
+}
+
+/* Selected Groups Bar (above table) */
+.cf_selected_groups_bar {
+  width: 100%;
+  padding: 8px 0;
+  margin-bottom: 8px;
+}
+
+.cf_selected_groups_list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cf_group_tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  background: #dbeafe;
+  color: #1e40af;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.cf_remove_group_btn {
+  background: none;
+  border: none;
+  color: #1e40af;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0;
+  margin-left: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  line-height: 1;
+}
+
+.cf_remove_group_btn:hover {
+  opacity: 0.7;
+}
+
+/* Assign Button */
+.cf_assign_button {
+  width: 100%;
+  padding: 10px 24px !important;
+  background: #0129ac !important;
+  color: #fff !important;
+  border: none !important;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.cf_assign_button:hover:not(:disabled) {
+  background: #001a6f !important;
+}
+
+.cf_assign_button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

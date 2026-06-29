@@ -1,0 +1,129 @@
+.cf_popup_main_container {
+  top: 0;
+  left: 0;
+  width: 100%;
+  display: flex;
+  height: 100vh;
+  z-index: 99999;
+  position: absolute;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.06);
+}
+
+@keyframes fadeIn {
+  0% {
+    margin-top: -100px;
+    opacity: 0.4;
+    height: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.cf_popup_container_side,
+.cf_popup_container {
+  display: flex;
+  overflow: hidden;
+  border-radius: 4px;
+  flex-direction: column;
+  background-color: #fff;
+  transform-origin: center;
+  transition: all 0.2s linear;
+  animation: fadeIn 0.2s linear;
+  box-shadow: rgba(0, 0, 0, 0.1) 0px 0px 5px 0px,
+    rgba(0, 0, 0, 0.1) 0px 0px 1px 0px;
+  /* transform: translateX(100%); */
+}
+
+.cf_popup_container_side {
+  animation: sideIn 0.2s linear;
+  border-radius: 0px;
+}
+
+@keyframes sideIn {
+  0% {
+    transform: translateX(10%);
+    opacity: 0;
+  }
+  100% {
+    transform: translateX(0%);
+    opacity: 1;
+  }
+}
+
+.cf_popup_container_side_title,
+.cf_popup_container_title {
+  width: 100%;
+  height: 40px;
+  display: flex;
+  color: #fff;
+  padding: 0 10px;
+  align-items: center;
+  background-color: #0062ff;
+  justify-content: space-between;
+}
+.cf_popup_container_side_title div,
+.cf_popup_container_title div {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cf_popup_container_side_title div svg,
+.cf_popup_container_title div svg {
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.cf_popup_container_side_title {
+  color: #454545;
+  background-color: #fff;
+}
+
+.cf_popup_container_body {
+  width: 100%;
+  display: flex;
+  height: calc(100% - 90px);
+  overflow-y: auto;
+  align-items: center;
+  justify-content: center;
+}
+
+.cf_popup_container_footer {
+  width: 100%;
+  display: flex;
+  height: 50px;
+  padding: 0 10px;
+  overflow-y: auto;
+  align-items: center;
+  justify-content: center;
+}
+
+.cf_powered_by_ai {
+  font-size: 10px;
+  color: #acacac;
+  font-weight: 400;
+  margin-left: 5px;
+  padding: 2px 5px;
+  border-radius: 5px;
+  color: #fff;
+  top: -6px;
+  position: relative;
+  transition: all 0.5s linear;
+  animation: changeBgColor 0.5s infinite alternate;
+}
+
+.cf_popup_container_side_title h3 {
+  position: absolute;
+}
+
+@keyframes changeBgColor {
+  0% {
+    background: #0037a9;
+  }
+  100% {
+    background: #001a6f;
+  }
+}

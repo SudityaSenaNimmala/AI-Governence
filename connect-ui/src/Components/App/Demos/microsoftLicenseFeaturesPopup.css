@@ -1,0 +1,118 @@
+/* Microsoft license “Features” popup — body content (works with center or side Popup) */
+
+.ms-license-features-popup {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.ms-license-features-popup__body {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: 20px 22px 26px;
+  box-sizing: border-box;
+  min-height: 120px;
+}
+
+.ms-license-features-popup__panel {
+  background: linear-gradient(165deg, #f0f7ff 0%, #ffffff 42%, #fafbfc 100%);
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 20px 20px 22px;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 8px 24px rgba(0, 98, 255, 0.06);
+}
+
+.ms-license-features-popup__kicker {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #0062ff;
+}
+
+.ms-license-features-popup__subtitle {
+  margin: 0 0 18px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #0f172a;
+  line-height: 1.35;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.ms-license-features-popup__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.ms-license-features-popup__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0;
+  padding: 12px 0;
+  border-bottom: 1px solid #f1f5f9;
+  font-size: 14px;
+  line-height: 1.55;
+  color: #334155;
+}
+
+.ms-license-features-popup__item:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.ms-license-features-popup__item:first-child {
+  padding-top: 2px;
+}
+
+.ms-license-features-popup__icon {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  margin-top: 1px;
+  border-radius: 8px;
+  /* background: linear-gradient(135deg, #0062ff 0%, #4f46e5 100%); */
+  color: #0062ff;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 24px;
+  text-align: center;
+  /* box-shadow: 0 2px 6px rgba(0, 98, 255, 0.25); */
+}
+
+.ms-license-features-popup__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.ms-license-features-popup__footer-note {
+  margin: 16px 4px 0;
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.45;
+}
+
+@media (max-width: 640px) {
+  .ms-license-features-popup__body {
+    padding: 16px 14px 20px;
+  }
+
+  .ms-license-features-popup__panel {
+    padding: 16px 16px 18px;
+    border-radius: 10px;
+  }
+
+  .ms-license-features-popup__item {
+    font-size: 13px;
+  }
+}

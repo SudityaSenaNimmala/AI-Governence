@@ -1,0 +1,7 @@
+Slack Workspace Admin (Source Cloud),mia@pepperwood.club
+Teams Admin (Destination Cloud),oilver@pepperwood.club
+
+User Email Id ,vimalesh.t@cloudfuze.com
+
+#,Message Workspace Id,Name,Channel Type,Total Messages,Total Processed,Total In Conflict,Move Status
+1,6683f1e6730acd364d81c786,James-smith,One-One,25,24,1,PROCESSED_WITH_SOME_CONFLICTS

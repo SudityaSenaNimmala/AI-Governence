@@ -1,0 +1,257 @@
+.cf_calendar_container {
+  top: 0;
+  width: 450px;
+  height: 430px;
+  display: flex;
+  flex-wrap: wrap;
+  overflow: hidden;
+  user-select: none;
+  position: absolute;
+  border-radius: 4px;
+  background-color: #fff;
+  z-index: 999999999999999999;
+  box-shadow: 0 5px 5px -3px #0003, 0 8px 10px 1px #00000024,
+    0 3px 14px 2px #0000001f;
+}
+
+.cf_calendar_body {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  height: calc(100% - 100px);
+  justify-content: space-between;
+}
+
+.cf_calendar_body_cal_container {
+  width: 60%;
+  height: 100%;
+}
+
+.cf_calendar_body_cal_container_header {
+  width: 100%;
+  height: 50px;
+  display: flex;
+  padding: 0 20px;
+  align-items: center;
+  background-color: #fff;
+  justify-content: space-between;
+}
+
+.cf_calendar_body_years,
+.cf_calendar_body_cal_container_body {
+  width: 100%;
+  padding: 10px 20px;
+}
+
+.cf_calendar_table {
+  width: 100%;
+  border-spacing: 0;
+  border-collapse: collapse;
+}
+
+.cf_calendar_table th,
+.cf_calendar_table td {
+  width: 38px;
+  height: 38px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #0000008a;
+  text-align: center;
+}
+
+.cf_calendar_table > td > div {
+  width: 35px;
+  height: 35px;
+  margin: auto;
+  display: flex;
+  cursor: pointer;
+  font-weight: 600;
+  border-radius: 50%;
+  align-items: center;
+  justify-content: center;
+}
+
+.cf_cal_nextDate_disabled {
+  pointer-events: none !important;
+  opacity: 0.5 !important;
+}
+
+.cf_calendar_table td {
+  font-weight: 600;
+  color: #2c3e50 !important;
+}
+
+.cf_cal_filter_date,
+.cf_cal_current_date,
+.cf_calendar_body_years_active,
+.cf_calendar_table > td > div:hover {
+  color: #fff !important;
+  background-color: #0062ff92 !important;
+}
+
+.cf_cal_month_year {
+  border: none;
+  padding: 8px;
+  outline: none;
+  cursor: pointer;
+  color: #5b667b;
+  font-weight: 400;
+  border-radius: 4px;
+  background-color: #ddd;
+}
+
+.cf_cal_mover_div {
+  display: flex;
+  font-size: 16px;
+}
+
+.cf_cal_mover_div div {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  cursor: pointer;
+  border-radius: 50%;
+  align-items: center;
+  justify-content: center;
+}
+.cf_cal_mover_div div svg {
+  font-size: 12px;
+}
+
+.cf_cal_mover_div div:hover {
+  background-color: #ddd;
+}
+
+.cf_calendar_header {
+  width: 100%;
+  height: 40px;
+  display: flex;
+  padding: 0 10px;
+  align-items: center;
+  border-bottom: 1px solid #ddd;
+}
+
+.cf_calendar_body_cal_presets p {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 4px;
+  padding: 5px 15px 5px 6px;
+}
+.cf_cal_preset_filters {
+  color: #5b667b;
+  font-weight: 500;
+}
+.cf_cal_preset_filters:hover {
+  background-color: #e6e9f0 !important;
+}
+
+.cf_calendar_body_cal_presets {
+  padding: 0 10px;
+  width: 30%;
+  height: 100%;
+}
+
+.cf_calendar_body_cal_presets p {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 4px;
+  margin: 0 0 10px;
+  padding: 5px 15px 5px 6px;
+}
+
+.cf_calendar_footer {
+  gap: 20px;
+  width: 100%;
+  height: 50px;
+  display: flex;
+  padding: 0 10px;
+  align-items: center;
+  justify-content: flex-end;
+  border-top: 1px solid #ddd;
+}
+
+.cf_calendar_body_years div {
+  width: 20%;
+  padding: 5px;
+  display: flex;
+  cursor: pointer;
+  border-radius: 4px;
+  align-items: center;
+  justify-content: center;
+  border: 0px solid #ddd;
+  color: #454545;
+}
+
+.cf_calendar_body_years {
+  flex-grow: 3;
+  display: flex;
+  gap: 10px 5px;
+  flex-wrap: wrap;
+  overflow-y: auto;
+  align-items: center;
+  max-height: calc(100% - 40px);
+}
+
+.cf_calendar_footer button {
+  border: 0;
+  outline: none;
+  cursor: pointer;
+  padding: 3px 18px;
+  border-radius: 4px;
+  background-color: #fff;
+}
+
+#cf_cal_btn_cancel {
+  font-weight: 500;
+  color: #0062ff;
+  border: 1px solid #0062ff !important;
+}
+
+#cf_cal_btn_apply {
+  color: #fff;
+  font-weight: 500;
+  border: 1px solid #0062ff !important;
+  background-color: #0062ff !important;
+}
+
+#cf_cal_btn_apply:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.cf_cal_range_between,
+.cf_cal_range_start,
+.cf_cal_range_end,
+.cf_cal_range_single,
+.cf_cal_range_anchor {
+  color: #fff !important;
+  font-weight: 600;
+}
+
+.cf_cal_range_between {
+  background-color: #8babff !important;
+  border-radius: 0 !important;
+  width: 100% !important;
+  max-width: 38px;
+}
+
+.cf_cal_range_start {
+  background-color: #0062ff !important;
+  border-radius: 50% 0 0 50% !important;
+}
+
+.cf_cal_range_end {
+  background-color: #0062ff !important;
+  border-radius: 0 50% 50% 0 !important;
+}
+
+.cf_cal_range_single {
+  background-color: #0062ff !important;
+}
+
+.cf_cal_range_anchor {
+  background-color: #4285f4 !important;
+  box-shadow: 0 0 0 2px #fff inset;
+}

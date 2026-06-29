@@ -17,4 +17,3 @@ agent/electron/node_modules/
 agent/electron/package-lock.json
 agent/browser-extension/Untitled
 .claude/settings.local.json
-connect-ui/

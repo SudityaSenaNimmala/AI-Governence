@@ -1,0 +1,477 @@
+{
+  "SLACK-GOOGLE_CHAT": {
+    "features": [
+      "One Time Migration",
+      "​Delta Migration",
+      "Public channels Migration",
+      "Private Channel Migrations",
+      "Channel Members",
+      "​Direct Messages Migration",
+      "​Pre-Scan",
+      "​User Groups",
+      "Message Posted Username",
+      "Text Messages",
+      "Threads",
+      "Attachments",
+      "User Mentions",
+      "Emojis"
+    ],
+    "enhancements": [
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_111",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "One Time Migration",
+        "description": "The initial transfer of channels and direct messages (DMs) from Slack to Teams"
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_112",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Delta Migration",
+        "description": "Migration of incremental changes made in Slack channels/DMs during the ongoing onetime migration is in progress."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_113",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Public channels Migration",
+        "description": "Transferring public channels from Slack to Teams, including all associated messages, attachments, and other content."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_114",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Private Channel Migrations",
+        "description": "Migrating private channels from Slack to Teams, preserving message history and content while maintaining the appropriate access restrictions."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_115",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Channel Members",
+        "description": " Ensuring that all members of the migrated channels are correctly transferred to Teams,maintaining the same membership and permissions."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_116",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Message Posted Username",
+        "description": "Retaining the information about the user who posted each message during the migration process, enabling proper attribution."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_117",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Text Messages",
+        "description": "Transferring regular messages from Slack to Teams, including text-based communication between users."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_118",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Self Messages",
+        "description": "Transferring regular messages from Slack to Teams, including text-based communication which user sent to himself."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_119",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Threads",
+        "description": "Preserving threaded conversations within channels, allowing users to follow and participate in ongoing discussions."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_120",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Attachments",
+        "description": "Migrating file attachments shared within channels, ensuring that all relevant files are transferred and accessible in Teams."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_121",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "User Mentions",
+        "description": "Retaining user mentions in messages during the migration, ensuring that notifications and references to specific users are preserved."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_122",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Emojis",
+        "description": "Transferring emojis used in Slack to Teams, maintaining the same expressions and visual elements in the migrated content."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_123",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "User Groups",
+        "description": "Transferring user groups or teams from Slack to Teams, preserving the group structure and membership for seamless collaboration."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_124",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Pinned Messages",
+        "description": "Preserving pinned messages in Direct Messages(channels is out of scope), allowing important information and announcements to  remain accessible in Teams chats."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_125",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Pre-Scan",
+        "description": "Conducting a preliminary scan or analysis of the Slack data to identify and prepare for any potential migration challenges or issues."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_126",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Direct Messages Migration",
+        "description": "Migrating one-on-one conversations or direct messages from Slack to Teams, ensuring that private communication is transferred securely."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_127",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Unlimited Delta",
+        "description": "Offering unlimited delta migration as a feature, allowing for incremental and continuous migration of messages after a specific point in time, ensuring all new and updated content is seamlessly transferred."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_128",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Option to cancel & Pause the Direct Message Migration.",
+        "description": "Users can pause ongoing migrations or cancel migration  altogether before it's delivered."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_129",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Option to cancel & Pause the channel Migration.",
+        "description": "Users can pause ongoing  channel migrations or cancel channel migration  altogether before it's delivered."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_130",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "When the user chooses to close spaces, RETRY will be disabled from the backend.",
+        "description": "To maintain the order of the messages and attachments, once the user chooses to 'Close Space' then the Retry option will be disabled from the backend"
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_131",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "JSON file export for Public Channels",
+        "description": "Users can able to initiate public channel migration after uploading  jason zip files in the UI."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_132",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "JSON file export for Private Channels",
+        "description": "Users can able to initiate private channel migration after uploading jason zip files in the UI."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_133",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "JSON file export for DMs",
+        "description": "Users can able to initiate Direct message migration after uploading jason zip files in the UI."
+      },
+      {
+        "tag": "Existing",
+        "note": "",
+        "status": "DONE",
+        "id": "S2C_134",
+        "releaseDate": "15/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Filtering/ Selecting Timeperiod to Migrate e.g. last 18 months, or last 3 years, etc.",
+        "description": "Users can able to filter channels based on specific time frames for efficient migration."
+      },
+      {
+        "tag": "New",
+        "note": "",
+        "status": "DEV",
+        "id": "S2C_135",
+        "releaseDate": "31/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Supress the message reactions",
+        "description": "Preventing the migration of reactions from Slack to Google chat"
+      },
+      {
+        "tag": "New",
+        "note": "",
+        "status": "DEV",
+        "id": "S2C_136",
+        "releaseDate": "31/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Suspended users during the migration are mapped to the service account",
+        "description": "During migration from Slack to Google chat, suspended users in Slack will be seamlessly mapped with service accounts."
+      },
+      {
+        "tag": "New",
+        "note": "",
+        "status": "DEV",
+        "id": "S2C_137",
+        "releaseDate": "31/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Channel Renaming",
+        "description": "Users can  rename channels by simply highlighting the channel name text box."
+      },
+      {
+        "tag": "New",
+        "note": "",
+        "status": "DEV",
+        "id": "S2C_138",
+        "releaseDate": "31/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Edited Message Migration with the edited tag.",
+        "description": "This feature allows users to seamlessly migrate edited messages from Slack to Google Chat by including a specific keyword in the edited message."
+      },
+      {
+        "tag": "New",
+        "note": "",
+        "status": "DEV",
+        "id": "S2C_139",
+        "releaseDate": "31/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Modified the timestamp for direct messages.",
+        "description": "Timestamps in direct messages are migrated in new format."
+      },
+      {
+        "tag": "New",
+        "note": "",
+        "status": "DEV",
+        "id": "S2C_140",
+        "releaseDate": "31/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Implemented pagination in channels page",
+        "description": "Loading a large number of channels simultaneously can increase the load time of the page and strain server resources. Pagination helps distribute the data retrieval process across multiple pages, resulting in faster loading times and better overall performance."
+      },
+      {
+        "tag": "New",
+        "note": "",
+        "status": "DEV",
+        "id": "S2C_141",
+        "releaseDate": "31/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Implemented pagination in Direct message  page",
+        "description": "Loading all direct message conversations at once can lead to longer loading times and increased server load. Pagination distributes the retrieval and rendering of DM conversations across multiple pages, resulting in faster loading times and better overall performance."
+      },
+      {
+        "tag": "New",
+        "note": "",
+        "status": "DEV",
+        "id": "S2C_142",
+        "releaseDate": "31/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Implemented delete icon in channels page and direct message page.",
+        "description": "In case users upload the wrong CSV file or encounter errors after uploading, having a delete icon allows the users to remove the uploaded CSV file in channels page and direct message page."
+      },
+      {
+        "tag": "New",
+        "note": "",
+        "status": "DEV",
+        "id": "S2C_143",
+        "releaseDate": "31/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Bulk Delta Migration",
+        "description": "Users can able to initiate bulk delta initiation."
+      },
+      {
+        "tag": "New",
+        "note": "",
+        "status": "DEV",
+        "id": "S2C_144",
+        "releaseDate": "31/07/2024",
+        "lastModified": "26/07/2024",
+        "title": "Non admin private channel migration",
+        "description": "Users can migrate private channels even if the admin is not part of the private channel"
+      },
+      {
+        "tag": "Roadmap",
+        "note": "",
+        "status": "IN_QUEUE",
+        "id": "S2C_145",
+        "releaseDate": "14/08/2024",
+        "lastModified": "26/07/2024",
+        "title": "Mapped User Filter for Direct Messages",
+        "description": "This feature, named \"Mapped User Filter,\" allows users to filter and display only Mapped users in the  UI."
+      },
+      {
+        "tag": "Roadmap",
+        "note": "",
+        "status": "IN_QUEUE",
+        "id": "S2C_146",
+        "releaseDate": "14/08/2024",
+        "lastModified": "26/07/2024",
+        "title": "​Sync New User\n",
+        "description": "​The Sync New Users feature streamlines the process of adding new users to the cloud without needing to re-add the cloud from the migration tool. It also provides a count of the synced users along with the date and time of the sync. The information is formatted as follows:\n\n\"Synced [Number] Users on [Date], [Time]\"\n\nExample: \"Synced 0 Users on 6/20/2024, 5:13:02 PM\"\n"
+      },
+      {
+        "tag": "Roadmap",
+        "note": "",
+        "status": "IN_QUEUE",
+        "id": "S2C_147",
+        "releaseDate": "14/08/2024",
+        "lastModified": "26/07/2024",
+        "title": "​External User migration in channels\n",
+        "description": "Channels containing external users are tagged with \"ext\" in the UI. After the completion of migration when the space is closed, invitations are automatically sent to the external users to join the migrated space.  External users have the option to accept these invitations; Only accepted users are added to the migrated space. Once the space is closed, in google chat migrated space will be created with external Tag . Messages posted by external users are migrated with a header showing \"via external user (username)\"."
+      },
+      {
+        "tag": "Roadmap",
+        "note": "",
+        "status": "IN_QUEUE",
+        "id": "S2C_148",
+        "releaseDate": "14/08/2024",
+        "lastModified": "26/07/2024",
+        "title": "​​Pagination and Search box in the channels tab on the report page ",
+        "description": "​The report page includes a pagination feature to navigate through large sets of data efficiently, breaking it into manageable pages. Additionally, a search box allows users to quickly search specific channels within the report page by entering keywords."
+      },
+      {
+        "tag": "Roadmap",
+        "note": "",
+        "status": "IN_QUEUE",
+        "id": "S2C_149",
+        "releaseDate": "14/08/2024",
+        "lastModified": "26/07/2024",
+        "title": "​Pagination and Search box in the Direct Message tab on the report page ",
+        "description": "​The report page includes a pagination feature to navigate through large sets of data efficiently, breaking it into manageable pages. Additionally, a search box allows users to quickly search specific DMs within the report page by entering keywords."
+      },
+      {
+        "tag": "Roadmap",
+        "note": "",
+        "status": "IN_QUEUE",
+        "id": "S2C_150",
+        "releaseDate": "14/08/2024",
+        "lastModified": "26/07/2024",
+        "title": "​Start and End Date of Migration",
+        "description": "​After initiating the Channel/DM migration, the UI will display the initiated date. Once the migration is completed, the processed date will also be updated and shown."
+      },
+      {
+        "tag": "Roadmap",
+        "note": "",
+        "status": "IN_QUEUE",
+        "id": "S2C_151",
+        "releaseDate": "14/08/2024",
+        "lastModified": "26/07/2024",
+        "title": "​Enable the menu panel",
+        "description": "​This feature allows users to toggle between tabs without having to reselect the source and destination each time they switch from the reports page to the Slack migration page, unless they have logged out or the session has timed out. Additionally, it ensures users are redirected to the previously used page within the Slack migration section."
+      }
+    ]
+  },
+  "SLACK-MICROSOFT_TEAMS": {
+    "features": [
+      "​One Time Migration",
+      "Delta migration​",
+      "Public channels Migration",
+      "Private Channel Migrations",
+      "Channel Members",
+      "Message Posted Username",
+      "Text Messages",
+      "​Self Messages",
+      "Threads",
+      "Attachments",
+      "User Mentions",
+      "Emojis",
+      "User Groups",
+      "Pinned Messages",
+      "Pre-Scan",
+      "Direct Messages Migration",
+      "Unlimited Delta"
+    ],
+    "enhancements": [
+      {
+        "id": "prod_1",
+        "title": "Filtering/ Selecting Timeperiod to Migrate e.g. last 18 months, or last 3 years, etc.",
+        "description": "Users can able to filter channels based on specific time frames for efficient migration.",
+        "status": "DONE",
+        "releaseDate": "15/07/2024"
+      },
+      {
+        "id": "prod_2",
+        "title": "Implemented pagination in Google Space migration in report page",
+        "description": "Loading an entire report with all its data at once can lead to slower page loading times and increased server load. Pagination helps distribute the data retrieval and rendering process, resulting in faster page performance and a smoother user experience.",
+        "status": "DEV",
+        "releaseDate": "21-07-2024"
+      },
+      {
+        "id": "prod_3",
+        "title": "Option to cancel & Pause the Direct Message Migration.",
+        "description": "Users can able to filter channels based on specific time frames for efficient migration.",
+        "status": "IN_QUEUE",
+        "releaseDate": "03-08-2024"
+      }
+    ]
+  }
+}
+

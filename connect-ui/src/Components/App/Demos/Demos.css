@@ -1,0 +1,84 @@
+.cf_image_light {
+  gap: 6px;
+  display: flex;
+  align-items: center;
+}
+
+.cf_image_light p {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.cf_move_inside_details {
+  transition: all 0.2s ease-in-out;
+  width: fit-content !important;
+  padding: 0 10px;
+  gap: 5px;
+}
+
+.cf_move_inside_details p {
+  font-size: 12px;
+  font-weight: 500;
+  color: #0062ff;
+}
+
+.cf_move_inside_details svg {
+  color: #0062ff;
+}
+
+/* .cf_move_inside_details:hover {
+  background-color: #0062ff;
+  color: #fff;
+}
+
+.cf_move_inside_details:hover p {
+  color: #fff;
+}
+
+.cf_move_inside_details:hover svg {
+  color: #fff;
+} */
+
+.cf_fulltab_switcher {
+  gap: 5px;
+  height: 35px;
+  display: flex;
+  max-width: 100%;
+  padding: 3px 5px;
+  width: fit-content;
+  border-radius: 5px;
+  align-items: center;
+  background-color: #f1f5f9;
+}
+
+.cf_fulltab_switcher_button {
+  height: 30px;
+  border: none;
+  outline: none;
+  cursor: pointer;
+  padding: 0 8px;
+  border-radius: 5px;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid transparent;
+  background-color: transparent;
+  transition: all 0.2s ease-in-out;
+}
+
+.cf_fulltab_switcher_button_active {
+  background-color: #fff;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+}
+
+.cf_fulltab_switcher_button p,
+.cf_fulltab_switcher_button_active p {
+  font-size: 12px;
+  font-weight: 500;
+  color: #64748b;
+  white-space: pre;
+}
+
+.cf_fulltab_switcher_button_active p {
+  color: #0062ff;
+}

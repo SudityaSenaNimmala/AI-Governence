@@ -1,0 +1,447 @@
+.cf_onboard_cloudSelect {
+  width: 100%;
+  display: flex;
+  padding: 0 10px;
+  min-height: 70px;
+  align-items: center;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.cf_onboard_cloudSelect p {
+  font-weight: 500;
+  font-size: 12px;
+}
+
+.cf_onboard_cloudSelect_img_wrapper {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  overflow: hidden;
+  border-radius: 50%;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #e0e0e0;
+}
+
+.cf_onboard_cloudSelect_img_wrapper img {
+  width: 30px;
+  /* border-radius: 50%; */
+}
+
+.cf_onBoard_YET_TO_START {
+  opacity: 0.5;
+  filter: grayscale(100%);
+}
+
+.cf_onBoard_COMPLETED,
+.cf_onBoard_IN_PROGRESS {
+  opacity: 1;
+  filter: grayscale(0%);
+  /* border-right: 2px solid #0000ff; */
+  border-radius: 9999px;
+  /* animation: spinBorders 1s linear infinite !important; */
+}
+
+.cf_onBoardingCompleted {
+  font-size: 20px;
+  /* color: #fff !important; */
+  /* background-color: #00c64f !important; */
+}
+
+.cf_onboard_cloudSelect_img_wrapper_flow {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.cf_onboard_cloudSelect_img_wrapper_flow img {
+  width: 30px;
+  height: 30px;
+}
+
+.cf_recomendedText {
+  gap: 5px;
+  display: flex;
+  padding: 0 10px;
+  width: fit-content;
+  align-items: center;
+  border-radius: 50px;
+  background-color: hsl(226, 100%, 22%);
+  animation: skeleton-loadingBlue 1s linear infinite alternate;
+}
+
+.cf_recomendedText p {
+  color: #fff;
+}
+
+@keyframes skeleton-loadingBlue {
+  0% {
+    background-color: hsl(226, 100%, 22%);
+  }
+  100% {
+    background-color: hsl(226, 60%, 50%);
+  }
+}
+
+.cf_workflow_canvas_container {
+  width: 100%;
+  height: 100%;
+  padding: 20px 10px 0 10px;
+  border-radius: 0.75rem;
+  background-color: #ffffff;
+  border: 1px solid #e2e8f0;
+}
+
+.cf_workflow_canvas_container_body {
+  gap: 20px;
+  width: 100%;
+  display: flex;
+  padding-top: 10px;
+  height: calc(100% - 50px);
+}
+
+.cf_workflow_canvas_container_body_left {
+  width: 300px;
+  height: 100%;
+  padding: 5px 0;
+  border-radius: 0.75rem;
+  background-color: #ffffff;
+  border: 1px solid #e2e8f0;
+}
+
+.cf_workflow_canvas_drag_drop_container {
+  width: calc(100% - 300px);
+  height: 100%;
+  padding: 5px 10px;
+  /* padding-bottom: 10px; */
+  border-radius: 0.75rem;
+  background-color: #ffffff;
+  border: 1px solid #e2e8f0;
+}
+
+.cf_workflow_canvas_container_body_left_header {
+  width: 100%;
+  height: 100px;
+  display: flex;
+  padding: 0 10px;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.cf_workflow_canvas_container_body_left_header h3 {
+  font-size: 14px;
+  color: #0f1729;
+  font-weight: 500;
+}
+
+.cf_workflow_canvas_container_body_left_header p {
+  font-size: 12px;
+  font-weight: 400;
+  color: #64748b !important;
+}
+
+.cf_workflow_canvas_container_body_left_body {
+  gap: 10px;
+  width: 100%;
+  display: flex;
+  padding: 10px;
+  overflow-y: auto;
+  flex-direction: column;
+  height: calc(100% - 100px);
+}
+
+.cf_workflow_canvas_container_body_left_body_item:active {
+  cursor: grabbing;
+}
+
+.cf_workflow_canvas_container_body_left_body_item {
+  width: 100%;
+  height: 70px;
+  cursor: grab;
+  display: flex;
+  user-select: none;
+  filter: none !important;
+  border-radius: 0.75rem;
+  justify-content: center;
+  border: 2px dotted #99bbf2;
+}
+
+.cf_workflow_canvas_container_body_left_body_item_grip {
+  width: 30px;
+  height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cf_workflow_canvas_container_body_left_body_item_content {
+  /* gap: 10px; */
+  height: 68px;
+  display: flex;
+  padding: 0 5px;
+  justify-content: center;
+  /* align-items: center; */
+  width: calc(100% - 30px);
+}
+
+.cf_workflow_canvas_container_body_left_body_item_content img {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+}
+
+.cf_workflow_canvas_container_body_left_body_item_content p {
+  font-size: 14px;
+  font-weight: 500;
+  color: #000 !important;
+}
+
+.cf_workflow_canvas_container_body_left_body_item_content_email {
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: #64748b !important;
+}
+
+.cf_workflow_canvas_drag_drop_container_header {
+  width: 100%;
+  height: 60px;
+  display: flex;
+  /* padding: 0 10px; */
+  flex-direction: column;
+  justify-content: center;
+}
+
+.cf_workflow_canvas_drag_drop_container_header h3 {
+  font-size: 14px;
+  color: #0f1729;
+  font-weight: 500;
+}
+
+.cf_workflow_canvas_drag_drop_container_header p {
+  font-size: 12px;
+  font-weight: 400;
+  color: #64748b !important;
+}
+
+.cf_workflow_canvas_drag_drop_container_body {
+  gap: 20px;
+  width: 100%;
+  padding: 15px;
+  display: flex;
+  overflow-x: auto;
+  border-width: 2px;
+  border-radius: 0.75rem;
+  border: 2px dashed #99bbf2;
+  height: calc(100% - 60px);
+  background-color: #f2f3ff66;
+}
+
+.cf_workflow_canvas_Cloud_Item {
+  width: 300px;
+  height: fit-content;
+  max-height: 100%;
+  display: flex;
+  position: relative;
+  border-radius: 0.75rem;
+  transition: all 0.3s ease;
+  animation: opacity 0.2s ease-in;
+  border: 1px solid #e2e8f0;
+  flex-direction: column;
+}
+
+.cf_workflow_canvas_Cloud_Item_header {
+  /* gap: 5px; */
+  width: 300px;
+  height: 60px;
+  display: flex;
+  padding: 0 20px;
+  justify-content: center;
+  flex-direction: column;
+}
+
+.cf_workflow_canvas_Cloud_Item_header img {
+  width: 15px;
+  height: 15px;
+  object-fit: contain;
+}
+
+.cf_workflow_canvas_Cloud_Item_header p {
+  font-size: 12px;
+  font-weight: 500;
+  color: #000;
+}
+
+.cf_workflow_canvas_Cloud_Item_header_block {
+  gap: 5px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+}
+
+.cf_workflow_canvas_Cloud_Item_close {
+  top: -10px;
+  right: -10px;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  color: #fff;
+  cursor: pointer;
+  visibility: hidden;
+  position: absolute;
+  border-radius: 50%;
+  align-items: center;
+  justify-content: center;
+  background-color: #fb2c36;
+  /* transition: all 0.3s ease; */
+}
+
+.cf_workflow_canvas_Cloud_Item:hover .cf_workflow_canvas_Cloud_Item_close {
+  visibility: visible;
+}
+
+.cf_workflow_canvas_Cloud_Item_body {
+  width: 100%;
+  padding: 0 20px;
+  overflow-y: auto;
+  height: calc(100% - 60px);
+}
+
+.cf_workdflow_cloud_license_item {
+  gap: 5px;
+  width: 100%;
+  display: flex;
+  padding: 5px;
+  /* align-items: center; */
+  /* justify-content: center; */
+}
+.cf_workdflow_cloud_license_item p {
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.cf_onboard_cloudSelect_userOptions {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px;
+  padding-top: 0;
+}
+
+.cf_new_workflow_action {
+  width: 100%;
+  height: 100px;
+  display: flex;
+  align-items: center;
+  border-radius: 0.75rem;
+  border: 1px solid #e2e8f0;
+}
+
+.cf_new_workflow_action_icon {
+  height: 50px;
+  width: 50px;
+  display: flex;
+  border-radius: 0.75rem;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(#0d00ffbf 0%, #5592f5bf);
+}
+
+.cf_saas_workflow_options_List {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
+
+.cf_saas_workflow_options_item {
+  padding: 1rem;
+  cursor: pointer;
+  position: relative;
+}
+
+.cf_saas_workflow_options_item_link {
+  position: absolute;
+  bottom: -100%;
+  padding: 1rem 1.5rem;
+  box-shadow:
+    rgba(60, 64, 67, 0.3) 0px 1px 2px 0px,
+    rgba(60, 64, 67, 0.15) 0px 1px 3px 1px;
+}
+.cf_saas_workflow_options_item:hover .cf_saas_workflow_options_item_link {
+  bottom: 0;
+}
+
+/* New Workflow dialog: narrower cards, no overlay on hover so content stays readable */
+.cf_new_workflow_dialog_cards.cf_saas_workflow_options_List {
+  grid-template-columns: repeat(1, minmax(200px, 100%)) !important;
+  max-width: 600px;
+  gap: 1rem;
+  display: grid;
+}
+
+.cf_new_workflow_dialog_cards.cf_saas_workflow_options_List.cf_new_workflow_dialog_cards_step2 {
+  grid-template-columns: 1fr !important;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.cf_new_workflow_dialog_cards .cf_saas_workflow_options_item {
+  max-width: 100%;
+}
+
+.cf_new_workflow_dialog_cards .cf_saas_menu_title_container {
+  padding: 0;
+}
+
+.cf_new_workflow_dialog_cards .cf_saas_workflow_options_item_link {
+  position: relative;
+  bottom: auto;
+  margin-top: 0.5rem;
+  border-radius: 0 0 0.75rem 0.75rem;
+  opacity: 1;
+  transition: opacity 0.2s ease;
+}
+
+.cf_new_workflow_dialog_cards
+  .cf_saas_workflow_options_item:hover
+  .cf_saas_workflow_options_item_link {
+  bottom: auto;
+  opacity: 1;
+}
+
+.cf_new_workflow_dialog_cards .cf_saas_menu_title_container_head,
+.cf_new_workflow_dialog_cards .cf_new_dashboard_pannel_info {
+  color: #1e293b;
+}
+
+.cf_new_workflow_dialog_cards
+  .cf_saas_workflow_options_item:hover
+  .cf_saas_menu_title_container_head,
+.cf_new_workflow_dialog_cards
+  .cf_saas_workflow_options_item:hover
+  .cf_new_dashboard_pannel_info {
+  color: #1e293b;
+}
+
+.cf_new_workflow_dialog_cards .cf_saas_workflow_options_item:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.cf_view_created_flow {
+  gap: 10px;
+  display: flex;
+  padding: 1rem;
+  margin-top: 20px;
+  border-radius: 0.75rem;
+  flex-direction: column;
+  border: 1px solid #e2e8f0;
+}
+/*  */

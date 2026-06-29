@@ -1,0 +1,135 @@
+.cf_browser_activity_card {
+  width: 100%;
+  height: fit-content;
+  display: flex;
+  position: relative;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px;
+  padding-bottom: 10px;
+  border-radius: 10px;
+  border: 1px solid #e0e0e0;
+  animation: moveIn 0.2s ease-in-out forwards;
+}
+
+.cf_browser_activity_card_header_image {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  overflow: hidden;
+  /* border-radius: 50%; */
+  align-items: center;
+  justify-content: center;
+}
+
+.cf_browser_activity_card_header {
+  gap: 10px;
+  width: 100%;
+  height: 40px;
+  display: flex;
+  align-items: center;
+}
+
+.cf_browser_activity_card_header_image img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.cf_browser_activity_card_header_content {
+  height: 40px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.cf_browser_activity_card_header_content p:first-child {
+  font-size: 14px;
+  font-weight: 500;
+  color: #000;
+  line-height: 1;
+}
+
+.cf_browser_activity_card_header_content p:last-child {
+  font-size: 12px;
+  font-weight: 400;
+  color: #64748b;
+}
+
+.cf_browser_activity_card_header_content2 {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cf_browser_activity_card_header_content2 p {
+  font-size: 10px;
+  font-weight: 500;
+  color: #64748b;
+  line-height: 1;
+}
+
+.cf_browser_activity_card_body {
+  gap: 5px;
+  padding: 10px;
+  display: flex;
+  margin-top: 10px;
+  flex-direction: column;
+  border-top: 1px solid #e0e0e0;
+}
+
+.cf_browser_activity_card_body p {
+  font-size: 12px;
+  font-weight: 500;
+  color: #64748b;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 100%;
+}
+
+.cf_browser_activity_card_title {
+  right: 0;
+  top: -10px;
+  color: #fff;
+  font-size: 10px;
+  padding: 2px 8px;
+  font-weight: 500;
+  position: absolute;
+  border-radius: 10px;
+  background-color: #ff4c4c;
+}
+
+.cf_browser_activity_card_body_pages {
+  margin-top: 10px;
+  padding: 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cf_browser_activity_card_body_pages code {
+  font-size: 12px;
+  font-weight: 500;
+  color: #747474;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 100%;
+}
+
+.cf_browser_activity_card_body_pages div {
+  padding: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #747474;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background-color: #e4e4e491;
+  padding: 5px 10px;
+  border-radius: 5px;
+  /* animation: moveIn 0.2s ease-in-out forwards; */
+}

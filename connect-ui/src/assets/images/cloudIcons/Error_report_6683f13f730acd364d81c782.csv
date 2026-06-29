@@ -1,0 +1,4 @@
+Source Channel Name,Job Type,Error Message,Error Description
+smith-Sophia,ONETIME,A file with the same name is currently being uploaded. Change the filename and try to save again.,NAME_ALREADY_EXISTS
+smith-Sophia,ONETIME,Successful,Successful
+

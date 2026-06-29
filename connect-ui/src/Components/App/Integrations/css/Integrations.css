@@ -1,0 +1,397 @@
+.cf_add_cloud_div {
+  gap: 30px;
+  width: 100%;
+  display: grid;
+  padding: 15px 0px;
+  flex-wrap: wrap;
+  align-items: center;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+}
+@media (max-width: 1450px) {
+  .cf_add_cloud_div {
+    grid-template-columns: repeat(9, minmax(0, 1fr));
+  }
+}
+@media (max-width: 1300px) {
+  .cf_add_cloud_div {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+  }
+}
+@media (max-width: 1150px) {
+  .cf_add_cloud_div {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+  }
+}
+@media (max-width: 1020px) {
+  .cf_add_cloud_div {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}
+@media (max-width: 900px) {
+  .cf_add_cloud_div {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+@media (max-width: 750px) {
+  .cf_add_cloud_div {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+@media (max-width: 600px) {
+  .cf_add_cloud_div {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 500px) {
+  .cf_add_cloud_div {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.cf_add_cloud_card {
+  gap: 10px;
+  width: 115px;
+  height: 115px;
+  display: flex;
+  cursor: pointer;
+  position: relative;
+  border-radius: 4px;
+  align-items: center;
+  flex-direction: column;
+  justify-content: center;
+  background-color: #fff;
+  transition: all 0.2s linear;
+  border: 1px solid #e5e5e5;
+  opacity: 0;
+  animation: moveIn 0.2s ease-in-out forwards;
+}
+@keyframes moveIn {
+  0% {
+    margin-bottom: -10px;
+    opacity: 0.2;
+  }
+  100% {
+    opacity: 1;
+    margin-bottom: 0;
+  }
+}
+.cf_add_cloud_card_info_icon {
+  top: 5px;
+  right: 5px;
+  position: absolute;
+}
+.cf_add_cloud_card_info_icon svg {
+  color: #acacac;
+  overflow: hidden;
+}
+.cf_add_cloud_card_info_icon svg:hover {
+  color: #454545;
+}
+.cf_add_cloud_card img {
+  width: 50px;
+}
+.cf_add_cloud_card:hover {
+  box-shadow:
+    0.5px 0px 2.7px rgba(0, 0, 0, 0.012),
+    1.3px 0.1px 6.9px rgba(0, 0, 0, 0.018),
+    2.7px 0.2px 14.2px rgba(0, 0, 0, 0.022),
+    5.5px 0.4px 29.2px rgba(0, 0, 0, 0.028),
+    15px 1px 80px rgba(0, 0, 0, 0.04);
+}
+.cf_add_cloud_card_image {
+  width: 50px;
+  height: 50px; /* background-size: contain; */
+  background-repeat: no-repeat;
+}
+.cf_add_cloud_card_title {
+  padding: 0 5px;
+  font-size: 12px;
+  line-height: 1.2;
+  text-align: center;
+  transition: all 0.2s linear;
+}
+
+.cf_add_cloud_card:focus,
+.cf_add_cloud_card:active,
+.cf_add_cloud_card:focus-visible {
+  outline: 1px solid #000 !important;
+}
+
+.cf_add_cloud_card:hover .cf_add_cloud_card_title {
+  font-weight: 600 !important;
+}
+.cf_add_cloud_filter_div {
+  gap: 10px;
+  width: 100%;
+  height: 40px;
+  display: flex;
+  position: relative;
+  padding: 15px 0px;
+  align-items: center;
+}
+.cf_add_cloud_filter_div span {
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 3px;
+  font-weight: 400;
+}
+.cf_add_cloud_filter_title {
+  color: #acacac;
+  padding: 0 !important;
+  cursor: auto !important;
+}
+.cf_add_cloud_active_filter {
+  color: #0026ff;
+  position: relative;
+  font-weight: 500 !important;
+  transition: all 0.2s linear;
+} /* .cf_add_cloud_active_filter::before {  content: "";  bottom: 0;  width: 100%;  height: 2px;  position: absolute;  background-color: #0026ff;} */
+.cf_add_cloud_active_move {
+  height: 2px; /* width: 24px; */
+  bottom: 5px; /* left: 8px; */
+  border-radius: 50px;
+  position: absolute;
+  background-color: #0026ff;
+  transition: all 0.2s linear;
+}
+.cf_added_clouds_div {
+  width: 100%;
+  height: 80px;
+  margin: 10px 0;
+  display: flex;
+  overflow: hidden;
+  border-radius: 4px;
+  border: 1px solid #ddd;
+}
+.cf_added_clouds_div_icon {
+  width: 10%;
+  height: 100%;
+  display: flex;
+  padding: 0 10px;
+  align-items: center;
+  justify-content: center; /* background-color: #f2f2f2; */
+}
+.cf_added_clouds_div_icon img {
+  width: 40px;
+}
+.cf_added_clouds_div_body {
+  width: 90%;
+  gap: 100px;
+  height: 100%;
+  display: flex;
+  padding: 10px;
+  position: relative;
+  align-items: center; /* flex-direction: column; */
+}
+.cf_added_clouds_div_body_title {
+  height: 40px;
+  width: 300px;
+  display: flex;
+  align-items: center;
+}
+.cf_added_clouds_div_body_title p {
+  font-size: 14px;
+  font-weight: 600;
+}
+.cf_added_clouds_div_body_domain {
+  width: 200px;
+  height: 50px;
+  display: flex;
+  align-items: center;
+}
+.cf_added_clouds_div_body_domain_qas {
+  width: 35%;
+}
+.cf_added_clouds_div_body_domain_res {
+  width: 100%;
+  font-weight: 400;
+  overflow: hidden;
+  text-wrap: nowrap;
+  text-overflow: ellipsis;
+}
+.cf_added_clouds_div_body_delete_div {
+  width: 90%;
+  height: 40px;
+  bottom: 0px;
+  display: flex;
+  position: absolute;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.cf_ManageClouds_table_image_container {
+  gap: 15px;
+  display: flex;
+  height: 100%;
+  display: flex;
+  color: #000;
+  align-items: center;
+}
+
+.cf_ManageClouds_table_image_container img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+
+.cf_ManageClouds_table_image_container p {
+  white-space: nowrap;
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.cf_ManageClouds_table_domain_name {
+  font-size: 14px;
+  color: #000;
+}
+
+.cf_ManageClouds_table_Actions {
+  gap: 50px;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+
+.cf_ManageClouds_table_Actions_button {
+  border: none;
+  outline: none;
+  padding: 10px;
+  display: flex;
+  cursor: pointer;
+  /* margin-left: auto; */
+  border-radius: 4px;
+  align-items: center;
+  justify-content: center;
+  background-color: transparent;
+}
+
+.cf_ManageClouds_table_Actions_button:hover {
+  background-color: #ddd;
+}
+
+.cf_upload_invoice_container {
+  width: 100%;
+  height: 80px;
+  display: flex;
+  cursor: pointer;
+  border-radius: 4px;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed #ddd;
+}
+
+.cf_upload_invoice_container p {
+  color: #acacac;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.cf_upload_invoice_container_info {
+  width: 100%;
+  height: 480px;
+  border-radius: 4px;
+  border: 2px dashed #ddd;
+}
+
+.cf_upload_invoice_container_info_div {
+  width: 100%;
+  height: 80px;
+  display: flex;
+  padding: 0 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cf_upload_invoice_container_info_div_title {
+  font-size: 14px;
+  font-weight: 500;
+  color: #000;
+  line-height: 1.2;
+}
+
+.cf_upload_invoice_container_info_div_subtitle {
+  font-size: 10px;
+  font-weight: 500;
+  color: #64748b;
+}
+
+.cf_upload_invoice_container_info_status {
+  font-size: 10px;
+  font-weight: 500;
+  color: #000;
+  padding: 4px 8px;
+  background-color: #f2f2f2;
+  border-radius: 4px;
+}
+
+.cf_Invoice_InProgress {
+  color: #856404 !important;
+  background-color: #fff3cd !important;
+  border-color: #ffeeba !important;
+}
+
+.cf_Invoice_Completed {
+  color: #00c64f !important;
+  background-color: #e4fcf1 !important;
+  border-color: #badbcc !important;
+}
+
+.cf_Invoice_Pending {
+  color: #acacac !important;
+  background-color: #f2f2f2 !important;
+  border-color: #f2f2f2 !important;
+}
+
+.cf_Invoice_Conflict {
+  color: #ff4c4c !important;
+  background-color: #ffe3e3 !important;
+  border-color: #ffc6c6 !important;
+}
+
+.cf_upload_invoice_container_info_div_yet_to_start {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* .cf_button_gradient {
+  color: #fff !important;
+  transition: all 0.2s cubic-bezier(0, 0, 0.2, 1) !important;
+  background-image: linear-gradient(to right, #001a6f, #0037a9);
+} */
+
+/* .cf_button_gradient:hover {
+  background-image: linear-gradient(to right, #0037a9, #001a6f);
+} */
+
+.cf_button_gradient {
+  color: #fff !important;
+  background: linear-gradient(to right, #001a6f, #0037a9);
+  background-size: 200% auto;
+  transition: background-position 0.5s ease;
+}
+
+.cf_button_gradient:hover {
+  background-position: right center;
+}
+
+.cf_manage_integriation_tag {
+  position: absolute;
+  top: -5px;
+  right: -18px;
+}
+
+.cf_manage_integriation_tag img {
+  width: 14px;
+  object-fit: contain;
+  filter: grayscale(100%);
+}
+
+.show_on_hover {
+  opacity: 0;
+  transition: all 0.2s linear;
+}
+
+tr:hover .show_on_hover {
+  opacity: 1;
+}

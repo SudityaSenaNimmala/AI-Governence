@@ -1,0 +1,863 @@
+.cf_sideNav_div nav {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  /* overflow-y: auto; */
+}
+
+.cf_sideNav_div {
+  top: 0;
+  width: 240px;
+  min-width: 240px;
+  height: 100vh;
+  position: sticky;
+  z-index: 9999;
+  background-color: #001a6f;
+  border-right: 1px solid #e8e8e8;
+  transition:
+    width 0.2s ease,
+    min-width 0.2s ease;
+}
+
+.cf_sideNav_collapsed {
+  width: 56px;
+  min-width: 56px;
+}
+
+.cf_topNav_div {
+  gap: 15px;
+  top: -10px;
+  width: 100%;
+  z-index: 999;
+  height: 60px;
+  display: flex;
+  padding: 0 10px;
+  position: sticky;
+  align-items: center;
+  border-radius: 0.75rem;
+
+  background-color: #001a6f;
+  color: white;
+
+  border: 1px solid #e2e8f0;
+}
+
+.cf_topNav_sidebar_toggle {
+  border: 0;
+  outline: none;
+  display: flex;
+  padding: 8px;
+  cursor: pointer;
+  border-radius: 6px;
+  align-items: center;
+  justify-content: center;
+  color: #e3e8f1;
+  background-color: transparent;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.cf_topNav_sidebar_toggle:hover {
+  background-color: #0062ff;
+  color: #fff;
+}
+
+.cf_topNav_title {
+  height: 60px;
+  display: flex;
+  font-size: 24px;
+  font-weight: 500;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.cf_topNav_userProfile div {
+  font-weight: 500;
+}
+
+.cf_topNav_userMenu_wrap {
+  position: relative;
+  height: 60px;
+  z-index: 9;
+}
+
+.cf_topNav_userProfile {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  font-size: 18px;
+  font-family: inherit;
+  cursor: pointer;
+  font-weight: 600;
+  color: #001a6f;
+  margin-left: auto;
+  padding: 0;
+  -webkit-user-select: none;
+  user-select: none;
+  border-radius: 50%;
+  position: relative;
+  align-items: center;
+  text-decoration: none;
+  justify-content: center;
+  /* background-color: #0022701a; */
+  background-color: #fff;
+  border: 1px solid #ddd;
+  transition: all 0.2s ease-in-out;
+}
+
+.cf_topNav_userProfile_active,
+.cf_topNav_userProfile_active:hover {
+  color: #fff;
+  background-color: #001a6f;
+}
+
+.cf_top_nav_userMenu {
+  top: 95%;
+  right: 00px;
+  width: 160px;
+  height: 80px;
+  display: flex;
+  overflow: hidden;
+  position: absolute;
+  border-radius: 4px;
+  flex-direction: column;
+  background-color: #fff;
+  border: 1px solid #ddd;
+  box-shadow: #2123261a 0 10px 10px -10px;
+}
+
+.cf_top_nav_userMenu div {
+  width: 100%;
+  height: 40px;
+}
+
+.cf_logout_div,
+.cf_top_nav_userMenu div a {
+  gap: 10px;
+  width: 100%;
+  height: 40px;
+  color: #000;
+  display: flex;
+  padding: 0 10px;
+  font-size: 14px;
+  align-items: center;
+  text-decoration: none;
+}
+
+.cf_top_nav_userMenu div:hover a,
+.cf_top_nav_userMenu div:hover {
+  color: #0062ff;
+  background-color: #f2f3ff;
+}
+
+.cf_topNav_userProfile:hover {
+  color: #fff;
+  background-color: #001a6f;
+}
+
+.cf_sideNav_logo_placer {
+  width: 100%;
+  height: 56px;
+  gap: 10px;
+  display: flex;
+  padding: 0 12px;
+  flex-shrink: 0;
+  align-items: center;
+  border-bottom: 1px solid #e8e8e82b;
+  overflow: visible;
+  position: relative;
+}
+
+.cf_sideNav_logo_placer img {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  object-fit: contain;
+}
+
+.cf_sideNav_brand_name {
+  font-size: 15px;
+  font-weight: 500;
+  color: #fff;
+  letter-spacing: -0.2px;
+}
+
+.cf_sideNav_toggle {
+  border: 0;
+  outline: none;
+  display: flex;
+  padding: 6px;
+  cursor: pointer;
+  /* margin-left: auto; */
+  flex-shrink: 0;
+  border-radius: 6px;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background-color: transparent;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.cf_sideNav_toggle:hover {
+  background-color: #f3f4f6;
+  color: #1a1a2e;
+}
+
+.cf_sideNav_collapsed .cf_sideNav_logo_placer {
+  justify-content: center;
+  padding: 0;
+}
+
+.cf_sideNav_collapsed .cf_sideNav_menu {
+  padding: 8px 4px;
+  align-items: center;
+}
+
+.cf_sideNav_collapsed .cf_sideNav_link {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  justify-content: center;
+}
+
+.cf_sideNav_collapsed .cf_sideNav_label,
+.cf_sideNav_collapsed .cf_sideNav_chevron,
+.cf_sideNav_collapsed .cf_sideNav_sublabel,
+.cf_sideNav_collapsed .cf_sideNav_submenu {
+  display: none;
+}
+
+.cf_sideNav_collapsed .cf_sideNav_footer {
+  align-items: center;
+}
+
+.cf_sideNav_collapsed .cf_sideNav_help_link {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  justify-content: center;
+}
+
+.cf_sideNav_menu {
+  width: 100%;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.cf_sideNav_item {
+  list-style: none;
+}
+
+.cf_sideNav_link {
+  gap: 10px;
+  width: 100%;
+  height: 36px;
+  display: flex;
+  padding: 0 12px;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  border-radius: 6px;
+  align-items: center;
+  text-decoration: none;
+  transition: background-color 0.15s ease;
+}
+
+.cf_sideNav_link:hover {
+  background-color: #0062ff;
+  color: #fff;
+}
+
+.cf_sideNav_active {
+  /* background-color: #eef2ff;
+  color: #001a6f; */
+  background-color: #0062ff;
+  color: #fff;
+  font-weight: 500;
+}
+
+.cf_sideNav_active:hover {
+  background-color: #0062ff;
+  color: #fff;
+}
+
+.cf_sideNav_icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+  flex-shrink: 0;
+}
+
+.cf_sideNav_label {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cf_sideNav_chevron {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  color: #fff;
+}
+
+.cf_sideNav_submenu {
+  padding: 2px 0 2px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.cf_sideNav_subitem {
+  list-style: none;
+}
+
+.cf_sideNav_sublink {
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  display: flex;
+  padding: 0 12px;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 6px;
+  align-items: center;
+  text-decoration: none;
+  transition: background-color 0.15s ease;
+}
+
+.cf_sideNav_sublink:hover {
+  background-color: #0062ff;
+  color: #fff;
+}
+
+.cf_sideNav_sublink.cf_sideNav_active {
+  background-color: #0062ff;
+  color: #fff;
+  font-weight: 500;
+}
+
+.cf_sideNav_sublabel {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cf_sideNav_footer {
+  padding: 8px;
+  border-top: 1px solid #e8e8e82b;
+}
+
+.cf_sideNav_help_link {
+  color: #fff;
+}
+
+.cf_sideNav_help_link:hover {
+  color: #1a1a2e;
+  background-color: #f3f4f6;
+}
+
+.cf_reports_subMenu {
+  display: none;
+}
+
+.cf_topNav_goBack_div {
+  border: 0;
+  outline: none;
+  display: flex;
+  padding: 0.5rem;
+  cursor: pointer;
+  align-items: center;
+  border-radius: 0.5rem;
+  justify-content: center;
+  background-color: transparent;
+  color: #fff;
+}
+
+.cf_topNav_goBack_div:hover {
+  background-color: #0037a9;
+  color: #fff;
+}
+
+.cf_topNav_MessageLinks {
+  cursor: pointer;
+  margin-left: 10px;
+  font-weight: 500;
+}
+
+.cf_topNav_MessageLinks_Container {
+  gap: 10px;
+  display: flex;
+  position: relative;
+  align-items: center;
+}
+
+.cf_topNav_MessageLinks_List_Container {
+  top: 42px;
+  width: 380px;
+  z-index: 99999;
+  min-height: 40px;
+  max-height: 220px;
+  position: absolute;
+  border-radius: 4px;
+  display: flex;
+  overflow: auto;
+  flex-direction: column;
+  background-color: #fff;
+  border: 1px solid #ddd;
+  box-shadow: #2123261a 0 10px 10px -10px;
+}
+
+.cf_topNav_MessageLinks_List_Container a {
+  gap: 5px;
+  color: #000;
+  display: flex;
+  font-size: 12px;
+  padding: 0 5px;
+  font-weight: 500;
+  padding: 12px 16px;
+  align-items: center;
+  text-decoration: none;
+}
+
+.cf_topNav_MessageLinks_List_Container a:hover p,
+.cf_topNav_MessageLinks_List_Container a:hover {
+  background-color: #fafafa;
+  color: #0062ff;
+}
+
+.cf_topNav_MessageLinks_List_Container a p {
+  color: #000;
+  font-weight: 500;
+}
+
+.cf_saas_selector:hover {
+  cursor: pointer;
+  background-color: #0037a9;
+}
+
+.cf_saas_selector_menu_item,
+.cf_saas_selector {
+  gap: 10px;
+  display: flex;
+  /* height: 40px; */
+  padding: 8px 10px;
+  border-radius: 5px;
+  align-items: center;
+}
+
+.cf_saas_selector {
+  border-radius: 5px 5px 0 0;
+}
+
+.cf_saas_selector_menu_item {
+  border-radius: 0px;
+}
+
+.cf_saas_selector_menu_item img,
+.cf_saas_selector img {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+}
+
+.cf_saas_selector_menu_item span {
+  color: #454545;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.cf_saas_selector span {
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.cf_saas_selector_img_div {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background-color: #fff;
+  border: 1px solid #ddd;
+}
+
+.cf_saas_selector_container {
+  width: 225px;
+  position: relative;
+}
+
+.cf_saas_selector_menu div:hover span {
+  color: #0062ff !important;
+}
+
+.cf_active_saas,
+.cf_saas_selector_menu div:hover {
+  cursor: pointer;
+  background-color: #f2f3ff;
+}
+
+.cf_saas_selector_menu {
+  width: 225px;
+  height: auto;
+  display: none;
+  color: #454545;
+  overflow-y: auto;
+  max-height: 320px;
+  position: absolute;
+  flex-direction: column;
+  background-color: #fff;
+  border: 1px solid #ddd;
+  box-shadow: #2123261a 0 10px 10px -10px;
+}
+
+.cf_saas_selector_container:hover .cf_saas_selector_menu {
+  display: flex;
+}
+
+.cf_navTabSwitcher_div {
+  gap: 30px;
+  height: 100%;
+  display: flex;
+  padding: 0px 10px;
+  width: fit-content;
+  align-items: flex-end;
+}
+
+.cf_navTabSwitcher_div_tab {
+  padding: 4px 5px;
+  position: relative;
+}
+
+.cf_navTabSwitcher_div_tab {
+  font-weight: 400;
+  font-size: 14px;
+  color: #e3e8f1;
+  cursor: pointer;
+}
+
+.cf_navTabSwitcher_div_tab a {
+  font-weight: 400;
+  font-size: 14px;
+  color: #e3e8f1;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.cf_navTabSwitcher_div_tab_active a {
+  font-weight: 500;
+  color: #fff;
+}
+
+.cf_navTabSwitcher_div_tab_active::after {
+  content: "";
+  width: 100%;
+  height: 6px;
+  background-color: #24dfd3;
+  position: absolute;
+  bottom: -6px;
+  left: 0;
+}
+
+.cf_renewal_calendar {
+  /* width: 0px; */
+  /* height: 40px; */
+  display: flex;
+  cursor: pointer;
+  border-radius: 50%;
+  place-items: center;
+  place-content: center;
+  background-color: #fff;
+}
+
+.cf_calendar_body_cal_container_renewal,
+.cf_calendar_body_renewal {
+  width: 100% !important;
+}
+
+.cf_calendar_body_cal_container_body_renewal {
+  height: calc(100% - 50px);
+}
+
+.cf_calendar_table_renewal {
+  height: 100%;
+  user-select: all !important;
+}
+.cf_calendar_table_renewal th,
+.cf_calendar_table_renewal td {
+  border: 1px solid #ddd;
+}
+
+.cf_calendar_container_renewal {
+  width: 750px !important;
+  max-height: 600px !important;
+  display: none !important;
+  height: auto !important;
+  position: fixed !important;
+  top: 60px !important;
+  right: 55px !important;
+  z-index: 999999 !important;
+}
+
+.cf_renewal_calendar:hover .cf_calendar_container_renewal {
+  display: flex !important;
+}
+
+.cf_calendar_body_cal_container_renewal_list {
+  gap: 15px;
+  display: flex;
+  flex-direction: row !important;
+  position: absolute;
+  bottom: 5px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px !important;
+}
+
+.cf_calendar_body_cal_container_renewal_list img {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+}
+
+.cf_calendar_container_renewal td div p {
+  font-weight: 500;
+}
+.cf_newDate_container {
+  width: 100% !important;
+  height: 100% !important;
+  position: relative;
+  flex-direction: column;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cf_notification_count {
+  top: 0px;
+  right: 0px;
+  width: 15px;
+  height: 15px;
+  display: flex;
+  color: #fff;
+  padding: 10px;
+  font-size: 8px;
+  font-weight: 500;
+  border-radius: 50%;
+  position: absolute;
+  align-items: center;
+  justify-content: center;
+  background-color: red;
+}
+
+.cf_notification_dropdown {
+  right: 10px;
+  top: 60px;
+  width: 400px;
+  height: 400px;
+  z-index: 999999;
+  border-radius: 5px;
+  position: fixed;
+  display: none;
+  flex-direction: column;
+  background-color: #fff;
+  border: 1px solid #ddd;
+  box-shadow:
+    0 5px 5px -3px #0003,
+    0 8px 10px 1px #00000024,
+    0 3px 14px 2px #0000001f;
+}
+
+.cf_notification_container:hover .cf_notification_dropdown {
+  display: flex;
+}
+
+.cf_notification_dropdown_title {
+  width: 100%;
+  height: 50px;
+  display: flex;
+  color: #454545;
+  align-items: center;
+  /* justify-content: center; */
+  border-bottom: 1px solid #ddd;
+}
+
+.cf_notification_dropdown_title p {
+  padding: 0 15px;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.cf_notification_dropdown_body {
+  color: #454545;
+  width: 100%;
+  display: flex;
+  overflow-y: auto;
+  flex-direction: column;
+  height: calc(100% - 50px);
+  overflow-x: hidden;
+}
+
+.cf_notification_dropdown_item {
+  gap: 10px;
+  width: 100%;
+  height: 65px;
+  display: flex;
+  padding: 0 10px;
+  position: relative;
+  align-items: center;
+  border-bottom: 1px solid #ddd;
+  animation: moveUp 0.25s ease;
+}
+
+.cf_notification_dropdown_item_icon {
+  width: 50px;
+  height: 60px;
+  display: flex;
+  align-items: center;
+}
+
+.cf_notification_dropdown_item_icon_calendar {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background-color: #f2f3ff;
+}
+
+.cf_notification_dropdown_item_message {
+  width: calc(100% - 50px);
+  height: 65px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.cf_notification_dropdown_item_message_title {
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+  width: 100%;
+}
+
+.cf_notification_dropdown_item_message_text {
+  font-size: 12px;
+  font-weight: 500;
+  color: #64748b;
+}
+
+.cf_notification_category {
+  padding: 2px 5px;
+  background-color: #f2f3ff;
+  border-radius: 3px;
+}
+.cf_notification_category p {
+  font-size: 10px;
+  font-weight: 500;
+  color: #64748b;
+}
+
+.cf_notification_markAsDoneButton {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  opacity: 0;
+  transform: translateY(10px);
+  cursor: pointer;
+  transition:
+    opacity 0.25s ease,
+    transform 0.25s ease;
+  position: absolute;
+  z-index: 9999999;
+  right: 10px;
+  bottom: 5px;
+}
+
+.cf_notification_dropdown_item:hover .cf_notification_markAsDoneButton {
+  opacity: 1;
+  transform: translateY(0);
+  cursor: pointer;
+}
+
+/* Product Switcher Dropdown */
+.cf_product_switcher_dropdown {
+  position: absolute;
+  top: 56px;
+  left: 8px;
+  width: 220px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  z-index: 99999;
+  padding: 10px;
+}
+
+.cf_product_switcher_heading {
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 0 0 8px 4px;
+}
+
+.cf_product_switcher_grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.cf_product_switcher_tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px 8px;
+  border-radius: 8px;
+  text-decoration: none;
+  color: #1e293b;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  cursor: pointer;
+}
+
+.cf_product_switcher_tile:hover,
+.cf_product_switcher_tile_active {
+  background: #eef2ff;
+  border-color: #c7d2fe;
+  color: #0062ff;
+}
+
+.cf_product_switcher_icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #0062ff;
+}
+
+.cf_product_switcher_label {
+  font-size: 11px;
+  font-weight: 500;
+  text-align: center;
+  line-height: 1.3;
+  color: inherit;
+}

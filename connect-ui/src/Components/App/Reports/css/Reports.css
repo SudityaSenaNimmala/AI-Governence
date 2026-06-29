@@ -1,0 +1,319 @@
+.cf_reports_content_container {
+  gap: 5px;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  padding: 10px 0 0 0;
+  flex-direction: column;
+}
+
+.cf_reports_migrations_info {
+  width: 100%;
+  height: 125px;
+  overflow: hidden;
+  border-radius: 2px;
+  background-color: #fff;
+  /* box-shadow: 0 0 10px #0000001f; */
+}
+
+.cf_reports_migrations_info_title {
+  width: 100%;
+  height: 40px;
+  display: flex;
+  padding: 0 10px;
+  align-items: center;
+}
+
+.cf_reports_migrations_info_title span {
+  font-size: 12px;
+  color: #767676;
+  margin-left: auto;
+  padding: 5px 10px;
+  border-radius: 5px;
+  background: #f2f2f2;
+}
+
+.cf_reports_migrations_info_body {
+  width: 100%;
+  display: flex;
+  padding: 0 10px;
+  height: calc(100% - 40px);
+  justify-content: space-between;
+}
+
+.cf_reports_migrations_info_body_tiles {
+  width: auto;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.cf_reports_migrations_info_body_tiles_title {
+  height: 25px;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #495057;
+  align-items: center;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  justify-content: space-between;
+}
+
+.cf_reports_migrations_info_body_tiles_body {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: calc(100% - 35px);
+}
+
+.cf_reports_migrations_info_body_tiles_body p {
+  font-size: 30px;
+  font-weight: 600;
+  color: #495057;
+}
+
+.cf_reports_tableDiv {
+  width: 100%;
+  overflow: auto;
+  height: calc(100% - 250px);
+}
+
+.cf_table_common_header {
+  background: #0062ff !important;
+}
+.cf_table_common_header_inside {
+  background: #f2f3ff !important;
+}
+.cf_table_common_header_inside tr th {
+  color: #000 !important;
+}
+
+.cf_table_common {
+  border: 0;
+  width: 100%;
+  overflow: auto;
+  border-collapse: collapse;
+}
+
+.cf_table_common thead tr {
+  top: 0;
+  position: sticky;
+  z-index: 99;
+  /* border: 1px solid #ddd; */
+  background-color: #f2f2f2;
+}
+
+.cf_table_common tbody tr {
+  border-bottom: 1px solid #ddd;
+}
+.cf_table_common tbody tr td span {
+  font-weight: 500;
+}
+
+.cf_table_common tbody tr td {
+  font-size: 12px;
+  text-align: left;
+  padding: 10px 15px;
+  background-color: #fff;
+  font-weight: 500;
+}
+
+.cf_table_common thead tr th {
+  font-size: 12px;
+  text-align: left;
+  padding: 10px 15px;
+  color: #fff;
+  font-weight: 600;
+  border-top: 1px solid #ddd;
+  border-bottom: 1px solid #ddd;
+}
+
+.CF_SEARCH_ICON_PLACER {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+}
+
+.CF_HAMBURGER_CONTENT {
+  flex-direction: column;
+  z-index: 99999999;
+  gap: 4px;
+}
+
+.CF_MENU_OPEN {
+  gap: 0 !important;
+}
+
+.CF_MENU_OPEN .BAR_2 {
+  display: none;
+}
+
+.CF_MENU_OPEN .BAR_1 {
+  transform: rotate(45deg);
+}
+
+.CF_MENU_OPEN .BAR_3 {
+  position: absolute;
+  transform: rotate(-45deg);
+}
+
+.CF_HAMBURGER {
+  width: 15px;
+  height: 2.5px;
+  border-radius: 40px;
+  background-color: #454545;
+  transition: all 0.1s linear;
+}
+
+.CF_LICENSE_SEARCH_CONTAINER {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  overflow: hidden;
+  border-radius: 4px;
+  align-items: center;
+  justify-content: center;
+  background-color: #fff;
+  transition: all 0.2s linear;
+  box-shadow: rgba(99, 99, 99, 0.2) 0px 2px 8px 0px;
+}
+
+.CF_SIDE_NAV_PLACER {
+  top: 98px;
+  z-index: 1;
+  display: flex;
+  position: absolute;
+  height: calc(100% - 100px);
+}
+
+.CF_SIDE_NAV {
+  width: 200px;
+  height: auto;
+  position: relative;
+  align-items: flex-start;
+}
+
+.CF_NAV_SIDE_ITEMS {
+  width: 100%;
+}
+
+.CF_NAV_SIDE_ITEMS li {
+  width: 100%;
+  height: 40px;
+  display: flex;
+  padding: 0 10px;
+  list-style: none;
+  align-items: center;
+}
+
+.CF_NAV_SIDE_ITEMS li a {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+
+.cf_reports_image_wrapper {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  overflow: hidden;
+  border-radius: 50%;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #ddd;
+  background-color: #fcfcfc;
+}
+
+.cf_reports_image_wrapper img {
+  width: 28px;
+}
+
+.cf_workspace_summary {
+  width: 100%;
+  height: 40px;
+  display: flex;
+  padding: 0 10px;
+  align-items: center;
+  justify-content: space-evenly;
+}
+
+.cf_reports_table_actions {
+  width: 100%;
+  height: 30px;
+  display: flex;
+  align-items: center;
+}
+
+.cf_reports_table_actions div {
+  display: flex;
+  cursor: pointer;
+  margin-left: auto;
+  align-items: center;
+  justify-content: center;
+}
+
+.cf_reports_table_actions div svg {
+  font-size: 22px;
+}
+
+.cf_messageReports_table_header {
+  border-right: 0px !important;
+  border-left: 0px !important;
+  background-color: transparent !important;
+}
+
+.cf_messageReports_table_header tr th {
+  color: #454545 !important;
+  font-weight: 400 !important;
+  padding: 10px !important;
+}
+
+.cf_messageReports_table_tbody tr td {
+  padding: 10px !important;
+}
+
+.cf_slackReportsBreadCrumbs {
+  gap: 30px;
+  width: fit-content;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  padding: 0px 10px 0px 0px;
+}
+
+.cf_reports_breadCrumbs_cta {
+  display: flex;
+  /* cursor: pointer; */
+  font-weight: 500;
+  color: #0062ff;
+  font-size: 12px !important;
+}
+
+.cf_slackReportsBreadCrumbs_actions {
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  color: #0062ff;
+  font-weight: 500;
+  align-items: center;
+}
+
+.changeButtonColorOnHover:hover {
+  background-color: #0062ff !important;
+  color: #fff !important;
+}
+
+.changeButtonColorOnHoverToRed:hover {
+  background-color: #ff4c4c !important;
+  color: #fff !important;
+}

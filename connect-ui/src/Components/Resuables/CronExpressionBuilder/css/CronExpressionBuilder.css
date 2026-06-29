@@ -1,0 +1,318 @@
+.cf_cron_builder_container {
+  width: 100%;
+  /* height: 100%; */
+  padding: 20px;
+  background: #ffffff;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.cf_cron_builder_header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding-bottom: 15px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.cf_cron_builder_header_left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+}
+
+.cf_cron_builder_footer {
+  margin-top: 25px;
+  padding-top: 20px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.cf_cron_save_disabled {
+  background-color: #cbd5e1 !important;
+  color: #94a3b8 !important;
+  cursor: not-allowed !important;
+}
+
+.cf_cron_save_disabled:hover {
+  background-color: #cbd5e1 !important;
+}
+
+.cf_cron_builder_header_icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: rgb(178 199 255 / 14%);
+  border-radius: 8px;
+  color: #0062ff;
+}
+
+.cf_cron_builder_header_title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #1e293b;
+  margin: 0;
+}
+
+.cf_cron_builder_header_actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cf_cron_save_button {
+  padding: 8px 16px;
+  background: #0062ff;
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.cf_cron_save_button:hover:not(:disabled) {
+  background: #0052d9;
+}
+
+.cf_cron_save_button:disabled {
+  background: #cbd5e1;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+.cf_cron_close_button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  color: #64748b;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.cf_cron_close_button:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #475569;
+}
+
+.cf_cron_builder_type_selector {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 25px;
+}
+
+.cf_cron_type_button {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 12px;
+  font-weight: 500;
+  color: #64748b;
+}
+
+.cf_cron_type_button:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+}
+
+.cf_cron_type_button.active {
+  background: rgb(178 199 255 / 14%);
+  border-color: #0062ff;
+  color: #0062ff;
+}
+
+.cf_cron_time_picker {
+  margin-bottom: 25px;
+}
+
+.cf_cron_label {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  color: #475569;
+  margin-bottom: 10px;
+}
+
+.cf_cron_time_inputs {
+  display: flex;
+  gap: 15px;
+}
+
+.cf_cron_time_input_group {
+  flex: 1;
+}
+
+.cf_cron_time_input_group label {
+  display: block;
+  font-size: 12px;
+  color: #64748b;
+  margin-bottom: 5px;
+}
+
+.cf_cron_select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 14px;
+  color: #1e293b;
+  background: #ffffff;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.cf_cron_select:hover {
+  border-color: #cbd5e1;
+}
+
+.cf_cron_select:focus {
+  outline: none;
+  border-color: #0062ff;
+  box-shadow: 0 0 0 3px rgba(0, 98, 255, 0.1);
+}
+
+.cf_cron_weekly_selector,
+.cf_cron_monthly_selector {
+  margin-bottom: 25px;
+}
+
+.cf_cron_days_grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 8px;
+}
+
+.cf_cron_day_button {
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #ffffff;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: #64748b;
+  transition: all 0.2s ease;
+}
+
+.cf_cron_day_button:hover {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+}
+
+.cf_cron_day_button.selected {
+  background: #0062ff;
+  border-color: #0062ff;
+  color: #ffffff;
+}
+
+.cf_cron_dates_grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 5px;
+}
+
+.cf_cron_date_button {
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #ffffff;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: #64748b;
+  transition: all 0.2s ease;
+  min-height: 40px;
+}
+
+.cf_cron_date_button:hover {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+}
+
+.cf_cron_date_button.selected {
+  background: #0062ff;
+  border-color: #0062ff;
+  color: #ffffff;
+}
+
+.cf_cron_error_text {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #ef4444;
+}
+
+.cf_cron_description {
+  margin-bottom: 20px;
+  padding: 12px;
+  background: #f8fafc;
+  border-radius: 6px;
+  border-left: 3px solid #0062ff;
+}
+
+.cf_cron_description_text {
+  margin: 0;
+  font-size: 14px;
+  color: #475569;
+  font-weight: 500;
+}
+
+.cf_cron_expression_display {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.cf_cron_expression_value {
+  padding: 12px;
+  background: #1e293b;
+  border-radius: 6px;
+  margin-top: 8px;
+}
+
+.cf_cron_expression_value code {
+  color: #10b981;
+  font-family: "Courier New", monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+/* Scrollbar styling for dates grid */
+.cf_cron_dates_grid::-webkit-scrollbar {
+  width: 6px;
+}
+
+.cf_cron_dates_grid::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 3px;
+}
+
+.cf_cron_dates_grid::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+
+.cf_cron_dates_grid::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}

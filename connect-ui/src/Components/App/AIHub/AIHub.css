@@ -1,0 +1,310 @@
+/* AI Hub — matches connect-ui manage theme */
+
+/* Stat cards */
+.aihub_stat_grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.aihub_stat_card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 18px 20px;
+  transition: box-shadow 0.15s;
+}
+.aihub_stat_card:hover {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+.aihub_stat_icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.aihub_stat_value {
+  font-size: 22px;
+  font-weight: 700;
+  color: #111827;
+  line-height: 1.2;
+}
+
+.aihub_stat_label {
+  font-size: 12px;
+  color: #6b7280;
+  font-weight: 500;
+}
+
+.aihub_stat_sub {
+  font-size: 10px;
+  color: #9ca3af;
+  margin-top: 2px;
+}
+
+/* Section headers */
+.aihub_section_header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.aihub_section_title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #111827;
+  margin: 0;
+}
+
+.aihub_section_subtitle {
+  font-size: 12px;
+  color: #9ca3af;
+  margin: 2px 0 0;
+}
+
+/* Cards */
+.aihub_card {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 18px;
+  margin-bottom: 16px;
+}
+
+/* Two column layout */
+.aihub_two_col {
+  display: grid;
+  grid-template-columns: 3fr 2fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+@media (max-width: 900px) {
+  .aihub_two_col { grid-template-columns: 1fr; }
+}
+
+/* Badge */
+.aihub_badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid;
+  white-space: nowrap;
+}
+
+/* Table */
+.aihub_table_wrap {
+  overflow-x: auto;
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+}
+
+.aihub_table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.aihub_table thead tr {
+  background: #f9fafb;
+  border-bottom: 2px solid #e5e7eb;
+}
+
+.aihub_table th {
+  text-align: left;
+  padding: 10px 14px;
+  color: #6b7280;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+
+.aihub_table td {
+  padding: 10px 14px;
+  color: #374151;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.aihub_table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.aihub_table tbody tr:hover {
+  background: #f9fafb;
+}
+
+.aihub_table_empty {
+  text-align: center;
+  padding: 40px !important;
+  color: #9ca3af;
+}
+
+/* Text helpers */
+.aihub_text_primary {
+  font-weight: 600;
+  color: #111827;
+}
+
+.aihub_text_muted {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.aihub_text_mono {
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+/* Search box */
+.aihub_search_box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  color: #9ca3af;
+}
+
+.aihub_search_box input {
+  border: none;
+  outline: none;
+  font-size: 13px;
+  color: #374151;
+  background: transparent;
+  width: 180px;
+  font-family: inherit;
+}
+
+/* Bar chart */
+.aihub_bar_chart {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.aihub_bar_row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.aihub_bar_label {
+  font-size: 12px;
+  color: #374151;
+  width: 120px;
+  flex-shrink: 0;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.aihub_bar_track {
+  flex: 1;
+  height: 8px;
+  background: #f3f4f6;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.aihub_bar_fill {
+  height: 100%;
+  background: linear-gradient(90deg, #0044cc, #6366f1);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.aihub_bar_value {
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+  min-width: 40px;
+  text-align: right;
+}
+
+/* Loading / Error / Empty */
+.aihub_loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 60px;
+  color: #9ca3af;
+  font-size: 14px;
+}
+
+.aihub_spin {
+  animation: aihub_rotate 1s linear infinite;
+}
+@keyframes aihub_rotate { to { transform: rotate(360deg); } }
+
+.aihub_error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 20px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  color: #dc2626;
+  font-size: 13px;
+}
+
+/* Filter buttons (Tools catalog status tabs) */
+.aihub_filter_btn {
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+  background: #fff;
+  color: #6b7280;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  text-transform: capitalize;
+  transition: all 0.15s;
+}
+.aihub_filter_btn:hover {
+  background: #f3f4f6;
+  color: #374151;
+}
+.aihub_filter_btn.active {
+  background: #0044cc;
+  color: #fff;
+  border-color: #0044cc;
+}
+
+.aihub_empty {
+  text-align: center;
+  padding: 50px 20px;
+  color: #9ca3af;
+}
+.aihub_empty h4 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #6b7280;
+  margin: 12px 0 6px;
+}
+.aihub_empty p {
+  font-size: 13px;
+  max-width: 400px;
+  margin: 0 auto;
+  line-height: 1.6;
+}

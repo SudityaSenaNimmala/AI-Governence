@@ -1,0 +1,121 @@
+.cf_org_selector_container {
+  z-index: 99;
+  width: 200px;
+  height: 40px;
+  display: flex;
+  cursor: pointer;
+  padding: 0 10px;
+  max-width: 200px;
+  position: relative;
+  border-radius: 5px;
+  align-items: center;
+  border: 1px solid #e2e8f0;
+  user-select: none;
+}
+
+.cf_org_selector_open {
+  border-color: #0062ff;
+}
+
+.cf_org_selector_caret {
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+
+.cf_org_selector_caret_open {
+  transform: rotate(180deg);
+}
+
+.cf_org_selector_container_header {
+  gap: 8px;
+  width: 100%;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.cf_org_selector_container_header p {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cf_org_selector_container_dropDown {
+  top: 44px;
+  right: 0px;
+  width: 100%;
+  height: auto;
+  z-index: 9999;
+  display: flex;
+  cursor: pointer;
+  overflow: hidden;
+  max-height: 280px;
+  position: absolute;
+  border-radius: 6px;
+  flex-direction: column;
+  background-color: #fff;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 4px 12px 0 rgb(0 0 0 / 0.1), 0 2px 4px -1px rgb(0 0 0 / 0.06);
+}
+
+.cf_org_selector_search {
+  padding: 8px 10px;
+  border-bottom: 1px solid #e2e8f0;
+  flex-shrink: 0;
+}
+
+.cf_org_selector_search input {
+  width: 100%;
+  height: 28px;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  padding: 0 8px;
+  font-size: 12px;
+  color: #334155;
+  outline: none;
+  box-sizing: border-box;
+  background-color: #f8fafc;
+}
+
+.cf_org_selector_search input:focus {
+  border-color: #0062ff;
+  background-color: #fff;
+}
+
+.cf_org_selector_list {
+  overflow-y: auto;
+  flex: 1;
+  padding: 4px 0;
+}
+
+.cf_org_selector_no_results {
+  font-size: 12px;
+  color: #94a3b8;
+  text-align: center;
+  padding: 12px 10px;
+  font-weight: 500;
+}
+
+.cf_org_selector_container_dropDown > .cf_org_selector_list > .cf_org_selector_container_header {
+  padding: 0 10px;
+  border-radius: 4px;
+  margin: 0 4px;
+  width: calc(100% - 8px);
+  box-sizing: border-box;
+}
+
+.cf_org_selector_container_dropDown > .cf_org_selector_list > .cf_org_selector_container_header:hover {
+  background-color: #eff6ff;
+}
+
+.cf_org_selector_container_dropDown > .cf_org_selector_list > .cf_org_selector_container_header:hover svg {
+  color: #0062ff !important;
+}
+
+.cf_org_selector_container_dropDown > .cf_org_selector_list > .cf_org_selector_container_header:hover p {
+  color: #0062ff;
+}

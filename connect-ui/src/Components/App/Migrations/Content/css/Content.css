@@ -1,0 +1,556 @@
+.CF_TEAM_BREAD_CRUMBS {
+  height: 60px;
+  display: flex;
+  align-items: center;
+}
+
+.CF_TEAM_BREAD_CRUMBS li {
+  height: 46px;
+  margin: 0 3px;
+  padding: 0 10px;
+  position: relative;
+  display: inline-block;
+  background-color: #f2f3ff;
+}
+
+.breadCrumbs-Div {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  padding: 0 5px;
+  overflow: hidden;
+  width: fit-content;
+  align-items: center;
+  justify-content: center;
+}
+
+/* .CF_TEAM_BREAD_CRUMBS li:first-child {
+  border-top-left-radius: 5px;
+  border-bottom-left-radius: 5px;
+}
+
+.CF_TEAM_BREAD_CRUMBS li:last-child {
+  border-top-right-radius: 5px;
+  border-bottom-right-radius: 5px;
+} */
+
+.CF_TEAM_Chevron {
+  right: -46px;
+  margin-top: 7px;
+  color: #f2f3ff;
+  z-index: 999999999;
+  position: absolute;
+}
+
+.CF_TEAM_Chevron_Icon {
+  font-size: 66px;
+  z-index: 999999999;
+}
+
+.CF_TEAM_Chevron_Before {
+  left: -20px;
+  color: #fff;
+  margin-top: 7.5px;
+  z-index: 99999999;
+  position: absolute;
+}
+
+.breadCrumbCount {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  font-size: 12px;
+  color: #0062ff;
+  font-weight: 600;
+  margin-left: 25px;
+  border-radius: 50%;
+  align-items: center;
+  justify-content: center;
+  background-color: #fff;
+}
+
+.breadCrumbName {
+  color: #000;
+  padding: 0 5px;
+  font-size: 12px;
+  font-weight: 500;
+  margin-left: 8px;
+}
+
+.breadCrumbeActive {
+  background-color: #0062ff !important;
+}
+
+.breadCrumbeActive .breadCrumbName {
+  color: #fff;
+}
+
+.breadCrumbeActive .CF_TEAM_Chevron {
+  color: #0062ff !important;
+}
+
+.CF_TEAM_BREAD_CRUMBS li:first-child .breadCrumbCount {
+  margin-left: 0 !important;
+}
+
+.CF_TEAM_BREAD_CRUMBS_DIV {
+  width: 100%;
+  margin-top: 0px;
+}
+
+.CT_TEAM_BreadCrumbs_Buttons {
+  width: 100%;
+  height: 50px;
+  display: flex;
+  padding: 5px 0;
+  justify-content: space-between;
+}
+
+.CT_TEAM_BreadCrumbs_Buttons button {
+  gap: 5px;
+  color: #fff;
+  display: flex;
+  font-weight: 500;
+  align-items: center;
+  background-color: #0062ff;
+  border-radius: 5px !important;
+  justify-content: space-between;
+}
+
+.gap-30 {
+  gap: 30px;
+}
+
+.searchPerMissionsUsers {
+  width: 360px;
+  height: 35px;
+  border: none;
+  outline: none;
+  font-size: 14px;
+  padding: 0 10px;
+  border-radius: 4px;
+}
+
+.breadCrumbeActive-Completed {
+  background-color: #d5d8ff !important;
+}
+
+.breadCrumbeActive-Completed .breadCrumbCount {
+  background-color: #0062ff !important;
+  color: #fff !important;
+}
+
+.breadCrumbeActive-Completed .CF_TEAM_Chevron {
+  color: #d5d8ff !important;
+}
+
+.cf_content_mapping_placer {
+  width: 100%;
+  display: flex;
+  /* margin-top: 10px; */
+  height: calc(100% - 115px);
+  justify-content: space-between;
+}
+.cf_content_mapping,
+.cf_content_source_selection,
+.cf_content_premissionMapping,
+.cf_content_migration_options,
+.cf_content_destination_selection,
+.cf_content_migration_preview_jobOptions {
+  width: 24%;
+  height: 100%;
+  display: flex;
+  overflow: hidden;
+  border-radius: 2px;
+  flex-direction: column;
+  background-color: #fff;
+  /* box-shadow: 0 1px 4px #0000001a; */
+  /* box-shadow: 0 1px 4px 0 rgba(0, 0, 0, 0.1); */
+}
+
+.cf_content_mapping {
+  width: 50% !important;
+}
+
+.cf_content_premissionMapping {
+  width: 75%;
+}
+
+.cf_content_premissionMapping .cf_content_mapping_title img {
+  width: 30px;
+  height: 30px;
+}
+.cf_content_premissionMapping .cf_content_mapping_title {
+  justify-content: space-between;
+}
+
+.cf_content_mapping_title {
+  width: 100%;
+  height: 40px;
+  display: flex;
+  color: #fff;
+  padding: 0 10px;
+  align-items: center;
+  background-color: #0062ff;
+}
+
+.cf_content_mapping_title_image {
+  width: 35px;
+  height: 35px;
+  display: flex;
+  user-select: none;
+  border-radius: 50%;
+  align-items: center;
+  background-color: #fff;
+  justify-content: center;
+}
+
+.cf_content_mapping_title_image img {
+  width: 30px;
+}
+
+.cf_content_mapping_title_search {
+  margin-left: auto;
+}
+
+.cf_content_mapping_title_actions {
+  gap: 5px;
+  width: auto;
+  display: flex;
+  margin-left: auto;
+  align-items: center;
+}
+
+.cf_content_mapping_title_actions span img {
+  width: 35px;
+}
+
+.cf_autoMap_action {
+  color: #fff;
+  cursor: pointer;
+  font-weight: 500;
+  padding: 5px 10px;
+  border-radius: 4px;
+  border: 1px solid #fff;
+  background-color: transparent;
+}
+
+.cf_content_mapping_title h4 {
+  font-weight: 500;
+}
+
+.cf_content_premissionMapping_body {
+  width: 100%;
+  overflow-y: auto;
+  height: calc(100% - 90px);
+}
+
+.cf_mapping_table {
+  border: 0;
+  width: 100%;
+  overflow: auto;
+  border-collapse: collapse;
+}
+
+.cf_mapping_table thead tr {
+  top: 0;
+  position: sticky;
+  background-color: #f2f3ff;
+}
+
+.cf_mapping_table tbody tr td {
+  border: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid #ddd;
+}
+
+.cf_mapping_table thead tr th {
+  border: 0;
+  padding: 8px 12px;
+  color: #000;
+  font-weight: 500;
+  text-align: left;
+}
+
+.cf_mapping_table_cloudIcon {
+  width: 25px;
+  height: 25px;
+  display: flex;
+  overflow: hidden;
+  border-radius: 50%;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #ddd;
+}
+
+.cf_mapping_table_cloudIcon img {
+  width: 18px;
+}
+
+.cf_mapping_email {
+  width: 95%;
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  white-space: pre;
+  text-overflow: ellipsis;
+}
+
+.cf_not_matched {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 10px;
+  border-radius: 5px;
+  width: fit-content;
+  background-color: #f2f3ff;
+}
+
+.cf_content_migration_options {
+  width: 49%;
+}
+
+.cf_content_migration_options_body {
+  width: 100%;
+  padding: 20px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  height: calc(100% - 45px);
+}
+
+.cf_content_migration_options_holder {
+  width: 100%;
+  height: auto;
+  border-radius: 4px;
+  padding: 10px;
+  border: 1px solid #ddd;
+}
+
+.cf_content_migration_options_input_holder {
+  width: 100%;
+  height: 40px;
+  display: flex;
+  padding: 0px 10px;
+  align-items: center;
+}
+
+.cf_content_migration_options_input_placer {
+  gap: 15px;
+  width: 100%;
+  height: 40px;
+  display: flex;
+  padding: 10px;
+  overflow: hidden;
+  border-radius: 4px;
+  align-items: center;
+}
+
+.cf_content_migration_options_input_placer span {
+  font-size: 12px;
+}
+
+.cf_job_options_notes {
+  padding: 10px 0;
+}
+
+.cf_job_options_notes span {
+  font-weight: 600;
+}
+
+.cf_jobOptions_Options_Div {
+  width: 100%;
+  height: 50px;
+  display: flex;
+  align-items: center;
+  border-top: 1px solid #ddd;
+}
+
+.cf_jobOptions_Options_Div_Key {
+  width: 45%;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+}
+.cf_jobOptions_Options_Div_Key,
+.cf_jobOptions_Options_Div_Key span {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.cf_jobOptions_jobType {
+  width: 115px;
+  height: 30px;
+  font-size: 12px;
+  line-height: 1.42857;
+  color: rgb(85, 85, 85);
+  background-color: rgb(255, 255, 255);
+  background-image: none;
+  border: 1px solid rgb(204, 204, 204);
+  border-radius: 4px;
+  box-shadow: rgba(0, 0, 0, 0.075) 0px 1px 1px inset;
+  transition: border-color 0.15s ease-in-out 0s, box-shadow 0.15s ease-in-out 0s;
+}
+
+.cf_content_migration_preview {
+  width: 49%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.cf_content_migration_preview_jobOptions {
+  height: 48%;
+  width: 100%;
+}
+
+.cf_content_mapping_body {
+  width: 100%;
+  display: flex;
+  overflow: auto;
+  flex-direction: column;
+  height: calc(100% - 40px);
+}
+
+.cf_mapping_domain svg {
+  font-weight: 600;
+}
+
+.cf_mapping_domain_container {
+  /* gap: 10px; */
+  width: 100%;
+  height: auto;
+  display: flex;
+  /* padding: 0 10px; */
+  align-items: center;
+  flex-direction: column;
+  animation: moveUp 0.2s ease-in;
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.cf_mapping_domain {
+  gap: 10px;
+  width: 100%;
+  height: 40px;
+  display: flex;
+  padding: 0 10px;
+  align-items: center;
+  animation: moveUp 0.2s ease-in;
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.cf_mapping_domain_name {
+  color: #000;
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-wrap: nowrap;
+  text-overflow: ellipsis;
+}
+
+.cf_mapping_domain_users_container {
+  width: 100%;
+  height: auto;
+  display: flex;
+  padding: 0 0 0 10px;
+  border-bottom: 1px solid #ddd;
+}
+
+.cf_mapping_domain_users {
+  gap: 10px;
+  width: 100%;
+  height: 40px;
+  display: flex;
+  padding: 0 0 0 10px;
+  align-items: center;
+  animation: moveUp 0.2s ease-in;
+}
+
+.chevron {
+  position: absolute;
+  top: -20px;
+  right: -29px;
+  z-index: 1;
+  display: block;
+  border: 48px solid transparent;
+  border-right: 0;
+  /* border-left: 24px solid #fff; */
+}
+.breadCrumbeActive .chevron:before {
+  border-left: 16px solid #0062ff !important;
+  /* #1D92AF; */
+}
+
+.breadCrumbeActive-Completed .chevron:before {
+  border-left: 16px solid #d5d8ff;
+  /* #1D92AF; */
+}
+.chevron::after {
+  position: absolute;
+  top: -28px;
+  right: 7px;
+  display: block;
+  border: 23px solid transparent;
+  border-right: 0;
+  border-left: 16px solid #fff;
+  content: "";
+  z-index: -9;
+}
+.chevron:before {
+  position: absolute;
+  top: -28px;
+  right: 13px;
+  display: block;
+  border: 23px solid transparent;
+  border-right: 0;
+  border-left: 16px solid #f2f3ff;
+  content: "";
+}
+
+.cf_content_premissionMapping_footer {
+  gap: 35px;
+  width: 100%;
+  height: 50px;
+  display: flex;
+  padding: 0 10px;
+  align-items: center;
+  border-top: 1px solid #ddd;
+}
+
+.cf_content_premissionMapping_footer div {
+  display: flex;
+  align-items: center;
+}
+
+.testForGrid {
+  /* display: grid; */
+  grid-template-areas: "a a a a";
+  grid-template-columns: repeat(4, 1fr); /* Adjust based on your layout */
+  height: 100%;
+  width: 100%;
+}
+
+.cf_list_excludeFileTypes {
+  gap: 10px;
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  height: fit-content;
+}
+
+.cf_fileType_container {
+  gap: 5px;
+  padding: 5px;
+  display: flex;
+  border-radius: 4px;
+  align-items: center;
+  border: 1px solid #ddd;
+}
+
+.cf_fileType_container span {
+  font-weight: 500;
+}
+
+.cf_fileType_container svg {
+  font-size: 14px;
+  cursor: pointer;
+}

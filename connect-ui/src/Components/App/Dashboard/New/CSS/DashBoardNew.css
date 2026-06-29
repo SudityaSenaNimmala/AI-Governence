@@ -1,0 +1,372 @@
+.cf_new_dashboard_resourceApps_container_3row,
+.cf_new_dashboard_resourceApps_container,
+.cf_new_dashboard_top_container {
+  gap: 1rem;
+  width: 100%;
+  display: grid;
+  padding: 10px 0;
+  height: fit-content; /* background-color: red; */
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.cf_new_dashboard_resourceApps_container {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.cf_new_dashboard_resourceApps_container_3row {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.cf_new_dashboard_info_pannel {
+  color: #0f1729;
+  overflow: hidden;
+  border-radius: 0.75rem;
+  background-color: #ffffff;
+  border: 1px solid #e2e8f0; /* box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1); */
+}
+.cf_new_dashboard_info_pannel_title {
+  /* gap: 8px; */
+  width: 100%;
+  display: flex;
+  padding: 1.5rem;
+  align-items: center;
+  padding-bottom: 0.6rem;
+  /* justify-content: space-between; */
+}
+.cf_new_dashboard_info_pannel_title p {
+  color: #0f1729;
+  font-weight: 500;
+}
+.cf_new_dashboard_info_pannel_body {
+  width: 100%;
+  padding: 1.5rem;
+  padding-top: 0;
+}
+.cf_new_dashboard_Data {
+  font-size: 1.5rem;
+  color: #0f1729;
+  line-height: 2rem;
+  font-weight: 700;
+}
+.cf_new_dashboard_pannel_info {
+  /* padding: 1.5rem; */
+  padding-top: 0;
+  font-size: 0.75rem;
+  font-weight: 400 !important;
+  color: #64748b !important;
+}
+@media (max-width: 1020px) {
+  .cf_new_dashboard_resourceApps_container_3row,
+  .cf_new_dashboard_resourceApps_container,
+  .cf_new_dashboard_top_container {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .cf_dBottom_Info_2Pannel {
+    grid-template-columns: repeat(1, minmax(0, 1fr)) !important;
+  }
+  .cf_dBottom_Info {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+  .cf_dBottom_Info_Renewals {
+    grid-column: span 4 / span 4 !important;
+  }
+}
+@media (max-width: 600px) {
+  .cf_new_dashboard_resourceApps_container_3row,
+  .cf_new_dashboard_resourceApps_container,
+  .cf_new_dashboard_top_container {
+    grid-template-columns: repeat(1, minmax(0, 1fr));
+  }
+  .cf_dBottom_Info_2Pannel {
+    grid-template-columns: repeat(1, minmax(0, 1fr)) !important;
+  }
+  .cf_dBottom_Info {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+  .cf_dBottom_Info_Renewals {
+    grid-column: span 4 / span 4 !important;
+  }
+}
+.cf_dBottom_Info_2Pannel {
+  gap: 1rem;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.cf_dBottom_Info {
+  gap: 1rem;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+.cf_dBottom_Info_Graph {
+  display: grid; /* padding: 1.5rem; */
+  padding-left: 0;
+  padding-top: 0;
+  overflow: hidden;
+  color: #0f1729;
+  border-radius: 0.75rem;
+  background-color: #ffffff;
+  border: 1px solid #e2e8f0;
+  grid-column: span 4 / span 4;
+  overflow-x: hidden !important;
+}
+.cf_dBottom_Info_Renewals {
+  display: grid; /* padding: 1.5rem; */
+  padding-left: 0;
+  padding-top: 0;
+  overflow: hidden;
+  color: #0f1729;
+  border-radius: 0.75rem;
+  background-color: #ffffff;
+  border: 1px solid #e2e8f0;
+  grid-column: span 3 / span 3;
+  overflow-x: hidden !important;
+}
+.cf_new_dashboard_info_pannel_title_alignment {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.cf_new_dashboard_info_graph_pannel_body {
+  padding: 1.6rem;
+  padding-top: 0;
+  width: 100%;
+  overflow-y: auto;
+  height: 370px;
+  max-height: 370px;
+  overflow-x: hidden !important;
+}
+.cf_new_dashboard_info_graph_container {
+  width: 100%;
+  height: 80px;
+  opacity: 0; /* margin-left: 5%; */
+  transition: all 0.2s ease-in-out;
+  animation: moveUP 0.2s ease-in forwards;
+}
+@keyframes moveUP {
+  0% {
+    opacity: 0; /* margin-left: 5%; */
+  }
+  100% {
+    opacity: 1; /* margin-left: 0%; */
+  }
+}
+.cf_new_dashboard_info_graph_container_details {
+  width: 100%;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  padding-top: 0.5rem;
+  justify-content: space-between;
+}
+.cf_new_dashboard_info_graph_container_details_app_name {
+  color: #0f1729;
+  font-weight: 500;
+  line-height: 1.25rem;
+}
+.cf_new_dashboard_info_graph_container_details_app_licensesInfo {
+  font-size: 12px; /* line-height: 1.25rem; */
+  color: #64748b;
+  font-weight: 400;
+}
+.cf_new_dashboard_info_graph_container_bar {
+  width: 100%;
+  height: 8px;
+  margin-top: 2px;
+  border-radius: 5px;
+  overflow: hidden;
+  background-color: #00227033;
+}
+.cf_new_dashboard_info_graph_container_bar_filler {
+  /* width: 66%; */
+  height: 100%;
+  background-color: #001a6f;
+  transition: all 0.2s ease-in-out;
+}
+
+.cf_newDashboard_OpenLink {
+  display: none;
+  cursor: pointer;
+}
+
+.cf_main_saas_selector_onboard_users:hover .cf_newDashboard_OpenLink_tr,
+.cf_saas_assessments_list_item:hover .cf_newDashboard_OpenLink_tr,
+.cf_new_tables_div table tbody tr:hover .cf_newDashboard_OpenLink_tr {
+  visibility: visible;
+  /* animation: slideIn 0.2s cubic-bezier(0.075, 0.82, 0.165, 1); */
+}
+
+.cf_newDashboard_OpenLink_tr {
+  visibility: hidden;
+}
+
+.cf_new_dashboard_info_pannel:hover {
+  box-shadow:
+    0 1px 3px 0 rgb(0 0 0 / 0.1),
+    0 1px 2px -1px rgb(0 0 0 / 0.1);
+}
+
+.cf_saas_assessments_list_item:hover .cf_newDashboard_OpenLink,
+.viewMoveIN:hover .cf_newDashboard_OpenLink,
+.cf_new_dashboard_info_pannel:hover .cf_newDashboard_OpenLink {
+  display: flex;
+  animation: slideIn 0.2s cubic-bezier(0.075, 0.82, 0.165, 1);
+}
+
+@keyframes slideIn {
+  0% {
+    opacity: 0.2;
+    margin-bottom: -10px;
+  }
+  100% {
+    opacity: 1;
+    margin-bottom: 0px;
+  }
+}
+
+/* .cf_new_dashboard_info_pannel:hover svg {
+  stroke: #0062ff !important;
+} */
+
+.cf_dashboard_analytics_edit {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  visibility: hidden;
+  align-items: center;
+  border-radius: 0.5rem;
+  justify-content: center;
+  background-color: #0022701a;
+}
+
+.cf_hideforTable {
+  visibility: hidden;
+}
+
+tr:hover .cf_hideforTable,
+tr:hover .cf_dashboard_analytics_edit,
+.cf_main_saas_selector:hover .cf_hideforTable,
+.cf_main_saas_selector:hover .cf_dashboard_analytics_edit {
+  visibility: visible;
+}
+
+.cf_cloudImageCloadDiv {
+  width: 34px;
+  height: 34px;
+  display: flex;
+  overflow: hidden;
+  border-radius: 50%;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #e2e8f0;
+}
+
+.cf_cloudImageCloadDiv img {
+  width: 25px;
+}
+
+.cf_chart_link {
+  color: #000;
+  font-size: 10px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.cf_chart_link:hover {
+  color: #0062ff;
+  text-decoration: underline;
+}
+
+.cf_new_dashboard_info_pannel_title_select {
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  padding: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 400;
+  color: #0f1729;
+  background-color: #ffffff;
+  cursor: pointer;
+  outline: none;
+}
+
+.cf_graph_toggler {
+  display: flex;
+  align-items: center;
+  border-radius: 5px;
+  cursor: pointer;
+  gap: 5px;
+  padding: 5px 10px;
+  background-color: #f2f2f2;
+}
+
+.cf_graph_toggler_item {
+  gap: 5px;
+  padding: 8px;
+  display: flex;
+  cursor: pointer;
+  border-radius: 5px;
+  align-items: center;
+  transition: all 0.2s ease-in-out;
+  /* background-color: #f8fafc; */
+}
+
+.cf_graph_toggler_item:hover {
+  background-color: #f8fafc;
+}
+
+.cf_graph_toggler_item_active {
+  background-color: #f8fafc;
+  transition: all 0.2s ease-in-out;
+  box-shadow:
+    0 1px 3px 0 rgb(0 0 0 / 0.1),
+    0 1px 2px -1px rgb(0 0 0 / 0.1);
+}
+
+/* License harvest card: show Harvest button on hover */
+.cf_license_harvest_card .cf_license_harvest_btn {
+  display: flex;
+  gap: 10px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.cf_license_harvest_card:hover .cf_license_harvest_btn {
+  opacity: 1;
+}
+
+/* Users License Harvest table design */
+.cf_users_license_table_card {
+  background: #fff;
+  border-radius: 12px 12px 0 0;
+  /* box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.08), 0 1px 2px -1px rgb(0 0 0 / 0.06); */
+  overflow: hidden;
+}
+.cf_users_license_table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.cf_users_license_table thead tr {
+  background: #f7f7f7;
+}
+.cf_users_license_table thead th {
+  padding: 12px 16px;
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6c757d;
+  border-bottom: 1px solid #eee;
+}
+.cf_users_license_table tbody tr td {
+  padding: 12px 16px;
+  border-bottom: 1px solid #f0f0f0;
+  vertical-align: middle;
+}
+.cf_users_license_table tbody tr.cf_users_license_row_alt td {
+  background: #fdfdfd;
+}
+.cf_users_license_table tbody tr:hover td {
+  background: #fafafa;
+}
+.cf_users_license_table tbody tr.cf_users_license_row_alt:hover td {
+  background: #f5f5f5;
+}
+

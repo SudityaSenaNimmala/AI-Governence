@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap"
+      rel="stylesheet"
+    />
+    <title>CloudFuze Invite</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        font-weight: 400;
+        line-height: 1.8;
+        box-sizing: border-box;
+        font-family: "Poppins", Arial, sans-serif;
+      }
+
+      .cf_emailContent_Header {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        padding: 1rem 0 1rem 0;
+        border-bottom: 2px solid #00227033;
+      }
+      .cf_emailContent_Header img {
+        width: 90px;
+      }
+      .cf_emailContent_Body {
+        padding-top: 1rem;
+        display: flex;
+        flex-direction: column;
+      }
+      .cf_emailContent_Instance {
+        gap: 10px;
+        display: flex;
+        flex-direction: column;
+      }
+      .cf_emailContent_Instance h1 {
+        font-size: 30px;
+        font-weight: 500;
+      }
+      .cf_emailContent_Instance p {
+        font-size: 14px;
+        color: #64748b;
+      }
+      .cf_instanceFeaturesDiv {
+        width: 100%;
+        height: 100px;
+        display: flex;
+        padding: 20px 5px;
+        margin-top: 1.5rem;
+        border-radius: 4px;
+        align-items: center;
+        background-color: #f9fafb;
+        justify-content: space-between;
+      }
+      .cf_instanceFeaturesDiv_Container {
+        height: 100%;
+        display: flex;
+      }
+      .cf_instanceFeaturesDiv_Container_Icons img {
+        width: 20px;
+      }
+      .cf_instanceFeaturesDiv_Info {
+        margin-left: 0.5rem;
+        width: 160px;
+      }
+      .cf_instanceFeaturesDiv_Info .cf_instanceFeaturesDiv_Info_title {
+        font-size: 14px;
+        font-weight: 500;
+      }
+      .cf_instanceFeaturesDiv_Info .cf_instanceFeaturesDiv_Info_desc {
+        line-height: 1.2;
+        font-size: 12px;
+        color: #64748b;
+      }
+      .cf_CompleteRegistration {
+        width: 100%;
+        margin-top: 1.5rem;
+        height: fit-content;
+      }
+      .cf_CompleteRegistration a img {
+        width: 20px;
+      }
+
+      .cf_nextSteps ol {
+        padding: 0 15px;
+      }
+      .cf_nextSteps ol li {
+        padding: 2px 0;
+        font-size: 12px;
+        color: #64748b;
+      }
+      .cf_nextSteps_title {
+        font-size: 14px;
+        font-weight: 500;
+        color: #64748b;
+      }
+      .cf_Footer p {
+        font-size: 12px;
+        color: #64748b;
+      }
+      .cf_Footer {
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 2px solid #00227033;
+      }
+      /* box-shadow: rgba(99, 99, 99, 0.2) 0px 2px 8px 0px; */
+    </style>
+  </head>
+  <body>
+    <div class="cf_emailContainer">
+      <div
+        class="cf_emailContent_container"
+        style="
+          width: 670px;
+          display: flex;
+          padding: 10px 20px;
+          border-radius: 8px;
+          height: calc(100% - 50px);
+          flex-direction: column;
+          background-color: #fff;
+        "
+      >
+        <div class="cf_emailContent_Header">
+          <img
+            src="https://cloudfuzehost.com/emailasserts/CF_LOGO.png"
+            alt="CloudFuze"
+          />
+        </div>
+        <div class="cf_emailContent_Body">
+          <div class="cf_emailContent_Instance">
+            <h1>Your Instance is Ready!</h1>
+            <p>
+              We're excited to let you know that your new instance has been
+              successfully created and is ready for you to get started.
+            </p>
+          </div>
+          <div class="cf_instanceFeaturesDiv">
+            <div class="cf_instanceFeaturesDiv_Container">
+              <div class="cf_instanceFeaturesDiv_Container_Icons">
+                <img
+                  src="https://cloudfuzehost.com/emailasserts/SERVER.png"
+                  alt="SERVER"
+                />
+              </div>
+              <div class="cf_instanceFeaturesDiv_Info">
+                <p class="cf_instanceFeaturesDiv_Info_title">
+                  Dedicated Instance
+                </p>
+                <p class="cf_instanceFeaturesDiv_Info_desc">
+                  Your secure environment is ready
+                </p>
+              </div>
+            </div>
+            <div class="cf_instanceFeaturesDiv_Container">
+              <div class="cf_instanceFeaturesDiv_Container_Icons">
+                <img
+                  src="https://cloudfuzehost.com/emailasserts/SECURE.png"
+                  alt="SECURE"
+                />
+              </div>
+              <div class="cf_instanceFeaturesDiv_Info">
+                <p class="cf_instanceFeaturesDiv_Info_title">
+                  Enhanced Security
+                </p>
+                <p class="cf_instanceFeaturesDiv_Info_desc">
+                  Built-in protection measures
+                </p>
+              </div>
+            </div>
+            <div class="cf_instanceFeaturesDiv_Container">
+              <div class="cf_instanceFeaturesDiv_Container_Icons">
+                <img
+                  src="https://cloudfuzehost.com/emailasserts/KEY.png"
+                  alt="KEY"
+                />
+              </div>
+              <div class="cf_instanceFeaturesDiv_Info">
+                <p class="cf_instanceFeaturesDiv_Info_title">Easy Access</p>
+                <p class="cf_instanceFeaturesDiv_Info_desc">
+                  One-click registration
+                </p>
+              </div>
+            </div>
+          </div>
+          <div class="cf_CompleteRegistration">
+            <a
+              href="https://{{subdomain}}.cloudfuzehost.com/CloudFuze/signup/complete?token={{token}}"
+              style="
+                gap: 12px;
+                border: none;
+                color: #fff;
+                display: flex;
+                font-size: 14px;
+                font-weight: 500;
+                border-radius: 4px;
+                padding: 10px 20px;
+                width: fit-content;
+                align-items: center;
+                text-decoration: none;
+                justify-content: space-between;
+                background-color: #0062ff;
+              "
+              >Complete Registration
+              <img
+                src="https://cloudfuzehost.com/emailasserts/ARROW.png"
+                alt="ARROW"
+                style="margin-left: 10px"
+              />
+            </a>
+          </div>
+          <div
+            class="cf_instanceFeaturesDiv"
+            style="padding: 0 10px; height: 120px"
+          >
+            <div class="cf_nextSteps">
+              <p class="cf_nextSteps_title">Next steps:</p>
+              <ol>
+                <li>Click the registration link above</li>
+                <li>Create your account credentials</li>
+                <li>Start using your new instance</li>
+              </ol>
+            </div>
+          </div>
+          <div class="cf_Footer">
+            <p>
+              If you have any questions, please don't hesitate to contact our
+              support team.
+            </p>
+            <p>Best regards,</p>
+            <p>CloudFuze</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

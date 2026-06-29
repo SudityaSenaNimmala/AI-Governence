@@ -1,0 +1,358 @@
+.cf_login_bg {
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  /* background-color: #f2f3ff; */
+}
+.cf_login_bg_part_1 {
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-size: contain;
+  background-image: url(../../../../assets/images/Hero_BG.png);
+}
+
+/* background-image: url(https://www.cloudfuze.com/wp-content/uploads/2021/12/Home-Hero-Banner-img.png); */
+.cf_login_bg_part_1_logo {
+  color: #fff;
+  font-size: 52px;
+  font-weight: 600;
+}
+
+.cf_login_bg_part_2 {
+  width: 60%;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cf_login_placer {
+  display: flex;
+  padding: 20px;
+  border-radius: 8px;
+  align-items: center;
+  flex-direction: column;
+  justify-content: center;
+  background-color: #fff;
+  transition: all 0.2s linear;
+  box-shadow: rgba(99, 99, 99, 0.2) 0px 2px 8px 0px;
+}
+
+.cf_login_logo {
+  width: 130px;
+  height: 75px;
+}
+
+.cf_login_content_placer {
+  gap: 20px;
+  width: 100%;
+  padding: 10px;
+  display: flex;
+  text-align: center;
+  flex-direction: column;
+}
+
+.cf_login_button {
+  border: none;
+  outline: none;
+  color: #fff;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: 5px;
+  padding: 12px 25px;
+  transition: all 0.2s linear;
+  background: #0129ac 0% 0% no-repeat padding-box;
+}
+
+.cf_login_button:hover {
+  box-shadow: rgba(100, 100, 111, 0.2) 0px 7px 29px 0px;
+}
+
+.cf_login_button_placer {
+  width: 100%;
+  height: 100px;
+  padding: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cf_login_content_placer h1 {
+  color: #0062ff;
+  font-weight: 500;
+}
+
+.cf_domain_icon_placer {
+  width: 100%;
+  height: 30%;
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.cf_domain_icon_placer svg {
+  font-size: 64px;
+  color: #0062ff;
+}
+
+.cf_domain_icon_placer img {
+  width: 120px;
+  height: 72px;
+}
+
+.cf_domain_icon_placer h5 {
+  color: #000;
+  font-size: 20px;
+  line-height: 1.2;
+  font-weight: 500 !important;
+}
+
+.cf_domain_placer {
+  gap: 50px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  /* justify-content: center; */
+}
+
+.cf_input_wrapper {
+  gap: 20px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.CF_Auth_Footer {
+  left: 50%;
+  bottom: -1%;
+  width: 100%;
+  color: #fff;
+  display: flex;
+  font-size: 12px;
+  margin-top: 10px;
+  position: absolute;
+  align-items: center;
+  justify-content: center;
+  transform: translate(-50%, -50%);
+}
+
+.CF_Auth_Footer p {
+  text-align: center;
+}
+
+.CF_Auth_Footer p a {
+  text-decoration: none;
+  color: #fff;
+}
+
+.CF_Auth_Footer p a:hover {
+  text-decoration: underline;
+}
+
+.cf_domainSpinner {
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 2px solid #0000ff;
+  border-left: none;
+  border-right: none;
+  border-radius: 9999px;
+  animation: spinAround 1s linear infinite !important;
+}
+
+@keyframes spinAround {
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@media screen and (max-width: 1280px) {
+  .cf_login_placer {
+    width: 40% !important;
+    height: 400px !important;
+  }
+  .cf_login_bg_part_2 {
+    width: 80%;
+  }
+}
+
+@media screen and (max-width: 870px) {
+  .cf_login_placer {
+    width: 100% !important;
+    height: 100%;
+  }
+  .cf_login_bg_part_2 {
+    width: 80%;
+  }
+}
+
+.cf_2fa_input {
+  width: 40px;
+  height: 40px;
+  font-size: 18px;
+  text-align: center;
+  border-radius: 4px;
+  border: 1px solid #757575;
+}
+
+.cf_resend_link {
+  font-weight: 500;
+  color: #0062ff;
+  cursor: pointer;
+}
+
+.cf_resend_link:hover {
+  text-decoration: underline;
+}
+
+.cf_sign_in_with_microsoft {
+  height: 41px;
+  display: flex;
+  color: #ffff;
+  font-weight: 600;
+  padding: 0 12px;
+  align-items: center;
+  width: fit-content;
+  font: Segoe UI Regular 15px;
+  background-color: #2f2f2f;
+}
+
+.cf_sign_in_with_microsoft img {
+  padding-right: 12px;
+}
+
+.cf_snow_doll {
+  bottom: -10px;
+  right: -0px;
+  width: 40px;
+  z-index: 0;
+  position: absolute;
+  transition: all 0.2s linear;
+  transform: translateY(40%);
+}
+
+.cf_login_button_placer_animation:hover .cf_snow_doll {
+  transform: translateY(0%) rotate(0deg);
+}
+
+.snow {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+}
+
+.snow-layer {
+  position: absolute;
+  inset: 0;
+  background-repeat: repeat;
+  animation: snow-fall linear infinite;
+}
+.layer1 {
+  background-image:
+    radial-gradient(6px 6px at 20px 30px, #fff, transparent),
+    radial-gradient(6px 6px at 100px 80px, #fff, transparent),
+    radial-gradient(6px 6px at 200px 150px, #fff, transparent);
+  background-size: 300px 300px;
+  animation-duration: 10s;
+  opacity: 0.8;
+}
+
+/* Medium snow */
+.layer2 {
+  background-image:
+    radial-gradient(8px 8px at 50px 60px, #fff, transparent),
+    radial-gradient(8px 8px at 150px 120px, #fff, transparent),
+    radial-gradient(8px 8px at 250px 200px, #fff, transparent);
+  background-size: 400px 400px;
+  animation-duration: 20s;
+  opacity: 0.6;
+}
+
+.layer3 {
+  background-image:
+    radial-gradient(4px 4px at 70px 90px, #fff, transparent),
+    radial-gradient(4px 4px at 180px 160px, #fff, transparent),
+    radial-gradient(4px 4px at 280px 240px, #fff, transparent);
+  background-size: 500px 500px;
+  animation-duration: 25s;
+  opacity: 0.4;
+}
+
+@keyframes snow-fall {
+  0% {
+    transform: translateY(-100%);
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(90%);
+    opacity: 0;
+  }
+}
+
+.cf_snow_layer_placer {
+  position: absolute;
+  bottom: 00px;
+  left: 0;
+  z-index: 0;
+  height: 50px;
+  width: 100%;
+  background-size: contain;
+  background-image: url(../../../../assets/images/cloudIcons/SNOW_LAYER.png);
+}
+
+.cf_animate_santa {
+  position: absolute;
+  width: 70px;
+  bottom: 25px;
+  right: 0;
+  z-index: 9;
+  animation: cf_animate_santa 20s linear infinite;
+  transform-origin: right;
+}
+@keyframes cf_animate_santa {
+  0% {
+    transform: translateY(15px) translateX(-102vw);
+  }
+  10% {
+    transform: translateY(15px) translateX(-90vw) rotate(10deg);
+  }
+  20% {
+    transform: translateY(15px) translateX(-80vw) rotate(0deg);
+  }
+  30% {
+    transform: translateY(15px) translateX(-70vw) rotate(10deg);
+  }
+  40% {
+    transform: translateY(15px) translateX(-60vw) rotate(0deg);
+  }
+  50% {
+    transform: translateY(15px) translateX(-50vw) rotate(0deg);
+  }
+  60% {
+    transform: translateY(15px) translateX(-40vw) rotate(10deg);
+  }
+  70% {
+    transform: translateY(15px) translateX(-30vw) rotate(0deg);
+  }
+  80% {
+    transform: translateY(15px) translateX(-20vw) rotate(10deg);
+  }
+  90% {
+    transform: translateY(15px) translateX(-10vw) rotate(0deg);
+  }
+  95% {
+    transform: translateY(15px) translateX(-5vw);
+  }
+  100% {
+    transform: translateY(15px) translateX(2vw);
+  }
+}

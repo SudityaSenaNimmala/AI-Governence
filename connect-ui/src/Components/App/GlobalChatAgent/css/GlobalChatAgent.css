@@ -1,0 +1,33 @@
+.cf_GlobalChatToggler {
+  right: 15px;
+  width: 65px;
+  height: 65px;
+  bottom: 15px;
+  display: flex;
+  cursor: pointer;
+  position: absolute;
+  border-radius: 50%;
+  align-items: center;
+  justify-content: center;
+  z-index: 99999999999999;
+  background-color: #fff;
+  border: 5px solid #e2e8f0;
+  box-shadow: rgba(0, 0, 0, 0.35) 0px 5px 15px;
+}
+
+.cf_GlobalChatToggler img {
+  width: 45px;
+}
+
+.cf_GlobalChatPopUpContainer {
+  width: 25%;
+  height: 80%;
+  right: 90px;
+  bottom: 15px;
+  border-radius: 8px;
+  position: absolute;
+  z-index: 99999999999999;
+  background-color: #fff;
+  border: 1px solid #e2e8f0;
+  box-shadow: rgba(0, 0, 0, 0.35) 0px 5px 15px;
+}

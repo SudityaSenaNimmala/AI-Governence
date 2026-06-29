@@ -1,0 +1,2970 @@
+[
+  {
+    "code": "Pacific/Kiritimati",
+    "name": "Line Islands Time",
+    "timeZone": "+14:00",
+    "displayTimeZone": "(GMT+14:00) Line Islands Time (Pacific/Kiritimati)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Chatham",
+    "name": "Chatham Daylight Time",
+    "timeZone": "+13:45",
+    "displayTimeZone": "(GMT+13:45) Chatham Daylight Time (Pacific/Chatham)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Antarctica/McMurdo",
+    "name": "New Zealand Daylight Time",
+    "timeZone": "+13:00",
+    "displayTimeZone": "(GMT+13:00) New Zealand Daylight Time (Antarctica/McMurdo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Apia",
+    "name": "Apia Standard Time",
+    "timeZone": "+13:00",
+    "displayTimeZone": "(GMT+13:00) Apia Standard Time (Pacific/Apia)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Auckland",
+    "name": "New Zealand Daylight Time",
+    "timeZone": "+13:00",
+    "displayTimeZone": "(GMT+13:00) New Zealand Daylight Time (Pacific/Auckland)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Enderbury",
+    "name": "Phoenix Islands Time",
+    "timeZone": "+13:00",
+    "displayTimeZone": "(GMT+13:00) Phoenix Islands Time (Pacific/Enderbury)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Fakaofo",
+    "name": "Tokelau Time",
+    "timeZone": "+13:00",
+    "displayTimeZone": "(GMT+13:00) Tokelau Time (Pacific/Fakaofo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Tongatapu",
+    "name": "Tonga Standard Time",
+    "timeZone": "+13:00",
+    "displayTimeZone": "(GMT+13:00) Tonga Standard Time (Pacific/Tongatapu)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Anadyr",
+    "name": "Anadyr Standard Time",
+    "timeZone": "+12:00",
+    "displayTimeZone": "(GMT+12:00) Anadyr Standard Time (Asia/Anadyr)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Kamchatka",
+    "name": "Petropavlovsk-Kamchatski Standard Time",
+    "timeZone": "+12:00",
+    "displayTimeZone": "(GMT+12:00) Petropavlovsk-Kamchatski Standard Time (Asia/Kamchatka)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Fiji",
+    "name": "Fiji Standard Time",
+    "timeZone": "+12:00",
+    "displayTimeZone": "(GMT+12:00) Fiji Standard Time (Pacific/Fiji)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Funafuti",
+    "name": "Tuvalu Time",
+    "timeZone": "+12:00",
+    "displayTimeZone": "(GMT+12:00) Tuvalu Time (Pacific/Funafuti)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Kwajalein",
+    "name": "Marshall Islands Time",
+    "timeZone": "+12:00",
+    "displayTimeZone": "(GMT+12:00) Marshall Islands Time (Pacific/Kwajalein)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Majuro",
+    "name": "Marshall Islands Time",
+    "timeZone": "+12:00",
+    "displayTimeZone": "(GMT+12:00) Marshall Islands Time (Pacific/Majuro)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Nauru",
+    "name": "Nauru Time",
+    "timeZone": "+12:00",
+    "displayTimeZone": "(GMT+12:00) Nauru Time (Pacific/Nauru)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Norfolk",
+    "name": "Norfolk Island Daylight Time",
+    "timeZone": "+12:00",
+    "displayTimeZone": "(GMT+12:00) Norfolk Island Daylight Time (Pacific/Norfolk)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Tarawa",
+    "name": "Gilbert Islands Time",
+    "timeZone": "+12:00",
+    "displayTimeZone": "(GMT+12:00) Gilbert Islands Time (Pacific/Tarawa)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Wake",
+    "name": "Wake Island Time",
+    "timeZone": "+12:00",
+    "displayTimeZone": "(GMT+12:00) Wake Island Time (Pacific/Wake)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Wallis",
+    "name": "Wallis & Futuna Time",
+    "timeZone": "+12:00",
+    "displayTimeZone": "(GMT+12:00) Wallis & Futuna Time (Pacific/Wallis)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Antarctica/Macquarie",
+    "name": "Australian Eastern Daylight Time",
+    "timeZone": "+11:00",
+    "displayTimeZone": "(GMT+11:00) Australian Eastern Daylight Time (Antarctica/Macquarie)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Magadan",
+    "name": "Magadan Standard Time",
+    "timeZone": "+11:00",
+    "displayTimeZone": "(GMT+11:00) Magadan Standard Time (Asia/Magadan)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Sakhalin",
+    "name": "Sakhalin Standard Time",
+    "timeZone": "+11:00",
+    "displayTimeZone": "(GMT+11:00) Sakhalin Standard Time (Asia/Sakhalin)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Srednekolymsk",
+    "name": "Magadan Standard Time",
+    "timeZone": "+11:00",
+    "displayTimeZone": "(GMT+11:00) Magadan Standard Time (Asia/Srednekolymsk)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Australia/Currie",
+    "name": "Australian Eastern Daylight Time",
+    "timeZone": "+11:00",
+    "displayTimeZone": "(GMT+11:00) Australian Eastern Daylight Time (Australia/Currie)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Australia/Hobart",
+    "name": "Australian Eastern Daylight Time",
+    "timeZone": "+11:00",
+    "displayTimeZone": "(GMT+11:00) Australian Eastern Daylight Time (Australia/Hobart)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Australia/Lord_Howe",
+    "name": "Lord Howe Daylight Time",
+    "timeZone": "+11:00",
+    "displayTimeZone": "(GMT+11:00) Lord Howe Daylight Time (Australia/Lord_Howe)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Australia/Melbourne",
+    "name": "Australian Eastern Daylight Time",
+    "timeZone": "+11:00",
+    "displayTimeZone": "(GMT+11:00) Australian Eastern Daylight Time (Australia/Melbourne)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Australia/Sydney",
+    "name": "Australian Eastern Daylight Time",
+    "timeZone": "+11:00",
+    "displayTimeZone": "(GMT+11:00) Australian Eastern Daylight Time (Australia/Sydney)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Bougainville",
+    "name": "Bougainville Standard Time",
+    "timeZone": "+11:00",
+    "displayTimeZone": "(GMT+11:00) Bougainville Standard Time (Pacific/Bougainville)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Efate",
+    "name": "Vanuatu Standard Time",
+    "timeZone": "+11:00",
+    "displayTimeZone": "(GMT+11:00) Vanuatu Standard Time (Pacific/Efate)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Guadalcanal",
+    "name": "Solomon Islands Time",
+    "timeZone": "+11:00",
+    "displayTimeZone": "(GMT+11:00) Solomon Islands Time (Pacific/Guadalcanal)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Kosrae",
+    "name": "Kosrae Time",
+    "timeZone": "+11:00",
+    "displayTimeZone": "(GMT+11:00) Kosrae Time (Pacific/Kosrae)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Noumea",
+    "name": "New Caledonia Standard Time",
+    "timeZone": "+11:00",
+    "displayTimeZone": "(GMT+11:00) New Caledonia Standard Time (Pacific/Noumea)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Ponape",
+    "name": "Ponape Time",
+    "timeZone": "+11:00",
+    "displayTimeZone": "(GMT+11:00) Ponape Time (Pacific/Ponape)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Australia/Adelaide",
+    "name": "Australian Central Daylight Time",
+    "timeZone": "+10:30",
+    "displayTimeZone": "(GMT+10:30) Australian Central Daylight Time (Australia/Adelaide)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Australia/Broken_Hill",
+    "name": "Australian Central Daylight Time",
+    "timeZone": "+10:30",
+    "displayTimeZone": "(GMT+10:30) Australian Central Daylight Time (Australia/Broken_Hill)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Antarctica/DumontDUrville",
+    "name": "Dumont-d’Urville Time",
+    "timeZone": "+10:00",
+    "displayTimeZone": "(GMT+10:00) Dumont-d’Urville Time (Antarctica/DumontDUrville)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Ust-Nera",
+    "name": "Vladivostok Standard Time",
+    "timeZone": "+10:00",
+    "displayTimeZone": "(GMT+10:00) Vladivostok Standard Time (Asia/Ust-Nera)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Vladivostok",
+    "name": "Vladivostok Standard Time",
+    "timeZone": "+10:00",
+    "displayTimeZone": "(GMT+10:00) Vladivostok Standard Time (Asia/Vladivostok)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Australia/Brisbane",
+    "name": "Australian Eastern Standard Time",
+    "timeZone": "+10:00",
+    "displayTimeZone": "(GMT+10:00) Australian Eastern Standard Time (Australia/Brisbane)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Australia/Lindeman",
+    "name": "Australian Eastern Standard Time",
+    "timeZone": "+10:00",
+    "displayTimeZone": "(GMT+10:00) Australian Eastern Standard Time (Australia/Lindeman)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Guam",
+    "name": "Chamorro Standard Time",
+    "timeZone": "+10:00",
+    "displayTimeZone": "(GMT+10:00) Chamorro Standard Time (Pacific/Guam)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Port_Moresby",
+    "name": "Papua New Guinea Time",
+    "timeZone": "+10:00",
+    "displayTimeZone": "(GMT+10:00) Papua New Guinea Time (Pacific/Port_Moresby)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Saipan",
+    "name": "Chamorro Standard Time",
+    "timeZone": "+10:00",
+    "displayTimeZone": "(GMT+10:00) Chamorro Standard Time (Pacific/Saipan)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Truk",
+    "name": "Chuuk Time",
+    "timeZone": "+10:00",
+    "displayTimeZone": "(GMT+10:00) Chuuk Time (Pacific/Truk)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Australia/Darwin",
+    "name": "Australian Central Standard Time",
+    "timeZone": "+09:30",
+    "displayTimeZone": "(GMT+09:30) Australian Central Standard Time (Australia/Darwin)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Chita",
+    "name": "Yakutsk Standard Time",
+    "timeZone": "+09:00",
+    "displayTimeZone": "(GMT+09:00) Yakutsk Standard Time (Asia/Chita)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Dili",
+    "name": "East Timor Time",
+    "timeZone": "+09:00",
+    "displayTimeZone": "(GMT+09:00) East Timor Time (Asia/Dili)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Jayapura",
+    "name": "Eastern Indonesia Time",
+    "timeZone": "+09:00",
+    "displayTimeZone": "(GMT+09:00) Eastern Indonesia Time (Asia/Jayapura)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Khandyga",
+    "name": "Yakutsk Standard Time",
+    "timeZone": "+09:00",
+    "displayTimeZone": "(GMT+09:00) Yakutsk Standard Time (Asia/Khandyga)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Seoul",
+    "name": "Korean Standard Time",
+    "timeZone": "+09:00",
+    "displayTimeZone": "(GMT+09:00) Korean Standard Time (Asia/Seoul)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Tokyo",
+    "name": "Japan Standard Time",
+    "timeZone": "+09:00",
+    "displayTimeZone": "(GMT+09:00) Japan Standard Time (Asia/Tokyo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Yakutsk",
+    "name": "Yakutsk Standard Time",
+    "timeZone": "+09:00",
+    "displayTimeZone": "(GMT+09:00) Yakutsk Standard Time (Asia/Yakutsk)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Palau",
+    "name": "Palau Time",
+    "timeZone": "+09:00",
+    "displayTimeZone": "(GMT+09:00) Palau Time (Pacific/Palau)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Australia/Eucla",
+    "name": "Australian Central Western Standard Time",
+    "timeZone": "+08:45",
+    "displayTimeZone": "(GMT+08:45) Australian Central Western Standard Time (Australia/Eucla)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Antarctica/Casey",
+    "name": "Casey Time",
+    "timeZone": "+08:00",
+    "displayTimeZone": "(GMT+08:00) Casey Time (Antarctica/Casey)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Brunei",
+    "name": "Brunei Darussalam Time",
+    "timeZone": "+08:00",
+    "displayTimeZone": "(GMT+08:00) Brunei Darussalam Time (Asia/Brunei)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Choibalsan",
+    "name": "Ulaanbaatar Standard Time",
+    "timeZone": "+08:00",
+    "displayTimeZone": "(GMT+08:00) Ulaanbaatar Standard Time (Asia/Choibalsan)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Hong_Kong",
+    "name": "Hong Kong Standard Time",
+    "timeZone": "+08:00",
+    "displayTimeZone": "(GMT+08:00) Hong Kong Standard Time (Asia/Hong_Kong)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Irkutsk",
+    "name": "Irkutsk Standard Time",
+    "timeZone": "+08:00",
+    "displayTimeZone": "(GMT+08:00) Irkutsk Standard Time (Asia/Irkutsk)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Kuala_Lumpur",
+    "name": "Malaysia Time",
+    "timeZone": "+08:00",
+    "displayTimeZone": "(GMT+08:00) Malaysia Time (Asia/Kuala_Lumpur)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Kuching",
+    "name": "Malaysia Time",
+    "timeZone": "+08:00",
+    "displayTimeZone": "(GMT+08:00) Malaysia Time (Asia/Kuching)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Macau",
+    "name": "China Standard Time",
+    "timeZone": "+08:00",
+    "displayTimeZone": "(GMT+08:00) China Standard Time (Asia/Macau)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Makassar",
+    "name": "Central Indonesia Time",
+    "timeZone": "+08:00",
+    "displayTimeZone": "(GMT+08:00) Central Indonesia Time (Asia/Makassar)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Manila",
+    "name": "Philippine Standard Time",
+    "timeZone": "+08:00",
+    "displayTimeZone": "(GMT+08:00) Philippine Standard Time (Asia/Manila)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Shanghai",
+    "name": "China Standard Time",
+    "timeZone": "+08:00",
+    "displayTimeZone": "(GMT+08:00) China Standard Time (Asia/Shanghai)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Singapore",
+    "name": "Singapore Standard Time",
+    "timeZone": "+08:00",
+    "displayTimeZone": "(GMT+08:00) Singapore Standard Time (Asia/Singapore)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Taipei",
+    "name": "Taipei Standard Time",
+    "timeZone": "+08:00",
+    "displayTimeZone": "(GMT+08:00) Taipei Standard Time (Asia/Taipei)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Ulaanbaatar",
+    "name": "Ulaanbaatar Standard Time",
+    "timeZone": "+08:00",
+    "displayTimeZone": "(GMT+08:00) Ulaanbaatar Standard Time (Asia/Ulaanbaatar)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Australia/Perth",
+    "name": "Australian Western Standard Time",
+    "timeZone": "+08:00",
+    "displayTimeZone": "(GMT+08:00) Australian Western Standard Time (Australia/Perth)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Antarctica/Davis",
+    "name": "Davis Time",
+    "timeZone": "+07:00",
+    "displayTimeZone": "(GMT+07:00) Davis Time (Antarctica/Davis)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Bangkok",
+    "name": "Indochina Time",
+    "timeZone": "+07:00",
+    "displayTimeZone": "(GMT+07:00) Indochina Time (Asia/Bangkok)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Barnaul",
+    "name": "Moscow Standard Time + 4",
+    "timeZone": "+07:00",
+    "displayTimeZone": "(GMT+07:00) Moscow Standard Time + 4 (Asia/Barnaul)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Ho_Chi_Minh",
+    "name": "Indochina Time",
+    "timeZone": "+07:00",
+    "displayTimeZone": "(GMT+07:00) Indochina Time (Asia/Ho_Chi_Minh)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Hovd",
+    "name": "Hovd Standard Time",
+    "timeZone": "+07:00",
+    "displayTimeZone": "(GMT+07:00) Hovd Standard Time (Asia/Hovd)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Jakarta",
+    "name": "Western Indonesia Time",
+    "timeZone": "+07:00",
+    "displayTimeZone": "(GMT+07:00) Western Indonesia Time (Asia/Jakarta)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Krasnoyarsk",
+    "name": "Krasnoyarsk Standard Time",
+    "timeZone": "+07:00",
+    "displayTimeZone": "(GMT+07:00) Krasnoyarsk Standard Time (Asia/Krasnoyarsk)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Novokuznetsk",
+    "name": "Krasnoyarsk Standard Time",
+    "timeZone": "+07:00",
+    "displayTimeZone": "(GMT+07:00) Krasnoyarsk Standard Time (Asia/Novokuznetsk)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Novosibirsk",
+    "name": "Novosibirsk Standard Time",
+    "timeZone": "+07:00",
+    "displayTimeZone": "(GMT+07:00) Novosibirsk Standard Time (Asia/Novosibirsk)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Phnom_Penh",
+    "name": "Indochina Time",
+    "timeZone": "+07:00",
+    "displayTimeZone": "(GMT+07:00) Indochina Time (Asia/Phnom_Penh)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Pontianak",
+    "name": "Western Indonesia Time",
+    "timeZone": "+07:00",
+    "displayTimeZone": "(GMT+07:00) Western Indonesia Time (Asia/Pontianak)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Tomsk",
+    "name": "Moscow Standard Time + 4",
+    "timeZone": "+07:00",
+    "displayTimeZone": "(GMT+07:00) Moscow Standard Time + 4 (Asia/Tomsk)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Vientiane",
+    "name": "Indochina Time",
+    "timeZone": "+07:00",
+    "displayTimeZone": "(GMT+07:00) Indochina Time (Asia/Vientiane)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Indian/Christmas",
+    "name": "Christmas Island Time",
+    "timeZone": "+07:00",
+    "displayTimeZone": "(GMT+07:00) Christmas Island Time (Indian/Christmas)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Rangoon",
+    "name": "Myanmar Time",
+    "timeZone": "+06:30",
+    "displayTimeZone": "(GMT+06:30) Myanmar Time (Asia/Rangoon)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Indian/Cocos",
+    "name": "Cocos Islands Time",
+    "timeZone": "+06:30",
+    "displayTimeZone": "(GMT+06:30) Cocos Islands Time (Indian/Cocos)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Bishkek",
+    "name": "Kyrgyzstan Time",
+    "timeZone": "+06:00",
+    "displayTimeZone": "(GMT+06:00) Kyrgyzstan Time (Asia/Bishkek)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Dhaka",
+    "name": "Bangladesh Standard Time",
+    "timeZone": "+06:00",
+    "displayTimeZone": "(GMT+06:00) Bangladesh Standard Time (Asia/Dhaka)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Omsk",
+    "name": "Omsk Standard Time",
+    "timeZone": "+06:00",
+    "displayTimeZone": "(GMT+06:00) Omsk Standard Time (Asia/Omsk)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Thimphu",
+    "name": "Bhutan Time",
+    "timeZone": "+06:00",
+    "displayTimeZone": "(GMT+06:00) Bhutan Time (Asia/Thimphu)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Urumqi",
+    "name": "China Standard Time",
+    "timeZone": "+06:00",
+    "displayTimeZone": "(GMT+06:00) China Standard Time (Asia/Urumqi)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Indian/Chagos",
+    "name": "Indian Ocean Time",
+    "timeZone": "+06:00",
+    "displayTimeZone": "(GMT+06:00) Indian Ocean Time (Indian/Chagos)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Kathmandu",
+    "name": "Nepal Time",
+    "timeZone": "+05:45",
+    "displayTimeZone": "(GMT+05:45) Nepal Time (Asia/Kathmandu)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Colombo",
+    "name": "India Standard Time",
+    "timeZone": "+05:30",
+    "displayTimeZone": "(GMT+05:30) India Standard Time (Asia/Colombo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Kolkata",
+    "name": "India Standard Time",
+    "timeZone": "+05:30",
+    "displayTimeZone": "(GMT+05:30) India Standard Time (Asia/Kolkata)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Antarctica/Mawson",
+    "name": "Mawson Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) Mawson Time (Antarctica/Mawson)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Antarctica/Vostok",
+    "name": "Vostok Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) Vostok Time (Antarctica/Vostok)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Almaty",
+    "name": "East Kazakhstan Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) East Kazakhstan Time (Asia/Almaty)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Aqtau",
+    "name": "West Kazakhstan Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) West Kazakhstan Time (Asia/Aqtau)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Aqtobe",
+    "name": "West Kazakhstan Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) West Kazakhstan Time (Asia/Aqtobe)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Ashgabat",
+    "name": "Turkmenistan Standard Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) Turkmenistan Standard Time (Asia/Ashgabat)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Atyrau",
+    "name": "West Kazakhstan Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) West Kazakhstan Time (Asia/Atyrau)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Dushanbe",
+    "name": "Tajikistan Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) Tajikistan Time (Asia/Dushanbe)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Karachi",
+    "name": "Pakistan Standard Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) Pakistan Standard Time (Asia/Karachi)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Oral",
+    "name": "West Kazakhstan Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) West Kazakhstan Time (Asia/Oral)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Qostanay",
+    "name": "East Kazakhstan Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) East Kazakhstan Time (Asia/Qostanay)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Qyzylorda",
+    "name": "West Kazakhstan Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) West Kazakhstan Time (Asia/Qyzylorda)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Samarkand",
+    "name": "Uzbekistan Standard Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) Uzbekistan Standard Time (Asia/Samarkand)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Tashkent",
+    "name": "Uzbekistan Standard Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) Uzbekistan Standard Time (Asia/Tashkent)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Yekaterinburg",
+    "name": "Yekaterinburg Standard Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) Yekaterinburg Standard Time (Asia/Yekaterinburg)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Indian/Kerguelen",
+    "name": "French Southern & Antarctic Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) French Southern & Antarctic Time (Indian/Kerguelen)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Indian/Maldives",
+    "name": "Maldives Time",
+    "timeZone": "+05:00",
+    "displayTimeZone": "(GMT+05:00) Maldives Time (Indian/Maldives)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Kabul",
+    "name": "Afghanistan Time",
+    "timeZone": "+04:30",
+    "displayTimeZone": "(GMT+04:30) Afghanistan Time (Asia/Kabul)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Baku",
+    "name": "Azerbaijan Standard Time",
+    "timeZone": "+04:00",
+    "displayTimeZone": "(GMT+04:00) Azerbaijan Standard Time (Asia/Baku)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Dubai",
+    "name": "Gulf Standard Time",
+    "timeZone": "+04:00",
+    "displayTimeZone": "(GMT+04:00) Gulf Standard Time (Asia/Dubai)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Muscat",
+    "name": "Gulf Standard Time",
+    "timeZone": "+04:00",
+    "displayTimeZone": "(GMT+04:00) Gulf Standard Time (Asia/Muscat)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Tbilisi",
+    "name": "Georgia Standard Time",
+    "timeZone": "+04:00",
+    "displayTimeZone": "(GMT+04:00) Georgia Standard Time (Asia/Tbilisi)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Yerevan",
+    "name": "Armenia Standard Time",
+    "timeZone": "+04:00",
+    "displayTimeZone": "(GMT+04:00) Armenia Standard Time (Asia/Yerevan)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Astrakhan",
+    "name": "Samara Standard Time",
+    "timeZone": "+04:00",
+    "displayTimeZone": "(GMT+04:00) Samara Standard Time (Europe/Astrakhan)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Samara",
+    "name": "Samara Standard Time",
+    "timeZone": "+04:00",
+    "displayTimeZone": "(GMT+04:00) Samara Standard Time (Europe/Samara)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Saratov",
+    "name": "Moscow Standard Time + 1",
+    "timeZone": "+04:00",
+    "displayTimeZone": "(GMT+04:00) Moscow Standard Time + 1 (Europe/Saratov)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Ulyanovsk",
+    "name": "Moscow Standard Time + 1",
+    "timeZone": "+04:00",
+    "displayTimeZone": "(GMT+04:00) Moscow Standard Time + 1 (Europe/Ulyanovsk)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Indian/Mahe",
+    "name": "Seychelles Time",
+    "timeZone": "+04:00",
+    "displayTimeZone": "(GMT+04:00) Seychelles Time (Indian/Mahe)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Indian/Mauritius",
+    "name": "Mauritius Standard Time",
+    "timeZone": "+04:00",
+    "displayTimeZone": "(GMT+04:00) Mauritius Standard Time (Indian/Mauritius)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Indian/Reunion",
+    "name": "Réunion Time",
+    "timeZone": "+04:00",
+    "displayTimeZone": "(GMT+04:00) Réunion Time (Indian/Reunion)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Addis_Ababa",
+    "name": "East Africa Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) East Africa Time (Africa/Addis_Ababa)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Asmera",
+    "name": "East Africa Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) East Africa Time (Africa/Asmera)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Dar_es_Salaam",
+    "name": "East Africa Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) East Africa Time (Africa/Dar_es_Salaam)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Djibouti",
+    "name": "East Africa Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) East Africa Time (Africa/Djibouti)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Kampala",
+    "name": "East Africa Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) East Africa Time (Africa/Kampala)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Mogadishu",
+    "name": "East Africa Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) East Africa Time (Africa/Mogadishu)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Nairobi",
+    "name": "East Africa Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) East Africa Time (Africa/Nairobi)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Antarctica/Syowa",
+    "name": "Syowa Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) Syowa Time (Antarctica/Syowa)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Aden",
+    "name": "Arabian Standard Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) Arabian Standard Time (Asia/Aden)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Amman",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) Eastern European Standard Time (Asia/Amman)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Baghdad",
+    "name": "Arabian Standard Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) Arabian Standard Time (Asia/Baghdad)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Bahrain",
+    "name": "Arabian Standard Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) Arabian Standard Time (Asia/Bahrain)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Kuwait",
+    "name": "Arabian Standard Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) Arabian Standard Time (Asia/Kuwait)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Qatar",
+    "name": "Arabian Standard Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) Arabian Standard Time (Asia/Qatar)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Riyadh",
+    "name": "Arabian Standard Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) Arabian Standard Time (Asia/Riyadh)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Istanbul",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) Eastern European Standard Time (Europe/Istanbul)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Kirov",
+    "name": "Moscow Standard Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) Moscow Standard Time (Europe/Kirov)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Minsk",
+    "name": "Moscow Standard Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) Moscow Standard Time (Europe/Minsk)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Moscow",
+    "name": "Moscow Standard Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) Moscow Standard Time (Europe/Moscow)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Volgograd",
+    "name": "Volgograd Standard Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) Volgograd Standard Time (Europe/Volgograd)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Indian/Antananarivo",
+    "name": "East Africa Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) East Africa Time (Indian/Antananarivo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Indian/Comoro",
+    "name": "East Africa Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) East Africa Time (Indian/Comoro)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Indian/Mayotte",
+    "name": "East Africa Time",
+    "timeZone": "+03:00",
+    "displayTimeZone": "(GMT+03:00) East Africa Time (Indian/Mayotte)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Blantyre",
+    "name": "Central Africa Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Central Africa Time (Africa/Blantyre)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Bujumbura",
+    "name": "Central Africa Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Central Africa Time (Africa/Bujumbura)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Cairo",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Africa/Cairo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Gaborone",
+    "name": "Central Africa Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Central Africa Time (Africa/Gaborone)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Harare",
+    "name": "Central Africa Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Central Africa Time (Africa/Harare)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Johannesburg",
+    "name": "South Africa Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) South Africa Standard Time (Africa/Johannesburg)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Juba",
+    "name": "Central Africa Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Central Africa Time (Africa/Juba)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Khartoum",
+    "name": "Central Africa Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Central Africa Time (Africa/Khartoum)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Kigali",
+    "name": "Central Africa Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Central Africa Time (Africa/Kigali)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Lubumbashi",
+    "name": "Central Africa Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Central Africa Time (Africa/Lubumbashi)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Lusaka",
+    "name": "Central Africa Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Central Africa Time (Africa/Lusaka)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Maputo",
+    "name": "Central Africa Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Central Africa Time (Africa/Maputo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Maseru",
+    "name": "South Africa Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) South Africa Standard Time (Africa/Maseru)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Mbabane",
+    "name": "South Africa Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) South Africa Standard Time (Africa/Mbabane)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Tripoli",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Africa/Tripoli)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Windhoek",
+    "name": "Central Africa Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Central Africa Time (Africa/Windhoek)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Beirut",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Asia/Beirut)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Famagusta",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Asia/Famagusta)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Gaza",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Asia/Gaza)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Hebron",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Asia/Hebron)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Jerusalem",
+    "name": "Israel Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Israel Standard Time (Asia/Jerusalem)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Asia/Nicosia",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Asia/Nicosia)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Athens",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Europe/Athens)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Bucharest",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Europe/Bucharest)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Chisinau",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Europe/Chisinau)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Helsinki",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Europe/Helsinki)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Kaliningrad",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Europe/Kaliningrad)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Kyiv",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Europe/Kyiv)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Mariehamn",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Europe/Mariehamn)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Riga",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Europe/Riga)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Sofia",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Europe/Sofia)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Tallinn",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Europe/Tallinn)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Uzhgorod",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Europe/Uzhgorod)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Vilnius",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Europe/Vilnius)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Zaporozhye",
+    "name": "Eastern European Standard Time",
+    "timeZone": "+02:00",
+    "displayTimeZone": "(GMT+02:00) Eastern European Standard Time (Europe/Zaporozhye)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Algiers",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Africa/Algiers)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Bangui",
+    "name": "West Africa Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) West Africa Standard Time (Africa/Bangui)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Brazzaville",
+    "name": "West Africa Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) West Africa Standard Time (Africa/Brazzaville)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Casablanca",
+    "name": "Western European Summer Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Western European Summer Time (Africa/Casablanca)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Ceuta",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Africa/Ceuta)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Douala",
+    "name": "West Africa Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) West Africa Standard Time (Africa/Douala)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/El_Aaiun",
+    "name": "Western European Summer Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Western European Summer Time (Africa/El_Aaiun)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Kinshasa",
+    "name": "West Africa Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) West Africa Standard Time (Africa/Kinshasa)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Lagos",
+    "name": "West Africa Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) West Africa Standard Time (Africa/Lagos)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Libreville",
+    "name": "West Africa Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) West Africa Standard Time (Africa/Libreville)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Luanda",
+    "name": "West Africa Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) West Africa Standard Time (Africa/Luanda)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Malabo",
+    "name": "West Africa Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) West Africa Standard Time (Africa/Malabo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Ndjamena",
+    "name": "West Africa Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) West Africa Standard Time (Africa/Ndjamena)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Niamey",
+    "name": "West Africa Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) West Africa Standard Time (Africa/Niamey)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Porto-Novo",
+    "name": "West Africa Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) West Africa Standard Time (Africa/Porto-Novo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Tunis",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Africa/Tunis)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Arctic/Longyearbyen",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Arctic/Longyearbyen)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Amsterdam",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Amsterdam)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Andorra",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Andorra)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Belgrade",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Belgrade)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Berlin",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Berlin)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Bratislava",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Bratislava)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Brussels",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Brussels)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Budapest",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Budapest)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Busingen",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Busingen)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Copenhagen",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Copenhagen)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Gibraltar",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Gibraltar)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Ljubljana",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Ljubljana)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Luxembourg",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Luxembourg)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Madrid",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Madrid)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Malta",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Malta)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Monaco",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Monaco)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Oslo",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Oslo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Paris",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Paris)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Podgorica",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Podgorica)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Prague",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Prague)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Rome",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Rome)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/San_Marino",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/San_Marino)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Sarajevo",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Sarajevo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Skopje",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Skopje)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Stockholm",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Stockholm)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Tirane",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Tirane)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Vaduz",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Vaduz)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Vatican",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Vatican)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Vienna",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Vienna)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Warsaw",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Warsaw)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Zagreb",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Zagreb)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Zurich",
+    "name": "Central European Standard Time",
+    "timeZone": "+01:00",
+    "displayTimeZone": "(GMT+01:00) Central European Standard Time (Europe/Zurich)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Abidjan",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Africa/Abidjan)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Accra",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Africa/Accra)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Bamako",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Africa/Bamako)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Banjul",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Africa/Banjul)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Bissau",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Africa/Bissau)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Conakry",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Africa/Conakry)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Dakar",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Africa/Dakar)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Freetown",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Africa/Freetown)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Lome",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Africa/Lome)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Monrovia",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Africa/Monrovia)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Nouakchott",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Africa/Nouakchott)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Ouagadougou",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Africa/Ouagadougou)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Africa/Sao_Tome",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Africa/Sao_Tome)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Danmarkshavn",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (America/Danmarkshavn)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Antarctica/Troll",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Antarctica/Troll)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Atlantic/Canary",
+    "name": "Western European Standard Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Western European Standard Time (Atlantic/Canary)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Atlantic/Faeroe",
+    "name": "Western European Standard Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Western European Standard Time (Atlantic/Faeroe)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Atlantic/Madeira",
+    "name": "Western European Standard Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Western European Standard Time (Atlantic/Madeira)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Atlantic/Reykjavik",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Atlantic/Reykjavik)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Atlantic/St_Helena",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Atlantic/St_Helena)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Dublin",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Europe/Dublin)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Guernsey",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Europe/Guernsey)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Isle_of_Man",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Europe/Isle_of_Man)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Jersey",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Europe/Jersey)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/Lisbon",
+    "name": "Western European Standard Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Western European Standard Time (Europe/Lisbon)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Europe/London",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (Europe/London)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "GMT",
+    "name": "Greenwich Mean Time",
+    "timeZone": "+00:00",
+    "displayTimeZone": "(GMT+00:00) Greenwich Mean Time (GMT)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Atlantic/Azores",
+    "name": "Azores Standard Time",
+    "timeZone": "-01:00",
+    "displayTimeZone": "(GMT-01:00) Azores Standard Time (Atlantic/Azores)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Atlantic/Cape_Verde",
+    "name": "Cape Verde Standard Time",
+    "timeZone": "-01:00",
+    "displayTimeZone": "(GMT-01:00) Cape Verde Standard Time (Atlantic/Cape_Verde)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Godthab",
+    "name": "West Greenland Standard Time",
+    "timeZone": "-02:00",
+    "displayTimeZone": "(GMT-02:00) West Greenland Standard Time (America/Godthab)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Noronha",
+    "name": "Fernando de Noronha Standard Time",
+    "timeZone": "-02:00",
+    "displayTimeZone": "(GMT-02:00) Fernando de Noronha Standard Time (America/Noronha)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Scoresbysund",
+    "name": "East Greenland Standard Time",
+    "timeZone": "-02:00",
+    "displayTimeZone": "(GMT-02:00) East Greenland Standard Time (America/Scoresbysund)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Atlantic/South_Georgia",
+    "name": "South Georgia Time",
+    "timeZone": "-02:00",
+    "displayTimeZone": "(GMT-02:00) South Georgia Time (Atlantic/South_Georgia)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Araguaina",
+    "name": "Brasilia Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Brasilia Standard Time (America/Araguaina)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Argentina/Buenos_Aires",
+    "name": "Argentina Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Argentina Standard Time (America/Argentina/Buenos_Aires)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Argentina/La_Rioja",
+    "name": "Argentina Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Argentina Standard Time (America/Argentina/La_Rioja)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Argentina/Rio_Gallegos",
+    "name": "Argentina Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Argentina Standard Time (America/Argentina/Rio_Gallegos)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Argentina/Salta",
+    "name": "Argentina Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Argentina Standard Time (America/Argentina/Salta)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Argentina/San_Juan",
+    "name": "Argentina Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Argentina Standard Time (America/Argentina/San_Juan)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Argentina/San_Luis",
+    "name": "Argentina Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Argentina Standard Time (America/Argentina/San_Luis)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Argentina/Tucuman",
+    "name": "Argentina Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Argentina Standard Time (America/Argentina/Tucuman)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Argentina/Ushuaia",
+    "name": "Argentina Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Argentina Standard Time (America/Argentina/Ushuaia)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Asuncion",
+    "name": "Paraguay Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Paraguay Standard Time (America/Asuncion)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Bahia",
+    "name": "Brasilia Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Brasilia Standard Time (America/Bahia)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Belem",
+    "name": "Brasilia Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Brasilia Standard Time (America/Belem)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Catamarca",
+    "name": "Argentina Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Argentina Standard Time (America/Catamarca)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Cayenne",
+    "name": "French Guiana Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) French Guiana Time (America/Cayenne)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Cordoba",
+    "name": "Argentina Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Argentina Standard Time (America/Cordoba)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Fortaleza",
+    "name": "Brasilia Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Brasilia Standard Time (America/Fortaleza)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Jujuy",
+    "name": "Argentina Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Argentina Standard Time (America/Jujuy)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Maceio",
+    "name": "Brasilia Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Brasilia Standard Time (America/Maceio)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Mendoza",
+    "name": "Argentina Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Argentina Standard Time (America/Mendoza)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Miquelon",
+    "name": "St Pierre & Miquelon Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) St Pierre & Miquelon Standard Time (America/Miquelon)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Montevideo",
+    "name": "Uruguay Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Uruguay Standard Time (America/Montevideo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Paramaribo",
+    "name": "Suriname Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Suriname Time (America/Paramaribo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Punta_Arenas",
+    "name": "Chile Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Chile Standard Time (America/Punta_Arenas)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Recife",
+    "name": "Brasilia Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Brasilia Standard Time (America/Recife)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Santarem",
+    "name": "Brasilia Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Brasilia Standard Time (America/Santarem)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Santiago",
+    "name": "Chile Summer Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Chile Summer Time (America/Santiago)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Sao_Paulo",
+    "name": "Brasilia Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Brasilia Standard Time (America/Sao_Paulo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Antarctica/Palmer",
+    "name": "Chile Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Chile Standard Time (Antarctica/Palmer)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Antarctica/Rothera",
+    "name": "Rothera Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Rothera Time (Antarctica/Rothera)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Atlantic/Stanley",
+    "name": "Falkland Islands Standard Time",
+    "timeZone": "-03:00",
+    "displayTimeZone": "(GMT-03:00) Falkland Islands Standard Time (Atlantic/Stanley)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/St_Johns",
+    "name": "Newfoundland Standard Time",
+    "timeZone": "-03:30",
+    "displayTimeZone": "(GMT-03:30) Newfoundland Standard Time (America/St_Johns)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Anguilla",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Anguilla)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Antigua",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Antigua)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Aruba",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Aruba)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Barbados",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Barbados)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Blanc-Sablon",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Blanc-Sablon)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Boa_Vista",
+    "name": "Amazon Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Amazon Standard Time (America/Boa_Vista)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Campo_Grande",
+    "name": "Amazon Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Amazon Standard Time (America/Campo_Grande)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Caracas",
+    "name": "Venezuela Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Venezuela Time (America/Caracas)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Cuiaba",
+    "name": "Amazon Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Amazon Standard Time (America/Cuiaba)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Curacao",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Curacao)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Dominica",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Dominica)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Glace_Bay",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Glace_Bay)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Goose_Bay",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Goose_Bay)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Grenada",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Grenada)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Guadeloupe",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Guadeloupe)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Guyana",
+    "name": "Guyana Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Guyana Time (America/Guyana)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Halifax",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Halifax)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Kralendijk",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Kralendijk)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/La_Paz",
+    "name": "Bolivia Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Bolivia Time (America/La_Paz)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Lower_Princes",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Lower_Princes)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Manaus",
+    "name": "Amazon Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Amazon Standard Time (America/Manaus)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Marigot",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Marigot)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Martinique",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Martinique)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Moncton",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Moncton)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Montserrat",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Montserrat)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Port_of_Spain",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Port_of_Spain)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Porto_Velho",
+    "name": "Amazon Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Amazon Standard Time (America/Porto_Velho)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Puerto_Rico",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Puerto_Rico)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Santo_Domingo",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Santo_Domingo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/St_Barthelemy",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/St_Barthelemy)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/St_Kitts",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/St_Kitts)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/St_Lucia",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/St_Lucia)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/St_Thomas",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/St_Thomas)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/St_Vincent",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/St_Vincent)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Thule",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Thule)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Tortola",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (America/Tortola)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Atlantic/Bermuda",
+    "name": "Atlantic Standard Time",
+    "timeZone": "-04:00",
+    "displayTimeZone": "(GMT-04:00) Atlantic Standard Time (Atlantic/Bermuda)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Bogota",
+    "name": "Colombia Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Colombia Standard Time (America/Bogota)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Cancun",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Cancun)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Cayman",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Cayman)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Coral_Harbour",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Coral_Harbour)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Detroit",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Detroit)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Eirunepe",
+    "name": "Acre Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Acre Standard Time (America/Eirunepe)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Grand_Turk",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Grand_Turk)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Guayaquil",
+    "name": "Ecuador Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Ecuador Time (America/Guayaquil)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Indiana/Indianapolis",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Indiana/Indianapolis)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Indiana/Marengo",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Indiana/Marengo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Indiana/Petersburg",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Indiana/Petersburg)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Indiana/Vevay",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Indiana/Vevay)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Indiana/Vincennes",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Indiana/Vincennes)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Indiana/Winamac",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Indiana/Winamac)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Iqaluit",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Iqaluit)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Jamaica",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Jamaica)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Kentucky/Monticello",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Kentucky/Monticello)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Lima",
+    "name": "Peru Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Peru Standard Time (America/Lima)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Louisville",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Louisville)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Montreal",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Montreal)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Nassau",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Nassau)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/New_York",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/New_York)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Nipigon",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Nipigon)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Panama",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Panama)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Pangnirtung",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Pangnirtung)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Port-au-Prince",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Port-au-Prince)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Rio_Branco",
+    "name": "Acre Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Acre Standard Time (America/Rio_Branco)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Thunder_Bay",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Thunder_Bay)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Toronto",
+    "name": "Eastern Standard Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Eastern Standard Time (America/Toronto)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Easter",
+    "name": "Easter Island Summer Time",
+    "timeZone": "-05:00",
+    "displayTimeZone": "(GMT-05:00) Easter Island Summer Time (Pacific/Easter)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Bahia_Banderas",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Bahia_Banderas)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Belize",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Belize)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Chicago",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Chicago)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Chihuahua",
+    "name": "Mexican Pacific Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Mexican Pacific Standard Time (America/Chihuahua)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Costa_Rica",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Costa_Rica)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/El_Salvador",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/El_Salvador)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Guatemala",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Guatemala)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Indiana/Knox",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Indiana/Knox)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Indiana/Tell_City",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Indiana/Tell_City)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Managua",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Managua)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Matamoros",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Matamoros)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Menominee",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Menominee)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Merida",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Merida)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Mexico_City",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Mexico_City)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Monterrey",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Monterrey)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/North_Dakota/Beulah",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/North_Dakota/Beulah)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/North_Dakota/Center",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/North_Dakota/Center)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/North_Dakota/New_Salem",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/North_Dakota/New_Salem)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Ojinaga",
+    "name": "Mountain Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Mountain Standard Time (America/Ojinaga)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Rainy_River",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Rainy_River)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Rankin_Inlet",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Rankin_Inlet)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Regina",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Regina)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Resolute",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Resolute)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Swift_Current",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Swift_Current)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Tegucigalpa",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Tegucigalpa)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Winnipeg",
+    "name": "Central Standard Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Central Standard Time (America/Winnipeg)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Galapagos",
+    "name": "Galapagos Time",
+    "timeZone": "-06:00",
+    "displayTimeZone": "(GMT-06:00) Galapagos Time (Pacific/Galapagos)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Boise",
+    "name": "Mountain Standard Time",
+    "timeZone": "-07:00",
+    "displayTimeZone": "(GMT-07:00) Mountain Standard Time (America/Boise)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Cambridge_Bay",
+    "name": "Mountain Standard Time",
+    "timeZone": "-07:00",
+    "displayTimeZone": "(GMT-07:00) Mountain Standard Time (America/Cambridge_Bay)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Creston",
+    "name": "Mountain Standard Time",
+    "timeZone": "-07:00",
+    "displayTimeZone": "(GMT-07:00) Mountain Standard Time (America/Creston)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Dawson",
+    "name": "Yukon Time",
+    "timeZone": "-07:00",
+    "displayTimeZone": "(GMT-07:00) Yukon Time (America/Dawson)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Dawson_Creek",
+    "name": "Mountain Standard Time",
+    "timeZone": "-07:00",
+    "displayTimeZone": "(GMT-07:00) Mountain Standard Time (America/Dawson_Creek)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Denver",
+    "name": "Mountain Standard Time",
+    "timeZone": "-07:00",
+    "displayTimeZone": "(GMT-07:00) Mountain Standard Time (America/Denver)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Edmonton",
+    "name": "Mountain Standard Time",
+    "timeZone": "-07:00",
+    "displayTimeZone": "(GMT-07:00) Mountain Standard Time (America/Edmonton)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Fort_Nelson",
+    "name": "Mountain Standard Time",
+    "timeZone": "-07:00",
+    "displayTimeZone": "(GMT-07:00) Mountain Standard Time (America/Fort_Nelson)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Hermosillo",
+    "name": "Mexican Pacific Standard Time",
+    "timeZone": "-07:00",
+    "displayTimeZone": "(GMT-07:00) Mexican Pacific Standard Time (America/Hermosillo)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Inuvik",
+    "name": "Mountain Standard Time",
+    "timeZone": "-07:00",
+    "displayTimeZone": "(GMT-07:00) Mountain Standard Time (America/Inuvik)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Mazatlan",
+    "name": "Mexican Pacific Standard Time",
+    "timeZone": "-07:00",
+    "displayTimeZone": "(GMT-07:00) Mexican Pacific Standard Time (America/Mazatlan)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Phoenix",
+    "name": "Mountain Standard Time",
+    "timeZone": "-07:00",
+    "displayTimeZone": "(GMT-07:00) Mountain Standard Time (America/Phoenix)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Whitehorse",
+    "name": "Yukon Time",
+    "timeZone": "-07:00",
+    "displayTimeZone": "(GMT-07:00) Yukon Time (America/Whitehorse)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Yellowknife",
+    "name": "Mountain Standard Time",
+    "timeZone": "-07:00",
+    "displayTimeZone": "(GMT-07:00) Mountain Standard Time (America/Yellowknife)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Los_Angeles",
+    "name": "Pacific Standard Time",
+    "timeZone": "-08:00",
+    "displayTimeZone": "(GMT-08:00) Pacific Standard Time (America/Los_Angeles)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Santa_Isabel",
+    "name": "Northwest Mexico Standard Time",
+    "timeZone": "-08:00",
+    "displayTimeZone": "(GMT-08:00) Northwest Mexico Standard Time (America/Santa_Isabel)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Tijuana",
+    "name": "Pacific Standard Time",
+    "timeZone": "-08:00",
+    "displayTimeZone": "(GMT-08:00) Pacific Standard Time (America/Tijuana)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Vancouver",
+    "name": "Pacific Standard Time",
+    "timeZone": "-08:00",
+    "displayTimeZone": "(GMT-08:00) Pacific Standard Time (America/Vancouver)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Pitcairn",
+    "name": "Pitcairn Time",
+    "timeZone": "-08:00",
+    "displayTimeZone": "(GMT-08:00) Pitcairn Time (Pacific/Pitcairn)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Anchorage",
+    "name": "Alaska Standard Time",
+    "timeZone": "-09:00",
+    "displayTimeZone": "(GMT-09:00) Alaska Standard Time (America/Anchorage)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Juneau",
+    "name": "Alaska Standard Time",
+    "timeZone": "-09:00",
+    "displayTimeZone": "(GMT-09:00) Alaska Standard Time (America/Juneau)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Metlakatla",
+    "name": "Alaska Standard Time",
+    "timeZone": "-09:00",
+    "displayTimeZone": "(GMT-09:00) Alaska Standard Time (America/Metlakatla)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Nome",
+    "name": "Alaska Standard Time",
+    "timeZone": "-09:00",
+    "displayTimeZone": "(GMT-09:00) Alaska Standard Time (America/Nome)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Sitka",
+    "name": "Alaska Standard Time",
+    "timeZone": "-09:00",
+    "displayTimeZone": "(GMT-09:00) Alaska Standard Time (America/Sitka)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Yakutat",
+    "name": "Alaska Standard Time",
+    "timeZone": "-09:00",
+    "displayTimeZone": "(GMT-09:00) Alaska Standard Time (America/Yakutat)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Gambier",
+    "name": "Gambier Time",
+    "timeZone": "-09:00",
+    "displayTimeZone": "(GMT-09:00) Gambier Time (Pacific/Gambier)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Marquesas",
+    "name": "Marquesas Time",
+    "timeZone": "-09:30",
+    "displayTimeZone": "(GMT-09:30) Marquesas Time (Pacific/Marquesas)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "America/Adak",
+    "name": "Hawaii-Aleutian Standard Time",
+    "timeZone": "-10:00",
+    "displayTimeZone": "(GMT-10:00) Hawaii-Aleutian Standard Time (America/Adak)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Honolulu",
+    "name": "Hawaii-Aleutian Standard Time",
+    "timeZone": "-10:00",
+    "displayTimeZone": "(GMT-10:00) Hawaii-Aleutian Standard Time (Pacific/Honolulu)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Johnston",
+    "name": "Hawaii-Aleutian Standard Time",
+    "timeZone": "-10:00",
+    "displayTimeZone": "(GMT-10:00) Hawaii-Aleutian Standard Time (Pacific/Johnston)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Rarotonga",
+    "name": "Cook Islands Standard Time",
+    "timeZone": "-10:00",
+    "displayTimeZone": "(GMT-10:00) Cook Islands Standard Time (Pacific/Rarotonga)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Tahiti",
+    "name": "Tahiti Time",
+    "timeZone": "-10:00",
+    "displayTimeZone": "(GMT-10:00) Tahiti Time (Pacific/Tahiti)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Midway",
+    "name": "Samoa Standard Time",
+    "timeZone": "-11:00",
+    "displayTimeZone": "(GMT-11:00) Samoa Standard Time (Pacific/Midway)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Niue",
+    "name": "Niue Time",
+    "timeZone": "-11:00",
+    "displayTimeZone": "(GMT-11:00) Niue Time (Pacific/Niue)",
+    "offSet": "GMT"
+  },
+  {
+    "code": "Pacific/Pago_Pago",
+    "name": "Samoa Standard Time",
+    "timeZone": "-11:00",
+    "displayTimeZone": "(GMT-11:00) Samoa Standard Time (Pacific/Pago_Pago)",
+    "offSet": "GMT"
+  }
+]

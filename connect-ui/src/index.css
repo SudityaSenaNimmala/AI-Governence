@@ -1,0 +1,1973 @@
+*,
+html {
+  margin: 0;
+  padding: 0;
+  font-weight: 400;
+  line-height: 1.8;
+  box-sizing: border-box;
+  font-family: "Poppins", Arial, sans-serif !important;
+}
+body {
+  margin: 0; /* display: flex; */ /* place-items: center; */
+  font-size: 14px;
+  color: #1f2129;
+  min-width: 320px;
+  min-height: 100vh;
+  font-family: "Poppins", sans-serif;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow-x: hidden;
+}
+.cf_main_container {
+  width: 100%;
+  height: 100vh;
+  display: flex;
+}
+
+.cf_ml_auto {
+  margin-left: auto;
+}
+
+input[type="radio"][disabled],
+input[type="checkbox"][disabled],
+.radio[disabled],
+.radio-inline[disabled],
+.checkbox[disabled],
+.checkbox-inline[disabled],
+fieldset[disabled] input[type="radio"],
+fieldset[disabled] input[type="checkbox"],
+fieldset[disabled] .radio,
+fieldset[disabled] .radio-inline,
+fieldset[disabled] .checkbox,
+fieldset[disabled] .checkbox-inline {
+  cursor: not-allowed;
+}
+
+.cf_main_content_place {
+  width: calc(100% - 55px);
+  padding: 10px;
+  display: flex;
+  height: 100vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex-direction: column;
+  background-color: #fcfcfc;
+  position: relative;
+}
+.cf_main_content_place_main {
+  width: 100%;
+  padding: 10px; /* padding: 1% 3%; */
+  text-align: justify;
+  transition: all 0.2s ease-in-out;
+  height: calc(100vh - 80px);
+}
+.cf_hide {
+  visibility: hidden;
+}
+.cf_d-none {
+  display: none !important;
+}
+.CF_d-flex {
+  display: flex;
+}
+.ai-center {
+  align-items: center;
+}
+.CF_Pointer,
+.pointer {
+  cursor: pointer;
+}
+.CF_flex-d-column {
+  flex-direction: column;
+}
+.fw-500 {
+  font-weight: 500 !important;
+}
+.fw-600 {
+  font-weight: 600 !important;
+}
+.cf_ml_auto {
+  margin-left: auto;
+}
+.cf_gap-5 {
+  gap: 5px;
+}
+@keyframes moveUp {
+  0% {
+    opacity: 0;
+    transform: translateX(10px);
+  }
+  50% {
+    opacity: 0.5;
+    transform: translateX(5px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0px);
+  }
+}
+.CF_SVG_THICK {
+  color: #000;
+}
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #fff 0% 0% no-repeat padding-box;
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #c0c0c0 0% 0% no-repeat padding-box;
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #dbdbdb 0% 0% no-repeat padding-box;
+  border-radius: 10px;
+}
+
+.skeletonDataNew {
+  color: transparent !important;
+  user-select: none !important;
+  width: fit-content;
+
+  opacity: 0.7;
+  animation: skeleton-loading 1s linear infinite alternate;
+}
+
+.skeletonData {
+  opacity: 0.7;
+  width: 100%;
+  height: 15px;
+  /* width: fit-content; */
+  user-select: none !important;
+  color: transparent !important;
+  animation: skeleton-loading 1s linear infinite alternate;
+}
+.skeleton {
+  /* width: 50px; */
+  opacity: 0.7;
+  user-select: none !important;
+  color: transparent !important;
+  animation: skeleton-loading 1s linear infinite alternate;
+}
+
+@keyframes skeleton-loading {
+  0% {
+    background-color: hsl(200, 4%, 85%);
+  }
+  100% {
+    background-color: hsl(200, 20%, 95%);
+  }
+}
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 60px;
+  height: 34px;
+}
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #ccc;
+  -webkit-transition: 0.4s;
+  transition: 0.4s;
+  height: 24px;
+  width: 50px;
+}
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 15px;
+  width: 15px;
+  left: 4px;
+  bottom: 5px;
+  background-color: white;
+  -webkit-transition: 0.4s;
+  transition: 0.4s;
+}
+input:checked + .slider {
+  background-color: #2196f3;
+}
+input:focus + .slider {
+  box-shadow: 0 0 1px #2196f3;
+}
+input:checked + .slider:before {
+  -webkit-transform: translateX(26px);
+  -ms-transform: translateX(26px);
+  transform: translateX(26px);
+}
+.slider.round {
+  border-radius: 34px;
+}
+.slider.round:before {
+  border-radius: 50%;
+}
+.slider.round {
+  border-left: 0px !important;
+}
+.CF_Text_Loader {
+  gap: 5px;
+  width: 100%;
+  height: 40px;
+  display: flex;
+  font-weight: 600;
+  color: #0062ff;
+  align-items: center;
+  justify-content: center;
+}
+.CF_Text_Loader_SPINNER {
+  color: #0062ff;
+  animation: spinner360 1s linear infinite;
+}
+
+.cf_domainSpinner_na {
+  animation: spinner360 1s linear infinite;
+}
+
+@keyframes spinner360 {
+  0% {
+    transform: rotate(0);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.errorText {
+  font-size: 10px;
+  white-space: nowrap;
+  color: red !important;
+  font-weight: 400 !important;
+}
+.CF_Text_Loader .error {
+  color: red !important;
+  font-weight: 600 !important;
+}
+.CF_Text_Loader p {
+  font-weight: 500;
+  color: #0062ff;
+} /* Loading CSS Start's */
+.CF_LOADER_DIV {
+  width: 400px;
+  height: 200px;
+  display: flex;
+  border-radius: 5px;
+  text-align: center;
+  position: relative;
+  align-items: center;
+  flex-direction: column;
+  background-color: #fff;
+  border: 1px solid #e2e2e2;
+  justify-content: space-evenly;
+  box-shadow:
+    0.5px 0px 2.7px rgba(0, 0, 0, 0.012),
+    1.3px 0.1px 6.9px rgba(0, 0, 0, 0.018),
+    2.7px 0.2px 14.2px rgba(0, 0, 0, 0.022),
+    5.5px 0.4px 29.2px rgba(0, 0, 0, 0.028),
+    15px 1px 80px rgba(0, 0, 0, 0.04);
+  animation: opacity 0.2s ease-in;
+}
+@keyframes opacity {
+  0% {
+    opacity: 0;
+  }
+  50% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+.cfLoading_cloudIcon {
+  width: 220px;
+  position: absolute;
+  color: #001a6f;
+  margin-top: 20px;
+}
+.CF_LOADER_DIV_TEXT {
+  position: absolute;
+  font-size: 18px;
+  font-weight: 500;
+  bottom: 30px;
+}
+.cfLoading_cloudIcon rect,
+.cfLoading_cloudIcon path {
+  fill: #001a6f;
+  stroke: #001a6f;
+  stroke-width: 0.5;
+  stroke-dasharray: 150;
+  stroke-dashoffset: 150;
+  animation: cloud 5s forwards infinite;
+} /* .cfLoading_cloudIcon path { */
+
+@keyframes cloud {
+  0% {
+    stroke-dashoffset: 150;
+  }
+  50% {
+    stroke-dashoffset: 0;
+  }
+  100% {
+    stroke-dashoffset: 150;
+  }
+}
+
+.cfLoading_cloudIcon g {
+  fill-opacity: 0;
+  animation: fillSvg 5s forwards infinite;
+}
+@keyframes fillSvg {
+  0% {
+    fill-opacity: 0;
+  }
+  50% {
+    fill-opacity: 1;
+  }
+  100% {
+    fill-opacity: 0;
+  }
+}
+.CF_LOADER_DIV_PARENT {
+  top: 0;
+  left: 00px;
+  height: 100vh;
+  display: flex;
+  position: absolute;
+  align-items: center;
+  justify-content: center;
+  width: calc(100% - 00px);
+  z-index: 999999999999999;
+  background-color: rgba(0, 0, 0, 0.12);
+} /* Loading CSS End's*/
+.cf_status_td {
+  font-weight: bold !important;
+}
+.IN_PROGRESS {
+  color: #1220f6 !important;
+}
+
+.cf_warning_div {
+  background-color: #fbda78a4 !important;
+  border-color: #fdf4e6 !important;
+}
+
+.cf_selectNone {
+  user-select: none !important;
+}
+
+.CANCEL,
+.PAUSE,
+.CONFLICT,
+.ERROR {
+  color: #ff4c4c !important;
+}
+.COMPLETED,
+.PROCESSED,
+.PROCESSED_WITH_SOME_ERRORS,
+.PROCESSED_WITH_SOME_PAUSE .PROCESSED_WITH_SOME_WARNINGS,
+.PROCESSED_WITH_SOME_CONFLICTS,
+.PROCESSED_WITH_SOME_CONFLICTS_AND_PAUSE {
+  color: #00c64f !important;
+}
+.IN_QUEUE,
+.NOT_STARTED,
+.NOT_PROCESSED {
+  color: brown !important;
+}
+.SUSPENDED {
+  color: #cc6600 !important;
+}
+.cf_edit_parent_div {
+  height: 40px;
+  display: flex;
+  align-items: center;
+}
+.edit_input_div {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  padding: 0 5px; /* padding: 5px 10px; */
+}
+.edit_input_div:hover {
+  /* padding: 5px 10px; */
+  width: fit-content !important;
+  background-color: #f2f3ff;
+}
+.cf_verifIcon {
+  color: #0006fc;
+}
+.cf_make_link {
+  cursor: pointer;
+  color: #0006fc;
+}
+
+.cf_new_tables_div table tbody tr:hover .cf_make_link,
+.cf_messageReports_table_tbody tr:hover .cf_make_link_reports,
+.cf_table_common tbody tr:hover .cf_make_link,
+.cf_make_link_reports:hover,
+.cf_make_link:hover {
+  cursor: pointer !important;
+  color: #0006fc !important;
+  text-decoration: underline !important;
+}
+.pagination {
+  display: flex;
+  padding-left: 0;
+  list-style: none;
+}
+.page-item:first-child .page-link {
+  border-top-left-radius: 0.25rem;
+  border-bottom-left-radius: 0.25rem;
+}
+.page-link {
+  position: relative;
+  display: block;
+  color: #0d6efd;
+  text-decoration: none;
+  background-color: #fff;
+  border: 1px solid #dee2e6;
+  transition:
+    color 0.15s ease-in-out,
+    background-color 0.15s ease-in-out,
+    border-color 0.15s ease-in-out,
+    box-shadow 0.15s ease-in-out;
+}
+.page-link {
+  padding: 0.375rem 0.75rem;
+  cursor: pointer;
+}
+.page-item.disabled .page-link {
+  color: #6c757d;
+  pointer-events: none;
+  background-color: #fff;
+  border-color: #dee2e6;
+}
+.page-item.active .page-link {
+  z-index: 3;
+  color: #fff;
+  background-color: #0d6efd;
+  border-color: #0d6efd;
+}
+.page-item:last-child .page-link {
+  border-top-right-radius: 0.25rem;
+  border-bottom-right-radius: 0.25rem;
+}
+.page-link:hover {
+  z-index: 2;
+  color: #0a58ca;
+  background-color: #e9ecef;
+  border-color: #dee2e6;
+}
+.CF_POPUP_CONTAINER {
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  z-index: 9999999;
+  position: absolute;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.15);
+}
+
+.cf_disabled a,
+.cf_disabled {
+  opacity: 0.4 !important;
+  cursor: not-allowed !important;
+  pointer-events: none;
+}
+
+.cf_border {
+  border: 1px solid #e2e8f0;
+}
+
+.cf_border_radius {
+  border-radius: 0.75rem;
+}
+
+.cf_overflow_hidden {
+  overflow: hidden !important;
+}
+
+.bg-CLOUDFUZE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/CF_LOGO.png");
+  background-size: contain;
+}
+
+.bg-AMAZON_S3 {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -10px;
+}
+.bg-ASANA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -10px;
+}
+
+.bg-AZURE_DEVOPS,
+.bg-AZURE_OBJECT_STORAGE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -80px;
+}
+.bg-BOX_BUSINESS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -80px;
+}
+.bg-DROPBOX_BUSINESS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -10px;
+}
+.bg-EGNYTE_ADMIN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -80px;
+}
+.bg-FTP {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -150px;
+}
+.bg-G_SUITE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -150px;
+}
+.bg-G_SUITE1 {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -150px;
+}
+.bg-GITHUB {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -10px;
+}
+.bg-GMAIL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -80px;
+}
+.bg-GOOGLE_CHAT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -150px;
+}
+.bg-GOOGLE_WORKSPACE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -220px;
+}
+.bg-GOOGLE_SHARED_DRIVES {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -220px;
+}
+.bg-HUBSPOT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -220px;
+}
+.bg-LUCID {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -220px;
+}
+.bg-MEMSE3,
+.bg-MICROSOFT_OFFICE_365 {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -10px;
+}
+.bg-MURAL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -80px;
+}
+.bg-MIRO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -150px;
+}
+.bg-NETWORK_FILESHARES {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -220px;
+}
+.bg-ONEDRIVE_BUSINESS_ADMIN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -290px;
+}
+.bg-ONEDRIVE_BUSINESS_ADMIN_HYBRID {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -290px;
+}
+.bg-OUTLOOK {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -290px;
+}
+.bg-SHARE_FILE_BUSINESS,
+.bg-SHAREFILE_BUSINESS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -290px;
+}
+.bg-SLACK {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -290px;
+}
+.bg-SMARTSHEET {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -10px;
+}
+.bg-SHAREPOINT_ONLINE_BUSINESS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -80px;
+}
+.bg-SHAREPOINT_2010 {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -150px;
+}
+.bg-SHAREPOINT_2013 {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -220px;
+}
+.bg-SHAREPOINT_ONLINE_HYBRID {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -290px;
+}
+.bg-MICROSOFT_TEAMS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -360px;
+}
+.bg-WORDPRESS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -360px;
+}
+.bg-GITLAB {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -360px;
+}
+.bg-FIGMA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -360px;
+}
+.bg-WEBFLOW {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -360px;
+}
+
+.bg-NOTION {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -360px;
+}
+
+.bg-AUTODESK {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -430px;
+}
+.bg-ZOHO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -430px;
+}
+
+.bg-ZOHO_MAIL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -430px;
+}
+
+.bg-ZOHO_INVENTORY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -430px;
+}
+
+.bg-ZOHO_DESK {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -430px;
+}
+.bg-ZOHO_PROJECTS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -430px;
+}
+
+.bg-WRIKE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -500px;
+}
+
+.bg-BITBUCKET {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -500px;
+}
+
+.bg-ZOHO_WORKDRIVE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -500px;
+}
+
+.bg-PAGERDUTY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -500px;
+}
+
+.bg-HEROKU {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -500px;
+}
+
+.bg-ONELOGIN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -500px;
+}
+
+.bg-LINODE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -570px;
+}
+
+.bg-CISCO_WEBEX_TEAMS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -570px;
+}
+
+.bg-XERO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -570px;
+}
+
+.bg-INTERCOM {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -570px;
+}
+
+.bg-HIVE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -570px;
+}
+
+.bg-FIVETRAN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -570px;
+}
+
+.bg-CLOUDFLARE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -640px;
+}
+
+.bg-GOTOMEETING {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -640px;
+}
+
+.bg-ATLASSIAN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -640px;
+}
+
+.bg-MONDAY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -640px;
+}
+
+.bg-UIPATH {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -640px;
+}
+
+.bg-TRELLO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -640px;
+}
+
+.bg-JUMPCLOUD {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -710px;
+}
+
+.bg-DOCUSIGN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -710px;
+}
+
+.bg-DOCUMENT360 {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -710px;
+}
+
+.bg-HELLOSIGN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -710px;
+}
+
+.bg-ZENDESK {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -710px;
+}
+
+.bg-ZENDESK {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -710px;
+}
+
+.bg-SENDGRID {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -710px;
+}
+
+.bg-JIRA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -780px;
+}
+
+.bg-SHOPIFY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -780px;
+}
+
+.bg-INSIGHTLY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -780px;
+}
+
+.bg-CONFLUENCE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -780px;
+}
+
+.bg-CLICKUP {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -780px;
+}
+
+.bg-SALESFORCE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -780px;
+}
+
+.bg-CALENDLY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -850px;
+}
+
+.bg-PANDADOC {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -850px;
+}
+
+.bg-AIRTABLE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -850px;
+}
+
+.bg-BASECAMP {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -850px;
+}
+
+.bg-ENTRA_SSO,
+.bg-AZURE_ACTIVE_DIRECTORY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -850px;
+}
+
+.bg-EVENTBRITE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -850px;
+}
+
+.bg-MAILCHIMP {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -920px;
+}
+
+.bg-DIGICERT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -920px;
+}
+
+.bg-SHUTTERSTOCK {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -920px;
+}
+
+.bg-FRESHBOOKS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -920px;
+}
+
+.bg-TWITCH {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -920px;
+}
+
+.bg-VIMEO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -920px;
+}
+
+.bg-FASTLY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -990px;
+}
+
+.bg-FRESH_DESK,
+.bg-FRESHCHAT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -990px;
+}
+
+.bg-HELP_DESK,
+.bg-HELPDESK {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -990px;
+}
+
+.bg-LAUNCH_DARKLY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -990px;
+}
+
+.bg-POSTMAN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -990px;
+}
+
+.bg-SHORTCUT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -990px;
+}
+
+.bg-HARVEST {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -1060px;
+}
+
+.bg-NETLIFY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -1060px;
+}
+
+.bg-APPFIGURES {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -1060px;
+}
+
+.bg-BUSINESSMAP {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -1060px;
+}
+
+.bg-DUO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -1060px;
+}
+
+.bg-CODA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -1060px;
+}
+
+.bg-PIPEDRIVE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -1130px;
+}
+
+/* MS_VIVA_ENGAGE */
+
+.bg-FACEBOOK_WORKPLACE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -1130px;
+}
+
+.bg-MS_VIVA_ENGAGE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -1130px;
+}
+
+.bg-LINKEDIN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -1130px;
+}
+
+.bg-CANVA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -1130px;
+}
+
+.bg-SMART_BEAR {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -1130px;
+}
+
+.bg-TERRAFORM {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -1200px;
+}
+
+.bg-THINKIFIC {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -1200px;
+}
+
+.bg-CODER_BYTE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -1200px;
+}
+
+.bg-ONE_PASSWORD {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -1200px;
+}
+
+.bg-ADOBE,
+.bg-ADOBE_CREATIVE,
+.bg-ADOBE_IDENTITY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -1200px;
+}
+
+.bg-ZOOM {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -1200px;
+}
+
+.bg-TAILSCALE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -1270px;
+}
+
+.bg-KAPA_AI {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -1270px;
+}
+
+.bg-TEAMWORK {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -1270px;
+}
+
+.bg-BRILLIUM {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -1270px;
+}
+
+.bg-AWS,
+.bg-AWS_IC {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -1270px;
+}
+
+.bg-INSIGHTFUL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -1270px;
+}
+
+.bg-CURSOR_AI {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -1340px;
+}
+
+.bg-LUMA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -1340px;
+}
+
+.bg-OKTA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -1340px;
+}
+
+.bg-INSTANTLY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -1340px;
+}
+
+.bg-OPENVPN_CLOUD {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -1340px;
+}
+
+.bg-LASTPASS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -1340px;
+}
+
+.bg-FILES_COM {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -1410px;
+}
+
+.bg-TABLEAU {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -1410px;
+}
+
+.bg-GUSTO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -1410px;
+}
+
+.bg-BAMBOOHR {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -1410px;
+}
+
+.bg-QUICKBOOKSONLINE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -1410px;
+}
+
+.bg-BILL_COM {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -1410px;
+}
+
+.bg-STRIPE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -1480px;
+}
+
+.bg-SNOWFLAKE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -1480px;
+}
+
+.bg-SERVICENOW {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -1480px;
+}
+
+.bg-ZOHOCRM {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -1480px;
+}
+
+.bg-MONGODBATLAS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -1480px;
+}
+
+.bg-SAP_HANA_CLOUD {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -1480px;
+}
+
+.bg-INFORMATICA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -1551px;
+}
+
+.bg-CONTENTFUL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -1551px;
+}
+
+.bg-OPENAI,
+.bg-CHATGPT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -1551px;
+}
+
+.bg-WORKDAY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -1551px;
+}
+
+.bg-MAILGUN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -1551px;
+}
+
+.bg-LATTICE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -1551px;
+}
+
+.bg-TAXJAR {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -1620px;
+}
+
+.bg-ACTIVECAMPAIGN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -1620px;
+}
+
+.bg-ZUORA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -1620px;
+}
+
+.bg-OWNBACKUP {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -1620px;
+}
+
+.bg-RIPPLING {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -1620px;
+}
+
+.bg-DYNAMICS_365_SALES {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -1620px;
+}
+
+.bg-MOUSEFLOW {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -1690px;
+}
+
+.bg-LAMBDATEST {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -1690px;
+}
+
+.bg-BRANDFOLDER {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -1690px;
+}
+
+.bg-BLACKLINE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -1690px;
+}
+
+.bg-GRAMMARLY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -1690px;
+}
+
+.bg-TWILIO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -1690px;
+}
+
+.bg-LEARNING_360 {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -1762px;
+}
+
+.bg-MAILTRAP {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -1762px;
+}
+
+.bg-UBERALL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -1762px;
+}
+
+.bg-SNIPE_IT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -1762px;
+}
+
+.bg-SONARCLOUD {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -1762px;
+}
+
+.bg-YEXT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -1762px;
+}
+
+.bg-AUTH0 {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -1832px;
+}
+
+.bg-SENTRY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -1832px;
+}
+
+.bg-PLANHAT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -1832px;
+}
+
+.bg-DATADOG {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -1832px;
+}
+
+.bg-JETBRAINS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -1832px;
+}
+
+.bg-SLING {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -1832px;
+}
+
+.bg-XCORP {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -1902px;
+}
+
+.bg-MEMZO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -1902px;
+}
+
+.bg-CHECKR {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -1902px;
+}
+
+.bg-APPVEYOR {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -1902px;
+}
+
+.bg-PUBNUB {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -1902px;
+}
+
+.bg-VERCEL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -1902px;
+}
+
+.bg-STATUSCAKE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -1972px;
+}
+
+.bg-PISIGNAGE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -1972px;
+}
+
+.bg-GEMFURY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -1972px;
+}
+
+.bg-AVALARA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -1972px;
+}
+
+.bg-ROLLBAR {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -1972px;
+}
+
+.bg-KINSTA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -1972px;
+}
+
+.bg-WP_ENGINE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -2042px;
+}
+
+.bg-SHIFTER_IO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -2042px;
+}
+
+.bg-VISUAL_VISITOR {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -2042px;
+}
+
+.bg-HACKERONE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -2042px;
+}
+
+.bg-GURU {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -2042px;
+}
+
+.bg-POSTHOG {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -2042px;
+}
+
+.bg-CLICKSEND {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -2112px;
+}
+
+.bg-ENVOY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -2112px;
+}
+
+.bg-JOTFORM {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -2112px;
+}
+
+.bg-CANNY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -2112px;
+}
+
+.bg-UPTIME_ROBOT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -2112px;
+}
+
+.bg-SNYK {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -2112px;
+}
+
+.bg-CORTEX {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -2182px;
+}
+
+.bg-VANTA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -2182px;
+}
+
+.bg-NAMECHEAP {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -2182px;
+}
+
+.bg-INMOMENT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -2182px;
+}
+
+.bg-USER_PILOT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -2182px;
+}
+
+.bg-QUICKSIGHT_AWS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -2182px;
+}
+
+.bg-WISTIA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -2252px;
+}
+
+.bg-UNBOUNCE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -2252px;
+}
+
+.bg-MIXPANEL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -2252px;
+}
+
+.bg-DATABOX {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -2252px;
+}
+
+.bg-FAVRO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -2252px;
+}
+
+.bg-AIRCALL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -2252px;
+}
+
+.bg-ROCKET_REACH {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -2322px;
+}
+
+.bg-EIGHTXEIGHT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -2322px;
+}
+
+.bg-NEW_RELIC {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -2322px;
+}
+
+.bg-AUTOMOX {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -2322px;
+}
+
+.bg-APOLLO_IO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -2322px;
+}
+
+.bg-AHA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -2322px;
+}
+
+.bg-DYNATRACE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -2392px;
+}
+
+.bg-DIGITALOCEAN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -2392px;
+}
+
+.bg-DOCKER {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -2392px;
+}
+
+.bg-REDHAT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -2392px;
+}
+
+.bg-REDHAT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -2392px;
+}
+
+.bg-DOMO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -2392px;
+}
+
+.bg-SIGMA_COMPUTING {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -2392px;
+}
+
+.bg-FIFTEEN_FIVE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -2462px;
+}
+
+.bg-AIKIDO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -2462px;
+}
+
+.bg-RUNN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -2462px;
+}
+
+.bg-HEX {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -2462px;
+}
+
+.bg-CLOSE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -2462px;
+}
+
+.bg-CROWDSTRIKE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -2462px;
+}
+
+.bg-ACTION1 {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -2532px;
+}
+
+.bg-GRAFANA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -2532px;
+}
+
+.bg-KAITEN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -2532px;
+}
+
+.bg-PRODUCTBOARD {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -2532px;
+}
+
+.bg-SIGNNOW {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -2532px;
+}
+
+.bg-ZUBE_IO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -2532px;
+}
+
+.bg-WAFEQ {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -2602px;
+}
+
+.bg-WORKABLE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -2602px;
+}
+
+.bg-TESTFAIRY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -2602px;
+}
+
+.bg-ZENDUTY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -2602px;
+}
+
+.bg-LARKSUITE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -2602px;
+}
+
+.bg-ARTICULATE_360 {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -2602px;
+}
+
+.bg-JITBIT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -2672px;
+}
+
+.bg-TWINGATE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -2672px;
+}
+
+.bg-ISPRING_LEARN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -2672px;
+}
+
+.bg-FRONT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -2672px;
+}
+
+.bg-TESTRAIL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -2672px;
+}
+
+.bg-FORMALIZE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -2672px;
+}
+
+.bg-KINTONE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -2742px;
+}
+
+.bg-CLAUDE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -2742px;
+}
+
+.bg-EZ_OFFICE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -2742px;
+}
+
+.bg-LEARNUPON {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -2745px;
+}
+
+.bg-TWILIO_SEGMENT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -2743px;
+}
+
+.bg-GODADDY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -2742px;
+}
+
+.bg-SURVEYMONKEY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -10px -2812px;
+}
+
+.bg-DEEL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -80px -2815px;
+}
+
+.bg-CALENDAR_HERO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -150px -2815px;
+}
+
+.bg-ALTERYX_CLOUD {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -220px -2815px;
+}
+
+.bg-HUBSTAFF {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -290px -2815px;
+}
+
+.bg-BRIVO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites.svg") -360px -2815px;
+}

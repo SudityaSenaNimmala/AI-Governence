@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/png" href="./src/assets/images/CF_LOGO.png" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CloudFuze</title>
+  <!-- <link
+      rel="preload"
+      href="./src/assets/images/cloudIcons/css_sprites.png"
+      as="image"
+    />
+    <link
+      rel="preload"
+      href="./src/assets/images/cloudIcons/css_sprites_35x35.svg"
+      as="image"
+    /> -->
+  <link
+    href="https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap"
+    rel="stylesheet" />
+  <meta property="og:title" content="CloudFuze Manage" />
+  <meta property="og:description" content="CloudFuze Manage" />
+  <meta property="og:image" content="./src/assets/images/CF_LOGO.png" />
+  <meta property="og:url" content="https://cloudfuzehost.com" />
+
+  <!-- Google Tag Manager -->
+  <script>
+    (function (w, d, s, l, i) {
+      w[l] = w[l] || [];
+      w[l].push({ "gtm.start": new Date().getTime(), event: "gtm.js" });
+      var f = d.getElementsByTagName(s)[0],
+        j = d.createElement(s),
+        dl = l != "dataLayer" ? "&l=" + l : "";
+      j.async = true;
+      j.src = "https://www.googletagmanager.com/gtm.js?id=" + i + dl;
+      f.parentNode.insertBefore(j, f);
+    })(window, document, "script", "dataLayer", "GTM-KM2B43ZH");
+  </script>
+  <!-- End Google Tag Manager -->
+  <!-- HotJar -->
+  <!-- Hotjar Tracking Code for CloudFuze Connect -->
+  <!-- <script>
+    (function (h, o, t, j, a, r) {
+      h.hj =
+        h.hj ||
+        function () {
+          (h.hj.q = h.hj.q || []).push(arguments);
+        };
+      h._hjSettings = { hjid: 5311868, hjsv: 6 };
+      a = o.getElementsByTagName("head")[0];
+      r = o.createElement("script");
+      r.async = 1;
+      r.src = t + h._hjSettings.hjid + j + h._hjSettings.hjsv;
+      a.appendChild(r);
+    })(window, document, "https://static.hotjar.com/c/hotjar-", ".js?sv=");
+  </script> -->
+  <!-- End HotJar -->
+  <!-- Clarity -->
+  <!-- <script
+    type="text/javascript">     (function (c, l, a, r, i, t, y) { c[a] = c[a] || function () { (c[a].q = c[a].q || []).push(arguments) }; t = l.createElement(r); t.async = 1; t.src = "https://www.clarity.ms/tag/" + i; y = l.getElementsByTagName(r)[0]; y.parentNode.insertBefore(t, y); })(window, document, "clarity", "script", "u5e50vh2gq"); </script> -->
+  <!-- End Clarity -->
+</head>
+
+<body>
+  <div id="root"></div>
+  <div id="popup-root"></div>
+  <div id="toast-root" style="z-index: 99999999999999999;"></div>
+  <script type="module" src="/src/main.jsx"></script>
+  <!-- Google Tag Manager (noscript) -->
+  <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-KM2B43ZH" height="0" width="0"
+      style="display: none; visibility: hidden"></iframe></noscript>
+  <!-- End Google Tag Manager (noscript) -->
+</body>
+
+<script>
+  if (window.location.pathname === "/CloudFuze" || window.location.pathname === "/CloudFuze/") {
+    document.body.style.overflow = window.location.host?.includes("blogs") ? "auto" : "hidden";
+  } else {
+    document.body.style.overflow = "auto";
+  }
+</script>
+
+</html>

@@ -1,0 +1,206 @@
+.test_container {
+  width: 50%;
+  height: 400px;
+  min-height: 400px;
+  max-height: auto;
+  display: flex;
+  /* background-color: #ddd; */
+}
+
+.source img,
+.destination img {
+  width: 40px;
+}
+
+.source,
+.destination {
+  gap: 50px;
+  width: 50%;
+  height: 100%;
+  display: flex;
+  position: relative;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.destination {
+  height: auto;
+}
+
+.dest_icons {
+  width: 50%;
+  height: 50px;
+  display: flex;
+  margin-left: 58px;
+  position: relative;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #acacac;
+}
+.arrow-right,
+.arrow-left {
+  top: 50%;
+  left: -65%;
+  width: 64%;
+  height: 2px;
+  position: absolute;
+  border-top: 2px dashed red;
+}
+.arrow-right {
+  width: 70% !important;
+  left: 101% !important;
+}
+.arrow-right::after,
+.arrow-left::after {
+  top: -5.5px;
+  right: 1px;
+  content: "";
+  position: absolute;
+  width: 0.5714285714rem;
+  height: 0.5714285714rem;
+  transform: rotate(225deg);
+  background: linear-gradient(
+    calc(45deg * 1),
+    red 50%,
+    transparent 51%,
+    transparent
+  );
+}
+
+.destination_binder div::before {
+  top: 50%;
+  left: -50px;
+  width: 49px;
+  height: 2px;
+  content: "";
+  position: absolute;
+  border-top: 2px dashed red;
+}
+
+.destination-arrow {
+  left: 0;
+  width: 2px;
+  height: calc(100% - 50px);
+  position: absolute;
+  border-left: 2px dashed red;
+}
+
+.destination_dist {
+  gap: 50px;
+  width: 100%;
+  height: auto;
+  display: flex;
+  position: relative;
+  align-items: center;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.cf_calendar {
+  top: 100px;
+  left: 100px;
+  width: 600px;
+  height: 400px;
+  display: flex;
+  border-radius: 4px;
+  position: absolute;
+  flex-direction: column;
+  background-color: #fff;
+  box-shadow: rgba(0, 0, 0, 0.1) 0px 0px 5px 0px,
+    rgba(0, 0, 0, 0.1) 0px 0px 1px 0px;
+}
+
+.cf_calendar_title {
+  width: 100%;
+  height: 50px;
+  display: flex;
+  padding: 0 10px;
+  align-items: center;
+  border-bottom: 1px solid #dddddd78;
+  box-shadow: rgba(33, 35, 38, 0.1) 0px 10px 10px -10px;
+}
+
+.cf_calendar_title p {
+  font-size: 16px;
+}
+
+.cf_calendar_body {
+  width: 100%;
+  height: calc(100% - 50px);
+}
+
+.cf_calendar_body_container {
+  width: 350px;
+  height: 100%;
+  padding: 10px;
+}
+
+.cf_calendar_body_container_title {
+  width: 100%;
+  height: 40px;
+  display: flex;
+  padding: 0 20px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cf_calendar_body_container_title div {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cf_calendar_body_container_body {
+  width: 100%;
+  padding: 10px;
+  height: calc(100% - 40px);
+}
+
+.cf_calendar_body_container_body table {
+  width: 100%;
+}
+
+.cf_calendar_body_container_body table th {
+  font-weight: 500 !important;
+}
+
+.cf_calendar_body_container_body table th,
+.cf_calendar_body_container_body table td,
+.cf_calendar_body_container_body table td div {
+  width: 38px;
+  height: 38px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #0000008a;
+  text-align: center;
+}
+
+/* src/SelectWithImages.css */
+.custom-select {
+  position: relative;
+  width: 200px; /* Adjust width as needed */
+  font-family: Arial, sans-serif;
+}
+
+.custom-select select {
+  width: 100%;
+  padding: 10px;
+  font-size: 16px;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+  appearance: none; /* Remove default arrow */
+  background: url('data:image/svg+xml;utf8,<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" stroke="%23333"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>')
+    no-repeat right 10px center/10px 10px; /* Custom dropdown arrow */
+}
+
+.custom-select select:focus {
+  outline: none;
+  border-color: #007bff; /* Example focus style */
+}
+
+.option-image {
+  width: 20px; /* Adjust image size as needed */
+  height: 20px;
+  margin-right: 10px;
+  vertical-align: middle;
+}

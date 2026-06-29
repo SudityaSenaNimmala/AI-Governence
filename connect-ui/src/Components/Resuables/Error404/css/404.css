@@ -1,0 +1,106 @@
+.cf_404Container {
+  width: 100%;
+  height: 100vh;
+  background-color: #f4f4f5;
+}
+
+.cf_404Placer {
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  position: relative;
+  align-items: center;
+  justify-content: center;
+}
+
+/* .cf_404Placer > div {
+  gap: 10px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform: skewX(30deg) scale(0.8);
+  animation: 1s ease-in-out infinite none running cf_404Placer;
+} */
+
+/* @keyframes cf_404Placer {
+  0% {
+    transform: translateY(30px) skewX(30deg) scale(0.8);
+  }
+  100% {
+    transform: translateY(0px) skewX(30deg) scale(1);
+  }
+} */
+
+.cf_404Text {
+  font-weight: 600;
+  font-size: 2rem;
+  /* animation: cf_404Text_4 1s linear infinite; */
+  /* transition: all 0.5s linear; */
+}
+
+.cf_404Face {
+  width: 45px;
+  height: 45px;
+  border-radius: 50%;
+  /* border: 10px solid #000; */
+  box-shadow: 0 0 0 6px rgba(0, 0, 0, 0.3);
+}
+
+.skeleton404 {
+  /* width: 50px; */
+  opacity: 0.7;
+  user-select: none !important;
+  /* color: transparent !important; */
+  animation: skeleton-loading404 1s linear infinite alternate;
+}
+
+@keyframes skeleton-loading404 {
+  0% {
+    color: hsl(226, 100%, 22%);
+  }
+  100% {
+    color: hsl(226, 100%, 95%);
+  }
+}
+
+.cf_404Container {
+  position: absolute;
+}
+
+.cf_404Text_4 {
+  position: relative;
+  top: 0;
+  left: 18px;
+  animation: cf_404Text_4 1s linear infinite;
+  transition: all 0.5s linear;
+  /* font-size: 1.5rem; */
+  /* transform: skewX(30deg) scale(0.8); */
+}
+
+@keyframes cf_404Text_4 {
+  0% {
+    transform: translate(0px);
+    opacity: 0.75;
+  }
+  25% {
+    transform: translate(30%);
+    opacity: 1;
+    /* rotate(30deg); */
+  }
+  50% {
+    transform: translate(60%);
+    /* rotate(60deg); */
+  }
+  75% {
+    transform: translate(100%);
+    /* rotate(90deg); */
+    opacity: 0.5;
+  }
+  100% {
+    transform: translate(120%);
+    /* rotate(120deg); */
+    opacity: 0;
+  }
+}

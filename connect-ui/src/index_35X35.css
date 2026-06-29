@@ -1,0 +1,1469 @@
+.bg_35-AMAZON_S3 {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -10px;
+}
+.bg_35-ASANA {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -10px;
+}
+
+.bg_35-AZURE_OBJECT_STORAGE {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -80px;
+}
+.bg_35-BOX_BUSINESS {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -80px;
+}
+.bg_35-DROPBOX_BUSINESS {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -10px;
+}
+.bg_35-EGNYTE_ADMIN {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -80px;
+}
+.bg_35-FTP {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -150px;
+}
+.bg_35-G_SUITE {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -150px;
+}
+.bg_35-G_SUITE1 {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -150px;
+}
+.bg_35-GITHUB {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -10px;
+}
+.bg_35-GMAIL {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -80px;
+}
+.bg_35-GOOGLE_CHAT {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -150px;
+}
+.bg_35-GOOGLE_WORKSPACE {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -221px;
+}
+.bg_35-GOOGLE_SHARED_DRIVES {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -220px;
+}
+.bg_35-HUBSPOT {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -222px;
+}
+.bg_35-LUCID {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -220px;
+}
+.bg_35-MEMSE3,
+.bg_35-MICROSOFT_OFFICE_365 {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -10px;
+}
+.bg_35-MURAL {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -80px;
+}
+.bg_35-MIRO {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -150px;
+}
+.bg_35-NETWORK_FILESHARES {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -220px;
+}
+.bg_35-ONEDRIVE_BUSINESS_ADMIN {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -290px;
+}
+.bg_35-ONEDRIVE_BUSINESS_ADMIN_HYBRID {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -290px;
+}
+.bg_35-OUTLOOK {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -290px;
+}
+.bg_35-SHARE_FILE_BUSINESS,
+.bg_35-SHAREFILE_BUSINESS {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -290px;
+}
+.bg_35-SLACK {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -290px;
+}
+.bg_35-SMARTSHEET {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -10px;
+}
+.bg_35-SHAREPOINT_ONLINE_BUSINESS {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -80px;
+}
+.bg_35-SHAREPOINT_2010 {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -150px;
+}
+.bg_35-SHAREPOINT_2013 {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -220px;
+}
+.bg_35-SHAREPOINT_ONLINE_HYBRID {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -290px;
+}
+.bg_35-MICROSOFT_TEAMS {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -360px;
+}
+.bg_35-WORDPRESS {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -362px;
+}
+.bg_35-GITLAB {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -360px;
+}
+.bg_35-FIGMA {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -362px;
+}
+.bg_35-WEBFLOW {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -360px;
+}
+
+.bg_35-NOTION {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -360px;
+}
+
+.bg_35-AUTODESK {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -430px;
+}
+.bg_35-ZOHO {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -430px;
+}
+
+.bg_35-ZOHO_MAIL {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -430px;
+}
+
+.bg_35-ZOHO_INVENTORY {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -430px;
+}
+
+.bg_35-ZOHO_DESK {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -430px;
+}
+.bg_35-ZOHO_PROJECTS {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -430px;
+}
+
+.bg_35-WRIKE {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -500px;
+}
+
+.bg_35-BITBUCKET {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -500px;
+}
+
+.bg_35-ZOHO_WORKDRIVE {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -500px;
+}
+
+.bg_35-PAGERDUTY {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -500px;
+}
+
+.bg_35-HEROKU {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -500px;
+}
+
+.bg_35-ONELOGIN {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -500px;
+}
+
+.bg_35-LINODE {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -570px;
+}
+
+.bg_35-CISCO_WEBEX_TEAMS {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -570px;
+}
+
+.bg_35-XERO {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -570px;
+}
+
+.bg_35-INTERCOM {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -570px;
+}
+
+.bg_35-HIVE {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -570px;
+}
+
+.bg_35-FIVETRAN {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -570px;
+}
+
+.bg_35-CLOUDFLARE {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -640px;
+}
+
+.bg_35-GOTOMEETING {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -640px;
+}
+
+.bg_35-ATLASSIAN {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -640px;
+}
+
+.bg_35-MONDAY {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -640px;
+}
+
+.bg_35-UIPATH {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -640px;
+}
+
+.bg_35-TRELLO {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -640px;
+}
+
+.bg_35-JUMPCLOUD {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -710px;
+}
+
+.bg_35-DOCUSIGN {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -710px;
+}
+
+.bg_35-DOCUMENT360 {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -710px;
+}
+
+.bg_35-HELLOSIGN {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -710px;
+}
+
+.bg_35-ZENDESK {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -710px;
+}
+
+.bg_35-ZENDESK {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -710px;
+}
+
+.bg_35-SENDGRID {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -710px;
+}
+
+.bg_35-JIRA {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -780px;
+}
+
+.bg_35-SHOPIFY {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -780px;
+}
+
+.bg_35-INSIGHTLY {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -780px;
+}
+
+.bg_35-CONFLUENCE {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -780px;
+}
+
+.bg_35-CLICKUP {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -782px;
+}
+
+.bg_35-SALESFORCE {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -780px;
+}
+
+.bg_35-CALENDLY {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -851px;
+}
+
+.bg_35-PANDADOC {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -850px;
+}
+
+.bg_35-AIRTABLE {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -850px;
+}
+
+.bg_35-BASECAMP {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -850px;
+}
+
+.bg_35-AZURE_ACTIVE_DIRECTORY,
+.bg_35-ENTRA_SSO {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -850px;
+}
+
+.bg_35-EVENTBRITE {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -850px;
+}
+
+.bg_35-MAILCHIMP {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -920px;
+}
+
+.bg_35-DIGICERT {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -920px;
+}
+
+.bg_35-SHUTTERSTOCK {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -920px;
+}
+
+.bg_35-FRESHBOOKS {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -920px;
+}
+
+.bg_35-TWITCH {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -918px;
+}
+
+.bg_35-VIMEO {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -921px;
+}
+
+.bg_35-FASTLY {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -990px;
+}
+
+.bg_35-FRESH_DESK,
+.bg_35-FRESHCHAT {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -991px;
+}
+
+.bg_35-HELP_DESK,
+.bg_35-HELPDESK {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -990px;
+}
+
+.bg_35-LAUNCH_DARKLY {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -990px;
+}
+
+.bg_35-POSTMAN {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -991px;
+}
+
+.bg_35-SHORTCUT {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -992px;
+}
+
+.bg_35-HARVEST {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -1060px;
+}
+
+.bg_35-NETLIFY {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -1060px;
+}
+
+.bg_35-APPFIGURES {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -1060px;
+}
+
+.bg_35-BUSINESSMAP {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -1060px;
+}
+
+.bg_35-DUO {
+  width: 35px;
+  height: 35px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -1060px;
+}
+
+.bg_35-DUO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -1060px;
+}
+
+.bg_35-PIPEDRIVE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -11px -1130px;
+}
+
+.bg_35-FACEBOOK_WORKPLACE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -1130px;
+}
+
+.bg_35-MS_VIVA_ENGAGE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -1130px;
+}
+
+.bg_35-LINKEDIN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -1130px;
+}
+
+.bg_35-CANVA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -1130px;
+}
+
+.bg_35-SMART_BEAR {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -1130px;
+}
+
+.bg_35-TERRAFORM {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -1200px;
+}
+
+.bg_35-THINKIFIC {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -1200px;
+}
+
+.bg_35-CODER_BYTE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -1200px;
+}
+
+.bg_35-ONE_PASSWORD {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -1200px;
+}
+
+.bg_35-ADOBE,
+.bg_35-ADOBE_CREATIVE,
+.bg_35-ADOBE_IDENTITY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -1200px;
+}
+
+.bg_35-ZOOM {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -1200px;
+}
+
+.bg_35-TAILSCALE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -1270px;
+}
+
+.bg_35-KAPA_AI {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -1270px;
+}
+
+.bg_35-TEAMWORK {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -1270px;
+}
+
+.bg_35-BRILLIUM {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -1270px;
+}
+
+.bg_35-AWS,
+.bg_35-AWS_IC {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -1270px;
+}
+
+.bg_35-INSIGHTFUL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -1270px;
+}
+
+.bg_35-CURSOR_AI {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -1340px;
+}
+
+.bg_35-LUMA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -1340px;
+}
+
+.bg_35-OTHERS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/APPLICATION.svg");
+  background-size: 35px 35px;
+  background-repeat: no-repeat;
+}
+
+.bg_35-OKTA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -1340px;
+}
+
+.bg_35-INSTANTLY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -1340px;
+}
+
+.bg_35-OPENVPN_CLOUD {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -1340px;
+}
+
+.bg_35-LASTPASS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -1340px;
+}
+
+.bg_35-FILES_COM {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -1410px;
+}
+
+.bg_35-TABLEAU {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -1410px;
+}
+
+.bg_35-GUSTO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -1410px;
+}
+
+.bg_35-BAMBOOHR {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -1410px;
+}
+
+.bg_35-QUICKBOOKSONLINE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -1410px;
+}
+
+.bg_35-BILL_COM {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -1410px;
+}
+
+.bg_35-STRIPE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -1480px;
+}
+
+.bg_35-SNOWFLAKE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -1480px;
+}
+
+.bg_35-SERVICENOW {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -1480px;
+}
+
+.bg_35-ZOHOCRM {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -1465px;
+}
+
+.bg_35-MONGODBATLAS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -1480px;
+}
+
+.bg_35-SAP_HANA_CLOUD {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -1480px;
+}
+
+.bg_35-INFORMATICA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -1550px;
+}
+
+.bg_35-CONTENTFUL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -1550px;
+}
+
+.bg_35-OPENAI,
+.bg_35-CHATGPT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -1550px;
+}
+
+.bg_35-WORKDAY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -1550px;
+}
+
+.bg_35-MAILGUN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -1550px;
+}
+
+.bg_35-LATTICE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -1550px;
+}
+
+.bg_35-TAXJAR {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -1620px;
+}
+
+.bg_35-ACTIVECAMPAIGN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -1620px;
+}
+
+.bg_35-ZUORA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -1620px;
+}
+
+.bg_35-OWNBACKUP {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -1620px;
+}
+
+.bg_35-RIPPLING {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -1620px;
+}
+
+.bg_35-DYNAMICS_365_SALES {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -1620px;
+}
+
+.bg_35-MOUSEFLOW {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -1690px;
+}
+
+.bg_35-LAMBDATEST {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -1690px;
+}
+
+.bg_35-BRANDFOLDER {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -1690px;
+}
+
+.bg_35-BLACKLINE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -1690px;
+}
+
+.bg_35-GRAMMARLY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -1690px;
+}
+
+.bg_35-TWILIO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -1690px;
+}
+
+.bg_35-LEARNING_360 {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -1760px;
+}
+
+.bg_35-MAILTRAP {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -1760px;
+}
+
+.bg_35-UBERALL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -1760px;
+}
+
+.bg_35-SNIPE_IT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -1760px;
+}
+
+.bg_35-SONARCLOUD {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -1760px;
+}
+
+.bg_35-YEXT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -1760px;
+}
+
+.bg_35-AUTH0 {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -1830px;
+}
+
+.bg_35-SENTRY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -1830px;
+}
+
+.bg_35-PLANHAT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -1830px;
+}
+
+.bg_35-DATADOG {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -1830px;
+}
+
+.bg_35-JETBRAINS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -1830px;
+}
+
+.bg_35-SLING {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -1830px;
+}
+
+.bg_35_XCORP {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -1900px;
+}
+
+.bg_35-MEMZO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -1900px;
+}
+
+.bg_35-CHECKR {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -1900px;
+}
+
+.bg_35-APPVEYOR {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -1900px;
+}
+
+.bg_35-PUBNUB {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -1900px;
+}
+
+.bg_35-VERCEL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -1900px;
+}
+
+.bg_35-STATUSCAKE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -1970px;
+}
+
+.bg_35-PISIGNAGE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -1970px;
+}
+
+.bg_35-GEMFURY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -1970px;
+}
+
+.bg_35-AVALARA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -1970px;
+}
+
+.bg_35-ROLLBAR {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -1970px;
+}
+
+.bg_35-KINSTA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -1970px;
+}
+
+.bg_35-WP_ENGINE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -2042px;
+}
+
+.bg_35-SHIFTER_IO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -2042px;
+}
+
+.bg_35-VISUAL_VISITOR {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -2042px;
+}
+
+.bg_35-HACKERONE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -2042px;
+}
+
+.bg_35-GURU {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -2042px;
+}
+
+.bg_35-POSTHOG {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -2042px;
+}
+
+.bg_35-CLICKSEND {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -2112px;
+}
+
+.bg_35-EVNOY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -2112px;
+}
+
+.bg_35-JOTFORM {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -2112px;
+}
+
+.bg_35-CANNY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -2112px;
+}
+
+.bg_35-UPTIME_ROBOT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -2112px;
+}
+
+.bg_35-SNYK {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -2112px;
+}
+
+.bg_35-CORTEX {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -2182px;
+}
+
+.bg_35-VANTA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -2182px;
+}
+
+.bg_35-NAMECHEAP {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -2182px;
+}
+
+.bg_35-INMOMENT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -2182px;
+}
+
+.bg_35-USER_PILOT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -2182px;
+}
+
+.bg_35-QUICKSIGHT_AWS {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -2182px;
+}
+
+.bg_35-WISTIA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -2252px;
+}
+
+.bg_35-UNBOUNCE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -2252px;
+}
+
+.bg_35-MIXPANEL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -2252px;
+}
+
+.bg_35-DATABOX {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -2252px;
+}
+
+.bg_35-FAVRO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -2252px;
+}
+
+.bg_35-AIRCALL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -2252px;
+}
+
+.bg_35-ROCKET_REACH {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -2322px;
+}
+
+.bg_35-EIGHTXEIGHT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -2322px;
+}
+
+.bg_35-NEW_RELIC {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -2322px;
+}
+
+.bg_35-AUTOMOX {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -2322px;
+}
+
+.bg_35-APOLLO_IO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -2322px;
+}
+
+.bg_35-AHA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -2322px;
+}
+
+.bg_35-DYNATRACE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -2392px;
+}
+
+.bg_35-DIGITALOCEAN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -2392px;
+}
+
+.bg_35-DOCKER {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -2392px;
+}
+
+.bg_35-REDHAT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -2392px;
+}
+
+.bg_35-REDHAT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -2392px;
+}
+
+.bg_35-DOMO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -2392px;
+}
+
+.bg_35-SIGMA_COMPUTING {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -2392px;
+}
+
+.bg_35-FIFTEEN_FIVE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -2392px;
+}
+
+.bg_35-AIKIDO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -2462px;
+}
+
+.bg_35-RUNN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -2462px;
+}
+
+.bg_35-HEX {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -2462px;
+}
+
+.bg_35-CLOSE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -2462px;
+}
+
+.bg_35-CROWDSTRIKE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -2462px;
+}
+
+.bg_35-ACTION1 {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -2462px;
+}
+
+.bg_35-GRAFANA {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -2532px;
+}
+
+.bg_35-KAITEN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -2532px;
+}
+
+.bg_35-PRODUCTBOARD {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -2532px;
+}
+
+.bg_35-SIGNNOW {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -2532px;
+}
+
+.bg_35-ZUBE_IO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -2532px;
+}
+
+.bg_35-WAFEQ {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -2602px;
+}
+
+.bg_35-WORKABLE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -2602px;
+}
+
+.bg_35-TESTFAIRY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -2602px;
+}
+
+.bg_35-ZENDUTY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -2602px;
+}
+
+.bg_35-LARKSUITE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -2602px;
+}
+
+.bg_35-ARTICULATE_360 {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -2602px;
+}
+
+.bg_35-JITBIT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -2672px;
+}
+
+.bg_35-TWINGATE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -2672px;
+}
+
+.bg_35-ISPRING_LEARN {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -2672px;
+}
+
+.bg_35-FRONT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -2672px;
+}
+
+.bg_35-TESTRAIL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -2672px;
+}
+
+.bg_35-FORMALIZE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -2672px;
+}
+
+.bg_35-KINTONE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -2742px;
+}
+
+.bg_35-CLAUDE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -2742px;
+}
+
+.bg_35-EZ_OFFICE {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -2742px;
+}
+
+.bg_35-LEARNUPON {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -2745px;
+}
+
+.bg_35-TWILIO_SEGMENT {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -2743px;
+}
+
+.bg_35-GODADDY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -2742px;
+}
+
+.bg_35-SURVEYMONKEY {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -10px -2812px;
+}
+
+.bg_35-DEEL {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -80px -2815px;
+}
+
+.bg_35-CALENDAR_HERO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -150px -2815px;
+}
+
+.bg_35-ALTERYX_CLOUD {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -220px -2815px;
+}
+
+.bg_35-HUBSTAFF {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -290px -2815px;
+}
+
+.bg_35-BRIVO {
+  width: 50px;
+  height: 50px;
+  background: url("./assets/images/cloudIcons/css_sprites_35x35.svg") -360px -2815px;
+}

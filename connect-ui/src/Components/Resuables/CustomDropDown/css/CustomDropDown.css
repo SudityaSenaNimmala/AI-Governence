@@ -1,0 +1,40 @@
+.cf_dropdown_contatiner {
+  position: relative;
+}
+
+.cf_dropdown_contatiner_content {
+  z-index: 1;
+  height: auto;
+  cursor: pointer;
+  min-height: 40px;
+  height: 300px;
+  width: 140px;
+  overflow: auto;
+  position: absolute;
+  border-radius: 4px;
+  max-height: fit-content;
+  background-color: #fff;
+  border: 1px solid #e5e5e5;
+}
+
+.cf_dropdown_contatiner_content div svg {
+  color: green;
+}
+.cf_dropdown_contatiner_content div {
+  gap: 8px;
+  height: 40px;
+  display: flex;
+  cursor: pointer;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 500;
+  align-items: center;
+}
+.cf_dropdown_contatiner_content div span {
+  font-weight: 500;
+}
+
+.cf_dropdown_contatiner_content div:hover {
+  background-color: #fafafa;
+  color: #0062ff;
+}
