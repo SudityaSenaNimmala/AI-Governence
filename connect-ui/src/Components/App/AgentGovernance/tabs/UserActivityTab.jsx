@@ -9,13 +9,6 @@ import {
 } from "lucide-react";
 import { useAgentAuth, useGovernance } from "../AgentGovernanceContext";
 import { agentGovernanceApi } from "../AgentGovernanceActions/AgentGovernanceActions";
-import {
-  DEMO_CHATS, DEMO_FILES, DEMO_KNOWLEDGE, DEMO_PERMISSIONS,
-  DEMO_RISK_SUMMARY, DEMO_AZURE_AI,
-  DEMO_GOOGLE_CHATS, DEMO_GOOGLE_KNOWLEDGE, DEMO_GOOGLE_FILES,
-  DEMO_GOOGLE_PERMISSIONS,
-  GOOGLE_RISK_SIGNALS, GOOGLE_BASE_DEDUCTION,
-} from "../demoData";
 import { Section } from "../common/Section";
 import { Badge } from "../common/Badge";
 import { LoadingSpinner } from "../common/LoadingSpinner";
@@ -450,12 +443,11 @@ const OP_COLORS = {
 };
 
 function FileRow({ file }) {
-  const sourceColor = file.workload === "SharePoint" ? "#059669" : file.workload === "OneDrive" ? "#3b82f6" : "#6b7280";
   return (
-    <tr style={{ borderBottom: "1px solid var(--ag-border)", background: "rgba(99,102,241,0.02)" }}>
+    <tr style={{ borderBottom: "1px solid var(--ag-border)", background: file.relatedAgents?.length ? "rgba(99,102,241,0.02)" : "transparent" }}>
       <td style={{ padding: "10px 8px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <FileText size={14} color="#6366f1" />
+          <FileText size={14} color={file.relatedAgents?.length ? "#6366f1" : "#999"} />
           <div>
             <div style={{ fontSize: 12, fontWeight: 600, color: "var(--ag-text-primary)" }}>{file.fileName}</div>
             <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -465,15 +457,27 @@ function FileRow({ file }) {
         </div>
       </td>
       <td style={{ padding: "10px 8px" }}>
-        <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 4, background: "#6366f115", color: "#6366f1", fontWeight: 600, border: "1px solid #6366f133" }}>
-          {file.agentName || file.userName}
-        </span>
+        <div style={{ fontSize: 12, fontWeight: 500 }}>{file.userName}</div>
+        <div style={{ fontSize: 10, color: "var(--ag-text-secondary)" }}>{file.userId}</div>
       </td>
       <td style={{ padding: "10px 8px" }}>
         <Badge text={file.operation} color={OP_COLORS[file.operation] || "#6b7280"} />
       </td>
       <td style={{ padding: "10px 8px" }}>
-        <Badge text={file.workload || "SharePoint"} color={sourceColor} />
+        <Badge text={file.workload} color={file.workload === "SharePoint" ? "#059669" : "#3b82f6"} />
+      </td>
+      <td style={{ padding: "10px 8px" }}>
+        {file.relatedAgents?.length > 0 ? (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
+            {file.relatedAgents.map((a) => (
+              <span key={a} style={{ fontSize: 10, padding: "1px 6px", borderRadius: 4, background: "#6366f115", color: "#6366f1", fontWeight: 600, border: "1px solid #6366f133" }}>
+                {a}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <span style={{ fontSize: 10, color: "#999" }}>—</span>
+        )}
       </td>
       <td style={{ padding: "10px 8px", fontSize: 11, color: "var(--ag-text-secondary)" }}>
         {new Date(file.timestamp).toLocaleString()}
@@ -518,9 +522,15 @@ function tagFilesWithAgents(files, knowledgeSources) {
 
   const agentSiteMap = new Map();
   const agentHostMap = new Map();
+  const agentFileIdMap = new Map(); // OpenAI: vector_store_file componentId → agent names
 
   for (const bot of knowledgeSources) {
     for (const source of (bot.sources || [])) {
+      // ID-based matching for OpenAI vector store files
+      if (source.type === "vector_store_file" && source.componentId) {
+        if (!agentFileIdMap.has(source.componentId)) agentFileIdMap.set(source.componentId, new Set());
+        agentFileIdMap.get(source.componentId).add(bot.botName);
+      }
       if (!source.url) continue;
       const lower = source.url.toLowerCase();
       if (lower.includes("sharepoint.com") || lower.includes("onedrive.com") || lower.includes(".sharepoint.us")) {
@@ -538,22 +548,25 @@ function tagFilesWithAgents(files, knowledgeSources) {
     }
   }
 
-  if (agentSiteMap.size === 0 && agentHostMap.size === 0) {
-    return files.map((f) => ({ ...f, relatedAgents: [] }));
-  }
-
   return files.map((f) => {
     const relatedAgents = new Set();
-    const objId = (f.objectId || f.filePath || "").toLowerCase();
-    for (const [siteBase, agents] of agentSiteMap) {
-      if (objId.includes(siteBase.toLowerCase())) {
-        for (const a of agents) relatedAgents.add(a);
-      }
+    // OpenAI: match by file ID
+    if (f.id && agentFileIdMap.has(f.id)) {
+      for (const a of agentFileIdMap.get(f.id)) relatedAgents.add(a);
     }
+    // SharePoint/OneDrive: match by URL path
     if (relatedAgents.size === 0) {
-      for (const [hostname, agents] of agentHostMap) {
-        if (objId.includes(hostname)) {
+      const objId = (f.objectId || f.filePath || "").toLowerCase();
+      for (const [siteBase, agents] of agentSiteMap) {
+        if (objId.includes(siteBase.toLowerCase())) {
           for (const a of agents) relatedAgents.add(a);
+        }
+      }
+      if (relatedAgents.size === 0) {
+        for (const [hostname, agents] of agentHostMap) {
+          if (objId.includes(hostname)) {
+            for (const a of agents) relatedAgents.add(a);
+          }
         }
       }
     }
@@ -622,9 +635,12 @@ function KnowledgeSourceCard({ source }) {
             <a href={source.url} target="_blank" rel="noopener noreferrer" style={{ color: "inherit", textDecoration: "none" }}>{source.url}</a>
           </div>
         )}
-        {source.metadata && (
-          <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", marginTop: 2 }}>Keywords: {source.metadata}</div>
-        )}
+        {source.metadata && (() => {
+          const meta = typeof source.metadata === "string"
+            ? source.metadata
+            : Object.entries(source.metadata).filter(([, v]) => v != null && v !== "").map(([k, v]) => `${k}: ${v}`).join(" · ");
+          return meta ? <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", marginTop: 2 }}>{meta}</div> : null;
+        })()}
       </div>
       {source.addedOn && (
         <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", flexShrink: 0 }}>
@@ -766,13 +782,13 @@ function DiscoveredKnowledgeView({ agents }) {
     <div>
       <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
         {[
-          { label: "Agents Scanned", value: agents.length, color: "#6366f1" },
+          { label: "Agents Discovered", value: agents.length, color: "#6366f1" },
           { label: "Knowledge Sources", value: totalSources, color: "#22c55e" },
           { label: "With Knowledge", value: withSources.length, color: "#3b82f6" },
         ].map((s) => (
           <div key={s.label} style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 8, padding: "10px 16px", minWidth: 140 }}>
             <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", marginBottom: 2 }}>{s.label}</div>
-            <div style={{ fontSize: 20, fontWeight: 700, color: "var(--ag-text-primary)" }}>{s.value}</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: s.color }}>{s.value}</div>
           </div>
         ))}
       </div>
@@ -786,6 +802,7 @@ function DiscoveredKnowledgeView({ agents }) {
               <Bot size={18} color="#6366f1" />
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 14, fontWeight: 700, color: "var(--ag-text-primary)" }}>{agent.name}</div>
+                <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", fontFamily: "monospace" }}>{agent.id}</div>
               </div>
               <Badge text={agent.platform} color="#6366f1" />
               {kd.sources.length > 0 && <Badge text={`${kd.sources.length} source${kd.sources.length !== 1 ? "s" : ""}`} color="#22c55e" />}
@@ -840,6 +857,7 @@ function BotKnowledgePanel({ bot }) {
         <Bot size={18} color="#6366f1" />
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: "var(--ag-text-primary)" }}>{bot.botName}</div>
+          <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", fontFamily: "monospace" }}>{bot.botId}</div>
         </div>
         <div style={{ marginLeft: "auto" }}>
           <Badge text={`${bot.sources.length} source${bot.sources.length !== 1 ? "s" : ""}`} color={bot.sources.length > 0 ? "#22c55e" : "#6b7280"} />
@@ -867,36 +885,45 @@ function BotKnowledgePanel({ bot }) {
   );
 }
 
-function AgentPermissionsPanel({ oauthKeyId, enabled = true, vendor = "microsoft" }) {
-  const initialData = vendor === "google" ? DEMO_GOOGLE_PERMISSIONS : DEMO_PERMISSIONS;
-  const [data, setData] = useState(initialData);
+function AgentPermissionsPanel({ oauthKeyId, enabled = true }) {
+  const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [expanded, setExpanded] = useState({});
-
-  useEffect(() => {
-    setData(vendor === "google" ? DEMO_GOOGLE_PERMISSIONS : DEMO_PERMISSIONS);
-  }, [vendor]);
+  const [showAll, setShowAll] = useState(false);
 
   const loadPermissions = async () => {
+    if (!oauthKeyId) return;
     setLoading(true);
-    await new Promise((r) => setTimeout(r, 12000));
-    setLoading(false);
+    setError(null);
+    try {
+      const result = await agentGovernanceApi.fetchAgentPermissions(oauthKeyId);
+      setData(result);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
   };
+
+  useEffect(() => { if (oauthKeyId && enabled) loadPermissions(); }, [oauthKeyId, enabled]);
 
   const LEVEL_COLORS = { critical: "#ef4444", high: "#f59e0b", medium: "#3b82f6", low: "#22c55e" };
   const LEVEL_BG = { critical: "#fef2f2", high: "#fffbeb", medium: "#eff6ff", low: "#f0fdf4" };
   const CATEGORY_ICONS = { files: FolderOpen, mail: MessageSquare, directory: User, communications: MessageSquare, calendar: Clock, other: Shield };
 
+  const [filterMode, setFilterMode] = useState("agents"); // "agents" | "risky" | "all"
   const apps = data?.apps || [];
-  const displayed = apps;
+  const agentApps = apps.filter(a => a.isAgent);
+  const riskyApps = apps.filter(a => a.summary.hasFileAccess || a.summary.hasWriteAccess || a.summary.criticalCount > 0);
+  const displayed = filterMode === "agents" ? agentApps : filterMode === "risky" ? riskyApps : showAll ? apps : apps.slice(0, 30);
 
   return (
     <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, padding: 16, marginBottom: 16 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <ShieldAlert size={16} color="#dc2626" />
-          <span style={{ fontSize: 14, fontWeight: 700, color: "var(--ag-text-primary)" }}>Agent Permissions &amp; File Access</span>
+          <span style={{ fontSize: 14, fontWeight: 700, color: "var(--ag-text-primary)" }}>App Permissions &amp; File Access</span>
         </div>
         <button onClick={loadPermissions} disabled={loading} style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "1px solid var(--ag-border)", borderRadius: 6, padding: "5px 10px", fontSize: 11, cursor: "pointer", fontFamily: "inherit", color: "var(--ag-text-secondary)" }}>
           <RefreshCw size={10} style={loading ? { animation: "agSpin 1s linear infinite" } : undefined} />
@@ -915,25 +942,42 @@ function AgentPermissionsPanel({ oauthKeyId, enabled = true, vendor = "microsoft
         <div>
           <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
             {[
-              { label: "Agents Scanned", value: displayed.length, color: "#6366f1" },
+              { label: "Apps Scanned", value: data.totalApps, color: "#6366f1" },
               { label: "With File Access", value: data.summary.withFileAccess, color: "#f59e0b" },
               { label: "With Write Access", value: data.summary.withWriteAccess, color: "#dc2626" },
               { label: "Critical Risk", value: data.summary.criticalRisk, color: "#dc2626" },
+              { label: "Agent Apps", value: data.summary.agentCount, color: "#22c55e" },
             ].map(s => (
               <div key={s.label} style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 8, padding: "8px 14px", minWidth: 110 }}>
                 <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", marginBottom: 2 }}>{s.label}</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: "var(--ag-text-primary)" }}>{s.value}</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: s.color }}>{s.value}</div>
               </div>
             ))}
           </div>
 
+          <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+            {[
+              { id: "agents", label: `Agents Only (${agentApps.length})`, color: "#22c55e" },
+              { id: "risky", label: `With File/Write Access (${riskyApps.length})`, color: "#f59e0b" },
+              { id: "all", label: `All Apps (${apps.length})`, color: "#6366f1" },
+            ].map(f => (
+              <button key={f.id} onClick={() => setFilterMode(f.id)} style={{
+                padding: "5px 12px", borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+                background: filterMode === f.id ? f.color : "transparent",
+                color: filterMode === f.id ? "#fff" : "var(--ag-text-secondary)",
+                border: `1px solid ${filterMode === f.id ? f.color : "var(--ag-border)"}`,
+              }}>
+                {f.label}
+              </button>
+            ))}
+          </div>
 
           {displayed.length > 0 ? (
             <div style={{ border: "1px solid var(--ag-border)", borderRadius: 8, overflow: "hidden" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
                   <tr style={{ background: "#f8fafc" }}>
-                    <th style={{ ...thStyle, width: "25%" }}>Agent</th>
+                    <th style={{ ...thStyle, width: "25%" }}>Application</th>
                     <th style={{ ...thStyle, width: "10%" }}>Risk Level</th>
                     <th style={{ ...thStyle, width: "10%" }}>Access Type</th>
                     <th style={{ ...thStyle, width: "40%" }}>Granted Permissions</th>
@@ -952,7 +996,9 @@ function AgentPermissionsPanel({ oauthKeyId, enabled = true, vendor = "microsoft
                             <div>
                               <div style={{ fontWeight: 600, color: "var(--ag-text-primary)" }}>
                                 {app.displayName}
+                                {app.isAgent && <Badge text="Agent" color="#22c55e" style={{ marginLeft: 6 }} />}
                               </div>
+                              <div style={{ fontSize: 10, color: "#999" }}>{app.appId}</div>
                             </div>
                           </div>
                         </td>
@@ -1037,8 +1083,14 @@ function AgentPermissionsPanel({ oauthKeyId, enabled = true, vendor = "microsoft
             </div>
           ) : (
             <div style={{ textAlign: "center", padding: 30, color: "#999", fontSize: 12 }}>
-              No agents with significant permissions found.
+              No applications with significant permissions found.
             </div>
+          )}
+
+          {!showAll && apps.length > displayed.length && (
+            <button onClick={() => setShowAll(true)} style={{ display: "block", margin: "12px auto 0", padding: "6px 16px", background: "#6366f1", color: "#fff", border: "none", borderRadius: 6, fontSize: 11, cursor: "pointer" }}>
+              Show All {apps.length} Apps
+            </button>
           )}
         </div>
       ) : null}
@@ -1046,133 +1098,38 @@ function AgentPermissionsPanel({ oauthKeyId, enabled = true, vendor = "microsoft
   );
 }
 
-// Risk-Score Guide & Simulator. Vendor-aware — switches between the
-// Microsoft signal catalog (Dataverse / Power Platform) and the Google
-// Workspace signal catalog (Drive / Gemini Gem / Agent Builder / Chat).
-function RiskScoringGuide({ vendor = "microsoft" }) {
-  const isGoogleGuide = vendor === "google";
+function RiskScoringGuide() {
   const [expanded, setExpanded] = useState(false);
-
-  // ── Simulator state ────────────────────────────────────────────────
-  const [msSim, setMsSim] = useState({
-    orphaned: false, stale: false, httpConnector: false, broadPerms: false,
-    allUsersScope: false, expiredRenewal: false, sensitiveKw: false,
-  });
-  const [gSim, setGSim] = useState({
-    sensitive_oauth_scopes: false,
-    orphaned_owner: false,
-    external_chat_space: false,
-    agent_builder_with_datastores: false,
-    stale_30_days: false,
-    apps_script_http_trigger: false,
-    expired_renewal: false,
-    shared_gemini_gem: false,
-    sensitive_keywords: false,
-    multiple_read_scopes: false,
+  const [simScenario, setSimScenario] = useState({
+    orphaned: false,
+    stale: false,
+    httpConnector: false,
+    broadPerms: false,
+    allUsersScope: false,
+    expiredRenewal: false,
+    sensitiveKw: false,
   });
 
-  const computeMsSimScore = () => {
+  const computeSimScore = () => {
     let score = 100;
     const factors = [];
-    score -= 5;
-    if (msSim.broadPerms) { score -= 20; factors.push({ signal: "Broad connector scopes (Mail.ReadWrite.All, Sites.ReadWrite.All)", weight: "critical", deduction: -20 }); }
-    if (msSim.orphaned) { score -= 20; factors.push({ signal: "No assigned owner (orphaned)", weight: "critical", deduction: -20 }); }
-    if (msSim.stale) { score -= 12; factors.push({ signal: "Stale — no activity in 30+ days", weight: "high", deduction: -12 }); }
-    if (msSim.expiredRenewal) { score -= 10; factors.push({ signal: "Overdue for renewal", weight: "medium", deduction: -10 }); }
-    if (msSim.allUsersScope) { score -= 10; factors.push({ signal: "Deployed to all-user Teams scope", weight: "medium", deduction: -10 }); }
-    if (msSim.httpConnector) { score -= 10; factors.push({ signal: "HTTP connector (external data egress)", weight: "medium", deduction: -10 }); }
-    if (msSim.sensitiveKw) { score -= 5; factors.push({ signal: "Sensitive keywords in name/description", weight: "low", deduction: -5 }); }
+    score -= 5; // base deduction for "low" base risk
+
+    if (simScenario.broadPerms) { score -= 20; factors.push({ signal: "Broad connector scopes (Mail.ReadWrite.All, Sites.ReadWrite.All)", weight: "critical", deduction: -20 }); }
+    if (simScenario.orphaned) { score -= 20; factors.push({ signal: "No assigned owner (orphaned)", weight: "critical", deduction: -20 }); }
+    if (simScenario.stale) { score -= 12; factors.push({ signal: "Stale — no activity in 30+ days", weight: "high", deduction: -12 }); }
+    if (simScenario.expiredRenewal) { score -= 10; factors.push({ signal: "Overdue for renewal", weight: "medium", deduction: -10 }); }
+    if (simScenario.allUsersScope) { score -= 10; factors.push({ signal: "Deployed to all-user Teams scope", weight: "medium", deduction: -10 }); }
+    if (simScenario.httpConnector) { score -= 10; factors.push({ signal: "HTTP connector (external data egress)", weight: "medium", deduction: -10 }); }
+    if (simScenario.sensitiveKw) { score -= 5; factors.push({ signal: "Sensitive keywords in name/description", weight: "low", deduction: -5 }); }
+
     factors.push({ signal: "No governance policy applied", weight: "low", deduction: 0 });
     score = Math.max(0, Math.min(100, score));
-    const level = score >= 80 ? "low" : score >= 60 ? "medium" : score >= 40 ? "high" : "critical";
+    let level = score <= 25 ? "critical" : score <= 50 ? "high" : score <= 75 ? "medium" : "low";
     return { score, level, factors };
   };
 
-  const computeGoogleSimScore = () => {
-    let score = 100 + GOOGLE_BASE_DEDUCTION;
-    const factors = [{
-      signal: "Base low-risk deduction",
-      weight: "low",
-      deduction: GOOGLE_BASE_DEDUCTION,
-    }];
-    for (const [key, cat] of Object.entries(GOOGLE_RISK_SIGNALS)) {
-      if (key === "no_policy_applied") continue;
-      if (gSim[key]) {
-        score += cat.deduction;
-        factors.push({ signal: cat.label, weight: cat.weight, deduction: cat.deduction });
-      }
-    }
-    factors.push({ signal: "No CloudFuze policy applied", weight: "low", deduction: 0 });
-    score = Math.max(0, Math.min(100, score));
-    const level = score <= 25 ? "critical" : score <= 50 ? "high" : score <= 75 ? "medium" : "low";
-    return { score, level, factors };
-  };
-
-  const sim = isGoogleGuide ? computeGoogleSimScore() : computeMsSimScore();
-  const simScenario = isGoogleGuide ? gSim : msSim;
-  const setSimScenario = isGoogleGuide ? setGSim : setMsSim;
-
-  // ── Signal catalog rows ────────────────────────────────────────────
-  const msSignals = [
-    { signal: "Broad connector scopes (Mail.ReadWrite, Sites.ReadWrite.All)", weight: "Critical", impact: "-20", source: "Power Platform API", how: "Checks connector permissions against dangerous scope list" },
-    { signal: "No assigned owner (orphaned agent)", weight: "Critical", impact: "-20", source: "Dataverse + Graph", how: "Resolves bot createdby \u2192 Dataverse user \u2192 Entra ID accountEnabled" },
-    { signal: "Stale agent (30+ days inactive)", weight: "High", impact: "-12", source: "Dataverse sessions + chats", how: "Computes days since last session; chats feed into activity tracking" },
-    { signal: "Expired renewal date", weight: "Medium", impact: "-10", source: "CloudFuze agent_registry", how: "Admin sets renewal date during governance review; triggers risk deduction when past due without re-certification" },
-    { signal: "All-user Teams deployment", weight: "Medium", impact: "-10", source: "Graph appCatalogs", how: "Checks consentType === 'AllPrincipals' from app registration" },
-    { signal: "HTTP connector present", weight: "Medium", impact: "-10", source: "Connector config", how: "Detects HTTP connector type in bot's connector list" },
-    { signal: "Sensitive keywords in name/description", weight: "Low", impact: "-5", source: "Dataverse name/desc", how: "Scans for keywords: password, secret, credential, PII, HIPAA, etc." },
-    { signal: "Multiple read permissions", weight: "Low", impact: "-5", source: "Connector config", how: "Counts read-level permissions (Mail.Read, Files.Read.All, etc.)" },
-    { signal: "No governance policy applied", weight: "Low", impact: "flag only", source: "CloudFuze", how: "Flags agents not covered by any CloudFuze governance policy" },
-  ];
-
-  const googleSignalHowTo = {
-    sensitive_oauth_scopes:        "Reads the Workspace app-manifest + admin OAuth audit; flags scopes starting with drive.*, gmail.*, chat.bot, chat.spaces.*, admin.directory.* when consent is Tenant or AllPrincipals",
-    orphaned_owner:                "Resolves agent owner → Workspace admin.directory.users → accountEnabled; also flags displayName of 'Unknown' or 'Former Employee'",
-    external_chat_space:           "Detects google_chat_bots agents with tenant-wide deployment OR any agent holding chat.bot / chat.spaces scopes at Tenant consent",
-    agent_builder_with_datastores: "Inspects discoveryengine.dataStores bound to the Agent Builder agent and its connector graph (BigQuery / Drive / Vector Search)",
-    stale_30_days:                 "Queries Cloud Logging aiplatform.googleapis.com + Gem activation logs; fires when no invocation has been observed for 30+ days",
-    apps_script_http_trigger:      "Lists Apps Script web-app deployments + Cloud Function HTTP triggers linked to the agent; fires when a webhook is reachable from the open internet",
-    expired_renewal:               "Reads the CloudFuze agent_registry renewal date; fires when past due with no re-certification recorded",
-    shared_gemini_gem:             "Reads gem.visibility from the Gemini Workspace admin API; fires for tenant-wide or group-shared Gems",
-    sensitive_keywords:            "Scans agent name/description for keywords such as patient, PHI, HIPAA, SSN, claim, revenue, billing, genetic, prescription, credential, secret, …",
-    multiple_read_scopes:          "Counts simultaneous read scopes across Workspace + GCP (.readonly, .dataViewer, .viewer, .subscriber, messages.readonly)",
-    no_policy_applied:             "Checks whether any CloudFuze governance policy is currently bound to the agent",
-  };
-
-  const googleSignals = Object.entries(GOOGLE_RISK_SIGNALS).map(([key, cat]) => ({
-    signal: cat.label,
-    weight: cat.weight.charAt(0).toUpperCase() + cat.weight.slice(1),
-    impact: cat.deduction === 0 ? "flag only" : `${cat.deduction}`,
-    source: cat.source,
-    how: googleSignalHowTo[key] || "",
-  }));
-
-  const signalRows = isGoogleGuide ? googleSignals : msSignals;
-
-  const msSimOpts = [
-    { key: "orphaned", label: "Agent has no owner (orphaned)", weight: "CRITICAL -20" },
-    { key: "broadPerms", label: "Has broad connector scopes", weight: "CRITICAL -20" },
-    { key: "stale", label: "No activity in 30+ days", weight: "HIGH -12" },
-    { key: "expiredRenewal", label: "Renewal date expired", weight: "MED -10" },
-    { key: "allUsersScope", label: "Deployed to all users (Teams)", weight: "MED -10" },
-    { key: "httpConnector", label: "HTTP connector present", weight: "MED -10" },
-    { key: "sensitiveKw", label: "Sensitive keywords in name/description", weight: "LOW -5" },
-  ];
-
-  const googleSimOpts = [
-    { key: "sensitive_oauth_scopes", label: "Sensitive OAuth scopes (Drive / Gmail / Chat) tenant-wide", weight: "CRITICAL -20" },
-    { key: "orphaned_owner", label: "Google account disabled / owner = 'Unknown'", weight: "CRITICAL -20" },
-    { key: "external_chat_space", label: "Chat bot reachable from external / tenant-wide space", weight: "HIGH -15" },
-    { key: "agent_builder_with_datastores", label: "Agent Builder backed by BigQuery / Drive data stores", weight: "HIGH -15" },
-    { key: "stale_30_days", label: "No Vertex / Gem activity in 30+ days", weight: "HIGH -12" },
-    { key: "apps_script_http_trigger", label: "Apps Script / HTTP webhook reachable from the open internet", weight: "MED -10" },
-    { key: "expired_renewal", label: "Annual governance review overdue", weight: "MED -10" },
-    { key: "shared_gemini_gem", label: "Gemini Gem shared tenant-wide", weight: "MED -10" },
-    { key: "sensitive_keywords", label: "Sensitive keywords (PHI / claims / secret / …)", weight: "LOW -5" },
-    { key: "multiple_read_scopes", label: "Multiple simultaneous read scopes (Workspace + GCP)", weight: "LOW -5" },
-  ];
-
-  const simOpts = isGoogleGuide ? googleSimOpts : msSimOpts;
+  const sim = computeSimScore();
 
   return (
     <div style={{ marginTop: 16, background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, overflow: "hidden" }}>
@@ -1192,20 +1149,12 @@ function RiskScoringGuide({ vendor = "microsoft" }) {
         <div style={{ padding: 16 }}>
           {/* Score bands */}
           <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
-            {(isGoogleGuide
-              ? [
-                  { level: "Low", range: "76-100", color: "#22c55e", desc: "Healthy — within acceptable risk" },
-                  { level: "Medium", range: "51-75", color: "#3b82f6", desc: "Monitor — some risk signals present" },
-                  { level: "High", range: "26-50", color: "#f59e0b", desc: "Needs review — multiple risk factors" },
-                  { level: "Critical", range: "0-25", color: "#ef4444", desc: "Immediate action — severe risk" },
-                ]
-              : [
-                  { level: "Low", range: "80-100", color: "#22c55e", desc: "Healthy — within acceptable risk" },
-                  { level: "Medium", range: "60-79", color: "#3b82f6", desc: "Monitor — some risk signals present" },
-                  { level: "High", range: "40-59", color: "#f59e0b", desc: "Needs review — multiple risk factors" },
-                  { level: "Critical", range: "0-39", color: "#ef4444", desc: "Immediate action — severe risk" },
-                ]
-            ).map(b => (
+            {[
+              { level: "Low", range: "76-100", color: "#22c55e", desc: "Healthy — within acceptable risk" },
+              { level: "Medium", range: "51-75", color: "#3b82f6", desc: "Monitor — some risk signals present" },
+              { level: "High", range: "26-50", color: "#f59e0b", desc: "Needs review — multiple risk factors" },
+              { level: "Critical", range: "0-25", color: "#ef4444", desc: "Immediate action — severe risk" },
+            ].map(b => (
               <div key={b.level} style={{ flex: 1, padding: "10px 12px", borderRadius: 8, border: `1px solid ${b.color}33`, background: `${b.color}08` }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
                   <div style={{ width: 10, height: 10, borderRadius: 2, background: b.color }} />
@@ -1231,7 +1180,17 @@ function RiskScoringGuide({ vendor = "microsoft" }) {
                 </tr>
               </thead>
               <tbody>
-                {signalRows.map((r, i) => (
+                {[
+                  { signal: "Broad connector scopes (Mail.ReadWrite, Sites.ReadWrite.All)", weight: "Critical", impact: "-20", source: "Power Platform API", how: "Checks connector permissions against dangerous scope list" },
+                  { signal: "No assigned owner (orphaned agent)", weight: "Critical", impact: "-20", source: "Dataverse + Graph", how: "Resolves bot createdby \u2192 Dataverse user \u2192 Entra ID accountEnabled" },
+                  { signal: "Stale agent (30+ days inactive)", weight: "High", impact: "-12", source: "Dataverse sessions + chats", how: "Computes days since last session; chats feed into activity tracking" },
+                  { signal: "Expired renewal date", weight: "Medium", impact: "-10", source: "CloudFuze agent_registry", how: "Admin sets renewal date during governance review; triggers risk deduction when past due without re-certification" },
+                  { signal: "All-user Teams deployment", weight: "Medium", impact: "-10", source: "Graph appCatalogs", how: "Checks consentType === 'AllPrincipals' from app registration" },
+                  { signal: "HTTP connector present", weight: "Medium", impact: "-10", source: "Connector config", how: "Detects HTTP connector type in bot's connector list" },
+                  { signal: "Sensitive keywords in name/description", weight: "Low", impact: "-5", source: "Dataverse name/desc", how: "Scans for keywords: password, secret, credential, PII, HIPAA, etc." },
+                  { signal: "Multiple read permissions", weight: "Low", impact: "-5", source: "Connector config", how: "Counts read-level permissions (Mail.Read, Files.Read.All, etc.)" },
+                  { signal: "No governance policy applied", weight: "Low", impact: "flag only", source: "CloudFuze", how: "Flags agents not covered by any CloudFuze governance policy" },
+                ].map((r, i) => (
                   <tr key={i} style={{ borderBottom: "1px solid var(--ag-border)" }}>
                     <td style={{ padding: "5px 8px" }}>{r.signal}</td>
                     <td style={{ padding: "5px 8px" }}>
@@ -1254,7 +1213,15 @@ function RiskScoringGuide({ vendor = "microsoft" }) {
             <div style={{ display: "flex", gap: 24 }}>
               <div style={{ flex: 1 }}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {simOpts.map(opt => (
+                  {[
+                    { key: "orphaned", label: "Agent has no owner (orphaned)", weight: "CRITICAL -20" },
+                    { key: "broadPerms", label: "Has broad connector scopes", weight: "CRITICAL -20" },
+                    { key: "stale", label: "No activity in 30+ days", weight: "HIGH -12" },
+                    { key: "expiredRenewal", label: "Renewal date expired", weight: "MED -10" },
+                    { key: "allUsersScope", label: "Deployed to all users (Teams)", weight: "MED -10" },
+                    { key: "httpConnector", label: "HTTP connector present", weight: "MED -10" },
+                    { key: "sensitiveKw", label: "Sensitive keywords in name/description", weight: "LOW -5" },
+                  ].map(opt => (
                     <label key={opt.key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, cursor: "pointer" }}>
                       <input
                         type="checkbox"
@@ -1300,44 +1267,21 @@ function RiskScoringGuide({ vendor = "microsoft" }) {
             <div style={{ fontWeight: 700, fontSize: 12, color: "#4338ca", marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
               <MessageSquare size={14} /> How User Chats & Files Affect Risk
             </div>
-            {isGoogleGuide ? (
-              <div style={{ fontSize: 11, color: "#4338ca", lineHeight: 1.7 }}>
-                <strong>User Chats (Gemini &amp; Chat transcripts):</strong> Conversation volume per agent is read from the
-                Gemini Workspace admin API and Chat API. It feeds the <strong>"No Vertex / Gem activity in 30+ days"</strong>
-                signal — if an agent hasn't been invoked within 30 days it takes a <strong>-12 point (High) deduction</strong>.
-                Agents with zero conversations surface as potentially unused in Stale Agents.
-                <br /><br />
-                <strong>Files &amp; Knowledge (Drive / BigQuery / Vertex DataStore / GCS):</strong> Knowledge bindings
-                (discoveryengine.dataStores, BigQuery dataset grants, Drive folder shares, Vector Search indexes)
-                directly drive the <strong>"Agent Builder with data stores"</strong> and <strong>"Multiple read scopes"</strong> signals.
-                File activity events (TableQueried, ObjectWritten, FileAccessed, MessageSent) come from Cloud Logging
-                and Drive Activity API.
-                <br /><br />
-                <strong>Renewal Date:</strong> The annual governance review date comes from the CloudFuze
-                agent_registry. When the review is overdue without a re-certification, the
-                <strong> "Expired renewal"</strong> signal triggers a <strong>-10 point deduction</strong>.
-                <br /><br />
-                <strong>Note:</strong> Google risk scoring uses the standard bands
-                <em> critical ≤ 25</em>, <em>high ≤ 50</em>, <em>medium ≤ 75</em>, otherwise <em>low</em>,
-                with a base −5 deduction applied to every agent to match Microsoft's baseline.
-              </div>
-            ) : (
-              <div style={{ fontSize: 11, color: "#4338ca", lineHeight: 1.7 }}>
-                <strong>User Chats (Conversation Transcripts):</strong> The number of conversations is tracked per agent from Dataverse.
-                This directly feeds the <strong>"Stale agent"</strong> signal — if an agent has sessions but the last one was 30+ days ago, it gets a <strong>-12 point (High) deduction</strong>.
-                Agents with zero conversations are flagged as potentially unused.
-                <br /><br />
-                <strong>Files &amp; Audit Logs:</strong> File access events from O365 Audit API (SharePoint/OneDrive operations) are monitored.
-                While file access cannot always be definitively attributed to a specific Copilot Studio agent at runtime, the audit data informs overall tenant activity.
-                <br /><br />
-                <strong>Renewal Date:</strong> Admins set a renewal date during governance review to schedule the next re-certification.
-                If no renewal date is set, the column shows the agent's creation date from Dataverse instead.
-                Once a renewal date passes without re-certification, the <strong>"Overdue for renewal"</strong> signal triggers a <strong>-10 point deduction</strong>.
-                <br /><br />
-                <strong>Note:</strong> Risk scoring is based on <em>configuration posture</em>, not observed runtime behavior.
-                Specific runtime actions (e.g., which files an agent read) are only visible when an audit event is generated.
-              </div>
-            )}
+            <div style={{ fontSize: 11, color: "#4338ca", lineHeight: 1.7 }}>
+              <strong>User Chats (Conversation Transcripts):</strong> The number of conversations is tracked per agent from Dataverse.
+              This directly feeds the <strong>"Stale agent"</strong> signal — if an agent has sessions but the last one was 30+ days ago, it gets a <strong>-12 point (High) deduction</strong>.
+              Agents with zero conversations are flagged as potentially unused.
+              <br /><br />
+              <strong>Files & Audit Logs:</strong> File access events from O365 Audit API (SharePoint/OneDrive operations) are monitored.
+              While file access cannot always be definitively attributed to a specific Copilot Studio agent at runtime, the audit data informs overall tenant activity.
+              <br /><br />
+              <strong>Renewal Date:</strong> Admins set a renewal date during governance review to schedule the next re-certification.
+              If no renewal date is set, the column shows the agent's creation date from Dataverse instead.
+              Once a renewal date passes without re-certification, the <strong>"Overdue for renewal"</strong> signal triggers a <strong>-10 point deduction</strong>.
+              <br /><br />
+              <strong>Note:</strong> Risk scoring is based on <em>configuration posture</em>, not observed runtime behavior.
+              Specific runtime actions (e.g., which files an agent read) are only visible when an audit event is generated.
+            </div>
           </div>
 
         </div>
@@ -1361,9 +1305,9 @@ function computeDiscoveredAgentRisk(agent) {
     factors.push({ signal: "Moderate permissions", weight: "medium", description: `Agent has ${permCount} permissions` });
   }
 
-  if (!agent.owner?.displayName || agent.owner?.displayName === "Unknown" || agent.isOrphaned || agent.owner?.accountEnabled === false) {
+  if (!agent.owner?.displayName) {
     score -= 20;
-    factors.push({ signal: "No identified owner", weight: "high", description: "Agent has no clear owner — orphaned agent" });
+    factors.push({ signal: "No identified owner", weight: "high", description: "Agent has no clear owner — may be orphaned" });
     recommendations.push(`Assign an owner to "${agent.name}" to ensure accountability.`);
   }
 
@@ -1395,54 +1339,88 @@ function computeDiscoveredAgentRisk(agent) {
 }
 
 function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [], applicationLabel, application = "copilot_studio", enabled = true, searchQuery = "", agentFilter = "all" }) {
-  const [riskData, setRiskData] = useState(DEMO_RISK_SUMMARY);
+  const [riskData, setRiskData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [expandedBot, setExpandedBot] = useState(null);
-  const isGoogleApplication = APP_OPTIONS.find((a) => a.id === application)?.vendor === "google";
-  const loadRisk = async () => {
-    setLoading(true);
-    await new Promise((r) => setTimeout(r, 12000));
-    setRiskData(DEMO_RISK_SUMMARY);
-    setLoading(false);
-  };
+
+  const [blockedAgents, setBlockedAgents] = useState(new Set());
+  const [blockFeedback, setBlockFeedback] = useState({});
 
   const isCopilotStudio = application === "copilot_studio";
+
+  // Load blocked agents on mount
+  useEffect(() => {
+    agentGovernanceApi.getBlockedAgents()
+      .then((list) => setBlockedAgents(new Set((list || []).map(b => b.agent_id))))
+      .catch(() => {});
+  }, []);
+
+  const handleBlockToggle = async (agent) => {
+    const agentId = agent.botId || agent.id;
+    const isBlocked = blockedAgents.has(agentId);
+    try {
+      if (isBlocked) {
+        await agentGovernanceApi.unblockAgent({ agent_id: agentId });
+        setBlockedAgents(prev => { const n = new Set(prev); n.delete(agentId); return n; });
+        setBlockFeedback(prev => ({ ...prev, [agentId]: { ok: true, msg: "Unblocked" } }));
+      } else {
+        await agentGovernanceApi.blockAgent({
+          agent_id: agentId,
+          agent_name: agent.botName || agent.name,
+          platform: agent.platform || application,
+          reason: "Blocked by admin from Risk Management",
+        });
+        setBlockedAgents(prev => new Set([...prev, agentId]));
+        setBlockFeedback(prev => ({ ...prev, [agentId]: { ok: true, msg: "Blocked" } }));
+      }
+    } catch (err) {
+      setBlockFeedback(prev => ({ ...prev, [agentId]: { ok: false, msg: err.message } }));
+    }
+    setTimeout(() => setBlockFeedback(prev => { const n = { ...prev }; delete n[agentId]; return n; }), 3000);
+  };
+
+  const loadRisk = async () => {
+    if (!oauthKeyId) return;
+    if (!isCopilotStudio) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await agentGovernanceApi.fetchRiskSummary(oauthKeyId, dataverseEnvUrl || undefined);
+      setRiskData(result);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (oauthKeyId && enabled && isCopilotStudio) loadRisk();
+  }, [oauthKeyId, enabled, isCopilotStudio]);
 
   // For non-Copilot-Studio apps, use discovery scan's pre-computed risk (from assessRisk in riskService)
   const discoveryAgentsWithRisk = useMemo(() => {
     if (isCopilotStudio || discoveredAgents.length === 0) return [];
-    return discoveredAgents.map((a, idx) => {
+    return discoveredAgents.map((a) => {
       const risk = a.risk || computeDiscoveredAgentRisk(a);
-      const ownerName = a.owner?.displayName;
-      const isOrphaned = a.isOrphaned || !ownerName || ownerName === "Unknown" || a.owner?.accountEnabled === false;
-      const totalUsage = a.activity?.totalInvocations || 0;
-      const chatCount = totalUsage;
-      const sessionCount = Math.round(totalUsage * (0.15 + (idx % 5) * 0.05));
-      const hasRenewal = idx % 3 !== 2;
-      let renewalDate = null;
-      let isExpiredRenewal = false;
-      if (hasRenewal) {
-        const offsetDays = idx % 5 === 0 ? -10 : idx % 5 === 1 ? 7 : idx % 5 === 3 ? 45 : 75;
-        renewalDate = new Date(Date.now() + offsetDays * 86400000).toISOString();
-        isExpiredRenewal = offsetDays < 0;
-      }
+      const isOrphaned = !a.owner?.displayName || a.isOrphaned;
       return {
         botId: a.id || a.botId,
         botName: a.name,
         description: a.description || `${a.platform} agent`,
-        ownerName: isOrphaned ? "Unknown" : ownerName,
+        ownerName: a.owner?.displayName || "Unknown",
         isOrphaned,
         status: a.lifecycleStatus || "unknown",
         risk,
-        sessionCount,
-        conversationCount: chatCount,
+        sessionCount: a.activity?.totalInvocations || 0,
+        conversationCount: a.activity?.totalConversations || 0,
         lastActivity: a.activity?.lastActiveTimestamp || null,
         createdOn: a.createdOn || a.registeredOn || null,
         modifiedOn: a.modifiedOn || null,
-        renewalDate,
+        renewalDate: null,
         renewalPeriodDays: 90,
-        isExpiredRenewal,
+        isExpiredRenewal: false,
         platform: a.platform,
         connectors: a.connectors,
         permissions: a.permissions,
@@ -1467,35 +1445,22 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
   // Copilot Studio fallback: if /risk-summary returned nothing but we have discovered agents
   const copilotFallbackAgents = useMemo(() => {
     if (!isCopilotStudio || dataverseAgents.length > 0 || discoveredAgents.length === 0) return [];
-    return discoveredAgents.map((a, idx) => {
+    return discoveredAgents.map((a) => {
       const risk = a.risk || computeDiscoveredAgentRisk(a);
-      const totalUsage = a.activity?.totalInvocations || 0;
-      const chatCount = totalUsage;
-      const sessionCount = Math.round(totalUsage * (0.15 + (idx % 5) * 0.05));
-      const cfOwnerName = a.owner?.displayName;
-      const cfIsOrphaned = a.isOrphaned || !cfOwnerName || cfOwnerName === "Unknown" || a.owner?.accountEnabled === false;
-      const hasRenewal = idx % 3 !== 2;
-      let renewalDate = null;
-      let isExpiredRenewal = false;
-      if (hasRenewal) {
-        const offsetDays = idx % 5 === 0 ? -10 : idx % 5 === 1 ? 7 : idx % 5 === 3 ? 45 : 75;
-        renewalDate = new Date(Date.now() + offsetDays * 86400000).toISOString();
-        isExpiredRenewal = offsetDays < 0;
-      }
       return {
         botId: a.id || a.botId,
         botName: a.name,
         description: a.description || `${a.platform} agent`,
-        ownerName: cfIsOrphaned ? "Unknown" : cfOwnerName,
-        isOrphaned: cfIsOrphaned,
+        ownerName: a.owner?.displayName || "Unknown",
+        isOrphaned: !a.owner?.displayName,
         status: a.lifecycleStatus || "unknown",
         risk,
-        sessionCount,
-        conversationCount: chatCount,
+        sessionCount: a.activity?.totalInvocations || 0,
+        conversationCount: 0,
         lastActivity: a.activity?.lastActiveTimestamp || null,
-        renewalDate,
+        renewalDate: null,
         renewalPeriodDays: 90,
-        isExpiredRenewal,
+        isExpiredRenewal: false,
         platform: a.platform,
         connectors: a.connectors,
         permissions: a.permissions,
@@ -1577,7 +1542,7 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                 padding: "10px 16px", minWidth: 110,
               }}>
                 <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", marginBottom: 2 }}>{s.label}</div>
-                <div style={{ fontSize: 22, fontWeight: 700, color: "var(--ag-text-primary)" }}>{s.value}</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color: s.color }}>{s.value}</div>
                 <div style={{ fontSize: 9, color: "#999" }}>{s.sub}</div>
               </div>
             ))}
@@ -1596,6 +1561,7 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                   <th style={thStyle}>Activity</th>
                   <th style={thStyle}>Renewal</th>
                   <th style={thStyle}>Risk Factors</th>
+                  <th style={thStyle}>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1622,6 +1588,7 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                             <Bot size={14} color="#6366f1" />
                             <div>
                               <div style={{ fontWeight: 600, color: "var(--ag-text-primary)" }}>{agent.botName}</div>
+                              <div style={{ fontSize: 9, color: "#999", fontFamily: "monospace" }}>{agent.botId?.substring(0, 12)}...</div>
                             </div>
                           </div>
                         </td>
@@ -1708,12 +1675,38 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                             <div style={{ fontSize: 9, color: "#6366f1", marginTop: 2 }}>{isExpanded ? "Click to collapse" : "Click for full breakdown"}</div>
                           </div>
                         </td>
+                        <td style={{ padding: "10px 8px" }} onClick={(e) => e.stopPropagation()}>
+                          {(() => {
+                            const agentId = agent.botId || agent.id;
+                            const fb = blockFeedback[agentId];
+                            if (fb) {
+                              return <span style={{ fontSize: 10, fontWeight: 600, color: fb.ok ? "#16a34a" : "#dc2626" }}>{fb.msg}</span>;
+                            }
+                            const isBlocked = blockedAgents.has(agentId);
+                            return (
+                              <button
+                                onClick={() => handleBlockToggle(agent)}
+                                title={isBlocked ? "Unblock this agent" : "Block this agent for all users"}
+                                style={{
+                                  display: "inline-flex", alignItems: "center", gap: 4,
+                                  padding: "4px 10px", borderRadius: 6, fontSize: 11, fontWeight: 600,
+                                  cursor: "pointer", fontFamily: "inherit",
+                                  border: isBlocked ? "1px solid #22c55e44" : "1px solid #ef444444",
+                                  background: isBlocked ? "#f0fdf4" : "#fef2f2",
+                                  color: isBlocked ? "#16a34a" : "#dc2626",
+                                }}
+                              >
+                                <Lock size={11} /> {isBlocked ? "Unblock" : "Block"}
+                              </button>
+                            );
+                          })()}
+                        </td>
                       </tr>
 
                       {/* Expanded Risk Breakdown */}
                       {isExpanded && (
                         <tr key={`${agent.botId}-breakdown`} style={{ borderBottom: "2px solid var(--ag-border)" }}>
-                          <td colSpan={8} style={{ padding: 0 }}>
+                          <td colSpan={9} style={{ padding: 0 }}>
                             <div style={{ padding: "12px 16px", background: "#f8f9fb", borderTop: "1px dashed var(--ag-border)" }}>
                               <div style={{ fontWeight: 700, fontSize: 12, color: "#4338ca", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
                                 <ShieldAlert size={14} /> Full Risk Breakdown — {agent.botName}
@@ -1728,35 +1721,12 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                                   <div style={{ fontSize: 11, fontWeight: 600, color: "var(--ag-text-primary)", marginBottom: 6 }}>Score Computation</div>
                                   <div style={{ fontSize: 11, fontFamily: "monospace", background: "#fff", padding: 10, borderRadius: 6, border: "1px solid var(--ag-border)", lineHeight: 1.8 }}>
                                     <div>Start: <span style={{ color: "#22c55e", fontWeight: 700 }}>100</span></div>
-                                    <div style={{ color: "#22c55e" }}>Base risk ({agent.risk?.level || "low"}): <span style={{ fontWeight: 700 }}>-5</span></div>
+                                    <div style={{ color: "#f59e0b" }}>Base risk ({agent.risk?.level || "low"}): <span style={{ fontWeight: 700 }}>-5</span></div>
                                     {allFactors.filter(f => f.weight !== "info").map((f, i) => {
-                                      // Color each signal by its severity so
-                                      // the breakdown visually matches the
-                                      // dots in the collapsed row and the
-                                      // risk-signal table in the scoring
-                                      // guide: critical=red, high=amber,
-                                      // medium=blue, low=green.
-                                      const hasDeduction = typeof f.deduction === "number";
-                                      const isDeduction = hasDeduction
-                                        ? f.deduction < 0
-                                        : (f.weight === "critical" || f.weight === "high" || f.weight === "medium" || f.weight === "low");
-                                      const isFlagOnly = hasDeduction && f.deduction === 0;
-                                      const WEIGHT_COLORS = { critical: "#ef4444", high: "#f59e0b", medium: "#3b82f6", low: "#22c55e" };
-                                      const color = isFlagOnly
-                                        ? "#9ca3af"
-                                        : WEIGHT_COLORS[f.weight] || (isDeduction ? "#ef4444" : "#22c55e");
-                                      const label = isFlagOnly
-                                        ? "flag only"
-                                        : isDeduction
-                                          ? (hasDeduction ? `${f.deduction}` : "deducted")
-                                          : "bonus";
+                                      const isDeduction = f.weight === "high" || f.weight === "medium" || f.weight === "low";
                                       return (
-                                        <div key={i} style={{ color, display: "flex", alignItems: "center", gap: 6 }}>
-                                          <span style={{
-                                            width: 6, height: 6, borderRadius: "50%",
-                                            background: color, flexShrink: 0,
-                                          }} />
-                                          {f.signal}: <span style={{ fontWeight: 700 }}>{label}</span>
+                                        <div key={i} style={{ color: isDeduction ? "#ef4444" : "#22c55e" }}>
+                                          {f.signal}: <span style={{ fontWeight: 700 }}>{isDeduction ? `deducted` : `bonus`}</span>
                                           <span style={{ color: "#999", fontSize: 10 }}> ({f.weight})</span>
                                         </div>
                                       );
@@ -1842,7 +1812,7 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
           )}
 
           {/* Risk Scoring Guide */}
-          <RiskScoringGuide vendor={isGoogleApplication ? "google" : "microsoft"} />
+          <RiskScoringGuide />
         </>
       ) : (
         <div style={{ textAlign: "center", padding: 60, color: "var(--ag-text-secondary)" }}>
@@ -1861,37 +1831,51 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
 }
 
 const APP_OPTIONS = [
-  // Microsoft
-  { id: "copilot_studio", label: "Copilot Studio", color: "#742774", vendor: "microsoft" },
-  { id: "personal_agent", label: "Personal Agents", color: "#2563eb", vendor: "microsoft" },
-  { id: "sharepoint_agent", label: "SharePoint Agents", color: "#059669", vendor: "microsoft" },
-  { id: "azure_foundry", label: "Azure AI Foundry", color: "#0078D4", vendor: "microsoft" },
-  // Google
-  { id: "agent_builder", label: "Agent Builder", color: "#4285F4", vendor: "google" },
-  { id: "gemini_gems", label: "Gemini Gems", color: "#886FBF", vendor: "google" },
-  { id: "notebook_lm", label: "NotebookLM", color: "#EA4335", vendor: "google" },
-  { id: "google_chat_bots", label: "Chat Bots", color: "#00AC47", vendor: "google" },
-  { id: "reasoning_engines", label: "Reasoning Engines", color: "#0F9D58", vendor: "google" },
+  { id: "copilot_studio", label: "Copilot Studio", color: "#742774" },
+  { id: "personal_agent", label: "Personal Agents", color: "#2563eb" },
+  { id: "sharepoint_agent", label: "SharePoint Agents", color: "#059669" },
+  { id: "azure_foundry", label: "Azure AI Foundry", color: "#0078D4" },
+  { id: "google_reasoning_engines", label: "Reasoning Engines", color: "#4285F4" },
+  { id: "google_agent_builder", label: "Agent Builder", color: "#EA4335" },
+  { id: "google_chat_bots", label: "Google Chat Bots", color: "#34A853" },
+  { id: "google_gems", label: "Gemini Gems", color: "#FBBC04" },
+  { id: "google_notebooklm", label: "NotebookLM", color: "#9334E6" },
+  { id: "openai_assistant", label: "OpenAI Assistants", color: "#10a37f" },
+  { id: "custom_gpt", label: "Custom GPTs", color: "#7c3aed" },
+  { id: "claude_ai_project", label: "Claude.ai Projects", color: "#D4622A" },
+  { id: "gemini_enterprise", label: "Gemini Enterprise", color: "#886FBF" },
 ];
+
+const GOOGLE_APP_IDS = new Set([
+  "google_reasoning_engines",
+  "google_agent_builder",
+  "google_chat_bots",
+  "google_gems",
+  "google_notebooklm",
+]);
+
+const OPENAI_APP_IDS = new Set(["openai_assistant", "custom_gpt"]);
+const CLAUDE_APP_IDS = new Set(["claude_ai_project"]);
+const GEMINI_ENTERPRISE_APP_IDS = new Set(["gemini_enterprise"]);
 
 // Azure Risk Panel — shows Azure-specific governance signals
 function AzureRiskPanel({ oauthKeyId }) {
-  const demoAzureRisk = {
-    openAIResources: DEMO_AZURE_AI.aiServices.filter((s) => s.kind === "OpenAI").map((s) => ({
-      ...s, publicAccess: "Enabled", localAuthDisabled: false,
-      deployments: DEMO_AZURE_AI.deployments.filter((d) => d.resourceName === s.name).map((d) => ({ ...d, contentFilter: d.model.includes("gpt-4") ? "nsi-safety-policy" : null })),
-    })),
-    accessControl: [
-      { principalType: "User", roleName: "Cognitive Services OpenAI Contributor", principalName: "David Nakamura" },
-      { principalType: "User", roleName: "Cognitive Services OpenAI Contributor", principalName: "Marcus Williams" },
-      { principalType: "User", roleName: "Owner", principalName: "Carlos Brooks" },
-      { principalType: "ServicePrincipal", roleName: "Cognitive Services OpenAI User", principalName: "Fraud Detection Engine" },
-      { principalType: "ServicePrincipal", roleName: "Cognitive Services OpenAI User", principalName: "Document Processing AI" },
-      { principalType: "ServicePrincipal", roleName: "Cognitive Services OpenAI User", principalName: "Underwriting Risk Analyzer" },
-      { principalType: "ServicePrincipal", roleName: "Cognitive Services OpenAI User", principalName: "Claims Photo Analyzer" },
-    ],
-  };
-  const data = demoAzureRisk;
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!oauthKeyId) return;
+    setLoading(true);
+    agentGovernanceApi.discoverAzureAI(oauthKeyId)
+      .then((result) => setData(result))
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, [oauthKeyId]);
+
+  if (loading) return <LoadingSpinner message="Analyzing Azure AI risk posture..." />;
+  if (error) return <div style={{ padding: 20, color: "#ef4444", fontSize: 12 }}>{error}</div>;
+  if (!data) return null;
 
   // Compute risk signals from Azure data
   const publicOpenAI = data.openAIResources.filter((r) => r.publicAccess !== "Disabled");
@@ -1922,20 +1906,20 @@ function AzureRiskPanel({ oauthKeyId }) {
       <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
         <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "16px 24px", minWidth: 160 }}>
           <div style={{ fontSize: 11, color: "#999", marginBottom: 4 }}>Azure AI Risk Score</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: "var(--ag-text-primary)" }}>{Math.max(0, overallScore)}</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: RISK_COLORS[overallLevel] }}>{Math.max(0, overallScore)}</div>
           <RiskBadge level={overallLevel} />
         </div>
         <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "16px 24px", minWidth: 120 }}>
           <div style={{ fontSize: 11, color: "#999", marginBottom: 4 }}>OpenAI Resources</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: "var(--ag-text-primary)" }}>{data.openAIResources.length}</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: "#10b981" }}>{data.openAIResources.length}</div>
         </div>
         <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "16px 24px", minWidth: 120 }}>
           <div style={{ fontSize: 11, color: "#999", marginBottom: 4 }}>Model Deployments</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: "var(--ag-text-primary)" }}>{data.openAIResources.reduce((s, r) => s + r.deployments.length, 0)}</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: "#6366f1" }}>{data.openAIResources.reduce((s, r) => s + r.deployments.length, 0)}</div>
         </div>
         <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "16px 24px", minWidth: 120 }}>
           <div style={{ fontSize: 11, color: "#999", marginBottom: 4 }}>RBAC Assignments</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: "var(--ag-text-primary)" }}>{data.accessControl.length}</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: "#f59e0b" }}>{data.accessControl.length}</div>
         </div>
       </div>
 
@@ -2024,16 +2008,19 @@ function AzureRiskPanel({ oauthKeyId }) {
 
 // Azure Knowledge Panel — shows OpenAI data sources / grounding config
 function AzureKnowledgePanel({ oauthKeyId }) {
-  const data = {
-    openAIResources: DEMO_AZURE_AI.aiServices.filter((s) => s.kind === "OpenAI").map((s) => ({
-      ...s, publicAccess: "Enabled", localAuthDisabled: false, skuName: s.sku,
-      deployments: DEMO_AZURE_AI.deployments.filter((d) => d.resourceName === s.name).map((d) => ({
-        id: d.name, name: d.name, modelName: d.model, modelVersion: d.version,
-        contentFilter: d.model.includes("gpt-4") ? "nsi-safety-policy" : null,
-        capacityTPM: d.capacity * 1000,
-      })),
-    })),
-  };
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!oauthKeyId) return;
+    setLoading(true);
+    agentGovernanceApi.discoverAzureAI(oauthKeyId)
+      .then((result) => setData(result))
+      .finally(() => setLoading(false));
+  }, [oauthKeyId]);
+
+  if (loading) return <LoadingSpinner message="Loading Azure AI resource details..." />;
+  if (!data) return null;
 
   return (
     <div>
@@ -2110,23 +2097,31 @@ function AzureKnowledgePanel({ oauthKeyId }) {
 // ── Azure Conversations Panel — real thread data ──
 function AzureConversationsPanel({ oauthKeyId }) {
   const [threads, setThreads] = useState([]);
+  const [usage, setUsage] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [loaded, setLoaded] = useState(false);
   const [expandedThread, setExpandedThread] = useState(null);
-  const usage = {
-    totalRequests: 342800,
-    totalTokens: 187400000,
-    resources: DEMO_AZURE_AI.aiServices.filter((s) => s.kind === "OpenAI").map((s) => ({
-      resourceName: s.name,
-      metrics: {
-        deployments: DEMO_AZURE_AI.deployments.filter((d) => d.resourceName === s.name).map((d) => ({
-          deploymentName: d.name, requestCount: Math.floor(Math.random() * 50000) + 10000,
-          promptTokens: Math.floor(Math.random() * 20000000) + 5000000,
-          completionTokens: Math.floor(Math.random() * 10000000) + 2000000,
-          totalTokens: Math.floor(Math.random() * 30000000) + 7000000,
-        })),
-      },
-    })),
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [threadData, usageData] = await Promise.all([
+        agentGovernanceApi.fetchAzureThreads(oauthKeyId),
+        agentGovernanceApi.fetchAzureUsage(oauthKeyId, "P7D"),
+      ]);
+      setThreads(threadData.threads || []);
+      setUsage(usageData);
+      setLoaded(true);
+    } catch (err) {
+      setError(err.message || "Failed to load Azure conversations");
+    } finally {
+      setLoading(false);
+    }
   };
-  const loaded = true;
+
+  useEffect(() => { if (oauthKeyId && !loaded) load(); }, [oauthKeyId]);
 
   if (loading && !loaded) return <LoadingSpinner message="Loading Azure AI conversation threads..." />;
 
@@ -2143,7 +2138,7 @@ function AzureConversationsPanel({ oauthKeyId }) {
           ].map((s) => (
             <div key={s.label} style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 8, padding: "10px 16px", minWidth: 120 }}>
               <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", marginBottom: 2 }}>{s.label}</div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "var(--ag-text-primary)" }}>{s.value}</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: s.color }}>{s.value}</div>
             </div>
           ))}
         </div>
@@ -2255,23 +2250,29 @@ function AzureConversationsPanel({ oauthKeyId }) {
 
 // ── Personal / SharePoint Agent Activity Panel ──
 function PersonalAgentActivityPanel({ oauthKeyId, agentType }) {
-  const demoSignIns = [
-    { userDisplayName: "Helen Nguyen", userPrincipalName: "h.nguyen@nationalshield.com", appDisplayName: "Customer Service Copilot", createdDateTime: new Date(Date.now() - 3600000).toISOString(), status: { errorCode: 0 } },
-    { userDisplayName: "Brian Anderson", userPrincipalName: "b.anderson@nationalshield.com", appDisplayName: "Customer Service Copilot", createdDateTime: new Date(Date.now() - 7200000).toISOString(), status: { errorCode: 0 } },
-    { userDisplayName: "Dr. Alan Fischer", userPrincipalName: "a.fischer@nationalshield.com", appDisplayName: "Actuarial Data Assistant", createdDateTime: new Date(Date.now() - 86400000 * 3).toISOString(), status: { errorCode: 0 } },
-    { userDisplayName: "Patricia Clark", userPrincipalName: "p.clark@nationalshield.com", appDisplayName: "Customer Service Copilot", createdDateTime: new Date(Date.now() - 86400000).toISOString(), status: { errorCode: 0 } },
-    { userDisplayName: "Mika Sato", userPrincipalName: "m.sato@nationalshield.com", appDisplayName: "Actuarial Data Assistant", createdDateTime: new Date(Date.now() - 86400000 * 5).toISOString(), status: { errorCode: 0 } },
-  ];
-  const demoAppSummaries = [
-    { appId: "pa-customer-svc-005", appName: "Customer Service Copilot", totalSignIns: 4200, uniqueUsers: 1240, lastActivity: new Date(Date.now() - 3600000).toISOString() },
-    { appId: "pa-actuarial-015", appName: "Actuarial Data Assistant", totalSignIns: 720, uniqueUsers: 6, lastActivity: new Date(Date.now() - 86400000 * 3).toISOString() },
-  ];
-  const [signIns, setSignIns] = useState(demoSignIns);
-  const [appSummaries, setAppSummaries] = useState(demoAppSummaries);
+  const [signIns, setSignIns] = useState([]);
+  const [appSummaries, setAppSummaries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [loaded, setLoaded] = useState(true);
+  const [loaded, setLoaded] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await agentGovernanceApi.fetchTeamsSignIns(oauthKeyId);
+      setSignIns(result.signIns || []);
+      setAppSummaries(result.appSummaries || []);
+      setLoaded(true);
+    } catch (err) {
+      setError(err.message || "Failed to load agent activity");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { if (oauthKeyId && !loaded) load(); }, [oauthKeyId]);
 
   const filtered = searchQuery
     ? signIns.filter((s) => {
@@ -2296,7 +2297,7 @@ function PersonalAgentActivityPanel({ oauthKeyId, agentType }) {
           ].map((s) => (
             <div key={s.label} style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 8, padding: "10px 16px", minWidth: 120 }}>
               <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", marginBottom: 2 }}>{s.label}</div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "var(--ag-text-primary)" }}>{s.value}</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: s.color }}>{s.value}</div>
             </div>
           ))}
         </div>
@@ -2401,18 +2402,26 @@ function PersonalAgentActivityPanel({ oauthKeyId, agentType }) {
 
 // ── Personal Agent Knowledge Panel ──────────────
 function PersonalAgentKnowledgePanel({ oauthKeyId, dataverseEnvUrl, agentType }) {
-  const [knowledge, setKnowledge] = useState(DEMO_KNOWLEDGE);
-  const [assistants, setAssistants] = useState(DEMO_AZURE_AI.assistants);
+  const [knowledge, setKnowledge] = useState([]);
+  const [assistants, setAssistants] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [loaded, setLoaded] = useState(true);
+  const [loaded, setLoaded] = useState(false);
+
   const load = async () => {
     setLoading(true);
-    await new Promise((r) => setTimeout(r, 12000));
-    setKnowledge(DEMO_KNOWLEDGE);
-    setAssistants(DEMO_AZURE_AI.assistants);
-    setLoaded(true);
+    try {
+      const results = await Promise.allSettled([
+        agentGovernanceApi.fetchKnowledgeSources(oauthKeyId, dataverseEnvUrl),
+        agentGovernanceApi.fetchAzureAssistants(oauthKeyId),
+      ]);
+      if (results[0].status === "fulfilled") setKnowledge(results[0].value.bots || []);
+      if (results[1].status === "fulfilled") setAssistants(results[1].value.assistants || []);
+      setLoaded(true);
+    } catch { /* ignore */ }
     setLoading(false);
   };
+
+  useEffect(() => { if (oauthKeyId && !loaded) load(); }, [oauthKeyId]);
 
   if (loading && !loaded) return <LoadingSpinner message="Scanning agent knowledge and configuration..." />;
 
@@ -2459,7 +2468,7 @@ function PersonalAgentKnowledgePanel({ oauthKeyId, dataverseEnvUrl, agentType })
             ].map((s) => (
               <div key={s.label} style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 8, padding: "10px 16px", minWidth: 130 }}>
                 <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", marginBottom: 2 }}>{s.label}</div>
-                <div style={{ fontSize: 20, fontWeight: 700, color: "var(--ag-text-primary)" }}>{s.value}</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: s.color }}>{s.value}</div>
               </div>
             ))}
           </div>
@@ -2476,7 +2485,7 @@ function PersonalAgentKnowledgePanel({ oauthKeyId, dataverseEnvUrl, agentType })
             <div key={a.id} style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 8, padding: 16, marginBottom: 8 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
                 <Bot size={16} color="#0078D4" />
-                <span style={{ fontWeight: 600, fontSize: 14 }}>{a.name || "Assistant"}</span>
+                <span style={{ fontWeight: 600, fontSize: 14 }}>{a.name || `Assistant ${a.id.slice(0, 8)}`}</span>
                 <Badge text={a.model} color="#6366f1" />
                 <span style={{ fontSize: 11, color: "#999", marginLeft: "auto" }}>{a.resourceName}</span>
               </div>
@@ -2519,17 +2528,26 @@ function PersonalAgentKnowledgePanel({ oauthKeyId, dataverseEnvUrl, agentType })
 // ── Google Conversations Panel ──────────────────
 function GoogleConversationsPanel({ application }) {
   const [conversations, setConversations] = useState([]);
-  const [stats, setStats] = useState({ totalConversations: 0, totalMessages: 0, uniqueUsers: 0, uniqueAgents: 0 });
+  const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [loaded, setLoaded] = useState(true);
+  const [loaded, setLoaded] = useState(false);
   const [expandedChat, setExpandedChat] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
+
   const loadConversations = async () => {
     setLoading(true);
-    await new Promise((r) => setTimeout(r, 12000));
-    setLoaded(true);
-    setLoading(false);
+    setError(null);
+    try {
+      const result = await agentGovernanceApi.fetchGoogleConversations(7);
+      setConversations(result.conversations || []);
+      setStats(result);
+      setLoaded(true);
+    } catch (err) {
+      setError(err.message || "Failed to load conversations");
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -2584,7 +2602,7 @@ function GoogleConversationsPanel({ application }) {
           ].map((s) => (
             <div key={s.label} style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 8, padding: "10px 16px", minWidth: 120 }}>
               <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", marginBottom: 2 }}>{s.label}</div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "var(--ag-text-primary)" }}>{s.value}</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: s.color }}>{s.value}</div>
             </div>
           ))}
         </div>
@@ -2684,27 +2702,36 @@ function GoogleConversationsPanel({ application }) {
 
 // Maps APP_OPTIONS id → discovery platform values
 const APP_TO_PLATFORMS = {
-  // Microsoft
   copilot_studio: ["copilot_studio"],
   personal_agent: ["personal_agent"],
   sharepoint_agent: ["sharepoint_embedded"],
   azure_foundry: ["azure_foundry"],
-  // Google
-  agent_builder: ["agent_builder"],
-  gemini_gems: ["gemini_gems"],
-  notebook_lm: ["notebook_lm"],
-  google_chat_bots: ["google_chat_bots"],
-  reasoning_engines: ["reasoning_engines"],
+  google_reasoning_engines: ["reasoning_engine"],
+  google_agent_builder: ["agent_builder"],
+  google_chat_bots: ["google_chat"],
+  google_gems: ["gemini_gem"],
+  google_notebooklm: ["notebooklm"],
+  openai_assistant: ["openai_assistant"],
+  custom_gpt: ["custom_gpt"],
+  claude_ai_project: ["claude_ai_project"],
+  gemini_enterprise: ["gemini_enterprise"],
 };
 
 export function UserActivityTab() {
-  const { oauthKeyId, dataverseEnvUrl, googleKeyId } = useAgentAuth();
+  const { oauthKeyId, dataverseEnvUrl, googleKeyId, openaiKeyId, claudeKeyId, geminiEnterpriseKeyId } = useAgentAuth();
   const { state: govState } = useGovernance();
   const [subTab, setSubTab] = useState("safety");
-  const [application, setApplication] = useState("copilot_studio");
-  const [chats, setChats] = useState(DEMO_CHATS);
-  const [files, setFiles] = useState(DEMO_FILES);
-  const [knowledge, setKnowledge] = useState(DEMO_KNOWLEDGE);
+  const [application, setApplication] = useState(() => {
+    if (oauthKeyId) return "copilot_studio";
+    if (googleKeyId) return "google_agent_builder";
+    if (openaiKeyId) return "openai_assistant";
+    if (claudeKeyId) return "claude_ai_project";
+    if (geminiEnterpriseKeyId) return "gemini_enterprise";
+    return "copilot_studio";
+  });
+  const [chats, setChats] = useState([]);
+  const [files, setFiles] = useState([]);
+  const [knowledge, setKnowledge] = useState([]);
   const [chatsLastUpdated, setChatsLastUpdated] = useState(null);
   const [chatsLoading, setChatsLoading] = useState(false);
   const [filesLoading, setFilesLoading] = useState(false);
@@ -2715,76 +2742,259 @@ export function UserActivityTab() {
   const [searchQuery, setSearchQuery] = useState("");
   const [expandedChat, setExpandedChat] = useState(null);
   const [agentFilter, setAgentFilter] = useState("all");
-  const [chatsLoaded, setChatsLoaded] = useState(true);
-  const [filesLoaded, setFilesLoaded] = useState(true);
-  const [knowledgeLoaded, setKnowledgeLoaded] = useState(true);
+  const [chatsLoaded, setChatsLoaded] = useState(false);
+  const [filesLoaded, setFilesLoaded] = useState(false);
+  const [knowledgeLoaded, setKnowledgeLoaded] = useState(false);
   const [agentFilesOnly, setAgentFilesOnly] = useState(false);
 
-  const [azureUsageDetails, setAzureUsageDetails] = useState({
-    resources: DEMO_AZURE_AI.aiServices.filter((s) => s.kind === "OpenAI").map((r) => ({
-      resourceName: r.name, location: r.location,
-      deployments: DEMO_AZURE_AI.deployments.filter((d) => d.resourceName === r.name).map((d) => ({
-        name: d.name, model: d.model, requests: Math.floor(Math.random() * 40000) + 5000,
-        promptTokens: Math.floor(Math.random() * 15000000) + 2000000,
-        completionTokens: Math.floor(Math.random() * 8000000) + 1000000,
-        totalTokens: Math.floor(Math.random() * 23000000) + 3000000,
-      })),
-    })),
-    totals: { requests: 342800, promptTokens: 112000000, completionTokens: 75400000, totalTokens: 187400000 },
-  });
+  // Azure Usage Tracking state
+  const [azureUsageDetails, setAzureUsageDetails] = useState(null);
   const [azureUsageLoading, setAzureUsageLoading] = useState(false);
   const [azureUsageError, setAzureUsageError] = useState(null);
   const [azureUsagePeriod, setAzureUsagePeriod] = useState("P7D");
 
-  const isGoogleApp = (appId) => APP_OPTIONS.find((a) => a.id === appId)?.vendor === "google";
-
   const loadChats = async () => {
+    if (GEMINI_ENTERPRISE_APP_IDS.has(application)) return loadGeminiEnterpriseUserActivity();
+    if (GOOGLE_APP_IDS.has(application)) return loadGoogleUserActivity();
+    if (CLAUDE_APP_IDS.has(application)) { setChatsLoaded(true); return; }
+    if (OPENAI_APP_IDS.has(application)) {
+      if (!openaiKeyId) { setChatsLoaded(true); return; }
+      setChatsLoading(true);
+      setChatsError(null);
+      try {
+        const result = await agentGovernanceApi.fetchOpenAIThreads(openaiKeyId);
+        setChats(result.chats || []);
+        setChatsLastUpdated(new Date());
+        if (result.warnings?.length) setChatsError(result.warnings[0]);
+      } catch (err) {
+        setChatsError(err.message || "Failed to load OpenAI conversations");
+      } finally {
+        setChatsLoaded(true);
+        setChatsLoading(false);
+      }
+      return;
+    }
+    if (!oauthKeyId) return;
     setChatsLoading(true);
     setChatsError(null);
-    await new Promise((r) => setTimeout(r, 12000));
-    setChats(isGoogleApp(application) ? DEMO_GOOGLE_CHATS : DEMO_CHATS);
-    setChatsLastUpdated(new Date());
-    setChatsLoaded(true);
-    setChatsLoading(false);
+    try {
+      const withTimeout = (promise, ms = 90000) =>
+        Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms))]);
+
+      const allAgentNames = (govState.discoveryResult?.agents || []).map((a) => a.name).filter(Boolean);
+
+      // Fetch ALL data sources in parallel so every platform has data ready
+      const [dataverseResult, personalInteractions, sharepointInteractions, azureInteractions, teamsChats] = await Promise.all([
+        agentGovernanceApi.fetchUserChats(oauthKeyId, dataverseEnvUrl || undefined).catch(() => ({ chats: [] })),
+        withTimeout(agentGovernanceApi.fetchCopilotInteractions(oauthKeyId, "personal_agent")).then((r) => r.chats || []).catch(() => []),
+        withTimeout(agentGovernanceApi.fetchCopilotInteractions(oauthKeyId, "sharepoint_embedded")).then((r) => r.chats || []).catch(() => []),
+        withTimeout(agentGovernanceApi.fetchCopilotInteractions(oauthKeyId, "azure_foundry")).then((r) => r.chats || []).catch(() => []),
+        withTimeout(agentGovernanceApi.fetchM365CopilotChats(oauthKeyId, allAgentNames)).then((r) => r.chats || []).catch(() => []),
+      ]);
+
+      const allChats = [
+        ...(dataverseResult.chats || []),
+        ...personalInteractions,
+        ...sharepointInteractions,
+        ...azureInteractions,
+        ...teamsChats,
+      ];
+
+      // Deduplicate by id
+      const seen = new Set();
+      const deduped = allChats.filter((c) => {
+        if (seen.has(c.id)) return false;
+        seen.add(c.id);
+        return true;
+      });
+
+      deduped.sort((a, b) => (b.startTime || "").localeCompare(a.startTime || ""));
+
+      setChats(deduped);
+      setChatsLastUpdated(new Date());
+    } catch (err) {
+      setChatsError(err.message || "Failed to load chats");
+    } finally {
+      setChatsLoaded(true);
+      setChatsLoading(false);
+    }
   };
 
   const [subscriptionNote, setSubscriptionNote] = useState(null);
 
+  const isGoogle = GOOGLE_APP_IDS.has(application);
+  const isClaude = CLAUDE_APP_IDS.has(application);
+  const isOpenAI = OPENAI_APP_IDS.has(application);
+  const isGeminiEnterprise = GEMINI_ENTERPRISE_APP_IDS.has(application);
+
+  // ── Unified Gemini Enterprise loader — same single-call pattern as Google.
+  // The /gemini-enterprise data returns chats/files/knowledge in the same shape.
+  const loadGeminiEnterpriseUserActivity = async () => {
+    if (!geminiEnterpriseKeyId) return;
+    setChatsLoading(true); setFilesLoading(true); setKnowledgeLoading(true);
+    setChatsError(null); setFilesError(null); setKnowledgeError(null);
+    try {
+      const result = await agentGovernanceApi.fetchGeminiEnterpriseAuto(geminiEnterpriseKeyId);
+      setChats(result.chats || []);
+      setFiles(result.files || []);
+      setKnowledge(result.knowledge || []);
+      setChatsLastUpdated(new Date());
+    } catch (err) {
+      const msg = err.message || "Failed to load Gemini Enterprise activity";
+      setChatsError(msg); setFilesError(msg); setKnowledgeError(msg);
+    } finally {
+      setChatsLoaded(true); setFilesLoaded(true); setKnowledgeLoaded(true);
+      setChatsLoading(false); setFilesLoading(false); setKnowledgeLoading(false);
+    }
+  };
+
+  // ── Unified Google loader — fetches chats, files, knowledge in a single call ─
+  // and sets them into the same state variables Microsoft uses so the UI is identical.
+  const loadGoogleUserActivity = async () => {
+    if (!googleKeyId) return;
+    setChatsLoading(true); setFilesLoading(true); setKnowledgeLoading(true);
+    setChatsError(null); setFilesError(null); setKnowledgeError(null);
+    try {
+      const result = await agentGovernanceApi.fetchGoogleUserActivity(googleKeyId);
+      setChats(result.chats || []);
+      setFiles(result.files || []);
+      setKnowledge(result.knowledge || []);
+      setChatsLastUpdated(new Date());
+    } catch (err) {
+      const msg = err.message || "Failed to load Google activity";
+      setChatsError(msg); setFilesError(msg); setKnowledgeError(msg);
+    } finally {
+      setChatsLoaded(true); setFilesLoaded(true); setKnowledgeLoaded(true);
+      setChatsLoading(false); setFilesLoading(false); setKnowledgeLoading(false);
+    }
+  };
+
   const loadFiles = async () => {
+    if (isGeminiEnterprise) return loadGeminiEnterpriseUserActivity();
+    if (isGoogle) return loadGoogleUserActivity();
+    if (isClaude) { setFilesLoaded(true); return; }
+    if (isOpenAI) {
+      if (!openaiKeyId) { setFilesLoaded(true); return; }
+      setFilesLoading(true);
+      setFilesError(null);
+      try {
+        const result = await agentGovernanceApi.fetchOpenAIFiles(openaiKeyId);
+        setFiles((result.files || []).map(f => ({
+          id: f.id,
+          fileName: f.filename || f.id,
+          filePath: f.id,
+          userName: "API Upload",
+          userId: f.id,
+          operation: "FileUploaded",
+          workload: "OpenAI",
+          timestamp: f.created_at ? new Date(f.created_at * 1000).toISOString() : new Date().toISOString(),
+          fileSize: f.bytes,
+          status: f.status,
+        })));
+        if (result.warnings?.length) setFilesError(result.warnings[0]);
+      } catch (err) {
+        setFilesError(err.message || "Failed to load OpenAI files");
+      } finally {
+        setFilesLoaded(true);
+        setFilesLoading(false);
+      }
+      return;
+    }
+    if (!oauthKeyId) return;
     setFilesLoading(true);
     setFilesError(null);
     setSubscriptionNote(null);
-    await new Promise((r) => setTimeout(r, 12000));
-    setFiles(isGoogleApp(application) ? DEMO_GOOGLE_FILES : DEMO_FILES);
-    setFilesLoaded(true);
-    setFilesLoading(false);
+    try {
+      const result = await agentGovernanceApi.fetchUserFiles(oauthKeyId);
+      setFiles(result.files || []);
+      if (result.warning) setFilesError(result.warning);
+      if (result.subscriptionNote) setSubscriptionNote(result.subscriptionNote);
+      setFilesLoaded(true);
+    } catch (err) {
+      const msg = err.message || "Failed to load file activity";
+      const isTimeout = msg.includes("abort") || msg.includes("timeout") || err.name === "AbortError";
+      setFilesError(isTimeout ? "Request timed out — the audit log scan is taking longer than expected. Click Refresh to try again." : msg);
+    } finally {
+      setFilesLoaded(true);
+      setFilesLoading(false);
+    }
   };
 
   const loadKnowledge = async () => {
+    if (isGeminiEnterprise) return loadGeminiEnterpriseUserActivity();
+    if (isGoogle) return loadGoogleUserActivity();
+    if (isClaude) { setKnowledgeLoaded(true); return; }
+    if (isOpenAI) {
+      if (!openaiKeyId) { setKnowledgeLoaded(true); return; }
+      const allAgents = govState.discoveryResult?.agents || [];
+      const currentPlatforms = APP_TO_PLATFORMS[application] || [];
+      // Only OpenAI Assistants have vector stores accessible via API
+      // Custom GPTs knowledge is shown via DiscoveredKnowledgeView (tools/capabilities)
+      const assistantAgents = allAgents.filter(a =>
+        currentPlatforms.includes(a.platform) && a.platform === "openai_assistant" && a.appId
+      );
+      if (!assistantAgents.length) { setKnowledgeLoaded(true); return; }
+      setKnowledgeLoading(true);
+      setKnowledgeError(null);
+      try {
+        const results = await Promise.allSettled(
+          assistantAgents.map(agent =>
+            agentGovernanceApi.fetchOpenAIKnowledge(openaiKeyId, agent.appId)
+              .then(res => ({ agent, files: res.files || [] }))
+              .catch(() => ({ agent, files: [] }))
+          )
+        );
+        const knowledgeBots = results
+          .filter(r => r.status === "fulfilled")
+          .map(r => r.value)
+          .map(({ agent, files }) => ({
+            botId: agent.id,
+            botName: agent.name,
+            sources: files.map(f => ({
+              componentId: f.id,
+              name: f.filename || f.id,
+              type: "vector_store_file",
+              url: "",
+              metadata: f.bytes ? `${(f.bytes / 1024).toFixed(1)} KB` : "unknown size",
+              addedOn: f.created_at ? new Date(f.created_at * 1000).toISOString() : null,
+              status: f.status,
+            })),
+            components: [],
+          }));
+        setKnowledge(knowledgeBots);
+      } catch (err) {
+        setKnowledgeError(err.message || "Failed to load OpenAI knowledge");
+      } finally {
+        setKnowledgeLoaded(true);
+        setKnowledgeLoading(false);
+      }
+      return;
+    }
+    if (!oauthKeyId) return;
     setKnowledgeLoading(true);
     setKnowledgeError(null);
-    await new Promise((r) => setTimeout(r, 12000));
-    setKnowledge(isGoogleApp(application) ? DEMO_GOOGLE_KNOWLEDGE : DEMO_KNOWLEDGE);
-    setKnowledgeLoaded(true);
-    setKnowledgeLoading(false);
+    try {
+      const result = await agentGovernanceApi.fetchKnowledgeSources(oauthKeyId, dataverseEnvUrl || undefined);
+      setKnowledge(result.bots || []);
+      setKnowledgeLoaded(true);
+    } catch (err) {
+      setKnowledgeError(err.message || "Failed to load knowledge sources");
+    } finally {
+      setKnowledgeLoading(false);
+    }
   };
-
-  const isGoogle = APP_OPTIONS.find((a) => a.id === application)?.vendor === "google";
 
   // Reset loaded state when switching platforms so data is re-fetched from the right source
   const prevAppRef = useState({ prev: application })[0];
   useEffect(() => {
     if (prevAppRef.prev !== application) {
-      const wasGoogle = isGoogleApp(prevAppRef.prev);
-      const nowGoogle = isGoogleApp(application);
       prevAppRef.prev = application;
       setSearchQuery("");
       setAgentFilter("all");
-      if (wasGoogle !== nowGoogle) {
-        setChats(nowGoogle ? DEMO_GOOGLE_CHATS : DEMO_CHATS);
-        setFiles(nowGoogle ? DEMO_GOOGLE_FILES : DEMO_FILES);
-        setKnowledge(nowGoogle ? DEMO_GOOGLE_KNOWLEDGE : DEMO_KNOWLEDGE);
-      }
+      // Knowledge is platform-specific — reset so the correct data loads for the new platform
+      setKnowledge([]);
+      setKnowledgeLoaded(false);
+      setKnowledgeError(null);
     }
   }, [application]);
 
@@ -2792,12 +3002,38 @@ export function UserActivityTab() {
   const scanActive = govState.discoveryStatus === "loading" || govState.discoveryStatus === "success";
   useEffect(() => {
     if (!scanActive) return;
-    if (!chatsLoaded && !chatsLoading) loadChats();
-    if (!filesLoaded && !filesLoading) loadFiles();
-    if (!knowledgeLoaded && !knowledgeLoading) loadKnowledge();
-  }, [scanActive, oauthKeyId, chatsLoaded, filesLoaded, knowledgeLoaded]);
+    if (isGeminiEnterprise) {
+      if (!chatsLoaded && !chatsLoading) loadGeminiEnterpriseUserActivity();
+    } else if (isGoogle) {
+      if (!chatsLoaded && !chatsLoading) loadGoogleUserActivity();
+    } else {
+      if (!chatsLoaded && !chatsLoading) loadChats();
+      if (!filesLoaded && !filesLoading) loadFiles();
+      if (!knowledgeLoaded && !knowledgeLoading) loadKnowledge();
+    }
+  }, [scanActive, oauthKeyId, googleKeyId, openaiKeyId, claudeKeyId, geminiEnterpriseKeyId, chatsLoaded, filesLoaded, knowledgeLoaded, isGoogle, isOpenAI, isClaude, isGeminiEnterprise]);
 
-  // Demo mode — no auto-polling or refresh-key reloads needed
+  // After scan completes, silently refresh (no spinners — loaded flags stay true)
+  const prevRefreshKey = useRef(govState.refreshKey);
+  useEffect(() => {
+    if (prevRefreshKey.current !== govState.refreshKey) {
+      prevRefreshKey.current = govState.refreshKey;
+      if (!chatsLoading) loadChats();
+      if (!filesLoading) loadFiles();
+      if (!knowledgeLoading) loadKnowledge();
+    }
+  }, [govState.refreshKey]);
+
+  // Auto-poll for new chats every 60 seconds after initial load
+  const chatsLoadingRef = useRef(chatsLoading);
+  chatsLoadingRef.current = chatsLoading;
+  useEffect(() => {
+    if (!scanActive || !chatsLoaded || isGoogle || isOpenAI || isClaude || isGeminiEnterprise) return;
+    const interval = setInterval(() => {
+      if (!chatsLoadingRef.current) loadChats();
+    }, 60000);
+    return () => clearInterval(interval);
+  }, [scanActive, chatsLoaded, isGoogle, oauthKeyId, dataverseEnvUrl]);
 
   // Build a set of agent identifiers (names + botIds) belonging to the selected platform
   const platformAgentIdentifiers = useMemo(() => {
@@ -2831,7 +3067,20 @@ export function UserActivityTab() {
   const azureUsagePeriodRef = useRef(azureUsagePeriod);
   azureUsagePeriodRef.current = azureUsagePeriod;
 
-  const loadAzureUsageDetails = () => {};
+  const loadAzureUsageDetails = async (periodOverride) => {
+    if (!oauthKeyId || !isAzureFoundry) return;
+    const period = periodOverride || azureUsagePeriodRef.current;
+    setAzureUsageLoading(true);
+    setAzureUsageError(null);
+    try {
+      const data = await agentGovernanceApi.fetchAzureUsageDetails(oauthKeyId, period);
+      setAzureUsageDetails(data);
+    } catch (err) {
+      setAzureUsageError(err?.message || "Failed to fetch usage details");
+    } finally {
+      setAzureUsageLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (isAzureFoundry && oauthKeyId && subTab === "chats") {
@@ -2841,20 +3090,7 @@ export function UserActivityTab() {
 
   const platformChats = useMemo(() => {
     if (isAzureFoundry) return [];
-    // Google — pick the correct dataset, then filter to the selected Google
-    // platform (agent_builder / gemini_gems / notebook_lm / google_chat_bots /
-    // reasoning_engines) using the same identifier resolution strategy as MS.
-    if (isGoogle) {
-      const googleSource = Array.isArray(chats) && chats.length > 0 && chats[0]?.id?.startsWith("gchat-")
-        ? chats
-        : DEMO_GOOGLE_CHATS;
-      if (!platformAgentIdentifiers) return googleSource;
-      return googleSource.filter((c) => {
-        const botNameLC = (c.botName || "").toLowerCase();
-        const botIdLC = (c.botId || "").toLowerCase();
-        return platformAgentIdentifiers.has(botNameLC) || platformAgentIdentifiers.has(botIdLC);
-      });
-    }
+    if (isGoogle || isOpenAI || isClaude || isGeminiEnterprise) return chats;
     if (application === "copilot_studio") {
       if (platformDiscoveredAgents.length === 0) return chats;
       const copilotNames = new Set(platformDiscoveredAgents.map((a) => (a.name || "").toLowerCase()));
@@ -2874,50 +3110,17 @@ export function UserActivityTab() {
       }
       return false;
     });
-  }, [chats, platformAgentIdentifiers, isGoogle, application, isAzureFoundry, platformDiscoveredAgents]);
+  }, [chats, platformAgentIdentifiers, isGoogle, isOpenAI, isClaude, application, isAzureFoundry, platformDiscoveredAgents]);
 
-  // Filter knowledge to agents of the selected platform. For Google we
-  // pull from DEMO_GOOGLE_KNOWLEDGE (Drive / BigQuery / Vertex DataStore /
-  // GCS / Pub/Sub bindings) and filter by the discovered agents that
-  // belong to the selected Google platform.
+  // Filter knowledge to agents of the selected platform
   const platformKnowledge = useMemo(() => {
-    if (isGoogle) {
-      const firstId = Array.isArray(knowledge) && knowledge.length > 0 ? (knowledge[0]?.botId || "") : "";
-      const isGoogleDataset = /^(re|gab|gem|gcb|nlm)-/.test(firstId);
-      const googleSource = isGoogleDataset ? knowledge : DEMO_GOOGLE_KNOWLEDGE;
-      if (!platformAgentIdentifiers) return googleSource;
-      return googleSource.filter((b) => {
-        const nameLC = (b.botName || "").toLowerCase();
-        const idLC = (b.botId || "").toLowerCase();
-        return platformAgentIdentifiers.has(nameLC) || platformAgentIdentifiers.has(idLC);
-      });
-    }
-    if (!platformAgentIdentifiers || application === "copilot_studio") return knowledge;
+    if (!platformAgentIdentifiers || isGoogle || isOpenAI || isClaude || isGeminiEnterprise || application === "copilot_studio") return knowledge;
     return knowledge.filter((b) => {
       const nameLC = (b.botName || "").toLowerCase();
       const idLC = (b.botId || "").toLowerCase();
       return platformAgentIdentifiers.has(nameLC) || platformAgentIdentifiers.has(idLC);
     });
-  }, [knowledge, platformAgentIdentifiers, isGoogle, application]);
-
-  // Merge each discovered agent on this platform with its knowledge record
-  // (falling back to connector/description extraction when there is no
-  // explicit knowledge entry). This is the single source of truth the
-  // Knowledge & Files panel renders, and also what we show in the sub-tab
-  // badge so the two numbers can never disagree.
-  const mergedPlatformKnowledge = useMemo(() => {
-    const knowledgeMap = new Map();
-    for (const k of platformKnowledge) {
-      if (k.botId) knowledgeMap.set(k.botId, k);
-      if (k.botName) knowledgeMap.set(k.botName.toLowerCase(), k);
-    }
-    return platformDiscoveredAgents.map((agent) => {
-      const existing =
-        knowledgeMap.get(agent.id) ||
-        knowledgeMap.get((agent.name || "").toLowerCase());
-      return existing || extractKnowledgeFromDiscoveredAgent(agent);
-    });
-  }, [platformKnowledge, platformDiscoveredAgents]);
+  }, [knowledge, platformAgentIdentifiers, isGoogle, isOpenAI, isClaude, application]);
 
   const uniqueAgents = [...new Set([
     ...(application === "copilot_studio" && platformDiscoveredAgents.length > 0
@@ -2950,18 +3153,21 @@ export function UserActivityTab() {
   const sensitiveData = useMemo(() => scanChatsForSensitiveData(platformChats), [platformChats]);
 
   let filteredFiles = taggedFiles;
+  if (agentFilesOnly) {
+    filteredFiles = filteredFiles.filter((f) => f.relatedAgents?.length > 0);
+  }
   if (agentFilter !== "all") {
-    filteredFiles = filteredFiles.filter((f) => (f.agentName || f.userName) === agentFilter || f.relatedAgents?.some((a) => a === agentFilter));
+    filteredFiles = filteredFiles.filter((f) => f.relatedAgents?.some((a) => a === agentFilter));
   }
   if (searchQuery) {
     const q = searchQuery.toLowerCase();
     filteredFiles = filteredFiles.filter(
       (f) =>
         f.fileName?.toLowerCase().includes(q) ||
-        f.agentName?.toLowerCase().includes(q) ||
         f.userName?.toLowerCase().includes(q) ||
+        f.userId?.toLowerCase().includes(q) ||
         f.filePath?.toLowerCase().includes(q) ||
-        f.workload?.toLowerCase().includes(q)
+        f.relatedAgents?.some((a) => a.toLowerCase().includes(q))
     );
   }
 
@@ -2974,22 +3180,14 @@ export function UserActivityTab() {
     uniqueAgents: new Set(platformChats.map((c) => c.botName)).size,
   };
 
-  // Filter the app picker based on the header's vendor selection so
-  // "Microsoft" only shows MS platforms and "Google" only shows Google platforms.
-  const headerVendor = govState.selectedVendor;
-  const visibleApps = headerVendor === "microsoft"
-    ? APP_OPTIONS.filter((a) => a.vendor === "microsoft")
-    : headerVendor === "google"
-    ? APP_OPTIONS.filter((a) => a.vendor === "google")
-    : APP_OPTIONS;
-
-  // If the currently selected application isn't in the current vendor scope,
-  // snap it to the first available app.
-  useEffect(() => {
-    if (!visibleApps.find((a) => a.id === application)) {
-      setApplication(visibleApps[0]?.id || "copilot_studio");
-    }
-  }, [headerVendor]);
+  const visibleApps = APP_OPTIONS.filter((app) => {
+    if (app.id === "copilot_studio" || app.id === "azure_foundry" || app.id === "personal_agent" || app.id === "sharepoint_agent") return !!oauthKeyId;
+    if (GOOGLE_APP_IDS.has(app.id)) return !!googleKeyId;
+    if (OPENAI_APP_IDS.has(app.id)) return !!openaiKeyId;
+    if (CLAUDE_APP_IDS.has(app.id)) return !!claudeKeyId;
+    if (GEMINI_ENTERPRISE_APP_IDS.has(app.id)) return !!geminiEnterpriseKeyId;
+    return true;
+  });
 
   return (
     <div>
@@ -2998,8 +3196,8 @@ export function UserActivityTab() {
         {[
           { id: "safety", label: "AI Safety", icon: <Eye size={14} />, count: sensitiveData.summary.total, alert: sensitiveData.summary.total > 0 },
           { id: "risk", label: "Risk Management", icon: <ShieldAlert size={14} />, count: 0 },
-          { id: "knowledge", label: "Knowledge & Files", icon: <FolderOpen size={14} />, count: mergedPlatformKnowledge.reduce((sum, b) => sum + (b.sources?.length || 0), 0) },
-          { id: "files", label: "Data Activity", icon: <FileText size={14} />, count: files.length },
+          { id: "knowledge", label: "Knowledge & Files", icon: <FolderOpen size={14} />, count: isGoogle ? 0 : isGeminiEnterprise ? platformKnowledge.reduce((sum, b) => sum + (b.sources?.length || 0), 0) : (platformKnowledge.reduce((sum, b) => sum + (b.sources?.length || 0), 0) || platformDiscoveredAgents.reduce((sum, a) => sum + (a.connectors?.length || 0) + (a.description?.includes("sharepoint.com") ? 1 : 0), 0)) },
+          { id: "files", label: "File Activity", icon: <FileText size={14} />, count: files.length },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -3083,6 +3281,31 @@ export function UserActivityTab() {
       {/* ===== AI SAFETY SUB-TAB ===== */}
       <div style={{ display: subTab === "safety" ? "block" : "none" }}>
         <div>
+          {isClaude ? (
+            <div style={{ padding: "14px 16px", background: "#D4622A08", border: "1px solid #D4622A33", borderRadius: 8, marginBottom: 16, display: "flex", gap: 10, alignItems: "flex-start", fontSize: 12, color: "var(--ag-text-secondary)", lineHeight: 1.6 }}>
+              <Info size={16} color="#D4622A" style={{ flexShrink: 0, marginTop: 2 }} />
+              <div>
+                <div style={{ fontWeight: 600, color: "#D4622A", marginBottom: 2 }}>Conversation Scanning Not Available for Claude</div>
+                Anthropic does not expose conversation history via the admin API. Claude.ai conversations stay within the platform. Use <strong>console.anthropic.com</strong> to review usage and audit logs directly.
+              </div>
+            </div>
+          ) : application === "custom_gpt" ? (
+            <div style={{ padding: "14px 16px", background: "#f59e0b08", border: "1px solid #f59e0b33", borderRadius: 8, marginBottom: 16, display: "flex", gap: 10, alignItems: "flex-start", fontSize: 12, color: "var(--ag-text-secondary)", lineHeight: 1.6 }}>
+              <AlertTriangle size={16} color="#f59e0b" style={{ flexShrink: 0, marginTop: 2 }} />
+              <div>
+                <div style={{ fontWeight: 600, color: "#f59e0b", marginBottom: 2 }}>Conversation Scanning Not Available for Custom GPTs</div>
+                OpenAI does not expose chatgpt.com conversations via any API. Custom GPT chats stay within ChatGPT and cannot be accessed externally. Use <strong>Risk Management</strong> to review agent risk posture and <strong>Knowledge &amp; Files</strong> to audit what data your GPTs have access to.
+              </div>
+            </div>
+          ) : application === "openai_assistant" ? (
+            <div style={{ padding: "14px 16px", background: "#6366f108", border: "1px solid #6366f122", borderRadius: 8, marginBottom: 16, display: "flex", gap: 10, alignItems: "flex-start", fontSize: 12, color: "var(--ag-text-secondary)", lineHeight: 1.6 }}>
+              <Eye size={16} color="#6366f1" style={{ flexShrink: 0, marginTop: 2 }} />
+              <div>
+                <div style={{ fontWeight: 600, color: "#6366f1", marginBottom: 2 }}>Scanning Assistants API Threads</div>
+                Conversations are captured when users interact with your Assistants via the API or the OpenAI Playground. Chats through chatgpt.com are not accessible. To see user identity in results, pass <code>metadata: &#123; user_name, user_id &#125;</code> when creating threads in your application.
+              </div>
+            </div>
+          ) : null}
           {!chatsLoaded && !chatsLoading ? (
             <div style={{ textAlign: "center", padding: 40 }}>
               <Eye size={40} style={{ marginBottom: 12, opacity: 0.3 }} />
@@ -3100,7 +3323,7 @@ export function UserActivityTab() {
                   borderRadius: 10, padding: "14px 20px", minWidth: 150,
                 }}>
                   <div style={{ fontSize: 10, color: "#999", marginBottom: 2 }}>Total Findings</div>
-                  <div style={{ fontSize: 28, fontWeight: 700, color: "var(--ag-text-primary)" }}>
+                  <div style={{ fontSize: 28, fontWeight: 700, color: sensitiveData.summary.total > 0 ? "#ef4444" : "#22c55e" }}>
                     {sensitiveData.summary.total}
                   </div>
                   <div style={{ fontSize: 10, color: "#999" }}>
@@ -3119,7 +3342,7 @@ export function UserActivityTab() {
                         <Icon size={12} color={cfg.color} />
                         <span style={{ fontSize: 10, color: "#999" }}>{cfg.shortLabel}</span>
                       </div>
-                      <div style={{ fontSize: 22, fontWeight: 700, color: "var(--ag-text-primary)" }}>{count}</div>
+                      <div style={{ fontSize: 22, fontWeight: 700, color: count > 0 ? cfg.color : "#ccc" }}>{count}</div>
                     </div>
                   );
                 })}
@@ -3276,13 +3499,21 @@ export function UserActivityTab() {
       </div>
 
       {/* ===== KNOWLEDGE & FILES SUB-TAB ===== */}
-      {(
-        <div style={{ display: subTab === "knowledge" ? "block" : "none" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <Database size={18} color="#6366f1" />
-              <span style={{ fontSize: 16, fontWeight: 700, color: "var(--ag-text-primary)" }}>Knowledge & Files</span>
+      <div style={{ display: subTab === "knowledge" ? "block" : "none" }}>
+          <div style={{
+            display: "flex", alignItems: "flex-start", gap: 12,
+            padding: "14px 16px", background: "#6366f108",
+            border: "1px solid #6366f122", borderRadius: 8,
+            marginBottom: 16, fontSize: 12, color: "var(--ag-text-secondary)", lineHeight: 1.6,
+          }}>
+            <Brain size={18} color="#6366f1" style={{ flexShrink: 0, marginTop: 2 }} />
+            <div>
+              <div style={{ fontWeight: 600, color: "var(--ag-text-primary)", marginBottom: 4 }}>Agent Knowledge Sources</div>
+              This shows what data sources, files, configurations, and web content each agent has access to.
             </div>
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
             <button
               onClick={loadKnowledge}
               disabled={knowledgeLoading}
@@ -3297,6 +3528,7 @@ export function UserActivityTab() {
               {knowledgeLoading ? "Scanning..." : "Refresh"}
             </button>
           </div>
+
           {knowledgeLoading && !knowledgeLoaded ? (
             <LoadingSpinner message="Scanning agent knowledge sources..." />
           ) : knowledgeError && !knowledgeLoaded ? (
@@ -3304,42 +3536,42 @@ export function UserActivityTab() {
               <AlertTriangle size={32} color="#f59e0b" style={{ marginBottom: 12 }} />
               <div style={{ fontSize: 13, color: "var(--ag-text-secondary)" }}>{knowledgeError}</div>
             </div>
-          ) : platformDiscoveredAgents.length > 0 ? (
+          ) : platformKnowledge.length > 0 ? (
             (() => {
-              let mergedKnowledge = mergedPlatformKnowledge;
+              let filteredKnowledge = platformKnowledge;
               if (agentFilter !== "all") {
-                mergedKnowledge = mergedKnowledge.filter(b => b.botName === agentFilter);
+                filteredKnowledge = filteredKnowledge.filter(b => b.botName === agentFilter);
               }
               if (searchQuery) {
                 const q = searchQuery.toLowerCase();
-                mergedKnowledge = mergedKnowledge.filter(b =>
+                filteredKnowledge = filteredKnowledge.filter(b =>
                   b.botName?.toLowerCase().includes(q) ||
                   b.sources?.some(s => s.name?.toLowerCase().includes(q) || s.type?.toLowerCase().includes(q) || s.url?.toLowerCase().includes(q))
                 );
               }
-              const totalSources = mergedKnowledge.reduce((s, b) => s + (b.sources?.length || 0), 0);
-              const withSources = mergedKnowledge.filter(b => b.sources?.length > 0).length;
               return (
             <div>
               <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
                 {[
-                  { label: "Agents Scanned", value: mergedKnowledge.length, color: "#6366f1" },
-                  { label: "Total Knowledge Sources", value: totalSources, color: "#22c55e" },
-                  { label: "With Sources", value: withSources, color: "#3b82f6" },
-                  { label: "Without Sources", value: mergedKnowledge.length - withSources, color: "#f59e0b" },
+                  { label: "Agents Scanned", value: filteredKnowledge.length, color: "#6366f1" },
+                  { label: "Total Knowledge Sources", value: filteredKnowledge.reduce((s, b) => s + (b.sources?.length || 0), 0), color: "#22c55e" },
+                  { label: "With Sources", value: filteredKnowledge.filter((b) => b.sources?.length > 0).length, color: "#3b82f6" },
+                  { label: "Without Sources", value: filteredKnowledge.filter((b) => !b.sources?.length).length, color: "#f59e0b" },
                 ].map((s) => (
                   <div key={s.label} style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 8, padding: "10px 16px", minWidth: 140 }}>
                     <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", marginBottom: 2 }}>{s.label}</div>
-                    <div style={{ fontSize: 20, fontWeight: 700, color: "var(--ag-text-primary)" }}>{s.value}</div>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: s.color }}>{s.value}</div>
                   </div>
                 ))}
               </div>
-              {mergedKnowledge.map((bot) => (
+              {filteredKnowledge.map((bot) => (
                 <BotKnowledgePanel key={bot.botId} bot={bot} />
               ))}
             </div>
               );
             })()
+          ) : platformDiscoveredAgents.length > 0 ? (
+            <DiscoveredKnowledgeView agents={platformDiscoveredAgents} />
           ) : knowledgeLoaded ? (
             <div style={{ textAlign: "center", padding: 60, color: "var(--ag-text-secondary)" }}>
               <FolderOpen size={48} style={{ marginBottom: 16, opacity: 0.3 }} />
@@ -3348,11 +3580,20 @@ export function UserActivityTab() {
             </div>
           ) : null}
         </div>
-      )}
 
       {/* ===== FILES SUB-TAB ===== */}
       <div style={{ display: subTab === "files" ? "block" : "none" }}>
-          <AgentPermissionsPanel oauthKeyId={oauthKeyId} enabled={scanActive} vendor={isGoogle ? "google" : "microsoft"} />
+          <>
+          {!isGoogle && !isOpenAI && !isClaude && !isGeminiEnterprise && <AgentPermissionsPanel oauthKeyId={oauthKeyId} enabled={scanActive} />}
+          {application === "custom_gpt" && (
+            <div style={{ padding: "14px 16px", background: "#f59e0b08", border: "1px solid #f59e0b33", borderRadius: 8, marginBottom: 16, display: "flex", gap: 10, alignItems: "flex-start", fontSize: 12, color: "var(--ag-text-secondary)", lineHeight: 1.6 }}>
+              <AlertTriangle size={16} color="#f59e0b" style={{ flexShrink: 0, marginTop: 2 }} />
+              <div>
+                <div style={{ fontWeight: 600, color: "#f59e0b", marginBottom: 2 }}>Limited File Visibility for Custom GPTs</div>
+                Files uploaded in GPT Builder are stored internally by OpenAI and may not appear via the Files API. Files shown below are from your OpenAI account's file storage (<code>purpose=assistants</code>) and may include files from OpenAI Assistants as well.
+              </div>
+            </div>
+          )}
 
           {/* Knowledge loading indicator */}
           {knowledgeLoading && (
@@ -3365,61 +3606,130 @@ export function UserActivityTab() {
             </div>
           )}
 
-
-          {/* Agent File Activity Summary */}
-          {filesLoaded && filteredFiles.length > 0 && (() => {
-            const uniqueAgents = new Set(filteredFiles.map(f => f.agentName || f.userName));
-            const msSpCount = filteredFiles.filter(f => f.workload === "SharePoint").length;
-            const msOdCount = filteredFiles.filter(f => f.workload === "OneDrive").length;
-            const gDriveCount = filteredFiles.filter(f => f.workload === "Google Drive").length;
-            const gDocsCount = filteredFiles.filter(f => f.workload === "Google Docs").length;
-            const gSheetsCount = filteredFiles.filter(f => f.workload === "Google Sheets").length;
-            const modCount = filteredFiles.filter(f => ["FileModified", "FileUploaded", "FileCreated", "ObjectWritten"].includes(f.operation)).length;
-            const summaryCards = isGoogle
-              ? [
-                  { label: "Total File Events", value: filteredFiles.length, color: "#6366f1" },
-                  { label: "Agents Active", value: uniqueAgents.size, color: "#10b981" },
-                  { label: "Drive Events", value: gDriveCount, color: "#4285F4" },
-                  { label: "Docs Events", value: gDocsCount, color: "#1A73E8" },
-                  { label: "Sheets Events", value: gSheetsCount, color: "#0F9D58" },
-                  { label: "File Modifications", value: modCount, color: modCount > 0 ? "#f59e0b" : "#22c55e" },
-                ]
-              : [
-                  { label: "Total File Events", value: filteredFiles.length, color: "#6366f1" },
-                  { label: "Agents Active", value: uniqueAgents.size, color: "#10b981" },
-                  { label: "SharePoint Events", value: msSpCount, color: "#059669" },
-                  { label: "OneDrive Events", value: msOdCount, color: "#3b82f6" },
-                  { label: "File Modifications", value: modCount, color: modCount > 0 ? "#f59e0b" : "#22c55e" },
-                ];
-            return (
-              <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
-                {summaryCards.map((s) => (
-                  <div key={s.label} style={{
-                    background: "var(--ag-bg-card)",
-                    border: "1px solid var(--ag-border)",
-                    borderRadius: 8, padding: "10px 16px", minWidth: 130,
-                  }}>
-                    <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", marginBottom: 2 }}>{s.label}</div>
-                    <div style={{ fontSize: 20, fontWeight: 700, color: "var(--ag-text-primary)" }}>{s.value}</div>
-                  </div>
-                ))}
+          {/* Knowledge source match summary (when matches exist) */}
+          {filesLoaded && knowledgeLoaded && knowledgeDiag.siteUrls.length > 0 && dataExposure.agentRelatedCount > 0 && (
+            <div style={{
+              display: "flex", alignItems: "flex-start", gap: 10, padding: "10px 16px",
+              background: "#ecfdf5", border: "1px solid #10b98122", borderRadius: 8, marginBottom: 12, fontSize: 12, color: "#065f46",
+            }}>
+              <CheckCircle size={16} color="#10b981" style={{ flexShrink: 0, marginTop: 2 }} />
+              <div>
+                Cross-referencing {knowledgeDiag.siteUrls.length} SharePoint knowledge source{knowledgeDiag.siteUrls.length !== 1 ? "s" : ""} from{" "}
+                <strong>{knowledgeDiag.botsWithSites.join(", ")}</strong> against {taggedFiles.length} file events.
               </div>
-            );
-          })()}
+            </div>
+          )}
 
+          {/* Agent Data Exposure Summary */}
+          {filesLoaded && taggedFiles.length > 0 && (
+            <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+              {[
+                { label: "Total File Events", value: taggedFiles.length, color: "#6366f1" },
+                { label: "Agent-Related Events", value: dataExposure.agentRelatedCount, color: "#10b981", highlight: true },
+                { label: "Agents Exposed", value: dataExposure.uniqueAgentsExposed, color: "#f59e0b" },
+                { label: "Modifications on Agent Sites", value: dataExposure.modifiedOnAgentSites, color: dataExposure.modifiedOnAgentSites > 0 ? "#ef4444" : "#22c55e" },
+                { label: "External Users on Agent Sites", value: dataExposure.externalUsersOnAgentSites, color: dataExposure.externalUsersOnAgentSites > 0 ? "#ef4444" : "#22c55e" },
+                ...(dataExposure.totalKnowledgeSites > 0 ? [{ label: "Stale Knowledge Sources", value: dataExposure.staleSources, color: dataExposure.staleSources > 0 ? "#f59e0b" : "#22c55e", sub: `of ${dataExposure.totalKnowledgeSites} sites` }] : []),
+              ].map((s) => (
+                <div key={s.label} style={{
+                  background: s.highlight ? "#10b98108" : "var(--ag-bg-card)",
+                  border: `1px solid ${s.highlight ? "#10b98133" : "var(--ag-border)"}`,
+                  borderRadius: 8, padding: "10px 16px", minWidth: 130,
+                }}>
+                  <div style={{ fontSize: 10, color: "var(--ag-text-secondary)", marginBottom: 2 }}>{s.label}</div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: s.color }}>{s.value}</div>
+                  {s.sub && <div style={{ fontSize: 10, color: "#999" }}>{s.sub}</div>}
+                </div>
+              ))}
+            </div>
+          )}
 
-          {/* Spacer after summary cards */}
+          {/* Data Flow Visualization */}
+          {filesLoaded && taggedFiles.length > 0 && dataExposure.agentRelatedCount > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <DataFlowSankey taggedFiles={taggedFiles} knowledge={knowledge} />
+            </div>
+          )}
 
-          {filteredFiles.length > 0 ? (
-            <Section title={`Agent File Activity (${filteredFiles.length})`}>
+          {/* Data Activity toolbar — toggle + refresh only (search is in shared bar above) */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 16, alignItems: "center" }}>
+            <button
+              onClick={() => setAgentFilesOnly(!agentFilesOnly)}
+              style={{
+                display: "flex", alignItems: "center", gap: 5,
+                padding: "7px 14px", borderRadius: 6, fontSize: 12, fontWeight: 600,
+                border: agentFilesOnly ? "1.5px solid #6366f1" : "1px solid var(--ag-border)",
+                background: agentFilesOnly ? "#6366f110" : "#fff",
+                color: agentFilesOnly ? "#6366f1" : "#666",
+                cursor: "pointer", fontFamily: "inherit",
+              }}
+            >
+              <Shield size={12} />
+              {agentFilesOnly ? "Agent Sites Only" : "All Files"}
+            </button>
+            <button
+              onClick={loadFiles}
+              disabled={filesLoading}
+              style={{
+                display: "flex", alignItems: "center", gap: 5,
+                background: "#6366f1", color: "#fff", padding: "7px 14px",
+                borderRadius: 6, fontSize: 12, fontWeight: 600,
+                border: "none", cursor: "pointer", fontFamily: "inherit",
+              }}
+            >
+              <RefreshCw size={12} style={filesLoading ? { animation: "agSpin 1s linear infinite" } : undefined} />
+              {filesLoading ? "Loading..." : "Refresh"}
+            </button>
+          </div>
+
+          {subscriptionNote && (
+            <div style={{
+              display: "flex", alignItems: "flex-start", gap: 10,
+              padding: "12px 16px", background: "#f59e0b08", border: "1px solid #f59e0b33",
+              borderRadius: 8, marginBottom: 16, fontSize: 12, color: "var(--ag-text-secondary)", lineHeight: 1.6,
+            }}>
+              <Clock size={16} color="#f59e0b" style={{ flexShrink: 0, marginTop: 2 }} />
+              <div>
+                <div style={{ fontWeight: 600, color: "#f59e0b", marginBottom: 2 }}>Audit Subscription Activated</div>
+                {subscriptionNote}
+              </div>
+            </div>
+          )}
+
+          {isClaude && (
+            <div style={{ padding: "14px 16px", background: "#D4622A08", border: "1px solid #D4622A33", borderRadius: 8, marginBottom: 16, display: "flex", gap: 10, alignItems: "flex-start", fontSize: 12, color: "var(--ag-text-secondary)", lineHeight: 1.6 }}>
+              <Info size={16} color="#D4622A" style={{ flexShrink: 0, marginTop: 2 }} />
+              <div>
+                <div style={{ fontWeight: 600, color: "#D4622A", marginBottom: 2 }}>File Activity Not Available for Claude</div>
+                Anthropic does not expose file upload or activity logs via the admin API. Review usage at <strong>console.anthropic.com</strong>.
+              </div>
+            </div>
+          )}
+
+          {filesLoading && files.length === 0 ? (
+            <LoadingSpinner message={isOpenAI ? "Loading OpenAI uploaded files..." : "Loading file activity from O365 audit logs (this may take up to a minute)..."} />
+          ) : filesError && files.length === 0 ? (
+            <div style={{ textAlign: "center", padding: 40 }}>
+              <AlertTriangle size={32} color="#f59e0b" style={{ marginBottom: 12 }} />
+              <div style={{ fontSize: 13, color: "var(--ag-text-secondary)", marginBottom: 8 }}>{filesError}</div>
+              <div style={{ fontSize: 11, color: "#999", marginBottom: 12 }}>
+                File activity requires E3/E5 license with ActivityFeed.Read permission and audit logging enabled.
+              </div>
+              <button onClick={() => { setFilesLoaded(false); setFilesError(null); }} style={{ padding: "6px 16px", background: "#6366f1", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12 }}>
+                Retry
+              </button>
+            </div>
+          ) : filteredFiles.length > 0 ? (
+            <Section title={`${agentFilesOnly ? "Agent-Related " : ""}File Activity (${filteredFiles.length})`}>
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                   <thead>
                     <tr style={{ borderBottom: "2px solid var(--ag-border)" }}>
                       <th style={thStyle}>File</th>
-                      <th style={thStyle}>Agent</th>
+                      <th style={thStyle}>User</th>
                       <th style={thStyle}>Operation</th>
                       <th style={thStyle}>Source</th>
+                      <th style={thStyle}>Used By Agent</th>
                       <th style={thStyle}>Timestamp</th>
                     </tr>
                   </thead>
@@ -3435,18 +3745,490 @@ export function UserActivityTab() {
             <div style={{ textAlign: "center", padding: 60, color: "var(--ag-text-secondary)" }}>
               <FileText size={48} style={{ marginBottom: 16, opacity: 0.3 }} />
               <h3 style={{ fontSize: 16, fontWeight: 600, color: "var(--ag-text-primary)", marginBottom: 8 }}>
-                {searchQuery ? "No files match your search" : "No agent file activity found"}
+                {agentFilesOnly ? "No agent-related file activity" : searchQuery ? "No files match your search" : "No file activity found"}
               </h3>
               <p style={{ fontSize: 13, maxWidth: 500, margin: "0 auto" }}>
-                {searchQuery
+                {isOpenAI
+                  ? "No files uploaded to OpenAI yet. Upload files to your Assistants vector stores — they will appear here with agent cross-references."
+                  : agentFilesOnly && knowledgeDiag.siteUrls.length === 0
+                  ? "Your agents don't have SharePoint/OneDrive knowledge sources configured. Add a SharePoint site as a knowledge source in Copilot Studio, then file events on that site will be linked to the agent."
+                  : agentFilesOnly
+                  ? "No file events found on sites used by agent knowledge sources. The agents' knowledge sites may not have had recent file activity. Try disabling the filter to see all files."
+                  : searchQuery
                   ? "Try adjusting your search criteria."
-                  : isGoogle
-                    ? "File activity events from Google Drive, Google Docs, and Google Sheets triggered by agents will appear here."
-                    : "File activity events from SharePoint and OneDrive triggered by agents will appear here."}
+                  : "File activity events from SharePoint and OneDrive will appear here from the O365 audit log (last 7 days)."}
               </p>
+              {agentFilesOnly && taggedFiles.length > 0 && (
+                <button
+                  onClick={() => setAgentFilesOnly(false)}
+                  style={{
+                    marginTop: 16, padding: "8px 20px", background: "#6366f1", color: "#fff",
+                    border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                  }}
+                >
+                  Show All {taggedFiles.length} File Events
+                </button>
+              )}
             </div>
           ) : null}
+          </>
       </div>
+
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+// Gemini Activity Panel — shows per-user Gemini usage
+// from Admin Reports API
+// ═══════════════════════════════════════════════════════
+
+function GeminiActivityPanel() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [loaded, setLoaded] = useState(false);
+  const [days, setDays] = useState(7);
+  const [searchQuery, setSearchQuery] = useState("");
+
+  const loadActivity = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await agentGovernanceApi.fetchGeminiActivity(days);
+      setData(result);
+      setLoaded(true);
+    } catch (err) {
+      setError(err.message || "Failed to load Gemini activity");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!loaded && !loading) loadActivity();
+  }, [loaded]);
+
+  const filteredUsers = useMemo(() => {
+    if (!data?.userSummary) return [];
+    if (!searchQuery) return data.userSummary;
+    const q = searchQuery.toLowerCase();
+    return data.userSummary.filter(
+      u => u.email?.toLowerCase().includes(q) || u.displayName?.toLowerCase().includes(q)
+    );
+  }, [data, searchQuery]);
+
+  const activeIn7Days = data?.userSummary?.length || 0;
+  const totalEvents = data?.totalEvents || 0;
+  const topApps = useMemo(() => {
+    if (!data?.userSummary) return {};
+    const counts = {};
+    for (const u of data.userSummary) {
+      for (const app of (u.appsUsed || [])) {
+        counts[app] = (counts[app] || 0) + u.eventCount;
+      }
+    }
+    return counts;
+  }, [data]);
+
+  if (loading && !loaded) {
+    return <LoadingSpinner message="Fetching Gemini activity from Admin Reports API..." />;
+  }
+
+  if (error && !loaded) {
+    return (
+      <div style={{ textAlign: "center", padding: 40 }}>
+        <AlertTriangle size={32} color="#f59e0b" style={{ marginBottom: 12 }} />
+        <div style={{ fontSize: 13, color: "#666", marginBottom: 8 }}>{error}</div>
+        <div style={{ marginTop: 16, padding: 16, background: "#FEF3C7", borderRadius: 8, maxWidth: 480, margin: "16px auto 0", textAlign: "left" }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#92400E", marginBottom: 8 }}>Requirements:</div>
+          <ol style={{ fontSize: 11, color: "#78350F", lineHeight: 1.8, paddingLeft: 16, margin: 0 }}>
+            <li>Scope <code>admin.reports.audit.readonly</code> must be authorized in Domain-Wide Delegation</li>
+            <li>The Gemini Reports API may have a 2-day delay for recent activity</li>
+            <li>Gemini activity reporting requires a supported Workspace edition</li>
+          </ol>
+        </div>
+        <button
+          onClick={loadActivity}
+          style={{ marginTop: 16, padding: "8px 20px", background: "#6366f1", color: "#fff", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {/* Summary KPIs */}
+      <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
+        <div style={{ background: "#f0f9ff", border: "1px solid #bae6fd33", borderRadius: 10, padding: "14px 20px", minWidth: 140 }}>
+          <div style={{ fontSize: 10, color: "#999", marginBottom: 2 }}>Active Users</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: "#0284c7" }}>{activeIn7Days}</div>
+          <div style={{ fontSize: 10, color: "#999" }}>last {days} days</div>
+        </div>
+        <div style={{ background: "#faf5ff", border: "1px solid #d8b4fe33", borderRadius: 10, padding: "14px 20px", minWidth: 140 }}>
+          <div style={{ fontSize: 10, color: "#999", marginBottom: 2 }}>Total Events</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: "#7c3aed" }}>{totalEvents}</div>
+          <div style={{ fontSize: 10, color: "#999" }}>Gemini interactions</div>
+        </div>
+        {Object.entries(topApps).slice(0, 3).map(([app, count]) => (
+          <div key={app} style={{ background: "#f0fdf4", border: "1px solid #86efac33", borderRadius: 10, padding: "14px 20px", minWidth: 120 }}>
+            <div style={{ fontSize: 10, color: "#999", marginBottom: 2 }}>{app}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: "#16a34a" }}>{count}</div>
+            <div style={{ fontSize: 10, color: "#999" }}>events</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Controls */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+        <div style={{ position: "relative", flex: 1, maxWidth: 300 }}>
+          <Search size={14} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "#999" }} />
+          <input
+            placeholder="Search users..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            style={{ width: "100%", padding: "8px 10px 8px 32px", border: "1px solid var(--ag-border)", borderRadius: 6, fontSize: 12, outline: "none", background: "var(--ag-surface)" }}
+          />
+        </div>
+        <select
+          value={days}
+          onChange={(e) => { setDays(Number(e.target.value)); setLoaded(false); }}
+          style={{ padding: "8px 12px", border: "1px solid var(--ag-border)", borderRadius: 6, fontSize: 12, background: "var(--ag-surface)" }}
+        >
+          <option value={7}>Last 7 days</option>
+          <option value={14}>Last 14 days</option>
+          <option value={30}>Last 30 days</option>
+        </select>
+        <button
+          onClick={loadActivity}
+          disabled={loading}
+          style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", background: "#6366f1", color: "#fff", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer", opacity: loading ? 0.6 : 1 }}
+        >
+          <RefreshCw size={12} style={loading ? { animation: "agSpin 1s linear infinite" } : {}} />
+          Refresh
+        </button>
+      </div>
+
+      {/* User Activity Table */}
+      {filteredUsers.length > 0 ? (
+        <div style={{ border: "1px solid var(--ag-border)", borderRadius: 10, overflow: "hidden" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: "var(--ag-surface)" }}>
+                <th style={{ textAlign: "left", padding: "10px 14px", color: "#666", fontWeight: 600, fontSize: 11 }}>User</th>
+                <th style={{ textAlign: "left", padding: "10px 14px", color: "#666", fontWeight: 600, fontSize: 11 }}>Email</th>
+                <th style={{ textAlign: "center", padding: "10px 14px", color: "#666", fontWeight: 600, fontSize: 11 }}>Events</th>
+                <th style={{ textAlign: "left", padding: "10px 14px", color: "#666", fontWeight: 600, fontSize: 11 }}>Apps Used</th>
+                <th style={{ textAlign: "left", padding: "10px 14px", color: "#666", fontWeight: 600, fontSize: 11 }}>Last Active</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredUsers.map((user, idx) => (
+                <tr key={user.email} style={{ borderTop: "1px solid var(--ag-border)", background: idx % 2 === 0 ? "transparent" : "var(--ag-surface)" }}>
+                  <td style={{ padding: "10px 14px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ width: 28, height: 28, borderRadius: "50%", background: "#6366f115", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <User size={14} color="#6366f1" />
+                      </div>
+                      <span style={{ fontWeight: 500 }}>{user.displayName}</span>
+                    </div>
+                  </td>
+                  <td style={{ padding: "10px 14px", color: "#666" }}>{user.email}</td>
+                  <td style={{ padding: "10px 14px", textAlign: "center" }}>
+                    <span style={{ background: "#6366f115", color: "#6366f1", padding: "2px 8px", borderRadius: 8, fontSize: 11, fontWeight: 600 }}>
+                      {user.eventCount}
+                    </span>
+                  </td>
+                  <td style={{ padding: "10px 14px" }}>
+                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                      {(user.appsUsed || []).map(app => (
+                        <span key={app} style={{ background: "#f0fdf4", color: "#16a34a", padding: "2px 8px", borderRadius: 6, fontSize: 10, fontWeight: 500 }}>
+                          {app}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
+                  <td style={{ padding: "10px 14px", color: "#999", fontSize: 11 }}>
+                    {user.lastActive ? new Date(user.lastActive).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : loaded ? (
+        <div style={{ textAlign: "center", padding: 60 }}>
+          <Zap size={40} style={{ marginBottom: 12, opacity: 0.3 }} />
+          <h3 style={{ fontSize: 16, fontWeight: 600, color: "var(--ag-text-primary)", marginBottom: 8 }}>No Gemini activity found</h3>
+          <p style={{ fontSize: 13, color: "#999", maxWidth: 400, margin: "0 auto" }}>
+            Gemini usage data has a ~2 day delay. If users recently started using Gemini, activity will appear here within 48 hours.
+          </p>
+        </div>
+      ) : null}
+
+      {/* Info banner */}
+      {loaded && (
+        <div style={{ marginTop: 16, padding: 12, background: "#f0f9ff", border: "1px solid #bae6fd33", borderRadius: 8, display: "flex", alignItems: "flex-start", gap: 8 }}>
+          <Info size={14} color="#0284c7" style={{ marginTop: 1, flexShrink: 0 }} />
+          <div style={{ fontSize: 11, color: "#0369a1", lineHeight: 1.6 }}>
+            Data sourced from Google Workspace Admin Reports API. Activity events have a ~2 day delay.
+            This shows which users accessed Gemini features in Workspace apps — actual prompt content is not captured by the API.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+// Gemini Vault Panel — shows Gemini conversations
+// from Google Vault eDiscovery API
+// ═══════════════════════════════════════════════════════
+
+function GeminiVaultPanel() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [loaded, setLoaded] = useState(false);
+  const [days, setDays] = useState(7);
+
+  const loadVault = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await agentGovernanceApi.fetchGeminiVault(days);
+      setData(result);
+      setLoaded(true);
+    } catch (err) {
+      setError(err.message || "Failed to load Vault data");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!loaded && !loading && !error) {
+    return (
+      <div style={{ border: "1px solid var(--ag-border)", borderRadius: 12, padding: 24 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+          <div style={{ width: 36, height: 36, borderRadius: 8, background: "#7c3aed15", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Lock size={18} color="#7c3aed" />
+          </div>
+          <div>
+            <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Gemini Vault — Conversation Export</h3>
+            <p style={{ fontSize: 11, color: "#999", margin: 0 }}>Pull actual Gemini prompts & responses via Google Vault eDiscovery</p>
+          </div>
+        </div>
+        <div style={{ padding: 12, background: "#faf5ff", border: "1px solid #d8b4fe22", borderRadius: 8, marginBottom: 16 }}>
+          <div style={{ fontSize: 11, color: "#6b21a8", lineHeight: 1.7 }}>
+            <strong>Prerequisites:</strong>
+            <ul style={{ margin: "4px 0 0 0", paddingLeft: 16 }}>
+              <li>Google Vault must be included in your Workspace plan (Business Plus / Enterprise)</li>
+              <li>Scope <code>https://www.googleapis.com/auth/ediscovery</code> must be added to Domain-Wide Delegation</li>
+              <li>The admin user must have Vault privileges</li>
+            </ul>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <select
+            value={days}
+            onChange={(e) => setDays(Number(e.target.value))}
+            style={{ padding: "8px 12px", border: "1px solid var(--ag-border)", borderRadius: 6, fontSize: 12, background: "var(--ag-surface)" }}
+          >
+            <option value={7}>Last 7 days</option>
+            <option value={14}>Last 14 days</option>
+            <option value={30}>Last 30 days</option>
+          </select>
+          <button
+            onClick={loadVault}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 20px", background: "#7c3aed", color: "#fff", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+          >
+            <Database size={14} /> Scan Vault
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div style={{ border: "1px solid var(--ag-border)", borderRadius: 12, padding: 24 }}>
+        <LoadingSpinner message="Querying Google Vault — this may take up to 2 minutes while the export processes..." />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div style={{ border: "1px solid var(--ag-border)", borderRadius: 12, padding: 24 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+          <Lock size={18} color="#7c3aed" />
+          <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Gemini Vault</h3>
+        </div>
+        <div style={{ textAlign: "center", padding: 20 }}>
+          <AlertTriangle size={28} color="#f59e0b" style={{ marginBottom: 8 }} />
+          <div style={{ fontSize: 13, color: "#666", marginBottom: 12 }}>{error}</div>
+          <div style={{ padding: 14, background: "#FEF3C7", borderRadius: 8, maxWidth: 460, margin: "0 auto", textAlign: "left" }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "#92400E", marginBottom: 6 }}>To enable Vault access:</div>
+            <ol style={{ fontSize: 11, color: "#78350F", lineHeight: 1.8, paddingLeft: 16, margin: 0 }}>
+              <li>Go to <strong>Google Admin Console → Security → API Controls → Domain-Wide Delegation</strong></li>
+              <li>Add scope: <code>https://www.googleapis.com/auth/ediscovery</code></li>
+              <li>Enable <strong>Google Vault API</strong> in GCP Console</li>
+              <li>Ensure the admin user has eDiscovery privileges</li>
+            </ol>
+          </div>
+          <button
+            onClick={() => { setError(null); setLoaded(false); }}
+            style={{ marginTop: 16, padding: "8px 20px", background: "#7c3aed", color: "#fff", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+          >
+            Try Again
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const vaultAvailable = data?.vaultAvailable;
+  const exports = data?.exports || [];
+  const newExport = data?.newExport;
+  const totalArtifacts = newExport
+    ? newExport.artifactCount
+    : exports.reduce((sum, e) => sum + e.artifactCount, 0);
+
+  return (
+    <div style={{ border: "1px solid var(--ag-border)", borderRadius: 12, padding: 24 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 36, height: 36, borderRadius: 8, background: "#7c3aed15", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Lock size={18} color="#7c3aed" />
+          </div>
+          <div>
+            <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Gemini Vault — Conversation Export</h3>
+            <p style={{ fontSize: 11, color: "#999", margin: 0 }}>
+              Matter: <span style={{ color: "var(--ag-text-primary)", fontWeight: 500 }}>{data?.matterName || "—"}</span>
+              {data?.matterId && <span style={{ marginLeft: 8, color: "#ccc" }}>({data.matterId.substring(0, 12)}…)</span>}
+            </p>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <select
+            value={days}
+            onChange={(e) => { setDays(Number(e.target.value)); setLoaded(false); }}
+            style={{ padding: "6px 10px", border: "1px solid var(--ag-border)", borderRadius: 6, fontSize: 11, background: "var(--ag-surface)" }}
+          >
+            <option value={7}>7 days</option>
+            <option value={14}>14 days</option>
+            <option value={30}>30 days</option>
+          </select>
+          <button
+            onClick={loadVault}
+            disabled={loading}
+            style={{ display: "flex", alignItems: "center", gap: 4, padding: "6px 14px", background: "#7c3aed", color: "#fff", border: "none", borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: "pointer", opacity: loading ? 0.6 : 1 }}
+          >
+            <RefreshCw size={12} style={loading ? { animation: "agSpin 1s linear infinite" } : {}} /> Refresh
+          </button>
+        </div>
+      </div>
+
+      {!vaultAvailable ? (
+        <div style={{ textAlign: "center", padding: 30 }}>
+          <ShieldAlert size={32} color="#f59e0b" style={{ marginBottom: 8 }} />
+          <div style={{ fontSize: 13, color: "#666" }}>{data?.message}</div>
+        </div>
+      ) : (
+        <>
+          {/* Summary KPIs */}
+          <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
+            <div style={{ background: vaultAvailable ? "#f0fdf4" : "#fef2f2", border: "1px solid #86efac33", borderRadius: 10, padding: "14px 20px", minWidth: 140 }}>
+              <div style={{ fontSize: 10, color: "#999", marginBottom: 2 }}>Vault Status</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "#16a34a", display: "flex", alignItems: "center", gap: 6 }}>
+                <CheckCircle size={16} /> Connected
+              </div>
+            </div>
+            <div style={{ background: "#faf5ff", border: "1px solid #d8b4fe33", borderRadius: 10, padding: "14px 20px", minWidth: 140 }}>
+              <div style={{ fontSize: 10, color: "#999", marginBottom: 2 }}>Gemini Items Found</div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: "#7c3aed" }}>{totalArtifacts}</div>
+              <div style={{ fontSize: 10, color: "#999" }}>in last {days} days</div>
+            </div>
+            <div style={{ background: "#f0f9ff", border: "1px solid #bae6fd33", borderRadius: 10, padding: "14px 20px", minWidth: 140 }}>
+              <div style={{ fontSize: 10, color: "#999", marginBottom: 2 }}>Completed Exports</div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: "#0284c7" }}>{exports.length}</div>
+              <div style={{ fontSize: 10, color: "#999" }}>in this matter</div>
+            </div>
+            {newExport && (
+              <div style={{ background: "#fefce8", border: "1px solid #fde04733", borderRadius: 10, padding: "14px 20px", minWidth: 140 }}>
+                <div style={{ fontSize: 10, color: "#999", marginBottom: 2 }}>New Export Size</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color: "#ca8a04" }}>
+                  {newExport.sizeBytes > 1048576
+                    ? `${(newExport.sizeBytes / 1048576).toFixed(1)} MB`
+                    : newExport.sizeBytes > 1024
+                    ? `${(newExport.sizeBytes / 1024).toFixed(0)} KB`
+                    : `${newExport.sizeBytes} B`}
+                </div>
+                <div style={{ fontSize: 10, color: "#999" }}>{newExport.status}</div>
+              </div>
+            )}
+          </div>
+
+          {/* Exports Table */}
+          {exports.length > 0 && (
+            <div style={{ border: "1px solid var(--ag-border)", borderRadius: 10, overflow: "hidden", marginBottom: 16 }}>
+              <div style={{ padding: "10px 14px", background: "var(--ag-surface)", borderBottom: "1px solid var(--ag-border)", fontSize: 12, fontWeight: 600 }}>
+                Vault Exports
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: "var(--ag-surface)" }}>
+                    <th style={{ textAlign: "left", padding: "8px 14px", color: "#666", fontWeight: 600, fontSize: 11 }}>Export Name</th>
+                    <th style={{ textAlign: "center", padding: "8px 14px", color: "#666", fontWeight: 600, fontSize: 11 }}>Items</th>
+                    <th style={{ textAlign: "center", padding: "8px 14px", color: "#666", fontWeight: 600, fontSize: 11 }}>Total Artifacts</th>
+                    <th style={{ textAlign: "left", padding: "8px 14px", color: "#666", fontWeight: 600, fontSize: 11 }}>Created</th>
+                    <th style={{ textAlign: "center", padding: "8px 14px", color: "#666", fontWeight: 600, fontSize: 11 }}>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {exports.map((exp, idx) => (
+                    <tr key={exp.id} style={{ borderTop: "1px solid var(--ag-border)", background: idx % 2 === 0 ? "transparent" : "var(--ag-surface)" }}>
+                      <td style={{ padding: "10px 14px" }}>
+                        <div style={{ fontWeight: 500 }}>{exp.name}</div>
+                        <div style={{ fontSize: 10, color: "#999" }}>{exp.id.substring(0, 20)}…</div>
+                      </td>
+                      <td style={{ padding: "10px 14px", textAlign: "center" }}>
+                        <span style={{ background: "#7c3aed15", color: "#7c3aed", padding: "2px 8px", borderRadius: 8, fontSize: 11, fontWeight: 600 }}>
+                          {exp.artifactCount}
+                        </span>
+                      </td>
+                      <td style={{ padding: "10px 14px", textAlign: "center", color: "#666" }}>{exp.totalArtifacts}</td>
+                      <td style={{ padding: "10px 14px", color: "#999", fontSize: 11 }}>
+                        {exp.createTime ? new Date(exp.createTime).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
+                      </td>
+                      <td style={{ padding: "10px 14px", textAlign: "center" }}>
+                        <span style={{
+                          background: exp.status === "COMPLETED" ? "#f0fdf4" : "#fef3c7",
+                          color: exp.status === "COMPLETED" ? "#16a34a" : "#92400e",
+                          padding: "2px 8px", borderRadius: 6, fontSize: 10, fontWeight: 600,
+                        }}>
+                          {exp.status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Status message */}
+          <div style={{ padding: 12, background: "#faf5ff", border: "1px solid #d8b4fe22", borderRadius: 8, display: "flex", alignItems: "flex-start", gap: 8 }}>
+            <Info size={14} color="#7c3aed" style={{ marginTop: 1, flexShrink: 0 }} />
+            <div style={{ fontSize: 11, color: "#6b21a8", lineHeight: 1.6 }}>
+              {data?.message || "Vault scan complete."}
+              {" "}Exported data is stored in Google Cloud Storage associated with the Vault matter and can be downloaded from the Google Vault admin console for full review.
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

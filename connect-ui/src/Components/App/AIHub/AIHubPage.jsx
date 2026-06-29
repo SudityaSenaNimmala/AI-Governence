@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import SideNav from "../../Resuables/Nav/SideNav";
 import TopNav from "../../Resuables/Nav/TopNav";
+import AgentGovernance from "../AgentGovernance/AgentGovernance";
 import {
   Monitor, Scan, AlertTriangle, Wrench, Server, Shield, Clock, ChevronRight,
   Search, RefreshCw, Activity, FileText, MessageSquare, Eye, Trash2, Plus, X,
@@ -370,6 +371,7 @@ const PAGES={
   ServerAgents:{title:"Server Agents",component:ServerAgentsView},
   DLP:{title:"AI Activity",component:DLPView},
   Platforms:{title:"AI Platforms",component:PlatformsView},
+  AgentGovernance:{title:"Agent Governance",component:AgentGovernance},
 };
 
 export default function AIHubPage({page}) {

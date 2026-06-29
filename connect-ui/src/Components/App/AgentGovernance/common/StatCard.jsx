@@ -1,4 +1,4 @@
-export function StatCard({ label, value, sub, icon }) {
+export function StatCard({ label, value, color, sub, icon }) {
   return (
     <div
       style={{
@@ -13,7 +13,7 @@ export function StatCard({ label, value, sub, icon }) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
         <div>
           <div style={{ fontSize: 12, color: "var(--ag-text-secondary)", marginBottom: 4 }}>{label}</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: "var(--ag-text-primary)" }}>{value}</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: color || "var(--ag-text-primary)" }}>{value}</div>
           {sub && <div style={{ fontSize: 11, color: "var(--ag-text-secondary)", marginTop: 2 }}>{sub}</div>}
         </div>
         {icon && <div style={{ opacity: 0.5 }}>{icon}</div>}

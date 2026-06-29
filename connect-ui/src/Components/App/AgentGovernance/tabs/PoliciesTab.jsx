@@ -4,7 +4,6 @@ import { useGovernance } from "../AgentGovernanceContext";
 import { Section } from "../common/Section";
 import { Badge } from "../common/Badge";
 import { agentGovernanceApi } from "../AgentGovernanceActions/AgentGovernanceActions";
-import { DEMO_POLICIES } from "../demoData";
 
 const severityColor = {
   critical: "#ef4444",
@@ -56,8 +55,8 @@ const ACTION_TYPES = [
 export function PoliciesTab() {
   const { state } = useGovernance();
   const scanActive = state.discoveryStatus === "loading" || state.discoveryStatus === "success";
-  const [policies, setPolicies] = useState(DEMO_POLICIES);
-  const [loading, setLoading] = useState(false);
+  const [policies, setPolicies] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [evaluationResult, setEvaluationResult] = useState(null);
   const [evaluating, setEvaluating] = useState(false);
   const [showCreateForm, setShowCreateForm] = useState(false);
@@ -292,11 +291,12 @@ export function PoliciesTab() {
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {policies.map((p) => (
-              <div key={p.id} style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 8, padding: 16, opacity: p.status === "disabled" ? 0.6 : 1 }}>
+              <div key={p.id} style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderLeft: `3px solid ${severityColor[p.severity] || "var(--ag-border)"}`, borderRadius: 8, padding: 16, opacity: p.status === "disabled" ? 0.6 : 1 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     {statusIcon[p.status] || statusIcon.draft}
                     <span style={{ fontWeight: 700, fontSize: 14 }}>{p.name}</span>
+                    {p.template && <span style={{ fontSize: 10, padding: "2px 6px", background: "#6366f122", color: "#6366f1", borderRadius: 4 }}>template</span>}
                   </div>
                   <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                     <Badge text={p.severity} color={severityColor[p.severity] || "#6b7280"} />
@@ -306,6 +306,11 @@ export function PoliciesTab() {
                   </div>
                 </div>
                 <div style={{ fontSize: 12, color: "var(--ag-text-secondary)", marginTop: 8, lineHeight: 1.6 }}>{p.description}</div>
+                {p.conditions && p.conditions.length > 0 && (
+                  <div style={{ fontSize: 11, color: "#6366f1", marginTop: 8, fontFamily: "monospace" }}>
+                    IF {p.conditions.map((c) => `${c.field} ${c.operator} ${c.value}`).join(" AND ")} &rarr; {p.actions?.map((a) => a.type).join(", ") || "flag"}
+                  </div>
+                )}
               </div>
             ))}
           </div>
