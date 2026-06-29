@@ -24,6 +24,7 @@ function parseHash() {
 
 export default function App() {
   const [route, setRoute] = useState(parseHash());
+  // embed mode removed — AI Hub views are built natively in connect-ui
 
   useEffect(() => {
     const onHash = () => setRoute(parseHash());
