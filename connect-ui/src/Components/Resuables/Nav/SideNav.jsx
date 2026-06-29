@@ -147,7 +147,7 @@ const SideNav = (props) => {
   };
 
   const isChildActive = (child) =>
-    child.title === props?.subMenuActive || child.title === props?.activeTab;
+    child.title === props?.subMenuActive || child.title === props?.activeTab || pathname === child.link || pathname.startsWith(child.link + "/");
 
   const hasActiveChild = (item) =>
     Array.isArray(item.children) && item.children.some(isChildActive);

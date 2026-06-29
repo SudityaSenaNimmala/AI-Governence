@@ -432,7 +432,7 @@ function updateTrayMenu() {
     { type: 'separator' },
     {
       label: 'Open Governance Dashboard',
-      click: () => shell.openExternal('http://localhost:8080'),
+      click: () => shell.openExternal('http://localhost:3000/CloudFuze'),
     },
     { type: 'separator' },
     {
@@ -524,7 +524,7 @@ function setupIPC() {
   });
 
   ipcMain.handle('open-dashboard', () => {
-    shell.openExternal('http://localhost:8080');
+    shell.openExternal('http://localhost:3000/CloudFuze');
   });
 
   ipcMain.handle('run-scan', () => {
