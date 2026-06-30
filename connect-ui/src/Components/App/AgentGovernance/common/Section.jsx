@@ -1,6 +1,6 @@
-export function Section({ title, children, style }) {
+export function Section({ title, children }) {
   return (
-    <div style={{ marginBottom: 28, display: "flex", flexDirection: "column", ...style }}>
+    <div style={{ marginBottom: 28 }}>
       <h3
         style={{
           fontSize: 16,
@@ -14,9 +14,7 @@ export function Section({ title, children, style }) {
       >
         {title}
       </h3>
-      <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-        {children}
-      </div>
+      {children}
     </div>
   );
 }

@@ -1,12 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Bell, BellOff, CheckCircle2, AlertTriangle, Clock, Settings2,
-  RefreshCw, CheckCheck, Filter, Cloud, Shield, XCircle
+  RefreshCw, CheckCheck, Filter, Cloud, Shield, XCircle, Bot
 } from "lucide-react";
 import { useGovernance, getScopedAgents } from "../AgentGovernanceContext";
 import { useAgentAuth } from "../AgentGovernanceContext";
 import { agentGovernanceApi } from "../AgentGovernanceActions/AgentGovernanceActions";
-import { DEMO_ALERTS } from "../demoData";
 import { Section } from "../common/Section";
 import { StatCard } from "../common/StatCard";
 import { Badge } from "../common/Badge";
@@ -22,6 +21,9 @@ const SEVERITY_CONFIG = {
 const VENDOR_CONFIG = {
   Microsoft: { color: "#0078D4", icon: <Shield size={14} />, label: "Microsoft 365" },
   Google: { color: "#4285F4", icon: <Cloud size={14} />, label: "Google Cloud" },
+  OpenAI: { color: "#10a37f", icon: <Bot size={14} />, label: "ChatGPT / OpenAI" },
+  "Claude / Anthropic": { color: "#D4622A", icon: <Bot size={14} />, label: "Claude / Anthropic" },
+  "Gemini Enterprise": { color: "#886FBF", icon: <Bot size={14} />, label: "Gemini Enterprise" },
   Unknown: { color: "#6b7280", icon: <AlertTriangle size={14} />, label: "Unknown" },
 };
 
@@ -39,7 +41,7 @@ function AlertCard({ alert, onResolve }) {
   const vendor = VENDOR_CONFIG[alert.vendor] || VENDOR_CONFIG.Unknown;
 
   return (
-    <div className="ag_alert_card" style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)" }}>
+    <div className="ag_alert_card" style={{ borderLeft: `3px solid ${sev.color}`, background: sev.bg, border: `1px solid ${sev.border}`, borderLeftWidth: 3, borderLeftColor: sev.color }}>
       <div className="ag_alert_card_header">
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <div style={{
@@ -206,7 +208,7 @@ function AlertSettings({ config, onSave, onClose }) {
 
 export function AlertsTab({ isActive = true }) {
   const { state } = useGovernance();
-  const { isAuthenticated, googleKeyId } = useAgentAuth();
+  const { isAuthenticated, googleKeyId, openaiKeyId, claudeKeyId, geminiEnterpriseKeyId } = useAgentAuth();
   const result = state.discoveryResult;
 
   const [alerts, setAlerts] = useState([]);
@@ -332,6 +334,9 @@ export function AlertsTab({ isActive = true }) {
 
   // Load config on mount
   useEffect(() => {
+    agentGovernanceApi.getAlertConfig()
+      .then(setAlertConfig)
+      .catch(() => {});
     requestNotificationPermission();
   }, [requestNotificationPermission]);
 
@@ -376,21 +381,16 @@ export function AlertsTab({ isActive = true }) {
     notifiedRef.current.clear();
   };
 
-  // Honor the global vendor selector from the header first, then the
-  // tab-local vendor filter.
-  const headerVendor = state.selectedVendor;
-  const headerFilteredAlerts = headerVendor === "microsoft"
-    ? alerts.filter((a) => a.vendor === "Microsoft")
-    : headerVendor === "google"
-    ? alerts.filter((a) => a.vendor === "Google")
-    : alerts;
-
+  // Filter alerts
   const filteredAlerts = vendorFilter === "all"
-    ? headerFilteredAlerts
-    : headerFilteredAlerts.filter((a) => a.vendor === vendorFilter);
+    ? alerts
+    : alerts.filter((a) => a.vendor === vendorFilter);
 
-  const microsoftAlerts = headerFilteredAlerts.filter((a) => a.vendor === "Microsoft");
-  const googleAlerts = headerFilteredAlerts.filter((a) => a.vendor === "Google");
+  const microsoftAlerts = alerts.filter((a) => a.vendor === "Microsoft");
+  const googleAlerts = alerts.filter((a) => a.vendor === "Google");
+  const openaiAlerts = alerts.filter((a) => a.vendor === "OpenAI");
+  const claudeAlerts = alerts.filter((a) => a.vendor === "Claude / Anthropic");
+  const geminiAlerts = alerts.filter((a) => a.vendor === "Gemini Enterprise");
 
   if (!result) {
     return (
@@ -413,8 +413,8 @@ export function AlertsTab({ isActive = true }) {
         <div style={{ flex: "0 1 calc(25% - 9px)", minWidth: 160 }}>
           <StatCard
             label="Total Stale"
-            value={headerFilteredAlerts.length}
-            color={headerFilteredAlerts.length > 0 ? "#ef4444" : "#22c55e"}
+            value={alerts.length}
+            color={alerts.length > 0 ? "#ef4444" : "#22c55e"}
             sub={`${Math.round(alertConfig.idle_threshold_minutes / 1440)} day threshold`}
             icon={<Bell size={20} />}
           />
@@ -446,11 +446,26 @@ export function AlertsTab({ isActive = true }) {
             </button>
           </div>
 
+          <select
+            value={vendorFilter}
+            onChange={(e) => setVendorFilter(e.target.value)}
+            style={{
+              background: "#fff", border: "1px solid var(--ag-border)", borderRadius: 6,
+              padding: "6px 10px", fontSize: 12, color: "#333",
+            }}
+          >
+            <option value="all">All Platforms</option>
+            <option value="Microsoft">Microsoft 365</option>
+            <option value="Google">Google Cloud</option>
+            <option value="OpenAI">ChatGPT / OpenAI</option>
+            {claudeKeyId && <option value="Claude / Anthropic">Claude / Anthropic</option>}
+            {geminiEnterpriseKeyId && <option value="Gemini Enterprise">Gemini Enterprise</option>}
+          </select>
         </div>
       </div>
 
-      {/* Microsoft Alerts — hidden when header vendor is Google */}
-      {headerVendor !== "google" && (vendorFilter === "all" || vendorFilter === "Microsoft") && (
+      {/* Microsoft Alerts */}
+      {(vendorFilter === "all" || vendorFilter === "Microsoft") && (
         <Section title={`Microsoft 365 Stale Agents (${microsoftAlerts.length})`}>
           {microsoftAlerts.length > 0 ? (
             <div className="ag_alerts_list">
@@ -471,8 +486,8 @@ export function AlertsTab({ isActive = true }) {
         </Section>
       )}
 
-      {/* Google Alerts — hidden when header vendor is Microsoft */}
-      {headerVendor !== "microsoft" && (vendorFilter === "all" || vendorFilter === "Google") && (
+      {/* Google Alerts */}
+      {(vendorFilter === "all" || vendorFilter === "Google") && (
         <Section title={`Google Cloud Stale Agents (${googleAlerts.length})`}>
           {googleAlerts.length > 0 ? (
             <div className="ag_alerts_list">
@@ -483,11 +498,61 @@ export function AlertsTab({ isActive = true }) {
           ) : (
             <div className="ag_alerts_empty">
               <Cloud size={24} color="#4285F4" style={{ opacity: 0.3 }} />
-              <span>
-                {alertConfig.notify_google
-                  ? "No stale Google agents detected"
-                  : "Google monitoring is paused"}
-              </span>
+              <span>No stale Google agents detected</span>
+            </div>
+          )}
+        </Section>
+      )}
+
+      {/* OpenAI / ChatGPT Alerts */}
+      {openaiKeyId && (vendorFilter === "all" || vendorFilter === "OpenAI") && (
+        <Section title={`ChatGPT / OpenAI Stale Agents (${openaiAlerts.length})`}>
+          {openaiAlerts.length > 0 ? (
+            <div className="ag_alerts_list">
+              {openaiAlerts.map((alert) => (
+                <AlertCard key={alert.agent_id} alert={alert} onResolve={handleResolve} />
+              ))}
+            </div>
+          ) : (
+            <div className="ag_alerts_empty">
+              <Bot size={24} color="#10a37f" style={{ opacity: 0.3 }} />
+              <span>No stale ChatGPT / OpenAI agents detected</span>
+            </div>
+          )}
+        </Section>
+      )}
+
+      {/* Claude / Anthropic Alerts */}
+      {claudeKeyId && (vendorFilter === "all" || vendorFilter === "Claude / Anthropic") && (
+        <Section title={`Claude / Anthropic Stale Agents (${claudeAlerts.length})`}>
+          {claudeAlerts.length > 0 ? (
+            <div className="ag_alerts_list">
+              {claudeAlerts.map((alert) => (
+                <AlertCard key={alert.agent_id} alert={alert} onResolve={handleResolve} />
+              ))}
+            </div>
+          ) : (
+            <div className="ag_alerts_empty">
+              <Bot size={24} color="#D4622A" style={{ opacity: 0.3 }} />
+              <span>No stale Claude / Anthropic agents detected</span>
+            </div>
+          )}
+        </Section>
+      )}
+
+      {/* Gemini Enterprise Alerts */}
+      {geminiEnterpriseKeyId && (vendorFilter === "all" || vendorFilter === "Gemini Enterprise") && (
+        <Section title={`Gemini Enterprise Stale Agents (${geminiAlerts.length})`}>
+          {geminiAlerts.length > 0 ? (
+            <div className="ag_alerts_list">
+              {geminiAlerts.map((alert) => (
+                <AlertCard key={alert.agent_id} alert={alert} onResolve={handleResolve} />
+              ))}
+            </div>
+          ) : (
+            <div className="ag_alerts_empty">
+              <Bot size={24} color="#886FBF" style={{ opacity: 0.3 }} />
+              <span>No stale Gemini Enterprise agents detected</span>
             </div>
           )}
         </Section>

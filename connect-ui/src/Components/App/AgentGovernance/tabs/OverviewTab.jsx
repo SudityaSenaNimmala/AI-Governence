@@ -9,13 +9,7 @@ import { Shield, AlertTriangle, Users, TrendingDown, Clock } from "lucide-react"
 export function OverviewTab() {
   const { state } = useGovernance();
   const result = state.discoveryResult;
-  const metrics = computeMetrics(result, state.selectedScope, state.selectedVendor);
-  const displayTenant =
-    state.selectedVendor === "google"
-      ? result?.tenants?.google
-      : state.selectedVendor === "microsoft"
-      ? result?.tenants?.microsoft
-      : result?.tenant;
+  const metrics = computeMetrics(result, state.selectedScope);
 
   if (state.discoveryStatus === "idle") {
     return (
@@ -25,7 +19,7 @@ export function OverviewTab() {
           No scan data yet
         </h3>
         <p style={{ fontSize: 13 }}>
-          Click <strong>"Run Scan"</strong> in the header to discover AI agents across your M365 tenant, SharePoint, and Azure.
+          Click <strong>"Run Scan"</strong> in the header to discover AI agents across your connected cloud platforms.
         </p>
       </div>
     );
@@ -65,7 +59,7 @@ export function OverviewTab() {
           label="AI Agents Discovered"
           value={metrics.totalAgents}
           color="#6366f1"
-          sub={`across ${displayTenant?.domain || result?.tenant?.domain || ""}`}
+          sub={`across ${result?.tenant.domain}`}
           icon={<Shield size={20} />}
         />
         <StatCard
@@ -98,13 +92,13 @@ export function OverviewTab() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
-        <Section title="Risk Distribution" style={{ flex: 1 }}>
-          <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, padding: 16, flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <Section title="Risk Distribution">
+          <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, padding: 16 }}>
             {riskData.length > 0 ? (
-              <div style={{ display: "flex", alignItems: "center", gap: 30 }}>
-                <ResponsiveContainer width={180} height={180}>
+              <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
+                <ResponsiveContainer width={140} height={140}>
                   <PieChart>
-                    <Pie data={riskData} cx="50%" cy="50%" innerRadius={45} outerRadius={80} dataKey="value" stroke="none">
+                    <Pie data={riskData} cx="50%" cy="50%" innerRadius={35} outerRadius={60} dataKey="value" stroke="none">
                       {riskData.map((entry, i) => (
                         <Cell key={i} fill={entry.color} />
                       ))}
@@ -114,10 +108,10 @@ export function OverviewTab() {
                 </ResponsiveContainer>
                 <div>
                   {riskData.map((d) => (
-                    <div key={d.name} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-                      <div style={{ width: 12, height: 12, borderRadius: 3, background: d.color }} />
-                      <span style={{ fontSize: 13, color: "var(--ag-text-secondary)" }}>
-                        {d.name}: <strong style={{ color: "var(--ag-text-primary)", fontSize: 14 }}>{d.value}</strong>
+                    <div key={d.name} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                      <div style={{ width: 10, height: 10, borderRadius: 2, background: d.color }} />
+                      <span style={{ fontSize: 12, color: "var(--ag-text-secondary)" }}>
+                        {d.name}: <strong style={{ color: "var(--ag-text-primary)" }}>{d.value}</strong>
                       </span>
                     </div>
                   ))}
@@ -131,38 +125,25 @@ export function OverviewTab() {
           </div>
         </Section>
 
-        <Section title="Live Activity Feed" style={{ flex: 1 }}>
-          <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, overflow: "hidden", flex: 1 }}>
+        <Section title="Live Activity Feed">
+          <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, padding: 12 }}>
             {metrics.recentEvents.length > 0 ? (
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                <thead>
-                  <tr>
-                    <th style={{ textAlign: "left", padding: "10px 12px", fontSize: 11, fontWeight: 600, color: "var(--ag-text-secondary)", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: "1px solid var(--ag-border)" }}>Name</th>
-                    <th style={{ textAlign: "left", padding: "10px 12px", fontSize: 11, fontWeight: 600, color: "var(--ag-text-secondary)", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: "1px solid var(--ag-border)", width: 80 }}>Score</th>
-                    <th style={{ textAlign: "left", padding: "10px 12px", fontSize: 11, fontWeight: 600, color: "var(--ag-text-secondary)", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: "1px solid var(--ag-border)", width: 110 }}>Severity</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {metrics.recentEvents.slice(0, 5).map((evt, idx, arr) => {
-                    const scoreMatch = evt.description?.match(/score:\s*(\d+)/i);
-                    const score = scoreMatch ? scoreMatch[1] : "—";
-                    const isLast = idx === arr.length - 1;
-                    return (
-                      <tr key={evt.id}>
-                        <td style={{ padding: "10px 12px", color: "var(--ag-text-primary)", borderBottom: isLast ? "none" : "1px solid var(--ag-border)" }}>
-                          {evt.agentName || evt.description}
-                        </td>
-                        <td style={{ padding: "10px 12px", color: "var(--ag-text-primary)", fontWeight: 600, borderBottom: isLast ? "none" : "1px solid var(--ag-border)" }}>
-                          {score}
-                        </td>
-                        <td style={{ padding: "10px 12px", borderBottom: isLast ? "none" : "1px solid var(--ag-border)" }}>
-                          <Badge text={evt.severity} color={riskColor[evt.severity]} />
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+              metrics.recentEvents.slice(0, 8).map((evt) => (
+                <div
+                  key={evt.id}
+                  style={{
+                    display: "flex",
+                    gap: 10,
+                    alignItems: "center",
+                    padding: "8px 0",
+                    borderBottom: "1px solid var(--ag-border)",
+                    fontSize: 12,
+                  }}
+                >
+                  <Badge text={evt.severity} color={riskColor[evt.severity]} />
+                  <span style={{ color: "var(--ag-text-primary)", flex: 1 }}>{evt.description}</span>
+                </div>
+              ))
             ) : (
               <div style={{ textAlign: "center", padding: 20, color: "var(--ag-text-secondary)", fontSize: 13 }}>
                 No events yet — run a discovery scan
@@ -187,7 +168,7 @@ export function OverviewTab() {
                 }}
               >
                 <div style={{ fontWeight: 700, color: "#6366f1", fontSize: 13 }}>
-                  {SCOPE_LABELS[platform] || platform.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
+                  {platform.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
                 </div>
                 <div style={{ color: "var(--ag-text-secondary)", marginTop: 2 }}>{count} agent{count !== 1 ? "s" : ""}</div>
               </div>
