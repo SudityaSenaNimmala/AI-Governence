@@ -40,6 +40,7 @@ function pickPatch(body) {
     out.sandbox = body.sandbox ?? null;
   }
   if ('governed'        in body) out.governed        = body.governed ? 1 : 0;
+  if ('blocked'         in body) out.blocked          = body.blocked ? 1 : 0;
   if ('surface'         in body) {
     if (body.surface != null && !VALID_SURFACE.has(body.surface)) return { _err: 'invalid surface' };
     out.surface = body.surface ?? 'browser';
@@ -59,6 +60,7 @@ function rowToJson(r) {
   return {
     ...rest,
     governed: !!rest.governed,
+    blocked:  !!rest.blocked,
     pinned:   !!rest.pinned,
   };
 }
@@ -78,7 +80,7 @@ export function mountAiPlatforms(app, db) {
       .limit(1000)
       .project({
         _id: 0, host: 1, vendor: 1, product: 1, category: 1, sandbox: 1,
-        governed: 1, surface: 1, capture_mode: 1, governance_note: 1, pinned: 1,
+        governed: 1, blocked: 1, surface: 1, capture_mode: 1, governance_note: 1, pinned: 1,
         source: 1, added_by: 1, added_at: 1, updated_at: 1,
       })
       .toArray();

@@ -9,7 +9,8 @@
   },
   "bin": {
     "ai-gov-agent": "./src/index.js",
-    "ai-gov-server-monitor": "./src/server-monitor/index.js"
+    "ai-gov-server-monitor": "./src/server-monitor/index.js",
+    "cfai-mcp-guard": "./src/mcp_guard/index.js"
   },
   "scripts": {
     "start": "node src/index.js",

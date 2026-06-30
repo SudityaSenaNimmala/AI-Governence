@@ -291,6 +291,105 @@
   border-color: #0044cc;
 }
 
+/* View / Open button (DLP content preview) */
+.aihub_view_btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid #c7d6f5;
+  border-radius: 6px;
+  background: #f3f7ff;
+  color: #0044cc;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.aihub_view_btn:hover { background: #0044cc; color: #fff; border-color: #0044cc; }
+
+/* DLP content drawer */
+.aihub_drawer_overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(15, 23, 42, 0.4);
+  backdrop-filter: blur(2px);
+}
+.aihub_drawer {
+  position: relative;
+  width: 100%;
+  max-width: 640px;
+  height: 100%;
+  background: #fff;
+  box-shadow: -8px 0 30px rgba(0, 0, 0, 0.15);
+  display: flex;
+  flex-direction: column;
+}
+.aihub_drawer_head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  border-bottom: 1px solid #e5e7eb;
+}
+.aihub_drawer_title { font-size: 14px; font-weight: 600; color: #111827; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aihub_drawer_sub { font-size: 12px; color: #6b7280; margin-top: 2px; }
+.aihub_drawer_close {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #6b7280;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.aihub_drawer_close:hover { background: #f3f4f6; color: #111827; }
+.aihub_drawer_body { flex: 1; overflow: auto; }
+.aihub_content_pre {
+  font-size: 12.5px;
+  line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #1f2937;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 16px;
+  margin: 0;
+}
+.aihub_content_mark {
+  background: #fee2e2;
+  color: #991b1b;
+  box-shadow: 0 0 0 1px #fca5a5;
+  border-radius: 3px;
+  padding: 0 2px;
+}
+.aihub_dl_btn {
+  margin-top: 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  height: 36px;
+  border-radius: 6px;
+  background: #0044cc;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.aihub_dl_btn:hover { background: #0037a6; }
+
 .aihub_empty {
   text-align: center;
   padding: 50px 20px;

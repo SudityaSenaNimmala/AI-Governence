@@ -73,6 +73,27 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   locates the send control (UIA hit-test at cursor) and swallows the click
   when the prompt holds a blocked pattern.
 
+- [ ] **Fix MCP filesystem target extractor mis-parsing npx package name as a directory**
+  `mcp_inspection.js` filesystem rule treats the `@modelcontextprotocol/server-filesystem`
+  arg as a directory target (its path regex matches the `/`), polluting data-flow
+  targets with a false directory. Skip the package/spec arg before extracting dirs.
+
+- [ ] **Endpoint enforcement for MCP servers (quarantine blocked MCP servers from config)**
+  Today MCP handling is discovery-only — a server can be sanctioned `blocked` in the
+  catalog but nothing acts on it; the proxy/hook/OS-monitor only cover prompt/file
+  flows to AI services, not local stdio MCP subprocesses. Add agent-side remediation
+  that neutralizes a blocked server's config entry (move to a quarantined block / mark
+  disabled) so the host app never launches it, and record the action as a finding.
+
+- [ ] **Content-level MCP DLP — stdio guard shim (block sensitive payloads, keep server running)**
+  Analog of the HTTPS proxy but for MCP's JSON-RPC-over-stdio. Rewrite the config launch
+  command to wrap the server (`cfai-mcp-guard <real command>`); the shim pass-throughs the
+  `initialize`/`tools/list` handshake, scans `tools/call` arguments (and optionally redacts
+  results) with the existing `os_monitor/classifier.js` pattern engine, and returns a
+  JSON-RPC error for calls carrying sensitive data instead of forwarding them — selective
+  content blocking, not a kill switch. Remote (HTTP/SSE) MCP servers can reuse the existing
+  proxy by whitelisting the endpoint and scanning JSON-RPC bodies.
+
 ---
 
 ## P2 — enterprise distribution

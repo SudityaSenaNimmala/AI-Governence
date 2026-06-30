@@ -24,6 +24,7 @@ const { values } = parseArgs({
     only: { type: 'string' },
     skip: { type: 'string' },
     monitor: { type: 'boolean', default: false },
+    'protect-mcp': { type: 'boolean', default: false },
     'inject-desktop': { type: 'boolean', default: false },
     proxy: { type: 'boolean', default: false },
     'proxy-port': { type: 'string' },
@@ -50,6 +51,12 @@ Options:
                                AI monitor (foreground + clipboard). Captures
                                sensitive pastes into any AI desktop app
                                regardless of install method (Store, .exe, etc.)
+      --protect-mcp            Govern every MCP server discovered in this scan:
+                               rewrite each config entry so the server launches
+                               through cfai-mcp-guard, which blocks sensitive
+                               tool-call data without disabling the server.
+                               Idempotent and reversible (keeps a .cfai-bak and
+                               the original command); safe to run on every scan.
       --inject-desktop         Opt-in: inject the DOM hook into Electron AI apps
                                by modifying app.asar. OFF by default — modifying
                                the asar BRICKS apps that enforce ASAR integrity
@@ -188,6 +195,37 @@ async function main() {
 
   if (!values.output && !values.server) {
     process.stdout.write(json + '\n');
+  }
+
+  // --protect-mcp: route every MCP server we just discovered through
+  // cfai-mcp-guard so sensitive tool-call data is blocked without disabling the
+  // server. Idempotent (already-guarded entries are skipped) and works with or
+  // without --server (the guard only reports blocks when creds are present).
+  if (values['protect-mcp']) {
+    const { apply } = await import('./mcp_guard/apply.js');
+    const creds = await loadCredentials();
+    const configPaths = [
+      ...new Set(report.findings.filter((f) => f.type === 'mcp_server' && f.configPath).map((f) => f.configPath)),
+    ];
+    if (configPaths.length === 0) {
+      log.info('protect-mcp: no MCP servers discovered — nothing to guard');
+    } else {
+      let guarded = 0;
+      for (const cp of configPaths) {
+        try {
+          const r = await apply(cp, {
+            serverUrl: creds?.serverUrl || values.server || null,
+            token: creds?.token || null,
+            threshold: 'high',
+          });
+          guarded += r.changed;
+          log.info(`protect-mcp: ${cp} — guarded ${r.changed} new of ${r.total} server(s)`);
+        } catch (err) {
+          log.warn(`protect-mcp: failed for ${cp}: ${err?.message || err}`);
+        }
+      }
+      log.info(`protect-mcp: ${guarded} newly-guarded MCP server(s) across ${configPaths.length} config file(s)`);
+    }
   }
 
   // --monitor: stay alive and run the OS-level AI monitor. Captures sensitive
