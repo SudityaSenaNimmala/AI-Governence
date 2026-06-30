@@ -34,6 +34,51 @@
     showWarning(matchObjs, 'Sensitive data blocked from being sent');
   });
 
+  // ── Full-platform block ────────────────────────────────────────────────────
+  // An admin can mark an AI platform "blocked" in the governance registry. On a
+  // blocked host we refuse EVERY send (not only sensitive ones) and show an
+  // org-block notice. The flag rides along in the platforms mirror the service
+  // worker syncs into chrome.storage.local (key 'cfai.platforms').
+  let PLATFORM_BLOCKED = false;
+  let BLOCKED_PLATFORM = null;
+  function platformBlockMatch(platforms) {
+    const h = location.hostname.toLowerCase();
+    for (const p of platforms || []) {
+      if (!p || !p.blocked || !p.host) continue;
+      const ph = String(p.host).toLowerCase();
+      if (h === ph || h.endsWith('.' + ph)) return p;
+    }
+    return null;
+  }
+  function applyPlatformPolicy(platforms) {
+    const hit = platformBlockMatch(platforms);
+    PLATFORM_BLOCKED = !!hit;
+    BLOCKED_PLATFORM = hit;
+    if (PLATFORM_BLOCKED) showPlatformBanner();
+    else removePlatformBanner();
+  }
+  try {
+    // 1) Instant first paint from the cached mirror.
+    chrome.storage.local.get(['cfai.platforms'], (r) => applyPlatformPolicy(r['cfai.platforms'] || []));
+    // 2) Live updates when the service worker rewrites the mirror.
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes['cfai.platforms']) applyPlatformPolicy(changes['cfai.platforms'].newValue || []);
+    });
+    // 3) Near-real-time poll (~3s) so admin block/allow changes reflect quickly
+    //    on this open tab. We ask the service worker (it caches + does the
+    //    cross-origin fetch); content-script fetches would hit the page CSP.
+    const pollPolicy = () => {
+      try {
+        chrome.runtime.sendMessage({ type: 'cfai-get-platforms' }, (resp) => {
+          if (chrome.runtime.lastError) return;
+          if (resp && Array.isArray(resp.platforms)) applyPlatformPolicy(resp.platforms);
+        });
+      } catch (e) {}
+    };
+    setInterval(pollPolicy, 3000);
+    pollPolicy();
+  } catch (e) {}
+
   const SERVICE = inferService(location.hostname);
   const scan = window.__cfaiPatterns?.scan ?? (() => []);
   const classifyFile = window.__cfaiPatterns?.classifyFile ?? ((n) => ({ class: 'other', severity: 'low', reason: '' }));
@@ -849,13 +894,17 @@
   }
 
   function emitEnforcement(action, el, matches, kind) {
+    const text = el ? readInputText(el) : '';
     emit({
       kind: 'enforcement_' + action,
       blocked_for: kind,
       matches: (matches || []).map((m) => ({ pattern: m.pattern, class: m.class, severity: m.severity, count: m.count })),
       highest_severity: highestSeverity(matches || []),
-      content_length: el ? readInputText(el).length : 0,
-      length_bucket: el ? lengthBucket(readInputText(el).length) : '<100',
+      content_length: text.length,
+      length_bucket: el ? lengthBucket(text.length) : '<100',
+      // Carry the blocked text so admins can View what was stopped — same as
+      // paste/submit events. The server stores this in dlp_content.
+      content_text: text || undefined,
     });
   }
 
@@ -969,6 +1018,34 @@
     );
   }
 
+  // Full-platform block popup — shown when the org has disallowed this platform.
+  function showPlatformBlockPopup() {
+    if (document.querySelector('.cfai-block-modal')) return;
+    const name = (BLOCKED_PLATFORM && (BLOCKED_PLATFORM.product || BLOCKED_PLATFORM.vendor || BLOCKED_PLATFORM.host)) || 'This AI platform';
+    showCfaiPopup({
+      title: `${name} is blocked`,
+      body:  'CloudFuze AI Governance has disallowed this AI platform for your organization. Prompts cannot be sent here.',
+      matches: [],
+      hint:  'Contact your administrator if you need access to this tool.',
+      hardBlock: true,
+    });
+  }
+
+  // Persistent banner pinned to the top of a blocked platform.
+  function showPlatformBanner() {
+    if (document.getElementById('cfai-platform-banner')) return;
+    const name = (BLOCKED_PLATFORM && (BLOCKED_PLATFORM.product || BLOCKED_PLATFORM.vendor || BLOCKED_PLATFORM.host)) || 'This AI platform';
+    const bar = document.createElement('div');
+    bar.id = 'cfai-platform-banner';
+    bar.setAttribute('style', 'position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#b91c1c;color:#fff;font:600 13px/1.4 system-ui,-apple-system,sans-serif;padding:10px 16px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.25);');
+    bar.textContent = `\u{1F512} ${name} is blocked by CloudFuze AI Governance — prompts cannot be sent here.`;
+    (document.documentElement || document.body).appendChild(bar);
+  }
+  function removePlatformBanner() {
+    const b = document.getElementById('cfai-platform-banner');
+    if (b) b.remove();
+  }
+
   // The original prompt-block popup — hard block, no dismiss.
   // Only disappears when the user removes sensitive data from the input.
   function showBlockPopup(matches) {
@@ -997,6 +1074,20 @@
   function tryBlock(el, e, label) {
     // Always reset dedup so repeated sends of the same sensitive text get blocked every time.
     _lastLogKey = null;
+
+    // (0) Full-platform block — the org has disallowed this AI platform, so we
+    //     refuse EVERY send regardless of content.
+    if (PLATFORM_BLOCKED) {
+      if (e) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (typeof e.stopPropagation === 'function') e.stopPropagation();
+      }
+      console.info('[cfai] BLOCKED (platform disallowed) via', label);
+      emit({ kind: 'enforcement_block', blocked_for: 'platform', reason: 'platform_blocked', highest_severity: 'critical', matches: [] });
+      showPlatformBlockPopup();
+      return true;
+    }
     // (1) Sensitive prompt text.
     const text = el ? readInputText(el) : '';
     const promptMatches = scanForBlockers(text);

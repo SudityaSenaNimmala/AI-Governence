@@ -24,6 +24,17 @@ function relTime(d) {
 function fmtUsd(n) { return "$" + (n||0).toFixed(2); }
 function fmtTokens(n) { if (!n) return "—"; if (n>1e6) return (n/1e6).toFixed(1)+"M"; if (n>1e3) return (n/1e3).toFixed(1)+"K"; return n; }
 
+// Only surface the severities that matter to a reviewer.
+const HI_CRIT = new Set(["critical", "high"]);
+function isHiCrit(sev) { return HI_CRIT.has(String(sev||"").toLowerCase()); }
+// Prefer the resolved AI platform (e.g. "Gemini in Gmail" / Google) over the raw
+// request host (e.g. "mail.google.com"), which is what the OS monitor records.
+function ServiceCell({ row }) {
+  const name = row.platform?.product || row.ai_service || "—";
+  const vendor = row.platform?.vendor;
+  return (<><div className="aihub_text_primary">{name}</div>{vendor && <div className="aihub_text_muted">{vendor}</div>}</>);
+}
+
 // ── Shared UI ────────────────────────────────────────────────────────────────
 function StatCard({ icon, label, value, hint, color="#0044cc" }) {
   return (<div className="aihub_stat_card"><div className="aihub_stat_icon" style={{background:color+"12",color}}>{icon}</div><div><div className="aihub_stat_value">{typeof value==="number"?value.toLocaleString():value}</div><div className="aihub_stat_label">{label}</div>{hint&&<div className="aihub_stat_sub">{hint}</div>}</div></div>);
@@ -50,6 +61,111 @@ function BarChart({ data, lk, vk, max=8 }) {
   return (<div className="aihub_bar_chart">{items.map((d,i)=>(<div key={i} className="aihub_bar_row"><div className="aihub_bar_label">{(d[lk]||"").replace(/_/g," ")}</div><div className="aihub_bar_track"><div className="aihub_bar_fill" style={{width:`${(d[vk]/mx)*100}%`}}/></div><div className="aihub_bar_value">{d[vk]?.toLocaleString()}</div></div>))}</div>);
 }
 
+// View button — opens the captured prompt/file content for one DLP event.
+// Only rendered when the server actually stored content for that event.
+function ViewBtn({ has, onClick, label="View" }) {
+  if (!has) return <span className="aihub_text_muted">—</span>;
+  return (<button className="aihub_view_btn" onClick={e=>{e.stopPropagation();onClick();}}><Eye size={13}/> {label}</button>);
+}
+function classifyKind(ct) { if(ct.startsWith("image/")) return "image"; if(ct.startsWith("application/pdf")) return "pdf"; return "binary"; }
+
+// Side drawer that fetches /dlp/:id/content and renders by Content-Type:
+// text → highlighted block, image → <img>, pdf → <iframe>, else download link.
+function ContentDrawer({ eventId, meta, onClose }) {
+  const [state,setState]=useState({status:"loading"});
+  const [url,setUrl]=useState(null);
+  useEffect(()=>{
+    let cancelled=false, revoke=null;
+    (async()=>{
+      setState({status:"loading"});
+      try{
+        const res=await fetch(`${API}/dlp/${eventId}/content`);
+        if(!res.ok){ const b=await res.text().catch(()=>""); if(!cancelled) setState({status:"error",error:`${res.status}: ${b||res.statusText}`}); return; }
+        const ct=res.headers.get("content-type")||"";
+        const truncated=res.headers.get("x-content-truncated")==="1";
+        if(ct.startsWith("text/")){
+          const text=await res.text(); if(cancelled) return;
+          setState({status:"ok",kind:"text",contentType:ct,text,truncated});
+        } else {
+          const blob=await res.blob(); if(cancelled) return;
+          const u=URL.createObjectURL(blob); revoke=u; setUrl(u);
+          setState({status:"ok",kind:classifyKind(ct),contentType:ct,truncated});
+        }
+      }catch(err){ if(!cancelled) setState({status:"error",error:err?.message||String(err)}); }
+    })();
+    return ()=>{ cancelled=true; if(revoke) URL.revokeObjectURL(revoke); };
+  },[eventId]);
+  useEffect(()=>{ const k=e=>{if(e.key==="Escape")onClose();}; window.addEventListener("keydown",k); return ()=>window.removeEventListener("keydown",k); },[onClose]);
+
+  const filename=meta?.metadata?.filename;
+  const title=filename || (String(meta?.event_kind||"").includes("prompt")?"Prompt content":"Captured content");
+  const service=meta?.platform?.product||meta?.ai_service;
+  const sev=meta?.secret_class||meta?.severity;
+  return (
+    <div className="aihub_drawer_overlay" onClick={onClose} role="dialog" aria-modal="true">
+      <aside className="aihub_drawer" onClick={e=>e.stopPropagation()}>
+        <header className="aihub_drawer_head">
+          <div style={{minWidth:0}}>
+            <div className="aihub_drawer_title">{title}</div>
+            <div className="aihub_drawer_sub">{[service,meta?.event_kind,meta?.occurred_at&&relTime(meta.occurred_at)].filter(Boolean).join(" · ")}</div>
+            <div style={{display:"flex",gap:6,marginTop:8,flexWrap:"wrap"}}>
+              {meta?.source && <Badge text={(meta.source||"").replace(/_/g," ")}/>}
+              {sev && <SeverityBadge sev={sev}/>}
+              {state.truncated && <Badge text="truncated" color="#f59e0b"/>}
+            </div>
+          </div>
+          <button className="aihub_drawer_close" onClick={onClose} title="Close (Esc)"><X size={16}/></button>
+        </header>
+        <div className="aihub_drawer_body">
+          {state.status==="loading" && <div className="aihub_loading"><RefreshCw size={16} className="aihub_spin"/> Loading content…</div>}
+          {state.status==="error" && <div style={{padding:16}}><div className="aihub_error"><AlertTriangle size={14}/> {state.error}</div><p className="aihub_text_muted" style={{fontSize:12,marginTop:10}}>Older events captured before content storage was enabled won't have a preview available.</p></div>}
+          {state.status==="ok" && state.kind==="text" && <TextContent text={state.text} matches={meta?.metadata?.matches} contentType={state.contentType}/>}
+          {state.status==="ok" && state.kind==="image" && <div style={{padding:16,display:"flex",justifyContent:"center",background:"#f9fafb",minHeight:"100%"}}><img src={url} alt={filename||""} style={{maxWidth:"100%",borderRadius:6}}/></div>}
+          {state.status==="ok" && state.kind==="pdf" && <iframe src={url} title="PDF preview" style={{width:"100%",height:"100%",border:0}}/>}
+          {state.status==="ok" && state.kind==="binary" && (
+            <div style={{padding:28,textAlign:"center",display:"flex",flexDirection:"column",alignItems:"center"}}>
+              <FileText size={28} strokeWidth={1.5}/>
+              <div style={{marginTop:10,fontWeight:600,color:"#374151"}}>{filename||"Binary file"}</div>
+              <div className="aihub_text_muted" style={{marginTop:4,fontSize:12}}>{state.contentType||"application/octet-stream"} · can't render inline</div>
+              <a href={url} download={filename||"download.bin"} className="aihub_dl_btn">Download file</a>
+            </div>
+          )}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+// Renders captured text with secret/PII patterns visually highlighted.
+function TextContent({ text, matches, contentType }) {
+  const HIGHLIGHTS=[
+    {re:/sk-ant-[A-Za-z0-9_\-]{20,}/g}, {re:/sk-[A-Za-z0-9]{20,}/g},
+    {re:/AKIA[0-9A-Z]{16}/g}, {re:/ghp_[A-Za-z0-9]{30,}/g},
+    {re:/\b\d{3}-\d{2}-\d{4}\b/g}, {re:/\b[\w.+-]+@[\w-]+\.[\w.-]+\b/g},
+    {re:/\b(?:\d[ -]?){13,19}\d\b/g}, {re:/[Bb]earer\s+[A-Za-z0-9\-._~+/]+=*/g},
+  ];
+  const spans=[];
+  for(const h of HIGHLIGHTS){ h.re.lastIndex=0; let m; while((m=h.re.exec(text))!==null){ spans.push({start:m.index,end:m.index+m[0].length}); if(m.index===h.re.lastIndex) h.re.lastIndex++; } }
+  spans.sort((a,b)=>a.start-b.start);
+  const merged=[]; let cur=-1;
+  for(const s of spans){ if(s.start<cur) continue; merged.push(s); cur=s.end; }
+  const parts=[]; let idx=0;
+  for(const s of merged){ if(s.start>idx) parts.push({text:text.slice(idx,s.start)}); parts.push({text:text.slice(s.start,s.end),hit:true}); idx=s.end; }
+  if(idx<text.length) parts.push({text:text.slice(idx)});
+  return (
+    <div style={{padding:"16px 20px"}}>
+      {Array.isArray(matches)&&matches.length>0 && (
+        <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:12,alignItems:"center"}}>
+          <span className="aihub_text_muted" style={{fontSize:11,fontWeight:600}}>Matched:</span>
+          {matches.map((m,i)=><Badge key={i} text={`${m.pattern}${m.count>1?` ×${m.count}`:""}`} color="#ef4444"/>)}
+        </div>
+      )}
+      <pre className="aihub_content_pre">{parts.map((p,i)=>p.hit?<mark key={i} className="aihub_content_mark">{p.text}</mark>:<span key={i}>{p.text}</span>)}</pre>
+      <div className="aihub_text_muted" style={{marginTop:10,fontSize:11}}>{text.length.toLocaleString()} chars · {contentType}</div>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 1. OVERVIEW
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -61,24 +177,16 @@ function OverviewView() {
     <SectionHeader title="Overview" hint="Aggregate AI tool and agent footprint across enrolled machines."/>
     <div className="aihub_stat_grid">
       <StatCard icon={<Monitor size={18}/>} label="Enrolled machines" value={d.totals.machines} color="#0044cc"/>
-      <StatCard icon={<Scan size={18}/>} label="Total scans" value={d.totals.scans} color="#0891b2"/>
-      <StatCard icon={<AlertTriangle size={18}/>} label="Findings" value={d.totals.findings} color="#f59e0b"/>
       <StatCard icon={<Wrench size={18}/>} label="Unique AI tools" value={d.totals.unique_tools} color="#8b5cf6"/>
     </div>
-    <div className="aihub_two_col">
-      <div className="aihub_card">
-        <SectionHeader title="Top AI tools across the org" hint="Most-detected tools, ranked by machine count."/>
-        <DataTable columns={[
-          {label:"Product",render:r=><><div className="aihub_text_primary">{r.product||"—"}</div><div className="aihub_text_muted">{r.vendor||"Unknown"}</div></>},
-          {label:"Machines",key:"machines",right:true},
-          {label:"Findings",key:"findings",right:true},
-          {label:"Status",render:r=><SanctionBadge status={r.sanction}/>},
-        ]} rows={d.topTools||[]}/>
-      </div>
-      <div className="aihub_card">
-        <SectionHeader title="Findings breakdown" hint="Distribution of finding categories."/>
-        <BarChart data={d.byType} lk="type" vk="count"/>
-      </div>
+    <div className="aihub_card">
+      <SectionHeader title="Top AI tools across the org" hint="Most-detected tools, ranked by machine count."/>
+      <DataTable columns={[
+        {label:"Product",render:r=><><div className="aihub_text_primary">{r.product||"—"}</div><div className="aihub_text_muted">{r.vendor||"Unknown"}</div></>},
+        {label:"Machines",key:"machines",right:true},
+        {label:"Findings",key:"findings",right:true},
+        {label:"Status",render:r=><SanctionBadge status={r.sanction}/>},
+      ]} rows={(d.topTools||[]).filter(t=>t.product)} empty="No named AI tools detected yet."/>
     </div>
   </div>);
 }
@@ -168,6 +276,7 @@ function AgentsView() {
         {label:"Server",render:r=><span className="aihub_text_primary">{r.payload?.serverName||"—"}</span>},
         {label:"Scopes",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.payload?.scopes||[]).map((s,i)=><Tag key={i} text={s}/>)}</div>},
         {label:"Command",render:r=><Mono>{[r.payload?.command,...(r.payload?.args||[])].filter(Boolean).join(" ").slice(0,60)}</Mono>},
+        {label:"Config file",render:r=>r.payload?.configPath?<Mono title={r.payload.configPath}>{r.payload.configPath}</Mono>:<span className="aihub_text_muted">—</span>},
       ]} rows={mcp} empty="No MCP servers found"/>
     </div>
 
@@ -262,14 +371,16 @@ function ServerAgentsView() {
 // ═══════════════════════════════════════════════════════════════════════════════
 function DLPView() {
   const [summary,setS]=useState(null),[events,setEv]=useState(null),[files,setF]=useState(null),[e,setE]=useState(null);
+  const [preview,setPreview]=useState(null);   // event row whose content is open
   useEffect(()=>{
     Promise.all([apiFetch("/dlp/summary").catch(()=>null),apiFetch("/dlp?limit=200").catch(()=>[]),apiFetch("/dlp/files").catch(()=>[])]).then(([s,ev,f])=>{setS(s);setEv(ev);setF(f)}).catch(x=>setE(x.message));
   },[]);
   if(e) return <Err msg={e}/>; if(!events) return <Loading/>;
 
-  const promptCount=(summary?.byKind||[]).filter(k=>k.kind!=="file_upload").reduce((s,k)=>s+k.count,0);
-  const fileCount=(summary?.byKind||[]).filter(k=>k.kind==="file_upload").reduce((s,k)=>s+k.count,0);
-  const highCrit=(summary?.bySeverity||[]).filter(s=>s.severity==="critical"||s.severity==="high").reduce((s,k)=>s+k.count,0);
+  // Server returns byKind as {event_kind, events} and bySeverity as {severity, events}.
+  const promptCount=(summary?.byKind||[]).filter(k=>k.event_kind!=="file_upload").reduce((s,k)=>s+(k.events||0),0);
+  const fileCount=(summary?.byKind||[]).filter(k=>k.event_kind==="file_upload").reduce((s,k)=>s+(k.events||0),0);
+  const highCrit=(summary?.bySeverity||[]).filter(s=>s.severity==="critical"||s.severity==="high").reduce((s,k)=>s+(k.events||0),0);
   const sourceTone={browser_extension:"#0044cc",desktop_hook:"#8b5cf6",os_monitor:"#f59e0b"};
 
   return (<div>
@@ -292,30 +403,34 @@ function DLPView() {
     </div>}
 
     <div className="aihub_card">
-      <SectionHeader title="Sensitive prompts"/>
-      <DataTable columns={[
+      <SectionHeader title="Sensitive prompts" hint="High & critical severity only. Click View to see the captured prompt."/>
+      <DataTable onRow={r=>{ if(r.has_content) setPreview(r); }} columns={[
         {label:"When",render:r=>relTime(r.occurred_at)},
-        {label:"Service",render:r=><span className="aihub_text_primary">{r.ai_service}</span>},
+        {label:"Service",render:r=><ServiceCell row={r}/>},
         {label:"Source",render:r=><Badge text={(r.source||"").replace(/_/g," ")} color={sourceTone[r.source]||"#9ca3af"}/>},
         {label:"Kind",render:r=><Tag text={r.event_kind}/>},
         {label:"Pattern",render:r=><Mono>{r.pattern_matched||"—"}</Mono>},
         {label:"Severity",render:r=><SeverityBadge sev={r.secret_class||r.highest_severity}/>},
         {label:"Length",render:r=>r.content_length||"—",right:true},
-      ]} rows={(events||[]).filter(e=>e.event_kind!=="file_upload")} empty="No sensitive prompt events yet."/>
+        {label:"",render:r=><ViewBtn has={r.has_content} onClick={()=>setPreview(r)}/>,right:true},
+      ]} rows={(events||[]).filter(e=>e.event_kind!=="file_upload"&&isHiCrit(e.secret_class||e.highest_severity))} empty="No high or critical prompt events yet."/>
     </div>
 
     <div className="aihub_card">
-      <SectionHeader title="File uploads"/>
-      <DataTable columns={[
+      <SectionHeader title="File uploads" hint="High & critical severity only. Click Open to view the file inline."/>
+      <DataTable onRow={r=>{ if(r.has_content) setPreview(r); }} columns={[
         {label:"When",render:r=>relTime(r.occurred_at)},
-        {label:"Service",render:r=><span className="aihub_text_primary">{r.ai_service}</span>},
+        {label:"Service",render:r=><ServiceCell row={r}/>},
         {label:"Filename",render:r=><Mono>{r.metadata?.filename||"—"}</Mono>},
         {label:"Class",render:r=><Tag text={r.file_class||"—"}/>},
         {label:"Severity",render:r=><SeverityBadge sev={r.severity||r.highest_severity}/>},
         {label:"Size",render:r=>r.metadata?.size_bucket||"—",right:true},
         {label:"Via",render:r=><Badge text={r.metadata?.via||"—"}/>},
-      ]} rows={files||[]} empty="No file upload events yet."/>
+        {label:"",render:r=><ViewBtn has={r.has_content} onClick={()=>setPreview(r)} label="Open"/>,right:true},
+      ]} rows={(files||[]).filter(f=>isHiCrit(f.severity||f.highest_severity))} empty="No high or critical file upload events yet."/>
     </div>
+
+    {preview && <ContentDrawer eventId={preview.id} meta={preview} onClose={()=>setPreview(null)}/>}
   </div>);
 }
 
@@ -323,13 +438,28 @@ function DLPView() {
 // 7. AI PLATFORMS
 // ═══════════════════════════════════════════════════════════════════════════════
 function PlatformsView() {
-  const [rows,setRows]=useState(null),[e,setE]=useState(null),[q,setQ]=useState("");
+  const [rows,setRows]=useState(null),[e,setE]=useState(null),[q,setQ]=useState(""),[busy,setBusy]=useState(null);
   useEffect(()=>{apiFetch("/ai-platforms").then(setRows).catch(x=>setE(x.message))},[]);
+
+  // Admin toggle: allow ⇄ block a platform. A blocked platform is enforced by
+  // the browser extension — users can't send any prompt to that host.
+  async function toggleBlocked(r){
+    const next=!r.blocked; setBusy(r.host);
+    try{
+      const res=await fetch(`${API}/ai-platforms/${encodeURIComponent(r.host)}`,{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({blocked:next})});
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      const updated=await res.json();
+      setRows(prev=>prev.map(x=>x.host===r.host?{...x,blocked:updated.blocked}:x));
+    }catch(err){ alert("Failed to update platform: "+err.message); }
+    finally{ setBusy(null); }
+  }
+
   if(e) return <Err msg={e}/>; if(!rows) return <Loading/>;
 
   const governed=rows.filter(r=>r.governed).length;
   const adminAdded=rows.filter(r=>r.source==="admin").length;
   const llmDisc=rows.filter(r=>r.source==="classifier").length;
+  const blockedCount=rows.filter(r=>r.blocked).length;
   const riskC={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e"};
   const surfaceC={browser:"#0044cc",desktop:"#8b5cf6",cli:"#f59e0b",all:"#22c55e"};
   const filtered=q?rows.filter(r=>[r.host,r.vendor,r.product,r.category].join(" ").toLowerCase().includes(q.toLowerCase())):rows;
@@ -341,6 +471,7 @@ function PlatformsView() {
       <StatCard icon={<Shield size={18}/>} label="Governed" value={governed} color="#22c55e"/>
       <StatCard icon={<Plus size={18}/>} label="Admin-added" value={adminAdded} color="#8b5cf6"/>
       <StatCard icon={<Scan size={18}/>} label="LLM-discovered" value={llmDisc} color="#f59e0b"/>
+      <StatCard icon={<X size={18}/>} label="Blocked" value={blockedCount} color="#ef4444"/>
     </div>
     <SectionHeader title="AI Platforms registry" action={<div className="aihub_search_box"><Search size={14}/><input placeholder="Filter by host, vendor, product..." value={q} onChange={e=>setQ(e.target.value)}/></div>}/>
     <div className="aihub_card">
@@ -352,6 +483,13 @@ function PlatformsView() {
         {label:"Sandbox",render:r=>r.sandbox?<Badge text={r.sandbox}/>:<span className="aihub_text_muted">—</span>},
         {label:"Surface",render:r=>r.surface?<Badge text={r.surface} color={surfaceC[r.surface]||"#9ca3af"}/>:<span className="aihub_text_muted">—</span>},
         {label:"Governed",render:r=><Badge text={r.governed?"on":"off"} color={r.governed?"#22c55e":"#9ca3af"}/>,right:true},
+        {label:"Access",render:r=>(
+          <button onClick={()=>toggleBlocked(r)} disabled={busy===r.host} title={r.blocked?"Click to allow":"Click to block (users can't send prompts)"}
+            style={{cursor:busy===r.host?"default":"pointer",padding:"3px 10px",borderRadius:6,fontSize:12,fontWeight:600,fontFamily:"inherit",
+              border:`1px solid ${r.blocked?"#fca5a5":"#bbf7d0"}`,background:r.blocked?"#fef2f2":"#f0fdf4",color:r.blocked?"#dc2626":"#16a34a",opacity:busy===r.host?0.6:1}}>
+            {busy===r.host?"…":r.blocked?"Blocked":"Allowed"}
+          </button>
+        )},
         {label:"Source",render:r=><Badge text={r.source||"—"}/>},
         {label:"Updated",render:r=>relTime(r.updated_at)},
       ]} rows={filtered}/>

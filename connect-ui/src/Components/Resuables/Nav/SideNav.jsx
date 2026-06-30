@@ -108,9 +108,9 @@ const SideNav = (props) => {
       children: [
         { icon: <LayoutDashboard size={16} />, title: "Overview", link: "/AIHub/Overview" },
         { icon: <MonitorCheck size={16} />, title: "Machines", link: "/AIHub/Machines" },
-        { icon: <AppWindow size={16} />, title: "Tools Catalog", link: "/AIHub/Tools" },
+        // { icon: <AppWindow size={16} />, title: "Tools Catalog", link: "/AIHub/Tools" },   // hidden for now
         { icon: <ShieldCheck size={16} />, title: "Agents & MCP", link: "/AIHub/Agents" },
-        { icon: <Database size={16} />, title: "Server Agents", link: "/AIHub/ServerAgents" },
+        // { icon: <Database size={16} />, title: "Server Agents", link: "/AIHub/ServerAgents" },   // hidden for now
         { icon: <Sparkles size={16} />, title: "AI Activity", link: "/AIHub/DLP" },
         { icon: <Grip size={16} />, title: "AI Platforms", link: "/AIHub/Platforms" },
         { icon: agentGovernanceIcon, title: "Agent Governance", link: "/AIHub/AgentGovernance" },

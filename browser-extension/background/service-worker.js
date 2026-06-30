@@ -18,7 +18,7 @@ const FLUSH_INTERVAL_MIN = 1;       // chrome.alarms minimum
 const BATCH_SIZE = 50;
 
 const PLATFORMS_ALARM = 'cfai-platforms-refresh';
-const PLATFORMS_REFRESH_MIN = 10;   // how often to pull the registry
+const PLATFORMS_REFRESH_MIN = 1;    // how often to pull the registry (1 = chrome.alarms min) so block/allow changes propagate fast
 
 const BLOCKED_ALARM = 'cfai-blocked-refresh';
 const BLOCKED_REFRESH_MIN = 2;     // poll blocked agents every 2 min
@@ -424,7 +424,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // to a small hardcoded list if storage hasn't been populated yet.
 async function refreshPlatforms() {
   try {
-    const res = await authedFetch('/api/v1/ai-platforms?governed=1&surface=browser');
+    // Use a PLAIN (unauthed) fetch: GET /ai-platforms is public, so the block
+    // list syncs even if the extension's token is stale or it hasn't enrolled
+    // yet. Block policy must never depend on enrollment state.
+    // No governed filter either: a blocked platform must sync even if it isn't
+    // otherwise governed, so the content script can enforce the block.
+    const config = await getConfig();
+    if (!config.serverUrl) return;
+    const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/ai-platforms?surface=browser`);
     if (!res.ok) return;
     const rows = await res.json();
     // Keep only the fields content scripts care about — keep storage small.
@@ -434,13 +441,51 @@ async function refreshPlatforms() {
       product:  r.product,
       category: r.category,
       sandbox:  r.sandbox,
+      governed: r.governed ? 1 : 0,
+      blocked:  r.blocked ? 1 : 0,
     }));
     await setStored(STORAGE.PLATFORMS,    compact);
     await setStored(STORAGE.PLATFORMS_AT, Date.now());
+    _platCache = compact;
+    _platCacheAt = Date.now();
   } catch (e) {
     console.warn('[cfai] platforms refresh failed:', e?.message || e);
   }
 }
+
+// Near-real-time policy for open AI tabs. The content script asks every few
+// seconds; we serve a short-lived cache so block/allow changes reflect in
+// ~2-3s without hammering the server (one fetch per ~2.5s no matter how many
+// tabs ask). chrome.alarms can't poll faster than 60s and an SW setInterval is
+// unreliable, so the persistent content script drives the cadence.
+let _platCache = null;
+let _platCacheAt = 0;
+const PLAT_CACHE_TTL_MS = 2500;
+async function getFreshPlatforms() {
+  const now = Date.now();
+  if (_platCache && now - _platCacheAt < PLAT_CACHE_TTL_MS) return _platCache;
+  const config = await getConfig();
+  if (!config.serverUrl) return _platCache || [];
+  try {
+    const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/ai-platforms?surface=browser`);
+    if (res.ok) {
+      const rows = await res.json();
+      _platCache = rows.map((r) => ({
+        host: r.host, vendor: r.vendor, product: r.product, category: r.category,
+        sandbox: r.sandbox, governed: r.governed ? 1 : 0, blocked: r.blocked ? 1 : 0,
+      }));
+      _platCacheAt = now;
+      await setStored(STORAGE.PLATFORMS, _platCache);
+    }
+  } catch { /* keep last cache */ }
+  return _platCache || [];
+}
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg && msg.type === 'cfai-get-platforms') {
+    getFreshPlatforms().then((platforms) => sendResponse({ platforms })).catch(() => sendResponse({ platforms: null }));
+    return true; // async response
+  }
+});
 
 // Also flush on startup
 chrome.runtime.onStartup.addListener(() => flushQueue());

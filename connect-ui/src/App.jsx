@@ -124,9 +124,9 @@ function App() {
           <Route path="/AgentGovernance" element={<AgentGovernance />} />
           <Route path="/AIHub/Overview" element={<AIHubPage page="Overview" />} />
           <Route path="/AIHub/Machines" element={<AIHubPage page="Machines" />} />
-          <Route path="/AIHub/Tools" element={<AIHubPage page="Tools" />} />
+          {/* <Route path="/AIHub/Tools" element={<AIHubPage page="Tools" />} /> hidden for now */}
           <Route path="/AIHub/Agents" element={<AIHubPage page="Agents" />} />
-          <Route path="/AIHub/ServerAgents" element={<AIHubPage page="ServerAgents" />} />
+          {/* <Route path="/AIHub/ServerAgents" element={<AIHubPage page="ServerAgents" />} /> hidden for now */}
           <Route path="/AIHub/DLP" element={<AIHubPage page="DLP" />} />
           <Route path="/AIHub/Platforms" element={<AIHubPage page="Platforms" />} />
           <Route path="/AIHub/AgentGovernance" element={<AgentGovernance />} />
