@@ -1,0 +1,43 @@
+# GStack workflow: bug-fix
+# Leaner pipeline for fixing a defect. Skips heavy upfront design unless the
+# root cause turns out to be architectural.
+# Trigger: "use gstack — fix <bug>"  (for trivial one-liners use "quick fix — ...")
+
+name: bug-fix
+description: Reproduce → diagnose → fix → test → targeted review → gated ship, for a defect.
+stack:
+  server: "Node 20 ESM, Express 4 (tsx), JWT auth, SQLite/Mongo/Postgres — port 8787"
+  agent: "Node CLI scanner (pdf-parse, tesseract OCR, mammoth, xlsx)"
+  connect-ui: "React 18 + Vite 5 — port 3000, base /CloudFuze, /api -> 8787"
+
+steps:
+  - id: reproduce
+    agent: qa-engineer
+    description: Reproduce the bug with a concrete failing case; capture exact steps, input, and observed vs expected.
+
+  - id: diagnose-and-fix
+    agent: backend-engineer   # or frontend-engineer depending on where the bug lives
+    depends_on: [reproduce]
+    description: Find root cause (cite file:line), apply the minimal correct fix, add a regression test that fails before / passes after.
+    escalate:
+      when: root cause is architectural or spans multiple subprojects
+      to: architect
+      note: "Stop and get a design before a large change."
+
+  - id: verify
+    agent: qa-engineer
+    depends_on: [diagnose-and-fix]
+    description: Confirm the repro now passes and run the relevant suites for regressions. Report PASS/FAIL honestly.
+
+  - id: review
+    agent: code-reviewer
+    depends_on: [verify]
+    description: Targeted review of the fix. Pull in security-reviewer if the fix touches auth, PII/data handling, or parsing.
+
+  - id: ship
+    agent: devops-engineer
+    depends_on: [review]
+    description: Two-step commit gate and three-step deploy gate, one question at a time. Never auto-approve.
+    gate:
+      type: human-approval
+      note: "Commit? -> which branch? then Deploy? -> which branch? -> dev or production?"

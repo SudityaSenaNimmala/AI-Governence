@@ -1,0 +1,53 @@
+# AI-Governance app stack — backend API + connect-ui frontend.
+# Used by the GStack deploy flow (`npm run deploy`).
+#
+#   docker compose up -d --build
+#
+# Set secrets in a local .env file (see .env.example). For a REMOTE Docker host,
+# export DOCKER_HOST=ssh://user@host before running (the deploy script honors it).
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: cloudfuze/ai-gov-server:latest
+    environment:
+      NODE_ENV: production
+      PORT: 8787
+      # REQUIRED — deploy fails fast if unset.
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      # The server's DAL is MongoDB-only. Defaults to the bundled mongo service;
+      # override in .env to point at an external Mongo (e.g. Atlas).
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongo:27017/aigov}
+    depends_on:
+      - mongo
+    ports:
+      - "8787:8787"
+    volumes:
+      - server-data:/app/server/data
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:7
+    # Cap the WiredTiger cache — this is a small (~1 GB) host.
+    command: ["--wiredTigerCacheSizeGB", "0.25"]
+    volumes:
+      - mongo-data:/data/db
+    restart: unless-stopped
+
+  connect-ui:
+    build:
+      context: ./connect-ui
+      dockerfile: Dockerfile
+    image: cloudfuze/ai-gov-connect-ui:latest
+    ports:
+      # Host 3000 -> nginx 80. App is live at http://<host>:3000/CloudFuze
+      - "3000:80"
+    depends_on:
+      - server
+    restart: unless-stopped
+
+volumes:
+  server-data:
+  mongo-data:

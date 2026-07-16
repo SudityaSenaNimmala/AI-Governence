@@ -1,0 +1,61 @@
+# GStack workflow: new-feature
+# Full pipeline for a non-trivial feature in the AI-Governance monorepo.
+# Trigger: "use gstack — implement <feature>"
+# Human review is required at the design gate and at every commit/deploy gate.
+
+name: new-feature
+description: Design → implement → test → audit → review → document → gated ship, for a non-trivial feature.
+stack:
+  server: "Node 20 ESM, Express 4 (tsx), JWT auth, SQLite/Mongo/Postgres — port 8787"
+  agent: "Node CLI scanner (pdf-parse, tesseract OCR, mammoth, xlsx)"
+  connect-ui: "React 18 + Vite 5 — port 3000, base /CloudFuze, /api -> 8787"
+  dashboard: "secondary React UI"
+  browser-extension: "MV3 DLP extension"
+
+steps:
+  - id: design
+    agent: architect
+    description: Produce the design (subprojects touched, storage, API surface, capture path, edge cases, sequencing).
+    gate:
+      type: human-review
+      prompt: "Review the design. Reply 'Proceed' to implement, or say what to change."
+
+  - id: implement-backend
+    agent: backend-engineer
+    depends_on: [design]
+    description: Implement server/agent changes per the approved design. Add/extend node --test coverage.
+    condition: design touches server or agent
+
+  - id: implement-frontend
+    agent: frontend-engineer
+    depends_on: [design]
+    description: Implement connect-ui/dashboard changes per the approved design. Build + lint must pass.
+    condition: design touches connect-ui or dashboard
+
+  - id: test
+    agent: qa-engineer
+    depends_on: [implement-backend, implement-frontend]
+    description: Happy path, error cases, edge cases, regression. Drive the running app/CLI. Report PASS/FAIL honestly.
+
+  - id: security-audit
+    agent: security-reviewer
+    depends_on: [test]
+    description: Audit auth, PII/data handling, storage queries, file parsing, extension surface. Rank by severity.
+
+  - id: code-review
+    agent: code-reviewer
+    depends_on: [test]
+    description: Review correctness, consistency, readability, resource handling. Rank Must/Should/Nice.
+
+  - id: docs
+    agent: documentation-engineer
+    depends_on: [security-audit, code-review]
+    description: Update README/docs/API notes for the feature. ROADMAP only via the ask-then-edit flow.
+
+  - id: ship
+    agent: devops-engineer
+    depends_on: [docs]
+    description: Enforce the two-step commit gate and three-step deploy gate. Never auto-approve.
+    gate:
+      type: human-approval
+      note: "Commit gate (commit? -> which branch?) and deploy gate (deploy? -> which branch? -> dev or production?) are asked one at a time. Production = merge to main."

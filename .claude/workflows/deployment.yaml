@@ -1,0 +1,42 @@
+# GStack workflow: deployment
+# The ship flow for the AI-Governance app stack (server + connect-ui) via Docker.
+#
+# Trigger: pushing to `main`.
+# Gate:    exactly ONE question after commit + push — "Do you want to deploy?"
+#          If yes, deploy directly to the Docker host and the feature goes live.
+#
+# This replaces the old multi-step deploy gate per the owner's decision:
+# commit → push to main → one deploy question → live.
+
+name: deployment
+description: Commit + push to main, then one deploy question; on yes, `npm run deploy` ships server + connect-ui via Docker and it's live.
+owner: devops-engineer
+
+target:
+  services: [server, connect-ui]
+  mechanism: "docker compose (docker-compose.yml at repo root) via `npm run deploy`"
+  host: "Docker host — local by default, or remote via DOCKER_HOST=ssh://user@host"
+  live_urls:
+    - "API:        http://<host>:8787"
+    - "connect-ui: http://<host>:3000/CloudFuze"
+
+preflight:
+  - "Build/tests green for changed subprojects (server/agent node --test, connect-ui build)."
+  - ".env exists on the deploy host with JWT_SECRET set (see .env.example)."
+  - "Docker + compose plugin available on the target host."
+
+flow:
+  - step: commit_and_push
+    action: "Stage intended files, commit (message ends with the required Co-Authored-By line), and push to `main`."
+    note: "The user's 'commit and push' instruction is the authorization — no separate commit-gate questions."
+
+  - step: deploy_gate
+    question: "Do you want to deploy to the server now?"
+    on_no: "Stop. Changes are on main but not deployed."
+    on_yes: "Run `npm run deploy` (docker compose build + up on the Docker host). Report the live URLs and health-check result."
+
+rules:
+  - "Only ONE question is asked (the deploy question). Do not re-introduce the old branch / dev-vs-prod prompts."
+  - "Deploy goes to whatever DOCKER_HOST points at — confirm with the user which host that is if it's ambiguous or production."
+  - "On a red build or a failed health check, stop and surface the error. Do not report 'live' unless the health check passed."
+  - "Report every command and its real output."
