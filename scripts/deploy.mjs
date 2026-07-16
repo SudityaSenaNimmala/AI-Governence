@@ -49,21 +49,32 @@ function sh(cmd) {
 // --- preflight ---
 if (!SSH_TARGET) die('DEPLOY_SSH is not set (e.g. DEPLOY_SSH=root@165.22.223.59). Put it in .env or the environment.');
 if (!existsSync(KEY)) die(`SSH key not found: ${KEY}`);
-if (!existsSync(resolve(root, '.env'))) die('No .env (need JWT_SECRET). Copy .env.example to .env.');
 const SSH = `ssh -i "${KEY}" -o BatchMode=yes -o ServerAliveInterval=30 ${SSH_TARGET}`;
 
 console.log(`\n▶ Deploying to ${SSH_TARGET}:${DIR}\n`);
 
-// 1. Build the frontend locally (needs more RAM than the host has).
-console.log('• Building connect-ui locally (Vite)…');
+// Secrets (MONGODB_URI, ENCRYPTION_KEY, JWT_SECRET, …) live ONLY in the
+// server's own ${DIR}/.env. We never ship or overwrite it — verify it's there.
+console.log('• Verifying server .env (secrets stay on the server)…');
+const envCheck = spawnSync('bash', ['-c', `${SSH} "test -f ${DIR}/.env"`], { cwd: root });
+if (envCheck.status !== 0) {
+  die(`No ${DIR}/.env on the server. Create it ONCE on the host with your secrets ` +
+      `(MONGODB_URI, ENCRYPTION_KEY, JWT_SECRET, ENROLL_SECRET — see .env.example). ` +
+      `Deploy never ships secrets.`);
+}
+
+// 1. Build the frontend locally / on the runner (needs more RAM than the host).
+console.log('• Building connect-ui (Vite)…');
 sh('npm --prefix connect-ui run build');
 if (!existsSync(resolve(root, 'connect-ui/dist/index.html'))) die('connect-ui build produced no dist/index.html');
 
 // 2. Stream source (incl. built dist, excl. node_modules) to the host.
-console.log('• Shipping source to host…');
+//    NOTE: .env is intentionally NOT shipped, and we delete everything in the
+//    remote dir EXCEPT .env so the server's secrets survive every deploy.
+console.log('• Shipping source to host (preserving server .env)…');
 const excludes = "--exclude='*/node_modules' --exclude='*/.vite' --exclude='*/coverage' --exclude='*/build' --exclude='*/out'";
-sh(`tar czf - ${excludes} agent server connect-ui docker-compose.yml .env .dockerignore ` +
-   `| ${SSH} "rm -rf ${DIR} && mkdir -p ${DIR} && tar xzf - -C ${DIR}"`);
+sh(`tar czf - ${excludes} agent server connect-ui docker-compose.yml .dockerignore ` +
+   `| ${SSH} "mkdir -p ${DIR} && find ${DIR} -mindepth 1 -maxdepth 1 ! -name .env -exec rm -rf {} + && tar xzf - -C ${DIR}"`);
 
 // 3. Build images natively on the host (sequential — small box) and bring up.
 console.log('• Building images on host + starting stack…');

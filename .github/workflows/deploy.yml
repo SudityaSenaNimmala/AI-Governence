@@ -1,0 +1,50 @@
+name: Deploy to server
+
+# Auto-deploy on every push to main (and the manual "Run workflow" button).
+# The runner builds connect-ui (plenty of RAM) then runs scripts/deploy.mjs to
+# ship code + rebuild on the server over SSH.
+#
+# Secrets stay on the SERVER: /opt/ai-gov/.env (created once) holds MONGODB_URI,
+# ENCRYPTION_KEY, JWT_SECRET, ENROLL_SECRET. The deploy never ships or overwrites
+# it. So GitHub only needs the SSH key + host — no database/app secrets here.
+#
+# Required repository Secrets (Settings → Secrets and variables → Actions):
+#   SSH_PRIVATE_KEY   contents of the deploy private key (~/.ssh/ai_gov_deploy)
+#   DEPLOY_HOST       user@host, e.g. root@165.22.223.59
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-server
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install connect-ui deps
+        working-directory: connect-ui
+        run: npm install --no-audit --no-fund
+
+      - name: Set up SSH key + known_hosts
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          HOST="${{ secrets.DEPLOY_HOST }}"; IP="${HOST#*@}"
+          ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Deploy (code only — server keeps its own .env)
+        env:
+          DEPLOY_SSH: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_KEY: /home/runner/.ssh/deploy_key
+        run: node scripts/deploy.mjs
