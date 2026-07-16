@@ -38,10 +38,13 @@ jobs:
       - name: Set up SSH key + known_hosts
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          # Strip any CR (Windows-pasted secrets get CRLF, which breaks key loading).
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           HOST="${{ secrets.DEPLOY_HOST }}"; IP="${HOST#*@}"
           ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts 2>/dev/null || true
+          echo "Testing SSH connectivity to $HOST ..."
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 "$HOST" 'echo SSH_OK'
 
       - name: Deploy (code only — server keeps its own .env)
         env:

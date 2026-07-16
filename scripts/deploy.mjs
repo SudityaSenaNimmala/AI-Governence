@@ -49,7 +49,7 @@ function sh(cmd) {
 // --- preflight ---
 if (!SSH_TARGET) die('DEPLOY_SSH is not set (e.g. DEPLOY_SSH=root@165.22.223.59). Put it in .env or the environment.');
 if (!existsSync(KEY)) die(`SSH key not found: ${KEY}`);
-const SSH = `ssh -i "${KEY}" -o BatchMode=yes -o ServerAliveInterval=30 ${SSH_TARGET}`;
+const SSH = `ssh -i "${KEY}" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 ${SSH_TARGET}`;
 
 console.log(`\n▶ Deploying to ${SSH_TARGET}:${DIR}\n`);
 
