@@ -9,8 +9,9 @@ name: Deploy to server
 # it. So GitHub only needs the SSH key + host — no database/app secrets here.
 #
 # Required repository Secrets (Settings → Secrets and variables → Actions):
-#   SSH_PRIVATE_KEY   contents of the deploy private key (~/.ssh/ai_gov_deploy)
-#   DEPLOY_HOST       user@host, e.g. root@165.22.223.59
+#   SSH_KEY_B64       base64 of the deploy private key (paste-proof, single line):
+#                       cat ~/.ssh/ai_gov_deploy | base64 -w0 | clip
+#   DEPLOY_HOST       user@host, EXACTLY: root@165.22.223.59
 
 on:
   push:
@@ -38,9 +39,10 @@ jobs:
       - name: Set up SSH key + known_hosts
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          # Strip any CR (Windows-pasted secrets get CRLF, which breaks key loading).
-          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' > ~/.ssh/deploy_key
+          # Key is stored base64 (paste-proof). Decode it — base64 ignores whitespace.
+          echo "${{ secrets.SSH_KEY_B64 }}" | base64 -d > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          echo "key fingerprint:"; ssh-keygen -l -f ~/.ssh/deploy_key || echo "!! key did not parse — SSH_KEY_B64 is wrong"
           HOST="${{ secrets.DEPLOY_HOST }}"; IP="${HOST#*@}"
           ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts 2>/dev/null || true
           echo "Testing SSH connectivity to $HOST ..."
