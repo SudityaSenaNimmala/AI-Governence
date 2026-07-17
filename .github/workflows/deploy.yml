@@ -42,14 +42,14 @@ jobs:
           # Key is stored base64 (paste-proof). Decode it — base64 ignores whitespace.
           echo "${{ secrets.SSH_KEY_B64 }}" | base64 -d > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          echo "key fingerprint:"; ssh-keygen -l -f ~/.ssh/deploy_key || echo "!! key did not parse — SSH_KEY_B64 is wrong"
-          HOST="${{ secrets.DEPLOY_HOST }}"; IP="${HOST#*@}"
+          echo "key fingerprint (expect ...I1FXkSy...):"; ssh-keygen -l -f ~/.ssh/deploy_key || echo "!! key did not parse — SSH_KEY_B64 is wrong"
+          IP="165.22.223.59"
           ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts 2>/dev/null || true
-          echo "Testing SSH connectivity to $HOST ..."
-          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 "$HOST" 'echo SSH_OK'
+          echo "Testing SSH connectivity to root@$IP ..."
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 "root@$IP" 'echo SSH_OK'
 
       - name: Deploy (code only — server keeps its own .env)
         env:
-          DEPLOY_SSH: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH: root@165.22.223.59
           DEPLOY_KEY: /home/runner/.ssh/deploy_key
         run: node scripts/deploy.mjs
