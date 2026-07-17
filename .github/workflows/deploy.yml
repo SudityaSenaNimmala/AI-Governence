@@ -9,9 +9,8 @@ name: Deploy to server
 # it. So GitHub only needs the SSH key + host — no database/app secrets here.
 #
 # Required repository Secrets (Settings → Secrets and variables → Actions):
-#   SSH_KEY_B64       base64 of the deploy private key (paste-proof, single line):
-#                       cat ~/.ssh/ai_gov_deploy | base64 -w0 | clip
-#   DEPLOY_HOST       user@host, EXACTLY: root@165.22.223.59
+#   SSH_PRIVATE_KEY   full contents of ~/.ssh/ai_gov_deploy (incl. BEGIN/END lines)
+#   (DEPLOY_HOST no longer used — host is hardcoded below since it's a public IP)
 
 on:
   push:
@@ -39,10 +38,10 @@ jobs:
       - name: Set up SSH key + known_hosts
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          # Key is stored base64 (paste-proof). Decode it — base64 ignores whitespace.
-          echo "${{ secrets.SSH_KEY_B64 }}" | base64 -d > ~/.ssh/deploy_key
+          # Use the raw SSH_PRIVATE_KEY secret; strip CR in case it was pasted with CRLF.
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          echo "key fingerprint (expect ...I1FXkSy...):"; ssh-keygen -l -f ~/.ssh/deploy_key || echo "!! key did not parse — SSH_KEY_B64 is wrong"
+          echo "key fingerprint (expect ...I1FXkSy...):"; ssh-keygen -l -f ~/.ssh/deploy_key || echo "!! key did not parse — SSH_PRIVATE_KEY must be the FULL key incl. BEGIN/END lines"
           IP="165.22.223.59"
           ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts 2>/dev/null || true
           echo "Testing SSH connectivity to root@$IP ..."
