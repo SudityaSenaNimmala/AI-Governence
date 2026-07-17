@@ -595,7 +595,7 @@ export default function AIHubPage({page}) {
         <TopNav pageName={config.title}/>
         <div className="cf_main_content_place_main" style={{flexDirection:"column",padding:"16px 20px",overflowY:"auto"}}>
           <div style={{display:"inline-flex",alignSelf:"flex-start",alignItems:"center",gap:"6px",padding:"3px 10px",marginBottom:"12px",borderRadius:"999px",background:"#eef2ff",color:"#4338ca",fontSize:"12px",fontWeight:600,border:"1px solid #c7d2fe"}}>
-            ● Standalone deployment · auto-deployed via CI
+            ● Standalone deployment · CI auto-deploy verified #2
           </div>
           <V/>
         </div>
