@@ -459,7 +459,35 @@ router.get("/risk-summary", async (req, res) => {
 
     const dvToken = await getDataverseToken(oauthKeyId, dvUrl);
     const dvClient = new DataverseClient(dvToken, dvUrl);
-    const bots = await dvClient.discoverBots();
+    const dataverseBots = await dvClient.discoverBots();
+
+    // Also include discovered agents from MongoDB (personal agents, sharepoint
+    // agents, etc.) that aren't in the Dataverse bots table but DO have
+    // conversation transcripts in Dataverse linked by their bot ID.
+    const discoveredAgents = await db.collection("discovered_agents")
+      .find({ oauth_key_id: oauthKeyId })
+      .project({ id: 1, botId: 1, name: 1, platform: 1, owner: 1, lifecycleStatus: 1, _id: 0 })
+      .toArray();
+
+    // Merge: add discovered agents that aren't already in the Dataverse bots list
+    const existingBotIds = new Set(dataverseBots.map((b: any) => b.botid?.toLowerCase()));
+    const extraBots: any[] = [];
+    for (const da of discoveredAgents) {
+      const bid = (da.botId || da.id || "").toLowerCase();
+      if (bid && !existingBotIds.has(bid)) {
+        extraBots.push({
+          botid: da.botId || da.id,
+          name: da.name,
+          statecode: da.lifecycleStatus === "suspended" ? 1 : 0,
+          createdon: null,
+          modifiedon: null,
+          _createdby_value: da.owner?.id || null,
+          _platform: da.platform,
+          _fromDiscovery: true,
+        });
+      }
+    }
+    const bots = [...dataverseBots, ...extraBots];
 
     // Resolve users for owner detection + guest user identification
     let userMap = new Map<string, { displayName: string; accountEnabled: boolean; userType?: string }>();
@@ -484,7 +512,7 @@ router.get("/risk-summary", async (req, res) => {
     let transcriptsByBot = new Map<string, number>();
     const guestUsersByBot = new Map<string, Set<string>>();
     try {
-      const transcripts = await dvClient.getAllConversationTranscripts(200);
+      const transcripts = await dvClient.getAllConversationTranscripts(1000);
       for (const t of transcripts) {
         if (t.botId) {
           transcriptsByBot.set(t.botId, (transcriptsByBot.get(t.botId) || 0) + 1);
@@ -512,7 +540,7 @@ router.get("/risk-summary", async (req, res) => {
       }
     } catch { /* ignore */ }
 
-    const agentRisks = await Promise.all(bots.slice(0, 20).map(async (bot) => {
+    const agentRisks = await Promise.all(bots.slice(0, 100).map(async (bot: any) => {
       const sessions = await dvClient.getBotSessions(bot.botid, 30);
       const now = Date.now();
       const lastSession = sessions.length > 0 ? sessions[0].startTime : undefined;
@@ -681,6 +709,7 @@ router.get("/risk-summary", async (req, res) => {
         ownerName,
         isOrphaned,
         status: bot.statecode === 0 ? "active" : "inactive",
+        platform: (bot as any)._platform || "copilot_studio",
         risk,
         sessionCount: sessions.length,
         conversationCount,

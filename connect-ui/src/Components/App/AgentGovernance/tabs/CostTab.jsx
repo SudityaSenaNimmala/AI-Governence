@@ -1,7 +1,8 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   DollarSign, TrendingUp, Cpu, Zap, RefreshCw, Cloud, Shield,
-  ArrowUpRight, ArrowDownRight, BarChart3, Clock, Filter, Bot, Sparkles
+  ArrowUpRight, ArrowDownRight, BarChart3, Clock, Filter, Bot, Sparkles,
+  Info
 } from "lucide-react";
 import { useAgentAuth, useGovernance } from "../AgentGovernanceContext";
 import { agentGovernanceApi } from "../AgentGovernanceActions/AgentGovernanceActions";
@@ -9,6 +10,45 @@ import { Section } from "../common/Section";
 import { StatCard } from "../common/StatCard";
 import { Badge } from "../common/Badge";
 import { LoadingSpinner } from "../common/LoadingSpinner";
+
+// ── Subscription-included limits (monthly) ──
+// These are well-known free tiers / subscription inclusions.
+// Usage within these limits is NOT extra cost.
+const SUBSCRIPTION_LIMITS = {
+  azure_openai: {
+    // Azure OpenAI is pure pay-as-you-go — no free tier
+    freeTokens: 0,
+    note: "Pay-as-you-go — all token usage is billed",
+  },
+  openai: {
+    // OpenAI API has no ongoing free tier (only one-time signup credits)
+    freeTokens: 0,
+    note: "Pay-as-you-go — all API usage is billed",
+  },
+  claude: {
+    // Anthropic API is pay-as-you-go
+    freeTokens: 0,
+    note: "Pay-as-you-go — all API usage is billed",
+  },
+  google_vertex: {
+    // Gemini Flash: free tier up to 15 RPM / 1M tokens/day
+    freeTokensPerDay: 1_000_000,
+    freeRequestsPerDay: 1500,
+    note: "Gemini Flash free tier: ~1M tokens/day, 15 RPM. Pro/Ultra are pay-as-you-go.",
+  },
+  gemini_enterprise: {
+    // Gemini for Google Workspace is included in Business Standard+, Enterprise, Education Plus
+    includedInSubscription: true,
+    note: "Included in Workspace Business Standard, Enterprise, and Education Plus licenses — no extra per-query cost for standard Gemini features",
+  },
+  m365_copilot: {
+    // M365 Copilot is a per-user add-on ($30/user/month) — usage within it has no per-token cost
+    includedInSubscription: true,
+    note: "M365 Copilot: $30/user/month add-on — no per-token overage. Copilot Studio: first 25,000 messages/month included with standalone license ($200/mo), then $0.01/message overage.",
+    copilotStudioFreeMessages: 25000,
+  },
+};
+
 
 const PERIOD_OPTIONS = [
   { value: "P1D", label: "Last 24 hours", days: 1 },
@@ -89,12 +129,17 @@ function CostBreakdownTable({ deployments, vendor }) {
                 </td>
                 <td style={{ padding: "10px" }}>
                   <span style={{
-                    display: "inline-flex", alignItems: "center",
+                    display: "inline-flex", alignItems: "center", gap: 4,
                     background: `${color}15`, color, padding: "2px 8px",
                     borderRadius: 4, fontWeight: 600, fontSize: 11,
                   }}>
                     {dep.modelName}
                   </span>
+                  {dep.costEstimated && (
+                    <div style={{ fontSize: 9, color: "#f59e0b", fontWeight: 500, marginTop: 2 }}>
+                      ~ estimated pricing
+                    </div>
+                  )}
                 </td>
                 <td style={{ ...tdRight }}>{formatTokens(dep.inputTokens)}</td>
                 <td style={{ ...tdRight }}>{formatTokens(dep.outputTokens)}</td>
@@ -196,216 +241,159 @@ export function CostTab() {
   const scanActive = discoveryStatus === "loading" || discoveryStatus === "success";
 
   const [period, setPeriod] = useState("P7D");
-  const [azureData, setAzureData] = useState(null);
-  const [googleData, setGoogleData] = useState(null);
-  const [openaiData, setOpenaiData] = useState(null);
-  const [claudeData, setClaudeData] = useState(null);
-  const [azureLoading, setAzureLoading] = useState(false);
-  const [googleLoading, setGoogleLoading] = useState(false);
-  const [openaiLoading, setOpenaiLoading] = useState(false);
-  const [claudeLoading, setClaudeLoading] = useState(false);
-  const [azureError, setAzureError] = useState(null);
-  const [googleError, setGoogleError] = useState(null);
-  const [openaiError, setOpenaiError] = useState(null);
-  const [claudeError, setClaudeError] = useState(null);
-  const [geminiData, setGeminiData] = useState(null);
-  const [geminiLoading, setGeminiLoading] = useState(false);
-  const [geminiError, setGeminiError] = useState(null);
+  const [costData, setCostData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [warnings, setWarnings] = useState([]);
 
   const periodDays = PERIOD_OPTIONS.find((p) => p.value === period)?.days || 7;
 
-  const fetchAzure = async () => {
-    if (!oauthKeyId) return;
-    setAzureLoading(true);
-    setAzureError(null);
+  // Detect which single vendor is active
+  const vendor = oauthKeyId ? "microsoft" : googleKeyId ? "google" : openaiKeyId ? "openai" : claudeKeyId ? "claude" : geminiEnterpriseKeyId ? "gemini" : null;
+
+  const VENDOR_META = {
+    microsoft: { label: "Microsoft / Azure OpenAI", color: "#0078D4", icon: Shield, costType: "pay-as-you-go",
+      subscriptionNote: "M365 Copilot usage is included in the Copilot license ($30/user/month) — no per-token cost. Copilot Studio includes 25,000 messages/month; overage is $0.01/message. Costs below are only for Azure OpenAI Service deployments (pay-as-you-go)." },
+    google: { label: "Google / Vertex AI", color: "#4285F4", icon: Cloud, costType: "pay-as-you-go + free tier",
+      subscriptionNote: "Gemini Flash includes a free tier (~1M tokens/day, 15 RPM). Pro and Ultra are pay-as-you-go from the first token. Costs below show only usage beyond the free tier." },
+    openai: { label: "ChatGPT / OpenAI", color: "#10a37f", icon: Bot, costType: "pay-as-you-go",
+      subscriptionNote: null },
+    claude: { label: "Claude / Anthropic", color: "#D4622A", icon: Bot, costType: "pay-as-you-go",
+      subscriptionNote: null },
+    gemini: { label: "Gemini Enterprise", color: "#886FBF", icon: Sparkles, costType: "included",
+      subscriptionNote: "Gemini Enterprise usage is included in Google Workspace Business Standard, Enterprise, and Education Plus licenses — no extra per-query charge. Request counts below are for visibility only." },
+  };
+
+  const meta = vendor ? VENDOR_META[vendor] : null;
+
+  const fetchCost = async () => {
+    if (!vendor) return;
+    setLoading(true);
+    setError(null);
+    setWarnings([]);
     try {
-      const data = await agentGovernanceApi.fetchAzureCost(oauthKeyId, period);
-      setAzureData(data);
+      let data;
+      if (vendor === "microsoft") {
+        data = await agentGovernanceApi.fetchAzureCost(oauthKeyId, period);
+        data._vendor = "microsoft";
+      } else if (vendor === "google") {
+        data = await agentGovernanceApi.fetchGoogleCost(googleKeyId, periodDays);
+        data._vendor = "google";
+      } else if (vendor === "openai") {
+        data = await agentGovernanceApi.fetchOpenAICost(openaiKeyId, period);
+        data._vendor = "openai";
+        if (data.warnings?.length) setWarnings(data.warnings);
+      } else if (vendor === "claude") {
+        data = await agentGovernanceApi.fetchClaudeUsage(claudeKeyId, period);
+        data._vendor = "claude";
+        if (data.warnings?.length) setWarnings(data.warnings);
+      } else if (vendor === "gemini") {
+        data = await agentGovernanceApi.fetchGeminiEnterpriseCost(geminiEnterpriseKeyId, periodDays);
+        data._vendor = "gemini";
+      }
+      setCostData(data);
     } catch (err) {
-      setAzureError(err.message || "Failed to fetch Azure cost data");
+      setError(err.message || "Failed to fetch cost data");
     } finally {
-      setAzureLoading(false);
+      setLoading(false);
     }
   };
 
-  const fetchGoogle = async () => {
-    if (!googleKeyId) return;
-    setGoogleLoading(true);
-    setGoogleError(null);
-    try {
-      const data = await agentGovernanceApi.fetchGoogleCost(googleKeyId, periodDays);
-      setGoogleData(data);
-    } catch (err) {
-      setGoogleError(err.message || "Failed to fetch Google cost data");
-    } finally {
-      setGoogleLoading(false);
+  useEffect(() => { if (scanActive && vendor) fetchCost(); }, [scanActive, period, vendor, refreshKey]);
+
+  // Extract unified values from whichever vendor is active
+  const deployments = costData?.deployments || costData?.endpoints || [];
+  const summary = costData?.summary || {};
+  const totalCost = summary.totalCost || costData?.estimatedTotalCost || 0;
+  const totalTokens = summary.totalTokens || 0;
+  const totalRequests = summary.totalRequests || summary.totalPredictions || costData?.totalRequests || 0;
+
+  // Compute extra cost (subtract subscription-included / free tier usage)
+  const extraCost = useMemo(() => {
+    if (vendor === "gemini") return 0; // included in Workspace subscription
+    if (vendor === "google" && costData?.endpoints?.length > 0) {
+      let extra = 0;
+      for (const ep of costData.endpoints) {
+        const isFlash = (ep.modelName || "").toLowerCase().includes("flash");
+        if (isFlash) {
+          const freeTotal = SUBSCRIPTION_LIMITS.google_vertex.freeTokensPerDay * periodDays;
+          const billable = Math.max(0, (ep.totalTokens || 0) - freeTotal);
+          if (billable > 0 && ep.totalTokens > 0) extra += ep.totalCost * (billable / ep.totalTokens);
+        } else {
+          extra += ep.totalCost || 0;
+        }
+      }
+      return extra;
     }
-  };
+    return totalCost; // azure, openai, claude — all pay-as-you-go
+  }, [vendor, totalCost, costData, periodDays]);
 
-  const fetchOpenAI = async () => {
-    if (!openaiKeyId) return;
-    setOpenaiLoading(true);
-    setOpenaiError(null);
-    try {
-      const data = await agentGovernanceApi.fetchOpenAICost(openaiKeyId, period);
-      setOpenaiData(data);
-    } catch (err) {
-      setOpenaiError(err.message || "Failed to fetch OpenAI cost data");
-    } finally {
-      setOpenaiLoading(false);
-    }
-  };
-
-  const fetchClaude = async () => {
-    if (!claudeKeyId) return;
-    setClaudeLoading(true);
-    setClaudeError(null);
-    try {
-      const data = await agentGovernanceApi.fetchClaudeUsage(claudeKeyId, period);
-      setClaudeData(data);
-    } catch (err) {
-      setClaudeError(err.message || "Failed to fetch Claude cost data");
-    } finally {
-      setClaudeLoading(false);
-    }
-  };
-
-  const fetchGemini = async () => {
-    if (!geminiEnterpriseKeyId) return;
-    setGeminiLoading(true);
-    setGeminiError(null);
-    try {
-      const data = await agentGovernanceApi.fetchGeminiEnterpriseCost(geminiEnterpriseKeyId, periodDays);
-      setGeminiData(data);
-    } catch (err) {
-      setGeminiError(err.message || "Failed to fetch Gemini Enterprise cost data");
-    } finally {
-      setGeminiLoading(false);
-    }
-  };
-
-  const fetchAll = () => {
-    fetchAzure();
-    fetchGoogle();
-    fetchOpenAI();
-    fetchClaude();
-    fetchGemini();
-  };
-
-  useEffect(() => { if (scanActive) fetchAll(); }, [scanActive, period, oauthKeyId, googleKeyId, openaiKeyId, claudeKeyId, geminiEnterpriseKeyId, refreshKey]);
-
-  const isLoading = azureLoading || googleLoading || openaiLoading || claudeLoading || geminiLoading;
-  const azureCost = azureData?.summary?.totalCost || 0;
-  const googleCost = googleData?.summary?.totalCost || 0;
-  const openaiCost = openaiData?.summary?.totalCost || 0;
-  const claudeCost = claudeData?.summary?.totalCost || 0;
-  const geminiCost = geminiData?.estimatedTotalCost || 0;
-  const totalCost = azureCost + googleCost + openaiCost + claudeCost + geminiCost;
-  const totalTokens = (azureData?.summary?.totalTokens || 0) + (googleData?.summary?.totalTokens || 0) + (openaiData?.summary?.totalTokens || 0) + (claudeData?.summary?.totalTokens || 0);
-  const totalRequests = (azureData?.summary?.totalRequests || 0) + (googleData?.summary?.totalPredictions || 0) + (openaiData?.summary?.totalRequests || 0) + (claudeData?.summary?.totalRequests || 0) + (geminiData?.totalRequests || 0);
-
-  if (!isAuthenticated && !googleKeyId && !openaiKeyId && !claudeKeyId && !geminiEnterpriseKeyId) {
+  if (!vendor) {
     return (
       <div style={{ textAlign: "center", padding: 60, color: "var(--ag-text-secondary)" }}>
         <DollarSign size={48} style={{ marginBottom: 16, opacity: 0.3 }} />
         <h3 style={{ fontSize: 16, fontWeight: 600, color: "var(--ag-text-primary)", marginBottom: 8 }}>
-          No platforms connected
+          No platform connected
         </h3>
         <p style={{ fontSize: 13 }}>
-          Connect Microsoft 365 or Google Cloud to track AI agent costs and token usage.
+          Connect a platform in <strong>Settings &gt; Integrations</strong> to start tracking AI agent costs.
         </p>
       </div>
     );
   }
 
+  const VendorIcon = meta.icon;
+
   return (
     <div>
       {/* Controls */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <div style={{ display: "flex", gap: 6 }}>
-          {PERIOD_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              onClick={() => setPeriod(opt.value)}
-              style={{
-                padding: "6px 14px", borderRadius: 6, fontSize: 12, fontWeight: 500,
-                border: period === opt.value ? "1px solid #6366f1" : "1px solid var(--ag-border)",
-                background: period === opt.value ? "#6366f112" : "#fff",
-                color: period === opt.value ? "#6366f1" : "var(--ag-text-secondary)",
-                cursor: "pointer", fontFamily: "inherit",
-              }}
-            >
-              {opt.label}
-            </button>
-          ))}
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ display: "flex", gap: 6 }}>
+            {PERIOD_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setPeriod(opt.value)}
+                style={{
+                  padding: "6px 14px", borderRadius: 6, fontSize: 12, fontWeight: 500,
+                  border: period === opt.value ? "1px solid #6366f1" : "1px solid var(--ag-border)",
+                  background: period === opt.value ? "#6366f112" : "#fff",
+                  color: period === opt.value ? "#6366f1" : "var(--ag-text-secondary)",
+                  cursor: "pointer", fontFamily: "inherit",
+                }}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: meta.color, fontWeight: 600 }}>
+            <VendorIcon size={14} /> {meta.label}
+          </div>
         </div>
-        <button onClick={fetchAll} disabled={isLoading} className="ag_btn_primary">
-          <RefreshCw size={13} style={isLoading ? { animation: "agSpin 1s linear infinite" } : undefined} />
-          {isLoading ? "Fetching..." : "Refresh Costs"}
+        <button onClick={fetchCost} disabled={loading} className="ag_btn_primary">
+          <RefreshCw size={13} style={loading ? { animation: "agSpin 1s linear infinite" } : undefined} />
+          {loading ? "Fetching..." : "Refresh Costs"}
         </button>
       </div>
 
       {/* KPI Cards */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 24 }}>
         <StatCard
-          label="Total Cost"
-          value={formatCost(totalCost)}
-          color={totalCost > 100 ? "#ef4444" : totalCost > 10 ? "#f59e0b" : "#22c55e"}
-          sub={PERIOD_OPTIONS.find((p) => p.value === period)?.label}
+          label={vendor === "gemini" ? "Extra Cost" : "Extra Cost (pay-as-you-go)"}
+          value={vendor === "gemini" && totalCost > 0 ? "Included" : formatCost(extraCost)}
+          color={extraCost > 100 ? "#ef4444" : extraCost > 10 ? "#f59e0b" : "#22c55e"}
+          sub={vendor === "gemini" ? "Included in Workspace subscription" : `${PERIOD_OPTIONS.find((p) => p.value === period)?.label} · excludes included usage`}
           icon={<DollarSign size={20} />}
         />
-        {isAuthenticated && (
+        {totalTokens > 0 && (
           <StatCard
-            label="Azure OpenAI Cost"
-            value={formatCost(azureCost)}
-            color="#0078D4"
-            sub={`${azureData?.deployments?.length || 0} deployment(s)`}
-            icon={<Shield size={20} />}
+            label="Total Tokens"
+            value={formatTokens(totalTokens)}
+            color="#6366f1"
+            sub="input + output"
+            icon={<Cpu size={20} />}
           />
         )}
-        {googleKeyId && (
-          <StatCard
-            label="Google Vertex AI Cost"
-            value={formatCost(googleCost)}
-            color="#4285F4"
-            sub={`${googleData?.endpoints?.length || 0} endpoint(s)`}
-            icon={<Cloud size={20} />}
-          />
-        )}
-        {openaiKeyId && (
-          <StatCard
-            label="ChatGPT / OpenAI Cost"
-            value={formatCost(openaiCost)}
-            color="#10a37f"
-            sub={`${openaiData?.deployments?.length || 0} model(s)`}
-            icon={<Bot size={20} />}
-          />
-        )}
-        {claudeKeyId && (
-          <StatCard
-            label="Claude / Anthropic Cost"
-            value={formatCost(claudeCost)}
-            color="#D4622A"
-            sub={`${claudeData?.deployments?.length || 0} model(s)`}
-            icon={<Bot size={20} />}
-          />
-        )}
-        {geminiEnterpriseKeyId && (
-          <StatCard
-            label="Gemini Enterprise Cost (est.)"
-            value={formatCost(geminiCost)}
-            color="#886FBF"
-            sub={`${(geminiData?.totalRequests || 0).toLocaleString()} request(s) · est. @ $${geminiData?.ratePer1kRequests ?? 2}/1k`}
-            icon={<Sparkles size={20} />}
-          />
-        )}
-        <StatCard
-          label="Total Tokens"
-          value={formatTokens(totalTokens)}
-          color="#6366f1"
-          sub="input + output"
-          icon={<Cpu size={20} />}
-        />
         <StatCard
           label="Total Requests"
           value={totalRequests.toLocaleString()}
@@ -413,216 +401,158 @@ export function CostTab() {
           sub={PERIOD_OPTIONS.find((p) => p.value === period)?.label}
           icon={<BarChart3 size={20} />}
         />
+        {deployments.length > 0 && (
+          <StatCard
+            label={vendor === "microsoft" ? "Deployments" : vendor === "google" ? "Endpoints" : "Models"}
+            value={deployments.length.toString()}
+            color={meta.color}
+            sub="active"
+            icon={<VendorIcon size={20} />}
+          />
+        )}
       </div>
 
-      {/* Azure OpenAI Cost */}
-      {isAuthenticated && (
-        <Section title={`Microsoft / Azure OpenAI Cost (${formatCost(azureCost)})`}>
-          {azureLoading && !azureData ? (
-            <LoadingSpinner message="Fetching Azure OpenAI usage metrics from Azure Monitor..." />
-          ) : azureError ? (
-            <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "14px 18px", fontSize: 12, color: "#dc2626" }}>
-              {azureError}
-              <button onClick={fetchAzure} className="ag_btn_secondary" style={{ marginLeft: 12, padding: "4px 10px", fontSize: 11 }}>
-                <RefreshCw size={11} /> Retry
-              </button>
-            </div>
-          ) : (
-            <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, overflow: "hidden" }}>
-              <CostBreakdownTable deployments={azureData?.deployments} vendor="Microsoft" />
-            </div>
-          )}
-
-          {azureData?.deployments?.length > 0 && (
-            <div style={{ marginTop: 16 }}>
-              <h4 style={{ fontSize: 13, fontWeight: 600, color: "var(--ag-text-primary)", marginBottom: 10 }}>Cost by Model</h4>
-              <ModelCostCards deployments={azureData.deployments} />
-            </div>
-          )}
-        </Section>
+      {/* Subscription note */}
+      {meta.subscriptionNote && (
+        <div style={{ background: "#dbeafe", border: "1px solid #93c5fd", borderRadius: 8, padding: "10px 14px", fontSize: 11, color: "#1e40af", marginBottom: 16, display: "flex", gap: 8, alignItems: "flex-start" }}>
+          <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>{meta.subscriptionNote}</span>
+        </div>
       )}
 
-      {/* Google Vertex AI Cost */}
-      {googleKeyId && (
-        <Section title={`Google / Vertex AI Cost (${formatCost(googleCost)})`}>
-          {googleLoading && !googleData ? (
-            <LoadingSpinner message="Fetching Vertex AI usage metrics from Cloud Monitoring..." />
-          ) : googleError ? (
-            <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "14px 18px", fontSize: 12, color: "#dc2626" }}>
-              {googleError}
-              <button onClick={fetchGoogle} className="ag_btn_secondary" style={{ marginLeft: 12, padding: "4px 10px", fontSize: 11 }}>
-                <RefreshCw size={11} /> Retry
-              </button>
-            </div>
-          ) : (
-            <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, overflow: "hidden" }}>
-              <CostBreakdownTable deployments={googleData?.endpoints} vendor="Google" />
+      {/* Warnings (OpenAI admin key, Claude admin key, etc.) */}
+      {warnings.length > 0 && (
+        <div style={{ background: "#fef3c7", border: "1px solid #f59e0b33", borderRadius: 8, padding: "10px 14px", fontSize: 11, color: "#78350f", marginBottom: 16 }}>
+          {warnings.map((w, i) => <div key={i}>• {w}</div>)}
+          {vendor === "openai" && (
+            <div style={{ marginTop: 6, color: "#92400e" }}>
+              Usage API requires an <strong>admin/org-level API key</strong>. Project keys will not return usage data.
             </div>
           )}
-
-          {googleData?.endpoints?.length > 0 && (
-            <div style={{ marginTop: 16 }}>
-              <h4 style={{ fontSize: 13, fontWeight: 600, color: "var(--ag-text-primary)", marginBottom: 10 }}>Cost by Model</h4>
-              <ModelCostCards deployments={googleData.endpoints} />
+          {vendor === "claude" && (
+            <div style={{ marginTop: 6, color: "#92400e" }}>
+              Usage API requires an <strong>admin API key</strong> (<code>sk-ant-admin...</code>). Standard keys will not return usage data.
             </div>
           )}
-        </Section>
+        </div>
       )}
 
-      {/* ChatGPT / OpenAI Direct Cost */}
-      {openaiKeyId && (
-        <Section title={`ChatGPT / OpenAI Direct Cost (${formatCost(openaiCost)})`}>
-          {openaiLoading && !openaiData ? (
-            <LoadingSpinner message="Fetching OpenAI usage metrics from organization usage API..." />
-          ) : openaiError ? (
-            <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "14px 18px", fontSize: 12, color: "#dc2626" }}>
-              {openaiError}
-              <button onClick={fetchOpenAI} className="ag_btn_secondary" style={{ marginLeft: 12, padding: "4px 10px", fontSize: 11 }}>
-                <RefreshCw size={11} /> Retry
-              </button>
-            </div>
-          ) : (
-            <>
-              {openaiData?.warnings?.length > 0 && (
-                <div style={{ background: "#fef3c7", border: "1px solid #f59e0b33", borderRadius: 8, padding: "10px 14px", fontSize: 11, color: "#78350f", marginBottom: 12 }}>
-                  {openaiData.warnings.map((w, i) => <div key={i}>• {w}</div>)}
-                  <div style={{ marginTop: 6, color: "#92400e" }}>
-                    Usage API requires an <strong>admin/org-level API key</strong>. Project keys will not return usage data.
-                  </div>
-                </div>
-              )}
-              <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, overflow: "hidden" }}>
-                <CostBreakdownTable deployments={openaiData?.deployments} vendor="OpenAI" />
-              </div>
-            </>
-          )}
-          {openaiData?.deployments?.length > 0 && (
-            <div style={{ marginTop: 16 }}>
-              <h4 style={{ fontSize: 13, fontWeight: 600, color: "var(--ag-text-primary)", marginBottom: 10 }}>Cost by Model</h4>
-              <ModelCostCards deployments={openaiData.deployments} />
-            </div>
-          )}
-        </Section>
-      )}
-
-      {/* Claude / Anthropic Cost */}
-      {claudeKeyId && (
-        <Section title={`Claude / Anthropic Cost (${formatCost(claudeCost)})`}>
-          {claudeLoading && !claudeData ? (
-            <LoadingSpinner message="Fetching Claude usage from Anthropic admin API..." />
-          ) : claudeError ? (
-            <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "14px 18px", fontSize: 12, color: "#dc2626" }}>
-              {claudeError}
-              <button onClick={fetchClaude} className="ag_btn_secondary" style={{ marginLeft: 12, padding: "4px 10px", fontSize: 11 }}>
-                <RefreshCw size={11} /> Retry
-              </button>
-            </div>
-          ) : (
-            <>
-              {claudeData?.warnings?.length > 0 && (
-                <div style={{ background: "#fef3c7", border: "1px solid #f59e0b33", borderRadius: 8, padding: "10px 14px", fontSize: 11, color: "#78350f", marginBottom: 12 }}>
-                  {claudeData.warnings.map((w, i) => <div key={i}>• {w}</div>)}
-                  <div style={{ marginTop: 6, color: "#92400e" }}>
-                    Usage API requires an <strong>admin API key</strong> (<code>sk-ant-admin...</code>). Standard keys will not return usage data.
-                  </div>
-                </div>
-              )}
-              <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, overflow: "hidden" }}>
-                <CostBreakdownTable deployments={claudeData?.deployments} vendor="Claude" />
-              </div>
-            </>
-          )}
-          {claudeData?.deployments?.length > 0 && (
-            <div style={{ marginTop: 16 }}>
-              <h4 style={{ fontSize: 13, fontWeight: 600, color: "var(--ag-text-primary)", marginBottom: 10 }}>Cost by Model</h4>
-              <ModelCostCards deployments={claudeData.deployments} />
-            </div>
-          )}
-        </Section>
-      )}
-
-      {/* Gemini Enterprise Cost */}
-      {geminiEnterpriseKeyId && (
-        <Section title={`Gemini Enterprise Cost — est. (${formatCost(geminiCost)})`}>
-          {geminiLoading && !geminiData ? (
-            <LoadingSpinner message="Fetching Discovery Engine usage from Cloud Monitoring..." />
-          ) : geminiError ? (
-            <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "14px 18px", fontSize: 12, color: "#dc2626" }}>
-              {geminiError}
-              <button onClick={fetchGemini} className="ag_btn_secondary" style={{ marginLeft: 12, padding: "4px 10px", fontSize: 11 }}>
-                <RefreshCw size={11} /> Retry
-              </button>
-            </div>
-          ) : (
-            <>
-              <div style={{ background: "#f5f3ff", border: "1px solid #ddd6fe", borderRadius: 8, padding: "10px 14px", fontSize: 11, color: "#5b21b6", marginBottom: 12 }}>
-                Request counts are <strong>real</strong> (Cloud Monitoring · Discovery Engine API). Cost is an
-                <strong> estimate</strong> at ${geminiData?.ratePer1kRequests ?? 2} per 1,000 requests over {geminiData?.period || `P${periodDays}D`}.
-              </div>
-              <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, overflow: "hidden" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ background: "var(--ag-bg-hover, #f9fafb)", textAlign: "left" }}>
-                      <th style={{ padding: "10px 14px", fontWeight: 600, color: "var(--ag-text-secondary)" }}>API Method</th>
-                      <th style={{ padding: "10px 14px", fontWeight: 600, color: "var(--ag-text-secondary)", textAlign: "right" }}>Requests</th>
-                      <th style={{ padding: "10px 14px", fontWeight: 600, color: "var(--ag-text-secondary)", textAlign: "right" }}>Est. Cost</th>
+      {/* Cost breakdown */}
+      <Section title={`${meta.label} Cost (${vendor === "gemini" ? "included" : formatCost(extraCost)})`}>
+        {loading && !costData ? (
+          <LoadingSpinner message={`Fetching ${meta.label} usage metrics...`} />
+        ) : error ? (
+          <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "14px 18px", fontSize: 12, color: "#dc2626" }}>
+            {error}
+            <button onClick={fetchCost} className="ag_btn_secondary" style={{ marginLeft: 12, padding: "4px 10px", fontSize: 11 }}>
+              <RefreshCw size={11} /> Retry
+            </button>
+          </div>
+        ) : vendor === "gemini" ? (
+          /* Gemini: request-based table */
+          <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, overflow: "hidden" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ background: "var(--ag-bg-hover, #f9fafb)", textAlign: "left" }}>
+                  <th style={{ padding: "10px 14px", fontWeight: 600, color: "var(--ag-text-secondary)" }}>API Method</th>
+                  <th style={{ padding: "10px 14px", fontWeight: 600, color: "var(--ag-text-secondary)", textAlign: "right" }}>Requests</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(costData?.methods || []).length === 0 ? (
+                  <tr><td colSpan={2} style={{ padding: "16px 14px", color: "var(--ag-text-secondary)", textAlign: "center" }}>No API requests recorded in this period.</td></tr>
+                ) : (
+                  costData.methods.map((m) => (
+                    <tr key={m.method} style={{ borderTop: "1px solid var(--ag-border)" }}>
+                      <td style={{ padding: "10px 14px", color: "var(--ag-text-primary)" }}>{m.method}</td>
+                      <td style={{ padding: "10px 14px", textAlign: "right" }}>{m.requestCount.toLocaleString()}</td>
                     </tr>
-                  </thead>
-                  <tbody>
-                    {(geminiData?.methods || []).length === 0 ? (
-                      <tr><td colSpan={3} style={{ padding: "16px 14px", color: "var(--ag-text-secondary)", textAlign: "center" }}>No Discovery Engine API requests recorded in this period.</td></tr>
-                    ) : (
-                      geminiData.methods.map((m) => (
-                        <tr key={m.method} style={{ borderTop: "1px solid var(--ag-border)" }}>
-                          <td style={{ padding: "10px 14px", color: "var(--ag-text-primary)" }}>{m.method}</td>
-                          <td style={{ padding: "10px 14px", textAlign: "right" }}>{m.requestCount.toLocaleString()}</td>
-                          <td style={{ padding: "10px 14px", textAlign: "right" }}>{formatCost(m.estimatedCost)}</td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          )}
-        </Section>
-      )}
-
-      {/* Pricing reference */}
-      <Section title="Pricing Reference">
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 16 }}>
-          <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, padding: 16 }}>
-            <div style={{ fontWeight: 600, fontSize: 13, color: "#10a37f", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
-              <Bot size={14} /> ChatGPT / OpenAI (per 1M tokens)
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          /* Token-based vendors: standard breakdown table */
+          <>
+            <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, overflow: "hidden" }}>
+              <CostBreakdownTable deployments={deployments} vendor={costData?.vendor || meta.label} />
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              {[
-                { model: "GPT-4o",       input: "$2.50",  output: "$10.00" },
-                { model: "GPT-4o-mini",  input: "$0.15",  output: "$0.60"  },
-                { model: "o1",           input: "$15.00", output: "$60.00" },
-                { model: "o1-mini",      input: "$3.00",  output: "$12.00" },
-                { model: "o3-mini",      input: "$1.10",  output: "$4.40"  },
-                { model: "GPT-3.5-turbo",input: "$0.50",  output: "$1.50"  },
-              ].map((r) => (
-                <div key={r.model} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "3px 0", borderBottom: "1px solid rgba(0,0,0,0.04)" }}>
-                  <span style={{ fontWeight: 500, color: getModelColor(r.model) }}>{r.model}</span>
-                  <span style={{ color: "#666" }}>{r.input} in / {r.output} out</span>
+            {vendor === "google" && extraCost < totalCost && totalCost > 0 && (
+              <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: "10px 14px", fontSize: 11, color: "#166534", marginTop: 12 }}>
+                <strong>Free tier applied:</strong> Gemini Flash includes ~{formatTokens(SUBSCRIPTION_LIMITS.google_vertex.freeTokensPerDay * periodDays)} tokens free for this {periodDays}-day period.
+                Only usage beyond the free tier ({formatCost(extraCost)}) is counted as extra cost.
+              </div>
+            )}
+          </>
+        )}
+
+        {deployments.length > 0 && vendor !== "gemini" && (
+          <div style={{ marginTop: 16 }}>
+            <h4 style={{ fontSize: 13, fontWeight: 600, color: "var(--ag-text-primary)", marginBottom: 10 }}>Cost by Model</h4>
+            <ModelCostCards deployments={deployments} />
+          </div>
+        )}
+      </Section>
+
+      {/* Pricing reference — only for the connected vendor */}
+      <Section title="Pricing Reference">
+        {vendor === "microsoft" && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, padding: 16 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "#0078D4", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+                <Shield size={14} /> Azure OpenAI — Pay-as-you-go (per 1M tokens)
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {[
+                  { model: "GPT-4o", input: "$2.50", output: "$10.00" },
+                  { model: "GPT-4o-mini", input: "$0.15", output: "$0.60" },
+                  { model: "GPT-4", input: "$30.00", output: "$60.00" },
+                  { model: "GPT-3.5-turbo", input: "$0.50", output: "$1.50" },
+                  { model: "o1", input: "$15.00", output: "$60.00" },
+                  { model: "o3-mini", input: "$1.10", output: "$4.40" },
+                ].map((r) => (
+                  <div key={r.model} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "3px 0", borderBottom: "1px solid rgba(0,0,0,0.04)" }}>
+                    <span style={{ fontWeight: 500, color: getModelColor(r.model) }}>{r.model}</span>
+                    <span style={{ color: "#666" }}>{r.input} in / {r.output} out</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div style={{ background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 10, padding: 16 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "#0369a1", marginBottom: 10 }}>
+                Included in Your Microsoft Subscription
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 11, color: "#0c4a6e" }}>
+                <div style={{ padding: "6px 0", borderBottom: "1px solid #bae6fd40" }}>
+                  <strong>M365 Copilot</strong> — $30/user/month add-on<br />
+                  <span style={{ color: "#22c55e", fontWeight: 600 }}>No extra cost.</span> Built-in Copilot in Word, Excel, Teams, Outlook. Unlimited usage, no per-token charges.
                 </div>
-              ))}
+                <div style={{ padding: "6px 0", borderBottom: "1px solid #bae6fd40" }}>
+                  <strong>Copilot Studio</strong> — $200/month standalone<br />
+                  <span style={{ color: "#22c55e", fontWeight: 600 }}>25,000 messages/month included.</span> Overage: $0.01/message. Classic bots: $0.001/message.
+                </div>
+                <div style={{ padding: "6px 0" }}>
+                  <strong>Power Virtual Agents (legacy)</strong><br />
+                  <span style={{ color: "#22c55e", fontWeight: 600 }}>2,000 sessions/month</span> included with certain Power Platform licenses.
+                </div>
+              </div>
             </div>
           </div>
-          <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, padding: 16 }}>
-            <div style={{ fontWeight: 600, fontSize: 13, color: "#0078D4", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
-              <Shield size={14} /> Azure OpenAI (per 1M tokens)
+        )}
+        {vendor === "openai" && (
+          <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, padding: 16, maxWidth: 400 }}>
+            <div style={{ fontWeight: 600, fontSize: 13, color: "#10a37f", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+              <Bot size={14} /> OpenAI API — Pay-as-you-go (per 1M tokens)
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               {[
                 { model: "GPT-4o", input: "$2.50", output: "$10.00" },
                 { model: "GPT-4o-mini", input: "$0.15", output: "$0.60" },
-                { model: "GPT-4", input: "$30.00", output: "$60.00" },
-                { model: "GPT-3.5-turbo", input: "$0.50", output: "$1.50" },
                 { model: "o1", input: "$15.00", output: "$60.00" },
+                { model: "o1-mini", input: "$3.00", output: "$12.00" },
                 { model: "o3-mini", input: "$1.10", output: "$4.40" },
+                { model: "GPT-3.5-turbo", input: "$0.50", output: "$1.50" },
               ].map((r) => (
                 <div key={r.model} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "3px 0", borderBottom: "1px solid rgba(0,0,0,0.04)" }}>
                   <span style={{ fontWeight: 500, color: getModelColor(r.model) }}>{r.model}</span>
@@ -631,18 +561,19 @@ export function CostTab() {
               ))}
             </div>
           </div>
-          <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, padding: 16 }}>
+        )}
+        {vendor === "claude" && (
+          <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, padding: 16, maxWidth: 400 }}>
             <div style={{ fontWeight: 600, fontSize: 13, color: "#D4622A", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
-              <Bot size={14} /> Claude / Anthropic (per 1M tokens)
+              <Bot size={14} /> Anthropic API — Pay-as-you-go (per 1M tokens)
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               {[
-                { model: "Claude Opus 4.7",   input: "$15.00", output: "$75.00" },
-                { model: "Claude Sonnet 4.6", input: "$3.00",  output: "$15.00" },
-                { model: "Claude Haiku 4.5",  input: "$0.80",  output: "$4.00"  },
-                { model: "Claude 3.5 Sonnet", input: "$3.00",  output: "$15.00" },
-                { model: "Claude 3.5 Haiku",  input: "$0.80",  output: "$4.00"  },
-                { model: "Claude 3 Opus",     input: "$15.00", output: "$75.00" },
+                { model: "Claude Opus 4", input: "$15.00", output: "$75.00" },
+                { model: "Claude Sonnet 4.6", input: "$3.00", output: "$15.00" },
+                { model: "Claude Haiku 4.5", input: "$0.80", output: "$4.00" },
+                { model: "Claude 3.5 Sonnet", input: "$3.00", output: "$15.00" },
+                { model: "Claude 3 Opus", input: "$15.00", output: "$75.00" },
               ].map((r) => (
                 <div key={r.model} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "3px 0", borderBottom: "1px solid rgba(0,0,0,0.04)" }}>
                   <span style={{ fontWeight: 500, color: getModelColor(r.model) }}>{r.model}</span>
@@ -651,28 +582,54 @@ export function CostTab() {
               ))}
             </div>
           </div>
-          <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, padding: 16 }}>
-            <div style={{ fontWeight: 600, fontSize: 13, color: "#4285F4", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
-              <Cloud size={14} /> Google Vertex AI (per 1M tokens)
+        )}
+        {vendor === "google" && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, padding: 16 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "#4285F4", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+                <Cloud size={14} /> Vertex AI — Pay-as-you-go (per 1M tokens)
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {[
+                  { model: "Gemini 2.0 Flash", input: "$0.10", output: "$0.40" },
+                  { model: "Gemini 2.0 Pro", input: "$1.25", output: "$5.00" },
+                  { model: "Gemini 1.5 Pro", input: "$1.25", output: "$5.00" },
+                  { model: "Gemini 1.5 Flash", input: "$0.075", output: "$0.30" },
+                  { model: "PaLM 2", input: "$0.50", output: "$1.50" },
+                ].map((r) => (
+                  <div key={r.model} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "3px 0", borderBottom: "1px solid rgba(0,0,0,0.04)" }}>
+                    <span style={{ fontWeight: 500, color: getModelColor(r.model) }}>{r.model}</span>
+                    <span style={{ color: "#666" }}>{r.input} in / {r.output} out</span>
+                  </div>
+                ))}
+              </div>
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              {[
-                { model: "Gemini 2.0 Flash", input: "$0.10", output: "$0.40" },
-                { model: "Gemini 2.0 Pro", input: "$1.25", output: "$5.00" },
-                { model: "Gemini 1.5 Pro", input: "$1.25", output: "$5.00" },
-                { model: "Gemini 1.5 Flash", input: "$0.075", output: "$0.30" },
-                { model: "PaLM 2", input: "$0.50", output: "$1.50" },
-              ].map((r) => (
-                <div key={r.model} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "3px 0", borderBottom: "1px solid rgba(0,0,0,0.04)" }}>
-                  <span style={{ fontWeight: 500, color: getModelColor(r.model) }}>{r.model}</span>
-                  <span style={{ color: "#666" }}>{r.input} in / {r.output} out</span>
-                </div>
-              ))}
+            <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10, padding: 16 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "#16a34a", marginBottom: 10 }}>
+                Free Tier (No Extra Cost)
+              </div>
+              <div style={{ fontSize: 11, color: "#166534", lineHeight: 1.7 }}>
+                <strong>Gemini Flash</strong> — ~1M tokens/day, 15 requests/min<br />
+                Usage within this limit is <strong>free</strong>. Only tokens beyond the daily limit are billed at pay-as-you-go rates.<br /><br />
+                <strong>Gemini Pro / Ultra</strong> — pay-as-you-go from the first token.
+              </div>
             </div>
           </div>
-        </div>
+        )}
+        {vendor === "gemini" && (
+          <div style={{ background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 10, padding: 16 }}>
+            <div style={{ fontWeight: 600, fontSize: 13, color: "#0369a1", marginBottom: 8 }}>
+              Gemini Enterprise — Included in Subscription
+            </div>
+            <div style={{ fontSize: 11, color: "#0c4a6e", lineHeight: 1.7 }}>
+              Gemini for Google Workspace is included in <strong>Business Standard</strong>, <strong>Enterprise</strong>, and <strong>Education Plus</strong> licenses.
+              There are no per-query or per-token charges for standard Gemini features (Gmail, Docs, Sheets, Meet, etc.).<br /><br />
+              Request counts on this page are shown for <strong>visibility and governance</strong> only — they represent usage volume, not billable costs.
+            </div>
+          </div>
+        )}
         <div style={{ fontSize: 11, color: "var(--ag-text-secondary)", marginTop: 10 }}>
-          Pricing is approximate and based on standard pay-as-you-go rates. Actual costs may vary based on your enterprise agreements, committed-use discounts, and region.
+          Pricing is approximate and based on standard pay-as-you-go rates. Actual costs may vary based on enterprise agreements, committed-use discounts, and region.
         </div>
       </Section>
     </div>

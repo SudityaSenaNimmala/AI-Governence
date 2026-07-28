@@ -1,7 +1,7 @@
 import React, { useContext, useEffect, useState } from "react";
 import { GlobalContext } from "../../../GlobalContext/GlobalContext";
 import { cloudImageMapper, getCloudName } from "../../helpers/helpers";
-import { formatCurrencyShort, getRandomColor } from "../../helpers/utils";
+import { formatCurrencyShort, getRandomColor, clearLocalStorage } from "../../helpers/utils";
 import "./css/Calendar.css";
 import { RESET_APP_CONTEXT } from "../../../GlobalContext/action.types";
 
@@ -32,7 +32,7 @@ const ReCalendar = () => {
         payload: "",
       });
       setTimeout(() => {
-        localStorage.clear();
+        clearLocalStorage();
         navigation("/#login");
       }, 500);
       return;

@@ -11,6 +11,7 @@ const CLAUDE_KEY = "ag_claude_key_id";
 const GEMINI_ENTERPRISE_KEY = "ag_gemini_enterprise_key_id";
 const GEMINI_ENTERPRISE_TOKEN_CONN = "ag_gemini_enterprise_token_conn";
 export const GEMINI_ENTERPRISE_TOKEN_SENTINEL = "__ge_token__";
+const AWS_KEY = "ag_aws_key_id";
 
 export const SCOPE_LABELS = {
   all: "All Applications",
@@ -40,6 +41,8 @@ export const SCOPE_LABELS = {
   custom_gpt: "Custom GPTs (ChatGPT)",
   claude_ai_project: "Claude.ai Projects",
   gemini_enterprise: "Gemini Enterprise",
+  aws_bedrock: "AWS Bedrock",
+  aws_sagemaker: "SageMaker",
 };
 
 export const SCOPE_COLORS = {
@@ -70,6 +73,8 @@ export const SCOPE_COLORS = {
   custom_gpt: "#7c3aed",
   claude_ai_project: "#D4622A",
   gemini_enterprise: "#886FBF",
+  aws_bedrock: "#FF9900",
+  aws_sagemaker: "#527FFF",
 };
 
 const governanceInitialState = {
@@ -98,7 +103,7 @@ function governanceReducer(state, action) {
     case "DISCOVERY_PROGRESS":
       return { ...state, discoveryProgress: action.message };
     case "DISCOVERY_SUCCESS":
-      return { ...state, discoveryStatus: "success", discoveryResult: action.result, discoveryProgress: "", refreshKey: state.refreshKey + 1 };
+      return { ...state, discoveryStatus: "success", discoveryResult: action.result ? { ...action.result, agents: normalizeAgents(action.result.agents || []) } : null, discoveryProgress: "", refreshKey: state.refreshKey + 1 };
     case "DISCOVERY_ERROR":
       return { ...state, discoveryStatus: "error", error: action.error, discoveryProgress: "" };
     case "SET_STATUS_FILTER":
@@ -138,7 +143,7 @@ export function getScopedAgents(result, scope) {
 }
 
 export function getScopeCounts(result) {
-  const counts = { all: 0, copilot_studio: 0, personal_agent: 0, teams_chat_agent: 0, sharepoint_embedded: 0, teams_app: 0, isv_store: 0, azure_foundry: 0, vertex_ai: 0, gemini: 0, google_workspace: 0, gemini_gmail: 0, gemini_docs: 0, gemini_sheets: 0, gemini_slides: 0, gemini_meet: 0, gemini_drive: 0, gemini_chat: 0, google_chat: 0, apps_script: 0, gemini_gems: 0, gemini_workspace: 0, oauth_app: 0, openai_assistant: 0, custom_gpt: 0, claude_project: 0, claude_model: 0, claude_agent: 0, claude_ai_project: 0, gemini_enterprise: 0 };
+  const counts = { all: 0, copilot_studio: 0, personal_agent: 0, teams_chat_agent: 0, sharepoint_embedded: 0, teams_app: 0, isv_store: 0, azure_foundry: 0, vertex_ai: 0, gemini: 0, google_workspace: 0, gemini_gmail: 0, gemini_docs: 0, gemini_sheets: 0, gemini_slides: 0, gemini_meet: 0, gemini_drive: 0, gemini_chat: 0, google_chat: 0, apps_script: 0, gemini_gems: 0, gemini_workspace: 0, oauth_app: 0, openai_assistant: 0, custom_gpt: 0, claude_project: 0, claude_model: 0, claude_agent: 0, claude_ai_project: 0, gemini_enterprise: 0, aws_bedrock: 0, aws_sagemaker: 0 };
   if (!result) return counts;
   counts.all = result.agents.length;
   for (const a of result.agents) {
@@ -229,6 +234,24 @@ export function computeMetrics(result, scope = "all") {
   };
 }
 
+// Ensure every agent has the minimum shape the UI expects (risk + activity).
+// Agents loaded from the server may lack these if they were persisted before
+// client-side conversion added them, or if the server stores a leaner shape.
+const DEFAULT_RISK = { score: 0, level: "low", factors: [], recommendations: [], computedAt: new Date().toISOString() };
+const DEFAULT_ACTIVITY = { totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0, uniqueUsers: 0, userBreakdown: [] };
+
+function normalizeAgent(a) {
+  return {
+    ...a,
+    risk: a.risk ? { ...DEFAULT_RISK, ...a.risk } : { ...DEFAULT_RISK },
+    activity: a.activity ? { ...DEFAULT_ACTIVITY, ...a.activity } : { ...DEFAULT_ACTIVITY },
+  };
+}
+
+function normalizeAgents(agents) {
+  return agents.map(normalizeAgent);
+}
+
 const GovernanceContext = createContext(null);
 const AuthContext = createContext(null);
 
@@ -243,23 +266,68 @@ export function AgentGovernanceProvider({ children }) {
   const [openaiKeyId, setOpenaiKeyId] = useState(() => localStorage.getItem(OPENAI_KEY));
   const [claudeKeyId, setClaudeKeyId] = useState(() => localStorage.getItem(CLAUDE_KEY));
   const [geminiEnterpriseKeyId, setGeminiEnterpriseKeyId] = useState(() => localStorage.getItem(GEMINI_ENTERPRISE_KEY));
+  const [awsKeyId, setAwsKeyId] = useState(() => localStorage.getItem(AWS_KEY));
   const [isConnecting, setIsConnecting] = useState(false);
   const [authError, setAuthError] = useState(null);
 
   const isAuthenticated = !!oauthKeyId;
 
-  // Load persisted agents on mount so the dashboard survives page refresh.
+  // Auto-restore connections from server if localStorage is empty.
+  // OAuth keys are persisted in MongoDB — fetch them and restore state.
   useEffect(() => {
-    if (!oauthKeyId) return;
+    // Only skip if ALL platforms are already in localStorage
+    if (oauthKeyId && googleKeyId && openaiKeyId && claudeKeyId && awsKeyId) return;
     (async () => {
       try {
-        const res = await fetch(`/api/discovery/agents?oauth_key_id=${oauthKeyId}`, {
+        const res = await fetch("/api/oauth-keys");
+        if (!res.ok) return;
+        const keys = await res.json();
+        for (const k of keys) {
+          if (k.vendor === "microsoft" && !oauthKeyId) {
+            localStorage.setItem(STORAGE_KEY, k.id);
+            localStorage.setItem(TENANT_KEY, k.tenant_id || "");
+            if (k.dataverse_env_url) localStorage.setItem(DV_ENV_KEY, k.dataverse_env_url);
+            if (k.azure_subscription_id) localStorage.setItem(AZ_SUB_KEY, k.azure_subscription_id);
+            setOauthKeyId(k.id);
+            setTenantId(k.tenant_id || "");
+            if (k.dataverse_env_url) setDataverseEnvUrl(k.dataverse_env_url);
+            if (k.azure_subscription_id) setAzureSubscriptionId(k.azure_subscription_id);
+          }
+          if (k.vendor === "google" && !googleKeyId) {
+            localStorage.setItem(GCP_KEY, k.id);
+            setGoogleKeyId(k.id);
+          }
+          if (k.vendor === "openai" && !openaiKeyId) {
+            localStorage.setItem(OPENAI_KEY, k.id);
+            setOpenaiKeyId(k.id);
+          }
+          if (k.vendor === "claude" && !claudeKeyId) {
+            localStorage.setItem(CLAUDE_KEY, k.id);
+            setClaudeKeyId(k.id);
+          }
+          if (k.vendor === "aws" && !awsKeyId) {
+            localStorage.setItem(AWS_KEY, k.id);
+            setAwsKeyId(k.id);
+          }
+        }
+      } catch (e) { /* server not reachable */ }
+    })();
+  }, []);
+
+  // Load persisted agents on mount so the dashboard survives page refresh.
+  // Runs for ANY connected platform, not just Microsoft.
+  const isAnyKeyPresent = !!oauthKeyId || !!googleKeyId || !!openaiKeyId || !!claudeKeyId || !!geminiEnterpriseKeyId || !!awsKeyId;
+  useEffect(() => {
+    if (!isAnyKeyPresent) return;
+    (async () => {
+      try {
+        // Fetch all persisted agents (no oauth_key_id filter — returns everything)
+        const res = await fetch("/api/discovery/agents", {
           headers: { "Content-Type": "application/json" },
         });
         if (!res.ok) return;
         const data = await res.json();
         if (data.agents && data.agents.length > 0) {
-          // Wrap in the full result shape the UI expects
           govDispatch({ type: "DISCOVERY_SUCCESS", result: {
             tenant: { id: tenantId || "cached", name: "Agent Governance", domain: "cached", license: "N/A" },
             agents: data.agents,
@@ -273,7 +341,7 @@ export function AgentGovernanceProvider({ children }) {
         }
       } catch (e) { /* silently fail — no persisted data yet */ }
     })();
-  }, [oauthKeyId, tenantId]);
+  }, [isAnyKeyPresent, tenantId]);
 
   const connect = useCallback(async (data) => {
     setIsConnecting(true);
@@ -455,6 +523,28 @@ export function AgentGovernanceProvider({ children }) {
     setGeminiEnterpriseKeyId(null);
   }, [geminiEnterpriseKeyId]);
 
+  const connectAWS = useCallback(async (accessKeyId, secretAccessKey, region, accountId) => {
+    setAuthError(null);
+    try {
+      const result = await agentGovernanceApi.connectAWS(accessKeyId, secretAccessKey, region, accountId);
+      localStorage.setItem(AWS_KEY, result.id);
+      setAwsKeyId(result.id);
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "AWS connection failed";
+      setAuthError(msg);
+      throw err;
+    }
+  }, []);
+
+  const disconnectAWS = useCallback(async () => {
+    if (awsKeyId) {
+      try { await agentGovernanceApi.deleteOAuthKey(awsKeyId); } catch { /* ignore */ }
+    }
+    localStorage.removeItem(AWS_KEY);
+    setAwsKeyId(null);
+  }, [awsKeyId]);
+
   const disconnect = useCallback(async () => {
     if (oauthKeyId) {
       try {
@@ -472,6 +562,7 @@ export function AgentGovernanceProvider({ children }) {
     localStorage.removeItem(CLAUDE_KEY);
     localStorage.removeItem(GEMINI_ENTERPRISE_KEY);
     localStorage.removeItem(GEMINI_ENTERPRISE_TOKEN_CONN);
+    localStorage.removeItem(AWS_KEY);
     setOauthKeyId(null);
     setTenantId(null);
     setDataverseEnvUrl(null);
@@ -480,11 +571,12 @@ export function AgentGovernanceProvider({ children }) {
     setOpenaiKeyId(null);
     setClaudeKeyId(null);
     setGeminiEnterpriseKeyId(null);
+    setAwsKeyId(null);
   }, [oauthKeyId]);
 
   return (
     <AuthContext.Provider
-      value={{ isAuthenticated, isConnecting, error: authError, oauthKeyId, tenantId, dataverseEnvUrl, azureSubscriptionId, googleKeyId, openaiKeyId, claudeKeyId, geminiEnterpriseKeyId, connect, connectGoogle, disconnectGoogle, connectOpenAI, disconnectOpenAI, connectClaude, disconnectClaude, connectGeminiEnterprise, connectGeminiEnterpriseToken, disconnectGeminiEnterprise, updateConnection, disconnect }}
+      value={{ isAuthenticated, isConnecting, error: authError, oauthKeyId, tenantId, dataverseEnvUrl, azureSubscriptionId, googleKeyId, openaiKeyId, claudeKeyId, geminiEnterpriseKeyId, awsKeyId, connect, connectGoogle, disconnectGoogle, connectOpenAI, disconnectOpenAI, connectClaude, disconnectClaude, connectGeminiEnterprise, connectGeminiEnterpriseToken, disconnectGeminiEnterprise, connectAWS, disconnectAWS, updateConnection, disconnect }}
     >
       <GovernanceContext.Provider value={{ state: govState, dispatch: govDispatch }}>
         {children}

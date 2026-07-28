@@ -21,6 +21,13 @@
 .aihub_stat_card:hover {
   box-shadow: 0 2px 8px rgba(0,0,0,0.06);
 }
+.aihub_stat_card_clickable {
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+.aihub_stat_card_clickable:hover {
+  border-color: #0044cc;
+  box-shadow: 0 2px 12px rgba(0,68,204,0.12);
+}
 
 .aihub_stat_icon {
   width: 40px;

@@ -1380,9 +1380,14 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
     setTimeout(() => setBlockFeedback(prev => { const n = { ...prev }; delete n[agentId]; return n; }), 3000);
   };
 
+  // Platforms that have agents in Dataverse (conversation transcripts available)
+  const DATAVERSE_PLATFORMS = new Set(["copilot_studio", "personal_agent", "sharepoint_embedded", "teams_app", "teams_chat_agent"]);
+  const mappedPlatforms = APP_TO_PLATFORMS[application] || [application];
+  const isDataversePlatform = mappedPlatforms.some(p => DATAVERSE_PLATFORMS.has(p));
+
   const loadRisk = async () => {
     if (!oauthKeyId) return;
-    if (!isCopilotStudio) return;
+    if (!isDataversePlatform) return;
     setLoading(true);
     setError(null);
     try {
@@ -1396,12 +1401,12 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
   };
 
   useEffect(() => {
-    if (oauthKeyId && enabled && isCopilotStudio) loadRisk();
+    if (oauthKeyId && enabled && isDataversePlatform) loadRisk();
   }, [oauthKeyId, enabled, isCopilotStudio]);
 
-  // For non-Copilot-Studio apps, use discovery scan's pre-computed risk (from assessRisk in riskService)
+  // For non-Dataverse platforms, use discovery scan's pre-computed risk
   const discoveryAgentsWithRisk = useMemo(() => {
-    if (isCopilotStudio || discoveredAgents.length === 0) return [];
+    if (isDataversePlatform || discoveredAgents.length === 0) return [];
     return discoveredAgents.map((a) => {
       const risk = a.risk || computeDiscoveredAgentRisk(a);
       const isOrphaned = !a.owner?.displayName || a.isOrphaned;
@@ -1429,22 +1434,19 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
     });
   }, [isCopilotStudio, discoveredAgents]);
 
-  // For Copilot Studio: use /risk-summary API, filtered by discovered agents
+  // For Dataverse platforms: use /risk-summary API, filtered by platform
   const allDataverseAgents = riskData?.agents || [];
   const dataverseAgents = useMemo(() => {
-    if (!isCopilotStudio) return [];
-    if (allDataverseAgents.length === 0 || discoveredAgents.length === 0) return allDataverseAgents;
-    const ids = new Set(discoveredAgents.map(a => a.id?.toLowerCase()).filter(Boolean));
-    const names = new Set(discoveredAgents.map(a => a.name?.toLowerCase()).filter(Boolean));
-    const botIds = new Set(discoveredAgents.map(a => a.botId?.toLowerCase()).filter(Boolean));
-    return allDataverseAgents.filter(a =>
-      ids.has(a.botId?.toLowerCase()) || names.has(a.botName?.toLowerCase()) || botIds.has(a.botId?.toLowerCase())
-    );
-  }, [isCopilotStudio, allDataverseAgents, discoveredAgents]);
+    if (!isDataversePlatform) return [];
+    if (allDataverseAgents.length === 0) return [];
+    // Filter by the mapped platform values (e.g. sharepoint_agent → sharepoint_embedded)
+    const platforms = APP_TO_PLATFORMS[application] || [application];
+    return allDataverseAgents.filter(a => platforms.includes(a.platform));
+  }, [isDataversePlatform, allDataverseAgents, application]);
 
-  // Copilot Studio fallback: if /risk-summary returned nothing but we have discovered agents
+  // Dataverse fallback: if /risk-summary returned nothing but we have discovered agents
   const copilotFallbackAgents = useMemo(() => {
-    if (!isCopilotStudio || dataverseAgents.length > 0 || discoveredAgents.length === 0) return [];
+    if (!isDataversePlatform || dataverseAgents.length > 0 || discoveredAgents.length === 0) return [];
     return discoveredAgents.map((a) => {
       const risk = a.risk || computeDiscoveredAgentRisk(a);
       return {
@@ -1466,9 +1468,9 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
         permissions: a.permissions,
       };
     });
-  }, [isCopilotStudio, dataverseAgents, discoveredAgents]);
+  }, [isDataversePlatform, dataverseAgents, discoveredAgents]);
 
-  let agents = isCopilotStudio
+  let agents = isDataversePlatform
     ? (dataverseAgents.length > 0 ? dataverseAgents : copilotFallbackAgents)
     : discoveryAgentsWithRisk;
   if (agentFilter !== "all") {
@@ -1497,7 +1499,7 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
           <Shield size={18} color="#6366f1" />
           <span style={{ fontSize: 16, fontWeight: 700, color: "var(--ag-text-primary)" }}>Risk Management</span>
         </div>
-        {isCopilotStudio ? (
+        {isDataversePlatform ? (
           <button
             onClick={loadRisk}
             disabled={loading}
@@ -1558,7 +1560,6 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                   <th style={thStyle}>Status</th>
                   <th style={thStyle}>Risk Level</th>
                   <th style={thStyle}>Score</th>
-                  <th style={thStyle}>Activity</th>
                   <th style={thStyle}>Renewal</th>
                   <th style={thStyle}>Risk Factors</th>
                   <th style={thStyle}>Actions</th>
@@ -1618,19 +1619,6 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                               }} />
                             </div>
                             <span style={{ fontSize: 11, fontWeight: 700, color: "var(--ag-text-primary)" }}>{agent.risk?.score}</span>
-                          </div>
-                        </td>
-                        <td style={{ padding: "10px 8px" }}>
-                          <div style={{ fontSize: 11 }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--ag-text-primary)" }}>
-                              <MessageSquare size={10} /> {agent.conversationCount || 0} chats
-                            </div>
-                            <div style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--ag-text-secondary)" }}>
-                              <Activity size={10} /> {agent.sessionCount} sessions
-                            </div>
-                            <div style={{ fontSize: 10, color: "#999" }}>
-                              {agent.lastActivity ? `Last: ${new Date(agent.lastActivity).toLocaleDateString()}` : "No activity"}
-                            </div>
                           </div>
                         </td>
                         <td style={{ padding: "10px 8px" }}>
@@ -1706,7 +1694,7 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                       {/* Expanded Risk Breakdown */}
                       {isExpanded && (
                         <tr key={`${agent.botId}-breakdown`} style={{ borderBottom: "2px solid var(--ag-border)" }}>
-                          <td colSpan={9} style={{ padding: 0 }}>
+                          <td colSpan={8} style={{ padding: 0 }}>
                             <div style={{ padding: "12px 16px", background: "#f8f9fb", borderTop: "1px dashed var(--ag-border)" }}>
                               <div style={{ fontWeight: 700, fontSize: 12, color: "#4338ca", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
                                 <ShieldAlert size={14} /> Full Risk Breakdown — {agent.botName}
@@ -1740,8 +1728,8 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                                 <div style={{ flex: 1, minWidth: 300 }}>
                                   <div style={{ fontSize: 11, fontWeight: 600, color: "var(--ag-text-primary)", marginBottom: 6 }}>Activity & Context</div>
                                   <div style={{ background: "#fff", padding: 10, borderRadius: 6, border: "1px solid var(--ag-border)", fontSize: 11, lineHeight: 1.8 }}>
-                                    {isCopilotStudio && <div><strong>Conversations:</strong> {agent.conversationCount || 0} transcripts in Dataverse</div>}
-                                    <div><strong>{isCopilotStudio ? "Sessions (30d)" : "Invocations"}:</strong> {agent.sessionCount || 0}</div>
+                                    {isDataversePlatform && <div><strong>Conversations:</strong> {agent.conversationCount || 0} transcripts in Dataverse</div>}
+                                    <div><strong>{isDataversePlatform ? "Sessions (30d)" : "Invocations"}:</strong> {agent.sessionCount || 0}</div>
                                     <div><strong>Last Activity:</strong> {agent.lastActivity ? new Date(agent.lastActivity).toLocaleString() : "Never"}</div>
                                     <div><strong>Days Since Activity:</strong> {agent.lastActivity ? Math.floor((Date.now() - new Date(agent.lastActivity).getTime()) / (1000 * 60 * 60 * 24)) : "N/A"}</div>
                                     <div><strong>Created:</strong> {agent.createdOn ? new Date(agent.createdOn).toLocaleString() : "Unknown"}</div>
@@ -1819,7 +1807,7 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
           <Shield size={48} style={{ marginBottom: 16, opacity: 0.3 }} />
           <h3 style={{ fontSize: 16, fontWeight: 600, color: "var(--ag-text-primary)", marginBottom: 8 }}>No agents found for {applicationLabel || "this application"}</h3>
           <p style={{ fontSize: 13 }}>
-            {isCopilotStudio
+            {isDataversePlatform
               ? "Click \"Refresh Risk Scores\" or run a discovery scan to compute risk scores for your agents."
               : "Run a discovery scan first to discover and compute risk scores for your agents."
             }
@@ -1834,6 +1822,7 @@ const APP_OPTIONS = [
   { id: "copilot_studio", label: "Copilot Studio", color: "#742774" },
   { id: "personal_agent", label: "Personal Agents", color: "#2563eb" },
   { id: "sharepoint_agent", label: "SharePoint Agents", color: "#059669" },
+  { id: "teams_app", label: "Teams Apps", color: "#6264a7" },
   { id: "azure_foundry", label: "Azure AI Foundry", color: "#0078D4" },
   { id: "google_reasoning_engines", label: "Reasoning Engines", color: "#4285F4" },
   { id: "google_agent_builder", label: "Agent Builder", color: "#EA4335" },
@@ -2705,6 +2694,7 @@ const APP_TO_PLATFORMS = {
   copilot_studio: ["copilot_studio"],
   personal_agent: ["personal_agent"],
   sharepoint_agent: ["sharepoint_embedded"],
+  teams_app: ["teams_app", "teams_chat_agent"],
   azure_foundry: ["azure_foundry"],
   google_reasoning_engines: ["reasoning_engine"],
   google_agent_builder: ["agent_builder"],
@@ -3181,7 +3171,7 @@ export function UserActivityTab() {
   };
 
   const visibleApps = APP_OPTIONS.filter((app) => {
-    if (app.id === "copilot_studio" || app.id === "azure_foundry" || app.id === "personal_agent" || app.id === "sharepoint_agent") return !!oauthKeyId;
+    if (app.id === "copilot_studio" || app.id === "azure_foundry" || app.id === "personal_agent" || app.id === "sharepoint_agent" || app.id === "teams_app") return !!oauthKeyId;
     if (GOOGLE_APP_IDS.has(app.id)) return !!googleKeyId;
     if (OPENAI_APP_IDS.has(app.id)) return !!openaiKeyId;
     if (CLAUDE_APP_IDS.has(app.id)) return !!claudeKeyId;

@@ -192,4 +192,40 @@ export const PLATFORM_CAPABILITIES: Record<string, PlatformCapabilities> = {
       },
     },
   },
+
+  aws: {
+    label: "AWS (Bedrock / SageMaker)",
+    discovery: "supported",
+    tabs: {
+      file_activity: {
+        status: "unsupported",
+        note: "AWS Bedrock has no file activity API.",
+      },
+      user_activity: {
+        status: "limited",
+        route: "/api/aws/usage",
+        requires: ["cloudwatch:GetMetricData", "CloudTrail access"],
+        note: "User-level attribution requires CloudTrail — aggregate metrics are available via CloudWatch.",
+      },
+      knowledge: {
+        status: "supported",
+        route: "/api/aws/scan-platform",
+        note: "Bedrock Knowledge Bases are discoverable via the Bedrock Agent API.",
+      },
+      files: {
+        status: "unsupported",
+        note: "AWS Bedrock has no direct file listing API.",
+      },
+      conversations: {
+        status: "unsupported",
+        note: "AWS Bedrock has no conversation retrieval API.",
+      },
+      usage: {
+        status: "limited",
+        route: "/api/aws/usage",
+        requires: ["cloudwatch:GetMetricData"],
+        note: "Aggregate Bedrock invocations and token counts from CloudWatch. Per-model breakdown requires CloudTrail.",
+      },
+    },
+  },
 };

@@ -178,6 +178,38 @@ router.get("/agents", async (req, res) => {
 });
 
 /**
+ * POST /api/discovery/agents — Persist agents from any platform scan.
+ * Called by the dashboard after a successful multi-platform scan so data
+ * survives page refresh. Upserts each agent by its id to avoid duplicates.
+ */
+router.post("/agents", async (req, res) => {
+  try {
+    const { agents } = req.body;
+    if (!Array.isArray(agents) || agents.length === 0) {
+      res.status(400).json({ error: "agents array is required" });
+      return;
+    }
+    const db = getDb();
+    const col = db.collection("discovered_agents");
+    let upserted = 0;
+    for (const agent of agents) {
+      const key = agent.id || agent.appId || agent.name;
+      if (!key) continue;
+      await col.updateOne(
+        { agent_key: key },
+        { $set: { ...agent, agent_key: key, updated_at: new Date() } },
+        { upsert: true },
+      );
+      upserted++;
+    }
+    res.json({ ok: true, persisted: upserted });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to persist agents";
+    res.status(500).json({ error: message });
+  }
+});
+
+/**
  * GET /api/discovery/debug-dataverse — Raw Dataverse query for debugging
  * Shows all bots, botcomponents, and recent transcripts
  */

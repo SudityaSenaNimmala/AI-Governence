@@ -57,6 +57,17 @@ export const agentGovernanceApi = {
     return request(url);
   },
 
+  async persistAgents(agents) {
+    return request("/discovery/agents", {
+      method: "POST",
+      body: JSON.stringify({ agents }),
+    });
+  },
+
+  async loadPersistedAgents() {
+    return request("/discovery/agents");
+  },
+
   async suspendAgent(data) {
     return request("/lifecycle/suspend", {
       method: "POST",
@@ -465,6 +476,24 @@ export const agentGovernanceApi = {
 
   async fetchClaudeFiles(claudeKeyId) {
     return request(`/claude/files?oauth_key_id=${claudeKeyId}`, undefined, 60000);
+  },
+
+  // AWS (Bedrock / SageMaker)
+  async connectAWS(accessKeyId, secretAccessKey, region, accountId) {
+    return request("/aws/connect", {
+      method: "POST",
+      body: JSON.stringify({ access_key_id: accessKeyId, secret_access_key: secretAccessKey, region, account_id: accountId || undefined }),
+    });
+  },
+
+  async discoverAWSPlatform(oauthKeyId, platform) {
+    const qs = oauthKeyId ? `?oauth_key_id=${oauthKeyId}&platform=${platform}` : `?platform=${platform}`;
+    return request(`/aws/scan-platform${qs}`, undefined, 120000);
+  },
+
+  async fetchAWSUsage(awsKeyId, period = "P7D") {
+    const days = { P1D: 1, P7D: 7, P30D: 30, P90D: 90 }[period] || 7;
+    return request(`/aws/usage?oauth_key_id=${awsKeyId}&period=${days}`, undefined, 60000);
   },
 
   // ── Sensitivity Labels ──────────────────────────────────────────────────────

@@ -36,6 +36,8 @@ export type AgentPlatform =
   | "gemini_workspace"       // Gemini for Google Workspace add-on
   | "claude_project"         // Claude.ai Projects (Anthropic — admin key)
   | "claude_model"           // Claude model deployments (standard key)
+  | "aws_bedrock"            // Amazon Bedrock agents and knowledge bases
+  | "aws_sagemaker"          // Amazon SageMaker endpoints and models
   | "manual";                // manually registered
 
 export type AgentCategory =

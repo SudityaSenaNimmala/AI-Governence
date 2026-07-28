@@ -7,9 +7,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 make g++ ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY agent ./agent
-COPY server/package.json ./server/
+COPY server/package.json server/package-lock.json ./server/
 WORKDIR /build/server
-RUN npm install --omit=dev --no-audit --no-fund
+RUN npm install --no-audit --no-fund
 
 FROM node:22-bookworm-slim
 WORKDIR /app
@@ -19,9 +19,8 @@ COPY --from=builder /build/agent /app/agent
 COPY --from=builder /build/server/node_modules /app/server/node_modules
 COPY server/src /app/server/src
 COPY server/package.json /app/server/
+COPY server/tsconfig.json /app/server/
 WORKDIR /app/server
 ENV NODE_ENV=production
-EXPOSE 8787
-# The server imports TypeScript modules (src/governance/*.ts) via .js specifiers,
-# so it must run under tsx (matches the "start" script), not plain node.
+EXPOSE 3001
 ENTRYPOINT ["node_modules/.bin/tsx", "src/index.js"]

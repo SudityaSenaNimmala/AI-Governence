@@ -3,7 +3,10 @@ import { ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 import App from "./App";
 import { ChatPanel } from "./Components/App/Agent/FloatingAgent/ChatPanel";
-import { isSessionValid, notifyToast } from "./Components/helpers/utils";
+import { isSessionValid, notifyToast, clearLocalStorage } from "./Components/helpers/utils";
+
+// Wrapper that preserves AG keys across session clear
+const clearLocalStorageSafe = clearLocalStorage;
 import { GlobalContext } from "./GlobalContext/GlobalContext";
 import GlobalContextReducer from "./GlobalContext/GlobalContextReducer";
 import { RESET_APP_CONTEXT } from "./GlobalContext/action.types";
@@ -75,7 +78,7 @@ const GlobalApp = () => {
           notifyToast("warn", "Session expired. Please login again.");
         }
         setTimeout(() => {
-          localStorage.clear();
+          clearLocalStorageSafe();
           window.location.href = "/CloudFuze#login";
         }, 200);
       }

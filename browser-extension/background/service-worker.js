@@ -337,13 +337,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     receivedAt: new Date().toISOString(),
   };
 
-  // Native OS notification for high/critical events so the user sees the
-  // warning even when the AI tab isn't focused. Goes through Windows Action
-  // Center / macOS Notification Center.
-  const sev = msg.highest_severity || msg.severity;
-  if (sev === 'critical' || sev === 'high') {
-    showNativeWarning(msg);
-  }
+  // Native OS notifications disabled — the in-page popup and toast already
+  // alert the user. Chrome notifications are redundant and annoying when
+  // multiple blocking events fire in quick succession.
+  // const sev = msg.highest_severity || msg.severity;
+  // if (sev === 'critical' || sev === 'high') {
+  //   showNativeWarning(msg);
+  // }
 
   pushEvent(event).then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
   return true; // async response

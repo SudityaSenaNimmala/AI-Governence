@@ -107,7 +107,6 @@ const SideNav = (props) => {
       link: "#",
       children: [
         { icon: <LayoutDashboard size={16} />, title: "Overview", link: "/AIHub/Overview" },
-        { icon: <MonitorCheck size={16} />, title: "Machines", link: "/AIHub/Machines" },
         // { icon: <AppWindow size={16} />, title: "Tools Catalog", link: "/AIHub/Tools" },   // hidden for now
         { icon: <ShieldCheck size={16} />, title: "Agents & MCP", link: "/AIHub/Agents" },
         // { icon: <Database size={16} />, title: "Server Agents", link: "/AIHub/ServerAgents" },   // hidden for now
@@ -146,14 +145,37 @@ const SideNav = (props) => {
     setExpandedMenus((prev) => ({ ...prev, [title]: !prev[title] }));
   };
 
-  const isChildActive = (child) =>
-    child.title === props?.subMenuActive || child.title === props?.activeTab || pathname === child.link || pathname.startsWith(child.link + "/");
+  // Pathname-first active detection: always matches the actual URL,
+  // with props as a supplementary signal for edge cases.
+  const isChildActive = (child) => {
+    if (pathname === child.link || pathname.startsWith(child.link + "/")) return true;
+    if (child.link.includes("#") && pathname === child.link.split("#")[0]) return true;
+    if (child.title === props?.subMenuActive) return true;
+    if (child.title === props?.activeTab) return true;
+    return false;
+  };
 
   const hasActiveChild = (item) =>
     Array.isArray(item.children) && item.children.some(isChildActive);
 
-  const isActive = (menuTitle) =>
-    menuTitle === (props?.activeTab ?? "Dashboard");
+  // For parent items with children, also check if the current pathname
+  // falls under the parent's route prefix (e.g. /AIHub/* for AI Hub).
+  const isParentPathActive = (item) => {
+    if (!item.children) return false;
+    return item.children.some(
+      (c) => pathname === c.link || pathname.startsWith(c.link + "/")
+    );
+  };
+
+  const isActive = (item) => {
+    // Prop-based check
+    if (item.title === (props?.activeTab ?? "Dashboard")) return true;
+    // Pathname-based check for top-level items without children
+    if (!item.children && item.link && item.link !== "#") {
+      if (pathname === item.link || pathname.startsWith(item.link + "/")) return true;
+    }
+    return false;
+  };
 
   return (
     <div className={`cf_sideNav_div ${collapsed ? "cf_sideNav_collapsed" : ""}`} ref={sideNavRef}>
@@ -230,8 +252,9 @@ const SideNav = (props) => {
           {menuJson.map((item) => {
             const hasChildren = item.children && item.children.length > 0;
             const childActive = hasActiveChild(item);
-            const isExpanded = expandedMenus[item.title] ?? childActive;
-            const active = isActive(item.title) || childActive;
+            const pathActive = isParentPathActive(item);
+            const active = isActive(item) || childActive || pathActive;
+            const isExpanded = expandedMenus[item.title] ?? (childActive || pathActive || active);
 
             return (
               <li key={item.title} className="cf_sideNav_item">
@@ -298,7 +321,7 @@ const SideNav = (props) => {
           {!isStandardUser && (
             <Link
               to="/Settings"
-              className={`cf_sideNav_link cf_sideNav_help_link ${isActive("Settings") ? "cf_sideNav_active" : ""}`}
+              className={`cf_sideNav_link cf_sideNav_help_link ${isActive({ title: "Settings", link: "/Settings" }) || pathname.startsWith("/Settings") ? "cf_sideNav_active" : ""}`}
               title="Settings"
             >
               <span className="cf_sideNav_icon">

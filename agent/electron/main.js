@@ -59,7 +59,7 @@ const MAX_ALERTS = 100;
 
 // ── Settings ───────────────────────────────────────────────────────────────────
 const DEFAULT_SETTINGS = {
-  serverUrl: 'http://localhost:8787',
+  serverUrl: 'https://cfagentgovernence.cloudfuzehost.com',
   enrollSecret: '',
   autoStart: true,
   monitorClipboard: true,
@@ -432,7 +432,11 @@ function updateTrayMenu() {
     { type: 'separator' },
     {
       label: 'Open Governance Dashboard',
-      click: () => shell.openExternal('http://localhost:3000/CloudFuze'),
+      click: () => {
+        const creds = loadCredentials();
+        const base = creds?.serverUrl || 'https://cfagentgovernence.cloudfuzehost.com';
+        shell.openExternal(`${base}/CloudFuze`);
+      },
     },
     { type: 'separator' },
     {
@@ -524,7 +528,9 @@ function setupIPC() {
   });
 
   ipcMain.handle('open-dashboard', () => {
-    shell.openExternal('http://localhost:3000/CloudFuze');
+    const creds = loadCredentials();
+    const base = creds?.serverUrl || 'https://cfagentgovernence.cloudfuzehost.com';
+    shell.openExternal(`${base}/CloudFuze`);
   });
 
   ipcMain.handle('run-scan', () => {

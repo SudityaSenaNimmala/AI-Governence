@@ -24,6 +24,7 @@ import {
   isSessionValid,
   makeFirstLetterCapital,
   notifyToast,
+  clearLocalStorage,
   onlyGroupsRequired,
   onlyTeamsRequired,
 } from "../../helpers/utils";
@@ -91,7 +92,7 @@ const TopNav = (props) => {
     window.removeEventListener("mousemove", handleMouseMove);
     notifyToast("success", "User Logged out successfully...");
     setTimeout(() => {
-      localStorage.clear();
+      clearLocalStorage();
       navigation("/#login");
     }, 1000);
   };
@@ -107,7 +108,7 @@ const TopNav = (props) => {
         notifyToast("warn", "Session expired. Please login again.");
       }
       setTimeout(() => {
-        localStorage.clear();
+        clearLocalStorage();
         window.location.href = "/CloudFuze#login";
       }, 700);
       window.removeEventListener("mousemove", handleMouseMove);

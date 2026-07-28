@@ -243,6 +243,124 @@ function mergeGooglePlatformResults(settledResults) {
 const GOOGLE_PLATFORMS = ["reasoning_engines", "agent_builder", "chat_bots", "gems", "notebooklm"];
 const OPENAI_PLATFORMS = ["assistants", "my_gpts", "vector_stores", "api_keys"];
 const CLAUDE_PLATFORMS = ["claude_ai_projects", "agents"];
+const AWS_PLATFORMS = ["bedrock_agents", "bedrock_models", "sagemaker_endpoints"];
+
+// ── Helper: convert AWS scan results → standard agent array ──────────────────
+function convertAWSResultToAgents(merged) {
+  const agents = [];
+  const now = new Date().toISOString();
+
+  for (const agent of merged.agents || []) {
+    agents.push({
+      id: `aws-bedrock-agent-${agent.agentId}`,
+      appId: agent.agentId,
+      name: agent.agentName || `Bedrock Agent ${agent.agentId}`,
+      description: agent.description || `AWS Bedrock Agent (${agent.foundationModel || "unknown model"})`,
+      vendor: "AWS",
+      category: "generative-ai",
+      platform: "aws_bedrock",
+      discoverySource: "aws_bedrock_api",
+      firstSeen: agent.createdAt || now,
+      lastModified: agent.updatedAt || now,
+      publishedStatus: agent.agentStatus === "PREPARED" ? "active" : "inactive",
+      isOrphaned: false,
+      llmModel: agent.foundationModel,
+      connectors: (agent.knowledgeBases || []).map(kb => ({ name: kb.knowledgeBaseName || kb.knowledgeBaseId, type: "KnowledgeBase" })),
+      permissions: [],
+      lifecycleStatus: agent.agentStatus === "PREPARED" ? "active" : "stale",
+      risk: {
+        score: 55, level: "medium",
+        factors: [{ signal: "AWS Bedrock Agent", weight: "medium", description: `AI agent with ${(agent.knowledgeBases || []).length} knowledge base(s)` }],
+        recommendations: ["Review IAM permissions and knowledge base data sources"],
+        computedAt: now,
+      },
+      activity: {
+        totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0,
+        uniqueUsers: 0, userBreakdown: [],
+        lastActiveTimestamp: agent.updatedAt || agent.createdAt || now,
+      },
+    });
+  }
+
+  for (const model of merged.models || []) {
+    agents.push({
+      id: `aws-bedrock-model-${model.modelId}`,
+      appId: model.modelId,
+      name: model.modelName || model.modelId,
+      description: `AWS Bedrock Foundation Model by ${model.providerName || "unknown"}`,
+      vendor: "AWS",
+      category: "ai-platform",
+      platform: "aws_bedrock",
+      discoverySource: "aws_bedrock_api",
+      firstSeen: now,
+      publishedStatus: "active",
+      isOrphaned: false,
+      llmModel: model.modelId,
+      connectors: [],
+      permissions: [],
+      lifecycleStatus: "active",
+      risk: {
+        score: 40, level: "low",
+        factors: [{ signal: "Foundation Model Access", weight: "low", description: `Access to ${model.modelId} via Bedrock` }],
+        recommendations: [],
+        computedAt: now,
+      },
+      activity: {
+        totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0,
+        uniqueUsers: 0, userBreakdown: [],
+      },
+    });
+  }
+
+  for (const ep of merged.endpoints || []) {
+    agents.push({
+      id: `aws-sagemaker-${ep.EndpointName}`,
+      appId: ep.EndpointName,
+      name: ep.EndpointName,
+      description: `SageMaker Endpoint (${ep.EndpointStatus || "unknown status"})`,
+      vendor: "AWS",
+      category: "ai-platform",
+      platform: "aws_sagemaker",
+      discoverySource: "aws_sagemaker_api",
+      firstSeen: ep.CreationTime || now,
+      lastModified: ep.LastModifiedTime || now,
+      publishedStatus: ep.EndpointStatus === "InService" ? "active" : "inactive",
+      isOrphaned: false,
+      connectors: [],
+      permissions: [],
+      lifecycleStatus: ep.EndpointStatus === "InService" ? "active" : "stale",
+      risk: {
+        score: 50, level: "medium",
+        factors: [{ signal: "SageMaker Endpoint", weight: "medium", description: "ML model serving endpoint" }],
+        recommendations: ["Review endpoint IAM policy and VPC configuration"],
+        computedAt: now,
+      },
+      activity: {
+        totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0,
+        uniqueUsers: 0, userBreakdown: [],
+        lastActiveTimestamp: ep.LastModifiedTime || ep.CreationTime || now,
+      },
+    });
+  }
+
+  return agents;
+}
+
+function mergeAWSPlatformResults(settledResults) {
+  const merged = { agents: [], models: [], endpoints: [], warnings: [] };
+  for (const settled of settledResults) {
+    if (settled.status === "rejected") {
+      merged.warnings.push(`AWS platform scan failed: ${settled.reason?.message || "unknown error"}`);
+      continue;
+    }
+    const r = settled.value;
+    if (r.agents?.length) merged.agents.push(...r.agents);
+    if (r.models?.length) merged.models.push(...r.models);
+    if (r.endpoints?.length) merged.endpoints.push(...r.endpoints);
+    if (r.warnings?.length) merged.warnings.push(...r.warnings);
+  }
+  return merged;
+}
 
 // Handles both Unix timestamps (number) and ISO strings (ChatGPT gizmo API)
 function parseTs(ts, fallback) {
@@ -599,7 +717,7 @@ function mergeClaudePlatformResults(settledResults) {
 }
 
 function AgentGovernanceInner() {
-  const { isAuthenticated, oauthKeyId, tenantId, dataverseEnvUrl, googleKeyId, openaiKeyId, claudeKeyId, geminiEnterpriseKeyId, disconnect, disconnectGoogle, disconnectOpenAI, disconnectClaude, disconnectGeminiEnterprise } = useAgentAuth();
+  const { isAuthenticated, oauthKeyId, tenantId, dataverseEnvUrl, googleKeyId, openaiKeyId, claudeKeyId, geminiEnterpriseKeyId, awsKeyId, disconnect, disconnectGoogle, disconnectOpenAI, disconnectClaude, disconnectGeminiEnterprise, disconnectAWS } = useAgentAuth();
   const { state, dispatch } = useGovernance();
   const [showModal, setShowModal] = useState(false);
   const [modalMode, setModalMode] = useState("connect");
@@ -607,7 +725,7 @@ function AgentGovernanceInner() {
   const alertIntervalRef = useRef(null);
   const scopeCounts = getScopeCounts(state.discoveryResult);
 
-  const isAnyConnected = isAuthenticated || !!googleKeyId || !!openaiKeyId || !!claudeKeyId || !!geminiEnterpriseKeyId;
+  const isAnyConnected = isAuthenticated || !!googleKeyId || !!openaiKeyId || !!claudeKeyId || !!geminiEnterpriseKeyId || !!awsKeyId;
 
   // Background alert monitoring — counts idle agents for the header badge
   const checkAlertCount = useCallback(async () => {
@@ -647,6 +765,7 @@ function AgentGovernanceInner() {
         openaiKeyId && "OpenAI Assistants",
         claudeKeyId && "Claude.ai Projects",
         geminiEnterpriseKeyId && "Gemini Enterprise",
+        awsKeyId && "AWS Bedrock · SageMaker",
       ].filter(Boolean).join(" · ");
       dispatch({ type: "DISCOVERY_PROGRESS", message: `Scanning all platforms in parallel (${platformLabels})...` });
 
@@ -654,7 +773,7 @@ function AgentGovernanceInner() {
         ? `/api/discovery/run?oauth_key_id=${oauthKeyId}${dataverseEnvUrl ? `&dataverse_env_url=${encodeURIComponent(dataverseEnvUrl)}` : ""}`
         : null;
 
-      const [msSettled, googleSettleds, openaiSettleds, claudeSettleds, geminiSettled] = await Promise.all([
+      const [msSettled, googleSettleds, openaiSettleds, claudeSettleds, geminiSettled, awsSettleds] = await Promise.all([
         msUrl
           ? Promise.allSettled([fetch(msUrl).then(r => { if (!r.ok) throw new Error("Microsoft scan failed"); return r.json(); })])
           : Promise.resolve([]),
@@ -670,6 +789,9 @@ function AgentGovernanceInner() {
         geminiEnterpriseKeyId
           ? Promise.allSettled([agentGovernanceApi.fetchGeminiEnterpriseAuto(geminiEnterpriseKeyId)])
           : Promise.resolve([]),
+        awsKeyId
+          ? Promise.allSettled(AWS_PLATFORMS.map(p => agentGovernanceApi.discoverAWSPlatform(awsKeyId, p)))
+          : Promise.resolve([]),
       ]);
 
       const msResult = msSettled[0];
@@ -679,7 +801,8 @@ function AgentGovernanceInner() {
         googleSettleds.every(s => s.status === "rejected") &&
         openaiSettleds.every(s => s.status === "rejected") &&
         claudeSettleds.every(s => s.status === "rejected") &&
-        (!geResult || geResult.status === "rejected");
+        (!geResult || geResult.status === "rejected") &&
+        awsSettleds.every(s => s.status === "rejected");
 
       if (allFailed) throw new Error("All platform scans failed. Check connections and try again.");
 
@@ -743,7 +866,23 @@ function AgentGovernanceInner() {
         }
       }
 
+      // Merge AWS agents
+      if (awsSettleds.length) {
+        const mergedAWS = mergeAWSPlatformResults(awsSettleds);
+        const awsAgents = convertAWSResultToAgents(mergedAWS);
+        result = {
+          ...result,
+          agents: [...(result.agents || []), ...awsAgents],
+          warnings: [...(result.warnings || []), ...mergedAWS.warnings],
+        };
+      }
+
       dispatch({ type: "DISCOVERY_SUCCESS", result });
+
+      // Persist all agents to the server so data survives page refresh
+      if (result.agents?.length) {
+        agentGovernanceApi.persistAgents(result.agents).catch(() => {});
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Discovery failed";
       dispatch({ type: "DISCOVERY_ERROR", error: message });
@@ -768,6 +907,7 @@ function AgentGovernanceInner() {
     if (openaiKeyId) await disconnectOpenAI();
     if (claudeKeyId) await disconnectClaude();
     if (geminiEnterpriseKeyId) await disconnectGeminiEnterprise();
+    if (awsKeyId) await disconnectAWS();
     dispatch({ type: "DISCOVERY_SUCCESS", result: null });
   };
 
@@ -777,6 +917,7 @@ function AgentGovernanceInner() {
   const OPENAI_SCOPES = new Set(["openai_assistant", "custom_gpt", "openai_api_key"]);
   const CLAUDE_SCOPES = new Set(["claude_ai_project"]);
   const GEMINI_ENTERPRISE_SCOPES = new Set(["gemini_enterprise"]);
+  const AWS_SCOPES = new Set(["aws_bedrock", "aws_sagemaker"]);
   const availableScopes = Object.keys(SCOPE_LABELS).filter((s) => {
     if (s === "all") return true;
     if (MICROSOFT_SCOPES.has(s) && !isAuthenticated) return false;
@@ -784,6 +925,7 @@ function AgentGovernanceInner() {
     if (OPENAI_SCOPES.has(s) && !openaiKeyId) return false;
     if (CLAUDE_SCOPES.has(s) && !claudeKeyId) return false;
     if (GEMINI_ENTERPRISE_SCOPES.has(s) && !geminiEnterpriseKeyId) return false;
+    if (AWS_SCOPES.has(s) && !awsKeyId) return false;
     return scopeCounts[s] > 0;
   });
 
@@ -794,6 +936,7 @@ function AgentGovernanceInner() {
   if (openaiKeyId) connectionBadges.push({ label: "ChatGPT", color: "#10a37f" });
   if (claudeKeyId) connectionBadges.push({ label: "Claude / Anthropic", color: "#D4622A" });
   if (geminiEnterpriseKeyId) connectionBadges.push({ label: "Gemini Enterprise", color: "#886FBF" });
+  if (awsKeyId) connectionBadges.push({ label: "AWS", color: "#FF9900" });
 
   return (
     <div className="ag_page_container">
@@ -931,8 +1074,8 @@ function AgentGovernanceInner() {
             </div>
             <h3>Connect a Cloud Platform</h3>
             <p>
-              Connect Microsoft 365 or Google Cloud to discover and govern AI agents.
-              Each platform works independently — connect one or both.
+              Connect Microsoft 365, Google Cloud, ChatGPT, Claude, or AWS to discover and govern AI agents.
+              Each platform works independently — connect one or more.
             </p>
             <button onClick={() => { setModalMode("connect"); setShowModal(true); }} className="ag_btn_primary" style={{ padding: "10px 24px", fontSize: 14 }}>
               <Plus size={16} /> Connect Platform

@@ -489,9 +489,8 @@ export async function runDiscovery(
       const searchBody = {
         requests: [{
           entityTypes: ["driveItem"],
-          query: { queryString: "filetype:agent OR filename:.agent OR filename:declarativeAgent" },
-          from: 0, size: 50,
-          region: "NAM",
+          query: { queryString: "filetype:agent OR filename:.agent OR filename:declarativeAgent OR filename:declarativeCopilot" },
+          from: 0, size: 100,
         }]
       };
 
@@ -536,11 +535,23 @@ export async function runDiscovery(
       console.warn("[Copilot] SharePoint agent search failed:", e instanceof Error ? e.message : "");
     }
 
-    // Approach 4: User-installed Teams apps (scan a few users for personal copilot agents)
+    // Approach 4: User-installed Teams apps (scan users for personal copilot agents)
+    // Prioritize known agent creators (from Dataverse bots) so their agents are always found
     try {
       console.log("[Copilot] Scanning user-installed apps...");
       const existingNames = new Set(result.agents.map(a => a.name.toLowerCase()));
-      const sampleUsers = users.filter(u => u.accountEnabled).slice(0, 5);
+
+      // Build prioritized user list: agent creators first, then remaining active users
+      const agentCreatorIds = new Set<string>();
+      for (const a of result.agents) {
+        if (a.owner?.id) agentCreatorIds.add(a.owner.id);
+      }
+      const activeUsers = users.filter(u => u.accountEnabled);
+      const creators = activeUsers.filter(u => agentCreatorIds.has(u.id));
+      const nonCreators = activeUsers.filter(u => !agentCreatorIds.has(u.id));
+      const sampleUsers = [...creators, ...nonCreators.slice(0, Math.max(25, 50 - creators.length))];
+      console.log(`[Copilot] Scanning ${sampleUsers.length} users (${creators.length} agent creators + ${sampleUsers.length - creators.length} others)`);
+
       let added = 0;
 
       for (const user of sampleUsers) {
@@ -562,11 +573,18 @@ export async function runDiscovery(
             const descLC = (def?.description || def?.shortDescription || "").toLowerCase();
             const hasBot = !!def?.bot;
             const isSharePoint = nameLC.includes("sharepoint") || descLC.includes("sharepoint");
+
+            // Accept ALL non-store apps that have a bot (these are custom/copilot agents)
+            // Also accept apps with copilot/agent keywords in name or description
             const isCopilotAgent = hasBot || nameLC.includes("copilot") || nameLC.includes("agent") ||
               nameLC.includes("assistant") || descLC.includes("copilot") || descLC.includes("agent") ||
               descLC.includes("assistant") || descLC.includes("declarative");
 
-            if (!isCopilotAgent && !isSharePoint) continue;
+            // For sideloaded/org apps: also accept any app with a bot component
+            // since custom bots deployed to Teams are agents worth tracking
+            const isSideloadedWithBot = (app.distributionMethod === "sideloaded" || app.distributionMethod === "organization") && hasBot;
+
+            if (!isCopilotAgent && !isSharePoint && !isSideloadedWithBot) continue;
 
             const platform: AgentPlatform = isSharePoint ? "sharepoint_embedded" : "personal_agent";
             existingNames.add(app.displayName.toLowerCase());
@@ -580,12 +598,13 @@ export async function runDiscovery(
               discoverySource: "graph_user_installed_apps", firstSeen: new Date().toISOString(),
               publishedStatus: "active", isOrphaned: false, connectors: [], permissions: [],
               deployedTo: ["M365 Copilot"], lifecycleStatus: "active",
+              owner: { id: user.id, displayName: user.displayName, userPrincipalName: user.userPrincipalName, accountEnabled: true },
               risk: { score: 0, level: "medium", factors: [], recommendations: [], computedAt: new Date().toISOString() },
               activity: { totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0, uniqueUsers: 0, userBreakdown: [] },
             });
           }
-        } catch {
-          // User might not have Teams access or permission denied
+        } catch (userErr) {
+          console.warn(`[Copilot] Failed to scan user ${user.userPrincipalName}:`, userErr instanceof Error ? userErr.message : "");
         }
       }
       if (added > 0) console.log(`[Copilot] Found ${added} agents via user-installed apps`);
@@ -594,13 +613,62 @@ export async function runDiscovery(
       console.warn("[Copilot] User-installed apps scan failed:", e instanceof Error ? e.message : "");
     }
 
+    // Approach 5: Search each agent creator's OneDrive for agent manifests
+    // Agents created in the Copilot web UI store manifests in the creator's OneDrive
+    try {
+      const existingIds5 = new Set(result.agents.map(a => a.id));
+      const existingNames5 = new Set(result.agents.map(a => (a.name || "").toLowerCase()));
+      const creatorsToScan = [...new Set(
+        result.agents.filter(a => a.owner?.id).map(a => a.owner!.id)
+      )].slice(0, 10);
+
+      let found5 = 0;
+      for (const userId of creatorsToScan) {
+        try {
+          // Search user's OneDrive for .agent files or Copilot agent folders
+          const items = await graphClient.getAllPages<any>(
+            `/v1.0/users/${userId}/drive/root/search(q='.agent')`,
+            {}, 1
+          );
+          for (const item of items) {
+            if (!item.name?.endsWith(".agent") && !item.name?.endsWith(".json")) continue;
+            if (existingIds5.has(item.id)) continue;
+            const name = (item.name || "").replace(/\.agent$/i, "").replace(/\.json$/i, "");
+            if (!name || existingNames5.has(name.toLowerCase())) continue;
+            existingIds5.add(item.id);
+            existingNames5.add(name.toLowerCase());
+
+            const ownerUser = userMap.get(userId);
+            result.agents.push({
+              id: item.id, name,
+              description: `Copilot agent from OneDrive — ${item.webUrl || ""}`,
+              vendor: "Microsoft", category: "generative-ai", platform: "personal_agent",
+              discoverySource: "graph_onedrive_search", firstSeen: item.createdDateTime || new Date().toISOString(),
+              lastModified: item.lastModifiedDateTime, publishedStatus: "active",
+              owner: ownerUser ? { id: ownerUser.id, displayName: ownerUser.displayName, userPrincipalName: ownerUser.userPrincipalName, accountEnabled: ownerUser.accountEnabled ?? true } : undefined,
+              isOrphaned: !ownerUser, connectors: [], permissions: [],
+              deployedTo: item.webUrl ? [item.webUrl] : undefined, lifecycleStatus: "active",
+              risk: { score: 0, level: "medium", factors: [], recommendations: [], computedAt: new Date().toISOString() },
+              activity: { totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0, uniqueUsers: 0, userBreakdown: [] },
+            });
+            found5++;
+          }
+        } catch {
+          // OneDrive access might be restricted for some users
+        }
+      }
+      if (found5 > 0) console.log(`[Copilot] Found ${found5} agents in user OneDrives`);
+    } catch (e) {
+      console.warn("[Copilot] OneDrive agent search failed:", e instanceof Error ? e.message : "");
+    }
+
     const personalCount = result.agents.filter(a => a.platform === "personal_agent").length;
     const spCount = result.agents.filter(a => a.platform === "sharepoint_embedded").length;
     const chatCount = result.agents.filter(a => a.platform === "teams_chat_agent").length;
     console.log(`[Copilot] Total: ${personalCount} personal, ${spCount} SharePoint, ${chatCount} chat agents`);
 
     return result;
-  })(), 45_000, "Copilot Agents");
+  })(), 60_000, "Copilot Agents");
 
   // ── Task E: Azure AI Foundry ────────────────────
   // Discovers Azure AI agents, OpenAI resources + deployments, and serverless endpoints.

@@ -9,13 +9,13 @@ export default defineConfig({
   //     '@': path.resolve(__dirname, 'src'),
   //   },
   // },
-  plugins: [react(), visualizer({ open: true })],
+  plugins: [react(), visualizer({ open: false })],
   base: "/CloudFuze",
   server: {
     port: 3000,
     proxy: {
       "/api": {
-        target: "http://localhost:8787",
+        target: "http://localhost:3001",
         changeOrigin: true,
       },
     },

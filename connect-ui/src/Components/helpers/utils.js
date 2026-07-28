@@ -28,7 +28,7 @@ export const validateEmail = (input) => {
 };
 
 export const clearLocalStorage = () => {
-  const preserved = ['cf_user_name'];
+  const preserved = ['cf_user_name', 'ag_oauth_key_id', 'ag_tenant_id', 'ag_dataverse_env_url', 'ag_azure_subscription_id', 'ag_google_key_id', 'ag_openai_key_id', 'ag_claude_key_id', 'ag_gemini_enterprise_key_id', 'ag_gemini_enterprise_token_conn'];
   const saved = {};
   preserved.forEach(key => { const v = localStorage.getItem(key); if (v !== null) saved[key] = v; });
   localStorage.clear();

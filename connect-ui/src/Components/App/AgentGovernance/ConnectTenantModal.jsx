@@ -34,6 +34,34 @@ const GCP_SCOPE_ITEMS = [
   { color: "#9334E6", label: "Enabled AI APIs", perm: "serviceusage.viewer" },
 ];
 
+const AWS_SCOPE_ITEMS = [
+  { color: "#FF9900", label: "Bedrock Agents", perm: "bedrock:ListAgents" },
+  { color: "#FF6600", label: "Bedrock Knowledge Bases", perm: "bedrock:ListKnowledgeBases" },
+  { color: "#232F3E", label: "Bedrock Foundation Models", perm: "bedrock:ListFoundationModels" },
+  { color: "#527FFF", label: "SageMaker Endpoints", perm: "sagemaker:ListEndpoints" },
+];
+
+const AWS_REGIONS = [
+  { value: "us-east-1", label: "US East (N. Virginia)" },
+  { value: "us-east-2", label: "US East (Ohio)" },
+  { value: "us-west-1", label: "US West (N. California)" },
+  { value: "us-west-2", label: "US West (Oregon)" },
+  { value: "eu-west-1", label: "EU (Ireland)" },
+  { value: "eu-west-2", label: "EU (London)" },
+  { value: "eu-west-3", label: "EU (Paris)" },
+  { value: "eu-central-1", label: "EU (Frankfurt)" },
+  { value: "eu-north-1", label: "EU (Stockholm)" },
+  { value: "ap-southeast-1", label: "Asia Pacific (Singapore)" },
+  { value: "ap-southeast-2", label: "Asia Pacific (Sydney)" },
+  { value: "ap-northeast-1", label: "Asia Pacific (Tokyo)" },
+  { value: "ap-northeast-2", label: "Asia Pacific (Seoul)" },
+  { value: "ap-south-1", label: "Asia Pacific (Mumbai)" },
+  { value: "sa-east-1", label: "South America (Sao Paulo)" },
+  { value: "ca-central-1", label: "Canada (Central)" },
+  { value: "me-south-1", label: "Middle East (Bahrain)" },
+  { value: "af-south-1", label: "Africa (Cape Town)" },
+];
+
 const TAB_STYLE_BASE = {
   flex: 1, padding: "10px 0", fontSize: 13, fontWeight: 600, border: "none",
   cursor: "pointer", borderRadius: "8px 8px 0 0", fontFamily: "inherit",
@@ -993,6 +1021,190 @@ function GeminiEnterpriseForm({ onClose }) {
   );
 }
 
+// ── AWS Tab ──
+
+const AWS_COLOR = "#FF9900";
+
+function AWSForm({ onClose }) {
+  const { connectAWS, awsKeyId } = useAgentAuth();
+  const [accessKeyId, setAccessKeyId] = useState("");
+  const [secretAccessKey, setSecretAccessKey] = useState("");
+  const [region, setRegion] = useState("us-east-1");
+  const [accountId, setAccountId] = useState("");
+  const [showSecret, setShowSecret] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [localError, setLocalError] = useState(null);
+  const [showScopes, setShowScopes] = useState(false);
+  const [savedKey, setSavedKey] = useState(null);
+  const [changeKey, setChangeKey] = useState(false);
+
+  const isAlreadyConnected = !!awsKeyId;
+
+  useEffect(() => {
+    agentGovernanceApi.listOAuthKeys().then((keys) => {
+      if (keys && keys.length > 0) {
+        const aKey = keys.find((k) => k.vendor === "aws");
+        if (aKey) setSavedKey(aKey);
+      }
+    }).catch(() => {});
+  }, []);
+
+  const hasSavedKey = !!savedKey && !changeKey;
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLocalError(null);
+
+    if (hasSavedKey) {
+      setLoading(true);
+      try {
+        await connectAWS("__USE_EXISTING__", "", region);
+        onClose();
+      } catch (err) {
+        setLocalError(err.message || "Failed to reconnect");
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    if (!accessKeyId.trim()) { setLocalError("Access Key ID is required"); return; }
+    if (!secretAccessKey.trim()) { setLocalError("Secret Access Key is required"); return; }
+    if (!region) { setLocalError("Region is required"); return; }
+
+    setLoading(true);
+    try {
+      await connectAWS(accessKeyId.trim(), secretAccessKey.trim(), region, accountId.trim() || undefined);
+      onClose();
+    } catch (err) {
+      setLocalError(err.message || "Failed to connect");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div>
+      {savedKey && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, padding: "10px 14px", background: "#fff8f0", border: "1px solid #ffe0b2", borderRadius: 8 }}>
+          <CheckCircle size={16} color={AWS_COLOR} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#7c4a03" }}>AWS credentials saved</div>
+            <div style={{ fontSize: 11, color: "#9a6700" }}>Key stored securely — ready to scan Bedrock &amp; SageMaker</div>
+          </div>
+          {!changeKey && (
+            <button type="button" onClick={() => setChangeKey(true)}
+              style={{ background: "none", border: "1px solid #ffe0b2", borderRadius: 6, padding: "4px 10px", fontSize: 11, color: "#7c4a03", cursor: "pointer", fontFamily: "inherit" }}>
+              Change
+            </button>
+          )}
+        </div>
+      )}
+
+      <button type="button" onClick={() => setShowScopes(!showScopes)}
+        style={{ display: "flex", alignItems: "center", gap: 4, width: "100%", background: "rgba(255,153,0,0.06)", border: "1px solid rgba(255,153,0,0.25)", borderRadius: 8, padding: "8px 12px", marginBottom: 14, fontSize: 11, fontWeight: 500, color: AWS_COLOR, cursor: "pointer", fontFamily: "inherit" }}>
+        {showScopes ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+        What this connection discovers
+      </button>
+
+      {showScopes && (
+        <div style={{ marginBottom: 14, border: "1px solid rgba(255,153,0,0.25)", borderRadius: 8, overflow: "hidden" }}>
+          {AWS_SCOPE_ITEMS.map((item) => (
+            <div key={item.label} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderBottom: "1px solid rgba(0,0,0,0.04)", fontSize: 11 }}>
+              <span style={{ width: 5, height: 5, borderRadius: "50%", background: item.color, flexShrink: 0 }} />
+              <span style={{ flex: 1, color: "#333", fontWeight: 500 }}>{item.label}</span>
+              <span style={{ color: AWS_COLOR, fontFamily: "monospace", fontSize: 10 }}>{item.perm}</span>
+            </div>
+          ))}
+          <div style={{ padding: "8px 12px", fontSize: 10, color: "#999", background: "#fafafa" }}>
+            Requires an IAM user or role with Bedrock and SageMaker read permissions.
+          </div>
+        </div>
+      )}
+
+      <form onSubmit={handleSubmit}>
+        <div className="ag_form_group">
+          <label className="ag_form_label">Access Key ID <span style={{ color: "#ef4444" }}>*</span></label>
+          {hasSavedKey ? (
+            <div className="ag_form_input" style={{ color: "#999", background: "#f9fafb" }}>••••••••••••••••••••</div>
+          ) : (
+            <input
+              type="text"
+              placeholder="AKIAIOSFODNN7EXAMPLE"
+              value={accessKeyId}
+              onChange={(e) => setAccessKeyId(e.target.value)}
+              className="ag_form_input"
+              autoComplete="off"
+            />
+          )}
+        </div>
+
+        <div className="ag_form_group">
+          <label className="ag_form_label">Secret Access Key <span style={{ color: "#ef4444" }}>*</span></label>
+          {hasSavedKey ? (
+            <div className="ag_form_input" style={{ color: "#999", background: "#f9fafb" }}>••••••••••••••••••••</div>
+          ) : (
+            <div style={{ position: "relative" }}>
+              <input
+                type={showSecret ? "text" : "password"}
+                placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+                value={secretAccessKey}
+                onChange={(e) => setSecretAccessKey(e.target.value)}
+                className="ag_form_input"
+                style={{ paddingRight: 40 }}
+                autoComplete="off"
+              />
+              <button type="button" onClick={() => setShowSecret(!showSecret)}
+                style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "#999", cursor: "pointer", padding: 4 }}>
+                {showSecret ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="ag_form_group">
+          <label className="ag_form_label">Region <span style={{ color: "#ef4444" }}>*</span></label>
+          <select
+            value={region}
+            onChange={(e) => setRegion(e.target.value)}
+            className="ag_form_input"
+            style={{ cursor: "pointer" }}
+          >
+            {AWS_REGIONS.map((r) => (
+              <option key={r.value} value={r.value}>{r.label} ({r.value})</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="ag_form_group">
+          <label className="ag_form_label">Account ID <span style={{ color: "#999", fontWeight: 400 }}>(optional)</span></label>
+          <input
+            type="text"
+            placeholder="123456789012"
+            value={accountId}
+            onChange={(e) => setAccountId(e.target.value)}
+            className="ag_form_input"
+            autoComplete="off"
+          />
+          <div style={{ fontSize: 11, color: "#999", marginTop: 4 }}>
+            AWS Console &rarr; IAM &rarr; Security Credentials &rarr; Access Keys
+          </div>
+        </div>
+
+        {localError && (
+          <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 6, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "#ef4444", lineHeight: 1.5 }}>
+            {localError}
+          </div>
+        )}
+
+        <button type="submit" disabled={loading} className="ag_connect_btn" style={{ background: AWS_COLOR }}>
+          {loading ? "Verifying & Connecting..." : hasSavedKey ? "Reconnect with Saved Key" : isAlreadyConnected ? "Update Credentials" : "Connect & Verify"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
 // ── Main Modal ──
 
 export function ConnectTenantModal({ onClose, mode = "connect" }) {
@@ -1004,6 +1216,7 @@ export function ConnectTenantModal({ onClose, mode = "connect" }) {
   const openaiTabActive = activeTab === "openai";
   const claudeTabActive = activeTab === "claude";
   const geminiTabActive = activeTab === "gemini_enterprise";
+  const awsTabActive = activeTab === "aws";
 
   return (
     <div className="ag_modal_overlay" onClick={onClose}>
@@ -1014,14 +1227,14 @@ export function ConnectTenantModal({ onClose, mode = "connect" }) {
               {isUpdateMode ? "Update Connection" : "Connect AI Platform"}
             </h2>
             <p style={{ fontSize: 12, color: "#999", margin: "4px 0 0 0" }}>
-              Connect Microsoft 365, Google Cloud, ChatGPT, or Claude for agent discovery
+              Connect Microsoft 365, Google Cloud, ChatGPT, Claude, or AWS for agent discovery
             </p>
           </div>
           <button onClick={onClose} className="ag_modal_close"><X size={18} /></button>
         </div>
 
-        {/* Platform Tabs */}
-        <div style={{ display: "flex", gap: 2, marginBottom: 16, background: "#f3f4f6", borderRadius: 8, padding: 2 }}>
+        {/* Platform Tabs — 2 rows x 3 columns */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 2, marginBottom: 16, background: "#f3f4f6", borderRadius: 8, padding: 2 }}>
           <button type="button" onClick={() => setActiveTab("microsoft")}
             style={{
               ...TAB_STYLE_BASE,
@@ -1080,6 +1293,22 @@ export function ConnectTenantModal({ onClose, mode = "connect" }) {
             <Sparkles size={14} color={geminiTabActive ? "#886FBF" : "#999"} />
             Gemini Enterprise
           </button>
+          <button type="button" onClick={() => setActiveTab("aws")}
+            style={{
+              ...TAB_STYLE_BASE,
+              background: awsTabActive ? "#fff" : "transparent",
+              color: awsTabActive ? "#FF9900" : "#666",
+              boxShadow: awsTabActive ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
+              borderRadius: 6,
+            }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+              <path d="M8.1 14.4c0 .2.1.4.2.5.1.2.2.3.3.4.1 0 .1.1.1.2s-.1.1-.2.2l-.8.5c-.1.1-.2.1-.3.1-.1 0-.2-.1-.3-.2-.1-.2-.3-.3-.4-.5-.1-.2-.2-.3-.3-.5-1 1.1-2.1 1.7-3.5 1.7-1 0-1.8-.3-2.4-.9-.6-.6-.9-1.3-.9-2.3 0-1 .4-1.8 1.1-2.4.7-.6 1.7-.9 2.9-.9.4 0 .8 0 1.3.1.5.1.9.2 1.4.3v-.8c0-.9-.2-1.5-.5-1.9-.4-.4-1-.6-1.9-.6-.4 0-.8.1-1.3.2-.4.1-.9.3-1.3.5-.2.1-.3.1-.4.2h-.2c-.2 0-.2-.1-.2-.4v-.6c0-.2 0-.3.1-.4.1-.1.2-.2.4-.3.4-.2 1-.4 1.5-.5.6-.2 1.2-.2 1.8-.2 1.4 0 2.4.3 3 .9.6.6.9 1.5.9 2.8v3.6h.1zm-4.8 1.8c.4 0 .8-.1 1.2-.2.4-.2.8-.4 1-.8.1-.2.2-.4.3-.7 0-.2.1-.5.1-.9v-.4c-.3-.1-.7-.2-1.1-.3-.4-.1-.7-.1-1.1-.1-.8 0-1.4.2-1.8.5-.4.3-.6.8-.6 1.4 0 .6.1 1 .4 1.3.3.3.8.5 1.4.5l.2-.3z" fill={awsTabActive ? "#FF9900" : "#999"} />
+              <path d="M14.8 16.2c-.2 0-.3 0-.4-.1-.1-.1-.2-.3-.3-.5l-3-9.8v-.3c0-.2.1-.3.3-.3h1.2c.2 0 .3 0 .4.1.1.1.2.3.2.5l2.1 8.3 2-8.3c.1-.3.1-.4.2-.5.1-.1.3-.1.4-.1h1c.2 0 .3 0 .4.1.1.1.2.3.2.5l2 8.4 2.2-8.4c.1-.3.1-.4.2-.5.1-.1.3-.1.4-.1h1.1c.2 0 .3.1.3.3 0 .1 0 .1 0 .2s0 .1-.1.2l-3.1 9.8c-.1.3-.1.4-.3.5-.1.1-.3.1-.4.1h-1.1c-.2 0-.3 0-.4-.1-.1-.1-.2-.3-.2-.5l-2-8.1-1.9 8.1c-.1.3-.1.4-.2.5-.1.1-.3.1-.4.1h-1.1l.2.1z" fill={awsTabActive ? "#FF9900" : "#999"} />
+              <path d="M23.3 18.1c-3 2.2-7.4 3.4-11.2 3.4-5.3 0-10.1-2-13.7-5.2-.3-.3 0-.6.3-.4 3.9 2.3 8.7 3.6 13.7 3.6 3.4 0 7-.7 10.4-2.1.5-.3.9.3.5.7z" fill={awsTabActive ? "#FF9900" : "#999"} />
+              <path d="M24.5 16.7c-.4-.5-2.5-.2-3.5-.1-.3 0-.3-.2-.1-.4 1.7-1.2 4.5-.8 4.8-.4.3.4-.1 3.1-1.7 4.4-.2.2-.5.1-.4-.2.4-.9 1.2-2.9.9-3.3z" fill={awsTabActive ? "#FF9900" : "#999"} />
+            </svg>
+            AWS
+          </button>
         </div>
 
         {/* Tab Content */}
@@ -1088,6 +1317,7 @@ export function ConnectTenantModal({ onClose, mode = "connect" }) {
         {activeTab === "openai" && <OpenAIForm onClose={onClose} />}
         {activeTab === "claude" && <ClaudeForm onClose={onClose} />}
         {activeTab === "gemini_enterprise" && <GeminiEnterpriseForm onClose={onClose} />}
+        {activeTab === "aws" && <AWSForm onClose={onClose} />}
 
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 16, fontSize: 11, color: "#999" }}>
           <Lock size={12} />

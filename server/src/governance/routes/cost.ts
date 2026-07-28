@@ -4,7 +4,7 @@ import { decrypt } from "../crypto.js";
 import { getValidToken } from "../services/tokenManager.js";
 import { AzureFoundryClient } from "../services/azureFoundryClient.js";
 import { GoogleWorkspaceClient, type GoogleServiceAccountKey } from "../services/googleWorkspaceClient.js";
-import { AZURE_PRICING, GOOGLE_PRICING, findPricing, computeCost } from "../services/pricingUtils.js";
+import { AZURE_PRICING, GOOGLE_PRICING, findPricing, computeCost, inferModelFromDeploymentName } from "../services/pricingUtils.js";
 import crypto from "node:crypto";
 
 const router = Router();
@@ -31,18 +31,40 @@ router.get("/azure", async (req: Request, res: Response) => {
         for (const dep of deployments) deploymentModelMap.set(dep.name, dep.properties?.model?.name || "unknown");
         const metrics = await client.getOpenAIUsageMetrics(account.id, period);
         for (const dep of metrics.deployments) {
-          const modelName = deploymentModelMap.get(dep.deploymentName) || dep.deploymentName;
+          // Resolve model name: deployment map → infer from deployment name → single-deployment fallback
+          let modelName = deploymentModelMap.get(dep.deploymentName) || "";
+          let modelEstimated = false;
+          if (!modelName || modelName === "unknown") {
+            // Try to infer from the deployment name itself (e.g. "gpt-4o-deployment" → "gpt-4o")
+            const inferred = inferModelFromDeploymentName(dep.deploymentName, "azure");
+            if (inferred) {
+              modelName = inferred;
+            } else if (dep.deploymentName === "unknown" && deploymentModelMap.size === 1) {
+              // Metrics lack deployment metadata — use the only available deployment
+              const [onlyDepName, onlyModel] = [...deploymentModelMap.entries()][0];
+              modelName = onlyModel !== "unknown" ? onlyModel : (inferModelFromDeploymentName(onlyDepName, "azure") || onlyDepName);
+            } else if (dep.deploymentName !== "unknown") {
+              // Use deployment name as-is (may contain model hint)
+              modelName = dep.deploymentName;
+            } else {
+              modelName = "unknown";
+              modelEstimated = true;
+            }
+          }
           const pricing = findPricing(modelName, "azure");
           const cost = computeCost(dep.promptTokens, dep.completionTokens, pricing);
           allDeploymentCosts.push({
             resourceName: account.name, resourceId: account.id,
-            deploymentName: dep.deploymentName, modelName,
+            deploymentName: dep.deploymentName === "unknown" && deploymentModelMap.size === 1
+              ? [...deploymentModelMap.keys()][0] : dep.deploymentName,
+            modelName,
             inputTokens: dep.promptTokens, outputTokens: dep.completionTokens,
             totalTokens: dep.totalTokens, requestCount: dep.requestCount,
             inputCost: (dep.promptTokens * pricing.input) / 1_000_000,
             outputCost: (dep.completionTokens * pricing.output) / 1_000_000,
             totalCost: cost, pricingPerMillionInput: pricing.input, pricingPerMillionOutput: pricing.output,
             vendor: "Microsoft", platform: "azure_openai",
+            costEstimated: modelEstimated,
           });
           totalInputTokens += dep.promptTokens; totalOutputTokens += dep.completionTokens;
           totalCost += cost; totalRequests += dep.requestCount;

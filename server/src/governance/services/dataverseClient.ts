@@ -187,7 +187,7 @@ export class DataverseClient {
     try {
       // Query bots table with expanded select to find declarative copilots
       // These have template = "dcBot" or configuration containing "declarativeCopilot"
-      const url = `${this.envUrl}/api/data/v9.2/bots?$select=botid,name,description,template,accesscontrolpolicy,statecode,createdon,modifiedon,_createdby_value,configuration&$orderby=modifiedon desc&$top=100`;
+      const url = `${this.envUrl}/api/data/v9.2/bots?$select=botid,name,description,template,accesscontrolpolicy,statecode,createdon,modifiedon,_createdby_value,configuration&$orderby=modifiedon desc&$top=500`;
       const response = await this.fetchWithRetry(url);
       const data = await response.json();
       const allBots = data.value || [];
