@@ -26,31 +26,13 @@
     });
   } catch (e) {}
 
-  // ── Reversible PII Tokenization config ──────────────────────────────────
-  // Load per-pattern action config from chrome.storage.
-  // IMPORTANT: content scripts and page-world scripts have ISOLATED JS
-  // contexts. window.__cfaiPatternActions is for content.js's own use.
-  // The fetch-blocker (page world) gets the config via postMessage.
-  // No per-pattern config needed — all patterns block by default.
-  // The popup always offers both "Tokenize & Send" and "Redact & Send".
-
-  // Token restoration in AI responses is NOT done via MutationObserver —
-  // that approach corrupts React's DOM state (causes raw JSON rendering,
-  // breaks page layout). The tokens in the AI response are visible as-is;
-  // the user can see [CFAI:SSN:xxx] in the response, which confirms their
-  // data was protected. Future: add a lightweight response-only restore
-  // that targets just the chat message container, not the whole page.
-
   // Listen for blocked fetch events from the fetch-blocker (safety net).
-  // Show the full block popup — not just a toast — so the user gets the
-  // "Tokenize & Send" option even when DOM-level enforcement missed.
   window.addEventListener('cfai-fetch-blocked', (e) => {
     if (PLATFORM_BLOCKED) return;
     const { matches } = e.detail || {};
-    console.info('[cfai] fetch was blocked, showing block popup. Matches:', matches);
+    console.info('[cfai] fetch was blocked, showing popup. Matches:', matches);
     const matchObjs = (matches || []).map(name => ({ pattern: name, severity: 'critical', count: 1 }));
-    const el = findActivePromptInput() || findPromptInputs()[0];
-    showBlockPopup(matchObjs, el);
+    showWarning(matchObjs, 'Sensitive data blocked from being sent');
   });
 
   // ── Full-platform block ────────────────────────────────────────────────────
@@ -988,22 +970,6 @@
     return matches.length > 0 ? matches : null;
   }
 
-  /**
-   * Tokenize ALL sensitive data in the prompt using reversible tokens.
-   */
-  function tokenizePrompt(el) {
-    if (!el) return null;
-    const text = readInputText(el);
-    if (!text) return null;
-    // Tokenize ALL patterns (not per-pattern config — everything tokenizes)
-    const allNames = (window.__cfaiPatterns.patternNames?.() || []).map(p => p.name);
-    const tokenizeSet = new Set(allNames);
-    if (tokenizeSet.size === 0) return null;
-    const result = window.__cfaiPatterns.tokenize(text, tokenizeSet);
-    if (result.tokens.length === 0) return null;
-    writeInputText(el, result.tokenized);
-    return { original: text, tokenized: result.tokenized, tokens: result.tokens };
-  }
 
   function emitEnforcement(action, el, matches, kind) {
     const text = el ? readInputText(el) : '';
@@ -1061,12 +1027,10 @@
       const canRedact = hasSensitiveMatches && opts.promptEl;
 
       let actionsHtml = '';
-      const showTokenize = opts.tokenizeMode && canRedact;
       if (canRedact) {
         actionsHtml = `
-          <div class="cfai-block-actions" style="gap:10px;">
-            <button type="button" class="cfai-block-tokenize">Tokenize &amp; Send</button>
-            <button type="button" class="cfai-block-dismiss cfai-block-edit-btn">Edit Manually</button>
+          <div class="cfai-block-actions">
+            <button type="button" class="cfai-block-dismiss">Got it</button>
           </div>
         `;
       } else if (!hasSensitiveMatches) {
@@ -1088,7 +1052,17 @@
       `;
       document.documentElement.appendChild(root);
 
-      // No preview — just the action buttons.
+      // Show redacted preview immediately if we can redact
+      if (canRedact) {
+        const previewDiv = root.querySelector('.cfai-redact-preview');
+        const previewText = root.querySelector('.cfai-redact-preview-text');
+        if (previewDiv && previewText) {
+          const text = readInputText(opts.promptEl);
+          const { redacted } = window.__cfaiPatterns.redact(text, BLOCK_SEVERITIES);
+          previewText.textContent = redacted.length > 300 ? redacted.slice(0, 300) + '…' : redacted;
+          previewDiv.style.display = '';
+        }
+      }
 
       // Block all keyboard/mouse events from reaching the page while modal is up
       const trap = (e) => {
@@ -1106,39 +1080,27 @@
       };
 
       if (canRedact) {
-        // Tokenize & Send button
-        const tokenizeBtn = root.querySelector('.cfai-block-tokenize');
-        if (tokenizeBtn) {
-          tokenizeBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const result = tokenizePrompt(opts.promptEl);
-            if (!result) {
-              console.warn('[cfai] tokenizePrompt returned null');
-              return;
-            }
-            emit({
-              kind: 'enforcement_tokenize',
-              blocked_for: 'prompt_submit',
-              patterns: result.tokens.map(t => ({ pattern: t.pattern, count: t.count })),
-              token_count: result.tokens.reduce((s, t) => s + t.count, 0),
-              mechanism: 'reversible_tokenization',
-              content_length: result.original.length,
-            });
-            close();
-            if (opts.promptEl) simulateSend(opts.promptEl);
-          });
-        }
+        // "Got it" button — closes the popup so user can edit their prompt
+        const dismissBtn = root.querySelector('.cfai-block-dismiss');
+        dismissBtn.addEventListener('click', (e) => { e.stopPropagation(); close(); });
+        dismissBtn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); e.stopImmediatePropagation(); close(); } }, true);
+        setTimeout(() => dismissBtn?.focus(), 0);
 
-
-        // Edit manually button — just closes the modal so user can fix it
-        const editBtn = root.querySelector('.cfai-block-edit-btn');
-        editBtn.addEventListener('click', (e) => { e.stopPropagation(); close(); });
-        setTimeout(() => redactBtn?.focus(), 0);
-
-        // No auto-dismiss — user must click a button to close.
+        // Auto-dismiss when user removes the sensitive data
+        pollClose = setInterval(() => {
+          const text = opts.promptEl ? readInputText(opts.promptEl) : '';
+          const stillSensitive = scanForBlockers(text);
+          if (!stillSensitive) close();
+        }, 300);
 
       } else if (hasSensitiveMatches) {
-        // Content block without element ref — no auto-dismiss.
+        // Content block without element ref: auto-dismiss when text cleaned
+        pollClose = setInterval(() => {
+          const el = findActivePromptInput() || findPromptInputs()[0];
+          const text = el ? readInputText(el) : '';
+          const stillSensitive = scanForBlockers(text);
+          if (!stillSensitive) close();
+        }, 300);
 
       } else {
         // Platform block: stay until manually dismissed
@@ -1224,23 +1186,16 @@
 
   // The original prompt-block popup — hard block, no dismiss.
   // Only disappears when the user removes sensitive data from the input.
-  let _lastPopupAt = 0;
   function showBlockPopup(matches, promptEl) {
-    // Debounce — prevent double-open flicker from DOM + fetch layers
-    const now = Date.now();
-    if (now - _lastPopupAt < 500) return;
-    _lastPopupAt = now;
+    if (document.querySelector('.cfai-block-modal')) return;
     const el = promptEl || findActivePromptInput() || findPromptInputs()[0];
     showCfaiPopup({
       title: "This prompt can't be sent",
       body:  'CloudFuze AI Governance blocked this message because it contains sensitive data:',
       matches,
-      hint:  el
-        ? 'Tokenize replaces sensitive values with safe placeholders and sends automatically.'
-        : 'Remove the sensitive information from your prompt to continue.',
+      hint:  'Remove the sensitive information from your prompt to continue.',
       hardBlock: true,
       promptEl: el,
-      tokenizeMode: true, // always offer tokenize alongside redact
     });
   }
 

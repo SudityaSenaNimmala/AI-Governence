@@ -2,8 +2,8 @@
 // Monkey-patches window.fetch to block any AI chat API call that contains
 // sensitive data patterns. This is the network-level safety net.
 //
-// Tokenization is handled at the DOM level by content.js (popup with
-// "Tokenize & Send" button — same flow as "Redact & Send").
+// Blocking is the primary defense. The DOM-level enforcement in content.js
+// shows the block popup with "Redact & Send". This is the network safety net.
 //
 // Agent blocking is handled by the content script at the DOM level (Enter/click
 // interception + input disabling) — NOT here.
@@ -33,13 +33,12 @@
     return found;
   }
 
-  // The fetch-blocker is the HARD SAFETY NET — it blocks ALL sensitive
-  // patterns regardless of block/tokenize config. The DOM enforcement in
-  // content.js provides the nice "Tokenize & Send" popup when it catches
-  // the event. If the DOM layer misses (React quirks on ChatGPT etc.),
-  // the fetch-blocker ensures raw sensitive data NEVER leaves the browser.
-  // When the user clicks "Tokenize & Send", the text is replaced with
-  // tokens BEFORE the fetch fires, so the fetch-blocker sees clean text.
+  // The fetch-blocker is the HARD SAFETY NET — blocks ALL sensitive
+  // patterns at the network level. The DOM enforcement in content.js
+  // shows the block popup with "Redact & Send". If the DOM layer misses
+  // (React quirks), the fetch-blocker ensures sensitive data NEVER leaves.
+  // When the user clicks "Redact & Send", the text is cleaned BEFORE
+  // the fetch fires, so the fetch-blocker sees clean text and lets it through.
 
   function extractUserText(bodyText) {
     try {
