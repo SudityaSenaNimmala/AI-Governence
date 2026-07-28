@@ -1,0 +1,10 @@
+node_modules
+build
+.vite
+.cache
+.git
+*.log
+.env
+.env.*
+.DS_Store
+stats.html

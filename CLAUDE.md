@@ -1,5 +1,31 @@
 # Project rules
 
+## Workflow Selection (GStack vs Direct)
+
+This repo has a **GStack** multi-agent pipeline in `.claude/agents/` and `.claude/workflows/`. Use it or work directly based on **size and risk** — not on how the request is phrased.
+
+### Default routing (by size/risk)
+- **GStack (full pipeline)** — new features, cross-subproject changes, anything touching auth (`JWT_SECRET`), storage schema/migrations, PII/data capture, SIEM/OTel forwarding, or the browser extension. Route through the `new-feature` workflow (design → implement → test → security audit → code review → docs → gated ship).
+- **GStack (bug-fix pipeline)** — real defects that need reproduction and a regression test. Route through `bug-fix`.
+- **Direct** — trivial, low-risk changes: typos, copy, a one-line fix, a config tweak, a comment. Just do it; no pipeline.
+
+### Overrides (explicit user intent wins over the default)
+- **"use gstack"** — force the full pipeline even for a small change.
+- **"quick fix"** — skip the pipeline and make the change directly, even if it looks medium-sized. (Still respect the commit/deploy gates below.)
+
+### Design gate
+For GStack features, the **architect** presents a design and STOPS. Do not implement until the human replies **"Proceed"** (or requests changes). Never rubber-stamp your own design.
+
+### Ship flow: commit → push → ONE deploy question → live
+The deploy model for this repo is: **commit, push to `main`, then exactly one question.** `devops-engineer` owns it.
+
+1. **Commit + push.** When the user says to commit/push/ship, stage the intended files (not blind `git add -A`), commit (message ends with the required Co-Authored-By line), and `git push origin main`. The user's instruction to commit-and-push is the authorization — no separate commit-gate questions.
+2. **Single deploy question:** **"Do you want to deploy to the server now?"**
+   - **No** → stop; changes are on `main`, not deployed.
+   - **Yes** → run `npm run deploy` (docker compose build + up on the Docker host: `server` + `connect-ui`). Live at `http://<host>:8787` and `http://<host>:3000/CloudFuze`.
+
+Rules: ask ONLY the one deploy question — do not re-introduce branch / dev-vs-prod prompts. Verify changed subprojects build/test green before deploying; refuse on a red build or a failed health check and say why. If `DOCKER_HOST` targets production (or is ambiguous), confirm the host once before shipping. Never report "live" unless the deploy health check passed.
+
 ## Roadmap auto-update (ask-then-edit)
 
 When a response surfaces a **real future enhancement** — something you'd write down as a maintainer, not just descriptive prose — do this BEFORE ending the turn:

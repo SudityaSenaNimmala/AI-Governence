@@ -80,6 +80,13 @@ export const notifyToast = (action, message, position) => {
 };
 
 export const isSessionValid = () => {
+  // ─── STANDALONE DEMO MODE (temporary) ────────────────────────────────────
+  // Bypasses the CloudFuze platform login/session gate so the AI Hub / Agent
+  // Governance dashboards render on the standalone deployment (which has no
+  // /cfcommon/api auth backend). TODO: implement standalone auth, then delete
+  // the line below to restore the real check that follows.
+  return true;
+  /* ─── ORIGINAL SESSION CHECK — restore when implementing standalone auth ───
   let store = localStorage?.globalState
     ? JSON.parse(localStorage?.globalState)
     : {};
@@ -101,6 +108,7 @@ export const isSessionValid = () => {
   } else {
     return false;
   }
+  */
 };
 
 export const isTimedOut = () => {

@@ -22,4 +22,6 @@ COPY server/package.json /app/server/
 WORKDIR /app/server
 ENV NODE_ENV=production
 EXPOSE 8787
-ENTRYPOINT ["node", "src/index.js"]
+# The server imports TypeScript modules (src/governance/*.ts) via .js specifiers,
+# so it must run under tsx (matches the "start" script), not plain node.
+ENTRYPOINT ["node_modules/.bin/tsx", "src/index.js"]

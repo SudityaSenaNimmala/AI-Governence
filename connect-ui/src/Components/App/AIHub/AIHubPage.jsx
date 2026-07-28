@@ -8,7 +8,11 @@ import {
 } from "lucide-react";
 import "./AIHub.css";
 
-const API = "http://localhost:8787/api/v1";
+// Relative base so it works both in dev (Vite proxies /api → localhost:8787)
+// and in production (the deployed host serves /api/v1/* via its reverse proxy).
+// A hardcoded localhost here made the deployed AI Hub call the *viewer's* own
+// machine, so nothing loaded for testers.
+const API = "/api/v1";
 async function apiFetch(path) {
   const r = await fetch(`${API}${path}`);
   if (!r.ok) throw new Error(`${r.status}`);
@@ -34,6 +38,16 @@ function ServiceCell({ row }) {
   const name = row.platform?.product || row.ai_service || "—";
   const vendor = row.platform?.vendor;
   return (<><div className="aihub_text_primary">{name}</div>{vendor && <div className="aihub_text_muted">{vendor}</div>}</>);
+}
+
+// Who did this — the enrolled person (OS username / signed-in email), with the
+// machine hostname (or a short machine-id) as the secondary line. Falls back to
+// the machine hash only when no identity was ever captured.
+function UserCell({ row }) {
+  const user = row.user;
+  const machine = row.hostname || (row.machine_id || "").slice(0, 10);
+  if (!user && !machine) return <span className="aihub_text_muted">—</span>;
+  return (<><div className="aihub_text_primary">{user || machine || "Unknown"}</div>{user && machine && <div className="aihub_text_muted">{machine}</div>}</>);
 }
 
 // ── Shared UI ────────────────────────────────────────────────────────────────
@@ -272,7 +286,7 @@ function AgentsView() {
     <div className="aihub_card">
       <SectionHeader title="MCP servers in use" hint="Each MCP server is a capability granted to an AI agent."/>
       <DataTable columns={[
-        {label:"Machine",render:r=><Mono>{(r.machine_id||"").slice(0,10)}</Mono>},
+        {label:"User",render:r=><UserCell row={r}/>},
         {label:"Client",render:r=>r.payload?.client||"—"},
         {label:"Server",render:r=><span className="aihub_text_primary">{r.payload?.serverName||"—"}</span>},
         {label:"Scopes",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.payload?.scopes||[]).map((s,i)=><Tag key={i} text={s}/>)}</div>},
@@ -286,7 +300,7 @@ function AgentsView() {
       <div className="aihub_card" key={cat}>
         <SectionHeader title={cfg.title} hint={cfg.hint}/>
         <DataTable columns={[
-          {label:"Machine",render:r=><Mono>{(r.machine_id||"").slice(0,10)}</Mono>},
+          {label:"User",render:r=><UserCell row={r}/>},
           {label:"Path",render:r=><Mono>{r.payload?.path||"—"}</Mono>},
           {label:"Language",render:r=>r.payload?.language||"—"},
           {label:"Frameworks",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.payload?.frameworks||[]).map((f,i)=><Tag key={i} text={f} color={cfg.color}/>)}</div>},
@@ -295,11 +309,11 @@ function AgentsView() {
       </div>
     ))}
 
-    {/* Desktop hooks */}
+    {/* Desktop hooks + Agent configs — hidden for now, will implement in UI later.
     <div className="aihub_card">
       <SectionHeader title="Desktop hook coverage" hint="Whether the endpoint agent has injected the in-app monitoring hook into Electron AI apps."/>
       <DataTable columns={[
-        {label:"Machine",render:r=><Mono>{(r.machine_id||"").slice(0,10)}</Mono>},
+        {label:"User",render:r=><UserCell row={r}/>},
         {label:"Product",render:r=><><span className="aihub_text_primary">{r.payload?.product||"—"}</span> <span className="aihub_text_muted">{r.payload?.vendor||""}</span></>},
         {label:"Version",render:r=><><span>{r.payload?.appVersion||"—"}</span> <span className="aihub_text_muted">hook {r.payload?.hookVersion||"?"}</span></>},
         {label:"Status",render:r=><Badge text={r.payload?.hookStatus||"unknown"} color={hookTone[r.payload?.hookStatus]||"#9ca3af"}/>},
@@ -307,17 +321,17 @@ function AgentsView() {
       ]} rows={hooks||[]} empty="No desktop hooks found"/>
     </div>
 
-    {/* Agent configs */}
     <div className="aihub_card">
       <SectionHeader title="Agent configurations" hint="Machine-level config files that grant capabilities to AI agents."/>
       <DataTable columns={[
-        {label:"Machine",render:r=><Mono>{(r.machine_id||"").slice(0,10)}</Mono>},
+        {label:"User",render:r=><UserCell row={r}/>},
         {label:"Kind",render:r=>r.payload?.kind||"—"},
         {label:"Vendor",render:r=>r.payload?.vendor||"—"},
         {label:"Path",render:r=><Mono>{r.payload?.path||"—"}</Mono>},
         {label:"Modified",render:r=>relTime(r.payload?.lastModified)},
       ]} rows={configs||[]} empty="No agent configs found"/>
     </div>
+    */}
   </div>);
 }
 
@@ -407,6 +421,7 @@ function DLPView() {
       <SectionHeader title="Sensitive prompts" hint="High & critical severity only. Click View to see the captured prompt."/>
       <DataTable onRow={r=>{ if(r.has_content) setPreview(r); }} columns={[
         {label:"When",render:r=>relTime(r.occurred_at)},
+        {label:"User",render:r=><UserCell row={r}/>},
         {label:"Service",render:r=><ServiceCell row={r}/>},
         {label:"Source",render:r=><Badge text={(r.source||"").replace(/_/g," ")} color={sourceTone[r.source]||"#9ca3af"}/>},
         {label:"Kind",render:r=><Tag text={r.event_kind}/>},
@@ -421,6 +436,7 @@ function DLPView() {
       <SectionHeader title="File uploads" hint="High & critical severity only. Click Open to view the file inline."/>
       <DataTable onRow={r=>{ if(r.has_content) setPreview(r); }} columns={[
         {label:"When",render:r=>relTime(r.occurred_at)},
+        {label:"User",render:r=><UserCell row={r}/>},
         {label:"Service",render:r=><ServiceCell row={r}/>},
         {label:"Filename",render:r=><Mono>{r.metadata?.filename||"—"}</Mono>},
         {label:"Class",render:r=><Tag text={r.file_class||"—"}/>},
@@ -499,6 +515,62 @@ function PlatformsView() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// 8. AI USAGE — prompts / estimated tokens / estimated cost, per platform & per user
+// ═══════════════════════════════════════════════════════════════════════════════
+function AIUsageView() {
+  const [data,setData]=useState(null),[e,setE]=useState(null),[sel,setSel]=useState(null);
+  useEffect(()=>{
+    apiFetch("/ai-usage").then(d=>{ setData(d); if(d.platforms?.length) setSel(d.platforms[0].ai_service); }).catch(x=>setE(x.message));
+  },[]);
+  if(e) return <Err msg={e}/>; if(!data) return <Loading/>;
+
+  const platforms=data.platforms||[];
+  const selected=platforms.find(p=>p.ai_service===sel)||null;
+  const a=data.assumptions||{};
+
+  return (<div>
+    <SectionHeader title="AI Usage" hint="Prompt volume with estimated token count and cost per user, across every AI platform (chat, Claude Code CLI, search engines). Estimated from captured prompt length — not billed figures."/>
+
+    <div className="aihub_stat_grid">
+      <StatCard icon={<Server size={18}/>} label="Platforms" value={platforms.length} color="#0044cc"/>
+      <StatCard icon={<MessageSquare size={18}/>} label="User prompts" value={data.totals?.prompts||0} color="#8b5cf6"/>
+      <StatCard icon={<Activity size={18}/>} label="Est. tokens" value={fmtTokens(data.totals?.est_total_tokens)} hint="input + output" color="#f59e0b"/>
+      <StatCard icon={<Wrench size={18}/>} label="Est. cost" value={fmtUsd(data.totals?.est_cost_usd)} hint="all platforms" color="#22c55e"/>
+    </div>
+
+    {!platforms.length ? (
+      <div className="aihub_card"><Empty icon={<MessageSquare size={32} strokeWidth={1.5}/>} title="No prompt activity yet" msg="Prompt events captured by the OS monitor and browser extension will appear here."/></div>
+    ) : (<>
+      <SectionHeader title="Platforms" hint="Select a platform to see per-user usage."/>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}}>
+        {platforms.map(p=>(
+          <button key={p.ai_service} className={`aihub_filter_btn ${sel===p.ai_service?"active":""}`} onClick={()=>setSel(p.ai_service)}>
+            {(p.product||p.ai_service)} · {(p.prompts||0).toLocaleString()} prompts · {fmtUsd(p.est_cost_usd)}
+          </button>
+        ))}
+      </div>
+
+      {selected && <div className="aihub_card">
+        <SectionHeader
+          title={`${selected.product||selected.ai_service} — usage by user`}
+          hint={`${(selected.prompts||0).toLocaleString()} prompts · ${fmtTokens(selected.est_total_tokens)} est. tokens · ${fmtUsd(selected.est_cost_usd)} est. cost · rate $${selected.rate_in}/$${selected.rate_out} per 1M tokens`}
+        />
+        <DataTable columns={[
+          {label:"User",render:r=><><div className="aihub_text_primary">{r.label||r.user||r.hostname||"—"}</div>{!r.attributed&&<div className="aihub_text_muted">browser · unattributed{r.machines>1?` · ${r.machines} installs`:""}</div>}</>},
+          {label:"Prompts",key:"prompts",right:true},
+          {label:"Est. tokens",render:r=>fmtTokens(r.est_total_tokens),right:true},
+          {label:"Est. cost",render:r=>fmtUsd(r.est_cost_usd),right:true},
+        ]} rows={selected.breakdown||[]} empty="No user activity for this platform."/>
+      </div>}
+
+      <p className="aihub_text_muted" style={{fontSize:11,marginTop:4}}>
+        Estimates: input ≈ prompt length ÷ {a.chars_per_token||4} chars/token; output assumed {a.output_ratio||3}× input; cost from published per-platform rates. Actual billing may differ.
+      </p>
+    </>)}
+  </div>);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // PAGE ROUTER
 // ═══════════════════════════════════════════════════════════════════════════════
 const PAGES={
@@ -508,6 +580,7 @@ const PAGES={
   Agents:{title:"Agents & MCP",component:AgentsView},
   ServerAgents:{title:"Server Agents",component:ServerAgentsView},
   DLP:{title:"AI Activity",component:DLPView},
+  AIUsage:{title:"AI Usage",component:AIUsageView},
   Platforms:{title:"AI Platforms",component:PlatformsView},
   AgentGovernance:{title:"Agent Governance",component:AgentGovernance},
 };
@@ -521,6 +594,9 @@ export default function AIHubPage({page}) {
       <div className="cf_main_content_place">
         <TopNav pageName={config.title}/>
         <div className="cf_main_content_place_main" style={{flexDirection:"column",padding:"16px 20px",overflowY:"auto"}}>
+          <div style={{display:"inline-flex",alignSelf:"flex-start",alignItems:"center",gap:"6px",padding:"3px 10px",marginBottom:"12px",borderRadius:"999px",background:"#eef2ff",color:"#4338ca",fontSize:"12px",fontWeight:600,border:"1px solid #c7d2fe"}}>
+            ● Standalone deployment · CI auto-deploy verified #2
+          </div>
           <V/>
         </div>
       </div>

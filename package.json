@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "release": "node scripts/release.mjs",
+    "deploy": "node scripts/deploy.mjs",
     "dev:server": "npm --prefix server run dev",
     "dev:dashboard": "npm --prefix dashboard run dev",
     "scan": "npm --prefix agent run scan"
