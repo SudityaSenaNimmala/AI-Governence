@@ -19,7 +19,7 @@
 // JSON-RPC messages may be written there — all diagnostics go to stderr.
 
 import { spawn } from 'node:child_process';
-import { inspectMessage, shouldBlock, blockResponse } from './guard.js';
+import { inspectMessage, shouldBlock, shouldTokenize, tokenizeMessage, blockResponse, TokenVault } from './guard.js';
 import { lengthBucket } from '../os_monitor/classifier.js';
 
 const argv = process.argv.slice(2);
@@ -34,6 +34,17 @@ const SERVER     = process.env.CFAI_GUARD_SERVER || null;
 const TOKEN      = process.env.CFAI_GUARD_TOKEN || null;
 const SERVERNAME = process.env.CFAI_GUARD_SERVERNAME || realCmd.join(' ').slice(0, 60);
 const THRESHOLD  = (process.env.CFAI_GUARD_THRESHOLD || 'high').toLowerCase();
+
+// ── Reversible PII Tokenization ──────────────────────────────────────
+// CFAI_GUARD_TOKENIZE: comma-separated pattern names to tokenize instead
+// of blocking. E.g. "us-ssn,credit-card,iban". Default: empty (all block).
+const TOKENIZE_RAW = process.env.CFAI_GUARD_TOKENIZE || '';
+const TOKENIZE_PATTERNS = new Set(
+  TOKENIZE_RAW.split(',').map(s => s.trim()).filter(Boolean)
+);
+const vault = new TokenVault();
+// Periodic vault cleanup
+setInterval(() => vault.gc(), 5 * 60 * 1000);
 
 const elog = (msg) => process.stderr.write(`[cfai-mcp-guard] ${msg}\n`);
 
@@ -65,8 +76,30 @@ child.on('exit', (code, signal) => {
   else process.exit(code ?? 0);
 });
 
-// server → host: pass through verbatim.
-child.stdout.on('data', (d) => process.stdout.write(d));
+// server → host: restore any tokens in the response before forwarding.
+// We line-buffer so we can parse individual JSON-RPC messages.
+let serverBuf = '';
+child.stdout.on('data', (d) => {
+  if (vault.size === 0) {
+    // No active tokens — fast path, pass through verbatim.
+    process.stdout.write(d);
+    return;
+  }
+  // Line-buffer to find complete JSON-RPC messages.
+  serverBuf += d.toString('utf8');
+  let idx;
+  while ((idx = serverBuf.indexOf('\n')) >= 0) {
+    const line = serverBuf.slice(0, idx);
+    serverBuf = serverBuf.slice(idx + 1);
+    if (vault.hasTokens(line)) {
+      const restored = vault.restore(line);
+      process.stdout.write(restored + '\n');
+      elog(`restored tokens in server response`);
+    } else {
+      process.stdout.write(line + '\n');
+    }
+  }
+});
 
 // host → server: line-buffered NDJSON, inspect each message.
 let buf = '';
@@ -97,6 +130,18 @@ function handleLine(line) {
   catch (err) { elog(`inspect error (passing through): ${err.message}`); }
 
   if (shouldBlock(inspection, THRESHOLD)) {
+    // Check if ALL matching patterns should be tokenized instead of blocked
+    if (TOKENIZE_PATTERNS.size > 0 && shouldTokenize(inspection, TOKENIZE_PATTERNS, THRESHOLD)) {
+      const result = tokenizeMessage(msg, vault, TOKENIZE_PATTERNS);
+      if (result) {
+        const tokenized = JSON.stringify(result.message);
+        child.stdin.write(tokenized + '\n');
+        elog(`TOKENIZED tools/call "${inspection.toolName}" — ${result.tokenCount} values (${inspection.matches.map((m) => m.pattern).join(', ')})`);
+        reportTokenize(inspection, result.tokenCount).catch(() => {});
+        return;
+      }
+    }
+
     const resp = blockResponse(msg, inspection);
     process.stdout.write(JSON.stringify(resp) + '\n');   // tell the host it was blocked
     elog(`BLOCKED tools/call "${inspection.toolName}" — ${inspection.highestSeverity} (${inspection.matches.map((m) => m.pattern).join(', ')})`);
@@ -130,4 +175,31 @@ async function report(inspection) {
   } catch { /* offline / server down — drop, enforcement already happened locally */ }
 }
 
-elog(`guarding: ${realCmd.join(' ')} (threshold=${THRESHOLD})`);
+async function reportTokenize(inspection, tokenCount) {
+  if (!SERVER || !TOKEN || typeof fetch !== 'function') return;
+  const event = {
+    occurredAt: new Date().toISOString(),
+    kind: 'enforcement_tokenize',
+    service: SERVERNAME,
+    source: 'mcp_guard',
+    event_kind: 'mcp_tool_call',
+    mechanism: 'reversible_tokenization',
+    token_count: tokenCount,
+    matches: inspection.matches.map((m) => ({ pattern: m.pattern, class: m.class, severity: m.severity, count: m.count })),
+    highest_severity: inspection.highestSeverity,
+    content_length: inspection.scannedLength,
+    length_bucket: lengthBucket(inspection.scannedLength),
+  };
+  try {
+    await fetch(SERVER.replace(/\/$/, '') + '/api/v1/dlp', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + TOKEN },
+      body: JSON.stringify({ events: [event] }),
+    });
+  } catch {}
+}
+
+const tokenizeInfo = TOKENIZE_PATTERNS.size > 0
+  ? `, tokenize=[${[...TOKENIZE_PATTERNS].join(',')}]`
+  : '';
+elog(`guarding: ${realCmd.join(' ')} (threshold=${THRESHOLD}${tokenizeInfo})`);

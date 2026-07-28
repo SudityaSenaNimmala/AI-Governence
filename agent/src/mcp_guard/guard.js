@@ -11,6 +11,7 @@
 // stdio plumbing lives in index.js.
 
 import { scan, classifyFile } from '../os_monitor/classifier.js';
+import { TokenVault } from '../proxy/token-vault.js';
 
 const SEVERITY_ORDER = ['low', 'moderate', 'high', 'critical'];
 export function sevRank(s) {
@@ -99,6 +100,71 @@ export function shouldBlock(inspection, threshold = 'high') {
   return sevRank(inspection.highestSeverity) >= sevRank(threshold);
 }
 
+// Decide whether to tokenize instead of block. Returns true when ALL matched
+// patterns are in the tokenize set (none need hard blocking).
+export function shouldTokenize(inspection, tokenizePatterns, threshold = 'high') {
+  if (!inspection || !tokenizePatterns || tokenizePatterns.size === 0) return false;
+  if (sevRank(inspection.highestSeverity) < sevRank(threshold)) return false;
+  // ALL matches at-or-above threshold must be in the tokenize set
+  return inspection.matches
+    .filter((m) => sevRank(m.severity) >= sevRank(threshold))
+    .every((m) => tokenizePatterns.has(m.pattern));
+}
+
+// Tokenize a JSON-RPC tools/call message in-place. Replaces sensitive values
+// in the arguments with reversible tokens. Returns the modified message JSON
+// string and the count of tokenized values.
+export function tokenizeMessage(msg, vault, tokenizePatterns) {
+  if (!msg || msg.method !== 'tools/call' || !msg.params) return null;
+
+  const REGEXES = {
+    'openai-api-key': /\b(sk-(?:proj-)?[A-Za-z0-9_-]{20,})\b/g,
+    'anthropic-api-key': /\b(sk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,})\b/g,
+    'google-api-key': /\b(AIza[0-9A-Za-z_-]{30,})\b/g,
+    'huggingface-token': /\b(hf_[A-Za-z0-9]{30,})\b/g,
+    'github-pat': /\b(gh[pousr]_[A-Za-z0-9]{30,})\b/g,
+    'gitlab-pat': /\b(glpat-[A-Za-z0-9_-]{20,})\b/g,
+    'aws-access-key': /\b(AKIA[0-9A-Z]{16})\b/g,
+    'slack-token': /\b(xox[abprs]-[A-Za-z0-9-]{10,})\b/g,
+    'jwt': /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+    'us-ssn': /\b\d{3}-\d{2}-\d{4}\b/g,
+    'credit-card': /\b(?:\d[ -]*?){13,16}\b/g,
+    'iban': /\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b/g,
+    'us-phone': /\b(?:\+?1[ -]?)?\(?[2-9]\d{2}\)?[ -]?\d{3}[ -]?\d{4}\b/g,
+    'cloudfuze-customer-id': /\bCF-CUST-[A-Z0-9]{6,}\b/g,
+    'internal-jira-key': /\b(CF|GOV|SEC)-\d{2,}\b/g,
+  };
+
+  let tokenCount = 0;
+  const copy = JSON.parse(JSON.stringify(msg)); // deep clone
+
+  function walkAndTokenize(val, key) {
+    if (typeof val === 'string') {
+      let result = val;
+      for (const patName of tokenizePatterns) {
+        const rx = REGEXES[patName];
+        if (!rx) continue;
+        rx.lastIndex = 0;
+        result = result.replace(rx, (match) => {
+          tokenCount++;
+          return vault.create(match, patName);
+        });
+      }
+      return result;
+    }
+    if (Array.isArray(val)) return val.map((v, i) => walkAndTokenize(v, i));
+    if (val && typeof val === 'object') {
+      const out = {};
+      for (const [k, v] of Object.entries(val)) out[k] = walkAndTokenize(v, k);
+      return out;
+    }
+    return val;
+  }
+
+  copy.params.arguments = walkAndTokenize(copy.params.arguments ?? {}, null);
+  return tokenCount > 0 ? { message: copy, tokenCount } : null;
+}
+
 // JSON-RPC error returned to the host in place of the blocked call. Uses a
 // distinct code so the agent/UI can recognise a policy block vs a real error.
 export const BLOCK_ERROR_CODE = -32001;
@@ -120,3 +186,6 @@ export function blockResponse(msg, inspection) {
     },
   };
 }
+
+// Re-export TokenVault for index.js
+export { TokenVault };

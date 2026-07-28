@@ -26,12 +26,31 @@
     });
   } catch (e) {}
 
-  // Listen for blocked fetch events from the injected script
+  // ── Reversible PII Tokenization config ──────────────────────────────────
+  // Load per-pattern action config from chrome.storage.
+  // IMPORTANT: content scripts and page-world scripts have ISOLATED JS
+  // contexts. window.__cfaiPatternActions is for content.js's own use.
+  // The fetch-blocker (page world) gets the config via postMessage.
+  // No per-pattern config needed — all patterns block by default.
+  // The popup always offers both "Tokenize & Send" and "Redact & Send".
+
+  // Token restoration in AI responses is NOT done via MutationObserver —
+  // that approach corrupts React's DOM state (causes raw JSON rendering,
+  // breaks page layout). The tokens in the AI response are visible as-is;
+  // the user can see [CFAI:SSN:xxx] in the response, which confirms their
+  // data was protected. Future: add a lightweight response-only restore
+  // that targets just the chat message container, not the whole page.
+
+  // Listen for blocked fetch events from the fetch-blocker (safety net).
+  // Show the full block popup — not just a toast — so the user gets the
+  // "Tokenize & Send" option even when DOM-level enforcement missed.
   window.addEventListener('cfai-fetch-blocked', (e) => {
+    if (PLATFORM_BLOCKED) return;
     const { matches } = e.detail || {};
-    console.info('[cfai] fetch was blocked, showing popup. Matches:', matches);
+    console.info('[cfai] fetch was blocked, showing block popup. Matches:', matches);
     const matchObjs = (matches || []).map(name => ({ pattern: name, severity: 'critical', count: 1 }));
-    showWarning(matchObjs, 'Sensitive data blocked from being sent');
+    const el = findActivePromptInput() || findPromptInputs()[0];
+    showBlockPopup(matchObjs, el);
   });
 
   // ── Full-platform block ────────────────────────────────────────────────────
@@ -144,6 +163,76 @@
     return el.innerText || '';
   }
 
+  /**
+   * Write text into a prompt input element in a React-compatible way.
+   * React ignores direct .value assignments because it tracks input state
+   * internally. We use the native value setter and dispatch proper events
+   * so React picks up the change.
+   */
+  function writeInputText(el, text) {
+    if (!el) return;
+    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+      // Use native setter to bypass React's synthetic event system
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
+        'value'
+      )?.set;
+      if (nativeSetter) {
+        nativeSetter.call(el, text);
+      } else {
+        el.value = text;
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      // contenteditable element (ChatGPT, Claude, etc.)
+      el.focus();
+      // Select all existing content and replace
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      // Use execCommand for React/framework compatibility
+      document.execCommand('insertText', false, text);
+      // Fallback if execCommand is not supported
+      if (readInputText(el).trim() !== text.trim()) {
+        el.textContent = text;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+      }
+    }
+  }
+
+  /**
+   * Redact sensitive data in the prompt and optionally trigger send.
+   * Returns the redacted text and replacement details.
+   */
+  function redactPrompt(el) {
+    if (!el) return null;
+    const text = readInputText(el);
+    if (!text) return null;
+    const { redacted, replacements } = window.__cfaiPatterns.redact(text, BLOCK_SEVERITIES);
+    if (replacements.length === 0) return null;
+    writeInputText(el, redacted);
+    return { original: text, redacted, replacements };
+  }
+
+  /**
+   * Simulate pressing Enter on the prompt input to trigger send.
+   * Delayed to let React process the text change first.
+   */
+  function simulateSend(el) {
+    setTimeout(() => {
+      if (!el) return;
+      el.focus();
+      const enterEvent = new KeyboardEvent('keydown', {
+        key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+        bubbles: true, cancelable: true,
+      });
+      el.dispatchEvent(enterEvent);
+    }, 150);
+  }
+
   // Read a File/Blob and return its bytes as a base64 string. Streaming via
   // FileReader avoids the 100MB+ string concat path that crashes Chrome.
   function fileToBase64(file) {
@@ -170,6 +259,10 @@
   // Dedup key — prevents double-emit when both the global enforcement handler
   // and the per-element fallback handler fire for the same Enter keypress.
   let _lastLogKey = null;
+
+  // Set by handlePaste when sensitive data is pasted. Checked by tryBlock
+  // when the input text hasn't been updated yet (paste+send in rapid succession).
+  let _recentSensitivePaste = null;
 
   // Central emit + notify function for every prompt send.
   // Called from tryBlock (synchronous, captures text before React clears it)
@@ -251,17 +344,19 @@
       content_length: text.length,
       matches: matches.map(({ pattern, class: cls, severity: sev, count }) => ({ pattern, class: cls, severity: sev, count })),
       highest_severity: severity,
-      content_text: text,           // full clipboard text for dashboard preview
+      content_text: text,
     });
 
     if (severity === 'critical') {
       showWarning(matches, 'Sensitive data pasted into ' + SERVICE);
     }
 
-    // Enforcement happens lazily on send (keydown Enter / click on send-like
-    // button). We intentionally do NOT re-evaluate or mutate the page DOM here
-    // — fighting React state on every keystroke caused Chrome to mark the page
-    // unresponsive (the page kept re-rendering as we kept disabling buttons).
+    // Flag that sensitive data was just pasted — tryBlock checks this when
+    // the input text hasn't updated yet (paste+Enter in rapid succession).
+    if (severity === 'critical' || severity === 'high') {
+      _recentSensitivePaste = { matches, text, at: Date.now() };
+      setTimeout(() => { _recentSensitivePaste = null; }, 2000);
+    }
   }
 
   // ---- File upload detection ----
@@ -893,6 +988,23 @@
     return matches.length > 0 ? matches : null;
   }
 
+  /**
+   * Tokenize ALL sensitive data in the prompt using reversible tokens.
+   */
+  function tokenizePrompt(el) {
+    if (!el) return null;
+    const text = readInputText(el);
+    if (!text) return null;
+    // Tokenize ALL patterns (not per-pattern config — everything tokenizes)
+    const allNames = (window.__cfaiPatterns.patternNames?.() || []).map(p => p.name);
+    const tokenizeSet = new Set(allNames);
+    if (tokenizeSet.size === 0) return null;
+    const result = window.__cfaiPatterns.tokenize(text, tokenizeSet);
+    if (result.tokens.length === 0) return null;
+    writeInputText(el, result.tokenized);
+    return { original: text, tokenized: result.tokenized, tokens: result.tokens };
+  }
+
   function emitEnforcement(action, el, matches, kind) {
     const text = el ? readInputText(el) : '';
     emit({
@@ -919,6 +1031,7 @@
   //   matches (array)           — { pattern, severity, count } chips
   //   hint (string, optional)   — small grey help text under the chips
   //   filename (string, opt)    — shown above the chips when blocking a file
+  //   promptEl (element, opt)   — the prompt input element (for redact & send)
   function showCfaiPopup(opts) {
     document.querySelector('.cfai-block-modal')?.remove();
 
@@ -939,8 +1052,27 @@
       : '';
 
     if (opts.hardBlock) {
-      // Hard block — no dismiss button, no escape, no backdrop click.
-      // Only way out: remove sensitive data from the prompt.
+      // Hard block — stays until dismissed.
+      // Three sub-modes:
+      //   A) Content block (has matches + promptEl) — shows Redact & Send + Edit options
+      //   B) Content block (has matches, no promptEl) — auto-dismiss when text cleaned
+      //   C) Platform block (no matches) — stays until user clicks dismiss
+      const hasSensitiveMatches = opts.matches && opts.matches.length > 0;
+      const canRedact = hasSensitiveMatches && opts.promptEl;
+
+      let actionsHtml = '';
+      const showTokenize = opts.tokenizeMode && canRedact;
+      if (canRedact) {
+        actionsHtml = `
+          <div class="cfai-block-actions" style="gap:10px;">
+            <button type="button" class="cfai-block-tokenize">Tokenize &amp; Send</button>
+            <button type="button" class="cfai-block-dismiss cfai-block-edit-btn">Edit Manually</button>
+          </div>
+        `;
+      } else if (!hasSensitiveMatches) {
+        actionsHtml = '<div class="cfai-block-actions"><button type="button" class="cfai-block-dismiss">Got it</button></div>';
+      }
+
       root.innerHTML = `
         <div class="cfai-block-backdrop"></div>
         <div class="cfai-block-card">
@@ -950,10 +1082,13 @@
           ${filenameRow}
           ${tagsRow}
           ${hintRow}
+          ${actionsHtml}
           <div class="cfai-block-footer">This event was reported to the security team.</div>
         </div>
       `;
       document.documentElement.appendChild(root);
+
+      // No preview — just the action buttons.
 
       // Block all keyboard/mouse events from reaching the page while modal is up
       const trap = (e) => {
@@ -964,22 +1099,63 @@
         root.addEventListener(evt, trap, true);
       }
 
-      // Auto-dismiss when sensitive text is removed — poll every 300ms
-      const pollClose = setInterval(() => {
-        const el = findActivePromptInput() || findPromptInputs()[0];
-        const text = el ? readInputText(el) : '';
-        const stillSensitive = scanForBlockers(text);
-        if (!stillSensitive) {
-          clearInterval(pollClose);
-          root.remove();
-        }
-      }, 300);
+      let pollClose = null;
+      const close = () => {
+        if (pollClose) clearInterval(pollClose);
+        root.remove();
+      };
 
-      // Allow clicking backdrop to go back and edit (remove modal but keep blocker active)
+      if (canRedact) {
+        // Tokenize & Send button
+        const tokenizeBtn = root.querySelector('.cfai-block-tokenize');
+        if (tokenizeBtn) {
+          tokenizeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const result = tokenizePrompt(opts.promptEl);
+            if (!result) {
+              console.warn('[cfai] tokenizePrompt returned null');
+              return;
+            }
+            emit({
+              kind: 'enforcement_tokenize',
+              blocked_for: 'prompt_submit',
+              patterns: result.tokens.map(t => ({ pattern: t.pattern, count: t.count })),
+              token_count: result.tokens.reduce((s, t) => s + t.count, 0),
+              mechanism: 'reversible_tokenization',
+              content_length: result.original.length,
+            });
+            close();
+            if (opts.promptEl) simulateSend(opts.promptEl);
+          });
+        }
+
+
+        // Edit manually button — just closes the modal so user can fix it
+        const editBtn = root.querySelector('.cfai-block-edit-btn');
+        editBtn.addEventListener('click', (e) => { e.stopPropagation(); close(); });
+        setTimeout(() => redactBtn?.focus(), 0);
+
+        // No auto-dismiss — user must click a button to close.
+
+      } else if (hasSensitiveMatches) {
+        // Content block without element ref — no auto-dismiss.
+
+      } else {
+        // Platform block: stay until manually dismissed
+        const dismissBtn = root.querySelector('.cfai-block-dismiss');
+        if (dismissBtn) {
+          dismissBtn.addEventListener('click', (e) => { e.stopPropagation(); close(); });
+          dismissBtn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); e.stopImmediatePropagation(); close(); } }, true);
+          setTimeout(() => dismissBtn?.focus(), 0);
+        }
+        const onKey = (e) => { if (e.key === 'Escape') { e.stopImmediatePropagation(); close(); document.removeEventListener('keydown', onKey, true); } };
+        document.addEventListener('keydown', onKey, true);
+      }
+
+      // Allow clicking backdrop to dismiss
       root.querySelector('.cfai-block-backdrop').addEventListener('click', (e) => {
         e.stopPropagation();
-        root.remove();
-        clearInterval(pollClose);
+        close();
       });
 
     } else {
@@ -1048,15 +1224,23 @@
 
   // The original prompt-block popup — hard block, no dismiss.
   // Only disappears when the user removes sensitive data from the input.
-  function showBlockPopup(matches) {
-    // Don't stack multiple popups
-    if (document.querySelector('.cfai-block-modal')) return;
+  let _lastPopupAt = 0;
+  function showBlockPopup(matches, promptEl) {
+    // Debounce — prevent double-open flicker from DOM + fetch layers
+    const now = Date.now();
+    if (now - _lastPopupAt < 500) return;
+    _lastPopupAt = now;
+    const el = promptEl || findActivePromptInput() || findPromptInputs()[0];
     showCfaiPopup({
       title: "This prompt can't be sent",
       body:  'CloudFuze AI Governance blocked this message because it contains sensitive data:',
       matches,
-      hint:  'Remove the sensitive information from your prompt to continue.',
+      hint:  el
+        ? 'Tokenize replaces sensitive values with safe placeholders and sends automatically.'
+        : 'Remove the sensitive information from your prompt to continue.',
       hardBlock: true,
+      promptEl: el,
+      tokenizeMode: true, // always offer tokenize alongside redact
     });
   }
 
@@ -1075,6 +1259,13 @@
     // Always reset dedup so repeated sends of the same sensitive text get blocked every time.
     _lastLogKey = null;
 
+    // If el is null or detached, try harder to find the prompt input.
+    // After popup dismissal, focus moves away and findActivePromptInput()
+    // returns null. Fall back to the first prompt input on the page.
+    if (!el || !el.isConnected) {
+      el = findActivePromptInput() || findPromptInputs()[0] || null;
+    }
+
     // (0) Full-platform block — the org has disallowed this AI platform, so we
     //     refuse EVERY send regardless of content.
     if (PLATFORM_BLOCKED) {
@@ -1092,20 +1283,26 @@
     const text = el ? readInputText(el) : '';
     const promptMatches = scanForBlockers(text);
 
-    // (2) Sensitive attachments still on the composer. We walk the flaggedFiles
-    //     map and check whether each filename is still visible in the document.
-    //     If the user removed the chip, its filename disappears from the DOM,
-    //     so we forget the entry to keep the map fresh.
+    // (2) Sensitive attachments still on the composer.
     const flaggedAttachments = collectActiveFlaggedAttachments(el);
 
     if (!promptMatches && flaggedAttachments.length === 0) {
-      // Not blocking — still log the send for governance and show the
-      // "monitored" indicator so users see the extension is active.
+      // Check if sensitive data was JUST pasted (within 2s). The input text
+      // might not reflect the paste yet (React batching / rapid paste+send).
+      // Don't consume the flag — let it persist for the full 2s timeout so
+      // multiple rapid send attempts are all caught.
+      if (_recentSensitivePaste && (Date.now() - _recentSensitivePaste.at) < 2000) {
+        if (e) { e.preventDefault(); e.stopImmediatePropagation(); if (typeof e.stopPropagation === 'function') e.stopPropagation(); }
+        console.info('[cfai] BLOCKED via', label, '(recent paste, input not yet updated)');
+        showBlockPopup(_recentSensitivePaste.matches, el);
+        return true;
+      }
+      // Not blocking — still log the send for governance.
       logPromptEvent(text);
       return false;
     }
 
-    // No override allowed — sensitive data must be removed before sending.
+    // Block path — sensitive data must be removed before sending.
 
     if (e) {
       e.preventDefault();
@@ -1130,7 +1327,7 @@
 
     console.info('[cfai] BLOCKED via', label, promptMatches.map((m) => m.pattern).join(', '));
     emitEnforcement('block', el, promptMatches, 'prompt_submit');
-    showBlockPopup(promptMatches);
+    showBlockPopup(promptMatches, el);
     return true;
   }
 
@@ -1298,17 +1495,22 @@
     let _lastBlockText = '';
 
     function globalBlocker(e) {
-      // Allow our own UI, typing, navigation, and non-send actions
+      // Allow our own UI
       if (e.target?.closest?.('.cfai-toast, .cfai-block-modal')) return;
-      if (e.type === 'keydown' && e.key !== 'Enter') return;
-      if (e.type === 'keydown' && e.key === 'Enter' && e.shiftKey) return;
+      // Only intercept actual send gestures — not random clicks
+      if (e.type === 'keydown') {
+        if (e.key !== 'Enter' || e.shiftKey) return;
+      } else {
+        // For pointer/mouse/click: only intercept send-like buttons
+        const btn = e.target?.closest?.('button, [role="button"]');
+        if (!btn || !looksLikeSendButton(btn)) return;
+      }
 
       const el = findActivePromptInput() || findPromptInputs()[0];
       if (!el) return;
       const text = readInputText(el);
       const matches = scanForBlockers(text);
       if (!matches) {
-        // Text was cleaned — deactivate blocker
         if (_blockActive) deactivateBlocker();
         return;
       }
@@ -1319,7 +1521,7 @@
       console.info('[cfai] GLOBAL BLOCKER stopped', e.type);
       _lastLogKey = null;
       emitEnforcement('block', el, matches, 'prompt_submit');
-      showBlockPopup(matches);
+      showBlockPopup(matches, el);
     }
 
     function activateBlocker() {
@@ -1343,6 +1545,9 @@
 
     // Poll the prompt input every 500ms. If sensitive content is detected,
     // activate the global blocker. This is lightweight and React-proof.
+    // Only activate the global blocker for genuine block-patterns.
+    // Tokenize-only patterns are handled by the popup at send time —
+    // the global blocker must NOT intercept sidebar clicks, navigation, etc.
     setInterval(() => {
       if (!ENFORCE) return;
       const el = findActivePromptInput() || findPromptInputs()[0];
@@ -1373,9 +1578,20 @@
       <div class="cfai-toast-body">${matches.map((m) => `<span class="cfai-tag cfai-${m.severity}">${m.pattern}</span>`).join(' ')}</div>
       <div class="cfai-toast-footer">CloudFuze AI Governance · This event was reported to the security team.</div>
     `;
-    toast.querySelector('.cfai-toast-close').addEventListener('click', () => toast.remove());
     document.body.appendChild(toast);
-    setTimeout(() => toast.remove(), 6000);
+    // Dismiss when user clicks anywhere outside the toast
+    const dismissOnClick = (e) => {
+      if (!toast.contains(e.target)) {
+        toast.remove();
+        document.removeEventListener('click', dismissOnClick, true);
+      }
+    };
+    toast.querySelector('.cfai-toast-close').addEventListener('click', () => {
+      toast.remove();
+      document.removeEventListener('click', dismissOnClick, true);
+    });
+    // Delay listener so the current click event doesn't immediately dismiss
+    setTimeout(() => document.addEventListener('click', dismissOnClick, true), 100);
   }
 
   // ---- Event wiring ----
@@ -1390,6 +1606,8 @@
 
     // PRIMARY ENFORCEMENT — block Enter directly on the input element.
     // This fires before React's delegation because it's on the element itself.
+    // Tokenize-patterns are filtered out by scanForBlockers — they pass through
+    // and are handled by the fetch-blocker at the network level.
     el.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         const captured = readInputText(el);
@@ -1402,7 +1620,7 @@
             console.info('[cfai] ELEMENT-LEVEL BLOCK on Enter');
             _lastLogKey = null;
             emitEnforcement('block', el, matches, 'prompt_submit');
-            showBlockPopup(matches);
+            showBlockPopup(matches, el);
             return;
           }
         }
@@ -1425,7 +1643,7 @@
         console.info('[cfai] BUTTON-LEVEL BLOCK on', e.type);
         _lastLogKey = null;
         emitEnforcement('block', el, matches, 'prompt_submit');
-        showBlockPopup(matches);
+        showBlockPopup(matches, el);
       };
       // Attach to all buttons in the composer area
       const attachToButtons = () => {

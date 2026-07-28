@@ -35,6 +35,7 @@ import { mintLeafCert } from './ca.js';
 import { scan } from '../os_monitor/classifier.js';
 import { shouldSkipScan, blockableMatches, isBrowserProcess, isAiDesktopProcess } from './scan-policy.js';
 import { getProcessByLocalPort, resolveOnDemand } from './process-resolver-win32.js';
+import { TokenVault } from './token-vault.js';
 
 const BODY_SCAN_MAX_BYTES = 2 * 1024 * 1024;     // 2MB — covers any normal prompt
 
@@ -77,7 +78,15 @@ const BLOCK_BODY = (matches) => JSON.stringify({
   remediation: 'Remove the highlighted information and retry. Contact security@cloudfuze.com for false positives.',
 });
 
-export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0.0.1', upstreamTlsOptions = null, onApiCall = null, alwaysIntercept = false }) {
+export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0.0.1', upstreamTlsOptions = null, onApiCall = null, alwaysIntercept = false, tokenizePatterns = null }) {
+  // ── Reversible PII Tokenization ─────────────────────────────────────
+  // tokenizePatterns: Set of pattern names (e.g. new Set(['us-ssn','credit-card']))
+  // whose matches should be tokenized rather than blocked. Patterns NOT in
+  // this set follow the existing block path. Default: null (all block).
+  const vault = new TokenVault();
+  const _tokenizePatterns = tokenizePatterns || new Set();
+  // Periodic GC for the vault
+  const _gcInterval = setInterval(() => vault.gc(), 5 * 60 * 1000);
   // onApiCall is the server-monitor hook. When provided, every successful
   // intercepted request gets its response body teed (capped) and the hook
   // fires once the response ends. The hook receives:
@@ -109,7 +118,7 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
       return res.end('Bad proxy request');
     }
     if (isIntercepted(target.hostname)) {
-      return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort: req.socket?.remotePort });
+      return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort: req.socket?.remotePort, vault, tokenizePatterns: _tokenizePatterns });
     }
     return forwardPlainHttp(req, res, target);
   });
@@ -195,7 +204,11 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
   log?.info?.(`proxy: listening on ${host}:${port}`);
   return {
     server,
-    stop: () => new Promise((resolve) => server.close(() => resolve())),
+    vault,
+    stop: () => new Promise((resolve) => {
+      clearInterval(_gcInterval);
+      server.close(() => resolve());
+    }),
   };
 }
 
@@ -220,7 +233,7 @@ function mitmTunnel({ clientSocket, head, reqHost, reqPort, secureContextFor, re
   const inner = http.createServer(async (req, res) => {
     // Reconstruct full URL — req.url here is just the path.
     const target = { hostname: reqHost, port: reqPort, path: req.url, protocol: 'https:' };
-    return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort });
+    return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort, vault, tokenizePatterns: _tokenizePatterns });
   });
   inner.emit('connection', tlsServer);
   // ^ giving the http.Server our already-established TLS socket directly is
@@ -239,15 +252,25 @@ async function handleInterceptedHttpRequest(req, res, target, reporter, log, ups
   const bodyLen = body.raw ? body.raw.length : 0;
   const textLen = body.text ? body.text.length : 0;
   log?.info?.(`proxy: req ${req.method} ${target.hostname}${target.path} body=${bodyLen}B text=${textLen}B skip=${skipped}`);
+  let tokenizeMatches = null;
   if (!skipped) {
     const text = body.text;
     if (text) {
       const result = scan(text);
       // Only prefix-anchored secret patterns trigger a proxy-level block.
-      // The looser patterns (credit-card, us-ssn, jwt, ...) still fire at
-      // the user-input layers (hook, extension, clipboard). See PROXY_BLOCK_PATTERNS.
       const blockers = blockableMatches(result.matches || []);
-      if (blockers.length > 0) blockMatches = blockers;
+      if (blockers.length > 0) {
+        // Separate into blockable and tokenizable based on config
+        const tokenizeSet = hooks?.tokenizePatterns || new Set();
+        const realBlockers = [];
+        const realTokenizers = [];
+        for (const m of blockers) {
+          if (tokenizeSet.has(m.pattern)) realTokenizers.push(m);
+          else realBlockers.push(m);
+        }
+        if (realBlockers.length > 0) blockMatches = realBlockers;
+        if (realTokenizers.length > 0) tokenizeMatches = realTokenizers;
+      }
     }
   }
 
@@ -272,8 +295,84 @@ async function handleInterceptedHttpRequest(req, res, target, reporter, log, ups
     return res.end(blockBody);
   }
 
+  // ── Tokenization path ──────────────────────────────────────────────
+  // If matched patterns are configured for tokenization (not blocking),
+  // replace sensitive values with reversible tokens and forward.
+  let forwardBody = body.raw;
+  if (tokenizeMatches && body.text && hooks?.vault) {
+    const vault = hooks.vault;
+    const tokenizeSet = hooks.tokenizePatterns;
+    let tokenizedText = body.text;
+    let tokenCount = 0;
+    // Import scan patterns — reuse the classifier's regex catalog
+    const { matches: allMatches } = scan(body.text);
+    // We need to do regex replacement inline. Use the scan results to know
+    // which patterns matched, then re-run the regexes to replace values.
+    try {
+      // Dynamic import of PATTERNS is complex; use a simple approach:
+      // parse the JSON body and tokenize user message fields.
+      const json = JSON.parse(body.text);
+      const processStr = (str) => {
+        let result = str;
+        for (const m of tokenizeMatches) {
+          // Reconstruct the regex from classifier — match the pattern name
+          const regexes = {
+            'openai-api-key': /\b(sk-(?:proj-)?[A-Za-z0-9_-]{20,})\b/g,
+            'anthropic-api-key': /\b(sk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,})\b/g,
+            'google-api-key': /\b(AIza[0-9A-Za-z_-]{30,})\b/g,
+            'huggingface-token': /\b(hf_[A-Za-z0-9]{30,})\b/g,
+            'github-pat': /\b(gh[pousr]_[A-Za-z0-9]{30,})\b/g,
+            'gitlab-pat': /\b(glpat-[A-Za-z0-9_-]{20,})\b/g,
+            'aws-access-key': /\b(AKIA[0-9A-Z]{16})\b/g,
+            'slack-token': /\b(xox[abprs]-[A-Za-z0-9-]{10,})\b/g,
+            'cloudfuze-customer-id': /\bCF-CUST-[A-Z0-9]{6,}\b/g,
+          };
+          const rx = regexes[m.pattern];
+          if (!rx) continue;
+          rx.lastIndex = 0;
+          result = result.replace(rx, (match) => {
+            tokenCount++;
+            return vault.create(match, m.pattern);
+          });
+        }
+        return result;
+      };
+      // Walk common AI API structures
+      if (Array.isArray(json.messages)) {
+        for (const msg of json.messages) {
+          if (typeof msg.content === 'string') msg.content = processStr(msg.content);
+          if (Array.isArray(msg.content)) {
+            for (const block of msg.content) {
+              if (block && typeof block.text === 'string') block.text = processStr(block.text);
+            }
+          }
+        }
+      }
+      if (typeof json.prompt === 'string') json.prompt = processStr(json.prompt);
+
+      if (tokenCount > 0) {
+        tokenizedText = JSON.stringify(json);
+        forwardBody = Buffer.from(tokenizedText, 'utf8');
+        log?.info?.(`proxy: TOKENIZED ${target.hostname}${target.path} — ${tokenCount} values (${tokenizeMatches.map(m => m.pattern).join(', ')})`);
+        reporter?.enqueue?.({
+          kind: 'enforcement_tokenize',
+          blocked_for: 'prompt_submit',
+          service: target.hostname,
+          mechanism: 'proxy_tokenize',
+          content_length: body.text.length,
+          token_count: tokenCount,
+          matches: tokenizeMatches.map((m) => ({ pattern: m.pattern, class: m.class, severity: m.severity, count: m.count })),
+          highest_severity: highestSeverity(tokenizeMatches),
+        });
+      }
+    } catch (e) {
+      log?.warn?.(`proxy: tokenization parse error: ${e?.message}`);
+      // Fall through — forward original body
+    }
+  }
+
   // Forward to origin.
-  forwardHttpsToOrigin(req, res, target, body.raw, log, upstreamTlsOptions, { ...hooks, startedAt });
+  forwardHttpsToOrigin(req, res, target, forwardBody, log, upstreamTlsOptions, { ...hooks, startedAt, vault: hooks?.vault });
 }
 
 function forwardHttpsToOrigin(req, res, target, rawBody, log, upstreamTlsOptions, hooks = {}) {
@@ -299,7 +398,65 @@ function forwardHttpsToOrigin(req, res, target, rawBody, log, upstreamTlsOptions
     headers,
     ...(upstreamTlsOptions || {}),
   }, (originRes) => {
-    // Stream response back unmodified — preserves SSE for streaming AI responses.
+    // ── Response token restoration ─────────────────────────────────────
+    // If the vault has active tokens, scan the response for them and
+    // restore originals. For non-streaming responses we buffer, replace,
+    // and send. For SSE/streaming, tokens are rare in responses (LLMs
+    // echo placeholders verbatim) so we pass through and let the client-
+    // side (browser extension MutationObserver) handle restoration.
+    const responseVault = hooks?.vault;
+    const contentType = (originRes.headers?.['content-type'] || '');
+    const isStreaming = contentType.includes('text/event-stream') || contentType.includes('stream');
+
+    if (responseVault && responseVault.size > 0 && !isStreaming) {
+      // Buffer the non-streaming response, restore tokens, then send
+      const chunks = [];
+      originRes.on('data', (c) => chunks.push(c));
+      originRes.on('end', () => {
+        let responseBody = Buffer.concat(chunks);
+        try {
+          const text = responseBody.toString('utf8');
+          if (responseVault.hasTokens(text)) {
+            const restored = responseVault.restore(text);
+            responseBody = Buffer.from(restored, 'utf8');
+            log?.info?.(`proxy: restored tokens in response from ${target.hostname}`);
+          }
+        } catch {}
+        const resHeaders = { ...originRes.headers };
+        resHeaders['content-length'] = String(responseBody.length);
+        res.writeHead(originRes.statusCode || 502, resHeaders);
+        res.end(responseBody);
+      });
+
+      // Still tee for server-monitor hook if present
+      if (typeof hooks?.onApiCall === 'function') {
+        const RESP_CAP = 2 * 1024 * 1024;
+        const hookChunks = [];
+        let totalLen = 0;
+        let truncated = false;
+        originRes.on('data', (chunk) => {
+          if (totalLen < RESP_CAP) hookChunks.push(chunk.length > (RESP_CAP - totalLen) ? chunk.subarray(0, RESP_CAP - totalLen) : chunk);
+          else truncated = true;
+          totalLen += chunk.length;
+        });
+        originRes.on('end', () => {
+          try {
+            hooks.onApiCall({
+              host: target.hostname, path: target.path || '/', method: req.method,
+              requestHeaders: req.headers, requestBody: rawBody || Buffer.alloc(0),
+              responseStatus: originRes.statusCode || 0, responseHeaders: originRes.headers,
+              responseBody: Buffer.concat(hookChunks), responseTruncated: truncated,
+              startedAt: hooks.startedAt || Date.now(),
+              durationMs: Date.now() - (hooks.startedAt || Date.now()),
+              peerPort: hooks.peerPort || null,
+            });
+          } catch (e) { log?.warn?.(`proxy: onApiCall hook error: ${e?.message || e}`); }
+        });
+      }
+      return;
+    }
+
+    // No tokenization — stream response back unmodified (preserves SSE).
     res.writeHead(originRes.statusCode || 502, originRes.headers);
 
     // If a server-monitor hook is attached, tee the response body (capped) so
