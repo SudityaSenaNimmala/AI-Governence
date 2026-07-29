@@ -78,21 +78,25 @@ function CodeBlock({ code, label }) {
 }
 function CopyBtn({ text }) {
   const [copied, setCopied] = useState(false);
-  const handleCopy = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  };
   return (
-    <button type="button" onClick={handleCopy}
-      style={{ position: "absolute", top: 8, right: 8, background: copied ? "#22c55e" : "#475569", color: "#fff", border: "none", borderRadius: 4, padding: "4px 10px", fontSize: 11, fontWeight: 500, cursor: "pointer", transition: "all 0.15s", opacity: copied ? 1 : 0.8, transform: copied ? "scale(1.05)" : "scale(1)" }}
-      onMouseEnter={e => { if (!copied) e.target.style.opacity = "1"; }}
-      onMouseLeave={e => { if (!copied) e.target.style.opacity = "0.8"; }}>
-      {copied ? "✓ Copied" : "Copy"}
-    </button>
+    <svg onClick={() => {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;left:-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 3000);
+    }}
+    width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={copied ? "#22c55e" : "#94a3b8"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+    style={{ position: "absolute", top: 10, right: 10, cursor: "pointer", transition: "stroke 0.2s" }}>
+    {copied
+      ? <polyline points="20 6 9 17 4 12" />
+      : <><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></>
+    }
+    </svg>
   );
 }
 function Loading() { return <div className="aihub_loading"><RefreshCw size={18} className="aihub_spin"/> Loading...</div>; }
