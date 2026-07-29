@@ -27,6 +27,7 @@ REMOTE_MODE=false
 SERVICE_NAME="cloudfuze-monitor"
 ENROLL_TOKEN=""
 GOV_SERVER=""
+ALLOWED_IPS=""
 
 # ── Parse args ────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
