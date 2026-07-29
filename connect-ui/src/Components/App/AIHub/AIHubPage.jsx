@@ -52,6 +52,15 @@ function SanctionBadge({ status }) { const c={approved:"#22c55e",restricted:"#f5
 function SeverityBadge({ sev }) { const c={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e"}; return <Badge text={sev||"—"} color={c[sev]||"#9ca3af"}/>; }
 function Mono({ children }) { return <span className="aihub_text_mono">{children}</span>; }
 function Tag({ text, color="#6366f1" }) { return <span style={{display:"inline-block",padding:"1px 6px",borderRadius:4,fontSize:10,fontWeight:600,background:color+"14",color,marginRight:3,marginBottom:2}}>{text}</span>; }
+function CopyBtn({ text }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button onClick={() => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+      style={{ position: "absolute", top: 8, right: 8, background: copied ? "#22c55e" : "#334155", color: "#fff", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "background 0.2s", display: "flex", alignItems: "center", gap: 5 }}>
+      {copied ? <><span style={{fontSize:14}}>&#10003;</span> Copied!</> : <><span style={{fontSize:14}}>&#9776;</span> Copy</>}
+    </button>
+  );
+}
 function Loading() { return <div className="aihub_loading"><RefreshCw size={18} className="aihub_spin"/> Loading...</div>; }
 function Err({msg}) { return <div className="aihub_error"><AlertTriangle size={14}/> {msg}</div>; }
 function Empty({icon,title,msg}) { return <div className="aihub_empty">{icon}<h4>{title}</h4><p>{msg}</p></div>; }
@@ -679,7 +688,7 @@ function ServerMonitorView() {
             </div>
             <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 16, fontFamily: "ui-monospace, monospace", fontSize: 12, overflowX: "auto", position: "relative", marginBottom: 20 }}>
               <code>{installCmd || "Loading..."}</code>
-              {installCmd && <button onClick={() => { navigator.clipboard.writeText(installCmd); }} style={{ position: "absolute", top: 8, right: 8, background: "#334155", color: "#e2e8f0", border: "none", borderRadius: 4, padding: "4px 8px", fontSize: 11, cursor: "pointer" }}>Copy</button>}
+              {installCmd && <CopyBtn text={installCmd} />}
             </div>
 
             <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
