@@ -662,7 +662,7 @@ function ServerMonitorView() {
           <SectionHeader title="Connected Servers" hint="Servers running the CloudFuze server monitor" />
           <DataTable
             columns={[
-              { label: "Server ID", render: r => <Mono>{r.machine_id}</Mono> },
+              { label: "Server", render: r => <div><div className="aihub_text_primary">{r.display_name || r.machine_id}</div>{r.source_ip && r.source_ip !== '127.0.0.1' && <div className="aihub_text_muted" style={{fontSize:11}}>Remote: {r.source_ip}</div>}</div> },
               { label: "Status", render: r => <Badge text={r.status} color={r.status === "active" ? "#22c55e" : "#9ca3af"} /> },
               { label: "Last Seen", render: r => relTime(r.last_seen) },
               { label: "Calls", key: "total_calls", right: true },

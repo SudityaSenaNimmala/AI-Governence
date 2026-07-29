@@ -118,7 +118,7 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
       return res.end('Bad proxy request');
     }
     if (isIntercepted(target.hostname)) {
-      return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort: req.socket?.remotePort, vault, tokenizePatterns: _tokenizePatterns });
+      return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort: req.socket?.remotePort, peerAddress: req.socket?.remoteAddress, vault, tokenizePatterns: _tokenizePatterns });
     }
     return forwardPlainHttp(req, res, target);
   });
@@ -185,7 +185,7 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
     if (decision === 'bridge') {
       return bridgeRawTls(clientSocket, head, reqHost, reqPort, log);
     }
-    return mitmTunnel({ clientSocket, head, reqHost, reqPort, secureContextFor, reporter, log, upstreamTlsOptions, onApiCall, peerPort: clientSocket.remotePort });
+    return mitmTunnel({ clientSocket, head, reqHost, reqPort, secureContextFor, reporter, log, upstreamTlsOptions, onApiCall, peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress });
   });
 
   // --- Errors at the outer-server layer (rare; per-request errors are caught inline). ---
@@ -214,7 +214,7 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
 
 // ---- HTTPS MITM tunnel ----
 
-function mitmTunnel({ clientSocket, head, reqHost, reqPort, secureContextFor, reporter, log, upstreamTlsOptions, onApiCall, peerPort }) {
+function mitmTunnel({ clientSocket, head, reqHost, reqPort, secureContextFor, reporter, log, upstreamTlsOptions, onApiCall, peerPort, peerAddress }) {
   clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
 
   const tlsServer = new tls.TLSSocket(clientSocket, {
@@ -233,7 +233,7 @@ function mitmTunnel({ clientSocket, head, reqHost, reqPort, secureContextFor, re
   const inner = http.createServer(async (req, res) => {
     // Reconstruct full URL — req.url here is just the path.
     const target = { hostname: reqHost, port: reqPort, path: req.url, protocol: 'https:' };
-    return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort, vault, tokenizePatterns: _tokenizePatterns });
+    return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort, peerAddress, vault, tokenizePatterns: _tokenizePatterns });
   });
   inner.emit('connection', tlsServer);
   // ^ giving the http.Server our already-established TLS socket directly is
@@ -449,6 +449,7 @@ function forwardHttpsToOrigin(req, res, target, rawBody, log, upstreamTlsOptions
               startedAt: hooks.startedAt || Date.now(),
               durationMs: Date.now() - (hooks.startedAt || Date.now()),
               peerPort: hooks.peerPort || null,
+            peerAddress: hooks.peerAddress || null,
             });
           } catch (e) { log?.warn?.(`proxy: onApiCall hook error: ${e?.message || e}`); }
         });
@@ -491,6 +492,7 @@ function forwardHttpsToOrigin(req, res, target, rawBody, log, upstreamTlsOptions
             startedAt: hooks.startedAt || Date.now(),
             durationMs: Date.now() - (hooks.startedAt || Date.now()),
             peerPort: hooks.peerPort || null,
+            peerAddress: hooks.peerAddress || null,
           });
         } catch (e) {
           log?.warn?.(`proxy: onApiCall hook error: ${e?.message || e}`);

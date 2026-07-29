@@ -107,6 +107,7 @@ async function main() {
       response_truncated: ev.responseTruncated,
 
       attribution,
+      source_ip: ev.peerAddress || null,
     });
   };
 

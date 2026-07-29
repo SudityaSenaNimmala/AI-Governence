@@ -55,6 +55,7 @@ export function mountServerAgents(app, db) {
         cwd: attr.cwd ?? null,
         trigger_source: attr.trigger_source ?? null,
         parent_chain_json: attr.parent_chain ? JSON.stringify(attr.parent_chain) : null,
+        source_ip: e.source_ip ?? null,
         prompt_text: truncate(e.prompt_text, MAX_PROMPT_BYTES),
         response_text: truncate(e.response_text, MAX_RESPONSE_BYTES),
         response_truncated: e.response_truncated ? 1 : 0,
@@ -385,11 +386,13 @@ export function mountServerAgents(app, db) {
     }
   });
 
-  // Connected servers list
+  // Connected servers list — groups by source_ip (remote servers) or machine_id (local)
   app.get('/api/v1/monitor/servers', a(async (req, res) => {
     const machines = await db.collection('server_agent_calls').aggregate([
       { $group: {
-        _id: '$machine_id',
+        _id: { $ifNull: ['$source_ip', '$machine_id'] },
+        machine_id: { $first: '$machine_id' },
+        source_ip: { $first: '$source_ip' },
         last_seen: { $max: '$occurred_at' },
         total_calls: { $sum: 1 },
         total_cost_usd: { $sum: { $ifNull: ['$total_cost_usd', 0] } },
@@ -398,18 +401,19 @@ export function mountServerAgents(app, db) {
         models: { $addToSet: '$model' },
       }},
       { $project: {
-        _id: 0, machine_id: '$_id', last_seen: 1, total_calls: 1, total_cost_usd: 1,
-        users: 1, providers: 1, models: 1,
+        _id: 0, machine_id: 1, source_ip: 1, last_seen: 1, total_calls: 1,
+        total_cost_usd: 1, users: 1, providers: 1, models: 1,
       }},
       { $sort: { last_seen: -1 } },
     ]).toArray();
 
-    // Enrich with hostname from enrollment
     for (const m of machines) {
       m.users = (m.users || []).filter(Boolean);
       m.providers = (m.providers || []).filter(Boolean);
       m.models = (m.models || []).filter(Boolean);
       m.status = (new Date() - new Date(m.last_seen)) < 300000 ? 'active' : 'inactive';
+      // Display name: use source_ip for remote servers, machine_id for local
+      m.display_name = m.source_ip && m.source_ip !== '127.0.0.1' ? m.source_ip : m.machine_id;
     }
 
     res.json(machines);
