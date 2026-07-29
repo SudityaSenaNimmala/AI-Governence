@@ -374,16 +374,21 @@ export function mountServerAgents(app, db) {
     });
   }));
 
-  // Serve the install script
+  // Serve the install script — try multiple paths (dev vs deployed)
   app.get('/install-monitor.sh', async (req, res) => {
-    const { resolve } = await import('path');
+    const { resolve, dirname } = await import('path');
     const { existsSync } = await import('fs');
-    const scriptPath = resolve(process.cwd(), '..', 'scripts', 'install-monitor.sh');
-    if (existsSync(scriptPath)) {
-      res.type('text/plain').sendFile(scriptPath);
-    } else {
-      res.status(404).send('Install script not found');
+    const { fileURLToPath } = await import('url');
+    const candidates = [
+      resolve(process.cwd(), '..', 'scripts', 'install-monitor.sh'),
+      resolve(process.cwd(), 'scripts', 'install-monitor.sh'),
+      resolve(process.cwd(), '..', '..', 'scripts', 'install-monitor.sh'),
+      '/opt/ai-gov/scripts/install-monitor.sh',
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) return res.type('text/plain').sendFile(p);
     }
+    res.status(404).send('Install script not found. Tried: ' + candidates.join(', '));
   });
 
   // Connected servers list — groups by source_ip (remote servers) or machine_id (local)
