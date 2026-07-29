@@ -1010,7 +1010,7 @@
       : '';
     const tagsRow = (opts.matches && opts.matches.length)
       ? `<div class="cfai-block-tags">${opts.matches.map((m) =>
-          `<span class="cfai-tag cfai-${m.severity}">${escapeHtml(m.pattern)}${m.count > 1 ? ' &times;' + m.count : ''}</span>`
+          `<span class="cfai-tag cfai-${m.severity}"${m.class ? ' data-class="' + escapeHtml(m.class) + '"' : ''}>${escapeHtml(m.pattern)}${m.count > 1 ? ' &times;' + m.count : ''}</span>`
         ).join(' ')}</div>`
       : '';
     const hintRow = opts.hint
@@ -1189,11 +1189,23 @@
   function showBlockPopup(matches, promptEl) {
     if (document.querySelector('.cfai-block-modal')) return;
     const el = promptEl || findActivePromptInput() || findPromptInputs()[0];
+    // Pick title/body based on whether it's a guardrail or DLP violation
+    const hasGuardrail = matches.some(m => m.class === 'guardrail');
+    const hasDlp = matches.some(m => m.class !== 'guardrail');
+    let title, body;
+    if (hasGuardrail && !hasDlp) {
+      title = 'Unsafe prompt blocked';
+      body = 'CloudFuze AI Governance blocked this message because it contains a security or safety violation:';
+    } else if (hasGuardrail && hasDlp) {
+      title = "This prompt can't be sent";
+      body = 'CloudFuze AI Governance blocked this message — it contains sensitive data and a safety violation:';
+    } else {
+      title = "This prompt can't be sent";
+      body = 'CloudFuze AI Governance blocked this message because it contains sensitive data:';
+    }
     showCfaiPopup({
-      title: "This prompt can't be sent",
-      body:  'CloudFuze AI Governance blocked this message because it contains sensitive data:',
-      matches,
-      hint:  'Remove the sensitive information from your prompt to continue.',
+      title, body, matches,
+      hint: 'Remove the flagged content from your prompt to continue.',
       hardBlock: true,
       promptEl: el,
     });

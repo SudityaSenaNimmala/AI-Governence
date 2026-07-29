@@ -12,6 +12,7 @@
   'use strict';
 
   const SENSITIVE_PATTERNS = [
+    // DLP
     { name: 'us-ssn',            regex: /\b\d{3}-\d{2}-\d{4}\b/g },
     { name: 'credit-card',       regex: /\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[ -]?\d{4}[ -]?\d{4}[ -]?\d{1,4}\b/g },
     { name: 'openai-api-key',    regex: /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/g },
@@ -21,6 +22,23 @@
     { name: 'github-pat',        regex: /\bgh[pousr]_[A-Za-z0-9]{30,}\b/g },
     { name: 'slack-token',        regex: /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g },
     { name: 'iban',              regex: /\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b/g },
+    // Guardrails — prompt injection + jailbreak + toxicity (network safety net)
+    { name: 'injection-ignore-instructions', regex: /(ignore|forget|disregard|override|skip|drop|abandon|do\s+not\s+follow)\s+(all\s+|any\s+|every\s+)?(previous|prior|above|earlier|system|original|initial|given|existing|preset|default|my|your)\s+(instructions|prompts?|rules|guidelines|directives|constraints|programming|training)/i },
+    { name: 'injection-override-safety',     regex: /\b(override\s+(your\s+|the\s+)?(safety|filters?|restrictions?|guardrails?|moderation|content\s+(policy|filter))|disable\s+(your\s+|the\s+)?(safety|filters?|content\s+filter|moderation)|bypass\s+(your\s+|the\s+)?(security|restrictions?|guardrails?|content\s+policy|filters?|safety|moderation)|turn\s+off\s+(your\s+|the\s+)?(safety|filters?|restrictions?|moderation|guardrails?|content\s+filter)|drop\s+(all\s+)?(your\s+)?(safety|filters?|restrictions?|guardrails?|guidelines?))\b/i },
+    { name: 'injection-new-identity',        regex: /(you\s+are\s+now|from\s+now\s+(on\s+)?you\s+are|I\s+want\s+you\s+to\s+be|act\s+like\s+you\s+are|pretend\s+you\s+are|you\s+are)\s+(a\s+|an\s+)?(different|new|unrestricted|uncensored|unfiltered|evil|malicious|rogue|unethical|amoral|dark|villainous|corrupt|sinister)/i },
+    { name: 'injection-no-restrictions',     regex: /(without|with\s+no|dont\s+have|don'?t\s+have|have\s+no|no|free\s+from|remove\s+all|drop\s+all|zero)\s+(any\s+)?(restrictions?|filters?|limits?|limitations?|boundaries|constraints|rules|guidelines|guardrails?|safety|ethics|morals)/i },
+    { name: 'injection-extract-system',      regex: /(output|print|show|display|reveal|repeat|leak|share|give|provide|tell|explain|describe|copy|paste|dump|what\s+(is|are))\s+(me\s+)?(your|the)\s+(system\s+prompt|system\s+instructions|instructions|initial\s+prompt|hidden\s+prompt|original\s+instructions|internal\s+rules|source\s+code|training\s+data)/i },
+    { name: 'injection-roleplay-dangerous',  regex: /\b(act|behave|respond|operate|pretend\s+to\s+be|you\s+are)\s+(as\s+|like\s+)?(a\s+|an\s+)?(hacker|criminal|terrorist|drug\s+dealer|assassin|hitman|serial\s+killer|thief|scammer|fraudster|bomb\s+maker)\b/i },
+    { name: 'jailbreak-dan',                 regex: /\b(do\s+anything\s+now|D[\s.-]*A[\s.-]*N\s+mode|D[\s.-]*A[\s.-]*N\b)/i },
+    { name: 'jailbreak-developer-mode',      regex: /\b(enable|activate|enter|unlock|switch\s+to|turn\s+on)\s+(your\s+)?(developer\s+mode|dev\s+mode|god\s+mode|sudo\s+mode|admin\s+mode)\b/i },
+    { name: 'jailbreak-no-ethics',           regex: /\b(without|no|ignore|disable|remove|drop|abandon|suspend|free\s+from)\s+(any\s+)?(ethical|moral|safety|content)?\s*(ethics|morals|morality|guidelines|constraints|restrictions|rules|filters|boundaries|limits|policies|standards|principles)/i },
+    { name: 'jailbreak-fiction-excuse',      regex: /\b(this\s+is\s+(just\s+|only\s+)?(a\s+)?(fiction|hypothetical|thought\s+experiment|dream|fantasy|game|joke|test|scenario|simulation|story)|for\s+(research|educational|academic|creative\s+writing|a\s+novel|a\s+story|a\s+movie|science|testing)\s+(purposes?|only|reasons?)?)\b/i },
+    { name: 'jailbreak-keyword',             regex: /\b(jailbreak|jailbroken)\s+(this|the|you|your|it|chatgpt|gpt|claude|gemini|copilot|ai|model|llm|chatbot)\b|\b(uncensored\s+mode|unrestricted\s+mode|unfiltered\s+mode|unlocked\s+mode|unhinged\s+mode|chaos\s+mode|evil\s+mode)\b/i },
+    { name: 'jailbreak-lets-go-crazy',       regex: /\b(let'?s?\s+go\s+crazy|go\s+wild|go\s+nuts|anything\s+goes|no\s+holds?\s+barr?ed|gloves?\s+(are\s+)?off)\b/i },
+    { name: 'toxicity-hate-request',         regex: /\b(write|generate|create|compose|draft|make|give\s+me|produce)\s+(a\s+|an\s+|me\s+a\s+|me\s+an\s+)?(hateful|racist|sexist|homophobic|antisemitic|islamophobic|xenophobic|violent|threatening|abusive|derogatory|discriminatory|offensive|bigoted|hate)\s+(rant|message|letter|speech|post|comment|text|essay|article|joke|poem|story|song|script|content)\b/i },
+    { name: 'toxicity-harm-instructions',    regex: /\b(how\s+(to|can\s+I|do\s+(I|you|we))|steps\s+to|guide\s+(to|for|on)|teach\s+me\s+(to|how)|ways?\s+to)\s+(make\s+(a\s+)?bombs?|make\s+(a\s+)?drugs?|make\s+(a\s+)?weapons?|make\s+(a\s+)?poison|make\s+(a\s+)?explosives?|make\s+(a\s+)?guns?|build\s+(a\s+)?weapons?|create\s+poison|hack\s+into|break\s+into|kill\s+(a\s+person|someone|people|myself)|manufacture\s+(drugs|explosives|weapons|meth|fentanyl))/i },
+    { name: 'toxicity-explicit-content',     regex: /\b(generate|write|create|produce|give|make|compose|describe|show|send)\s+(me\s+)?(some\s+)?(explicit|pornographic|nsfw|sexual|sexually\s+explicit|erotic|adult|xxx|nude|naked)\s+(content|story|stories|text|images?|fiction|stuff|things?|pics?|material)\b/i },
+    { name: 'toxicity-self-harm',            regex: /\b(how\s+(to|can\s+I|do\s+I|could\s+I)\s+(commit\s+suicide|hurt\s+myself|self[\s-]?harm|end\s+my\s+life|kill\s+myself|harm\s+myself)|best\s+way\s+to\s+(die|kill\s+myself|end\s+it|commit\s+suicide))\b/i },
   ];
 
   function scanText(text) {

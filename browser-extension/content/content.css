@@ -38,6 +38,9 @@
 .cfai-high     { background: #fee2e2; color: #991b1b; }
 .cfai-critical { background: #7f1d1d; color: #fff; font-weight: 600; }
 
+/* Guardrail-specific tag colors */
+.cfai-tag[data-class="guardrail"] { background: #f97316; color: #fff; font-weight: 600; }
+
 @keyframes cfai-slide-in {
   from { transform: translateY(20px); opacity: 0; }
   to   { transform: translateY(0);    opacity: 1; }
