@@ -380,10 +380,11 @@ export function mountServerAgents(app, db) {
     const { existsSync } = await import('fs');
     const { fileURLToPath } = await import('url');
     const candidates = [
-      resolve(process.cwd(), '..', 'scripts', 'install-monitor.sh'),
+      resolve(process.cwd(), '..', 'scripts', 'install-monitor.sh'),  // Docker: /app/server → /app/scripts
       resolve(process.cwd(), 'scripts', 'install-monitor.sh'),
-      resolve(process.cwd(), '..', '..', 'scripts', 'install-monitor.sh'),
-      '/opt/ai-gov/scripts/install-monitor.sh',
+      resolve(process.cwd(), '..', '..', 'scripts', 'install-monitor.sh'),  // dev: server/ → ../../scripts
+      '/opt/ai-gov/scripts/install-monitor.sh',                        // bare deploy
+      '/app/scripts/install-monitor.sh',                                // Docker absolute
     ];
     for (const p of candidates) {
       if (existsSync(p)) return res.type('text/plain').sendFile(p);

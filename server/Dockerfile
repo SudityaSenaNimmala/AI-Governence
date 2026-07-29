@@ -20,6 +20,7 @@ COPY --from=builder /build/server/node_modules /app/server/node_modules
 COPY server/src /app/server/src
 COPY server/package.json /app/server/
 COPY server/tsconfig.json /app/server/
+COPY scripts /app/scripts
 WORKDIR /app/server
 ENV NODE_ENV=production
 EXPOSE 3001

@@ -580,10 +580,15 @@ function ServerMonitorView() {
 
   useEffect(() => {
     if (tab === "setup" && !installCmd) {
+      // Use the API server URL for the install command, not the dashboard URL.
+      // In production the API runs on port 8787, dashboard on 3000.
+      const apiOrigin = window.location.port === "3000"
+        ? window.location.origin.replace(":3000", ":8787")
+        : window.location.origin;
       fetch(`${API}/monitor/generate-token`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ serverUrl: window.location.origin }),
+        body: JSON.stringify({ serverUrl: apiOrigin }),
       }).then(r => r.json()).then(d => setInstallCmd(d.install_command || "")).catch(() => {});
     }
   }, [tab]);
