@@ -521,6 +521,7 @@ function ServerMonitorView() {
   const [selectedTrace, setSelectedTrace] = useState(null);
   const [traceDetail, setTraceDetail] = useState(null);
   const [installCmd, setInstallCmd] = useState("");
+  const [installMode, setInstallMode] = useState("local");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -677,25 +678,44 @@ function ServerMonitorView() {
 
       {tab === "setup" && (
         <div>
-          <SectionHeader title="Install Server Monitor" hint="Run this command on any Linux server to start monitoring AI agent activity" />
+          <SectionHeader title="Install Server Monitor" hint="Choose how you want to monitor AI agent activity" />
+
+          {/* Mode selector */}
+          <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+            {[{id:"local",label:"Install on Server",desc:"Monitor runs directly on the AI server"},{id:"remote",label:"Remote Monitor",desc:"Monitor runs on a separate box, no install on production server"}].map(m => (
+              <div key={m.id} onClick={() => setInstallMode?.(m.id)} style={{ flex: 1, padding: 16, border: "1px solid " + (installMode === m.id ? "#2563eb" : "#e5e7eb"), borderRadius: 10, cursor: "pointer", background: installMode === m.id ? "#eff6ff" : "#fff" }}>
+                <div style={{ fontWeight: 600, fontSize: 14, color: installMode === m.id ? "#2563eb" : "#374151" }}>{m.label}</div>
+                <div className="aihub_text_muted" style={{ fontSize: 12 }}>{m.desc}</div>
+              </div>
+            ))}
+          </div>
+
           <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 24 }}>
             <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
               <div style={{ width: 32, height: 32, borderRadius: "50%", background: "#dbeafe", color: "#2563eb", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>1</div>
               <div>
-                <div style={{ fontWeight: 600, fontSize: 14 }}>Run this command on your server</div>
-                <div className="aihub_text_muted" style={{ fontSize: 12 }}>Requires sudo access. Installs the monitor, configures system proxy, and starts the service.</div>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{installMode === "remote" ? "Run this on a separate monitoring machine" : "Run this command on your server"}</div>
+                <div className="aihub_text_muted" style={{ fontSize: 12 }}>{installMode === "remote" ? "Installs the monitor on this machine. No changes to your production server." : "Requires sudo access. Installs the monitor, configures system proxy, and starts the service."}</div>
               </div>
             </div>
-            <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 16, fontFamily: "ui-monospace, monospace", fontSize: 12, overflowX: "auto", position: "relative", marginBottom: 20 }}>
-              <code>{installCmd || "Loading..."}</code>
-              {installCmd && <CopyBtn text={installCmd} />}
+            <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 16, fontFamily: "ui-monospace, monospace", fontSize: 12, overflowX: "auto", position: "relative", marginBottom: 20, lineHeight: 1.6 }}>
+              <code>{installCmd ? (installCmd + (installMode === "remote" ? " --remote" : "")) : "Loading..."}</code>
+              {installCmd && <CopyBtn text={installCmd + (installMode === "remote" ? " --remote" : "")} />}
             </div>
 
             <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
               <div style={{ width: 32, height: 32, borderRadius: "50%", background: "#dcfce7", color: "#16a34a", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>2</div>
               <div>
-                <div style={{ fontWeight: 600, fontSize: 14 }}>That's it</div>
-                <div className="aihub_text_muted" style={{ fontSize: 12 }}>The monitor automatically intercepts all AI API calls (OpenAI, Anthropic, Google, AWS) from every process on the server. No code changes needed.</div>
+                {installMode === "remote" ? (<>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>Point your production server to the monitor</div>
+                  <div className="aihub_text_muted" style={{ fontSize: 12, marginBottom: 8 }}>On each production server, set one environment variable. Nothing else installed.</div>
+                  <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 12, fontFamily: "ui-monospace, monospace", fontSize: 12 }}>
+                    <code>export HTTPS_PROXY=http://&lt;monitor-machine-ip&gt;:8443</code>
+                  </div>
+                </>) : (<>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>That's it</div>
+                  <div className="aihub_text_muted" style={{ fontSize: 12 }}>The monitor automatically intercepts all AI API calls (OpenAI, Anthropic, Google, AWS) from every process on the server. No code changes needed.</div>
+                </>)}
               </div>
             </div>
 

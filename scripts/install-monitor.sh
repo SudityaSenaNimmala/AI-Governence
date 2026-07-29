@@ -23,6 +23,7 @@ INSTALL_DIR="/opt/cloudfuze-monitor"
 DATA_DIR="/etc/cloudfuze"
 PROXY_PORT=8443
 PROXY_HOST="127.0.0.1"
+REMOTE_MODE=false
 SERVICE_NAME="cloudfuze-monitor"
 ENROLL_TOKEN=""
 GOV_SERVER=""
@@ -33,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     --token)   ENROLL_TOKEN="$2"; shift 2;;
     --server)  GOV_SERVER="$2"; shift 2;;
     --port)    PROXY_PORT="$2"; shift 2;;
+    --remote)  REMOTE_MODE=true; PROXY_HOST="0.0.0.0"; shift;;
     uninstall) exec "$0" --do-uninstall; exit;;
     --do-uninstall)
       echo "Uninstalling CloudFuze Server Monitor..."
@@ -143,18 +145,17 @@ echo "[4/7] Installing CA into system trust store..."
 # For now, create a post-start hook
 
 # ── Set HTTPS_PROXY system-wide ───────────────────────────────────────────
-echo "[5/7] Configuring system-wide HTTPS proxy..."
-# Remove any existing cloudfuze proxy config
-sed -i '/cloudfuze-monitor/d' /etc/environment 2>/dev/null || true
-sed -i '/HTTPS_PROXY.*'"$PROXY_PORT"'/d' /etc/environment 2>/dev/null || true
-
-# Add proxy config
-echo "# cloudfuze-monitor — AI API governance proxy" >> /etc/environment
-echo "HTTPS_PROXY=http://${PROXY_HOST}:${PROXY_PORT}" >> /etc/environment
-echo "https_proxy=http://${PROXY_HOST}:${PROXY_PORT}" >> /etc/environment
-
-# Also export for current session
-export HTTPS_PROXY="http://${PROXY_HOST}:${PROXY_PORT}"
+if [[ "$REMOTE_MODE" == "true" ]]; then
+  echo "[5/7] Remote mode — skipping system proxy config (set HTTPS_PROXY on target servers instead)"
+else
+  echo "[5/7] Configuring system-wide HTTPS proxy..."
+  sed -i '/cloudfuze-monitor/d' /etc/environment 2>/dev/null || true
+  sed -i '/HTTPS_PROXY.*'"$PROXY_PORT"'/d' /etc/environment 2>/dev/null || true
+  echo "# cloudfuze-monitor — AI API governance proxy" >> /etc/environment
+  echo "HTTPS_PROXY=http://${PROXY_HOST}:${PROXY_PORT}" >> /etc/environment
+  echo "https_proxy=http://${PROXY_HOST}:${PROXY_PORT}" >> /etc/environment
+  export HTTPS_PROXY="http://${PROXY_HOST}:${PROXY_PORT}"
+fi
 
 # ── Create systemd service ────────────────────────────────────────────────
 echo "[6/7] Creating systemd service..."
@@ -215,17 +216,28 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
   MACHINE_ID=$(cat "$DATA_DIR/monitor-token.json" 2>/dev/null | grep -o '"machineId":"[^"]*"' | cut -d'"' -f4 || echo "unknown")
   SERVER_ID="srv-$(echo "$MACHINE_ID" | head -c 8)"
 
+  MONITOR_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "$PROXY_HOST")
   echo ""
   echo "  ╔══════════════════════════════════════════════════════════╗"
   echo "  ║   CloudFuze Server Monitor — Installed Successfully!    ║"
   echo "  ╠══════════════════════════════════════════════════════════╣"
   echo "  ║                                                        ║"
-  echo "  ║   Server ID:   $SERVER_ID                              ║"
-  echo "  ║   Status:      Active                                  ║"
-  echo "  ║   Proxy:       $PROXY_HOST:$PROXY_PORT                 ║"
-  echo "  ║   Instance:    $GOV_SERVER                             ║"
+  echo "  ║   Server ID:   $SERVER_ID"
+  echo "  ║   Status:      Active"
+  echo "  ║   Proxy:       $PROXY_HOST:$PROXY_PORT"
+  echo "  ║   Instance:    $GOV_SERVER"
   echo "  ║                                                        ║"
+  if [[ "$REMOTE_MODE" == "true" ]]; then
+  echo "  ║   REMOTE MODE — monitoring remote servers              ║"
+  echo "  ║                                                        ║"
+  echo "  ║   On each server you want to monitor, run:             ║"
+  echo "  ║     export HTTPS_PROXY=http://${MONITOR_IP}:${PROXY_PORT}"
+  echo "  ║                                                        ║"
+  echo "  ║   That's it. One env var, nothing else installed.      ║"
+  else
   echo "  ║   All AI API calls from this server are now monitored. ║"
+  fi
+  echo "  ║                                                        ║"
   echo "  ║   View traces: Dashboard → AI Hub → Server Monitor     ║"
   echo "  ║                                                        ║"
   echo "  ║   Commands:                                            ║"
