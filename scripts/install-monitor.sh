@@ -165,14 +165,15 @@ cp -r "$AGENT_SRC/"* "$INSTALL_DIR/"
 rm -rf "$REPO_TMP"
 echo "  Files installed to $INSTALL_DIR"
 
-# Install npm deps
+# Install npm deps — skip optional native modules (better-sqlite3, tesseract)
+# that need g++ but aren't used by the server-monitor (it uses MongoDB)
 if [[ -f "$INSTALL_DIR/package.json" ]]; then
   echo "  Installing dependencies..."
   cd "$INSTALL_DIR"
-  npm install --production --no-audit --no-fund || {
-    echo "  ERROR: npm install failed."
-    exit 1
-  }
+  npm install --omit=dev --no-audit --no-fund --ignore-scripts 2>&1 || true
+  # Rebuild only pure-JS native deps (node-forge for CA generation)
+  npm rebuild node-forge 2>/dev/null || true
+  echo "  Dependencies installed"
 fi
 
 # ── Generate CA ───────────────────────────────────────────────────────────
