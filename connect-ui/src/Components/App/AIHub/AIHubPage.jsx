@@ -52,6 +52,30 @@ function SanctionBadge({ status }) { const c={approved:"#22c55e",restricted:"#f5
 function SeverityBadge({ sev }) { const c={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e"}; return <Badge text={sev||"—"} color={c[sev]||"#9ca3af"}/>; }
 function Mono({ children }) { return <span className="aihub_text_mono">{children}</span>; }
 function Tag({ text, color="#6366f1" }) { return <span style={{display:"inline-block",padding:"1px 6px",borderRadius:4,fontSize:10,fontWeight:600,background:color+"14",color,marginRight:3,marginBottom:2}}>{text}</span>; }
+function Step({ n, title, hint, children }) {
+  return (
+    <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+      <div style={{ width: 32, height: 32, minWidth: 32, borderRadius: "50%", background: n <= 2 ? "#dbeafe" : n <= 3 ? "#e0e7ff" : "#dcfce7", color: n <= 2 ? "#2563eb" : n <= 3 ? "#4338ca" : "#16a34a", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>{n}</div>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>{title}</div>
+        <div className="aihub_text_muted" style={{ fontSize: 12, lineHeight: 1.5 }}>{hint}</div>
+        {children && <div style={{ marginTop: 10 }}>{children}</div>}
+      </div>
+    </div>
+  );
+}
+function CodeBlock({ code, label }) {
+  if (!code) return <div style={{ background: "#1e293b", borderRadius: 8, padding: 16, color: "#94a3b8", fontSize: 12 }}>Loading...</div>;
+  return (
+    <div>
+      <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 16, fontFamily: "ui-monospace, monospace", fontSize: 12, overflowX: "auto", position: "relative", lineHeight: 1.6, wordBreak: "break-all" }}>
+        <code>{code}</code>
+        <CopyBtn text={code} />
+      </div>
+      {label && <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 4 }}>{label}</div>}
+    </div>
+  );
+}
 function CopyBtn({ text }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -678,61 +702,73 @@ function ServerMonitorView() {
 
       {tab === "setup" && (
         <div>
-          <SectionHeader title="Install Server Monitor" hint="Choose how you want to monitor AI agent activity" />
+          <SectionHeader title="Install Server Monitor" hint="Choose your deployment mode and follow the steps" />
 
           {/* Mode selector */}
           <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
-            {[{id:"local",label:"Install on Server",desc:"Monitor runs directly on the AI server"},{id:"remote",label:"Remote Monitor",desc:"Monitor runs on a separate box, no install on production server"}].map(m => (
-              <div key={m.id} onClick={() => setInstallMode?.(m.id)} style={{ flex: 1, padding: 16, border: "1px solid " + (installMode === m.id ? "#2563eb" : "#e5e7eb"), borderRadius: 10, cursor: "pointer", background: installMode === m.id ? "#eff6ff" : "#fff" }}>
+            {[
+              { id: "local", label: "Direct Install", desc: "Monitor runs on the same server as your AI agents. Simplest setup." },
+              { id: "remote", label: "Remote Monitor (Recommended)", desc: "Monitor runs on a separate machine. Nothing installed on production servers." },
+            ].map(m => (
+              <div key={m.id} onClick={() => setInstallMode(m.id)} style={{ flex: 1, padding: 16, border: "2px solid " + (installMode === m.id ? "#2563eb" : "#e5e7eb"), borderRadius: 10, cursor: "pointer", background: installMode === m.id ? "#eff6ff" : "#fff" }}>
                 <div style={{ fontWeight: 600, fontSize: 14, color: installMode === m.id ? "#2563eb" : "#374151" }}>{m.label}</div>
-                <div className="aihub_text_muted" style={{ fontSize: 12 }}>{m.desc}</div>
+                <div className="aihub_text_muted" style={{ fontSize: 12, marginTop: 4 }}>{m.desc}</div>
               </div>
             ))}
           </div>
 
+          {/* Steps */}
           <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 24 }}>
-            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-              <div style={{ width: 32, height: 32, borderRadius: "50%", background: "#dbeafe", color: "#2563eb", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>1</div>
-              <div>
-                <div style={{ fontWeight: 600, fontSize: 14 }}>{installMode === "remote" ? "Run this on a separate monitoring machine" : "Run this command on your server"}</div>
-                <div className="aihub_text_muted" style={{ fontSize: 12 }}>{installMode === "remote" ? "Installs the monitor on this machine. No changes to your production server." : "Requires sudo access. Installs the monitor, configures system proxy, and starts the service."}</div>
-              </div>
-            </div>
-            <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 16, fontFamily: "ui-monospace, monospace", fontSize: 12, overflowX: "auto", position: "relative", marginBottom: 20, lineHeight: 1.6 }}>
-              <code>{installCmd ? (installCmd + (installMode === "remote" ? " --remote" : "")) : "Loading..."}</code>
-              {installCmd && <CopyBtn text={installCmd + (installMode === "remote" ? " --remote" : "")} />}
-            </div>
 
-            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-              <div style={{ width: 32, height: 32, borderRadius: "50%", background: "#dcfce7", color: "#16a34a", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>2</div>
-              <div>
-                {installMode === "remote" ? (<>
-                  <div style={{ fontWeight: 600, fontSize: 14 }}>Point your production server to the monitor</div>
-                  <div className="aihub_text_muted" style={{ fontSize: 12, marginBottom: 8 }}>On each production server, set one environment variable. Nothing else installed.</div>
-                  <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 12, fontFamily: "ui-monospace, monospace", fontSize: 12 }}>
-                    <code>export HTTPS_PROXY=http://&lt;monitor-machine-ip&gt;:8443</code>
-                  </div>
-                </>) : (<>
-                  <div style={{ fontWeight: 600, fontSize: 14 }}>That's it</div>
-                  <div className="aihub_text_muted" style={{ fontSize: 12 }}>The monitor automatically intercepts all AI API calls (OpenAI, Anthropic, Google, AWS) from every process on the server. No code changes needed.</div>
-                </>)}
-              </div>
-            </div>
+            {installMode === "local" ? (<>
+              {/* LOCAL MODE — 2 steps */}
+              <Step n={1} title="Run this command on your AI server" hint="Requires sudo. Installs the monitor, configures proxy, installs CA, and starts the service automatically.">
+                <CodeBlock code={installCmd} />
+              </Step>
+              <Step n={2} title="Done — traces appear automatically" hint="All AI API calls (OpenAI, Anthropic, Google, AWS Bedrock) from every process on this server are now captured. No code changes needed. Come back to the Traces tab to see live data." />
+            </>) : (<>
+              {/* REMOTE MODE — 4 steps */}
+              <Step n={1} title="Choose a monitoring machine" hint="This can be any Linux server in your network — a utility box, a jump server, or a lightweight VM. It does NOT need to be your production server." />
 
-            <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 14, marginTop: 16 }}>
-              <div style={{ fontWeight: 600, fontSize: 13, color: "#166534", marginBottom: 6 }}>What gets captured:</div>
+              <Step n={2} title="Run this command on the monitoring machine" hint="Installs the monitor with remote mode enabled. It will ask you which production server IPs are allowed to connect (for security).">
+                <CodeBlock code={installCmd ? installCmd + " --remote" : ""} />
+                <div style={{ background: "#fefce8", border: "1px solid #fde68a", borderRadius: 6, padding: 10, marginTop: 10, fontSize: 12, color: "#854d0e" }}>
+                  The installer will prompt: <strong>"Enter allowed IP addresses"</strong> — enter the IPs of your production servers (comma-separated). Only these IPs will be able to connect. All others are blocked by firewall.
+                </div>
+              </Step>
+
+              <Step n={3} title="On each production server, set one environment variable" hint="This tells the server to route AI API traffic through the monitor. Nothing is installed on the production server — just one env var.">
+                <CodeBlock code="export HTTPS_PROXY=http://<monitor-machine-ip>:8443" label="Replace <monitor-machine-ip> with the actual IP of the machine from Step 2" />
+                <div style={{ fontSize: 12, color: "#6b7280", marginTop: 8, lineHeight: 1.6 }}>
+                  To make it permanent (survives reboot), add it to <code style={{ background: "#f1f5f9", padding: "1px 4px", borderRadius: 3 }}>/etc/environment</code>:
+                </div>
+                <CodeBlock code={'echo \'HTTPS_PROXY=http://<monitor-machine-ip>:8443\' | sudo tee -a /etc/environment'} />
+              </Step>
+
+              <Step n={4} title="Done — all servers appear in the dashboard" hint="Each production server shows separately in the Servers tab (identified by IP). The monitor machine itself is also tracked. Come back to the Traces tab to see live execution data from all connected servers." />
+            </>)}
+
+            {/* What gets captured */}
+            <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 14, marginTop: 20 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "#166534", marginBottom: 6 }}>What gets captured from every server:</div>
               <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: "#166534", lineHeight: 1.8 }}>
-                <li>Every LLM API call — model, tokens, cost, prompt, response</li>
-                <li>Who made the call — user, process, command line, working directory</li>
+                <li>Every LLM API call — provider, model, tokens, cost, full prompt and response</li>
+                <li>Who made the call — user, process name, command line, working directory</li>
                 <li>How it was triggered — SSH session, cron job, CI pipeline, systemd service</li>
-                <li>Timing — duration, latency, errors</li>
+                <li>Timing — start time, duration, latency, HTTP status, errors</li>
+                <li>Source server — IP address of the server that made the call</li>
               </ul>
             </div>
 
-            <div style={{ background: "#fefce8", border: "1px solid #fde68a", borderRadius: 8, padding: 14, marginTop: 12 }}>
-              <div style={{ fontWeight: 600, fontSize: 13, color: "#854d0e", marginBottom: 6 }}>To uninstall:</div>
-              <code style={{ fontSize: 12, color: "#854d0e" }}>sudo cloudfuze-monitor uninstall</code>
-              <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 4 }}>Removes everything cleanly — service, CA, proxy config, all files.</div>
+            {/* Management commands */}
+            <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: 14, marginTop: 12 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "#334155", marginBottom: 8 }}>Management commands (run on the monitor machine):</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: 12 }}>
+                <code style={{ color: "#2563eb" }}>cloudfuze-monitor status</code><span className="aihub_text_muted">Check if the service is running</span>
+                <code style={{ color: "#2563eb" }}>cloudfuze-monitor logs</code><span className="aihub_text_muted">View live logs (Ctrl+C to stop)</span>
+                <code style={{ color: "#2563eb" }}>cloudfuze-monitor restart</code><span className="aihub_text_muted">Restart the monitor service</span>
+                <code style={{ color: "#2563eb" }}>cloudfuze-monitor uninstall</code><span className="aihub_text_muted">Remove everything cleanly</span>
+              </div>
             </div>
           </div>
         </div>
