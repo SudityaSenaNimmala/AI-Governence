@@ -146,11 +146,16 @@ if ! git clone --depth 1 https://github.com/SudityaSenaNimmala/AI-Governence.git
   exit 1
 fi
 
-# The agent code lives under "agent team/agent/" in the repo
-AGENT_SRC="$REPO_TMP/repo/agent team/agent"
-if [[ ! -d "$AGENT_SRC/src/server-monitor" ]]; then
+# Find the agent directory — could be at root or under "agent team/"
+AGENT_SRC=""
+for candidate in "$REPO_TMP/repo/agent" "$REPO_TMP/repo/agent team/agent"; do
+  if [[ -d "$candidate/src/server-monitor" ]]; then
+    AGENT_SRC="$candidate"
+    break
+  fi
+done
+if [[ -z "$AGENT_SRC" ]]; then
   echo "  ERROR: server-monitor not found in cloned repo."
-  echo "  Looked in: $AGENT_SRC/src/server-monitor"
   ls -la "$REPO_TMP/repo/" 2>/dev/null || true
   rm -rf "$REPO_TMP"
   exit 1
