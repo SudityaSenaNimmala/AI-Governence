@@ -240,6 +240,233 @@ export function mountServerAgents(app, db) {
 
     res.json({ totals, byUser, byProvider, byModel, byTrigger });
   }));
+
+  // ── Traces — group calls into execution traces ─────────────────────────
+  // Groups individual server_agent_calls into traces by:
+  //   same machine_id + same pid + calls within 30s of each other
+  // Returns aggregated trace summaries.
+
+  app.get('/api/v1/traces/stats', a(async (req, res) => {
+    const now = new Date();
+    const dayAgo = new Date(now.getTime() - 86400000);
+
+    const [totalCalls, recentCalls, machines] = await Promise.all([
+      db.collection('server_agent_calls').countDocuments(),
+      db.collection('server_agent_calls').countDocuments({
+        occurred_at: { $gte: dayAgo.toISOString() },
+      }),
+      db.collection('server_agent_calls').distinct('machine_id'),
+    ]);
+
+    const costAgg = await db.collection('server_agent_calls').aggregate([
+      { $group: { _id: null, total: { $sum: { $ifNull: ['$total_cost_usd', 0] } } } },
+    ]).toArray();
+
+    res.json({
+      total_calls: totalCalls,
+      calls_last_24h: recentCalls,
+      connected_servers: machines.filter(Boolean).length,
+      total_cost_usd: costAgg[0]?.total || 0,
+    });
+  }));
+
+  app.get('/api/v1/traces', a(async (req, res) => {
+    const { user, provider, model, machineId, limit = 50 } = req.query;
+    const filter = {};
+    if (user)      filter.user = user;
+    if (provider)  filter.provider = provider;
+    if (model)     filter.model = model;
+    if (machineId) filter.machine_id = machineId;
+    const lim = Math.min(Number(limit) || 50, 200);
+
+    // Get recent calls sorted by time
+    const calls = await db.collection('server_agent_calls')
+      .find(filter)
+      .sort({ occurred_at: -1 })
+      .limit(lim * 20) // fetch more than needed, then group
+      .project({
+        _id: 0, id: 1, machine_id: 1, occurred_at: 1, duration_ms: 1,
+        response_status: 1, provider: 1, model: 1,
+        prompt_tokens: 1, completion_tokens: 1, total_cost_usd: 1,
+        pid: 1, user: 1, cmdline: 1, cwd: 1, trigger_source: 1,
+      })
+      .toArray();
+
+    // Group into traces: same machine_id + pid, within 30s gap
+    const traces = groupIntoTraces(calls, 30000);
+    res.json(traces.slice(0, lim));
+  }));
+
+  app.get('/api/v1/traces/:traceId', a(async (req, res) => {
+    const traceId = req.params.traceId;
+
+    // traceId format: machine_id|pid|startTimestamp
+    const parts = traceId.split('|');
+    if (parts.length < 3) return res.status(400).json({ error: 'invalid trace ID' });
+    const [machineId, pid, startTs] = parts;
+    const startTime = new Date(Number(startTs));
+    const endTime = new Date(Number(startTs) + 300000); // 5 min max trace window
+
+    const calls = await db.collection('server_agent_calls')
+      .find({
+        machine_id: machineId,
+        pid: Number(pid) || pid,
+        occurred_at: { $gte: startTime.toISOString(), $lte: endTime.toISOString() },
+      })
+      .sort({ occurred_at: 1 })
+      .project({ _id: 0 })
+      .toArray();
+
+    if (calls.length === 0) return res.status(404).json({ error: 'trace not found' });
+
+    // Build trace summary
+    const firstCall = calls[0];
+    const lastCall = calls[calls.length - 1];
+    const lastEnd = new Date(lastCall.occurred_at).getTime() + (lastCall.duration_ms || 0);
+    const totalDuration = lastEnd - new Date(firstCall.occurred_at).getTime();
+    const totalTokens = calls.reduce((s, c) => s + (c.prompt_tokens || 0) + (c.completion_tokens || 0), 0);
+    const totalCost = calls.reduce((s, c) => s + (c.total_cost_usd || 0), 0);
+    const hasError = calls.some(c => c.response_status && c.response_status >= 400);
+
+    res.json({
+      trace_id: traceId,
+      machine_id: machineId,
+      pid,
+      user: firstCall.user,
+      cmdline: firstCall.cmdline,
+      cwd: firstCall.cwd,
+      trigger_source: firstCall.trigger_source,
+      started_at: firstCall.occurred_at,
+      duration_ms: totalDuration,
+      call_count: calls.length,
+      total_tokens: totalTokens,
+      total_cost_usd: Math.round(totalCost * 1000000) / 1000000,
+      status: hasError ? 'error' : 'ok',
+      providers: [...new Set(calls.map(c => c.provider).filter(Boolean))],
+      models: [...new Set(calls.map(c => c.model).filter(Boolean))],
+      calls: calls.map(c => ({
+        ...c,
+        // Add relative timing for timeline visualization
+        offset_ms: new Date(c.occurred_at).getTime() - new Date(firstCall.occurred_at).getTime(),
+      })),
+    });
+  }));
+
+  // ── Install token generation ──────────────────────────────────────────
+  // Dashboard calls this to generate a one-time install command for customers.
+  app.post('/api/v1/monitor/generate-token', a(async (req, res) => {
+    const serverUrl = req.body?.serverUrl || `${req.protocol}://${req.get('host')}`;
+    // Import ENROLL_SECRET — already loaded at server startup
+    const authMod = await import('../auth.js');
+    const enrollSecret = authMod.ENROLL_SECRET;
+
+    // Token format: cfm_base64(serverUrl|enrollSecret)
+    const payload = Buffer.from(`${serverUrl}|${enrollSecret}`).toString('base64');
+    const token = `cfm_${payload}`;
+
+    const installCmd = `curl -sSL ${serverUrl}/install-monitor.sh | sudo bash -s -- --token ${token}`;
+
+    res.json({
+      token,
+      install_command: installCmd,
+      server_url: serverUrl,
+    });
+  }));
+
+  // Serve the install script
+  app.get('/install-monitor.sh', async (req, res) => {
+    const { resolve } = await import('path');
+    const { existsSync } = await import('fs');
+    const scriptPath = resolve(process.cwd(), '..', 'scripts', 'install-monitor.sh');
+    if (existsSync(scriptPath)) {
+      res.type('text/plain').sendFile(scriptPath);
+    } else {
+      res.status(404).send('Install script not found');
+    }
+  });
+
+  // Connected servers list
+  app.get('/api/v1/monitor/servers', a(async (req, res) => {
+    const machines = await db.collection('server_agent_calls').aggregate([
+      { $group: {
+        _id: '$machine_id',
+        last_seen: { $max: '$occurred_at' },
+        total_calls: { $sum: 1 },
+        total_cost_usd: { $sum: { $ifNull: ['$total_cost_usd', 0] } },
+        users: { $addToSet: '$user' },
+        providers: { $addToSet: '$provider' },
+        models: { $addToSet: '$model' },
+      }},
+      { $project: {
+        _id: 0, machine_id: '$_id', last_seen: 1, total_calls: 1, total_cost_usd: 1,
+        users: 1, providers: 1, models: 1,
+      }},
+      { $sort: { last_seen: -1 } },
+    ]).toArray();
+
+    // Enrich with hostname from enrollment
+    for (const m of machines) {
+      m.users = (m.users || []).filter(Boolean);
+      m.providers = (m.providers || []).filter(Boolean);
+      m.models = (m.models || []).filter(Boolean);
+      m.status = (new Date() - new Date(m.last_seen)) < 300000 ? 'active' : 'inactive';
+    }
+
+    res.json(machines);
+  }));
+}
+
+function groupIntoTraces(calls, gapMs) {
+  // Sort oldest first for grouping
+  const sorted = [...calls].sort((a, b) =>
+    new Date(a.occurred_at).getTime() - new Date(b.occurred_at).getTime()
+  );
+
+  const traceMap = new Map(); // key: machine_id|pid → { calls, lastTime }
+
+  for (const call of sorted) {
+    const key = `${call.machine_id}|${call.pid || 'none'}`;
+    const callTime = new Date(call.occurred_at).getTime();
+    const existing = traceMap.get(key);
+
+    if (existing && (callTime - existing.lastTime) < gapMs) {
+      existing.calls.push(call);
+      existing.lastTime = callTime + (call.duration_ms || 0);
+    } else {
+      // New trace
+      const traceId = `${call.machine_id}|${call.pid || 'none'}|${callTime}`;
+      traceMap.set(key, { traceId, calls: [call], lastTime: callTime + (call.duration_ms || 0) });
+    }
+  }
+
+  // Build trace summaries
+  const traces = [];
+  for (const entry of traceMap.values()) {
+    const first = entry.calls[0];
+    const last = entry.calls[entry.calls.length - 1];
+    const lastEnd = new Date(last.occurred_at).getTime() + (last.duration_ms || 0);
+    const totalDuration = lastEnd - new Date(first.occurred_at).getTime();
+
+    traces.push({
+      trace_id: entry.traceId,
+      machine_id: first.machine_id,
+      pid: first.pid,
+      user: first.user,
+      cmdline: first.cmdline,
+      trigger_source: first.trigger_source,
+      started_at: first.occurred_at,
+      duration_ms: totalDuration,
+      call_count: entry.calls.length,
+      total_tokens: entry.calls.reduce((s, c) => s + (c.prompt_tokens || 0) + (c.completion_tokens || 0), 0),
+      total_cost_usd: Math.round(entry.calls.reduce((s, c) => s + (c.total_cost_usd || 0), 0) * 1000000) / 1000000,
+      status: entry.calls.some(c => c.response_status >= 400) ? 'error' : 'ok',
+      providers: [...new Set(entry.calls.map(c => c.provider).filter(Boolean))],
+      models: [...new Set(entry.calls.map(c => c.model).filter(Boolean))],
+    });
+  }
+
+  // Sort newest first
+  return traces.sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime());
 }
 
 function validateEvent(e) {

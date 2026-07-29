@@ -18,7 +18,8 @@ import {
   Sparkles,
   Unplug,
   Workflow,
-  Grip
+  Grip,
+  Activity
 } from "lucide-react";
 import { useContext, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
@@ -113,6 +114,7 @@ const SideNav = (props) => {
         { icon: <Sparkles size={16} />, title: "AI Activity", link: "/AIHub/DLP" },
         { icon: <Grip size={16} />, title: "AI Platforms", link: "/AIHub/Platforms" },
         { icon: agentGovernanceIcon, title: "Agent Governance", link: "/AIHub/AgentGovernance" },
+        { icon: <Activity size={16} />, title: "Server Monitor", link: "/AIHub/ServerMonitor" },
       ],
     },
     ...(hasContentSprawl

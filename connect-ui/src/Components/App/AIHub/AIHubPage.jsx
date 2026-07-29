@@ -501,6 +501,217 @@ function PlatformsView() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// SERVER MONITOR — Install + Traces
+// ═══════════════════════════════════════════════════════════════════════════════
+function ServerMonitorView() {
+  const [tab, setTab] = useState("traces");
+  const [stats, setStats] = useState(null);
+  const [servers, setServers] = useState([]);
+  const [traces, setTraces] = useState([]);
+  const [selectedTrace, setSelectedTrace] = useState(null);
+  const [traceDetail, setTraceDetail] = useState(null);
+  const [installCmd, setInstallCmd] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [s, srv, t] = await Promise.all([
+          apiFetch("/traces/stats"),
+          apiFetch("/monitor/servers"),
+          apiFetch("/traces?limit=50"),
+        ]);
+        setStats(s);
+        setServers(srv);
+        setTraces(t);
+      } catch (e) { console.error(e); }
+      setLoading(false);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (tab === "setup" && !installCmd) {
+      fetch(`${API}/monitor/generate-token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ serverUrl: window.location.origin }),
+      }).then(r => r.json()).then(d => setInstallCmd(d.install_command || "")).catch(() => {});
+    }
+  }, [tab]);
+
+  useEffect(() => {
+    if (!selectedTrace) { setTraceDetail(null); return; }
+    apiFetch("/traces/" + encodeURIComponent(selectedTrace)).then(setTraceDetail).catch(() => setTraceDetail(null));
+  }, [selectedTrace]);
+
+  if (loading) return <Loading />;
+
+  const tabs = [
+    { id: "traces", label: "Traces", icon: <Activity size={14} /> },
+    { id: "servers", label: "Servers", icon: <Server size={14} /> },
+    { id: "setup", label: "Setup", icon: <Plus size={14} /> },
+  ];
+
+  return (
+    <div>
+      {/* Stats cards */}
+      <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+        <StatCard icon={<Activity size={18} />} label="Total Calls" value={stats?.total_calls || 0} hint="All time" color="#3b82f6" />
+        <StatCard icon={<Clock size={18} />} label="Last 24h" value={stats?.calls_last_24h || 0} hint="Recent calls" color="#8b5cf6" />
+        <StatCard icon={<Server size={18} />} label="Servers" value={stats?.connected_servers || 0} hint="Connected" color="#22c55e" />
+        <StatCard icon={<Shield size={18} />} label="Total Cost" value={fmtUsd(stats?.total_cost_usd)} hint="All time" color="#f59e0b" />
+      </div>
+
+      {/* Tab bar */}
+      <div style={{ display: "flex", gap: 2, marginBottom: 16, borderBottom: "1px solid #e5e7eb", paddingBottom: 0 }}>
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => { setTab(t.id); setSelectedTrace(null); }}
+            style={{ display: "flex", alignItems: "center", gap: 5, padding: "8px 16px", border: "none", background: "none", cursor: "pointer", fontSize: 13, fontWeight: tab === t.id ? 600 : 400, color: tab === t.id ? "#2563eb" : "#6b7280", borderBottom: tab === t.id ? "2px solid #2563eb" : "2px solid transparent", marginBottom: -1 }}>
+            {t.icon} {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab content */}
+      {tab === "traces" && !selectedTrace && (
+        <div>
+          <SectionHeader title="Agent Execution Traces" hint="Each trace groups LLM calls from the same process into a single execution timeline" />
+          <DataTable
+            columns={[
+              { label: "Time", render: r => <span style={{ fontSize: 12 }}>{relTime(r.started_at)}</span> },
+              { label: "User", render: r => <div><div className="aihub_text_primary">{r.user || "—"}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>{(r.cmdline || "").split("/").pop()}</div></div> },
+              { label: "Provider", render: r => <div>{(r.providers || []).map(p => <Tag key={p} text={p} color={p === "openai" ? "#10a37f" : p === "anthropic" ? "#d97706" : "#6366f1"} />)}</div> },
+              { label: "Calls", key: "call_count", right: true },
+              { label: "Duration", render: r => <span>{r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "—"}</span>, right: true },
+              { label: "Tokens", render: r => fmtTokens(r.total_tokens), right: true },
+              { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
+              { label: "Status", render: r => <Badge text={r.status} color={r.status === "error" ? "#ef4444" : "#22c55e"} /> },
+              { label: "Trigger", render: r => <span className="aihub_text_muted" style={{ fontSize: 11 }}>{r.trigger_source || "—"}</span> },
+            ]}
+            rows={traces}
+            empty="No traces yet. Install the server monitor to start capturing."
+            onRow={r => setSelectedTrace(r.trace_id)}
+          />
+        </div>
+      )}
+
+      {tab === "traces" && selectedTrace && traceDetail && (
+        <div>
+          <button onClick={() => setSelectedTrace(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0 }}>← Back to traces</button>
+          <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 20 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: 16 }}>{traceDetail.user || "Unknown"} — {(traceDetail.cmdline || "").split("/").pop()}</h3>
+                <div className="aihub_text_muted" style={{ fontSize: 12, marginTop: 4 }}>
+                  {traceDetail.trigger_source} · {traceDetail.cwd} · {new Date(traceDetail.started_at).toLocaleString()}
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 12, textAlign: "right" }}>
+                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{traceDetail.call_count}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>calls</div></div>
+                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{(traceDetail.duration_ms / 1000).toFixed(1)}s</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>duration</div></div>
+                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtTokens(traceDetail.total_tokens)}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>tokens</div></div>
+                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtUsd(traceDetail.total_cost_usd)}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>cost</div></div>
+              </div>
+            </div>
+
+            {/* Timeline visualization */}
+            <div style={{ borderTop: "1px solid #f3f4f6", paddingTop: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", marginBottom: 8 }}>EXECUTION TIMELINE</div>
+              {(traceDetail.calls || []).map((call, i) => {
+                const totalDur = traceDetail.duration_ms || 1;
+                const barLeft = ((call.offset_ms || 0) / totalDur) * 100;
+                const barWidth = Math.max(((call.duration_ms || 100) / totalDur) * 100, 2);
+                const isErr = call.response_status >= 400;
+                const provColor = call.provider === "openai" ? "#10a37f" : call.provider === "anthropic" ? "#d97706" : "#6366f1";
+                return (
+                  <div key={i} style={{ marginBottom: 12, padding: 12, background: isErr ? "#fef2f2" : "#f9fafb", borderRadius: 8, border: "1px solid " + (isErr ? "#fecaca" : "#e5e7eb") }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                      <span style={{ background: provColor, color: "#fff", padding: "1px 6px", borderRadius: 4, fontSize: 10, fontWeight: 600 }}>{call.provider}</span>
+                      <span style={{ fontSize: 12, fontWeight: 600 }}>{call.model}</span>
+                      <span className="aihub_text_muted" style={{ fontSize: 11, marginLeft: "auto" }}>{call.duration_ms}ms · {fmtTokens((call.prompt_tokens||0)+(call.completion_tokens||0))} tokens · {fmtUsd(call.total_cost_usd)}</span>
+                      {isErr && <Badge text={call.response_status} color="#ef4444" />}
+                    </div>
+                    {/* Bar */}
+                    <div style={{ height: 6, background: "#e5e7eb", borderRadius: 3, position: "relative", marginBottom: 8 }}>
+                      <div style={{ position: "absolute", left: barLeft + "%", width: barWidth + "%", height: "100%", background: isErr ? "#ef4444" : provColor, borderRadius: 3 }} />
+                    </div>
+                    {/* Prompt/Response preview */}
+                    {call.prompt_text && <div style={{ fontSize: 11, color: "#374151", marginBottom: 4 }}><strong>Prompt:</strong> {call.prompt_text.length > 150 ? call.prompt_text.slice(0, 150) + "…" : call.prompt_text}</div>}
+                    {call.response_text && <div style={{ fontSize: 11, color: "#6b7280" }}><strong>Response:</strong> {call.response_text.length > 150 ? call.response_text.slice(0, 150) + "…" : call.response_text}</div>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab === "servers" && (
+        <div>
+          <SectionHeader title="Connected Servers" hint="Servers running the CloudFuze server monitor" />
+          <DataTable
+            columns={[
+              { label: "Server ID", render: r => <Mono>{r.machine_id}</Mono> },
+              { label: "Status", render: r => <Badge text={r.status} color={r.status === "active" ? "#22c55e" : "#9ca3af"} /> },
+              { label: "Last Seen", render: r => relTime(r.last_seen) },
+              { label: "Calls", key: "total_calls", right: true },
+              { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
+              { label: "Users", render: r => (r.users || []).join(", ") || "—" },
+              { label: "Providers", render: r => <div>{(r.providers || []).map(p => <Tag key={p} text={p} />)}</div> },
+            ]}
+            rows={servers}
+            empty="No servers connected yet. Go to Setup tab to install."
+          />
+        </div>
+      )}
+
+      {tab === "setup" && (
+        <div>
+          <SectionHeader title="Install Server Monitor" hint="Run this command on any Linux server to start monitoring AI agent activity" />
+          <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 24 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+              <div style={{ width: 32, height: 32, borderRadius: "50%", background: "#dbeafe", color: "#2563eb", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>1</div>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>Run this command on your server</div>
+                <div className="aihub_text_muted" style={{ fontSize: 12 }}>Requires sudo access. Installs the monitor, configures system proxy, and starts the service.</div>
+              </div>
+            </div>
+            <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 16, fontFamily: "ui-monospace, monospace", fontSize: 12, overflowX: "auto", position: "relative", marginBottom: 20 }}>
+              <code>{installCmd || "Loading..."}</code>
+              {installCmd && <button onClick={() => { navigator.clipboard.writeText(installCmd); }} style={{ position: "absolute", top: 8, right: 8, background: "#334155", color: "#e2e8f0", border: "none", borderRadius: 4, padding: "4px 8px", fontSize: 11, cursor: "pointer" }}>Copy</button>}
+            </div>
+
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+              <div style={{ width: 32, height: 32, borderRadius: "50%", background: "#dcfce7", color: "#16a34a", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>2</div>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>That's it</div>
+                <div className="aihub_text_muted" style={{ fontSize: 12 }}>The monitor automatically intercepts all AI API calls (OpenAI, Anthropic, Google, AWS) from every process on the server. No code changes needed.</div>
+              </div>
+            </div>
+
+            <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 14, marginTop: 16 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "#166534", marginBottom: 6 }}>What gets captured:</div>
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: "#166534", lineHeight: 1.8 }}>
+                <li>Every LLM API call — model, tokens, cost, prompt, response</li>
+                <li>Who made the call — user, process, command line, working directory</li>
+                <li>How it was triggered — SSH session, cron job, CI pipeline, systemd service</li>
+                <li>Timing — duration, latency, errors</li>
+              </ul>
+            </div>
+
+            <div style={{ background: "#fefce8", border: "1px solid #fde68a", borderRadius: 8, padding: 14, marginTop: 12 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "#854d0e", marginBottom: 6 }}>To uninstall:</div>
+              <code style={{ fontSize: 12, color: "#854d0e" }}>sudo cloudfuze-monitor uninstall</code>
+              <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 4 }}>Removes everything cleanly — service, CA, proxy config, all files.</div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // PAGE ROUTER
 // ═══════════════════════════════════════════════════════════════════════════════
 const PAGES={
@@ -512,6 +723,7 @@ const PAGES={
   DLP:{title:"AI Activity",component:DLPView},
   Platforms:{title:"AI Platforms",component:PlatformsView},
   AgentGovernance:{title:"Agent Governance",component:AgentGovernance},
+  ServerMonitor:{title:"Server Monitor",component:ServerMonitorView},
 };
 
 export default function AIHubPage({page}) {
