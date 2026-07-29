@@ -90,17 +90,15 @@ if [[ "$REMOTE_MODE" == "true" ]]; then
   PROXY_HOST="0.0.0.0"
   if [[ -z "$ALLOWED_IPS" ]]; then
     echo ""
-    echo "  Remote mode: the proxy will accept connections from other servers."
-    echo "  For security, specify which IPs are allowed to connect."
+    echo "  ERROR: --remote requires --allow to specify which IPs can connect."
     echo ""
-    echo "  Enter allowed IP addresses (comma-separated, e.g. 10.0.1.5,10.0.1.6):"
-    read -r -p "  > " ALLOWED_IPS
+    echo "  Usage:"
+    echo "    curl -sSL .../install-monitor.sh | sudo bash -s -- --token TOKEN --remote --allow 10.0.1.5,10.0.1.6"
     echo ""
-    if [[ -z "$ALLOWED_IPS" ]]; then
-      echo "  ERROR: At least one IP is required in remote mode."
-      echo "  Use --allow 10.0.1.5,10.0.1.6 or enter IPs when prompted."
-      exit 1
-    fi
+    echo "  You can allow multiple IPs (comma-separated) or a subnet:"
+    echo "    --allow 10.0.1.5,10.0.1.6,10.0.2.0/24"
+    echo ""
+    exit 1
   fi
 fi
 
