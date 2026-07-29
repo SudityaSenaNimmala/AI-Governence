@@ -138,23 +138,36 @@ fi
 echo "[2/7] Downloading CloudFuze server-monitor..."
 mkdir -p "$INSTALL_DIR" "$DATA_DIR"
 
-# Download the agent package from the governance server
-curl -sSf "$GOV_SERVER/api/v1/monitor/download" -o "$INSTALL_DIR/monitor.tar.gz" 2>/dev/null || {
-  # Fallback: clone from git (for development)
-  if command -v git &>/dev/null; then
-    echo "  (download endpoint not available, cloning from git...)"
-    git clone --depth 1 https://github.com/SudityaSenaNimmala/AI-Governence.git "$INSTALL_DIR/repo" 2>/dev/null || true
-    if [[ -d "$INSTALL_DIR/repo/agent team/agent" ]]; then
-      cp -r "$INSTALL_DIR/repo/agent team/agent/"* "$INSTALL_DIR/"
-      rm -rf "$INSTALL_DIR/repo"
-    fi
-  fi
-}
+REPO_TMP=$(mktemp -d)
+echo "  Cloning repository..."
+if ! git clone --depth 1 https://github.com/SudityaSenaNimmala/AI-Governence.git "$REPO_TMP/repo" 2>&1; then
+  echo "  ERROR: git clone failed. Ensure git is installed and the server has internet access."
+  rm -rf "$REPO_TMP"
+  exit 1
+fi
 
-# Install npm deps if package.json exists
+# The agent code lives under "agent team/agent/" in the repo
+AGENT_SRC="$REPO_TMP/repo/agent team/agent"
+if [[ ! -d "$AGENT_SRC/src/server-monitor" ]]; then
+  echo "  ERROR: server-monitor not found in cloned repo."
+  echo "  Looked in: $AGENT_SRC/src/server-monitor"
+  ls -la "$REPO_TMP/repo/" 2>/dev/null || true
+  rm -rf "$REPO_TMP"
+  exit 1
+fi
+
+cp -r "$AGENT_SRC/"* "$INSTALL_DIR/"
+rm -rf "$REPO_TMP"
+echo "  Files installed to $INSTALL_DIR"
+
+# Install npm deps
 if [[ -f "$INSTALL_DIR/package.json" ]]; then
+  echo "  Installing dependencies..."
   cd "$INSTALL_DIR"
-  npm install --production --no-audit --no-fund 2>/dev/null || true
+  npm install --production --no-audit --no-fund || {
+    echo "  ERROR: npm install failed."
+    exit 1
+  }
 fi
 
 # ── Generate CA ───────────────────────────────────────────────────────────
