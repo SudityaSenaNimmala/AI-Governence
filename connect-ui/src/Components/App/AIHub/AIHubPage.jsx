@@ -78,10 +78,20 @@ function CodeBlock({ code, label }) {
 }
 function CopyBtn({ text }) {
   const [copied, setCopied] = useState(false);
+  const handleCopy = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
   return (
-    <button onClick={() => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-      style={{ position: "absolute", top: 8, right: 8, background: copied ? "#22c55e" : "#334155", color: "#fff", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "background 0.2s", display: "flex", alignItems: "center", gap: 5 }}>
-      {copied ? <><span style={{fontSize:14}}>&#10003;</span> Copied!</> : <><span style={{fontSize:14}}>&#9776;</span> Copy</>}
+    <button type="button" onClick={handleCopy}
+      style={{ position: "absolute", top: 8, right: 8, background: copied ? "#22c55e" : "#475569", color: "#fff", border: "none", borderRadius: 4, padding: "4px 10px", fontSize: 11, fontWeight: 500, cursor: "pointer", transition: "all 0.15s", opacity: copied ? 1 : 0.8, transform: copied ? "scale(1.05)" : "scale(1)" }}
+      onMouseEnter={e => { if (!copied) e.target.style.opacity = "1"; }}
+      onMouseLeave={e => { if (!copied) e.target.style.opacity = "0.8"; }}>
+      {copied ? "✓ Copied" : "Copy"}
     </button>
   );
 }
