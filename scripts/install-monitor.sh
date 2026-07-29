@@ -34,7 +34,8 @@ while [[ $# -gt 0 ]]; do
     --token)   ENROLL_TOKEN="$2"; shift 2;;
     --server)  GOV_SERVER="$2"; shift 2;;
     --port)    PROXY_PORT="$2"; shift 2;;
-    --remote)  REMOTE_MODE=true; PROXY_HOST="0.0.0.0"; shift;;
+    --remote)  REMOTE_MODE=true; shift;;
+    --allow)   ALLOWED_IPS="$2"; shift 2;;
     uninstall) exec "$0" --do-uninstall; exit;;
     --do-uninstall)
       echo "Uninstalling CloudFuze Server Monitor..."
@@ -48,6 +49,10 @@ while [[ $# -gt 0 ]]; do
       # Remove HTTPS_PROXY from /etc/environment
       sed -i '/cloudfuze-monitor/d' /etc/environment 2>/dev/null || true
       sed -i '/HTTPS_PROXY.*8443/d' /etc/environment 2>/dev/null || true
+      # Remove firewall rules
+      iptables -S INPUT 2>/dev/null | grep "cloudfuze-monitor" | while read -r rule; do
+        iptables $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
+      done
       # Remove install dir
       rm -rf "$INSTALL_DIR" "$DATA_DIR"
       rm -f /usr/local/bin/cloudfuze-monitor
@@ -76,6 +81,25 @@ if [[ -z "$GOV_SERVER" ]]; then
   else
     echo "ERROR: Could not extract server URL from token. Use --server URL"
     exit 1
+  fi
+fi
+
+# ── Remote mode: collect allowed IPs ──────────────────────────────────
+if [[ "$REMOTE_MODE" == "true" ]]; then
+  PROXY_HOST="0.0.0.0"
+  if [[ -z "$ALLOWED_IPS" ]]; then
+    echo ""
+    echo "  Remote mode: the proxy will accept connections from other servers."
+    echo "  For security, specify which IPs are allowed to connect."
+    echo ""
+    echo "  Enter allowed IP addresses (comma-separated, e.g. 10.0.1.5,10.0.1.6):"
+    read -r -p "  > " ALLOWED_IPS
+    echo ""
+    if [[ -z "$ALLOWED_IPS" ]]; then
+      echo "  ERROR: At least one IP is required in remote mode."
+      echo "  Use --allow 10.0.1.5,10.0.1.6 or enter IPs when prompted."
+      exit 1
+    fi
   fi
 fi
 
@@ -190,6 +214,39 @@ systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
 systemctl start "$SERVICE_NAME"
 
+# ── Firewall: restrict proxy port to allowed IPs only ─────────────────
+if [[ "$REMOTE_MODE" == "true" && -n "$ALLOWED_IPS" ]]; then
+  echo "[6.5/7] Configuring firewall — only allowing: $ALLOWED_IPS"
+  # Use iptables (available on all Linux distros)
+  # First remove any existing cloudfuze rules
+  iptables -D INPUT -p tcp --dport "$PROXY_PORT" -j DROP 2>/dev/null || true
+  iptables -S INPUT 2>/dev/null | grep "cloudfuze-monitor" | while read -r rule; do
+    iptables $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
+  done
+
+  # Allow each specified IP
+  IFS=',' read -ra IPS <<< "$ALLOWED_IPS"
+  for ip in "${IPS[@]}"; do
+    ip=$(echo "$ip" | xargs)  # trim whitespace
+    if [[ -n "$ip" ]]; then
+      iptables -A INPUT -p tcp --dport "$PROXY_PORT" -s "$ip" -m comment --comment "cloudfuze-monitor" -j ACCEPT
+      echo "  ✓ Allowed: $ip"
+    fi
+  done
+  # Allow localhost always
+  iptables -A INPUT -p tcp --dport "$PROXY_PORT" -s 127.0.0.1 -m comment --comment "cloudfuze-monitor" -j ACCEPT
+  # Drop everything else to this port
+  iptables -A INPUT -p tcp --dport "$PROXY_PORT" -m comment --comment "cloudfuze-monitor" -j DROP
+  echo "  ✓ All other IPs blocked on port $PROXY_PORT"
+
+  # Persist iptables rules across reboots
+  if command -v netfilter-persistent &>/dev/null; then
+    netfilter-persistent save 2>/dev/null || true
+  elif command -v iptables-save &>/dev/null; then
+    iptables-save > /etc/iptables.rules 2>/dev/null || true
+  fi
+fi
+
 # Wait for startup
 sleep 3
 
@@ -229,8 +286,9 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
   echo "  ║                                                        ║"
   if [[ "$REMOTE_MODE" == "true" ]]; then
   echo "  ║   REMOTE MODE — monitoring remote servers              ║"
+  echo "  ║   Allowed IPs: $ALLOWED_IPS"
   echo "  ║                                                        ║"
-  echo "  ║   On each server you want to monitor, run:             ║"
+  echo "  ║   On each allowed server, run:                         ║"
   echo "  ║     export HTTPS_PROXY=http://${MONITOR_IP}:${PROXY_PORT}"
   echo "  ║                                                        ║"
   echo "  ║   That's it. One env var, nothing else installed.      ║"
