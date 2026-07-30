@@ -131,6 +131,7 @@ function App() {
           <Route path="/AIHub/Platforms" element={<AIHubPage page="Platforms" />} />
           <Route path="/AIHub/AgentGovernance" element={<AIHubPage page="AgentGovernance" />} />
           <Route path="/AIHub/ServerMonitor" element={<AIHubPage page="ServerMonitor" />} />
+          <Route path="/AIHub/AIBudget" element={<AIHubPage page="AIBudget" />} />
           <Route path="/Data" element={<DataDashboard />} />
           <Route path="/MessageSprawl" element={<MessageDashboard />} />
           <Route path="/EmailSprawl" element={<EmailDashboard />} />

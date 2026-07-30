@@ -19,7 +19,8 @@ import {
   Unplug,
   Workflow,
   Grip,
-  Activity
+  Activity,
+  Wallet
 } from "lucide-react";
 import { useContext, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
@@ -115,6 +116,7 @@ const SideNav = (props) => {
         { icon: <Grip size={16} />, title: "AI Platforms", link: "/AIHub/Platforms" },
         { icon: agentGovernanceIcon, title: "Agent Governance", link: "/AIHub/AgentGovernance" },
         { icon: <Activity size={16} />, title: "Server Monitor", link: "/AIHub/ServerMonitor" },
+        { icon: <Wallet size={16} />, title: "AI Budget", link: "/AIHub/AIBudget" },
       ],
     },
     ...(hasContentSprawl

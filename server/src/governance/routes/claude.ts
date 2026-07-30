@@ -304,4 +304,92 @@ router.get("/files", async (req, res) => {
   } catch (err: any) { res.status(err?.status || 500).json({ error: err.message || "Failed to fetch files" }); }
 });
 
+// ── AI Budget: fetch org members ─────────────────────────────────────────────
+router.get("/budget/members", async (req, res) => {
+  try {
+    const { oauth_key_id } = req.query as { oauth_key_id?: string };
+    if (!oauth_key_id) return res.status(400).json({ error: "oauth_key_id required" });
+    const { apiKey } = await loadClaudeKey(oauth_key_id);
+
+    if (!apiKey.startsWith("sk-ant-admin")) {
+      return res.status(400).json({
+        error: "An Admin API key (sk-ant-admin...) is required. The currently connected key is a standard API key.",
+        needsAdminKey: true,
+      });
+    }
+
+    const headers = anthropicHeaders(apiKey);
+
+    // 1. Fetch all org members (paginated)
+    const allUsers: any[] = [];
+    let afterId: string | null = null;
+    do {
+      const url = new URL(`${ANTHROPIC_BASE}/v1/organizations/users`);
+      url.searchParams.set("limit", "100");
+      if (afterId) url.searchParams.set("after_id", afterId);
+
+      const r = await fetch(url.toString(), { headers });
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({})) as any;
+        return res.status(r.status).json({
+          error: `Anthropic API error (HTTP ${r.status}): ${errBody?.error?.message || r.statusText}`,
+        });
+      }
+      const data = await r.json() as any;
+      if (Array.isArray(data.data)) allUsers.push(...data.data);
+      afterId = data.has_more ? data.last_id : null;
+    } while (afterId);
+
+    // 2. Fetch org cost report for the current month
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const costUrl = new URL(`${ANTHROPIC_BASE}/v1/organizations/cost_report`);
+    costUrl.searchParams.set("starting_at", monthStart.toISOString());
+    costUrl.searchParams.set("ending_at", now.toISOString());
+    costUrl.searchParams.set("bucket_width", "1d");
+
+    let totalCostUsd = 0;
+    try {
+      const costRes = await fetch(costUrl.toString(), { headers });
+      if (costRes.ok) {
+        const costData = await costRes.json() as any;
+        for (const bucket of costData.data || []) {
+          const amt = parseFloat(bucket.amount || "0");
+          if (!isNaN(amt)) totalCostUsd += amt;
+        }
+        // Amount is in cents
+        totalCostUsd = totalCostUsd / 100;
+      }
+    } catch { /* cost report is optional, don't fail */ }
+
+    // 3. Fetch usage report grouped by workspace for the current month
+    const usageUrl = new URL(`${ANTHROPIC_BASE}/v1/organizations/usage_report/messages`);
+    usageUrl.searchParams.set("starting_at", monthStart.toISOString());
+    usageUrl.searchParams.set("ending_at", now.toISOString());
+    usageUrl.searchParams.set("bucket_width", "1d");
+
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    try {
+      const usageRes = await fetch(usageUrl.toString(), { headers });
+      if (usageRes.ok) {
+        const usageData = await usageRes.json() as any;
+        for (const bucket of usageData.data || []) {
+          totalInputTokens += (bucket.input_tokens || 0) + (bucket.cache_creation_input_tokens || 0) + (bucket.cache_read_input_tokens || 0);
+          totalOutputTokens += bucket.output_tokens || 0;
+        }
+      }
+    } catch { /* usage report is optional */ }
+
+    res.json({
+      members: allUsers,
+      total: allUsers.length,
+      cost: { total_usd: totalCostUsd, month: monthStart.toISOString().slice(0, 7) },
+      usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
+    });
+  } catch (err: any) {
+    res.status(err?.status || 500).json({ error: err.message || "Failed to fetch org members" });
+  }
+});
+
 export default router;

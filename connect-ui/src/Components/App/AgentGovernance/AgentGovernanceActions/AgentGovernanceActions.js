@@ -478,6 +478,10 @@ export const agentGovernanceApi = {
     return request(`/claude/files?oauth_key_id=${claudeKeyId}`, undefined, 60000);
   },
 
+  async fetchClaudeBudgetMembers(claudeKeyId) {
+    return request(`/claude/budget/members?oauth_key_id=${claudeKeyId}`, undefined, 30000);
+  },
+
   // AWS (Bedrock / SageMaker)
   async connectAWS(accessKeyId, secretAccessKey, region, accountId) {
     return request("/aws/connect", {

@@ -555,7 +555,7 @@ function PlatformsView() {
 // ═══════════════════════════════════════════════════════════════════════════════
 function SetupView({ installCmd, installMode, setInstallMode }) {
   const [ips, setIps] = useState([""]);
-  const [port, setPort] = useState("8443");
+  const [port, setPort] = useState("");
   const [generatedCmd, setGeneratedCmd] = useState("");
 
   const updateIp = (i, val) => {
@@ -571,12 +571,12 @@ function SetupView({ installCmd, installMode, setInstallMode }) {
     setGeneratedCmd("");
   };
   const filledIps = ips.filter(ip => ip.trim());
-  const portFlag = port && port !== "8443" ? " --port " + port : "";
+  const portFlag = port ? " --port " + port : "";
   const generateCmd = () => {
-    if (!filledIps.length || !installCmd) return;
+    if (!filledIps.length || !installCmd || !port) return;
     setGeneratedCmd(installCmd + " --remote --allow " + filledIps.join(",") + portFlag);
   };
-  const localCmd = installCmd ? installCmd + portFlag : "";
+  const localCmd = (installCmd && port) ? installCmd + portFlag : "";
 
   const inputStyle = { padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 13, outline: "none", fontFamily: "ui-monospace, monospace" };
 
@@ -607,8 +607,8 @@ function SetupView({ installCmd, installMode, setInstallMode }) {
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
           <label style={{ fontSize: 13, fontWeight: 500, color: "#374151" }}>Proxy Port:</label>
           <input type="text" value={port} onChange={e => { setPort(e.target.value.replace(/\D/g, "")); setGeneratedCmd(""); }}
-            style={{ ...inputStyle, width: 90 }} placeholder="8443" />
-          <span className="aihub_text_muted" style={{ fontSize: 11 }}>Choose a free port on your server (default 8443)</span>
+            style={{ ...inputStyle, width: 90, borderColor: !port ? "#ef4444" : "#d1d5db" }} placeholder="e.g. 8443" />
+          <span className="aihub_text_muted" style={{ fontSize: 11 }}>Enter a free port on your server {!port && <span style={{ color: "#ef4444" }}>(required)</span>}</span>
         </div>
 
         {installMode === "local" ? (<>
@@ -646,8 +646,8 @@ function SetupView({ installCmd, installMode, setInstallMode }) {
             ))}
           </div>
 
-          <button onClick={generateCmd} disabled={!filledIps.length}
-            style={{ background: filledIps.length ? "#2563eb" : "#d1d5db", color: "#fff", border: "none", borderRadius: 8, padding: "10px 24px", fontSize: 14, fontWeight: 600, cursor: filledIps.length ? "pointer" : "default", marginBottom: 20 }}>
+          <button onClick={generateCmd} disabled={!filledIps.length || !port}
+            style={{ background: (filledIps.length && port) ? "#2563eb" : "#d1d5db", color: "#fff", border: "none", borderRadius: 8, padding: "10px 24px", fontSize: 14, fontWeight: 600, cursor: (filledIps.length && port) ? "pointer" : "default", marginBottom: 20 }}>
             Generate Install Command
           </button>
 
