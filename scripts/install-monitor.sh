@@ -37,6 +37,8 @@ while [[ $# -gt 0 ]]; do
     --port)    PROXY_PORT="$2"; shift 2;;
     --remote)  REMOTE_MODE=true; shift;;
     --allow)   ALLOWED_IPS="$2"; shift 2;;
+    ,*) ALLOWED_IPS="${ALLOWED_IPS}${1}"; shift;;
+    [0-9]*) if [[ -n "$ALLOWED_IPS" ]]; then ALLOWED_IPS="${ALLOWED_IPS},${1}"; else ALLOWED_IPS="$1"; fi; shift;;
     uninstall) exec "$0" --do-uninstall; exit;;
     --do-uninstall)
       echo "Uninstalling CloudFuze Server Monitor..."
