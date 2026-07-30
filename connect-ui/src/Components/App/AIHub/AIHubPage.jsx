@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 import SideNav from "../../Resuables/Nav/SideNav";
 import TopNav from "../../Resuables/Nav/TopNav";
 import AgentGovernance from "../AgentGovernance/AgentGovernance";
+import { AgentGovernanceProvider } from "../AgentGovernance/AgentGovernanceContext";
+import { BudgetTab } from "../AgentGovernance/tabs/BudgetTab";
 import {
   Monitor, Scan, AlertTriangle, Wrench, Server, Shield, Clock, ChevronRight,
   Search, RefreshCw, Activity, FileText, MessageSquare, Eye, Trash2, Plus, X,
@@ -553,12 +555,12 @@ function PlatformsView() {
 // ═══════════════════════════════════════════════════════════════════════════════
 function SetupView({ installCmd, installMode, setInstallMode }) {
   const [ips, setIps] = useState([""]);
+  const [port, setPort] = useState("8443");
   const [generatedCmd, setGeneratedCmd] = useState("");
 
   const updateIp = (i, val) => {
     const next = [...ips];
     next[i] = val;
-    // Auto-add empty field when typing in the last one
     if (i === next.length - 1 && val.trim()) next.push("");
     setIps(next);
   };
@@ -569,10 +571,14 @@ function SetupView({ installCmd, installMode, setInstallMode }) {
     setGeneratedCmd("");
   };
   const filledIps = ips.filter(ip => ip.trim());
+  const portFlag = port && port !== "8443" ? " --port " + port : "";
   const generateCmd = () => {
     if (!filledIps.length || !installCmd) return;
-    setGeneratedCmd(installCmd + " --remote --allow " + filledIps.join(","));
+    setGeneratedCmd(installCmd + " --remote --allow " + filledIps.join(",") + portFlag);
   };
+  const localCmd = installCmd ? installCmd + portFlag : "";
+
+  const inputStyle = { padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 13, outline: "none", fontFamily: "ui-monospace, monospace" };
 
   const btnStyle = (active) => ({
     flex: 1, padding: "28px 24px", border: "2px solid " + (active ? "#2563eb" : "#e5e7eb"),
@@ -597,13 +603,21 @@ function SetupView({ installCmd, installMode, setInstallMode }) {
       </div>
 
       <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: 24 }}>
+        {/* Port input — shared between both modes */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
+          <label style={{ fontSize: 13, fontWeight: 500, color: "#374151" }}>Proxy Port:</label>
+          <input type="text" value={port} onChange={e => { setPort(e.target.value.replace(/\D/g, "")); setGeneratedCmd(""); }}
+            style={{ ...inputStyle, width: 90 }} placeholder="8443" />
+          <span className="aihub_text_muted" style={{ fontSize: 11 }}>Choose a free port on your server (default 8443)</span>
+        </div>
+
         {installMode === "local" ? (<>
           {/* SINGLE SERVER — just the command */}
           <div style={{ marginBottom: 16 }}>
             <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 4 }}>Run this command on your server</div>
             <div className="aihub_text_muted" style={{ fontSize: 12 }}>Installs the monitor, configures proxy, and starts automatically. Requires sudo.</div>
           </div>
-          <CodeBlock code={installCmd} />
+          <CodeBlock code={localCmd} />
           <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 14, marginTop: 20, fontSize: 12, color: "#166534" }}>
             That's it. All AI API calls from this server will appear in the <strong>Traces</strong> tab automatically.
           </div>
@@ -647,8 +661,8 @@ function SetupView({ installCmd, installMode, setInstallMode }) {
             <div style={{ marginTop: 20 }}>
               <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>Step 2 — On each production server, set one variable</div>
               <div className="aihub_text_muted" style={{ fontSize: 12, marginBottom: 8 }}>Replace &lt;MONITOR_IP&gt; with the IP of the machine from Step 1. Nothing else is installed.</div>
-              <CodeBlock code="export HTTPS_PROXY=http://<MONITOR_IP>:8443" />
-              <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 6 }}>To persist across reboots: <code style={{ background: "#f1f5f9", padding: "1px 4px", borderRadius: 3 }}>echo 'HTTPS_PROXY=http://MONITOR_IP:8443' | sudo tee -a /etc/environment</code></div>
+              <CodeBlock code={"export HTTPS_PROXY=http://<MONITOR_IP>:" + (port || "8443")} />
+              <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 6 }}>To persist across reboots: <code style={{ background: "#f1f5f9", padding: "1px 4px", borderRadius: 3 }}>{"echo 'HTTPS_PROXY=http://MONITOR_IP:" + (port || "8443") + "' | sudo tee -a /etc/environment"}</code></div>
             </div>
 
             <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 14, marginTop: 20, fontSize: 12, color: "#166534" }}>
@@ -860,6 +874,7 @@ const PAGES={
   Platforms:{title:"AI Platforms",component:PlatformsView},
   AgentGovernance:{title:"Agent Governance",component:AgentGovernance},
   ServerMonitor:{title:"Server Monitor",component:ServerMonitorView},
+  AIBudget:{title:"AI Budget",component:function AIBudgetPage(){return <AgentGovernanceProvider><BudgetTab/></AgentGovernanceProvider>;}},
 };
 
 export default function AIHubPage({page}) {
