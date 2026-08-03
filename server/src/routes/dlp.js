@@ -14,14 +14,47 @@ export function mountDlp(app, db) {
     if (events.length > 200) return res.status(413).json({ error: 'batch too large (max 200)' });
 
     let stored = 0;
+    let bound = 0;
     for (const e of events) {
       const valid = validateEvent(e);
       if (valid.error) continue;
 
+      // Session grouping (Session Replay, phase 1). The browser extension
+      // stamps every event with the conversation it belongs to (session_id)
+      // and its order inside that conversation (client_seq). Both are stored
+      // as top-level columns — same rule the rest of this handler follows:
+      // anything we filter/sort/join on is top-level, descriptive detail goes
+      // into metadata_json.
+      const sessionId = normalizeSessionId(e.session_id);
+      const clientSeq = normalizeClientSeq(e.client_seq);
+
+      // `session_bind` is not a DLP event. It only tells us that this browser
+      // session_id corresponds to the AI site's own conversation id, so it
+      // updates the session record and is never stored in dlp_events.
+      if (e.kind === 'session_bind') {
+        if (sessionId) {
+          await upsertSession(db, {
+            sessionId,
+            machineId: req.machine.id,
+            aiService: e.service,
+            externalConvId: normalizeExternalConvId(e.external_conv_id),
+            occurredAt: e.occurredAt,
+            countMessage: false,
+          });
+          bound++;
+        }
+        continue;
+      }
+
       const isFileUpload = e.kind === 'file_upload';
+      const isAiResponse = e.kind === 'ai_response';
       const secretClass    = isFileUpload ? e.severity   : highestSeverityClass(e.matches);
       const patternMatched = isFileUpload ? e.file_class : (e.matches || []).map((m) => m.pattern).join(',');
       const contentLength  = isFileUpload ? (e.size ?? null) : (e.content_length ?? null);
+      // Who is speaking. Derived from the event kind on the SERVER — never taken
+      // from the client — so an agent cannot mislabel a user prompt as an
+      // assistant reply. Needed to render a conversation in order later.
+      const role = roleForKind(e.kind);
 
       const eventId = crypto.randomUUID();
       await db.collection('dlp_events').insertOne({
@@ -31,35 +64,66 @@ export function mountDlp(app, db) {
         source: e.source ?? 'browser_extension',
         ai_service: e.service ?? 'unknown',
         event_kind: e.kind ?? 'unknown',
+        role,
+        session_id: sessionId,
+        client_seq: clientSeq,
         secret_class: secretClass,
         content_length: contentLength,
         pattern_matched: patternMatched,
-        metadata_json: JSON.stringify(isFileUpload ? {
-          filename: e.filename,
-          size: e.size,
-          size_bucket: e.size_bucket,
-          mime_type: e.mime_type,
-          extension: e.extension,
-          file_class: e.file_class,
-          severity: e.severity,
-          reason: e.reason,
-          via: e.via,
-          tab_host: e.tabHost,
-          content_scan: e.content_scan ?? null,
-        } : {
-          matches: e.matches ?? [],
-          length_bucket: e.length_bucket,
-          highest_severity: e.highest_severity,
-          tab_host: e.tabHost,
-        }),
+        metadata_json: JSON.stringify(
+          isFileUpload ? {
+            filename: e.filename,
+            size: e.size,
+            size_bucket: e.size_bucket,
+            mime_type: e.mime_type,
+            extension: e.extension,
+            file_class: e.file_class,
+            severity: e.severity,
+            reason: e.reason,
+            via: e.via,
+            tab_host: e.tabHost,
+            content_scan: e.content_scan ?? null,
+          } : isAiResponse ? {
+            // How the reply was decoded on the client, and whether the page-side
+            // buffer had to cut it short. No content here — the text itself goes
+            // to dlp_content like every other captured body.
+            response_format: e.response_format ?? null,
+            capture_truncated: e.capture_truncated ? 1 : 0,
+            duration_ms: e.duration_ms ?? null,
+            length_bucket: e.length_bucket,
+            tab_host: e.tabHost,
+          } : {
+            matches: e.matches ?? [],
+            length_bucket: e.length_bucket,
+            highest_severity: e.highest_severity,
+            tab_host: e.tabHost,
+          },
+        ),
         received_at: new Date(),
       });
 
       await insertContent(db, eventId, e);
+
+      if (sessionId) {
+        await upsertSession(db, {
+          sessionId,
+          machineId: req.machine.id,
+          aiService: e.service,
+          externalConvId: null,
+          occurredAt: e.occurredAt,
+          countMessage: true,
+          role,
+          // The server-derived severity only — the same value stored as this
+          // event's secret_class. A client-supplied metadata.highest_severity
+          // (enforcement_* kinds) is deliberately NOT rolled up, matching what
+          // GET /api/v1/sessions/stats/summary already counts.
+          severity: secretClass,
+        });
+      }
       stored++;
     }
 
-    res.status(201).json({ ok: true, stored });
+    res.status(201).json({ ok: true, stored, bound });
   }));
 
   // Stream the captured content for a single event.
@@ -222,13 +286,28 @@ export function mountDlp(app, db) {
   }));
 }
 
+// Which side of the conversation an event kind belongs to.
+//   'user'      — the human put this content in front of the model
+//   'assistant' — the model produced it
+//   'system'    — our own governance bookkeeping (blocks, redactions, decisions)
+// Anything unrecognized is 'system' rather than a guess: a replay view showing
+// an unknown event as a user turn would be worse than showing it as metadata.
+const USER_KINDS = new Set(['prompt_submit', 'prompt_paste', 'prompt_typed', 'file_upload']);
+const ASSISTANT_KINDS = new Set(['ai_response']);
+
+function roleForKind(kind) {
+  if (USER_KINDS.has(kind)) return 'user';
+  if (ASSISTANT_KINDS.has(kind)) return 'assistant';
+  return 'system';
+}
+
 // Persist content if the event carries any.
 async function insertContent(db, eventId, e) {
   const isFileUpload = e.kind === 'file_upload';
 
   let mimeType = e.mime_type || null;
   let filename = isFileUpload ? (e.filename || null) : null;
-  let kind = isFileUpload ? 'file' : 'prompt';
+  let kind = isFileUpload ? 'file' : (e.kind === 'ai_response' ? 'response' : 'prompt');
   let contentText = null;
   let contentBlob = null;
   let byteSize = null;
@@ -274,6 +353,179 @@ async function insertContent(db, eventId, e) {
   });
 }
 
+// ── Sessions (Session Replay, phases 1 + 3) ──────────────────────────────────
+// One document per conversation, tracked as a first-class concept so later
+// phases have something to hang messages off. Deliberately minimal: identity,
+// ownership, the activity window and message counters. No content ever lands
+// here — prompt/response bodies stay in dlp_content.
+//
+// Counters (phase 3): `message_count` stays what it always was — EVERY stored
+// event in the session, which is what the phase-1 dashboards read — and the
+// per-role counters are added alongside it rather than redefining it:
+//   message_count            all stored events (incl. enforcement bookkeeping)
+//   user_message_count       prompts + uploads
+//   assistant_message_count  captured AI replies
+// An AI reply is part of the conversation, so it counts in message_count too.
+//
+// Severity rollup (phase 4): the worst severity seen in the conversation is kept
+// on the session as a high-water mark so the list route can show and filter it
+// without an aggregation over dlp_events per request:
+//   highest_severity_rank   numeric, 0 = none … 4 = critical (see SEVERITY_RANK)
+//   highest_severity        the matching label, or null while nothing has scored
+// Sessions that existed before this shipped carry neither field until their next
+// event arrives; readers treat that as "unknown", the same as rank 0.
+//
+// Session boundary (engagement rule): a session_id now covers a continuous
+// stretch of using ONE AI service in ONE browser tab — it survives chat switches,
+// "New chat" and same-service reloads, and the browser extension ends it only on
+// tab close, a service change, 15 min of visible-tab inactivity, a 12h cap or a
+// browser restart. Nothing about that decision lives here (it is entirely
+// client-side, in browser-extension/lib/recording.js), but two consequences do:
+//   * a session spans several of the AI site's own conversation ids, so they
+//     accumulate in `external_conv_ids` alongside the most-recent scalar
+//   * a session lives long enough for out-of-order delivery to matter, so the
+//     activity window is maintained with $max / $min instead of $set
+// Deliberately NOT stored: ended_at / end_reason / session_scope (out of scope by
+// product decision) and an `ai_services` plural — a session is single-service by
+// construction, so the scalar `ai_service` remains correct.
+async function upsertSession(db, { sessionId, machineId, aiService, externalConvId, occurredAt, countMessage, role = null, severity = null }) {
+  const activityAt = toDate(occurredAt);
+  const rank = severityRank(severity);
+
+  const set = {};
+  const setOnInsert = {
+    session_id: sessionId,
+    // Ownership is claimed once, by the machine whose events created the
+    // session, and never rewritten — a second machine reusing (or guessing) a
+    // session_id must not be able to take the record over.
+    machine_id: machineId,
+  };
+  const addToSet = {};
+
+  // The activity window is maintained with $max / $min, not $set / $setOnInsert,
+  // because arrival order is not event order. The extension queues events in
+  // chrome.storage and flushes them on an alarm, so a batch that was offline for
+  // an hour lands AFTER the events that happened later — and a session that now
+  // spans a whole stretch of AI use (chat switches, reloads and all) sees far
+  // more of that than a per-conversation one did.
+  //   last_activity_at  $max — a late-arriving old event must not drag the
+  //                     window backwards and make a live session look stale
+  //   started_at        $min — an out-of-order first event must not pin a start
+  //                     later than the true one
+  // $min on an ABSENT field just sets it, which is why started_at can drop out of
+  // $setOnInsert entirely (and must: a field may not appear in two operators).
+  // The one trap — $min will NOT replace a stored null with a number, because
+  // null sorts below every number in BSON — does not apply here, since started_at
+  // is never written as null on any path.
+  const max = { last_activity_at: activityAt };
+  const min = { started_at: activityAt };
+
+  // A field may not appear in both $set and $setOnInsert, so only default the
+  // ones we aren't already writing on this event.
+  const service = aiService ?? null;
+  if (service) set.ai_service = service;
+  else setOnInsert.ai_service = 'unknown';
+
+  // `external_conv_id` (scalar) stays what it always was: the MOST RECENT
+  // conversation the tab was in. `external_conv_ids` (array) accumulates every
+  // one of them, because a session now spans chat switches — the user starting a
+  // new chat, or flipping back to an old one, no longer ends the session, so a
+  // single scalar can no longer answer "which conversations did this session
+  // touch". $addToSet, so re-binding the same id (a reload, a re-scan) does not
+  // grow the array.
+  if (externalConvId) {
+    set.external_conv_id = externalConvId;
+    addToSet.external_conv_ids = externalConvId;
+  } else {
+    setOnInsert.external_conv_id = null;
+    setOnInsert.external_conv_ids = [];
+  }
+
+  // The label is never written in this operator document: $set is unconditional
+  // and would cheerfully overwrite 'critical' with 'low'. It only gets a null
+  // default here so a fresh session doc has the field. The rank is not defaulted
+  // because $max already creates it (and both on one path is a Mongo conflict).
+  setOnInsert.highest_severity = null;
+
+  // Raise the severity watermark, never lower it. $max does the comparison inside
+  // the single atomic document update, so two events for the same session racing
+  // through this function cannot lose the higher one the way a read-compare-write
+  // in JS would. It shares the operator with last_activity_at, which wants the
+  // same "never go backwards" guarantee.
+  max.highest_severity_rank = rank;
+
+  const update = {
+    $setOnInsert: setOnInsert,
+    // $inc creates the field at 0 on insert when the delta is 0, which is
+    // what we want for a session that starts life with a session_bind — and
+    // for the role counters on a session that has only seen one side so far.
+    $inc: {
+      message_count: countMessage ? 1 : 0,
+      user_message_count: countMessage && role === 'user' ? 1 : 0,
+      assistant_message_count: countMessage && role === 'assistant' ? 1 : 0,
+    },
+    $max: max,
+    $min: min,
+  };
+  // Mongo rejects an EMPTY operator document, and both of these are now legitimately
+  // empty on some paths (an event with no service name and no conversation id).
+  if (Object.keys(set).length) update.$set = set;
+  if (Object.keys(addToSet).length) update.$addToSet = addToSet;
+
+  await db.collection('ai_sessions').updateOne({ session_id: sessionId }, update, { upsert: true });
+
+  if (rank === NO_SEVERITY_RANK) return;
+
+  // Sync the human-readable label to the watermark we just raised. Guarded by
+  // the rank in the FILTER, so this is a compare-and-set, not a read-then-write:
+  // it lands only while the stored rank is still the one this event produced. A
+  // slower low-severity event therefore cannot relabel a session that a
+  // concurrent high-severity event already raised — its filter simply no longer
+  // matches and the update is a no-op. The `$ne` skips the write entirely once
+  // the label is already correct, which is the common case in a long chat.
+  await db.collection('ai_sessions').updateOne(
+    {
+      session_id: sessionId,
+      highest_severity_rank: rank,
+      highest_severity: { $ne: severity },
+    },
+    { $set: { highest_severity: severity } },
+  );
+}
+
+// The client clock is not trusted for ordering (client_seq is), but it is still
+// the best available wall-clock for the activity window. Fall back to server
+// time when it's missing or unparseable.
+function toDate(value) {
+  if (value) {
+    const d = new Date(value);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  return new Date();
+}
+
+function normalizeSessionId(value) {
+  if (typeof value !== 'string') return null;
+  const s = value.trim();
+  if (!s || s.length > 128) return null;
+  return s;
+}
+
+function normalizeClientSeq(value) {
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < 0) return null;
+  return n;
+}
+
+// Opaque id minted by the AI site itself (ChatGPT /c/<id> etc.). Never used in
+// a path or a query we build by hand, but keep it short and boring anyway.
+function normalizeExternalConvId(value) {
+  if (typeof value !== 'string') return null;
+  const s = value.trim();
+  if (!s || s.length > 200) return null;
+  return s;
+}
+
 function encodeFilename(name) {
   return String(name).replace(/[\r\n"\\]/g, '_');
 }
@@ -284,12 +536,40 @@ function validateEvent(e) {
   return { ok: true };
 }
 
+// ── Severity ordering ────────────────────────────────────────────────────────
+// One definition for "which severity is worse", used both to pick the top match
+// on a single event and to keep the per-session watermark.
+//
+// The DLP scale is the one the browser extension emits: low < moderate < high <
+// critical (browser-extension/content/patterns.js). The governance side spells
+// the middle step 'medium' (src/governance/types/agent.ts) — same level, so it
+// ranks identically rather than being treated as unknown. Absent/unrecognized
+// severity ranks 0, which is how a turn with no matches is treated: it can never
+// raise the watermark and can never be picked as the top match.
+const NO_SEVERITY_RANK = 0;
+const SEVERITY_RANK = {
+  low: 1,
+  moderate: 2,
+  medium: 2,
+  high: 3,
+  critical: 4,
+};
+
+function severityRank(severity) {
+  if (typeof severity !== 'string') return NO_SEVERITY_RANK;
+  return SEVERITY_RANK[severity.trim().toLowerCase()] ?? NO_SEVERITY_RANK;
+}
+
 function highestSeverityClass(matches) {
   if (!matches?.length) return null;
-  const order = ['low', 'moderate', 'high', 'critical'];
   let top = null;
+  let topRank = NO_SEVERITY_RANK;
   for (const m of matches) {
-    if (order.indexOf(m.severity) > order.indexOf(top)) top = m.severity;
+    const rank = severityRank(m?.severity);
+    if (rank > topRank) {
+      topRank = rank;
+      top = m.severity;
+    }
   }
   return top;
 }

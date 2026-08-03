@@ -58,9 +58,22 @@ export function mountQueries(app, db) {
   }));
 
   app.get('/api/v1/machines', a(async (req, res) => {
-    // Only endpoint-agent machines (platform IS NOT NULL).
+    // EVERY enrolled machine, agent or browser extension.
+    //
+    // This used to filter { platform: { $ne: null } } to mean "endpoint agents
+    // only". In Mongo that predicate also excludes documents where `platform` is
+    // simply ABSENT, and a browser-extension enrollment never reports one — so
+    // every extension-enrolled machine was missing from the roster the UI joins
+    // session/event rows against, and an extension-only session rendered as a raw
+    // machine UUID with no readable label anywhere to fall back to.
+    //
+    // The rows below already carry `user` (agent-reported username), `hostname`
+    // (the extension sets '<browser>-browser-extension' at enroll time) and `id`,
+    // which is exactly the label precedence the UI wants: user → hostname → id.
+    // `platform` is passed through as-is, so a caller that genuinely wants agents
+    // only can still tell them apart.
     const machinesList = await db.collection('machines')
-      .find({ platform: { $ne: null } })
+      .find({})
       .sort({ last_seen: -1 })
       .toArray();
 

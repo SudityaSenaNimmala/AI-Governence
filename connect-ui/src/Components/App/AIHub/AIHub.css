@@ -414,3 +414,315 @@
   margin: 0 auto;
   line-height: 1.6;
 }
+
+/* ── Session Replay ───────────────────────────────────────────────────────── */
+
+/* Filter bar (service / date range / severity) */
+.aihub_filter_bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.aihub_filter_group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.aihub_filter_label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.aihub_select {
+  height: 30px;
+  min-width: 160px;
+  padding: 0 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #374151;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.aihub_select:focus-visible {
+  outline: 2px solid #0044cc;
+  outline-offset: 1px;
+}
+
+.aihub_back_btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.aihub_back_btn:hover { background: #f3f4f6; color: #111827; }
+
+/* Session metadata header */
+.aihub_replay_meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 14px 20px;
+}
+.aihub_replay_meta_label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #9ca3af;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 4px;
+}
+.aihub_replay_ids {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #f3f4f6;
+  font-size: 11px;
+  word-break: break-all;
+}
+
+/* Chronological transcript */
+.aihub_transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.aihub_msg_row { display: flex; }
+.aihub_msg_row.user { justify-content: flex-end; }
+.aihub_msg_row.assistant { justify-content: flex-start; }
+.aihub_msg_bubble {
+  max-width: 78%;
+  min-width: 260px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+}
+.aihub_msg_bubble.user {
+  background: #f3f7ff;
+  border-color: #c7d6f5;
+}
+.aihub_msg_bubble.assistant {
+  background: #f9fafb;
+  border-color: #e5e7eb;
+}
+.aihub_msg_head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: #6b7280;
+}
+.aihub_msg_who {
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+}
+.aihub_msg_time {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-left: auto;
+  white-space: nowrap;
+}
+.aihub_msg_chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+.aihub_msg_foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 11px;
+}
+.aihub_msg_content {
+  margin-top: 10px;
+  border-top: 1px solid #e5e7eb;
+  padding-top: 4px;
+}
+
+/* Enforcement / decision events — a system note, not conversation content */
+.aihub_sys_note {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  font-size: 12px;
+  margin: 0 auto;
+  width: 100%;
+  max-width: 92%;
+}
+
+@media (max-width: 900px) {
+  .aihub_msg_bubble { max-width: 100%; min-width: 0; }
+  .aihub_sys_note { max-width: 100%; }
+}
+
+/* ── Video session recording ───────────────────────────────────────────────── */
+
+/* Player column + transcript side by side. The video card sticks to the top of
+   the scroll container so it stays visible while the transcript scrolls. */
+.aihub_replay_split {
+  display: grid;
+  /* Wide enough that rrweb-player's own control bar (timestamps + speed
+     buttons) doesn't clip — 420px was sized for the old video thumbnail and
+     is too narrow for the interactive DOM replay's controls. */
+  grid-template-columns: minmax(360px, 720px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.aihub_replay_video_col { position: sticky; top: 0; z-index: 2; }
+@media (max-width: 1100px) {
+  .aihub_replay_split { grid-template-columns: 1fr; }
+  /* Stacked: pinning a full-width video would eat the viewport. */
+  .aihub_replay_video_col { position: static; }
+}
+
+/* Maximized: replay takes the full row, transcript hides rather than
+   shrinking to nothing. The player re-sizes itself (ResizeObserver in
+   ReplayPlayer), so this is a pure CSS toggle. */
+.aihub_replay_split.aihub_replay_split_max {
+  grid-template-columns: 1fr;
+}
+.aihub_replay_split.aihub_replay_split_max .aihub_replay_transcript_col {
+  display: none;
+}
+
+.aihub_replay_maximize_btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 8px;
+  padding: 4px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+.aihub_replay_maximize_btn:hover { background: #f9fafb; }
+
+/* The CSP-isolated iframe rrwebHost.js mounts the player into. Iframes do not
+   stretch to their container's width like a block <div> — with no rule here
+   it renders at the browser's default 300px, clipping the wider content the
+   player is actually sized to (ReplayPlayer's ResizeObserver reads THIS
+   element's clientWidth, so this rule is what makes that measurement mean
+   anything). setHeight() is set inline by JS per-recording; width stays 100%. */
+.aihub_replay_host {
+  display: block;
+  width: 100%;
+  border: 0;
+}
+.aihub_replay_stage { width: 100%; }
+
+.aihub_rec_card { margin-bottom: 0; }
+.aihub_rec_video {
+  display: block;
+  width: 100%;
+  max-height: 60vh;
+  border-radius: 8px;
+  background: #111827;
+  outline: none;
+}
+.aihub_rec_video:focus-visible { outline: 2px solid #0044cc; outline-offset: 2px; }
+
+.aihub_rec_tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.aihub_rec_meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 12px 16px;
+  margin-top: 12px;
+}
+.aihub_rec_hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 11px;
+  color: #6b7280;
+}
+/* Retention already deleted the media — say so instead of a broken player. */
+.aihub_rec_gone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 4px;
+  padding: 28px 16px;
+  border: 1px dashed #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+  color: #9ca3af;
+}
+.aihub_rec_gone_title { font-size: 13px; font-weight: 600; color: #374151; }
+.aihub_rec_gone p { margin: 0; font-size: 12px; max-width: 320px; }
+
+/* Forensic export link — deliberately understated; this is not the play path. */
+.aihub_rec_dl { color: #0044cc; font-weight: 600; text-decoration: none; }
+.aihub_rec_dl:hover { text-decoration: underline; }
+
+/* One-line note for sessions the server confirms have no recording. */
+.aihub_rec_none {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+  font-size: 11px;
+  color: #9ca3af;
+}
+
+/* A turn that maps to a moment in the active clip. */
+.aihub_seekable { cursor: pointer; }
+.aihub_msg_bubble.aihub_seekable:hover { border-color: #93b4f0; }
+.aihub_jump_btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border: 1px solid #c7d6f5;
+  border-radius: 5px;
+  background: #f3f7ff;
+  color: #0044cc;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.aihub_jump_btn:hover { background: #e3ecff; }
+.aihub_jump_btn:focus-visible { outline: 2px solid #0044cc; outline-offset: 1px; }
+
+/* Applied imperatively by the playback-sync effect, not by React state. */
+.aihub_msg_row.aihub_msg_synced .aihub_msg_bubble,
+.aihub_sys_note.aihub_msg_synced {
+  border-color: #0044cc;
+  box-shadow: 0 0 0 3px rgba(0, 68, 204, 0.14);
+}

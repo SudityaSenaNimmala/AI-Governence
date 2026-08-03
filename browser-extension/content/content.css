@@ -149,6 +149,8 @@
 .cfai-block-actions {
   display: flex;
   justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 .cfai-block-dismiss {
   appearance: none;
@@ -189,17 +191,11 @@
 .cfai-block-redact:focus,
 .cfai-block-tokenize:focus  { outline: 3px solid #a7f3d0; outline-offset: 2px; }
 
-/* Edit Manually — outlined, secondary */
+/* "Edit manually" — outlined secondary button. Rendered alongside
+   .cfai-block-dismiss so it inherits that button's size/radius and only
+   overrides the colours. */
 .cfai-block-edit-btn {
   background: #fff !important;
-  color: #475569 !important;
-  border: 1px solid #cbd5e1 !important;
-}
-.cfai-block-edit-btn:hover { background: #f8fafc !important; }
-
-/* Edit manually button — secondary style */
-.cfai-block-edit-btn {
-  background: transparent !important;
   color: #64748b !important;
   border: 1px solid #cbd5e1 !important;
   box-shadow: none !important;
@@ -208,6 +204,7 @@
   background: #f1f5f9 !important;
   color: #334155 !important;
 }
+.cfai-block-edit-btn:focus { outline: 3px solid #cbd5e1 !important; outline-offset: 2px; }
 
 /* Redacted preview area */
 .cfai-redact-preview {

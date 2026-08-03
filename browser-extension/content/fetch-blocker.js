@@ -87,9 +87,381 @@
     return false;
   }
 
+  // ── AI response capture (Session Replay, phase 3) ──────────────────────────
+  // Everything between this sentinel and the matching end sentinel is PURE:
+  // no window, document, fetch, location or console. That is what lets
+  // tests/load-response-assembler.mjs slice the region out and run the real
+  // shipped reassembly logic under Node. Keep it that way.
+  //
+  // The job: given the raw bytes of one AI chat response (already decoded to a
+  // string), rebuild the assistant's message. Every site streams, and each one
+  // streams differently, so we identify the site, split the stream into events
+  // once, and run site-specific extractors over the parsed events. This is the
+  // browser port of the reassembly the Node side does in
+  // agent/src/server-monitor/cost-parser.js — same idea, different host.
+  //
+  // Cost control: parsing happens ONCE, at end of stream. Per chunk we only
+  // decode and push a string. A previous incident on this codebase (see the
+  // ENFORCEMENT notes in content.js) showed that doing real work per streamed
+  // token is what makes Chrome's tab go unresponsive.
+
+  // Which wire format does this host speak on the response side?
+  //   'unsupported' → we know the format is one this approach cannot read, so
+  //                   don't even buffer it.
+  const RESPONSE_SITE_RULES = [
+    { rx: /(^|\.)chatgpt\.com$/,                        site: 'chatgpt' },
+    { rx: /(^|\.)chat\.openai\.com$/,                   site: 'chatgpt' },
+    { rx: /(^|\.)claude\.ai$/,                          site: 'claude' },
+    { rx: /(^|\.)api\.anthropic\.com$/,                 site: 'anthropic' },
+    { rx: /(^|\.)api\.openai\.com$/,                    site: 'openai' },
+    { rx: /(^|\.)generativelanguage\.googleapis\.com$/, site: 'google' },
+    { rx: /(^|\.)aistudio\.google\.com$/,               site: 'google' },
+    // Consumer Gemini answers over batchexecute: a `)]}'`-prefixed stream of
+    // length-delimited, deeply nested JSON arrays with no stable text path.
+    { rx: /(^|\.)gemini\.google\.com$/,                 site: 'unsupported' },
+    // Copilot chat rides SignalR/WebSocket, which never passes through fetch or
+    // XHR at all (same reason the DOM-level block exists in content.js).
+    { rx: /(^|\.)copilot\.microsoft\.com$/,             site: 'unsupported' },
+    { rx: /(^|\.)cloud\.microsoft$/,                    site: 'unsupported' },
+  ];
+
+  function hostOf(url, fallbackHost) {
+    const s = typeof url === 'string' ? url : (url && url.toString ? url.toString() : '');
+    const m = s.match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i);
+    if (m) return m[1].split('@').pop().split(':')[0].toLowerCase();
+    return (fallbackHost || '').toLowerCase();
+  }
+
+  function responseSiteFor(url, fallbackHost) {
+    const host = hostOf(url, fallbackHost);
+    if (!host) return 'generic';
+    for (const r of RESPONSE_SITE_RULES) { if (r.rx.test(host)) return r.site; }
+    return 'generic';
+  }
+
+  // --- stream splitting ---
+
+  function safeParse(s) {
+    try { return JSON.parse(s); } catch (e) { return undefined; }
+  }
+
+  // SSE: blank-line-delimited blocks of `field: value` lines. Multiple data:
+  // lines in one block concatenate with \n (per the spec).
+  function parseSseFrames(text) {
+    const out = [];
+    for (const block of text.split(/\r?\n\r?\n/)) {
+      if (!block.trim()) continue;
+      let name = null;
+      const data = [];
+      for (const line of block.split(/\r?\n/)) {
+        if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+        else if (line.startsWith('event:')) name = line.slice(6).trim();
+      }
+      if (!data.length) continue;
+      const payload = data.join('\n');
+      if (payload === '[DONE]') continue;
+      out.push({ name: name, data: payload, json: safeParse(payload) });
+    }
+    return out;
+  }
+
+  function parseNdjsonLines(text) {
+    const out = [];
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const json = safeParse(line);
+      if (json !== undefined) out.push({ name: null, data: line, json: json });
+    }
+    return out;
+  }
+
+  // Returns { format, items }. `format` is descriptive only — it rides along on
+  // the event so the server can tell how a capture was decoded.
+  function collectStreamEvents(raw) {
+    const text = typeof raw === 'string' ? raw : '';
+    if (!text.trim()) return { format: 'empty', items: [] };
+    if (/(^|\n)(data|event):/.test(text)) {
+      const items = parseSseFrames(text);
+      if (items.length) return { format: 'sse', items: items };
+    }
+    const whole = safeParse(text);
+    if (whole !== undefined) return { format: 'json', items: [{ name: null, data: text, json: whole }] };
+    const lines = parseNdjsonLines(text);
+    if (lines.length) return { format: 'ndjson', items: lines };
+    return { format: 'unknown', items: [] };
+  }
+
+  // --- per-site extractors: (items) → assembled assistant text ('' if none) ---
+
+  function partsText(msg) {
+    const parts = msg && msg.content && msg.content.parts;
+    if (!Array.isArray(parts)) return '';
+    return parts.filter((p) => typeof p === 'string').join('');
+  }
+
+  function isAssistantText(msg) {
+    if (!msg || !msg.author || msg.author.role !== 'assistant') return false;
+    const ct = msg.content && msg.content.content_type;
+    return ct == null || ct === 'text';
+  }
+
+  // ChatGPT's own backend. Two shapes coexist:
+  //   legacy   — each frame is a FULL snapshot: {message:{author,content:{parts:[...]}}}
+  //   v1 delta — {"p":"/message/content/parts/0","o":"append","v":"tok"} operations
+  //              (the initial op is {p:"",o:"add",v:{message:{...}}}, and later
+  //              frames often drop p/o entirely and are just {"v":"tok"},
+  //              meaning "same target as last time")
+  // We track both and keep whichever produced more text.
+  function extractChatGpt(items) {
+    let snapshot = '';        // best full snapshot seen (legacy shape)
+    let base = '';            // parts text at the moment the assistant msg was added
+    let appended = '';        // accumulated append deltas
+    let onTarget = false;     // is the current append target the assistant text?
+
+    const isTextPartPath = (p) => typeof p === 'string' && /\/content\/parts\/\d+$/.test(p) && !/thought/i.test(p);
+
+    const takeSnapshot = (msg) => {
+      if (!isAssistantText(msg)) { onTarget = false; return; }
+      const text = partsText(msg);
+      onTarget = true;
+      if (text.length > snapshot.length) snapshot = text;
+      base = text;
+      appended = '';
+    };
+
+    const applyOp = (op, depth) => {
+      if (!op || typeof op !== 'object' || depth > 4) return;
+      if (op.message && typeof op.message === 'object') { takeSnapshot(op.message); return; }
+      const kind = typeof op.o === 'string' ? op.o : null;
+      if (kind === 'patch' && Array.isArray(op.v)) {
+        for (const sub of op.v) applyOp(sub, depth + 1);
+        return;
+      }
+      if (kind === 'add' || kind === 'replace') {
+        if (op.v && typeof op.v === 'object') {
+          if (op.v.message) takeSnapshot(op.v.message);
+          else if (op.v.author) takeSnapshot(op.v);
+          else if (Array.isArray(op.v)) { for (const sub of op.v) applyOp(sub, depth + 1); }
+        } else if (typeof op.v === 'string' && isTextPartPath(op.p)) {
+          onTarget = true;
+          base = op.v;
+          appended = '';
+        }
+        return;
+      }
+      if (typeof op.v === 'string') {
+        // Explicit append, or a bare {"v":"..."} continuation of the last target.
+        if (op.p == null || op.p === '' || isTextPartPath(op.p)) {
+          if (op.p != null && op.p !== '') onTarget = isTextPartPath(op.p);
+          if (onTarget) appended += op.v;
+        } else {
+          onTarget = false;
+        }
+        return;
+      }
+      if (Array.isArray(op.v)) { for (const sub of op.v) applyOp(sub, depth + 1); }
+    };
+
+    for (const it of items) {
+      if (it.json === undefined || it.json === null || typeof it.json !== 'object') continue;
+      applyOp(it.json, 0);
+    }
+    const streamed = base + appended;
+    return streamed.length >= snapshot.length ? streamed : snapshot;
+  }
+
+  // Anthropic wire format — used by api.anthropic.com AND by claude.ai's own
+  // /completion endpoint. Older claude.ai builds send {type:'completion'}.
+  function extractAnthropic(items) {
+    let out = '';
+    for (const it of items) {
+      const e = it.json;
+      if (!e || typeof e !== 'object') continue;
+      if (e.type === 'content_block_delta' && e.delta && typeof e.delta.text === 'string') out += e.delta.text;
+      else if (e.type === 'content_block_start' && e.content_block && typeof e.content_block.text === 'string') out += e.content_block.text;
+      else if (typeof e.completion === 'string') out += e.completion;
+      else if (Array.isArray(e.content)) {
+        // Non-streaming /v1/messages response.
+        for (const b of e.content) { if (b && typeof b.text === 'string') out += b.text; }
+      }
+    }
+    return out;
+  }
+
+  // OpenAI-compatible: chat completions (streamed deltas or a whole message),
+  // legacy completions, and the Responses API's output_text deltas.
+  function extractOpenAi(items) {
+    let out = '';
+    for (const it of items) {
+      const e = it.json;
+      if (!e || typeof e !== 'object') continue;
+      const choices = Array.isArray(e.choices) ? e.choices : null;
+      if (choices) {
+        for (const c of choices) {
+          if (!c) continue;
+          if (c.delta && typeof c.delta.content === 'string') out += c.delta.content;
+          else if (c.message && typeof c.message.content === 'string') out += c.message.content;
+          else if (typeof c.text === 'string') out += c.text;
+        }
+        continue;
+      }
+      if (e.type === 'response.output_text.delta' && typeof e.delta === 'string') out += e.delta;
+    }
+    return out;
+  }
+
+  // Gemini / Google AI Studio: candidates[].content.parts[].text
+  function extractGoogle(items) {
+    let out = '';
+    for (const it of items) {
+      const e = it.json;
+      if (!e || typeof e !== 'object') continue;
+      const cands = Array.isArray(e.candidates) ? e.candidates : null;
+      if (!cands) continue;
+      for (const c of cands) {
+        const parts = c && c.content && c.content.parts;
+        if (Array.isArray(parts)) {
+          for (const p of parts) { if (p && typeof p.text === 'string') out += p.text; }
+        }
+      }
+    }
+    return out;
+  }
+
+  // Ollama / llama.cpp style local servers, and anything else that streams a
+  // plain {message:{content}} / {response} / {content} object per chunk.
+  function extractLocalish(items) {
+    let out = '';
+    for (const it of items) {
+      const e = it.json;
+      if (!e || typeof e !== 'object') continue;
+      if (e.message && typeof e.message.content === 'string') out += e.message.content;
+      else if (typeof e.response === 'string') out += e.response;
+      else if (typeof e.content === 'string') out += e.content;
+    }
+    return out;
+  }
+
+  function extractorsFor(site) {
+    if (site === 'chatgpt')   return [extractChatGpt, extractOpenAi];
+    if (site === 'claude')    return [extractAnthropic];
+    if (site === 'anthropic') return [extractAnthropic];
+    if (site === 'openai')    return [extractOpenAi];
+    if (site === 'google')    return [extractGoogle];
+    // Unknown AI host: try every shape, most specific first.
+    return [extractAnthropic, extractOpenAi, extractGoogle, extractChatGpt, extractLocalish];
+  }
+
+  /**
+   * Reassemble one AI response. Returns { text, format }; text is '' when
+   * nothing recognizable was found (caller then emits nothing).
+   */
+  function assembleAiResponseText(raw, site) {
+    if (site === 'unsupported') return { text: '', format: 'unsupported' };
+    const collected = collectStreamEvents(raw);
+    if (!collected.items.length) return { text: '', format: collected.format };
+    for (const ex of extractorsFor(site)) {
+      let text = '';
+      try { text = ex(collected.items) || ''; } catch (e) { text = ''; }
+      if (text) return { text: text, format: collected.format };
+    }
+    return { text: '', format: collected.format };
+  }
+  // ── end AI response capture ────────────────────────────────────────────────
+
+  // Cap on how much decoded response text we keep per call. Beyond this we keep
+  // draining the stream (so the page is never starved) but stop buffering.
+  const RESPONSE_MAX_CHARS = 1024 * 1024;
+
+  // Page world → content-script world. Same channel the existing block path
+  // uses (a CustomEvent on window, which content.js already listens for), so
+  // there is no second communication mechanism to reason about.
+  function publishAiResponse(url, site, raw, truncated, startedAt) {
+    try {
+      const result = assembleAiResponseText(raw, site);
+      if (!result.text) return;
+      window.dispatchEvent(new CustomEvent('cfai-ai-response', {
+        detail: {
+          text: result.text,
+          format: result.format,
+          site: site,
+          url: String(url || ''),
+          truncated: !!truncated,
+          duration_ms: startedAt ? (Date.now() - startedAt) : null,
+        },
+      }));
+    } catch (e) {
+      // Capture must never affect the page.
+    }
+  }
+
+  const CAPTURABLE_CONTENT_TYPE = /event-stream|ndjson|json|text\/plain/i;
+
+  // POSTs on AI hosts that are definitely not a chat turn — anti-bot sentinels,
+  // telemetry, moderation, account state. Skipping them means we never buffer a
+  // body we know carries no reply. Same spirit as the proxy's scan-policy skip
+  // list. A wrong skip only costs us a capture; it can never break the page.
+  const NON_CHAT_PATH = /\/(sentinel|ces|telemetry|analytics|metrics|health|settings|account|bootstrap|prepare|moderations?|usage|feedback|voice|share|title)\b/i;
+
+  // Drain a cloned response body, buffering the decoded text, and publish ONE
+  // event when the stream ends. Per-chunk work is a TextDecoder call and an
+  // array push — no parsing, no regex, no DOM.
+  async function captureResponseStream(res, url, site, startedAt) {
+    let reader;
+    try { reader = res.body.getReader(); } catch (e) { return; }
+    const decoder = new TextDecoder('utf-8');
+    const chunks = [];
+    let chars = 0;
+    let truncated = false;
+    try {
+      for (;;) {
+        const step = await reader.read();
+        if (step.done) break;
+        if (!step.value) continue;
+        if (truncated) continue;                       // still draining, no longer keeping
+        const piece = decoder.decode(step.value, { stream: true });
+        chars += piece.length;
+        if (chars > RESPONSE_MAX_CHARS) { truncated = true; continue; }
+        chunks.push(piece);
+      }
+      if (!truncated) chunks.push(decoder.decode());
+    } catch (e) {
+      // Stream aborted (user hit stop, tab navigated) — publish the partial.
+    }
+    publishAiResponse(url, site, chunks.join(''), truncated, startedAt);
+  }
+
+  /**
+   * Tee the response for capture without handing the page a different Response
+   * object. response.clone() shares the body via an internal tee, so the page
+   * keeps the ORIGINAL response — url, type, redirected and headers all intact.
+   * Rebuilding a Response around a piped stream would silently change those.
+   */
+  function withResponseCapture(promise, url, site) {
+    const startedAt = Date.now();
+    return promise.then((response) => {
+      try {
+        if (!site || site === 'unsupported') return response;
+        if (NON_CHAT_PATH.test(String(url || ''))) return response;
+        if (!response || !response.ok || !response.body) return response;
+        const ct = response.headers && response.headers.get ? (response.headers.get('content-type') || '') : '';
+        if (!CAPTURABLE_CONTENT_TYPE.test(ct)) return response;
+        captureResponseStream(response.clone(), url, site, startedAt);
+      } catch (e) {
+        // Never break the page's fetch because capture failed.
+      }
+      return response;
+    });
+  }
+
   const originalFetch = window.fetch;
 
   window.fetch = function (input, init) {
+    // Set inside the try below when this call is an AI chat POST whose response
+    // we can read. Declared out here so the fall-through return can use it even
+    // if the blocking logic threw.
+    let captureSite = null;
+    let captureUrl = '';
     try {
       const url = typeof input === 'string' ? input
         : input instanceof Request ? input.url
@@ -97,6 +469,9 @@
       const method = init?.method || (input instanceof Request ? input.method : 'GET');
 
       if (isChatPost(url, method)) {
+        captureUrl = url;
+        const site = responseSiteFor(url, location.hostname);
+        captureSite = site === 'unsupported' ? null : site;
         let bodyText = '';
         if (typeof init?.body === 'string') bodyText = init.body;
 
@@ -148,15 +523,16 @@
                   return;
                 }
               }
-              resolve(originalFetch.call(window, input, init));
-            } catch (e) { resolve(originalFetch.call(window, input, init)); }
+              resolve(withResponseCapture(originalFetch.call(window, input, init), url, captureSite));
+            } catch (e) { resolve(withResponseCapture(originalFetch.call(window, input, init), url, captureSite)); }
           });
         }
       }
     } catch (e) {
       console.warn('[cfai] fetch blocker error (allowing request):', e);
     }
-    return originalFetch.apply(this, arguments);
+    const passthrough = originalFetch.apply(this, arguments);
+    return captureSite ? withResponseCapture(passthrough, captureUrl, captureSite) : passthrough;
   };
 
   const origXhrOpen = XMLHttpRequest.prototype.open;
@@ -184,6 +560,26 @@
               return;
             }
           }
+        }
+        // Response capture. We read responseText ONCE, at DONE — the full
+        // streamed body is already there, so polling it per progress event
+        // would just be repeated work for the same result.
+        const site = responseSiteFor(this._cfaiUrl, location.hostname);
+        if (site !== 'unsupported' && !NON_CHAT_PATH.test(String(this._cfaiUrl || '')) && !this._cfaiCapturing) {
+          this._cfaiCapturing = true;
+          const startedAt = Date.now();
+          const url = this._cfaiUrl;
+          this.addEventListener('load', () => {
+            try {
+              if (this.status < 200 || this.status >= 300) return;
+              // responseText throws for arraybuffer/blob response types.
+              if (this.responseType && this.responseType !== 'text') return;
+              const raw = this.responseText || '';
+              if (!raw) return;
+              const truncated = raw.length > RESPONSE_MAX_CHARS;
+              publishAiResponse(url, site, truncated ? raw.slice(0, RESPONSE_MAX_CHARS) : raw, truncated, startedAt);
+            } catch (e) {}
+          });
         }
       }
     } catch (e) {}
@@ -237,5 +633,5 @@
     }
   });
 
-  console.info('[cfai] fetch blocker installed — sensitive data will be intercepted');
+  console.info('[cfai] fetch blocker installed — sensitive data will be intercepted, AI responses captured');
 })();

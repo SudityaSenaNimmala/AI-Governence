@@ -1,27 +1,27 @@
-// Tests for the browser extension's tokenization logic.
-// Simulates the fetch-blocker's decision making without a browser.
+// Tests for the fetch-blocker's block-vs-tokenize DECISION logic.
+//
+// Pattern matching now comes from the REAL catalog (content/patterns.js) via
+// loadPatterns() instead of a local copy of the regexes. Only the action
+// classification below is still mirrored locally — that logic lives in
+// content/fetch-blocker.js, which runs in the page's JS world and is not
+// importable from Node.
+//
+// The one-way redaction path used by the block modal's "Tokenize & Send"
+// button is covered separately in redaction.test.mjs.
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { loadPatterns } from './load-patterns.mjs';
 
-// Simulate the fetch-blocker's pattern matching and classification
-const SENSITIVE_PATTERNS = [
-  { name: 'us-ssn',            regex: /\b\d{3}-\d{2}-\d{4}\b/g },
-  { name: 'openai-api-key',    regex: /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/g },
-  { name: 'aws-access-key',    regex: /\bAKIA[0-9A-Z]{16}\b/g },
-  { name: 'github-pat',        regex: /\bgh[pousr]_[A-Za-z0-9]{30,}\b/g },
-];
+const P = loadPatterns();
 
+/** Pattern names present in `text`, per the shipped catalog. */
 function scanText(text) {
   if (!text || text.length < 5) return [];
-  const found = [];
-  for (const p of SENSITIVE_PATTERNS) {
-    p.regex.lastIndex = 0;
-    if (p.regex.test(text)) found.push(p.name);
-  }
-  return found;
+  return P.scan(text).map((m) => m.pattern);
 }
 
+// --- mirrors content/fetch-blocker.js ---
 function getPatternAction(patternName, actions) {
   if (!actions || typeof actions !== 'object') return 'block';
   return actions[patternName] || 'block';
@@ -36,6 +36,8 @@ function classifyMatches(matchNames, actions) {
   }
   return { blockable, tokenizable };
 }
+
+const sorted = (a) => [...a].sort();
 
 describe('Browser Extension: Block vs Tokenize Decision', () => {
   test('default: all patterns block (no actions configured)', () => {
@@ -66,7 +68,7 @@ describe('Browser Extension: Block vs Tokenize Decision', () => {
     const matches = scanText('SSN 123-45-6789 key AKIAIOSFODNN7EXAMPLE');
     const { blockable, tokenizable } = classifyMatches(matches, actions);
     assert.deepEqual(blockable, []);
-    assert.deepEqual(tokenizable, ['us-ssn', 'aws-access-key']);
+    assert.deepEqual(sorted(tokenizable), ['aws-access-key', 'us-ssn']);
   });
 
   test('no matches → no block, no tokenize', () => {
@@ -79,7 +81,7 @@ describe('Browser Extension: Block vs Tokenize Decision', () => {
   test('fetch decision: blockable.length > 0 → BLOCK (existing behavior)', () => {
     const actions = { 'us-ssn': 'tokenize' }; // SSN tokenize, others block
     const matches = scanText('SSN 123-45-6789 key AKIAIOSFODNN7EXAMPLE');
-    const { blockable, tokenizable } = classifyMatches(matches, actions);
+    const { blockable } = classifyMatches(matches, actions);
     // When ANY pattern is blockable, the ENTIRE request blocks
     const shouldBlock = blockable.length > 0;
     assert.ok(shouldBlock);

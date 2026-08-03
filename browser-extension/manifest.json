@@ -1,9 +1,16 @@
 {
   "manifest_version": 3,
   "name": "CloudFuze AI Governance",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Detects sensitive data flowing into AI services. Reports to CloudFuze governance, never to third parties.",
-  "permissions": ["storage", "alarms", "tabs", "notifications", "scripting", "webNavigation"],
+  "permissions": [
+    "storage",
+    "alarms",
+    "tabs",
+    "notifications",
+    "scripting",
+    "webNavigation"
+  ],
   "host_permissions": [
     "<all_urls>",
     "https://chatgpt.com/*",
@@ -88,7 +95,9 @@
         "vendor/xlsx.min.js",
         "vendor/jszip.min.js",
         "vendor/tesseract/tesseract.min.js",
+        "vendor/rrweb-record.js",
         "content/patterns.js",
+        "content/replay.js",
         "content/content.js"
       ],
       "css": ["content/content.css"],
@@ -106,6 +115,7 @@
     {
       "resources": [
         "content/fetch-blocker.js",
+        "content/content.css",
         "vendor/pdf.worker.js",
         "vendor/tesseract/worker.min.js",
         "vendor/tesseract/tesseract-core.wasm",
@@ -129,8 +139,7 @@
   },
   "options_page": "options/options.html",
   "action": {
-    "default_title": "CloudFuze AI Governance",
-    "default_popup": "options/options.html"
+    "default_title": "CloudFuze AI Governance — settings"
   },
   "icons": {
     "16": "icons/icon-16.png",

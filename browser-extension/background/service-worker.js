@@ -2,6 +2,26 @@
 // governance server. Survives termination by persisting queue + token to
 // chrome.storage.local, using chrome.alarms for periodic flushes.
 
+// Both halves of lib/recording.js are used here now: the session boundary
+// (engagements) and the recorder half — policy clamps, the host allowlist and the
+// daily-cap ledger — which this worker serves to content/replay.js over the
+// replay* control RPCs at the bottom of this file.
+//
+// There is deliberately NO persistent offline queue for replay chunks (and so no
+// queue helper to import for one) — parking gzipped, UNMASKED composer text in
+// chrome.storage.local at rest is a worse governance outcome than losing the tail
+// of one run, and the recorder already has a bounded in-memory rollback for a
+// transient outage (see flushChunk in content/replay.js).
+import {
+  DEFAULT_REPLAY_POLICY,
+  nextEngagement,
+  engagementExpiry,
+  normalizeReplayPolicy,
+  isRecordableHost,
+  remainingDailyMs,
+  accrueDaily,
+} from '../lib/recording.js';
+
 const STORAGE = {
   CONFIG:    'cfai.config',
   TOKEN:     'cfai.token',
@@ -11,6 +31,15 @@ const STORAGE = {
   PLATFORMS_AT: 'cfai.platforms_at',   // timestamp of last refresh
   BLOCKED:   'cfai.blocked',          // blocked agents list from governance
   BLOCKED_AT:'cfai.blocked_at',
+  SESSIONS:  'cfai.sessions',          // tabId → engagement (THE session boundary)
+  // The daily observation budget, { day, ms }. Same key the video phase used, on
+  // purpose: what is measured changed (video wall-clock → DOM-observation
+  // wall-clock) but the ledger shape did not, and a stale entry from a previous day
+  // normalizes to zero anyway (see normalizeDailyLedger in lib/recording.js), so
+  // there is nothing to migrate or clear.
+  RECORDING_DAILY: 'cfai.recordingDaily',
+  // GONE WITH THE VIDEO PIPELINE: 'cfai.recordings' (tabId → live video capture).
+  // Nothing reads it any more.
 };
 
 const FLUSH_ALARM = 'cfai-flush';
@@ -34,6 +63,9 @@ async function setStored(key, value) {
 }
 async function getConfig() {
   return getStored(STORAGE.CONFIG, { serverUrl: '', enrollSecret: '' });
+}
+function safeHost(url) {
+  try { return new URL(url).hostname; } catch (e) { return null; }
 }
 async function getOrCreateMachineId() {
   let id = await getStored(STORAGE.MACHINE_ID);
@@ -71,6 +103,179 @@ async function ensureToken() {
   }
 }
 
+// ── Engagement: THE session boundary ────────────────────────────────────────
+// One session_id covers a continuous stretch of using the SAME AI service in the
+// SAME tab. It survives chat switches, "New chat" and same-service reloads, and
+// ends only on: tab closed, a switch to a DIFFERENT AI service, 15 min without
+// VISIBLE-tab use, a 12h hard cap, or a browser restart.
+//
+// WHY THIS LIVES HERE AND NOT IN content.js: session identity used to be three
+// locals in the content script (_sessionId / _clientSeq / _lastConvId), and
+// content-script memory is destroyed by every page load. That is precisely why a
+// reload or a hard navigation between chats silently started a new session. The
+// worker survives navigation, and chrome.storage.local survives the worker being
+// terminated, so identity is owned here and keyed by tab id.
+//
+// The decision logic itself is pure and unit-tested in lib/recording.js
+// (nextEngagement / engagementExpiry / serviceKeyForHost — see
+// tests/engagement.test.mjs). This half only supplies storage, tab ids and the
+// clock. Keep it that way: none of the branching below should grow conditions.
+
+const ENGAGEMENT_SWEEP_ALARM = 'cfai-engagement-sweep';
+
+// The idle/cap windows ride on the replay policy document, which the replayPolicy
+// RPC further down fetches and caches (already normalized + clamped). Sync on
+// purpose — every engagement decision needs these windows, and none of them may
+// wait on a network round-trip. Before the first successful fetch, and whenever the
+// server is unreachable, this is DEFAULT_REPLAY_POLICY: 15 min idle / 12 h cap,
+// which is the product decision anyway.
+function engagementPolicy() {
+  return cachedReplayPolicy() || DEFAULT_REPLAY_POLICY;
+}
+
+// --- engagement state (tabId → engagement) ---
+// Same shape as the recordings map above: one storage key holding a plain
+// tabId → record object.
+
+async function getEngagements() {
+  const map = await getStored(STORAGE.SESSIONS, {});
+  return map && typeof map === 'object' ? map : {};
+}
+async function getEngagement(tabId) {
+  return (await getEngagements())[String(tabId)] || null;
+}
+async function putEngagement(tabId, rec) {
+  const map = await getEngagements();
+  map[String(tabId)] = rec;
+  await setStored(STORAGE.SESSIONS, map);
+}
+async function dropEngagement(tabId) {
+  const map = await getEngagements();
+  const rec = map[String(tabId)] || null;
+  delete map[String(tabId)];
+  await setStored(STORAGE.SESSIONS, map);
+  return rec;
+}
+
+// --- single writer over cfai.sessions ---
+// Every engagement read-modify-writes ONE storage key holding the whole map, so
+// two concurrent writers clobber each other's tabs, not just their own. Two
+// events from different frames of the same tab arriving in the same task would
+// otherwise each see "no engagement" and mint one — two session_ids for one tab.
+// Same promise-chain trick as the daily ledger further down; a rejection must not
+// poison the next waiter, hence the catch on the tail.
+let _sessionsChain = Promise.resolve();
+function withSessionsLock(fn) {
+  const run = _sessionsChain.then(fn, fn);
+  _sessionsChain = run.catch(() => {});
+  return run;
+}
+
+const NO_SESSION = Object.freeze({ session_id: null, service_key: null, client_seq: null });
+
+/**
+ * Resolve this tab's engagement against one signal and persist the result.
+ *
+ * signal.type:
+ *   'activity'       an event this tab is about to enqueue — consumes a
+ *                    client_seq, and extends the idle window when the tab is
+ *                    visible. May mint.
+ *   'touch'          the tab was used but produced no event (became visible, the
+ *                    replay controller asked for the current id). NEVER mints.
+ *   'nav_committed'  a top-frame navigation committed. Boundary check only.
+ *
+ * Returns { session_id, service_key, client_seq } — all null when there is no
+ * engagement (no tab, an unusable host, or a 'touch' with nothing to resume).
+ */
+async function sessionTouch(tabId, host, signal = {}) {
+  if (typeof tabId !== 'number' || tabId < 0) return NO_SESSION;
+  return withSessionsLock(async () => {
+    // The MIRROR, never getFreshPlatforms(): a session boundary must not depend
+    // on a network round-trip, and must not be decided differently because one
+    // fetch happened to fail.
+    const platforms = await getStored(STORAGE.PLATFORMS, []);
+    const current = await getEngagement(tabId);
+
+    const result = nextEngagement(current, {
+      type: signal.type || 'touch',
+      host,
+      platforms,
+      visible: signal.visible,
+      isTopFrame: signal.isTopFrame,
+      new_session_id: crypto.randomUUID(),
+    }, Date.now(), engagementPolicy());
+
+    if (result.closed) logEngagementEnd(tabId, result.closed);
+    if (result.action === 'mint') {
+      console.info('[cfai] session', result.record.session_id,
+                   '— tab', tabId, '(' + result.record.service_key + ')');
+    }
+
+    if (result.record) {
+      // 'none' means nothing was decided; leave storage alone rather than
+      // rewriting the same map on every read.
+      if (result.action !== 'none') await putEngagement(tabId, result.record);
+      return {
+        session_id: result.record.session_id,
+        service_key: result.record.service_key,
+        client_seq: result.seq,
+      };
+    }
+    if (result.action === 'closed') await dropEngagement(tabId);
+    return NO_SESSION;
+  });
+}
+
+function logEngagementEnd(tabId, closed) {
+  console.info('[cfai] session ended', closed.session_id, '— tab', tabId,
+               '— reason:', closed.reason,
+               '— lasted', Math.round((closed.last_activity_at - closed.started_at) / 1000) + 's');
+}
+
+/** Close a tab's engagement for a reason that is not a signal about a host. */
+async function closeEngagement(tabId, reason) {
+  if (typeof tabId !== 'number' || tabId < 0) return null;
+  return withSessionsLock(async () => {
+    const rec = await dropEngagement(tabId);
+    if (rec) logEngagementEnd(tabId, { ...rec, reason });
+    return rec;
+  });
+}
+
+/** Age every stored engagement out. Driven by the 1-minute sweep alarm. */
+async function engagementSweep() {
+  await withSessionsLock(async () => {
+    const map = await getEngagements();
+    const keys = Object.keys(map);
+    if (keys.length === 0) return;
+    const now = Date.now();
+    const policy = engagementPolicy();
+    let changed = false;
+    for (const key of keys) {
+      const reason = engagementExpiry(map[key], now, policy);
+      if (!reason) continue;
+      logEngagementEnd(Number(key), { ...map[key], reason });
+      delete map[key];
+      changed = true;
+    }
+    if (changed) await setStored(STORAGE.SESSIONS, map);
+  });
+}
+
+// Tab ids are not stable across a browser restart, so a persisted engagement can
+// no longer be matched to the tab it belonged to — nothing resumes, everything
+// closes.
+async function closeEngagementsOnStartup() {
+  await withSessionsLock(async () => {
+    const map = await getEngagements();
+    const keys = Object.keys(map);
+    if (keys.length === 0) return;
+    console.info('[cfai] closing', keys.length, 'session(s) left from the previous browser run');
+    for (const key of keys) logEngagementEnd(Number(key), { ...map[key], reason: 'browser_restarted' });
+    await setStored(STORAGE.SESSIONS, {});
+  });
+}
+
 // --- queue ---
 
 async function pushEvent(event) {
@@ -79,6 +284,20 @@ async function pushEvent(event) {
   // Cap to prevent runaway growth if server is unreachable for a long time.
   if (queue.length > 1000) queue.splice(0, queue.length - 1000);
   await setStored(STORAGE.QUEUE, queue);
+}
+
+// Stamp an outgoing event with the tab's session identity, then queue it.
+// session_id / client_seq come from the WORKER's engagement record — the content
+// script no longer sends either. client_seq (not occurredAt) stays the ordering
+// source of truth: this queue flushes on an alarm, so delivery order is not send
+// order, and the user's clock may be skewed.
+// The session_id is handed back in the response so the sender learns which
+// session its event landed in without a second round-trip — content.js caches it
+// for the replay controller.
+async function pushTabEvent(event, tabId, host, visible) {
+  const { session_id, client_seq } = await sessionTouch(tabId, host, { type: 'activity', visible });
+  await pushEvent({ ...event, session_id, client_seq });
+  return session_id;
 }
 
 async function flushQueue() {
@@ -262,8 +481,15 @@ async function markKnownAiTool({ host, vendor, product, category, sandbox, sourc
 }
 
 // Inject the heavy DLP stack into a tab AFTER classification said yes.
-// File order matters — vendor libs first, then patterns, then content.js
-// which reads window.__cfaiPatterns.
+// File order matters — vendor libs first, then patterns + replay, then content.js
+// which reads window.__cfaiPatterns and window.__cfaiReplay.
+//
+// This list MUST stay in step with manifest.json's content_scripts[0].js (the
+// hardcoded-host path). This is the OTHER injection path: hosts an admin added to
+// the platforms registry, or that the LLM classifier decided to govern, only ever
+// get the stack through here — so a file missing from this array means recording
+// silently never happens on exactly the hosts an admin went out of their way to
+// add. tests/replay-vendor.test.mjs asserts the two lists agree.
 async function injectDlpStack(tabId) {
   await chrome.scripting.executeScript({
     target: { tabId, allFrames: false },
@@ -273,7 +499,9 @@ async function injectDlpStack(tabId) {
       'vendor/xlsx.min.js',
       'vendor/jszip.min.js',
       'vendor/tesseract/tesseract.min.js',
+      'vendor/rrweb-record.js',
       'content/patterns.js',
+      'content/replay.js',
       'content/content.js',
     ],
   });
@@ -328,10 +556,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // Attach the tab URL host as the canonical source
+  // Control-channel RPC is NOT a governance event. This listener runs for every
+  // runtime message, so anything it doesn't recognise falls through to
+  // pushEvent() below and gets uploaded to /api/v1/dlp as a junk event. That was
+  // already happening for the cfai-get-* polls; the video-recording phase adds
+  // several more control messages, so the channel is now named explicitly. The
+  // dedicated listeners further down answer these.
+  if (isControlMessage(msg)) return;
+
+  // Attach the tab URL host as the canonical source.
+  // NOTE: events are forwarded VERBATIM — every field the content script sets
+  // (including event kinds like `session_bind`) rides through the queue and the
+  // /api/v1/dlp POST untouched. There is no field allowlist here on purpose; keep
+  // it that way so new event fields don't need a service-worker change.
+  //
+  // TWO exceptions, both deliberate:
+  //   session_id / client_seq  stamped BY THE WORKER (see pushTabEvent) because
+  //                            session identity now lives here, not in the
+  //                            content script. Whatever the sender put there is
+  //                            overwritten.
+  //   __cfai_visible           a control field, not governance data: it tells us
+  //                            whether the tab was visible when the event fired,
+  //                            which is what decides whether the idle window
+  //                            slides. Stripped before the event is queued.
   const tabHost = sender?.tab?.url ? new URL(sender.tab.url).hostname : null;
+  const tabId = sender?.tab?.id;
+  const visible = msg.__cfai_visible !== false;
+  const { __cfai_visible: _dropVisible, session_id: _dropSid, client_seq: _dropSeq, ...forwarded } = msg;
   const event = {
-    ...msg,
+    ...forwarded,
     source: 'browser_extension',
     tabHost,
     receivedAt: new Date().toISOString(),
@@ -345,7 +598,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   //   showNativeWarning(msg);
   // }
 
-  pushEvent(event).then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
+  pushTabEvent(event, tabId, tabHost, visible)
+    .then((sessionId) => sendResponse({ ok: true, session_id: sessionId }))
+    .catch(() => sendResponse({ ok: false }));
   return true; // async response
 });
 
@@ -379,10 +634,15 @@ function showNativeWarning(msg) {
 chrome.alarms.create(FLUSH_ALARM, { periodInMinutes: FLUSH_INTERVAL_MIN });
 chrome.alarms.create(PLATFORMS_ALARM, { periodInMinutes: PLATFORMS_REFRESH_MIN });
 chrome.alarms.create(BLOCKED_ALARM, { periodInMinutes: BLOCKED_REFRESH_MIN });
+// The idle/cap sweep. 1 minute is the chrome.alarms floor, so an engagement can
+// outlive its window by up to a minute — which is why every signal path also
+// re-checks expiry through nextEngagement() instead of trusting the sweep.
+chrome.alarms.create(ENGAGEMENT_SWEEP_ALARM, { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === FLUSH_ALARM)     flushQueue();
   if (alarm.name === PLATFORMS_ALARM) refreshPlatforms();
   if (alarm.name === BLOCKED_ALARM)   refreshBlockedAgents();
+  if (alarm.name === ENGAGEMENT_SWEEP_ALARM) engagementSweep().catch(() => {});
 });
 
 // Refresh once at startup too — alarm fires on its own schedule, not at boot.
@@ -422,16 +682,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // read it from storage directly — that's the channel from server policy to
 // in-page behavior. Failures here are non-fatal: content scripts fall back
 // to a small hardcoded list if storage hasn't been populated yet.
+//
+// ── PLATFORMS MIRROR TRUST (security-critical) ───────────────────────────────
+// This mirror USED to be fetched with a plain unauthenticated fetch(), on the
+// grounds that GET /ai-platforms is public and the block list should sync even
+// with a stale token — wrong data there fails safe either way, because it only
+// decided block-vs-allow.
+//
+// It does not only decide that any more. isRecordableHost() in lib/recording.js
+// treats any registry row with governed:true OR blocked:true as RECORDABLE, and
+// replayGate() answers the content script's "may I record" from this same mirror.
+// With <all_urls> host permissions, an unauthenticated response is an on-path
+// injection point that turns into full-DOM session recording and upload of an
+// arbitrary internal site, off one forged row. So every fetch that WRITES this
+// mirror goes through authedFetch(): the JWT the machine already holds for every
+// other server call, plus its 401-rotation retry. An unenrolled install now syncs
+// no platforms at all, which is the correct fail-closed answer for a mirror that
+// can start a recording.
 async function refreshPlatforms() {
   try {
-    // Use a PLAIN (unauthed) fetch: GET /ai-platforms is public, so the block
-    // list syncs even if the extension's token is stale or it hasn't enrolled
-    // yet. Block policy must never depend on enrollment state.
-    // No governed filter either: a blocked platform must sync even if it isn't
-    // otherwise governed, so the content script can enforce the block.
+    // AUTHED, deliberately — see PLATFORMS MIRROR TRUST below. No governed filter,
+    // though: a blocked platform must sync even if it isn't otherwise governed, so
+    // the content script can enforce the block.
     const config = await getConfig();
     if (!config.serverUrl) return;
-    const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/ai-platforms?surface=browser`);
+    const res = await authedFetch('/api/v1/ai-platforms?surface=browser');
     if (!res.ok) return;
     const rows = await res.json();
     // Keep only the fields content scripts care about — keep storage small.
@@ -467,7 +742,9 @@ async function getFreshPlatforms() {
   const config = await getConfig();
   if (!config.serverUrl) return _platCache || [];
   try {
-    const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/ai-platforms?surface=browser`);
+    // AUTHED for the same reason refreshPlatforms() is — this path also writes
+    // STORAGE.PLATFORMS, which gates recording. See PLATFORMS MIRROR TRUST above.
+    const res = await authedFetch('/api/v1/ai-platforms?surface=browser');
     if (res.ok) {
       const rows = await res.json();
       _platCache = rows.map((r) => ({
@@ -487,6 +764,462 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 });
 
-// Also flush on startup
-chrome.runtime.onStartup.addListener(() => flushQueue());
-chrome.runtime.onInstalled.addListener(() => flushQueue());
+// ── Session Replay — the worker half of the rrweb recorder ──────────────────
+// WHAT USED TO BE HERE, AND WHY IT IS GONE
+// This section held the tab-VIDEO recording pipeline: chrome.tabCapture →
+// MediaRecorder in an offscreen document, armed by a toolbar click, with a
+// recordings map, a REC badge, an offscreen watchdog and a /api/v1/recordings
+// registration. chrome.tabCapture only hands out a stream for a tab the extension
+// has been INVOKED on — a click per tab, every time — so automatic governance
+// recording was impossible with it. It was replaced by rrweb DOM/interaction
+// recording in content/replay.js, which needs no gesture because it runs inside
+// the content script the DLP layer already auto-injects.
+//
+// WHAT THIS SECTION IS NOW: pure TRANSPORT plus the three things a content script
+// cannot answer for itself.
+//   the host gate      lib/recording.js is ESM; a classic content script cannot
+//                      import it, so isRecordableHost() is asked over the wire
+//   the server policy  a content-script fetch would hit the page's CSP and has no
+//                      JWT. authedFetch here has both.
+//   the daily ledger   chrome.storage belongs to the worker
+// The recorder's state machine, chunking, gzip and masking all live in
+// content/replay.js. Nothing about a run is tracked here: these handlers are
+// stateless request forwarders (the one exception is the policy cache below, which
+// exists so 30 s polls from N open tabs do not become N server calls per 30 s).
+//
+// LOGGING DISCIPLINE, NON-NEGOTIABLE: sizes, counts, hosts, status codes. Never
+// chunk_b64, never a decoded event, never prompt text. A chunk is opaque here and
+// must stay that way — the /api/v1/replays chunk store is its only destination, and
+// it must never reach the DLP event queue (which is exactly why every kind below is
+// listed in CONTROL_KINDS).
+
+const REPLAY_POLICY_TTL_MS = 5 * 60 * 1000;
+
+let _replayPolicy = null;
+let _replayPolicyAt = 0;
+
+/** The last normalized policy, or null before the first successful fetch. */
+function cachedReplayPolicy() {
+  return _replayPolicy;
+}
+
+/**
+ * GET /api/v1/replay-policy, normalized + clamped by lib/recording.js and cached
+ * for REPLAY_POLICY_TTL_MS.
+ *
+ * The cache is the whole reason this function exists: every recording tab re-asks
+ * its gate every 30 s, so without it N open tabs would be N server calls per 30 s
+ * for a document that changes about never.
+ *
+ * Throws on any failure — deciding what a failure MEANS is replayGate()'s job, and
+ * "the fetch failed" must never resolve to a policy that permits recording. A stale
+ * cached policy is deliberately NOT served past its TTL: the policy is what says
+ * whether recording is allowed at all.
+ */
+async function getReplayPolicy() {
+  const now = Date.now();
+  if (_replayPolicy && now - _replayPolicyAt < REPLAY_POLICY_TTL_MS) return _replayPolicy;
+  const res = await authedFetch('/api/v1/replay-policy');
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  _replayPolicy = normalizeReplayPolicy(await res.json());
+  _replayPolicyAt = now;
+  return _replayPolicy;
+}
+
+/**
+ * Is the configured server a TLS endpoint?
+ *
+ * SCOPED TO REPLAY ON PURPOSE. options.html takes the server URL as a bare
+ * type="url" with no scheme restriction, and DLP enrollment/flush have historically
+ * tolerated http:// (an on-prem lab server, a dev box), so tightening that here would
+ * break installs that are working today. Session recording is a different bar: it
+ * ships the DOM of the page, and both the recording TRIGGER (the platforms mirror)
+ * and the evidence itself would cross the wire in cleartext, readable and forgeable
+ * by anyone on the path. So a non-https server means enabled:false for replay only,
+ * with a warning that says why.
+ */
+function isSecureServerUrl(serverUrl) {
+  return typeof serverUrl === 'string' && serverUrl.trim().toLowerCase().startsWith('https://');
+}
+
+let _insecureUrlWarned = false;
+
+/** The host of the tab that sent this message. The SENDER is trusted, not the body. */
+function senderHost(msg, sender) {
+  const fromSender = sender?.tab?.url ? safeHost(sender.tab.url) : null;
+  if (fromSender) return fromSender;
+  return typeof msg?.host === 'string' && msg.host ? safeHost('https://' + msg.host) || msg.host : null;
+}
+
+/**
+ * Answer the content script's every-30s "may I record, and under what policy".
+ *
+ * FAILS CLOSED on every unhappy path: an unenrolled install, an unreachable
+ * policy, no serverUrl, no token → enabled:false with a reason. `recordable` is
+ * still reported, because that answer does not depend on the server being up and
+ * the content script logs it.
+ */
+async function replayGate(msg, sender) {
+  const host = senderHost(msg, sender);
+  // The MIRROR, same as sessionTouch(): the host gate must not depend on a network
+  // round-trip, and must not answer differently because one fetch failed.
+  const platforms = await getStored(STORAGE.PLATFORMS, []);
+  const recordable = isRecordableHost(host, platforms).ok;
+
+  let policy;
+  try {
+    policy = await getReplayPolicy();
+  } catch (err) {
+    const message = String(err?.message || err);
+    const reason = /not configured|not enrolled/i.test(message) ? 'not_enrolled' : 'policy_unavailable';
+    return { ok: true, recordable, enabled: false, reason };
+  }
+
+  // No destination for the evidence means do not record and do not show a banner.
+  // A cleartext destination counts as no destination — see isSecureServerUrl().
+  const config = await getConfig();
+  const token = await getStored(STORAGE.TOKEN);
+  const secure = isSecureServerUrl(config.serverUrl);
+  if (config.serverUrl && !secure && !_insecureUrlWarned) {
+    _insecureUrlWarned = true;
+    console.warn('[cfai] session replay is OFF: the configured server URL is not https://.',
+                 'Recording uploads the page DOM, and the platforms registry that decides',
+                 'WHICH hosts get recorded would both be readable and forgeable over http.',
+                 'Fix the Server URL on the options page to enable replay.');
+  }
+  const enabled = !!policy.enabled && secure && !!(typeof token === 'string' && token);
+
+  const ledger = await getStored(STORAGE.RECORDING_DAILY, null);
+  return {
+    ok: true,
+    recordable,
+    enabled,
+    ...(enabled ? {} : {
+      reason: !config.serverUrl ? 'not_configured'
+        : !secure ? 'insecure_server_url'
+        : !token ? 'not_enrolled'
+        : 'policy_disabled',
+    }),
+    policy,
+    remaining_daily_ms: remainingDailyMs(ledger, policy.max_daily_ms),
+  };
+}
+
+/** POST /api/v1/replays. 201 and 200 (idempotent re-register) are both success. */
+async function replayRegister(msg, sender) {
+  const tabId = sender?.tab?.id;
+  const host = senderHost(msg, sender) || msg?.tab_host || null;
+  const body = {
+    replay_id: msg?.replay_id,
+    session_id: msg?.session_id,
+    tab_host: host,
+    started_at: msg?.started_at,
+    recorder: msg?.recorder,
+    mask_profile: msg?.mask_profile,
+    capture: 'dom_events',
+  };
+  // The canonical service key the engagement is already keyed by. Omitted rather
+  // than guessed when there is none — the server defaults it to 'unknown'.
+  const engagement = typeof tabId === 'number' ? await getEngagement(tabId) : null;
+  const aiService = msg?.ai_service || engagement?.service_key || null;
+  if (aiService) body.ai_service = aiService;
+
+  const res = await authedFetch('/api/v1/replays', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 201 || res.status === 200) {
+    console.info('[cfai] replay run registered', msg?.replay_id, '—', host, `(${res.status})`);
+    return { ok: true };
+  }
+  console.warn('[cfai] replay register refused:', res.status);
+  return { ok: false, error: res.status };
+}
+
+/**
+ * POST /api/v1/replays/:replay_id/chunks/:seq. STATELESS — forward and answer.
+ * There is no queue here on purpose (see the note on the lib/recording.js import).
+ * A rejected chunk is the recorder's problem; it rolls back in memory and, after a
+ * few consecutive refusals, ends the run with stop_reason 'chunk_rejected'.
+ */
+async function replayChunk(msg) {
+  const replayId = String(msg?.replay_id ?? '');
+  const seq = Number(msg?.seq);
+  if (!replayId || !Number.isInteger(seq) || seq < 0) return { ok: false, error: 'bad chunk address' };
+
+  // EXACTLY these fields. Whatever else rode along on the control message (there
+  // should be nothing) does not reach the server.
+  const body = {
+    encoding: msg?.encoding,
+    chunk_b64: msg?.chunk_b64,
+    sha256: msg?.sha256,
+    event_count: msg?.event_count,
+    first_ts: msg?.first_ts,
+    last_ts: msg?.last_ts,
+    has_full_snapshot: msg?.has_full_snapshot,
+  };
+  const b64Len = typeof body.chunk_b64 === 'string' ? body.chunk_b64.length : 0;
+
+  const res = await authedFetch(
+    `/api/v1/replays/${encodeURIComponent(replayId)}/chunks/${seq}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
+  if (res.status === 204) return { ok: true };
+  // Sizes, counts and the status code only.
+  console.warn('[cfai] replay chunk', seq, 'refused:', res.status,
+               `(${body.event_count} events, ${Math.round(b64Len / 1024)} KB b64)`);
+  return { ok: false, error: res.status };
+}
+
+/** POST /api/v1/replays/:replay_id/complete. Idempotent server-side; 200 is success. */
+async function replayComplete(msg) {
+  const replayId = String(msg?.replay_id ?? '');
+  if (!replayId) return { ok: false, error: 'replay_id required' };
+  const res = await authedFetch(`/api/v1/replays/${encodeURIComponent(replayId)}/complete`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      stop_reason: msg?.stop_reason,
+      chunk_count: msg?.chunk_count,
+      event_count: msg?.event_count,
+      session_ids: msg?.session_ids,
+      ended_at: msg?.ended_at,
+      duration_ms: msg?.duration_ms,
+    }),
+  });
+  if (res.status === 200) {
+    console.info('[cfai] replay run complete', replayId,
+                 `— ${msg?.chunk_count ?? 0} chunks, ${msg?.event_count ?? 0} events,`,
+                 `reason=${msg?.stop_reason ?? 'unknown'}`);
+    return { ok: true };
+  }
+  console.warn('[cfai] replay complete refused:', res.status);
+  return { ok: false, error: res.status };
+}
+
+// --- single writer over cfai.recordingDaily ---
+// Same promise-chain trick as withSessionsLock: the ledger is one key that every
+// recording tab read-modify-writes, so two tabs reporting accrual in the same task
+// would each read the same starting total and one increment would vanish. A
+// rejection must not poison the next waiter, hence the catch on the tail.
+let _dailyChain = Promise.resolve();
+function withDailyLock(fn) {
+  const run = _dailyChain.then(fn, fn);
+  _dailyChain = run.catch(() => {});
+  return run;
+}
+
+/** Add observed milliseconds to today's total and report what is left. */
+async function replayAccrueDaily(ms) {
+  return withDailyLock(async () => {
+    const ledger = await getStored(STORAGE.RECORDING_DAILY, null);
+    const next = accrueDaily(ledger, ms);
+    await setStored(STORAGE.RECORDING_DAILY, next);
+    const policy = cachedReplayPolicy() || DEFAULT_REPLAY_POLICY;
+    return remainingDailyMs(next, policy.max_daily_ms);
+  });
+}
+
+// Control-message discriminators — see the guard in the event listener above.
+// These MUST keep listing every control message any other context can send, even
+// ones nothing answers any more: an unrecognised message falls through to the
+// event path and gets uploaded to /api/v1/dlp as a junk governance event. For the
+// replay* kinds that is not merely junk — a replayChunk falling through would park
+// gzipped, base64'd, UNMASKED composer DOM in the DLP queue and POST it to
+// /api/v1/dlp, i.e. raw prompt bytes into the wrong store. Every replay kind below
+// is load-bearing; tests/worker-load.test.mjs asserts the chunk case specifically.
+const CONTROL_TYPES = new Set([
+  'cfai-get-blocked',
+  'cfai-get-platforms',
+  'cfai-blocked-update',
+  'cfai-arm-recording',
+  'cfai-stop-recording',
+  'cfai-recording-state',
+]);
+const CONTROL_KINDS = new Set([
+  'classifyHost',
+  'knownAiTool',
+  'currentSessionId',
+  'replayPolicy',
+  'replayRegister',
+  'replayChunk',
+  'replayComplete',
+  'replayDailyAccrued',
+]);
+function isControlMessage(msg) {
+  if (!msg || typeof msg !== 'object') return false;
+  if (msg.__cfai_kind && CONTROL_KINDS.has(msg.__cfai_kind)) return true;
+  return !!(msg.type && CONTROL_TYPES.has(msg.type));
+}
+
+// --- the session_id this tab is currently in ---
+// A PLAIN LOCAL READ of the tab's engagement. This used to be a cross-context
+// relay (worker → tabs.sendMessage → content script → its _sessionId local),
+// because the content script was the only holder of session identity. The worker
+// owns it now, so there is nothing to ask anybody: an out-of-process round-trip
+// to learn our own state would just be a way to get a different answer per frame.
+//
+// A tab with no engagement answers null — that is normal and means "nobody has
+// used the AI in this tab yet". Asking must never MINT (that would open a
+// conversation with no turns), and an engagement the sweep is about to reap is
+// reported as null rather than handed out for one last event.
+async function getTabSessionId(tabId) {
+  const rec = await getEngagement(tabId);
+  if (!rec || !rec.session_id) return null;
+  if (engagementExpiry(rec, Date.now(), engagementPolicy())) return null;
+  return rec.session_id;
+}
+
+// --- wiring ---
+
+// The toolbar icon. It used to be the recording ARM GESTURE — chrome.tabCapture
+// required a per-tab invocation, which is why manifest.json declares no
+// default_popup (a popup suppresses onClicked entirely). rrweb recording needs no
+// gesture, so there is nothing to arm, and the listener is kept only as the
+// settings shortcut armTab already had for a not-yet-configured install. A toolbar
+// icon that does nothing at all reads as a broken extension.
+chrome.action.onClicked.addListener(() => {
+  try { chrome.runtime.openOptionsPage(); } catch (e) {}
+});
+
+// A closed tab ends its engagement. 'tab_closed' is the one session boundary that
+// is not a signal about a host, so nextEngagement() has nothing to say about it
+// and the close is driven from here.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  closeEngagement(tabId, 'tab_closed').catch(() => {});
+});
+
+// A top-frame navigation is the engagement's navigation boundary: a same-service
+// commit (a reload, a hard navigation between chats, "New chat") CONTINUES the
+// engagement — that is the entire point of moving session identity out of the
+// content script. Only a commit to a DIFFERENT service ends it
+// ('service_changed'), or to a host that is not an AI surface at all
+// ('navigated_away'). A service change does not mint a replacement here: the next
+// activity signal does, because a commit is not evidence anyone used the new
+// service.
+chrome.webNavigation?.onCommitted?.addListener((details) => {
+  if (details.frameId !== 0) return;
+  let host = null;
+  try { host = new URL(details.url).hostname; } catch {}
+  sessionTouch(details.tabId, host, { type: 'nav_committed', isTopFrame: true }).catch(() => {});
+});
+
+// Control channel. Kept separate from the event listener above, which treats
+// unrecognised messages as governance events.
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || typeof msg !== 'object') return;
+
+  // "Which session is this tab in right now?" Asked by the content script so the
+  // replay controller can scope one run to one session_id. A plain read of the
+  // tab's stored engagement — no relay, no minting. A null answer is normal and
+  // means "nobody has used the AI in this tab yet".
+  //
+  // `touch: true` also counts the ask as visible-tab use, which is how the
+  // content script's visibilitychange refresh keeps a session alive while someone
+  // is reading a long reply without typing. It still never mints.
+  if (msg.__cfai_kind === 'currentSessionId') {
+    const tabId = typeof msg.tab_id === 'number' ? msg.tab_id : sender?.tab?.id;
+    const host = sender?.tab?.url ? safeHost(sender.tab.url) : null;
+    const answer = msg.touch
+      ? sessionTouch(tabId, host, { type: 'touch', visible: msg.__cfai_visible !== false })
+          .then((r) => r.session_id)
+      : getTabSessionId(tabId);
+    answer
+      .then((sessionId) => sendResponse({ session_id: sessionId }))
+      .catch(() => sendResponse({ session_id: null }));
+    return true;
+  }
+
+  // ── the replay recorder's five RPCs ──────────────────────────────────────
+  // content/replay.js is the state machine; these are its hands. Every one of them
+  // answers asynchronously (hence `return true`) and NEVER rejects into the
+  // channel: the recorder treats a missing or { ok:false } answer as "not
+  // accepted" and handles it itself, so a thrown error here would only turn a
+  // handled outage into an unhandled one.
+
+  // "May I record this tab, and under what policy / what budget is left?" Polled
+  // every 30 s per recording tab, which is why the policy behind it is cached.
+  if (msg.__cfai_kind === 'replayPolicy') {
+    replayGate(msg, sender)
+      .then(sendResponse)
+      .catch((err) => {
+        console.warn('[cfai] replay policy failed:', err?.message || err);
+        sendResponse({ ok: true, recordable: false, enabled: false, reason: 'policy_unavailable' });
+      });
+    return true;
+  }
+
+  // A run has a session_id and is opening a server row for itself.
+  if (msg.__cfai_kind === 'replayRegister') {
+    replayRegister(msg, sender)
+      .then(sendResponse)
+      .catch((err) => {
+        console.warn('[cfai] replay register failed:', err?.message || err);
+        sendResponse({ ok: false, error: err?.message || String(err) });
+      });
+    return true;
+  }
+
+  // One gzipped chunk of the event stream. Forwarded verbatim, never stored here,
+  // never logged beyond its size and the response status.
+  if (msg.__cfai_kind === 'replayChunk') {
+    replayChunk(msg)
+      .then(sendResponse)
+      .catch((err) => {
+        console.warn('[cfai] replay chunk upload failed:', err?.message || err);
+        sendResponse({ ok: false, error: err?.message || String(err) });
+      });
+    return true;
+  }
+
+  if (msg.__cfai_kind === 'replayComplete') {
+    replayComplete(msg)
+      .then(sendResponse)
+      .catch((err) => {
+        console.warn('[cfai] replay complete failed:', err?.message || err);
+        sendResponse({ ok: false, error: err?.message || String(err) });
+      });
+    return true;
+  }
+
+  // Observed-time accrual against the daily cap. The worker is the ledger's only
+  // writer; the recorder reports a delta and gets the remaining budget back so the
+  // cap still bites before its next policy poll.
+  if (msg.__cfai_kind === 'replayDailyAccrued') {
+    replayAccrueDaily(Number(msg.ms))
+      .then((remaining) => sendResponse({ ok: true, remaining_daily_ms: remaining }))
+      .catch((err) => {
+        console.warn('[cfai] replay daily accrual failed:', err?.message || err);
+        sendResponse({ ok: false, error: err?.message || String(err) });
+      });
+    return true;
+  }
+
+  // Everything else on this channel belonged to the video recorder: the arm /
+  // stop / is-this-tab-recording requests and the offscreen document's
+  // recordingStopped / recordingDailyAccrued / refreshMachineToken RPCs. They are
+  // gone with it. content.js's recording-banner region still SENDS
+  // cfai-stop-recording and cfai-recording-state; nothing answers, its callbacks
+  // already tolerate a missing responder (they read chrome.runtime.lastError), and
+  // isControlMessage() still lists both so they can never be mistaken for
+  // governance events and uploaded.
+});
+
+// A stale alarm from the deleted offscreen watchdog would keep waking this worker
+// once a minute forever with nothing to handle it — chrome.alarms persist across
+// extension updates.
+chrome.alarms.clear('cfai-recording-watchdog').catch(() => {});
+
+// Also flush on startup. A browser restart also ends every session: tab ids are
+// not stable across it, so a persisted engagement can no longer be matched to the
+// tab it belonged to and nothing resumes.
+chrome.runtime.onStartup.addListener(() => {
+  flushQueue();
+  closeEngagementsOnStartup().catch(() => {});
+});
+chrome.runtime.onInstalled.addListener(() => { flushQueue(); });

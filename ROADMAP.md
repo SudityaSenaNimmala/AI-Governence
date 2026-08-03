@@ -43,6 +43,13 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   with the right icon/label and distinguishes them from `enforcement_block`
   from the hook/extension.
 
+- [ ] **Scan captured AI responses for sensitive data**
+  Session Replay (Phase 3) now captures the AI's reply text on ChatGPT,
+  Claude, and the OpenAI/Google APIs, but nothing scans it — if a model
+  echoes back a secret or PII from context, it's stored with `matches: []`
+  and never raises severity. Reuse the existing pattern-scan engine on
+  `ai_response` content the same way it already runs on prompts.
+
 ---
 
 ## P1 — broader OS / browser coverage
@@ -94,9 +101,59 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   content blocking, not a kill switch. Remote (HTTP/SSE) MCP servers can reuse the existing
   proxy by whitelisting the endpoint and scanning JSON-RPC bodies.
 
+- [ ] **Fix streamed AI responses with no usage block being dropped entirely**
+  `cost-parser.js` returns `null` for any API call with no token-usage data,
+  which silently discards the already-reassembled response text along with
+  it — a real data-loss bug in Session Replay's response capture (Phase 3),
+  not just a cost-accounting gap.
+
+- [ ] **Capture AI responses from Microsoft Copilot and Poe**
+  Session Replay (Phase 3) can't capture replies from these today — both use
+  transports (SignalR / GraphQL-over-WebSocket) that bypass the fetch/XHR
+  interception the current capture approach relies on. Copilot in particular
+  is widely used in enterprise M365 environments.
+
+- [ ] **Add missing index for the Session Replay list sort**
+  `GET /api/v1/sessions` sorts `ai_sessions` by `last_activity_at`, but no
+  index backs that field — today it's an unindexed in-memory sort, which
+  MongoDB hard-errors on past 32MB of sorted data. Add
+  `createIndex({ last_activity_at: -1 })` in `applyInitialSchema`.
+
+- [ ] **Audit log for video recording playback**
+  Session Replay's video recordings (screen captures of employee AI usage)
+  can currently be played back via the admin-authenticated media routes with
+  no record of who watched what, when. For data this sensitive, an access
+  log (who, which recording_id, timestamp) should be close to a baseline
+  requirement, not a follow-up.
+
+- [ ] **Browser extension: "Stop recording" doesn't survive a full page reload**
+  Session Replay's stop latch lives in the content-script instance; a full page
+  reload creates a new instance while the underlying engagement/session
+  survives, so recording silently resumes mid-engagement after a user
+  explicitly stopped it.
+
 ---
 
 ## P2 — enterprise distribution
+
+- [ ] **Support recording multiple browser tabs concurrently**
+  Session Replay's video capture currently allows only one armed/recording
+  tab at a time — a second tab is refused loudly rather than silently
+  failing, but this limits power users with multiple AI conversations open
+  at once. Would require multiplexing through the single offscreen document
+  (only one may exist per extension) rather than one document per tab.
+
+- [ ] **More durable offline video buffering**
+  Session Replay's video capture buffers unsent segments in-memory only
+  (capped at 8 segments / 32MB) when the server is unreachable — the buffer
+  dies with the offscreen document and old segments are dropped past the
+  cap. An IndexedDB-backed buffer would survive longer outages and document
+  restarts.
+
+- [ ] **Admin UI for video recording policy**
+  Session Replay's recording policy (fps, bitrate, resolution, max duration,
+  retention days) is currently hardcoded server-side defaults with no way
+  to configure per-tenant without a code change. Needs a settings screen.
 
 - [ ] **Group Policy / Intune playbook for CA + agent distribution**
   One-pager IT can hand to a sysadmin: how to deploy the CA via GPO Trusted
@@ -124,6 +181,22 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   The injected desktop hook scans uploads as UTF-8 text only; the browser
   extension extracts PDF/docx/xlsx and recurses into zips via bundled vendor
   libs. Enterprises expect identical file coverage across surfaces.
+
+- [ ] **Capture AI responses from consumer Google Gemini (gemini.google.com)**
+  Session Replay (Phase 3) supports the Google API/AI Studio surface but not
+  consumer Gemini — it uses an internal `batchexecute` wire format (length-
+  delimited nested arrays, no stable text path) that the current parser
+  approach can't reliably read.
+
+- [ ] **Paginate Session Replay's single-session message view**
+  `GET /api/v1/sessions/:session_id` silently caps at 2000 messages
+  (`messages_truncated` flag set past that). Add cursor pagination on
+  `client_seq` for very long conversations.
+
+- [ ] **Browser extension options page: validate serverUrl is https:// at input time**
+  The options page's server-URL field accepts any URL (`type="url"`, no scheme
+  check). A wrong or insecure URL currently only fails later, silently-ish, at
+  the Session Replay gate rather than being caught when the admin configures it.
 
 ---
 

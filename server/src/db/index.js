@@ -37,9 +37,43 @@ export async function applyInitialSchema(db) {
   await db.collection('dlp_events').createIndex({ ai_service: 1 });
   await db.collection('dlp_events').createIndex({ secret_class: 1 });
   await db.collection('dlp_events').createIndex({ event_kind: 1 });
+  // Replay a conversation in order: filter by session, then order by time.
+  // (client_seq is the tie-breaker the reader applies, occurred_at is the index.)
+  await db.collection('dlp_events').createIndex({ session_id: 1, occurred_at: 1 });
+
+  // ai_sessions — one doc per conversation (browser extension session_id)
+  await db.collection('ai_sessions').createIndex({ session_id: 1 }, { unique: true });
+  await db.collection('ai_sessions').createIndex({ machine_id: 1, started_at: -1 });
 
   // dlp_content
   await db.collection('dlp_content').createIndex({ event_id: 1 }, { unique: true });
+
+  // session_recordings — one doc per capture run (Session Replay). Reused across
+  // both capture phases and discriminated by `capture`: 'dom_events' for the
+  // current rrweb DOM/interaction recording, 'tab_video' for the retired video
+  // phase (those rows survive only as audit tombstones — see
+  // scripts/cleanup-video-recordings.mjs). A run can span several conversations,
+  // so the conversation ids it covers live in a `session_ids` array rather than a
+  // single scalar column.
+  await db.collection('session_recordings').createIndex({ recording_id: 1 }, { unique: true });
+  await db.collection('session_recordings').createIndex({ machine_id: 1, started_at: -1 });
+  // "Which replays cover this conversation" — the multikey index makes the array
+  // containment lookup on the session detail route an index hit.
+  await db.collection('session_recordings').createIndex({ session_ids: 1, started_at: 1 });
+  // Drives the retention sweeper. Deliberately NOT a TTL index: TTL would delete
+  // this run doc — the audit tombstone — and leave its chunk documents behind with
+  // nothing pointing at them. The sweeper in lib/replay-retention.js reads this
+  // index, deletes the chunks, and leaves the run doc behind.
+  await db.collection('session_recordings').createIndex({ expires_at: 1 });
+
+  // session_replay_chunks — the uploaded event chunks of a DOM replay run. Each
+  // doc holds a gzipped JSON array of rrweb events INLINE in `payload` (no GridFS;
+  // a chunk is capped at 256 KB gzipped). The unique key is both the idempotency
+  // guarantee for a retried upload and the natural index for the ordered read.
+  await db.collection('session_replay_chunks').createIndex(
+    { recording_id: 1, seq: 1 },
+    { unique: true },
+  );
 
   // server_agent_calls
   await db.collection('server_agent_calls').createIndex({ occurred_at: -1 });

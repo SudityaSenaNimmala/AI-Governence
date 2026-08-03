@@ -9,6 +9,9 @@ import { mountQueries } from './routes/queries.js';
 import { mountSanctions } from './routes/sanctions.js';
 import { mountEnroll } from './routes/enroll.js';
 import { mountDlp } from './routes/dlp.js';
+import { mountSessions } from './routes/sessions.js';
+import { mountReplays } from './routes/replays.js';
+import { startReplayRetentionSweeper } from './lib/replay-retention.js';
 import { mountServerAgents } from './routes/server-agents.js';
 import { mountDiscovered } from './routes/discovered.js';
 import { mountClassifications } from './routes/classifications.js';
@@ -37,6 +40,10 @@ mountReports(app, db);
 mountQueries(app, db);
 mountSanctions(app, db);
 mountDlp(app, db);
+mountSessions(app, db);
+// Session Replay — rrweb DOM/interaction recording. Chunks are inline documents,
+// so there is no blob store to build or share.
+mountReplays(app, db);
 mountServerAgents(app, db);
 mountDiscovered(app, db);
 mountClassifications(app, db);
@@ -49,6 +56,12 @@ app.use((err, req, res, next) => {
   console.error('Server error:', err);
   res.status(500).json({ error: err.message });
 });
+
+// Replay retention. A Mongo TTL index would delete the run document (the audit
+// tombstone) and leave its chunk documents orphaned, so retention has to be an
+// explicit sweep. Started after the routes are mounted; it runs once now and then
+// on an interval.
+startReplayRetentionSweeper(db);
 
 app.listen(PORT, () => {
   console.log(`AI Governance server listening on http://localhost:${PORT}`);
