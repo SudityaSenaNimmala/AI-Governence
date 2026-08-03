@@ -93,6 +93,9 @@ export class Enforcer extends EventEmitter {
       case 'block':
         this.emit('block', ev);
         break;
+      case 'prompt':
+        this.emit('prompt', ev);
+        break;
       case 'override':
         this.emit('override', ev);
         break;

@@ -20,7 +20,8 @@
     "test": "node --test tests/",
     "build:bundle": "node scripts/build.mjs bundle",
     "build:sea": "node scripts/build.mjs sea",
-    "build": "node scripts/build.mjs all"
+    "build": "node scripts/build.mjs all",
+    "build:claude-tracker": "node scripts/build-claude-tracker.mjs"
   },
   "dependencies": {
     "@electron/asar": "^3.2.10",

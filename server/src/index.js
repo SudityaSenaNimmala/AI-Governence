@@ -1,5 +1,6 @@
-import dotenv from 'dotenv';
-dotenv.config();
+// MUST be the first import: loads .env as a module side effect so that env vars
+// are set before auth.js (or anything else) is evaluated. See src/env.js.
+import './env.js';
 
 import express from 'express';
 import cors from 'cors';
@@ -13,6 +14,13 @@ import { mountServerAgents } from './routes/server-agents.js';
 import { mountDiscovered } from './routes/discovered.js';
 import { mountClassifications } from './routes/classifications.js';
 import { mountAiPlatforms } from './routes/ai-platforms.js';
+import { mountAiUsage } from './routes/ai-usage.js';
+import { mountClaudeUsage } from './routes/claude-usage.js';
+import { mountOtel } from './routes/otel.js';
+import { mountWebhooks } from './routes/webhooks.js';
+import { mountSignals } from './routes/signals.js';
+import { mountApprovals } from './routes/approvals.js';
+import { mountSiem } from './routes/siem.js';
 import { seedAiPlatforms } from './seed-platforms.js';
 import { JWT_SECRET, ENROLL_SECRET, ADMIN_TOKEN } from './auth.js';
 import governanceRouter from './governance/app.js';
@@ -41,6 +49,13 @@ mountServerAgents(app, db);
 mountDiscovered(app, db);
 mountClassifications(app, db);
 mountAiPlatforms(app, db);
+mountAiUsage(app, db);
+mountClaudeUsage(app, db);
+mountOtel(app, db);
+mountWebhooks(app, db);
+mountSignals(app, db);
+mountApprovals(app, db);
+mountSiem(app, db);
 
 // ── Agent Governance routes (multi-platform discovery, policies, alerts, cost, etc.) ──
 app.use(governanceRouter);

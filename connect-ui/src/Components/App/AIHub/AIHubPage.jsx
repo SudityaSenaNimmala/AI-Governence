@@ -864,8 +864,104 @@ function ServerMonitorView() {
 
 // PAGE ROUTER
 // ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// 9. CLAUDE USAGE — every Claude surface in one place. Prompt counts are measured
+//    everywhere; tokens/cost are MEASURED for Claude Code (the CLI reports them)
+//    and ESTIMATED elsewhere. The two are never added together.
+// ═══════════════════════════════════════════════════════════════════════════════
+function ClaudeUsageView() {
+  const [data,setData]=useState(null),[e,setE]=useState(null),[sel,setSel]=useState(null);
+  useEffect(()=>{
+    apiFetch("/claude-usage").then(d=>{ setData(d); if(d.surfaces?.length) setSel(d.surfaces[0].surface); }).catch(x=>setE(x.message));
+  },[]);
+  if(e) return <Err msg={e}/>; if(!data) return <Loading/>;
+
+  const surfaces=data.surfaces||[];
+  const selected=surfaces.find(s=>s.surface===sel)||null;
+  const t=data.totals||{};
+  const a=data.assumptions||{};
+
+  return (<div>
+    <SectionHeader title="Claude Usage" hint="Prompts per user across Claude, Claude Desktop, Claude Code CLI and Claude Code on the web. Prompt counts are measured. Tokens and cost are measured for Claude Code and estimated elsewhere — the two are shown separately and never summed."/>
+
+    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,padding:"7px 12px",borderRadius:6,background:"#f1f5f9",border:"1px solid #e2e8f0",fontSize:12,color:"#475569"}}>
+      <Shield size={13}/>
+      <span>
+        Source: <strong>{data.sources_mode === "all" ? "all capture pipelines" : "Claude Usage Tracker (.exe) + Claude Code telemetry"}</strong>
+        {data.sources_mode !== "all" && " — browser-extension and OS-monitor events are excluded so each prompt is counted once."}
+      </span>
+    </div>
+
+    <div className="aihub_stat_grid">
+      <StatCard icon={<MessageSquare size={18}/>} label="Claude prompts" value={(t.prompts||0).toLocaleString()} hint="all surfaces" color="#8b5cf6"/>
+      <StatCard icon={<Activity size={18}/>} label="Measured tokens" value={fmtTokens(t.measured_tokens)} hint={`${(t.measured_requests||0).toLocaleString()} Claude Code requests`} color="#0044cc"/>
+      <StatCard icon={<Wrench size={18}/>} label="Measured cost" value={fmtUsd(t.measured_cost_usd)} hint="reported by Claude Code" color="#22c55e"/>
+      <StatCard icon={<Clock size={18}/>} label="Est. tokens" value={fmtTokens(t.estimated_tokens)} hint={`≈${fmtUsd(t.estimated_cost_usd)} · browser & desktop`} color="#f59e0b"/>
+    </div>
+
+    {!(t.prompts>0) && (
+      <div className="aihub_card" style={{marginBottom:14}}>
+        <Empty icon={<MessageSquare size={32} strokeWidth={1.5}/>} title="No Claude prompts recorded yet" msg="Run the Claude Usage Tracker (.exe) on a machine and send a prompt. Surfaces below stay listed at zero so you can see what is being tracked."/>
+      </div>
+    )}
+
+    <>
+      <SectionHeader title="By person / system" hint="One row per person per machine. Claude Code reports usage against a signed-in account while desktop and browser report an OS user — the tracker links them, so the same person counts once."/>
+      <div className="aihub_card" style={{marginBottom:18}}>
+        <DataTable columns={[
+          {label:"Person",render:r=><><div className="aihub_text_primary">{r.label}</div>{r.email&&r.email!==r.label&&<div className="aihub_text_muted">{r.email}</div>}</>},
+          {label:"System",render:r=>r.hostname?<Mono>{r.hostname}</Mono>:<span className="aihub_text_muted">—</span>},
+          {label:"Desktop",render:r=>(r.by_surface?.["Claude Desktop"]||0),right:true},
+          {label:"Browser",render:r=>(r.by_surface?.["Claude (browser)"]||0),right:true},
+          {label:"Code CLI",render:r=>(r.by_surface?.["Claude Code (CLI)"]||0),right:true},
+          {label:"Total prompts",render:r=><strong>{(r.prompts||0).toLocaleString()}</strong>,right:true},
+          {label:"Measured cost",render:r=>r.measured_cost_usd>0?fmtUsd(r.measured_cost_usd):<span className="aihub_text_muted">—</span>,right:true},
+        ]} rows={data.systems||[]} empty="No Claude usage recorded yet."/>
+      </div>
+
+      <SectionHeader title="Surfaces" hint="Claude Desktop, Claude in the browser and Claude Code CLI are always listed — a zero means tracked with no activity yet, not untracked. Select one to see per-user prompt counts."/>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}}>
+        {surfaces.map(s=>(
+          <button key={s.surface} className={`aihub_filter_btn ${sel===s.surface?"active":""}`} onClick={()=>setSel(s.surface)}
+                  style={s.prompts?undefined:{opacity:0.62}}>
+            {s.surface} · {(s.prompts||0).toLocaleString()} prompts
+            {s.measured_tokens>0 && <> · {fmtUsd(s.measured_cost_usd)}</>}
+          </button>
+        ))}
+      </div>
+
+      {selected && <div className="aihub_card">
+        <SectionHeader
+          title={`${selected.surface} — usage by user`}
+          hint={
+            selected.measured_tokens>0
+              ? `${(selected.prompts||0).toLocaleString()} prompts · ${fmtTokens(selected.measured_tokens)} measured tokens · ${fmtUsd(selected.measured_cost_usd)} measured cost (reported by Claude Code)`
+              : `${(selected.prompts||0).toLocaleString()} prompts · ${fmtTokens(selected.estimated_tokens)} estimated tokens · ≈${fmtUsd(selected.estimated_cost_usd)} estimated cost`
+          }
+        />
+        <DataTable columns={[
+          {label:"User",render:r=><><div className="aihub_text_primary">{r.label||r.user||r.hostname||"—"}</div>{!r.attributed&&<div className="aihub_text_muted">unattributed</div>}</>},
+          {label:"Prompts",key:"prompts",right:true},
+          {label:"Tokens",render:r=>fmtTokens(r.tokens),right:true},
+          {label:"Cost",render:r=>fmtUsd(r.cost_usd),right:true},
+          {label:"Basis",render:r=>r.measured
+            ? <span style={{color:"#16a34a",fontWeight:600,fontSize:11}}>measured</span>
+            : <span style={{color:"#b45309",fontWeight:600,fontSize:11}}>estimated</span>},
+          {label:"Model",render:r=>(r.models&&r.models.length)?<Mono>{r.models[0]}</Mono>:"—"},
+        ]} rows={selected.breakdown||[]} empty={`No ${selected.surface} prompts recorded yet.`}/>
+      </div>}
+
+      <p className="aihub_text_muted" style={{fontSize:11,marginTop:4}}>
+        Measured rows come from Claude Code's own reporting (real token counts and cost). Estimated rows infer
+        input ≈ prompt length ÷ {a.chars_per_token||4} chars/token with output assumed at {a.output_ratio||3}× input; actual billing may differ.
+      </p>
+    </>
+  </div>);
+}
+
 const PAGES={
   Overview:{title:"AI Overview",component:OverviewView},
+  ClaudeUsage:{title:"Claude Usage",component:ClaudeUsageView},
   Machines:{title:"Machines",component:MachinesView},
   Tools:{title:"Tools Catalog",component:ToolsView},
   Agents:{title:"Agents & MCP",component:AgentsView},

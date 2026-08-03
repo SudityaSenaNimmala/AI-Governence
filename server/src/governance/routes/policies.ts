@@ -4,6 +4,10 @@ import { v4 as uuidv4 } from "uuid";
 import { POLICY_TEMPLATES, evaluateAllPolicies } from "../services/policyEngine.js";
 import type { PolicyDefinition, PolicyViolation } from "../services/policyEngine.js";
 import type { DiscoveredAgent } from "../types/agent.js";
+import { emitWebhook } from "../../routes/webhooks.js";
+import { siemForward } from "../../lib/siem-forward.js";
+import { executePolicyActions } from "../services/actionExecutor.js";
+import type { ExecutedAction } from "../services/actionExecutor.js";
 
 const router = Router();
 
@@ -111,7 +115,7 @@ router.post("/seed-templates", async (_req, res) => {
     const existing = await db.collection("policies")
       .find({ template: { $ne: null } }, { projection: { template: 1 } })
       .toArray();
-    const existingTemplates = new Set(existing.map((r) => r.template));
+    const existingTemplates = new Set(existing.map((r: any) => r.template));
 
     let created = 0;
     for (const tpl of POLICY_TEMPLATES) {
@@ -177,27 +181,80 @@ router.post("/evaluate", async (req, res) => {
     }));
 
     const violations = evaluateAllPolicies(policies, agents);
+    const policyById = new Map(policies.map((p) => [p.id, p]));
 
     for (const v of violations.slice(0, 500)) {
       try {
-        // Use upsert to avoid duplicates — use a compound key check
-        await db.collection("policy_violations").updateOne(
-          { id: uuidv4() },
+        // Dedupe on (policy, agent) while a violation is still open. The old
+        // code keyed the upsert on a fresh uuid every run, so it never matched
+        // and re-inserted a duplicate on every evaluate — and never fired the
+        // side effects below. A stable dedupe_key fixes both.
+        const dedupeKey = `${v.policyId}:${v.agentId}`;
+        const now = new Date();
+        const result = await db.collection("policy_violations").updateOne(
+          { dedupe_key: dedupeKey, resolved: { $ne: true } },
           {
             $setOnInsert: {
               id: uuidv4(),
+              dedupe_key: dedupeKey,
               policy_id: v.policyId,
               agent_id: v.agentId,
               agent_name: v.agentName,
               condition_triggered: v.conditionTriggered,
               action_taken: v.actionRecommended,
               details: v.details,
-              created_at: new Date(),
+              resolved: false,
+              created_at: now,
             },
+            $set: { last_seen_at: now, condition_triggered: v.conditionTriggered },
           },
           { upsert: true }
         );
-      } catch { /* ignore duplicate insert errors */ }
+
+        // Fire side effects only for a NEWLY-recorded violation so re-running
+        // evaluate doesn't spam webhook subscribers or re-trigger enforcement
+        // actions for an already-open violation.
+        if (result.upsertedCount === 1) {
+          // Execute the policy's actions for real (notify/flag/escalate/
+          // suspend/archive) and record what actually happened.
+          let executed: ExecutedAction[] = [];
+          const policy = policyById.get(v.policyId);
+          if (policy) {
+            executed = await executePolicyActions(db, policy, v);
+            const done = executed.filter((e) => e.status === "done").map((e) => e.type);
+            await db.collection("policy_violations").updateOne(
+              { dedupe_key: dedupeKey, resolved: { $ne: true } },
+              { $set: { actions_executed: executed, action_taken: done.join(", ") || v.actionRecommended } },
+            );
+          }
+
+          await emitWebhook(db, "policy.violation", {
+            policy_id: v.policyId,
+            policy_name: v.policyName,
+            agent_id: v.agentId,
+            agent_name: v.agentName,
+            severity: v.severity,
+            condition_triggered: v.conditionTriggered,
+            action_recommended: v.actionRecommended,
+            actions_executed: executed,
+            details: v.details,
+          });
+
+          // Real-time push to a configured SIEM syslog collector (no-op if unset).
+          siemForward("violation", {
+            policy_id: v.policyId,
+            policy_name: v.policyName,
+            agent_id: v.agentId,
+            agent_name: v.agentName,
+            severity: v.severity,
+            condition_triggered: v.conditionTriggered,
+            action_taken: v.actionRecommended,
+            actions_executed: executed,
+            details: v.details,
+            created_at: now,
+          });
+        }
+      } catch { /* ignore individual violation failures */ }
     }
 
     const summary = {

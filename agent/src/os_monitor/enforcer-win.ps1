@@ -266,14 +266,23 @@ public static class CfaiEnforcer
                 int msg = wParam.ToInt32();
                 if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP)
                 {
-                    if (_fgIsAi && BlockActiveForMouse() && _hasRect)
+                    int x = Marshal.ReadInt32(lParam);        // MSLLHOOKSTRUCT.pt.x
+                    int y = Marshal.ReadInt32(lParam, 4);     // MSLLHOOKSTRUCT.pt.y
+                    bool inRect = _hasRect && x >= _rx && x < _rx + _rw && y >= _ry && y < _ry + _rh;
+                    if (_fgIsAi && inRect)
                     {
-                        int x = Marshal.ReadInt32(lParam);        // MSLLHOOKSTRUCT.pt.x
-                        int y = Marshal.ReadInt32(lParam, 4);     // MSLLHOOKSTRUCT.pt.y
-                        if (x >= _rx && x < _rx + _rw && y >= _ry && y < _ry + _rh)
+                        if (BlockActiveForMouse())
                         {
                             if (msg == WM_LBUTTONDOWN) Emit("block", _app, ActivePatterns(), "click");
                             return (IntPtr)1;   // swallow both down and up on the send button
+                        }
+                        // Benign send-button click — capture the prompt (LENGTH ONLY),
+                        // then let the click through so the prompt actually sends. Mirrors
+                        // the Enter path so click-to-send is counted on sealed apps too.
+                        if (msg == WM_LBUTTONDOWN && _typed.Length >= 1)
+                        {
+                            Emit("prompt", _app, "", "click", _typed.Length);
+                            _typed.Length = 0; _blockTyped = false; _typedPatterns = "";
                         }
                     }
                 }
@@ -346,7 +355,12 @@ public static class CfaiEnforcer
                             }
                             else
                             {
-                                // Clean send — reset the buffer for the next prompt.
+                                // Clean send — capture the prompt (LENGTH ONLY, no
+                                // content) for per-user usage/attribution, then reset.
+                                // This is the SAME reconstructed keystroke buffer we
+                                // use to block sensitive sends, which is why it works
+                                // on Claude Desktop where UIA can't read the composer.
+                                if (_typed.Length >= 1) { Emit("prompt", _app, "", "send", _typed.Length); }
                                 _typed.Length = 0; _blockTyped = false; _typedPatterns = "";
                             }
                         }
@@ -541,7 +555,10 @@ public static class CfaiEnforcer
     // Cleared when no block is active so normal clicks are never swallowed.
     static void UpdateSendRect()
     {
-        if (!_fgIsAi || !BlockActiveForMouse()) { _hasRect = false; return; }
+        // Locate the send button when a block is active (to swallow the click)
+        // OR when there's a pending typed prompt (to capture a benign click-send).
+        // Cleared otherwise so normal clicks are never swallowed or captured.
+        if (!_fgIsAi || (!BlockActiveForMouse() && _typed.Length < 1)) { _hasRect = false; return; }
         try
         {
             IntPtr fg = GetForegroundWindow();
@@ -690,12 +707,13 @@ public static class CfaiEnforcer
         return string.Join(",", hits.ToArray());
     }
 
-    static void Emit(string kind, string app, string patterns, string reason)
+    static void Emit(string kind, string app, string patterns, string reason, int len = -1)
     {
         string json = "{\"kind\":\"" + kind + "\""
             + (reason.Length > 0 ? ",\"reason\":\"" + Esc(reason) + "\"" : "")
             + (app.Length > 0 ? ",\"process\":\"" + Esc(app) + "\"" : "")
             + (patterns.Length > 0 ? ",\"patterns\":\"" + Esc(patterns) + "\"" : "")
+            + (len >= 0 ? ",\"len\":" + len : "")
             + "}";
         lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }

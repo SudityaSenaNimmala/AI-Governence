@@ -1,4 +1,5 @@
 import { a } from '../util.js';
+import { attachMachineIdentity } from '../lib/machine-identity.js';
 
 export function mountQueries(app, db) {
   app.get('/api/v1/overview', a(async (req, res) => {
@@ -151,6 +152,7 @@ export function mountQueries(app, db) {
       .project({ _id: 0, id: 1, scan_id: 1, machine_id: 1, detector: 1, type: 1, vendor: 1, product: 1, provider: 1, tool_key: 1, risk_score: 1, payload_json: 1, detected_at: 1 })
       .toArray();
 
+    await attachMachineIdentity(db, rows);
     res.json(rows.map(parsePayload));
   }));
 
