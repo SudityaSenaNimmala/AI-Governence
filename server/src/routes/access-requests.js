@@ -12,6 +12,7 @@
 
 import crypto from 'node:crypto';
 import { a } from '../util.js';
+import { fireWebhooks } from './webhooks.js';
 
 export function mountAccessRequests(app, db) {
   const requests   = () => db.collection('access_requests');
@@ -53,6 +54,17 @@ export function mountAccessRequests(app, db) {
     };
 
     await requests().insertOne(request);
+
+    // Fire webhook for access_request trigger
+    fireWebhooks(db, 'access_request', {
+      title: 'New Access Request: ' + (request.tool_name || request.tool_host),
+      body: (request.user || request.hostname || 'An employee') + ' is requesting access to ' + (request.tool_name || request.tool_host) + '.\nReason: ' + (request.reason || 'No reason provided'),
+      severity: 'info',
+      employee: request.user || request.hostname || 'Unknown',
+      tool: request.tool_name || request.tool_host,
+      trigger: 'access_request',
+    });
+
     res.status(201).json({ ok: true, id: request.id });
   }));
 

@@ -10,6 +10,7 @@
 // Each entry has: name, platform, owner, risk, status, data access, lifecycle, last active.
 
 import { a } from '../util.js';
+import { fireWebhooks } from './webhooks.js';
 
 // Normalize finding types to registry categories
 const CATEGORY_MAP = {
@@ -371,6 +372,16 @@ export function mountRegistry(app, db) {
       { $or: [{ id: id }, { botId: id }, { appId: id }, { name: id }] },
       { $set: { lifecycleStatus: isBlocked ? 'suspended' : 'active' } },
     );
+
+    // Fire webhook
+    const productName = req.body.product_name || id;
+    fireWebhooks(db, isBlocked ? 'tool_blocked' : 'tool_approved', {
+      title: (isBlocked ? 'Tool Blocked: ' : 'Tool Approved: ') + productName,
+      body: productName + ' has been ' + (isBlocked ? 'blocked' : 'approved') + ' in the AI Registry.',
+      severity: isBlocked ? 'high' : 'info',
+      tool: productName,
+      trigger: isBlocked ? 'tool_blocked' : 'tool_approved',
+    });
 
     res.json({ ok: true, enforced: matched.matchedCount > 0 || matched.modifiedCount > 0 });
   }));

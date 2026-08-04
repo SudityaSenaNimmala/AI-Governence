@@ -1812,66 +1812,102 @@ def _cf_create(self, *a, **kw):
 
 openai.resources.chat.completions.Completions.create = _cf_create`,
 
-    java: `import java.net.http.*;
+    java: `package com.cloudfuze.agent.observability;
+
+import java.net.http.*;
 import java.net.URI;
 import java.util.concurrent.*;
-import java.util.List;
-import java.util.ArrayList;
-import com.google.gson.*;
+import java.util.*;
+import java.util.regex.*;
 
 public class CloudFuzeTracer {
-    private static final String CF_URL = "${serverUrl}/api/v1/sdk/events";
-    private static final String CF_KEY = "${apiKey}";
+    private static final String CF_URL = System.getenv("CLOUDFUZE_URL") != null
+        ? System.getenv("CLOUDFUZE_URL") : "${serverUrl}/api/v1/sdk/events";
+    private static final String CF_KEY = System.getenv("CLOUDFUZE_API_KEY") != null
+        ? System.getenv("CLOUDFUZE_API_KEY") : "${apiKey}";
     private static final String CF_APP = "${appName}";
-    private static final List<JsonObject> queue = new ArrayList<>();
+    private static final List<String> queue = Collections.synchronizedList(new ArrayList<>());
     private static final HttpClient http = HttpClient.newHttpClient();
-    private static final Gson gson = new Gson();
+    private static final Pattern AI_HOST = Pattern.compile("openai\\\\.com|anthropic\\\\.com|generativelanguage\\\\.googleapis");
+    private static final Pattern MODEL_PAT = Pattern.compile("\\"model\\"\\\\s*:\\\\s*\\"([^\\"]+)\\"");
+    private static final Pattern PROMPT_TOK = Pattern.compile("\\"prompt_tokens\\"\\\\s*:\\\\s*(\\\\d+)");
+    private static final Pattern COMP_TOK = Pattern.compile("\\"completion_tokens\\"\\\\s*:\\\\s*(\\\\d+)");
 
     static {
-        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-        scheduler.scheduleAtFixedRate(CloudFuzeTracer::flush, 5, 5, TimeUnit.SECONDS);
+        Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "cloudfuze-flush");
+            t.setDaemon(true);
+            return t;
+        }).scheduleAtFixedRate(CloudFuzeTracer::flush, 5, 5, TimeUnit.SECONDS);
+
+        Runtime.getRuntime().addShutdownHook(new Thread(CloudFuzeTracer::flush));
     }
 
     private static void flush() {
         if (queue.isEmpty()) return;
-        List<JsonObject> batch;
-        synchronized (queue) { batch = new ArrayList<>(queue); queue.clear(); }
+        List<String> batch = new ArrayList<>(queue);
+        queue.clear();
         try {
-            JsonObject body = new JsonObject();
-            body.add("events", gson.toJsonTree(batch));
+            String body = "{\\"events\\":[" + String.join(",", batch) + "]}";
             HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(CF_URL))
                 .header("Content-Type", "application/json")
                 .header("Authorization", "Bearer " + CF_KEY)
-                .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(body)))
+                .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
             http.sendAsync(req, HttpResponse.BodyHandlers.discarding());
         } catch (Exception ignored) {}
     }
 
-    public static void trace(String provider, String model,
-                             Integer promptTokens, Integer completionTokens,
-                             long durationMs, String status,
-                             String promptText, String responseText) {
-        JsonObject event = new JsonObject();
-        event.addProperty("type", "llm_call");
-        event.addProperty("provider", provider);
-        event.addProperty("model", model);
-        if (promptTokens != null) event.addProperty("prompt_tokens", promptTokens);
-        if (completionTokens != null) event.addProperty("completion_tokens", completionTokens);
-        event.addProperty("duration_ms", durationMs);
-        event.addProperty("status", status);
-        event.addProperty("prompt_text", promptText != null ? promptText.substring(0, Math.min(500, promptText.length())) : "");
-        event.addProperty("response_text", responseText != null ? responseText.substring(0, Math.min(500, responseText.length())) : "");
-        event.addProperty("occurred_at", java.time.Instant.now().toString());
-        JsonObject meta = new JsonObject();
-        meta.addProperty("app", CF_APP);
-        event.add("metadata", meta);
-        synchronized (queue) { queue.add(event); }
-    }
-}
+    public static void trace(String reqUrl, String reqBody, String resBody,
+                             long durationMs, int statusCode) {
+        try {
+            String provider = reqUrl.contains("openai") ? "openai"
+                : reqUrl.contains("anthropic") ? "anthropic"
+                : reqUrl.contains("google") ? "google" : "other";
+            String model = extract(MODEL_PAT, reqBody.length() > 0 ? reqBody : resBody, "unknown");
+            String promptTok = extract(PROMPT_TOK, resBody, null);
+            String compTok = extract(COMP_TOK, resBody, null);
+            String prompt = truncate(reqBody, 500);
+            String response = truncate(resBody, 500);
 
-`,
+            String event = String.format(
+                "{\\"type\\":\\"llm_call\\",\\"provider\\":\\"%s\\",\\"model\\":\\"%s\\","
+                + "%s%s"
+                + "\\"duration_ms\\":%d,\\"status\\":\\"%s\\","
+                + "\\"prompt_text\\":\\"%s\\",\\"response_text\\":\\"%s\\","
+                + "\\"occurred_at\\":\\"%s\\",\\"metadata\\":{\\"app\\":\\"%s\\"}}",
+                provider, model,
+                promptTok != null ? "\\"prompt_tokens\\":" + promptTok + "," : "",
+                compTok != null ? "\\"completion_tokens\\":" + compTok + "," : "",
+                durationMs, statusCode < 400 ? "ok" : "error",
+                escapeJson(prompt), escapeJson(response),
+                java.time.Instant.now().toString(), CF_APP);
+            queue.add(event);
+        } catch (Exception ignored) {}
+    }
+
+    public static boolean isAiUrl(String url) {
+        return url != null && AI_HOST.matcher(url).find();
+    }
+
+    private static String extract(Pattern p, String text, String fallback) {
+        if (text == null) return fallback;
+        java.util.regex.Matcher m = p.matcher(text);
+        return m.find() ? m.group(1) : fallback;
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) return "";
+        return s.length() <= max ? s : s.substring(0, max);
+    }
+
+    private static String escapeJson(String s) {
+        if (s == null) return "";
+        return s.replace("\\\\", "\\\\\\\\").replace("\\"", "\\\\\\"")
+                .replace("\\n", "\\\\n").replace("\\r", "\\\\r").replace("\\t", "\\\\t");
+    }
+}`,
   });
 
   const copyText = (text) => {
@@ -2021,7 +2057,11 @@ public class CloudFuzeTracer {
                 <CodeBox code={fullSnippet(selectedProject.api_key || "cfsk_••••••••••••", selectedProject.name)[snippetLang] || "Select a language"} />
                 <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 12, marginTop: 10 }}>
                   <div style={{ fontSize: 12, color: "#166534", lineHeight: 1.6 }}>
-                    <strong>No installation needed.</strong> Just paste and run. This snippet automatically captures every AI API call — model, tokens, cost, duration, prompt, response — and sends it to your CloudFuze dashboard.
+                    {snippetLang === "java" ? (<>
+                      <strong>Add this class to your project.</strong> Set env vars <code style={{background:"#dcfce7",padding:"1px 4px",borderRadius:3}}>CLOUDFUZE_URL</code> and <code style={{background:"#dcfce7",padding:"1px 4px",borderRadius:3}}>CLOUDFUZE_API_KEY</code>. Then after each HTTP call to an AI API, call: <code style={{background:"#dcfce7",padding:"1px 4px",borderRadius:3}}>CloudFuzeTracer.trace(url, reqBody, resBody, durationMs, statusCode)</code> — or use <code style={{background:"#dcfce7",padding:"1px 4px",borderRadius:3}}>CloudFuzeTracer.isAiUrl(url)</code> to check if a URL is an AI endpoint first.
+                    </>) : (<>
+                      <strong>No installation needed.</strong> Just paste and run. This snippet automatically captures every AI API call — model, tokens, duration, prompt, response — and sends it to your CloudFuze dashboard.
+                    </>)}
                   </div>
                 </div>
               </div>
@@ -2205,6 +2245,330 @@ function AIUsageView() {
   );
 }
 
+// ── Integrations View (Webhooks) ──────────────────────────────────────────
+
+const WEBHOOK_API = "/api/v1/webhooks";
+const CONNECTIONS_API = "/api/v1/connections";
+
+function IntegrationsView() {
+  const [connections,setConnections]=useState(null);
+  const [hooks,setHooks]=useState(null);
+  const [templates,setTemplates]=useState(null);
+  const [triggersList,setTriggersList]=useState([]);
+  const [deliveryLog,setLog]=useState(null);
+  const [err,setErr]=useState(null);
+  const [tab,setTab]=useState("webhooks");
+  const [showForm,setShowForm]=useState(false);
+  const [editId,setEditId]=useState(null);
+  const [testing,setTesting]=useState(null);
+  const [fName,setFName]=useState("");
+  const [fUrl,setFUrl]=useState("");
+  const [fTemplate,setFTemplate]=useState("slack");
+  const [fTriggers,setFTriggers]=useState([]);
+  const [fAuth,setFAuth]=useState("");
+  const [fChannelId,setFChannelId]=useState("");
+  const [channelData,setChannelData]=useState(null);
+  const [channelSearch,setChannelSearch]=useState("");
+  const [expandedTeam,setExpandedTeam]=useState(null);
+  const [teamChannels,setTeamChannels]=useState({});  // teamId → channels[]
+  const [loadingTeamCh,setLoadingTeamCh]=useState(null);
+  // Connection config form
+  const [configType,setConfigType]=useState(null);
+  const [cfgSlackToken,setCfgSlackToken]=useState("");
+  const [cfgTeamsClientId,setCfgTeamsClientId]=useState("");
+  const [cfgTeamsSecret,setCfgTeamsSecret]=useState("");
+  const [cfgTeamsTenant,setCfgTeamsTenant]=useState("");
+  const [cfgSaving,setCfgSaving]=useState(false);
+
+  const loadAll=()=>{
+    Promise.all([
+      fetch(CONNECTIONS_API).then(r=>r.json()),
+      fetch(WEBHOOK_API).then(r=>r.json()),
+      fetch(WEBHOOK_API+"/templates").then(r=>r.json()),
+      fetch(WEBHOOK_API+"/log").then(r=>r.json()),
+    ]).then(([c,h,t,l])=>{setConnections(c);setHooks(h);setTemplates(t.templates);setTriggersList(t.triggers);setLog(l);}).catch(x=>setErr(x.message));
+  };
+  useEffect(loadAll,[]);
+
+  const saveConnection=async(type)=>{
+    setCfgSaving(true);
+    try {
+      const body=type==='slack'?{bot_token:cfgSlackToken}:{client_id:cfgTeamsClientId,client_secret:cfgTeamsSecret,tenant_id:cfgTeamsTenant};
+      const r=await fetch(CONNECTIONS_API+"/"+type,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      const d=await r.json();
+      if(!r.ok){alert("Error: "+(d.error||"Failed"));setCfgSaving(false);return;}
+      setConfigType(null);setCfgSlackToken("");setCfgTeamsClientId("");setCfgTeamsSecret("");setCfgTeamsTenant("");loadAll();
+    } catch(e){alert(e.message);}
+    setCfgSaving(false);
+  };
+
+  const disconnect=async(type)=>{
+    if(!confirm("Disconnect "+type+"? Existing webhooks using this connection will stop working.")) return;
+    await fetch(CONNECTIONS_API+"/"+type,{method:"DELETE"});loadAll();
+  };
+
+  const [loadingChannels,setLoadingChannels]=useState(false);
+  const loadChannels=async(type)=>{
+    setLoadingChannels(true);
+    setChannelData(null);
+    setChannelSearch("");
+    try {
+      const r=await fetch(CONNECTIONS_API+"/"+type+"/channels");
+      if(r.ok) setChannelData(await r.json());
+    } catch {}
+    setLoadingChannels(false);
+  };
+
+  const save=async()=>{
+    if(!fName)return;
+    const isDirectConn=fTemplate==='slack'||fTemplate==='teams';
+    const body={name:fName,template:fTemplate,triggers:fTriggers};
+    if(isDirectConn){
+      // Direct connection mode — no URL needed, use channel_id
+      if(!fChannelId){alert("Please select a channel");return;}
+      body.connection_type=fTemplate;
+      body.channel_id=fChannelId;
+      body.url='direct://'+fTemplate; // placeholder — not used for posting
+    } else {
+      // Legacy webhook URL mode
+      if(!fUrl)return;
+      body.url=fUrl;
+      body.auth_header=fAuth||null;
+    }
+    if(editId) await fetch(`${WEBHOOK_API}/${editId}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    else await fetch(WEBHOOK_API,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    closeForm();loadAll();
+  };
+  const closeForm=()=>{setShowForm(false);setEditId(null);setFName("");setFUrl("");setFTemplate("slack");setFTriggers([]);setFAuth("");setFChannelId("");setChannelData(null);setChannelSearch("");};
+  const startEdit=(h)=>{setEditId(h.id);setFName(h.name);setFUrl(h.url);setFTemplate(h.template||"custom");setFTriggers(h.triggers||[]);setFAuth(h.auth_header||"");setShowForm(true);};
+  const remove=async(id)=>{if(!confirm("Delete this webhook?"))return;await fetch(`${WEBHOOK_API}/${id}`,{method:"DELETE"});loadAll();};
+  const toggle=async(h)=>{await fetch(`${WEBHOOK_API}/${h.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:!h.enabled})});loadAll();};
+  const test=async(id)=>{setTesting(id);const r=await fetch(`${WEBHOOK_API}/${id}/test`,{method:"POST"});const d=await r.json();alert(d.ok?"Test delivered successfully!":"Test failed: "+(d.error||"HTTP "+d.status));setTesting(null);loadAll();};
+
+  if(err) return <Err msg={err}/>;
+  if(!hooks) return <Loading/>;
+
+  const TL={dlp_critical:"DLP Critical Violation",risk_score_high:"Risk Score → High",access_request:"New Access Request",tool_blocked:"Tool Blocked",tool_approved:"Tool Approved"};
+  const TI={slack:"💬",teams:"👥",jira:"🎫",servicenow:"🔧",custom:"⚡"};
+
+  const configuredCount=(connections||[]).filter(c=>c.status==='configured').length;
+  const configuredConnections=(connections||[]).filter(c=>c.status==='configured');
+
+  return (<div>
+    <SectionHeader title="Integrations" hint="Connect CloudFuze to your existing tools — notifications, ticketing, identity, and cloud platforms"/>
+
+    {/* Tabs: Webhooks | Delivery Log | Connections */}
+    <div style={{display:"flex",gap:2,marginBottom:16,borderBottom:"2px solid #f3f4f6"}}>
+      {[
+        {id:"webhooks",label:"Webhooks ("+hooks.length+")"},
+        {id:"log",label:"Delivery Log"},
+        {id:"connections",label:"Connections ("+configuredCount+"/"+((connections||[]).length)+")"},
+      ].map(t=>
+        <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"8px 18px",fontSize:13,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0044cc":"2px solid transparent",background:"none",color:tab===t.id?"#0044cc":"#6b7280",cursor:"pointer",marginBottom:-2}}>{t.label}</button>
+      )}
+    </div>
+
+    {/* Connections Tab */}
+    {tab==="connections"&&(
+      <div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:14,marginBottom:16}}>
+          {(connections||[]).map(c=>(
+            <div key={c.type} style={{border:"1px solid "+(c.status==='configured'?"#22c55e30":"#e5e7eb"),borderRadius:12,padding:18,background:c.status==='configured'?"#f0fdf4":"#fff"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+                <span style={{fontSize:30}}>{c.icon}</span>
+                <div>
+                  <div style={{fontWeight:700,fontSize:15}}>{c.name}</div>
+                  <div style={{fontSize:12,color:"#9ca3af"}}>{c.description}</div>
+                </div>
+              </div>
+              {c.status==='configured'?(
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 12px",background:"#22c55e0a",borderRadius:8,border:"1px solid #22c55e20"}}>
+                  <span style={{fontSize:12,fontWeight:700,color:"#22c55e"}}>✓ Connected</span>
+                  <button onClick={()=>disconnect(c.type)} style={{fontSize:11,color:"#ef4444",background:"none",border:"none",cursor:"pointer"}}>Disconnect</button>
+                </div>
+              ):(
+                <button onClick={()=>setConfigType(c.type)} style={{width:"100%",padding:"8px 0",borderRadius:8,border:"1px solid #0044cc30",background:"#0044cc08",color:"#0044cc",fontSize:13,fontWeight:600,cursor:"pointer"}}>Configure</button>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {/* Slack Config Form */}
+        {configType==='slack'&&(
+          <div className="aihub_card" style={{background:"#f9fafb"}}>
+            <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>Connect Slack</h4>
+            <p style={{fontSize:12,color:"#6b7280",marginBottom:12}}>Create a Slack App → OAuth & Permissions → add scopes: <code>chat:write</code>, <code>channels:read</code> → Install to Workspace → copy the <strong>Bot User OAuth Token</strong></p>
+            <div style={{marginBottom:12}}>
+              <label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Bot Token</label>
+              <input value={cfgSlackToken} onChange={e=>setCfgSlackToken(e.target.value)} placeholder="xoxb-..." style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/>
+            </div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+              <button onClick={()=>setConfigType(null)} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>Cancel</button>
+              <button onClick={()=>saveConnection('slack')} disabled={!cfgSlackToken||cfgSaving} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:!cfgSlackToken||cfgSaving?0.5:1}}>{cfgSaving?"Verifying...":"Connect"}</button>
+            </div>
+          </div>
+        )}
+
+        {/* Teams Config Form */}
+        {configType==='teams'&&(
+          <div className="aihub_card" style={{background:"#f9fafb"}}>
+            <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>Connect Microsoft Teams</h4>
+            <p style={{fontSize:12,color:"#6b7280",marginBottom:12}}>Azure Portal → App registrations → your app → API permissions → Add:<br/>
+            <code style={{background:"#f1f5f9",padding:"1px 4px",borderRadius:3}}>ChannelMessage.Send</code> (to post messages),
+            <code style={{background:"#f1f5f9",padding:"1px 4px",borderRadius:3}}>Team.ReadBasic.All</code> (to list teams),
+            <code style={{background:"#f1f5f9",padding:"1px 4px",borderRadius:3}}>Channel.ReadBasic.All</code> (to list channels)<br/>
+            All as <strong>Application</strong> type → then click <strong>Grant admin consent</strong></p>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+              <div>
+                <label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Client ID</label>
+                <input value={cfgTeamsClientId} onChange={e=>setCfgTeamsClientId(e.target.value)} placeholder="Azure App Client ID" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/>
+              </div>
+              <div>
+                <label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Tenant ID</label>
+                <input value={cfgTeamsTenant} onChange={e=>setCfgTeamsTenant(e.target.value)} placeholder="Azure Tenant ID" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/>
+              </div>
+            </div>
+            <div style={{marginBottom:12}}>
+              <label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Client Secret</label>
+              <input type="password" value={cfgTeamsSecret} onChange={e=>setCfgTeamsSecret(e.target.value)} placeholder="Azure App Client Secret" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/>
+            </div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+              <button onClick={()=>setConfigType(null)} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>Cancel</button>
+              <button onClick={()=>saveConnection('teams')} disabled={!cfgTeamsClientId||!cfgTeamsSecret||!cfgTeamsTenant||cfgSaving} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:(!cfgTeamsClientId||!cfgTeamsSecret||!cfgTeamsTenant||cfgSaving)?0.5:1}}>{cfgSaving?"Verifying...":"Connect"}</button>
+            </div>
+          </div>
+        )}
+      </div>
+    )}
+
+    {tab==="webhooks"&&(<div>
+      <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
+        <button onClick={()=>{
+          const firstConn=configuredConnections[0];
+          const defaultType=firstConn?.type||'custom';
+          setFTemplate(defaultType);
+          setShowForm(true);
+          if(defaultType==='slack'||defaultType==='teams') loadChannels(defaultType);
+        }} style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}><Plus size={14}/> Add Webhook</button>
+      </div>
+      {showForm&&(<div className="aihub_card" style={{marginBottom:16,background:"#f9fafb"}}>
+        <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>{editId?"Edit Webhook":"New Webhook"}</h4>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+          <div><label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Name</label><input value={fName} onChange={e=>setFName(e.target.value)} placeholder="e.g. Security Alerts Slack" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/></div>
+          <div><label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Send To</label><select value={fTemplate} onChange={e=>{setFTemplate(e.target.value);setFChannelId("");setChannels([]);if(e.target.value==='slack'||e.target.value==='teams')loadChannels(e.target.value);}} style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}>
+            {configuredConnections.map(c=><option key={c.type} value={c.type}>{c.icon+" "+c.name}</option>)}
+            <option value="custom">⚡ Custom Webhook URL</option>
+          </select></div>
+        </div>
+
+        {/* Channel picker for direct connections */}
+        {(fTemplate==='slack'||fTemplate==='teams')&&(
+          <div style={{marginBottom:12}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}}>
+              <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Channel {fChannelId&&<span style={{fontWeight:400,color:"#22c55e"}}> ✓ selected</span>}</label>
+              <button type="button" onClick={()=>loadChannels(fTemplate)} disabled={loadingChannels} style={{fontSize:11,color:"#0044cc",background:"none",border:"none",cursor:"pointer",fontWeight:600}}>{loadingChannels?"Loading...":"↻ Refresh"}</button>
+            </div>
+            {loadingChannels?(
+              <div style={{padding:"16px",background:"#f9fafb",borderRadius:8,fontSize:12,color:"#6b7280",textAlign:"center"}}>Loading from {fTemplate==='slack'?'Slack':'Microsoft Teams'}...</div>
+            ):channelData?(()=>{
+              const q=channelSearch.toLowerCase();
+
+              if(channelData.type==='hierarchical'){
+                // Teams — show teams, click to expand and lazy-load channels
+                const filteredTeams=(channelData.teams||[]).filter(t=>!q||t.team_name.toLowerCase().includes(q));
+                const expandTeam=async(teamId)=>{
+                  if(expandedTeam===teamId){setExpandedTeam(null);return;}
+                  setExpandedTeam(teamId);
+                  if(!teamChannels[teamId]){
+                    setLoadingTeamCh(teamId);
+                    try{
+                      const r=await fetch(CONNECTIONS_API+"/teams/team/"+teamId+"/channels");
+                      if(r.ok){const chs=await r.json();setTeamChannels(prev=>({...prev,[teamId]:chs}));}
+                    }catch{}
+                    setLoadingTeamCh(null);
+                  }
+                };
+                return (<div style={{border:"1px solid #e5e7eb",borderRadius:8,overflow:"hidden"}}>
+                  <div style={{padding:"8px 10px",borderBottom:"1px solid #e5e7eb",background:"#f9fafb"}}>
+                    <input value={channelSearch} onChange={e=>setChannelSearch(e.target.value)} placeholder={"Search "+filteredTeams.length+" teams..."} style={{width:"100%",border:"none",background:"transparent",outline:"none",fontSize:12,boxSizing:"border-box"}}/>
+                  </div>
+                  <div style={{maxHeight:300,overflowY:"auto"}}>
+                    {filteredTeams.length===0&&<div style={{padding:12,textAlign:"center",fontSize:12,color:"#9ca3af"}}>No teams match "{channelSearch}"</div>}
+                    {filteredTeams.map(t=>(
+                      <div key={t.team_id}>
+                        <div onClick={()=>expandTeam(t.team_id)} style={{padding:"8px 12px",fontSize:12,fontWeight:600,color:"#374151",background:expandedTeam===t.team_id?"#eef2ff":"#f9fafb",borderBottom:"1px solid #f3f4f6",cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
+                          <span style={{fontSize:10,color:"#6b7280"}}>{expandedTeam===t.team_id?"▼":"▶"}</span> 🏢 {t.team_name}
+                        </div>
+                        {expandedTeam===t.team_id&&(
+                          loadingTeamCh===t.team_id?
+                            <div style={{padding:"8px 32px",fontSize:11,color:"#9ca3af"}}>Loading channels...</div>
+                          :(teamChannels[t.team_id]||[]).map(ch=>(
+                            <div key={ch.id} onClick={()=>setFChannelId(ch.id)}
+                              style={{padding:"7px 12px 7px 36px",fontSize:12,cursor:"pointer",borderBottom:"1px solid #f9fafb",
+                                background:fChannelId===ch.id?"#0044cc10":"#fff",color:fChannelId===ch.id?"#0044cc":"#374151",fontWeight:fChannelId===ch.id?600:400}}>
+                              # {ch.name}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>);
+
+              } else {
+                // Slack — flat list
+                const chs=(channelData.channels||[]).filter(ch=>!q||ch.name.toLowerCase().includes(q));
+                return (<div style={{border:"1px solid #e5e7eb",borderRadius:8,overflow:"hidden"}}>
+                  <div style={{padding:"8px 10px",borderBottom:"1px solid #e5e7eb",background:"#f9fafb"}}>
+                    <input value={channelSearch} onChange={e=>setChannelSearch(e.target.value)} placeholder={"Search "+chs.length+" channels..."} style={{width:"100%",border:"none",background:"transparent",outline:"none",fontSize:12,boxSizing:"border-box"}}/>
+                  </div>
+                  <div style={{maxHeight:300,overflowY:"auto"}}>
+                    {chs.length===0&&<div style={{padding:12,textAlign:"center",fontSize:12,color:"#9ca3af"}}>No channels match "{channelSearch}"</div>}
+                    {chs.map(ch=>(
+                      <div key={ch.id} onClick={()=>setFChannelId(ch.id)}
+                        style={{padding:"7px 12px",fontSize:12,cursor:"pointer",borderBottom:"1px solid #f9fafb",
+                          background:fChannelId===ch.id?"#0044cc10":"#fff",color:fChannelId===ch.id?"#0044cc":"#374151",fontWeight:fChannelId===ch.id?600:400}}>
+                        {ch.name} {ch.is_private&&<span style={{fontSize:10,color:"#9ca3af"}}>🔒</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>);
+              }
+            })():(
+              <div style={{padding:"10px 12px",background:"#fff7ed",borderRadius:8,fontSize:12,color:"#92400e",border:"1px solid #fed7aa"}}>Click "↻ Refresh" to load from {fTemplate==='slack'?'Slack':'Microsoft Teams'}</div>
+            )}
+          </div>
+        )}
+
+        {/* URL + Auth for custom webhooks only */}
+        {fTemplate==='custom'&&(<>
+          <div style={{marginBottom:12}}><label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Webhook URL</label><input value={fUrl} onChange={e=>setFUrl(e.target.value)} placeholder="https://..." style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/></div>
+          <div style={{marginBottom:12}}><label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Auth Header <span style={{fontWeight:400,color:"#9ca3af"}}>(optional)</span></label><input value={fAuth} onChange={e=>setFAuth(e.target.value)} placeholder="Authorization: Bearer your-token" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/></div>
+        </>)}
+
+        <div style={{marginBottom:12}}><label style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:6,display:"block"}}>Triggers</label><div style={{display:"flex",flexWrap:"wrap",gap:6}}>{triggersList.map(t=>{const sel=fTriggers.includes(t);return <button key={t} type="button" onClick={()=>setFTriggers(sel?fTriggers.filter(x=>x!==t):[...fTriggers,t])} style={{padding:"4px 12px",borderRadius:6,fontSize:11,fontWeight:600,border:"1px solid",cursor:"pointer",background:sel?"#0044cc14":"#fff",color:sel?"#0044cc":"#6b7280",borderColor:sel?"#0044cc30":"#e5e7eb"}}>{TL[t]||t}</button>;})}</div></div>
+        <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}><button onClick={closeForm} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>Cancel</button><button onClick={save} disabled={!fName} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:!fName?0.5:1}}>{editId?"Update":"Save"}</button></div>
+      </div>)}
+      <div className="aihub_card"><DataTable columns={[
+        {label:"Webhook",render:r=><div><div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:16}}>{TI[r.template]||"⚡"}</span><div className="aihub_text_primary">{r.name}</div></div><div className="aihub_text_muted" style={{fontSize:11}}>{r.url?.slice(0,50)}{r.url?.length>50?"...":""}</div></div>},
+        {label:"Template",render:r=><Tag text={templates?.[r.template]?.name||r.template}/>},
+        {label:"Triggers",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:3}}>{(r.triggers||[]).map(t=><Tag key={t} text={TL[t]||t} color="#6366f1"/>)}</div>},
+        {label:"Status",render:r=><Badge text={r.enabled?"Active":"Disabled"} color={r.enabled?"#22c55e":"#9ca3af"}/>},
+        {label:"Actions",render:r=><div style={{display:"flex",gap:6,whiteSpace:"nowrap"}}><button onClick={()=>startEdit(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#0044cc",fontSize:12,fontWeight:600}}>Edit</button><button onClick={()=>test(r.id)} disabled={testing===r.id} style={{background:"none",border:"none",cursor:"pointer",color:"#6366f1",fontSize:12,fontWeight:600}}>{testing===r.id?"Testing...":"Test"}</button><button onClick={()=>toggle(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#f59e0b",fontSize:12,fontWeight:600}}>{r.enabled?"Disable":"Enable"}</button><button onClick={()=>remove(r.id)} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",fontSize:12,fontWeight:600}}>Delete</button></div>},
+      ]} rows={hooks} empty="No webhooks configured. Click 'Add Webhook' to connect to Slack, Teams, Jira, or any tool."/></div>
+    </div>)}
+
+    {tab==="log"&&(<div className="aihub_card"><DataTable columns={[
+      {label:"Time",render:r=>relTime(r.timestamp)},
+      {label:"Webhook",render:r=><div className="aihub_text_primary">{r.webhook_name||"—"}</div>},
+      {label:"Trigger",render:r=><Tag text={TL[r.trigger]||r.trigger}/>},
+      {label:"Status",render:r=><Badge text={r.status} color={r.status==='delivered'?"#22c55e":r.status==='failed'?"#f59e0b":"#ef4444"}/>},
+      {label:"HTTP",render:r=>r.http_status||"—"},
+      {label:"Error",render:r=><div className="aihub_text_muted" style={{fontSize:11,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis"}}>{r.error||"—"}</div>},
+    ]} rows={deliveryLog||[]} empty="No webhook deliveries yet."/></div>)}
+  </div>);
+}
+
 const PAGES={
   Overview:{title:"AI Overview",component:OverviewView},
   AIUsage:{title:"AI Usage",component:AIUsageView},
@@ -2222,6 +2586,7 @@ const PAGES={
   RiskScores:{title:"Risk Scores",component:RiskScoreView},
   AIRegistry:{title:"AI Registry",component:AIRegistryView},
   AccessRequests:{title:"Access Requests",component:AccessRequestsView},
+  Integrations:{title:"Integrations",component:IntegrationsView},
   DeveloperSDK:{title:"Developer SDK",component:DeveloperSDKView},
 };
 

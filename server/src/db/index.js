@@ -86,6 +86,14 @@ export async function applyInitialSchema(db) {
   // risk_scores (historical)
   await db.collection('risk_scores').createIndex({ profile_id: 1, computed_at: -1 });
 
+  // integrations (connections)
+  await db.collection('integrations').createIndex({ type: 1 }, { unique: true });
+
+  // webhooks
+  await db.collection('webhooks').createIndex({ id: 1 }, { unique: true });
+  await db.collection('webhook_log').createIndex({ timestamp: -1 });
+  await db.collection('webhook_log').createIndex({ webhook_id: 1 });
+
   // access_requests
   await db.collection('access_requests').createIndex({ id: 1 }, { unique: true });
   await db.collection('access_requests').createIndex({ machine_id: 1, tool_host: 1 });

@@ -139,6 +139,7 @@ function App() {
           <Route path="/AIHub/RiskScores" element={<AIHubPage page="RiskScores" />} />
           <Route path="/AIHub/AIRegistry" element={<AIHubPage page="AIRegistry" />} />
           <Route path="/AIHub/AccessRequests" element={<AIHubPage page="AccessRequests" />} />
+          <Route path="/AIHub/Integrations" element={<AIHubPage page="Integrations" />} />
           <Route path="/AIHub/DeveloperSDK" element={<AIHubPage page="DeveloperSDK" />} />
           <Route path="/Data" element={<DataDashboard />} />
           <Route path="/MessageSprawl" element={<MessageDashboard />} />

@@ -82,15 +82,15 @@ export function mountDlp(app, db) {
 
       await insertContent(db, eventId, e);
 
-      // Push enforcement events to any third-party webhook subscribers.
-      if (e.kind === 'enforcement_block' || e.kind === 'enforcement_override') {
-        emitWebhook(db, e.kind === 'enforcement_override' ? 'enforcement.override' : 'enforcement.block', {
-          event_id: eventId,
-          machine_id: req.machine.id,
-          ai_service: e.service ?? 'unknown',
+      // Push critical enforcement events to webhook subscribers.
+      if ((e.kind === 'enforcement_block' || e.kind === 'enforcement_override') && (secretClass === 'critical' || secretClass === 'high')) {
+        emitWebhook(db, 'dlp_critical', {
+          title: 'DLP Violation: ' + (e.service || 'AI Tool'),
+          body: 'Sensitive data (' + (secretClass || 'unknown') + ') detected in ' + (e.service || 'an AI tool') + '. ' + (e.kind === 'enforcement_override' ? 'User overrode the block.' : 'Prompt was blocked.') + '\nPatterns: ' + (patternMatched || 'unknown'),
           severity: secretClass,
-          patterns: patternMatched ? String(patternMatched).split(',').filter(Boolean) : [],
-          occurred_at: e.occurredAt,
+          employee: req.machine.hostname || req.machine.id,
+          tool: e.service || 'unknown',
+          trigger: 'dlp_critical',
         });
       }
 

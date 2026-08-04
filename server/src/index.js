@@ -19,11 +19,12 @@ import { mountIdentity, resolveProfiles } from './routes/identity.js';
 import { mountRiskScore } from './routes/risk-score.js';
 import { mountRegistry } from './routes/registry.js';
 import { mountAccessRequests } from './routes/access-requests.js';
+import { mountWebhooks } from './routes/webhooks.js';
+import { mountConnections } from './routes/connections.js';
 import { mountSdk } from './routes/sdk.js';
 import { mountAiUsage } from './routes/ai-usage.js';
 import { mountClaudeUsage } from './routes/claude-usage.js';
 import { mountOtel } from './routes/otel.js';
-import { mountWebhooks } from './routes/webhooks.js';
 import { mountSignals } from './routes/signals.js';
 import { mountApprovals } from './routes/approvals.js';
 import { mountSiem } from './routes/siem.js';
@@ -62,6 +63,8 @@ mountIdentity(app, db);
 mountRiskScore(app, db);
 mountRegistry(app, db);
 mountAccessRequests(app, db);
+mountWebhooks(app, db);
+mountConnections(app, db);
 mountSdk(app, db);
 
 // Auto-resolve employee profiles from enrolled machines on startup
@@ -71,7 +74,6 @@ resolveProfiles(db, await db.collection('machines').find({}).project({ _id: 0 })
 mountAiUsage(app, db);
 mountClaudeUsage(app, db);
 mountOtel(app, db);
-mountWebhooks(app, db);
 mountSignals(app, db);
 mountApprovals(app, db);
 mountSiem(app, db);

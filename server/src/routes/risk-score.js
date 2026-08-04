@@ -18,6 +18,7 @@
 
 import crypto from 'node:crypto';
 import { a } from '../util.js';
+import { fireWebhooks } from './webhooks.js';
 
 const WINDOW_DAYS = 90;
 const WEIGHTS = {
@@ -67,6 +68,18 @@ export function mountRiskScore(app, db) {
           risk_computed_at: new Date(),
         },
       });
+
+      // Fire webhook if score is high or critical
+      if (score.level === 'high' || score.level === 'critical') {
+        fireWebhooks(db, 'risk_score_high', {
+          title: 'Risk Score Alert: ' + (profile.display_name || 'Employee') + ' → ' + score.level.toUpperCase(),
+          body: (profile.display_name || 'An employee') + ' has a risk score of ' + score.score + ' (' + score.level + '). Top factors: DLP violations (' + (score.factors?.dlp_violations?.raw || 0) + '), overrides (' + (score.factors?.enforcement_overrides?.raw || 0) + '), shadow tools (' + (score.factors?.shadow_tools?.raw || 0) + ').',
+          severity: score.level,
+          employee: profile.display_name || profile.email || 'Unknown',
+          tool: 'Risk Score Engine',
+          trigger: 'risk_score_high',
+        });
+      }
     }
 
     res.json({ computed: results.length, scores: results });

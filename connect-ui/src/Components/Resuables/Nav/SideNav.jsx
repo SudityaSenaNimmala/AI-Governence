@@ -125,6 +125,7 @@ const SideNav = (props) => {
         { icon: <ShieldCheck size={16} />, title: "Risk Scores", link: "/AIHub/RiskScores" },
         { icon: <Database size={16} />, title: "AI Registry", link: "/AIHub/AIRegistry" },
         { icon: <ShieldCheck size={16} />, title: "Access Requests", link: "/AIHub/AccessRequests" },
+        { icon: <Unplug size={16} />, title: "Integrations", link: "/AIHub/Integrations" },
         { icon: <Unplug size={16} />, title: "Developer SDK", link: "/AIHub/DeveloperSDK" },
       ],
     },
