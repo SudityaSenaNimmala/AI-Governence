@@ -94,6 +94,10 @@ if (values.proxy) {
   // (no event upload) so the user can try it before wiring it to the server.
   const { loadCredentials } = await import('./util/credentials.js');
   const creds = await loadCredentials();
+
+  // Start identity beacon so the browser extension can auto-discover this machine
+  const { startIdentityBeacon } = await import('./identity-beacon.js');
+  startIdentityBeacon({ machineId: creds?.machineId || 'unknown', log: log.child('beacon') });
   await runProxy({
     serverUrl: creds?.serverUrl || values.server,
     token: creds?.token,
@@ -255,6 +259,10 @@ async function main() {
     // Reap any orphan poller/toast-helper processes left by prior crashes.
     // Safe to do this now because the lock guarantees no other monitor is alive.
     await reapOrphans({ log: log.child('reap-orphans') });
+
+    // Start identity beacon so the browser extension can auto-discover this machine
+    const { startIdentityBeacon } = await import('./identity-beacon.js');
+    startIdentityBeacon({ machineId: config.machineId, log: log.child('beacon') });
 
     const monitor = new OsMonitor({
       serverUrl: creds.serverUrl || values.server,

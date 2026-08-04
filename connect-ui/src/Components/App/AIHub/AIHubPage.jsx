@@ -54,53 +54,6 @@ function SanctionBadge({ status }) { const c={approved:"#22c55e",restricted:"#f5
 function SeverityBadge({ sev }) { const c={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e"}; return <Badge text={sev||"—"} color={c[sev]||"#9ca3af"}/>; }
 function Mono({ children }) { return <span className="aihub_text_mono">{children}</span>; }
 function Tag({ text, color="#6366f1" }) { return <span style={{display:"inline-block",padding:"1px 6px",borderRadius:4,fontSize:10,fontWeight:600,background:color+"14",color,marginRight:3,marginBottom:2}}>{text}</span>; }
-function Step({ n, title, hint, children }) {
-  return (
-    <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
-      <div style={{ width: 32, height: 32, minWidth: 32, borderRadius: "50%", background: n <= 2 ? "#dbeafe" : n <= 3 ? "#e0e7ff" : "#dcfce7", color: n <= 2 ? "#2563eb" : n <= 3 ? "#4338ca" : "#16a34a", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>{n}</div>
-      <div style={{ flex: 1 }}>
-        <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>{title}</div>
-        <div className="aihub_text_muted" style={{ fontSize: 12, lineHeight: 1.5 }}>{hint}</div>
-        {children && <div style={{ marginTop: 10 }}>{children}</div>}
-      </div>
-    </div>
-  );
-}
-function CodeBlock({ code, label }) {
-  if (!code) return <div style={{ background: "#1e293b", borderRadius: 8, padding: 16, color: "#94a3b8", fontSize: 12 }}>Loading...</div>;
-  return (
-    <div>
-      <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 16, fontFamily: "ui-monospace, monospace", fontSize: 12, overflowX: "auto", position: "relative", lineHeight: 1.6, wordBreak: "break-all" }}>
-        <code>{code}</code>
-        <CopyBtn text={code} />
-      </div>
-      {label && <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 4 }}>{label}</div>}
-    </div>
-  );
-}
-function CopyBtn({ text }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <svg onClick={() => {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      ta.style.cssText = "position:fixed;left:-9999px";
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 3000);
-    }}
-    width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={copied ? "#22c55e" : "#94a3b8"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-    style={{ position: "absolute", top: 10, right: 10, cursor: "pointer", transition: "stroke 0.2s" }}>
-    {copied
-      ? <polyline points="20 6 9 17 4 12" />
-      : <><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></>
-    }
-    </svg>
-  );
-}
 function Loading() { return <div className="aihub_loading"><RefreshCw size={18} className="aihub_spin"/> Loading...</div>; }
 function Err({msg}) { return <div className="aihub_error"><AlertTriangle size={14}/> {msg}</div>; }
 function Empty({icon,title,msg}) { return <div className="aihub_empty">{icon}<h4>{title}</h4><p>{msg}</p></div>; }
@@ -551,319 +504,1433 @@ function PlatformsView() {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
-// SETUP VIEW — clean install UI for single/multiple servers
+// COPILOT READINESS — Pre-deployment scan for M365 Copilot
 // ═══════════════════════════════════════════════════════════════════════════════
-function SetupView({ installCmd, installMode, setInstallMode }) {
-  const [ips, setIps] = useState([""]);
-  const [port, setPort] = useState("");
-  const [generatedCmd, setGeneratedCmd] = useState("");
+function CopilotReadinessView() {
+  const [scan, setScan] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [oauthKeys, setOauthKeys] = useState([]);
+  const [selectedKey, setSelectedKey] = useState("");
+  const [pollId, setPollId] = useState(null);
 
-  const updateIp = (i, val) => {
-    const next = [...ips];
-    next[i] = val;
-    if (i === next.length - 1 && val.trim()) next.push("");
-    setIps(next);
-  };
-  const removeIp = (i) => {
-    const next = ips.filter((_, j) => j !== i);
-    if (next.length === 0) next.push("");
-    setIps(next);
-    setGeneratedCmd("");
-  };
-  const filledIps = ips.filter(ip => ip.trim());
-  const portFlag = port ? " --port " + port : "";
-  const generateCmd = () => {
-    if (!filledIps.length || !installCmd || !port) return;
-    setGeneratedCmd(installCmd + " --remote --allow " + filledIps.join(",") + portFlag);
-  };
-  const localCmd = (installCmd && port) ? installCmd + portFlag : "";
+  useEffect(() => {
+    // Load Microsoft OAuth keys (governance routes are /api/ not /api/v1/)
+    fetch("/api/oauth-keys").then(r => r.json()).then(data => {
+      const arr = Array.isArray(data) ? data : (data.keys || []);
+      const msKeys = arr.filter(k => k.vendor === "microsoft");
+      setOauthKeys(msKeys);
+      if (msKeys.length >= 1) setSelectedKey(msKeys[0].id);
+    }).catch(() => {});
+    // Load latest scan
+    fetch("/api/copilot-readiness/results").then(r => r.json()).then(data => {
+      if (data.scan) setScan(data.scan);
+    }).catch(() => {});
+  }, []);
 
-  const inputStyle = { padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 13, outline: "none", fontFamily: "ui-monospace, monospace" };
+  // Poll for scan completion
+  useEffect(() => {
+    if (!pollId) return;
+    const interval = setInterval(() => {
+      fetch(`/api/copilot-readiness/results/${pollId}`).then(r => r.json()).then(data => {
+        if (data.scan) {
+          setScan(data.scan);
+          if (data.scan.status !== "running") {
+            clearInterval(interval);
+            setPollId(null);
+            setScanning(false);
+          }
+        }
+      }).catch(() => {});
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [pollId]);
 
-  const btnStyle = (active) => ({
-    flex: 1, padding: "28px 24px", border: "2px solid " + (active ? "#2563eb" : "#e5e7eb"),
-    borderRadius: 14, cursor: "pointer", background: active ? "#eff6ff" : "#fff",
-    textAlign: "center", transition: "all 0.15s",
-  });
+  const runScan = async () => {
+    if (!selectedKey) return;
+    setScanning(true);
+    try {
+      const res = await fetch(`/api/copilot-readiness/scan?oauth_key_id=${selectedKey}`, { method: "POST" });
+      const data = await res.json();
+      if (data.scanId) setPollId(data.scanId);
+    } catch (e) {
+      setScanning(false);
+    }
+  };
+
+  const sevColor = { critical: "#ef4444", high: "#f59e0b", medium: "#3b82f6", low: "#22c55e", none: "#9ca3af" };
+  const catIcon = { sharepoint: "📂", onedrive: "☁️", teams: "💬", exchange: "📧" };
 
   return (
     <div>
-      {/* Big mode buttons */}
-      <div style={{ display: "flex", gap: 16, marginBottom: 24 }}>
-        <div onClick={() => { setInstallMode("local"); setGeneratedCmd(""); }} style={btnStyle(installMode === "local")}>
-          <Server size={32} style={{ margin: "0 auto 10px", display: "block", color: installMode === "local" ? "#2563eb" : "#9ca3af" }} />
-          <div style={{ fontWeight: 700, fontSize: 16, color: installMode === "local" ? "#2563eb" : "#374151" }}>Single Server</div>
-          <div className="aihub_text_muted" style={{ fontSize: 12, marginTop: 6 }}>Monitor runs on the same server as your AI agents</div>
+      {/* Header + Scan button */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 20 }}>Copilot Readiness Assessment</h2>
+          <p className="aihub_text_muted" style={{ margin: "4px 0 0", fontSize: 13 }}>
+            Scan your Microsoft 365 environment for overshared data before enabling Copilot
+          </p>
         </div>
-        <div onClick={() => { setInstallMode("remote"); setGeneratedCmd(""); }} style={btnStyle(installMode === "remote")}>
-          <Activity size={32} style={{ margin: "0 auto 10px", display: "block", color: installMode === "remote" ? "#2563eb" : "#9ca3af" }} />
-          <div style={{ fontWeight: 700, fontSize: 16, color: installMode === "remote" ? "#2563eb" : "#374151" }}>Multiple Servers</div>
-          <div className="aihub_text_muted" style={{ fontSize: 12, marginTop: 6 }}>Monitor on one machine, production servers connect remotely</div>
-        </div>
-      </div>
-
-      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: 24 }}>
-        {/* Port input — shared between both modes */}
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
-          <label style={{ fontSize: 13, fontWeight: 500, color: "#374151" }}>Proxy Port:</label>
-          <input type="text" value={port} onChange={e => { setPort(e.target.value.replace(/\D/g, "")); setGeneratedCmd(""); }}
-            style={{ ...inputStyle, width: 90, borderColor: !port ? "#ef4444" : "#d1d5db" }} placeholder="e.g. 8443" />
-          <span className="aihub_text_muted" style={{ fontSize: 11 }}>Enter a free port on your server {!port && <span style={{ color: "#ef4444" }}>(required)</span>}</span>
-        </div>
-
-        {installMode === "local" ? (<>
-          {/* SINGLE SERVER — just the command */}
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 4 }}>Run this command on your server</div>
-            <div className="aihub_text_muted" style={{ fontSize: 12 }}>Installs the monitor, configures proxy, and starts automatically. Requires sudo.</div>
-          </div>
-          <CodeBlock code={localCmd} />
-          <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 14, marginTop: 20, fontSize: 12, color: "#166534" }}>
-            That's it. All AI API calls from this server will appear in the <strong>Traces</strong> tab automatically.
-          </div>
-        </>) : (<>
-          {/* MULTIPLE SERVERS — IP inputs + generate */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 4 }}>Enter your production server IPs</div>
-            <div className="aihub_text_muted" style={{ fontSize: 12 }}>These are the servers running AI agents. Only these IPs will be allowed to connect to the monitor.</div>
-          </div>
-
-          <div style={{ marginBottom: 20 }}>
-            {ips.map((ip, i) => (
-              <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
-                <span className="aihub_text_muted" style={{ fontSize: 12, width: 20, textAlign: "right" }}>{i + 1}.</span>
-                <input
-                  type="text" value={ip} placeholder={i === 0 ? "e.g. 10.0.1.5" : "Add another IP..."}
-                  onChange={e => updateIp(i, e.target.value)}
-                  style={{ flex: 1, padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 13, outline: "none", fontFamily: "ui-monospace, monospace" }}
-                  onFocus={e => e.target.style.borderColor = "#2563eb"}
-                  onBlur={e => e.target.style.borderColor = "#d1d5db"}
-                />
-                {ips.length > 1 && ip.trim() && (
-                  <button onClick={() => removeIp(i)} style={{ background: "none", border: "none", color: "#9ca3af", cursor: "pointer", fontSize: 18, padding: "0 4px", lineHeight: 1 }} title="Remove">×</button>
-                )}
-              </div>
-            ))}
-          </div>
-
-          <button onClick={generateCmd} disabled={!filledIps.length || !port}
-            style={{ background: (filledIps.length && port) ? "#2563eb" : "#d1d5db", color: "#fff", border: "none", borderRadius: 8, padding: "10px 24px", fontSize: 14, fontWeight: 600, cursor: (filledIps.length && port) ? "pointer" : "default", marginBottom: 20 }}>
-            Generate Install Command
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          {oauthKeys.length > 1 && (
+            <select value={selectedKey} onChange={e => setSelectedKey(e.target.value)}
+              style={{ padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 13 }}>
+              <option value="">Select tenant...</option>
+              {oauthKeys.map(k => <option key={k.id} value={k.id}>{k.tenant_id || k.id}</option>)}
+            </select>
+          )}
+          <button onClick={runScan} disabled={scanning || !selectedKey}
+            style={{ background: scanning ? "#9ca3af" : "#2563eb", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 14, fontWeight: 600, cursor: scanning ? "default" : "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+            {scanning ? <><RefreshCw size={14} className="aihub_spin" /> Scanning...</> : <><Scan size={14} /> Run Assessment</>}
           </button>
-
-          {generatedCmd && (<>
-            <div style={{ marginTop: 8, marginBottom: 8 }}>
-              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>Step 1 — Run this on your monitoring machine</div>
-              <div className="aihub_text_muted" style={{ fontSize: 12, marginBottom: 8 }}>This is a separate machine from your production servers. A utility box, jump server, or lightweight VM.</div>
-              <CodeBlock code={generatedCmd} />
-            </div>
-
-            <div style={{ marginTop: 20 }}>
-              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>Step 2 — On each production server, set one variable</div>
-              <div className="aihub_text_muted" style={{ fontSize: 12, marginBottom: 8 }}>Replace &lt;MONITOR_IP&gt; with the IP of the machine from Step 1. Nothing else is installed.</div>
-              <CodeBlock code={"export HTTPS_PROXY=http://<MONITOR_IP>:" + (port || "8443")} />
-              <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 6 }}>To persist across reboots: <code style={{ background: "#f1f5f9", padding: "1px 4px", borderRadius: 3 }}>{"echo 'HTTPS_PROXY=http://MONITOR_IP:" + (port || "8443") + "' | sudo tee -a /etc/environment"}</code></div>
-            </div>
-
-            <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 14, marginTop: 20, fontSize: 12, color: "#166534" }}>
-              Done. All {filledIps.length} server{filledIps.length > 1 ? "s" : ""} ({filledIps.join(", ")}) will appear separately in the <strong>Traces</strong> and <strong>Servers</strong> tabs.
-            </div>
-          </>)}
-        </>)}
-
-        {/* Management commands */}
-        <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: 14, marginTop: 24 }}>
-          <div style={{ fontWeight: 600, fontSize: 13, color: "#334155", marginBottom: 8 }}>Management commands:</div>
-          <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 16px", fontSize: 12 }}>
-            <code style={{ color: "#2563eb" }}>cloudfuze-monitor status</code><span className="aihub_text_muted">Check service status</span>
-            <code style={{ color: "#2563eb" }}>cloudfuze-monitor logs</code><span className="aihub_text_muted">View live logs</span>
-            <code style={{ color: "#2563eb" }}>cloudfuze-monitor restart</code><span className="aihub_text_muted">Restart service</span>
-            <code style={{ color: "#2563eb" }}>cloudfuze-monitor uninstall</code><span className="aihub_text_muted">Remove completely</span>
-          </div>
         </div>
       </div>
+
+      {/* No Microsoft tenant connected */}
+      {oauthKeys.length === 0 && (
+        <Empty icon={<Shield size={32} />} title="No Microsoft 365 tenant connected"
+          msg="Connect your Microsoft tenant in Agent Governance → Setup to run the Copilot Readiness Assessment." />
+      )}
+
+      {/* Scan results */}
+      {scan && scan.status === "completed" && (<>
+        {/* Risk score banner */}
+        <div style={{ background: sevColor[scan.riskLevel] + "10", border: "1px solid " + sevColor[scan.riskLevel] + "40", borderRadius: 12, padding: 20, marginBottom: 20, display: "flex", alignItems: "center", gap: 16 }}>
+          <div style={{ width: 60, height: 60, borderRadius: "50%", background: sevColor[scan.riskLevel] + "20", color: sevColor[scan.riskLevel], display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, fontWeight: 700 }}>
+            {scan.riskLevel === "critical" ? "!" : scan.riskLevel === "high" ? "⚠" : scan.riskLevel === "none" ? "✓" : "~"}
+          </div>
+          <div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: sevColor[scan.riskLevel], textTransform: "uppercase" }}>{scan.riskLevel} Risk</div>
+            <div style={{ fontSize: 13, color: "#475569", marginTop: 2 }}>
+              {scan.summary.totalFindings} finding{scan.summary.totalFindings !== 1 ? "s" : ""} · ~{scan.summary.estimatedExposedDocs.toLocaleString()} documents potentially exposed · Scanned in {((scan.durationMs || 0) / 1000).toFixed(1)}s
+            </div>
+          </div>
+        </div>
+
+        {/* Summary cards */}
+        <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
+          <StatCard icon={<span>📂</span>} label="SharePoint" value={scan.summary.sharepoint} hint="Overshared sites" color="#2563eb" />
+          <StatCard icon={<span>☁️</span>} label="OneDrive" value={scan.summary.onedrive} hint="Org-wide shares" color="#8b5cf6" />
+          <StatCard icon={<span>💬</span>} label="Teams" value={scan.summary.teams} hint="Public teams" color="#22c55e" />
+          <StatCard icon={<span>📧</span>} label="Exchange" value={scan.summary.exchange} hint="Delegate access" color="#f59e0b" />
+        </div>
+
+        {/* Severity breakdown */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+          {[["critical", scan.summary.critical], ["high", scan.summary.high], ["medium", scan.summary.medium], ["low", scan.summary.low]].map(([sev, count]) => (
+            <div key={sev} style={{ padding: "6px 12px", borderRadius: 6, background: sevColor[sev] + "14", color: sevColor[sev], fontSize: 12, fontWeight: 600 }}>
+              {sev}: {count}
+            </div>
+          ))}
+        </div>
+
+        {/* Findings table */}
+        <SectionHeader title="Findings" hint="Each finding represents an oversharing risk that Copilot would expose" />
+        <DataTable
+          columns={[
+            { label: "Sev", render: r => <div style={{ width: 8, height: 8, borderRadius: "50%", background: sevColor[r.severity] }} />, },
+            { label: "Category", render: r => <span>{catIcon[r.category] || ""} {r.category}</span> },
+            { label: "Finding", render: r => <div><div className="aihub_text_primary" style={{ fontSize: 13 }}>{r.title}</div><div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 2 }}>{r.description.length > 120 ? r.description.slice(0, 120) + "…" : r.description}</div></div> },
+            { label: "Exposed To", render: r => <span style={{ fontSize: 12 }}>{r.exposedTo}</span> },
+            { label: "Remediation", render: r => <span className="aihub_text_muted" style={{ fontSize: 11 }}>{r.remediation.length > 80 ? r.remediation.slice(0, 80) + "…" : r.remediation}</span> },
+          ]}
+          rows={scan.findings || []}
+          empty="No oversharing risks found — your environment looks clean!"
+        />
+
+        {/* Scan metadata */}
+        <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 16 }}>
+          Scan ID: {scan.id} · Started: {new Date(scan.startedAt).toLocaleString()} · Duration: {((scan.durationMs || 0) / 1000).toFixed(1)}s
+        </div>
+      </>)}
+
+      {/* Scan running */}
+      {scan && scan.status === "running" && (
+        <div style={{ textAlign: "center", padding: 60 }}>
+          <RefreshCw size={32} className="aihub_spin" style={{ color: "#2563eb", marginBottom: 12 }} />
+          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>Scanning your Microsoft 365 environment...</div>
+          <div className="aihub_text_muted">Checking SharePoint, OneDrive, Teams, and Exchange for overshared permissions. This usually takes 1-2 minutes.</div>
+        </div>
+      )}
+
+      {/* Scan failed */}
+      {scan && scan.status === "failed" && (
+        <Err msg={`Scan failed: ${scan.error || "Unknown error"}. Check that your Microsoft tenant is connected with the correct permissions.`} />
+      )}
+
+      {/* No scan yet */}
+      {!scan && oauthKeys.length > 0 && !scanning && (
+        <div style={{ textAlign: "center", padding: 60, background: "#f8fafc", borderRadius: 12, border: "1px solid #e5e7eb" }}>
+          <Shield size={40} style={{ color: "#9ca3af", marginBottom: 12 }} />
+          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>No assessment run yet</div>
+          <div className="aihub_text_muted" style={{ marginBottom: 16 }}>Click "Run Assessment" to scan your Microsoft 365 environment for oversharing risks before enabling Copilot.</div>
+          <div style={{ fontSize: 12, color: "#6b7280", maxWidth: 500, margin: "0 auto", lineHeight: 1.6 }}>
+            The scan checks: SharePoint site permissions, OneDrive org-wide shares, public Teams channels, and Exchange delegate access.
+            It reads permissions only — no data is modified.
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SERVER MONITOR — Install + Traces
-// ═══════════════════════════════════════════════════════════════════════════════
-function ServerMonitorView() {
-  const [tab, setTab] = useState("traces");
-  const [stats, setStats] = useState(null);
-  const [servers, setServers] = useState([]);
-  const [traces, setTraces] = useState([]);
-  const [selectedTrace, setSelectedTrace] = useState(null);
-  const [traceDetail, setTraceDetail] = useState(null);
-  const [installCmd, setInstallCmd] = useState("");
-  const [installMode, setInstallMode] = useState("local");
-  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const [s, srv, t] = await Promise.all([
-          apiFetch("/traces/stats"),
-          apiFetch("/monitor/servers"),
-          apiFetch("/traces?limit=50"),
-        ]);
-        setStats(s);
-        setServers(srv);
-        setTraces(t);
-      } catch (e) { console.error(e); }
-      setLoading(false);
-    })();
-  }, []);
+// ── Model Routing View ─────────────────────────────────────────────────────
+// Sub-tabs: Overview, Rules, Endpoints, Routing Log
 
-  useEffect(() => {
-    if (tab === "setup" && !installCmd) {
-      // Use the API server URL for the install command, not the dashboard URL.
-      // In production the API runs on port 8787, dashboard on 3000.
-      const apiOrigin = window.location.port === "3000"
-        ? window.location.origin.replace(":3000", ":8787")
-        : window.location.origin;
-      fetch(`${API}/monitor/generate-token`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ serverUrl: apiOrigin }),
-      }).then(r => r.json()).then(d => setInstallCmd(d.install_command || "")).catch(() => {});
-    }
-  }, [tab]);
+const ROUTING_API = "/api/v1/routing";
+async function routingFetch(path, opts) {
+  const r = await fetch(`${ROUTING_API}${path}`, {
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  if (!r.ok) throw new Error(`${r.status}`);
+  return r.json();
+}
 
-  useEffect(() => {
-    if (!selectedTrace) { setTraceDetail(null); return; }
-    apiFetch("/traces/" + encodeURIComponent(selectedTrace)).then(setTraceDetail).catch(() => setTraceDetail(null));
-  }, [selectedTrace]);
+const SEVERITY_OPTIONS = ["critical","high","moderate","low"];
+const COMPLEXITY_OPTIONS = ["simple","moderate","complex"];
+const PROVIDER_OPTIONS = ["openai","anthropic","google","microsoft","perplexity","huggingface"];
+const MODEL_SUGGESTIONS = {
+  openai:["gpt-4","gpt-4-turbo","gpt-4o","gpt-4o-mini","gpt-4.1","gpt-4.1-mini","gpt-4.1-nano","gpt-3.5-turbo","o1","o1-mini","o3","o3-mini","o4-mini"],
+  anthropic:["claude-opus-4-20250514","claude-sonnet-4-20250514","claude-haiku-4-5-20251001","claude-3-5-sonnet-20241022","claude-3-5-haiku-20241022"],
+  google:["gemini-2.5-pro","gemini-2.5-flash","gemini-2.0-flash","gemini-2.0-pro","gemini-1.5-pro","gemini-1.5-flash"],
+};
 
-  if (loading) return <Loading />;
+function MultiSelect({options,value=[],onChange,label}) {
+  return (<div style={{marginBottom:10}}>
+    {label&&<div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:4}}>{label}</div>}
+    <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+      {options.map(o=>{
+        const sel=value.includes(o);
+        return <button key={o} type="button" onClick={()=>onChange(sel?value.filter(v=>v!==o):[...value,o])}
+          style={{padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:600,border:"1px solid",cursor:"pointer",
+            background:sel?"#0044cc14":"#fff",color:sel?"#0044cc":"#6b7280",borderColor:sel?"#0044cc30":"#e5e7eb"}}>{o}</button>;
+      })}
+    </div>
+  </div>);
+}
 
-  const tabs = [
-    { id: "traces", label: "Traces", icon: <Activity size={14} /> },
-    { id: "servers", label: "Servers", icon: <Server size={14} /> },
-    { id: "setup", label: "Setup", icon: <Plus size={14} /> },
+function RuleFormModal({rule,onSave,onClose}) {
+  const isEdit=!!rule?.id;
+  const [name,setName]=useState(rule?.name||"");
+  const [priority,setPriority]=useState(rule?.priority??50);
+  const [enabled,setEnabled]=useState(rule?.enabled??true);
+  const [condSensitivity,setCondSensitivity]=useState(rule?.conditions?.sensitivity||[]);
+  const [condComplexity,setCondComplexity]=useState(rule?.conditions?.complexity||[]);
+  const [condProvider,setCondProvider]=useState(rule?.conditions?.provider||[]);
+  const [condModel,setCondModel]=useState((rule?.conditions?.model||[]).join(", "));
+  const [condTokensGt,setCondTokensGt]=useState(rule?.conditions?.prompt_tokens_gt??"");
+  const [condTokensLt,setCondTokensLt]=useState(rule?.conditions?.prompt_tokens_lt??"");
+  const [actionModel,setActionModel]=useState(rule?.action?.model||"");
+  const [actionHost,setActionHost]=useState(rule?.action?.host||"");
+  const [saving,setSaving]=useState(false);
+
+  const handleSave=async()=>{
+    if(!name.trim()||!actionModel.trim()) return;
+    setSaving(true);
+    const conditions={};
+    if(condSensitivity.length) conditions.sensitivity=condSensitivity;
+    if(condComplexity.length) conditions.complexity=condComplexity;
+    if(condProvider.length) conditions.provider=condProvider;
+    if(condModel.trim()) conditions.model=condModel.split(",").map(s=>s.trim()).filter(Boolean);
+    if(condTokensGt!=="") conditions.prompt_tokens_gt=Number(condTokensGt);
+    if(condTokensLt!=="") conditions.prompt_tokens_lt=Number(condTokensLt);
+    const action={model:actionModel.trim()};
+    if(actionHost.trim()) action.host=actionHost.trim();
+    try {
+      if(isEdit) await routingFetch(`/rules/${rule.id}`,{method:"PUT",body:JSON.stringify({name,priority:Number(priority),enabled,conditions,action})});
+      else await routingFetch("/rules",{method:"POST",body:JSON.stringify({name,priority:Number(priority),enabled,conditions,action})});
+      onSave();
+    } catch(e) { alert("Error: "+e.message); }
+    setSaving(false);
+  };
+
+  return (<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onClose}>
+    <div style={{background:"#fff",borderRadius:14,padding:24,width:560,maxHeight:"85vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.15)"}} onClick={e=>e.stopPropagation()}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+        <h3 style={{margin:0,fontSize:16,fontWeight:700}}>{isEdit?"Edit Rule":"Create Routing Rule"}</h3>
+        <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer"}}><X size={18} color="#6b7280"/></button>
+      </div>
+
+      <div style={{marginBottom:12}}>
+        <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Rule Name *</label>
+        <input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Route simple tasks to cheap model"
+          style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+      </div>
+      <div style={{display:"flex",gap:12,marginBottom:12}}>
+        <div style={{flex:1}}>
+          <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Priority (lower = first)</label>
+          <input type="number" value={priority} onChange={e=>setPriority(e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+        </div>
+        <div style={{flex:1,display:"flex",alignItems:"flex-end",paddingBottom:4}}>
+          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13}}>
+            <input type="checkbox" checked={enabled} onChange={e=>setEnabled(e.target.checked)}/> Enabled
+          </label>
+        </div>
+      </div>
+
+      <div style={{background:"#f9fafb",borderRadius:10,padding:14,marginBottom:14}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#111827",marginBottom:10}}>Conditions <span style={{fontWeight:400,color:"#9ca3af"}}>(all must match)</span></div>
+        <MultiSelect label="Data Sensitivity" options={SEVERITY_OPTIONS} value={condSensitivity} onChange={setCondSensitivity}/>
+        <MultiSelect label="Prompt Complexity" options={COMPLEXITY_OPTIONS} value={condComplexity} onChange={setCondComplexity}/>
+        <MultiSelect label="Provider" options={PROVIDER_OPTIONS} value={condProvider} onChange={setCondProvider}/>
+        <div style={{marginBottom:10}}>
+          <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Original Model (comma-separated patterns)</label>
+          <input value={condModel} onChange={e=>setCondModel(e.target.value)} placeholder="e.g. gpt-4, claude-opus"
+            style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+        </div>
+        <div style={{display:"flex",gap:12}}>
+          <div style={{flex:1}}>
+            <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Tokens &gt;</label>
+            <input type="number" value={condTokensGt} onChange={e=>setCondTokensGt(e.target.value)} placeholder="e.g. 500"
+              style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+          </div>
+          <div style={{flex:1}}>
+            <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Tokens &lt;</label>
+            <input type="number" value={condTokensLt} onChange={e=>setCondTokensLt(e.target.value)} placeholder="e.g. 200"
+              style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+          </div>
+        </div>
+      </div>
+
+      <div style={{background:"#f0f9ff",borderRadius:10,padding:14,marginBottom:18}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#111827",marginBottom:10}}>Action — Route To</div>
+        <div style={{marginBottom:10}}>
+          <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Target Model *</label>
+          <input value={actionModel} onChange={e=>setActionModel(e.target.value)} placeholder="e.g. gpt-4o-mini"
+            style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+          <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:6}}>
+            {[...MODEL_SUGGESTIONS.openai.slice(0,4),...MODEL_SUGGESTIONS.anthropic.slice(0,3),...MODEL_SUGGESTIONS.google.slice(0,2)].map(m=>
+              <button key={m} type="button" onClick={()=>setActionModel(m)}
+                style={{padding:"2px 8px",borderRadius:5,fontSize:10,border:"1px solid #e5e7eb",background:actionModel===m?"#0044cc14":"#fff",color:actionModel===m?"#0044cc":"#6b7280",cursor:"pointer"}}>{m}</button>
+            )}
+          </div>
+        </div>
+        <div>
+          <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Target Host <span style={{fontWeight:400,color:"#9ca3af"}}>(optional, for private endpoints)</span></label>
+          <input value={actionHost} onChange={e=>setActionHost(e.target.value)} placeholder="e.g. my-company.openai.azure.com"
+            style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+        </div>
+      </div>
+
+      <div style={{display:"flex",justifyContent:"flex-end",gap:10}}>
+        <button onClick={onClose} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>Cancel</button>
+        <button onClick={handleSave} disabled={saving||!name.trim()||!actionModel.trim()}
+          style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:saving||!name.trim()||!actionModel.trim()?0.5:1}}>{saving?"Saving...":isEdit?"Save Changes":"Create Rule"}</button>
+      </div>
+    </div>
+  </div>);
+}
+
+function ModelRoutingView() {
+  const [tab,setTab]=useState("overview");
+  const [rules,setRules]=useState(null);
+  const [endpoints,setEndpoints]=useState(null);
+  const [analytics,setAnalytics]=useState(null);
+  const [routingLog,setRoutingLog]=useState(null);
+  const [err,setErr]=useState(null);
+  const [showRuleForm,setShowRuleForm]=useState(false);
+  const [editRule,setEditRule]=useState(null);
+
+  const loadAll=()=>{
+    Promise.all([
+      routingFetch("/rules"),
+      routingFetch("/endpoints"),
+      routingFetch("/analytics"),
+      routingFetch("/log?limit=50"),
+    ]).then(([r,e,a,l])=>{ setRules(r); setEndpoints(e); setAnalytics(a); setRoutingLog(l); })
+      .catch(x=>setErr(x.message));
+  };
+  useEffect(loadAll,[]);
+
+  const deleteRule=async(id)=>{ if(!confirm("Delete this rule?")) return; await routingFetch(`/rules/${id}`,{method:"DELETE"}); loadAll(); };
+  const toggleRule=async(r)=>{ await routingFetch(`/rules/${r.id}`,{method:"PUT",body:JSON.stringify({enabled:!r.enabled})}); loadAll(); };
+
+  // Endpoint CRUD
+  const [showEpForm,setShowEpForm]=useState(false);
+  const [epName,setEpName]=useState(""); const [epProvider,setEpProvider]=useState("openai"); const [epHost,setEpHost]=useState("");
+  const [epModels,setEpModels]=useState(""); const [epRegion,setEpRegion]=useState("");
+  const saveEndpoint=async()=>{
+    if(!epName.trim()) return;
+    await routingFetch("/endpoints",{method:"POST",body:JSON.stringify({name:epName,provider:epProvider,host:epHost||null,models:epModels.split(",").map(s=>s.trim()).filter(Boolean),region:epRegion||null})});
+    setShowEpForm(false); setEpName(""); setEpHost(""); setEpModels(""); setEpRegion(""); loadAll();
+  };
+  const deleteEndpoint=async(id)=>{ if(!confirm("Delete this endpoint?")) return; await routingFetch(`/endpoints/${id}`,{method:"DELETE"}); loadAll(); };
+
+  if(err) return <Err msg={err}/>;
+  if(!rules) return <Loading/>;
+
+  const activeRules=rules.filter(r=>r.enabled).length;
+  const tabs=[
+    {id:"overview",label:"Overview"},
+    {id:"rules",label:`Rules (${rules.length})`},
+    {id:"endpoints",label:`Endpoints (${(endpoints||[]).length})`},
+    {id:"log",label:"Routing Log"},
   ];
 
-  return (
-    <div>
-      {/* Stats cards */}
-      <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
-        <StatCard icon={<Activity size={18} />} label="Total Calls" value={stats?.total_calls || 0} hint="All time" color="#3b82f6" />
-        <StatCard icon={<Clock size={18} />} label="Last 24h" value={stats?.calls_last_24h || 0} hint="Recent calls" color="#8b5cf6" />
-        <StatCard icon={<Server size={18} />} label="Servers" value={stats?.connected_servers || 0} hint="Connected" color="#22c55e" />
-        <StatCard icon={<Shield size={18} />} label="Total Cost" value={fmtUsd(stats?.total_cost_usd)} hint="All time" color="#f59e0b" />
-      </div>
+  return (<div>
+    <SectionHeader title="Intelligent Model Routing" hint="Automatically route AI requests to the optimal model based on cost, sensitivity, and complexity"/>
 
-      {/* Tab bar */}
-      <div style={{ display: "flex", gap: 2, marginBottom: 16, borderBottom: "1px solid #e5e7eb", paddingBottom: 0 }}>
-        {tabs.map(t => (
-          <button key={t.id} onClick={() => { setTab(t.id); setSelectedTrace(null); }}
-            style={{ display: "flex", alignItems: "center", gap: 5, padding: "8px 16px", border: "none", background: "none", cursor: "pointer", fontSize: 13, fontWeight: tab === t.id ? 600 : 400, color: tab === t.id ? "#2563eb" : "#6b7280", borderBottom: tab === t.id ? "2px solid #2563eb" : "2px solid transparent", marginBottom: -1 }}>
-            {t.icon} {t.label}
+    {/* Stat Cards */}
+    <div className="aihub_stat_grid">
+      <StatCard icon={<Activity size={18}/>} label="Requests Routed" value={analytics?.total_routed||0} hint={`${analytics?.last_24h||0} in last 24h`} color="#0044cc"/>
+      <StatCard icon={<Shield size={18}/>} label="Active Rules" value={activeRules} hint={`${rules.length} total`} color="#8b5cf6"/>
+      <StatCard icon={<Server size={18}/>} label="Endpoints" value={analytics?.active_endpoints||0} color="#22c55e"/>
+      <StatCard icon={<Activity size={18}/>} label="Last 7 Days" value={analytics?.last_7d||0} color="#f59e0b"/>
+    </div>
+
+    {/* Tabs */}
+    <div style={{display:"flex",gap:2,marginBottom:16,borderBottom:"2px solid #f3f4f6"}}>
+      {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)}
+        style={{padding:"8px 18px",fontSize:13,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0044cc":"2px solid transparent",
+          background:"none",color:tab===t.id?"#0044cc":"#6b7280",cursor:"pointer",marginBottom:-2}}>{t.label}</button>)}
+    </div>
+
+    {/* ── Overview Tab ── */}
+    {tab==="overview"&&(<div>
+      {analytics?.total_routed===0 ? (
+        <div className="aihub_card" style={{textAlign:"center",padding:"40px 20px"}}>
+          <Activity size={40} color="#d1d5db" style={{marginBottom:12}}/>
+          <h4 style={{margin:"0 0 8px",color:"#374151"}}>No routing activity yet</h4>
+          <p style={{color:"#9ca3af",fontSize:13,maxWidth:400,margin:"0 auto 16px"}}>
+            Create routing rules to automatically swap expensive models for cheaper ones on simple tasks, route sensitive data to private endpoints, and set up failover.
+          </p>
+          <button onClick={()=>{setTab("rules");setShowRuleForm(true);}} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>
+            <Plus size={14} style={{verticalAlign:"middle",marginRight:4}}/> Create First Rule
           </button>
-        ))}
-      </div>
-
-      {/* Tab content */}
-      {tab === "traces" && !selectedTrace && (
-        <div>
-          <SectionHeader title="Agent Execution Traces" hint="Each trace groups LLM calls from the same process into a single execution timeline" />
-          <DataTable
-            columns={[
-              { label: "Time", render: r => <span style={{ fontSize: 12 }}>{relTime(r.started_at)}</span> },
-              { label: "User", render: r => <div><div className="aihub_text_primary">{r.user || "—"}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>{(r.cmdline || "").split("/").pop()}</div></div> },
-              { label: "Provider", render: r => <div>{(r.providers || []).map(p => <Tag key={p} text={p} color={p === "openai" ? "#10a37f" : p === "anthropic" ? "#d97706" : "#6366f1"} />)}</div> },
-              { label: "Calls", key: "call_count", right: true },
-              { label: "Duration", render: r => <span>{r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "—"}</span>, right: true },
-              { label: "Tokens", render: r => fmtTokens(r.total_tokens), right: true },
-              { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
-              { label: "Status", render: r => <Badge text={r.status} color={r.status === "error" ? "#ef4444" : "#22c55e"} /> },
-              { label: "Trigger", render: r => <span className="aihub_text_muted" style={{ fontSize: 11 }}>{r.trigger_source || "—"}</span> },
-            ]}
-            rows={traces}
-            empty="No traces yet. Install the server monitor to start capturing."
-            onRow={r => setSelectedTrace(r.trace_id)}
-          />
         </div>
-      )}
-
-      {tab === "traces" && selectedTrace && traceDetail && (
-        <div>
-          <button onClick={() => setSelectedTrace(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0 }}>← Back to traces</button>
-          <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 20 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
-              <div>
-                <h3 style={{ margin: 0, fontSize: 16 }}>{traceDetail.user || "Unknown"} — {(traceDetail.cmdline || "").split("/").pop()}</h3>
-                <div className="aihub_text_muted" style={{ fontSize: 12, marginTop: 4 }}>
-                  {traceDetail.trigger_source} · {traceDetail.cwd} · {new Date(traceDetail.started_at).toLocaleString()}
-                </div>
-              </div>
-              <div style={{ display: "flex", gap: 12, textAlign: "right" }}>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{traceDetail.call_count}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>calls</div></div>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{(traceDetail.duration_ms / 1000).toFixed(1)}s</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>duration</div></div>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtTokens(traceDetail.total_tokens)}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>tokens</div></div>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtUsd(traceDetail.total_cost_usd)}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>cost</div></div>
+      ):(
+        <div className="aihub_two_col">
+          <div className="aihub_card">
+            <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>Model Swaps</h4>
+            {(analytics?.by_model||[]).length?<DataTable columns={[
+              {label:"Original Model",render:r=><Mono>{r.from||"—"}</Mono>},
+              {label:"Routed To",render:r=><Badge text={r.to||"—"} color="#0044cc"/>},
+              {label:"Count",key:"count",right:true},
+            ]} rows={analytics.by_model}/>:<div className="aihub_text_muted" style={{padding:16}}>No data yet</div>}
+          </div>
+          <div>
+            <div className="aihub_card" style={{marginBottom:16}}>
+              <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>By Rule</h4>
+              <BarChart data={(analytics?.by_rule||[]).map(r=>({label:r.name||"unknown",count:r.count}))} lk="label" vk="count"/>
+            </div>
+            <div className="aihub_card">
+              <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>By Complexity</h4>
+              <div style={{display:"flex",gap:8}}>
+                {(analytics?.by_complexity||[]).map(c=>
+                  <div key={c.complexity} style={{flex:1,textAlign:"center",padding:12,borderRadius:8,background:"#f9fafb"}}>
+                    <div style={{fontSize:20,fontWeight:700,color:"#111827"}}>{c.count}</div>
+                    <div style={{fontSize:11,color:"#6b7280",textTransform:"capitalize"}}>{c.complexity||"unknown"}</div>
+                  </div>
+                )}
               </div>
             </div>
+          </div>
+        </div>
+      )}
+    </div>)}
 
-            {/* Timeline visualization */}
-            <div style={{ borderTop: "1px solid #f3f4f6", paddingTop: 16 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", marginBottom: 8 }}>EXECUTION TIMELINE</div>
-              {(traceDetail.calls || []).map((call, i) => {
-                const totalDur = traceDetail.duration_ms || 1;
-                const barLeft = ((call.offset_ms || 0) / totalDur) * 100;
-                const barWidth = Math.max(((call.duration_ms || 100) / totalDur) * 100, 2);
-                const isErr = call.response_status >= 400;
-                const provColor = call.provider === "openai" ? "#10a37f" : call.provider === "anthropic" ? "#d97706" : "#6366f1";
-                return (
-                  <div key={i} style={{ marginBottom: 12, padding: 12, background: isErr ? "#fef2f2" : "#f9fafb", borderRadius: 8, border: "1px solid " + (isErr ? "#fecaca" : "#e5e7eb") }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                      <span style={{ background: provColor, color: "#fff", padding: "1px 6px", borderRadius: 4, fontSize: 10, fontWeight: 600 }}>{call.provider}</span>
-                      <span style={{ fontSize: 12, fontWeight: 600 }}>{call.model}</span>
-                      <span className="aihub_text_muted" style={{ fontSize: 11, marginLeft: "auto" }}>{call.duration_ms}ms · {fmtTokens((call.prompt_tokens||0)+(call.completion_tokens||0))} tokens · {fmtUsd(call.total_cost_usd)}</span>
-                      {isErr && <Badge text={call.response_status} color="#ef4444" />}
-                    </div>
-                    {/* Bar */}
-                    <div style={{ height: 6, background: "#e5e7eb", borderRadius: 3, position: "relative", marginBottom: 8 }}>
-                      <div style={{ position: "absolute", left: barLeft + "%", width: barWidth + "%", height: "100%", background: isErr ? "#ef4444" : provColor, borderRadius: 3 }} />
-                    </div>
-                    {/* Prompt/Response preview */}
-                    {call.prompt_text && <div style={{ fontSize: 11, color: "#374151", marginBottom: 4 }}><strong>Prompt:</strong> {call.prompt_text.length > 150 ? call.prompt_text.slice(0, 150) + "…" : call.prompt_text}</div>}
-                    {call.response_text && <div style={{ fontSize: 11, color: "#6b7280" }}><strong>Response:</strong> {call.response_text.length > 150 ? call.response_text.slice(0, 150) + "…" : call.response_text}</div>}
-                  </div>
-                );
-              })}
+    {/* ── Rules Tab ── */}
+    {tab==="rules"&&(<div>
+      <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
+        <button onClick={()=>{setEditRule(null);setShowRuleForm(true);}}
+          style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>
+          <Plus size={14}/> Add Rule
+        </button>
+      </div>
+      <div className="aihub_card">
+        <DataTable columns={[
+          {label:"Priority",render:r=><span style={{fontWeight:700,color:"#6b7280"}}>{r.priority}</span>},
+          {label:"Rule Name",render:r=><div><div className="aihub_text_primary">{r.name}</div></div>},
+          {label:"Conditions",render:r=>{
+            const c=r.conditions||{};
+            const tags=[];
+            if(c.sensitivity) tags.push(...(Array.isArray(c.sensitivity)?c.sensitivity:[c.sensitivity]).map(s=>"sensitivity:"+s));
+            if(c.complexity) tags.push(...(Array.isArray(c.complexity)?c.complexity:[c.complexity]).map(s=>"complexity:"+s));
+            if(c.provider) tags.push(...(Array.isArray(c.provider)?c.provider:[c.provider]).map(s=>"provider:"+s));
+            if(c.model) tags.push(...(Array.isArray(c.model)?c.model:[c.model]).map(s=>"model:"+s));
+            if(c.prompt_tokens_gt!=null) tags.push("tokens>"+c.prompt_tokens_gt);
+            if(c.prompt_tokens_lt!=null) tags.push("tokens<"+c.prompt_tokens_lt);
+            return <div style={{display:"flex",flexWrap:"wrap",gap:3}}>{tags.map(t=><Tag key={t} text={t}/>)}</div>;
+          }},
+          {label:"Route To",render:r=><Badge text={r.action?.model||"—"} color="#0044cc"/>},
+          {label:"Status",render:r=><Badge text={r.enabled?"Active":"Disabled"} color={r.enabled?"#22c55e":"#9ca3af"}/>},
+          {label:"Actions",render:r=><div style={{display:"flex",gap:6}}>
+            <button onClick={()=>{setEditRule(r);setShowRuleForm(true);}} style={{background:"none",border:"none",cursor:"pointer",color:"#0044cc",fontSize:12,fontWeight:600}}>Edit</button>
+            <button onClick={()=>toggleRule(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#f59e0b",fontSize:12,fontWeight:600}}>{r.enabled?"Disable":"Enable"}</button>
+            <button onClick={()=>deleteRule(r.id)} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",fontSize:12,fontWeight:600}}>Delete</button>
+          </div>},
+        ]} rows={rules} empty="No routing rules yet. Click 'Add Rule' to create one."/>
+      </div>
+
+      {/* Example rules hint */}
+      {rules.length===0&&(
+        <div className="aihub_card" style={{background:"#f0f9ff",border:"1px solid #bfdbfe"}}>
+          <h4 style={{margin:"0 0 10px",fontSize:14,fontWeight:700,color:"#1e40af"}}>Example Routing Rules</h4>
+          <div style={{fontSize:13,color:"#374151",lineHeight:1.8}}>
+            <strong>Cost Optimization:</strong> When complexity = "simple" → route to gpt-4o-mini (saves ~66x on token cost)<br/>
+            <strong>Data Protection:</strong> When sensitivity = "critical" or "high" → route to your private Azure endpoint<br/>
+            <strong>Compliance:</strong> When provider = "openai" and model contains "gpt-4" → route to EU-hosted deployment<br/>
+            <strong>Budget Control:</strong> When tokens &gt; 5000 → route to gpt-4o-mini (long prompts get expensive fast)
+          </div>
+        </div>
+      )}
+    </div>)}
+
+    {/* ── Endpoints Tab ── */}
+    {tab==="endpoints"&&(<div>
+      <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
+        <button onClick={()=>setShowEpForm(!showEpForm)}
+          style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>
+          <Plus size={14}/> Add Endpoint
+        </button>
+      </div>
+
+      {showEpForm&&(
+        <div className="aihub_card" style={{marginBottom:16,background:"#f9fafb"}}>
+          <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>Register Endpoint</h4>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <div>
+              <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Name *</label>
+              <input value={epName} onChange={e=>setEpName(e.target.value)} placeholder="e.g. Azure OpenAI Frankfurt"
+                style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+            </div>
+            <div>
+              <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Provider</label>
+              <select value={epProvider} onChange={e=>setEpProvider(e.target.value)}
+                style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}>
+                {PROVIDER_OPTIONS.map(p=><option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Host</label>
+              <input value={epHost} onChange={e=>setEpHost(e.target.value)} placeholder="e.g. my-company.openai.azure.com"
+                style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+            </div>
+            <div>
+              <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Models (comma-separated)</label>
+              <input value={epModels} onChange={e=>setEpModels(e.target.value)} placeholder="e.g. gpt-4o, gpt-4o-mini"
+                style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+            </div>
+            <div>
+              <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Region</label>
+              <input value={epRegion} onChange={e=>setEpRegion(e.target.value)} placeholder="e.g. eu-west, us-east"
+                style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+            </div>
+            <div style={{display:"flex",alignItems:"flex-end",gap:8}}>
+              <button onClick={saveEndpoint} disabled={!epName.trim()}
+                style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:!epName.trim()?0.5:1}}>Save</button>
+              <button onClick={()=>setShowEpForm(false)} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>Cancel</button>
             </div>
           </div>
         </div>
       )}
 
-      {tab === "servers" && (
-        <div>
-          <SectionHeader title="Connected Servers" hint="Servers running the CloudFuze server monitor" />
-          <DataTable
-            columns={[
-              { label: "Server", render: r => <div><div className="aihub_text_primary">{r.display_name || r.machine_id}</div>{r.source_ip && r.source_ip !== '127.0.0.1' && <div className="aihub_text_muted" style={{fontSize:11}}>Remote: {r.source_ip}</div>}</div> },
-              { label: "Status", render: r => <Badge text={r.status} color={r.status === "active" ? "#22c55e" : "#9ca3af"} /> },
-              { label: "Last Seen", render: r => relTime(r.last_seen) },
-              { label: "Calls", key: "total_calls", right: true },
-              { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
-              { label: "Users", render: r => (r.users || []).join(", ") || "—" },
-              { label: "Providers", render: r => <div>{(r.providers || []).map(p => <Tag key={p} text={p} />)}</div> },
-            ]}
-            rows={servers}
-            empty="No servers connected yet. Go to Setup tab to install."
-          />
-        </div>
-      )}
+      <div className="aihub_card">
+        <DataTable columns={[
+          {label:"Name",render:r=><div className="aihub_text_primary">{r.name}</div>},
+          {label:"Provider",render:r=><Badge text={r.provider} color="#6366f1"/>},
+          {label:"Host",render:r=><Mono>{r.host||"(default)"}</Mono>},
+          {label:"Models",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:3}}>{(r.models||[]).map(m=><Tag key={m} text={m}/>)}</div>},
+          {label:"Region",render:r=>r.region||"—"},
+          {label:"Status",render:r=><Badge text={r.enabled?"Active":"Disabled"} color={r.enabled?"#22c55e":"#9ca3af"}/>},
+          {label:"",render:r=><button onClick={()=>deleteEndpoint(r.id)} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444"}}><Trash2 size={14}/></button>},
+        ]} rows={endpoints||[]} empty="No endpoints registered. Add a private endpoint for sensitive data routing."/>
+      </div>
+    </div>)}
 
-      {tab === "setup" && (<SetupView installCmd={installCmd} installMode={installMode} setInstallMode={setInstallMode} />)}
+    {/* ── Routing Log Tab ── */}
+    {tab==="log"&&(<div>
+      <div className="aihub_card">
+        <DataTable columns={[
+          {label:"Time",render:r=>relTime(r.timestamp)},
+          {label:"Original Model",render:r=><Mono>{r.original_model||"—"}</Mono>},
+          {label:"Routed To",render:r=><Badge text={r.routed_model||"—"} color="#0044cc"/>},
+          {label:"Rule",render:r=><div className="aihub_text_muted">{r.rule_name||"—"}</div>},
+          {label:"Sensitivity",render:r=>r.sensitivity?<SeverityBadge sev={r.sensitivity}/>:<span className="aihub_text_muted">—</span>},
+          {label:"Complexity",render:r=>r.complexity?<Badge text={r.complexity} color={r.complexity==="simple"?"#22c55e":r.complexity==="complex"?"#ef4444":"#f59e0b"}/>:<span className="aihub_text_muted">—</span>},
+          {label:"Tokens",render:r=>r.prompt_tokens_est?fmtTokens(r.prompt_tokens_est):"—",right:true},
+        ]} rows={routingLog||[]} empty="No routing events yet. Routing decisions will appear here once rules are active and AI requests flow through the proxy."/>
+      </div>
+    </div>)}
+
+    {/* Rule Form Modal */}
+    {showRuleForm&&<RuleFormModal rule={editRule} onSave={()=>{setShowRuleForm(false);setEditRule(null);loadAll();}} onClose={()=>{setShowRuleForm(false);setEditRule(null);}}/>}
+  </div>);
+}
+
+// ── Risk Score View ────────────────────────────────────────────────────────
+
+const RISK_API = "/api/v1/risk-scores";
+const IDENTITY_API = "/api/v1/identity";
+
+const RISK_COLORS = { low: "#22c55e", medium: "#f59e0b", high: "#ef4444", critical: "#991b1b" };
+const RISK_BG     = { low: "#f0fdf4", medium: "#fffbeb", high: "#fef2f2", critical: "#fef2f2" };
+
+function RiskLevelBadge({ level, score }) {
+  const c = RISK_COLORS[level] || "#6b7280";
+  return <span style={{display:"inline-flex",alignItems:"center",gap:6,padding:"3px 10px",borderRadius:8,fontSize:12,fontWeight:700,background:c+"14",color:c,border:"1px solid "+c+"30"}}>
+    <span style={{width:8,height:8,borderRadius:"50%",background:c,display:"inline-block"}}/> {score} — {(level||"unknown").charAt(0).toUpperCase()+(level||"").slice(1)}
+  </span>;
+}
+
+function ScoreBar({ score }) {
+  const c = score<=30?"#22c55e":score<=60?"#f59e0b":score<=80?"#ef4444":"#991b1b";
+  return <div style={{width:"100%",height:8,background:"#f3f4f6",borderRadius:4,overflow:"hidden"}}>
+    <div style={{width:score+"%",height:"100%",background:c,borderRadius:4,transition:"width 0.4s ease"}}/>
+  </div>;
+}
+
+function FactorRow({ label, factor }) {
+  if (!factor) return null;
+  const pct = Math.min(factor.score, 100);
+  const c = pct > 60 ? "#ef4444" : pct > 30 ? "#f59e0b" : "#22c55e";
+  return <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+    <div style={{width:140,fontSize:12,color:"#6b7280",flexShrink:0}}>{label}</div>
+    <div style={{flex:1,height:6,background:"#f3f4f6",borderRadius:3,overflow:"hidden"}}>
+      <div style={{width:pct+"%",height:"100%",background:c,borderRadius:3}}/>
     </div>
-  );
+    <div style={{width:50,fontSize:12,fontWeight:600,color:c,textAlign:"right"}}>{factor.raw}</div>
+    <div style={{width:40,fontSize:11,color:"#9ca3af",textAlign:"right"}}>{factor.weight}%</div>
+  </div>;
+}
+
+function RiskScoreView() {
+  const [scores,setScores]=useState(null);
+  const [summary,setSummary]=useState(null);
+  const [err,setErr]=useState(null);
+  const [computing,setComputing]=useState(false);
+  const [selected,setSelected]=useState(null);
+  const [detail,setDetail]=useState(null);
+
+  const loadAll=()=>{
+    Promise.all([
+      apiFetch("/risk-scores"),
+      apiFetch("/risk-scores/summary"),
+    ]).then(([s,sum])=>{ setScores(s); setSummary(sum); })
+      .catch(x=>setErr(x.message));
+  };
+  useEffect(loadAll,[]);
+
+  const compute=async()=>{
+    setComputing(true);
+    try {
+      // First resolve profiles, then compute scores
+      await fetch(IDENTITY_API+"/resolve",{method:"POST"});
+      await fetch(RISK_API+"/compute",{method:"POST"});
+      loadAll();
+    } catch(e) { setErr(e.message); }
+    setComputing(false);
+  };
+
+  const showDetail=async(profileId)=>{
+    try {
+      const r=await fetch(RISK_API+"/"+profileId);
+      if(!r.ok) throw new Error(""+r.status);
+      const d=await r.json();
+      setDetail(d);
+      setSelected(profileId);
+    } catch(e) { setErr(e.message); }
+  };
+
+  if(err) return <Err msg={err}/>;
+  if(!scores) return <Loading/>;
+
+  // Filter out browser-extension noise (no real identity)
+  // Only show employees with real identity — hide unidentified browser extension installs
+  const realScores = scores.filter(s => s.display_name && !s.display_name.startsWith('Browser User'));
+
+  return (<div>
+    <SectionHeader title="AI Risk Scores" hint="Per-employee AI safety score — 0 (safe) to 100 (critical)"
+      action={<button onClick={compute} disabled={computing} style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:computing?0.5:1}}>
+        <RefreshCw size={14} className={computing?"aihub_spin":""}/> {computing?"Computing...":"Compute Scores"}
+      </button>}
+    />
+
+    {/* Summary Cards */}
+    {summary && <div className="aihub_stat_grid">
+      <StatCard icon={<Shield size={18}/>} label="Average Score" value={summary.average_score} hint={summary.average_score<=30?"Low Risk":summary.average_score<=60?"Medium":"High"} color={summary.average_score<=30?"#22c55e":summary.average_score<=60?"#f59e0b":"#ef4444"}/>
+      <StatCard icon={<Activity size={18}/>} label="Total Employees" value={summary.total_employees} color="#0044cc"/>
+      <StatCard icon={<Shield size={18}/>} label="Low Risk" value={summary.distribution?.low||0} hint="Score 0-30" color="#22c55e"/>
+      <StatCard icon={<AlertTriangle size={18}/>} label="Medium Risk" value={summary.distribution?.medium||0} hint="Score 31-60" color="#f59e0b"/>
+      <StatCard icon={<AlertTriangle size={18}/>} label="High + Critical" value={(summary.distribution?.high||0)+(summary.distribution?.critical||0)} hint="Score 61-100" color="#ef4444"/>
+    </div>}
+
+    {realScores.length===0 ? (
+      <div className="aihub_card" style={{textAlign:"center",padding:"40px 20px"}}>
+        <Shield size={40} color="#d1d5db" style={{marginBottom:12}}/>
+        <h4 style={{margin:"0 0 8px",color:"#374151"}}>No risk scores computed yet</h4>
+        <p style={{color:"#9ca3af",fontSize:13,maxWidth:400,margin:"0 auto 16px"}}>
+          Click "Compute Scores" to analyze employee AI behavior and generate risk scores from DLP events, tool usage, and violation history.
+        </p>
+      </div>
+    ) : (
+      <div className="aihub_two_col">
+        {/* Employee List */}
+        <div className="aihub_card">
+          <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>Employees by Risk</h4>
+          <DataTable columns={[
+            {label:"Employee",render:r=><div>
+              <div className="aihub_text_primary">{r.display_name}</div>
+              <div className="aihub_text_muted">{r.email||r.hostname||"—"}</div>
+            </div>},
+            {label:"Score",render:r=><RiskLevelBadge level={r.risk_level} score={r.risk_score}/>},
+            {label:"",render:r=><ScoreBar score={r.risk_score}/>},
+            {label:"Sources",render:r=><div style={{display:"flex",gap:3}}>{(r.sources||[]).map(s=><Tag key={s} text={s}/>)}</div>},
+            {label:"Computed",render:r=>relTime(r.risk_computed_at)},
+          ]} rows={realScores} onRow={(r)=>showDetail(r.id)}/>
+        </div>
+
+        {/* Detail Panel */}
+        <div>
+          {detail ? (
+            <div className="aihub_card">
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+                <div>
+                  <h4 style={{margin:0,fontSize:16,fontWeight:700}}>{detail.profile?.display_name}</h4>
+                  <div className="aihub_text_muted">{detail.profile?.email||detail.profile?.hostname||""}</div>
+                </div>
+                <RiskLevelBadge level={detail.profile?.risk_level} score={detail.profile?.risk_score}/>
+              </div>
+
+              <div style={{marginBottom:16}}>
+                <div style={{fontSize:13,fontWeight:600,color:"#374151",marginBottom:10}}>Risk Factors</div>
+                <FactorRow label="DLP Violations" factor={detail.profile?.risk_factors?.dlp_violations}/>
+                <FactorRow label="Override Bypasses" factor={detail.profile?.risk_factors?.enforcement_overrides}/>
+                <FactorRow label="Shadow AI Tools" factor={detail.profile?.risk_factors?.shadow_tools}/>
+                <FactorRow label="Data Sensitivity" factor={detail.profile?.risk_factors?.data_sensitivity}/>
+                <FactorRow label="Volume Anomaly" factor={detail.profile?.risk_factors?.volume_anomaly}/>
+              </div>
+
+              {detail.history && detail.history.length > 0 && (
+                <div style={{marginBottom:16}}>
+                  <div style={{fontSize:13,fontWeight:600,color:"#374151",marginBottom:8}}>Score History</div>
+                  <div style={{display:"flex",gap:4,alignItems:"flex-end",height:60}}>
+                    {detail.history.slice(0,30).reverse().map((h,i)=>{
+                      const c=h.score<=30?"#22c55e":h.score<=60?"#f59e0b":"#ef4444";
+                      return <div key={i} title={h.score+" — "+new Date(h.computed_at).toLocaleDateString()} style={{flex:1,minWidth:4,height:Math.max(h.score*0.6,2),background:c,borderRadius:2}}/>;
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {detail.recent_events && detail.recent_events.length > 0 && (
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,color:"#374151",marginBottom:8}}>Recent Events</div>
+                  {detail.recent_events.slice(0,5).map((ev,i)=>(
+                    <div key={i} style={{padding:"8px 0",borderBottom:"1px solid #f3f4f6",fontSize:12}}>
+                      <div style={{display:"flex",justifyContent:"space-between"}}>
+                        <span style={{fontWeight:600}}>{ev.event_kind||ev.kind||"—"}</span>
+                        <span className="aihub_text_muted">{relTime(ev.occurred_at)}</span>
+                      </div>
+                      <div className="aihub_text_muted">{ev.ai_service||"—"} · {ev.secret_class||ev.highest_severity||"—"}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="aihub_card" style={{textAlign:"center",padding:"40px 20px",color:"#9ca3af"}}>
+              <Shield size={32} color="#d1d5db" style={{marginBottom:8}}/>
+              <div style={{fontSize:13}}>Click an employee to see their risk breakdown</div>
+            </div>
+          )}
+        </div>
+      </div>
+    )}
+  </div>);
 }
 
 // PAGE ROUTER
 // ═══════════════════════════════════════════════════════════════════════════════
+// ── AI Registry View ──────────────────────────────────────────────────────
+
+const REGISTRY_API = "/api/v1/registry";
+
+const STATUS_COLORS = { approved: "#22c55e", blocked: "#ef4444", unknown: "#f59e0b" };
+const CATEGORY_ICONS = {
+  'desktop-app': '💻', 'ide-assistant': '🧩', 'web-service': '🌐', 'autonomous-agent': '🤖',
+  'chat-agent': '💬', 'mcp-server': '🔌', 'local-model': '🏠', 'ml-platform': '☁️',
+  'automation': '⚙️', 'embedded-agent': '📎', 'marketplace-app': '🏪', 'agent-config': '📁', 'unknown': '❓',
+};
+
+function RegistryStatusBadge({ status }) {
+  const label = status === 'approved' ? 'Allowed' : status === 'blocked' ? 'Blocked' : 'Unreviewed';
+  const c = STATUS_COLORS[status] || "#f59e0b";
+  return <span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 10px",borderRadius:8,fontSize:11,fontWeight:700,background:c+"14",color:c,border:"1px solid "+c+"30"}}>{label}</span>;
+}
+
+function RegistryToggle({ status, onChange }) {
+  const isUnreviewed = status === 'unknown' || status === 'restricted';
+  const isAllowed = status === 'approved';
+  const isBlocked = status === 'blocked';
+
+  if (isUnreviewed) {
+    // First time — show both options side by side
+    return (<div style={{display:"flex",alignItems:"center",gap:8}}>
+      <button onClick={()=>onChange('approved')} style={{padding:"6px 16px",borderRadius:8,fontSize:12,fontWeight:600,border:"1px solid #22c55e40",background:"#22c55e14",color:"#22c55e",cursor:"pointer"}}>Allow</button>
+      <span style={{fontSize:11,color:"#f59e0b",fontWeight:600}}>Unreviewed</span>
+      <button onClick={()=>onChange('blocked')} style={{padding:"6px 16px",borderRadius:8,fontSize:12,fontWeight:600,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:"pointer"}}>Block</button>
+    </div>);
+  }
+
+  // After first decision — simple toggle between allowed and blocked
+  return (<div style={{display:"flex",alignItems:"center",gap:10}}>
+    <span style={{fontSize:12,fontWeight:isAllowed?700:400,color:isAllowed?"#22c55e":"#9ca3af"}}>Allowed</span>
+    <div onClick={()=>onChange(isAllowed?'blocked':'approved')}
+      style={{width:44,height:24,borderRadius:12,background:isAllowed?"#22c55e":"#ef4444",cursor:"pointer",position:"relative",transition:"background 0.2s"}}>
+      <div style={{width:18,height:18,borderRadius:9,background:"#fff",position:"absolute",top:3,left:isAllowed?3:23,transition:"left 0.2s",boxShadow:"0 1px 3px rgba(0,0,0,0.2)"}}/>
+    </div>
+    <span style={{fontSize:12,fontWeight:isBlocked?700:400,color:isBlocked?"#ef4444":"#9ca3af"}}>Blocked</span>
+  </div>);
+}
+
+function AIRegistryView() {
+  const [allItems,setAllItems]=useState(null);
+  const [summary,setSummary]=useState(null);
+  const [err,setErr]=useState(null);
+  const [search,setSearch]=useState("");
+  const [filterStatus,setFilterStatus]=useState("");
+  const [filterCategory,setFilterCategory]=useState("");
+  const [filterRisk,setFilterRisk]=useState("");
+  const [hideInactive,setHideInactive]=useState(true);
+  const [selected,setSelected]=useState(null);
+
+  // Fetch ALL data once on mount — filter client-side for instant response
+  const loadAll=()=>{
+    Promise.all([
+      fetch(REGISTRY_API).then(r=>r.json()),
+      fetch(`${REGISTRY_API}/summary`).then(r=>r.json()),
+    ]).then(([r,s])=>{setAllItems(r);setSummary(s);}).catch(x=>setErr(x.message));
+  };
+  useEffect(loadAll,[]);
+
+  const updateStatus=async(id,status,productName)=>{
+    await fetch(`${REGISTRY_API}/${encodeURIComponent(id)}/status`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status,product_name:productName})});
+    loadAll();
+  };
+
+  if(err) return <Err msg={err}/>;
+  if(!allItems) return <Loading/>;
+
+  // Client-side filtering — instant, no network calls
+  const q=search.toLowerCase();
+  const activeCount=allItems.filter(r=>(r.activity?.total||0)>0).length;
+  const inactiveCount=allItems.length-activeCount;
+  const items=allItems.filter(r=>{
+    if(hideInactive && (r.activity?.total||0)===0) return false;
+    if(filterStatus) {
+      if(filterStatus==='unknown') { if(r.status!=='unknown'&&r.status!=='restricted') return false; }
+      else if(r.status!==filterStatus) return false;
+    }
+    if(filterCategory && r.category!==filterCategory) return false;
+    if(filterRisk && r.risk_level!==filterRisk) return false;
+    if(q && !(r.name||'').toLowerCase().includes(q) && !(r.vendor||'').toLowerCase().includes(q) && !(r.owner||'').toLowerCase().includes(q) && !(r.platform||'').toLowerCase().includes(q) && !(r.category||'').toLowerCase().includes(q)) return false;
+    return true;
+  }).sort((a,b)=>(b.activity?.total||0)-(a.activity?.total||0));
+
+  const categories=[...new Set(allItems.map(i=>i.category).filter(Boolean))].sort();
+  const detailItem=selected?allItems.find(i=>i.id===selected):null;
+
+  return (<div>
+    <SectionHeader title="AI & Agent Registry" hint="Unified catalog of every AI system across your organization"/>
+
+    {/* Summary Cards — count from visible pool (respects hide-inactive toggle) */}
+    {(()=>{
+      const pool=hideInactive?allItems.filter(r=>(r.activity?.total||0)>0):allItems;
+      return <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(4, 1fr)"}}>
+        <StatCard icon={<Monitor size={18}/>} label="AI Systems" value={pool.length} hint={hideInactive?`+${inactiveCount} inactive`:`${activeCount} active`} color="#0044cc" onClick={()=>setHideInactive(!hideInactive)}/>
+        <StatCard icon={<Shield size={18}/>} label="Allowed" value={pool.filter(i=>i.status==='approved').length} color="#22c55e" onClick={()=>setFilterStatus(filterStatus==='approved'?'':'approved')}/>
+        <StatCard icon={<AlertTriangle size={18}/>} label="Unreviewed" value={pool.filter(i=>i.status==='unknown'||i.status==='restricted').length} hint="Need decision" color="#f59e0b" onClick={()=>setFilterStatus(filterStatus==='unknown'?'':'unknown')}/>
+        <StatCard icon={<AlertTriangle size={18}/>} label="Blocked" value={pool.filter(i=>i.status==='blocked').length} color="#ef4444" onClick={()=>setFilterStatus(filterStatus==='blocked'?'':'blocked')}/>
+      </div>;
+    })()}
+
+    {/* Filters */}
+    <div className="aihub_card" style={{display:"flex",flexWrap:"wrap",gap:10,alignItems:"center",padding:12,marginBottom:16}}>
+      <div className="aihub_search_box" style={{flex:1,minWidth:200}}>
+        <Search size={14}/><input placeholder="Search name, vendor, owner..." value={search} onChange={e=>setSearch(e.target.value)} style={{border:"none",outline:"none",flex:1,fontSize:13}}/>
+      </div>
+      <select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12}}>
+        <option value="">All Statuses</option>
+        <option value="approved">Allowed</option>
+        <option value="unknown">Unreviewed</option>
+        <option value="blocked">Blocked</option>
+      </select>
+      <select value={filterCategory} onChange={e=>setFilterCategory(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12}}>
+        <option value="">All Categories</option>
+        {categories.map(c=><option key={c} value={c}>{c}</option>)}
+      </select>
+      <select value={filterRisk} onChange={e=>setFilterRisk(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12}}>
+        <option value="">All Risk Levels</option>
+        <option value="low">Low</option>
+        <option value="medium">Medium</option>
+        <option value="high">High</option>
+        <option value="critical">Critical</option>
+      </select>
+      <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:"#6b7280",cursor:"pointer"}}>
+        <input type="checkbox" checked={!hideInactive} onChange={e=>setHideInactive(!e.target.checked)}/> Show inactive ({inactiveCount})
+      </label>
+      <div style={{fontSize:12,color:"#9ca3af",marginLeft:"auto"}}>{items.length} results</div>
+    </div>
+
+    <div className="aihub_two_col">
+      {/* Registry Table */}
+      <div className="aihub_card" style={{overflow:"auto"}}>
+        <DataTable columns={[
+          {label:"AI System",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:18}}>{CATEGORY_ICONS[r.category]||'❓'}</span>
+            <div>
+              <div className="aihub_text_primary">{r.name}</div>
+              <div className="aihub_text_muted">{r.vendor||""}{r.platform?" · "+r.platform:""}</div>
+            </div>
+          </div>},
+          {label:"Status",render:r=><RegistryStatusBadge status={r.status}/>},
+          {label:"Risk",render:r=>r.risk_score!=null?<span style={{whiteSpace:"nowrap"}}><RiskLevelBadge level={r.risk_level} score={r.risk_score}/></span>:<span className="aihub_text_muted">—</span>},
+          {label:"Owner",render:r=><div style={{whiteSpace:"nowrap"}}>
+            <div style={{fontSize:12}}>{r.owner||"—"}</div>
+            {r.is_orphaned&&<span style={{fontSize:10,color:"#ef4444",fontWeight:600}}>⚠ Orphaned</span>}
+          </div>},
+          {label:"Activity",render:r=><div style={{textAlign:"right",whiteSpace:"nowrap"}}>
+            <div style={{fontSize:13,fontWeight:600}}>{r.activity?.total?.toLocaleString()||0}</div>
+            <div className="aihub_text_muted">{r.activity?.last_active?relTime(r.activity.last_active):"never"}</div>
+          </div>,right:true},
+          {label:"Source",render:r=><Tag text={r.source==="governance"?"Gov":r.source==="endpoint_scan"?"Scan":"Platform"} color={r.source==="governance"?"#8b5cf6":r.source==="endpoint_scan"?"#0044cc":"#6b7280"}/>},
+        ]} rows={items} onRow={r=>setSelected(r.id)} empty="No AI systems found matching your filters."/>
+      </div>
+
+      {/* Detail Panel */}
+      <div>
+        {detailItem ? (
+          <div className="aihub_card">
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+              <div>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                  <span style={{fontSize:24}}>{CATEGORY_ICONS[detailItem.category]||'❓'}</span>
+                  <h4 style={{margin:0,fontSize:16,fontWeight:700}}>{detailItem.name}</h4>
+                </div>
+                <div className="aihub_text_muted">{detailItem.vendor}{detailItem.platform?" · "+detailItem.platform:""}</div>
+                {detailItem.description&&<div style={{fontSize:12,color:"#374151",marginTop:6}}>{detailItem.description}</div>}
+              </div>
+              <RegistryStatusBadge status={detailItem.status}/>
+            </div>
+
+            {/* Allow / Block Toggle */}
+            <div style={{marginBottom:16}}>
+              <RegistryToggle status={detailItem.status} onChange={(s)=>updateStatus(detailItem.id,s,detailItem.name)}/>
+            </div>
+
+            {/* Info Grid */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:16,fontSize:12}}>
+              <div><span style={{color:"#9ca3af"}}>Category:</span> <span style={{fontWeight:600}}>{detailItem.category}</span></div>
+              <div><span style={{color:"#9ca3af"}}>Lifecycle:</span> <span style={{fontWeight:600}}>{detailItem.lifecycle}</span></div>
+              <div><span style={{color:"#9ca3af"}}>Owner:</span> <span style={{fontWeight:600}}>{detailItem.owner||"—"}</span></div>
+              <div><span style={{color:"#9ca3af"}}>Owner Email:</span> <span style={{fontWeight:600}}>{detailItem.owner_email||"—"}</span></div>
+              <div><span style={{color:"#9ca3af"}}>Model:</span> <span style={{fontWeight:600}}>{detailItem.model||"—"}</span></div>
+              <div><span style={{color:"#9ca3af"}}>Source:</span> <Tag text={detailItem.source_detail||detailItem.source}/></div>
+              <div><span style={{color:"#9ca3af"}}>First Seen:</span> <span>{detailItem.first_seen?relTime(detailItem.first_seen):"—"}</span></div>
+              <div><span style={{color:"#9ca3af"}}>Last Active:</span> <span>{detailItem.last_active?relTime(detailItem.last_active):"—"}</span></div>
+              {detailItem.machine_count&&<div><span style={{color:"#9ca3af"}}>Machines:</span> <span style={{fontWeight:600}}>{detailItem.machine_count}</span></div>}
+              {detailItem.is_orphaned&&<div style={{gridColumn:"1/-1",color:"#ef4444",fontWeight:600}}>⚠ Owner account is disabled — this system is orphaned</div>}
+            </div>
+
+            {/* Risk */}
+            {detailItem.risk_score!=null&&(
+              <div style={{marginBottom:16}}>
+                <div style={{fontSize:13,fontWeight:600,color:"#374151",marginBottom:6}}>Risk Assessment</div>
+                <RiskLevelBadge level={detailItem.risk_level} score={detailItem.risk_score}/>
+                {detailItem.risk_factors?.length>0&&<div style={{marginTop:8}}>
+                  {detailItem.risk_factors.map((f,i)=><div key={i} style={{fontSize:11,color:"#6b7280",marginBottom:2}}>• {f.description||f.signal}</div>)}
+                </div>}
+              </div>
+            )}
+
+            {/* Data Access / Connectors */}
+            {detailItem.data_access?.length>0&&(
+              <div style={{marginBottom:16}}>
+                <div style={{fontSize:13,fontWeight:600,color:"#374151",marginBottom:6}}>Data Access</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                  {detailItem.data_access.map((d,i)=><Tag key={i} text={d} color="#ef4444"/>)}
+                </div>
+              </div>
+            )}
+
+            {/* Permissions */}
+            {detailItem.permissions?.length>0&&(
+              <div style={{marginBottom:16}}>
+                <div style={{fontSize:13,fontWeight:600,color:"#374151",marginBottom:6}}>Permissions ({detailItem.permissions.length})</div>
+                <div style={{maxHeight:100,overflowY:"auto",fontSize:11,color:"#6b7280"}}>
+                  {detailItem.permissions.map((p,i)=><div key={i}>• {typeof p==='string'?p:p.scope||p.name||JSON.stringify(p)}</div>)}
+                </div>
+              </div>
+            )}
+
+            {/* Activity */}
+            <div>
+              <div style={{fontSize:13,fontWeight:600,color:"#374151",marginBottom:6}}>Activity</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:12}}>
+                <div style={{background:"#f9fafb",padding:10,borderRadius:8,textAlign:"center"}}>
+                  <div style={{fontSize:18,fontWeight:700}}>{(detailItem.activity?.total||0).toLocaleString()}</div>
+                  <div className="aihub_text_muted">Total Events</div>
+                </div>
+                <div style={{background:"#f9fafb",padding:10,borderRadius:8,textAlign:"center"}}>
+                  <div style={{fontSize:18,fontWeight:700}}>{detailItem.activity?.unique_users||0}</div>
+                  <div className="aihub_text_muted">Users</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="aihub_card" style={{textAlign:"center",padding:"40px 20px",color:"#9ca3af"}}>
+            <Monitor size={32} color="#d1d5db" style={{marginBottom:8}}/>
+            <div style={{fontSize:13}}>Click an AI system to see its full details</div>
+          </div>
+        )}
+      </div>
+    </div>
+  </div>);
+}
+
+// ── Access Requests View ──────────────────────────────────────────────────
+
+const ACCESS_API = "/api/v1/access-requests";
+const EXCEPTION_API = "/api/v1/access-exceptions";
+
+function AccessRequestsView() {
+  const [requests,setRequests]=useState(null);
+  const [exceptions,setExceptions]=useState(null);
+  const [err,setErr]=useState(null);
+  const [tab,setTab]=useState("pending");
+  const [approving,setApproving]=useState(null); // request id being approved
+  const [expiryMode,setExpiryMode]=useState("hours"); // "hours" or "date"
+  const [expiryHours,setExpiryHours]=useState("24");
+  const [expiryDate,setExpiryDate]=useState("");
+  const [reviewNote,setReviewNote]=useState("");
+
+  const loadAll=()=>{
+    Promise.all([
+      fetch(ACCESS_API).then(r=>r.json()),
+      fetch(EXCEPTION_API).then(r=>r.json()),
+    ]).then(([r,e])=>{setRequests(r);setExceptions(e);}).catch(x=>setErr(x.message));
+  };
+  useEffect(loadAll,[]);
+
+  const approve=async(id)=>{
+    const body={note:reviewNote};
+    if(expiryMode==="hours") body.expires_in_hours=Number(expiryHours);
+    else body.expires_at=expiryDate;
+    const res=await fetch(`${ACCESS_API}/${id}/approve`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!res.ok){const e=await res.json().catch(()=>({}));alert(e.error||"Failed");return;}
+    setApproving(null);setReviewNote("");loadAll();
+  };
+
+  const reject=async(id)=>{
+    await fetch(`${ACCESS_API}/${id}/reject`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({note:reviewNote})});
+    setApproving(null);setReviewNote("");loadAll();
+  };
+
+  const revoke=async(id)=>{
+    if(!confirm("Revoke this access? The tool will be blocked again for this employee.")) return;
+    await fetch(`${EXCEPTION_API}/${id}`,{method:"DELETE"});
+    loadAll();
+  };
+
+  if(err) return <Err msg={err}/>;
+  if(!requests) return <Loading/>;
+
+  const pending=requests.filter(r=>r.status==="pending");
+  const history=requests.filter(r=>r.status!=="pending");
+
+  const tabs=[
+    {id:"pending",label:`Pending (${pending.length})`},
+    {id:"active",label:`Active Exceptions (${(exceptions||[]).length})`},
+    {id:"history",label:"History"},
+  ];
+
+  return (<div>
+    <SectionHeader title="Tool Access Requests" hint="Employees request temporary access to blocked AI tools. Approve with a mandatory expiry date."/>
+
+    {/* Summary */}
+    <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(3, 1fr)"}}>
+      <StatCard icon={<Clock size={18}/>} label="Pending" value={pending.length} hint="Awaiting your review" color="#f59e0b"/>
+      <StatCard icon={<Shield size={18}/>} label="Active Exceptions" value={(exceptions||[]).length} hint="Temporary access granted" color="#22c55e"/>
+      <StatCard icon={<Activity size={18}/>} label="Total Requests" value={requests.length} color="#0044cc"/>
+    </div>
+
+    {/* Tabs */}
+    <div style={{display:"flex",gap:2,marginBottom:16,borderBottom:"2px solid #f3f4f6"}}>
+      {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)}
+        style={{padding:"8px 18px",fontSize:13,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0044cc":"2px solid transparent",
+          background:"none",color:tab===t.id?"#0044cc":"#6b7280",cursor:"pointer",marginBottom:-2}}>{t.label}</button>)}
+    </div>
+
+    {/* Pending Tab */}
+    {tab==="pending"&&(<div>
+      {pending.length===0?(
+        <div className="aihub_card" style={{textAlign:"center",padding:"40px 20px"}}>
+          <Shield size={40} color="#d1d5db" style={{marginBottom:12}}/>
+          <h4 style={{margin:"0 0 8px",color:"#374151"}}>No pending requests</h4>
+          <p style={{color:"#9ca3af",fontSize:13}}>When employees request access to a blocked tool, their requests appear here.</p>
+        </div>
+      ):(
+        <div className="aihub_card">
+          {pending.map(r=>(<div key={r.id} style={{padding:"16px 0",borderBottom:"1px solid #f3f4f6"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+              <div>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                  <span style={{fontSize:16,fontWeight:700}}>{r.tool_name||r.tool_host}</span>
+                  {r.tool_vendor&&<Tag text={r.tool_vendor}/>}
+                </div>
+                <div className="aihub_text_muted" style={{marginBottom:6}}>
+                  Requested by <strong>{r.employee_name}</strong> · {relTime(r.submitted_at)}
+                </div>
+                {r.reason&&<div style={{fontSize:13,color:"#374151",background:"#f9fafb",padding:"8px 12px",borderRadius:8,marginBottom:8}}>"{r.reason}"</div>}
+              </div>
+            </div>
+
+            {approving===r.id?(
+              <div style={{background:"#f0f9ff",borderRadius:10,padding:14,marginTop:8}}>
+                <div style={{fontSize:13,fontWeight:600,marginBottom:8}}>Set expiry (required)</div>
+                <div style={{display:"flex",gap:8,marginBottom:10}}>
+                  <button onClick={()=>setExpiryMode("hours")} style={{padding:"5px 12px",borderRadius:6,fontSize:12,border:"1px solid",cursor:"pointer",background:expiryMode==="hours"?"#0044cc14":"#fff",color:expiryMode==="hours"?"#0044cc":"#6b7280",borderColor:expiryMode==="hours"?"#0044cc40":"#e5e7eb"}}>Hours</button>
+                  <button onClick={()=>setExpiryMode("date")} style={{padding:"5px 12px",borderRadius:6,fontSize:12,border:"1px solid",cursor:"pointer",background:expiryMode==="date"?"#0044cc14":"#fff",color:expiryMode==="date"?"#0044cc":"#6b7280",borderColor:expiryMode==="date"?"#0044cc40":"#e5e7eb"}}>Date</button>
+                </div>
+                {expiryMode==="hours"?(
+                  <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:10}}>
+                    {["4","8","24","72","168"].map(h=>
+                      <button key={h} onClick={()=>setExpiryHours(h)} style={{padding:"4px 10px",borderRadius:6,fontSize:11,border:"1px solid",cursor:"pointer",background:expiryHours===h?"#0044cc14":"#fff",color:expiryHours===h?"#0044cc":"#6b7280",borderColor:expiryHours===h?"#0044cc40":"#e5e7eb"}}>{h==="168"?"7 days":h+"h"}</button>
+                    )}
+                    <input type="number" value={expiryHours} onChange={e=>setExpiryHours(e.target.value)} style={{width:60,padding:"4px 8px",border:"1px solid #e5e7eb",borderRadius:6,fontSize:12}} min="1"/>
+                    <span style={{fontSize:12,color:"#6b7280"}}>hours</span>
+                  </div>
+                ):(
+                  <input type="datetime-local" value={expiryDate} onChange={e=>setExpiryDate(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12,marginBottom:10}}/>
+                )}
+                <input value={reviewNote} onChange={e=>setReviewNote(e.target.value)} placeholder="Note (optional)" style={{width:"100%",padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12,marginBottom:10,boxSizing:"border-box"}}/>
+                <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                  <button onClick={()=>{setApproving(null);setReviewNote("");}} style={{padding:"6px 16px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:12}}>Cancel</button>
+                  <button onClick={()=>reject(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:"pointer",fontSize:12,fontWeight:600}}>Reject</button>
+                  <button onClick={()=>approve(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"none",background:"#22c55e",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:600}}>Approve</button>
+                </div>
+              </div>
+            ):(
+              <div style={{display:"flex",gap:8,marginTop:8}}>
+                <button onClick={()=>setApproving(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:600}}>Review</button>
+                <button onClick={()=>reject(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:"pointer",fontSize:12,fontWeight:600}}>Reject</button>
+              </div>
+            )}
+          </div>))}
+        </div>
+      )}
+    </div>)}
+
+    {/* Active Exceptions Tab */}
+    {tab==="active"&&(<div className="aihub_card">
+      <DataTable columns={[
+        {label:"Tool",render:r=><div className="aihub_text_primary">{r.tool_name||r.tool_host}</div>},
+        {label:"Machine",render:r=><Mono>{r.machine_id?.slice(0,12)}</Mono>},
+        {label:"Granted",render:r=>relTime(r.granted_at)},
+        {label:"Expires",render:r=>{
+          const d=new Date(r.expires_at);
+          const ms=d-Date.now();
+          if(ms<=0) return <Badge text="Expired" color="#ef4444"/>;
+          const h=Math.floor(ms/3600000);
+          if(h<24) return <Badge text={h+"h left"} color="#f59e0b"/>;
+          return <Badge text={Math.floor(h/24)+"d left"} color="#22c55e"/>;
+        }},
+        {label:"",render:r=><button onClick={()=>revoke(r.request_id)} style={{padding:"4px 12px",borderRadius:6,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:"pointer",fontSize:11,fontWeight:600}}>Revoke</button>},
+      ]} rows={exceptions||[]} empty="No active access exceptions."/>
+    </div>)}
+
+    {/* History Tab */}
+    {tab==="history"&&(<div className="aihub_card">
+      <DataTable columns={[
+        {label:"Tool",render:r=><div className="aihub_text_primary">{r.tool_name||r.tool_host}</div>},
+        {label:"Employee",render:r=>r.employee_name||"—"},
+        {label:"Reason",render:r=><div style={{fontSize:12,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.reason||"—"}</div>},
+        {label:"Status",render:r=><Badge text={r.status} color={r.status==="approved"?"#22c55e":r.status==="rejected"?"#ef4444":r.status==="revoked"?"#f59e0b":"#9ca3af"}/>},
+        {label:"Reviewed",render:r=>r.reviewed_at?relTime(r.reviewed_at):"—"},
+        {label:"Expires",render:r=>r.expires_at?new Date(r.expires_at).toLocaleDateString():"—"},
+        {label:"Note",render:r=><div className="aihub_text_muted" style={{fontSize:11}}>{r.review_note||"—"}</div>},
+      ]} rows={history} empty="No request history yet."/>
+    </div>)}
+  </div>);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEVELOPER SDK — Projects, API Keys, Traces
+// ═══════════════════════════════════════════════════════════════════════════════
+function DeveloperSDKView() {
+  const [stats, setStats] = useState(null);
+  const [projects, setProjects] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [selectedProject, setSelectedProject] = useState(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newDesc, setNewDesc] = useState("");
+  const [newLang] = useState("javascript");
+  const [createdKey, setCreatedKey] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [snippetLang, setSnippetLang] = useState("javascript");
+  const [showCode, setShowCode] = useState(false);
+
+  const load = async () => {
+    try {
+      const [s, p] = await Promise.all([
+        fetch("/api/v1/sdk/stats").then(r => r.json()),
+        fetch("/api/v1/sdk/projects").then(r => r.json()),
+      ]);
+      setStats(s);
+      setProjects(p);
+    } catch {}
+    setLoading(false);
+  };
+  useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    if (!selectedProject) { setEvents([]); return; }
+    fetch(`/api/v1/sdk/events?project_id=${selectedProject.id}&limit=50`).then(r => r.json()).then(setEvents).catch(() => {});
+  }, [selectedProject]);
+
+  const createProject = async () => {
+    if (!newName.trim()) return;
+    const res = await fetch("/api/v1/sdk/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: newName, language: newLang, description: newDesc }),
+    });
+    const project = await res.json();
+    setCreatedKey(project);
+    setShowCreate(false);
+    setNewName("");
+    setNewDesc("");
+    load();
+  };
+
+  const deleteProject = async (id) => {
+    if (!confirm("Delete this project? API key will stop working.")) return;
+    await fetch(`/api/v1/sdk/projects/${id}`, { method: "DELETE" });
+    setSelectedProject(null);
+    setCreatedKey(null);
+    load();
+  };
+
+  const serverUrl = window.location.origin.includes(":3000")
+    ? window.location.origin.replace(":3000", ":8787")
+    : window.location.origin;
+
+  const installCmds = {
+    javascript: `npm install @cloudfuze/sdk`,
+    typescript: `npm install @cloudfuze/sdk`,
+    python: `pip install cloudfuze-sdk`,
+    go: `go get github.com/cloudfuze/sdk-go`,
+  };
+
+  const connectSnippets = (apiKey, appName) => ({
+    javascript: `require('@cloudfuze/sdk').init({
+  serverUrl: '${serverUrl}',
+  apiKey: '${apiKey}',
+  appName: '${appName}',
+});`,
+
+    typescript: `import { init } from '@cloudfuze/sdk';
+
+init({
+  serverUrl: '${serverUrl}',
+  apiKey: '${apiKey}',
+  appName: '${appName}',
+});`,
+
+    python: `from cloudfuze import init
+
+init(
+    server_url="${serverUrl}",
+    api_key="${apiKey}",
+    app_name="${appName}",
+)`,
+
+    go: `import "github.com/cloudfuze/sdk-go"
+
+cloudfuze.Init(cloudfuze.Config{
+    ServerURL: "${serverUrl}",
+    APIKey:    "${apiKey}",
+    AppName:   "${appName}",
+})`,
+  });
+
+  const copyText = (text) => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;left:-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+  };
+
+  const CodeBox = ({ code }) => (
+    <div style={{ position: "relative" }}>
+      <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 16, fontFamily: "ui-monospace, monospace", fontSize: 11, lineHeight: 1.6, overflowX: "auto", whiteSpace: "pre" }}>{code}</div>
+      <CopyIcon onClick={() => copyText(code)} />
+    </div>
+  );
+
+  const CopyIcon = ({ onClick }) => {
+    const [ok, setOk] = useState(false);
+    return (
+      <svg onClick={() => { onClick(); setOk(true); setTimeout(() => setOk(false), 2000); }}
+        width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={ok ? "#22c55e" : "#94a3b8"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+        style={{ position: "absolute", top: 10, right: 10, cursor: "pointer", transition: "stroke 0.2s" }}>
+        {ok ? <polyline points="20 6 9 17 4 12" /> : <><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></>}
+      </svg>
+    );
+  };
+
+  const langLabels = { javascript: "JavaScript", typescript: "TypeScript", python: "Python", go: "Go" };
+
+  if (loading) return <Loading />;
+
+  return (
+    <div>
+      {/* Stats */}
+      <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
+        <StatCard icon={<Server size={18} />} label="Projects" value={stats?.total_projects || 0} hint="Connected" color="#2563eb" />
+        <StatCard icon={<Activity size={18} />} label="Total Traces" value={stats?.total_events || 0} hint="All time" color="#8b5cf6" />
+        <StatCard icon={<Shield size={18} />} label="Active (24h)" value={stats?.active_projects || 0} hint="Sending data" color="#22c55e" />
+        <StatCard icon={<Clock size={18} />} label="Total Cost" value={fmtUsd(stats?.total_cost_usd)} hint="All time" color="#f59e0b" />
+      </div>
+
+      {/* Created key banner */}
+      {createdKey && (
+        <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 12, padding: 20, marginBottom: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <div style={{ fontWeight: 700, fontSize: 16, color: "#166534" }}>Project "{createdKey.name}" created!</div>
+            <button onClick={() => setCreatedKey(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "#6b7280", fontSize: 18 }}>×</button>
+          </div>
+          <div style={{ fontSize: 13, color: "#166534", marginBottom: 6 }}>Your API key:</div>
+          <CodeBox code={createdKey.api_key} />
+          <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 6, marginBottom: 14 }}>You can always view the integration code from the project's detail page.</div>
+        </div>
+      )}
+
+      {/* Projects list + Create button */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <SectionHeader title="SDK Projects" hint="Each project gets a unique API key for your application" />
+        <button onClick={() => setShowCreate(true)}
+          style={{ background: "#2563eb", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 14, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+          <Plus size={14} /> New Project
+        </button>
+      </div>
+
+      {/* Create project form */}
+      {showCreate && (
+        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 20, marginBottom: 16 }}>
+          <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 12 }}>Create New Project</div>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4 }}>Project Name *</div>
+            <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="e.g. customer-support-bot"
+              style={{ width: "100%", padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 13 }} />
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4 }}>Description (optional)</div>
+            <input value={newDesc} onChange={e => setNewDesc(e.target.value)} placeholder="What does this app do?"
+              style={{ width: "100%", padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 13 }} />
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={createProject} disabled={!newName.trim()}
+              style={{ background: newName.trim() ? "#2563eb" : "#d1d5db", color: "#fff", border: "none", borderRadius: 8, padding: "8px 20px", fontSize: 13, fontWeight: 600, cursor: newName.trim() ? "pointer" : "default" }}>
+              Create & Generate Key
+            </button>
+            <button onClick={() => setShowCreate(false)}
+              style={{ background: "#fff", color: "#6b7280", border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 20px", fontSize: 13, cursor: "pointer" }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Projects table */}
+      {!selectedProject && (
+        <DataTable
+          columns={[
+            { label: "Project", render: r => <div><div className="aihub_text_primary">{r.name}</div>{r.description && <div className="aihub_text_muted" style={{ fontSize: 11 }}>{r.description}</div>}</div> },
+            { label: "Language", render: r => <Tag text={r.language || "js"} /> },
+            { label: "Status", render: r => <Badge text={r.status} color={r.status === "active" ? "#22c55e" : "#9ca3af"} /> },
+            { label: "Events", key: "total_events", right: true },
+            { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
+            { label: "Last Event", render: r => relTime(r.last_event_at) },
+            { label: "Created", render: r => relTime(r.created_at) },
+            { label: "", render: r => <button onClick={e => { e.stopPropagation(); deleteProject(r.id); }} style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 12 }}>Delete</button> },
+          ]}
+          rows={projects}
+          empty="No projects yet. Click 'New Project' to create one and get your API key."
+          onRow={r => setSelectedProject(r)}
+        />
+      )}
+
+      {/* Project detail — events */}
+      {selectedProject && (
+        <div>
+          <button onClick={() => setSelectedProject(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0 }}>← Back to projects</button>
+          <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 20 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
+              <div>
+                <h3 style={{ margin: 0 }}>{selectedProject.name}</h3>
+                <div className="aihub_text_muted" style={{ fontSize: 12 }}>{selectedProject.description || "No description"}</div>
+              </div>
+              <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                <button onClick={() => setShowCode(!showCode)}
+                  style={{ background: showCode ? "#1e293b" : "#fff", color: showCode ? "#fff" : "#374151", border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer" }}>
+                  {showCode ? "Hide Code" : "< > Code"}
+                </button>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontSize: 20, fontWeight: 700 }}>{selectedProject.total_events}</div>
+                  <div className="aihub_text_muted" style={{ fontSize: 11 }}>total events</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Code snippet */}
+            {showCode && (
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ display: "flex", gap: 4, marginBottom: 14 }}>
+                  {Object.entries(langLabels).map(([k, v]) => (
+                    <button key={k} onClick={() => setSnippetLang(k)}
+                      style={{ padding: "5px 12px", border: "1px solid " + (snippetLang === k ? "#2563eb" : "#e5e7eb"), borderRadius: 6, background: snippetLang === k ? "#eff6ff" : "#fff", color: snippetLang === k ? "#2563eb" : "#6b7280", fontSize: 11, fontWeight: snippetLang === k ? 600 : 400, cursor: "pointer" }}>
+                      {v}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>1. Install the SDK</div>
+                <CodeBox code={installCmds[snippetLang]} />
+                <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginTop: 14, marginBottom: 6 }}>2. Add this at the top of your app (before any AI imports)</div>
+                <CodeBox code={connectSnippets(selectedProject.api_key || "cfsk_••••••••••••", selectedProject.name)[snippetLang]} />
+                <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 10 }}>That's it. All AI API calls from this app will appear in the traces above automatically.</div>
+              </div>
+            )}
+
+            <SectionHeader title="Recent Traces" hint="AI API calls captured from this project" />
+            <DataTable
+              columns={[
+                { label: "Time", render: r => <span style={{ fontSize: 12 }}>{relTime(r.occurred_at)}</span> },
+                { label: "Type", render: r => <Tag text={r.type} /> },
+                { label: "Provider", render: r => <Tag text={r.provider || "—"} color={r.provider === "openai" ? "#10a37f" : r.provider === "anthropic" ? "#d97706" : "#6366f1"} /> },
+                { label: "Model", render: r => <span style={{ fontSize: 12 }}>{r.model || "—"}</span> },
+                { label: "Tokens", render: r => fmtTokens((r.prompt_tokens || 0) + (r.completion_tokens || 0)), right: true },
+                { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
+                { label: "Duration", render: r => r.duration_ms ? r.duration_ms + "ms" : "—", right: true },
+                { label: "Status", render: r => <Badge text={r.status || "ok"} color={r.status === "error" ? "#ef4444" : "#22c55e"} /> },
+              ]}
+              rows={events}
+              empty="No events yet. Integrate the SDK and make an AI API call."
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const PAGES={
   Overview:{title:"AI Overview",component:OverviewView},
   Machines:{title:"Machines",component:MachinesView},
@@ -873,8 +1940,13 @@ const PAGES={
   DLP:{title:"AI Activity",component:DLPView},
   Platforms:{title:"AI Platforms",component:PlatformsView},
   AgentGovernance:{title:"Agent Governance",component:AgentGovernance},
-  ServerMonitor:{title:"Server Monitor",component:ServerMonitorView},
+  CopilotReadiness:{title:"Copilot Readiness",component:CopilotReadinessView},
   AIBudget:{title:"AI Budget",component:function AIBudgetPage(){return <AgentGovernanceProvider><BudgetTab/></AgentGovernanceProvider>;}},
+  ModelRouting:{title:"Model Routing",component:ModelRoutingView},
+  RiskScores:{title:"Risk Scores",component:RiskScoreView},
+  AIRegistry:{title:"AI Registry",component:AIRegistryView},
+  AccessRequests:{title:"Access Requests",component:AccessRequestsView},
+  DeveloperSDK:{title:"Developer SDK",component:DeveloperSDKView},
 };
 
 export default function AIHubPage({page}) {

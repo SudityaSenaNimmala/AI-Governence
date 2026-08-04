@@ -13,7 +13,14 @@ import { mountServerAgents } from './routes/server-agents.js';
 import { mountDiscovered } from './routes/discovered.js';
 import { mountClassifications } from './routes/classifications.js';
 import { mountAiPlatforms } from './routes/ai-platforms.js';
+import { mountRouting } from './routes/routing.js';
+import { mountIdentity, resolveProfiles } from './routes/identity.js';
+import { mountRiskScore } from './routes/risk-score.js';
+import { mountRegistry } from './routes/registry.js';
+import { mountAccessRequests } from './routes/access-requests.js';
+import { mountSdk } from './routes/sdk.js';
 import { seedAiPlatforms } from './seed-platforms.js';
+import { seedDefaultRoutingRules } from './seed-routing.js';
 import { JWT_SECRET, ENROLL_SECRET, ADMIN_TOKEN } from './auth.js';
 import governanceRouter from './governance/app.js';
 
@@ -21,6 +28,7 @@ const PORT = Number(process.env.PORT) || 8787;
 const db = await openDb();
 await applyInitialSchema(db);
 await seedAiPlatforms(db);
+await seedDefaultRoutingRules(db);
 
 const app = express();
 app.use(cors());
@@ -41,6 +49,17 @@ mountServerAgents(app, db);
 mountDiscovered(app, db);
 mountClassifications(app, db);
 mountAiPlatforms(app, db);
+mountRouting(app, db);
+mountIdentity(app, db);
+mountRiskScore(app, db);
+mountRegistry(app, db);
+mountAccessRequests(app, db);
+mountSdk(app, db);
+
+// Auto-resolve employee profiles from enrolled machines on startup
+resolveProfiles(db, await db.collection('machines').find({}).project({ _id: 0 }).toArray())
+  .then(s => console.log(`[identity] resolved ${s.total_profiles} employee profiles (${s.created} new, ${s.updated} updated)`))
+  .catch(e => console.warn('[identity] auto-resolve failed:', e.message));
 
 // ── Agent Governance routes (multi-platform discovery, policies, alerts, cost, etc.) ──
 app.use(governanceRouter);

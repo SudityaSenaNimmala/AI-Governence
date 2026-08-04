@@ -477,6 +477,186 @@ When a critical governance violation occurs, CloudFuze doesn't just log it — i
 
 ---
 
+## #32 — Cross-Platform AI/Agent Registry
+
+**Category:** Gartner MQ Critical Gap — #1 Named Criterion
+**Competitors who have it:** IBM (watsonx.governance), ServiceNow (AI Control Tower), Truyo, Credo AI, Arthur AI
+
+**How it works:**
+A central, searchable catalog of every AI system, agent, and model in use across the entire organization — not just Microsoft. Every AI tool from every platform (OpenAI, Anthropic, Google, AWS, Azure, Hugging Face, local models, custom agents) gets a registry entry with structured metadata: name, owner, purpose, risk tier (EU AI Act classification), data sources, tools/APIs it accesses, approval status, and lifecycle state (draft → approved → production → retired).
+
+The registry is the single source of truth that feeds into every other governance feature — risk scoring, policy evaluation, compliance reporting, and cost tracking all reference the registry to know "what AI exists in this organization."
+
+**What the registry contains per entry:**
+- **Identity:** Name, description, platform (OpenAI/Azure/AWS/custom), model(s) used, version
+- **Ownership:** Business owner, technical owner, department, cost center
+- **Classification:** EU AI Act risk tier, data sensitivity level, approval status
+- **Data sources:** What databases, APIs, files, SharePoint sites the agent accesses
+- **Tools/Permissions:** MCP servers, API keys, OAuth scopes, file system access
+- **Lifecycle:** Created date, last active, review date, retirement date, lifecycle state
+- **Risk score:** Auto-calculated from permissions, data access, usage patterns, guardrail violations
+- **Compliance:** Which policy packs apply, last assessment date, open violations
+
+**Customer example:**
+> Your CISO asks: "How many AI agents do we have running in production, who owns them, and which ones have access to customer data?"
+>
+> **Without registry:** You check Microsoft admin center (finds 15 Copilot Studio bots), ask the engineering team (they have 8 LangChain agents on AWS), check Google (3 Vertex AI agents), and find 12 more that nobody knew about from the endpoint scan. Took 2 weeks to compile a spreadsheet. It's already outdated.
+>
+> **With CloudFuze AI Registry:** Open the Registry tab → filter by "data classification = customer data" → instantly see 38 agents across 5 platforms, each with owner, risk tier, last activity, and approval status. Export as PDF for the board meeting. Took 30 seconds.
+
+**Why it makes money:** Gartner's #1 named evaluation criterion for AI Governance Platforms is "AI discovery and registry." Every Leader in the MQ has this. Without it, CloudFuze cannot qualify for MQ inclusion regardless of how good the other features are. This is the structural foundation that every other governance capability builds on.
+
+---
+
+## #33 — AI Tool Intake & Approval Workflow
+
+**Category:** Gartner MQ Differentiator — Vendor/Model Evaluation
+**Competitors who have it:** Trustible, Truyo, OneTrust, Credo AI
+
+**How it works:**
+A structured process for reviewing and approving new AI tools before anyone in the organization uses them. When an employee wants to use a new AI vendor (e.g., "I want to try Anthropic Claude for our customer support"), they submit an intake request through CloudFuze. The request goes through a configurable approval workflow: security review, privacy assessment, legal review, and management sign-off.
+
+The workflow evaluates the AI tool against the organization's policies: Does it meet data residency requirements? Does it have a signed DPA? What data will employees send to it? Does it comply with the relevant regulatory frameworks (GDPR, HIPAA, SOC 2)? Based on the evaluation, the tool is either approved (added to the sanctioned list), restricted (allowed with conditions), or blocked.
+
+**Workflow stages:**
+1. **Request:** Employee submits "I want to use [AI tool] for [purpose]" through the dashboard
+2. **Auto-Assessment:** CloudFuze automatically checks: vendor security posture, data processing agreement, regulatory compliance, pricing model, data residency
+3. **Security Review:** Security team evaluates API security, authentication, data encryption, audit logging
+4. **Privacy Review:** Privacy team checks data processing, consent requirements, cross-border transfers
+5. **Risk Scoring:** Auto-calculated risk score based on the assessment results
+6. **Approval/Rejection:** Approver makes the final decision with documented rationale
+7. **Registry Update:** Approved tools are added to the AI Registry with their approved configuration
+8. **Enforcement:** Browser extension and proxy automatically enforce the decision — approved tools pass, blocked tools are intercepted
+
+**Customer example:**
+> A product manager discovers a new AI coding assistant and starts using it on their laptop. CloudFuze's browser extension detects it as an unsanctioned tool and shows a popup: "This AI tool hasn't been approved by your organization. Submit an intake request?"
+>
+> The PM clicks "Request Access" → fills in purpose ("code generation"), data types ("source code"), and business justification. The request auto-routes to the security team.
+>
+> Security team opens the intake dashboard → sees the auto-assessment: "Vendor SOC 2 certified ✓, DPA signed ✗, GDPR compliant ✓, data residency: US-only ✗ (requires EU processing for EU team)."
+>
+> Security team adds conditions: "Approved for US-based employees only. No customer data. Requires DPA signature before EU rollout." → Approves with restrictions.
+>
+> The tool appears in the AI Registry as "restricted" with the conditions documented. The browser extension now allows it for US employees but blocks EU employees. Full audit trail of the decision.
+
+**Why it makes money:** This is the "front door" to AI governance. You currently have enforcement for tools already in use (DLP, guardrails), but nothing for the decision of WHETHER a tool should be used in the first place. Trustible specifically won MQ recognition for their intake workflow capability. This feature converts CloudFuze from a "security tool that blocks things" to a "governance platform that manages the entire AI lifecycle."
+
+---
+
+## #34 — GRC & Identity Integration Layer
+
+**Category:** Gartner MQ Interoperability — Connected Governance
+**Competitors who have it:** IBM (OpenPages integration), ServiceNow (native GRC), OneTrust, Credo AI (300+ integrations)
+
+**How it works:**
+Bidirectional integrations with enterprise GRC platforms (ServiceNow GRC, OneTrust, Archer, Qualys) and identity providers (Okta, Microsoft Entra ID, Google Workspace) so that AI governance events flow into existing enterprise workflows and risk scores can trigger automated access changes.
+
+**GRC Integration (outbound — push governance data to GRC):**
+- Policy violation → auto-creates a ServiceNow incident with severity, affected agent, remediation steps
+- Risk score change → updates the risk register in OneTrust/Archer with the new AI risk assessment
+- Compliance gap → creates a finding in the GRC platform's compliance module
+- Audit evidence → exports guardrail logs, DLP events, approval records as compliance evidence
+
+**GRC Integration (inbound — pull policy definitions from GRC):**
+- Compliance requirements from the GRC platform → auto-generate CloudFuze policy packs
+- Risk appetite changes → adjust CloudFuze sensitivity thresholds automatically
+- Control objectives → map to CloudFuze guardrail configurations
+
+**Identity Integration (automate access based on risk):**
+- Employee risk score crosses threshold → auto-disable AI access via Entra ID conditional access policy
+- Employee terminated in Okta → instant revocation of all AI tool access, API keys rotated
+- New hire onboarded → auto-provision sanctioned AI tools based on role/department
+- Group membership change → update AI tool access permissions in real-time
+
+**Customer example:**
+> An employee's AI Risk Score (Feature #24) crosses from 45 (medium) to 78 (high) because they attempted 3 jailbreaks and sent customer data to an unsanctioned tool.
+>
+> **Without GRC/identity integration:** The risk score sits in the CloudFuze dashboard. The security team might notice it next week during their review.
+>
+> **With integration:**
+> - CloudFuze pushes a P2 incident to ServiceNow: "Employee risk score critical — AI governance violations"
+> - ServiceNow routes it to the security team with a 4-hour SLA
+> - Simultaneously, CloudFuze triggers an Entra ID conditional access policy: employee's access to ChatGPT, Claude, and all unsanctioned tools is suspended pending review
+> - The employee sees: "Your AI tool access has been temporarily restricted. Contact security@company.com"
+> - Security team investigates using CloudFuze session replay, resolves the incident in ServiceNow
+> - When resolved, CloudFuze restores access and the Entra ID policy is lifted
+>
+> Total time from violation to restriction: 5 minutes (automated). Total time to resolution: 2 hours (human review). No manual steps needed for the restriction — it happened automatically.
+
+**Why it makes money:** Gartner's "interoperability" criterion and the "governance singularity" finding (only IBM and ServiceNow qualify across AI Governance, D&A Governance, AND GRC Magic Quadrants) both point the same direction: buyers want one connected governance layer, not a point solution. The MQ explicitly rewards vendors who connect to existing enterprise systems. ServiceNow is a Leader partly BECAUSE it IS a GRC platform — CloudFuze needs to integrate with them instead. This is the feature that gets CloudFuze evaluated alongside IBM and ServiceNow instead of below them.
+
+---
+
+## #35 — EU AI Act Assessment & Reporting Module
+
+**Category:** Gartner MQ Critical Gap — Regulatory Compliance
+**Competitors who have it:** IBM (watsonx.governance), ServiceNow (AI Control Tower), Holistic AI, Credo AI, Saidot, AgentGov, Difinity, Acipta
+
+**How it works:**
+A complete EU AI Act compliance module that supplements Feature #11 (Pre-built Compliance Policy Packs). While the policy packs handle enforcement rules, this feature handles the assessment, classification, and reporting side — the part that Gartner requires and every MQ Leader has.
+
+Three core components:
+
+**1. Risk Tier Classification Wizard**
+A guided questionnaire that walks the compliance officer through classifying each AI system into one of the four EU AI Act risk tiers:
+- **Unacceptable** (banned) — social scoring, manipulative techniques, untargeted facial scraping, emotion recognition in workplaces/schools, real-time biometric identification in public spaces
+- **High Risk** (full obligations) — AI in employment decisions, education, credit scoring, law enforcement, critical infrastructure, biometrics, migration/asylum, democratic processes, safety components of regulated products
+- **Limited Risk** (transparency obligations) — chatbots, deepfakes, emotion recognition systems, AI-generated content
+- **Minimal Risk** (no obligations) — spam filters, video games, basic recommendation engines
+
+The wizard asks ~12 branching questions based on Annex III of the EU AI Act and auto-assigns the tier. The compliance officer can review and override with documented justification. Each AI system in the Registry (Feature #32) gets a risk tier badge.
+
+**2. FRIA (Fundamental Rights Impact Assessment) Generator**
+Required under Article 27 for deployers of high-risk AI systems (public bodies, essential service operators, education providers). The FRIA is a structured pre-deployment review that evaluates:
+- Which fundamental rights the AI system affects (dignity, equality, privacy, non-discrimination, access to legal remedy)
+- Categories and number of affected individuals/groups
+- Specific risks of harm — what happens when the system makes errors
+- Frequency and scale of use — how often, how many decisions
+- Human oversight measures — who reviews AI decisions, escalation procedures
+- Data protection measures — DPIA reference, data minimization, storage limits
+- Risk mitigation steps — what controls are in place to prevent harm
+
+CloudFuze generates the FRIA as a structured questionnaire (following the format Article 27(5) requires the European AI Office to publish). Answers are stored in the database and linked to the AI system's registry entry.
+
+**3. One-Click Compliance Report (PDF Export)**
+Generates a branded, audit-ready compliance report that includes:
+- Cover page with organization name, report date, compliance officer name
+- Executive summary: "X of Y AI systems classified. Z high-risk systems with completed FRIAs. Overall compliance score: 78%"
+- Per-system detail pages: risk tier classification with justification, FRIA results (if high-risk), applied policy packs, guardrail configuration, DLP patterns active, last review date
+- Evidence appendix: relevant entries from the governance audit log, guardrail violation counts, DLP block counts, policy evaluation results
+- Remediation checklist: open compliance gaps with recommended actions
+- Digital signature and timestamp for legal defensibility
+
+Uses the existing `jspdf` dependency in the dashboard for PDF generation.
+
+**Customer example:**
+> Your company is deploying AI across three departments: an HR chatbot that screens resumes (employment decisions = high-risk), a customer support bot that answers billing questions (limited-risk), and an internal code assistant for developers (minimal-risk).
+>
+> **Without this feature:** Your legal team spends 3 weeks manually researching which EU AI Act tier each system falls into, writing FRIA documents in Word, and compiling evidence from multiple dashboards. The result is inconsistent and may not survive an audit.
+>
+> **With CloudFuze EU AI Act Module:**
+> 1. Open the AI Registry → click "Classify" on the HR chatbot → wizard asks: "Does this AI system make decisions about employment?" → Yes → "Does it filter, score, or rank candidates?" → Yes → Auto-classified as **High Risk** with Article reference (Annex III, §3)
+> 2. High-risk badge triggers: "FRIA required before deployment" → Click "Start FRIA" → guided questionnaire pre-filled with data from the registry (data sources, user counts, permissions) → complete the assessment in 20 minutes
+> 3. Customer support bot → wizard determines **Limited Risk** (transparency obligation only) → badge says "Disclose AI nature to users" — no FRIA needed
+> 4. Code assistant → wizard determines **Minimal Risk** → no obligations
+> 5. Click "Generate Compliance Report" → one-click PDF with all three systems, their classifications, the HR bot's completed FRIA, evidence from guardrail logs, and a compliance score → hand to the auditor
+>
+> **Result:** 3 weeks of manual compliance work reduced to 2 hours. Repeatable, consistent, audit-ready.
+
+**What gets built:**
+- Risk tier classification wizard (12 branching questions based on Annex III)
+- FRIA questionnaire template (follows Article 27 structure)
+- Compliance report PDF generator (uses jspdf)
+- Per-system risk tier badge in the AI Registry
+- Compliance scoring dashboard (% of systems classified, % of FRIAs completed)
+- Database: `eu_ai_act_classifications` collection with risk tier, justification, classified_by, classified_at
+- Database: `fria_assessments` collection with questionnaire answers, assessment date, assessor
+- API routes: classify, get classification, generate FRIA, export report
+
+**Why it makes money:** EU AI Act enforcement began February 2025 (banned practices) and high-risk obligations take full effect August 2, 2026. Non-compliance fines go up to €35 million or 7% of global turnover. Every Gartner MQ Leader has this capability. Regulated buyers (finance, healthcare, government) will not purchase an AI governance platform that lacks EU AI Act compliance tooling. This is the single most important regulatory feature for European market expansion, and increasingly for any enterprise with EU customers or employees. The FRIA generator alone is a deal-closer — Article 27 requires it, the official EU template hasn't been published yet, and CloudFuze providing one first is a competitive advantage.
+
+---
+
 ## P0 FIXES (Must-Do Regardless — Production Blockers)
 
 ### P0-1 — Persist JWT_SECRET

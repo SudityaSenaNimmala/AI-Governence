@@ -78,7 +78,7 @@ const BLOCK_BODY = (matches) => JSON.stringify({
   remediation: 'Remove the highlighted information and retry. Contact security@cloudfuze.com for false positives.',
 });
 
-export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0.0.1', upstreamTlsOptions = null, onApiCall = null, alwaysIntercept = false, tokenizePatterns = null }) {
+export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0.0.1', upstreamTlsOptions = null, onApiCall = null, alwaysIntercept = false, tokenizePatterns = null, modelRouter = null }) {
   // ── Reversible PII Tokenization ─────────────────────────────────────
   // tokenizePatterns: Set of pattern names (e.g. new Set(['us-ssn','credit-card']))
   // whose matches should be tokenized rather than blocked. Patterns NOT in
@@ -118,7 +118,7 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
       return res.end('Bad proxy request');
     }
     if (isIntercepted(target.hostname)) {
-      return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort: req.socket?.remotePort, peerAddress: req.socket?.remoteAddress, vault, tokenizePatterns: _tokenizePatterns });
+      return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort: req.socket?.remotePort, peerAddress: req.socket?.remoteAddress, vault, tokenizePatterns: _tokenizePatterns, modelRouter });
     }
     return forwardPlainHttp(req, res, target);
   });
@@ -233,7 +233,7 @@ function mitmTunnel({ clientSocket, head, reqHost, reqPort, secureContextFor, re
   const inner = http.createServer(async (req, res) => {
     // Reconstruct full URL — req.url here is just the path.
     const target = { hostname: reqHost, port: reqPort, path: req.url, protocol: 'https:' };
-    return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort, peerAddress, vault, tokenizePatterns: _tokenizePatterns });
+    return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort, peerAddress, vault, tokenizePatterns: _tokenizePatterns, modelRouter });
   });
   inner.emit('connection', tlsServer);
   // ^ giving the http.Server our already-established TLS socket directly is
@@ -248,6 +248,7 @@ async function handleInterceptedHttpRequest(req, res, target, reporter, log, ups
   // without scanning. Their bodies are noise (IDs, timestamps, JWTs in
   // auth) and false-positive aggressively. See scan-policy.js.
   let blockMatches = null;
+  let scanResult = null;   // hoisted for model-routing sensitivity
   const skipped = shouldSkipScan(target.hostname, target.path);
   const bodyLen = body.raw ? body.raw.length : 0;
   const textLen = body.text ? body.text.length : 0;
@@ -257,6 +258,7 @@ async function handleInterceptedHttpRequest(req, res, target, reporter, log, ups
     const text = body.text;
     if (text) {
       const result = scan(text);
+      scanResult = result;
       // Only prefix-anchored secret patterns trigger a proxy-level block.
       const blockers = blockableMatches(result.matches || []);
       if (blockers.length > 0) {
@@ -368,6 +370,77 @@ async function handleInterceptedHttpRequest(req, res, target, reporter, log, ups
     } catch (e) {
       log?.warn?.(`proxy: tokenization parse error: ${e?.message}`);
       // Fall through — forward original body
+    }
+  }
+
+  // ── Model routing ─────────────────────────────────────────────────
+  // Evaluate cached routing rules BEFORE forwarding. If a rule matches,
+  // rewrite the model field in the JSON body (and optionally the target
+  // host). This happens AFTER DLP scan/tokenization so the sensitivity
+  // classification is already available. The decision is <1ms (local).
+  const router = hooks?.modelRouter;
+  if (router?.ready && body.text && req.method === 'POST') {
+    try {
+      const json = forwardBody !== body.raw
+        ? JSON.parse(forwardBody.toString('utf8'))  // already modified by tokenization
+        : JSON.parse(body.text);                     // parse fresh
+
+      if (json.model) {
+        // Use the full DLP scan result for sensitivity (covers all matched
+        // patterns, not just blocked/tokenized ones).
+        const sensitivity = scanResult?.matches?.length
+          ? highestSeverity(scanResult.matches)
+          : tokenizeMatches ? highestSeverity(tokenizeMatches)
+          : 'low';
+        // Extract prompt text for complexity classification
+        let promptText = '';
+        if (Array.isArray(json.messages)) {
+          for (const msg of json.messages) {
+            if (msg.role === 'user') {
+              if (typeof msg.content === 'string') promptText += msg.content + ' ';
+              else if (Array.isArray(msg.content)) {
+                for (const b of msg.content) {
+                  if (b && typeof b.text === 'string') promptText += b.text + ' ';
+                }
+              }
+            }
+          }
+        } else if (typeof json.prompt === 'string') {
+          promptText = json.prompt;
+        }
+
+        const decision = router.decide({
+          host: target.hostname,
+          model: json.model,
+          text: promptText,
+          sensitivity,
+        });
+
+        if (decision.routed) {
+          const originalModel = json.model;
+          json.model = decision.model;
+          if (decision.host) target.hostname = decision.host;
+          forwardBody = Buffer.from(JSON.stringify(json), 'utf8');
+          log?.info?.(`proxy: ROUTED ${target.hostname} model ${originalModel} → ${decision.model} (rule: ${decision.rule_name})`);
+
+          reporter?.enqueue?.({
+            kind: 'model_routed',
+            service: target.hostname,
+            mechanism: 'proxy_route',
+            original_model: originalModel,
+            routed_model: decision.model,
+            routed_host: decision.host || null,
+            rule_id: decision.rule_id,
+            rule_name: decision.rule_name,
+            sensitivity: decision.sensitivity,
+            complexity: decision.complexity,
+            prompt_tokens_est: decision.prompt_tokens_est,
+          });
+        }
+      }
+    } catch (e) {
+      // Non-fatal — forward the original body if routing fails
+      log?.warn?.(`proxy: routing error: ${e?.message}`);
     }
   }
 

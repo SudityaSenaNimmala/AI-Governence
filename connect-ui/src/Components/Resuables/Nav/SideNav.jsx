@@ -20,7 +20,8 @@ import {
   Workflow,
   Grip,
   Activity,
-  Wallet
+  Wallet,
+  Shuffle
 } from "lucide-react";
 import { useContext, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
@@ -115,8 +116,14 @@ const SideNav = (props) => {
         { icon: <Sparkles size={16} />, title: "AI Activity", link: "/AIHub/DLP" },
         { icon: <Grip size={16} />, title: "AI Platforms", link: "/AIHub/Platforms" },
         { icon: agentGovernanceIcon, title: "Agent Governance", link: "/AIHub/AgentGovernance" },
-        { icon: <Activity size={16} />, title: "Server Monitor", link: "/AIHub/ServerMonitor" },
+        // { icon: <Activity size={16} />, title: "Server Monitor", link: "/AIHub/ServerMonitor" },  // disabled — needs SDK first
         { icon: <Wallet size={16} />, title: "AI Budget", link: "/AIHub/AIBudget" },
+        { icon: <ShieldCheck size={16} />, title: "Copilot Readiness", link: "/AIHub/CopilotReadiness" },
+        { icon: <Shuffle size={16} />, title: "Model Routing", link: "/AIHub/ModelRouting" },
+        { icon: <ShieldCheck size={16} />, title: "Risk Scores", link: "/AIHub/RiskScores" },
+        { icon: <Database size={16} />, title: "AI Registry", link: "/AIHub/AIRegistry" },
+        { icon: <ShieldCheck size={16} />, title: "Access Requests", link: "/AIHub/AccessRequests" },
+        { icon: <Unplug size={16} />, title: "Developer SDK", link: "/AIHub/DeveloperSDK" },
       ],
     },
     ...(hasContentSprawl

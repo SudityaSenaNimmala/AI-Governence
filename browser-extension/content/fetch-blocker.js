@@ -255,5 +255,68 @@
     }
   });
 
-  console.info('[cfai] fetch blocker installed — sensitive data will be intercepted');
+  // ── Model Routing — rewrite model field in API request body ──────
+  // The content script dispatches 'cfai-route-model' when a routing rule
+  // matches. We store the target model and apply it to the NEXT fetch POST
+  // to an AI host. No DOM scanning, no dropdown interaction — just rewrite
+  // the JSON body before it leaves the browser.
+  let _pendingRoute = null;
+
+  document.addEventListener('cfai-route-model', (e) => {
+    if (e.detail && e.detail.model) {
+      _pendingRoute = { model: e.detail.model, rule_name: e.detail.rule_name || '', ts: Date.now() };
+      console.info('[cfai] routing queued:', _pendingRoute.model, '(' + _pendingRoute.rule_name + ')');
+    }
+  });
+
+  // ── Smart tier detection for fetch-blocker backup routing ──
+  function detectTier(modelId) {
+    const t = (modelId || '').toLowerCase();
+    if (t.includes('opus'))   return { provider: 'anthropic', tier: 'premium' };
+    if (t.includes('sonnet')) return { provider: 'anthropic', tier: 'standard' };
+    if (t.includes('haiku'))  return { provider: 'anthropic', tier: 'economy' };
+    if (t.includes('mini') || t.includes('3.5'))  return { provider: 'openai', tier: 'economy' };
+    if (t.includes('4o') || t.includes('4.1'))    return { provider: 'openai', tier: 'standard' };
+    if (t.includes('gpt-4') || t.includes('o1') || t.includes('o3')) return { provider: 'openai', tier: 'premium' };
+    if (t.includes('flash'))  return { provider: 'google', tier: 'economy' };
+    if (t.includes('pro'))    return { provider: 'google', tier: 'standard' };
+    return null;
+  }
+
+  const FALLBACK_ROUTES = {
+    anthropic: { premium: 'claude-sonnet-4-20250514', standard: 'claude-haiku-4-5-20251001' },
+    openai:    { premium: 'gpt-4o', standard: 'gpt-4o-mini' },
+    google:    { premium: 'gemini-2.0-flash', standard: 'gemini-2.0-flash' },
+  };
+
+  // Patch the fetch wrapper to apply routing BEFORE sending
+  const _routedFetch = window.fetch;
+  window.fetch = function(input, init) {
+    try {
+      const url = typeof input === 'string' ? input : input instanceof Request ? input.url : String(input || '');
+      const method = init?.method || (input instanceof Request ? input.method : 'GET');
+
+      if (isChatPost(url, method) && typeof init?.body === 'string') {
+        try {
+          const json = JSON.parse(init.body);
+          if (json.model) {
+            // Primary: use pending route from content script
+            if (_pendingRoute && (Date.now() - _pendingRoute.ts) < 5000) {
+              const originalModel = json.model;
+              json.model = _pendingRoute.model;
+              init = { ...init, body: JSON.stringify(json) };
+              console.info('[cfai] ROUTED fetch:', originalModel, '→', json.model);
+              document.dispatchEvent(new CustomEvent('cfai-route-applied', {
+                detail: { from: originalModel, to: json.model, rule: _pendingRoute.rule_name }
+              }));
+              _pendingRoute = null;
+            }
+          }
+        } catch {}
+      }
+    } catch {}
+    return _routedFetch.apply(this, arguments);
+  };
+
+  console.info('[cfai] fetch blocker + smart model router installed');
 })();

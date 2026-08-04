@@ -406,6 +406,181 @@
     });
   }, true);
 
+  // ── Model Routing ─────────────────────────────────────────────────
+  // Complexity classifier — determines if a prompt is simple/moderate/complex.
+  const COMPLEX_RE = /\b(architect|design|implement|refactor|optimize|compare|evaluate|explain in detail|step.by.step|comprehensive|thorough|deep.dive|trade.?offs?|debug|investigate|root.cause|security.review|performance|scale|migration)\b/i;
+  const SIMPLE_RE  = /\b(commit.message|changelog|fix.typo|rename|format|lint|summarize|translate|convert|hello|hi|hey|thanks|thank.you|yes|no|ok|okay)\b/i;
+
+  function classifyComplexity(text) {
+    if (!text) return 'unknown';
+    const tokens = Math.ceil(text.length / 4);
+    if (tokens < 100) return 'simple';
+    if (tokens > 3000) return 'complex';
+    const sample = text.length > 2000 ? text.slice(0, 2000) : text;
+    if (COMPLEX_RE.test(sample)) return 'complex';
+    if (SIMPLE_RE.test(sample)) return 'simple';
+    const codeBlocks = (sample.match(/```/g) || []).length / 2;
+    if (codeBlocks >= 2) return 'complex';
+    if (codeBlocks >= 1) return 'moderate';
+    return 'moderate';
+  }
+
+  function providerFromHost() {
+    const h = window.location.hostname || '';
+    if (h.includes('claude') || h.includes('anthropic')) return 'anthropic';
+    if (h.includes('openai') || h.includes('chatgpt'))   return 'openai';
+    if (h.includes('gemini') || h.includes('google'))     return 'google';
+    return 'unknown';
+  }
+
+  function matchRoutingRules(text, sensitivity) {
+    const rules = window.__cfaiRoutingRules;
+    if (!rules || !Array.isArray(rules) || rules.length === 0) return null;
+    const complexity = classifyComplexity(text);
+    const provider = providerFromHost();
+    const promptTokens = Math.ceil((text || '').length / 4);
+
+    for (const rule of rules) {
+      if (!rule.enabled) continue;
+      const c = rule.conditions || {};
+      if (c.sensitivity) {
+        const targets = Array.isArray(c.sensitivity) ? c.sensitivity : [c.sensitivity];
+        if (!sensitivity || !targets.includes(sensitivity)) continue;
+      }
+      if (c.complexity) {
+        const targets = Array.isArray(c.complexity) ? c.complexity : [c.complexity];
+        if (!targets.includes(complexity)) continue;
+      }
+      if (c.provider) {
+        const targets = Array.isArray(c.provider) ? c.provider : [c.provider];
+        if (!targets.includes(provider)) continue;
+      }
+      if (c.prompt_tokens_gt != null && promptTokens <= c.prompt_tokens_gt) continue;
+      if (c.prompt_tokens_lt != null && promptTokens >= c.prompt_tokens_lt) continue;
+      // All conditions matched
+      if (rule.action && rule.action.model) {
+        return { model: rule.action.model, rule_name: rule.name, rule_id: rule.id, complexity };
+      }
+    }
+    return null;
+  }
+
+  // Model display name mapping — maps API model IDs to text shown in Claude Desktop's UI
+  const MODEL_DISPLAY = {
+    'claude-opus-4-20250514':     ['Opus 4', 'Claude Opus 4', 'Opus'],
+    'claude-sonnet-4-20250514':   ['Sonnet 4', 'Claude Sonnet 4', 'Sonnet'],
+    'claude-haiku-4-5-20251001':  ['Haiku 4.5', 'Claude Haiku 4.5', 'Haiku'],
+    'claude-3-5-sonnet-20241022': ['Sonnet 3.5', 'Claude 3.5 Sonnet'],
+    'claude-3-5-haiku-20241022':  ['Haiku 3.5', 'Claude 3.5 Haiku'],
+    'claude-3-opus-20240229':     ['Opus 3', 'Claude 3 Opus'],
+  };
+
+  // Find the model selector button in Claude Desktop's UI.
+  // Strategy: look for a button or clickable near the input area whose text
+  // contains a known model name (e.g., "Opus", "Sonnet", "Haiku").
+  function findModelSelectorButton() {
+    const modelKeywords = ['Opus', 'Sonnet', 'Haiku'];
+    // Check buttons, [role=button], and other clickables
+    const selectors = 'button, [role="button"], [role="listbox"], [role="combobox"], [data-testid*="model"], [aria-label*="model" i], [aria-label*="Model" i]';
+    const candidates = document.querySelectorAll(selectors);
+    for (const el of candidates) {
+      const text = (el.textContent || '').trim();
+      if (text.length > 80) continue; // skip large containers
+      if (modelKeywords.some(kw => text.includes(kw))) return el;
+    }
+    // Fallback: search ALL elements with short model-like text
+    const all = document.querySelectorAll('*');
+    for (const el of all) {
+      if (el.children.length > 5) continue;
+      const text = (el.textContent || '').trim();
+      if (text.length > 50 || text.length < 3) continue;
+      if (modelKeywords.some(kw => text.includes(kw))) {
+        // Walk up to find the clickable parent
+        let clickable = el;
+        for (let i = 0; i < 4 && clickable.parentElement; i++) {
+          if (clickable.tagName === 'BUTTON' || clickable.getAttribute('role') === 'button' || clickable.onclick) break;
+          clickable = clickable.parentElement;
+        }
+        return clickable;
+      }
+    }
+    return null;
+  }
+
+  // Try to select a target model in the dropdown. Returns a Promise<boolean>.
+  async function selectModelInUI(targetModelId) {
+    const btn = findModelSelectorButton();
+    if (!btn) return false;
+
+    // Read what's currently selected
+    const currentText = (btn.textContent || '').trim();
+    const targetNames = MODEL_DISPLAY[targetModelId] || [targetModelId];
+
+    // Already on the target model?
+    if (targetNames.some(n => currentText.includes(n))) return true;
+
+    // Click to open dropdown
+    btn.click();
+    await new Promise(r => setTimeout(r, 300));
+
+    // Find the target option in the opened dropdown/menu
+    const optionSelectors = '[role="option"], [role="menuitem"], [role="menuitemradio"], li[data-value], [data-testid*="model"]';
+    let found = false;
+    const options = document.querySelectorAll(optionSelectors);
+    for (const opt of options) {
+      const text = (opt.textContent || '').trim();
+      if (targetNames.some(n => text.includes(n))) {
+        opt.click();
+        found = true;
+        break;
+      }
+    }
+
+    // If no role-based options, try all visible clickables in any open popover/menu
+    if (!found) {
+      const allEls = document.querySelectorAll('[class*="popover" i] *, [class*="dropdown" i] *, [class*="menu" i] *, [class*="picker" i] *, [role="dialog"] *');
+      for (const el of allEls) {
+        const text = (el.textContent || '').trim();
+        if (text.length > 60 || text.length < 3) continue;
+        if (targetNames.some(n => text.includes(n))) {
+          el.click();
+          found = true;
+          break;
+        }
+      }
+    }
+
+    if (!found) {
+      // Close the dropdown if we couldn't find the target
+      btn.click();
+      // Fallback: press Escape to close any open menu
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    }
+
+    await new Promise(r => setTimeout(r, 200));
+    return found;
+  }
+
+  // Routing notification toast — shown briefly at bottom-right
+  function showRoutingToast(fromModel, toModel, ruleName) {
+    const existing = document.getElementById('cfai-routing-toast');
+    if (existing) existing.remove();
+    const toast = document.createElement('div');
+    toast.id = 'cfai-routing-toast';
+    toast.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;background:#0044cc;color:#fff;padding:12px 18px;border-radius:10px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,0.2);animation:cfai-fade-in .2s ease-out;max-width:350px;';
+    const fromShort = fromModel.replace(/claude-/i,'').replace(/-\d{8}$/,'');
+    const toShort = toModel.replace(/claude-/i,'').replace(/-\d{8}$/,'');
+    toast.innerHTML = '<div style="font-weight:700;margin-bottom:4px;">⚡ Model Routed</div>' +
+      '<div>' + escapeHtml(fromShort) + ' → <strong>' + escapeHtml(toShort) + '</strong></div>' +
+      '<div style="font-size:11px;opacity:0.8;margin-top:4px;">Rule: ' + escapeHtml(ruleName) + '</div>' +
+      '<div style="font-size:10px;opacity:0.6;margin-top:2px;">CloudFuze AI Governance</div>';
+    document.documentElement.appendChild(toast);
+    setTimeout(() => { try { toast.remove(); } catch {} }, 5000);
+  }
+
+  // Flag to skip routing on re-triggered sends (prevent infinite loop)
+  let _skipRouting = false;
+
   // ---- Enforcement: Enter key (no Shift) ----
   // MUST use capture phase (true) so we fire before the app's own React/keydown
   // handler — without it, the app sends first and our preventDefault is too late.
@@ -417,6 +592,55 @@
     const text = readInputText(el);
     const blocked = tryBlock(el, e, 'keydown:Enter');
     if (blocked) return;
+
+    // ── Model routing check ──
+    if (!_skipRouting && text.length >= 4) {
+      const allMatches = scan(text);
+      const sensitivity = allMatches.length > 0 ? highest(allMatches) : 'low';
+      const routing = matchRoutingRules(text, sensitivity);
+
+      if (routing) {
+        // PAUSE the send
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (typeof e.stopPropagation === 'function') e.stopPropagation();
+
+        // Change model, then re-send
+        selectModelInUI(routing.model).then((changed) => {
+          // Show notification regardless
+          const currentBtn = findModelSelectorButton();
+          const fromModel = (currentBtn?.textContent || 'current').trim();
+          showRoutingToast(fromModel, routing.model, routing.rule_name);
+
+          // Report the routing event
+          emit({
+            kind: 'model_routed',
+            service: window.location.hostname,
+            mechanism: 'desktop_hook',
+            routed_model: routing.model,
+            rule_id: routing.rule_id,
+            rule_name: routing.rule_name,
+            complexity: routing.complexity,
+            content_length: text.length,
+          });
+
+          // Re-trigger the send with skip flag
+          _skipRouting = true;
+          setTimeout(() => {
+            const target = isPromptInput(el) && el.isConnected ? el : findActivePromptInput();
+            if (target) {
+              target.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+                bubbles: true, cancelable: true,
+              }));
+            }
+            setTimeout(() => { _skipRouting = false; }, 200);
+          }, 300);
+        });
+        return;
+      }
+    }
+
     // Clean send — emit telemetry. Use pre-captured text since the field may
     // be cleared by the time the micro-task fires.
     if (text.length >= 4) {

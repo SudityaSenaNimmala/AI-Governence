@@ -11,6 +11,8 @@ const STORAGE = {
   PLATFORMS_AT: 'cfai.platforms_at',   // timestamp of last refresh
   BLOCKED:   'cfai.blocked',          // blocked agents list from governance
   BLOCKED_AT:'cfai.blocked_at',
+  ROUTING_RULES: 'cfai.routing_rules',     // model routing rules from server
+  ROUTING_RULES_AT: 'cfai.routing_rules_at',
 };
 
 const FLUSH_ALARM = 'cfai-flush';
@@ -22,6 +24,9 @@ const PLATFORMS_REFRESH_MIN = 1;    // how often to pull the registry (1 = chrom
 
 const BLOCKED_ALARM = 'cfai-blocked-refresh';
 const BLOCKED_REFRESH_MIN = 2;     // poll blocked agents every 2 min
+
+const ROUTING_ALARM = 'cfai-routing-refresh';
+const ROUTING_REFRESH_MIN = 1;     // poll routing rules every 1 min
 
 // --- helpers ---
 
@@ -53,13 +58,35 @@ async function ensureToken() {
   if (!config.serverUrl || !config.enrollSecret) return null;
 
   const machineId = await getOrCreateMachineId();
-  const hostname = navigator.userAgent.split(/[\s/(]/)[0] + '-browser-extension';
+
+  // Try to auto-detect hostname from desktop agent beacon
+  let computerName = config.computerName;
+  if (!computerName) {
+    try {
+      const beaconRes = await fetch('http://127.0.0.1:19532/cfai/identity', { signal: AbortSignal.timeout(2000) });
+      if (beaconRes.ok) {
+        const beaconData = await beaconRes.json();
+        computerName = beaconData.hostname;
+        // Persist for future enrollments
+        config.computerName = computerName;
+        config.detectedUser = beaconData.user;
+        await setStored(STORAGE.CONFIG, config);
+        console.info('[cfai] auto-detected hostname from desktop agent:', computerName);
+      }
+    } catch { /* agent not running — proceed without linking */ }
+  }
+
+  const hostname = computerName
+    ? computerName + '-browser-extension'
+    : 'browser-extension-' + machineId.slice(0, 8);
 
   try {
+    const enrollBody = { machineId, hostname, enrollSecret: config.enrollSecret };
+    if (config.employeeEmail) enrollBody.employeeEmail = config.employeeEmail;
     const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/enroll`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ machineId, hostname, enrollSecret: config.enrollSecret }),
+      body: JSON.stringify(enrollBody),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const { token } = await res.json();
@@ -379,16 +406,67 @@ function showNativeWarning(msg) {
 chrome.alarms.create(FLUSH_ALARM, { periodInMinutes: FLUSH_INTERVAL_MIN });
 chrome.alarms.create(PLATFORMS_ALARM, { periodInMinutes: PLATFORMS_REFRESH_MIN });
 chrome.alarms.create(BLOCKED_ALARM, { periodInMinutes: BLOCKED_REFRESH_MIN });
+chrome.alarms.create(ROUTING_ALARM, { periodInMinutes: ROUTING_REFRESH_MIN });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === FLUSH_ALARM)     flushQueue();
   if (alarm.name === PLATFORMS_ALARM) refreshPlatforms();
   if (alarm.name === BLOCKED_ALARM)   refreshBlockedAgents();
+  if (alarm.name === ROUTING_ALARM)   refreshRoutingRules();
 });
 
 // Refresh once at startup too — alarm fires on its own schedule, not at boot.
 // Best-effort: if the worker is unenrolled or offline, no-op.
 refreshPlatforms().catch(() => {});
 refreshBlockedAgents().catch(() => {});
+refreshRoutingRules().catch(() => {});
+
+// Auto-link: detect desktop agent beacon → re-enroll with real hostname if needed.
+// Runs every startup so a freshly installed extension links automatically.
+// Wrapped in setTimeout to avoid racing with other startup tasks.
+setTimeout(async () => {
+  try {
+    console.info('[cfai] checking for desktop agent beacon...');
+    const res = await fetch('http://127.0.0.1:19532/cfai/identity', { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) { console.info('[cfai] beacon responded but not ok:', res.status); return; }
+    const beacon = await res.json();
+    if (!beacon.hostname) { console.info('[cfai] beacon has no hostname'); return; }
+
+    const config = await getConfig();
+
+    // Update config with detected hostname (always, in case beacon info changed)
+    const wasLinked = config.computerName === beacon.hostname;
+    config.computerName = beacon.hostname;
+    config.detectedUser = beacon.user;
+    config.detectedMachineId = beacon.machineId;
+    await setStored(STORAGE.CONFIG, config);
+
+    if (wasLinked) {
+      console.info('[cfai] already linked to:', beacon.hostname);
+      // Still verify the enrollment happened — force re-enroll if the server
+      // doesn't have a machine record with our expected hostname
+      try {
+        const checkRes = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/machines`);
+        if (checkRes.ok) {
+          const machines = await checkRes.json();
+          const expectedHost = beacon.hostname + '-browser-extension';
+          const found = machines.some(m => m.hostname === expectedHost);
+          if (found) return; // all good — already enrolled with correct hostname
+          console.info('[cfai] extension not enrolled with correct hostname yet, re-enrolling...');
+        }
+      } catch {} // server down — try re-enroll anyway
+    } else {
+      console.info('[cfai] detected desktop agent:', beacon.hostname, beacon.user);
+    }
+
+    // Force re-enrollment with the real hostname
+    await chrome.storage.local.remove(STORAGE.TOKEN);
+    console.info('[cfai] cleared old token, re-enrolling...');
+    const newToken = await ensureToken();
+    console.info('[cfai] re-enrolled:', newToken ? 'OK' : 'FAILED (no serverUrl/secret?)');
+  } catch (err) {
+    console.info('[cfai] desktop agent not detected:', err.message || 'fetch failed');
+  }
+}, 2000);
 
 // --- blocked agents sync ---
 
@@ -413,6 +491,39 @@ async function refreshBlockedAgents() {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'cfai-get-blocked') {
     getStored(STORAGE.BLOCKED, []).then(list => sendResponse({ blocked: list }));
+    return true;
+  }
+  // Access request — relay from content script to server
+  if (msg.kind === 'access_request') {
+    (async () => {
+      try {
+        const config = await getConfig();
+        if (!config.serverUrl) { sendResponse({ error: 'Extension is not configured. Open extension settings and enter the server URL.' }); return; }
+        const machineId = await getOrCreateMachineId();
+        const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/access-requests`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            machine_id: machineId,
+            hostname: config.computerName || null,
+            user: config.detectedUser || null,
+            tool_host: msg.tool_host,
+            tool_name: msg.tool_name,
+            tool_vendor: msg.tool_vendor,
+            reason: msg.reason || '',
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          sendResponse({ error: err.error || 'Server returned ' + res.status });
+        } else {
+          const data = await res.json();
+          sendResponse({ ok: true, id: data.id });
+        }
+      } catch (err) {
+        sendResponse({ error: 'Cannot reach the governance server. Please check your network connection or contact IT.' });
+      }
+    })();
     return true; // async response
   }
 });
@@ -450,6 +561,23 @@ async function refreshPlatforms() {
     _platCacheAt = Date.now();
   } catch (e) {
     console.warn('[cfai] platforms refresh failed:', e?.message || e);
+  }
+}
+
+// --- routing rules sync ---
+// Pull model routing rules so the content script can auto-switch models before send.
+async function refreshRoutingRules() {
+  try {
+    const config = await getConfig();
+    if (!config.serverUrl) return;
+    const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/routing/rules`);
+    if (!res.ok) return;
+    const rules = await res.json();
+    const active = (rules || []).filter(r => r.enabled).sort((a,b) => (a.priority||50) - (b.priority||50));
+    await setStored(STORAGE.ROUTING_RULES,    active);
+    await setStored(STORAGE.ROUTING_RULES_AT, Date.now());
+  } catch (e) {
+    console.warn('[cfai] routing rules refresh failed:', e?.message || e);
   }
 }
 

@@ -7,7 +7,7 @@ import { KNOWN_APPS, candidateAsarsFor } from './known-apps.js';
 import { extractAsar, packAsar, cleanup, readJsonFromExtracted, writeFileInExtracted } from './asar.js';
 import { renderHookFiles } from './hook-template.js';
 
-export const HOOK_VERSION = '0.6.0';  // pattern catalog brought to full parity with browser-extension/content/patterns.js (gitlab/gcp/jwt/iban/us-phone/internal + Luhn credit-card validation); added Gemini desktop
+export const HOOK_VERSION = '0.7.0';  // intelligent model routing — auto-swap model based on prompt complexity + admin rules
 
 // The bootstrap filename we set as pkg.main. Hoisted so injectOne can detect a
 // package.json whose main already points at us (a prior injection) and avoid
