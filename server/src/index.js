@@ -1,5 +1,6 @@
-import dotenv from 'dotenv';
-dotenv.config();
+// MUST be the first import: loads .env as a module side effect so that env vars
+// are set before auth.js (or anything else) is evaluated. See src/env.js.
+import './env.js';
 
 import express from 'express';
 import cors from 'cors';
@@ -19,6 +20,13 @@ import { mountRiskScore } from './routes/risk-score.js';
 import { mountRegistry } from './routes/registry.js';
 import { mountAccessRequests } from './routes/access-requests.js';
 import { mountSdk } from './routes/sdk.js';
+import { mountAiUsage } from './routes/ai-usage.js';
+import { mountClaudeUsage } from './routes/claude-usage.js';
+import { mountOtel } from './routes/otel.js';
+import { mountWebhooks } from './routes/webhooks.js';
+import { mountSignals } from './routes/signals.js';
+import { mountApprovals } from './routes/approvals.js';
+import { mountSiem } from './routes/siem.js';
 import { seedAiPlatforms } from './seed-platforms.js';
 import { seedDefaultRoutingRules } from './seed-routing.js';
 import { JWT_SECRET, ENROLL_SECRET, ADMIN_TOKEN } from './auth.js';
@@ -60,6 +68,13 @@ mountSdk(app, db);
 resolveProfiles(db, await db.collection('machines').find({}).project({ _id: 0 }).toArray())
   .then(s => console.log(`[identity] resolved ${s.total_profiles} employee profiles (${s.created} new, ${s.updated} updated)`))
   .catch(e => console.warn('[identity] auto-resolve failed:', e.message));
+mountAiUsage(app, db);
+mountClaudeUsage(app, db);
+mountOtel(app, db);
+mountWebhooks(app, db);
+mountSignals(app, db);
+mountApprovals(app, db);
+mountSiem(app, db);
 
 // ── Agent Governance routes (multi-platform discovery, policies, alerts, cost, etc.) ──
 app.use(governanceRouter);

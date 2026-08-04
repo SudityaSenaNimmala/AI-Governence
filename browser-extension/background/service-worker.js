@@ -5,6 +5,7 @@
 const STORAGE = {
   CONFIG:    'cfai.config',
   TOKEN:     'cfai.token',
+  USER:      'cfai.user',              // last identity sent to the server
   MACHINE_ID:'cfai.machineId',
   QUEUE:     'cfai.queue',
   PLATFORMS: 'cfai.platforms',         // mirror of GET /api/v1/ai-platforms
@@ -38,7 +39,24 @@ async function setStored(key, value) {
   await chrome.storage.local.set({ [key]: value });
 }
 async function getConfig() {
-  return getStored(STORAGE.CONFIG, { serverUrl: '', enrollSecret: '' });
+  return getStored(STORAGE.CONFIG, { serverUrl: '', enrollSecret: '', userEmail: '' });
+}
+// Resolve a real user identity so usage attributes to a person, not the browser.
+// 1) admin/user-configured identity (works in every browser, incl. Firefox);
+// 2) Chrome signed-in profile email (best-effort — needs the "identity"/"identity.email"
+//    permission; if absent it just returns null and we fall through).
+async function resolveUserIdentity(config) {
+  if (config.userEmail) return config.userEmail;
+  try {
+    if (typeof chrome !== 'undefined' && chrome.identity?.getProfileUserInfo) {
+      const info = await new Promise((resolve) => {
+        try { chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, resolve); }
+        catch { resolve(null); }
+      });
+      if (info?.email) return info.email;
+    }
+  } catch { /* unsupported / not permitted — fall through */ }
+  return null;
 }
 async function getOrCreateMachineId() {
   let id = await getStored(STORAGE.MACHINE_ID);
@@ -79,6 +97,8 @@ async function ensureToken() {
   const hostname = computerName
     ? computerName + '-browser-extension'
     : 'browser-extension-' + machineId.slice(0, 8);
+  const hostname = navigator.userAgent.split(/[\s/(]/)[0] + '-browser-extension';
+  const user = await resolveUserIdentity(config);
 
   try {
     const enrollBody = { machineId, hostname, enrollSecret: config.enrollSecret };
@@ -87,14 +107,45 @@ async function ensureToken() {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(enrollBody),
+      body: JSON.stringify({ machineId, hostname, user, enrollSecret: config.enrollSecret }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const { token } = await res.json();
     await setStored(STORAGE.TOKEN, token);
+    await setStored(STORAGE.USER, user);
     return token;
   } catch (err) {
     console.warn('[cfai] enrollment failed:', err.message);
     return null;
+  }
+}
+
+// Keep the machine's attributed user current. Runs cheaply on every flush and
+// at startup; only re-enrolls (network) when the resolved identity actually
+// changes — e.g. after the admin sets an email, or the browser sign-in changes.
+// This is what makes already-installed extensions start reporting a real user.
+async function syncIdentity() {
+  const config = await getConfig();
+  if (!config.serverUrl || !config.enrollSecret) return;
+  const current = await resolveUserIdentity(config);
+  if (!current) return;                          // nothing to attribute yet
+  const last = await getStored(STORAGE.USER);
+  if (current === last) return;                  // unchanged — no network call
+  const machineId = await getOrCreateMachineId();
+  const hostname = navigator.userAgent.split(/[\s/(]/)[0] + '-browser-extension';
+  try {
+    const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/enroll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ machineId, hostname, user: current, enrollSecret: config.enrollSecret }),
+    });
+    if (res.ok) {
+      const { token } = await res.json();
+      await setStored(STORAGE.TOKEN, token);
+      await setStored(STORAGE.USER, current);
+    }
+  } catch (err) {
+    console.warn('[cfai] identity sync failed:', err.message);
   }
 }
 
@@ -117,7 +168,10 @@ async function flushQueue() {
   const token = await ensureToken();
   if (!token) return;
 
-  const batch = queue.slice(0, BATCH_SIZE);
+  // Stamp the signed-in person on each event so activity attributes to a user,
+  // not just the machine. Uses the identity resolved at enroll / last sync.
+  const user = (await resolveUserIdentity(config)) || (await getStored(STORAGE.USER)) || null;
+  const batch = queue.slice(0, BATCH_SIZE).map((e) => (e.user ? e : { ...e, user }));
   try {
     // authedFetch transparently handles 401-on-token-rotation by clearing
     // the stale token, re-enrolling using stored config, and retrying once.
@@ -408,7 +462,7 @@ chrome.alarms.create(PLATFORMS_ALARM, { periodInMinutes: PLATFORMS_REFRESH_MIN }
 chrome.alarms.create(BLOCKED_ALARM, { periodInMinutes: BLOCKED_REFRESH_MIN });
 chrome.alarms.create(ROUTING_ALARM, { periodInMinutes: ROUTING_REFRESH_MIN });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === FLUSH_ALARM)     flushQueue();
+  if (alarm.name === FLUSH_ALARM)     { syncIdentity().catch(() => {}); flushQueue(); }
   if (alarm.name === PLATFORMS_ALARM) refreshPlatforms();
   if (alarm.name === BLOCKED_ALARM)   refreshBlockedAgents();
   if (alarm.name === ROUTING_ALARM)   refreshRoutingRules();
@@ -467,6 +521,7 @@ setTimeout(async () => {
     console.info('[cfai] desktop agent not detected:', err.message || 'fetch failed');
   }
 }, 2000);
+syncIdentity().catch(() => {});
 
 // --- blocked agents sync ---
 
@@ -479,10 +534,17 @@ async function refreshBlockedAgents() {
     const list = await res.json();
     await setStored(STORAGE.BLOCKED, list);
     await setStored(STORAGE.BLOCKED_AT, Date.now());
-    // Notify all content scripts so they can enforce immediately
-    const tabs = await chrome.tabs.query({});
+    // Notify content scripts so they can enforce immediately. Only http(s)
+    // tabs can have our content script; skip chrome://, extensions, the Web
+    // Store, etc. In MV3 sendMessage returns a promise, so a missing receiver
+    // rejects ASYNC — a sync try/catch can't catch it. We must .catch() the
+    // promise, or Chrome logs "Could not establish connection. Receiving end
+    // does not exist." for every tab without our content script.
+    const tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] });
     for (const tab of tabs) {
-      try { chrome.tabs.sendMessage(tab.id, { type: 'cfai-blocked-update', blocked: list }); } catch {}
+      if (!tab.id) continue;
+      Promise.resolve(chrome.tabs.sendMessage(tab.id, { type: 'cfai-blocked-update', blocked: list }))
+        .catch(() => { /* no content script in this tab — expected, ignore */ });
     }
   } catch {}
 }

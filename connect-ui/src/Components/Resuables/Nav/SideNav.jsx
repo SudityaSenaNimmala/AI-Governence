@@ -114,6 +114,8 @@ const SideNav = (props) => {
         { icon: <ShieldCheck size={16} />, title: "Agents & MCP", link: "/AIHub/Agents" },
         // { icon: <Database size={16} />, title: "Server Agents", link: "/AIHub/ServerAgents" },   // hidden for now
         { icon: <Sparkles size={16} />, title: "AI Activity", link: "/AIHub/DLP" },
+        { icon: <Gem size={16} />, title: "AI Usage", link: "/AIHub/AIUsage" },
+        { icon: <MessageCircle size={16} />, title: "Claude Usage", link: "/AIHub/ClaudeUsage" },
         { icon: <Grip size={16} />, title: "AI Platforms", link: "/AIHub/Platforms" },
         { icon: agentGovernanceIcon, title: "Agent Governance", link: "/AIHub/AgentGovernance" },
         // { icon: <Activity size={16} />, title: "Server Monitor", link: "/AIHub/ServerMonitor" },  // disabled — needs SDK first

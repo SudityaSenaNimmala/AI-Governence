@@ -3,6 +3,7 @@ const $ = (id) => document.getElementById(id);
 const STORAGE = {
   CONFIG: 'cfai.config',
   TOKEN: 'cfai.token',
+  USER: 'cfai.user',
   MACHINE_ID: 'cfai.machineId',
   QUEUE: 'cfai.queue',
 };
@@ -11,6 +12,7 @@ async function load() {
   const { [STORAGE.CONFIG]: config = {}, [STORAGE.QUEUE]: queue = [], [STORAGE.TOKEN]: token } =
     await chrome.storage.local.get([STORAGE.CONFIG, STORAGE.QUEUE, STORAGE.TOKEN]);
   $('serverUrl').value = config.serverUrl || '';
+  $('userEmail').value = config.userEmail || '';
   // Never display the actual secret, but show a "saved" placeholder so the
   // user knows they don't need to retype it.
   $('enrollSecret').value = '';
@@ -47,6 +49,7 @@ async function detectDesktopAgent() {
 async function save() {
   const serverUrl = $('serverUrl').value.trim();
   const enrollSecretInput = $('enrollSecret').value.trim();
+  const userEmail = $('userEmail').value.trim();
   if (!serverUrl) return setStatus('Server URL required', 'err');
 
   // Read the existing config. If the user left the secret field blank AND we
@@ -59,7 +62,7 @@ async function save() {
   if (!enrollSecret) return setStatus('Enrollment secret required (first time only)', 'err');
 
   await chrome.storage.local.set({
-    [STORAGE.CONFIG]: { serverUrl, enrollSecret },
+    [STORAGE.CONFIG]: { serverUrl, enrollSecret, userEmail },
   });
   // Force re-enrollment with the (possibly new) credentials
   await chrome.storage.local.remove([STORAGE.TOKEN]);
@@ -85,10 +88,23 @@ async function save() {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(enrollBody),
+    const hostname = navigator.userAgent.split(/[\s/(]/)[0] + '-browser-extension';
+    // Prefer the typed email; else auto-detect the signed-in browser account.
+    let user = userEmail;
+    if (!user && chrome.identity?.getProfileUserInfo) {
+      try {
+        const info = await new Promise((r) => chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, r));
+        if (info?.email) user = info.email;
+      } catch { /* permission not granted — fall through */ }
+    }
+    const res = await fetch(`${serverUrl.replace(/\/$/, '')}/api/v1/enroll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ machineId, hostname, user: user || null, enrollSecret }),
     });
     if (!res.ok) throw new Error(await res.text());
     const { token } = await res.json();
-    await chrome.storage.local.set({ [STORAGE.TOKEN]: token });
+    await chrome.storage.local.set({ [STORAGE.TOKEN]: token, [STORAGE.USER]: user || null });
     setStatus('Enrolled successfully.', 'ok');
     load();
   } catch (err) {

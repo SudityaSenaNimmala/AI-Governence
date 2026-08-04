@@ -12,14 +12,29 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { EventEmitter } from 'node:events';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const WATCHER_SCRIPT = join(__dirname, 'prompt-watcher.ps1');
+// Resolved defensively: under a bundler that emits CJS (the SEA tracker build)
+// import.meta.url is not available, so this must not throw at module load. The
+// tracker passes an explicit scriptPath in that case.
+const MODULE_DIR = (() => {
+  try { return dirname(fileURLToPath(import.meta.url)); } catch { return null; }
+})();
+const WATCHER_SCRIPT = MODULE_DIR ? join(MODULE_DIR, 'prompt-watcher.ps1') : null;
 
 export class PromptWatcher extends EventEmitter {
-  constructor({ log, aiProcessNames }) {
+  // trackerMode=true switches the PS1 into Claude-tracker behaviour: browser
+  // coverage behind a claude.ai URL gate, and prompt_submit events carrying only
+  // a length instead of prompt_text carrying the text. Left false, the watcher
+  // behaves exactly as it always has.
+  // scriptPath overrides where prompt-watcher.ps1 is found. A SEA-built binary
+  // has no real directory to resolve it from, so the tracker locates the script
+  // next to the executable and passes it in.
+  constructor({ log, aiProcessNames, trackerMode = false, browserProcessNames = null, scriptPath = null }) {
     super();
     this.log = log;
     this.aiProcessNames = aiProcessNames;
+    this.trackerMode = trackerMode;
+    this.browserProcessNames = browserProcessNames;
+    this.scriptPath = scriptPath || WATCHER_SCRIPT;
     this.child = null;
     this.buffer = '';
     this.stopRequested = false;
@@ -32,11 +47,16 @@ export class PromptWatcher extends EventEmitter {
     this.log?.info('prompt-watcher: starting UIA helper (typed-prompt capture)');
     this.child = spawn(
       'powershell',
-      ['-NoProfile', '-NonInteractive', '-Sta', '-ExecutionPolicy', 'Bypass', '-File', WATCHER_SCRIPT],
+      ['-NoProfile', '-NonInteractive', '-Sta', '-ExecutionPolicy', 'Bypass', '-File', this.scriptPath],
       {
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, CFAI_AI_PROCESSES: this.aiProcessNames.join(',') },
+        env: {
+          ...process.env,
+          CFAI_AI_PROCESSES: this.aiProcessNames.join(','),
+          ...(this.trackerMode ? { CFAI_CLAUDE_TRACKER: '1' } : {}),
+          ...(this.browserProcessNames ? { CFAI_BROWSER_PROCESSES: this.browserProcessNames.join(',') } : {}),
+        },
       }
     );
 
@@ -81,10 +101,17 @@ export class PromptWatcher extends EventEmitter {
   #dispatch(ev) {
     switch (ev.kind) {
       case 'ready':
-        this.log?.info(`prompt-watcher: ready (pid=${ev.pid}, ai=${(ev.ai_processes || []).length} procs)`);
+        this.log?.info(
+          `prompt-watcher: ready (pid=${ev.pid}, ${ev.ai_count ?? '?'} app(s)` +
+          `${ev.tracker ? ', claude-tracker mode' : ''})`,
+        );
         break;
       case 'prompt_text':
         this.emit('prompt_text', ev);
+        break;
+      case 'prompt_submit':
+        // Tracker mode only: {service, len, process, pid} — no prompt text.
+        this.emit('prompt_submit', ev);
         break;
       case 'heartbeat':
         break;

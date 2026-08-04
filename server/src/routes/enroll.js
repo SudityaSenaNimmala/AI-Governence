@@ -4,10 +4,8 @@ import { a } from '../util.js';
 import { resolveProfiles } from './identity.js';
 
 export function mountEnroll(app, db) {
-  // Body: { machineId, hostname, enrollSecret, employeeEmail? }
-  // Returns: { token, machineId }
   app.post('/api/v1/enroll', a(async (req, res) => {
-    const { machineId, hostname, enrollSecret, employeeEmail } = req.body ?? {};
+    const { machineId, hostname, user, claudeAccountEmail, displayName, enrollSecret, employeeEmail } = req.body ?? {};
     if (!machineId || !hostname) return res.status(400).json({ error: 'machineId and hostname required' });
     if (!enrollSecret) return res.status(401).json({ error: 'enrollSecret required' });
 
@@ -16,17 +14,21 @@ export function mountEnroll(app, db) {
     }
 
     const now = new Date();
-    const machineData = { id: machineId, hostname, last_seen: now };
-    if (employeeEmail) machineData.employee_email = employeeEmail.toLowerCase().trim();
+    const set = { id: machineId, hostname, last_seen: now };
+    if (user) set.user = user;   // only overwrite when the client actually sends one
+    if (claudeAccountEmail) set.claude_account_email = String(claudeAccountEmail).toLowerCase();
+    if (displayName) set.display_name = displayName;
 
-    await db.collection('machines').updateOne(
-      { id: machineId },
-      {
-        $set: machineData,
-        $setOnInsert: { first_seen: now },
-      },
-      { upsert: true },
-    );
+    const update = { $set: set, $setOnInsert: { first_seen: now } };
+
+    // Accumulate every Claude account seen on this machine rather than only the
+    // latest. One person often signs in under several accounts over time; without
+    // the history, each one looks like a different user and their usage fragments.
+    if (claudeAccountEmail) {
+      update.$addToSet = { claude_accounts: String(claudeAccountEmail).toLowerCase() };
+    }
+
+    await db.collection('machines').updateOne({ id: machineId }, update, { upsert: true });
 
     // Auto-resolve employee profiles in background (non-blocking)
     const allMachines = await db.collection('machines').find({}).project({ _id: 0 }).toArray();

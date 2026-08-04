@@ -128,6 +128,8 @@ function App() {
           <Route path="/AIHub/Agents" element={<AIHubPage page="Agents" />} />
           {/* <Route path="/AIHub/ServerAgents" element={<AIHubPage page="ServerAgents" />} /> hidden for now */}
           <Route path="/AIHub/DLP" element={<AIHubPage page="DLP" />} />
+          <Route path="/AIHub/AIUsage" element={<AIHubPage page="AIUsage" />} />
+          <Route path="/AIHub/ClaudeUsage" element={<AIHubPage page="ClaudeUsage" />} />
           <Route path="/AIHub/Platforms" element={<AIHubPage page="Platforms" />} />
           <Route path="/AIHub/AgentGovernance" element={<AIHubPage page="AgentGovernance" />} />
           {/* <Route path="/AIHub/ServerMonitor" element={<AIHubPage page="ServerMonitor" />} /> disabled — needs SDK first */}

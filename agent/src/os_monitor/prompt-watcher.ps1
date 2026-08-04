@@ -46,6 +46,87 @@ $AiProcesses = if ($env:CFAI_AI_PROCESSES) {
     @('ChatGPT', 'Claude', 'Cursor', 'Copilot', 'Comet', 'Gemini', 'Poe')
 }
 
+# ── Claude-tracker mode (opt-in) ───────────────────────────────────────────────
+# Set CFAI_CLAUDE_TRACKER=1 to enable browser coverage and submit detection.
+# When unset, the loop below behaves exactly as it always has, so the full agent
+# is unaffected by anything in this block.
+$TrackerMode = ($env:CFAI_CLAUDE_TRACKER -eq '1')
+
+$BrowserProcesses = if ($env:CFAI_BROWSER_PROCESSES) {
+    $env:CFAI_BROWSER_PROCESSES -split ','
+} else {
+    @('chrome', 'msedge', 'brave', 'firefox')
+}
+
+function Is-BrowserProcess([string]$name) {
+    if (-not $name) { return $false }
+    $base = $name -replace '\.exe$',''
+    foreach ($p in $BrowserProcesses) { if ($base -ieq $p.Trim()) { return $true } }
+    return $false
+}
+
+# Read the browser's address bar. This is the privacy gate: we resolve the URL
+# BEFORE touching any text box, so a Gmail or Jira composer is never read at all
+# — only a focused composer on claude.ai is.
+function Get-BrowserUrl([System.IntPtr]$hwnd) {
+    try {
+        $win = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+        if (-not $win) { return $null }
+        $cond = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Edit)
+        $edits = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
+        foreach ($e in $edits) {
+            $nm = ''
+            try { $nm = $e.Current.Name } catch {}
+            # Chromium: "Address and search bar". Firefox: "Search with ... or enter address".
+            if ($nm -match 'address|url|search bar|location') {
+                $vp = $null
+                if ($e.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) {
+                    $v = $vp.Current.Value
+                    if ($v) { return $v }
+                }
+            }
+        }
+    } catch {}
+    return $null
+}
+
+# Walking the browser's UIA tree isn't free, so cache per-window for a few ticks.
+$UrlCache = @{}
+$UrlCacheTtlSec = 3
+
+function Get-BrowserUrlCached([System.IntPtr]$hwnd) {
+    $k = $hwnd.ToString()
+    $now = Get-Date
+    $hit = $UrlCache[$k]
+    if ($hit -and (($now - $hit.at).TotalSeconds -lt $UrlCacheTtlSec)) { return $hit.url }
+    $url = Get-BrowserUrl $hwnd
+    $UrlCache[$k] = [pscustomobject]@{ url = $url; at = $now }
+    return $url
+}
+
+# claude.ai -> which Claude surface. Anything else returns $null, which means
+# "don't look at this window".
+function Classify-ClaudeUrl([string]$u) {
+    if (-not $u) { return $null }
+    $s = $u.Trim()
+    if ($s -notmatch '^[a-zA-Z]+://') { $s = 'https://' + $s }   # omnibox hides the scheme
+    try { $uri = [Uri]$s } catch { return $null }
+    $h = ($uri.Host).ToLower() -replace '^www\.',''
+    if ($h -ne 'claude.ai') { return $null }
+    if ($uri.AbsolutePath -match '^/code') { return 'Claude Code (web)' }
+    return 'Claude'
+}
+
+function Get-DesktopService([string]$procName) {
+    $base = $procName -replace '\.exe$',''
+    # 'Claude Desktop', not 'Claude' — the server needs to tell the desktop app
+    # apart from claude.ai in a browser, and both arrive from the same tracker.
+    if ($base -ieq 'claude') { return 'Claude Desktop' }
+    return $base
+}
+
 # Cap how much text we pull from a control — a prompt box won't be huge, and
 # this bounds the cost of reading a large TextPattern document.
 $MaxChars = 16000
@@ -71,7 +152,7 @@ function Get-ForegroundProc {
     if ($procId -eq 0) { return $null }
     try {
         $proc = Get-Process -Id $procId -ErrorAction Stop
-        return [pscustomobject]@{ pid = $procId; process = $proc.ProcessName }
+        return [pscustomobject]@{ pid = $procId; process = $proc.ProcessName; hwnd = $hwnd }
     } catch { return $null }
 }
 
@@ -120,7 +201,10 @@ function Is-EditableControl($el) {
     return $false
 }
 
-Emit-Json @{ kind = 'ready'; pid = $PID; ai_processes = $AiProcesses }
+# ai_count is emitted alongside the list because ConvertTo-Json collapses a
+# single-element array to a bare string, which made the consumer log a string
+# length instead of a process count.
+Emit-Json @{ kind = 'ready'; pid = $PID; ai_processes = $AiProcesses; ai_count = @($AiProcesses).Count; tracker = $TrackerMode }
 
 # Per-process last text we emitted — only emit on change, so we don't spam a
 # line every tick while the user pauses. Node dedupes further by match set.
@@ -131,6 +215,53 @@ while ($true) {
     $tick++
     try {
         $fg = Get-ForegroundProc
+
+        if ($TrackerMode) {
+            # ── Claude tracker: resolve the surface FIRST, then read text ──────
+            $service = $null
+            if ($fg) {
+                if (Is-BrowserProcess $fg.process) {
+                    $service = Classify-ClaudeUrl (Get-BrowserUrlCached $fg.hwnd)
+                } elseif (Is-AiProcess $fg.process) {
+                    $service = Get-DesktopService $fg.process
+                }
+            }
+
+            if ($service) {
+                $focused = $null
+                try { $focused = [System.Windows.Automation.AutomationElement]::FocusedElement } catch {}
+                if ($focused -and (Is-EditableControl $focused)) {
+                    $text = Read-FocusedText $focused
+                    if ($text -and $text.Length -gt $MaxChars) { $text = $text.Substring(0, $MaxChars) }
+                    $key = "$($fg.process)|$service"
+                    $prev = $LastTextByProc[$key]
+
+                    if ($text -and $text.Length -ge 2) {
+                        # Still composing — remember it so we can size the prompt on submit.
+                        if ($text -ne $prev) { $LastTextByProc[$key] = $text }
+                    } elseif ($prev) {
+                        # Composer went from non-empty to empty: the prompt was sent.
+                        # We report only its LENGTH, never the text.
+                        $LastTextByProc.Remove($key)
+                        Emit-Json @{
+                            t       = (Get-Date).ToUniversalTime().ToString('o')
+                            kind    = 'prompt_submit'
+                            pid     = $fg.pid
+                            process = $fg.process
+                            service = $service
+                            len     = $prev.Length
+                        }
+                    }
+                }
+            }
+
+            if ($tick % 50 -eq 0) {
+                Emit-Json @{ t = (Get-Date).ToUniversalTime().ToString('o'); kind = 'heartbeat'; tick = $tick }
+            }
+            Start-Sleep -Milliseconds 1200
+            continue
+        }
+
         if ($fg -and (Is-AiProcess $fg.process)) {
             $focused = $null
             try { $focused = [System.Windows.Automation.AutomationElement]::FocusedElement } catch {}

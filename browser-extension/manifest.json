@@ -3,7 +3,7 @@
   "name": "CloudFuze AI Governance",
   "version": "0.6.1",
   "description": "Detects sensitive data flowing into AI services. Reports to CloudFuze governance, never to third parties.",
-  "permissions": ["storage", "alarms", "tabs", "notifications", "scripting", "webNavigation"],
+  "permissions": ["storage", "alarms", "tabs", "notifications", "scripting", "webNavigation", "identity"],
   "host_permissions": [
     "<all_urls>",
     "https://chatgpt.com/*",
