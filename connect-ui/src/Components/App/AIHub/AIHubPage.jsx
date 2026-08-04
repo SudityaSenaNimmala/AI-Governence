@@ -1811,6 +1811,73 @@ def _cf_create(self, *a, **kw):
     return res
 
 openai.resources.chat.completions.Completions.create = _cf_create`,
+
+    java: `import java.net.http.*;
+import java.net.URI;
+import java.util.concurrent.*;
+import java.util.List;
+import java.util.ArrayList;
+import com.google.gson.*;
+
+public class CloudFuzeTracer {
+    private static final String CF_URL = "${serverUrl}/api/v1/sdk/events";
+    private static final String CF_KEY = "${apiKey}";
+    private static final String CF_APP = "${appName}";
+    private static final List<JsonObject> queue = new ArrayList<>();
+    private static final HttpClient http = HttpClient.newHttpClient();
+    private static final Gson gson = new Gson();
+
+    static {
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        scheduler.scheduleAtFixedRate(CloudFuzeTracer::flush, 5, 5, TimeUnit.SECONDS);
+    }
+
+    private static void flush() {
+        if (queue.isEmpty()) return;
+        List<JsonObject> batch;
+        synchronized (queue) { batch = new ArrayList<>(queue); queue.clear(); }
+        try {
+            JsonObject body = new JsonObject();
+            body.add("events", gson.toJsonTree(batch));
+            HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(CF_URL))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + CF_KEY)
+                .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(body)))
+                .build();
+            http.sendAsync(req, HttpResponse.BodyHandlers.discarding());
+        } catch (Exception ignored) {}
+    }
+
+    public static void trace(String provider, String model,
+                             Integer promptTokens, Integer completionTokens,
+                             long durationMs, String status,
+                             String promptText, String responseText) {
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "llm_call");
+        event.addProperty("provider", provider);
+        event.addProperty("model", model);
+        if (promptTokens != null) event.addProperty("prompt_tokens", promptTokens);
+        if (completionTokens != null) event.addProperty("completion_tokens", completionTokens);
+        event.addProperty("duration_ms", durationMs);
+        event.addProperty("status", status);
+        event.addProperty("prompt_text", promptText != null ? promptText.substring(0, Math.min(500, promptText.length())) : "");
+        event.addProperty("response_text", responseText != null ? responseText.substring(0, Math.min(500, responseText.length())) : "");
+        event.addProperty("occurred_at", java.time.Instant.now().toString());
+        JsonObject meta = new JsonObject();
+        meta.addProperty("app", CF_APP);
+        event.add("metadata", meta);
+        synchronized (queue) { queue.add(event); }
+    }
+}
+
+// Usage after each OpenAI/Anthropic call:
+// long start = System.currentTimeMillis();
+// ChatCompletion result = openai.chat().completions().create(req);
+// CloudFuzeTracer.trace("openai", "gpt-4",
+//     result.usage().promptTokens(), result.usage().completionTokens(),
+//     System.currentTimeMillis() - start, "ok",
+//     lastMessage, result.choices().get(0).message().content());`,
   });
 
   const copyText = (text) => {
@@ -1841,7 +1908,7 @@ openai.resources.chat.completions.Completions.create = _cf_create`,
     );
   };
 
-  const langLabels = { javascript: "JavaScript / Node.js", python: "Python" };
+  const langLabels = { javascript: "JavaScript / Node.js", python: "Python", java: "Java" };
 
   if (loading) return <Loading />;
 
