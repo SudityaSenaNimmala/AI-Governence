@@ -2026,8 +2026,70 @@ function ClaudeUsageView() {
   </div>);
 }
 
+// ── AI Usage View ────────────────────────────────────────────────────────
+function AIUsageView() {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    fetch("/api/v1/ai-usage").then(r => r.json()).then(setData).catch(e => setErr(e.message));
+  }, []);
+  if (err) return <Err msg={err} />;
+  if (!data) return <Loading />;
+
+  const totals = data.totals || {};
+  const platforms = data.platforms || [];
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
+        <StatCard icon={<MessageSquare size={18} />} label="Total Prompts" value={totals.prompts || 0} hint="Across all AI tools" color="#2563eb" />
+        <StatCard icon={<Activity size={18} />} label="Est. Tokens" value={fmtTokens(totals.est_total_tokens)} hint="Estimated usage" color="#8b5cf6" />
+        <StatCard icon={<Shield size={18} />} label="Est. Cost" value={fmtUsd(totals.est_cost_usd)} hint="Estimated spend" color="#f59e0b" />
+        <StatCard icon={<Server size={18} />} label="AI Platforms" value={platforms.length} hint="Active" color="#22c55e" />
+      </div>
+
+      <SectionHeader title="Usage by AI Platform" hint="Prompt counts and estimated token usage per AI tool" />
+      <DataTable
+        columns={[
+          { label: "Platform", render: r => <div><div className="aihub_text_primary">{r.product || r.service}</div>{r.vendor && <div className="aihub_text_muted" style={{ fontSize: 11 }}>{r.vendor}</div>}</div> },
+          { label: "Prompts", key: "prompts", right: true },
+          { label: "Est. Tokens", render: r => fmtTokens(r.est_total_tokens), right: true },
+          { label: "Est. Cost", render: r => fmtUsd(r.est_cost_usd), right: true },
+          { label: "Users", render: r => (r.users || []).length, right: true },
+        ]}
+        rows={platforms}
+        empty="No AI usage data yet. Install the browser extension to start capturing."
+      />
+
+      {platforms.length > 0 && (<>
+        <SectionHeader title="Usage by User" hint="Per-user breakdown across all AI platforms" />
+        {platforms.map(p => (
+          <div key={p.service} style={{ marginBottom: 16 }}>
+            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>{p.product || p.service}</div>
+            <DataTable
+              columns={[
+                { label: "User", render: r => <span style={{ fontSize: 12 }}>{r.identity || r.hostname || "Unknown"}</span> },
+                { label: "Prompts", key: "prompts", right: true },
+                { label: "Est. Tokens", render: r => fmtTokens(r.est_total_tokens), right: true },
+                { label: "Est. Cost", render: r => fmtUsd(r.est_cost_usd), right: true },
+              ]}
+              rows={p.users || []}
+              empty="No users"
+            />
+          </div>
+        ))}
+      </>)}
+
+      <p className="aihub_text_muted" style={{ fontSize: 11, marginTop: 8 }}>
+        Token and cost estimates are based on captured prompt lengths. Actual billed usage may differ.
+      </p>
+    </div>
+  );
+}
+
 const PAGES={
   Overview:{title:"AI Overview",component:OverviewView},
+  AIUsage:{title:"AI Usage",component:AIUsageView},
   ClaudeUsage:{title:"Claude Usage",component:ClaudeUsageView},
   Machines:{title:"Machines",component:MachinesView},
   Tools:{title:"Tools Catalog",component:ToolsView},
