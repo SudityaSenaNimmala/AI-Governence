@@ -1871,13 +1871,7 @@ public class CloudFuzeTracer {
     }
 }
 
-// Usage after each OpenAI/Anthropic call:
-// long start = System.currentTimeMillis();
-// ChatCompletion result = openai.chat().completions().create(req);
-// CloudFuzeTracer.trace("openai", "gpt-4",
-//     result.usage().promptTokens(), result.usage().completionTokens(),
-//     System.currentTimeMillis() - start, "ok",
-//     lastMessage, result.choices().get(0).message().content());`,
+`,
   });
 
   const copyText = (text) => {
