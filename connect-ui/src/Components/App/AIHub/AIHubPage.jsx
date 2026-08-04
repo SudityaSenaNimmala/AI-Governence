@@ -1719,43 +1719,98 @@ function DeveloperSDKView() {
     ? window.location.origin.replace(":3000", ":8787")
     : window.location.origin;
 
-  const installCmds = {
-    javascript: `npm install @cloudfuze/sdk`,
-    typescript: `npm install @cloudfuze/sdk`,
-    python: `pip install cloudfuze-sdk`,
-    go: `go get github.com/cloudfuze/sdk-go`,
-  };
+  const fullSnippet = (apiKey, appName) => ({
+    javascript: `const _CF_URL = '${serverUrl}/api/v1/sdk/events';
+const _CF_KEY = '${apiKey}';
+const _CF_APP = '${appName}';
+const _CF_Q = [];
+const _cf_flush = () => {
+  if (!_CF_Q.length) return;
+  const batch = _CF_Q.splice(0, 50);
+  fetch(_CF_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + _CF_KEY },
+    body: JSON.stringify({ events: batch }),
+  }).catch(() => {});
+};
+setInterval(_cf_flush, 5000);
+const _origFetch = globalThis.fetch;
+globalThis.fetch = async function(url, opts) {
+  const u = typeof url === 'string' ? url : url?.url || '';
+  const isAI = opts?.method === 'POST' && /openai\\.com|anthropic\\.com|generativelanguage\\.googleapis/.test(u);
+  const start = Date.now();
+  const res = await _origFetch.apply(this, arguments);
+  if (isAI) {
+    try {
+      const clone = res.clone();
+      const reqBody = opts?.body ? JSON.parse(opts.body) : {};
+      const resBody = await clone.json().catch(() => ({}));
+      const usage = resBody.usage || {};
+      const model = reqBody.model || resBody.model || 'unknown';
+      const provider = u.includes('openai') ? 'openai' : u.includes('anthropic') ? 'anthropic' : u.includes('google') ? 'google' : 'other';
+      const prompt = reqBody.messages?.[reqBody.messages.length-1]?.content || reqBody.prompt || '';
+      const response = resBody.choices?.[0]?.message?.content || resBody.content?.[0]?.text || '';
+      _CF_Q.push({
+        type: 'llm_call', provider, model,
+        prompt_tokens: usage.prompt_tokens || usage.input_tokens || null,
+        completion_tokens: usage.completion_tokens || usage.output_tokens || null,
+        total_cost_usd: null,
+        duration_ms: Date.now() - start,
+        status: res.ok ? 'ok' : 'error',
+        prompt_text: typeof prompt === 'string' ? prompt.slice(0, 500) : JSON.stringify(prompt).slice(0, 500),
+        response_text: typeof response === 'string' ? response.slice(0, 500) : '',
+        occurred_at: new Date().toISOString(),
+        metadata: { app: _CF_APP, status_code: res.status },
+      });
+    } catch {}
+  }
+  return res;
+};`,
 
-  const connectSnippets = (apiKey, appName) => ({
-    javascript: `require('@cloudfuze/sdk').init({
-  serverUrl: '${serverUrl}',
-  apiKey: '${apiKey}',
-  appName: '${appName}',
-});`,
+    python: `import threading, json, time
+from urllib.request import Request, urlopen
 
-    typescript: `import { init } from '@cloudfuze/sdk';
+_CF_URL = '${serverUrl}/api/v1/sdk/events'
+_CF_KEY = '${apiKey}'
+_CF_APP = '${appName}'
+_cf_queue = []
 
-init({
-  serverUrl: '${serverUrl}',
-  apiKey: '${apiKey}',
-  appName: '${appName}',
-});`,
+def _cf_flush():
+    while True:
+        time.sleep(5)
+        if not _cf_queue: continue
+        batch, _cf_queue[:] = _cf_queue[:50], _cf_queue[50:]
+        try:
+            req = Request(_CF_URL, json.dumps({"events": batch}).encode(),
+                          {"Content-Type": "application/json", "Authorization": f"Bearer {_CF_KEY}"})
+            urlopen(req, timeout=5)
+        except: pass
 
-    python: `from cloudfuze import init
+threading.Thread(target=_cf_flush, daemon=True).start()
 
-init(
-    server_url="${serverUrl}",
-    api_key="${apiKey}",
-    app_name="${appName}",
-)`,
+import openai
+_orig_create = openai.resources.chat.completions.Completions.create
 
-    go: `import "github.com/cloudfuze/sdk-go"
+def _cf_create(self, *a, **kw):
+    start = time.time()
+    res = _orig_create(self, *a, **kw)
+    try:
+        usage = getattr(res, 'usage', None)
+        msg = res.choices[0].message.content if res.choices else ''
+        prompt = kw.get('messages', [{}])[-1].get('content', '') if kw.get('messages') else ''
+        _cf_queue.append({
+            "type": "llm_call", "provider": "openai", "model": kw.get("model", "unknown"),
+            "prompt_tokens": getattr(usage, 'prompt_tokens', None),
+            "completion_tokens": getattr(usage, 'completion_tokens', None),
+            "duration_ms": int((time.time() - start) * 1000),
+            "status": "ok", "prompt_text": str(prompt)[:500], "response_text": str(msg)[:500],
+            "occurred_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "metadata": {"app": _CF_APP},
+        })
+    except: pass
+    return res
 
-cloudfuze.Init(cloudfuze.Config{
-    ServerURL: "${serverUrl}",
-    APIKey:    "${apiKey}",
-    AppName:   "${appName}",
-})`,
+openai.resources.chat.completions.Completions.create = _cf_create`,
   });
 
   const copyText = (text) => {
@@ -1786,7 +1841,7 @@ cloudfuze.Init(cloudfuze.Config{
     );
   };
 
-  const langLabels = { javascript: "JavaScript", typescript: "TypeScript", python: "Python", go: "Go" };
+  const langLabels = { javascript: "JavaScript / Node.js", python: "Python" };
 
   if (loading) return <Loading />;
 
@@ -1809,7 +1864,7 @@ cloudfuze.Init(cloudfuze.Config{
           </div>
           <div style={{ fontSize: 13, color: "#166534", marginBottom: 6 }}>Your API key:</div>
           <CodeBox code={createdKey.api_key} />
-          <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 6, marginBottom: 14 }}>You can always view the integration code from the project's detail page.</div>
+          <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 6, marginBottom: 14 }}>Click into the project and use the "Code" button to get the integration snippet.</div>
         </div>
       )}
 
@@ -1901,11 +1956,13 @@ cloudfuze.Init(cloudfuze.Config{
                     </button>
                   ))}
                 </div>
-                <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>1. Install the SDK</div>
-                <CodeBox code={installCmds[snippetLang]} />
-                <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginTop: 14, marginBottom: 6 }}>2. Add this at the top of your app (before any AI imports)</div>
-                <CodeBox code={connectSnippets(selectedProject.api_key || "cfsk_••••••••••••", selectedProject.name)[snippetLang]} />
-                <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 10 }}>That's it. All AI API calls from this app will appear in the traces above automatically.</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Paste this at the top of your app (before any AI imports)</div>
+                <CodeBox code={fullSnippet(selectedProject.api_key || "cfsk_••••••••••••", selectedProject.name)[snippetLang] || "Select a language"} />
+                <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 12, marginTop: 10 }}>
+                  <div style={{ fontSize: 12, color: "#166534", lineHeight: 1.6 }}>
+                    <strong>No installation needed.</strong> Just paste and run. This snippet automatically captures every AI API call — model, tokens, cost, duration, prompt, response — and sends it to your CloudFuze dashboard.
+                  </div>
+                </div>
               </div>
             )}
 
