@@ -1929,6 +1929,8 @@ cloudfuze.Init(cloudfuze.Config{
       )}
     </div>
   );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 9. CLAUDE USAGE — every Claude surface in one place. Prompt counts are measured
 //    everywhere; tokens/cost are MEASURED for Claude Code (the CLI reports them)
