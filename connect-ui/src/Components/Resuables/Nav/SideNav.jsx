@@ -127,7 +127,7 @@ const SideNav = (props) => {
         // { icon: <Scale size={16} />, title: "EU AI Act", link: "/AIHub/EuAiAct" },
         { icon: <Grip size={16} />, title: "AI Platforms", link: "/AIHub/Platforms" },
         { icon: agentGovernanceIcon, title: "Agent Governance", link: "/AIHub/AgentGovernance" },
-        // { icon: <Activity size={16} />, title: "Server Monitor", link: "/AIHub/ServerMonitor" },  // disabled — needs SDK first
+        { icon: <Activity size={16} />, title: "Server Monitor", link: "/AIHub/ServerMonitor" },
         { icon: <Wallet size={16} />, title: "AI Budget", link: "/AIHub/AIBudget" },
         { icon: <ShieldCheck size={16} />, title: "Copilot Readiness", link: "/AIHub/CopilotReadiness" },
         { icon: <Shuffle size={16} />, title: "Model Routing", link: "/AIHub/ModelRouting" },

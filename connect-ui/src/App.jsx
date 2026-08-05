@@ -139,7 +139,7 @@ function App() {
               <Route path="/AIHub/EuAiAct" element={<AIHubPage page="EuAiAct" />} /> */}
           <Route path="/AIHub/Platforms" element={<AIHubPage page="Platforms" />} />
           <Route path="/AIHub/AgentGovernance" element={<AIHubPage page="AgentGovernance" />} />
-          {/* <Route path="/AIHub/ServerMonitor" element={<AIHubPage page="ServerMonitor" />} /> disabled — needs SDK first */}
+          <Route path="/AIHub/ServerMonitor" element={<AIHubPage page="ServerMonitor" />} />
           <Route path="/AIHub/AIBudget" element={<AIHubPage page="AIBudget" />} />
           <Route path="/AIHub/CopilotReadiness" element={<AIHubPage page="CopilotReadiness" />} />
           <Route path="/AIHub/ModelRouting" element={<AIHubPage page="ModelRouting" />} />

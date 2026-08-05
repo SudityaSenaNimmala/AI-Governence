@@ -241,6 +241,114 @@ export function mountServerAgents(app, db) {
 
     res.json({ totals, byUser, byProvider, byModel, byTrigger });
   }));
+
+  // ── Traces — group calls into execution traces ─────────────────────────
+  app.get('/api/v1/traces/stats', a(async (req, res) => {
+    const now = new Date();
+    const dayAgo = new Date(now.getTime() - 86400000);
+    const [totalCalls, recentCalls, machines] = await Promise.all([
+      db.collection('server_agent_calls').countDocuments(),
+      db.collection('server_agent_calls').countDocuments({ occurred_at: { $gte: dayAgo.toISOString() } }),
+      db.collection('server_agent_calls').distinct('machine_id'),
+    ]);
+    const costAgg = await db.collection('server_agent_calls').aggregate([
+      { $group: { _id: null, total: { $sum: { $ifNull: ['$total_cost_usd', 0] } } } },
+    ]).toArray();
+    res.json({ total_calls: totalCalls, calls_last_24h: recentCalls, connected_servers: machines.filter(Boolean).length, total_cost_usd: costAgg[0]?.total || 0 });
+  }));
+
+  app.get('/api/v1/traces', a(async (req, res) => {
+    const { user, provider, model, machineId, limit = 50 } = req.query;
+    const filter = {};
+    if (user) filter.user = user;
+    if (provider) filter.provider = provider;
+    if (model) filter.model = model;
+    if (machineId) filter.machine_id = machineId;
+    const lim = Math.min(Number(limit) || 50, 200);
+    const calls = await db.collection('server_agent_calls')
+      .find(filter).sort({ occurred_at: -1 }).limit(lim * 20)
+      .project({ _id: 0, id: 1, machine_id: 1, occurred_at: 1, duration_ms: 1, response_status: 1, provider: 1, model: 1, prompt_tokens: 1, completion_tokens: 1, total_cost_usd: 1, pid: 1, user: 1, cmdline: 1, cwd: 1, trigger_source: 1 })
+      .toArray();
+    res.json(groupIntoTraces(calls, 30000).slice(0, lim));
+  }));
+
+  app.get('/api/v1/traces/:traceId', a(async (req, res) => {
+    const parts = req.params.traceId.split('|');
+    if (parts.length < 3) return res.status(400).json({ error: 'invalid trace ID' });
+    const [machineId, pid, startTs] = parts;
+    const calls = await db.collection('server_agent_calls')
+      .find({ machine_id: machineId, pid: Number(pid) || pid, occurred_at: { $gte: new Date(Number(startTs)).toISOString(), $lte: new Date(Number(startTs) + 300000).toISOString() } })
+      .sort({ occurred_at: 1 }).project({ _id: 0 }).toArray();
+    if (calls.length === 0) return res.status(404).json({ error: 'trace not found' });
+    const first = calls[0], last = calls[calls.length - 1];
+    const dur = new Date(last.occurred_at).getTime() + (last.duration_ms || 0) - new Date(first.occurred_at).getTime();
+    const tokens = calls.reduce((s, c) => s + (c.prompt_tokens || 0) + (c.completion_tokens || 0), 0);
+    const cost = calls.reduce((s, c) => s + (c.total_cost_usd || 0), 0);
+    res.json({
+      trace_id: req.params.traceId, machine_id: machineId, pid, user: first.user, cmdline: first.cmdline, cwd: first.cwd, trigger_source: first.trigger_source, started_at: first.occurred_at,
+      duration_ms: dur, call_count: calls.length, total_tokens: tokens, total_cost_usd: Math.round(cost * 1e6) / 1e6,
+      status: calls.some(c => c.response_status >= 400) ? 'error' : 'ok',
+      providers: [...new Set(calls.map(c => c.provider).filter(Boolean))], models: [...new Set(calls.map(c => c.model).filter(Boolean))],
+      calls: calls.map(c => ({ ...c, offset_ms: new Date(c.occurred_at).getTime() - new Date(first.occurred_at).getTime() })),
+    });
+  }));
+
+  // ── Install token generation ──────────────────────────────────────────
+  app.post('/api/v1/monitor/generate-token', a(async (req, res) => {
+    const serverUrl = req.body?.serverUrl || `${req.protocol}://${req.get('host')}`;
+    const authMod = await import('../auth.js');
+    const payload = Buffer.from(`${serverUrl}|${authMod.ENROLL_SECRET}`).toString('base64');
+    const token = `cfm_${payload}`;
+    res.json({ token, install_command: `curl -sSL ${serverUrl}/install-monitor.sh | sudo bash -s -- --token ${token}`, server_url: serverUrl });
+  }));
+
+  app.get('/install-monitor.sh', async (req, res) => {
+    const { resolve } = await import('path');
+    const { existsSync } = await import('fs');
+    const candidates = [
+      resolve(process.cwd(), '..', 'scripts', 'install-monitor.sh'),
+      resolve(process.cwd(), 'scripts', 'install-monitor.sh'),
+      resolve(process.cwd(), '..', '..', 'scripts', 'install-monitor.sh'),
+      '/opt/ai-gov/scripts/install-monitor.sh', '/app/scripts/install-monitor.sh',
+    ];
+    for (const p of candidates) { if (existsSync(p)) return res.type('text/plain').sendFile(p); }
+    res.status(404).send('Install script not found. Tried: ' + candidates.join(', '));
+  });
+
+  app.get('/api/v1/monitor/servers', a(async (req, res) => {
+    const machines = await db.collection('server_agent_calls').aggregate([
+      { $group: { _id: { $ifNull: ['$source_ip', '$machine_id'] }, machine_id: { $first: '$machine_id' }, source_ip: { $first: '$source_ip' }, last_seen: { $max: '$occurred_at' }, total_calls: { $sum: 1 }, total_cost_usd: { $sum: { $ifNull: ['$total_cost_usd', 0] } }, users: { $addToSet: '$user' }, providers: { $addToSet: '$provider' }, models: { $addToSet: '$model' } } },
+      { $project: { _id: 0, machine_id: 1, source_ip: 1, last_seen: 1, total_calls: 1, total_cost_usd: 1, users: 1, providers: 1, models: 1 } },
+      { $sort: { last_seen: -1 } },
+    ]).toArray();
+    for (const m of machines) {
+      m.users = (m.users || []).filter(Boolean);
+      m.providers = (m.providers || []).filter(Boolean);
+      m.models = (m.models || []).filter(Boolean);
+      m.status = (new Date() - new Date(m.last_seen)) < 300000 ? 'active' : 'inactive';
+      m.display_name = m.source_ip && m.source_ip !== '127.0.0.1' ? m.source_ip : m.machine_id;
+    }
+    res.json(machines);
+  }));
+}
+
+function groupIntoTraces(calls, gapMs) {
+  const sorted = [...calls].sort((a, b) => new Date(a.occurred_at).getTime() - new Date(b.occurred_at).getTime());
+  const traceMap = new Map();
+  for (const call of sorted) {
+    const key = `${call.machine_id}|${call.pid || 'none'}`;
+    const t = new Date(call.occurred_at).getTime();
+    const ex = traceMap.get(key);
+    if (ex && (t - ex.lastTime) < gapMs) { ex.calls.push(call); ex.lastTime = t + (call.duration_ms || 0); }
+    else { traceMap.set(key, { traceId: `${call.machine_id}|${call.pid || 'none'}|${t}`, calls: [call], lastTime: t + (call.duration_ms || 0) }); }
+  }
+  const traces = [];
+  for (const e of traceMap.values()) {
+    const f = e.calls[0], l = e.calls[e.calls.length - 1];
+    const dur = new Date(l.occurred_at).getTime() + (l.duration_ms || 0) - new Date(f.occurred_at).getTime();
+    traces.push({ trace_id: e.traceId, machine_id: f.machine_id, pid: f.pid, user: f.user, cmdline: f.cmdline, trigger_source: f.trigger_source, started_at: f.occurred_at, duration_ms: dur, call_count: e.calls.length, total_tokens: e.calls.reduce((s, c) => s + (c.prompt_tokens || 0) + (c.completion_tokens || 0), 0), total_cost_usd: Math.round(e.calls.reduce((s, c) => s + (c.total_cost_usd || 0), 0) * 1e6) / 1e6, status: e.calls.some(c => c.response_status >= 400) ? 'error' : 'ok', providers: [...new Set(e.calls.map(c => c.provider).filter(Boolean))], models: [...new Set(e.calls.map(c => c.model).filter(Boolean))] });
+  }
+  return traces.sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime());
 }
 
 function validateEvent(e) {
