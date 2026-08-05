@@ -3660,10 +3660,515 @@ function IntegrationsView() {
   </div>);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 10. POLICY PACKS — pre-built compliance bundles (GDPR, HIPAA, SOC 2, ...).
+//     Deploying a pack materialises its agent rules as ordinary policies, so they
+//     are evaluated by the existing engine. DLP and attestation rules are shown
+//     distinctly because they are NOT auto-enforced — pretending otherwise is what
+//     fails an audit.
+// ═══════════════════════════════════════════════════════════════════════════════
+const PACK_API = "/api";   // governance routes live under /api, not /api/v1
+
+async function packFetch(path, opts) {
+  const r = await fetch(`${PACK_API}${path}`, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `${r.status}`);
+  return body;
+}
+
+const ENFORCE_META = {
+  agent:       { label:"Enforced",   color:"#16a34a", hint:"Evaluated automatically against discovered AI agents." },
+  dlp:         { label:"Monitored",  color:"#0044cc", hint:"Detected in prompts by the endpoint agent / extension. Coverage is verified against observed events, not toggled from here." },
+  attestation: { label:"Attestation",color:"#b45309", hint:"A control software cannot decide — record who owns it and the evidence." },
+};
+
+function PolicyPacksView() {
+  const [packs,setPacks]=useState(null),[err,setErr]=useState(null);
+  const [openId,setOpenId]=useState(null),[detail,setDetail]=useState(null),[busy,setBusy]=useState(false);
+  const [simId,setSimId]=useState(null);
+
+  const loadPacks = () => packFetch("/policy-packs").then(d=>setPacks(d)).catch(e=>setErr(e.message));
+  useEffect(()=>{loadPacks()},[]);
+
+  const openPack = async (id) => {
+    setOpenId(id); setDetail(null);
+    try { setDetail(await packFetch(`/policy-packs/${id}`)); } catch(e){ setErr(e.message); }
+  };
+
+  const act = async (fn) => {
+    setBusy(true);
+    try { await fn(); await loadPacks(); if(openId) setDetail(await packFetch(`/policy-packs/${openId}`)); }
+    catch(e){ setErr(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const deploy   = (id) => act(()=>packFetch(`/policy-packs/${id}/deploy`,{method:"POST",headers:{"content-type":"application/json"},body:"{}"}));
+  const undeploy = (id) => act(()=>packFetch(`/policy-packs/${id}/undeploy`,{method:"POST",headers:{"content-type":"application/json"},body:"{}"}));
+  const accept   = (id) => act(()=>packFetch(`/policy-packs/${id}/accept-version`,{method:"POST",headers:{"content-type":"application/json"},body:"{}"}));
+  const toggle   = (id,key,enabled) => act(()=>packFetch(`/policy-packs/${id}/rules/${key}`,{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({enabled})}));
+  const tune     = (id,key,v) => act(()=>packFetch(`/policy-packs/${id}/rules/${key}`,{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({tuned_value:Number(v)})}));
+  const attest   = (id,key,owner) => act(()=>packFetch(`/policy-packs/${id}/attestations/${key}`,{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({status:"attested",owner})}));
+  const unattest = (id,key) => act(()=>packFetch(`/policy-packs/${id}/attestations/${key}`,{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({status:null})}));
+
+  if(err) return <Err msg={err}/>;
+  if(!packs) return <Loading/>;
+
+  const list = packs.packs || [];
+  const simPack = list.find(p=>p.id===simId) || null;
+  const deployedCount = list.filter(p=>p.deployed).length;
+  const totalRules = list.reduce((a,p)=>a+p.ruleCount,0);
+  const liveRules = list.filter(p=>p.deployed).reduce((a,p)=>a+p.enforceable,0);
+
+  return (<div>
+    <SectionHeader title="Compliance Policy Packs" hint="Ready-made rule bundles per framework. Deploying a pack creates real policies evaluated by the policy engine; rules that depend on prompt detection or human sign-off are labelled separately so coverage is never overstated. Use Simulate on any pack to see what it would have blocked before you deploy it."/>
+
+    {!!(packs.definition_problems||[]).length &&
+      <div className="aihub_error" style={{marginBottom:12}}>
+        <AlertTriangle size={14}/> Pack definition problems: {packs.definition_problems.join("; ")}
+      </div>}
+
+    <div className="aihub_stat_grid">
+      <StatCard icon={<Shield size={18}/>} label="Frameworks" value={list.length} color="#0044cc"/>
+      <StatCard icon={<Wrench size={18}/>} label="Deployed" value={deployedCount} hint={`of ${list.length}`} color="#22c55e"/>
+      <StatCard icon={<FileText size={18}/>} label="Total rules" value={totalRules} hint="across all packs" color="#8b5cf6"/>
+      <StatCard icon={<Activity size={18}/>} label="Live enforced rules" value={liveRules} hint="evaluated automatically" color="#f59e0b"/>
+    </div>
+
+    <SectionHeader title="Frameworks"/>
+    <div className="aihub_card" style={{marginBottom:18}}>
+      <DataTable columns={[
+        {label:"Framework",render:p=><><div className="aihub_text_primary">{p.framework}</div><div className="aihub_text_muted">{p.name}</div></>},
+        {label:"Rules",render:p=>p.ruleCount,right:true},
+        {label:"Enforced",render:p=><span style={{color:ENFORCE_META.agent.color,fontWeight:600}}>{p.enforceable}</span>,right:true},
+        {label:"Monitored",render:p=><span style={{color:ENFORCE_META.dlp.color,fontWeight:600}}>{p.monitored}</span>,right:true},
+        {label:"Attestations",render:p=><span style={{color:ENFORCE_META.attestation.color,fontWeight:600}}>{p.attestations}</span>,right:true},
+        {label:"Status",render:p=>p.deployed
+          ? <span style={{color:"#16a34a",fontWeight:600,fontSize:11}}>deployed v{p.deployed_version}{p.update_available&&" · update available"}</span>
+          : <span className="aihub_text_muted" style={{fontSize:11}}>not deployed</span>},
+        {label:"Actions",render:p=><div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
+          <button className="aihub_filter_btn" disabled={busy} onClick={()=>openPack(p.id)}>Review</button>
+          <button className="aihub_filter_btn" disabled={busy||p.monitored===0}
+                  title={p.monitored===0
+                    ? "This pack has no prompt-detection rules, so there is nothing to simulate."
+                    : "See what this pack would have blocked, before deploying it."}
+                  onClick={()=>setSimId(simId===p.id?null:p.id)}>Simulate</button>
+          {p.deployed
+            ? <>{p.update_available && <button className="aihub_action_btn warn" disabled={busy} onClick={()=>accept(p.id)}>Accept v{p.version}</button>}
+                <button className="aihub_action_btn danger" disabled={busy} onClick={()=>undeploy(p.id)}>Undeploy</button></>
+            : <button className="aihub_action_btn" disabled={busy} onClick={()=>deploy(p.id)}>Deploy</button>}
+        </div>,right:true},
+      ]} rows={list} empty="No policy packs available."/>
+    </div>
+
+    {simPack && <PackSimulation pack={simPack} onClose={()=>setSimId(null)}/>}
+
+    {openId && (!detail ? <Loading/> : <div className="aihub_card">
+      <SectionHeader
+        title={`${detail.framework} — ${detail.ruleCount} rules`}
+        hint={detail.description}
+        action={<div style={{display:"flex",gap:6}}>
+          {detail.monitored>0 && <button className="aihub_filter_btn" onClick={()=>setSimId(simId===detail.id?null:detail.id)}>
+            {simId===detail.id?"Hide simulation":"Run simulation"}
+          </button>}
+          <button className="aihub_filter_btn" onClick={()=>{setOpenId(null);setDetail(null);}}><X size={13}/> Close</button>
+        </div>}
+      />
+
+      <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:12,fontSize:11}}>
+        {Object.entries(ENFORCE_META).map(([k,m])=>(
+          <span key={k} style={{color:m.color}}>
+            <strong>{m.label}</strong> — {m.hint}
+          </span>
+        ))}
+      </div>
+
+      <DataTable columns={[
+        {label:"Rule",render:r=><>
+          <div className="aihub_text_primary">{r.title}</div>
+          <div className="aihub_text_muted">{r.citation}</div>
+        </>},
+        {label:"Type",render:r=><span style={{color:ENFORCE_META[r.enforcement].color,fontWeight:600,fontSize:11}}>{ENFORCE_META[r.enforcement].label}</span>},
+        {label:"Severity",render:r=><Badge text={r.severity} color={{critical:"#dc2626",high:"#ea580c",medium:"#d97706",low:"#65a30d"}[r.severity]||"#9ca3af"}/>},
+        {label:"State",render:r=>{
+          if(r.enforcement==="agent") return <span style={{fontSize:11,color:r.enabled?"#16a34a":"#9ca3af"}}>{r.enabled?"active":"disabled"}</span>;
+          if(r.enforcement==="dlp") return r.coverage_verified
+            ? <span style={{fontSize:11,color:"#16a34a"}}>patterns seen</span>
+            : <span style={{fontSize:11,color:"#b45309"}}>no events yet</span>;
+          return r.attestation
+            ? <span style={{fontSize:11,color:"#16a34a"}}>attested — {r.attestation.owner}</span>
+            : <span style={{fontSize:11,color:"#b45309"}}>outstanding</span>;
+        }},
+        {label:"",render:r=>{
+          if(!detail.deployed) return <span className="aihub_text_muted" style={{fontSize:11}}>deploy first</span>;
+          if(r.enforcement==="agent") return <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <button className="aihub_filter_btn" disabled={busy} onClick={()=>toggle(detail.id,r.key,!r.enabled)}>{r.enabled?"Disable":"Enable"}</button>
+            {r.tunable && <input type="number" defaultValue={r.tuned_value ?? r.conditions?.[0]?.value}
+              min={r.tunable.min} max={r.tunable.max} title={r.tunable.label} disabled={busy}
+              style={{width:70,padding:"3px 6px",fontSize:12,border:"1px solid var(--ag-border)",borderRadius:4}}
+              onBlur={e=>{const v=e.target.value; if(v!=="") tune(detail.id,r.key,v);}}/>}
+          </div>;
+          if(r.enforcement==="attestation") return r.attestation
+            ? <button className="aihub_filter_btn" disabled={busy} onClick={()=>unattest(detail.id,r.key)}>Clear</button>
+            : <button className="aihub_action_btn warn" disabled={busy} onClick={()=>{
+                const owner=window.prompt(`Who is accountable for this control?\n\n${r.evidence||""}`);
+                if(owner) attest(detail.id,r.key,owner);
+              }}>Attest</button>;
+          return <span className="aihub_text_muted" style={{fontSize:11}}>{(r.patterns||[]).length} patterns</span>;
+        }},
+      ]} rows={detail.rules||[]} empty="No rules in this pack."/>
+
+      <p className="aihub_text_muted" style={{fontSize:11,marginTop:8}}>
+        Deploying creates {detail.enforceable} policies that the engine evaluates on every agent scan. The
+        {" "}{detail.monitored} monitored rules rely on prompt detection already running on enrolled endpoints —
+        their coverage is confirmed from observed events. The {detail.attestations} attestations require a named
+        owner and are never satisfied automatically.
+      </p>
+    </div>)}
+  </div>);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 11. PACK IMPACT SIMULATION — "what if" mode, scoped to one policy pack and shown
+//     alongside Review so the impact is visible BEFORE the pack is deployed.
+//     Nothing is enabled by simulating; the payload carries applied:false and the
+//     UI says so, because a simulation must never read as a deployment.
+// ═══════════════════════════════════════════════════════════════════════════════
+// Sub-panels inside the simulation card — a nested .aihub_card would double the
+// border and padding, so these are flat bordered blocks instead.
+const SIM_PANEL={border:"1px solid var(--ag-border)",borderRadius:8,padding:"12px 14px",background:"#fff"};
+
+function PackSimulation({ pack, onClose }) {
+  const [opts,setOpts]=useState(null),[err,setErr]=useState(null);
+  const [days,setDays]=useState(30);
+  const [excl,setExcl]=useState([]);
+  const [samples,setSamples]=useState(false);
+  const [result,setResult]=useState(null),[busy,setBusy]=useState(false);
+
+  // Refetch options when the window changes — the tool list is window-scoped, so a
+  // stale list would offer exclusions that match nothing in the new window.
+  useEffect(()=>{
+    packFetch(`/policy-simulator/options?days=${days}`).then(setOpts).catch(e=>setErr(e.message));
+  },[days]);
+
+  const run = async () => {
+    setBusy(true); setErr(null);
+    try {
+      setResult(await packFetch("/policy-simulator/simulate",{
+        method:"POST", headers:{"content-type":"application/json"},
+        body:JSON.stringify({ days, pack_id:pack.id, include_samples:samples, rule:{ exclude_services:excl } }),
+      }));
+    } catch(e){ setErr(e.message); setResult(null); }
+    finally { setBusy(false); }
+  };
+
+  // Auto-run once on open, and again whenever the window changes — opening a
+  // simulation panel with empty stat cards reads as "no impact", which is wrong.
+  // A pack with no detection rules has nothing to simulate: the API would reject
+  // an empty pattern set, so show the explanation instead of an error banner.
+  useEffect(()=>{ if(opts && pack.monitored>0) run(); },[opts]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggleExcl = (v) => setExcl(a=>a.includes(v)?a.filter(x=>x!==v):[...a,v]);
+  const impactColor = {low:"#16a34a",medium:"#b45309",high:"#b91c1c"};
+
+  return (<div className="aihub_card" style={{marginBottom:18,borderLeft:"3px solid #0044cc"}}>
+    <SectionHeader
+      title={`Simulation — ${pack.framework}`}
+      hint={pack.deployed
+        ? "This pack is already deployed. The figures below show what its detection patterns match in real history."
+        : "What this pack's detection patterns would have matched, from real captured prompts. Nothing is enabled by running this."}
+      action={<button className="aihub_filter_btn" onClick={onClose}><X size={13}/> Close</button>}
+    />
+
+    {err && <div className="aihub_error" style={{marginBottom:12}}><AlertTriangle size={14}/> {err}</div>}
+
+    {pack.monitored===0
+      ? <p className="aihub_text_muted" style={{fontSize:12,margin:0}}>
+          This pack has no prompt-detection rules, so there is nothing to simulate. Its controls are agent
+          policies and attestations, which are evaluated against the agent registry rather than prompt history.
+        </p>
+      : <>
+        <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:10,flexWrap:"wrap"}}>
+          <span style={{fontSize:12,fontWeight:600}}>Window</span>
+          {[7,30,90].map(d=>(
+            <button key={d} className={`aihub_filter_btn ${days===d?"active":""}`} disabled={busy} onClick={()=>setDays(d)}>{d} days</button>
+          ))}
+          {opts && <span className="aihub_text_muted" style={{fontSize:11}}>{opts.events_available} prompt events captured in this window</span>}
+        </div>
+
+        {!!opts?.services?.length && <div style={{marginBottom:12}}>
+          <div style={{fontSize:12,fontWeight:600,marginBottom:5}}>Allow these tools (exclude from blocking)</div>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            {opts.services.slice(0,10).map(s=>(
+              <button key={s.value} className={`aihub_filter_btn ${excl.includes(s.value)?"active":""}`}
+                      disabled={busy} onClick={()=>toggleExcl(s.value)}>{s.value} · {s.events}</button>
+            ))}
+          </div>
+          <div className="aihub_text_muted" style={{fontSize:11,marginTop:4}}>
+            Use this to keep an approved internal tool working while blocking the same data elsewhere.
+          </div>
+        </div>}
+
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:result?14:0}}>
+          <button className="aihub_action_btn" disabled={busy||!opts} onClick={run}>
+            {busy?"Simulating…":"Re-run simulation"}
+          </button>
+          <label style={{fontSize:12,display:"flex",alignItems:"center",gap:5}}>
+            <input type="checkbox" checked={samples} disabled={busy} onChange={e=>setSamples(e.target.checked)}/>
+            Include example prompts (masked)
+          </label>
+        </div>
+      </>}
+
+    {result && <>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,padding:"7px 12px",borderRadius:6,
+                   background:"#f0fdf4",border:"1px solid #bbf7d0",fontSize:12,color:"#166534"}}>
+        <Shield size={13}/>
+        <span><strong>Simulation only — nothing was enabled.</strong> {result.rule_label}, {result.window_days} days.</span>
+      </div>
+
+      <div className="aihub_stat_grid">
+        <StatCard icon={<AlertTriangle size={18}/>} label="Would be blocked" value={(result.would_block_total||0).toLocaleString()} hint={`of ${(result.events_in_scope||0).toLocaleString()} in scope`} color="#b91c1c"/>
+        <StatCard icon={<MessageSquare size={18}/>} label="People impacted" value={result.unique_users_impacted} color="#8b5cf6"/>
+        <StatCard icon={<Activity size={18}/>} label="Interruptions / person / day" value={result.productivity.blocks_per_user_per_day} hint={`${result.productivity.impact_level} impact`} color={impactColor[result.productivity.impact_level]||"#f59e0b"}/>
+        <StatCard icon={<Wrench size={18}/>} label="vs enforcement today" value={result.comparison.delta_percent!=null?`${result.comparison.delta_percent>0?"+":""}${result.comparison.delta_percent}%`:"—"} hint={`now ${result.comparison.current_enforcement_events}`} color="#0044cc"/>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:14}}>
+        <div style={SIM_PANEL}>
+          <SectionHeader title="By AI tool"/>
+          <DataTable columns={[{label:"Tool",key:"service"},{label:"Would block",key:"blocks",right:true}]}
+                     rows={result.by_service} empty="Nothing would be blocked."/>
+        </div>
+        <div style={SIM_PANEL}>
+          <SectionHeader title="By data category"/>
+          <DataTable columns={[{label:"Category",key:"category"},{label:"Would block",key:"blocks",right:true}]}
+                     rows={result.by_category} empty="Nothing would be blocked."/>
+        </div>
+      </div>
+
+      <div style={{...SIM_PANEL,marginBottom:14}}>
+        <SectionHeader title="Highest impact people" hint={result.productivity.summary}/>
+        <DataTable columns={[
+          {label:"Person",render:r=><><div className="aihub_text_primary">{r.user}</div>{!r.attributed&&<div className="aihub_text_muted">unattributed install, not a confirmed person</div>}</>},
+          {label:"Would block",key:"blocks",right:true},
+          {label:"Per day",key:"per_day",right:true},
+        ]} rows={result.top_users} empty="Nobody would be affected."/>
+      </div>
+
+      {!!result.samples?.length && <div style={{...SIM_PANEL,marginBottom:14}}>
+        <SectionHeader title="Example prompts that would have been blocked" hint="Detected secrets and identifiers are masked before display — the excerpt shows the context, never the sensitive value."/>
+        <DataTable columns={[
+          {label:"When",render:r=>relTime(r.occurred_at)},
+          {label:"Tool",key:"ai_service"},
+          {label:"Detected",render:r=>(r.patterns||[]).join(", ")},
+          {label:"Excerpt",render:r=>r.excerpt_available?<span style={{fontSize:11}}>{r.excerpt}</span>:<span className="aihub_text_muted">no text retained</span>},
+        ]} rows={result.samples} empty="No excerpts available."/>
+      </div>}
+
+      <div style={SIM_PANEL}>
+        <SectionHeader title={pack.deployed?"Worth knowing":"Before you deploy"}/>
+        <ul style={{margin:0,paddingLeft:18,fontSize:12,color:"#4b5563"}}>
+          {result.caveats.map((c,i)=><li key={i} style={{marginBottom:3}}>{c}</li>)}
+        </ul>
+      </div>
+    </>}
+  </div>);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 12. EU AI ACT — classification wizard, FRIA, and the audit-ready report.
+//     The wizard PROPOSES a tier; a named officer confirms or overrides it with a
+//     written justification. That record is what an auditor asks for.
+// ═══════════════════════════════════════════════════════════════════════════════
+const TIER_COLOR={unacceptable:"#b91c1c",high:"#c2410c",limited:"#b45309",minimal:"#15803d"};
+
+function EuAiActView() {
+  const [meta,setMeta]=useState(null),[list,setList]=useState(null),[err,setErr]=useState(null);
+  const [mode,setMode]=useState("portfolio");     // portfolio | wizard | fria
+  const [sysName,setSysName]=useState(""),[sysId,setSysId]=useState("");
+  const [answers,setAnswers]=useState({}),[live,setLive]=useState(null);
+  const [officer,setOfficer]=useState(""),[busy,setBusy]=useState(false);
+  const [ovTier,setOvTier]=useState(""),[ovWhy,setOvWhy]=useState("");
+  const [friaFor,setFriaFor]=useState(null),[friaAns,setFriaAns]=useState({});
+
+  const reload = () => packFetch("/eu-ai-act/assessments").then(setList).catch(e=>setErr(e.message));
+  useEffect(()=>{ packFetch("/eu-ai-act/questionnaire").then(setMeta).catch(e=>setErr(e.message)); reload(); },[]);
+
+  // Re-score as the user answers, so the outcome is never a surprise at the end.
+  useEffect(()=>{
+    if(mode!=="wizard") return;
+    packFetch("/eu-ai-act/classify",{method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({answers})}).then(setLive).catch(()=>{});
+  },[answers,mode]);
+
+  const setAns=(id,v)=>setAnswers(a=>({...a,[id]:v}));
+
+  const save = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const id = sysId || sysName.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"");
+      await packFetch(`/eu-ai-act/assessments/${encodeURIComponent(id)}`,{
+        method:"PUT",headers:{"content-type":"application/json"},
+        body:JSON.stringify({system_name:sysName,answers,assessed_by:officer,
+          ...(ovTier?{override_tier:ovTier,override_justification:ovWhy}:{})}),
+      });
+      setMode("portfolio"); setAnswers({}); setSysName(""); setSysId(""); setOvTier(""); setOvWhy(""); setLive(null);
+      await reload();
+    } catch(e){ setErr(e.message); } finally { setBusy(false); }
+  };
+
+  const saveFria = async () => {
+    setBusy(true); setErr(null);
+    try {
+      await packFetch(`/eu-ai-act/assessments/${encodeURIComponent(friaFor.system_id)}/fria`,{
+        method:"PUT",headers:{"content-type":"application/json"},
+        body:JSON.stringify({fria_answers:friaAns,completed_by:officer||friaFor.assessed_by}),
+      });
+      setMode("portfolio"); setFriaFor(null); setFriaAns({});
+      await reload();
+    } catch(e){ setErr(e.message); } finally { setBusy(false); }
+  };
+
+  const del = async (id) => { try{ await packFetch(`/eu-ai-act/assessments/${encodeURIComponent(id)}`,{method:"DELETE"}); await reload(); }catch(e){ setErr(e.message); } };
+
+  if(err && !meta) return <Err msg={err}/>;
+  if(!meta || !list) return <Loading/>;
+
+  const s = list.summary;
+  const reportUrl = `${PACK_API}/eu-ai-act/report?format=html&org=${encodeURIComponent("CloudFuze")}&officer=${encodeURIComponent(officer||"—")}`;
+
+  return (<div>
+    <SectionHeader title="EU AI Act — Assessment & Reporting" hint="Classify each AI system into the Act's four risk tiers, complete a Fundamental Rights Impact Assessment where Article 27 requires one, and export an audit-ready report. The wizard proposes a tier; a named officer confirms or overrides it with a written reason."/>
+
+    {err && <div className="aihub_error" style={{marginBottom:12}}><AlertTriangle size={14}/> {err}</div>}
+
+    <div className="aihub_stat_grid">
+      <StatCard icon={<FileText size={18}/>} label="Systems classified" value={s.total_assessed} color="#0044cc"/>
+      <StatCard icon={<AlertTriangle size={18}/>} label="Prohibited in use" value={s.prohibited_in_use} hint={s.prohibited_in_use?"must not be deployed":"none"} color={s.prohibited_in_use?"#b91c1c":"#16a34a"}/>
+      <StatCard icon={<Shield size={18}/>} label="High risk" value={s.by_tier.high} hint="full obligations" color="#c2410c"/>
+      <StatCard icon={<Clock size={18}/>} label="FRIAs complete" value={`${s.fria_complete}/${s.fria_required}`} hint="Article 27" color="#8b5cf6"/>
+    </div>
+
+    <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
+      <button className={`aihub_filter_btn ${mode==="portfolio"?"active":""}`} onClick={()=>setMode("portfolio")}>Portfolio</button>
+      <button className="aihub_action_btn" onClick={()=>{setMode("wizard");setAnswers({});setLive(null);}}><Plus size={13}/> Classify a system</button>
+      <a className="aihub_filter_btn" href={reportUrl} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}>Open compliance report</a>
+      <input placeholder="Your name (compliance officer)" value={officer} onChange={e=>setOfficer(e.target.value)}
+             style={{padding:"5px 10px",fontSize:12,border:"1px solid var(--ag-border)",borderRadius:6,minWidth:210}}/>
+    </div>
+
+    {mode==="portfolio" && <div className="aihub_card">
+      <SectionHeader title="Assessed AI systems"/>
+      <DataTable columns={[
+        {label:"System",render:r=><><div className="aihub_text_primary">{r.system_name}</div><div className="aihub_text_muted">{r.assessed_by}</div></>},
+        {label:"Risk tier",render:r=><Badge text={r.final_tier} color={TIER_COLOR[r.final_tier]||"#6b7280"}/>},
+        {label:"Basis",render:r=>r.overridden
+          ? <span style={{fontSize:11,color:"#b45309"}}>overridden from {r.proposed_tier}</span>
+          : <span style={{fontSize:11}}>{(r.proposed_reasons||[]).map(x=>x.citation).join(", ")||"no triggers"}</span>},
+        {label:"FRIA",render:r=>!r.fria_required
+          ? <span className="aihub_text_muted" style={{fontSize:11}}>not required</span>
+          : <span style={{fontSize:11,color:r.fria_completeness?.complete?"#16a34a":"#b45309"}}>
+              {r.fria_completeness?.answered||0}/{r.fria_completeness?.total||10} sections</span>},
+        {label:"Actions",render:r=><div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
+          {r.fria_required && <button className="aihub_action_btn warn" onClick={()=>{setFriaFor(r);setFriaAns(r.fria_answers||{});setMode("fria");}}>FRIA</button>}
+          <button className="aihub_action_btn danger" onClick={()=>del(r.system_id)}><Trash2 size={12}/></button>
+        </div>,right:true},
+      ]} rows={list.assessments} empty="No systems classified yet. Use “Classify a system” to start."/>
+    </div>}
+
+    {mode==="wizard" && <div className="aihub_card">
+      <SectionHeader title="Risk tier classification"
+        hint="Answer only what applies. Prohibited practices take precedence over everything else — the Act's bans are absolute, so a later answer cannot soften them."
+        action={<button className="aihub_filter_btn" onClick={()=>setMode("portfolio")}><X size={13}/> Cancel</button>}/>
+
+      <input placeholder="AI system name (e.g. HR CV Screener)" value={sysName} onChange={e=>setSysName(e.target.value)}
+             style={{padding:"7px 11px",fontSize:13,border:"1px solid var(--ag-border)",borderRadius:6,width:"100%",maxWidth:460,marginBottom:14}}/>
+
+      {["prohibited","high_risk","transparency","context"].map(sec=>{
+        const qs=meta.tier_questions.filter(q=>q.section===sec);
+        const title={prohibited:"1. Prohibited practices (Article 5)",high_risk:"2. High-risk use cases (Annex III)",
+                     transparency:"3. Transparency obligations (Article 50)",context:"4. Your role and context"}[sec];
+        return (<div key={sec} style={{marginBottom:16}}>
+          <div style={{fontSize:12,fontWeight:700,color:"#0044cc",marginBottom:6}}>{title}</div>
+          {qs.map(q=>(
+            <div key={q.id} style={{padding:"8px 0",borderBottom:"1px solid #f1f5f9"}}>
+              <div style={{fontSize:12.5,marginBottom:3}}>{q.question}</div>
+              <div className="aihub_text_muted" style={{fontSize:11,marginBottom:5}}>{q.help} · <Mono>{q.citation}</Mono></div>
+              <div style={{display:"flex",gap:6}}>
+                <button className={`aihub_filter_btn ${answers[q.id]===true?"active":""}`} onClick={()=>setAns(q.id,true)}>Yes</button>
+                <button className={`aihub_filter_btn ${answers[q.id]===false?"active":""}`} onClick={()=>setAns(q.id,false)}>No</button>
+              </div>
+            </div>
+          ))}
+        </div>);
+      })}
+
+      {live && <div style={{padding:"12px 14px",borderRadius:6,marginBottom:12,
+                            background:"#f8fafc",border:`2px solid ${TIER_COLOR[live.tier]}`}}>
+        <div style={{fontSize:13,fontWeight:700,color:TIER_COLOR[live.tier]}}>Proposed: {live.tier_meta.label}</div>
+        <div style={{fontSize:12,margin:"4px 0 6px"}}>{live.tier_meta.summary}</div>
+        {!!live.reasons.length && <div style={{fontSize:11,color:"#4b5563"}}>Because: {live.reasons.map(r=>r.citation).join(", ")}</div>}
+        {live.fria_required && <div style={{fontSize:11,color:"#b45309",marginTop:4}}><strong>A FRIA is required</strong> (Article 27) — you indicated a public body or essential-service operator.</div>}
+        <div style={{fontSize:11,marginTop:8}}><strong>Obligations if confirmed:</strong></div>
+        <ul style={{margin:"3px 0 0 16px",fontSize:11,color:"#4b5563"}}>
+          {live.tier_meta.obligations.map((o,i)=><li key={i}>{o}</li>)}
+        </ul>
+      </div>}
+
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
+        <span style={{fontSize:12,fontWeight:600}}>Override tier (optional)</span>
+        {["","unacceptable","high","limited","minimal"].map(t=>(
+          <button key={t||"none"} className={`aihub_filter_btn ${ovTier===t?"active":""}`} onClick={()=>setOvTier(t)}>{t||"no override"}</button>
+        ))}
+      </div>
+      {ovTier && <input placeholder="Why are you overriding the proposed tier? (required, recorded in the report)"
+              value={ovWhy} onChange={e=>setOvWhy(e.target.value)}
+              style={{padding:"7px 11px",fontSize:12,border:"1px solid var(--ag-border)",borderRadius:6,width:"100%",marginBottom:10}}/>}
+
+      <button className="aihub_action_btn" disabled={busy||!sysName||!officer||(!!ovTier&&!ovWhy)} onClick={save}>
+        {busy?"Saving…":"Save classification"}
+      </button>
+      {(!sysName||!officer) && <div className="aihub_text_muted" style={{fontSize:11,marginTop:5}}>
+        A system name and your name are required — an assessment needs an accountable person.
+      </div>}
+    </div>}
+
+    {mode==="fria" && friaFor && <div className="aihub_card">
+      <SectionHeader title={`FRIA — ${friaFor.system_name}`}
+        hint="Fundamental Rights Impact Assessment under Article 27. Required before first use of a high-risk system by a public body or essential-service operator."
+        action={<button className="aihub_filter_btn" onClick={()=>setMode("portfolio")}><X size={13}/> Cancel</button>}/>
+      {meta.fria_questions.map(q=>(
+        <div key={q.id} style={{marginBottom:12}}>
+          <div style={{fontSize:12.5,fontWeight:600}}>{q.prompt}</div>
+          <div className="aihub_text_muted" style={{fontSize:11,marginBottom:4}}>{q.help} · <Mono>{q.citation}</Mono></div>
+          <textarea rows={q.kind==="list"?2:3} value={friaAns[q.id]||""}
+                    onChange={e=>setFriaAns(a=>({...a,[q.id]:e.target.value}))}
+                    style={{width:"100%",padding:"7px 10px",fontSize:12,border:"1px solid var(--ag-border)",
+                            borderRadius:6,fontFamily:"inherit",resize:"vertical"}}/>
+        </div>
+      ))}
+      <button className="aihub_action_btn" disabled={busy} onClick={saveFria}>{busy?"Saving…":"Save FRIA"}</button>
+      <div className="aihub_text_muted" style={{fontSize:11,marginTop:5}}>
+        Saved progress is kept. Sections shorter than ten characters count as outstanding, and the report lists them.
+      </div>
+    </div>}
+  </div>);
+}
+
 const PAGES={
   Overview:{title:"AI Overview",component:OverviewView},
   AIUsage:{title:"AI Usage",component:AIUsageView},
   ClaudeUsage:{title:"Claude Usage",component:ClaudeUsageView},
+  PolicyPacks:{title:"Policy Packs",component:PolicyPacksView},
+  // Policy Simulator is no longer a standalone page — it now runs per pack from
+  // Policy Packs ("Simulate" / "Run simulation"), so impact is seen next to the
+  // deploy decision rather than in a separate screen.
+  //
+  // EU AI Act is hidden until the intake is seeded from the discovered agent
+  // registry — as a blank 19-question form per system it is unusable at scale.
+  // The API (/api/eu-ai-act) and EuAiActView below are intact; re-enable by
+  // uncommenting this line plus the route in App.jsx and the SideNav entry.
+  // EuAiAct:{title:"EU AI Act",component:EuAiActView},
   Machines:{title:"Machines",component:MachinesView},
   Tools:{title:"Tools Catalog",component:ToolsView},
   Agents:{title:"Agents & MCP",component:AgentsView},

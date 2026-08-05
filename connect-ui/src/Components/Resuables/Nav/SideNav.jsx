@@ -20,6 +20,7 @@ import {
   Workflow,
   Grip,
   History,
+  Scale,
   Activity,
   Wallet,
   Shuffle
@@ -118,6 +119,12 @@ const SideNav = (props) => {
         { icon: <History size={16} />, title: "Session Replay", link: "/AIHub/SessionReplay" },
         // { icon: <Gem size={16} />, title: "AI Usage", link: "/AIHub/AIUsage" },  // hidden for now
         { icon: <MessageCircle size={16} />, title: "Claude Usage", link: "/AIHub/ClaudeUsage" },
+        { icon: <ShieldCheck size={16} />, title: "Policy Packs", link: "/AIHub/PolicyPacks" },
+        // Policy Simulator now runs per pack from inside Policy Packs, so it has no
+        // standalone page. EU AI Act is hidden until its intake is seeded from the
+        // discovered agent registry.
+        // { icon: <Workflow size={16} />, title: "Policy Simulator", link: "/AIHub/PolicySimulator" },
+        // { icon: <Scale size={16} />, title: "EU AI Act", link: "/AIHub/EuAiAct" },
         { icon: <Grip size={16} />, title: "AI Platforms", link: "/AIHub/Platforms" },
         { icon: agentGovernanceIcon, title: "Agent Governance", link: "/AIHub/AgentGovernance" },
         // { icon: <Activity size={16} />, title: "Server Monitor", link: "/AIHub/ServerMonitor" },  // disabled — needs SDK first

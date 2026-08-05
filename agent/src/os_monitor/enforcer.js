@@ -62,6 +62,34 @@ export class Enforcer extends EventEmitter {
     });
   }
 
+  /**
+   * Swap in a new block-pattern set (server policy changed).
+   *
+   * The helper receives its rules once, via CFAI_BLOCK_PATTERNS at spawn time, so
+   * there is no way to update a running child. Killing it is the update: the exit
+   * handler above respawns after 2s with the new env. `stopRequested` stays false
+   * so that restart happens.
+   *
+   * A no-op when the rules are unchanged — otherwise a policy poll that found
+   * nothing new would still drop keystroke protection for a couple of seconds
+   * each time.
+   */
+  updateBlockPatterns(blockPatterns) {
+    const next = JSON.stringify(blockPatterns || []);
+    if (next === JSON.stringify(this.blockPatterns || [])) return false;
+
+    this.blockPatterns = blockPatterns;
+    this.log?.info(`enforcer: block patterns changed (${(blockPatterns || []).length} rules) — restarting helper`);
+    if (this.child) {
+      try { this.child.kill(); } catch {}
+      // Deliberately not clearing this.child here: the 'exit' handler does that
+      // and schedules the respawn.
+    } else if (!this.stopRequested) {
+      this.start();
+    }
+    return true;
+  }
+
   stop() {
     this.stopRequested = true;
     if (this.child) {

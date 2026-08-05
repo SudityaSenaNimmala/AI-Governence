@@ -164,6 +164,31 @@
     if (PLATFORM_BLOCKED) showPlatformBanner();
     else removePlatformBanner();
   }
+  // ── Server-driven DLP pattern policy ─────────────────────────────────────────
+  // Mirrors the platform-policy plumbing below: cached read for an instant start,
+  // storage listener for live updates, and a message fallback if this tab loaded
+  // before the service worker had written the mirror.
+  //
+  // If none of that yields a policy, patterns.js keeps every pattern enabled at
+  // its built-in severity. Detection degrading silently to nothing because the
+  // server was unreachable would be far worse than ignoring pack configuration.
+  function applyDlpPolicy(policy) {
+    try {
+      if (!policy || !window.__cfaiPatterns?.applyPolicy) return;
+      window.__cfaiPatterns.applyPolicy(policy);
+    } catch { /* never let policy handling break the page */ }
+  }
+  try {
+    chrome.storage.local.get(['cfai.dlp_policy'], (r) => applyDlpPolicy(r['cfai.dlp_policy']));
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes['cfai.dlp_policy']) applyDlpPolicy(changes['cfai.dlp_policy'].newValue);
+    });
+    chrome.runtime.sendMessage({ type: 'cfai-get-dlp-policy' }, (resp) => {
+      if (chrome.runtime.lastError) return;
+      if (resp && resp.policy) applyDlpPolicy(resp.policy);
+    });
+  } catch { /* extension context unavailable — defaults apply */ }
+
   try {
     // 1) Instant first paint from the cached mirror.
     chrome.storage.local.get(['cfai.platforms'], (r) => applyPlatformPolicy(r['cfai.platforms'] || []));

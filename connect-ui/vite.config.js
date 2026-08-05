@@ -15,7 +15,12 @@ export default defineConfig({
     port: 3000,
     proxy: {
       "/api": {
-        target: "http://localhost:3001",
+        // The API server listens on 8787 (server/.env PORT). A previous conflict
+        // resolution left this pointing at 3001, where nothing listens, so every
+        // /api call from the dev server failed with ECONNREFUSED.
+        // 127.0.0.1 rather than localhost: on Node 18+ localhost can resolve to
+        // ::1 first and the proxy does not always fall back to IPv4.
+        target: "http://127.0.0.1:8787",
         changeOrigin: true,
       },
     },
