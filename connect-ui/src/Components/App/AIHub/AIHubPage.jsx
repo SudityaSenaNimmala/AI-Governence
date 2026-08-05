@@ -9,7 +9,7 @@ import {
   Monitor, Scan, AlertTriangle, Wrench, Server, Shield, Clock, ChevronRight,
   Search, RefreshCw, Activity, FileText, MessageSquare, Eye, Trash2, Plus, X,
   History, ArrowLeft, Bot, User, ShieldAlert, Film, PlayCircle, MonitorPlay,
-  Maximize2, Minimize2,
+  Maximize2, Minimize2, Copy, Check,
 } from "lucide-react";
 import { sanitizeReplayEvents } from "./replaySanitize";
 import { createReplayHost, applyReplayIframeCsp } from "./rrwebHost";
@@ -4204,9 +4204,20 @@ function ServerMonitorView() {
   };
 
   const copyCmd = () => {
-    navigator.clipboard.writeText(installCmd);
+    try {
+      navigator.clipboard.writeText(installCmd);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = installCmd;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setTimeout(() => setCopied(false), 1500);
   };
 
   if (loading) return <Loading />;
@@ -4354,9 +4365,9 @@ function ServerMonitorView() {
                 {installCmd ? (
                   <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 16, fontFamily: "ui-monospace, monospace", fontSize: 12, overflowX: "auto", position: "relative", lineHeight: 1.6, wordBreak: "break-all" }}>
                     <code>{installCmd}</code>
-                    <button onClick={copyCmd}
-                      style={{ position: "absolute", top: 8, right: 8, background: copied ? "#16a34a" : "#334155", color: "#e2e8f0", border: "none", borderRadius: 4, padding: "4px 10px", fontSize: 11, cursor: "pointer", transition: "background 0.2s" }}>
-                      {copied ? "Copied!" : "Copy"}
+                    <button onClick={copyCmd} title={copied ? "Copied!" : "Copy to clipboard"}
+                      style={{ position: "absolute", top: 10, right: 10, background: "none", border: "none", color: copied ? "#4ade80" : "#94a3b8", cursor: "pointer", padding: 2, transition: "color 0.2s", display: "flex", alignItems: "center" }}>
+                      {copied ? <Check size={16} /> : <Copy size={16} />}
                     </button>
                   </div>
                 ) : (
