@@ -27,14 +27,25 @@ export function replaySource() {
   return src;
 }
 
+// A bare `fetch` reference in replay.js resolves to whatever this parameter
+// name is bound to — in the real browser (a classic script, not wrapped in
+// `new Function`) that's naturally window.fetch; here it's whatever we pass
+// in below, which is how the font-inlining tests control it without ever
+// touching the network. Anything that DIDN'T opt into a fetch stub gets one
+// that throws loudly, so an accidental real network call in an unrelated
+// test fails obviously instead of hanging or flaking.
+async function unexpectedFetch() {
+  throw new Error('fetch() called without a test-provided stub — see fetchImpl in loadReplay()/makeReplayHarness()');
+}
+
 /** Evaluate content/replay.js and hand back window.__cfaiReplay. */
-export function loadReplay() {
+export function loadReplay({ fetchImpl = unexpectedFetch } = {}) {
   const win = { Buffer };
   const noopInterval = () => 0;
   // eslint-disable-next-line no-new-func
   const run = new Function(
     'window', 'document', 'crypto', 'console', 'setInterval', 'clearInterval',
-    'btoa', 'Blob', 'CompressionStream', 'Response',
+    'btoa', 'Blob', 'CompressionStream', 'Response', 'fetch',
     src,
   );
   run(
@@ -48,6 +59,7 @@ export function loadReplay() {
     globalThis.Blob,
     globalThis.CompressionStream,
     globalThis.Response,
+    fetchImpl,
   );
   if (!win.__cfaiReplay) throw new Error('replay.js did not publish window.__cfaiReplay');
   return win.__cfaiReplay;
@@ -129,6 +141,13 @@ export const DLP_BROAD_MARK = '__cfaiAttached';
 export async function gzip(str) { return new Uint8Array(zlib.gzipSync(Buffer.from(str, 'utf8'))); }
 export async function sha256(bytes) { return createHash('sha256').update(Buffer.from(bytes)).digest('hex'); }
 
+/** Inverse of a replayChunk payload's chunk_b64 — for tests that need to
+ * inspect what actually got sent (e.g. did a font really get inlined). */
+export function decodeChunkEvents(payload) {
+  const gz = Buffer.from(payload.chunk_b64, 'base64');
+  return JSON.parse(zlib.gunzipSync(gz).toString('utf8'));
+}
+
 /** Let every pending microtask + timer-0 continuation settle. */
 export async function settle(rounds = 8) {
   for (let i = 0; i < rounds; i++) await new Promise((r) => setTimeout(r, 0));
@@ -176,11 +195,14 @@ export function makeReplayHarness({
   // JSON.stringify throws a RangeError on a big enough snapshot.
   compress = gzip,
   digest = sha256,
+  // Overridable so font-inlining tests can script fetch() responses without
+  // touching the network; every other test gets the loud-failure default.
+  fetchImpl = undefined,
   // Spread over the deps LAST, so a test can replace any single collaborator —
   // including with one that throws, which is how "tick() must never reject" is proved.
   extraDeps = {},
 } = {}) {
-  const api = loadReplay();
+  const api = loadReplay(fetchImpl ? { fetchImpl } : undefined);
 
   const sends = [];
   const banners = [];
@@ -255,6 +277,23 @@ export function makeReplayHarness({
   function fullSnapshotEvent(ts) {
     return { type: 2, timestamp: ts, data: { node: { id: 1 } } };
   }
+  // A snapshot whose serialized DOM carries a <style> element's _cssText,
+  // exactly the shape rrweb-snapshot produces for inlineStylesheet:true — for
+  // exercising capture-time font inlining.
+  function fullSnapshotEventWithCss(ts, cssText) {
+    return {
+      type: 2,
+      timestamp: ts,
+      data: {
+        node: {
+          id: 1,
+          childNodes: [
+            { type: 2, tagName: 'style', attributes: { _cssText: cssText }, id: 2, childNodes: [] },
+          ],
+        },
+      },
+    };
+  }
   function fontEvent(ts, fontFace = 'x'.repeat(2000)) {
     // IncrementalSnapshot (type 3), IncrementalSource.Font (source 10).
     return { type: 3, timestamp: ts, data: { source: 10, fontFace, fontSource: 'data:font/woff2;base64,' + fontFace } };
@@ -276,6 +315,7 @@ export function makeReplayHarness({
     hasEmit() { return typeof emitFn === 'function'; },
     emit(event, isCheckout = false) { if (emitFn) emitFn(event, isCheckout); },
     snapshot() { if (emitFn) emitFn(fullSnapshotEvent(clock), true); },
+    snapshotWithCss(cssText) { if (emitFn) emitFn(fullSnapshotEventWithCss(clock, cssText), true); },
     font(bytes = 2000) { if (emitFn) emitFn(fontEvent(clock, 'x'.repeat(Math.max(1, bytes))), false); },
     noise(n = 1, bytes = 200) {
       const filler = 'x'.repeat(Math.max(1, bytes));

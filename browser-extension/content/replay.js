@@ -202,6 +202,185 @@
   const RRWEB_TYPE_INCREMENTAL_SNAPSHOT = 3;
   const RRWEB_SOURCE_FONT = 10;
 
+  // ── Capture-time font inlining ─────────────────────────────────────────────
+  // WHY THIS EXISTS: collectFonts:true (above) only catches fonts loaded via the
+  // JS FontFace API. Most real sites — Gemini included — declare fonts as
+  // ordinary CSS `@font-face { src: url(https://fonts.gstatic.com/...) }` rules
+  // inside a stylesheet, which inlineStylesheet:true dutifully copies into the
+  // snapshot as CSS TEXT, but the url() inside it still points at a live vendor
+  // host. connect-ui's replaySanitize.js (deliberately, as a security control)
+  // blanks every such external reference before replay, so the browser falls
+  // back to a system font — different character widths, which is exactly what
+  // overlapped and garbled Gemini's sidebar/composer text in testing.
+  //
+  // The fix: fetch the font bytes HERE, at record time, while the browser
+  // already trusts the host that served the live page's fonts, and inline them
+  // as data: URIs directly into the CSS text before it ever leaves this
+  // machine. That keeps the "a replay fetches nothing from the internet, ever"
+  // guarantee fully intact (a data: URI has nothing left to sanitize) — the
+  // same approach images would use if this recorder inlined them, which it
+  // deliberately does not (images are content; typefaces are not).
+  //
+  // BOUNDED, not exhaustive: a page can declare far more @font-face rules than
+  // it actually uses (Gemini's snapshot carries ~186 — one per script/weight/
+  // style subset; a real conversation only ever renders a handful of them, and
+  // the browser only fetches the ones it needs). Fetching all of them could
+  // blow well past the snapshot's own size ceiling. So this fetches greedily in
+  // FIRST-SEEN order up to a byte/count budget and stops — whatever it can't
+  // fit is left as an external reference and sanitized away at replay exactly
+  // as it is today. That is a "less perfect" outcome for a rare edge case, not
+  // a regression: nothing was rendering correctly for those fonts before this
+  // existed either.
+  const FONT_FACE_BLOCK_RE = /@font-face\s*\{[^}]*\}/g;
+  const EXTERNAL_URL_RE = /url\(\s*(['"]?)(https?:\/\/[^'")]+)\1\s*\)/gi;
+  const MAX_FONT_INLINE_BYTES = 1.5 * 1024 * 1024; // ceiling for ONE snapshot's own fonts
+  const MAX_FONT_INLINE_COUNT = 40;                // safety valve if files are tiny
+  // A SECOND, independent ceiling on top of the per-snapshot one above. A tab
+  // whose visibility toggles (switching windows, checking DevTools — exactly
+  // what happened live while testing this) makes rrweb take a BRAND NEW full
+  // snapshot on every resume. Each one is a genuinely distinct event object, so
+  // the once-per-event tracking below correctly leaves it alone rather than
+  // re-inlining it — but if the CURRENT chunk keeps getting refused, several of
+  // these distinct snapshots can pile up TOGETHER in the same still-unsent
+  // buffer, and each would otherwise still claim its OWN fresh ~1.5 MB
+  // allowance, simply adding up. Confirmed live: a chunk's wire size jumped
+  // 6 MB -> 12 MB across exactly one more accumulated snapshot. So the budget
+  // for any ONE call is however much room is left under THIS total, not a flat
+  // per-call number — see inlineExternalFontsInEvents's `currentRawBytes` param.
+  const MAX_TOTAL_RAW_BYTES_WITH_FONTS = 2.5 * 1024 * 1024;
+  const FONT_FETCH_TIMEOUT_MS = 4000;
+
+  function guessFontMime(url) {
+    const u = String(url || '').toLowerCase();
+    if (u.includes('.woff2')) return 'font/woff2';
+    if (u.includes('.woff')) return 'font/woff';
+    if (u.includes('.ttf')) return 'font/ttf';
+    if (u.includes('.otf')) return 'font/otf';
+    return 'application/octet-stream';
+  }
+
+  /** Fetch one font file and return it as a data: URI, or null on any failure
+   * (network error, timeout, budget exhausted). Never throws — a font this
+   * couldn't fetch just stays external and gets sanitized at replay, same as
+   * every font did before this existed. `budget.maxBytes` is per-CALL (see
+   * inlineExternalFontsInEvents) — usually MAX_FONT_INLINE_BYTES, but reduced
+   * when other snapshots already occupy some of MAX_TOTAL_RAW_BYTES_WITH_FONTS. */
+  async function fetchFontDataUri(url, budget) {
+    if (budget.bytes >= budget.maxBytes || budget.count >= MAX_FONT_INLINE_COUNT) return null;
+    let timer = null;
+    try {
+      const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+      if (ctrl) timer = setTimeout(() => ctrl.abort(), FONT_FETCH_TIMEOUT_MS);
+      const res = await fetch(url, ctrl ? { signal: ctrl.signal } : undefined);
+      if (!res.ok) return null;
+      const buf = new Uint8Array(await res.arrayBuffer());
+      if (budget.bytes + buf.length > budget.maxBytes) return null;
+      budget.bytes += buf.length;
+      budget.count += 1;
+      return `data:${guessFontMime(url)};base64,${bytesToBase64(buf)}`;
+    } catch (e) {
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /** Rewrite every external url(...) inside each @font-face block of one CSS
+   * text blob, in place. `cache` is shared across the whole snapshot so the
+   * same font file (declared in multiple <style>/<link> blocks) is only ever
+   * fetched once. Scoped to @font-face blocks specifically — never touches a
+   * background-image or other url() elsewhere in the same stylesheet, which
+   * stays blocked exactly as the existing sanitizer already intends. */
+  async function inlineFontsInCssText(cssText, cache, budget) {
+    if (typeof cssText !== 'string' || !cssText.includes('@font-face')) return cssText;
+    const blocks = cssText.match(FONT_FACE_BLOCK_RE);
+    if (!blocks) return cssText;
+    let out = cssText;
+    for (const block of blocks) {
+      EXTERNAL_URL_RE.lastIndex = 0;
+      const urls = [];
+      let m;
+      while ((m = EXTERNAL_URL_RE.exec(block))) urls.push(m[2]);
+      if (!urls.length) continue;
+      let rewritten = block;
+      for (const url of urls) {
+        if (!cache.has(url)) cache.set(url, await fetchFontDataUri(url, budget));
+        const dataUri = cache.get(url);
+        if (!dataUri) continue;
+        // Literal substring replace, not a regex, so a URL containing regex
+        // metacharacters can never misbehave.
+        for (const quoted of [`url("${url}")`, `url('${url}')`, `url(${url})`]) {
+          rewritten = rewritten.split(quoted).join(`url("${dataUri}")`);
+        }
+      }
+      if (rewritten !== block) out = out.split(block).join(rewritten);
+    }
+    return out;
+  }
+
+  /** Walk one serialized DOM node (rrweb-snapshot's format) looking for the two
+   * places CSS text lives — a <style>/<link> element's `_cssText` attribute,
+   * and a <style> tag's text-node child marked `isStyle` (an older rrweb
+   * representation, kept as a fallback) — and inline any font URLs found. */
+  async function inlineFontsInNode(node, cache, budget) {
+    if (!node || typeof node !== 'object') return;
+    if (node.type === 2 && node.attributes && typeof node.attributes._cssText === 'string') {
+      node.attributes._cssText = await inlineFontsInCssText(node.attributes._cssText, cache, budget);
+    }
+    if (node.type === 3 && node.isStyle && typeof node.textContent === 'string') {
+      node.textContent = await inlineFontsInCssText(node.textContent, cache, budget);
+    }
+    if (Array.isArray(node.childNodes)) {
+      for (const child of node.childNodes) await inlineFontsInNode(child, cache, budget);
+    }
+  }
+
+  // A rejected chunk's events are ROLLED BACK into the buffer and re-flushed
+  // later — same event objects, not fresh ones (that is what lets a full
+  // snapshot survive eviction across retries, by design). Font inlining
+  // mutates those objects IN PLACE, so without this set, every retry would
+  // call inlineExternalFontsInEvents again with a BRAND NEW budget and
+  // happily inline ANOTHER ~1.5 MB batch of whatever font-face rules didn't
+  // fit last time — the budget resetting per call while the mutations
+  // ACCUMULATE across calls. Confirmed live: a Gemini recording's snapshot
+  // chunk grew 6 MB → 12 MB → 13 MB → ~14 MB over ~24 retries (working
+  // through its ~186 @font-face rules a budget's worth at a time) before the
+  // run gave up — nine times the sanctioned ceiling, entirely because
+  // "already tried" was never remembered. One attempt per snapshot event,
+  // ever, closes that: whatever didn't fit the FIRST time stays external for
+  // the life of this event, exactly as the budget always intended.
+  const _fontInliningAttempted = new WeakSet();
+
+  /** Entry point: given one flush's worth of events, inline whatever fonts fit
+   * the budget into every full-snapshot event's serialized CSS — ONCE per
+   * distinct event object (see _fontInliningAttempted above). Full snapshots
+   * only — that is where a page's <style>/<link> content lands (see the
+   * _cssText note above), and where the practical fix belongs: initial page
+   * load is where virtually every real site declares its @font-face rules.
+   *
+   * `currentRawBytes` is the CALLER's fresh measurement of the whole `events`
+   * array's current JSON size (see flushChunk) — fresh, not the stale
+   * pre-mutation estimate content.js's own bookkeeping keeps elsewhere, because
+   * a PRIOR snapshot in this same array may already carry inlined fonts from
+   * an earlier call, and only a fresh measurement reflects that. This call's
+   * own allowance is whatever room is left under MAX_TOTAL_RAW_BYTES_WITH_FONTS
+   * after that — never more than MAX_FONT_INLINE_BYTES, and never negative. */
+  async function inlineExternalFontsInEvents(events, currentRawBytes = 0) {
+    const cache = new Map();
+    const maxBytes = Math.max(0, Math.min(
+      MAX_FONT_INLINE_BYTES,
+      MAX_TOTAL_RAW_BYTES_WITH_FONTS - currentRawBytes,
+    ));
+    const budget = { bytes: 0, count: 0, maxBytes };
+    for (const ev of events) {
+      if (ev && ev.type === RRWEB_TYPE_FULL_SNAPSHOT && ev.data && ev.data.node) {
+        if (_fontInliningAttempted.has(ev)) continue;
+        _fontInliningAttempted.add(ev);
+        await inlineFontsInNode(ev.data.node, cache, budget);
+      }
+    }
+  }
+
   // ── Pure: the state machine ───────────────────────────────────────────────
   // Three states, no grace period. Recording stops the moment the tab is hidden,
   // unconditionally — an earlier design kept recording through an in-flight AI
@@ -714,6 +893,32 @@
       let gz = null;
       let failure = null;
       try {
+        // Best-effort, before stringify so an inlined font is part of what gets
+        // measured/compressed/sent below, not a second write. Font inlining is
+        // an enhancement, not part of the core pipeline: fetchFontDataUri's own
+        // network call never throws past itself, but the CSS tree-walk around
+        // it (regex/string work over WHATEVER a real page's stylesheet turns
+        // out to look like) is not proven against every real-world shape the
+        // way the rest of this function is. A bug there must degrade to
+        // "upload the snapshot without inlined fonts" — exactly what shipped
+        // before this feature existed — never to "the run aborts having
+        // uploaded nothing," which is what an uncaught throw here would cause
+        // by falling into the SAME failure path as a genuine server rejection.
+        if (events.some((e) => e && e.type === RRWEB_TYPE_FULL_SNAPSHOT)) {
+          try {
+            // A FRESH measurement, not `rawBytes` above: `rawBytes` was captured
+            // when these events were first buffered, before any font-inlining
+            // ever touched them — on a retry, a PRIOR snapshot in this same
+            // array may already carry inlined fonts from an earlier call, which
+            // `rawBytes` knows nothing about. Only a fresh stringify reflects
+            // what is actually in the array right now.
+            let preInlineBytes = 0;
+            try { preInlineBytes = JSON.stringify(events).length; } catch (e) { preInlineBytes = rawBytes; }
+            await inlineExternalFontsInEvents(events, preInlineBytes);
+          } catch (e) {
+            d.warn('font inlining failed, uploading the snapshot without it:', e && e.message ? e.message : e);
+          }
+        }
         json = JSON.stringify(events);
         gz = await d.compress(json);
         const sha = await d.digest(gz);
@@ -1153,5 +1358,11 @@
     gzipString,
     sha256Hex,
     createReplayController,
+    MAX_FONT_INLINE_BYTES,
+    MAX_FONT_INLINE_COUNT,
+    MAX_TOTAL_RAW_BYTES_WITH_FONTS,
+    inlineFontsInCssText,
+    inlineFontsInNode,
+    inlineExternalFontsInEvents,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

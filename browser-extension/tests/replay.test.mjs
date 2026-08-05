@@ -25,6 +25,7 @@ import {
   composerMark,
   DLP_BROAD_MARK,
   settle,
+  decodeChunkEvents,
 } from './load-replay.mjs';
 
 const R = loadReplay();
@@ -1059,6 +1060,260 @@ test('with nothing but snapshots and fonts left, the run aborts instead of evict
   const done = h.sentOf('replayComplete');
   assert.equal(done.length, 1);
   assert.equal(done[0].stop_reason, 'chunk_rejected', 'an honest abort, not a silently corrupt recording');
+});
+
+// ── capture-time font inlining ────────────────────────────────────────────────
+// collectFonts:true only catches the JS FontFace API. Real sites (Gemini
+// included) declare fonts as ordinary @font-face CSS rules pointing at a vendor
+// CDN, which the replay-side sanitizer blanks — so this fetches the bytes at
+// RECORD time (while the browser already trusts the host) and inlines them as
+// data: URIs before the snapshot ever leaves the machine.
+
+test('a CSS blob with no @font-face is returned untouched, and fetch is never called', async () => {
+  // Uses the shared R (loadReplay() with no fetchImpl override — its default
+  // throws loudly on any call), so this only passes if fetch is genuinely
+  // never reached for CSS with nothing to inline.
+  const css = '.foo { color: red; } .bar { background: url(https://cdn.example.com/x.png); }';
+  const out = await R.inlineFontsInCssText(css, new Map(), { bytes: 0, count: 0, maxBytes: R.MAX_FONT_INLINE_BYTES });
+  assert.equal(out, css);
+});
+
+test('an external @font-face url is fetched and inlined as a data: URI', async () => {
+  const fontBytes = Buffer.from('fake-woff2-bytes');
+  const url = 'https://fonts.gstatic.com/s/googlesans/v1/regular.woff2';
+  let fetchCalls = 0;
+  const h = makeReplayHarness({
+    sessionId: 'sess-1',
+    fetchImpl: async (reqUrl) => {
+      fetchCalls++;
+      assert.equal(reqUrl, url);
+      return { ok: true, arrayBuffer: async () => fontBytes.buffer.slice(fontBytes.byteOffset, fontBytes.byteOffset + fontBytes.byteLength) };
+    },
+  });
+
+  await h.ctl.init();
+  await settle();
+
+  const css = `@font-face { font-family: "Google Sans"; src: url("${url}") format("woff2"); }`;
+  h.snapshotWithCss(css);
+  await settle();
+
+  assert.equal(fetchCalls, 1);
+  const chunk = h.sentOf('replayChunk').at(-1);
+  const events = decodeChunkEvents(chunk);
+  const styleNode = events[0].data.node.childNodes[0];
+  assert.ok(styleNode.attributes._cssText.includes('data:font/woff2;base64,'), 'the url was replaced with an inline data: URI');
+  assert.ok(!styleNode.attributes._cssText.includes(url), 'the original external URL is gone');
+});
+
+test('the same font URL declared twice is only fetched once', async () => {
+  const url = 'https://fonts.gstatic.com/s/googlesans/v1/regular.woff2';
+  let fetchCalls = 0;
+  const h = makeReplayHarness({
+    sessionId: 'sess-1',
+    fetchImpl: async () => {
+      fetchCalls++;
+      return { ok: true, arrayBuffer: async () => new ArrayBuffer(10) };
+    },
+  });
+
+  await h.ctl.init();
+  await settle();
+
+  const css = `@font-face { font-family: "A"; src: url("${url}"); }`
+    + `@font-face { font-family: "A"; font-weight: bold; src: url("${url}"); }`;
+  h.snapshotWithCss(css);
+  await settle();
+
+  assert.equal(fetchCalls, 1, 'the cache de-duplicates identical font URLs within one snapshot');
+  const events = decodeChunkEvents(h.sentOf('replayChunk').at(-1));
+  const cssOut = events[0].data.node.childNodes[0].attributes._cssText;
+  assert.equal((cssOut.match(/data:font/g) || []).length, 2, 'both declarations got the inlined result');
+});
+
+test('a font fetch failure leaves that url() untouched — no crash, no data loss', async () => {
+  const url = 'https://fonts.gstatic.com/s/googlesans/v1/broken.woff2';
+  const h = makeReplayHarness({
+    sessionId: 'sess-1',
+    fetchImpl: async () => ({ ok: false, status: 404 }),
+  });
+
+  await h.ctl.init();
+  await settle();
+
+  const css = `@font-face { font-family: "A"; src: url("${url}"); }`;
+  h.snapshotWithCss(css);
+  await settle();
+
+  const chunk = h.sentOf('replayChunk').at(-1);
+  assert.ok(chunk, 'the chunk still uploaded — a failed font fetch does not fail the flush');
+  const events = decodeChunkEvents(chunk);
+  const cssOut = events[0].data.node.childNodes[0].attributes._cssText;
+  assert.ok(cssOut.includes(url), 'left exactly as it was — sanitized away at replay like today, not a regression');
+});
+
+test('a background-image url() outside @font-face is never touched', async () => {
+  const h = makeReplayHarness({
+    sessionId: 'sess-1',
+    fetchImpl: async () => { throw new Error('should never be called for a non-font url'); },
+  });
+
+  await h.ctl.init();
+  await settle();
+
+  const css = '.hero { background-image: url(https://cdn.example.com/photo.png); }';
+  h.snapshotWithCss(css);
+  await settle();
+
+  const events = decodeChunkEvents(h.sentOf('replayChunk').at(-1));
+  const cssOut = events[0].data.node.childNodes[0].attributes._cssText;
+  assert.equal(cssOut, css, 'untouched — images stay blocked, this only ever reaches inside @font-face blocks');
+});
+
+test('the total inlined bytes are capped, and whatever does not fit is left external', async () => {
+  const bigChunk = Buffer.alloc(1024 * 1024).fill('a'); // 1 MB per "font"
+  let fetchCalls = 0;
+  const h = makeReplayHarness({
+    sessionId: 'sess-1',
+    fetchImpl: async () => {
+      fetchCalls++;
+      return { ok: true, arrayBuffer: async () => bigChunk.buffer.slice(0, bigChunk.byteLength) };
+    },
+  });
+
+  await h.ctl.init();
+  await settle();
+
+  // 3 distinct ~1 MB fonts — comfortably over the 1.5 MB total budget, so the
+  // third one (at least) cannot fit regardless of fetch order. Family names are
+  // plain (F1/F2/F3), not derived from the URL, so `cssOut.includes(url)` below
+  // can only match the url() itself — not an unrelated copy of the same string.
+  const urls = [1, 2, 3].map((n) => `https://fonts.gstatic.com/s/font${n}.woff2`);
+  const css = urls.map((u, i) => `@font-face { font-family: "F${i}"; src: url("${u}"); }`).join('');
+  h.snapshotWithCss(css);
+  await settle();
+
+  const events = decodeChunkEvents(h.sentOf('replayChunk').at(-1));
+  const cssOut = events[0].data.node.childNodes[0].attributes._cssText;
+  const inlinedCount = (cssOut.match(/data:font/g) || []).length;
+  const externalCount = urls.filter((u) => cssOut.includes(u)).length;
+  assert.ok(inlinedCount < urls.length, 'not everything fit under the budget');
+  assert.ok(externalCount > 0, 'and what did not fit was left external rather than corrupting the CSS');
+  assert.equal(inlinedCount + externalCount, urls.length);
+});
+
+test('a rejected snapshot chunk does not re-attempt font inlining on retry — no unbounded growth', async () => {
+  // THE LIVE BUG: a rejected chunk rolls its events back into the buffer and
+  // re-flushes them later — same event objects, not fresh ones. Without
+  // per-event tracking, EVERY retry called inlineExternalFontsInEvents again
+  // with a brand-new budget, inlining ANOTHER ~1.5 MB batch of whatever font
+  // didn't fit last time — the budget resetting per call while the CSS
+  // mutations accumulated across calls. Confirmed live: a real Gemini
+  // recording's snapshot chunk grew 6 MB -> 12 MB -> 13 MB -> ~14 MB over
+  // ~24 retries before the run gave up, nine times the sanctioned ceiling.
+  const bigFont = Buffer.alloc(1024 * 1024).fill('a'); // 1 MB
+  let fetchCalls = 0;
+  let sendAttempt = 0;
+  const h = makeReplayHarness({
+    sessionId: 'sess-1',
+    fetchImpl: async () => {
+      fetchCalls++;
+      return { ok: true, arrayBuffer: async () => bigFont.buffer.slice(0, bigFont.byteLength) };
+    },
+    responses: {
+      // The FIRST send is refused (mirrors the live 413); every send after
+      // that succeeds, so a second attempt is exactly one retry, not a loop.
+      replayChunk: () => { sendAttempt++; return sendAttempt === 1 ? { ok: false, error: 413 } : { ok: true }; },
+    },
+  });
+
+  await h.ctl.init();
+  await settle();
+
+  // 3 distinct ~1 MB fonts — only one fits under the 1.5 MB budget on any
+  // single pass, so this reproduces "something left over to (wrongly) top up."
+  const urls = [1, 2, 3].map((n) => `https://fonts.gstatic.com/s/font${n}.woff2`);
+  const css = urls.map((u, i) => `@font-face { font-family: "F${i}"; src: url("${u}"); }`).join('');
+  h.snapshotWithCss(css);
+  await settle();
+
+  assert.equal(sendAttempt, 1, 'first attempt made and refused');
+  const fetchesAfterFirst = fetchCalls;
+
+  // The rejected chunk waits for the next flush trigger to retry.
+  h.advance(11_000);
+  await h.ctl.tick();
+  await settle();
+
+  assert.equal(sendAttempt, 2, 'retried exactly once');
+  assert.equal(fetchCalls, fetchesAfterFirst, 'THE FIX: no new font fetches on the retry');
+
+  const allChunks = h.sentOf('replayChunk');
+  assert.equal(allChunks.length, 2, 'the refused attempt and the retry both show up as sends');
+  const css1 = decodeChunkEvents(allChunks[0])[0].data.node.childNodes[0].attributes._cssText;
+  const css2 = decodeChunkEvents(allChunks[1])[0].data.node.childNodes[0].attributes._cssText;
+  assert.equal(css1, css2, 'byte-for-byte identical — the retried payload did not grow');
+  const inlinedCount = (css2.match(/data:font/g) || []).length;
+  assert.ok(inlinedCount < urls.length, 'still bounded by the budget, exactly as the first attempt was');
+});
+
+test('two genuinely distinct snapshots piled up in one buffer share ONE total budget, not one each', async () => {
+  // THE SECOND LIVE BUG, on top of the first: a tab whose VISIBILITY toggles
+  // (switching windows to check DevTools — exactly what happened testing this
+  // live) makes rrweb take a BRAND NEW full snapshot on every resume. Each one
+  // is a genuinely distinct object, so the once-per-event fix above correctly
+  // leaves it alone (no re-fetch) — but if the chunk keeps getting refused,
+  // several of these distinct snapshots pile up TOGETHER in the same
+  // still-unsent buffer, and each would otherwise still claim its own fresh
+  // ~1.5 MB allowance, simply adding up. Confirmed live: a chunk's wire size
+  // jumped 6 MB -> 12 MB across exactly one more accumulated snapshot.
+  // Sized to fully consume ONE snapshot's own ~1.5 MB per-snapshot cap by
+  // itself (R.MAX_FONT_INLINE_BYTES) — the numbers matter here: this is what
+  // makes "snapshot 2 gets NOTHING" (fixed) cleanly distinguishable from
+  // "snapshot 2 gets its own font anyway" (broken), rather than both landing
+  // on the same count by coincidence.
+  const bigFont = Buffer.alloc(R.MAX_FONT_INLINE_BYTES).fill('a');
+  let sendAttempt = 0;
+  const h = makeReplayHarness({
+    sessionId: 'sess-1',
+    fetchImpl: async () => ({ ok: true, arrayBuffer: async () => bigFont.buffer.slice(0, bigFont.byteLength) }),
+    responses: {
+      // First attempt (snapshot 1 alone) is refused, forcing a rollback;
+      // everything after that succeeds.
+      replayChunk: () => { sendAttempt++; return sendAttempt === 1 ? { ok: false, error: 413 } : { ok: true }; },
+    },
+  });
+
+  await h.ctl.init();
+  await settle();
+
+  const cssFor = (n) => `@font-face { font-family: "Snap${n}"; src: url("https://fonts.gstatic.com/s/snap${n}font.woff2"); }`;
+
+  // Snapshot 1 — one font that alone fills its per-snapshot cap — refused,
+  // rolled back into the buffer.
+  h.snapshotWithCss(cssFor(1));
+  await settle();
+  assert.equal(sendAttempt, 1);
+
+  // A second, genuinely distinct snapshot arrives while the first is still
+  // stuck unsent — the visibility-toggle pile-up scenario.
+  h.snapshotWithCss(cssFor(2));
+  await settle();
+  assert.equal(sendAttempt, 2, 'retried with both snapshots bundled together');
+
+  const events = decodeChunkEvents(h.sentOf('replayChunk').at(-1));
+  const snapshots = events.filter((e) => e.type === 2);
+  assert.equal(snapshots.length, 2, 'both distinct snapshots really did end up in the same chunk');
+  const css1 = snapshots[0].data.node.childNodes[0].attributes._cssText;
+  const css2 = snapshots[1].data.node.childNodes[0].attributes._cssText;
+
+  assert.ok(css1.includes('data:font'), 'snapshot 1 got its font — it had the whole ceiling to itself');
+  // THE FIX: snapshot 1 alone already used up MAX_FONT_INLINE_BYTES worth of
+  // the SHARED MAX_TOTAL_RAW_BYTES_WITH_FONTS ceiling, so snapshot 2 must get
+  // ZERO room left — not its own fresh ~1.5 MB. Without the fix (a flat
+  // per-call budget), snapshot 2 would inline its font too.
+  assert.ok(!css2.includes('data:font'), 'snapshot 2 must get NOTHING — no fresh budget of its own');
+  assert.ok(css2.includes('https://fonts.gstatic.com/s/snap2font.woff2'), 'left external, exactly like any font that does not fit');
 });
 
 // ── plumbing ────────────────────────────────────────────────────────────────

@@ -340,6 +340,7 @@ function chunkMessage(overrides = {}) {
     first_ts: 1_700_000_000_000,
     last_ts: 1_700_000_009_000,
     has_full_snapshot: true,
+    has_font_event: false,
     byte_size: 1234,
     ...overrides,
   };
@@ -399,10 +400,11 @@ test('a chunk goes to the right URL, with exactly the fields the API expects', a
   assert.equal(posted[0].method, 'POST');
   // seq travels in the PATH, not the body, and the body carries nothing else.
   assert.deepEqual(Object.keys(posted[0].body).sort(), [
-    'chunk_b64', 'encoding', 'event_count', 'first_ts', 'has_full_snapshot', 'last_ts', 'sha256',
+    'chunk_b64', 'encoding', 'event_count', 'first_ts', 'has_font_event', 'has_full_snapshot', 'last_ts', 'sha256',
   ]);
   assert.equal(posted[0].body.event_count, 12);
   assert.equal(posted[0].body.has_full_snapshot, true);
+  assert.equal(posted[0].body.has_font_event, false);
   assert.match(posted[0].headers.authorization, /^Bearer /, 'it goes out through authedFetch');
 });
 

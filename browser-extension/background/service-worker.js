@@ -1146,6 +1146,7 @@ async function replayChunk(msg) {
     first_ts: msg?.first_ts,
     last_ts: msg?.last_ts,
     has_full_snapshot: msg?.has_full_snapshot,
+    has_font_event: msg?.has_font_event,
   };
   const b64Len = typeof body.chunk_b64 === 'string' ? body.chunk_b64.length : 0;
 
