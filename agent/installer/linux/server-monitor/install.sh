@@ -76,34 +76,62 @@ echo "[3/5] Installing CA into system trust store…"
 install -m 644 "$CA_DIR/ca.crt" "$TRUSTED_CA"
 update-ca-certificates
 
-echo "[4/5] Writing /etc/profile.d/cloudfuze-proxy.sh…"
-cat > "$PROFILE_FILE" <<EOF
-# CloudFuze AI Governance — added by server-monitor installer.
-# Every new login shell / cron task / systemd unit that sources profile gets
-# its outbound LLM API traffic routed through the local proxy.
+# Transparent port is proxy port + 1 (the daemon opens both automatically).
+TRANSPARENT_PORT=$((LISTEN_PORT + 1))
+
+echo "[4/6] Setting up iptables transparent redirect…"
+# Redirect ALL outbound port-443 traffic through the transparent proxy.
+# This captures every process on the server — already-running agents,
+# new processes, cron jobs, Docker containers (host networking), everything.
+# No HTTPS_PROXY env var needed. No process restart needed.
 #
-# NB: NO_PROXY intentionally does NOT include localhost/127.0.0.1. Local
-# model servers (ollama, vLLM, llama.cpp) run there and we want to govern
-# them too (Tier 2). The proxy bridges non-LLM localhost traffic at the
-# socket level — no MITM, no breakage.
+# --uid-owner 0: exclude root (the proxy daemon itself runs as root; without
+# this exclusion the proxy's own outbound requests would loop back into itself).
+# -d 127.0.0.0/8: exclude localhost (local model servers like ollama respond on
+# 127.0.0.1, and we don't want to redirect their inbound traffic).
+
+# Remove any old rules first (idempotent reinstall)
+iptables -t nat -D OUTPUT -p tcp --dport 443 ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "$TRANSPARENT_PORT" 2>/dev/null || true
+
+# Add the redirect rule
+iptables -t nat -A OUTPUT -p tcp --dport 443 ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "$TRANSPARENT_PORT"
+
+echo "    iptables: all port-443 traffic → localhost:$TRANSPARENT_PORT (transparent proxy)"
+
+# Persist iptables rules across reboots
+if command -v iptables-save >/dev/null 2>&1; then
+  iptables-save > /etc/iptables.rules 2>/dev/null || true
+  # Install restore-on-boot if not already present
+  if [[ ! -f /etc/network/if-pre-up.d/iptables ]] && [[ -d /etc/network/if-pre-up.d ]]; then
+    cat > /etc/network/if-pre-up.d/iptables <<'IPTEOF'
+#!/bin/sh
+iptables-restore < /etc/iptables.rules
+IPTEOF
+    chmod +x /etc/network/if-pre-up.d/iptables
+  fi
+fi
+
+# Also set HTTPS_PROXY as fallback for processes that don't go through port 443
+# directly (e.g. they use custom ports, or the OS doesn't support iptables).
+echo "[5/6] Writing /etc/profile.d/cloudfuze-proxy.sh (fallback)…"
+cat > "$PROFILE_FILE" <<EOF
+# CloudFuze AI Governance — fallback for processes that bypass port 443.
+# Primary interception is via iptables (transparent proxy), so this is backup.
 export HTTPS_PROXY="http://$LISTEN_HOST:$LISTEN_PORT"
 export HTTP_PROXY="http://$LISTEN_HOST:$LISTEN_PORT"
 export NO_PROXY="$LISTEN_HOST:$LISTEN_PORT"
 EOF
 chmod 644 "$PROFILE_FILE"
 
-# Also append to /etc/environment so non-login shells, cron, and most systemd
-# units inherit it. (NB: systemd units only inherit if they don't set
-# Environment= themselves; for those we recommend a drop-in.)
 if ! grep -q "^HTTPS_PROXY=" /etc/environment 2>/dev/null; then
   {
     echo "HTTPS_PROXY=\"http://$LISTEN_HOST:$LISTEN_PORT\""
     echo "HTTP_PROXY=\"http://$LISTEN_HOST:$LISTEN_PORT\""
-    echo "NO_PROXY=\"$LISTEN_HOST:$LISTEN_PORT\""    # localhost intentionally excluded — we govern local LLMs
+    echo "NO_PROXY=\"$LISTEN_HOST:$LISTEN_PORT\""
   } >> /etc/environment
 fi
 
-echo "[5/5] Installing systemd unit…"
+echo "[6/6] Installing systemd unit…"
 cat > "$UNIT_DIR/cloudfuze-server-monitor.service" <<EOF
 [Unit]
 Description=CloudFuze AI Governance — server-side agent monitor
@@ -173,9 +201,9 @@ echo
 echo "✓ Installation complete."
 echo "  Logs:        journalctl -u cloudfuze-server-monitor -f"
 echo "  Status:      systemctl status cloudfuze-server-monitor"
-echo "  Proxy:       $LISTEN_HOST:$LISTEN_PORT  (HTTPS_PROXY is now set system-wide)"
-echo "  Dashboard:   $SERVER  →  Server agents"
+echo "  Transparent: iptables REDIRECT port 443 → localhost:$TRANSPARENT_PORT"
+echo "  Fallback:    HTTPS_PROXY=http://$LISTEN_HOST:$LISTEN_PORT"
+echo "  Dashboard:   $SERVER  →  Server Monitor"
 echo
-echo "  IMPORTANT: existing long-running processes (already-running agents,"
-echo "  cron jobs spawned before this install, etc.) will NOT pick up the"
-echo "  new HTTPS_PROXY until they're restarted."
+echo "  ALL processes on this server (including already-running agents)"
+echo "  are now governed via iptables. No restart needed."

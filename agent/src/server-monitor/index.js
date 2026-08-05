@@ -111,7 +111,7 @@ async function main() {
     });
   };
 
-  const { stop } = await startProxy({
+  const { stop, transparentPort } = await startProxy({
     ca,
     reporter: null,           // proxy's enforcement reporter — unused in server mode
     log,
@@ -121,8 +121,12 @@ async function main() {
     alwaysIntercept: true,    // no browsers on the server; intercept all whitelisted hosts
   });
 
-  log.info(`proxy listening on ${HOST}:${PORT}`);
-  log.info(`tell agents on this server: export HTTPS_PROXY=http://${HOST}:${PORT} (and trust the CA)`);
+  log.info(`proxy listening on ${HOST}:${PORT} (explicit HTTPS_PROXY mode)`);
+  if (transparentPort) {
+    log.info(`transparent proxy on 0.0.0.0:${transparentPort} (iptables REDIRECT target)`);
+    log.info(`iptables rule: iptables -t nat -A OUTPUT -p tcp --dport 443 ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port ${transparentPort}`);
+  }
+  log.info(`HTTPS_PROXY fallback: export HTTPS_PROXY=http://${HOST}:${PORT}`);
 
   // Tier 2 + Tier 3 supplementary captures — all best-effort, no-op when the
   // platform tooling isn't present.

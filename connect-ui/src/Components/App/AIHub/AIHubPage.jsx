@@ -4156,13 +4156,17 @@ function EuAiActView() {
 }
 
 function ServerMonitorView() {
-  const [tab, setTab] = useState("traces");
+  const [tab, setTab] = useState("setup");
   const [stats, setStats] = useState(null);
   const [servers, setServers] = useState([]);
   const [traces, setTraces] = useState([]);
   const [selectedTrace, setSelectedTrace] = useState(null);
   const [traceDetail, setTraceDetail] = useState(null);
   const [installCmd, setInstallCmd] = useState("");
+  const [proxyPort, setProxyPort] = useState("8443");
+  const [serverIp, setServerIp] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -4180,25 +4184,37 @@ function ServerMonitorView() {
   }, []);
 
   useEffect(() => {
-    if (tab === "setup" && !installCmd) {
-      fetch(`${API}/monitor/generate-token`, {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ serverUrl: window.location.origin }),
-      }).then(r => r.json()).then(d => setInstallCmd(d.install_command || "")).catch(() => {});
-    }
-  }, [tab]);
-
-  useEffect(() => {
     if (!selectedTrace) { setTraceDetail(null); return; }
     apiFetch("/traces/" + encodeURIComponent(selectedTrace)).then(setTraceDetail).catch(() => setTraceDetail(null));
   }, [selectedTrace]);
 
+  const generateInstallCmd = async () => {
+    setGenerating(true);
+    try {
+      // Use the governance server's actual URL (where the dashboard is hosted)
+      const govUrl = window.location.origin.replace(/\/CloudFuze.*/, '').replace(/:3000$/, ':3001');
+      const r = await fetch(`${API}/monitor/generate-token`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ serverUrl: govUrl, port: proxyPort }),
+      });
+      const d = await r.json();
+      setInstallCmd(d.install_command || "");
+    } catch (e) { console.error(e); }
+    setGenerating(false);
+  };
+
+  const copyCmd = () => {
+    navigator.clipboard.writeText(installCmd);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   if (loading) return <Loading />;
 
   const smTabs = [
+    { id: "setup", label: "Setup", icon: <Plus size={14} /> },
     { id: "traces", label: "Traces", icon: <Activity size={14} /> },
     { id: "servers", label: "Servers", icon: <Server size={14} /> },
-    { id: "setup", label: "Setup", icon: <Plus size={14} /> },
   ];
 
   return (
@@ -4298,39 +4314,93 @@ function ServerMonitorView() {
 
       {tab === "setup" && (
         <div>
-          <SectionHeader title="Install Server Monitor" hint="Run this command on any Linux server to start monitoring AI agent activity" />
+          <SectionHeader title="Install Server Monitor" hint="Monitor all AI agent activity on any Linux/macOS server. Detects and governs every AI API call automatically." />
           <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 24 }}>
-            <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+
+            {/* Step 1: Configure */}
+            <div style={{ display: "flex", gap: 12, marginBottom: 24 }}>
               <div style={{ width: 32, height: 32, minWidth: 32, borderRadius: "50%", background: "#dbeafe", color: "#2563eb", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>1</div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>Run this command on your server</div>
-                <div className="aihub_text_muted" style={{ fontSize: 12, marginBottom: 10 }}>Requires sudo access. Installs the monitor, configures system proxy, and starts the service.</div>
-                <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 16, fontFamily: "ui-monospace, monospace", fontSize: 12, overflowX: "auto", position: "relative" }}>
-                  <code>{installCmd || "Generating install command..."}</code>
-                  {installCmd && <button onClick={() => { navigator.clipboard.writeText(installCmd); }} style={{ position: "absolute", top: 8, right: 8, background: "#334155", color: "#e2e8f0", border: "none", borderRadius: 4, padding: "4px 8px", fontSize: 11, cursor: "pointer" }}>Copy</button>}
+                <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>Configure your server</div>
+                <div className="aihub_text_muted" style={{ fontSize: 12, marginBottom: 14 }}>Enter the proxy port the monitor will listen on. This port intercepts all outbound AI API traffic from every process on the server.</div>
+
+                <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+                  <div>
+                    <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 4 }}>Proxy Port</label>
+                    <input type="number" value={proxyPort} onChange={e => { setProxyPort(e.target.value); setInstallCmd(""); }}
+                      style={{ width: 120, padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 14, fontFamily: "ui-monospace, monospace" }}
+                      placeholder="8443" min="1024" max="65535" />
+                  </div>
+                  <div>
+                    <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 4 }}>Server IP / Hostname <span style={{ fontWeight: 400, color: "#9ca3af" }}>(optional)</span></label>
+                    <input type="text" value={serverIp} onChange={e => { setServerIp(e.target.value); setInstallCmd(""); }}
+                      style={{ width: 220, padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 14 }}
+                      placeholder="auto-detect" />
+                  </div>
+                  <button onClick={generateInstallCmd} disabled={generating || !proxyPort}
+                    style={{ padding: "8px 20px", borderRadius: 6, border: "none", background: "#2563eb", color: "#fff", fontSize: 13, fontWeight: 600, cursor: generating ? "wait" : "pointer", opacity: generating ? 0.6 : 1, height: 38 }}>
+                    {generating ? "Generating..." : "Generate Install Command"}
+                  </button>
                 </div>
               </div>
             </div>
-            <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
-              <div style={{ width: 32, height: 32, minWidth: 32, borderRadius: "50%", background: "#dcfce7", color: "#16a34a", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>2</div>
+
+            {/* Step 2: Install command */}
+            <div style={{ display: "flex", gap: 12, marginBottom: 24 }}>
+              <div style={{ width: 32, height: 32, minWidth: 32, borderRadius: "50%", background: installCmd ? "#dcfce7" : "#f3f4f6", color: installCmd ? "#16a34a" : "#9ca3af", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>2</div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>That's it</div>
-                <div className="aihub_text_muted" style={{ fontSize: 12 }}>The monitor automatically intercepts all AI API calls (OpenAI, Anthropic, Google, AWS) from every process on the server. No code changes needed.</div>
+                <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>Run this command on your server</div>
+                <div className="aihub_text_muted" style={{ fontSize: 12, marginBottom: 10 }}>SSH into your server and paste this command. Requires sudo access.</div>
+                {installCmd ? (
+                  <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 16, fontFamily: "ui-monospace, monospace", fontSize: 12, overflowX: "auto", position: "relative", lineHeight: 1.6, wordBreak: "break-all" }}>
+                    <code>{installCmd}</code>
+                    <button onClick={copyCmd}
+                      style={{ position: "absolute", top: 8, right: 8, background: copied ? "#16a34a" : "#334155", color: "#e2e8f0", border: "none", borderRadius: 4, padding: "4px 10px", fontSize: 11, cursor: "pointer", transition: "background 0.2s" }}>
+                      {copied ? "Copied!" : "Copy"}
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ background: "#f9fafb", border: "1px dashed #d1d5db", borderRadius: 8, padding: 16, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
+                    Configure port above and click "Generate Install Command"
+                  </div>
+                )}
               </div>
             </div>
-            <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 14, marginTop: 16 }}>
-              <div style={{ fontWeight: 600, fontSize: 13, color: "#166534", marginBottom: 6 }}>What gets captured:</div>
+
+            {/* Step 3: Done */}
+            <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+              <div style={{ width: 32, height: 32, minWidth: 32, borderRadius: "50%", background: "#f3f4f6", color: "#9ca3af", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>3</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>ALL agents are instantly governed</div>
+                <div className="aihub_text_muted" style={{ fontSize: 12 }}>The installer sets up an <code style={{ background: "#f1f5f9", padding: "1px 4px", borderRadius: 3 }}>iptables</code> transparent redirect that captures ALL outbound port-443 traffic at the kernel level. Every process &mdash; already running or new &mdash; is governed instantly. No code changes, no env vars, no agent restarts needed. Works with Node.js, Python, Go, curl, anything.</div>
+              </div>
+            </div>
+
+            {/* What gets captured */}
+            <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 14, marginTop: 8 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "#166534", marginBottom: 6 }}>What gets captured from every AI agent on the server:</div>
               <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: "#166534", lineHeight: 1.8 }}>
-                <li>Every LLM API call &mdash; model, tokens, cost, prompt, response</li>
-                <li>Who made the call &mdash; user, process, command line, working directory</li>
-                <li>How it was triggered &mdash; SSH session, cron job, CI pipeline, systemd service</li>
-                <li>Timing &mdash; duration, latency, errors</li>
+                <li>Every LLM API call &mdash; provider, model, tokens, cost, full prompt and response</li>
+                <li>Who made the call &mdash; user, process ID, command line, working directory</li>
+                <li>How it was triggered &mdash; SSH session, cron job, CI pipeline, systemd service, Docker container</li>
+                <li>Timing &mdash; duration, latency, HTTP status, errors</li>
+                <li>Local models too &mdash; Ollama, vLLM, llama.cpp on localhost are also governed</li>
               </ul>
             </div>
+
+            {/* How it works */}
+            <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 8, padding: 14, marginTop: 12 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "#1e40af", marginBottom: 6 }}>How it works:</div>
+              <div style={{ fontSize: 12, color: "#1e40af", lineHeight: 1.7 }}>
+                The monitor uses <strong>iptables transparent redirect</strong> to capture ALL outbound HTTPS traffic at the kernel level. Every connection to port 443 is redirected through the monitor's proxy, which reads the SNI hostname from the TLS handshake. AI provider traffic (OpenAI, Anthropic, Google, AWS, local models) is intercepted and logged with full prompt/response, cost, and process attribution. Non-AI traffic is bridged transparently with zero overhead. Works on already-running processes &mdash; no restart needed.
+              </div>
+            </div>
+
+            {/* Uninstall */}
             <div style={{ background: "#fefce8", border: "1px solid #fde68a", borderRadius: 8, padding: 14, marginTop: 12 }}>
               <div style={{ fontWeight: 600, fontSize: 13, color: "#854d0e", marginBottom: 6 }}>To uninstall:</div>
-              <code style={{ fontSize: 12, color: "#854d0e" }}>sudo cloudfuze-monitor uninstall</code>
-              <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 4 }}>Removes everything cleanly &mdash; service, CA, proxy config, all files.</div>
+              <code style={{ fontSize: 12, color: "#854d0e" }}>sudo systemctl stop cloudfuze-server-monitor && sudo rm -rf /opt/cloudfuze /etc/cloudfuze</code>
+              <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 4 }}>Stops the service and removes all files, CA, and proxy config.</div>
             </div>
           </div>
         </div>

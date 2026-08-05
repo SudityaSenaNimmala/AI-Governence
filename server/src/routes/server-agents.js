@@ -296,10 +296,12 @@ export function mountServerAgents(app, db) {
   // ── Install token generation ──────────────────────────────────────────
   app.post('/api/v1/monitor/generate-token', a(async (req, res) => {
     const serverUrl = req.body?.serverUrl || `${req.protocol}://${req.get('host')}`;
+    const port = req.body?.port || '8443';
     const authMod = await import('../auth.js');
     const payload = Buffer.from(`${serverUrl}|${authMod.ENROLL_SECRET}`).toString('base64');
     const token = `cfm_${payload}`;
-    res.json({ token, install_command: `curl -sSL ${serverUrl}/install-monitor.sh | sudo bash -s -- --token ${token}`, server_url: serverUrl });
+    const installCmd = `curl -sSL ${serverUrl}/install-monitor.sh | sudo bash -s -- --token ${token} --listen-port ${port}`;
+    res.json({ token, install_command: installCmd, server_url: serverUrl, port });
   }));
 
   app.get('/install-monitor.sh', async (req, res) => {

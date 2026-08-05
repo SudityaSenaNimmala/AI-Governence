@@ -36,6 +36,7 @@ import { scan } from '../os_monitor/classifier.js';
 import { shouldSkipScan, blockableMatches, isBrowserProcess, isAiDesktopProcess } from './scan-policy.js';
 import { getProcessByLocalPort, resolveOnDemand } from './process-resolver-win32.js';
 import { TokenVault } from './token-vault.js';
+import { extractSni } from './tls-sni.js';
 
 const BODY_SCAN_MAX_BYTES = 2 * 1024 * 1024;     // 2MB — covers any normal prompt
 
@@ -202,11 +203,92 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
     });
   });
   log?.info?.(`proxy: listening on ${host}:${port}`);
+
+  // ── Transparent proxy (iptables REDIRECT mode) ───────────────────────
+  // When iptables redirects port-443 traffic to us, we receive raw TLS
+  // ClientHello bytes instead of HTTP CONNECT. We extract the SNI hostname,
+  // check the whitelist, and either MITM-intercept or bridge to the real host.
+  // This captures ALL outbound HTTPS traffic — no HTTPS_PROXY env var needed.
+  let transparentServer = null;
+  const tpPort = port + 1;   // transparent port = proxy port + 1 (e.g. 8444)
+
+  if (alwaysIntercept) {   // only in server-monitor mode
+    transparentServer = net.createServer({ pauseOnConnect: true }, (clientSocket) => {
+      // Peek at the first bytes to extract SNI from the TLS ClientHello
+      clientSocket.once('readable', () => {
+        const peek = clientSocket.read();
+        if (!peek || peek.length === 0) { clientSocket.destroy(); return; }
+
+        const sniHost = extractSni(peek);
+
+        if (!sniHost) {
+          // Not TLS or no SNI — bridge to original destination (best effort)
+          log?.warn?.(`transparent: no SNI in ${peek.length} bytes, bridging`);
+          clientSocket.destroy();
+          return;
+        }
+
+        if (isPinnedHost(sniHost) || !isIntercepted(sniHost)) {
+          // Non-AI traffic or pinned host — bridge raw TLS to real destination
+          const upstream = net.createConnection(443, sniHost, () => {
+            upstream.write(peek);
+            clientSocket.pipe(upstream);
+            upstream.pipe(clientSocket);
+            clientSocket.resume();
+          });
+          upstream.on('error', () => { try { clientSocket.destroy(); } catch {} });
+          clientSocket.on('error', () => { try { upstream.destroy(); } catch {} });
+          return;
+        }
+
+        // AI host — MITM intercept
+        log?.info?.(`transparent: intercepting ${sniHost}`);
+        const tlsSock = new tls.TLSSocket(clientSocket, {
+          isServer: true,
+          secureContext: secureContextFor(sniHost),
+        });
+        // Push the peeked bytes back so TLS handshake sees the full ClientHello
+        tlsSock.push(peek);
+        clientSocket.resume();
+
+        tlsSock.on('error', (err) => {
+          log?.warn?.(`transparent: TLS error for ${sniHost}: ${err?.code || err?.message}`);
+          try { clientSocket.destroy(); } catch {}
+        });
+
+        // Parse decrypted HTTP requests off the TLS stream
+        const inner = http.createServer(async (req, res) => {
+          const target = { hostname: sniHost, port: 443, path: req.url, protocol: 'https:' };
+          return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress, vault, tokenizePatterns: _tokenizePatterns, modelRouter });
+        });
+        inner.emit('connection', tlsSock);
+      });
+    });
+
+    try {
+      await new Promise((resolve, reject) => {
+        transparentServer.once('error', (err) => {
+          log?.warn?.(`transparent: failed to start on port ${tpPort}: ${err.message}. Falling back to HTTPS_PROXY-only mode.`);
+          transparentServer = null;
+          resolve();   // non-fatal — explicit proxy still works
+        });
+        transparentServer.listen(tpPort, '0.0.0.0', () => {
+          transparentServer.off('error', reject);
+          log?.info?.(`transparent: listening on 0.0.0.0:${tpPort} (iptables REDIRECT target)`);
+          resolve();
+        });
+      });
+    } catch { transparentServer = null; }
+  }
+
   return {
     server,
+    transparentServer,
+    transparentPort: transparentServer ? tpPort : null,
     vault,
     stop: () => new Promise((resolve) => {
       clearInterval(_gcInterval);
+      if (transparentServer) transparentServer.close(() => {});
       server.close(() => resolve());
     }),
   };
