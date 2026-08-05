@@ -386,6 +386,29 @@ export class OsMonitor {
       }
     });
 
+    // Benign Enter-sends the enforcer lets through — captured from the SAME
+    // reconstructed keystroke buffer the blocker uses (length only, no content).
+    // This is what gives per-user prompt counts + token estimates for sealed
+    // desktop apps like Claude Desktop, where UIA can't read the composer and
+    // the DOM hook / proxy are both blocked. Sensitive sends never reach here —
+    // they go through the 'block' path below — so there's no double counting.
+    this.enforcer.on('prompt', (ev) => {
+      const ai = identifyAiProcess(ev.process);
+      if (!ai) return;
+      const len = Number(ev.len) || 0;
+      if (len < 1) return;
+      this.reporter.enqueue({
+        kind: 'prompt_submit',
+        source: 'os_monitor_enforcer',
+        service: ai.product,
+        vendor: ai.vendor,
+        process_name: ev.process,
+        content_length: len,
+        length_bucket: lengthBucket(len),
+      });
+      this.log?.info(`os_monitor: prompt sent into ${ai.product} (${len} chars)`);
+    });
+
     // Enforcer — the only real block for sealed desktop apps. When it swallows
     // a send/paste it emits a block event; we report it and toast the user.
     // Distinct dedup namespace ('enf|…') so the block notice always shows at

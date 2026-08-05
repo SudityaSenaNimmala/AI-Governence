@@ -135,8 +135,30 @@
     }
     return null;
   }
-  function applyPlatformPolicy(platforms) {
+  async function applyPlatformPolicy(platforms) {
     const hit = platformBlockMatch(platforms);
+    if (hit) {
+      // Check if this machine has a temporary access exception
+      try {
+        const config = await new Promise(r => chrome.storage.local.get(['cfai.config', 'cfai.machineId'], r));
+        const serverUrl = (config['cfai.config']?.serverUrl || '').replace(/\/$/, '');
+        const machineId = config['cfai.machineId'];
+        if (serverUrl && machineId) {
+          const res = await fetch(`${serverUrl}/api/v1/access-exceptions/check?machine_id=${encodeURIComponent(machineId)}&tool_host=${encodeURIComponent(location.hostname)}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.allowed) {
+              // Exception active — don't block
+              PLATFORM_BLOCKED = false;
+              BLOCKED_PLATFORM = null;
+              removePlatformBanner();
+              console.info('[cfai] access exception active for', location.hostname, '— expires:', data.expires_at);
+              return;
+            }
+          }
+        }
+      } catch {} // Server unavailable — enforce the block
+    }
     PLATFORM_BLOCKED = !!hit;
     BLOCKED_PLATFORM = hit;
     if (PLATFORM_BLOCKED) showPlatformBanner();
@@ -531,6 +553,431 @@
   // Set by handlePaste when sensitive data is pasted. Checked by tryBlock
   // when the input text hasn't been updated yet (paste+send in rapid succession).
   let _recentSensitivePaste = null;
+
+  // ── Model Routing ──────────────────────────────────────────────────
+  let _skipRouting = false;
+
+  // ── Smart Model Router — tier-based, works across all providers ──────
+  //
+  // Model hierarchy per provider:
+  //   Premium  (expensive, most capable) → for complex tasks only
+  //   Standard (balanced)                → for moderate tasks
+  //   Economy  (cheap, fast)             → for simple tasks
+  //
+  // Routes BOTH directions:
+  //   - Downgrade: user picks Opus for "hi" → routes to Haiku (save money)
+  //   - Upgrade:   user picks Haiku for architecture design → routes to Sonnet (ensure quality)
+
+  const COMPLEX_RE = /\b(architect|design|implement|refactor|optimize|compare|evaluate|explain.in.detail|step.by.step|comprehensive|thorough|deep.dive|trade.?offs?|debug|investigate|root.cause|security.review|performance|scale|migration|analyze|algorithm|distributed|concurrency|microservice|infrastructure|deployment|kubernetes|terraform|database.schema|system.design|code.review|vulnerability|pentest|threat.model|roadmap|strategy|tutorial|walkthrough|guide.me|plan.for|build.a|create.a|develop|detailed|in.depth|end.to.end|full.stack|production|enterprise|advanced|complex|multi.step|pipeline|workflow|framework|integration|authentication|authorization|caching|monitoring|testing.strategy|api.design|data.model)\b/i;
+  const SIMPLE_RE  = /\b(commit.message|changelog|fix.typo|rename|format|lint|translate|convert|hello|hi|hey|thanks|thank.you|yes|no|ok|okay|define|spell|grammar|weather|time|date|joke|funny|meaning.of)\b/i;
+
+  function classifyComplexity(text) {
+    if (!text) return 'simple';
+    const len = text.length;
+    const sample = len > 2000 ? text.slice(0, 2000) : text;
+
+    // Keywords FIRST — "Design distributed system" is complex even if short
+    if (COMPLEX_RE.test(sample)) return 'complex';
+    if (SIMPLE_RE.test(sample)) return 'simple';
+
+    // No keyword match — use length as heuristic
+    if (len < 300) return 'simple';
+    if (len > 8000) return 'complex';
+    const codeBlocks = (sample.match(/```/g) || []).length / 2;
+    if (codeBlocks >= 2) return 'complex';
+    if (codeBlocks >= 1 && len > 800) return 'complex';
+    if (len < 800) return 'simple';
+    return 'moderate';
+  }
+
+  // Detect model tier from button text or model ID.
+  // Handles current + future model names dynamically by keyword matching.
+  function detectModelInfo(text) {
+    const t = (text || '').toLowerCase();
+
+    // Anthropic — Fable and Opus are premium, Sonnet is standard, Haiku is economy
+    if (t.includes('fable'))  return { provider: 'anthropic', tier: 'premium' };
+    if (t.includes('opus'))   return { provider: 'anthropic', tier: 'premium' };
+    if (t.includes('sonnet')) return { provider: 'anthropic', tier: 'standard' };
+    if (t.includes('haiku'))  return { provider: 'anthropic', tier: 'economy' };
+
+    // OpenAI — order matters: "mini" before "4o", "o1/o3/o4" are premium
+    if (t.includes('mini') || t.includes('3.5') || t.includes('nano'))  return { provider: 'openai', tier: 'economy' };
+    if (t.includes('4o') || t.includes('4.1'))                          return { provider: 'openai', tier: 'standard' };
+    if (t.includes('gpt-4') || t.includes('gpt4'))                      return { provider: 'openai', tier: 'premium' };
+    if (/\bo[1-9]/.test(t))                                             return { provider: 'openai', tier: 'premium' };
+    // ChatGPT sometimes shows just "ChatGPT" with no version — treat as standard
+    if (t.includes('chatgpt'))                                          return { provider: 'openai', tier: 'standard' };
+
+    // Google — "flash" before "pro"
+    if (t.includes('flash') || t.includes('lite'))  return { provider: 'google', tier: 'economy' };
+    if (t.includes('pro'))                          return { provider: 'google', tier: 'standard' };
+    if (t.includes('ultra'))                        return { provider: 'google', tier: 'premium' };
+
+    return null;
+  }
+
+  // Smart routing table: [provider][currentTier][complexity] → target
+  // Uses UI DISPLAY NAMES (what the user sees in the dropdown), NOT API model IDs.
+  // This way we don't need to know or hardcode API IDs — the app sends the right
+  // one automatically when the dropdown changes.
+  const ROUTE_TABLE = {
+    anthropic: {
+      premium: {  // Opus, Fable
+        simple:   { uiName: 'Haiku',  reason: 'Simple prompt → Haiku (10x cheaper)' },
+        moderate: { uiName: 'Sonnet', reason: 'Standard prompt → Sonnet (5x cheaper)' },
+        complex:  null,
+      },
+      standard: { // Sonnet
+        simple:   { uiName: 'Haiku',  reason: 'Simple prompt → Haiku (faster + cheaper)' },
+        moderate: null,
+        complex:  null,
+      },
+      economy: {  // Haiku
+        simple:   null,
+        moderate: null,
+        complex:  { uiName: 'Sonnet', reason: 'Complex prompt → upgraded to Sonnet' },
+      },
+    },
+    openai: {
+      premium: {  // GPT-4, o1, o3
+        simple:   { uiName: 'GPT-4o mini', reason: 'Simple prompt → GPT-4o mini (66x cheaper)' },
+        moderate: { uiName: 'GPT-4o',      reason: 'Standard prompt → GPT-4o (balanced)' },
+        complex:  null,
+      },
+      standard: { // GPT-4o
+        simple:   { uiName: 'GPT-4o mini', reason: 'Simple prompt → GPT-4o mini (cheaper)' },
+        moderate: null,
+        complex:  null,
+      },
+      economy: {  // GPT-4o mini, GPT-3.5
+        simple:   null,
+        moderate: null,
+        complex:  { uiName: 'GPT-4o',      reason: 'Complex prompt → upgraded to GPT-4o' },
+      },
+    },
+    google: {
+      premium: {  // Gemini Ultra/Pro
+        simple:   { uiName: 'Flash',          reason: 'Simple prompt → Flash (fastest)' },
+        moderate: { uiName: 'Flash',          reason: 'Standard prompt → Flash' },
+        complex:  null,
+      },
+      standard: { // Gemini Pro
+        simple:   { uiName: 'Flash',          reason: 'Simple prompt → Flash (faster)' },
+        moderate: null,
+        complex:  null,
+      },
+      economy: {  // Gemini Flash
+        simple:   null,
+        moderate: null,
+        complex:  { uiName: 'Pro',            reason: 'Complex prompt → upgraded to Pro' },
+      },
+    },
+  };
+
+  // ── User ceiling tracking ──
+  // The "ceiling" is what the user MANUALLY selected — the most expensive
+  // model they're willing to pay for. We optimize within that ceiling.
+  // When we change the model via routing, we DON'T update the ceiling.
+  let _userCeiling = null;    // { provider, tier, modelText }
+  let _weAreRouting = false;  // true while our code is changing the model
+
+  const TIER_NUM = { premium: 3, standard: 2, economy: 1 };
+  const TIER_NAME = { 3: 'premium', 2: 'standard', 1: 'economy' };
+
+  // Maps provider + tier number → UI name to search for in dropdown
+  const TIER_UI_NAME = {
+    anthropic: { 3: 'Opus', 2: 'Sonnet', 1: 'Haiku' },
+    openai:    { 3: 'GPT-4', 2: 'GPT-4o', 1: 'GPT-4o mini' },
+    google:    { 3: 'Ultra', 2: 'Pro', 1: 'Flash' },
+  };
+
+  const TIER_REASON = {
+    upgrade:   { 3: 'Complex prompt → premium model', 2: 'Complex prompt → upgraded for quality', 1: '' },
+    downgrade: { 2: 'Standard prompt → balanced model', 1: 'Simple prompt → fastest & cheapest' },
+  };
+
+  // Load persisted ceiling from chrome.storage (survives extension refresh)
+  try {
+    chrome.storage.local.get('cfai.user_ceiling', (data) => {
+      if (data['cfai.user_ceiling']) {
+        _userCeiling = data['cfai.user_ceiling'];
+        console.info('[cfai] ceiling restored:', _userCeiling.modelText, '→', _userCeiling.tier);
+      }
+    });
+  } catch {}
+
+  function updateUserCeiling() {
+    if (_weAreRouting) return;
+    const btn = getModelButton();
+    if (!btn) return;
+    const text = (btn.textContent || '').trim();
+    const info = detectModelInfo(text);
+    if (!info) return;
+    const newTierNum = TIER_NUM[info.tier] || 2;
+    const oldTierNum = _userCeiling ? (TIER_NUM[_userCeiling.tier] || 2) : 0;
+
+    // Only update ceiling if user manually selected a HIGHER tier model.
+    // This prevents our own downgrades from lowering the ceiling.
+    if (newTierNum > oldTierNum || !_userCeiling || _userCeiling.provider !== info.provider) {
+      _userCeiling = { ...info, modelText: text };
+      console.info('[cfai] user ceiling updated:', text, '→', info.tier);
+      try { chrome.storage.local.set({ 'cfai.user_ceiling': _userCeiling }); } catch {}
+    }
+  }
+
+  // Check for manual model changes every 2s
+  setInterval(updateUserCeiling, 2000);
+  // Initial detection
+  setTimeout(updateUserCeiling, 1000);
+
+  function smartRoute(currentModelText, promptText) {
+    const current = detectModelInfo(currentModelText);
+    if (!current) return null;
+
+    // Set ceiling on first detection if not set
+    if (!_userCeiling) {
+      _userCeiling = { ...current, modelText: currentModelText };
+    }
+
+    // If ceiling is for a different provider or not set, use standard as default ceiling
+    const ceiling = (_userCeiling && _userCeiling.provider === current.provider)
+      ? _userCeiling
+      : { ...current, tier: 'standard' };  // assume standard ceiling if unknown
+
+    const complexity = classifyComplexity(promptText);
+    const ceilingNum = TIER_NUM[ceiling.tier] || 2;
+    const currentNum = TIER_NUM[current.tier] || 2;
+
+    // Determine target tier based on complexity
+    let targetNum;
+    if (complexity === 'simple') {
+      targetNum = 1;  // economy — cheapest
+    } else if (complexity === 'complex') {
+      // Complex prompts ALWAYS get at least standard (tier 2).
+      // If user's ceiling is higher, use that.
+      targetNum = Math.max(ceilingNum, 2);
+    } else {
+      // moderate → standard tier
+      targetNum = 2;
+    }
+
+    // Cap at ceiling (don't exceed what user is willing to pay)
+    if (complexity !== 'complex') {
+      targetNum = Math.min(targetNum, Math.max(ceilingNum, 2));
+    }
+
+    // Already at the right tier?
+    if (targetNum === currentNum) return null;
+
+    const targetTierName = TIER_NAME[targetNum];
+    const uiName = TIER_UI_NAME[current.provider]?.[targetNum];
+    if (!uiName) return null;
+
+    const direction = targetNum < currentNum ? 'downgrade' : 'upgrade';
+    const reason = direction === 'downgrade'
+      ? (TIER_REASON.downgrade[targetNum] || 'Optimized for this prompt')
+      : (TIER_REASON.upgrade[targetNum] || 'Upgraded for quality');
+
+    return {
+      model: uiName,
+      uiName,
+      rule_name: reason,
+      complexity,
+      currentTier: current.tier,
+      targetTier: targetTierName,
+      provider: current.provider,
+    };
+  }
+
+  // Tell fetch-blocker (page context) to rewrite the model on next API call.
+  // This is the RELIABLE backup — always works regardless of UI changes.
+  function dispatchRouteModel(model, ruleName) {
+    document.dispatchEvent(new CustomEvent('cfai-route-model', {
+      detail: { model, rule_name: ruleName },
+    }));
+  }
+
+  document.addEventListener('cfai-route-applied', (e) => {
+    console.info('[cfai] fetch-level route applied:', e.detail?.from, '→', e.detail?.to);
+  });
+
+  // ── Adaptive Model Selector — learns the DOM once, reuses, re-learns if stale ──
+  // Cache stores the button element. If it's detached, we re-scan.
+  let _modelBtnCache = null;
+
+  // Keywords that indicate a model selector button — covers all major AI platforms
+  const MODEL_KEYWORDS = [
+    // Anthropic
+    'Opus', 'Sonnet', 'Haiku', 'Fable',
+    // OpenAI
+    'GPT-4', 'GPT-3', 'ChatGPT', 'o1', 'o3', 'o4',
+    // Google
+    'Gemini', 'Flash', 'Ultra',
+    // Microsoft
+    'Copilot',
+    // Other
+    'Mistral', 'Llama', 'Command',
+  ];
+
+  // Platform-specific selectors — checked first before generic keyword search
+  const PLATFORM_BUTTON_SELECTORS = {
+    'chatgpt.com':     '[data-testid="model-switcher"], button[aria-label*="Model"], [class*="model-switcher"]',
+    'chat.openai.com': '[data-testid="model-switcher"], button[aria-label*="Model"], [class*="model-switcher"]',
+    'gemini.google.com': 'button[aria-label*="model" i], [class*="model-selector"], [data-model-selector]',
+  };
+
+  function findModelButton() {
+    const host = window.location.hostname;
+
+    // Try platform-specific selectors first
+    for (const [domain, selector] of Object.entries(PLATFORM_BUTTON_SELECTORS)) {
+      if (host.includes(domain.replace('www.', ''))) {
+        const el = document.querySelector(selector);
+        if (el) {
+          _modelBtnCache = el;
+          console.info('[cfai] model button found via platform selector:', (el.textContent || '').trim().slice(0, 40));
+          return el;
+        }
+      }
+    }
+
+    // Generic keyword search — works on any AI platform
+    for (const el of document.querySelectorAll('button, [role="button"], [role="combobox"], [role="listbox"]')) {
+      const t = (el.textContent || '').trim();
+      if (t.length > 100 || t.length < 2) continue;
+      if (MODEL_KEYWORDS.some(k => t.includes(k))) {
+        _modelBtnCache = el;
+        console.info('[cfai] model button discovered:', t);
+        return el;
+      }
+    }
+    return null;
+  }
+
+  function getModelButton() {
+    // Use cache if element still in DOM
+    if (_modelBtnCache && _modelBtnCache.isConnected) return _modelBtnCache;
+    // Cache stale — re-scan
+    _modelBtnCache = null;
+    return findModelButton();
+  }
+
+  // Search the ENTIRE document for a clickable element containing specific text.
+  // Returns the most specific (deepest) match — avoids clicking a parent container.
+  function findClickableByText(text) {
+    let best = null;
+    let bestLen = Infinity;
+    for (const el of document.querySelectorAll('*')) {
+      if (el.children.length > 10) continue;
+      const t = (el.textContent || '').trim();
+      if (t.length > 100 || t.length < 2) continue;
+      if (!t.includes(text)) continue;
+      // Prefer the shortest text that contains our target (= most specific element)
+      if (t.length < bestLen) {
+        best = el;
+        bestLen = t.length;
+      }
+    }
+    return best;
+  }
+
+  async function changeModelInUI(targetModelId) {
+    const btn = getModelButton();
+    if (!btn) { console.warn('[cfai] model button not found'); return false; }
+
+    const btnText = (btn.textContent || '').trim();
+    const targetText = targetModelId;
+
+    // Already on target model?
+    if (btnText.includes(targetText)) return true;
+
+    // Step 1: Click model button to open dropdown
+    console.info('[cfai] step 1: clicking model button');
+    btn.click();
+    await new Promise(r => setTimeout(r, 400));
+
+    // Step 2: Search for target model — try multiple strategies
+    let targetEl = findClickableByText(targetText);
+
+    if (!targetEl) {
+      // Strategy A: look for "More models" sub-menu (Claude pattern)
+      const moreEl = findClickableByText('More models');
+      if (moreEl) {
+        console.info('[cfai] step 2a: clicking "More models"');
+        moreEl.click();
+        await new Promise(r => setTimeout(r, 400));
+        targetEl = findClickableByText(targetText);
+      }
+    }
+
+    if (!targetEl) {
+      // Strategy B: look for "See all models" or "Show all" (ChatGPT/other patterns)
+      for (const altText of ['See all', 'Show all', 'All models', 'More', 'View all']) {
+        const altEl = findClickableByText(altText);
+        if (altEl) {
+          console.info('[cfai] step 2b: clicking "' + altText + '"');
+          altEl.click();
+          await new Promise(r => setTimeout(r, 400));
+          targetEl = findClickableByText(targetText);
+          if (targetEl) break;
+        }
+      }
+    }
+
+    if (!targetEl) {
+      // Strategy C: look in any open popover/menu/dialog by role
+      for (const el of document.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], [role="listbox"] *')) {
+        const t = (el.textContent || '').trim();
+        if (t.includes(targetText) && t.length < 80) {
+          targetEl = el;
+          console.info('[cfai] step 2c: found via role selector');
+          break;
+        }
+      }
+    }
+
+    if (targetEl) {
+      console.info('[cfai] clicking target:', (targetEl.textContent || '').trim().slice(0, 40));
+      targetEl.click();
+    } else {
+      console.warn('[cfai] target "' + targetText + '" not found in any dropdown');
+      // Close any open menus
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await new Promise(r => setTimeout(r, 100));
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return false;
+    }
+
+    // Verify
+    await new Promise(r => setTimeout(r, 400));
+    _modelBtnCache = null;
+    const newBtn = findModelButton();
+    const newText = newBtn ? (newBtn.textContent || '').trim() : '';
+    if (newText.includes(targetText)) {
+      console.info('[cfai] ✓ model changed:', btnText, '→', newText);
+      return true;
+    }
+
+    console.info('[cfai] click done, button now shows:', newText);
+    return newText !== btnText;
+  }
+
+  function showRoutingToast(fromModel, toModel, ruleName) {
+    const old = document.getElementById('cfai-routing-toast');
+    if (old) old.remove();
+    const d = document.createElement('div');
+    d.id = 'cfai-routing-toast';
+    d.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;background:#0044cc;color:#fff;padding:12px 18px;border-radius:10px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,0.2);max-width:350px;animation:cfai-fade-in .2s ease-out;';
+    const f = (fromModel || '').replace(/claude-/i,'').replace(/-\d{8}$/,'');
+    const t = (toModel || '').replace(/claude-/i,'').replace(/-\d{8}$/,'');
+    d.innerHTML = '<div style="font-weight:700;margin-bottom:4px">⚡ Model Routed</div>' +
+      '<div>' + f + ' → <strong>' + t + '</strong></div>' +
+      '<div style="font-size:11px;opacity:0.8;margin-top:4px">Rule: ' + (ruleName||'') + '</div>' +
+      '<div style="font-size:10px;opacity:0.6;margin-top:2px">CloudFuze AI Governance</div>';
+    document.documentElement.appendChild(d);
+    setTimeout(() => { try { d.remove(); } catch {} }, 5000);
+  }
 
   // Central emit + notify function for every prompt send.
   // Called from tryBlock (synchronous, captures text before React clears it)
@@ -1387,7 +1834,7 @@
       : '';
     const tagsRow = (opts.matches && opts.matches.length)
       ? `<div class="cfai-block-tags">${opts.matches.map((m) =>
-          `<span class="cfai-tag cfai-${m.severity}">${escapeHtml(m.pattern)}${m.count > 1 ? ' &times;' + m.count : ''}</span>`
+          `<span class="cfai-tag cfai-${m.severity}"${m.class ? ' data-class="' + escapeHtml(m.class) + '"' : ''}>${escapeHtml(m.pattern)}${m.count > 1 ? ' &times;' + m.count : ''}</span>`
         ).join(' ')}</div>`
       : '';
     const hintRow = opts.hint
@@ -1429,7 +1876,10 @@
             <button type="button" class="cfai-block-dismiss cfai-block-edit-btn">Edit manually</button>
           </div>`;
       } else {
-        actionsHtml = '<div class="cfai-block-actions"><button type="button" class="cfai-block-dismiss">Got it</button></div>';
+        const requestBtn = opts.requestAccess
+          ? '<button type="button" class="cfai-block-request" style="appearance:none;border:0;background:#0044cc;color:#fff;font-size:13px;font-weight:600;padding:9px 22px;border-radius:8px;cursor:pointer;margin-right:8px;">Request Access</button>'
+          : '';
+        actionsHtml = '<div class="cfai-block-actions">' + requestBtn + '<button type="button" class="cfai-block-dismiss">Got it</button></div>';
       }
 
       ui.innerHTML = `
@@ -1517,6 +1967,84 @@
           }
           run(e);
         }, true);
+      }
+
+      // Request Access button (platform block, no sensitive matches) — shows an
+      // inline form and submits to the server. Only rendered by actionsHtml
+      // when !hasSensitiveMatches && opts.requestAccess, so this is a no-op
+      // for the redaction/tokenize path above.
+      if (!hasSensitiveMatches) {
+        const requestBtn = ui.querySelector('.cfai-block-request');
+        if (requestBtn && opts.requestAccess) {
+          requestBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            // Replace button with inline form
+            const actionsDiv = ui.querySelector('.cfai-block-actions');
+            if (actionsDiv) {
+              actionsDiv.innerHTML = `
+                <div style="width:100%;text-align:left;">
+                  <div style="font-size:13px;font-weight:600;margin-bottom:6px;">Why do you need access?</div>
+                  <textarea id="cfai-request-reason" placeholder="Briefly describe your use case..." style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;resize:vertical;min-height:60px;box-sizing:border-box;font-family:inherit;"></textarea>
+                  <div style="display:flex;gap:8px;margin-top:8px;justify-content:flex-end;">
+                    <button type="button" class="cfai-block-dismiss" style="appearance:none;border:1px solid #e2e8f0;background:#fff;color:#475569;font-size:13px;padding:7px 16px;border-radius:8px;cursor:pointer;">Cancel</button>
+                    <button type="button" id="cfai-submit-request" style="appearance:none;border:0;background:#0044cc;color:#fff;font-size:13px;font-weight:600;padding:7px 16px;border-radius:8px;cursor:pointer;">Submit Request</button>
+                  </div>
+                </div>
+              `;
+              // Cancel button
+              actionsDiv.querySelector('.cfai-block-dismiss').addEventListener('click', (e) => { e.stopPropagation(); close(); });
+              // Submit button
+              actionsDiv.querySelector('#cfai-submit-request').addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const reason = (ui.querySelector('#cfai-request-reason')?.value || '').trim();
+                const submitBtn = actionsDiv.querySelector('#cfai-submit-request');
+                submitBtn.textContent = 'Submitting...';
+                submitBtn.disabled = true;
+                try {
+                  // Route through service worker to avoid mixed-content blocks
+                  const result = await new Promise((resolve, reject) => {
+                    try {
+                      chrome.runtime.sendMessage({
+                        kind: 'access_request',
+                        tool_host: opts.requestAccess.tool_host,
+                        tool_name: opts.requestAccess.tool_name,
+                        tool_vendor: opts.requestAccess.tool_vendor,
+                        reason,
+                      }, (response) => {
+                        if (chrome.runtime.lastError) {
+                          const msg = chrome.runtime.lastError.message || '';
+                          if (msg.includes('invalidated') || msg.includes('Receiving end does not exist')) {
+                            // Extension was reloaded — refresh page to load new content script
+                            window.location.reload();
+                            return;
+                          }
+                          reject(new Error(msg));
+                        }
+                        else if (response?.error) reject(new Error(response.error));
+                        else resolve(response);
+                      });
+                    } catch (e) {
+                      if (e.message?.includes('invalidated')) { window.location.reload(); return; }
+                      reject(e);
+                    }
+                  });
+                  actionsDiv.innerHTML = '<div style="text-align:center;padding:12px;color:#22c55e;font-weight:600;">✓ Request submitted! Your admin will review it.</div>';
+                } catch (err) {
+                  let msg;
+                  if (err.message?.includes('invalidated') || err.message?.includes('Receiving end')) {
+                    window.location.reload(); return;
+                  } else if (err.message?.includes('pending')) msg = 'You already have a pending request for this tool.';
+                  else if (err.message?.includes('fetch') || err.message?.includes('NetworkError') || err.message?.includes('Failed')) msg = 'Cannot reach the governance server. Please check your network connection or contact IT.';
+                  else if (err.message?.includes('Not configured')) msg = 'Extension is not configured yet. Open extension settings and enter the server URL.';
+                  else msg = 'Something went wrong. Please try again or contact your administrator.';
+                  actionsDiv.innerHTML = '<div style="text-align:center;padding:12px;color:#ef4444;">' + escapeHtml(msg) + '</div><div style="text-align:center;margin-top:8px;"><button type="button" class="cfai-block-dismiss" style="appearance:none;border:1px solid #e2e8f0;background:#fff;color:#475569;font-size:13px;padding:7px 16px;border-radius:8px;cursor:pointer;">Close</button></div>';
+                  actionsDiv.querySelector('.cfai-block-dismiss')?.addEventListener('click', (e) => { e.stopPropagation(); close(); });
+                }
+              });
+              setTimeout(() => ui.querySelector('#cfai-request-reason')?.focus(), 0);
+            }
+          });
+        }
       }
 
       const dismissBtn = ui.querySelector('.cfai-block-dismiss');
@@ -2098,15 +2626,24 @@
   }
 
   // Full-platform block popup — shown when the org has disallowed this platform.
+  // Includes "Request Access" button so employees can ask for temporary access.
   function showPlatformBlockPopup() {
     if (existingCfaiModal()) return;
-    const name = (BLOCKED_PLATFORM && (BLOCKED_PLATFORM.product || BLOCKED_PLATFORM.vendor || BLOCKED_PLATFORM.host)) || 'This AI platform';
+    const platformInfo = BLOCKED_PLATFORM || {};
+    const name = platformInfo.product || platformInfo.vendor || platformInfo.host || 'This AI platform';
+    const host = window.location.hostname;
+
     showCfaiPopup({
       title: `${name} is blocked`,
       body:  'CloudFuze AI Governance has disallowed this AI platform for your organization. Prompts cannot be sent here.',
       matches: [],
-      hint:  'Contact your administrator if you need access to this tool.',
+      hint:  'Need access? Click below to submit a request to your administrator.',
       hardBlock: true,
+      requestAccess: {
+        tool_host: host,
+        tool_name: name,
+        tool_vendor: platformInfo.vendor || null,
+      },
     });
   }
 
@@ -2133,11 +2670,29 @@
   function showBlockPopup(matches, promptEl, clientEventId) {
     if (existingCfaiModal()) return;
     const el = promptEl || findActivePromptInput() || findPromptInputs()[0];
+    // Pick title/body based on whether it's a guardrail or DLP violation
+    const hasGuardrail = matches.some(m => m.class === 'guardrail');
+    const hasDlp = matches.some(m => m.class !== 'guardrail');
+    let title, body;
+    if (hasGuardrail && !hasDlp) {
+      title = 'Unsafe prompt blocked';
+      body = 'CloudFuze AI Governance blocked this message because it contains a security or safety violation:';
+    } else if (hasGuardrail && hasDlp) {
+      title = "This prompt can't be sent";
+      body = 'CloudFuze AI Governance blocked this message — it contains sensitive data and a safety violation:';
+    } else {
+      title = "This prompt can't be sent";
+      body = 'CloudFuze AI Governance blocked this message because it contains sensitive data:';
+    }
     showCfaiPopup({
-      title: 'Sensitive data detected — how do you want to send this?',
-      body:  'CloudFuze AI Governance found sensitive data in this prompt:',
-      matches,
-      hint:  'Tokenize &amp; Send replaces each detected value with a fixed label such as [SSN] before sending. The original values are never sent, and cannot be recovered from the label.',
+      title, body, matches,
+      // Tokenize & Send only ever appears (via actionsHtml/redaction) when there
+      // is DLP content to mask — a pure guardrail violation (jailbreak, toxicity,
+      // etc.) has nothing to tokenize, so its hint stays the plain removal
+      // instruction rather than describing a button that won't render.
+      hint: hasDlp
+        ? 'Tokenize &amp; Send replaces each detected value with a fixed label such as [SSN] before sending. The original values are never sent, and cannot be recovered from the label.'
+        : 'Remove the flagged content from your prompt to continue.',
       hardBlock: true,
       offerRedact: true,
       promptEl: el,
@@ -2210,6 +2765,56 @@
         showBlockPopup(_recentSensitivePaste.matches, el, cid);
         return true;
       }
+      // ── Model Routing ──
+      // 1. Try to change the model in the UI (visible to user)
+      // 2. Always set fetch-blocker backup (guarantees the API call uses the right model)
+      // 3. Pause the send → change model → re-send
+      if (!_skipRouting) {
+        const currentModelText = (getModelButton()?.textContent || '').trim();
+        const routing = smartRoute(currentModelText, text);
+        if (routing) {
+          // PAUSE the send
+          if (e) { e.preventDefault(); e.stopImmediatePropagation(); if (typeof e.stopPropagation === 'function') e.stopPropagation(); }
+          console.info('[cfai] SMART ROUTE:', currentModelText, '→', routing.uiName, '(' + routing.rule_name + ')');
+
+          // Set fetch-blocker backup (always works even if DOM change fails)
+          dispatchRouteModel(routing.model, routing.rule_name);
+
+          // Try DOM change, then re-send regardless
+          _weAreRouting = true;
+          changeModelInUI(routing.model).then((uiChanged) => {
+            _weAreRouting = false;
+            showRoutingToast(currentModelText, routing.uiName, routing.rule_name);
+            emit({
+              kind: 'model_routed',
+              mechanism: 'browser_extension',
+              routed_model: routing.model,
+              routed_ui_name: routing.uiName,
+              rule_name: routing.rule_name,
+              complexity: routing.complexity,
+              current_tier: routing.currentTier,
+              provider: routing.provider,
+              content_length: text.length,
+              ui_changed: uiChanged,
+            });
+
+            // Re-trigger the send
+            _skipRouting = true;
+            setTimeout(() => {
+              const target = (el && el.isConnected) ? el : findActivePromptInput();
+              if (target) {
+                target.dispatchEvent(new KeyboardEvent('keydown', {
+                  key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+                  bubbles: true, cancelable: true,
+                }));
+              }
+              setTimeout(() => { _skipRouting = false; }, 500);
+            }, 200);
+          });
+          return true;
+        }
+      }
+
       // Not blocking — still log the send for governance.
       logPromptEvent(text);
       return false;

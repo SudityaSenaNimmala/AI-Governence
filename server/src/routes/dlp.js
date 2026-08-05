@@ -1,6 +1,9 @@
 import crypto from 'node:crypto';
 import { a } from '../util.js';
 import { requireMachineAuth } from '../auth.js';
+import { emitWebhook } from './webhooks.js';
+import { siemForward } from '../lib/siem-forward.js';
+import { attachMachineIdentity, machineIdentity } from '../lib/machine-identity.js';
 
 // Hard cap on per-event content size. Anything bigger gets stored truncated
 // with a `truncated=1` flag so the dashboard can warn the admin.
@@ -12,6 +15,11 @@ export function mountDlp(app, db) {
     const events = req.body?.events;
     if (!Array.isArray(events)) return res.status(400).json({ error: 'events array required' });
     if (events.length > 200) return res.status(413).json({ error: 'batch too large (max 200)' });
+
+    // Every event in a batch belongs to the authenticated machine, so resolve
+    // the enrolled person once and stamp it on each event (a client-supplied
+    // e.user still wins — e.g. the browser extension's signed-in identity).
+    const identity = await machineIdentity(db, req.machine.id);
 
     let stored = 0;
     let bound = 0;
@@ -56,10 +64,18 @@ export function mountDlp(app, db) {
       // assistant reply. Needed to render a conversation in order later.
       const role = roleForKind(e.kind);
 
-      const eventId = crypto.randomUUID();
-      await db.collection('dlp_events').insertOne({
+      // A client may supply a stable dedupe key (the Claude tracker uses the
+      // transcript message uuid). Re-reporting the same key updates the row
+      // instead of inserting a duplicate, which is what makes replaying local
+      // history safe after the server has been unreachable.
+      const dedupeKey = typeof e.clientEventId === 'string' && e.clientEventId ? e.clientEventId : null;
+      const eventId = dedupeKey || crypto.randomUUID();
+      const eventDoc = {
         id: eventId,
+        client_event_id: dedupeKey,
         machine_id: req.machine.id,
+        user: e.user ?? identity.user,
+        hostname: e.hostname ?? identity.hostname,
         occurred_at: e.occurredAt,
         source: e.source ?? 'browser_extension',
         ai_service: e.service ?? 'unknown',
@@ -100,7 +116,16 @@ export function mountDlp(app, db) {
           },
         ),
         received_at: new Date(),
-      });
+      };
+      if (dedupeKey) {
+        await db.collection('dlp_events').updateOne(
+          { id: dedupeKey },
+          { $set: eventDoc },
+          { upsert: true },
+        );
+      } else {
+        await db.collection('dlp_events').insertOne(eventDoc);
+      }
 
       await insertContent(db, eventId, e);
 
@@ -120,6 +145,21 @@ export function mountDlp(app, db) {
           severity: secretClass,
         });
       }
+
+      // Push critical enforcement events to webhook subscribers.
+      if ((e.kind === 'enforcement_block' || e.kind === 'enforcement_override') && (secretClass === 'critical' || secretClass === 'high')) {
+        emitWebhook(db, 'dlp_critical', {
+          title: 'DLP Violation: ' + (e.service || 'AI Tool'),
+          body: 'Sensitive data (' + (secretClass || 'unknown') + ') detected in ' + (e.service || 'an AI tool') + '. ' + (e.kind === 'enforcement_override' ? 'User overrode the block.' : 'Prompt was blocked.') + '\nPatterns: ' + (patternMatched || 'unknown'),
+          severity: secretClass,
+          employee: req.machine.hostname || req.machine.id,
+          tool: e.service || 'unknown',
+          trigger: 'dlp_critical',
+        });
+      }
+
+      // Real-time push to a configured SIEM syslog collector (no-op if unset).
+      siemForward('dlp', eventDoc);
       stored++;
     }
 
@@ -182,6 +222,9 @@ export function mountDlp(app, db) {
       .toArray();
     const hasContentSet = new Set(contentDocs.map((c) => c.event_id));
 
+    // Resolve the person for events that predate per-event user stamping.
+    await attachMachineIdentity(db, rows);
+
     const platformMap = buildPlatformMap(platforms);
     res.json(rows.map((r) => {
       const meta = safeJson(r.metadata_json);
@@ -231,8 +274,9 @@ export function mountDlp(app, db) {
       .find({ secret_class: { $in: ['critical', 'high'] } })
       .sort({ occurred_at: -1 })
       .limit(25)
-      .project({ _id: 0, id: 1, occurred_at: 1, ai_service: 1, pattern_matched: 1, event_kind: 1, machine_id: 1, metadata_json: 1 })
+      .project({ _id: 0, id: 1, occurred_at: 1, ai_service: 1, pattern_matched: 1, event_kind: 1, machine_id: 1, user: 1, hostname: 1, metadata_json: 1 })
       .toArray();
+    await attachMachineIdentity(db, recentCritical);
 
     res.json({
       byService,
@@ -266,12 +310,16 @@ export function mountDlp(app, db) {
       .toArray();
     const hasContentSet = new Set(contentDocs.map((c) => c.event_id));
 
+    await attachMachineIdentity(db, rows);
+
     const platformMap = buildPlatformMap(platforms);
     res.json(rows.map((r) => {
       const meta = safeJson(r.metadata_json);
       return {
         id: r.id,
         machine_id: r.machine_id,
+        user: r.user,
+        hostname: r.hostname,
         occurred_at: r.occurred_at,
         ai_service: r.ai_service,
         file_class: r.pattern_matched,

@@ -1,0 +1,10 @@
+{
+  "_comment": "Claude Code CLI telemetry -> CloudFuze AI-Governance. Merge this 'env' block into the user's ~/.claude/settings.json, OR enforce org-wide at C:\\ProgramData\\ClaudeCode\\managed-settings.json (macOS: /Library/Application Support/ClaudeCode/managed-settings.json, Linux: /etc/claude-code/managed-settings.json). The CLI then reports each prompt to /api/v1/otel/v1/logs and it appears in the AI Usage tab under 'Claude Code'. Replace localhost with the server host for remote machines. Prompt CONTENT is not sent (only prompt_length) unless OTEL_LOG_USER_PROMPTS is set.",
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:8787/api/v1/otel",
+    "OTEL_LOGS_EXPORT_INTERVAL": "5000"
+  }
+}

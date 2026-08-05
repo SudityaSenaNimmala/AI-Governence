@@ -16,6 +16,7 @@ import { spawnWatchdog } from './watchdog.js';
 import { Reporter } from '../os_monitor/reporter.js';
 import { DiscoveryReporter } from './discovery-reporter.js';
 import { parseApiCall } from '../server-monitor/cost-parser.js';
+import { ModelRouter } from './router.js';
 
 export async function runProxy({
   serverUrl,
@@ -94,10 +95,20 @@ export async function runProxy({
     }
   };
 
+  // 4c. Model Router — fetches routing rules from server, evaluates locally.
+  const modelRouter = new ModelRouter({
+    serverUrl: serverUrl || null,
+    token: token || null,
+    log: log?.child?.('router') ?? log,
+  });
+  if (serverUrl && token) {
+    await modelRouter.start();
+  }
+
   // 5. MITM proxy server. Must be listening BEFORE we touch the system proxy
   //    (system-proxy-win32 does its own listen-probe but we want the visible
   //    log line first).
-  const { server, stop } = await startProxy({ ca, reporter, log, port, onApiCall });
+  const { server, stop } = await startProxy({ ca, reporter, log, port, onApiCall, modelRouter });
 
   // 6. PAC server (only needed for PAC mode). Tiny static HTTP server on a
   //    separate port — its purpose is to keep serving the PAC file with a
@@ -143,6 +154,7 @@ export async function runProxy({
     try { stopResolver(); } catch {}
     try { reporter?.stop(); } catch {}
     try { discoveryReporter?.stop(); } catch {}
+    try { modelRouter?.stop(); } catch {}
     // The detached watchdog will notice the parent is gone within POLL_MS
     // and exit on its own (it'll find STATE_PATH already removed → no-op).
     process.exit(0);

@@ -19,7 +19,10 @@ import {
   Unplug,
   Workflow,
   Grip,
-  History
+  History,
+  Activity,
+  Wallet,
+  Shuffle
 } from "lucide-react";
 import { useContext, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
@@ -113,8 +116,19 @@ const SideNav = (props) => {
         // { icon: <Database size={16} />, title: "Server Agents", link: "/AIHub/ServerAgents" },   // hidden for now
         { icon: <Sparkles size={16} />, title: "AI Activity", link: "/AIHub/DLP" },
         { icon: <History size={16} />, title: "Session Replay", link: "/AIHub/SessionReplay" },
+        // { icon: <Gem size={16} />, title: "AI Usage", link: "/AIHub/AIUsage" },  // hidden for now
+        { icon: <MessageCircle size={16} />, title: "Claude Usage", link: "/AIHub/ClaudeUsage" },
         { icon: <Grip size={16} />, title: "AI Platforms", link: "/AIHub/Platforms" },
         { icon: agentGovernanceIcon, title: "Agent Governance", link: "/AIHub/AgentGovernance" },
+        // { icon: <Activity size={16} />, title: "Server Monitor", link: "/AIHub/ServerMonitor" },  // disabled — needs SDK first
+        { icon: <Wallet size={16} />, title: "AI Budget", link: "/AIHub/AIBudget" },
+        { icon: <ShieldCheck size={16} />, title: "Copilot Readiness", link: "/AIHub/CopilotReadiness" },
+        { icon: <Shuffle size={16} />, title: "Model Routing", link: "/AIHub/ModelRouting" },
+        { icon: <ShieldCheck size={16} />, title: "Risk Scores", link: "/AIHub/RiskScores" },
+        { icon: <Database size={16} />, title: "AI Registry", link: "/AIHub/AIRegistry" },
+        { icon: <ShieldCheck size={16} />, title: "Access Requests", link: "/AIHub/AccessRequests" },
+        { icon: <Unplug size={16} />, title: "Integrations", link: "/AIHub/Integrations" },
+        { icon: <Unplug size={16} />, title: "Developer SDK", link: "/AIHub/DeveloperSDK" },
       ],
     },
     ...(hasContentSprawl

@@ -22,6 +22,7 @@ import promptsRouter from "./routes/prompts.js";
 import recertificationRouter from "./routes/recertification.js";
 import agentMetadataRouter from "./routes/agentMetadata.js";
 import capabilitiesRouter from "./routes/capabilities.js";
+import copilotReadinessRouter from "./routes/copilotReadiness.js";
 
 const governanceRouter = Router();
 
@@ -44,6 +45,7 @@ governanceRouter.use("/api/prompts", promptsRouter);
 governanceRouter.use("/api/recertification", recertificationRouter);
 governanceRouter.use("/api/agent-metadata", agentMetadataRouter);
 governanceRouter.use("/api/capabilities", capabilitiesRouter);
+governanceRouter.use("/api/copilot-readiness", copilotReadinessRouter);
 
 governanceRouter.get("/api/health", (_req, res) => {
   res.json({ status: "ok", source: "agent-governance", timestamp: new Date().toISOString() });

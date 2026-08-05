@@ -80,6 +80,13 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   locates the send control (UIA hit-test at cursor) and swallows the click
   when the prompt holds a blocked pattern.
 
+- [ ] **First-class staged-enforcement switch (observe → hold → block_critical) across all surfaces**
+  `capture_mode` (observe / block_critical / hold, default observe) is modeled on each AI
+  platform and drives the hold flow, but the browser extension / OS monitor / proxy clients
+  currently enforce off severity + the platform `blocked` flag rather than reading
+  `capture_mode` uniformly. Wire all client surfaces to honor the same mode so an admin gets
+  one monitor-then-enforce rollout control (read-only → approval → block) per platform.
+
 - [ ] **Fix MCP filesystem target extractor mis-parsing npx package name as a directory**
   `mcp_inspection.js` filesystem rule treats the `@modelcontextprotocol/server-filesystem`
   arg as a directory target (its path regex matches the `/`), polluting data-flow
@@ -131,6 +138,12 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   reload creates a new instance while the underlying engagement/session
   survives, so recording silently resumes mid-engagement after a user
   explicitly stopped it.
+
+- [x] **Execute policyEngine actions (suspend/escalate/notify) instead of only recording them**
+  Today `policyEngine` templates advertise `suspend`/`escalate`/`notify` actions, but
+  `policies.ts` only writes `action_taken: actionRecommended` — a string of what *should*
+  happen. Nothing suspends an agent, routes an escalation, or sends a notification. Wire
+  the recommended actions to real effects (Graph disable/suspend, escalation queue, email/webhook).
 
 ---
 
@@ -198,6 +211,11 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   check). A wrong or insecure URL currently only fails later, silently-ish, at
   the Session Replay gate rather than being caught when the admin configures it.
 
+- [x] **Native SIEM/CEF/syslog export of decision + evidence records**
+  Today external systems can only pull via REST or receive signed webhooks. Regulated
+  buyers expect push into a SIEM/audit pipeline. Add a CEF/syslog (and/or scheduled
+  audit-bundle) exporter for `dlp_events`, `approval_requests`, and `policy_violations`.
+
 ---
 
 ## P3 — coverage expansion
@@ -224,6 +242,11 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   monitor + extension + hook DO store full text (per the 2026-05-18 content
   storage decision). Decide whether proxy_block events should also include
   full text and align with the same retention policy.
+
+- [x] **Wire the declared `policy.violation` webhook**
+  `policy.violation` is listed in `WEBHOOK_EVENTS` but no `emitWebhook` call ever fires it,
+  so subscribers can't receive Layer-B policy violations. Emit it from the policy-evaluation
+  path (`policies.ts`) alongside the existing enforcement/approval webhooks.
 
 ---
 

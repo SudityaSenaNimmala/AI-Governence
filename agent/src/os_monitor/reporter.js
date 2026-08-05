@@ -6,9 +6,17 @@
 // Two-tier flush: a fast debounce after each enqueue (so the dashboard sees
 // events within a couple seconds for live alerting), plus a longer safety-net
 // interval (in case the debounce timer is somehow lost or stalled).
+import os from 'node:os';
+
 const DEBOUNCE_MS         = 2_000;   // flush this long after the latest event
 const SAFETY_INTERVAL_MS  = 30_000;  // also flush at least this often
 const MAX_BATCH           = 50;
+
+// The currently logged-in OS user — stamped on every event so the dashboard
+// attributes activity to a person, and stays correct on shared machines even
+// if the machine record's enrolled user differs. Resolved once.
+let OS_USER = null;
+try { OS_USER = os.userInfo().username || null; } catch { OS_USER = null; }
 
 export class Reporter {
   constructor({ serverUrl, token, log }) {
@@ -35,6 +43,7 @@ export class Reporter {
     this.queue.push({
       ...event,
       source: 'os_monitor',
+      user: event.user || OS_USER,
       occurredAt: event.occurredAt || new Date().toISOString(),
     });
 

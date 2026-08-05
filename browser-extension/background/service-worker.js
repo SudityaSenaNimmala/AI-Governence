@@ -25,6 +25,7 @@ import {
 const STORAGE = {
   CONFIG:    'cfai.config',
   TOKEN:     'cfai.token',
+  USER:      'cfai.user',              // last identity sent to the server
   MACHINE_ID:'cfai.machineId',
   QUEUE:     'cfai.queue',
   PLATFORMS: 'cfai.platforms',         // mirror of GET /api/v1/ai-platforms
@@ -40,6 +41,8 @@ const STORAGE = {
   RECORDING_DAILY: 'cfai.recordingDaily',
   // GONE WITH THE VIDEO PIPELINE: 'cfai.recordings' (tabId → live video capture).
   // Nothing reads it any more.
+  ROUTING_RULES: 'cfai.routing_rules',     // model routing rules from server
+  ROUTING_RULES_AT: 'cfai.routing_rules_at',
 };
 
 const FLUSH_ALARM = 'cfai-flush';
@@ -52,6 +55,9 @@ const PLATFORMS_REFRESH_MIN = 1;    // how often to pull the registry (1 = chrom
 const BLOCKED_ALARM = 'cfai-blocked-refresh';
 const BLOCKED_REFRESH_MIN = 2;     // poll blocked agents every 2 min
 
+const ROUTING_ALARM = 'cfai-routing-refresh';
+const ROUTING_REFRESH_MIN = 1;     // poll routing rules every 1 min
+
 // --- helpers ---
 
 async function getStored(key, fallback = null) {
@@ -62,7 +68,24 @@ async function setStored(key, value) {
   await chrome.storage.local.set({ [key]: value });
 }
 async function getConfig() {
-  return getStored(STORAGE.CONFIG, { serverUrl: '', enrollSecret: '' });
+  return getStored(STORAGE.CONFIG, { serverUrl: '', enrollSecret: '', userEmail: '' });
+}
+// Resolve a real user identity so usage attributes to a person, not the browser.
+// 1) admin/user-configured identity (works in every browser, incl. Firefox);
+// 2) Chrome signed-in profile email (best-effort — needs the "identity"/"identity.email"
+//    permission; if absent it just returns null and we fall through).
+async function resolveUserIdentity(config) {
+  if (config.userEmail) return config.userEmail;
+  try {
+    if (typeof chrome !== 'undefined' && chrome.identity?.getProfileUserInfo) {
+      const info = await new Promise((resolve) => {
+        try { chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, resolve); }
+        catch { resolve(null); }
+      });
+      if (info?.email) return info.email;
+    }
+  } catch { /* unsupported / not permitted — fall through */ }
+  return null;
 }
 function safeHost(url) {
   try { return new URL(url).hostname; } catch (e) { return null; }
@@ -85,17 +108,41 @@ async function ensureToken() {
   if (!config.serverUrl || !config.enrollSecret) return null;
 
   const machineId = await getOrCreateMachineId();
-  const hostname = navigator.userAgent.split(/[\s/(]/)[0] + '-browser-extension';
+
+  // Try to auto-detect hostname from desktop agent beacon
+  let computerName = config.computerName;
+  if (!computerName) {
+    try {
+      const beaconRes = await fetch('http://127.0.0.1:19532/cfai/identity', { signal: AbortSignal.timeout(2000) });
+      if (beaconRes.ok) {
+        const beaconData = await beaconRes.json();
+        computerName = beaconData.hostname;
+        // Persist for future enrollments
+        config.computerName = computerName;
+        config.detectedUser = beaconData.user;
+        await setStored(STORAGE.CONFIG, config);
+        console.info('[cfai] auto-detected hostname from desktop agent:', computerName);
+      }
+    } catch { /* agent not running — proceed without linking */ }
+  }
+
+  const hostname = computerName
+    ? computerName + '-browser-extension'
+    : navigator.userAgent.split(/[\s/(]/)[0] + '-browser-extension';
+  const user = await resolveUserIdentity(config);
 
   try {
+    const enrollBody = { machineId, hostname, user, enrollSecret: config.enrollSecret };
+    if (config.employeeEmail) enrollBody.employeeEmail = config.employeeEmail;
     const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/enroll`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ machineId, hostname, enrollSecret: config.enrollSecret }),
+      body: JSON.stringify(enrollBody),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const { token } = await res.json();
     await setStored(STORAGE.TOKEN, token);
+    await setStored(STORAGE.USER, user);
     return token;
   } catch (err) {
     console.warn('[cfai] enrollment failed:', err.message);
@@ -276,6 +323,35 @@ async function closeEngagementsOnStartup() {
   });
 }
 
+// Keep the machine's attributed user current. Runs cheaply on every flush and
+// at startup; only re-enrolls (network) when the resolved identity actually
+// changes — e.g. after the admin sets an email, or the browser sign-in changes.
+// This is what makes already-installed extensions start reporting a real user.
+async function syncIdentity() {
+  const config = await getConfig();
+  if (!config.serverUrl || !config.enrollSecret) return;
+  const current = await resolveUserIdentity(config);
+  if (!current) return;                          // nothing to attribute yet
+  const last = await getStored(STORAGE.USER);
+  if (current === last) return;                  // unchanged — no network call
+  const machineId = await getOrCreateMachineId();
+  const hostname = navigator.userAgent.split(/[\s/(]/)[0] + '-browser-extension';
+  try {
+    const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/enroll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ machineId, hostname, user: current, enrollSecret: config.enrollSecret }),
+    });
+    if (res.ok) {
+      const { token } = await res.json();
+      await setStored(STORAGE.TOKEN, token);
+      await setStored(STORAGE.USER, current);
+    }
+  } catch (err) {
+    console.warn('[cfai] identity sync failed:', err.message);
+  }
+}
+
 // --- queue ---
 
 async function pushEvent(event) {
@@ -309,7 +385,10 @@ async function flushQueue() {
   const token = await ensureToken();
   if (!token) return;
 
-  const batch = queue.slice(0, BATCH_SIZE);
+  // Stamp the signed-in person on each event so activity attributes to a user,
+  // not just the machine. Uses the identity resolved at enroll / last sync.
+  const user = (await resolveUserIdentity(config)) || (await getStored(STORAGE.USER)) || null;
+  const batch = queue.slice(0, BATCH_SIZE).map((e) => (e.user ? e : { ...e, user }));
   try {
     // authedFetch transparently handles 401-on-token-rotation by clearing
     // the stale token, re-enrolling using stored config, and retrying once.
@@ -638,17 +717,69 @@ chrome.alarms.create(BLOCKED_ALARM, { periodInMinutes: BLOCKED_REFRESH_MIN });
 // outlive its window by up to a minute — which is why every signal path also
 // re-checks expiry through nextEngagement() instead of trusting the sweep.
 chrome.alarms.create(ENGAGEMENT_SWEEP_ALARM, { periodInMinutes: 1 });
+chrome.alarms.create(ROUTING_ALARM, { periodInMinutes: ROUTING_REFRESH_MIN });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === FLUSH_ALARM)     flushQueue();
+  if (alarm.name === FLUSH_ALARM)     { syncIdentity().catch(() => {}); flushQueue(); }
   if (alarm.name === PLATFORMS_ALARM) refreshPlatforms();
   if (alarm.name === BLOCKED_ALARM)   refreshBlockedAgents();
   if (alarm.name === ENGAGEMENT_SWEEP_ALARM) engagementSweep().catch(() => {});
+  if (alarm.name === ROUTING_ALARM)   refreshRoutingRules();
 });
 
 // Refresh once at startup too — alarm fires on its own schedule, not at boot.
 // Best-effort: if the worker is unenrolled or offline, no-op.
 refreshPlatforms().catch(() => {});
 refreshBlockedAgents().catch(() => {});
+refreshRoutingRules().catch(() => {});
+
+// Auto-link: detect desktop agent beacon → re-enroll with real hostname if needed.
+// Runs every startup so a freshly installed extension links automatically.
+// Wrapped in setTimeout to avoid racing with other startup tasks.
+setTimeout(async () => {
+  try {
+    console.info('[cfai] checking for desktop agent beacon...');
+    const res = await fetch('http://127.0.0.1:19532/cfai/identity', { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) { console.info('[cfai] beacon responded but not ok:', res.status); return; }
+    const beacon = await res.json();
+    if (!beacon.hostname) { console.info('[cfai] beacon has no hostname'); return; }
+
+    const config = await getConfig();
+
+    // Update config with detected hostname (always, in case beacon info changed)
+    const wasLinked = config.computerName === beacon.hostname;
+    config.computerName = beacon.hostname;
+    config.detectedUser = beacon.user;
+    config.detectedMachineId = beacon.machineId;
+    await setStored(STORAGE.CONFIG, config);
+
+    if (wasLinked) {
+      console.info('[cfai] already linked to:', beacon.hostname);
+      // Still verify the enrollment happened — force re-enroll if the server
+      // doesn't have a machine record with our expected hostname
+      try {
+        const checkRes = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/machines`);
+        if (checkRes.ok) {
+          const machines = await checkRes.json();
+          const expectedHost = beacon.hostname + '-browser-extension';
+          const found = machines.some(m => m.hostname === expectedHost);
+          if (found) return; // all good — already enrolled with correct hostname
+          console.info('[cfai] extension not enrolled with correct hostname yet, re-enrolling...');
+        }
+      } catch {} // server down — try re-enroll anyway
+    } else {
+      console.info('[cfai] detected desktop agent:', beacon.hostname, beacon.user);
+    }
+
+    // Force re-enrollment with the real hostname
+    await chrome.storage.local.remove(STORAGE.TOKEN);
+    console.info('[cfai] cleared old token, re-enrolling...');
+    const newToken = await ensureToken();
+    console.info('[cfai] re-enrolled:', newToken ? 'OK' : 'FAILED (no serverUrl/secret?)');
+  } catch (err) {
+    console.info('[cfai] desktop agent not detected:', err.message || 'fetch failed');
+  }
+}, 2000);
+syncIdentity().catch(() => {});
 
 // --- blocked agents sync ---
 
@@ -661,10 +792,17 @@ async function refreshBlockedAgents() {
     const list = await res.json();
     await setStored(STORAGE.BLOCKED, list);
     await setStored(STORAGE.BLOCKED_AT, Date.now());
-    // Notify all content scripts so they can enforce immediately
-    const tabs = await chrome.tabs.query({});
+    // Notify content scripts so they can enforce immediately. Only http(s)
+    // tabs can have our content script; skip chrome://, extensions, the Web
+    // Store, etc. In MV3 sendMessage returns a promise, so a missing receiver
+    // rejects ASYNC — a sync try/catch can't catch it. We must .catch() the
+    // promise, or Chrome logs "Could not establish connection. Receiving end
+    // does not exist." for every tab without our content script.
+    const tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] });
     for (const tab of tabs) {
-      try { chrome.tabs.sendMessage(tab.id, { type: 'cfai-blocked-update', blocked: list }); } catch {}
+      if (!tab.id) continue;
+      Promise.resolve(chrome.tabs.sendMessage(tab.id, { type: 'cfai-blocked-update', blocked: list }))
+        .catch(() => { /* no content script in this tab — expected, ignore */ });
     }
   } catch {}
 }
@@ -673,6 +811,39 @@ async function refreshBlockedAgents() {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'cfai-get-blocked') {
     getStored(STORAGE.BLOCKED, []).then(list => sendResponse({ blocked: list }));
+    return true;
+  }
+  // Access request — relay from content script to server
+  if (msg.kind === 'access_request') {
+    (async () => {
+      try {
+        const config = await getConfig();
+        if (!config.serverUrl) { sendResponse({ error: 'Extension is not configured. Open extension settings and enter the server URL.' }); return; }
+        const machineId = await getOrCreateMachineId();
+        const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/access-requests`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            machine_id: machineId,
+            hostname: config.computerName || null,
+            user: config.detectedUser || null,
+            tool_host: msg.tool_host,
+            tool_name: msg.tool_name,
+            tool_vendor: msg.tool_vendor,
+            reason: msg.reason || '',
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          sendResponse({ error: err.error || 'Server returned ' + res.status });
+        } else {
+          const data = await res.json();
+          sendResponse({ ok: true, id: data.id });
+        }
+      } catch (err) {
+        sendResponse({ error: 'Cannot reach the governance server. Please check your network connection or contact IT.' });
+      }
+    })();
     return true; // async response
   }
 });
@@ -725,6 +896,23 @@ async function refreshPlatforms() {
     _platCacheAt = Date.now();
   } catch (e) {
     console.warn('[cfai] platforms refresh failed:', e?.message || e);
+  }
+}
+
+// --- routing rules sync ---
+// Pull model routing rules so the content script can auto-switch models before send.
+async function refreshRoutingRules() {
+  try {
+    const config = await getConfig();
+    if (!config.serverUrl) return;
+    const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/routing/rules`);
+    if (!res.ok) return;
+    const rules = await res.json();
+    const active = (rules || []).filter(r => r.enabled).sort((a,b) => (a.priority||50) - (b.priority||50));
+    await setStored(STORAGE.ROUTING_RULES,    active);
+    await setStored(STORAGE.ROUTING_RULES_AT, Date.now());
+  } catch (e) {
+    console.warn('[cfai] routing rules refresh failed:', e?.message || e);
   }
 }
 

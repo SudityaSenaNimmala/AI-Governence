@@ -147,6 +147,32 @@ function pollRendererQueue(win) {
   poll();
 }
 
+// ---- Model Routing: fetch rules and push into renderers ----
+let _routingRules = [];
+async function refreshRoutingRules() {
+  if (!CFAI_SERVER_URL || !CFAI_TOKEN) return;
+  try {
+    const res = await fetch(CFAI_SERVER_URL + '/api/v1/routing/rules', {
+      headers: { 'authorization': 'Bearer ' + CFAI_TOKEN },
+    });
+    if (res.ok) {
+      const rules = await res.json();
+      _routingRules = (rules || []).filter(r => r.enabled).sort((a,b) => (a.priority||50) - (b.priority||50));
+      // Push into all active renderer windows
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) {
+          win.webContents.executeJavaScript(
+            'window.__cfaiRoutingRules = ' + JSON.stringify(_routingRules) + ';'
+          ).catch(() => {});
+        }
+      }
+    }
+  } catch {}
+}
+// Refresh every 60s, initial fetch on load
+setTimeout(refreshRoutingRules, 3000);
+setInterval(refreshRoutingRules, 60000);
+
 export function installHook() {
   app.on('browser-window-created', (_event, win) => installInWindow(win));
   // Apps may create windows before this module loads — handle existing ones too.

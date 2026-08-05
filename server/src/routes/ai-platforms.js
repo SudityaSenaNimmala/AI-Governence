@@ -16,7 +16,7 @@ const VALID_CATEGORY = new Set([
 ]);
 const VALID_SANDBOX = new Set(['local', 'remote', 'mixed', 'unknown']);
 const VALID_SURFACE = new Set(['browser', 'desktop', 'cli', 'all']);
-const VALID_CAPTURE_MODE = new Set(['observe', 'block_critical']);
+const VALID_CAPTURE_MODE = new Set(['observe', 'block_critical', 'hold']);
 
 function normalizeHost(h) {
   if (!h || typeof h !== 'string') return null;

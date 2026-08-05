@@ -73,7 +73,7 @@ if (!existsSync(resolve(root, 'connect-ui/dist/index.html'))) die('connect-ui bu
 //    remote dir EXCEPT .env so the server's secrets survive every deploy.
 console.log('• Shipping source to host (preserving server .env)…');
 const excludes = "--exclude='*/node_modules' --exclude='*/.vite' --exclude='*/coverage' --exclude='*/build' --exclude='*/out'";
-sh(`tar czf - ${excludes} agent server connect-ui docker-compose.yml .dockerignore ` +
+sh(`tar czf - ${excludes} agent server connect-ui scripts docker-compose.yml .dockerignore ` +
    `| ${SSH} "mkdir -p ${DIR} && find ${DIR} -mindepth 1 -maxdepth 1 ! -name .env -exec rm -rf {} + && tar xzf - -C ${DIR}"`);
 
 // 3. Build images natively on the host (sequential — small box) and bring up.

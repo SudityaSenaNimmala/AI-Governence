@@ -55,6 +55,7 @@ export function mountServerAgents(app, db) {
         cwd: attr.cwd ?? null,
         trigger_source: attr.trigger_source ?? null,
         parent_chain_json: attr.parent_chain ? JSON.stringify(attr.parent_chain) : null,
+        source_ip: e.source_ip ?? null,
         prompt_text: truncate(e.prompt_text, MAX_PROMPT_BYTES),
         response_text: truncate(e.response_text, MAX_RESPONSE_BYTES),
         response_truncated: e.response_truncated ? 1 : 0,

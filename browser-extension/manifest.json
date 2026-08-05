@@ -9,7 +9,8 @@
     "tabs",
     "notifications",
     "scripting",
-    "webNavigation"
+    "webNavigation",
+    "identity"
   ],
   "host_permissions": [
     "<all_urls>",

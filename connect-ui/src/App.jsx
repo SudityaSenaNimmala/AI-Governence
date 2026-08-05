@@ -129,8 +129,19 @@ function App() {
           {/* <Route path="/AIHub/ServerAgents" element={<AIHubPage page="ServerAgents" />} /> hidden for now */}
           <Route path="/AIHub/DLP" element={<AIHubPage page="DLP" />} />
           <Route path="/AIHub/SessionReplay" element={<AIHubPage page="SessionReplay" />} />
+          <Route path="/AIHub/AIUsage" element={<AIHubPage page="AIUsage" />} />
+          <Route path="/AIHub/ClaudeUsage" element={<AIHubPage page="ClaudeUsage" />} />
           <Route path="/AIHub/Platforms" element={<AIHubPage page="Platforms" />} />
           <Route path="/AIHub/AgentGovernance" element={<AIHubPage page="AgentGovernance" />} />
+          {/* <Route path="/AIHub/ServerMonitor" element={<AIHubPage page="ServerMonitor" />} /> disabled — needs SDK first */}
+          <Route path="/AIHub/AIBudget" element={<AIHubPage page="AIBudget" />} />
+          <Route path="/AIHub/CopilotReadiness" element={<AIHubPage page="CopilotReadiness" />} />
+          <Route path="/AIHub/ModelRouting" element={<AIHubPage page="ModelRouting" />} />
+          <Route path="/AIHub/RiskScores" element={<AIHubPage page="RiskScores" />} />
+          <Route path="/AIHub/AIRegistry" element={<AIHubPage page="AIRegistry" />} />
+          <Route path="/AIHub/AccessRequests" element={<AIHubPage page="AccessRequests" />} />
+          <Route path="/AIHub/Integrations" element={<AIHubPage page="Integrations" />} />
+          <Route path="/AIHub/DeveloperSDK" element={<AIHubPage page="DeveloperSDK" />} />
           <Route path="/Data" element={<DataDashboard />} />
           <Route path="/MessageSprawl" element={<MessageDashboard />} />
           <Route path="/EmailSprawl" element={<EmailDashboard />} />

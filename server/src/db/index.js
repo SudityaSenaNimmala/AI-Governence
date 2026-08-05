@@ -104,6 +104,44 @@ export async function applyInitialSchema(db) {
   // ai_platforms
   await db.collection('ai_platforms').createIndex({ host: 1 }, { unique: true });
   await db.collection('ai_platforms').createIndex({ updated_at: -1 });
+
+  // routing_rules
+  await db.collection('routing_rules').createIndex({ id: 1 }, { unique: true });
+  await db.collection('routing_rules').createIndex({ priority: 1 });
+
+  // routing_endpoints
+  await db.collection('routing_endpoints').createIndex({ id: 1 }, { unique: true });
+
+  // routing_log
+  await db.collection('routing_log').createIndex({ timestamp: -1 });
+  await db.collection('routing_log').createIndex({ machine_id: 1 });
+  await db.collection('routing_log').createIndex({ rule_id: 1 });
+
+  // risk_scores (historical)
+  await db.collection('risk_scores').createIndex({ profile_id: 1, computed_at: -1 });
+
+  // integrations (connections)
+  await db.collection('integrations').createIndex({ type: 1 }, { unique: true });
+
+  // webhooks
+  await db.collection('webhooks').createIndex({ id: 1 }, { unique: true });
+  await db.collection('webhook_log').createIndex({ timestamp: -1 });
+  await db.collection('webhook_log').createIndex({ webhook_id: 1 });
+
+  // access_requests
+  await db.collection('access_requests').createIndex({ id: 1 }, { unique: true });
+  await db.collection('access_requests').createIndex({ machine_id: 1, tool_host: 1 });
+  await db.collection('access_requests').createIndex({ status: 1 });
+
+  // access_exceptions
+  await db.collection('access_exceptions').createIndex({ machine_id: 1, tool_host: 1 });
+  await db.collection('access_exceptions').createIndex({ expires_at: 1 });
+
+  // employee_profiles
+  await db.collection('employee_profiles').createIndex({ id: 1 }, { unique: true });
+  await db.collection('employee_profiles').createIndex({ resolve_key: 1 }, { unique: true });
+  await db.collection('employee_profiles').createIndex({ machine_ids: 1 });
+  await db.collection('employee_profiles').createIndex({ email: 1 });
 }
 
 // Stable identifier for one logical AI tool, e.g. "openai:chatgpt".
