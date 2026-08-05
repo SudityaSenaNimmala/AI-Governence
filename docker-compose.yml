@@ -20,6 +20,12 @@ services:
       # The server's DAL is MongoDB-only. Defaults to the bundled mongo service;
       # override in .env to point at an external Mongo (e.g. Atlas).
       MONGODB_URI: ${MONGODB_URI:-mongodb://mongo:27017/aigov}
+      # Gates the admin-only dashboard routes (Session Replay playback, etc.).
+      # scripts/deploy.mjs auto-generates this in the server's .env on first
+      # deploy if it's missing, and never overwrites an existing value. Without
+      # this line the container never sees it and silently falls back to the
+      # hardcoded dev default, regardless of what's in .env.
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
     depends_on:
       - mongo
     ports:

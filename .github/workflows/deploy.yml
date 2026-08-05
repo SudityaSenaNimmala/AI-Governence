@@ -7,6 +7,9 @@ name: Deploy to server
 # Secrets stay on the SERVER: /opt/ai-gov/.env (created once) holds MONGODB_URI,
 # ENCRYPTION_KEY, JWT_SECRET, ENROLL_SECRET. The deploy never ships or overwrites
 # it. So GitHub only needs the SSH key + host — no database/app secrets here.
+# ADMIN_TOKEN is the one exception to "created once, by hand": scripts/deploy.mjs
+# generates it directly in that same .env on the server if it's missing (never
+# overwriting an existing value), so it needs no manual setup at all.
 #
 # Required repository Secrets (Settings → Secrets and variables → Actions):
 #   SSH_KEY_B64       base64 of ~/.ssh/ai_gov_deploy (single line, paste-proof):

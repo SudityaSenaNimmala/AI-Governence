@@ -63,9 +63,34 @@ if (envCheck.status !== 0) {
       `Deploy never ships secrets.`);
 }
 
+// ADMIN_TOKEN gates the dashboard's admin-only routes (Session Replay playback,
+// etc.). Same "server owns its secrets" rule as above: generate it ONCE,
+// server-side, if it's not already there — never overwrite an existing value,
+// never print it, never let it pass through sh()'s command-echo. connect-ui
+// needs the SAME value baked in at build time (VITE_ADMIN_TOKEN), so it's read
+// back here rather than just generated blind on the host.
+console.log('• Ensuring server ADMIN_TOKEN exists (generated once if missing)…');
+// openssl, not node -e: the bare host only guarantees bash/tar/ssh/docker (per
+// the file header) — Node only exists INSIDE the containers this deploy builds.
+const ensureToken = spawnSync('bash', ['-c',
+  `${SSH} "grep -q '^ADMIN_TOKEN=' ${DIR}/.env || ` +
+  `echo ADMIN_TOKEN=\\$(openssl rand -hex 32) >> ${DIR}/.env"`,
+], { cwd: root });
+if (ensureToken.status !== 0) die('failed to ensure ADMIN_TOKEN on the server');
+const tokenRead = spawnSync('bash', ['-c',
+  `${SSH} "grep '^ADMIN_TOKEN=' ${DIR}/.env | head -1 | cut -d= -f2-"`,
+], { cwd: root, encoding: 'utf8' });
+const ADMIN_TOKEN = tokenRead.stdout.trim();
+if (!ADMIN_TOKEN) die('could not read back ADMIN_TOKEN from the server .env');
+
 // 1. Build the frontend locally / on the runner (needs more RAM than the host).
+// VITE_ADMIN_TOKEN is passed via the child process env, never inlined into a
+// shell string, so it can never end up in a printed/logged command.
 console.log('• Building connect-ui (Vite)…');
-sh('npm --prefix connect-ui run build');
+const buildResult = spawnSync('npm', ['--prefix', 'connect-ui', 'run', 'build'], {
+  cwd: root, stdio: 'inherit', env: { ...process.env, VITE_ADMIN_TOKEN: ADMIN_TOKEN },
+});
+if (buildResult.status !== 0) die(`connect-ui build failed (exit ${buildResult.status})`);
 if (!existsSync(resolve(root, 'connect-ui/dist/index.html'))) die('connect-ui build produced no dist/index.html');
 
 // 2. Stream source (incl. built dist, excl. node_modules) to the host.
