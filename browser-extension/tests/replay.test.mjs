@@ -311,10 +311,11 @@ test('buildRecordOptions pins the capture profile', () => {
   assert.equal(opts.maskAllInputs, true, 'every input is masked by default');
   assert.equal(typeof opts.maskInputFn, 'function', 'and the composer is unmasked by function');
   assert.equal(opts.blockSelector, 'img,video,canvas,object,embed');
-  // No pixels, no fonts, no main-world injection.
+  // No pixels, no main-world injection. Fonts ARE collected — see the
+  // font-event tests below for why (missing fonts garble text layout).
   assert.equal(opts.recordCanvas, false, 'canvas needs main-world injection — never enabled');
   assert.equal(opts.inlineImages, false);
-  assert.equal(opts.collectFonts, false);
+  assert.equal(opts.collectFonts, true, 'without real font metrics, replay text overlaps/garbles');
   assert.equal(opts.slimDOMOptions, 'all');
   assert.equal(opts.checkoutEveryNms, policy.checkout_every_ms);
   assert.equal(typeof opts.errorHandler, 'function', 'rrweb must never break the host page');
@@ -955,6 +956,104 @@ test('with nothing but the snapshot left, the run aborts instead of evicting it'
   await settle();
   assert.match(h.logs.warn.join('\n'), /refused 3 times in a row/);
 
+  await h.ctl.tick();
+  await settle();
+  const done = h.sentOf('replayComplete');
+  assert.equal(done.length, 1);
+  assert.equal(done[0].stop_reason, 'chunk_rejected', 'an honest abort, not a silently corrupt recording');
+});
+
+// ── font events (collectFonts) ───────────────────────────────────────────────
+// Same three tests as the full-snapshot fix above, for the same reason: a font
+// missing from the replay reproduces the garbled/overlapping-text bug
+// collectFonts:true exists to fix, just as surely as a missing snapshot blanks
+// the page. Font events are IncrementalSnapshot (type 3) / source 10.
+
+test('a font event is flushed on its own instead of accumulating events first', async () => {
+  const h = makeReplayHarness({
+    sessionId: 'sess-1',
+    policy: { chunk_max_bytes: 8 * 1024 * 1024, chunk_flush_ms: 10_000 },
+  });
+
+  await h.ctl.init();
+  await settle();
+  h.snapshot();
+  await settle();
+  const before = h.sentOf('replayChunk').length;
+
+  h.font();
+  await settle();
+
+  const uploads = h.sentOf('replayChunk');
+  assert.equal(uploads.length, before + 1, 'the font did not wait for the interval or the byte budget');
+  const chunk = uploads.at(-1);
+  assert.equal(chunk.has_font_event, true);
+  assert.equal(chunk.event_count, 1, 'and it went up in its own chunk, with nothing piled on top of it');
+
+  h.noise(5);
+  await settle();
+  assert.equal(h.sentOf('replayChunk').length, before + 1, 'no chunk per event');
+});
+
+test('eviction drops everything else before it will drop a font event', async () => {
+  let accept = false;
+  const h = makeReplayHarness({
+    sessionId: 'sess-1',
+    policy: { chunk_max_bytes: 8 * 1024 * 1024, chunk_flush_ms: 10_000 },
+    responses: { replayChunk: () => (accept ? { ok: true } : { ok: false, error: 413 }) },
+  });
+
+  await h.ctl.init();
+  await settle();
+  h.snapshot();
+  await settle();
+  h.font();
+  await settle();
+  assert.equal(h.sentOf('replayChunk').length, 2, 'refusal — the font chunk (snapshot already went up separately)');
+  assert.equal(h.ctl.stats().buffered_fonts, 1, 'rolled back into the buffer, not lost');
+
+  h.noise(9, 300 * 1024);
+  h.advance(11_000);
+  await h.ctl.tick();
+  await settle();
+
+  const s = h.ctl.stats();
+  assert.equal(s.buffered_fonts, 1, 'THE FIX: the font is still there');
+  assert.ok(s.dropped_events > 0, 'other events were evicted in its place');
+  assert.ok(s.buffered_bytes <= 2 * 1024 * 1024, 'and the buffer really was brought back under its ceiling');
+
+  accept = true;
+  h.advance(11_000);
+  await h.ctl.tick();
+  await settle();
+  const uploaded = h.sentOf('replayChunk').at(-1);
+  assert.equal(uploaded.has_font_event, true);
+});
+
+test('with nothing but snapshots and fonts left, the run aborts instead of evicting either', async () => {
+  const h = makeReplayHarness({
+    sessionId: 'sess-1',
+    policy: { chunk_max_bytes: 8 * 1024 * 1024, chunk_flush_ms: 10_000 },
+    responses: { replayChunk: { ok: false, error: 413 } },
+  });
+
+  await h.ctl.init();
+  await settle();
+
+  h.snapshot();
+  await settle();
+  h.font(1_600_000);
+  await settle();
+
+  const s = h.ctl.stats();
+  assert.equal(s.buffered_snapshots, 1);
+  assert.equal(s.buffered_fonts, 1);
+  assert.equal(s.dropped_events, 0, 'nothing was evicted, because everything left is protected');
+  assert.ok(s.buffered_bytes > 2 * 1024 * 1024, 'the buffer is knowingly left over its ceiling');
+
+  h.advance(11_000);
+  await h.ctl.tick();
+  await settle();
   await h.ctl.tick();
   await settle();
   const done = h.sentOf('replayComplete');

@@ -196,9 +196,11 @@
   // pixels out of the payload and keeps chunks small.
   const BLOCK_SELECTOR = 'img,video,canvas,object,embed';
 
-  // rrweb EventType values used here. Kept as literals so this file has no
-  // dependency on rrweb's enum export.
+  // rrweb EventType / IncrementalSource values used here. Kept as literals so
+  // this file has no dependency on rrweb's enum export.
   const RRWEB_TYPE_FULL_SNAPSHOT = 2;
+  const RRWEB_TYPE_INCREMENTAL_SNAPSHOT = 3;
+  const RRWEB_SOURCE_FONT = 10;
 
   // ── Pure: the state machine ───────────────────────────────────────────────
   // Three states, no grace period. Recording stops the moment the tab is hidden,
@@ -351,11 +353,18 @@
       maskAllInputs: true,
       maskInputFn: makeMaskInputFn(selector, policy.mask_profile),
       blockSelector: BLOCK_SELECTOR,
-      // No pixels, no fonts, no main-world injection.
+      // No pixels, no main-world injection. Fonts ARE collected (inlined as
+      // data: URLs): without the real @font-face, replay substitutes a fallback
+      // font with different character widths, which overflows/overlaps any
+      // fixed-size text the original page laid out assuming the real metrics —
+      // that's what made ChatGPT/Gemini's sidebar and composer text garbled in
+      // early testing. Fonts are typefaces, not user data, so there is no
+      // masking/privacy tradeoff here — only a size one, handled the same way
+      // the full-snapshot fix handles it: see isFontEvent() below.
       recordCanvas: false,
       inlineImages: false,
       inlineStylesheet: true,
-      collectFonts: false,
+      collectFonts: true,
       slimDOMOptions: 'all',
       sampling: { mousemove: 50, scroll: 150, input: 'last', media: 800 },
       checkoutEveryNms: policy.checkout_every_ms,
@@ -641,11 +650,22 @@
       // chunk to (whatever accumulated since the last flush) + the snapshot itself,
       // which is what keeps it under the server's size allowance.
       if (isFullSnapshot(event)) { queueFlush('snapshot'); return; }
+      // Font events are far smaller than a full snapshot, but the same "flush
+      // it alone before anything piles on top" logic applies for the same
+      // reason: a font stuck in a chunk that keeps getting refused is a font
+      // that keeps getting re-evicted, and a replay missing its font is
+      // exactly the garbled-text bug this exists to fix.
+      if (isFontEvent(event)) { queueFlush('font'); return; }
       if (run.pendingBytes >= policy.chunk_max_bytes) queueFlush('bytes');
     }
 
     function isFullSnapshot(event) {
       return !!event && event.type === RRWEB_TYPE_FULL_SNAPSHOT;
+    }
+
+    function isFontEvent(event) {
+      return !!event && event.type === RRWEB_TYPE_INCREMENTAL_SNAPSHOT
+        && !!event.data && event.data.source === RRWEB_SOURCE_FONT;
     }
 
     function forceCheckout() {
@@ -707,6 +727,7 @@
           first_ts: firstTs(events),
           last_ts: lastTs(events),
           has_full_snapshot: events.some(isFullSnapshot),
+          has_font_event: events.some(isFontEvent),
           sha256: sha,
           byte_size: gz.length,
         };
@@ -725,7 +746,7 @@
         run.buffer = events.concat(run.buffer);
         run.pendingBytes += rawBytes;
         let evicted = 0;
-        // EVICTION ORDER: OLDEST FIRST, BUT NEVER THE FULL SNAPSHOT.
+        // EVICTION ORDER: OLDEST FIRST, BUT NEVER A FULL SNAPSHOT OR A FONT.
         //
         // This used to be a plain shift() off the front, which is exactly backwards
         // for the one event that matters: the full snapshot is always the OLDEST
@@ -736,14 +757,17 @@
         // is evicted to make room — leaving a run that uploads successfully and
         // replays as a blank page with a moving cursor. That was the live-test
         // finding, and it is worse than an outright failure because it looks fine.
+        // Font events get the same protection for the same reason: evicting one
+        // doesn't blank the page, but it silently reproduces the garbled-text bug
+        // collectFonts was turned on specifically to fix.
         //
-        // So: evict the oldest NON-snapshot event each pass. If nothing but full
-        // snapshots is left, evict nothing and let the buffer stay over its ceiling
-        // — the rejectStreak below then ends the run honestly with 'chunk_rejected'.
-        // A recording with no snapshot is not a recording, so refusing to make one
-        // is the correct ending, not a softer failure mode to be engineered around.
+        // So: evict the oldest event that is neither, each pass. If nothing but
+        // snapshots/fonts is left, evict nothing and let the buffer stay over its
+        // ceiling — the rejectStreak below then ends the run honestly with
+        // 'chunk_rejected'. A recording with no snapshot is not a recording, so
+        // refusing to make one is the correct ending, not a softer failure mode.
         while (run.pendingBytes > REBUFFER_MAX_BYTES && run.buffer.length > 1) {
-          const idx = run.buffer.findIndex((e) => !isFullSnapshot(e));
+          const idx = run.buffer.findIndex((e) => !isFullSnapshot(e) && !isFontEvent(e));
           if (idx < 0) break;
           const gone = run.buffer.splice(idx, 1)[0];
           let s = 0;
@@ -1098,6 +1122,7 @@
           // "the snapshot survived the eviction" is directly assertable instead of
           // being inferred from byte totals.
           buffered_snapshots: run.buffer.reduce((n, e) => n + (isFullSnapshot(e) ? 1 : 0), 0),
+          buffered_fonts: run.buffer.reduce((n, e) => n + (isFontEvent(e) ? 1 : 0), 0),
           dropped_events: run.droppedEvents,
           reject_streak: run.rejectStreak,
           observed_ms: Math.round(runMsNow()),

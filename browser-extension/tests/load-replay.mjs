@@ -255,6 +255,10 @@ export function makeReplayHarness({
   function fullSnapshotEvent(ts) {
     return { type: 2, timestamp: ts, data: { node: { id: 1 } } };
   }
+  function fontEvent(ts, fontFace = 'x'.repeat(2000)) {
+    // IncrementalSnapshot (type 3), IncrementalSource.Font (source 10).
+    return { type: 3, timestamp: ts, data: { source: 10, fontFace, fontSource: 'data:font/woff2;base64,' + fontFace } };
+  }
 
   return {
     api,
@@ -272,6 +276,7 @@ export function makeReplayHarness({
     hasEmit() { return typeof emitFn === 'function'; },
     emit(event, isCheckout = false) { if (emitFn) emitFn(event, isCheckout); },
     snapshot() { if (emitFn) emitFn(fullSnapshotEvent(clock), true); },
+    font(bytes = 2000) { if (emitFn) emitFn(fontEvent(clock, 'x'.repeat(Math.max(1, bytes))), false); },
     noise(n = 1, bytes = 200) {
       const filler = 'x'.repeat(Math.max(1, bytes));
       for (let i = 0; i < n; i++) {

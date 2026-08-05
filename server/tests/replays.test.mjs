@@ -47,7 +47,7 @@ function mkEvents(count, baseTs, { fullSnapshot = false } = {}) {
 
 // Build the wire body for one chunk: gzip the JSON array, base64 it, hash the
 // gzip bytes exactly as the extension is specified to.
-function mkChunk(events, { hasFullSnapshot = false, eventCount = null, corruptSha = false, raw = null } = {}) {
+function mkChunk(events, { hasFullSnapshot = false, hasFontEvent = false, eventCount = null, corruptSha = false, raw = null } = {}) {
   const bytes = raw ?? zlib.gzipSync(Buffer.from(JSON.stringify(events), 'utf8'));
   const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
   const timestamps = events.map((e) => e.timestamp);
@@ -58,6 +58,7 @@ function mkChunk(events, { hasFullSnapshot = false, eventCount = null, corruptSh
     first_ts: timestamps.length ? Math.min(...timestamps) : 0,
     last_ts: timestamps.length ? Math.max(...timestamps) : 0,
     has_full_snapshot: hasFullSnapshot,
+    has_font_event: hasFontEvent,
     sha256: corruptSha ? 'f'.repeat(64) : sha256,
     _bytes: bytes,
   };
@@ -199,10 +200,12 @@ async function withServer(fn) {
 // flat 256 KB cap used to refuse outright. The filler is random (so incompressible:
 // the size is real, not a gzip artefact) and `fullSnapshot` decides whether a type-2
 // event is genuinely present, which is the whole point of the two-tier check.
-function mkOversizeEvents({ fullSnapshot = false } = {}) {
+function mkOversizeEvents({ fullSnapshot = false, fontEvent = false } = {}) {
   const events = fullSnapshot
     ? [{ type: 2, timestamp: T0, data: { node: { id: 1, tagName: 'html' } } }]
-    : [];
+    : fontEvent
+      ? [{ type: 3, timestamp: T0, data: { source: 10, fontSource: 'data:font/woff2;base64,AAAA' } }]
+      : [];
   for (let i = 0; i < 40; i++) {
     events.push({
       type: 3,
@@ -559,6 +562,50 @@ test('a chunk that REALLY carries a full snapshot is accepted over the ordinary 
 
     const manifest = await api.manifest(id);
     assert.deepEqual(manifest.body.chunks.map((c) => c.has_full_snapshot), [true, true]);
+  });
+});
+
+// Same two-tier logic, same reason, for font events: a font file can exceed
+// 256 KB the same way a full DOM snapshot can, and neither can be split across
+// chunks without corrupting the replay (a run missing its font just reproduces
+// the garbled/overlapping-text bug collectFonts:true exists to fix).
+
+test('a chunk over the ordinary cap that only CLAIMS a font event is held to the 256 KB cap', async () => {
+  await withServer(async (api) => {
+    const id = (await api.create({})).body.replay_id;
+
+    const liar = mkChunk(mkOversizeEvents({ fontEvent: false }), { hasFontEvent: true });
+    assert.ok(liar._bytes.length > REPLAY_CAPS.max_chunk_bytes, 'the fixture must be over the cap');
+    assert.ok(liar._bytes.length < REPLAY_CAPS.max_snapshot_chunk_bytes, 'and under the ceiling');
+
+    const res = await api.putChunk(id, 0, liar);
+    assert.equal(res.status, 413);
+    assert.match(res.body.error, new RegExp(`${REPLAY_CAPS.max_chunk_bytes} gzipped bytes`));
+    assert.equal(api.chunkRows(id).length, 0);
+  });
+});
+
+test('a chunk that REALLY carries a font event is accepted over the ordinary cap', async () => {
+  await withServer(async (api) => {
+    const id = (await api.create({})).body.replay_id;
+
+    const fontChunk = mkChunk(mkOversizeEvents({ fontEvent: true }), { hasFontEvent: true });
+    assert.ok(fontChunk._bytes.length > REPLAY_CAPS.max_chunk_bytes);
+    assert.ok(fontChunk._bytes.length < REPLAY_CAPS.max_snapshot_chunk_bytes);
+
+    assert.equal((await api.putChunk(id, 0, fontChunk)).status, 204);
+    const row = api.chunkRows(id).find((c) => c.seq === 0);
+    assert.equal(row.has_font_event, true);
+    assert.equal(row.byte_size, fontChunk._bytes.length);
+
+    // Server-derived, same as has_full_snapshot: a chunk carrying a font is
+    // recorded as such even when the client forgot to claim it.
+    const fontEvt = { type: 3, timestamp: T0 + 60_000, data: { source: 10, fontSource: 'data:font/woff2;base64,AAAA' } };
+    const modest = mkChunk([fontEvt], { hasFontEvent: false });
+    assert.equal((await api.putChunk(id, 1, modest)).status, 204);
+    const seq1 = api.chunkRows(id).find((c) => c.seq === 1);
+    assert.equal(seq1.has_font_event, true, 'derived from the payload');
+    assert.equal(seq1.client_has_font_event, false, 'the claim is kept beside it, never over it');
   });
 });
 

@@ -151,11 +151,16 @@ const MAX_SESSION_IDS = 50;
 // of chunks is already answered by the counters.
 const MAX_REPORTED_GAPS = 100;
 
-// rrweb's EventType.FullSnapshot. Mirrors RRWEB_TYPE_FULL_SNAPSHOT in
-// browser-extension/content/replay.js, which is where the events are produced. The
-// server needs it to VERIFY a client's has_full_snapshot claim against the decoded
-// payload, which is what earns a chunk the larger size allowance above.
+// rrweb's EventType.FullSnapshot / IncrementalSnapshot+Font. Mirror the same
+// constants in browser-extension/content/replay.js, which is where the events
+// are produced. The server needs them to VERIFY a client's has_full_snapshot /
+// has_font_event claims against the decoded payload, which is what earns a
+// chunk the larger size allowance above — a font file can exceed the ordinary
+// 256 KB cap the same way a full DOM snapshot can, for the same reason
+// (neither can be split across chunks without corrupting the replay).
 const RRWEB_TYPE_FULL_SNAPSHOT = 2;
+const RRWEB_TYPE_INCREMENTAL_SNAPSHOT = 3;
+const RRWEB_SOURCE_FONT = 10;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA256_RE = /^[0-9a-f]{64}$/i;
@@ -393,11 +398,13 @@ export function mountReplays(app, db) {
     // bytes we just inflated. Nothing from the events is retained — this is one
     // boolean over their `type` field.
     const hasFullSnapshot = events.some((e) => e && e.type === RRWEB_TYPE_FULL_SNAPSHOT);
+    const hasFontEvent = events.some((e) => e && e.type === RRWEB_TYPE_INCREMENTAL_SNAPSHOT
+      && e.data && e.data.source === RRWEB_SOURCE_FONT);
 
     // Tier 1: a chunk over the ordinary cap is only allowed the larger allowance if
-    // it genuinely carries the snapshot that justifies it. A client that set
+    // it genuinely carries the snapshot or font that justifies it. A client that set
     // has_full_snapshot to buy room for 300 KB of mouse moves gets the normal 413.
-    if (overOrdinaryCap && !hasFullSnapshot) {
+    if (overOrdinaryCap && !hasFullSnapshot && !hasFontEvent) {
       return res.status(413).json({ error: `chunk exceeds ${MAX_CHUNK_BYTES} gzipped bytes` });
     }
 
@@ -452,6 +459,8 @@ export function mountReplays(app, db) {
         // above); the client's own claim is kept beside it, never over it.
         has_full_snapshot: hasFullSnapshot,
         client_has_full_snapshot: b.has_full_snapshot === true,
+        has_font_event: hasFontEvent,
+        client_has_font_event: b.has_font_event === true,
         byte_size: bytes.length,
         sha256,
         received_at: new Date(),
