@@ -229,9 +229,12 @@
     const spans = [];
     if (!text || typeof text !== 'string') return spans;
     const f = filter || { names: null, severities: null };
-    for (const p of PATTERNS) {
+    // activePatterns(), not PATTERNS: masking must use the same active set as
+    // detection. Filtering only one of the two would let a pattern be reported
+    // and then left in the outgoing text, or masked after being disabled.
+    for (const p of activePatterns()) {
       if (f.names && !f.names.has(p.name)) continue;
-      if (f.severities && !f.severities.has(p.severity)) continue;
+      if (f.severities && !f.severities.has(effectiveSeverity(p))) continue;
       const flags = p.regex.flags.includes('g') ? p.regex.flags : p.regex.flags + 'g';
       const rx = new RegExp(p.regex.source, flags);
       const label = REDACT_LABELS[p.name] || REDACT_FALLBACK_LABEL;
@@ -431,10 +434,15 @@
   // can both access it.
   window.__cfaiTokenVault = tokenVault;
 
+  // Iterates activePatterns(), not PATTERNS: a pattern the server policy disables
+  // must not be detected here either, or a "disabled" rule would still report.
+  // Severity comes from effectiveSeverity() so a pack can raise or lower it
+  // without editing this file. With no policy mirrored yet, activePatterns()
+  // returns everything, which is the safe default.
   function scanAll(text) {
     if (!text || typeof text !== 'string') return [];
     const matches = [];
-    for (const p of PATTERNS) {
+    for (const p of activePatterns()) {
       p.regex.lastIndex = 0;
       let n = 0;
       let m;
@@ -447,7 +455,7 @@
         n++;
       }
       if (n > 0) {
-        matches.push({ pattern: p.name, class: p.class, severity: p.severity, count: n });
+        matches.push({ pattern: p.name, class: p.class, severity: effectiveSeverity(p), count: n });
       }
     }
     return matches;
@@ -466,10 +474,59 @@
 
   // Run all patterns on text. Returns an array of { pattern, class, severity, count }.
   // Never returns the matched value.
+  // ── Server-driven policy ───────────────────────────────────────────────────
+  // The service worker mirrors GET /api/policy-packs/extension-config into
+  // chrome.storage.local and calls applyPolicy() here. Until that happens (and if
+  // the server is unreachable) POLICY stays null and every pattern runs at its
+  // built-in severity — losing contact with the server must never quietly reduce
+  // detection.
+  let POLICY = null;
+
+  function isEnabled(name) {
+    if (!POLICY) return true;
+    const p = POLICY.patterns && POLICY.patterns[name];
+    return !p || p.enabled !== false;
+  }
+
+  // A deployed compliance pack may grade a pattern higher than its built-in
+  // severity (an SSN is "critical" under HIPAA even if the catalog says otherwise).
+  // Server severity is only ever taken when it is stricter.
+  const SEV_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
+  function effectiveSeverity(p) {
+    const override = POLICY?.patterns?.[p.name]?.severity;
+    if (!override) return p.severity;
+    return (SEV_RANK[override] || 0) > (SEV_RANK[p.severity] || 0) ? override : p.severity;
+  }
+
+  /** Patterns that should run, in effect, right now. */
+  function activePatterns() {
+    return PATTERNS.filter((p) => isEnabled(p.name));
+  }
+
   window.__cfaiPatterns = {
     classifyFile,
     sizeBucket,
     scan(text) { return scanAll(text); },
+
+    /** Called by content.js whenever the mirrored server policy changes. */
+    applyPolicy(policy) {
+      POLICY = policy && typeof policy === 'object' && policy.patterns ? policy : null;
+      return {
+        version: POLICY?.version || null,
+        active: activePatterns().length,
+        total: PATTERNS.length,
+      };
+    },
+
+    /** Current effective policy state, for the options page and debugging. */
+    policyState() {
+      return {
+        version: POLICY?.version || null,
+        source: POLICY ? 'server' : 'built-in defaults',
+        active: activePatterns().map((p) => p.name),
+        disabled: PATTERNS.filter((p) => !isEnabled(p.name)).map((p) => p.name),
+      };
+    },
 
     /**
      * The pre-send safety gate for the extension's "Tokenize & Send" flow.
@@ -609,7 +666,7 @@
       let result = text;
       const tokens = [];
 
-      for (const p of PATTERNS) {
+      for (const p of activePatterns()) {
         if (!tokenizePatterns.has(p.name)) continue;
         p.regex.lastIndex = 0;
         let count = 0;

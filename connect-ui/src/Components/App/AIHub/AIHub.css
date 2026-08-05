@@ -726,3 +726,48 @@
   border-color: #0044cc;
   box-shadow: 0 0 0 3px rgba(0, 68, 204, 0.14);
 }
+
+/* Primary / destructive action buttons (Policy Packs deploy, undeploy, accept).
+   Previously these reused .ag_btn_primary from Agent Governance, which this
+   stylesheet does not define — the button rendered unstyled and was invisible
+   against the white table row. */
+.aihub_action_btn {
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid #0044cc;
+  background: #0044cc;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.aihub_action_btn:hover:not(:disabled) {
+  background: #0037a6;
+  border-color: #0037a6;
+}
+.aihub_action_btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.aihub_action_btn.danger {
+  background: #fff;
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+.aihub_action_btn.danger:hover:not(:disabled) {
+  background: #fef2f2;
+  border-color: #f87171;
+}
+
+.aihub_action_btn.warn {
+  background: #b45309;
+  border-color: #b45309;
+}
+.aihub_action_btn.warn:hover:not(:disabled) {
+  background: #92400e;
+  border-color: #92400e;
+}

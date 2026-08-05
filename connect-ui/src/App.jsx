@@ -1,4 +1,4 @@
-import { Route, BrowserRouter as Router, Routes } from "react-router-dom";
+import { Navigate, Route, BrowserRouter as Router, Routes } from "react-router-dom";
 import "./App.css";
 import Admin from "./Components/App/Admin/Admin";
 import MyAccount from "./Components/App/Admin/MyAccount";
@@ -131,6 +131,12 @@ function App() {
           <Route path="/AIHub/SessionReplay" element={<AIHubPage page="SessionReplay" />} />
           <Route path="/AIHub/AIUsage" element={<AIHubPage page="AIUsage" />} />
           <Route path="/AIHub/ClaudeUsage" element={<AIHubPage page="ClaudeUsage" />} />
+          <Route path="/AIHub/PolicyPacks" element={<AIHubPage page="PolicyPacks" />} />
+          {/* Simulation now runs per pack from inside Policy Packs — keep the old
+              link working rather than dropping bookmarks onto the Overview page. */}
+          <Route path="/AIHub/PolicySimulator" element={<Navigate to="/AIHub/PolicyPacks" replace />} />
+          {/* EU AI Act hidden until its intake is seeded from the discovered agent registry.
+              <Route path="/AIHub/EuAiAct" element={<AIHubPage page="EuAiAct" />} /> */}
           <Route path="/AIHub/Platforms" element={<AIHubPage page="Platforms" />} />
           <Route path="/AIHub/AgentGovernance" element={<AIHubPage page="AgentGovernance" />} />
           {/* <Route path="/AIHub/ServerMonitor" element={<AIHubPage page="ServerMonitor" />} /> disabled — needs SDK first */}

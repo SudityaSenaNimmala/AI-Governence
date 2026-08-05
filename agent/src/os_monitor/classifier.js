@@ -69,6 +69,76 @@ export const BLOCK_PATTERNS = PATTERNS
   .filter((p) => (p.severity === 'high' || p.severity === 'critical') && !p.validate)
   .map((p) => ({ name: p.name, source: p.regex.source, severity: p.severity }));
 
+// ── Server-driven pattern policy ─────────────────────────────────────────────
+// policy-sync.js mirrors GET /api/policy-packs/extension-config here, so a
+// deployed compliance pack governs desktop detection the same way it governs the
+// browser extension.
+//
+// Until a policy arrives — and whenever the server is unreachable or returns
+// something malformed — POLICY stays null and every pattern runs at its built-in
+// severity. Losing contact with the server must never quietly reduce detection.
+let POLICY = null;
+
+function isEnabled(name) {
+  if (!POLICY) return true;
+  const p = POLICY.patterns && POLICY.patterns[name];
+  return !p || p.enabled !== false;
+}
+
+// A pack may grade a pattern higher than the catalog does (a phone number is a
+// HIPAA identifier even though the catalog calls it 'low'). Only ever stricter.
+const SEV_RANK = { low: 1, moderate: 2, medium: 2, high: 3, critical: 4 };
+function effectiveSeverity(p) {
+  const override = POLICY?.patterns?.[p.name]?.severity;
+  if (!override) return p.severity;
+  return (SEV_RANK[override] || 0) > (SEV_RANK[p.severity] || 0) ? override : p.severity;
+}
+
+function activePatterns() {
+  return PATTERNS.filter((p) => isEnabled(p.name));
+}
+
+/**
+ * Install a policy. Returns a small summary so the caller can log what changed.
+ * Passing null/garbage reverts to built-in defaults rather than disabling
+ * everything.
+ */
+export function applyPolicy(policy) {
+  POLICY = policy && typeof policy === 'object' && policy.patterns ? policy : null;
+  return {
+    version: POLICY?.version || null,
+    active: activePatterns().length,
+    total: PATTERNS.length,
+  };
+}
+
+export function policyState() {
+  return {
+    version: POLICY?.version || null,
+    source: POLICY ? 'server' : 'built-in defaults',
+    active: activePatterns().map((p) => p.name),
+    disabled: PATTERNS.filter((p) => !isEnabled(p.name)).map((p) => p.name),
+  };
+}
+
+/**
+ * Block patterns under the current policy — the keystroke blocker's rule set.
+ *
+ * BLOCK_PATTERNS above stays exported unchanged for callers that want the static
+ * catalog, but the enforcer must use THIS so a disabled pattern stops being
+ * blocked and an escalated one starts being blocked. Detection and blocking
+ * disagreeing is the failure that matters: a pattern reported as critical while
+ * the blocker ignores it looks like enforcement and is not.
+ */
+export function getBlockPatterns() {
+  return activePatterns()
+    .filter((p) => {
+      const sev = effectiveSeverity(p);
+      return (sev === 'high' || sev === 'critical') && !p.validate;
+    })
+    .map((p) => ({ name: p.name, source: p.regex.source, severity: effectiveSeverity(p) }));
+}
+
 function luhnCheck(numStr) {
   const digits = numStr.replace(/\D/g, '');
   if (digits.length < 13 || digits.length > 19) return false;
@@ -89,7 +159,7 @@ export function scan(text) {
     return { matches: [], highestSeverity: null };
   }
   const matches = [];
-  for (const p of PATTERNS) {
+  for (const p of activePatterns()) {
     p.regex.lastIndex = 0;
     let n = 0; let m;
     while ((m = p.regex.exec(text)) !== null) {
@@ -97,7 +167,7 @@ export function scan(text) {
       n++;
     }
     if (n > 0) {
-      matches.push({ pattern: p.name, class: p.class, severity: p.severity, count: n });
+      matches.push({ pattern: p.name, class: p.class, severity: effectiveSeverity(p), count: n });
     }
   }
   let highest = null;

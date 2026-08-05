@@ -13,7 +13,8 @@
 import { createPoller } from './poller-factory.js';
 import { createNotifier } from './notify-factory.js';
 import { AI_PROCESSES, identifyAiProcess, isAttachmentWatcherEligible } from './ai-processes.js';
-import { scan, lengthBucket, BLOCK_PATTERNS } from './classifier.js';
+import { scan, lengthBucket, BLOCK_PATTERNS, getBlockPatterns } from './classifier.js';
+import { PolicySync } from './policy-sync.js';
 import { buildFileUploadEvent } from './file-handler.js';
 import { FileDialogWatcher } from './file-dialog-watcher.js';
 import { AttachmentWatcher } from './attachment-watcher.js';
@@ -48,7 +49,16 @@ export class OsMonitor {
     this.promptWatcher = new PromptWatcher({ log, aiProcessNames: aiProcNames });
     // Keystroke send-blocker — actually prevents the send (swallows Enter /
     // Ctrl+V) when the focused AI prompt or clipboard holds a blocked pattern.
-    this.enforcer = new Enforcer({ log, aiProcessNames: aiProcNames, blockPatterns: BLOCK_PATTERNS });
+    this.enforcer = new Enforcer({ log, aiProcessNames: aiProcNames, blockPatterns: getBlockPatterns() });
+    // Keeps desktop detection aligned with deployed compliance policy packs. When
+    // the policy changes we must push the new rule set to the keystroke blocker
+    // too — otherwise a pattern could be reported as critical while the blocker
+    // still ignores it, which looks like enforcement without being it.
+    this.policySync = new PolicySync({
+      serverUrl,
+      log,
+      onChange: ({ blockPatterns }) => this.enforcer.updateBlockPatterns(blockPatterns),
+    });
     this.currentFocus = null;  // { pid, process, title, aiInfo? }
     // Map<"seq|process", lastFiredAtMs> — used to suppress duplicate fires
     // when the user pastes the same clipboard contents repeatedly into the
@@ -87,6 +97,7 @@ export class OsMonitor {
 
     this.reporter.start();
     this.toast.start();
+    this.policySync.start();
 
     this.poller.on('focus', (ev) => {
       const ai = identifyAiProcess(ev.process);
@@ -479,6 +490,7 @@ export class OsMonitor {
     this.attachmentWatcher.stop();
     this.promptWatcher.stop();
     this.enforcer.stop();
+    this.policySync.stop();
     this.reporter.stop();
     this.toast.stop();
   }

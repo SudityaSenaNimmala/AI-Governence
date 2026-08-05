@@ -43,6 +43,8 @@ const STORAGE = {
   // Nothing reads it any more.
   ROUTING_RULES: 'cfai.routing_rules',     // model routing rules from server
   ROUTING_RULES_AT: 'cfai.routing_rules_at',
+  DLP_POLICY:   'cfai.dlp_policy',    // mirror of GET /api/policy-packs/extension-config
+  DLP_POLICY_AT:'cfai.dlp_policy_at',
 };
 
 const FLUSH_ALARM = 'cfai-flush';
@@ -57,6 +59,8 @@ const BLOCKED_REFRESH_MIN = 2;     // poll blocked agents every 2 min
 
 const ROUTING_ALARM = 'cfai-routing-refresh';
 const ROUTING_REFRESH_MIN = 1;     // poll routing rules every 1 min
+const DLP_POLICY_ALARM = 'cfai-dlp-policy-refresh';
+const DLP_POLICY_REFRESH_MIN = 5;  // pattern policy changes rarely; 5 min is ample
 
 // --- helpers ---
 
@@ -718,13 +722,19 @@ chrome.alarms.create(BLOCKED_ALARM, { periodInMinutes: BLOCKED_REFRESH_MIN });
 // re-checks expiry through nextEngagement() instead of trusting the sweep.
 chrome.alarms.create(ENGAGEMENT_SWEEP_ALARM, { periodInMinutes: 1 });
 chrome.alarms.create(ROUTING_ALARM, { periodInMinutes: ROUTING_REFRESH_MIN });
+chrome.alarms.create(DLP_POLICY_ALARM, { periodInMinutes: DLP_POLICY_REFRESH_MIN });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === FLUSH_ALARM)     { syncIdentity().catch(() => {}); flushQueue(); }
-  if (alarm.name === PLATFORMS_ALARM) refreshPlatforms();
-  if (alarm.name === BLOCKED_ALARM)   refreshBlockedAgents();
+  if (alarm.name === FLUSH_ALARM)      { syncIdentity().catch(() => {}); flushQueue(); }
+  if (alarm.name === PLATFORMS_ALARM)  refreshPlatforms();
+  if (alarm.name === BLOCKED_ALARM)    refreshBlockedAgents();
   if (alarm.name === ENGAGEMENT_SWEEP_ALARM) engagementSweep().catch(() => {});
-  if (alarm.name === ROUTING_ALARM)   refreshRoutingRules();
+  if (alarm.name === ROUTING_ALARM)    refreshRoutingRules();
+  if (alarm.name === DLP_POLICY_ALARM) refreshDlpPolicy();
 });
+
+// Fetch once at load as well: the first alarm is up to DLP_POLICY_REFRESH_MIN
+// away, and a freshly installed extension should not run unpoliced until then.
+refreshDlpPolicy();
 
 // Refresh once at startup too — alarm fires on its own schedule, not at boot.
 // Best-effort: if the worker is unenrolled or offline, no-op.
@@ -916,6 +926,35 @@ async function refreshRoutingRules() {
   }
 }
 
+// Pull the DLP pattern policy derived from deployed compliance policy packs and
+// mirror it into chrome.storage.local, where content scripts pick it up. This is
+// the channel that lets a pack's `dlp` rules actually govern client detection
+// instead of only describing it.
+//
+// Unauthenticated GET, like the platforms registry: detection policy must sync
+// even when the extension's token is stale or it has not enrolled yet.
+//
+// On any failure we deliberately leave the previous mirror in place and do NOT
+// write a default. patterns.js treats "no policy" as "run everything", so an
+// empty write would look like a successful sync that silently disabled nothing —
+// or worse, a truncated response could disable real detection.
+async function refreshDlpPolicy() {
+  try {
+    const config = await getConfig();
+    if (!config.serverUrl) return;
+    const res = await fetch(
+      `${config.serverUrl.replace(/\/$/, '')}/api/policy-packs/extension-config`,
+    );
+    if (!res.ok) return;
+    const policy = await res.json();
+    if (!policy || typeof policy !== 'object' || !policy.patterns) return;
+    await setStored(STORAGE.DLP_POLICY, policy);
+    await setStored(STORAGE.DLP_POLICY_AT, Date.now());
+  } catch (e) {
+    console.warn('[cfai] dlp policy refresh failed:', e?.message || e);
+  }
+}
+
 // Near-real-time policy for open AI tabs. The content script asks every few
 // seconds; we serve a short-lived cache so block/allow changes reflect in
 // ~2-3s without hammering the server (one fetch per ~2.5s no matter how many
@@ -948,6 +987,15 @@ async function getFreshPlatforms() {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === 'cfai-get-platforms') {
     getFreshPlatforms().then((platforms) => sendResponse({ platforms })).catch(() => sendResponse({ platforms: null }));
+    return true; // async response
+  }
+  // Content scripts cannot fetch cross-origin under the page CSP, so they ask us
+  // for the mirrored DLP policy. Serving from storage keeps this cheap however
+  // many tabs are open; the alarm above is what actually refreshes it.
+  if (msg && msg.type === 'cfai-get-dlp-policy') {
+    getStored(STORAGE.DLP_POLICY)
+      .then((policy) => sendResponse({ policy: policy || null }))
+      .catch(() => sendResponse({ policy: null }));
     return true; // async response
   }
 });
