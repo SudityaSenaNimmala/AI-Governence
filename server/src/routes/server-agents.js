@@ -295,7 +295,13 @@ export function mountServerAgents(app, db) {
 
   // ── Install token generation ──────────────────────────────────────────
   app.post('/api/v1/monitor/generate-token', a(async (req, res) => {
-    const serverUrl = req.body?.serverUrl || `${req.protocol}://${req.get('host')}`;
+    // Build server URL from: explicit host in body, or X-Forwarded-Host, or req.get('host')
+    const bodyHost = req.body?.host;
+    const reqHost = req.get('host');  // includes port (e.g. "165.22.223.59:8787")
+    const proto = req.get('x-forwarded-proto') || req.protocol || 'http';
+    const serverUrl = bodyHost
+      ? `${proto}://${bodyHost}:${reqHost?.split(':')[1] || '8787'}`
+      : `${proto}://${reqHost}`;
     const port = req.body?.port || '8443';
     const authMod = await import('../auth.js');
     const payload = Buffer.from(`${serverUrl}|${authMod.ENROLL_SECRET}`).toString('base64');

@@ -4191,11 +4191,11 @@ function ServerMonitorView() {
   const generateInstallCmd = async () => {
     setGenerating(true);
     try {
-      // Use the governance server's actual URL (where the dashboard is hosted)
-      const govUrl = window.location.origin.replace(/\/CloudFuze.*/, '').replace(/:3000$/, ':3001');
+      // Let the server determine its own public URL (it knows its port)
+      const host = window.location.hostname;
       const r = await fetch(`${API}/monitor/generate-token`, {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ serverUrl: govUrl, port: proxyPort }),
+        body: JSON.stringify({ host, port: proxyPort }),
       });
       const d = await r.json();
       setInstallCmd(d.install_command || "");
