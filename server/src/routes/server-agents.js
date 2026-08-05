@@ -306,7 +306,7 @@ export function mountServerAgents(app, db) {
     const authMod = await import('../auth.js');
     const payload = Buffer.from(`${serverUrl}|${authMod.ENROLL_SECRET}`).toString('base64');
     const token = `cfm_${payload}`;
-    const installCmd = `curl -sSL ${serverUrl}/install-monitor.sh | sudo bash -s -- --token ${token} --listen-port ${port}`;
+    const installCmd = `curl -sSL ${serverUrl}/install-monitor.sh | sudo bash -s -- --token ${token} --port ${port}`;
     res.json({ token, install_command: installCmd, server_url: serverUrl, port });
   }));
 
