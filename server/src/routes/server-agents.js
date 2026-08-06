@@ -381,11 +381,49 @@ for candidate in "\$TMP/repo/scripts/install-monitor.sh" "\$TMP/repo/agent team/
   fi
 done
 
-echo "[5/5] Restarting service..."
+echo "[5/7] Updating systemd unit..."
+# Re-run the install script's systemd + iptables sections
+INSTALL_SCRIPT="\$INSTALL_DIR/scripts/install-monitor.sh"
+if [[ -f "\$INSTALL_SCRIPT" ]]; then
+  # Extract proxy port and server URL from existing unit
+  PROXY_PORT=\$(grep PROXY_LISTEN_PORT /etc/systemd/system/cloudfuze-monitor.service 2>/dev/null | head -1 | sed 's/.*=//' || echo "8443")
+  GOV_SERVER=\$(grep GOV_SERVER_URL /etc/systemd/system/cloudfuze-monitor.service 2>/dev/null | head -1 | sed 's/.*=//')
+  ENROLL_SECRET=\$(grep GOV_ENROLL_SECRET /etc/systemd/system/cloudfuze-monitor.service 2>/dev/null | head -1 | sed 's/.*=//')
+
+  # Update systemd unit to use 0.0.0.0 (needed for Docker bridge traffic)
+  sed -i "s|PROXY_LISTEN_HOST=127.0.0.1|PROXY_LISTEN_HOST=0.0.0.0|" /etc/systemd/system/cloudfuze-monitor.service 2>/dev/null || true
+  # Fix CA cert path in ExecStartPost
+  sed -i "s|/etc/cloudfuze/ca/ca.crt|/root/.cloudfuze-aigov/ca/ca.crt|" /etc/systemd/system/cloudfuze-monitor.service 2>/dev/null || true
+  systemctl daemon-reload
+  echo "  Systemd unit updated."
+fi
+
+echo "[6/7] Setting up iptables rules..."
+# Same rules as install script — redirect port 443 traffic to proxy
+PROXY_PORT=\${PROXY_PORT:-8443}
+
+# Docker container traffic (PREROUTING on bridge interfaces)
+if command -v docker &>/dev/null; then
+  for iface in \$(ip link show 2>/dev/null | grep -oP '(docker0|br-[a-f0-9]+)(?=[@:])' | sort -u); do
+    iptables -t nat -D PREROUTING -i "\$iface" -p tcp --dport 443 -j REDIRECT --to-port "\$PROXY_PORT" 2>/dev/null || true
+    iptables -t nat -A PREROUTING -i "\$iface" -p tcp --dport 443 -j REDIRECT --to-port "\$PROXY_PORT" 2>/dev/null || true
+    echo "  ✓ Containers on \$iface → :\${PROXY_PORT}"
+  done
+fi
+
+# Host process traffic (non-root to avoid proxy loop)
+iptables -t nat -D OUTPUT -p tcp --dport 443 ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "\$PROXY_PORT" 2>/dev/null || true
+iptables -t nat -A OUTPUT -p tcp --dport 443 ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "\$PROXY_PORT" 2>/dev/null || true
+echo "  ✓ Host processes → :\${PROXY_PORT}"
+
+# Persist
+iptables-save > /etc/iptables.rules 2>/dev/null || true
+
+echo "[7/7] Restarting service..."
 systemctl restart cloudfuze-monitor 2>/dev/null || systemctl restart cloudfuze-server-monitor 2>/dev/null || true
 
 echo ""
-echo "  Update complete. Service restarted."
+echo "  Update complete."
 echo "  Run 'cloudfuze-monitor help' to see all commands."
 echo ""
 `;
