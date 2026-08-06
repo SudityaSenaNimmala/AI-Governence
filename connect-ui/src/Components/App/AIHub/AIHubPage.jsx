@@ -4441,6 +4441,25 @@ function ServerMonitorView() {
               </div>
             </div>
 
+            {/* Coverage & Limitations */}
+            <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, padding: 14, marginTop: 12 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "#111", marginBottom: 8 }}>Coverage:</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "4px 16px", fontSize: 12, lineHeight: 1.8 }}>
+                <span>Host processes (direct on server)</span><span style={{ color: "#16a34a", fontWeight: 600 }}>Full governance</span>
+                <span>Docker containers (bridge network)</span><span style={{ color: "#16a34a", fontWeight: 600 }}>Full governance *</span>
+                <span>Docker containers (custom bridge)</span><span style={{ color: "#16a34a", fontWeight: 600 }}>Full governance *</span>
+                <span>Docker containers (host network)</span><span style={{ color: "#16a34a", fontWeight: 600 }}>Full governance</span>
+              </div>
+              <div style={{ fontSize: 11, color: "#6b7280", marginTop: 6 }}>* Requires <code>docker-enable</code> + container restart for prompt/response content.</div>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "#111", marginTop: 12, marginBottom: 8 }}>Not supported:</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "4px 16px", fontSize: 12, lineHeight: 1.8, color: "#6b7280" }}>
+                <span>Docker Macvlan/IPvlan networks</span><span>Rare — traffic bypasses bridge</span>
+                <span>Kubernetes pods</span><span>Requires sidecar approach</span>
+                <span>Podman rootless containers</span><span>Runs in user namespace</span>
+                <span>VPN/tunnel-wrapped traffic</span><span>Encrypted before iptables</span>
+              </div>
+            </div>
+
             {/* Uninstall */}
             <div style={{ background: "#fefce8", border: "1px solid #fde68a", borderRadius: 8, padding: 14, marginTop: 12 }}>
               <div style={{ fontWeight: 600, fontSize: 13, color: "#854d0e", marginBottom: 6 }}>To uninstall:</div>

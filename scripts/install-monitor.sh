@@ -295,19 +295,27 @@ if grep -q "PROXY_LISTEN_HOST=127.0.0.1" "/etc/systemd/system/${SERVICE_NAME}.se
   sleep 2
 fi
 
+# Port 443 — standard HTTPS. Every cloud AI API uses this:
+# OpenAI, Anthropic, Google, AWS Bedrock, Azure OpenAI.
+AI_PORTS="443"
+
 if command -v docker &>/dev/null; then
   echo "[+] Docker detected — adding network-level interception..."
   for iface in $(ip link show 2>/dev/null | grep -oP '(docker0|br-[a-f0-9]+)(?=[@:])' | sort -u); do
-    iptables -t nat -D PREROUTING -i "$iface" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-    iptables -t nat -A PREROUTING -i "$iface" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-    echo "  ✓ Containers on $iface → :${PROXY_PORT}"
+    for aport in $AI_PORTS; do
+      iptables -t nat -D PREROUTING -i "$iface" -p tcp --dport "$aport" -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+      iptables -t nat -A PREROUTING -i "$iface" -p tcp --dport "$aport" -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+    done
+    echo "  ✓ Containers on $iface → :${PROXY_PORT} (ports: $AI_PORTS)"
   done
 fi
 
 # Host processes (non-root to avoid proxy's own traffic looping back)
-iptables -t nat -D OUTPUT -p tcp --dport 443 ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-iptables -t nat -A OUTPUT -p tcp --dport 443 ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-echo "  ✓ Host processes → :${PROXY_PORT}"
+for aport in $AI_PORTS; do
+  iptables -t nat -D OUTPUT -p tcp --dport "$aport" ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+  iptables -t nat -A OUTPUT -p tcp --dport "$aport" ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+done
+echo "  ✓ Host processes → :${PROXY_PORT} (ports: $AI_PORTS)"
 
 # Persist across reboots
 iptables-save > /etc/iptables.rules 2>/dev/null || true
