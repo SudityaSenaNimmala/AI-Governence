@@ -427,11 +427,15 @@ JEOF
         echo "  ✓ All containers restarted with full governance enabled."
       else
         echo "  Containers not restarted. To apply later:"
-        echo "    docker restart \$(docker ps -q)"
+        echo ""
+        echo "    Restart one:  docker restart <container_name>"
+        echo "    Restart all:  docker restart \$(docker ps -q)"
       fi
     else
       echo "  Non-interactive — containers not restarted. To apply:"
-      echo "    docker restart \$(docker ps -q)"
+      echo ""
+      echo "    Restart one:  docker restart <container_name>"
+      echo "    Restart all:  docker restart \$(docker ps -q)"
     fi
     echo ""
     echo "  To disable Docker governance later:"
