@@ -306,9 +306,42 @@ cat > /usr/local/bin/cloudfuze-monitor << 'WRAPPER'
 #!/bin/bash
 DATA_DIR="/etc/cloudfuze"
 SERVICE="cloudfuze-monitor"
-# CA cert location: the proxy writes to ~/.cloudfuze-aigov/ca/ (root's home)
 CA_CERT="/root/.cloudfuze-aigov/ca/ca.crt"
 DOCKER_CA="/etc/cloudfuze/docker-ca.crt"
+
+# Helper: find env file and run docker compose with override
+compose_up() {
+  local dir="$1"
+  local svc="$2"
+  local override="$3"  # optional override file
+  cd "$dir"
+
+  # Find the right env file for variable substitution
+  local ENV_FLAG=""
+  if [[ ! -f "$dir/.env" ]]; then
+    for candidate in .env.prod .env.production .env.local .env.staging .env.dev; do
+      if [[ -f "$dir/$candidate" ]]; then
+        ENV_FLAG="--env-file $dir/$candidate"
+        break
+      fi
+    done
+  fi
+
+  # Build compose file flags
+  local FILE_FLAGS=""
+  for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+    if [[ -f "$dir/$f" ]]; then
+      FILE_FLAGS="-f $dir/$f"
+      break
+    fi
+  done
+  if [[ -n "$override" && -f "$override" ]]; then
+    FILE_FLAGS="$FILE_FLAGS -f $override"
+  fi
+
+  docker compose $FILE_FLAGS $ENV_FLAG up -d "$svc" 2>&1 || docker-compose $FILE_FLAGS $ENV_FLAG up -d "$svc" 2>&1
+  return $?
+}
 
 case "$1" in
   status)
@@ -401,159 +434,41 @@ case "$1" in
       iptables -t nat -A PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null
       echo "  [OK] Traffic redirect added"
 
-      # Step 2: If docker-compose managed, modify compose file to add CA cert + env var
+      # Step 2: If docker-compose managed, create an override file (never touch original)
       if [[ -n "$COMPOSE_DIR" && -n "$COMPOSE_SVC" ]]; then
-        COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
-        if [[ ! -f "$COMPOSE_FILE" ]]; then
-          COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yaml"
-        fi
+        OVERRIDE="$COMPOSE_DIR/docker-compose.cloudfuze.yml"
+        echo "  Compose dir: $COMPOSE_DIR (service: $COMPOSE_SVC)"
 
-        if [[ -f "$COMPOSE_FILE" ]]; then
-          echo "  Compose: $COMPOSE_FILE (service: $COMPOSE_SVC)"
+        # Create override file with our CA cert mount + env vars
+        cat > "$OVERRIDE" << OVEOF
+services:
+  $COMPOSE_SVC:
+    environment:
+      - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt
+      - SSL_CERT_FILE=/certs/cloudfuze.crt
+      - REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt
+    volumes:
+      - /root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro
+OVEOF
+        echo "  [OK] Override created: $OVERRIDE"
+        echo "        (original compose file NOT modified)"
 
-          # Backup
-          if [[ ! -f "${COMPOSE_FILE}.cloudfuze-backup" ]]; then
-            cp "$COMPOSE_FILE" "${COMPOSE_FILE}.cloudfuze-backup"
-            echo "  [OK] Backup saved: ${COMPOSE_FILE}.cloudfuze-backup"
+        # Redeploy with override
+        echo "  Redeploying $COMPOSE_SVC..."
+        compose_up "$COMPOSE_DIR" "$COMPOSE_SVC" "$OVERRIDE"
+        if [[ $? -eq 0 ]]; then
+          sleep 2
+          NEW_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TARGET" 2>/dev/null)
+          if [[ -n "$NEW_IP" && "$NEW_IP" != "$CONTAINER_IP" ]]; then
+            iptables -t nat -D PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+            iptables -t nat -D PREROUTING -s "$NEW_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+            iptables -t nat -A PREROUTING -s "$NEW_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null
+            echo "  IP changed: $CONTAINER_IP -> $NEW_IP (iptables updated)"
           fi
-
-          # Use python3 to safely modify the YAML
-          python3 - "$COMPOSE_FILE" "$COMPOSE_SVC" << 'PYEOF'
-import sys, re
-
-compose_file = sys.argv[1]
-service_name = sys.argv[2]
-ca_mount = "/root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro"
-env_vars = [
-    "NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt",
-    "SSL_CERT_FILE=/certs/cloudfuze.crt",
-    "REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt",
-]
-
-with open(compose_file, 'r') as f:
-    content = f.read()
-
-# Check if already modified
-if "cloudfuze.crt" in content:
-    print("  Already configured -- skipping compose modification.", file=sys.stderr)
-    sys.exit(0)
-
-lines = content.split('\n')
-result = []
-in_service = False
-service_indent = 0
-found_env = False
-found_vol = False
-added_env = False
-added_vol = False
-i = 0
-
-while i < len(lines):
-    line = lines[i]
-    stripped = line.lstrip()
-    indent = len(line) - len(stripped)
-
-    # Detect if we're entering our target service
-    if stripped == service_name + ':' or stripped == f'"{service_name}":' or stripped == f"'{service_name}':":
-        in_service = True
-        service_indent = indent
-        result.append(line)
-        i += 1
-        continue
-
-    # Detect if we've left our target service (another service at same indent)
-    if in_service and indent <= service_indent and stripped and not stripped.startswith('#') and ':' in stripped and indent == service_indent:
-        # Before leaving, add missing sections
-        svc_content_indent = service_indent + 2
-        sp = ' ' * svc_content_indent
-        sp2 = ' ' * (svc_content_indent + 2)
-        if not found_env:
-            result.append(f"{sp}environment:")
-            for ev in env_vars:
-                result.append(f'{sp2}- "{ev}"')
-        if not found_vol:
-            result.append(f"{sp}volumes:")
-            result.append(f'{sp2}- "{ca_mount}"')
-        in_service = False
-
-    if in_service:
-        # Check for environment section
-        if stripped.startswith('environment:'):
-            found_env = True
-            result.append(line)
-            i += 1
-            # Add our env vars right after
-            env_indent = indent + 2
-            sp = ' ' * env_indent
-            for ev in env_vars:
-                result.append(f'{sp}- "{ev}"')
-            added_env = True
-            continue
-
-        # Check for volumes section
-        if stripped.startswith('volumes:'):
-            found_vol = True
-            result.append(line)
-            i += 1
-            vol_indent = indent + 2
-            sp = ' ' * vol_indent
-            result.append(f'{sp}- "{ca_mount}"')
-            added_vol = True
-            continue
-
-    result.append(line)
-    i += 1
-
-# If we ended while still in service (last service in file), add missing sections
-if in_service:
-    svc_content_indent = service_indent + 2
-    sp = ' ' * svc_content_indent
-    sp2 = ' ' * (svc_content_indent + 2)
-    if not found_env:
-        result.append(f"{sp}environment:")
-        for ev in env_vars:
-            result.append(f'{sp2}- "{ev}"')
-    if not found_vol:
-        result.append(f"{sp}volumes:")
-        result.append(f'{sp2}- "{ca_mount}"')
-
-with open(compose_file, 'w') as f:
-    f.write('\n'.join(result))
-
-print("  [OK] Compose file updated", file=sys.stderr)
-PYEOF
-
-          if [[ $? -eq 0 ]]; then
-            # Redeploy only this service
-            echo "  Redeploying $COMPOSE_SVC..."
-            cd "$COMPOSE_DIR"
-            docker compose up -d "$COMPOSE_SVC" 2>/dev/null || docker-compose up -d "$COMPOSE_SVC" 2>/dev/null
-            if [[ $? -eq 0 ]]; then
-              # Re-get IP since container was recreated
-              sleep 2
-              NEW_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TARGET" 2>/dev/null)
-              if [[ -n "$NEW_IP" && "$NEW_IP" != "$CONTAINER_IP" ]]; then
-                # Update iptables rule with new IP
-                iptables -t nat -D PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-                iptables -t nat -D PREROUTING -s "$NEW_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-                iptables -t nat -A PREROUTING -s "$NEW_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null
-                echo "  IP changed: $CONTAINER_IP -> $NEW_IP (iptables updated)"
-              fi
-              echo "  [OK] $TARGET -- fully governed (prompt, response, tokens, cost)"
-            else
-              echo "  [!] Redeploy failed. Restoring backup..."
-              cp "${COMPOSE_FILE}.cloudfuze-backup" "$COMPOSE_FILE"
-              echo "  Restored original compose file."
-            fi
-          fi
+          echo "  [OK] $TARGET -- fully governed (prompt, response, tokens, cost)"
         else
-          echo "  [!] Compose file not found at $COMPOSE_DIR"
-          echo "    Container has iptables redirect (metadata tracking)."
-          echo "    For full tracing, add to docker-compose.yml:"
-          echo "      environment:"
-          echo "        - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt"
-          echo "      volumes:"
-          echo "        - /root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro"
+          echo "  [!] Redeploy failed. Removing override..."
+          rm -f "$OVERRIDE"
         fi
       else
         echo "  Not docker-compose managed -- iptables redirect added (metadata only)."
@@ -586,24 +501,18 @@ PYEOF
       echo "  [OK] Traffic redirect removed"
     fi
 
-    # Restore compose file if we modified it
+    # Remove our override file and redeploy with original config only
     COMPOSE_DIR=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$TARGET" 2>/dev/null)
     COMPOSE_SVC=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$TARGET" 2>/dev/null)
     if [[ -n "$COMPOSE_DIR" ]]; then
-      for ext in yml yaml; do
-        BACKUP="$COMPOSE_DIR/docker-compose.${ext}.cloudfuze-backup"
-        COMPOSE="$COMPOSE_DIR/docker-compose.${ext}"
-        if [[ -f "$BACKUP" ]]; then
-          cp "$BACKUP" "$COMPOSE"
-          rm -f "$BACKUP"
-          echo "  [OK] Compose file restored from backup"
-          # Redeploy with original config
-          cd "$COMPOSE_DIR"
-          docker compose up -d "$COMPOSE_SVC" 2>/dev/null || docker-compose up -d "$COMPOSE_SVC" 2>/dev/null
-          echo "  [OK] $TARGET redeployed with original config"
-          break
-        fi
-      done
+      OVERRIDE="$COMPOSE_DIR/docker-compose.cloudfuze.yml"
+      if [[ -f "$OVERRIDE" ]]; then
+        rm -f "$OVERRIDE"
+        echo "  [OK] Override file removed"
+        # Redeploy without override (original config only)
+        compose_up "$COMPOSE_DIR" "$COMPOSE_SVC"
+        echo "  [OK] $TARGET redeployed with original config"
+      fi
     fi
 
     echo "  [OK] $TARGET -- governance removed"
