@@ -411,21 +411,28 @@ JEOF
     echo "  ✓ Docker proxy config written"
     echo "  ✓ CA cert copied to $DOCKER_CA_PATH"
     echo ""
-    echo "  To apply, containers need a restart. You have two options:"
     echo ""
-    echo "  Option 1 — Restart specific containers:"
-    echo "    docker restart <container_name>"
-    echo ""
-    echo "  Option 2 — Restart all containers (brief downtime):"
-    echo "    docker restart \$(docker ps -q)"
-    echo ""
-    echo "  After restart, add this to your docker-compose.yml for full tracing:"
-    echo "    volumes:"
-    echo "      - /etc/cloudfuze/docker-ca.crt:/usr/local/share/ca-certificates/cloudfuze.crt:ro"
-    echo "    environment:"
-    echo "      - NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/cloudfuze.crt"
-    echo "      - SSL_CERT_FILE=/usr/local/share/ca-certificates/cloudfuze.crt"
-    echo "      - REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/cloudfuze.crt"
+
+    # Ask whether to restart containers now
+    if [[ -t 0 ]]; then
+      read -p "  Restart all running containers now to apply? (y/n): " RESTART_CHOICE
+      echo ""
+      if [[ "$RESTART_CHOICE" =~ ^[Yy] ]]; then
+        echo "  Restarting containers..."
+        docker ps -q 2>/dev/null | while read cid; do
+          CNAME=$(docker inspect --format '{{.Name}}' "$cid" 2>/dev/null | sed 's|^/||')
+          docker restart "$cid" >/dev/null 2>&1 && echo "    ✓ $CNAME" || echo "    ✗ $CNAME (failed)"
+        done
+        echo ""
+        echo "  ✓ All containers restarted with full governance enabled."
+      else
+        echo "  Containers not restarted. To apply later:"
+        echo "    docker restart \$(docker ps -q)"
+      fi
+    else
+      echo "  Non-interactive — containers not restarted. To apply:"
+      echo "    docker restart \$(docker ps -q)"
+    fi
     echo ""
     echo "  To disable Docker governance later:"
     echo "    sudo cloudfuze-monitor docker-disable"
