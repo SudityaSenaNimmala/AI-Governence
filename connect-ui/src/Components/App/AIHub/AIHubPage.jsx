@@ -4407,11 +4407,45 @@ function ServerMonitorView() {
               </div>
             </div>
 
+            {/* Docker governance */}
+            <div style={{ background: "#f5f3ff", border: "1px solid #c4b5fd", borderRadius: 8, padding: 14, marginTop: 12 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "#5b21b6", marginBottom: 6 }}>Docker Container Governance:</div>
+              <div style={{ fontSize: 12, color: "#5b21b6", lineHeight: 1.7, marginBottom: 8 }}>
+                After installing, host processes are <strong>fully governed</strong> (prompt, response, tokens, cost &mdash; everything captured).
+                Docker containers are tracked at the network level (which AI provider, when, duration). To enable <strong>full governance inside containers</strong>
+                (prompt/response content, token counts, cost), the install will ask you to enable Docker governance. This requires a one-time container restart.
+              </div>
+              <div style={{ fontSize: 12, color: "#5b21b6", lineHeight: 1.7 }}>
+                Enable anytime later: <code style={{ background: "#ede9fe", padding: "1px 5px", borderRadius: 3 }}>sudo cloudfuze-monitor docker-enable</code><br/>
+                Disable: <code style={{ background: "#ede9fe", padding: "1px 5px", borderRadius: 3 }}>sudo cloudfuze-monitor docker-disable</code>
+              </div>
+            </div>
+
+            {/* Commands reference */}
+            <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, padding: 14, marginTop: 12 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: "#111", marginBottom: 8 }}>Available Commands:</div>
+              <div style={{ fontSize: 12, color: "#374151", fontFamily: "ui-monospace, monospace", lineHeight: 2.0 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: "2px 16px" }}>
+                  <span>cloudfuze-monitor status</span><span style={{ color: "#6b7280" }}>Show service status</span>
+                  <span>cloudfuze-monitor logs</span><span style={{ color: "#6b7280" }}>Stream live logs</span>
+                  <span>cloudfuze-monitor restart</span><span style={{ color: "#6b7280" }}>Restart the monitor</span>
+                  <span>cloudfuze-monitor update</span><span style={{ color: "#6b7280" }}>Update to latest version</span>
+                  <span>cloudfuze-monitor docker-enable</span><span style={{ color: "#6b7280" }}>Enable full Docker container governance</span>
+                  <span>cloudfuze-monitor docker-disable</span><span style={{ color: "#6b7280" }}>Disable Docker container governance</span>
+                  <span>cloudfuze-monitor uninstall</span><span style={{ color: "#6b7280" }}>Remove completely</span>
+                  <span>cloudfuze-monitor help</span><span style={{ color: "#6b7280" }}>Show all commands</span>
+                </div>
+              </div>
+              <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 8 }}>
+                Run these commands on the server where the monitor is installed. Most require <code>sudo</code>.
+              </div>
+            </div>
+
             {/* Uninstall */}
             <div style={{ background: "#fefce8", border: "1px solid #fde68a", borderRadius: 8, padding: 14, marginTop: 12 }}>
               <div style={{ fontWeight: 600, fontSize: 13, color: "#854d0e", marginBottom: 6 }}>To uninstall:</div>
-              <code style={{ fontSize: 12, color: "#854d0e" }}>sudo systemctl stop cloudfuze-server-monitor && sudo rm -rf /opt/cloudfuze /etc/cloudfuze</code>
-              <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 4 }}>Stops the service and removes all files, CA, and proxy config.</div>
+              <code style={{ fontSize: 12, color: "#854d0e" }}>sudo cloudfuze-monitor uninstall</code>
+              <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 4 }}>Stops the service, removes iptables rules, CA, proxy config, and all files.</div>
             </div>
           </div>
         </div>
