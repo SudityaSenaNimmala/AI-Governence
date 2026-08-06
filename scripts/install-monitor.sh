@@ -309,19 +309,20 @@ SERVICE="cloudfuze-monitor"
 CA_CERT="/root/.cloudfuze-aigov/ca/ca.crt"
 DOCKER_CA="/etc/cloudfuze/docker-ca.crt"
 
-# Helper: find env file and run docker compose with override
+# Helper: run docker compose with override, handling missing .env
 compose_up() {
   local dir="$1"
   local svc="$2"
-  local override="$3"  # optional override file
+  local override="$3"
   cd "$dir"
 
-  # Find the right env file for variable substitution
-  local ENV_FLAG=""
+  # If .env is missing, temporarily copy the real env file
+  local CREATED_ENV=0
   if [[ ! -f "$dir/.env" ]]; then
     for candidate in .env.prod .env.production .env.local .env.staging .env.dev; do
       if [[ -f "$dir/$candidate" ]]; then
-        ENV_FLAG="--env-file $dir/$candidate"
+        cp "$dir/$candidate" "$dir/.env"
+        CREATED_ENV=1
         break
       fi
     done
@@ -339,8 +340,14 @@ compose_up() {
     FILE_FLAGS="$FILE_FLAGS -f $override"
   fi
 
-  docker compose $FILE_FLAGS $ENV_FLAG up -d "$svc" 2>&1 || docker-compose $FILE_FLAGS $ENV_FLAG up -d "$svc" 2>&1
-  return $?
+  docker compose $FILE_FLAGS up -d "$svc" 2>&1 || docker-compose $FILE_FLAGS up -d "$svc" 2>&1
+  local rc=$?
+
+  # Clean up temporary .env
+  if [[ "$CREATED_ENV" == "1" ]]; then
+    rm -f "$dir/.env"
+  fi
+  return $rc
 }
 
 case "$1" in
@@ -439,32 +446,8 @@ case "$1" in
         OVERRIDE="$COMPOSE_DIR/docker-compose.cloudfuze.yml"
         echo "  Compose dir: $COMPOSE_DIR (service: $COMPOSE_SVC)"
 
-        # Find the env file referenced in compose and check if it exists
-        ORIG_ENV=""
-        REAL_ENV=""
-        for cfile in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
-          if [[ -f "$COMPOSE_DIR/$cfile" ]]; then
-            ORIG_ENV=$(grep -A 1 'env_file:' "$COMPOSE_DIR/$cfile" 2>/dev/null | grep -oP '^\s*-\s*\K\S+' | head -1)
-            break
-          fi
-        done
-        # If the referenced env file doesn't exist, find the real one
-        if [[ -n "$ORIG_ENV" && ! -f "$COMPOSE_DIR/$ORIG_ENV" ]]; then
-          for candidate in .env.prod .env.production .env.local .env.staging .env.dev .env.development; do
-            if [[ -f "$COMPOSE_DIR/$candidate" ]]; then
-              REAL_ENV="$candidate"
-              echo "  Env: $ORIG_ENV not found, using $REAL_ENV"
-              break
-            fi
-          done
-        fi
-
-        # Create override file
-        ENV_LINE=""
-        if [[ -n "$REAL_ENV" ]]; then
-          ENV_LINE=$(printf "    env_file:\n      - %s\n" "$REAL_ENV")
-        fi
-        printf "services:\n  %s:\n%s    environment:\n      - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt\n      - SSL_CERT_FILE=/certs/cloudfuze.crt\n      - REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt\n    volumes:\n      - /root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro\n" "$COMPOSE_SVC" "$ENV_LINE" > "$OVERRIDE"
+        # Create override file (env_file handled by compose_up helper)
+        printf "services:\n  %s:\n    environment:\n      - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt\n      - SSL_CERT_FILE=/certs/cloudfuze.crt\n      - REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt\n    volumes:\n      - /root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro\n" "$COMPOSE_SVC" > "$OVERRIDE"
         echo "  [OK] Override created: $OVERRIDE"
         echo "        (original compose file NOT modified)"
 
