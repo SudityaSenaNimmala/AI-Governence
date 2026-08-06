@@ -42,6 +42,7 @@ while [[ $# -gt 0 ]]; do
     --token)   ENROLL_TOKEN="$2"; shift 2;;
     --server)  GOV_SERVER="$2"; shift 2;;
     --port)    PROXY_PORT="$2"; shift 2;;
+    --refresh-cli) REFRESH_CLI_ONLY=true; shift;;
     --remote)  REMOTE_MODE=true; shift;;
     --allow)   ALLOWED_IPS="$2"; shift 2;;
     ,*) ALLOWED_IPS="${ALLOWED_IPS}${1}"; shift;;
@@ -71,6 +72,17 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1"; exit 1;;
   esac
 done
+
+# ── Refresh CLI only mode (called by update script) ──────────────────────
+if [[ "$REFRESH_CLI_ONLY" == "true" ]]; then
+  # Jump to the CLI wrapper section — source this file with the WRAPPER heredoc
+  # The wrapper is written below in the main install flow. We duplicate just
+  # the cat-heredoc here so --refresh-cli can run standalone.
+  SOURCE_SCRIPT="$(readlink -f "$0")"
+  # Extract the wrapper block and eval it
+  sed -n '/^# ── Create CLI tool/,/^chmod +x \/usr\/local\/bin\/cloudfuze-monitor/p' "$SOURCE_SCRIPT" | bash
+  exit 0
+fi
 
 if [[ -z "$ENROLL_TOKEN" ]]; then
   echo "ERROR: --token is required. Get it from your CloudFuze dashboard."
