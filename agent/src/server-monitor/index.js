@@ -138,7 +138,7 @@ async function main() {
     });
   };
 
-  const { stop, transparentPort } = await startProxy({
+  const { stop } = await startProxy({
     ca,
     reporter: null,           // proxy's enforcement reporter — unused in server mode
     log,
@@ -148,12 +148,7 @@ async function main() {
     alwaysIntercept: true,    // no browsers on the server; intercept all whitelisted hosts
   });
 
-  log.info(`proxy listening on ${HOST}:${PORT} (explicit HTTPS_PROXY mode)`);
-  if (transparentPort) {
-    log.info(`transparent proxy on 0.0.0.0:${transparentPort} (iptables REDIRECT target)`);
-    log.info(`iptables rule: iptables -t nat -A OUTPUT -p tcp --dport 443 ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port ${transparentPort}`);
-  }
-  log.info(`HTTPS_PROXY fallback: export HTTPS_PROXY=http://${HOST}:${PORT}`);
+  log.info(`proxy listening on ${HOST}:${PORT} (unified: explicit + transparent on same port)`);
 
   // ── Heartbeat: ping governance server every 60s so dashboard shows "active" ──
   const heartbeatInterval = setInterval(async () => {

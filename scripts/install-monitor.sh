@@ -277,45 +277,40 @@ fi
 # Wait for startup + CA generation
 sleep 3
 
-# ── Docker/container governance via iptables (zero-touch, invisible) ─────
-# If Docker is present, add iptables PREROUTING rules on bridge interfaces
-# so container traffic to port 443 gets redirected through the transparent
-# proxy. No Docker config changes, no container restarts, no env vars.
-# Completely invisible to running containers.
-TRANSPARENT_PORT=$((PROXY_PORT + 1))
+# ── Network-level interception (single port, zero-touch, invisible) ──────
+# iptables redirects all outbound port-443 traffic to our proxy port.
+# The proxy auto-detects whether a connection is raw TLS (iptables redirect)
+# or HTTP CONNECT (explicit proxy) by peeking the first byte. Single port,
+# no conflicts, no extra ports needed.
+#
+# For Docker containers: PREROUTING on bridge interfaces.
+# For host processes: OUTPUT chain (excludes root to avoid proxy loop).
+# Nothing inside any container is touched, changed, or restarted.
+
+# Make proxy listen on 0.0.0.0 so redirected traffic from Docker bridges can reach it
+if grep -q "PROXY_LISTEN_HOST=127.0.0.1" "/etc/systemd/system/${SERVICE_NAME}.service" 2>/dev/null; then
+  sed -i "s|PROXY_LISTEN_HOST=127.0.0.1|PROXY_LISTEN_HOST=0.0.0.0|" "/etc/systemd/system/${SERVICE_NAME}.service"
+  systemctl daemon-reload
+  systemctl restart "$SERVICE_NAME"
+  sleep 2
+fi
+
 if command -v docker &>/dev/null; then
   echo "[+] Docker detected — adding network-level interception..."
-
-  # Make proxy listen on 0.0.0.0 so Docker bridge traffic can reach it
-  if grep -q "PROXY_LISTEN_HOST=127.0.0.1" "/etc/systemd/system/${SERVICE_NAME}.service" 2>/dev/null; then
-    sed -i "s|PROXY_LISTEN_HOST=127.0.0.1|PROXY_LISTEN_HOST=0.0.0.0|" "/etc/systemd/system/${SERVICE_NAME}.service"
-    systemctl daemon-reload
-    systemctl restart "$SERVICE_NAME"
-    sleep 2
-  fi
-
-  # Add iptables PREROUTING rules for all Docker bridge interfaces
-  # This catches traffic from containers without touching any container config
-  for iface in $(ip link show 2>/dev/null | grep -oP '(docker0|br-[a-f0-9]+|veth[a-f0-9]+)(?=[@:])' | sort -u); do
-    iptables -t nat -D PREROUTING -i "$iface" -p tcp --dport 443 -j REDIRECT --to-port "$TRANSPARENT_PORT" 2>/dev/null || true
-    iptables -t nat -A PREROUTING -i "$iface" -p tcp --dport 443 -j REDIRECT --to-port "$TRANSPARENT_PORT" 2>/dev/null || true
-    echo "  ✓ Intercepting: $iface → :${TRANSPARENT_PORT}"
+  for iface in $(ip link show 2>/dev/null | grep -oP '(docker0|br-[a-f0-9]+)(?=[@:])' | sort -u); do
+    iptables -t nat -D PREROUTING -i "$iface" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+    iptables -t nat -A PREROUTING -i "$iface" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+    echo "  ✓ Containers on $iface → :${PROXY_PORT}"
   done
-
-  # Also add for OUTPUT (host processes, non-root to avoid proxy loop)
-  iptables -t nat -D OUTPUT -p tcp --dport 443 ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "$TRANSPARENT_PORT" 2>/dev/null || true
-  iptables -t nat -A OUTPUT -p tcp --dport 443 ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "$TRANSPARENT_PORT" 2>/dev/null || true
-  echo "  ✓ Intercepting: host processes → :${TRANSPARENT_PORT}"
-
-  # Persist iptables
-  iptables-save > /etc/iptables.rules 2>/dev/null || true
-  echo "  ✓ All containers and host processes governed (no restarts, no config changes)"
-else
-  # No Docker — just add OUTPUT rule for host processes
-  iptables -t nat -D OUTPUT -p tcp --dport 443 ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "$TRANSPARENT_PORT" 2>/dev/null || true
-  iptables -t nat -A OUTPUT -p tcp --dport 443 ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "$TRANSPARENT_PORT" 2>/dev/null || true
-  iptables-save > /etc/iptables.rules 2>/dev/null || true
 fi
+
+# Host processes (non-root to avoid proxy's own traffic looping back)
+iptables -t nat -D OUTPUT -p tcp --dport 443 ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+iptables -t nat -A OUTPUT -p tcp --dport 443 ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+echo "  ✓ Host processes → :${PROXY_PORT}"
+
+# Persist across reboots
+iptables-save > /etc/iptables.rules 2>/dev/null || true
 
 # ── Create uninstall command ──────────────────────────────────────────────
 cat > /usr/local/bin/cloudfuze-monitor << 'WRAPPER'

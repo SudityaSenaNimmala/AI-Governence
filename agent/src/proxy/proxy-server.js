@@ -195,22 +195,17 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
     try { sock.destroy(); } catch {}
   });
 
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, host, () => {
-      server.off('error', reject);
-      resolve();
-    });
-  });
-  log?.info?.(`proxy: listening on ${host}:${port}`);
-
   // ── Transparent proxy (iptables REDIRECT mode) ───────────────────────
   // When iptables redirects port-443 traffic to us, we receive raw TLS
   // ClientHello bytes instead of HTTP CONNECT. We extract the SNI hostname,
   // check the whitelist, and either MITM-intercept or bridge to the real host.
   // This captures ALL outbound HTTPS traffic — no HTTPS_PROXY env var needed.
+  //
+  // Both explicit proxy (HTTP CONNECT) and transparent (raw TLS) share the
+  // SAME port. We detect which protocol by peeking at the first byte:
+  //   0x16 = TLS ClientHello → transparent mode
+  //   anything else = HTTP request → explicit proxy mode
   let transparentServer = null;
-  const tpPort = port + 1;   // transparent port = proxy port + 1 (e.g. 8444)
 
   if (alwaysIntercept) {   // only in server-monitor mode
     // Docker bridge subnet — traffic from containers comes from 172.17.0.0/16
@@ -225,15 +220,24 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
       return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31;
     };
 
-    transparentServer = net.createServer({ pauseOnConnect: true }, (clientSocket) => {
+    // Handle raw TLS connections that arrive on the same port via iptables REDIRECT.
+    // The HTTP server's 'connection' event fires for every new TCP socket BEFORE
+    // any HTTP parsing. We peek the first byte: 0x16 = TLS → handle as transparent.
+    // Anything else → let the HTTP server parse it normally (CONNECT / plain HTTP).
+    const handleTransparentConnection = (clientSocket) => {
       clientSocket.once('readable', () => {
         const peek = clientSocket.read();
         if (!peek || peek.length === 0) { clientSocket.destroy(); return; }
 
-        const sniHost = extractSni(peek);
+        // Not TLS? Put the data back and let the HTTP server handle it.
+        if (peek[0] !== 0x16) {
+          clientSocket.unshift(peek);
+          server.emit('connection', clientSocket);
+          return;
+        }
 
+        const sniHost = extractSni(peek);
         if (!sniHost) {
-          log?.warn?.(`transparent: no SNI in ${peek.length} bytes, dropping`);
           clientSocket.destroy();
           return;
         }
@@ -241,7 +245,7 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
         const fromContainer = isDockerIp(clientSocket.remoteAddress);
 
         if (isPinnedHost(sniHost) || !isIntercepted(sniHost)) {
-          // Non-AI traffic — bridge transparently, zero overhead
+          // Non-AI traffic — bridge transparently
           const upstream = net.createConnection(443, sniHost, () => {
             upstream.write(peek);
             clientSocket.pipe(upstream);
@@ -254,43 +258,34 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
         }
 
         if (fromContainer) {
-          // AI traffic from Docker container — bridge (don't MITM, CA not trusted
-          // inside container) but LOG the metadata so it appears in dashboard.
-          log?.info?.(`transparent: container AI call → ${sniHost} (bridge+log)`);
+          // Docker container AI traffic — bridge + log metadata (no MITM, no breakage)
+          log?.info?.(`transparent: container → ${sniHost} (bridge+log)`);
           const startedAt = Date.now();
-          let bytesSent = peek.length;
-          let bytesReceived = 0;
+          let bytesSent = peek.length, bytesReceived = 0;
           const upstream = net.createConnection(443, sniHost, () => {
             upstream.write(peek);
             clientSocket.on('data', (chunk) => { bytesSent += chunk.length; upstream.write(chunk); });
             upstream.on('data', (chunk) => { bytesReceived += chunk.length; clientSocket.write(chunk); });
             clientSocket.resume();
           });
-          const logOnEnd = () => {
-            if (onApiCall) {
-              onApiCall({
-                host: sniHost, path: '/', method: 'POST',
-                requestHeaders: {}, requestBody: null,
-                responseStatus: 200, responseHeaders: {}, responseBody: null,
-                responseTruncated: true,
-                startedAt, durationMs: Date.now() - startedAt,
-                peerPort: clientSocket.remotePort,
-                peerAddress: clientSocket.remoteAddress,
-                _containerMode: true,
-                _bytesSent: bytesSent,
-                _bytesReceived: bytesReceived,
-              });
-            }
-          };
-          upstream.on('end', logOnEnd);
+          upstream.on('end', () => {
+            if (onApiCall) onApiCall({
+              host: sniHost, path: '/', method: 'POST',
+              requestHeaders: {}, requestBody: null,
+              responseStatus: 200, responseHeaders: {}, responseBody: null,
+              responseTruncated: true, startedAt, durationMs: Date.now() - startedAt,
+              peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress,
+              _containerMode: true, _bytesSent: bytesSent, _bytesReceived: bytesReceived,
+            });
+            try { clientSocket.end(); } catch {}
+          });
           upstream.on('error', () => { try { clientSocket.destroy(); } catch {} });
           clientSocket.on('error', () => { try { upstream.destroy(); } catch {} });
           clientSocket.on('end', () => { try { upstream.end(); } catch {} });
-          upstream.on('end', () => { try { clientSocket.end(); } catch {} });
           return;
         }
 
-        // AI traffic from host process — MITM intercept (CA is trusted on host)
+        // Host process AI traffic — full MITM (CA trusted on host)
         log?.info?.(`transparent: intercepting ${sniHost}`);
         const tlsSock = new tls.TLSSocket(clientSocket, {
           isServer: true,
@@ -298,45 +293,50 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
         });
         tlsSock.push(peek);
         clientSocket.resume();
-
         tlsSock.on('error', (err) => {
-          log?.warn?.(`transparent: TLS error for ${sniHost}: ${err?.code || err?.message}`);
+          log?.warn?.(`transparent: TLS error ${sniHost}: ${err?.code || err?.message}`);
           try { clientSocket.destroy(); } catch {}
         });
-
         const inner = http.createServer(async (req, res) => {
           const target = { hostname: sniHost, port: 443, path: req.url, protocol: 'https:' };
           return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress, vault, tokenizePatterns: _tokenizePatterns, modelRouter });
         });
         inner.emit('connection', tlsSock);
       });
-    });
+    };
 
-    try {
-      await new Promise((resolve, reject) => {
-        transparentServer.once('error', (err) => {
-          log?.warn?.(`transparent: failed to start on port ${tpPort}: ${err.message}. Falling back to HTTPS_PROXY-only mode.`);
-          transparentServer = null;
-          resolve();   // non-fatal — explicit proxy still works
-        });
-        transparentServer.listen(tpPort, '0.0.0.0', () => {
-          transparentServer.off('error', reject);
-          log?.info?.(`transparent: listening on 0.0.0.0:${tpPort} (iptables REDIRECT target)`);
-          resolve();
-        });
+    // Replace the default HTTP server with a raw TCP server that peeks first byte.
+    // This single port handles BOTH explicit proxy (HTTP CONNECT) and transparent
+    // (raw TLS from iptables REDIRECT). No second port needed.
+    transparentServer = net.createServer({ pauseOnConnect: true }, handleTransparentConnection);
+    transparentServer.on('error', (err) => log?.warn?.(`proxy error: ${err.message}`));
+
+    await new Promise((resolve, reject) => {
+      transparentServer.once('error', reject);
+      transparentServer.listen(port, host, () => {
+        transparentServer.off('error', reject);
+        resolve();
       });
-    } catch { transparentServer = null; }
+    });
+    log?.info?.(`proxy: listening on ${host}:${port} (unified: explicit + transparent)`);
+  } else {
+    // Desktop mode — just the HTTP proxy, no transparent handling
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, host, () => {
+        server.off('error', reject);
+        resolve();
+      });
+    });
+    log?.info?.(`proxy: listening on ${host}:${port}`);
   }
 
   return {
-    server,
-    transparentServer,
-    transparentPort: transparentServer ? tpPort : null,
+    server: transparentServer || server,
     vault,
     stop: () => new Promise((resolve) => {
       clearInterval(_gcInterval);
-      if (transparentServer) transparentServer.close(() => {});
-      server.close(() => resolve());
+      (transparentServer || server).close(() => resolve());
     }),
   };
 }
