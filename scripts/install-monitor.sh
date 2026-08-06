@@ -460,21 +460,11 @@ case "$1" in
         fi
 
         # Create override file
-        {
-          echo "services:"
-          echo "  $COMPOSE_SVC:"
-          # Override env_file if the original one is missing
-          if [[ -n "$REAL_ENV" ]]; then
-            echo "    env_file:"
-            echo "      - $REAL_ENV"
-          fi
-          echo "    environment:"
-          echo "      - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt"
-          echo "      - SSL_CERT_FILE=/certs/cloudfuze.crt"
-          echo "      - REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt"
-          echo "    volumes:"
-          echo "      - /root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro"
-        } > "$OVERRIDE"
+        ENV_LINE=""
+        if [[ -n "$REAL_ENV" ]]; then
+          ENV_LINE=$(printf "    env_file:\n      - %s\n" "$REAL_ENV")
+        fi
+        printf "services:\n  %s:\n%s    environment:\n      - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt\n      - SSL_CERT_FILE=/certs/cloudfuze.crt\n      - REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt\n    volumes:\n      - /root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro\n" "$COMPOSE_SVC" "$ENV_LINE" > "$OVERRIDE"
         echo "  [OK] Override created: $OVERRIDE"
         echo "        (original compose file NOT modified)"
 
