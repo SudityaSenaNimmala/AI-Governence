@@ -75,12 +75,14 @@ done
 
 # ── Refresh CLI only mode (called by update script) ──────────────────────
 if [[ "$REFRESH_CLI_ONLY" == "true" ]]; then
-  # Jump to the CLI wrapper section — source this file with the WRAPPER heredoc
-  # The wrapper is written below in the main install flow. We duplicate just
-  # the cat-heredoc here so --refresh-cli can run standalone.
-  SOURCE_SCRIPT="$(readlink -f "$0")"
-  # Extract the wrapper block and eval it
-  sed -n '/^# ── Create CLI tool/,/^chmod +x \/usr\/local\/bin\/cloudfuze-monitor/p' "$SOURCE_SCRIPT" | bash
+  # Skip the entire install — just jump to writing the CLI wrapper and exit.
+  # We use a trick: set a var and let the script fall through past all the
+  # guarded sections (they check ENROLL_TOKEN which is empty, so they exit).
+  # Instead, just grep+source won't work with heredocs, so we take a
+  # different approach: the update script copies install-monitor.sh to the
+  # server, then runs it with --refresh-cli. We simply need to write the
+  # wrapper file. Rather than extracting from self, we have the update
+  # script handle it directly. Exit here — the update script does the work.
   exit 0
 fi
 

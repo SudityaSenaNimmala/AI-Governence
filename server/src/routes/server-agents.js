@@ -360,21 +360,26 @@ cd "\$INSTALL_DIR"
 npm install --omit=dev --no-audit --no-fund --quiet 2>&1 | tail -3
 
 echo "[4/5] Refreshing CLI commands..."
-# Copy the install script to the install dir so we can re-run the CLI wrapper part
+# Copy the install script to the install dir
 for candidate in "\$TMP/repo/scripts/install-monitor.sh" "\$TMP/repo/agent team/scripts/install-monitor.sh"; do
   if [[ -f "\$candidate" ]]; then
     mkdir -p "\$INSTALL_DIR/scripts"
     cp "\$candidate" "\$INSTALL_DIR/scripts/install-monitor.sh"
     chmod +x "\$INSTALL_DIR/scripts/install-monitor.sh"
+    # Extract the CLI wrapper heredoc and write it directly
+    # The block is between 'cat > /usr/local/bin/cloudfuze-monitor' and 'WRAPPER'
+    awk '/^cat > \\/usr\\/local\\/bin\\/cloudfuze-monitor/,/^WRAPPER/' "\$candidate" > /tmp/cfm-cli-block.sh
+    if [[ -s /tmp/cfm-cli-block.sh ]]; then
+      bash /tmp/cfm-cli-block.sh 2>/dev/null
+      chmod +x /usr/local/bin/cloudfuze-monitor 2>/dev/null
+      rm -f /tmp/cfm-cli-block.sh
+      echo "  CLI commands updated."
+    else
+      echo "  CLI extraction failed — not updated."
+    fi
     break
   fi
 done
-# Re-run install with --refresh-cli flag (only rewrites the CLI wrapper)
-if [[ -f "\$INSTALL_DIR/scripts/install-monitor.sh" ]]; then
-  bash "\$INSTALL_DIR/scripts/install-monitor.sh" --refresh-cli 2>/dev/null && echo "  CLI commands updated." || echo "  CLI update skipped."
-else
-  echo "  Install script not found — CLI not updated."
-fi
 
 echo "[5/5] Restarting service..."
 systemctl restart cloudfuze-monitor 2>/dev/null || systemctl restart cloudfuze-server-monitor 2>/dev/null || true

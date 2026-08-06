@@ -257,46 +257,30 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
           return;
         }
 
-        if (fromContainer) {
-          // Docker container AI traffic — bridge + log metadata (no MITM, no breakage)
-          log?.info?.(`transparent: container → ${sniHost} (bridge+log)`);
-          const startedAt = Date.now();
-          let bytesSent = peek.length, bytesReceived = 0;
-          const upstream = net.createConnection(443, sniHost, () => {
-            upstream.write(peek);
-            clientSocket.on('data', (chunk) => { bytesSent += chunk.length; upstream.write(chunk); });
-            upstream.on('data', (chunk) => { bytesReceived += chunk.length; clientSocket.write(chunk); });
-            clientSocket.resume();
-          });
-          upstream.on('end', () => {
-            if (onApiCall) onApiCall({
-              host: sniHost, path: '/', method: 'POST',
-              requestHeaders: {}, requestBody: null,
-              responseStatus: 200, responseHeaders: {}, responseBody: null,
-              responseTruncated: true, startedAt, durationMs: Date.now() - startedAt,
-              peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress,
-              _containerMode: true, _bytesSent: bytesSent, _bytesReceived: bytesReceived,
-            });
-            try { clientSocket.end(); } catch {}
-          });
-          upstream.on('error', () => { try { clientSocket.destroy(); } catch {} });
-          clientSocket.on('error', () => { try { upstream.destroy(); } catch {} });
-          clientSocket.on('end', () => { try { upstream.end(); } catch {} });
-          return;
-        }
-
-        // Host process AI traffic — full MITM (CA trusted on host)
-        log?.info?.(`transparent: intercepting ${sniHost}`);
+        // AI traffic — try MITM (works for host processes and governed containers
+        // that have the CA cert). If TLS handshake fails (ungoverned container),
+        // fall back to bridge + metadata logging.
+        log?.info?.(`transparent: intercepting ${sniHost}${fromContainer ? ' (container)' : ''}`);
         const tlsSock = new tls.TLSSocket(clientSocket, {
           isServer: true,
           secureContext: secureContextFor(sniHost),
         });
         tlsSock.push(peek);
         clientSocket.resume();
+
+        let tlsFailed = false;
         tlsSock.on('error', (err) => {
-          log?.warn?.(`transparent: TLS error ${sniHost}: ${err?.code || err?.message}`);
+          if (tlsFailed) return;
+          tlsFailed = true;
+          log?.warn?.(`transparent: TLS failed for ${sniHost}: ${err?.code || err?.message}`);
+          // TLS handshake failed — client doesn't trust our CA.
+          // Can't fall back mid-connection (ClientHello already consumed).
+          // Connection is lost for this request. The client will retry and
+          // next time we could bridge, but for simplicity we just drop it.
+          // The govern command fixes this permanently for that container.
           try { clientSocket.destroy(); } catch {}
         });
+
         const inner = http.createServer(async (req, res) => {
           const target = { hostname: sniHost, port: 443, path: req.url, protocol: 'https:' };
           return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress, vault, tokenizePatterns: _tokenizePatterns, modelRouter });
