@@ -320,13 +320,13 @@ echo "  ✓ Host processes → :${PROXY_PORT} (ports: $AI_PORTS)"
 # Persist across reboots
 iptables-save > /etc/iptables.rules 2>/dev/null || true
 
-# ── Create CLI tool with all commands ─────────────────────────────────────
+# ── Create CLI tool ──────────────────────────────────────────────────────
 cat > /usr/local/bin/cloudfuze-monitor << 'WRAPPER'
 #!/bin/bash
-INSTALL_DIR="/opt/cloudfuze-monitor"
 DATA_DIR="/etc/cloudfuze"
 SERVICE="cloudfuze-monitor"
 CA_CERT="$DATA_DIR/ca/ca.crt"
+DOCKER_CA="/etc/cloudfuze/docker-ca.crt"
 
 case "$1" in
   status)
@@ -340,137 +340,98 @@ case "$1" in
     echo "Service restarted."
     ;;
   update)
-    echo "Fetching update script from governance server..."
-    TOKEN_FILE="$DATA_DIR/monitor-token.json"
-    if [[ -f "$TOKEN_FILE" ]]; then
-      GOV_URL=$(grep -o '"serverUrl":"[^"]*"' /etc/systemd/system/$SERVICE.service 2>/dev/null | head -1 | cut -d'"' -f4 || echo "")
-      if [[ -z "$GOV_URL" ]]; then
-        GOV_URL=$(grep GOV_SERVER_URL /etc/systemd/system/$SERVICE.service 2>/dev/null | head -1 | sed 's/.*=//')
-      fi
-      if [[ -n "$GOV_URL" ]]; then
-        curl -sSL "$GOV_URL/update-monitor.sh" | bash
-      else
-        echo "ERROR: Could not determine governance server URL."
-      fi
+    echo "Fetching update script..."
+    GOV_URL=$(grep GOV_SERVER_URL /etc/systemd/system/$SERVICE.service 2>/dev/null | head -1 | sed 's/.*=//')
+    if [[ -n "$GOV_URL" ]]; then
+      curl -sSL "$GOV_URL/update-monitor.sh" | bash
     else
-      echo "ERROR: Not enrolled. Run the install command first."
+      echo "ERROR: Could not determine governance server URL."
     fi
     ;;
-  docker-enable)
+  govern)
     if [[ $EUID -ne 0 ]]; then echo "Must run as root (use sudo)"; exit 1; fi
+    if ! command -v docker &>/dev/null; then echo "Docker not found."; exit 1; fi
     if [[ ! -f "$CA_CERT" ]]; then echo "ERROR: CA cert not found. Is the monitor running?"; exit 1; fi
+    cp "$CA_CERT" "$DOCKER_CA" 2>/dev/null
 
-    echo ""
-    echo "  Enabling full Docker container governance..."
-    echo ""
-
-    # Create daemon.json with default CA mount for all containers
-    DAEMON_JSON="/etc/docker/daemon.json"
-    DOCKER_CA_PATH="/etc/cloudfuze/docker-ca.crt"
-    cp "$CA_CERT" "$DOCKER_CA_PATH" 2>/dev/null
-
-    # Merge into existing daemon.json or create new
-    if [[ -f "$DAEMON_JSON" ]]; then
-      # Backup existing
-      cp "$DAEMON_JSON" "${DAEMON_JSON}.cloudfuze-backup"
-    fi
-
-    # Docker doesn't support default volume mounts in daemon.json.
-    # Instead we create a systemd override that adds default env vars
-    # to the Docker daemon, which get inherited by containers.
-    mkdir -p /etc/systemd/system/docker.service.d
-    cat > /etc/systemd/system/docker.service.d/cloudfuze-ca.conf << DEOF
-[Service]
-Environment="CLOUDFUZE_CA_ENABLED=1"
-DEOF
-
-    # The real magic: create a default container config via Docker's
-    # config.json that auto-injects proxy + CA env vars into every container
-    DOCKER_CONFIG="/root/.docker/config.json"
-    mkdir -p /root/.docker
-
-    BRIDGE_IP=$(ip -4 addr show docker0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' || echo "172.17.0.1")
-    PROXY_PORT=$(grep PROXY_LISTEN_PORT /etc/systemd/system/cloudfuze-monitor.service 2>/dev/null | head -1 | sed 's/.*=//' || echo "8443")
-
-    python3 -c "
-import json, os
-cfg = {}
-if os.path.exists('$DOCKER_CONFIG'):
-    try: cfg = json.load(open('$DOCKER_CONFIG'))
-    except: pass
-cfg['proxies'] = {'default': {
-    'httpsProxy': 'http://${BRIDGE_IP}:${PROXY_PORT}',
-    'httpProxy': 'http://${BRIDGE_IP}:${PROXY_PORT}',
-    'noProxy': '${BRIDGE_IP},localhost,127.0.0.1'
-}}
-json.dump(cfg, open('$DOCKER_CONFIG','w'), indent=2)
-" 2>/dev/null || cat > "$DOCKER_CONFIG" << JEOF
-{
-  "proxies": {
-    "default": {
-      "httpsProxy": "http://${BRIDGE_IP}:${PROXY_PORT}",
-      "httpProxy": "http://${BRIDGE_IP}:${PROXY_PORT}",
-      "noProxy": "${BRIDGE_IP},localhost,127.0.0.1"
-    }
-  }
-}
-JEOF
-
-    echo "  ✓ Docker proxy config written"
-    echo "  ✓ CA cert copied to $DOCKER_CA_PATH"
-    echo ""
-    echo ""
-
-    # Ask whether to restart containers now
-    if [[ -t 0 ]]; then
-      read -p "  Restart all running containers now to apply? (y/n): " RESTART_CHOICE
+    while true; do
       echo ""
-      if [[ "$RESTART_CHOICE" =~ ^[Yy] ]]; then
-        echo "  Restarting containers..."
-        docker ps -q 2>/dev/null | while read cid; do
-          CNAME=$(docker inspect --format '{{.Name}}' "$cid" 2>/dev/null | sed 's|^/||')
-          docker restart "$cid" >/dev/null 2>&1 && echo "    ✓ $CNAME" || echo "    ✗ $CNAME (failed)"
-        done
-        echo ""
-        echo "  ✓ All containers restarted with full governance enabled."
-      else
-        echo "  Containers not restarted. To apply later:"
-        echo ""
-        echo "    Restart one:  docker restart <container_name>"
-        echo "    Restart all:  docker restart \$(docker ps -q)"
+      echo "  Running containers:"
+      echo "  ───────────────────────────────────"
+      CONTAINERS=()
+      while IFS= read -r line; do
+        CONTAINERS+=("$line")
+      done < <(docker ps --format '{{.Names}}' 2>/dev/null)
+
+      if [[ ${#CONTAINERS[@]} -eq 0 ]]; then
+        echo "  No running containers found."
+        break
       fi
-    else
-      echo "  Non-interactive — containers not restarted. To apply:"
+
+      for i in "${!CONTAINERS[@]}"; do
+        echo "    $((i+1)). ${CONTAINERS[$i]}"
+      done
       echo ""
-      echo "    Restart one:  docker restart <container_name>"
-      echo "    Restart all:  docker restart \$(docker ps -q)"
-    fi
+      read -p "  Enter container name or number (or 'done'): " INPUT
+      [[ "$INPUT" == "done" || "$INPUT" == "q" || -z "$INPUT" ]] && break
+
+      # Resolve: number or name with fuzzy match
+      TARGET=""
+      if [[ "$INPUT" =~ ^[0-9]+$ ]] && (( INPUT >= 1 && INPUT <= ${#CONTAINERS[@]} )); then
+        TARGET="${CONTAINERS[$((INPUT-1))]}"
+      else
+        # Exact match
+        for c in "${CONTAINERS[@]}"; do
+          [[ "$c" == "$INPUT" ]] && TARGET="$c" && break
+        done
+        # Fuzzy match
+        if [[ -z "$TARGET" ]]; then
+          MATCHES=()
+          IL=$(echo "$INPUT" | tr '[:upper:]' '[:lower:]')
+          for c in "${CONTAINERS[@]}"; do
+            CL=$(echo "$c" | tr '[:upper:]' '[:lower:]')
+            [[ "$CL" == *"$IL"* ]] && MATCHES+=("$c")
+          done
+          if [[ ${#MATCHES[@]} -eq 1 ]]; then
+            TARGET="${MATCHES[0]}"
+          elif [[ ${#MATCHES[@]} -gt 1 ]]; then
+            echo ""
+            echo "  Multiple matches:"
+            for i in "${!MATCHES[@]}"; do
+              echo "    $((i+1)). ${MATCHES[$i]}"
+            done
+            read -p "  Select number: " MN
+            if [[ "$MN" =~ ^[0-9]+$ ]] && (( MN >= 1 && MN <= ${#MATCHES[@]} )); then
+              TARGET="${MATCHES[$((MN-1))]}"
+            else
+              echo "  Invalid selection."; continue
+            fi
+          else
+            echo "  No container matching '$INPUT' found."; continue
+          fi
+        fi
+      fi
+
+      echo ""
+      echo "  Governing: $TARGET"
+      # Copy CA cert into container
+      docker cp "$DOCKER_CA" "$TARGET:/usr/local/share/ca-certificates/cloudfuze.crt" 2>/dev/null
+      docker exec "$TARGET" sh -c 'command -v update-ca-certificates >/dev/null && update-ca-certificates 2>/dev/null; exit 0' 2>/dev/null
+      # Restart to apply
+      docker restart "$TARGET" >/dev/null 2>&1
+      if [[ $? -eq 0 ]]; then
+        echo "  ✓ $TARGET — CA injected, restarted, fully governed"
+      else
+        echo "  ✗ $TARGET — restart failed"
+      fi
+
+      echo ""
+      read -p "  Govern another container? (y/n): " MORE
+      [[ ! "$MORE" =~ ^[Yy] ]] && break
+    done
     echo ""
-    echo "  To disable Docker governance later:"
-    echo "    sudo cloudfuze-monitor docker-disable"
+    echo "  Done. Governed containers have full prompt/response tracing."
     echo ""
-    ;;
-  docker-disable)
-    if [[ $EUID -ne 0 ]]; then echo "Must run as root (use sudo)"; exit 1; fi
-    echo "Disabling Docker container governance..."
-    # Remove Docker proxy config
-    DOCKER_CONFIG="/root/.docker/config.json"
-    if [[ -f "$DOCKER_CONFIG" ]]; then
-      python3 -c "
-import json, os
-cfg = json.load(open('$DOCKER_CONFIG'))
-cfg.pop('proxies', None)
-json.dump(cfg, open('$DOCKER_CONFIG','w'), indent=2)
-" 2>/dev/null || rm -f "$DOCKER_CONFIG"
-    fi
-    # Remove systemd override
-    rm -f /etc/systemd/system/docker.service.d/cloudfuze-ca.conf
-    rmdir /etc/systemd/system/docker.service.d 2>/dev/null || true
-    echo "  ✓ Docker proxy config removed"
-    echo "  ✓ Containers will stop routing through monitor after restart"
-    echo ""
-    echo "  Note: Running containers keep the old config until restarted."
-    echo "  Host processes are still governed (iptables rules remain active)."
     ;;
   uninstall)
     exec /opt/cloudfuze-monitor/scripts/install-monitor.sh --do-uninstall
@@ -480,14 +441,13 @@ json.dump(cfg, open('$DOCKER_CONFIG','w'), indent=2)
     echo "  CloudFuze Server Monitor — Commands"
     echo "  ════════════════════════════════════"
     echo ""
-    echo "  cloudfuze-monitor status          Show service status"
-    echo "  cloudfuze-monitor logs            Stream live logs"
-    echo "  cloudfuze-monitor restart         Restart the monitor"
-    echo "  cloudfuze-monitor update          Update to latest version"
-    echo "  cloudfuze-monitor docker-enable   Enable full Docker container governance"
-    echo "  cloudfuze-monitor docker-disable  Disable Docker container governance"
-    echo "  cloudfuze-monitor uninstall       Remove completely"
-    echo "  cloudfuze-monitor help            Show this help"
+    echo "  cloudfuze-monitor status     Show service status"
+    echo "  cloudfuze-monitor logs       Stream live logs"
+    echo "  cloudfuze-monitor restart    Restart the monitor"
+    echo "  cloudfuze-monitor update     Update to latest version"
+    echo "  cloudfuze-monitor govern     Enable full governance per container"
+    echo "  cloudfuze-monitor uninstall  Remove completely"
+    echo "  cloudfuze-monitor help       Show this help"
     echo ""
     echo "  Run on the server where the monitor is installed."
     echo "  Most commands require sudo."
@@ -545,51 +505,17 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
   echo "  ╚══════════════════════════════════════════════════════════╝"
   echo ""
 
-  # ── Docker: ask about full container governance ──────────────────────
+  # ── Docker: inform about per-container governance ────────────────────
   if command -v docker &>/dev/null && [[ "$REMOTE_MODE" != "true" ]]; then
     DOCKER_CONTAINERS=$(docker ps -q 2>/dev/null | wc -l)
     if [[ "$DOCKER_CONTAINERS" -gt 0 ]]; then
       echo ""
-      echo "  ┌──────────────────────────────────────────────────────────┐"
-      echo "  │  Docker detected: $DOCKER_CONTAINERS container(s) running"
-      echo "  │                                                          │"
-      echo "  │  Host processes are fully governed (prompt, response,    │"
-      echo "  │  tokens, cost — everything captured).                    │"
-      echo "  │                                                          │"
-      echo "  │  Docker containers are currently tracked at the network  │"
-      echo "  │  level only (which AI provider was called, when, and     │"
-      echo "  │  for how long). To enable FULL governance inside         │"
-      echo "  │  containers (prompt/response content, token counts,      │"
-      echo "  │  cost tracking), the containers need access to our       │"
-      echo "  │  CA certificate.                                         │"
-      echo "  │                                                          │"
-      echo "  │  This requires a one-time container restart.             │"
-      echo "  │  No data is lost. Services resume in seconds.            │"
-      echo "  └──────────────────────────────────────────────────────────┘"
+      echo "  Docker detected: $DOCKER_CONTAINERS container(s) running."
+      echo "  Host processes are fully governed. To enable full governance"
+      echo "  for Docker containers, run:"
       echo ""
-
-      # Interactive prompt (only if stdin is a terminal)
-      if [[ -t 0 ]]; then
-        read -p "  Enable full Docker container governance? (y/n): " DOCKER_CHOICE
-        echo ""
-        if [[ "$DOCKER_CHOICE" =~ ^[Yy] ]]; then
-          cloudfuze-monitor docker-enable
-        else
-          echo "  Docker container governance skipped."
-          echo ""
-          echo "  Containers are still tracked (AI provider + timing) but without"
-          echo "  prompt/response content. To enable full governance later:"
-          echo ""
-          echo "    sudo cloudfuze-monitor docker-enable"
-          echo ""
-        fi
-      else
-        echo "  Non-interactive install — skipping Docker governance prompt."
-        echo "  To enable full Docker governance later:"
-        echo ""
-        echo "    sudo cloudfuze-monitor docker-enable"
-        echo ""
-      fi
+      echo "    sudo cloudfuze-monitor govern"
+      echo ""
     fi
   fi
 else

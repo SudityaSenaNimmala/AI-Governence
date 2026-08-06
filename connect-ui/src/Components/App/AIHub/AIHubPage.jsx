@@ -4412,12 +4412,12 @@ function ServerMonitorView() {
               <div style={{ fontWeight: 600, fontSize: 13, color: "#5b21b6", marginBottom: 6 }}>Docker Container Governance:</div>
               <div style={{ fontSize: 12, color: "#5b21b6", lineHeight: 1.7, marginBottom: 8 }}>
                 After installing, host processes are <strong>fully governed</strong> (prompt, response, tokens, cost &mdash; everything captured).
-                Docker containers are tracked at the network level (which AI provider, when, duration). To enable <strong>full governance inside containers</strong>
-                (prompt/response content, token counts, cost), the install will ask you to enable Docker governance. This requires a one-time container restart.
+                Docker containers are tracked at the network level (which AI provider, when, duration). To enable <strong>full governance inside a container</strong>
+                (prompt/response content, token counts, cost), run:
               </div>
               <div style={{ fontSize: 12, color: "#5b21b6", lineHeight: 1.7 }}>
-                Enable anytime later: <code style={{ background: "#ede9fe", padding: "1px 5px", borderRadius: 3 }}>sudo cloudfuze-monitor docker-enable</code><br/>
-                Disable: <code style={{ background: "#ede9fe", padding: "1px 5px", borderRadius: 3 }}>sudo cloudfuze-monitor docker-disable</code>
+                <code style={{ background: "#ede9fe", padding: "2px 6px", borderRadius: 3 }}>sudo cloudfuze-monitor govern</code>
+                <div style={{ marginTop: 4, fontSize: 11, color: "#7c3aed" }}>Interactive &mdash; lists containers, you pick which ones to govern, one at a time. Each container gets the CA cert injected and restarts automatically.</div>
               </div>
             </div>
 
@@ -4430,8 +4430,7 @@ function ServerMonitorView() {
                   <span>cloudfuze-monitor logs</span><span style={{ color: "#6b7280" }}>Stream live logs</span>
                   <span>cloudfuze-monitor restart</span><span style={{ color: "#6b7280" }}>Restart the monitor</span>
                   <span>cloudfuze-monitor update</span><span style={{ color: "#6b7280" }}>Update to latest version</span>
-                  <span>cloudfuze-monitor docker-enable</span><span style={{ color: "#6b7280" }}>Enable full Docker container governance</span>
-                  <span>cloudfuze-monitor docker-disable</span><span style={{ color: "#6b7280" }}>Disable Docker container governance</span>
+                  <span>cloudfuze-monitor govern</span><span style={{ color: "#6b7280" }}>Enable full governance per Docker container</span>
                   <span>cloudfuze-monitor uninstall</span><span style={{ color: "#6b7280" }}>Remove completely</span>
                   <span>cloudfuze-monitor help</span><span style={{ color: "#6b7280" }}>Show all commands</span>
                 </div>
