@@ -310,34 +310,63 @@ export function mountServerAgents(app, db) {
     res.json({ token, install_command: installCmd, server_url: serverUrl, port });
   }));
 
-  // ── Update script — served to monitors that run `cloudfuze-monitor update` ──
+  // ── Update script — served to monitors that run the update command ──────
   app.get('/update-monitor.sh', async (req, res) => {
     const script = `#!/usr/bin/env bash
 set -euo pipefail
-echo "Checking for updates..."
-INSTALL_DIR="/opt/cloudfuze-monitor"
-if [[ ! -d "\$INSTALL_DIR" ]]; then echo "CloudFuze monitor not installed."; exit 1; fi
 
-# Pull latest from git
-cd "\$INSTALL_DIR"
-if [[ -d .git ]]; then
-  BEFORE=\$(git rev-parse HEAD 2>/dev/null || echo "none")
-  git fetch origin main --quiet 2>/dev/null
-  AFTER=\$(git rev-parse origin/main 2>/dev/null || echo "none")
-  if [[ "\$BEFORE" == "\$AFTER" ]]; then
-    echo "Already up to date."
-    exit 0
-  fi
-  echo "Updating from \${BEFORE:0:8} to \${AFTER:0:8}..."
-  git reset --hard origin/main --quiet
-  cd agent && npm install --omit=dev --quiet 2>/dev/null
-  echo "Restarting service..."
-  systemctl restart cloudfuze-monitor 2>/dev/null || systemctl restart cloudfuze-server-monitor 2>/dev/null || true
-  echo "Update complete."
-else
-  echo "Not a git install — re-run the install command to update."
+INSTALL_DIR="/opt/cloudfuze-monitor"
+REPO_URL="https://github.com/SudityaSenaNimmala/AI-Governence.git"
+
+if [[ ! -d "\$INSTALL_DIR" ]]; then
+  echo "CloudFuze monitor not installed at \$INSTALL_DIR"
   exit 1
 fi
+
+echo ""
+echo "  Updating CloudFuze Server Monitor..."
+echo ""
+
+# Clone latest into temp dir
+TMP=\$(mktemp -d)
+trap 'rm -rf "\$TMP"' EXIT
+
+echo "[1/4] Downloading latest version..."
+git clone --depth 1 "\$REPO_URL" "\$TMP/repo" 2>&1 | tail -1
+
+AGENT_SRC="\$TMP/repo/agent team/agent"
+if [[ ! -d "\$AGENT_SRC/src/server-monitor" ]]; then
+  AGENT_SRC="\$TMP/repo/agent"
+fi
+if [[ ! -d "\$AGENT_SRC/src/server-monitor" ]]; then
+  echo "ERROR: server-monitor not found in repo."
+  exit 1
+fi
+
+echo "[2/4] Replacing files..."
+# Preserve config/token files
+cp "\$INSTALL_DIR/node_modules" /tmp/cfm-node-modules-bak -r 2>/dev/null || true
+
+# Copy new source files (preserve node_modules and data dir)
+find "\$INSTALL_DIR" -maxdepth 1 ! -name node_modules ! -name "." ! -name ".." -exec rm -rf {} + 2>/dev/null || true
+cp -r "\$AGENT_SRC/"* "\$INSTALL_DIR/"
+
+# Restore node_modules if backup exists
+if [[ -d /tmp/cfm-node-modules-bak ]]; then
+  mv /tmp/cfm-node-modules-bak "\$INSTALL_DIR/node_modules"
+fi
+
+echo "[3/4] Updating dependencies..."
+cd "\$INSTALL_DIR"
+npm install --omit=dev --no-audit --no-fund --quiet 2>&1 | tail -3
+
+echo "[4/4] Restarting service..."
+systemctl restart cloudfuze-monitor 2>/dev/null || systemctl restart cloudfuze-server-monitor 2>/dev/null || true
+
+echo ""
+echo "  Update complete. Service restarted."
+echo "  Status: systemctl status cloudfuze-monitor"
+echo ""
 `;
     res.type('text/plain').send(script);
   });
