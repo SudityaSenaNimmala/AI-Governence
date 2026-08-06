@@ -18,6 +18,13 @@
 
 set -euo pipefail
 
+# ── Clear any leftover proxy from a previous install ─────────────────────
+# A prior CloudFuze install sets HTTPS_PROXY pointing to the local proxy.
+# If the proxy service is stopped/broken, every outbound HTTPS call (including
+# git clone below) fails. Clear it before doing anything networked.
+unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NO_PROXY no_proxy 2>/dev/null || true
+export HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy=""
+
 # ── Defaults ──────────────────────────────────────────────────────────────
 INSTALL_DIR="/opt/cloudfuze-monitor"
 DATA_DIR="/etc/cloudfuze"
