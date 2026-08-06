@@ -213,8 +213,19 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
   const tpPort = port + 1;   // transparent port = proxy port + 1 (e.g. 8444)
 
   if (alwaysIntercept) {   // only in server-monitor mode
+    // Docker bridge subnet — traffic from containers comes from 172.17.0.0/16
+    // or 172.18-31.x.x (custom Docker networks). We detect this to decide
+    // whether to MITM (host traffic, CA trusted) or bridge+log (container
+    // traffic, CA NOT trusted — MITM would break the container's TLS).
+    const isDockerIp = (ip) => {
+      if (!ip) return false;
+      const m = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/) || ip.match(/^(\d+\.\d+\.\d+\.\d+)$/);
+      if (!m) return false;
+      const parts = m[1].split('.').map(Number);
+      return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31;
+    };
+
     transparentServer = net.createServer({ pauseOnConnect: true }, (clientSocket) => {
-      // Peek at the first bytes to extract SNI from the TLS ClientHello
       clientSocket.once('readable', () => {
         const peek = clientSocket.read();
         if (!peek || peek.length === 0) { clientSocket.destroy(); return; }
@@ -222,14 +233,15 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
         const sniHost = extractSni(peek);
 
         if (!sniHost) {
-          // Not TLS or no SNI — bridge to original destination (best effort)
-          log?.warn?.(`transparent: no SNI in ${peek.length} bytes, bridging`);
+          log?.warn?.(`transparent: no SNI in ${peek.length} bytes, dropping`);
           clientSocket.destroy();
           return;
         }
 
+        const fromContainer = isDockerIp(clientSocket.remoteAddress);
+
         if (isPinnedHost(sniHost) || !isIntercepted(sniHost)) {
-          // Non-AI traffic or pinned host — bridge raw TLS to real destination
+          // Non-AI traffic — bridge transparently, zero overhead
           const upstream = net.createConnection(443, sniHost, () => {
             upstream.write(peek);
             clientSocket.pipe(upstream);
@@ -241,13 +253,49 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
           return;
         }
 
-        // AI host — MITM intercept
+        if (fromContainer) {
+          // AI traffic from Docker container — bridge (don't MITM, CA not trusted
+          // inside container) but LOG the metadata so it appears in dashboard.
+          log?.info?.(`transparent: container AI call → ${sniHost} (bridge+log)`);
+          const startedAt = Date.now();
+          let bytesSent = peek.length;
+          let bytesReceived = 0;
+          const upstream = net.createConnection(443, sniHost, () => {
+            upstream.write(peek);
+            clientSocket.on('data', (chunk) => { bytesSent += chunk.length; upstream.write(chunk); });
+            upstream.on('data', (chunk) => { bytesReceived += chunk.length; clientSocket.write(chunk); });
+            clientSocket.resume();
+          });
+          const logOnEnd = () => {
+            if (onApiCall) {
+              onApiCall({
+                host: sniHost, path: '/', method: 'POST',
+                requestHeaders: {}, requestBody: null,
+                responseStatus: 200, responseHeaders: {}, responseBody: null,
+                responseTruncated: true,
+                startedAt, durationMs: Date.now() - startedAt,
+                peerPort: clientSocket.remotePort,
+                peerAddress: clientSocket.remoteAddress,
+                _containerMode: true,
+                _bytesSent: bytesSent,
+                _bytesReceived: bytesReceived,
+              });
+            }
+          };
+          upstream.on('end', logOnEnd);
+          upstream.on('error', () => { try { clientSocket.destroy(); } catch {} });
+          clientSocket.on('error', () => { try { upstream.destroy(); } catch {} });
+          clientSocket.on('end', () => { try { upstream.end(); } catch {} });
+          upstream.on('end', () => { try { clientSocket.end(); } catch {} });
+          return;
+        }
+
+        // AI traffic from host process — MITM intercept (CA is trusted on host)
         log?.info?.(`transparent: intercepting ${sniHost}`);
         const tlsSock = new tls.TLSSocket(clientSocket, {
           isServer: true,
           secureContext: secureContextFor(sniHost),
         });
-        // Push the peeked bytes back so TLS handshake sees the full ClientHello
         tlsSock.push(peek);
         clientSocket.resume();
 
@@ -256,7 +304,6 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
           try { clientSocket.destroy(); } catch {}
         });
 
-        // Parse decrypted HTTP requests off the TLS stream
         const inner = http.createServer(async (req, res) => {
           const target = { hostname: sniHost, port: 443, path: req.url, protocol: 'https:' };
           return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress, vault, tokenizePatterns: _tokenizePatterns, modelRouter });

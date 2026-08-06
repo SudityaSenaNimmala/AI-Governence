@@ -23,7 +23,7 @@ import { loadOrCreateCA } from '../proxy/ca.js';
 import { startProxy } from '../proxy/proxy-server.js';
 import { attribute } from './attribution.js';
 import { pidForLocalPort, ensureStarted as ensurePortLookupStarted } from './port-lookup.js';
-import { parseApiCall } from './cost-parser.js';
+import { parseApiCall, providerForHost } from './cost-parser.js';
 import { ensureEnrolled } from './enroll.js';
 import { createReporter } from './reporter.js';
 import { startGpuWatch } from './gpu-watch.js';
@@ -67,6 +67,33 @@ async function main() {
   // The hook fires for every intercepted API call. Attribution + cost runs
   // here, not in the proxy, to keep the proxy generic.
   const onApiCall = async (ev) => {
+    // Container bridge mode — we see the host but not the decrypted content.
+    // Still log the call so it appears in the dashboard.
+    if (ev._containerMode) {
+      const provider = providerForHost(ev.host, ev.path) || 'unknown';
+
+      reporter.enqueue({
+        occurred_at: new Date(ev.startedAt).toISOString(),
+        duration_ms: ev.durationMs,
+        response_status: ev.responseStatus,
+        host: ev.host,
+        path: ev.path || '/',
+        method: ev.method || 'POST',
+        provider: provider,
+        model: null,
+        prompt_tokens: null,
+        completion_tokens: null,
+        cached_tokens: null,
+        cost: null,
+        prompt_text: `[container traffic — ${ev._bytesSent || 0} bytes sent]`,
+        response_text: `[container traffic — ${ev._bytesReceived || 0} bytes received]`,
+        response_truncated: true,
+        attribution: { user: 'docker-container', trigger_source: 'container' },
+        source_ip: ev.peerAddress || null,
+      });
+      return;
+    }
+
     const parsed = parseApiCall({
       host: ev.host,
       path: ev.path,
