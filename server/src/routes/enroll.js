@@ -18,6 +18,8 @@ export function mountEnroll(app, db) {
     if (user) set.user = user;   // only overwrite when the client actually sends one
     if (claudeAccountEmail) set.claude_account_email = String(claudeAccountEmail).toLowerCase();
     if (displayName) set.display_name = displayName;
+    if (req.body?.type) set.type = req.body.type;  // 'server-monitor' or 'desktop-agent'
+    if (req.body?.proxy_port) set.proxy_port = req.body.proxy_port;
 
     const update = { $set: set, $setOnInsert: { first_seen: now } };
 

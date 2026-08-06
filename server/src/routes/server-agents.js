@@ -246,15 +246,15 @@ export function mountServerAgents(app, db) {
   app.get('/api/v1/traces/stats', a(async (req, res) => {
     const now = new Date();
     const dayAgo = new Date(now.getTime() - 86400000);
-    const [totalCalls, recentCalls, machines] = await Promise.all([
+    const [totalCalls, recentCalls, enrolledCount] = await Promise.all([
       db.collection('server_agent_calls').countDocuments(),
       db.collection('server_agent_calls').countDocuments({ occurred_at: { $gte: dayAgo.toISOString() } }),
-      db.collection('server_agent_calls').distinct('machine_id'),
+      db.collection('machines').countDocuments({ type: 'server-monitor', status: { $ne: 'removed' } }),
     ]);
     const costAgg = await db.collection('server_agent_calls').aggregate([
       { $group: { _id: null, total: { $sum: { $ifNull: ['$total_cost_usd', 0] } } } },
     ]).toArray();
-    res.json({ total_calls: totalCalls, calls_last_24h: recentCalls, connected_servers: machines.filter(Boolean).length, total_cost_usd: costAgg[0]?.total || 0 });
+    res.json({ total_calls: totalCalls, calls_last_24h: recentCalls, connected_servers: enrolledCount, total_cost_usd: costAgg[0]?.total || 0 });
   }));
 
   app.get('/api/v1/traces', a(async (req, res) => {
@@ -323,20 +323,71 @@ export function mountServerAgents(app, db) {
     res.status(404).send('Install script not found. Tried: ' + candidates.join(', '));
   });
 
+  // ── Monitor heartbeat — called periodically by the daemon ──────────────
+  app.post('/api/v1/monitor/heartbeat', requireMachineAuth, a(async (req, res) => {
+    await db.collection('machines').updateOne(
+      { id: req.machine.id },
+      { $set: { last_seen: new Date(), status: 'active' } },
+    );
+    res.json({ ok: true });
+  }));
+
+  // ── Monitor deregister — called on uninstall ─────────────────────────
+  app.post('/api/v1/monitor/deregister', requireMachineAuth, a(async (req, res) => {
+    await db.collection('machines').updateOne(
+      { id: req.machine.id },
+      { $set: { status: 'removed', removed_at: new Date() } },
+    );
+    res.json({ ok: true });
+  }));
+
+  // ── Connected servers list ────────────────────────────────────────────
+  // Shows all enrolled server-monitor machines (appears immediately on install,
+  // disappears on uninstall). Enriched with call stats from server_agent_calls.
   app.get('/api/v1/monitor/servers', a(async (req, res) => {
-    const machines = await db.collection('server_agent_calls').aggregate([
-      { $group: { _id: { $ifNull: ['$source_ip', '$machine_id'] }, machine_id: { $first: '$machine_id' }, source_ip: { $first: '$source_ip' }, last_seen: { $max: '$occurred_at' }, total_calls: { $sum: 1 }, total_cost_usd: { $sum: { $ifNull: ['$total_cost_usd', 0] } }, users: { $addToSet: '$user' }, providers: { $addToSet: '$provider' }, models: { $addToSet: '$model' } } },
-      { $project: { _id: 0, machine_id: 1, source_ip: 1, last_seen: 1, total_calls: 1, total_cost_usd: 1, users: 1, providers: 1, models: 1 } },
-      { $sort: { last_seen: -1 } },
+    // 1. Get all server-monitor machines from enrollment (excludes removed)
+    const enrolled = await db.collection('machines')
+      .find({ type: 'server-monitor', status: { $ne: 'removed' } })
+      .project({ _id: 0, id: 1, hostname: 1, last_seen: 1, first_seen: 1, proxy_port: 1, user: 1, display_name: 1 })
+      .sort({ last_seen: -1 })
+      .toArray();
+
+    // 2. Get call stats per machine from server_agent_calls
+    const callStats = await db.collection('server_agent_calls').aggregate([
+      { $group: {
+        _id: '$machine_id',
+        total_calls: { $sum: 1 },
+        total_cost_usd: { $sum: { $ifNull: ['$total_cost_usd', 0] } },
+        users: { $addToSet: '$user' },
+        providers: { $addToSet: '$provider' },
+        models: { $addToSet: '$model' },
+        last_call: { $max: '$occurred_at' },
+      }},
     ]).toArray();
-    for (const m of machines) {
-      m.users = (m.users || []).filter(Boolean);
-      m.providers = (m.providers || []).filter(Boolean);
-      m.models = (m.models || []).filter(Boolean);
-      m.status = (new Date() - new Date(m.last_seen)) < 300000 ? 'active' : 'inactive';
-      m.display_name = m.source_ip && m.source_ip !== '127.0.0.1' ? m.source_ip : m.machine_id;
-    }
-    res.json(machines);
+    const statsMap = new Map(callStats.map(s => [s._id, s]));
+
+    // 3. Merge enrollment + call stats
+    const result = enrolled.map(m => {
+      const s = statsMap.get(m.id) || {};
+      const lastSeen = m.last_seen || m.first_seen;
+      const isActive = lastSeen && (new Date() - new Date(lastSeen)) < 300000; // 5 min
+      return {
+        machine_id: m.id,
+        hostname: m.hostname,
+        display_name: m.display_name || m.hostname || m.id,
+        proxy_port: m.proxy_port || null,
+        status: isActive ? 'active' : 'inactive',
+        last_seen: lastSeen,
+        first_seen: m.first_seen || null,
+        total_calls: s.total_calls || 0,
+        total_cost_usd: s.total_cost_usd || 0,
+        users: (s.users || []).filter(Boolean),
+        providers: (s.providers || []).filter(Boolean),
+        models: (s.models || []).filter(Boolean),
+      };
+    });
+
+    res.json(result);
   }));
 }
 

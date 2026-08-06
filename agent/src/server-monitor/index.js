@@ -128,6 +128,23 @@ async function main() {
   }
   log.info(`HTTPS_PROXY fallback: export HTTPS_PROXY=http://${HOST}:${PORT}`);
 
+  // ── Heartbeat: ping governance server every 60s so dashboard shows "active" ──
+  const heartbeatInterval = setInterval(async () => {
+    try {
+      await fetch(`${SERVER_URL}/api/v1/monitor/heartbeat`, {
+        method: 'POST',
+        headers: { 'authorization': `Bearer ${enrollment.token}`, 'content-type': 'application/json' },
+      });
+    } catch (err) {
+      log.warn(`heartbeat failed: ${err.message}`);
+    }
+  }, 60_000);
+  // Send first heartbeat immediately
+  fetch(`${SERVER_URL}/api/v1/monitor/heartbeat`, {
+    method: 'POST',
+    headers: { 'authorization': `Bearer ${enrollment.token}`, 'content-type': 'application/json' },
+  }).catch(() => {});
+
   // Tier 2 + Tier 3 supplementary captures — all best-effort, no-op when the
   // platform tooling isn't present.
   const gpuWatch    = startGpuWatch({ reporter: signalReporter, log });
@@ -137,6 +154,7 @@ async function main() {
 
   const shutdown = async (sig) => {
     log.info(`received ${sig}; draining reporter and stopping proxy`);
+    clearInterval(heartbeatInterval);
     try { gpuWatch?.stop?.(); } catch {}
     try { auditWatch?.stop?.(); } catch {}
     try { shimIngest?.stop?.(); } catch {}
@@ -144,6 +162,14 @@ async function main() {
     try { await stop(); } catch (e) { log.warn(`stop error: ${e.message}`); }
     try { await reporter.drain(); } catch (e) { log.warn(`drain error: ${e.message}`); }
     try { await signalReporter.drain(); } catch (e) { log.warn(`drain signals error: ${e.message}`); }
+    // Deregister from governance server so dashboard removes this server
+    try {
+      await fetch(`${SERVER_URL}/api/v1/monitor/deregister`, {
+        method: 'POST',
+        headers: { 'authorization': `Bearer ${enrollment.token}`, 'content-type': 'application/json' },
+      });
+      log.info('deregistered from governance server');
+    } catch (e) { log.warn(`deregister failed: ${e.message}`); }
     process.exit(0);
   };
   process.on('SIGINT',  () => shutdown('SIGINT'));

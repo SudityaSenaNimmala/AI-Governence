@@ -26,10 +26,11 @@ export async function ensureEnrolled({ serverUrl, enrollSecret, tokenFile = DEFA
   const machineId = await deriveMachineId();
   const hostname = os.hostname();
 
+  const proxyPort = process.env.PROXY_LISTEN_PORT || '8443';
   const res = await fetch(`${serverUrl.replace(/\/+$/, '')}/api/v1/enroll`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ machineId, hostname, enrollSecret }),
+    body: JSON.stringify({ machineId, hostname, enrollSecret, type: 'server-monitor', proxy_port: proxyPort }),
   });
   if (!res.ok) throw new Error(`enroll failed: ${res.status} ${await res.text().catch(() => '')}`);
   const { token } = await res.json();
