@@ -344,17 +344,16 @@ if [[ ! -d "\$AGENT_SRC/src/server-monitor" ]]; then
 fi
 
 echo "[2/4] Replacing files..."
-# Preserve config/token files
-cp "\$INSTALL_DIR/node_modules" /tmp/cfm-node-modules-bak -r 2>/dev/null || true
+# Remove old source files but keep node_modules and data
+for item in "\$INSTALL_DIR"/*; do
+  case "\$(basename "\$item")" in
+    node_modules) ;;  # keep
+    *) rm -rf "\$item" ;;
+  esac
+done
 
-# Copy new source files (preserve node_modules and data dir)
-find "\$INSTALL_DIR" -maxdepth 1 ! -name node_modules ! -name "." ! -name ".." -exec rm -rf {} + 2>/dev/null || true
+# Copy new source files in
 cp -r "\$AGENT_SRC/"* "\$INSTALL_DIR/"
-
-# Restore node_modules if backup exists
-if [[ -d /tmp/cfm-node-modules-bak ]]; then
-  mv /tmp/cfm-node-modules-bak "\$INSTALL_DIR/node_modules"
-fi
 
 echo "[3/4] Updating dependencies..."
 cd "\$INSTALL_DIR"
