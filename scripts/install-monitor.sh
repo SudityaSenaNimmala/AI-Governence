@@ -309,47 +309,6 @@ SERVICE="cloudfuze-monitor"
 CA_CERT="/root/.cloudfuze-aigov/ca/ca.crt"
 DOCKER_CA="/etc/cloudfuze/docker-ca.crt"
 
-# Helper: run docker compose with override, handling missing .env
-compose_up() {
-  local dir="$1"
-  local svc="$2"
-  local override="$3"
-  cd "$dir"
-
-  # If .env is missing, temporarily copy the real env file
-  local CREATED_ENV=0
-  if [[ ! -f "$dir/.env" ]]; then
-    for candidate in .env.prod .env.production .env.local .env.staging .env.dev; do
-      if [[ -f "$dir/$candidate" ]]; then
-        cp "$dir/$candidate" "$dir/.env"
-        CREATED_ENV=1
-        break
-      fi
-    done
-  fi
-
-  # Build compose file flags
-  local FILE_FLAGS=""
-  for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
-    if [[ -f "$dir/$f" ]]; then
-      FILE_FLAGS="-f $dir/$f"
-      break
-    fi
-  done
-  if [[ -n "$override" && -f "$override" ]]; then
-    FILE_FLAGS="$FILE_FLAGS -f $override"
-  fi
-
-  docker compose $FILE_FLAGS up -d "$svc" 2>&1 || docker-compose $FILE_FLAGS up -d "$svc" 2>&1
-  local rc=$?
-
-  # Clean up temporary .env
-  if [[ "$CREATED_ENV" == "1" ]]; then
-    rm -f "$dir/.env"
-  fi
-  return $rc
-}
-
 case "$1" in
   status)
     systemctl status $SERVICE
@@ -441,38 +400,115 @@ case "$1" in
       iptables -t nat -A PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null
       echo "  [OK] Traffic redirect added"
 
-      # Step 2: If docker-compose managed, create an override file (never touch original)
-      if [[ -n "$COMPOSE_DIR" && -n "$COMPOSE_SVC" ]]; then
-        OVERRIDE="$COMPOSE_DIR/docker-compose.cloudfuze.yml"
-        echo "  Compose dir: $COMPOSE_DIR (service: $COMPOSE_SVC)"
+      # Step 2: Recreate container with CA cert using Docker directly
+      # No docker-compose dependency. Works with any container regardless
+      # of how it was created (compose, docker run, CI/CD, anything).
+      echo "  Recreating with CA cert..."
+      python3 -c "
+import json, subprocess, sys
 
-        # Create override file (env_file handled by compose_up helper)
-        printf "services:\n  %s:\n    environment:\n      - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt\n      - SSL_CERT_FILE=/certs/cloudfuze.crt\n      - REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt\n    volumes:\n      - /root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro\n" "$COMPOSE_SVC" > "$OVERRIDE"
-        echo "  [OK] Override created: $OVERRIDE"
-        echo "        (original compose file NOT modified)"
+target = '$TARGET'
+ca_src = '/root/.cloudfuze-aigov/ca/ca.crt'
+ca_dst = '/certs/cloudfuze.crt'
+extra_env = ['NODE_EXTRA_CA_CERTS=' + ca_dst, 'SSL_CERT_FILE=' + ca_dst, 'REQUESTS_CA_BUNDLE=' + ca_dst]
+extra_bind = ca_src + ':' + ca_dst + ':ro'
 
-        # Redeploy with override
-        echo "  Redeploying $COMPOSE_SVC..."
-        compose_up "$COMPOSE_DIR" "$COMPOSE_SVC" "$OVERRIDE"
-        if [[ $? -eq 0 ]]; then
-          sleep 2
-          NEW_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TARGET" 2>/dev/null)
-          if [[ -n "$NEW_IP" && "$NEW_IP" != "$CONTAINER_IP" ]]; then
-            iptables -t nat -D PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-            iptables -t nat -D PREROUTING -s "$NEW_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-            iptables -t nat -A PREROUTING -s "$NEW_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null
-            echo "  IP changed: $CONTAINER_IP -> $NEW_IP (iptables updated)"
-          fi
-          echo "  [OK] $TARGET -- fully governed (prompt, response, tokens, cost)"
-        else
-          echo "  [!] Redeploy failed. Removing override..."
-          rm -f "$OVERRIDE"
+# 1. Inspect running container
+raw = subprocess.check_output(['docker', 'inspect', target])
+info = json.loads(raw)[0]
+cfg = info['Config']
+hcfg = info['HostConfig']
+
+# 2. Build docker create args
+args = ['docker', 'create', '--name', target + '-cfz-tmp']
+
+# Env vars (existing + ours)
+for e in (cfg.get('Env') or []):
+    if not e.startswith('NODE_EXTRA_CA_CERTS=') and not e.startswith('SSL_CERT_FILE=') and not e.startswith('REQUESTS_CA_BUNDLE='):
+        args += ['-e', e]
+for e in extra_env:
+    args += ['-e', e]
+
+# Ports
+for cport, bindings in (hcfg.get('PortBindings') or {}).items():
+    if bindings:
+        for b in bindings:
+            hp = b.get('HostPort', '')
+            hip = b.get('HostIp', '')
+            if hip and hp:
+                args += ['-p', hip + ':' + hp + ':' + cport]
+            elif hp:
+                args += ['-p', hp + ':' + cport]
+
+# Volumes (existing + ours)
+for m in (hcfg.get('Binds') or []):
+    if 'cloudfuze' not in m:
+        args += ['-v', m]
+args += ['-v', extra_bind]
+
+# Restart policy
+rp = hcfg.get('RestartPolicy', {})
+if rp.get('Name'):
+    r = rp['Name']
+    if rp.get('MaximumRetryCount', 0) > 0:
+        r += ':' + str(rp['MaximumRetryCount'])
+    args += ['--restart', r]
+
+# Working dir
+if cfg.get('WorkingDir'):
+    args += ['-w', cfg['WorkingDir']]
+
+# Labels
+for k, v in (cfg.get('Labels') or {}).items():
+    args += ['--label', k + '=' + v]
+
+# Network mode
+nm = hcfg.get('NetworkMode', '')
+if nm and nm != 'default':
+    args += ['--network', nm]
+
+# Image
+args.append(cfg['Image'])
+
+# CMD
+if cfg.get('Cmd'):
+    args += cfg['Cmd']
+
+# 3. Stop and rename old container (keep as backup)
+subprocess.run(['docker', 'stop', target], capture_output=True)
+subprocess.run(['docker', 'rename', target, target + '-cfz-backup'], capture_output=True)
+
+# 4. Create new container
+result = subprocess.run(args, capture_output=True, text=True)
+if result.returncode != 0:
+    print('  [!] Create failed: ' + result.stderr.strip(), file=sys.stderr)
+    # Restore backup
+    subprocess.run(['docker', 'rename', target + '-cfz-backup', target], capture_output=True)
+    subprocess.run(['docker', 'start', target], capture_output=True)
+    sys.exit(1)
+
+# 5. Rename new container to original name
+subprocess.run(['docker', 'rename', target + '-cfz-tmp', target], capture_output=True)
+
+# 6. Start it
+subprocess.run(['docker', 'start', target], capture_output=True)
+
+# 7. Remove backup
+subprocess.run(['docker', 'rm', target + '-cfz-backup'], capture_output=True)
+
+print('OK')
+" 2>&1
+      if [[ $? -eq 0 ]]; then
+        sleep 2
+        NEW_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TARGET" 2>/dev/null)
+        if [[ -n "$NEW_IP" && "$NEW_IP" != "$CONTAINER_IP" ]]; then
+          iptables -t nat -D PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+          iptables -t nat -D PREROUTING -s "$NEW_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+          iptables -t nat -A PREROUTING -s "$NEW_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null
         fi
+        echo "  [OK] $TARGET -- fully governed (prompt, response, tokens, cost)"
       else
-        echo "  Not docker-compose managed -- iptables redirect added (metadata only)."
-        echo "  For full tracing, add to your docker run command:"
-        echo "    -e NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt"
-        echo "    -v /root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro"
+        echo "  [!] Failed. Original container restored."
       fi
 
       echo ""
@@ -499,19 +535,79 @@ case "$1" in
       echo "  [OK] Traffic redirect removed"
     fi
 
-    # Remove our override file and redeploy with original config only
-    COMPOSE_DIR=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$TARGET" 2>/dev/null)
-    COMPOSE_SVC=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$TARGET" 2>/dev/null)
-    if [[ -n "$COMPOSE_DIR" ]]; then
-      OVERRIDE="$COMPOSE_DIR/docker-compose.cloudfuze.yml"
-      if [[ -f "$OVERRIDE" ]]; then
-        rm -f "$OVERRIDE"
-        echo "  [OK] Override file removed"
-        # Redeploy without override (original config only)
-        compose_up "$COMPOSE_DIR" "$COMPOSE_SVC"
-        echo "  [OK] $TARGET redeployed with original config"
-      fi
-    fi
+    # Recreate container without our CA cert env vars and volume
+    python3 -c "
+import json, subprocess, sys
+
+target = '$TARGET'
+
+raw = subprocess.check_output(['docker', 'inspect', target])
+info = json.loads(raw)[0]
+cfg = info['Config']
+hcfg = info['HostConfig']
+
+args = ['docker', 'create', '--name', target + '-cfz-tmp']
+
+# Env vars (strip ours)
+skip_env = {'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'}
+for e in (cfg.get('Env') or []):
+    key = e.split('=')[0]
+    if key not in skip_env:
+        args += ['-e', e]
+
+# Ports
+for cport, bindings in (hcfg.get('PortBindings') or {}).items():
+    if bindings:
+        for b in bindings:
+            hp = b.get('HostPort', '')
+            hip = b.get('HostIp', '')
+            if hip and hp:
+                args += ['-p', hip + ':' + hp + ':' + cport]
+            elif hp:
+                args += ['-p', hp + ':' + cport]
+
+# Volumes (strip ours)
+for m in (hcfg.get('Binds') or []):
+    if 'cloudfuze' not in m:
+        args += ['-v', m]
+
+# Restart policy
+rp = hcfg.get('RestartPolicy', {})
+if rp.get('Name'):
+    r = rp['Name']
+    if rp.get('MaximumRetryCount', 0) > 0:
+        r += ':' + str(rp['MaximumRetryCount'])
+    args += ['--restart', r]
+
+if cfg.get('WorkingDir'):
+    args += ['-w', cfg['WorkingDir']]
+
+for k, v in (cfg.get('Labels') or {}).items():
+    args += ['--label', k + '=' + v]
+
+nm = hcfg.get('NetworkMode', '')
+if nm and nm != 'default':
+    args += ['--network', nm]
+
+args.append(cfg['Image'])
+if cfg.get('Cmd'):
+    args += cfg['Cmd']
+
+subprocess.run(['docker', 'stop', target], capture_output=True)
+subprocess.run(['docker', 'rename', target, target + '-cfz-backup'], capture_output=True)
+
+result = subprocess.run(args, capture_output=True, text=True)
+if result.returncode != 0:
+    print('  [!] Restore failed: ' + result.stderr.strip(), file=sys.stderr)
+    subprocess.run(['docker', 'rename', target + '-cfz-backup', target], capture_output=True)
+    subprocess.run(['docker', 'start', target], capture_output=True)
+    sys.exit(1)
+
+subprocess.run(['docker', 'rename', target + '-cfz-tmp', target], capture_output=True)
+subprocess.run(['docker', 'start', target], capture_output=True)
+subprocess.run(['docker', 'rm', target + '-cfz-backup'], capture_output=True)
+print('OK')
+" 2>&1
 
     echo "  [OK] $TARGET -- governance removed"
     ;;
