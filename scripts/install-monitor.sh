@@ -356,58 +356,39 @@ case "$1" in
 
     while true; do
       echo ""
-      echo "  Running containers:"
-      echo "  ───────────────────────────────────"
-      CONTAINERS=()
-      while IFS= read -r line; do
-        CONTAINERS+=("$line")
-      done < <(docker ps --format '{{.Names}}' 2>/dev/null)
-
-      if [[ ${#CONTAINERS[@]} -eq 0 ]]; then
-        echo "  No running containers found."
-        break
-      fi
-
-      for i in "${!CONTAINERS[@]}"; do
-        echo "    $((i+1)). ${CONTAINERS[$i]}"
-      done
-      echo ""
-      read -p "  Enter container name or number (or 'done'): " INPUT
+      read -p "  Enter container name (or 'done'): " INPUT
       [[ "$INPUT" == "done" || "$INPUT" == "q" || -z "$INPUT" ]] && break
 
-      # Resolve: number or name with fuzzy match
+      # Exact match first
       TARGET=""
-      if [[ "$INPUT" =~ ^[0-9]+$ ]] && (( INPUT >= 1 && INPUT <= ${#CONTAINERS[@]} )); then
-        TARGET="${CONTAINERS[$((INPUT-1))]}"
+      if docker inspect --format '{{.Name}}' "$INPUT" &>/dev/null; then
+        TARGET="$INPUT"
       else
-        # Exact match
-        for c in "${CONTAINERS[@]}"; do
-          [[ "$c" == "$INPUT" ]] && TARGET="$c" && break
-        done
-        # Fuzzy match
-        if [[ -z "$TARGET" ]]; then
-          MATCHES=()
-          IL=$(echo "$INPUT" | tr '[:upper:]' '[:lower:]')
-          for c in "${CONTAINERS[@]}"; do
-            CL=$(echo "$c" | tr '[:upper:]' '[:lower:]')
-            [[ "$CL" == *"$IL"* ]] && MATCHES+=("$c")
+        # Fuzzy match — find containers whose name contains the input
+        MATCHES=()
+        IL=$(echo "$INPUT" | tr '[:upper:]' '[:lower:]')
+        while IFS= read -r c; do
+          CL=$(echo "$c" | tr '[:upper:]' '[:lower:]')
+          [[ "$CL" == *"$IL"* ]] && MATCHES+=("$c")
+        done < <(docker ps --format '{{.Names}}' 2>/dev/null)
+
+        if [[ ${#MATCHES[@]} -eq 0 ]]; then
+          echo "  No container matching '$INPUT' found."
+          continue
+        elif [[ ${#MATCHES[@]} -eq 1 ]]; then
+          TARGET="${MATCHES[0]}"
+          echo "  Found: $TARGET"
+        else
+          echo ""
+          echo "  Did you mean:"
+          for i in "${!MATCHES[@]}"; do
+            echo "    $((i+1)). ${MATCHES[$i]}"
           done
-          if [[ ${#MATCHES[@]} -eq 1 ]]; then
-            TARGET="${MATCHES[0]}"
-          elif [[ ${#MATCHES[@]} -gt 1 ]]; then
-            echo ""
-            echo "  Multiple matches:"
-            for i in "${!MATCHES[@]}"; do
-              echo "    $((i+1)). ${MATCHES[$i]}"
-            done
-            read -p "  Select number: " MN
-            if [[ "$MN" =~ ^[0-9]+$ ]] && (( MN >= 1 && MN <= ${#MATCHES[@]} )); then
-              TARGET="${MATCHES[$((MN-1))]}"
-            else
-              echo "  Invalid selection."; continue
-            fi
+          read -p "  Select number: " MN
+          if [[ "$MN" =~ ^[0-9]+$ ]] && (( MN >= 1 && MN <= ${#MATCHES[@]} )); then
+            TARGET="${MATCHES[$((MN-1))]}"
           else
-            echo "  No container matching '$INPUT' found."; continue
+            echo "  Invalid selection."; continue
           fi
         fi
       fi
