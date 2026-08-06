@@ -274,8 +274,96 @@ if [[ "$REMOTE_MODE" == "true" && -n "$ALLOWED_IPS" ]]; then
   fi
 fi
 
-# Wait for startup
+# Wait for startup + CA generation
 sleep 3
+
+# ── Docker: auto-configure so containers are governed too ────────────────
+if command -v docker &>/dev/null; then
+  echo "[+] Docker detected — configuring container governance..."
+
+  # Get the Docker bridge IP (host IP from container's perspective)
+  DOCKER_BRIDGE_IP=$(ip -4 addr show docker0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' || echo "172.17.0.1")
+
+  # 1. Docker proxy config — auto-injects HTTPS_PROXY into every new container
+  DOCKER_CONFIG_DIR="/root/.docker"
+  DOCKER_CONFIG="$DOCKER_CONFIG_DIR/config.json"
+  mkdir -p "$DOCKER_CONFIG_DIR"
+
+  # Read existing config or start fresh
+  if [[ -f "$DOCKER_CONFIG" ]]; then
+    EXISTING=$(cat "$DOCKER_CONFIG")
+  else
+    EXISTING="{}"
+  fi
+
+  # Add/update proxies section using python (available on most systems) or simple write
+  if command -v python3 &>/dev/null; then
+    python3 -c "
+import json, sys
+cfg = json.loads('''$EXISTING''') if '''$EXISTING'''.strip() else {}
+cfg['proxies'] = cfg.get('proxies', {})
+cfg['proxies']['default'] = {
+    'httpsProxy': 'http://${DOCKER_BRIDGE_IP}:${PROXY_PORT}',
+    'httpProxy': 'http://${DOCKER_BRIDGE_IP}:${PROXY_PORT}',
+    'noProxy': '${DOCKER_BRIDGE_IP},localhost,127.0.0.1'
+}
+json.dump(cfg, sys.stdout, indent=2)
+" > "$DOCKER_CONFIG"
+  else
+    cat > "$DOCKER_CONFIG" << DCEOF
+{
+  "proxies": {
+    "default": {
+      "httpsProxy": "http://${DOCKER_BRIDGE_IP}:${PROXY_PORT}",
+      "httpProxy": "http://${DOCKER_BRIDGE_IP}:${PROXY_PORT}",
+      "noProxy": "${DOCKER_BRIDGE_IP},localhost,127.0.0.1"
+    }
+  }
+}
+DCEOF
+  fi
+  echo "  ✓ Docker proxy config: containers will route through ${DOCKER_BRIDGE_IP}:${PROXY_PORT}"
+
+  # 2. Copy CA cert to a shared location that can be mounted into containers
+  CA_CERT="$DATA_DIR/ca/ca.crt"
+  SHARED_CA="/etc/cloudfuze/docker-ca.crt"
+  if [[ -f "$CA_CERT" ]]; then
+    cp "$CA_CERT" "$SHARED_CA" 2>/dev/null || true
+  fi
+
+  # 3. Make proxy listen on Docker bridge IP (update systemd unit to use 0.0.0.0)
+  if [[ "$PROXY_HOST" == "127.0.0.1" ]]; then
+    sed -i "s|PROXY_LISTEN_HOST=127.0.0.1|PROXY_LISTEN_HOST=0.0.0.0|" "/etc/systemd/system/${SERVICE_NAME}.service"
+    systemctl daemon-reload
+    systemctl restart "$SERVICE_NAME"
+    sleep 2
+    echo "  ✓ Proxy now listens on 0.0.0.0:${PROXY_PORT} (reachable from containers)"
+  fi
+
+  # 4. Tell user about CA for full content tracing
+  echo "  ✓ New containers auto-governed via HTTPS_PROXY"
+  echo ""
+  echo "  NOTE: For full prompt/response tracing inside containers, add the CA cert:"
+  echo "    docker run -v /etc/cloudfuze/docker-ca.crt:/usr/local/share/ca-certificates/cloudfuze.crt:ro ..."
+  echo "    OR in docker-compose:"
+  echo "      volumes:"
+  echo "        - /etc/cloudfuze/docker-ca.crt:/usr/local/share/ca-certificates/cloudfuze.crt:ro"
+  echo "      environment:"
+  echo "        - NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/cloudfuze.crt"
+  echo "        - REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/cloudfuze.crt"
+  echo ""
+  echo "  Without the CA, containers are still tracked (hostname + timing) but"
+  echo "  prompt/response content is not visible."
+
+  # 5. Restart existing containers so they pick up the new proxy config
+  echo ""
+  echo "  Restarting running containers to apply proxy..."
+  docker ps -q 2>/dev/null | while read cid; do
+    CNAME=$(docker inspect --format '{{.Name}}' "$cid" 2>/dev/null | sed 's|^/||')
+    docker restart "$cid" >/dev/null 2>&1 && echo "    ✓ Restarted: $CNAME" || echo "    ✗ Failed: $CNAME"
+  done
+  echo "  Done."
+fi
 
 # ── Create uninstall command ──────────────────────────────────────────────
 cat > /usr/local/bin/cloudfuze-monitor << 'WRAPPER'
