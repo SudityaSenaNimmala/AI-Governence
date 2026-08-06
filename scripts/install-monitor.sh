@@ -378,7 +378,7 @@ case "$1" in
       # Get container's internal IP
       CONTAINER_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TARGET" 2>/dev/null)
       if [[ -z "$CONTAINER_IP" ]]; then
-        echo "  ✗ Could not find IP for $TARGET. Is it running?"
+        echo "  [!] Could not find IP for $TARGET. Is it running?"
         continue
       fi
 
@@ -392,14 +392,14 @@ case "$1" in
 
       CA_FILE="/root/.cloudfuze-aigov/ca/ca.crt"
       if [[ ! -f "$CA_FILE" ]]; then
-        echo "  ✗ CA cert not found at $CA_FILE. Is the monitor running?"
+        echo "  [!] CA cert not found at $CA_FILE. Is the monitor running?"
         continue
       fi
 
       # Step 1: Add iptables rule for this container only
       iptables -t nat -D PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
       iptables -t nat -A PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null
-      echo "  ✓ Traffic redirect added"
+      echo "  [OK] Traffic redirect added"
 
       # Step 2: If docker-compose managed, modify compose file to add CA cert + env var
       if [[ -n "$COMPOSE_DIR" && -n "$COMPOSE_SVC" ]]; then
@@ -414,7 +414,7 @@ case "$1" in
           # Backup
           if [[ ! -f "${COMPOSE_FILE}.cloudfuze-backup" ]]; then
             cp "$COMPOSE_FILE" "${COMPOSE_FILE}.cloudfuze-backup"
-            echo "  ✓ Backup saved: ${COMPOSE_FILE}.cloudfuze-backup"
+            echo "  [OK] Backup saved: ${COMPOSE_FILE}.cloudfuze-backup"
           fi
 
           # Use python3 to safely modify the YAML
@@ -435,7 +435,7 @@ with open(compose_file, 'r') as f:
 
 # Check if already modified
 if "cloudfuze.crt" in content:
-    print("  Already configured — skipping compose modification.", file=sys.stderr)
+    print("  Already configured -- skipping compose modification.", file=sys.stderr)
     sys.exit(0)
 
 lines = content.split('\n')
@@ -520,7 +520,7 @@ if in_service:
 with open(compose_file, 'w') as f:
     f.write('\n'.join(result))
 
-print("  ✓ Compose file updated", file=sys.stderr)
+print("  [OK] Compose file updated", file=sys.stderr)
 PYEOF
 
           if [[ $? -eq 0 ]]; then
@@ -537,17 +537,17 @@ PYEOF
                 iptables -t nat -D PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
                 iptables -t nat -D PREROUTING -s "$NEW_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
                 iptables -t nat -A PREROUTING -s "$NEW_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null
-                echo "  ✓ IP changed: $CONTAINER_IP → $NEW_IP (iptables updated)"
+                echo "  IP changed: $CONTAINER_IP -> $NEW_IP (iptables updated)"
               fi
-              echo "  ✓ $TARGET — fully governed (prompt, response, tokens, cost)"
+              echo "  [OK] $TARGET -- fully governed (prompt, response, tokens, cost)"
             else
-              echo "  ✗ Redeploy failed. Restoring backup..."
+              echo "  [!] Redeploy failed. Restoring backup..."
               cp "${COMPOSE_FILE}.cloudfuze-backup" "$COMPOSE_FILE"
               echo "  Restored original compose file."
             fi
           fi
         else
-          echo "  ✗ Compose file not found at $COMPOSE_DIR"
+          echo "  [!] Compose file not found at $COMPOSE_DIR"
           echo "    Container has iptables redirect (metadata tracking)."
           echo "    For full tracing, add to docker-compose.yml:"
           echo "      environment:"
@@ -556,7 +556,7 @@ PYEOF
           echo "        - /root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro"
         fi
       else
-        echo "  Not docker-compose managed — iptables redirect added (metadata only)."
+        echo "  Not docker-compose managed -- iptables redirect added (metadata only)."
         echo "  For full tracing, add to your docker run command:"
         echo "    -e NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt"
         echo "    -v /root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro"
@@ -583,7 +583,7 @@ PYEOF
     # Remove iptables rule
     if [[ -n "$CONTAINER_IP" ]]; then
       iptables -t nat -D PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-      echo "  ✓ Traffic redirect removed"
+      echo "  [OK] Traffic redirect removed"
     fi
 
     # Restore compose file if we modified it
@@ -596,25 +596,25 @@ PYEOF
         if [[ -f "$BACKUP" ]]; then
           cp "$BACKUP" "$COMPOSE"
           rm -f "$BACKUP"
-          echo "  ✓ Compose file restored from backup"
+          echo "  [OK] Compose file restored from backup"
           # Redeploy with original config
           cd "$COMPOSE_DIR"
           docker compose up -d "$COMPOSE_SVC" 2>/dev/null || docker-compose up -d "$COMPOSE_SVC" 2>/dev/null
-          echo "  ✓ $TARGET redeployed with original config"
+          echo "  [OK] $TARGET redeployed with original config"
           break
         fi
       done
     fi
 
-    echo "  ✓ $TARGET — governance removed"
+    echo "  [OK] $TARGET -- governance removed"
     ;;
   uninstall)
     exec /opt/cloudfuze-monitor/scripts/install-monitor.sh --do-uninstall
     ;;
   help|"")
     echo ""
-    echo "  CloudFuze Server Monitor — Commands"
-    echo "  ════════════════════════════════════"
+    echo "  CloudFuze Server Monitor -- Commands"
+    echo "  ======================================"
     echo ""
     echo "  cloudfuze-monitor status                  Show service status"
     echo "  cloudfuze-monitor logs                    Stream live logs"
