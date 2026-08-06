@@ -249,7 +249,7 @@ export function mountServerAgents(app, db) {
     const [totalCalls, recentCalls, enrolledCount] = await Promise.all([
       db.collection('server_agent_calls').countDocuments(),
       db.collection('server_agent_calls').countDocuments({ occurred_at: { $gte: dayAgo.toISOString() } }),
-      db.collection('machines').countDocuments({ type: 'server-monitor', status: { $ne: 'removed' } }),
+      db.collection('monitored_servers').countDocuments({ status: { $ne: 'removed' } }),
     ]);
     const costAgg = await db.collection('server_agent_calls').aggregate([
       { $group: { _id: null, total: { $sum: { $ifNull: ['$total_cost_usd', 0] } } } },
@@ -310,6 +310,38 @@ export function mountServerAgents(app, db) {
     res.json({ token, install_command: installCmd, server_url: serverUrl, port });
   }));
 
+  // ── Update script — served to monitors that run `cloudfuze-monitor update` ──
+  app.get('/update-monitor.sh', async (req, res) => {
+    const script = `#!/usr/bin/env bash
+set -euo pipefail
+echo "Checking for updates..."
+INSTALL_DIR="/opt/cloudfuze-monitor"
+if [[ ! -d "\$INSTALL_DIR" ]]; then echo "CloudFuze monitor not installed."; exit 1; fi
+
+# Pull latest from git
+cd "\$INSTALL_DIR"
+if [[ -d .git ]]; then
+  BEFORE=\$(git rev-parse HEAD 2>/dev/null || echo "none")
+  git fetch origin main --quiet 2>/dev/null
+  AFTER=\$(git rev-parse origin/main 2>/dev/null || echo "none")
+  if [[ "\$BEFORE" == "\$AFTER" ]]; then
+    echo "Already up to date."
+    exit 0
+  fi
+  echo "Updating from \${BEFORE:0:8} to \${AFTER:0:8}..."
+  git reset --hard origin/main --quiet
+  cd agent && npm install --omit=dev --quiet 2>/dev/null
+  echo "Restarting service..."
+  systemctl restart cloudfuze-monitor 2>/dev/null || systemctl restart cloudfuze-server-monitor 2>/dev/null || true
+  echo "Update complete."
+else
+  echo "Not a git install — re-run the install command to update."
+  exit 1
+fi
+`;
+    res.type('text/plain').send(script);
+  });
+
   app.get('/install-monitor.sh', async (req, res) => {
     const { resolve } = await import('path');
     const { existsSync } = await import('fs');
@@ -325,7 +357,7 @@ export function mountServerAgents(app, db) {
 
   // ── Monitor heartbeat — called periodically by the daemon ──────────────
   app.post('/api/v1/monitor/heartbeat', requireMachineAuth, a(async (req, res) => {
-    await db.collection('machines').updateOne(
+    await db.collection('monitored_servers').updateOne(
       { id: req.machine.id },
       { $set: { last_seen: new Date(), status: 'active' } },
     );
@@ -334,7 +366,7 @@ export function mountServerAgents(app, db) {
 
   // ── Monitor deregister — called on uninstall ─────────────────────────
   app.post('/api/v1/monitor/deregister', requireMachineAuth, a(async (req, res) => {
-    await db.collection('machines').updateOne(
+    await db.collection('monitored_servers').updateOne(
       { id: req.machine.id },
       { $set: { status: 'removed', removed_at: new Date() } },
     );
@@ -346,8 +378,8 @@ export function mountServerAgents(app, db) {
   // disappears on uninstall). Enriched with call stats from server_agent_calls.
   app.get('/api/v1/monitor/servers', a(async (req, res) => {
     // 1. Get all server-monitor machines from enrollment (excludes removed)
-    const enrolled = await db.collection('machines')
-      .find({ type: 'server-monitor', status: { $ne: 'removed' } })
+    const enrolled = await db.collection('monitored_servers')
+      .find({ status: { $ne: 'removed' } })
       .project({ _id: 0, id: 1, hostname: 1, last_seen: 1, first_seen: 1, proxy_port: 1, user: 1, display_name: 1 })
       .sort({ last_seen: -1 })
       .toArray();

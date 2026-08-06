@@ -30,7 +30,9 @@ export function mountEnroll(app, db) {
       update.$addToSet = { claude_accounts: String(claudeAccountEmail).toLowerCase() };
     }
 
-    await db.collection('machines').updateOne({ id: machineId }, update, { upsert: true });
+    // Server monitors go into their own collection, not machines (which is for desktop agents/users)
+    const collection = set.type === 'server-monitor' ? 'monitored_servers' : 'machines';
+    await db.collection(collection).updateOne({ id: machineId }, update, { upsert: true });
 
     // Auto-resolve employee profiles in background (non-blocking)
     const allMachines = await db.collection('machines').find({}).project({ _id: 0 }).toArray();

@@ -41,6 +41,10 @@ export async function applyInitialSchema(db) {
   // (client_seq is the tie-breaker the reader applies, occurred_at is the index.)
   await db.collection('dlp_events').createIndex({ session_id: 1, occurred_at: 1 });
 
+  // monitored_servers — server-monitor enrollments (separate from desktop machines)
+  await db.collection('monitored_servers').createIndex({ id: 1 }, { unique: true });
+  await db.collection('monitored_servers').createIndex({ status: 1 });
+
   // ai_sessions — one doc per conversation (browser extension session_id)
   await db.collection('ai_sessions').createIndex({ session_id: 1 }, { unique: true });
   await db.collection('ai_sessions').createIndex({ machine_id: 1, started_at: -1 });
