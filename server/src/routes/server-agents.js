@@ -385,9 +385,14 @@ echo ""
 
   // ── Monitor heartbeat — called periodically by the daemon ──────────────
   app.post('/api/v1/monitor/heartbeat', requireMachineAuth, a(async (req, res) => {
+    // Upsert — ensures the server appears even if enrollment went to the wrong collection
     await db.collection('monitored_servers').updateOne(
       { id: req.machine.id },
-      { $set: { last_seen: new Date(), status: 'active' } },
+      {
+        $set: { last_seen: new Date(), status: 'active', hostname: req.machine.hostname, type: 'server-monitor' },
+        $setOnInsert: { first_seen: new Date() },
+      },
+      { upsert: true },
     );
     res.json({ ok: true });
   }));
