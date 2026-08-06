@@ -243,7 +243,7 @@ Restart=always
 RestartSec=5
 
 # Post-start: install CA into system trust store
-ExecStartPost=/bin/bash -c 'sleep 2 && cp $DATA_DIR/ca/ca.crt /usr/local/share/ca-certificates/cloudfuze-monitor.crt 2>/dev/null && update-ca-certificates 2>/dev/null || true'
+ExecStartPost=/bin/bash -c 'sleep 2 && cp /root/.cloudfuze-aigov/ca/ca.crt /usr/local/share/ca-certificates/cloudfuze-monitor.crt 2>/dev/null && update-ca-certificates 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
@@ -337,7 +337,8 @@ cat > /usr/local/bin/cloudfuze-monitor << 'WRAPPER'
 #!/bin/bash
 DATA_DIR="/etc/cloudfuze"
 SERVICE="cloudfuze-monitor"
-CA_CERT="$DATA_DIR/ca/ca.crt"
+# CA cert location: the proxy writes to ~/.cloudfuze-aigov/ca/ (root's home)
+CA_CERT="/root/.cloudfuze-aigov/ca/ca.crt"
 DOCKER_CA="/etc/cloudfuze/docker-ca.crt"
 
 case "$1" in

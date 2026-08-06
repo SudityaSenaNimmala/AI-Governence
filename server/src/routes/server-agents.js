@@ -331,7 +331,7 @@ echo ""
 TMP=\$(mktemp -d)
 trap 'rm -rf "\$TMP"' EXIT
 
-echo "[1/4] Downloading latest version..."
+echo "[1/5] Downloading latest version..."
 git clone --depth 1 "\$REPO_URL" "\$TMP/repo" 2>&1 | tail -1
 
 AGENT_SRC="\$TMP/repo/agent team/agent"
@@ -343,7 +343,7 @@ if [[ ! -d "\$AGENT_SRC/src/server-monitor" ]]; then
   exit 1
 fi
 
-echo "[2/4] Replacing files..."
+echo "[2/5] Replacing files..."
 # Remove old source files but keep node_modules and data
 for item in "\$INSTALL_DIR"/*; do
   case "\$(basename "\$item")" in
@@ -355,7 +355,7 @@ done
 # Copy new source files in
 cp -r "\$AGENT_SRC/"* "\$INSTALL_DIR/"
 
-echo "[3/4] Updating dependencies..."
+echo "[3/5] Updating dependencies..."
 cd "\$INSTALL_DIR"
 npm install --omit=dev --no-audit --no-fund --quiet 2>&1 | tail -3
 
