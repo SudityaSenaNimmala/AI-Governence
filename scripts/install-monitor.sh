@@ -439,17 +439,42 @@ case "$1" in
         OVERRIDE="$COMPOSE_DIR/docker-compose.cloudfuze.yml"
         echo "  Compose dir: $COMPOSE_DIR (service: $COMPOSE_SVC)"
 
-        # Create override file with our CA cert mount + env vars
-        cat > "$OVERRIDE" << OVEOF
-services:
-  $COMPOSE_SVC:
-    environment:
-      - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt
-      - SSL_CERT_FILE=/certs/cloudfuze.crt
-      - REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt
-    volumes:
-      - /root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro
-OVEOF
+        # Find the env file referenced in compose and check if it exists
+        ORIG_ENV=""
+        REAL_ENV=""
+        for cfile in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+          if [[ -f "$COMPOSE_DIR/$cfile" ]]; then
+            ORIG_ENV=$(grep -A 1 'env_file:' "$COMPOSE_DIR/$cfile" 2>/dev/null | grep -oP '^\s*-\s*\K\S+' | head -1)
+            break
+          fi
+        done
+        # If the referenced env file doesn't exist, find the real one
+        if [[ -n "$ORIG_ENV" && ! -f "$COMPOSE_DIR/$ORIG_ENV" ]]; then
+          for candidate in .env.prod .env.production .env.local .env.staging .env.dev .env.development; do
+            if [[ -f "$COMPOSE_DIR/$candidate" ]]; then
+              REAL_ENV="$candidate"
+              echo "  Env: $ORIG_ENV not found, using $REAL_ENV"
+              break
+            fi
+          done
+        fi
+
+        # Create override file
+        {
+          echo "services:"
+          echo "  $COMPOSE_SVC:"
+          # Override env_file if the original one is missing
+          if [[ -n "$REAL_ENV" ]]; then
+            echo "    env_file:"
+            echo "      - $REAL_ENV"
+          fi
+          echo "    environment:"
+          echo "      - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt"
+          echo "      - SSL_CERT_FILE=/certs/cloudfuze.crt"
+          echo "      - REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt"
+          echo "    volumes:"
+          echo "      - /root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro"
+        } > "$OVERRIDE"
         echo "  [OK] Override created: $OVERRIDE"
         echo "        (original compose file NOT modified)"
 
