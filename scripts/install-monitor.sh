@@ -291,48 +291,15 @@ fi
 # Wait for startup + CA generation
 sleep 3
 
-# ── Network-level interception (single port, zero-touch, invisible) ──────
-# iptables redirects all outbound port-443 traffic to our proxy port.
-# The proxy auto-detects whether a connection is raw TLS (iptables redirect)
-# or HTTP CONNECT (explicit proxy) by peeking the first byte. Single port,
-# no conflicts, no extra ports needed.
-#
-# For Docker containers: PREROUTING on bridge interfaces.
-# For host processes: OUTPUT chain (excludes root to avoid proxy loop).
-# Nothing inside any container is touched, changed, or restarted.
-
-# Make proxy listen on 0.0.0.0 so redirected traffic from Docker bridges can reach it
+# ── Proxy setup ──────────────────────────────────────────────────────────
+# Make proxy listen on 0.0.0.0 so governed containers can reach it.
+# No broad iptables rules — governance is per-container via 'cloudfuze-monitor govern'.
 if grep -q "PROXY_LISTEN_HOST=127.0.0.1" "/etc/systemd/system/${SERVICE_NAME}.service" 2>/dev/null; then
   sed -i "s|PROXY_LISTEN_HOST=127.0.0.1|PROXY_LISTEN_HOST=0.0.0.0|" "/etc/systemd/system/${SERVICE_NAME}.service"
   systemctl daemon-reload
   systemctl restart "$SERVICE_NAME"
   sleep 2
 fi
-
-# Port 443 — standard HTTPS. Every cloud AI API uses this:
-# OpenAI, Anthropic, Google, AWS Bedrock, Azure OpenAI.
-AI_PORTS="443"
-
-if command -v docker &>/dev/null; then
-  echo "[+] Docker detected — adding network-level interception..."
-  for iface in $(ip link show 2>/dev/null | grep -oP '(docker0|br-[a-f0-9]+)(?=[@:])' | sort -u); do
-    for aport in $AI_PORTS; do
-      iptables -t nat -D PREROUTING -i "$iface" -p tcp --dport "$aport" -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-      iptables -t nat -A PREROUTING -i "$iface" -p tcp --dport "$aport" -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-    done
-    echo "  ✓ Containers on $iface → :${PROXY_PORT} (ports: $AI_PORTS)"
-  done
-fi
-
-# Host processes (non-root to avoid proxy's own traffic looping back)
-for aport in $AI_PORTS; do
-  iptables -t nat -D OUTPUT -p tcp --dport "$aport" ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-  iptables -t nat -A OUTPUT -p tcp --dport "$aport" ! -d 127.0.0.0/8 -m owner ! --uid-owner 0 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-done
-echo "  ✓ Host processes → :${PROXY_PORT} (ports: $AI_PORTS)"
-
-# Persist across reboots
-iptables-save > /etc/iptables.rules 2>/dev/null || true
 
 # ── Create CLI tool ──────────────────────────────────────────────────────
 cat > /usr/local/bin/cloudfuze-monitor << 'WRAPPER'
@@ -366,8 +333,8 @@ case "$1" in
   govern)
     if [[ $EUID -ne 0 ]]; then echo "Must run as root (use sudo)"; exit 1; fi
     if ! command -v docker &>/dev/null; then echo "Docker not found."; exit 1; fi
-    if [[ ! -f "$CA_CERT" ]]; then echo "ERROR: CA cert not found. Is the monitor running?"; exit 1; fi
-    cp "$CA_CERT" "$DOCKER_CA" 2>/dev/null
+
+    PROXY_PORT=$(grep PROXY_LISTEN_PORT /etc/systemd/system/$SERVICE.service 2>/dev/null | head -1 | sed 's/.*=//' || echo "8443")
 
     while true; do
       echo ""
@@ -379,7 +346,7 @@ case "$1" in
       if docker inspect --format '{{.Name}}' "$INPUT" &>/dev/null; then
         TARGET="$INPUT"
       else
-        # Fuzzy match — find containers whose name contains the input
+        # Fuzzy match
         MATCHES=()
         IL=$(echo "$INPUT" | tr '[:upper:]' '[:lower:]')
         while IFS= read -r c; do
@@ -408,26 +375,238 @@ case "$1" in
         fi
       fi
 
-      echo ""
-      echo "  Governing: $TARGET"
-      # Copy CA cert into container
-      docker cp "$DOCKER_CA" "$TARGET:/usr/local/share/ca-certificates/cloudfuze.crt" 2>/dev/null
-      docker exec "$TARGET" sh -c 'command -v update-ca-certificates >/dev/null && update-ca-certificates 2>/dev/null; exit 0' 2>/dev/null
-      # Restart to apply
-      docker restart "$TARGET" >/dev/null 2>&1
-      if [[ $? -eq 0 ]]; then
-        echo "  ✓ $TARGET — CA injected, restarted, fully governed"
-      else
-        echo "  ✗ $TARGET — restart failed"
+      # Get container's internal IP
+      CONTAINER_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TARGET" 2>/dev/null)
+      if [[ -z "$CONTAINER_IP" ]]; then
+        echo "  ✗ Could not find IP for $TARGET. Is it running?"
+        continue
       fi
+
+      # Find docker-compose project dir and service name
+      COMPOSE_DIR=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$TARGET" 2>/dev/null)
+      COMPOSE_SVC=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$TARGET" 2>/dev/null)
+
+      echo ""
+      echo "  Container: $TARGET"
+      echo "  IP:        $CONTAINER_IP"
+
+      CA_FILE="/root/.cloudfuze-aigov/ca/ca.crt"
+      if [[ ! -f "$CA_FILE" ]]; then
+        echo "  ✗ CA cert not found at $CA_FILE. Is the monitor running?"
+        continue
+      fi
+
+      # Step 1: Add iptables rule for this container only
+      iptables -t nat -D PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+      iptables -t nat -A PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null
+      echo "  ✓ Traffic redirect added"
+
+      # Step 2: If docker-compose managed, modify compose file to add CA cert + env var
+      if [[ -n "$COMPOSE_DIR" && -n "$COMPOSE_SVC" ]]; then
+        COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
+        if [[ ! -f "$COMPOSE_FILE" ]]; then
+          COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yaml"
+        fi
+
+        if [[ -f "$COMPOSE_FILE" ]]; then
+          echo "  Compose: $COMPOSE_FILE (service: $COMPOSE_SVC)"
+
+          # Backup
+          if [[ ! -f "${COMPOSE_FILE}.cloudfuze-backup" ]]; then
+            cp "$COMPOSE_FILE" "${COMPOSE_FILE}.cloudfuze-backup"
+            echo "  ✓ Backup saved: ${COMPOSE_FILE}.cloudfuze-backup"
+          fi
+
+          # Use python3 to safely modify the YAML
+          python3 - "$COMPOSE_FILE" "$COMPOSE_SVC" << 'PYEOF'
+import sys, re
+
+compose_file = sys.argv[1]
+service_name = sys.argv[2]
+ca_mount = "/root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro"
+env_vars = [
+    "NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt",
+    "SSL_CERT_FILE=/certs/cloudfuze.crt",
+    "REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt",
+]
+
+with open(compose_file, 'r') as f:
+    content = f.read()
+
+# Check if already modified
+if "cloudfuze.crt" in content:
+    print("  Already configured — skipping compose modification.", file=sys.stderr)
+    sys.exit(0)
+
+lines = content.split('\n')
+result = []
+in_service = False
+service_indent = 0
+found_env = False
+found_vol = False
+added_env = False
+added_vol = False
+i = 0
+
+while i < len(lines):
+    line = lines[i]
+    stripped = line.lstrip()
+    indent = len(line) - len(stripped)
+
+    # Detect if we're entering our target service
+    if stripped == service_name + ':' or stripped == f'"{service_name}":' or stripped == f"'{service_name}':":
+        in_service = True
+        service_indent = indent
+        result.append(line)
+        i += 1
+        continue
+
+    # Detect if we've left our target service (another service at same indent)
+    if in_service and indent <= service_indent and stripped and not stripped.startswith('#') and ':' in stripped and indent == service_indent:
+        # Before leaving, add missing sections
+        svc_content_indent = service_indent + 2
+        sp = ' ' * svc_content_indent
+        sp2 = ' ' * (svc_content_indent + 2)
+        if not found_env:
+            result.append(f"{sp}environment:")
+            for ev in env_vars:
+                result.append(f'{sp2}- "{ev}"')
+        if not found_vol:
+            result.append(f"{sp}volumes:")
+            result.append(f'{sp2}- "{ca_mount}"')
+        in_service = False
+
+    if in_service:
+        # Check for environment section
+        if stripped.startswith('environment:'):
+            found_env = True
+            result.append(line)
+            i += 1
+            # Add our env vars right after
+            env_indent = indent + 2
+            sp = ' ' * env_indent
+            for ev in env_vars:
+                result.append(f'{sp}- "{ev}"')
+            added_env = True
+            continue
+
+        # Check for volumes section
+        if stripped.startswith('volumes:'):
+            found_vol = True
+            result.append(line)
+            i += 1
+            vol_indent = indent + 2
+            sp = ' ' * vol_indent
+            result.append(f'{sp}- "{ca_mount}"')
+            added_vol = True
+            continue
+
+    result.append(line)
+    i += 1
+
+# If we ended while still in service (last service in file), add missing sections
+if in_service:
+    svc_content_indent = service_indent + 2
+    sp = ' ' * svc_content_indent
+    sp2 = ' ' * (svc_content_indent + 2)
+    if not found_env:
+        result.append(f"{sp}environment:")
+        for ev in env_vars:
+            result.append(f'{sp2}- "{ev}"')
+    if not found_vol:
+        result.append(f"{sp}volumes:")
+        result.append(f'{sp2}- "{ca_mount}"')
+
+with open(compose_file, 'w') as f:
+    f.write('\n'.join(result))
+
+print("  ✓ Compose file updated", file=sys.stderr)
+PYEOF
+
+          if [[ $? -eq 0 ]]; then
+            # Redeploy only this service
+            echo "  Redeploying $COMPOSE_SVC..."
+            cd "$COMPOSE_DIR"
+            docker compose up -d "$COMPOSE_SVC" 2>/dev/null || docker-compose up -d "$COMPOSE_SVC" 2>/dev/null
+            if [[ $? -eq 0 ]]; then
+              # Re-get IP since container was recreated
+              sleep 2
+              NEW_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TARGET" 2>/dev/null)
+              if [[ -n "$NEW_IP" && "$NEW_IP" != "$CONTAINER_IP" ]]; then
+                # Update iptables rule with new IP
+                iptables -t nat -D PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+                iptables -t nat -D PREROUTING -s "$NEW_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+                iptables -t nat -A PREROUTING -s "$NEW_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null
+                echo "  ✓ IP changed: $CONTAINER_IP → $NEW_IP (iptables updated)"
+              fi
+              echo "  ✓ $TARGET — fully governed (prompt, response, tokens, cost)"
+            else
+              echo "  ✗ Redeploy failed. Restoring backup..."
+              cp "${COMPOSE_FILE}.cloudfuze-backup" "$COMPOSE_FILE"
+              echo "  Restored original compose file."
+            fi
+          fi
+        else
+          echo "  ✗ Compose file not found at $COMPOSE_DIR"
+          echo "    Container has iptables redirect (metadata tracking)."
+          echo "    For full tracing, add to docker-compose.yml:"
+          echo "      environment:"
+          echo "        - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt"
+          echo "      volumes:"
+          echo "        - /root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro"
+        fi
+      else
+        echo "  Not docker-compose managed — iptables redirect added (metadata only)."
+        echo "  For full tracing, add to your docker run command:"
+        echo "    -e NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt"
+        echo "    -v /root/.cloudfuze-aigov/ca/ca.crt:/certs/cloudfuze.crt:ro"
+      fi
+
+      echo ""
+      echo "  To remove governance:"
+      echo "    sudo cloudfuze-monitor ungovernable $TARGET"
 
       echo ""
       read -p "  Govern another container? (y/n): " MORE
       [[ ! "$MORE" =~ ^[Yy] ]] && break
     done
     echo ""
-    echo "  Done. Governed containers have full prompt/response tracing."
-    echo ""
+    ;;
+  ungovernable)
+    if [[ $EUID -ne 0 ]]; then echo "Must run as root (use sudo)"; exit 1; fi
+    if [[ -z "$2" ]]; then echo "Usage: cloudfuze-monitor ungovernable <container_name>"; exit 1; fi
+
+    TARGET="$2"
+    CONTAINER_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TARGET" 2>/dev/null)
+    PROXY_PORT=$(grep PROXY_LISTEN_PORT /etc/systemd/system/$SERVICE.service 2>/dev/null | head -1 | sed 's/.*=//' || echo "8443")
+
+    # Remove iptables rule
+    if [[ -n "$CONTAINER_IP" ]]; then
+      iptables -t nat -D PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
+      echo "  ✓ Traffic redirect removed"
+    fi
+
+    # Restore compose file if we modified it
+    COMPOSE_DIR=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$TARGET" 2>/dev/null)
+    COMPOSE_SVC=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$TARGET" 2>/dev/null)
+    if [[ -n "$COMPOSE_DIR" ]]; then
+      for ext in yml yaml; do
+        BACKUP="$COMPOSE_DIR/docker-compose.${ext}.cloudfuze-backup"
+        COMPOSE="$COMPOSE_DIR/docker-compose.${ext}"
+        if [[ -f "$BACKUP" ]]; then
+          cp "$BACKUP" "$COMPOSE"
+          rm -f "$BACKUP"
+          echo "  ✓ Compose file restored from backup"
+          # Redeploy with original config
+          cd "$COMPOSE_DIR"
+          docker compose up -d "$COMPOSE_SVC" 2>/dev/null || docker-compose up -d "$COMPOSE_SVC" 2>/dev/null
+          echo "  ✓ $TARGET redeployed with original config"
+          break
+        fi
+      done
+    fi
+
+    echo "  ✓ $TARGET — governance removed"
     ;;
   uninstall)
     exec /opt/cloudfuze-monitor/scripts/install-monitor.sh --do-uninstall
@@ -437,13 +616,14 @@ case "$1" in
     echo "  CloudFuze Server Monitor — Commands"
     echo "  ════════════════════════════════════"
     echo ""
-    echo "  cloudfuze-monitor status     Show service status"
-    echo "  cloudfuze-monitor logs       Stream live logs"
-    echo "  cloudfuze-monitor restart    Restart the monitor"
-    echo "  cloudfuze-monitor update     Update to latest version"
-    echo "  cloudfuze-monitor govern     Enable full governance per container"
-    echo "  cloudfuze-monitor uninstall  Remove completely"
-    echo "  cloudfuze-monitor help       Show this help"
+    echo "  cloudfuze-monitor status                  Show service status"
+    echo "  cloudfuze-monitor logs                    Stream live logs"
+    echo "  cloudfuze-monitor restart                 Restart the monitor"
+    echo "  cloudfuze-monitor update                  Update to latest version"
+    echo "  cloudfuze-monitor govern                  Track a Docker container's AI calls"
+    echo "  cloudfuze-monitor ungovernable <name>     Stop tracking a container"
+    echo "  cloudfuze-monitor uninstall               Remove completely"
+    echo "  cloudfuze-monitor help                    Show this help"
     echo ""
     echo "  Run on the server where the monitor is installed."
     echo "  Most commands require sudo."
@@ -507,10 +687,12 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
     if [[ "$DOCKER_CONTAINERS" -gt 0 ]]; then
       echo ""
       echo "  Docker detected: $DOCKER_CONTAINERS container(s) running."
-      echo "  Host processes are fully governed. To enable full governance"
-      echo "  for Docker containers, run:"
+      echo "  To track AI calls from a specific container:"
       echo ""
       echo "    sudo cloudfuze-monitor govern"
+      echo ""
+      echo "  This adds a lightweight network rule for that container only."
+      echo "  No files are changed inside the container. No restart needed."
       echo ""
     fi
   fi
