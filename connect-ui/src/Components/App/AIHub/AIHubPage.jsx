@@ -3381,13 +3381,23 @@ function IntegrationsView() {
   };
   useEffect(loadAll,[]);
 
+  const [teamsManualUpload,setTeamsManualUpload]=useState(false);
+  const [showHelp,setShowHelp]=useState(null); // 'slack' | 'teams' | null
+
   const saveConnection=async(type)=>{
     setCfgSaving(true);
+    setTeamsManualUpload(false);
     try {
       const body=type==='slack'?{bot_token:cfgSlackToken}:{client_id:cfgTeamsClientId,client_secret:cfgTeamsSecret,tenant_id:cfgTeamsTenant};
       const r=await fetch(CONNECTIONS_API+"/"+type,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
       const d=await r.json();
       if(!r.ok){alert("Error: "+(d.error||"Failed"));setCfgSaving(false);return;}
+      if(d.manual_upload_needed){
+        setTeamsManualUpload(true);
+        setCfgSaving(false);
+        loadAll();
+        return;
+      }
       setConfigType(null);setCfgSlackToken("");setCfgTeamsClientId("");setCfgTeamsSecret("");setCfgTeamsTenant("");loadAll();
     } catch(e){alert(e.message);}
     setCfgSaving(false);
@@ -3487,8 +3497,13 @@ function IntegrationsView() {
         {/* Slack Config Form */}
         {configType==='slack'&&(
           <div className="aihub_card" style={{background:"#f9fafb"}}>
-            <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>Connect Slack</h4>
-            <p style={{fontSize:12,color:"#6b7280",marginBottom:12}}>Create a Slack App → OAuth & Permissions → add scopes: <code>chat:write</code>, <code>channels:read</code> → Install to Workspace → copy the <strong>Bot User OAuth Token</strong></p>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+              <h4 style={{margin:0,fontSize:14,fontWeight:700}}>Connect Slack</h4>
+              <div style={{position:"relative"}}>
+                <button onClick={()=>setShowHelp('slack')} style={{background:"none",border:"1px solid #0044cc30",borderRadius:"50%",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:"#0044cc",fontWeight:700,fontSize:14}}>?</button>
+                {!cfgSlackToken&&<div style={{position:"absolute",right:36,top:4,whiteSpace:"nowrap",fontSize:11,color:"#0044cc",fontWeight:600,animation:"cfai-fade-in .3s"}}>Need help? Click here →</div>}
+              </div>
+            </div>
             <div style={{marginBottom:12}}>
               <label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Bot Token</label>
               <input value={cfgSlackToken} onChange={e=>setCfgSlackToken(e.target.value)} placeholder="xoxb-..." style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/>
@@ -3503,12 +3518,13 @@ function IntegrationsView() {
         {/* Teams Config Form */}
         {configType==='teams'&&(
           <div className="aihub_card" style={{background:"#f9fafb"}}>
-            <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>Connect Microsoft Teams</h4>
-            <p style={{fontSize:12,color:"#6b7280",marginBottom:12}}>Azure Portal → App registrations → your app → API permissions → Add:<br/>
-            <code style={{background:"#f1f5f9",padding:"1px 4px",borderRadius:3}}>ChannelMessage.Send</code> (to post messages),
-            <code style={{background:"#f1f5f9",padding:"1px 4px",borderRadius:3}}>Team.ReadBasic.All</code> (to list teams),
-            <code style={{background:"#f1f5f9",padding:"1px 4px",borderRadius:3}}>Channel.ReadBasic.All</code> (to list channels)<br/>
-            All as <strong>Application</strong> type → then click <strong>Grant admin consent</strong></p>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+              <h4 style={{margin:0,fontSize:14,fontWeight:700}}>Connect Microsoft Teams</h4>
+              <div style={{position:"relative"}}>
+                <button onClick={()=>setShowHelp('teams')} style={{background:"none",border:"1px solid #0044cc30",borderRadius:"50%",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:"#0044cc",fontWeight:700,fontSize:14}}>?</button>
+                {!cfgTeamsClientId&&<div style={{position:"absolute",right:36,top:4,whiteSpace:"nowrap",fontSize:11,color:"#0044cc",fontWeight:600,animation:"cfai-fade-in .3s"}}>Need help? Click here →</div>}
+              </div>
+            </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
               <div>
                 <label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Client ID</label>
@@ -3523,12 +3539,123 @@ function IntegrationsView() {
               <label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Client Secret</label>
               <input type="password" value={cfgTeamsSecret} onChange={e=>setCfgTeamsSecret(e.target.value)} placeholder="Azure App Client Secret" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/>
             </div>
+            {teamsManualUpload&&(
+              <div style={{marginBottom:12,padding:14,background:"#fff7ed",border:"1px solid #fed7aa",borderRadius:10}}>
+                <div style={{fontWeight:700,fontSize:13,color:"#92400e",marginBottom:6}}>⚠ Connected — but bot app needs manual upload</div>
+                <div style={{fontSize:12,color:"#78350f",lineHeight:1.6,marginBottom:10}}>
+                  Your org policy blocks automated app uploads. The credentials are saved and working. To complete setup:<br/>
+                  1. Download the bot manifest below<br/>
+                  2. Go to <strong>Teams Admin Center</strong> → Teams apps → Manage apps → Upload new app<br/>
+                  3. Select the downloaded zip file<br/>
+                  After upload, webhooks will auto-install the bot in any team you select.
+                </div>
+                <a href={CONNECTIONS_API+"/teams/manifest"} download="CloudFuze-Alerts-Bot.zip"
+                  style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",fontSize:13,fontWeight:600,textDecoration:"none",cursor:"pointer"}}>
+                  ⬇ Download Manifest ZIP
+                </a>
+              </div>
+            )}
             <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
-              <button onClick={()=>setConfigType(null)} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>Cancel</button>
-              <button onClick={()=>saveConnection('teams')} disabled={!cfgTeamsClientId||!cfgTeamsSecret||!cfgTeamsTenant||cfgSaving} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:(!cfgTeamsClientId||!cfgTeamsSecret||!cfgTeamsTenant||cfgSaving)?0.5:1}}>{cfgSaving?"Verifying...":"Connect"}</button>
+              <button onClick={()=>{setConfigType(null);setTeamsManualUpload(false);}} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>{teamsManualUpload?"Done":"Cancel"}</button>
+              {!teamsManualUpload&&<button onClick={()=>saveConnection('teams')} disabled={!cfgTeamsClientId||!cfgTeamsSecret||!cfgTeamsTenant||cfgSaving} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:(!cfgTeamsClientId||!cfgTeamsSecret||!cfgTeamsTenant||cfgSaving)?0.5:1}}>{cfgSaving?"Verifying...":"Connect"}</button>}
             </div>
           </div>
         )}
+      </div>
+    )}
+
+    {/* Help Modal */}
+    {showHelp&&(
+      <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={()=>setShowHelp(null)}>
+        <div style={{background:"#fff",borderRadius:14,padding:28,width:640,maxHeight:"85vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.2)"}} onClick={e=>e.stopPropagation()}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+            <h3 style={{margin:0,fontSize:18,fontWeight:700}}>{showHelp==='slack'?'How to Connect Slack':'How to Connect Microsoft Teams'}</h3>
+            <button onClick={()=>setShowHelp(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:20,color:"#6b7280"}}>✕</button>
+          </div>
+
+          {showHelp==='slack'&&(<div style={{fontSize:13,color:"#374151",lineHeight:1.8}}>
+            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 1 — Create a Slack App</div>
+            <ol style={{paddingLeft:20,marginBottom:16}}>
+              <li>Go to <strong>api.slack.com/apps</strong></li>
+              <li>Click <strong>Create New App</strong> → <strong>Blank app</strong></li>
+              <li>App name: <code style={{background:"#f1f5f9",padding:"1px 6px",borderRadius:3}}>CloudFuze Alerts</code></li>
+              <li>Pick your workspace → <strong>Create App</strong></li>
+            </ol>
+            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 2 — Add Bot Permissions</div>
+            <ol style={{paddingLeft:20,marginBottom:16}}>
+              <li>Left sidebar → <strong>OAuth & Permissions</strong></li>
+              <li>Scroll to <strong>Bot Token Scopes</strong></li>
+              <li>Click <strong>Add an OAuth Scope</strong> and add these:
+                <div style={{display:"flex",gap:6,marginTop:6,flexWrap:"wrap"}}>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>chat:write</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>channels:read</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>channels:join</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>groups:read</code>
+                </div>
+              </li>
+            </ol>
+            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 3 — Install & Copy Token</div>
+            <ol style={{paddingLeft:20,marginBottom:16}}>
+              <li>Scroll up → <strong>Install to Workspace</strong> → <strong>Allow</strong></li>
+              <li>Copy the <strong>Bot User OAuth Token</strong> (starts with <code>xoxb-</code>)</li>
+              <li>Paste it in the field below and click <strong>Connect</strong></li>
+            </ol>
+            <div style={{background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:8,padding:12,fontSize:12,color:"#166534"}}>
+              <strong>That's it!</strong> CloudFuze will automatically join any channel you select when creating webhooks. No manual bot invites needed.
+            </div>
+          </div>)}
+
+          {showHelp==='teams'&&(<div style={{fontSize:13,color:"#374151",lineHeight:1.8}}>
+            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 1 — Create Azure Bot Resource</div>
+            <ol style={{paddingLeft:20,marginBottom:16}}>
+              <li>Go to <strong>portal.azure.com</strong></li>
+              <li>Search <strong>"Azure Bot"</strong> in the top search bar → click under Marketplace → <strong>Create</strong></li>
+              <li>Fill in: Bot handle: <code style={{background:"#f1f5f9",padding:"1px 6px",borderRadius:3}}>CloudFuze-Alerts-Bot</code>, Type: <strong>Multi Tenant</strong></li>
+              <li>Click <strong>Review + Create</strong> → <strong>Create</strong></li>
+            </ol>
+            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 2 — Get App ID & Secret</div>
+            <ol style={{paddingLeft:20,marginBottom:16}}>
+              <li>Go to <strong>Azure Portal</strong> → <strong>App registrations</strong> → find your bot</li>
+              <li>Copy the <strong>Application (client) ID</strong> and <strong>Directory (tenant) ID</strong></li>
+              <li>Go to <strong>Certificates & secrets</strong> → <strong>New client secret</strong> → copy the <strong>Value</strong></li>
+            </ol>
+            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 3 — Enable Teams Channel</div>
+            <ol style={{paddingLeft:20,marginBottom:16}}>
+              <li>Go to the <strong>Azure Bot</strong> resource (not App registration)</li>
+              <li>Left sidebar → <strong>Channels</strong> → select <strong>Microsoft Teams</strong> → <strong>Apply</strong></li>
+            </ol>
+            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 4 — Add API Permissions</div>
+            <ol style={{paddingLeft:20,marginBottom:16}}>
+              <li>Go to <strong>App registrations</strong> → your bot → <strong>API permissions</strong></li>
+              <li>Click <strong>Add a permission</strong> → <strong>Microsoft Graph</strong> → <strong>Application permissions</strong></li>
+              <li>Add these permissions:
+                <div style={{display:"flex",gap:6,marginTop:6,flexWrap:"wrap"}}>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>Group.Read.All</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>Team.ReadBasic.All</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>Channel.ReadBasic.All</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>AppCatalog.Read.All</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>AppCatalog.ReadWrite.All</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>TeamsAppInstallation.ReadWriteForTeam.All</code>
+                </div>
+              </li>
+              <li>Click <strong>Grant admin consent for [your org]</strong></li>
+            </ol>
+            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 5 — Connect in CloudFuze</div>
+            <ol style={{paddingLeft:20,marginBottom:16}}>
+              <li>Paste <strong>Client ID</strong>, <strong>Tenant ID</strong>, and <strong>Client Secret</strong> below</li>
+              <li>Click <strong>Connect</strong></li>
+              <li>CloudFuze will auto-publish the bot to your org's app catalog</li>
+              <li>If auto-publish fails, download the manifest and upload manually via <strong>Teams Admin Center</strong></li>
+            </ol>
+            <div style={{background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:8,padding:12,fontSize:12,color:"#166534"}}>
+              <strong>Once connected,</strong> CloudFuze will automatically install the bot in any team you select when creating webhooks. No manual app installs needed.
+            </div>
+          </div>)}
+
+          <div style={{display:"flex",justifyContent:"flex-end",marginTop:16}}>
+            <button onClick={()=>setShowHelp(null)} style={{padding:"8px 24px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>Got it</button>
+          </div>
+        </div>
       </div>
     )}
 

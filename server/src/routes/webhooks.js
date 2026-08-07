@@ -6,6 +6,7 @@
 
 import crypto from 'node:crypto';
 import { a } from '../util.js';
+import { postToTeamsChannel } from './connections.js';
 
 const VALID_TRIGGERS = ['dlp_critical', 'risk_score_high', 'access_request', 'tool_blocked', 'tool_approved'];
 
@@ -126,6 +127,12 @@ async function postViaConnection(db, hook, trigger, eventData) {
     const title = eventData.title || 'CloudFuze AI Governance';
 
     if (hook.connection_type === 'slack') {
+      // Auto-join channel (idempotent)
+      await fetch('https://slack.com/api/conversations.join', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + conn.bot_token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: hook.channel_id }),
+      }).catch(() => {});
       const r = await fetch('https://slack.com/api/chat.postMessage', {
         method: 'POST',
         headers: { 'Authorization': 'Bearer ' + conn.bot_token, 'Content-Type': 'application/json' },
@@ -136,47 +143,10 @@ async function postViaConnection(db, hook, trigger, eventData) {
       return data.ok ? { ok: true } : { error: 'Slack: ' + data.error };
 
     } else if (hook.connection_type === 'teams') {
-      // Use Bot Framework API for posting
-      const botTokenRes = await fetch(`https://login.microsoftonline.com/${conn.tenant_id}/oauth2/v2.0/token`, {
-        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ grant_type: 'client_credentials', client_id: conn.client_id, client_secret: conn.client_secret, scope: 'https://api.botframework.com/.default' }),
-      });
-      const botTokenData = await botTokenRes.json();
-      if (!botTokenData.access_token) return { error: 'Bot token failed: ' + (botTokenData.error_description || botTokenData.error) };
-
-      const [teamId, channelId] = hook.channel_id.split('|');
-      const serviceUrl = 'https://smba.trafficmanager.net/amer/';
-
-      // Try creating a conversation with an activity
-      const r = await fetch(serviceUrl + 'v3/conversations', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + botTokenData.access_token, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          bot: { id: conn.client_id },
-          isGroup: true,
-          channelData: { channel: { id: channelId } },
-          activity: { type: 'message', text: '**' + title + '**\n\n' + text },
-        }),
-      });
-
-      const status = r.status;
-      const respText = await r.text().catch(() => '');
-      let finalOk = r.ok;
-
-      // Fallback: post directly to channel conversation
-      if (!finalOk) {
-        const r2 = await fetch(serviceUrl + 'v3/conversations/' + channelId + '/activities', {
-          method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + botTokenData.access_token, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 'message', text: '**' + title + '**\n\n' + text }),
-        });
-        finalOk = r2.ok;
-      }
-
-      await db.collection('webhook_log').insertOne({ webhook_id: hook.id, webhook_name: hook.name, trigger, status: finalOk ? 'delivered' : 'failed', http_status: status, error: finalOk ? null : respText.slice(0, 200), timestamp: new Date() });
-      if (finalOk) return { ok: true };
-      if (respText.includes('Forbidden') || respText.includes('403')) return { error: '403 Forbidden. Make sure the CloudFuze Alerts bot is added to the target team in Microsoft Teams.' };
-      return { error: status + ' ' + respText.slice(0, 200) };
+      // Use shared postToTeamsChannel (includes auto-install of bot in team)
+      const result = await postToTeamsChannel(conn, hook.channel_id, title, text);
+      await db.collection('webhook_log').insertOne({ webhook_id: hook.id, webhook_name: hook.name, trigger, status: result.ok ? 'delivered' : 'failed', error: result.ok ? null : result.error, timestamp: new Date() });
+      return result;
     }
     return { ok: true };
   } catch (e) {

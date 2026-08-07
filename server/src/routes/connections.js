@@ -11,6 +11,11 @@
 
 import crypto from 'node:crypto';
 import { a } from '../util.js';
+import { createRequire } from 'node:module';
+import { writeFileSync, readFileSync, mkdirSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { execSync } from 'node:child_process';
 
 export function mountConnections(app, db) {
   const integrations = () => db.collection('integrations');
@@ -69,35 +74,96 @@ export function mountConnections(app, db) {
       if (!client_id || !client_secret || !tenant_id) {
         return res.status(400).json({ error: 'client_id, client_secret, and tenant_id are required' });
       }
-      // Verify by getting an access token
       try {
+        // Step 1: Verify credentials
         const tokenRes = await fetch(`https://login.microsoftonline.com/${tenant_id}/oauth2/v2.0/token`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            grant_type: 'client_credentials',
-            client_id, client_secret,
-            scope: 'https://graph.microsoft.com/.default',
-          }),
+          body: new URLSearchParams({ grant_type: 'client_credentials', client_id, client_secret, scope: 'https://graph.microsoft.com/.default' }),
         });
         const tokenData = await tokenRes.json();
         if (!tokenData.access_token) {
           return res.status(400).json({ error: 'Failed to get token: ' + (tokenData.error_description || tokenData.error || 'unknown') });
         }
 
+        // Step 2: Check if bot app already exists in catalog (user may have uploaded manually)
+        let teamsAppId = null;
+        try {
+          const catRes = await fetch(
+            `https://graph.microsoft.com/v1.0/appCatalogs/teamsApps?$filter=externalId eq '${client_id}'&$select=id`,
+            { headers: { 'Authorization': 'Bearer ' + tokenData.access_token } },
+          );
+          const catData = await catRes.json();
+          teamsAppId = catData.value?.[0]?.id || null;
+        } catch {}
+
+        if (teamsAppId) {
+          // Already in catalog — no upload needed
+        } else {
+          // Step 3: Generate manifest and try to upload
+          const manifest = generateTeamsManifest(client_id);
+          const zipBuffer = buildManifestZip(manifest);
+          try {
+            const uploadRes = await fetch(
+              'https://graph.microsoft.com/v1.0/appCatalogs/teamsApps?requiresReview=false',
+              { method: 'POST', headers: { 'Authorization': 'Bearer ' + tokenData.access_token, 'Content-Type': 'application/zip' }, body: zipBuffer },
+            );
+            if (uploadRes.ok || uploadRes.status === 201) {
+              const uploadData = await uploadRes.json().catch(() => ({}));
+              teamsAppId = uploadData.id;
+            }
+          } catch {}
+
+          // Search again in case upload succeeded but didn't return the id
+          if (!teamsAppId) {
+            try {
+              const catRes2 = await fetch(
+                `https://graph.microsoft.com/v1.0/appCatalogs/teamsApps?$filter=externalId eq '${client_id}'&$select=id`,
+                { headers: { 'Authorization': 'Bearer ' + tokenData.access_token } },
+              );
+              const catData2 = await catRes2.json();
+              teamsAppId = catData2.value?.[0]?.id || null;
+            } catch {}
+          }
+        }
+
+        // Step 4: Save credentials + catalog app ID
         await integrations().updateOne(
           { type: 'teams' },
-          { $set: { type: 'teams', client_id, client_secret, tenant_id, configured_at: new Date() } },
+          { $set: { type: 'teams', client_id, client_secret, tenant_id, teams_app_id: teamsAppId, configured_at: new Date() } },
           { upsert: true },
         );
-        res.json({ ok: true });
+
+        if (teamsAppId) {
+          res.json({ ok: true, catalog_published: true });
+        } else {
+          // Configuration succeeded but catalog upload failed — still connected, just needs manual upload
+          res.json({
+            ok: true,
+            catalog_published: false,
+            manual_upload_needed: true,
+            message: 'Connected successfully but could not auto-publish bot to Teams app catalog. Your org policy may block API-based app uploads. Download the manifest and upload it manually via Teams Admin Center.',
+          });
+        }
       } catch (e) {
-        res.status(400).json({ error: 'Failed to verify credentials: ' + e.message });
+        res.status(400).json({ error: 'Failed to configure Teams: ' + e.message });
       }
 
     } else {
       res.status(400).json({ error: 'Unsupported connection type: ' + type });
     }
+  }));
+
+  // ── Download Teams manifest zip (for manual upload) ──
+
+  app.get('/api/v1/connections/teams/manifest', a(async (req, res) => {
+    const conn = await integrations().findOne({ type: 'teams' });
+    if (!conn) return res.status(404).json({ error: 'Teams not connected' });
+    const manifest = generateTeamsManifest(conn.client_id);
+    const zipBuffer = buildManifestZip(manifest);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="CloudFuze-Alerts-Bot.zip"');
+    res.send(zipBuffer);
   }));
 
   // ── Disconnect ──
@@ -195,6 +261,12 @@ export function mountConnections(app, db) {
 
     try {
       if (type === 'slack') {
+        // Auto-join the channel first (idempotent — no-op if already in)
+        await fetch('https://slack.com/api/conversations.join', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + conn.bot_token, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel: channel_id }),
+        });
         const r = await fetch('https://slack.com/api/chat.postMessage', {
           method: 'POST',
           headers: { 'Authorization': 'Bearer ' + conn.bot_token, 'Content-Type': 'application/json' },
@@ -219,14 +291,15 @@ export function mountConnections(app, db) {
 }
 
 // Post to a Teams channel via Bot Framework proactive messaging
-async function postToTeamsChannel(conn, channelId, title, text) {
+export async function postToTeamsChannel(conn, channelId, title, text) {
   try {
-    // Step 1: Get bot token from Bot Framework
-    const botToken = await getBotFrameworkToken(conn);
-
-    // Step 2: The channelId is in format "teamId|channelId"
-    // The Bot Framework conversationId for a channel is the channelId part
     const [teamId, teamsChannelId] = channelId.split('|');
+
+    // Step 1: Auto-install bot in the team (idempotent — no-op if already installed)
+    await installBotInTeam(conn, teamId).catch(() => {});
+
+    // Step 2: Get bot token from Bot Framework
+    const botToken = await getBotFrameworkToken(conn);
 
     // Step 3: Create conversation in the channel
     const serviceUrl = 'https://smba.trafficmanager.net/amer/';
@@ -265,6 +338,39 @@ async function postToTeamsChannel(conn, channelId, title, text) {
   }
 }
 
+// Auto-install bot app in a team via Graph API (idempotent)
+async function installBotInTeam(conn, teamId) {
+  const graphToken = await getTeamsToken(conn);
+
+  // Use the stored teamsAppId if available, otherwise try to find it
+  let teamsAppId = conn.teams_app_id;
+
+  if (!teamsAppId) {
+    // Try to find our app in the catalog by externalId (bot's client_id)
+    try {
+      const catalogRes = await fetch(
+        `https://graph.microsoft.com/v1.0/appCatalogs/teamsApps?$filter=externalId eq '${conn.client_id}'&$select=id`,
+        { headers: { 'Authorization': 'Bearer ' + graphToken } },
+      );
+      const catalogData = await catalogRes.json();
+      teamsAppId = catalogData.value?.[0]?.id;
+    } catch {}
+  }
+
+  if (!teamsAppId) return; // Can't auto-install without the catalog ID
+
+  // Install the app in the team (201 = installed, 409 = already installed)
+  const installRes = await fetch(
+    `https://graph.microsoft.com/v1.0/teams/${teamId}/installedApps`,
+    {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + graphToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 'teamsApp@odata.bind': `https://graph.microsoft.com/v1.0/appCatalogs/teamsApps/${teamsAppId}` }),
+    },
+  );
+  if (installRes.status === 201 || installRes.status === 409) return;
+}
+
 // Get Bot Framework token (different from Graph token)
 async function getBotFrameworkToken(conn) {
   const res = await fetch(`https://login.microsoftonline.com/${conn.tenant_id}/oauth2/v2.0/token`, {
@@ -297,4 +403,121 @@ async function getTeamsToken(conn) {
   const data = await res.json();
   if (!data.access_token) throw new Error('Token failed: ' + (data.error_description || data.error));
   return data.access_token;
+}
+
+// Generate a Teams app manifest JSON for the bot
+function generateTeamsManifest(clientId) {
+  return {
+    '$schema': 'https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json',
+    manifestVersion: '1.16',
+    version: '1.0.0',
+    id: clientId,
+    developer: { name: 'CloudFuze', websiteUrl: 'https://cloudfuze.com', privacyUrl: 'https://cloudfuze.com/privacy', termsOfUseUrl: 'https://cloudfuze.com/terms' },
+    name: { short: 'CloudFuze Alerts', full: 'CloudFuze AI Governance Alerts' },
+    description: { short: 'AI governance alerts', full: 'Receive AI governance alerts — DLP violations, risk score changes, access requests — directly in Teams.' },
+    icons: { color: 'color.png', outline: 'outline.png' },
+    accentColor: '#0044CC',
+    bots: [{ botId: clientId, scopes: ['team', 'groupChat'], supportsFiles: false, isNotificationOnly: true }],
+    permissions: ['identity', 'messageTeamMembers'],
+    validDomains: [],
+  };
+}
+
+// Build a minimal valid zip containing manifest.json + placeholder icons
+function buildManifestZip(manifest) {
+  // Use a minimal zip builder — no external dependencies
+  const manifestJson = JSON.stringify(manifest, null, 2);
+  const manifestBuf = Buffer.from(manifestJson, 'utf8');
+
+  // Minimal 1x1 PNG (192x192 required but Teams accepts small PNGs for dev/testing)
+  const colorPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPj/HwADBwIAMCbHYQAAAABJRU5ErkJggg==', 'base64');
+  const outlinePng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/58BAwoDBwIRGBoAAAAASUVORK5CYII=', 'base64');
+
+  // Build ZIP manually (no dependency needed for 3 small files)
+  return createZip([
+    { name: 'manifest.json', data: manifestBuf },
+    { name: 'color.png', data: colorPng },
+    { name: 'outline.png', data: outlinePng },
+  ]);
+}
+
+// Minimal ZIP file builder — produces a valid ZIP with no compression (STORE method)
+function createZip(files) {
+  const parts = [];
+  const centralDir = [];
+  let offset = 0;
+
+  for (const file of files) {
+    const nameBuf = Buffer.from(file.name, 'utf8');
+    const data = file.data;
+
+    // Local file header (30 bytes + name + data)
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);   // signature
+    local.writeUInt16LE(20, 4);            // version needed
+    local.writeUInt16LE(0, 6);             // flags
+    local.writeUInt16LE(0, 8);             // compression: STORE
+    local.writeUInt16LE(0, 10);            // mod time
+    local.writeUInt16LE(0, 12);            // mod date
+    local.writeUInt32LE(crc32(data), 14);  // CRC-32
+    local.writeUInt32LE(data.length, 18);  // compressed size
+    local.writeUInt32LE(data.length, 22);  // uncompressed size
+    local.writeUInt16LE(nameBuf.length, 26); // name length
+    local.writeUInt16LE(0, 28);            // extra length
+
+    parts.push(local, nameBuf, data);
+
+    // Central directory entry (46 bytes + name)
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);  // signature
+    central.writeUInt16LE(20, 4);           // version made by
+    central.writeUInt16LE(20, 6);           // version needed
+    central.writeUInt16LE(0, 8);            // flags
+    central.writeUInt16LE(0, 10);           // compression
+    central.writeUInt16LE(0, 12);           // mod time
+    central.writeUInt16LE(0, 14);           // mod date
+    central.writeUInt32LE(crc32(data), 16); // CRC-32
+    central.writeUInt32LE(data.length, 20); // compressed size
+    central.writeUInt32LE(data.length, 24); // uncompressed size
+    central.writeUInt16LE(nameBuf.length, 28); // name length
+    central.writeUInt16LE(0, 30);           // extra length
+    central.writeUInt16LE(0, 32);           // comment length
+    central.writeUInt16LE(0, 34);           // disk start
+    central.writeUInt16LE(0, 36);           // internal attrs
+    central.writeUInt32LE(0, 38);           // external attrs
+    central.writeUInt32LE(offset, 42);      // local header offset
+
+    centralDir.push(central, nameBuf);
+    offset += 30 + nameBuf.length + data.length;
+  }
+
+  const centralDirBuf = Buffer.concat(centralDir);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);           // signature
+  eocd.writeUInt16LE(0, 4);                     // disk number
+  eocd.writeUInt16LE(0, 6);                     // central dir disk
+  eocd.writeUInt16LE(files.length, 8);          // entries on disk
+  eocd.writeUInt16LE(files.length, 10);         // total entries
+  eocd.writeUInt32LE(centralDirBuf.length, 12); // central dir size
+  eocd.writeUInt32LE(offset, 16);               // central dir offset
+  eocd.writeUInt16LE(0, 20);                    // comment length
+
+  return Buffer.concat([...parts, centralDirBuf, eocd]);
+}
+
+// CRC-32 lookup table
+const crcTable = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[i] = c;
+  }
+  return t;
+})();
+
+function crc32(buf) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) crc = crcTable[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
 }
