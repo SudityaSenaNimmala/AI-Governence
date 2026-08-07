@@ -5001,7 +5001,8 @@ const TAB_GROUPS = {
     tabs: [
       { slug: "integrations", label: "Integrations",      component: IntegrationsView },
       { slug: "sdk",          label: "Developer SDK",     component: DeveloperSDKView },
-      { slug: "copilot",      label: "Copilot Readiness", component: CopilotReadinessView },
+      { slug: "server-monitor", label: "Server Monitor",  component: ServerMonitorView },
+      // { slug: "copilot",      label: "Copilot Readiness", component: CopilotReadinessView },  // hidden — not working reliably
       // Machines is commented out because Policies & Risk → Risk Scores already
       // lists every enrolled machine: all of its rows carry a hostname, sourced
       // from the agent and the extension. /AIHub/Machines redirects there.
