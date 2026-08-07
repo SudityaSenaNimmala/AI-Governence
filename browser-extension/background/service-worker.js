@@ -564,8 +564,9 @@ async function markKnownAiTool({ host, vendor, product, category, sandbox, sourc
 }
 
 // Inject the heavy DLP stack into a tab AFTER classification said yes.
-// File order matters — vendor libs first, then patterns + replay, then content.js
-// which reads window.__cfaiPatterns and window.__cfaiReplay.
+// File order matters — vendor libs first, then patterns + complexity + replay,
+// then content.js which reads window.__cfaiPatterns, window.__cfaiComplexity and
+// window.__cfaiReplay.
 //
 // This list MUST stay in step with manifest.json's content_scripts[0].js (the
 // hardcoded-host path). This is the OTHER injection path: hosts an admin added to
@@ -584,6 +585,7 @@ async function injectDlpStack(tabId) {
       'vendor/tesseract/tesseract.min.js',
       'vendor/rrweb-record.js',
       'content/patterns.js',
+      'content/complexity.js',
       'content/replay.js',
       'content/content.js',
     ],
@@ -651,7 +653,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // NOTE: events are forwarded VERBATIM — every field the content script sets
   // (including event kinds like `session_bind`) rides through the queue and the
   // /api/v1/dlp POST untouched. There is no field allowlist here on purpose; keep
-  // it that way so new event fields don't need a service-worker change.
+  // it that way so new event fields don't need a service-worker change. That is
+  // how `external_conv_id` — the AI site's own conversation id, stamped by
+  // content.js's emit() at the moment of the action — reaches the ingest route
+  // without a change here.
   //
   // TWO exceptions, both deliberate:
   //   session_id / client_seq  stamped BY THE WORKER (see pushTabEvent) because
@@ -1062,8 +1067,22 @@ async function getReplayPolicy() {
   return _replayPolicy;
 }
 
+// localhost/127.0.0.1/[::1], any port. Mirrors the web platform's own Secure
+// Context exemption for loopback (https://w3c.github.io/webappsec-secure-contexts/#localhost):
+// traffic to loopback never leaves the machine, so there is no network path for
+// an attacker to intercept or spoof it on — the exact risk isSecureServerUrl()
+// exists to close for a REMOTE host. A developer running the stack from a fresh
+// clone therefore gets working Session Replay against `http://localhost:8787`
+// with no certificate, no trust-store change, no download of any kind — the
+// same zero-setup bar every other feature (DLP, enrollment) already has.
+// Matched against URL.hostname (via safeHost), which strips the port but KEEPS
+// the [] brackets an IPv6 literal wears in a URL string (confirmed: Node's
+// `new URL('http://[::1]:8787').hostname` is `'[::1]'`, not `'::1'`) — an
+// anchored exact match, so `localhost.evil.com` does not qualify as `localhost`.
+const LOOPBACK_HOST_RE = /^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/i;
+
 /**
- * Is the configured server a TLS endpoint?
+ * Is the configured server a TLS endpoint, OR loopback (see LOOPBACK_HOST_RE)?
  *
  * SCOPED TO REPLAY ON PURPOSE. options.html takes the server URL as a bare
  * type="url" with no scheme restriction, and DLP enrollment/flush have historically
@@ -1071,11 +1090,17 @@ async function getReplayPolicy() {
  * break installs that are working today. Session recording is a different bar: it
  * ships the DOM of the page, and both the recording TRIGGER (the platforms mirror)
  * and the evidence itself would cross the wire in cleartext, readable and forgeable
- * by anyone on the path. So a non-https server means enabled:false for replay only,
- * with a warning that says why.
+ * by anyone on the path — UNLESS that path is loopback, which by definition has no
+ * wire for anyone else to be on. A non-https, non-loopback server means
+ * enabled:false for replay only, with a warning that says why.
  */
 function isSecureServerUrl(serverUrl) {
-  return typeof serverUrl === 'string' && serverUrl.trim().toLowerCase().startsWith('https://');
+  if (typeof serverUrl !== 'string') return false;
+  const trimmed = serverUrl.trim().toLowerCase();
+  if (trimmed.startsWith('https://')) return true;
+  if (!trimmed.startsWith('http://')) return false;
+  const host = safeHost(trimmed);
+  return !!host && LOOPBACK_HOST_RE.test(host);
 }
 
 let _insecureUrlWarned = false;
@@ -1118,10 +1143,11 @@ async function replayGate(msg, sender) {
   const secure = isSecureServerUrl(config.serverUrl);
   if (config.serverUrl && !secure && !_insecureUrlWarned) {
     _insecureUrlWarned = true;
-    console.warn('[cfai] session replay is OFF: the configured server URL is not https://.',
+    console.warn('[cfai] session replay is OFF: the configured server URL is not https:// (or localhost/127.0.0.1).',
                  'Recording uploads the page DOM, and the platforms registry that decides',
-                 'WHICH hosts get recorded would both be readable and forgeable over http.',
-                 'Fix the Server URL on the options page to enable replay.');
+                 'WHICH hosts get recorded would both be readable and forgeable over http to a REMOTE server.',
+                 'Fix the Server URL on the options page — https:// for a real deployment,',
+                 'or http://localhost:<port> / http://127.0.0.1:<port> for local development.');
   }
   const enabled = !!policy.enabled && secure && !!(typeof token === 'string' && token);
 
@@ -1159,6 +1185,15 @@ async function replayRegister(msg, sender) {
   const engagement = typeof tabId === 'number' ? await getEngagement(tabId) : null;
   const aiService = msg?.ai_service || engagement?.service_key || null;
   if (aiService) body.ai_service = aiService;
+  // The AI site's own conversation id, when the recorder already knew it at
+  // registration (an EXISTING chat being revisited). Rides along exactly like
+  // ai_service above; a run that learns its conversation later sends a separate
+  // replayBindConversation instead. Omitted rather than sent as null so the
+  // server's "optional, defaults null" path is the one that runs.
+  const convId = typeof msg?.external_conv_id === 'string' && msg.external_conv_id.trim()
+    ? msg.external_conv_id.trim()
+    : null;
+  if (convId) body.external_conv_id = convId;
 
   const res = await authedFetch('/api/v1/replays', {
     method: 'POST',
@@ -1210,6 +1245,33 @@ async function replayChunk(msg) {
   // Sizes, counts and the status code only.
   console.warn('[cfai] replay chunk', seq, 'refused:', res.status,
                `(${body.event_count} events, ${Math.round(b64Len / 1024)} KB b64)`);
+  return { ok: false, error: res.status };
+}
+
+/**
+ * POST /api/v1/replays/:replay_id/conversation — "this run turned out to be in
+ * conversation X". Only sent for a run that registered before the site had
+ * minted a conversation id (a brand-new chat); an existing chat's id rides along
+ * in the registration payload instead.
+ *
+ * Set-once server-side: 204 on a set or an idempotent repeat, 409 if the run
+ * already carries a DIFFERENT id or is no longer recording. Every non-204 is
+ * reported as { ok:false } and the recorder decides what to do — a failed bind
+ * never stops a recording, it only leaves the run ungrouped.
+ */
+async function replayBindConversation(msg) {
+  const replayId = String(msg?.replay_id ?? '');
+  const convId = typeof msg?.external_conv_id === 'string' ? msg.external_conv_id.trim() : '';
+  if (!replayId) return { ok: false, error: 'replay_id required' };
+  if (!convId) return { ok: false, error: 'external_conv_id required' };
+
+  const res = await authedFetch(`/api/v1/replays/${encodeURIComponent(replayId)}/conversation`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ external_conv_id: convId }),
+  });
+  if (res.status === 204) return { ok: true };
+  console.warn('[cfai] replay conversation bind refused:', res.status);
   return { ok: false, error: res.status };
 }
 
@@ -1284,6 +1346,7 @@ const CONTROL_KINDS = new Set([
   'currentSessionId',
   'replayPolicy',
   'replayRegister',
+  'replayBindConversation',
   'replayChunk',
   'replayComplete',
   'replayDailyAccrued',
@@ -1372,7 +1435,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // ── the replay recorder's five RPCs ──────────────────────────────────────
+  // ── the replay recorder's six RPCs ───────────────────────────────────────
   // content/replay.js is the state machine; these are its hands. Every one of them
   // answers asynchronously (hence `return true`) and NEVER rejects into the
   // channel: the recorder treats a missing or { ok:false } answer as "not
@@ -1397,6 +1460,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .then(sendResponse)
       .catch((err) => {
         console.warn('[cfai] replay register failed:', err?.message || err);
+        sendResponse({ ok: false, error: err?.message || String(err) });
+      });
+    return true;
+  }
+
+  // A registered run learned which conversation it is in. Metadata only — one
+  // opaque id the AI site itself minted.
+  if (msg.__cfai_kind === 'replayBindConversation') {
+    replayBindConversation(msg)
+      .then(sendResponse)
+      .catch((err) => {
+        console.warn('[cfai] replay conversation bind failed:', err?.message || err);
         sendResponse({ ok: false, error: err?.message || String(err) });
       });
     return true;

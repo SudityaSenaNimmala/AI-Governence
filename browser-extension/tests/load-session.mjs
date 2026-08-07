@@ -75,7 +75,7 @@ export function loadSession({ service = 'ChatGPT', pathname = '/', visibility = 
 
   const body = sliceSessionRegion() +
     '\nreturn { emit, checkConvUrl, currentConvId, emitSessionBind, refreshSessionId,' +
-    ' currentSessionIdCached, isTabVisible };\n';
+    ' currentSessionIdCached, activeConvIdCached, isTabVisible };\n';
 
   // eslint-disable-next-line no-new-func
   const run = new Function('chrome', 'location', 'document', 'console', 'crypto', 'SERVICE', body);

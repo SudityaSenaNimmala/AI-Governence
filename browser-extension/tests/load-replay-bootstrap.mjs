@@ -50,6 +50,9 @@ function sliceBootstrapRegion() {
  *   response     what the worker answers a sendReplayRpc with
  *   sendThrows   sendMessage itself throws (extension context invalidated)
  *   sessionId    what currentSessionIdCached() returns
+ *   activeConvId what activeConvIdCached() returns — the conversation the user
+ *                last actually interacted in (content.js's _activeConvId, which
+ *                lives in the conversation-identity region, not in this slice)
  *   visible      what isTabVisible() returns
  *
  * Returns the region's own functions plus test controls:
@@ -70,6 +73,7 @@ export function loadReplayBootstrap({
   response = { ok: true },
   sendThrows = false,
   sessionId = 'sess-cached',
+  activeConvId = 'conv-cached',
   visible = true,
 } = {}) {
   const created = [];
@@ -140,7 +144,7 @@ export function loadReplayBootstrap({
   // eslint-disable-next-line no-new-func
   const run = new Function(
     'window', 'document', 'chrome', 'console', 'location',
-    'isTopFrame', 'isTabVisible', 'currentSessionIdCached',
+    'isTopFrame', 'isTabVisible', 'currentSessionIdCached', 'activeConvIdCached',
     'showRecordingBanner', 'hideRecordingBanner', '_replayController',
     body,
   );
@@ -157,6 +161,7 @@ export function loadReplayBootstrap({
     () => topFrame,
     () => visible,
     () => sessionId,
+    () => activeConvId,
     (id) => { banners.push({ show: id ?? null }); return null; },
     () => { banners.push({ hide: true }); },
     null,

@@ -143,7 +143,7 @@ export function makeDocumentWorld({ topFrame = true, sessionId = 'sess-1' } = {}
       // eslint-disable-next-line no-new-func
       const run = new Function(
         'window', 'document', 'chrome', 'console', 'location',
-        'isTopFrame', 'isTabVisible', 'currentSessionIdCached',
+        'isTopFrame', 'isTabVisible', 'currentSessionIdCached', 'activeConvIdCached',
         'showRecordingBanner', 'hideRecordingBanner', '_replayController',
         body,
       );
@@ -156,6 +156,10 @@ export function makeDocumentWorld({ topFrame = true, sessionId = 'sess-1' } = {}
         () => topFrame,
         () => true,
         () => sessionId,
+        // The conversation the user last actually interacted in. Declared in
+        // content.js's conversation-identity region, which is outside both
+        // slices, so it arrives as a parameter like the session-id reader.
+        () => 'conv-abc',
         (id) => { banners.push({ show: id ?? null }); return null; },
         () => { banners.push({ hide: true }); },
         null,

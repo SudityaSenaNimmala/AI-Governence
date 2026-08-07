@@ -186,3 +186,86 @@ test('asking never mints: the tab keeps reporting null until the worker has a se
   assert.equal(s.currentSessionIdCached(), null);
   assert.equal(s.sent.length, 0, 'and no event was invented to create one');
 });
+
+// ── the ACTIVE conversation — what the replay recorder is scoped to ──────────
+//
+// _lastConvId follows the URL. _activeConvId deliberately does NOT: it only
+// moves when the user actually DID something in a chat. That single rule is what
+// replaces a debounce timer — clicking through old chats is free, and the first
+// prompt in one of them is the boundary.
+
+test('_activeConvId only moves on a REAL user action, never on navigation alone', () => {
+  const s = loadSession({ pathname: '/c/conversation-aaaa' });
+  assert.equal(s.activeConvIdCached(), null, 'nothing has happened yet');
+
+  // Merely being on a chat page — and even binding it, which the URL watcher
+  // does — must not make it the active conversation.
+  s.checkConvUrl();
+  assert.equal(s.sent.at(-1).kind, 'session_bind');
+  assert.equal(s.activeConvIdCached(), null, 'a bind is not an interaction');
+
+  // The user submits a prompt. NOW it is the active conversation.
+  s.emit({ kind: 'prompt_submit', content_length: 12 });
+  assert.equal(s.activeConvIdCached(), 'conversation-aaaa');
+  assert.equal(s.sent.at(-1).external_conv_id, 'conversation-aaaa');
+
+  // They click into five other chats and read. The recorder's view never moves,
+  // so no replay boundary can fire and nothing new is recorded.
+  for (const id of ['bbbb', 'cccc', 'dddd', 'eeee', 'ffff']) {
+    s.setPath(`/c/conversation-${id}`);
+    s.checkConvUrl();
+    assert.equal(s.activeConvIdCached(), 'conversation-aaaa');
+  }
+
+  // Then they type in the one they landed on.
+  s.emit({ kind: 'prompt_submit', content_length: 8 });
+  assert.equal(s.activeConvIdCached(), 'conversation-ffff');
+  assert.equal(s.sent.at(-1).external_conv_id, 'conversation-ffff');
+});
+
+test('every user-action kind moves it; no passive or bookkeeping kind does', () => {
+  const s = loadSession({ pathname: '/c/conversation-aaaa' });
+
+  for (const kind of ['prompt_submit', 'prompt_paste', 'prompt_typed', 'file_upload']) {
+    const fresh = loadSession({ pathname: '/c/conversation-aaaa' });
+    fresh.emit({ kind });
+    assert.equal(fresh.activeConvIdCached(), 'conversation-aaaa', kind);
+  }
+
+  // Establish an active conversation, then move the URL somewhere else and fire
+  // everything that is NOT the user sending content to the AI tool.
+  s.emit({ kind: 'prompt_submit' });
+  s.setPath('/c/conversation-zzzz');
+  for (const kind of [
+    'session_bind', 'ai_response', 'enforcement_block', 'enforcement_redact',
+    'enforcement_decision', 'enforcement_override', 'model_routed',
+  ]) {
+    s.emit({ kind });
+    assert.equal(s.activeConvIdCached(), 'conversation-aaaa', kind);
+  }
+});
+
+test('every emitted event carries the conversation it happened in', () => {
+  const s = loadSession({ pathname: '/c/conversation-aaaa' });
+  s.emit({ kind: 'prompt_submit' });
+  // A bookkeeping event that follows a prompt belongs to the same conversation,
+  // even though it did not move the pointer itself.
+  s.emit({ kind: 'enforcement_block' });
+  assert.equal(s.sent.every((e) => e.external_conv_id === 'conversation-aaaa'), true);
+
+  // On a site we can extract no id from, it is simply null — never invented.
+  const plain = loadSession({ pathname: '/some/app' });
+  plain.emit({ kind: 'prompt_submit' });
+  assert.equal(plain.sent[0].external_conv_id, null);
+});
+
+test('an event that captured its OWN conversation id keeps it', () => {
+  // The ai_response listener records the conversation at the moment the request
+  // was teed, because the reply can finish streaming after the user has already
+  // switched chats. emit() must not overwrite that with the active one.
+  const s = loadSession({ pathname: '/c/conversation-aaaa' });
+  s.emit({ kind: 'prompt_submit' });
+  s.emit({ kind: 'ai_response', external_conv_id: 'conversation-older' });
+  assert.equal(s.sent.at(-1).external_conv_id, 'conversation-older');
+  assert.equal(s.activeConvIdCached(), 'conversation-aaaa', 'and the reply did not move the pointer');
+});

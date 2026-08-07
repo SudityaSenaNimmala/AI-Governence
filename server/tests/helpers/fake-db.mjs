@@ -222,10 +222,18 @@ function duplicateKeyError(keys) {
   return err;
 }
 
+// Mongo's default index name: each key joined with its direction, e.g.
+// { machine_id: 1, occurred_at: -1 } → 'machine_id_1_occurred_at_-1'.
+function indexName(spec) {
+  return Object.entries(spec).map(([k, dir]) => `${k}_${dir}`).join('_');
+}
+
 class FakeCollection {
-  constructor(docs, uniqueIndexes) {
+  constructor(docs, uniqueIndexes, indexSpecs, onDrop = () => {}) {
     this.docs = docs;
     this.uniqueIndexes = uniqueIndexes;
+    this.indexSpecs = indexSpecs;
+    this.onDrop = onDrop;
   }
 
   assertUnique(doc, ignore = null) {
@@ -318,6 +326,24 @@ class FakeCollection {
     return { matchedCount: 0, modifiedCount: 0, upsertedCount: 1 };
   }
 
+  // Every matching doc, no upsert (Mongo's updateMany can upsert, but nothing in
+  // this codebase asks it to and modelling a shape no caller uses would only
+  // invite a test to rely on it). Deliberately narrower than updateOne: only the
+  // operators a caller actually reaches for here are supported, and anything
+  // else throws rather than quietly doing nothing.
+  async updateMany(filter = {}, update = {}) {
+    assertNoConflict(update);
+    const unsupported = Object.keys(update).filter((k) => k !== '$set');
+    if (unsupported.length) {
+      throw new Error(`fake-db: updateMany supports $set only, got ${unsupported.join(', ')}`);
+    }
+    const set = update.$set ?? {};
+    const hits = this.docs.filter((d) => matches(d, filter));
+    for (const d of hits) Object.assign(d, set);
+    for (const d of hits) this.assertUnique(d, d);
+    return { matchedCount: hits.length, modifiedCount: hits.length, upsertedCount: 0 };
+  }
+
   async deleteMany(filter = {}) {
     const keep = this.docs.filter((d) => !matches(d, filter));
     const deletedCount = this.docs.length - keep.length;
@@ -345,28 +371,60 @@ class FakeCollection {
     };
   }
 
-  // Only { unique: true } is modelled; ordinary indexes change nothing an
-  // in-memory array can observe.
+  // Only { unique: true } is modelled behaviourally; ordinary indexes change
+  // nothing an in-memory array can observe. Every declaration is still RECORDED
+  // so indexes() can answer "was this index declared", which is the only thing a
+  // schema test can meaningfully assert about a non-unique index.
   async createIndex(spec = {}, options = {}) {
     if (options.unique) {
       const keys = Object.keys(spec);
       const already = this.uniqueIndexes.some((k) => k.join(',') === keys.join(','));
       if (!already) this.uniqueIndexes.push(keys);
     }
-    return 'ok';
+    const name = options.name || indexName(spec);
+    if (!this.indexSpecs.some((i) => i.name === name)) {
+      this.indexSpecs.push({ v: 2, key: { ...spec }, name, ...(options.unique ? { unique: true } : {}) });
+    }
+    return name;
+  }
+
+  // Shaped like the driver's: the implicit _id_ index first, then the declared
+  // ones in declaration order.
+  async indexes() {
+    return [{ v: 2, key: { _id: 1 }, name: '_id_' }, ...this.indexSpecs.map((i) => ({ ...i }))];
+  }
+
+  // Real drop() removes the collection itself, not just its documents — a
+  // subsequent listCollections() must not report it.
+  async drop() {
+    this.docs.length = 0;
+    this.indexSpecs.length = 0;
+    this.uniqueIndexes.length = 0;
+    this.onDrop();
+    return true;
   }
 }
 
 export function createFakeDb() {
   const store = new Map();
   const indexes = new Map();
-  return {
+  const indexSpecs = new Map();
+  const db = {
     collection(name) {
       if (!store.has(name)) store.set(name, []);
       if (!indexes.has(name)) indexes.set(name, []);
-      return new FakeCollection(store.get(name), indexes.get(name));
+      if (!indexSpecs.has(name)) indexSpecs.set(name, []);
+      return new FakeCollection(
+        store.get(name), indexes.get(name), indexSpecs.get(name),
+        () => { store.delete(name); indexes.delete(name); indexSpecs.delete(name); },
+      );
+    },
+    // Only the { nameOnly: true } shape any caller in this repo uses.
+    listCollections() {
+      return { async toArray() { return [...store.keys()].map((name) => ({ name })); } };
     },
     // test-only escape hatch
     _rows(name) { return store.get(name) ?? []; },
   };
+  return db;
 }

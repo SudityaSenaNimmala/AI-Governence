@@ -115,6 +115,152 @@ test('lazy registration, then pause/resume on visibility', () => {
   assert.equal(R.nextReplayState({ ...base, state: STATES.PAUSED, visible: false }).action, 'none');
 });
 
+// ── the conversation boundary ───────────────────────────────────────────────
+// A session survives a chat switch by design (the engagement rule). A REPLAY
+// must not: otherwise one recording covers three different chats and can never
+// honestly be shown against any of them.
+
+test('the conversation null-semantics table, row by row', () => {
+  const conv = { ...base, runConversationId: null, conversationId: null };
+
+  // null → null: nothing has been established yet.
+  assert.equal(R.nextReplayState(conv).action, 'none');
+
+  // null → 'A': ADOPT. A run that started before the site minted an id belongs
+  // to whatever id it eventually gets — that is never a rotation.
+  const adopt = R.nextReplayState({ ...conv, conversationId: 'A' });
+  assert.deepEqual(adopt, { state: STATES.RECORDING, action: 'bind_conversation', stop_reason: null });
+
+  // 'A' → 'B': ROTATE.
+  const rotate = R.nextReplayState({ ...conv, runConversationId: 'A', conversationId: 'B' });
+  assert.equal(rotate.stop_reason, 'conversation_changed');
+  assert.equal(rotate.action, 'complete');
+  assert.equal(rotate.state, STATES.IDLE);
+
+  // 'A' → null: ROTATE. This is "New chat" — the next prompt belongs to a
+  // conversation whose id does not exist yet, so the CURRENT run must close now
+  // rather than swallow the first turn of the next chat.
+  const newChat = R.nextReplayState({ ...conv, runConversationId: 'A', conversationId: null });
+  assert.equal(newChat.stop_reason, 'conversation_changed');
+  assert.equal(newChat.action, 'complete');
+
+  // …and the same conversation is, of course, no boundary at all. (Once the
+  // server has acknowledged it — an id claimed locally but not yet confirmed is
+  // still owed a bind, which is a separate axis; see the bind test below.)
+  assert.equal(
+    R.nextReplayState({ ...conv, runConversationId: 'A', runConversationBound: true, conversationId: 'A' }).action,
+    'none',
+  );
+});
+
+test('an unregistered run is DISCARDED on a conversation change, not completed', () => {
+  // Unreachable in practice (runConversationId is only set once a run has
+  // registered), but the close() contract must hold for this reason too.
+  const t = R.nextReplayState({
+    ...base, registered: false, runConversationId: 'A', conversationId: 'B',
+  });
+  assert.equal(t.action, 'discard');
+  assert.equal(t.stop_reason, 'conversation_changed');
+});
+
+test('a coincident engagement rotation wins the name — the coarser boundary', () => {
+  const t = R.nextReplayState({
+    ...base,
+    sessionId: 'sess-2', runSessionId: 'sess-1',
+    conversationId: 'B', runConversationId: 'A',
+  });
+  assert.equal(t.stop_reason, 'engagement_rotated', 'the older, coarser boundary is reported');
+});
+
+test('bind_conversation is RECORDING-only and stops once the SERVER confirms it', () => {
+  const bindable = { ...base, runConversationId: null, conversationId: 'A' };
+  assert.equal(R.nextReplayState(bindable).action, 'bind_conversation');
+
+  // A paused run is not observing anything; the bind can wait for the resume.
+  assert.equal(R.nextReplayState({ ...bindable, state: STATES.PAUSED, visible: false }).action, 'none');
+  // Registration comes first: an unregistered run has no replay_id to bind.
+  assert.equal(
+    R.nextReplayState({ ...bindable, registered: false, runSessionId: null }).action,
+    'register',
+  );
+
+  // WHAT ENDS THE ASKING IS THE ACK, NOT THE LOCAL CLAIM. The action sets
+  // runConversationId optimistically, so if that alone stopped the retry, one
+  // transient failure would leave the run permanently unbound server-side.
+  assert.equal(
+    R.nextReplayState({ ...bindable, runConversationId: 'A', runConversationBound: false }).action,
+    'bind_conversation',
+    'claimed locally but not acknowledged → keep asking',
+  );
+  assert.equal(
+    R.nextReplayState({ ...bindable, runConversationId: 'A', runConversationBound: true }).action,
+    'none',
+    'acknowledged → nothing left to do',
+  );
+  // …and the retry budget latches, so a server that never answers cannot make
+  // this spin for the life of the run.
+  assert.equal(
+    R.nextReplayState({ ...bindable, runConversationId: 'A', bindAbandoned: true }).action,
+    'none',
+  );
+});
+
+test('an UNACKNOWLEDGED conversation id still rotates the run', () => {
+  // THE MERGE BUG. A transient bind failure used to roll runConversationId back
+  // to null, and the rotation guard needs it truthy to fire at all — so for the
+  // whole ~30 s retry window a chat switch could not be detected and one run
+  // kept recording across two conversations.
+  const t = R.nextReplayState({
+    ...base, runConversationId: 'A', runConversationBound: false, conversationId: 'B',
+  });
+  assert.equal(t.stop_reason, 'conversation_changed');
+  assert.equal(t.action, 'complete');
+  // Same for a run whose bind was permanently given up on: recording continues,
+  // but the boundary it knows about is still a boundary.
+  assert.equal(
+    R.nextReplayState({
+      ...base, runConversationId: 'A', bindAbandoned: true, conversationId: 'B',
+    }).stop_reason,
+    'conversation_changed',
+  );
+});
+
+test('visibility outranks the bind: a hidden tab pauses with a bind outstanding', () => {
+  // A pending bind re-triggers on EVERY tick until it is acknowledged, so while
+  // it sat ahead of the visibility check it could hold a hidden tab in RECORDING
+  // for the entire retry window — against this file's own "recording stops the
+  // moment the tab is hidden, unconditionally" invariant.
+  const pending = { ...base, runConversationId: null, runConversationBound: false, conversationId: 'A' };
+  assert.equal(R.nextReplayState(pending).action, 'bind_conversation', 'visible → bind');
+  assert.deepEqual(
+    R.nextReplayState({ ...pending, visible: false }),
+    { state: STATES.PAUSED, action: 'pause', stop_reason: null },
+  );
+
+  // Registration keeps its place AHEAD of the pause, because registering is what
+  // flushes the ring buffer.
+  assert.equal(
+    R.nextReplayState({ ...pending, visible: false, registered: false, runSessionId: null }).action,
+    'register',
+  );
+});
+
+test('a conversation change never outranks a cap, a stop or the gate', () => {
+  const rotating = { ...base, runConversationId: 'A', conversationId: 'B' };
+  assert.equal(R.nextReplayState({ ...rotating, stopRequest: 'pagehide' }).stop_reason, 'pagehide');
+  assert.equal(R.nextReplayState({ ...rotating, enabled: false }).stop_reason, 'policy_disabled');
+  assert.equal(R.nextReplayState({ ...rotating, recordable: false }).stop_reason, 'navigated_away');
+  assert.equal(R.nextReplayState({ ...rotating, remainingDailyMs: 0 }).stop_reason, 'daily_cap');
+});
+
+test('a caller that never wires getConversationId behaves exactly as before', () => {
+  // The dep defaults to () => null, so conversationId/runConversationId are both
+  // null on every tick and neither the boundary nor the bind can ever fire.
+  const t = R.nextReplayState({ ...base });
+  assert.equal(t.action, 'none');
+  assert.equal(t.stop_reason, null);
+});
+
 // ── masking ─────────────────────────────────────────────────────────────────
 
 test('the composer is unmasked and NOTHING else is', () => {
@@ -1314,6 +1460,368 @@ test('two genuinely distinct snapshots piled up in one buffer share ONE total bu
   // per-call budget), snapshot 2 would inline its font too.
   assert.ok(!css2.includes('data:font'), 'snapshot 2 must get NOTHING — no fresh budget of its own');
   assert.ok(css2.includes('https://fonts.gstatic.com/s/snap2font.woff2'), 'left external, exactly like any font that does not fit');
+});
+
+// ── conversation scoping, end to end ────────────────────────────────────────
+//
+// THE ACCEPTANCE REQUIREMENT, restated: one tab, one sitting, no idle gap —
+// ask in chat A, switch to chat B and ask, come back to A and ask. Chat A's
+// replay must hold the first and third turns and NOTHING from B; chat B's must
+// hold only its own. Before this existed that was ONE undifferentiated
+// recording, because the engagement (session_id) deliberately survives a
+// same-service chat switch and the run was scoped only to the engagement.
+//
+// The debounce is not a timer. What the recorder reads only moves when the user
+// actually DID something in a chat (content.js updates _activeConvId inside
+// emit(), for prompt/upload kinds only), so clicking through old chats is free
+// by construction. `h.navigateTo()` vs `h.interactIn()` is exactly that split.
+
+/** Drive the controller until it settles: several ticks with the clock moving,
+ * the way the real 1 s interval does. */
+async function run(h, ticks = 3) {
+  for (let i = 0; i < ticks; i++) {
+    h.advance(1_000);
+    await h.fireTimer();
+    await settle();
+  }
+}
+
+test('a run registered in an existing chat carries the conversation id with it', async () => {
+  const h = makeReplayHarness({ sessionId: 'sess-1', conversationId: 'conv-A' });
+  await h.ctl.init();
+  h.snapshot();
+  await h.ctl.tick();
+  await settle();
+
+  const reg = h.sentOf('replayRegister')[0];
+  assert.equal(reg.external_conv_id, 'conv-A', 'no separate bind round-trip is needed');
+  assert.equal(h.sentOf('replayBindConversation').length, 0);
+  assert.equal(h.ctl.stats().conversation_id, 'conv-A');
+});
+
+test('a run that starts in a NEW chat adopts the id the site mints, without rotating', async () => {
+  // "New chat": the URL has no /c/<id> when the first prompt goes out, so the
+  // run registers unbound and adopts the id the site produces afterwards.
+  const h = makeReplayHarness({ sessionId: 'sess-1' });
+  await h.ctl.init();
+  h.snapshot();
+  await h.ctl.tick();
+  await settle();
+
+  const reg = h.sentOf('replayRegister')[0];
+  assert.equal('external_conv_id' in reg, false, 'nothing is claimed that is not known');
+  assert.equal(h.ctl.stats().conversation_id, null);
+
+  // The site mints one, and the user's next prompt is what the recorder sees.
+  h.interactIn('conv-A');
+  await run(h);
+
+  const binds = h.sentOf('replayBindConversation');
+  assert.equal(binds.length, 1, 'exactly one bind');
+  assert.deepEqual(binds[0], {
+    __cfai_kind: 'replayBindConversation',
+    replay_id: reg.replay_id,
+    external_conv_id: 'conv-A',
+  });
+  assert.equal(h.ctl.stats().replay_id, reg.replay_id, 'the SAME run — adopting is not a boundary');
+  assert.equal(h.ctl.stats().conversation_id, 'conv-A');
+  assert.equal(h.sentOf('replayComplete').length, 0, 'nothing was closed');
+
+  // …and it is never re-sent.
+  await run(h, 5);
+  assert.equal(h.sentOf('replayBindConversation').length, 1);
+});
+
+test('a failing bind is retried, then given up on — recording never stops', async () => {
+  let ok = false;
+  const h = makeReplayHarness({
+    sessionId: 'sess-1',
+    responses: { replayBindConversation: () => (ok ? { ok: true } : { ok: false, error: 503 }) },
+  });
+  await h.ctl.init();
+  h.snapshot();
+  await h.ctl.tick();
+  await settle();
+  const replayId = h.ctl.stats().replay_id;
+
+  h.interactIn('conv-A');
+  // Attempts are rate-limited to one per REGISTER_RETRY_MS (5 s), so the clock
+  // has to move for the retry to be allowed.
+  for (let i = 0; i < 3; i++) { h.advance(6_000); await h.fireTimer(); await settle(); }
+  assert.ok(h.sentOf('replayBindConversation').length >= 2, 'it retried');
+  assert.equal(h.ctl.state, STATES.RECORDING, 'and kept recording throughout');
+  assert.equal(h.ctl.stats().replay_id, replayId, 'the same run');
+
+  // Burn through the attempt cap.
+  for (let i = 0; i < 8; i++) { h.advance(6_000); await h.fireTimer(); await settle(); }
+  const attempts = h.sentOf('replayBindConversation').length;
+  assert.match(h.logs.warn.join('\n'), /could not bind run .* after \d+ attempts/);
+  assert.equal(h.ctl.state, STATES.RECORDING, 'a failed bind must never abort a run');
+
+  // Permanently given up: no more binds, ever, for this run.
+  ok = true;
+  for (let i = 0; i < 5; i++) { h.advance(6_000); await h.fireTimer(); await settle(); }
+  assert.equal(h.sentOf('replayBindConversation').length, attempts, 'it does not spin forever');
+  assert.equal(h.ctl.stats().replay_id, replayId);
+});
+
+// ── a bind that has NOT been confirmed is still a conversation boundary ──────
+// Both of these reproduce live-confirmed bugs whose single root cause was
+// doBindConversation() rolling run.conversationId back to null on every
+// TRANSIENT failure, not just on the permanent give-up.
+
+test('a chat switch DURING a failed bind still rotates the run — it is never merged', async () => {
+  // THE MERGE BUG, end to end. Recording starts in a brand-new chat, the site
+  // mints an id, the bind fails transiently, and inside the ~30 s retry window
+  // the user switches to another chat and prompts there. With the id rolled back
+  // to null the rotation guard could not fire, so ONE run kept recording across
+  // BOTH chats and was finally bound to the second — silently merging the first
+  // chat's screen content into what displays as the second chat's replay.
+  const h = makeReplayHarness({
+    sessionId: 'sess-1',
+    responses: { replayBindConversation: { ok: false, error: 503 } },
+  });
+  await h.ctl.init();
+  h.snapshot();
+  await h.ctl.tick();
+  await settle();
+  const runId = h.ctl.stats().replay_id;
+  assert.equal(h.sentOf('replayRegister')[0].external_conv_id, undefined, 'a brand-new chat');
+
+  // The site mints conv-A and the user prompts in it. The bind is refused.
+  h.interactIn('conv-A');
+  await run(h);
+  assert.ok(h.sentOf('replayBindConversation').length >= 1, 'it tried');
+  assert.equal(h.ctl.stats().replay_id, runId, 'a failed bind never ends a run');
+  assert.equal(h.ctl.stats().conversation_id, 'conv-A',
+    'the id stays claimed even though the server never acknowledged it');
+  assert.equal(h.ctl.stats().conversation_bound, false, '…and it is HONEST about that');
+
+  // Still inside the retry window, the user switches to chat B and prompts there.
+  h.interactIn('conv-B');
+  await run(h);
+
+  const done = h.sentOf('replayComplete').find((c) => c.replay_id === runId);
+  assert.ok(done, 'the run that observed chat A closed instead of absorbing chat B');
+  assert.equal(done.stop_reason, 'conversation_changed');
+
+  const regs = h.sentOf('replayRegister');
+  assert.equal(regs.length, 2, 'chat B is a NEW run');
+  assert.equal(regs[1].external_conv_id, 'conv-B', 'and it carries B from the start');
+  assert.notEqual(h.ctl.stats().replay_id, runId);
+
+  // The failed bind must never have named chat B against chat A's run.
+  const bindsForRunA = h.sentOf('replayBindConversation').filter((b) => b.replay_id === runId);
+  assert.equal(bindsForRunA.every((b) => b.external_conv_id === 'conv-A'), true,
+    "run A was only ever offered A's id");
+});
+
+test('a pending bind never keeps a HIDDEN tab recording', async () => {
+  // Same root cause, second symptom. A bind that is still retrying re-triggers
+  // on every tick, and while that check sat ahead of the visibility check the
+  // tab kept observing for up to ~25 s after being hidden.
+  const h = makeReplayHarness({
+    sessionId: 'sess-1',
+    responses: { replayBindConversation: { ok: false, error: 503 } },
+  });
+  await h.ctl.init();
+  h.snapshot();
+  await h.ctl.tick();
+  await settle();
+
+  h.interactIn('conv-A');
+  await run(h, 1);
+  assert.equal(h.sentOf('replayBindConversation').length, 1, 'one refused attempt is outstanding');
+  assert.equal(h.ctl.state, STATES.RECORDING);
+  const detaches = h.stopCalls();
+
+  // The user switches windows. The very NEXT tick must pause — not the tick
+  // after the retry budget runs out.
+  h.setVisible(false);
+  h.advance(1_000);
+  await h.fireTimer();
+  await settle();
+
+  assert.equal(h.ctl.state, STATES.PAUSED, 'paused immediately');
+  assert.equal(h.stopCalls(), detaches + 1, 'and rrweb really was detached, not just relabelled');
+
+  // It stays paused for the whole retry window rather than resuming to bind.
+  for (let i = 0; i < 6; i++) { h.advance(6_000); await h.fireTimer(); await settle(); }
+  assert.equal(h.ctl.state, STATES.PAUSED, 'a hidden tab is never re-armed by a pending bind');
+  assert.equal(h.stopCalls(), detaches + 1, 'and never re-attached in the meantime');
+
+  // Coming back resumes, and the bind picks up where it left off.
+  h.setVisible(true);
+  await run(h);
+  assert.equal(h.ctl.state, STATES.RECORDING);
+  assert.ok(h.sentOf('replayBindConversation').length > 1, 'the bind resumed too');
+});
+
+test('a bind that finally succeeds stops the retry; one that never does, latches', async () => {
+  let ok = false;
+  const h = makeReplayHarness({
+    sessionId: 'sess-1',
+    responses: { replayBindConversation: () => (ok ? { ok: true } : { ok: false, error: 503 }) },
+  });
+  await h.ctl.init();
+  h.snapshot();
+  await h.ctl.tick();
+  await settle();
+
+  h.interactIn('conv-A');
+  h.advance(1_000); await h.fireTimer(); await settle();
+  assert.equal(h.ctl.stats().conversation_bound, false);
+
+  ok = true;
+  h.advance(6_000); await h.fireTimer(); await settle();
+  assert.equal(h.ctl.stats().conversation_bound, true, 'the ack is what flips it');
+  const sentSoFar = h.sentOf('replayBindConversation').length;
+
+  // …and it is never re-sent once acknowledged.
+  for (let i = 0; i < 5; i++) { h.advance(6_000); await h.fireTimer(); await settle(); }
+  assert.equal(h.sentOf('replayBindConversation').length, sentSoFar);
+  assert.equal(h.ctl.stats().conversation_bind_abandoned, false);
+});
+
+test('clicking through five old chats without typing records NOTHING new', async () => {
+  // THE DEBOUNCE REPLACEMENT. No timer, no settle window: navigation alone does
+  // not move what the recorder reads, so no boundary can fire.
+  const h = makeReplayHarness({ sessionId: 'sess-1', conversationId: 'conv-A' });
+  await h.ctl.init();
+  h.snapshot();
+  await h.ctl.tick();
+  await settle();
+
+  const runId = h.ctl.stats().replay_id;
+  const registers = h.sentOf('replayRegister').length;
+  const completes = h.sentOf('replayComplete').length;
+
+  for (const id of ['conv-B', 'conv-C', 'conv-D', 'conv-E', 'conv-F']) {
+    h.navigateTo(id);
+    await run(h, 2);
+    assert.equal(h.activeConvId(), 'conv-A', 'the recorder still sees the chat the user last used');
+  }
+
+  assert.equal(h.sentOf('replayRegister').length, registers, 'not one extra run');
+  assert.equal(h.sentOf('replayComplete').length, completes, 'and not one extra completion');
+  assert.equal(h.sentOf('replayBindConversation').length, 0);
+  assert.equal(h.ctl.stats().replay_id, runId, 'still the same run');
+
+  // …and then they actually type in the chat they landed on. NOW it rotates.
+  h.interactIn();
+  await run(h);
+  assert.equal(h.sentOf('replayComplete').length, completes + 1);
+  assert.equal(h.sentOf('replayComplete').at(-1).stop_reason, 'conversation_changed');
+  assert.equal(h.sentOf('replayRegister').at(-1).external_conv_id, 'conv-F');
+  assert.notEqual(h.ctl.stats().replay_id, runId);
+});
+
+test('THE ACCEPTANCE SCENARIO: A → B → A is three runs, tagged A, B, A', async () => {
+  // No session yet: the worker mints one on the first real activity, exactly as
+  // it does in the browser. So the recorder is observing into the ring buffer
+  // and nothing has been registered.
+  const h = makeReplayHarness();
+  await h.ctl.init();
+  h.snapshot();
+  await settle();
+  assert.equal(h.sentOf('replayRegister').length, 0, 'nothing is stored until someone uses the AI');
+
+  // "What is CloudFuze?" in chat A — the prompt mints the engagement AND moves
+  // the active conversation, both in the same moment.
+  h.setSessionId('sess-1');
+  h.interactIn('conv-A');
+  await run(h);
+
+  // Switch to chat B and ask "What is AI Governance?".
+  h.navigateTo('conv-B');
+  h.interactIn();
+  await run(h);
+
+  // Back to chat A and ask "What is Data Governance?".
+  h.navigateTo('conv-A');
+  h.interactIn();
+  await run(h);
+
+  const regs = h.sentOf('replayRegister');
+  assert.equal(regs.length, 3, 'exactly three runs — one per conversation visit');
+  assert.deepEqual(regs.map((r) => r.external_conv_id), ['conv-A', 'conv-B', 'conv-A']);
+  // Three distinct server rows: A's two visits are two runs, and neither of them
+  // is the run that covered B.
+  assert.equal(new Set(regs.map((r) => r.replay_id)).size, 3);
+
+  const dones = h.sentOf('replayComplete');
+  assert.equal(dones.length, 2, 'the first two closed; the third is still recording');
+  assert.deepEqual(dones.map((d) => d.stop_reason), ['conversation_changed', 'conversation_changed']);
+  assert.deepEqual(dones.map((d) => d.replay_id), [regs[0].replay_id, regs[1].replay_id]);
+  // Every run stayed inside ONE engagement — the session never rotated, which is
+  // exactly why the engagement boundary alone could not tell these apart.
+  assert.equal(dones.every((d) => d.session_ids.length === 1 && d.session_ids[0] === 'sess-1'), true);
+  assert.equal(h.ctl.state, STATES.RECORDING);
+  assert.equal(h.ctl.stats().conversation_id, 'conv-A');
+});
+
+test('a run mid-upload when the conversation switches still completes cleanly', async () => {
+  // The rollback path and the boundary must not fight: a chunk the worker
+  // refuses is re-buffered, and the run then closes on the conversation change
+  // with its counters intact.
+  let accept = false;
+  const h = makeReplayHarness({
+    sessionId: 'sess-1',
+    conversationId: 'conv-A',
+    responses: { replayChunk: () => (accept ? { ok: true } : { ok: false, error: 500 }) },
+  });
+  await h.ctl.init();
+  h.snapshot();
+  await h.ctl.tick();
+  await settle();
+
+  assert.equal(h.sentOf('replayChunk').length, 1);
+  assert.ok(h.ctl.stats().buffered_events > 0, 'the refused chunk rolled back into the buffer');
+  assert.equal(h.ctl.stats().buffered_snapshots, 1, 'including the snapshot, which is never evicted');
+
+  // The server comes back just as the user switches chats.
+  accept = true;
+  h.interactIn('conv-B');
+  await run(h);
+
+  const done = h.sentOf('replayComplete').find((d) => d.replay_id === h.sentOf('replayRegister')[0].replay_id);
+  assert.ok(done, 'the first run completed');
+  assert.equal(done.stop_reason, 'conversation_changed');
+  assert.ok(done.chunk_count >= 1, 'the re-buffered events went up before it closed');
+  assert.equal(h.sentOf('replayRegister').at(-1).external_conv_id, 'conv-B');
+});
+
+test('a conversation change does NOT release the stop latch', async () => {
+  // Only an ENGAGEMENT rotation does. If a chat switch released it, a user who
+  // pressed Stop and then clicked into another chat would be silently recorded
+  // again — consent does not carry across a click.
+  const h = makeReplayHarness({ sessionId: 'sess-1', conversationId: 'conv-A' });
+  await h.ctl.init();
+  h.snapshot();
+  await h.ctl.tick();
+  await settle();
+
+  await h.ctl.stop('user_stopped');
+  await settle();
+  assert.equal(h.ctl.stopped, true);
+  const registers = h.sentOf('replayRegister').length;
+  const records = h.recordCalls();
+
+  // Switch chats — and actually type there, the strongest signal available.
+  h.interactIn('conv-B');
+  await run(h, 10);
+
+  assert.equal(h.ctl.stopped, true, 'still latched');
+  assert.equal(h.ctl.state, STATES.IDLE);
+  assert.equal(h.ctl.stats(), null, 'no replacement run');
+  assert.equal(h.recordCalls(), records, 'rrweb was never re-attached');
+  assert.equal(h.sentOf('replayRegister').length, registers);
+
+  // The engagement rotating DOES release it — the existing rule, unchanged.
+  h.setSessionId('sess-2');
+  await run(h);
+  assert.equal(h.ctl.stopped, false);
+  assert.equal(h.ctl.state, STATES.RECORDING);
 });
 
 // ── plumbing ────────────────────────────────────────────────────────────────

@@ -267,6 +267,19 @@ test('an event in becomes a stamped event out, with one session and rising clien
   assert.equal(rec.client_seq, 2);
 });
 
+test('the conversation an event happened in rides through to the DLP queue untouched', async () => {
+  // There is no field allowlist on the event path on purpose, which is how
+  // external_conv_id — stamped by content.js's emit() at the moment of the
+  // action — reaches /api/v1/dlp without a service-worker change. It must not be
+  // overwritten by the worker the way session_id / client_seq are.
+  const before = queue().length;
+  await emit({ external_conv_id: 'conv-abc123' }, 7, 'https://chatgpt.com/c/abc12345');
+  const queued = queue().at(-1);
+  assert.equal(queue().length, before + 1);
+  assert.equal(queued.external_conv_id, 'conv-abc123');
+  assert.match(queued.session_id, /^[0-9a-f-]{36}$/, 'the worker still owns session identity');
+});
+
 test('a same-service navigation does NOT rotate the session', async () => {
   const before = engagements()['7'].session_id;
   for (const fn of chrome._listeners.navCommitted) {
@@ -323,7 +336,7 @@ test('asking for the current session never mints one', async () => {
 // from the outside. So every replay kind must be a CONTROL message, and the proof of
 // that is "cfai.queue did not grow".
 
-const REPLAY_KINDS = ['replayPolicy', 'replayRegister', 'replayChunk', 'replayComplete', 'replayDailyAccrued'];
+const REPLAY_KINDS = ['replayPolicy', 'replayRegister', 'replayBindConversation', 'replayChunk', 'replayComplete', 'replayDailyAccrued'];
 
 const AI_TAB = { tab: { id: 21, url: 'https://chatgpt.com/c/deadbeef1234' } };
 
@@ -349,12 +362,13 @@ function chunkMessage(overrides = {}) {
 test('NOT ONE of the replay RPCs falls through to the DLP event queue', async () => {
   server.route('POST /api/v1/replays/11111111-2222-3333-4444-555555555555/chunks/0', emptyResponse(204));
   server.route('POST /api/v1/replays/11111111-2222-3333-4444-555555555555/complete', jsonResponse(200, { ok: true }));
+  server.route('POST /api/v1/replays/11111111-2222-3333-4444-555555555555/conversation', emptyResponse(204));
 
   const before = queue().length;
   for (const kind of REPLAY_KINDS) {
     const msg = kind === 'replayChunk'
       ? chunkMessage()
-      : { __cfai_kind: kind, replay_id: '11111111-2222-3333-4444-555555555555', ms: 1, seq: 0 };
+      : { __cfai_kind: kind, replay_id: '11111111-2222-3333-4444-555555555555', ms: 1, seq: 0, external_conv_id: 'conv-abc123' };
     const answer = await send(msg, AI_TAB);
     assert.ok(answer && typeof answer === 'object', `${kind} was answered by a dedicated handler`);
     assert.equal('session_id' in answer, false,
@@ -452,6 +466,63 @@ test('replayRegister treats an idempotent 200 as success and anything else as a 
   assert.deepEqual(await send({ __cfai_kind: 'replayRegister', replay_id: 'r-1' }, AI_TAB), { ok: false, error: 400 });
 
   server.route('POST /api/v1/replays', jsonResponse(201, { replay_id: 'r-1' }));
+});
+
+test('replayRegister carries the conversation id when the recorder already knows it', async () => {
+  server.reset();
+  await send({
+    __cfai_kind: 'replayRegister',
+    replay_id: '11111111-2222-3333-4444-555555555556',
+    session_id: 'sess-a',
+    external_conv_id: '  conv-abc123  ',
+  }, AI_TAB);
+  assert.equal(server.of('/api/v1/replays')[0].body.external_conv_id, 'conv-abc123', 'trimmed, and sent as-is');
+
+  // A run that does not know one must not claim one: the field is OMITTED, so
+  // the server's "optional, defaults null" path is the one that runs.
+  server.reset();
+  await send({ __cfai_kind: 'replayRegister', replay_id: 'r-2', session_id: 'sess-a' }, AI_TAB);
+  assert.equal('external_conv_id' in server.of('/api/v1/replays')[0].body, false);
+
+  server.reset();
+  await send({ __cfai_kind: 'replayRegister', replay_id: 'r-3', session_id: 'sess-a', external_conv_id: '   ' }, AI_TAB);
+  assert.equal('external_conv_id' in server.of('/api/v1/replays')[0].body, false, 'blank is not an id');
+});
+
+test('replayBindConversation posts the id and never falls through to the DLP queue', async () => {
+  server.reset();
+  const queuedBefore = queue().length;
+  server.route('POST /api/v1/replays/r-7/conversation', jsonResponse(204, null));
+
+  const answer = await send({
+    __cfai_kind: 'replayBindConversation',
+    replay_id: 'r-7',
+    external_conv_id: 'conv-abc123',
+  }, AI_TAB);
+
+  assert.deepEqual(answer, { ok: true }, '204 is the success answer');
+  const posted = server.of('/api/v1/replays/r-7/conversation');
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].method, 'POST');
+  assert.deepEqual(posted[0].body, { external_conv_id: 'conv-abc123' }, 'exactly this, nothing else');
+  assert.match(posted[0].headers.authorization, /^Bearer /, 'it goes out through authedFetch');
+  assert.equal(queue().length, queuedBefore, 'and nothing was queued as a governance event');
+
+  // A 409 (already bound to a different conversation, or the run has ended) is
+  // reported, never retried into the queue.
+  server.route('POST /api/v1/replays/r-7/conversation', jsonResponse(409, { error: 'already bound' }));
+  assert.deepEqual(
+    await send({ __cfai_kind: 'replayBindConversation', replay_id: 'r-7', external_conv_id: 'conv-other' }, AI_TAB),
+    { ok: false, error: 409 },
+  );
+});
+
+test('a bind with nothing to bind is refused locally instead of being sent', async () => {
+  server.reset();
+  assert.equal((await send({ __cfai_kind: 'replayBindConversation', external_conv_id: 'c' }, AI_TAB)).ok, false);
+  assert.equal((await send({ __cfai_kind: 'replayBindConversation', replay_id: 'r-7' }, AI_TAB)).ok, false);
+  assert.equal((await send({ __cfai_kind: 'replayBindConversation', replay_id: 'r-7', external_conv_id: '  ' }, AI_TAB)).ok, false);
+  assert.deepEqual(server.calls, [], 'nothing was sent');
 });
 
 test('replayComplete closes the run', async () => {
@@ -582,6 +653,35 @@ test('replayPolicy refuses to record to a NON-https server', async () => {
   const ok = await send({ __cfai_kind: 'replayPolicy' }, AI_TAB);
   assert.equal(ok.enabled, true);
   assert.equal('reason' in ok, false);
+});
+
+test('replayPolicy allows plain http to LOOPBACK — a fresh clone works with zero certificates', async () => {
+  // The web platform itself treats localhost as a Secure Context over plain
+  // http (https://w3c.github.io/webappsec-secure-contexts/#localhost): traffic
+  // to loopback never leaves the machine, so there is no network path for
+  // anyone to intercept or spoof it on — the exact risk the https-only rule
+  // above exists to close for a REMOTE host. Without this, anyone who clones
+  // the repo and runs the stack locally would need a real certificate (or a
+  // hand-built self-signed one manually trusted in the OS store) just to see
+  // Session Replay work — a real one-time cost this project does not want to
+  // impose on every contributor.
+  const config = chrome._store['cfai.config'];
+  try {
+    for (const url of ['http://localhost:8787', 'http://127.0.0.1:8787', 'http://[::1]:8787']) {
+      chrome._store['cfai.config'] = { serverUrl: url, enrollSecret: 's3cret' };
+      const answer = await send({ __cfai_kind: 'replayPolicy' }, AI_TAB);
+      assert.equal(answer.enabled, true, `${url} must be treated as secure`);
+      assert.equal('reason' in answer, false, `${url} must not carry an insecure-url reason`);
+    }
+
+    // A lookalike hostname must not slip through the same check.
+    chrome._store['cfai.config'] = { serverUrl: 'http://localhost.evil.example.com', enrollSecret: 's3cret' };
+    const spoofed = await send({ __cfai_kind: 'replayPolicy' }, AI_TAB);
+    assert.equal(spoofed.enabled, false, 'a hostname merely containing "localhost" is not loopback');
+    assert.equal(spoofed.reason, 'insecure_server_url');
+  } finally {
+    chrome._store['cfai.config'] = config;
+  }
 });
 
 // LAST, on purpose: these two poison the in-memory policy cache (or rely on it
