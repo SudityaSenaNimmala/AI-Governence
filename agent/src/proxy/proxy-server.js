@@ -225,8 +225,10 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
     // any HTTP parsing. We peek the first byte: 0x16 = TLS → handle as transparent.
     // Anything else → let the HTTP server parse it normally (CONNECT / plain HTTP).
     const handleTransparentConnection = (clientSocket) => {
+      log?.info?.(`transparent: new connection from ${clientSocket.remoteAddress}:${clientSocket.remotePort}`);
       clientSocket.once('readable', () => {
         const peek = clientSocket.read();
+        log?.info?.(`transparent: readable fired, got ${peek ? peek.length : 0} bytes, first byte: ${peek ? '0x' + peek[0].toString(16) : 'null'}`);
         if (!peek || peek.length === 0) { clientSocket.destroy(); return; }
 
         // Not TLS? Put the data back and let the HTTP server handle it.
@@ -246,6 +248,7 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
 
         if (isPinnedHost(sniHost) || !isIntercepted(sniHost)) {
           // Non-AI traffic — bridge transparently
+          log?.info?.(`transparent: bridging ${sniHost} (non-AI)`);
           const upstream = net.createConnection(443, sniHost, () => {
             upstream.write(peek);
             clientSocket.pipe(upstream);
