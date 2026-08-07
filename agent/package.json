@@ -17,7 +17,7 @@
     "scan": "node src/index.js --output ./out/report.json --pretty",
     "scan:dry": "node src/index.js --dry-run --pretty",
     "server-monitor": "node src/server-monitor/index.js",
-    "test": "node --test tests/",
+    "test": "node --test \"tests/**/*.test.*\"",
     "build:bundle": "node scripts/build.mjs bundle",
     "build:sea": "node scripts/build.mjs sea",
     "build": "node scripts/build.mjs all",

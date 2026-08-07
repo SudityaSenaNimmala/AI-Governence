@@ -186,7 +186,16 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
     if (decision === 'bridge') {
       return bridgeRawTls(clientSocket, head, reqHost, reqPort, log);
     }
-    return mitmTunnel({ clientSocket, head, reqHost, reqPort, secureContextFor, reporter, log, upstreamTlsOptions, onApiCall, peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress });
+    // vault + tokenizePatterns are startProxy-local state and MUST be passed
+    // explicitly — mitmTunnel is a module-level function and has no access to
+    // this closure. (Regression: it used to read them off a scope it does not
+    // have, which threw a ReferenceError on every intercepted HTTPS request.)
+    return mitmTunnel({
+      clientSocket, head, reqHost, reqPort, secureContextFor, reporter, log,
+      upstreamTlsOptions, onApiCall, peerPort: clientSocket.remotePort,
+      peerAddress: clientSocket.remoteAddress,
+      vault, tokenizePatterns: _tokenizePatterns,
+    });
   });
 
   // --- Errors at the outer-server layer (rare; per-request errors are caught inline). ---
@@ -330,7 +339,10 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
 
 // ---- HTTPS MITM tunnel ----
 
-function mitmTunnel({ clientSocket, head, reqHost, reqPort, secureContextFor, reporter, log, upstreamTlsOptions, onApiCall, peerPort, peerAddress }) {
+// Everything this function needs is an explicit parameter. `vault` and
+// `tokenizePatterns` in particular live in startProxy's scope, which this
+// module-level function cannot see — they have to be threaded through.
+function mitmTunnel({ clientSocket, head, reqHost, reqPort, secureContextFor, reporter, log, upstreamTlsOptions, onApiCall, peerPort, peerAddress, vault = null, tokenizePatterns = null, modelRouter = null }) {
   clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
 
   const tlsServer = new tls.TLSSocket(clientSocket, {
@@ -344,16 +356,36 @@ function mitmTunnel({ clientSocket, head, reqHost, reqPort, secureContextFor, re
     try { clientSocket.destroy(); } catch {}
   });
 
-  // Parse inner HTTP/1.1 requests off the TLS-decrypted stream. We use an
-  // inline http.Server with `request` events instead of an external library.
+  return serveInnerHttp({
+    socket: tlsServer, reqHost, reqPort, reporter, log,
+    upstreamTlsOptions, onApiCall, peerPort, peerAddress, vault, tokenizePatterns, modelRouter,
+  });
+}
+
+// Parse inner HTTP/1.1 requests off an already-established (normally
+// TLS-decrypted) duplex stream. We use an inline http.Server with `request`
+// events instead of an external library.
+//
+// Split out of mitmTunnel so the intercept path can be exercised over a plain
+// socket pair in tests — no certs, no TLS handshake, no network. See
+// agent/tests/proxy-mitm.test.mjs.
+export function serveInnerHttp({ socket, reqHost, reqPort, reporter, log, upstreamTlsOptions, onApiCall, peerPort, peerAddress, vault = null, tokenizePatterns = null, modelRouter = null }) {
   const inner = http.createServer(async (req, res) => {
     // Reconstruct full URL — req.url here is just the path.
     const target = { hostname: reqHost, port: reqPort, path: req.url, protocol: 'https:' };
-    return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort, peerAddress, vault, tokenizePatterns: _tokenizePatterns, modelRouter });
+    return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, {
+      onApiCall,
+      peerPort,
+      peerAddress,
+      vault,
+      tokenizePatterns: tokenizePatterns || new Set(),
+      modelRouter,
+    });
   });
-  inner.emit('connection', tlsServer);
-  // ^ giving the http.Server our already-established TLS socket directly is
-  // how we get it to parse requests off the stream without re-listening.
+  inner.emit('connection', socket);
+  // ^ giving the http.Server our already-established socket directly is how we
+  // get it to parse requests off the stream without re-listening.
+  return inner;
 }
 
 async function handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, hooks = {}) {

@@ -115,3 +115,36 @@ test('a listener throw can never escape into the page', () => {
   assert.doesNotThrow(() => s.fire(hostile));
   assert.equal(s.sent.length, 0);
 });
+
+// ── which conversation a reply belongs to ───────────────────────────────────
+// The page side captures it when the request is TEED. A long answer can still be
+// streaming when the user has clicked into another chat, so reading the URL at
+// end-of-stream would file the reply under whichever chat is on screen by then.
+
+test('a reply is filed under the conversation captured at tee time, not the current one', () => {
+  const s = loadAiResponseListener({ pathname: '/c/conversation-newer' });
+  // The user asked in the older chat, then switched while the answer streamed.
+  s.fire({ text: 'the answer to the earlier question', format: 'sse', external_conv_id: 'conversation-older' });
+  assert.equal(s.sent[0].external_conv_id, 'conversation-older');
+});
+
+test('a reply with no captured id falls back rather than inventing one', () => {
+  const s = loadAiResponseListener({ pathname: '/c/conversation-aaaa' });
+  // Nothing has been interacted with, so there is no active conversation either.
+  s.fire({ text: 'an answer', format: 'sse' });
+  assert.equal(s.sent[0].external_conv_id, null);
+
+  // After a real prompt in this chat, the fallback is that chat.
+  s.emit({ kind: 'prompt_submit', content_length: 4 });
+  s.fire({ text: 'another answer', format: 'sse' });
+  assert.equal(s.sent.at(-1).external_conv_id, 'conversation-aaaa');
+});
+
+test('a junk captured id is ignored, not forwarded', () => {
+  const s = loadAiResponseListener({ pathname: '/c/conversation-aaaa' });
+  s.emit({ kind: 'prompt_submit' });
+  for (const bad of ['', '   ', 42, null, {}]) {
+    s.fire({ text: `answer ${String(bad)}`, format: 'sse', external_conv_id: bad });
+    assert.equal(s.sent.at(-1).external_conv_id, 'conversation-aaaa', String(bad));
+  }
+});

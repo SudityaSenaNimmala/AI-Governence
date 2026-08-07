@@ -11,6 +11,7 @@ import { mountSanctions } from './routes/sanctions.js';
 import { mountEnroll } from './routes/enroll.js';
 import { mountDlp } from './routes/dlp.js';
 import { mountSessions } from './routes/sessions.js';
+import { mountConversations } from './routes/conversations.js';
 import { mountReplays } from './routes/replays.js';
 import { startReplayRetentionSweeper } from './lib/replay-retention.js';
 import { mountServerAgents } from './routes/server-agents.js';
@@ -25,6 +26,7 @@ import { mountAccessRequests } from './routes/access-requests.js';
 import { mountWebhooks } from './routes/webhooks.js';
 import { mountConnections } from './routes/connections.js';
 import { mountSdk } from './routes/sdk.js';
+import { mountLangfuseGateway } from './routes/langfuse-gateway.js';
 import { mountAiUsage } from './routes/ai-usage.js';
 import { mountClaudeUsage } from './routes/claude-usage.js';
 import { mountOtel } from './routes/otel.js';
@@ -58,6 +60,9 @@ mountQueries(app, db);
 mountSanctions(app, db);
 mountDlp(app, db);
 mountSessions(app, db);
+// The same stored turns grouped by the AI site's OWN chat thread rather than by
+// engagement — admin-authenticated, matching the replay routes it links to.
+mountConversations(app, db);
 // Session Replay — rrweb DOM/interaction recording. Chunks are inline documents,
 // so there is no blob store to build or share.
 mountReplays(app, db);
@@ -73,6 +78,10 @@ mountAccessRequests(app, db);
 mountWebhooks(app, db);
 mountConnections(app, db);
 mountSdk(app, db);
+// Developer SDK ingestion gateway. Developers' Langfuse SDKs point at
+// <server>/api/v1/lf with the credentials mountSdk issued; this relays to the
+// real Langfuse Cloud project after stamping the per-project tenancy tag.
+mountLangfuseGateway(app, db);
 
 // Auto-resolve employee profiles from enrolled machines on startup
 resolveProfiles(db, await db.collection('machines').find({}).project({ _id: 0 }).toArray())

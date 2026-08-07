@@ -40,6 +40,19 @@ export async function applyInitialSchema(db) {
   // Replay a conversation in order: filter by session, then order by time.
   // (client_seq is the tie-breaker the reader applies, occurred_at is the index.)
   await db.collection('dlp_events').createIndex({ session_id: 1, occurred_at: 1 });
+  // Replay ONE of the AI site's own conversations in order, across every session
+  // that touched it. Scoped by machine because the conversation id is minted by
+  // the AI site, not by us: two machines can legitimately hold the same id
+  // (a shared chat), and they must never merge into one conversation view.
+  // Events stored before this shipped simply lack the field, so they are never
+  // grouped — the same terminal state as a site we can extract no conversation
+  // id from at all. There is no migration for them. There IS a narrow,
+  // forward-only backfill for the one case the client genuinely cannot stamp at
+  // emit time — the first turn of a brand-new chat, sent before the site minted
+  // the id — which adopts still-null events of the SAME session once that id
+  // arrives (backfillConversationId in routes/dlp.js). It runs off the
+  // {session_id, occurred_at} index above and never touches a non-null value.
+  await db.collection('dlp_events').createIndex({ machine_id: 1, external_conv_id: 1, occurred_at: 1 });
 
   // monitored_servers — server-monitor enrollments (separate from desktop machines)
   await db.collection('monitored_servers').createIndex({ id: 1 }, { unique: true });
@@ -48,6 +61,15 @@ export async function applyInitialSchema(db) {
   // ai_sessions — one doc per conversation (browser extension session_id)
   await db.collection('ai_sessions').createIndex({ session_id: 1 }, { unique: true });
   await db.collection('ai_sessions').createIndex({ machine_id: 1, started_at: -1 });
+  // "Every sitting that touched this conversation, oldest first" — the visits
+  // lookup of the conversation detail route (routes/conversations.js). Multikey
+  // on external_conv_ids, because one session legitimately spans several chats.
+  // Scoped by machine for the same reason the dlp_events index above is: the id
+  // is minted by the AI site, so two machines can hold the same one. Without
+  // this the route falls back to the {machine_id, started_at} index and filters
+  // that machine's ENTIRE session history in memory, which is the opposite of
+  // the "direct, indexed lookups" its own comment claims.
+  await db.collection('ai_sessions').createIndex({ machine_id: 1, external_conv_ids: 1, started_at: 1 });
 
   // dlp_content
   await db.collection('dlp_content').createIndex({ event_id: 1 }, { unique: true });
@@ -64,6 +86,10 @@ export async function applyInitialSchema(db) {
   // "Which replays cover this conversation" — the multikey index makes the array
   // containment lookup on the session detail route an index hit.
   await db.collection('session_recordings').createIndex({ session_ids: 1, started_at: 1 });
+  // "Which runs cover this conversation, oldest first" — the conversation view's
+  // own lookup. A run is scoped to at most one conversation (it ends when the
+  // tab moves to another chat), so this is a plain scalar index.
+  await db.collection('session_recordings').createIndex({ external_conv_id: 1, started_at: 1 });
   // Drives the retention sweeper. Deliberately NOT a TTL index: TTL would delete
   // this run doc — the audit tombstone — and leave its chunk documents behind with
   // nothing pointing at them. The sweeper in lib/replay-retention.js reads this
@@ -140,6 +166,16 @@ export async function applyInitialSchema(db) {
   // access_exceptions
   await db.collection('access_exceptions').createIndex({ machine_id: 1, tool_host: 1 });
   await db.collection('access_exceptions').createIndex({ expires_at: 1 });
+
+  // sdk_projects — Developer SDK projects, i.e. the per-developer Langfuse
+  // credential pairs this server mints (routes/sdk.js). These indexes did not
+  // exist while the collection was created implicitly on first insert, which
+  // left the gateway's hot path — "look up the project for this public key on
+  // every ingestion request" — as a collection scan, and left nothing enforcing
+  // that a minted public key is unique.
+  await db.collection('sdk_projects').createIndex({ id: 1 }, { unique: true });
+  await db.collection('sdk_projects').createIndex({ public_key: 1 }, { unique: true });
+  await db.collection('sdk_projects').createIndex({ created_at: -1 });
 
   // employee_profiles
   await db.collection('employee_profiles').createIndex({ id: 1 }, { unique: true });

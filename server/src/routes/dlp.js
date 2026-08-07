@@ -41,14 +41,29 @@ export function mountDlp(app, db) {
       // updates the session record and is never stored in dlp_events.
       if (e.kind === 'session_bind') {
         if (sessionId) {
+          const boundConvId = normalizeExternalConvId(e.external_conv_id);
           await upsertSession(db, {
             sessionId,
             machineId: req.machine.id,
             aiService: e.service,
-            externalConvId: normalizeExternalConvId(e.external_conv_id),
+            externalConvId: boundConvId,
             occurredAt: e.occurredAt,
             countMessage: false,
           });
+          // THE FIRST TURN OF A BRAND-NEW CHAT. The site does not mint /c/<id>
+          // until the first prompt has been sent, so that prompt (and usually
+          // its reply) was stamped external_conv_id: null at emit time and would
+          // otherwise stay ungrouped forever — the conversation detail view of
+          // every newly-created chat permanently missing its opening question.
+          // This bind is the moment the id becomes known, so it is also the
+          // moment to fix them up. See backfillConversationId for the bound.
+          if (boundConvId) {
+            await backfillConversationId(db, {
+              machineId: req.machine.id,
+              sessionId,
+              externalConvId: boundConvId,
+            });
+          }
           bound++;
         }
         continue;
@@ -83,6 +98,22 @@ export function mountDlp(app, db) {
         role,
         session_id: sessionId,
         client_seq: clientSeq,
+        // Which of the AI site's OWN conversations this single turn belonged to,
+        // as the browser extension saw it at the moment of the action. Top-level
+        // because it is grouped and filtered on (routes/conversations.js), same
+        // rule as session_id above.
+        //
+        // This is per-EVENT and deliberately independent of the session's own
+        // conversation tracking: one session spans several chats, so the
+        // session's scalar external_conv_id ("the most recent one") cannot say
+        // which chat a given turn was in. The upsertSession() call below is
+        // unchanged and still passes externalConvId: null — only `session_bind`
+        // moves the session's own conversation fields.
+        //
+        // NOT forwarded to SIEM: normalizeDlpEvent (lib/cef.js) maps an explicit
+        // allowlist of fields, so a field added here cannot reach the syslog feed
+        // by accident, and this one is deliberately not added to it.
+        external_conv_id: normalizeExternalConvId(e.external_conv_id),
         secret_class: secretClass,
         content_length: contentLength,
         pattern_matched: patternMatched,
@@ -584,6 +615,48 @@ async function upsertSession(db, { sessionId, machineId, aiService, externalConv
   );
 }
 
+// ── Late conversation stamping ───────────────────────────────────────────────
+// A brand-new chat has no id in the URL until AFTER the first prompt is sent —
+// the site mints /c/<id> in response to that first message. So the opening turn
+// (and usually its reply) is stamped external_conv_id: null at emit time and
+// nothing downstream can group it, even though the REPLAY side of this feature
+// has always handled the same timing gap correctly via its late bind. This is
+// that missing half: the moment the id becomes known for a session, every event
+// of that session that is STILL unstamped is adopted into it.
+//
+// EXPORTED because two independent signals mean "the id is now known", and both
+// call this so whichever lands first wins and the other is a no-op:
+//   * routes/dlp.js  a `session_bind` event — emitted by the content script the
+//     instant the SPA route gains the id. This is the one that fires in practice
+//     for a new chat, because events and binds ride the SAME queue and flush
+//     together, so the bind arrives in (or right after) the batch carrying the
+//     first prompt.
+//   * routes/replays.js  POST /replays/:id/conversation — the recorder's own
+//     late bind. It reaches the server within a second of the id appearing,
+//     which is usually BEFORE the first prompt has flushed (the extension's
+//     event queue drains on a 1-minute alarm), so on its own it would generally
+//     find nothing to fix. It is still called: a run bound late — after a long
+//     chat, on a retry, or with recording started mid-conversation — can be the
+//     first to know.
+//
+// WHY THIS CANNOT MIS-TAG A DIFFERENT CONVERSATION. Three bounds, all narrowing:
+//   * ONE session_id. A session is one tab, one service, one continuous sitting.
+//   * ONE machine. session_id is minted client-side, so it is only unique per
+//     machine; ownership must not be assumed.
+//   * ONLY still-null events. An event that already carries an id is never
+//     touched — this can add grouping, never move it. A session that visits
+//     several chats therefore self-corrects: each chat's own bind clears its own
+//     nulls, so the next bind finds nothing left from the previous one.
+// That also makes it idempotent, which is what lets both callers run it freely.
+export async function backfillConversationId(db, { machineId, sessionId, externalConvId }) {
+  if (!machineId || !sessionId || !externalConvId) return 0;
+  const result = await db.collection('dlp_events').updateMany(
+    { machine_id: machineId, session_id: sessionId, external_conv_id: null },
+    { $set: { external_conv_id: externalConvId } },
+  );
+  return result?.modifiedCount ?? 0;
+}
+
 // The client clock is not trusted for ordering (client_seq is), but it is still
 // the best available wall-clock for the activity window. Fall back to server
 // time when it's missing or unparseable.
@@ -610,7 +683,13 @@ function normalizeClientSeq(value) {
 
 // Opaque id minted by the AI site itself (ChatGPT /c/<id> etc.). Never used in
 // a path or a query we build by hand, but keep it short and boring anyway.
-function normalizeExternalConvId(value) {
+//
+// EXPORTED because three other places now store or look up the same value —
+// routes/replays.js (a recording run's conversation), routes/conversations.js
+// (the grouping key) and the dlp_events column below. One definition, so a
+// change to the cap or the trimming rule cannot leave two of them disagreeing
+// about whether a given id is the same id.
+export function normalizeExternalConvId(value) {
   if (typeof value !== 'string') return null;
   const s = value.trim();
   if (!s || s.length > 200) return null;
@@ -671,7 +750,7 @@ function validateEvent(e) {
 // ranks identically rather than being treated as unknown. Absent/unrecognized
 // severity ranks 0, which is how a turn with no matches is treated: it can never
 // raise the watermark and can never be picked as the top match.
-const NO_SEVERITY_RANK = 0;
+export const NO_SEVERITY_RANK = 0;
 const SEVERITY_RANK = {
   low: 1,
   moderate: 2,
@@ -680,7 +759,10 @@ const SEVERITY_RANK = {
   critical: 4,
 };
 
-function severityRank(severity) {
+// Exported so the conversation view ranks severities on exactly this scale
+// rather than inventing a second one — a conversation's "worst turn" and a
+// session's stored watermark have to mean the same thing.
+export function severityRank(severity) {
   if (typeof severity !== 'string') return NO_SEVERITY_RANK;
   return SEVERITY_RANK[severity.trim().toLowerCase()] ?? NO_SEVERITY_RANK;
 }

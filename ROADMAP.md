@@ -145,6 +145,12 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   happen. Nothing suspends an agent, routes an escalation, or sends a notification. Wire
   the recommended actions to real effects (Graph disable/suspend, escalation queue, email/webhook).
 
+- [ ] **Fix routing-toast notification building HTML from page-controlled text**
+  Today: `showRoutingToast` in `browser-extension/content/content.js` builds `innerHTML`
+  from the currently-selected model button's text, which is page DOM content — a hostile
+  AI-site page could inject markup into our own model-routing toast. Fix: build the
+  page-derived model name with `textContent`, not string-concatenated `innerHTML`.
+
 ---
 
 ## P2 — enterprise distribution
@@ -216,6 +222,12 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   buyers expect push into a SIEM/audit pipeline. Add a CEF/syslog (and/or scheduled
   audit-bundle) exporter for `dlp_events`, `approval_requests`, and `policy_violations`.
 
+- [ ] **Make model-routing complexity lexicon admin-configurable**
+  Today: `browser-extension/content/complexity.js`'s signal categories and weights
+  (what counts as a "simple" vs "complex" prompt for Smart Model Router) are hardcoded
+  in the extension. Needs a settings screen so an admin can tune routing behavior
+  per tenant without a code change.
+
 ---
 
 ## P3 — coverage expansion
@@ -247,6 +259,12 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   `policy.violation` is listed in `WEBHOOK_EVENTS` but no `emitWebhook` call ever fires it,
   so subscribers can't receive Layer-B policy violations. Emit it from the policy-evaluation
   path (`policies.ts`) alongside the existing enforcement/approval webhooks.
+
+- [ ] **Broaden model-routing classifier's stack-trace / error-label pattern coverage**
+  Today: `complexity.js`'s structural detectors miss some real-world formats — labels
+  like `TypeError:`/`ValueError:` (only bare `Error:` matches), Node's `at async fn (...)`
+  stack frames, and bare Java frames pasted without the `Exception in thread` header.
+  Common cases already work; this improves accuracy on the less common ones.
 
 ---
 

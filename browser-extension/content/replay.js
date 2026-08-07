@@ -387,8 +387,20 @@
   // reply and that was explicitly removed.
   //
   // PRECEDENCE: completion beats everything, then registration, then pause/resume,
-  // then a cold start. If a completing condition and a pause condition are both
-  // true in the same tick, the run COMPLETES.
+  // then the conversation bind, then a cold start. If a completing condition and a
+  // pause condition are both true in the same tick, the run COMPLETES.
+  //
+  // WHY THE BIND SITS AFTER PAUSE/RESUME AND REGISTRATION SITS BEFORE IT.
+  // Registration is what FLUSHES the ring buffer, so a run that pauses while still
+  // unregistered has nowhere to put its buffered events — it has to register first.
+  // The bind flushes nothing; it is pure enrichment of a row the server already
+  // holds. It used to sit ahead of the visibility check anyway, and because a
+  // pending bind RE-TRIGGERS on every tick until the server acknowledges it (see
+  // runConversationBound), a bind that was retrying could return 'bind_conversation'
+  // on every iteration of every tick for the whole ~30 s retry window — so a HIDDEN
+  // tab kept observing the page for up to ~25 s instead of pausing at once, in
+  // direct contradiction of this file's own "recording stops the moment the tab is
+  // hidden, unconditionally" invariant. Nothing about a bind may outrank that.
   //
   // The caller applies ONE transition and calls again (the controller loops a few
   // times per tick), so "session rotated" resolves as complete → then start.
@@ -397,6 +409,8 @@
   //   none      nothing to do
   //   start     begin observing into the ring buffer; nothing registered/uploaded
   //   register  a session_id exists — POST /replays, then flush the buffer as seq 0
+  //   bind_conversation  the run learned which conversation it is in AFTER it
+  //             registered — tell the server, keep recording (never a boundary)
   //   pause     flush, fully stop the recorder, accrue time; run stays open
   //   resume    restart the recorder (which re-snapshots), same run and seq counter
   //   complete  flush, POST /complete, close the run
@@ -411,6 +425,19 @@
       sessionId = null,
       registered = false,
       runSessionId = null,
+      conversationId = null,
+      runConversationId = null,
+      // Has the SERVER acknowledged runConversationId? Deliberately a separate
+      // fact from "is runConversationId set at all": the id is claimed locally
+      // the instant the bind is attempted (optimistically — see
+      // doBindConversation), and it STAYS claimed through every transient
+      // failure, so the rotation guard below keeps working while the
+      // confirmation is still outstanding. Only this flag decides whether
+      // another bind attempt is wanted.
+      runConversationBound = false,
+      // The retry budget for the bind is spent: never ask again for this run.
+      // The run keeps recording and simply stays ungrouped server-side.
+      bindAbandoned = false,
       remainingDailyMs = 0,
       runMs = 0,
       maxRunMs = CLIENT_POLICY_DEFAULTS.max_run_ms,
@@ -442,16 +469,57 @@
       //    (A chat switch no longer does this: the session survives it. What does
       //    is a different AI service, an idle timeout or the 12h cap.)
       if (sessionId && runSessionId && sessionId !== runSessionId) return close('engagement_rotated');
+      // 4. the tab moved to a DIFFERENT conversation of the same service. The
+      //    engagement (session_id) deliberately survives that — see the note
+      //    above — but a replay must not, or one recording covers three chats
+      //    and can never be shown against any of them.
+      //
+      //    LAST on purpose: if an engagement rotation and a conversation change
+      //    land on the same tick, the coarser, older boundary wins the name.
+      //
+      //    NOT symmetric with the session check above, which needs both ids:
+      //      null → null   nothing
+      //      null → 'A'    ADOPT (handled below as 'bind_conversation'), never a
+      //                    rotation — a run that started before the site had
+      //                    minted an id belongs to whatever id it gets
+      //      'A'  → 'B'    ROTATE
+      //      'A'  → null   ROTATE. This is "New chat": the next prompt belongs
+      //                    to a conversation whose id does not exist yet, so the
+      //                    CURRENT run has to close now rather than swallow the
+      //                    first turn of the next chat.
+      //
+      //    READS runConversationId, NOT runConversationBound, and that is the
+      //    point: a run whose bind the server has not confirmed yet is still a
+      //    run that BELONGS to that conversation, so a switch away from it is
+      //    still a rotation. This guard used to be defeatable — a transient bind
+      //    failure nulled runConversationId back out, and while it was null this
+      //    line could not fire at all, so a chat switch inside the ~30 s retry
+      //    window silently kept ONE run recording across TWO conversations and
+      //    filed the result under the second one.
+      if (runConversationId && conversationId !== runConversationId) return close('conversation_changed');
     }
 
-    // 4. lazy registration: recording started before any session existed
+    // 5. lazy registration: recording started before any session existed. Ahead
+    //    of the pause below because registering is what flushes the ring buffer.
     if (state === STATES.RECORDING && !registered && sessionId) return stay('register');
 
-    // 5. visibility
+    // 6. visibility. Unconditional, and ahead of the bind below — see the
+    //    PRECEDENCE note at the top of this function.
     if (state === STATES.RECORDING && !visible) return { state: STATES.PAUSED, action: 'pause', stop_reason: null };
     if (state === STATES.PAUSED && visible) return { state: STATES.RECORDING, action: 'resume', stop_reason: null };
 
-    // 6. cold start
+    // 7. late conversation binding — the ADOPT row of the table above. RECORDING
+    //    only (a paused run is not observing anything, and the bind can wait for
+    //    the resume), and only until the SERVER confirms it: the action claims
+    //    runConversationId optimistically but leaves runConversationBound false,
+    //    so this keeps asking until an ack lands or the retry budget runs out
+    //    (bindAbandoned). It cannot loop forever — both of those latch.
+    if (state === STATES.RECORDING && registered && conversationId
+        && !runConversationBound && !bindAbandoned) {
+      return stay('bind_conversation');
+    }
+
+    // 8. cold start
     if (state === STATES.IDLE) {
       if (visible && recordable && enabled && remainingDailyMs >= MIN_USEFUL_BUDGET_MS) {
         return { state: STATES.RECORDING, action: 'start', stop_reason: null };
@@ -612,6 +680,24 @@
    *   getSessionId () => string|null  — the session this tab is in, as content.js
    *                  last heard it from the service worker (which owns it).
    *                  A cached read: synchronous, and MUST NOT MINT.
+   *   getConversationId () => string|null — the AI site's OWN conversation id
+   *                  (ChatGPT /c/<id> etc.) that content.js recorded at the
+   *                  moment of the last REAL user interaction — a submitted
+   *                  prompt or a file upload — NOT a live read of the URL.
+   *
+   *                  That distinction is the whole debounce. Clicking through
+   *                  five old chats without typing in any of them never changes
+   *                  this value, so no boundary fires and nothing new is
+   *                  recorded; the first prompt in one of them changes it, and
+   *                  that is exactly when a new recording should begin. There is
+   *                  deliberately no timer, no settle window and no
+   *                  rate-limiting anywhere in this file for conversation
+   *                  changes: the action-gating on content.js's side IS the
+   *                  debounce, by construction.
+   *
+   *                  Defaults to () => null, so a surface that has not wired it
+   *                  behaves exactly as it did before conversation scoping
+   *                  existed (one run per engagement, no bind, no rotation).
    *   visible      () => boolean
    *   showBanner   (replayId) => void
    *   hideBanner   () => void
@@ -632,6 +718,7 @@
       showBanner: () => {},
       hideBanner: () => {},
       getSessionId: () => null,
+      getConversationId: () => null,
       doc: typeof document !== 'undefined' ? document : null,
       log: (...a) => console.info('[cfai/replay]', ...a),
       warn: (...a) => console.warn('[cfai/replay]', ...a),
@@ -674,6 +761,23 @@
         registerAt: 0,
         runSessionId: null,
         sessionIds: [],
+        // The AI site's own conversation id this run is scoped to, once known.
+        // Set at registration when the tab is already in an existing chat, or
+        // later by doBindConversation() when the site mints one mid-run. Once
+        // non-null a change to it ends the run (see nextReplayState), and it is
+        // NEVER un-set: "we could not confirm this with the server" is tracked
+        // separately, below, precisely so a failed confirmation can never
+        // disarm the rotation guard.
+        conversationId: null,
+        // Has the server ACKNOWLEDGED conversationId? False while a bind is
+        // outstanding or retrying; true only after a 2xx from the bind route (or
+        // from the registration that carried the id in the first place).
+        conversationBound: false,
+        // The retry budget is spent. The run keeps recording and keeps its
+        // boundary behaviour; only the server-side grouping stays incomplete.
+        bindAbandoned: false,
+        bindAttempts: 0,
+        bindAt: 0,
         startedAt: new Date(d.now()).toISOString(),
         buffer: [],
         pendingBytes: 0,
@@ -720,11 +824,31 @@
     }
 
     /**
+     * The conversation id in effect at the last real user interaction, or null.
+     * Same discipline as sessionIdNow(): never throws (it is an injected
+     * collaborator, not our code), trims, and treats an empty string as absent
+     * so '' can never be mistaken for a real id and rotate a run.
+     */
+    function conversationIdNow() {
+      try {
+        const id = d.getConversationId();
+        return typeof id === 'string' && id.trim() ? id.trim() : null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    /**
      * Release the latch once the engagement has rotated to a different session than
      * the one that was current when the user (or the fail-closed banner path) stopped
      * recording. Same rule as nextReplayState's 'engagement_rotated': a new session id
      * is a new engagement, and stopping is scoped to an engagement, not to the tab
      * for all time.
+     *
+     * A CONVERSATION change deliberately does NOT release it, and this function
+     * is the only place that could: the engagement is the unit a stop applies
+     * to, and a user who pressed Stop and then clicked into another chat in the
+     * same tab has not asked to be recorded again.
      */
     function releaseLatchOnRotation(sid) {
       if (!userStopped) return;
@@ -1071,6 +1195,13 @@
       run.registerAttempts += 1;
 
       const replayId = d.uuid();
+      // The conversation the tab is in RIGHT NOW, as of the last real
+      // interaction. Non-null whenever an existing chat is being revisited, and
+      // then it rides along in the registration payload exactly like ai_service
+      // and tab_host — no separate bind round-trip is needed for that case.
+      // Null for a brand-new chat (the site has not minted an id yet), which is
+      // what doBindConversation() below is for.
+      const cid = conversationIdNow();
       let resp = null;
       try {
         resp = await d.send({
@@ -1082,6 +1213,7 @@
           recorder: RECORDER_ID,
           mask_profile: policy.mask_profile,
           capture: 'dom_events',
+          ...(cid ? { external_conv_id: cid } : {}),
         });
       } catch (e) { resp = null; }
 
@@ -1095,12 +1227,92 @@
       run.replayId = replayId;
       run.runSessionId = sid;
       run.registered = true;
+      // Only claim it locally once the server has taken it: an unbound run that
+      // rotates on the next chat switch is recoverable, a run that thinks it is
+      // bound to a conversation the server never heard of is not. The
+      // registration response IS the acknowledgement, so no separate bind
+      // round-trip is ever needed for this path.
+      if (cid) {
+        run.conversationId = cid;
+        run.conversationBound = true;
+      }
       observeSession(sid);
       d.showBanner(replayId);
-      d.log(`run ${replayId} registered for session ${sid}`);
+      d.log(`run ${replayId} registered for session ${sid}`, cid ? `(conversation ${cid})` : '(no conversation id yet)');
       // seq 0 begins at the ring buffer's full snapshot, so it is independently
       // replayable on its own.
       await queueFlush('register');
+    }
+
+    /**
+     * Tell the server which conversation an ALREADY REGISTERED run turned out to
+     * belong to. Only reachable when the run registered with no conversation id
+     * (a brand-new chat: the site mints /c/<id> after the first turn), so this is
+     * a pure enrichment — it never opens, closes or interrupts a run.
+     *
+     * run.conversationId is set OPTIMISTICALLY, before the round-trip resolves.
+     * That is deliberate: the round-trip is a service-worker hop plus an HTTP
+     * request, and the user can be in a different chat by the time it lands. The
+     * boundary check in nextReplayState reads run.conversationId, so leaving it
+     * null until the ack would mean a chat switch in that window silently folded
+     * a second conversation into this recording — the exact bug this feature
+     * exists to fix. Being briefly optimistic can at worst cost one extra
+     * boundary; being briefly wrong costs evidence.
+     *
+     * "OPTIMISTIC" AND "CONFIRMED" ARE TWO DIFFERENT FACTS, and they are tracked
+     * in two different fields. A transient failure (a network blip, a momentary
+     * 5xx) leaves run.conversationId exactly where it is and only leaves
+     * run.conversationBound false, so the retry keeps going WHILE the rotation
+     * guard stays armed. Rolling the id back — which is what this used to do —
+     * disarmed that guard for the whole ~30 s retry window: a user who switched
+     * chats and prompted inside it kept ONE run recording across TWO
+     * conversations, and it ended up filed under the second one, silently
+     * merging the first one's screen content into it.
+     *
+     * Failure is retried on the same cadence and with the same attempt bound as
+     * registration, and then given up on PERMANENTLY for this run
+     * (bindAbandoned): the local value stays set (so conversation boundaries
+     * keep working) and the server row simply stays ungrouped. A failed bind
+     * must never stop a recording.
+     */
+    async function doBindConversation() {
+      const r = run;
+      if (!r || !r.registered || !r.replayId) return;
+      const cid = conversationIdNow();
+      if (!cid) return;
+      if (r.bindAt && d.now() - r.bindAt < REGISTER_RETRY_MS) return;
+      r.bindAt = d.now();
+      r.bindAttempts += 1;
+      r.conversationId = cid;
+
+      let resp = null;
+      try {
+        resp = await d.send({
+          __cfai_kind: 'replayBindConversation',
+          replay_id: r.replayId,
+          external_conv_id: cid,
+        });
+      } catch (e) { resp = null; }
+
+      if (resp && resp.ok) {
+        r.conversationBound = true;
+        d.log(`run ${r.replayId} bound to conversation ${cid}`);
+        return;
+      }
+      // The run can be closed under us while the send is in flight.
+      if (!run || run !== r) return;
+      if (r.bindAttempts >= REGISTER_MAX_ATTEMPTS) {
+        r.bindAbandoned = true;
+        d.warn(`could not bind run ${r.replayId} to its conversation after ${r.bindAttempts} attempts`,
+               `(${(resp && resp.error) || 'no response'}) — recording continues, the run stays ungrouped`);
+        return;
+      }
+      d.warn(`could not bind run ${r.replayId} to its conversation`,
+             `(attempt ${r.bindAttempts}/${REGISTER_MAX_ATTEMPTS}):`, (resp && resp.error) || 'no response');
+      // NO ROLLBACK of r.conversationId. The next tick re-asks because
+      // conversationBound is still false — and until it lands, the run still
+      // knows which conversation it is in, so a switch away from it still ends
+      // the run instead of being absorbed into it.
     }
 
     async function doPause() {
@@ -1162,6 +1374,7 @@
       switch (t.action) {
         case 'start':    return doStart();
         case 'register': return doRegister();
+        case 'bind_conversation': return doBindConversation();
         case 'pause':    return doPause();
         case 'resume':   return doResume();
         case 'complete': return doComplete(t.stop_reason);
@@ -1185,6 +1398,10 @@
         await refreshGate(false);
         for (let i = 0; i < 4; i++) {
           const sid = sessionIdNow();
+          // Read once per iteration, like the session id. NOT rate-limited and
+          // NOT debounced here: this value only moves when the user actually
+          // did something in a chat (see the getConversationId dep note).
+          const cid = conversationIdNow();
           releaseLatchOnRotation(sid);
           // READ AND CLEAR, every iteration. It used to be cleared only on i===0,
           // but the actions applied inside this loop SET it too (doRegister on
@@ -1202,6 +1419,10 @@
             sessionId: sid,
             registered: !!(run && run.registered),
             runSessionId: run ? run.runSessionId : null,
+            conversationId: cid,
+            runConversationId: run ? run.conversationId : null,
+            runConversationBound: !!(run && run.conversationBound),
+            bindAbandoned: !!(run && run.bindAbandoned),
             remainingDailyMs: remainingMs(),
             runMs: runMsNow(),
             maxRunMs: policy.max_run_ms,
@@ -1315,6 +1536,15 @@
           replay_id: run.replayId,
           registered: run.registered,
           session_id: run.runSessionId,
+          // The AI site's own conversation id, or null while the run is not
+          // scoped to one. An ID, never any content — same rule as everything
+          // else reported here.
+          conversation_id: run.conversationId,
+          // Whether the SERVER has acknowledged that id. A run can legitimately
+          // report an id with this false — an outstanding or permanently
+          // abandoned bind — and it still uses the id for its own boundaries.
+          conversation_bound: run.conversationBound,
+          conversation_bind_abandoned: run.bindAbandoned,
           seq: run.seq,
           chunks: run.chunkCount,
           events: run.eventCount,
