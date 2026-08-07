@@ -719,6 +719,7 @@
     try { return c.classify(text); } catch { return 'moderate'; }
   }
 
+  // ── Model tier detection (Smart Model Router) ────────────────────────────
   // Detect model tier from button text or model ID.
   // Handles current + future model names dynamically by keyword matching.
   function detectModelInfo(text) {
@@ -738,13 +739,21 @@
     // ChatGPT sometimes shows just "ChatGPT" with no version — treat as standard
     if (t.includes('chatgpt'))                                          return { provider: 'openai', tier: 'standard' };
 
-    // Google — "flash" before "pro"
+    // Google — Gemini renamed its lineup from Flash/Pro/Ultra to Flash/Thinking/Pro
+    // (confirmed against Google's own pricing/plan pages, 2026-08). "Thinking" is a
+    // reasoning mode layered on Flash, priced close to Flash; "Pro" is now the
+    // separate, priciest flagship gated behind a paid plan — so the tier order is
+    // Flash (cheapest) < Thinking (middle) < Pro (priciest), not a straight rename.
+    // "ultra" is kept as a legacy/back-compat match in case an older or
+    // enterprise surface still shows it.
     if (t.includes('flash') || t.includes('lite'))  return { provider: 'google', tier: 'economy' };
-    if (t.includes('pro'))                          return { provider: 'google', tier: 'standard' };
+    if (t.includes('thinking'))                     return { provider: 'google', tier: 'standard' };
+    if (t.includes('pro'))                          return { provider: 'google', tier: 'premium' };
     if (t.includes('ultra'))                        return { provider: 'google', tier: 'premium' };
 
     return null;
   }
+  // ── end model tier detection ─
 
   // Smart routing table: [provider][currentTier][complexity] → target
   // Uses UI DISPLAY NAMES (what the user sees in the dropdown), NOT API model IDs.
@@ -818,7 +827,7 @@
   const TIER_UI_NAME = {
     anthropic: { 3: 'Opus', 2: 'Sonnet', 1: 'Haiku' },
     openai:    { 3: 'GPT-4', 2: 'GPT-4o', 1: 'GPT-4o mini' },
-    google:    { 3: 'Ultra', 2: 'Pro', 1: 'Flash' },
+    google:    { 3: 'Pro', 2: 'Thinking', 1: 'Flash' },
   };
 
   const TIER_REASON = {
@@ -942,7 +951,7 @@
     // OpenAI
     'GPT-4', 'GPT-3', 'ChatGPT', 'o1', 'o3', 'o4',
     // Google
-    'Gemini', 'Flash', 'Ultra',
+    'Gemini', 'Flash', 'Ultra', 'Thinking',
     // Microsoft
     'Copilot',
     // Other
