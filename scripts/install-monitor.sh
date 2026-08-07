@@ -400,106 +400,55 @@ case "$1" in
       iptables -t nat -A PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null
       echo "  [OK] Traffic redirect added"
 
-      # Step 2: Recreate container with CA cert using Docker directly
-      # No docker-compose dependency. Works with any container regardless
-      # of how it was created (compose, docker run, CI/CD, anything).
-      echo "  Recreating with CA cert..."
+      # Step 2: Inject CA cert + env vars into existing container
+      # NEVER recreates the container. Preserves all networks, ports, volumes.
+      # Uses docker cp + direct config edit (safe, no recreation needed).
+      echo "  Injecting CA cert..."
+
+      # Copy CA cert into running container
+      docker exec "$TARGET" mkdir -p /certs 2>/dev/null
+      docker cp "$CA_FILE" "$TARGET:/certs/cloudfuze.crt" 2>/dev/null
+      if [[ $? -ne 0 ]]; then
+        echo "  [!] Failed to copy CA cert into container."
+        continue
+      fi
+      echo "  [OK] CA cert copied to container:/certs/cloudfuze.crt"
+
+      # Add env vars by editing container config directly
+      # This preserves ALL container settings (networks, ports, everything)
+      echo "  Adding env vars..."
+      CID=$(docker inspect --format '{{.Id}}' "$TARGET" 2>/dev/null)
+      CONFIG_FILE="/var/lib/docker/containers/$CID/config.v2.json"
+
+      if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "  [!] Container config not found. Skipping env var injection."
+        echo "  Container has CA cert but needs NODE_EXTRA_CA_CERTS env var."
+        echo "  Add to your deployment: -e NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt"
+        continue
+      fi
+
+      docker stop "$TARGET" >/dev/null 2>&1
+
       python3 -c "
-import json, subprocess, sys
-
-target = '$TARGET'
-ca_src = '/root/.cloudfuze-aigov/ca/ca.crt'
-ca_dst = '/certs/cloudfuze.crt'
-extra_env = ['NODE_EXTRA_CA_CERTS=' + ca_dst, 'SSL_CERT_FILE=' + ca_dst, 'REQUESTS_CA_BUNDLE=' + ca_dst]
-extra_bind = ca_src + ':' + ca_dst + ':ro'
-
-# 1. Inspect running container
-raw = subprocess.check_output(['docker', 'inspect', target])
-info = json.loads(raw)[0]
-cfg = info['Config']
-hcfg = info['HostConfig']
-
-# 2. Build docker create args
-args = ['docker', 'create', '--name', target + '-cfz-tmp']
-
-# Env vars (existing + ours)
-for e in (cfg.get('Env') or []):
-    if not e.startswith('NODE_EXTRA_CA_CERTS=') and not e.startswith('SSL_CERT_FILE=') and not e.startswith('REQUESTS_CA_BUNDLE='):
-        args += ['-e', e]
-for e in extra_env:
-    args += ['-e', e]
-
-# Ports
-for cport, bindings in (hcfg.get('PortBindings') or {}).items():
-    if bindings:
-        for b in bindings:
-            hp = b.get('HostPort', '')
-            hip = b.get('HostIp', '')
-            if hip and hp:
-                args += ['-p', hip + ':' + hp + ':' + cport]
-            elif hp:
-                args += ['-p', hp + ':' + cport]
-
-# Volumes (existing + ours)
-for m in (hcfg.get('Binds') or []):
-    if 'cloudfuze' not in m:
-        args += ['-v', m]
-args += ['-v', extra_bind]
-
-# Restart policy
-rp = hcfg.get('RestartPolicy', {})
-if rp.get('Name'):
-    r = rp['Name']
-    if rp.get('MaximumRetryCount', 0) > 0:
-        r += ':' + str(rp['MaximumRetryCount'])
-    args += ['--restart', r]
-
-# Working dir
-if cfg.get('WorkingDir'):
-    args += ['-w', cfg['WorkingDir']]
-
-# Labels
-for k, v in (cfg.get('Labels') or {}).items():
-    args += ['--label', k + '=' + v]
-
-# Network mode
-nm = hcfg.get('NetworkMode', '')
-if nm and nm != 'default':
-    args += ['--network', nm]
-
-# Image
-args.append(cfg['Image'])
-
-# CMD
-if cfg.get('Cmd'):
-    args += cfg['Cmd']
-
-# 3. Stop and rename old container (keep as backup)
-subprocess.run(['docker', 'stop', target], capture_output=True)
-subprocess.run(['docker', 'rename', target, target + '-cfz-backup'], capture_output=True)
-
-# 4. Create new container
-result = subprocess.run(args, capture_output=True, text=True)
-if result.returncode != 0:
-    print('  [!] Create failed: ' + result.stderr.strip(), file=sys.stderr)
-    # Restore backup
-    subprocess.run(['docker', 'rename', target + '-cfz-backup', target], capture_output=True)
-    subprocess.run(['docker', 'start', target], capture_output=True)
-    sys.exit(1)
-
-# 5. Rename new container to original name
-subprocess.run(['docker', 'rename', target + '-cfz-tmp', target], capture_output=True)
-
-# 6. Start it
-subprocess.run(['docker', 'start', target], capture_output=True)
-
-# 7. Remove backup
-subprocess.run(['docker', 'rm', target + '-cfz-backup'], capture_output=True)
-
+import json, sys
+cfg_path = '$CONFIG_FILE'
+extra = ['NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt', 'SSL_CERT_FILE=/certs/cloudfuze.crt', 'REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt']
+with open(cfg_path, 'r') as f:
+    cfg = json.load(f)
+env = cfg.get('Config', {}).get('Env', []) or []
+# Remove old cloudfuze entries if any
+env = [e for e in env if not e.startswith('NODE_EXTRA_CA_CERTS=') and not e.startswith('SSL_CERT_FILE=') and not e.startswith('REQUESTS_CA_BUNDLE=')]
+env.extend(extra)
+cfg['Config']['Env'] = env
+with open(cfg_path, 'w') as f:
+    json.dump(cfg, f)
 print('OK')
-" 2>&1
-      if [[ $? -eq 0 ]]; then
-        sleep 2
+" 2>/dev/null
+
+      docker start "$TARGET" >/dev/null 2>&1
+      sleep 2
+
+      if docker inspect --format '{{.State.Running}}' "$TARGET" 2>/dev/null | grep -q true; then
         NEW_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TARGET" 2>/dev/null)
         if [[ -n "$NEW_IP" && "$NEW_IP" != "$CONTAINER_IP" ]]; then
           iptables -t nat -D PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
@@ -508,7 +457,7 @@ print('OK')
         fi
         echo "  [OK] $TARGET -- fully governed (prompt, response, tokens, cost)"
       else
-        echo "  [!] Failed. Original container restored."
+        echo "  [!] Container failed to start. Check: docker logs $TARGET"
       fi
 
       echo ""
@@ -535,79 +484,26 @@ print('OK')
       echo "  [OK] Traffic redirect removed"
     fi
 
-    # Recreate container without our CA cert env vars and volume
-    python3 -c "
-import json, subprocess, sys
+    # Remove env vars from container config and restart
+    CID=$(docker inspect --format '{{.Id}}' "$TARGET" 2>/dev/null)
+    CONFIG_FILE="/var/lib/docker/containers/$CID/config.v2.json"
 
-target = '$TARGET'
-
-raw = subprocess.check_output(['docker', 'inspect', target])
-info = json.loads(raw)[0]
-cfg = info['Config']
-hcfg = info['HostConfig']
-
-args = ['docker', 'create', '--name', target + '-cfz-tmp']
-
-# Env vars (strip ours)
-skip_env = {'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'}
-for e in (cfg.get('Env') or []):
-    key = e.split('=')[0]
-    if key not in skip_env:
-        args += ['-e', e]
-
-# Ports
-for cport, bindings in (hcfg.get('PortBindings') or {}).items():
-    if bindings:
-        for b in bindings:
-            hp = b.get('HostPort', '')
-            hip = b.get('HostIp', '')
-            if hip and hp:
-                args += ['-p', hip + ':' + hp + ':' + cport]
-            elif hp:
-                args += ['-p', hp + ':' + cport]
-
-# Volumes (strip ours)
-for m in (hcfg.get('Binds') or []):
-    if 'cloudfuze' not in m:
-        args += ['-v', m]
-
-# Restart policy
-rp = hcfg.get('RestartPolicy', {})
-if rp.get('Name'):
-    r = rp['Name']
-    if rp.get('MaximumRetryCount', 0) > 0:
-        r += ':' + str(rp['MaximumRetryCount'])
-    args += ['--restart', r]
-
-if cfg.get('WorkingDir'):
-    args += ['-w', cfg['WorkingDir']]
-
-for k, v in (cfg.get('Labels') or {}).items():
-    args += ['--label', k + '=' + v]
-
-nm = hcfg.get('NetworkMode', '')
-if nm and nm != 'default':
-    args += ['--network', nm]
-
-args.append(cfg['Image'])
-if cfg.get('Cmd'):
-    args += cfg['Cmd']
-
-subprocess.run(['docker', 'stop', target], capture_output=True)
-subprocess.run(['docker', 'rename', target, target + '-cfz-backup'], capture_output=True)
-
-result = subprocess.run(args, capture_output=True, text=True)
-if result.returncode != 0:
-    print('  [!] Restore failed: ' + result.stderr.strip(), file=sys.stderr)
-    subprocess.run(['docker', 'rename', target + '-cfz-backup', target], capture_output=True)
-    subprocess.run(['docker', 'start', target], capture_output=True)
-    sys.exit(1)
-
-subprocess.run(['docker', 'rename', target + '-cfz-tmp', target], capture_output=True)
-subprocess.run(['docker', 'start', target], capture_output=True)
-subprocess.run(['docker', 'rm', target + '-cfz-backup'], capture_output=True)
+    if [[ -f "$CONFIG_FILE" ]]; then
+      docker stop "$TARGET" >/dev/null 2>&1
+      python3 -c "
+import json
+cfg_path = '$CONFIG_FILE'
+with open(cfg_path, 'r') as f:
+    cfg = json.load(f)
+env = cfg.get('Config', {}).get('Env', []) or []
+env = [e for e in env if not e.startswith('NODE_EXTRA_CA_CERTS=') and not e.startswith('SSL_CERT_FILE=') and not e.startswith('REQUESTS_CA_BUNDLE=')]
+cfg['Config']['Env'] = env
+with open(cfg_path, 'w') as f:
+    json.dump(cfg, f)
 print('OK')
-" 2>&1
+" 2>/dev/null
+      docker start "$TARGET" >/dev/null 2>&1
+    fi
 
     echo "  [OK] $TARGET -- governance removed"
     ;;
