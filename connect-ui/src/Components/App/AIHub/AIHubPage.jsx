@@ -1947,7 +1947,7 @@ function RuleFormModal({rule,onSave,onClose}) {
 }
 
 function ModelRoutingView() {
-  const [tab,setTab]=useState("overview");
+  const [tab,setTab]=useState("rules");
   const [rules,setRules]=useState(null);
   const [endpoints,setEndpoints]=useState(null);
   const [analytics,setAnalytics]=useState(null);
@@ -1986,10 +1986,9 @@ function ModelRoutingView() {
 
   const activeRules=rules.filter(r=>r.enabled).length;
   const tabs=[
-    {id:"overview",label:"Overview"},
     {id:"rules",label:`Rules (${rules.length})`},
-    {id:"endpoints",label:`Endpoints (${(endpoints||[]).length})`},
-    {id:"log",label:"Routing Log"},
+    // {id:"endpoints",label:`Endpoints (${(endpoints||[]).length})`},  // hidden — proxy routing pivoted to browser extension approach
+    {id:"log",label:"Routing Log",hidden:true},
   ];
 
   return (<div>
@@ -2007,10 +2006,8 @@ function ModelRoutingView() {
     <div style={{display:"flex",gap:2,marginBottom:16,borderBottom:"2px solid #f3f4f6"}}>
       {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)}
         style={{padding:"8px 18px",fontSize:13,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0044cc":"2px solid transparent",
-          background:"none",color:tab===t.id?"#0044cc":"#6b7280",cursor:"pointer",marginBottom:-2}}>{t.label}</button>)}
+          background:"none",color:t.hidden?(tab===t.id?"#0044cc":"transparent"):(tab===t.id?"#0044cc":"#6b7280"),cursor:"pointer",marginBottom:-2}}>{t.label}</button>)}
     </div>
-
-    {/* ── Overview Tab ── */}
     {tab==="overview"&&(<div>
       {analytics?.total_routed===0 ? (
         <div className="aihub_card" style={{textAlign:"center",padding:"40px 20px"}}>
@@ -4257,70 +4254,84 @@ function PolicyPacksView() {
       ]} rows={list} empty="No policy packs available."/>
     </div>
 
-    {simPack && <PackSimulation pack={simPack} onClose={()=>setSimId(null)}/>}
-
-    {openId && (!detail ? <Loading/> : <div className="aihub_card">
-      <SectionHeader
-        title={`${detail.framework} — ${detail.ruleCount} rules`}
-        hint={detail.description}
-        action={<div style={{display:"flex",gap:6}}>
-          {detail.monitored>0 && <button className="aihub_filter_btn" onClick={()=>setSimId(simId===detail.id?null:detail.id)}>
-            {simId===detail.id?"Hide simulation":"Run simulation"}
-          </button>}
-          <button className="aihub_filter_btn" onClick={()=>{setOpenId(null);setDetail(null);}}><X size={13}/> Close</button>
-        </div>}
-      />
-
-      <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:12,fontSize:11}}>
-        {Object.entries(ENFORCE_META).map(([k,m])=>(
-          <span key={k} style={{color:m.color}}>
-            <strong>{m.label}</strong> — {m.hint}
-          </span>
-        ))}
+    {/* Simulate Modal */}
+    {simPack && (
+      <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={()=>setSimId(null)}>
+        <div style={{background:"#fff",borderRadius:14,padding:28,width:800,maxHeight:"85vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.2)"}} onClick={e=>e.stopPropagation()}>
+          <PackSimulation pack={simPack} onClose={()=>setSimId(null)}/>
+        </div>
       </div>
+    )}
 
-      <DataTable columns={[
-        {label:"Rule",render:r=><>
-          <div className="aihub_text_primary">{r.title}</div>
-          <div className="aihub_text_muted">{r.citation}</div>
-        </>},
-        {label:"Type",render:r=><span style={{color:ENFORCE_META[r.enforcement].color,fontWeight:600,fontSize:11}}>{ENFORCE_META[r.enforcement].label}</span>},
-        {label:"Severity",render:r=><Badge text={r.severity} color={{critical:"#dc2626",high:"#ea580c",medium:"#d97706",low:"#65a30d"}[r.severity]||"#9ca3af"}/>},
-        {label:"State",render:r=>{
-          if(r.enforcement==="agent") return <span style={{fontSize:11,color:r.enabled?"#16a34a":"#9ca3af"}}>{r.enabled?"active":"disabled"}</span>;
-          if(r.enforcement==="dlp") return r.coverage_verified
-            ? <span style={{fontSize:11,color:"#16a34a"}}>patterns seen</span>
-            : <span style={{fontSize:11,color:"#b45309"}}>no events yet</span>;
-          return r.attestation
-            ? <span style={{fontSize:11,color:"#16a34a"}}>attested — {r.attestation.owner}</span>
-            : <span style={{fontSize:11,color:"#b45309"}}>outstanding</span>;
-        }},
-        {label:"",render:r=>{
-          if(!detail.deployed) return <span className="aihub_text_muted" style={{fontSize:11}}>deploy first</span>;
-          if(r.enforcement==="agent") return <div style={{display:"flex",gap:6,alignItems:"center"}}>
-            <button className="aihub_filter_btn" disabled={busy} onClick={()=>toggle(detail.id,r.key,!r.enabled)}>{r.enabled?"Disable":"Enable"}</button>
-            {r.tunable && <input type="number" defaultValue={r.tuned_value ?? r.conditions?.[0]?.value}
-              min={r.tunable.min} max={r.tunable.max} title={r.tunable.label} disabled={busy}
-              style={{width:70,padding:"3px 6px",fontSize:12,border:"1px solid #e5e7eb",borderRadius:4}}
-              onBlur={e=>{const v=e.target.value; if(v!=="") tune(detail.id,r.key,v);}}/>}
-          </div>;
-          if(r.enforcement==="attestation") return r.attestation
-            ? <button className="aihub_filter_btn" disabled={busy} onClick={()=>unattest(detail.id,r.key)}>Clear</button>
-            : <button className="aihub_action_btn warn" disabled={busy} onClick={()=>{
-                const owner=window.prompt(`Who is accountable for this control?\n\n${r.evidence||""}`);
-                if(owner) attest(detail.id,r.key,owner);
-              }}>Attest</button>;
-          return <span className="aihub_text_muted" style={{fontSize:11}}>{(r.patterns||[]).length} patterns</span>;
-        }},
-      ]} rows={detail.rules||[]} empty="No rules in this pack."/>
+    {/* Review Modal */}
+    {openId && (!detail ? <Loading/> : (
+      <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={()=>{setOpenId(null);setDetail(null);}}>
+        <div style={{background:"#fff",borderRadius:14,padding:28,width:900,maxHeight:"85vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.2)"}} onClick={e=>e.stopPropagation()}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+            <div>
+              <h3 style={{margin:"0 0 4px",fontSize:18,fontWeight:700}}>{detail.framework} — {detail.ruleCount} rules</h3>
+              <div className="aihub_text_muted">{detail.description}</div>
+            </div>
+            <div style={{display:"flex",gap:6}}>
+              {detail.monitored>0 && <button className="aihub_filter_btn" onClick={()=>setSimId(simId===detail.id?null:detail.id)}>
+                {simId===detail.id?"Hide simulation":"Run simulation"}
+              </button>}
+              <button onClick={()=>{setOpenId(null);setDetail(null);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:20,color:"#6b7280"}}>✕</button>
+            </div>
+          </div>
 
-      <p className="aihub_text_muted" style={{fontSize:11,marginTop:8}}>
-        Deploying creates {detail.enforceable} policies that the engine evaluates on every agent scan. The
-        {" "}{detail.monitored} monitored rules rely on prompt detection already running on enrolled endpoints —
-        their coverage is confirmed from observed events. The {detail.attestations} attestations require a named
-        owner and are never satisfied automatically.
-      </p>
-    </div>)}
+          <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:12,fontSize:11}}>
+            {Object.entries(ENFORCE_META).map(([k,m])=>(
+              <span key={k} style={{color:m.color}}>
+                <strong>{m.label}</strong> — {m.hint}
+              </span>
+            ))}
+          </div>
+
+          <DataTable columns={[
+            {label:"Rule",render:r=><>
+              <div className="aihub_text_primary">{r.title}</div>
+              <div className="aihub_text_muted">{r.citation}</div>
+            </>},
+            {label:"Type",render:r=><span style={{color:ENFORCE_META[r.enforcement].color,fontWeight:600,fontSize:11}}>{ENFORCE_META[r.enforcement].label}</span>},
+            {label:"Severity",render:r=><Badge text={r.severity} color={{critical:"#dc2626",high:"#ea580c",medium:"#d97706",low:"#65a30d"}[r.severity]||"#9ca3af"}/>},
+            {label:"State",render:r=>{
+              if(r.enforcement==="agent") return <span style={{fontSize:11,color:r.enabled?"#16a34a":"#9ca3af"}}>{r.enabled?"active":"disabled"}</span>;
+              if(r.enforcement==="dlp") return r.coverage_verified
+                ? <span style={{fontSize:11,color:"#16a34a"}}>patterns seen</span>
+                : <span style={{fontSize:11,color:"#b45309"}}>no events yet</span>;
+              return r.attestation
+                ? <span style={{fontSize:11,color:"#16a34a"}}>attested — {r.attestation.owner}</span>
+                : <span style={{fontSize:11,color:"#b45309"}}>outstanding</span>;
+            }},
+            {label:"",render:r=>{
+              if(!detail.deployed) return <span className="aihub_text_muted" style={{fontSize:11}}>deploy first</span>;
+              if(r.enforcement==="agent") return <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <button className="aihub_filter_btn" disabled={busy} onClick={()=>toggle(detail.id,r.key,!r.enabled)}>{r.enabled?"Disable":"Enable"}</button>
+                {r.tunable && <input type="number" defaultValue={r.tuned_value ?? r.conditions?.[0]?.value}
+                  min={r.tunable.min} max={r.tunable.max} title={r.tunable.label} disabled={busy}
+                  style={{width:70,padding:"3px 6px",fontSize:12,border:"1px solid #e5e7eb",borderRadius:4}}
+                  onBlur={e=>{const v=e.target.value; if(v!=="") tune(detail.id,r.key,v);}}/>}
+              </div>;
+              if(r.enforcement==="attestation") return r.attestation
+                ? <button className="aihub_filter_btn" disabled={busy} onClick={()=>unattest(detail.id,r.key)}>Clear</button>
+                : <button className="aihub_action_btn warn" disabled={busy} onClick={()=>{
+                    const owner=window.prompt(`Who is accountable for this control?\n\n${r.evidence||""}`);
+                    if(owner) attest(detail.id,r.key,owner);
+                  }}>Attest</button>;
+              return <span className="aihub_text_muted" style={{fontSize:11}}>{(r.patterns||[]).length} patterns</span>;
+            }},
+          ]} rows={detail.rules||[]} empty="No rules in this pack."/>
+
+          <p className="aihub_text_muted" style={{fontSize:11,marginTop:8}}>
+            Deploying creates {detail.enforceable} policies that the engine evaluates on every agent scan. The
+            {" "}{detail.monitored} monitored rules rely on prompt detection already running on enrolled endpoints —
+            their coverage is confirmed from observed events. The {detail.attestations} attestations require a named
+            owner and are never satisfied automatically.
+          </p>
+        </div>
+      </div>
+    ))}
   </div>);
 }
 
@@ -5054,8 +5065,8 @@ const TAB_GROUPS = {
     hint: "Wiring and one-off assessments. Configure once, then rarely visit.",
     tabs: [
       { slug: "integrations", label: "Integrations",      component: IntegrationsView },
-      { slug: "sdk",          label: "Developer SDK",     component: DeveloperSDKView },
-      { slug: "server-monitor", label: "Server Monitor",  component: ServerMonitorView },
+      { slug: "sdk",            label: "Developer SDK",    component: DeveloperSDKView, hidden: true },
+      { slug: "server-monitor", label: "Server Monitor",  component: ServerMonitorView, hidden: true },
       // { slug: "copilot",      label: "Copilot Readiness", component: CopilotReadinessView },  // hidden — not working reliably
       // Machines is commented out because Policies & Risk → Risk Scores already
       // lists every enrolled machine: all of its rows carry a hostname, sourced
@@ -5112,6 +5123,7 @@ function TabGroup({ group }) {
       {group.tabs.map((t) => (
         <button key={t.slug}
                 className={`aihub_group_tab ${t.slug === active.slug ? "active" : ""}`}
+                style={t.hidden ? {color: t.slug === active.slug ? undefined : "transparent"} : undefined}
                 onClick={() => select(t)}>
           {t.label}
         </button>
