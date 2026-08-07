@@ -172,17 +172,53 @@ export function mountRouting(app, db) {
 
   app.get('/api/v1/routing/log', a(async (req, res) => {
     const limit = Math.min(Number(req.query.limit) || 100, 500);
-    const rows = await log()
-      .find({}).sort({ timestamp: -1 }).limit(limit).project({ _id: 0 }).toArray();
-    res.json(rows);
+    // Routing events are stored in dlp_events (sent by browser extension as
+    // kind: 'model_routed'). The dedicated routing_log collection only has
+    // entries from the proxy path. Merge both sources.
+    const [dlpRows, logRows] = await Promise.all([
+      db.collection('dlp_events')
+        .find({ event_kind: 'model_routed' })
+        .sort({ occurred_at: -1 }).limit(limit)
+        .project({ _id: 0, id: 1, machine_id: 1, occurred_at: 1, ai_service: 1, metadata_json: 1 })
+        .toArray(),
+      log().find({}).sort({ timestamp: -1 }).limit(limit).project({ _id: 0 }).toArray(),
+    ]);
+    // Normalize dlp_events to routing log format
+    const normalized = dlpRows.map(r => {
+      let meta = {};
+      try { meta = typeof r.metadata_json === 'string' ? JSON.parse(r.metadata_json) : (r.metadata_json || {}); } catch {}
+      return {
+        timestamp: r.occurred_at,
+        machine_id: r.machine_id,
+        original_model: null,
+        routed_model: meta.routed_model || null,
+        rule_name: meta.rule_name || null,
+        sensitivity: meta.sensitivity || null,
+        complexity: meta.complexity || meta.current_tier || null,
+        provider: meta.provider || null,
+        ai_service: r.ai_service || null,
+        source: 'browser_extension',
+      };
+    });
+    // Merge and sort by time
+    const all = [...normalized, ...logRows.map(r => ({ ...r, source: 'proxy' }))];
+    all.sort((a, b) => (b.timestamp || b.occurred_at || '') > (a.timestamp || a.occurred_at || '') ? 1 : -1);
+    res.json(all.slice(0, limit));
   }));
 
   // ── Analytics ───────────────────────────────────────────────────────
 
   app.get('/api/v1/routing/analytics', a(async (req, res) => {
-    const totalRouted  = await log().countDocuments();
-    const last24h      = await log().countDocuments({ timestamp: { $gte: new Date(Date.now() - 86400000) } });
-    const last7d       = await log().countDocuments({ timestamp: { $gte: new Date(Date.now() - 7 * 86400000) } });
+    // Count from BOTH dlp_events (browser extension) and routing_log (proxy)
+    const dlpRouted = await db.collection('dlp_events').countDocuments({ event_kind: 'model_routed' });
+    const proxyRouted = await log().countDocuments();
+    const totalRouted = dlpRouted + proxyRouted;
+    const now24h = new Date(Date.now() - 86400000).toISOString();
+    const now7d = new Date(Date.now() - 7 * 86400000).toISOString();
+    const dlp24h = await db.collection('dlp_events').countDocuments({ event_kind: 'model_routed', occurred_at: { $gte: now24h } });
+    const dlp7d = await db.collection('dlp_events').countDocuments({ event_kind: 'model_routed', occurred_at: { $gte: now7d } });
+    const last24h = dlp24h + await log().countDocuments({ timestamp: { $gte: new Date(Date.now() - 86400000) } });
+    const last7d = dlp7d + await log().countDocuments({ timestamp: { $gte: new Date(Date.now() - 7 * 86400000) } });
     const activeRules  = await rules().countDocuments({ enabled: true });
     const totalEndpoints = await endpoints().countDocuments({ enabled: true });
 

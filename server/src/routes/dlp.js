@@ -139,6 +139,14 @@ export function mountDlp(app, db) {
             duration_ms: e.duration_ms ?? null,
             length_bucket: e.length_bucket,
             tab_host: e.tabHost,
+          } : e.kind === 'model_routed' ? {
+            routed_model: e.routed_model ?? e.routed_ui_name ?? null,
+            rule_name: e.rule_name ?? null,
+            complexity: e.complexity ?? null,
+            current_tier: e.current_tier ?? null,
+            provider: e.provider ?? null,
+            ui_changed: e.ui_changed ?? null,
+            tab_host: e.tabHost,
           } : {
             matches: e.matches ?? [],
             length_bucket: e.length_bucket,
