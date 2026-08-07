@@ -122,32 +122,51 @@ function App() {
           <Route path="/MFA" element={<MFA />} />
           <Route path="/DataSprawl" element={<DataDashboard />} />
           <Route path="/AgentGovernance" element={<AgentGovernance />} />
+          {/* ── AI Hub: six top-level screens ───────────────────────────────────
+              Sub-screens are tabs within these (TAB_GROUPS in AIHubPage.jsx),
+              addressed as ?tab=<slug> so deep links survive being pasted into
+              tickets. Every former URL redirects to its new home + tab below —
+              without that, sixteen live bookmarks would land on Overview. */}
           <Route path="/AIHub/Overview" element={<AIHubPage page="Overview" />} />
-          <Route path="/AIHub/Machines" element={<AIHubPage page="Machines" />} />
-          {/* <Route path="/AIHub/Tools" element={<AIHubPage page="Tools" />} /> hidden for now */}
-          <Route path="/AIHub/Agents" element={<AIHubPage page="Agents" />} />
-          {/* <Route path="/AIHub/ServerAgents" element={<AIHubPage page="ServerAgents" />} /> hidden for now */}
-          <Route path="/AIHub/DLP" element={<AIHubPage page="DLP" />} />
-          <Route path="/AIHub/SessionReplay" element={<AIHubPage page="SessionReplay" />} />
-          <Route path="/AIHub/AIUsage" element={<AIHubPage page="AIUsage" />} />
-          <Route path="/AIHub/ClaudeUsage" element={<AIHubPage page="ClaudeUsage" />} />
-          <Route path="/AIHub/PolicyPacks" element={<AIHubPage page="PolicyPacks" />} />
-          {/* Simulation now runs per pack from inside Policy Packs — keep the old
-              link working rather than dropping bookmarks onto the Overview page. */}
-          <Route path="/AIHub/PolicySimulator" element={<Navigate to="/AIHub/PolicyPacks" replace />} />
-          {/* EU AI Act hidden until its intake is seeded from the discovered agent registry.
-              <Route path="/AIHub/EuAiAct" element={<AIHubPage page="EuAiAct" />} /> */}
-          <Route path="/AIHub/Platforms" element={<AIHubPage page="Platforms" />} />
-          <Route path="/AIHub/AgentGovernance" element={<AIHubPage page="AgentGovernance" />} />
-          <Route path="/AIHub/ServerMonitor" element={<AIHubPage page="ServerMonitor" />} />
-          <Route path="/AIHub/AIBudget" element={<AIHubPage page="AIBudget" />} />
-          <Route path="/AIHub/CopilotReadiness" element={<AIHubPage page="CopilotReadiness" />} />
-          <Route path="/AIHub/ModelRouting" element={<AIHubPage page="ModelRouting" />} />
-          <Route path="/AIHub/RiskScores" element={<AIHubPage page="RiskScores" />} />
-          <Route path="/AIHub/AIRegistry" element={<AIHubPage page="AIRegistry" />} />
+          <Route path="/AIHub/Inventory" element={<AIHubPage page="Inventory" />} />
+          <Route path="/AIHub/Activity" element={<AIHubPage page="Activity" />} />
+          <Route path="/AIHub/PoliciesRisk" element={<AIHubPage page="PoliciesRisk" />} />
+          {/* Its own screen, not a Policies & Risk tab — an approval queue is
+              somebody waiting on a decision, so it stays one click from anywhere. */}
           <Route path="/AIHub/AccessRequests" element={<AIHubPage page="AccessRequests" />} />
-          <Route path="/AIHub/Integrations" element={<AIHubPage page="Integrations" />} />
-          <Route path="/AIHub/DeveloperSDK" element={<AIHubPage page="DeveloperSDK" />} />
+          <Route path="/AIHub/AgentGovernance" element={<AIHubPage page="AgentGovernance" />} />
+          <Route path="/AIHub/Setup" element={<AIHubPage page="Setup" />} />
+
+          {/* Reachable by URL only — hidden from the nav before this regrouping too. */}
+          <Route path="/AIHub/AIUsage" element={<AIHubPage page="AIUsage" />} />
+          {/* <Route path="/AIHub/Tools" element={<AIHubPage page="Tools" />} /> hidden for now */}
+          {/* <Route path="/AIHub/ServerAgents" element={<AIHubPage page="ServerAgents" />} /> hidden for now */}
+          {/* <Route path="/AIHub/ServerMonitor" element={<AIHubPage page="ServerMonitor" />} /> disabled — needs SDK first */}
+
+          {/* Legacy URLs → new home + tab. */}
+          <Route path="/AIHub/AIRegistry"       element={<Navigate to="/AIHub/Inventory?tab=systems" replace />} />
+          <Route path="/AIHub/Agents"           element={<Navigate to="/AIHub/Inventory?tab=agents" replace />} />
+          <Route path="/AIHub/Platforms"        element={<Navigate to="/AIHub/Inventory?tab=platforms" replace />} />
+          <Route path="/AIHub/DLP"              element={<Navigate to="/AIHub/Activity?tab=prompts" replace />} />
+          <Route path="/AIHub/SessionReplay"    element={<Navigate to="/AIHub/Activity?tab=sessions" replace />} />
+          <Route path="/AIHub/ClaudeUsage"      element={<Navigate to="/AIHub/Activity?tab=claude" replace />} />
+          <Route path="/AIHub/PolicyPacks"      element={<Navigate to="/AIHub/PoliciesRisk?tab=packs" replace />} />
+          <Route path="/AIHub/RiskScores"       element={<Navigate to="/AIHub/PoliciesRisk?tab=risk" replace />} />
+          <Route path="/AIHub/ModelRouting"     element={<Navigate to="/AIHub/Activity?tab=routing" replace />} />
+          <Route path="/AIHub/Integrations"     element={<Navigate to="/AIHub/Setup?tab=integrations" replace />} />
+          <Route path="/AIHub/DeveloperSDK"     element={<Navigate to="/AIHub/Setup?tab=sdk" replace />} />
+          <Route path="/AIHub/CopilotReadiness" element={<Navigate to="/AIHub/Setup?tab=copilot" replace />} />
+          {/* Machines has no tab of its own — Risk Scores already lists every
+              enrolled machine by hostname, so send it straight there. */}
+          <Route path="/AIHub/Machines"         element={<Navigate to="/AIHub/PoliciesRisk?tab=risk" replace />} />
+          {/* Simulation runs per pack from inside Policy Packs. AI Budget was Agent
+              Governance's BudgetTab surfaced a second time — its Cost/Budget tabs
+              are the one home for it now. */}
+          <Route path="/AIHub/PolicySimulator"  element={<Navigate to="/AIHub/PoliciesRisk?tab=packs" replace />} />
+          <Route path="/AIHub/AIBudget"         element={<Navigate to="/AIHub/AgentGovernance" replace />} />
+          {/* EU AI Act returns as a PoliciesRisk tab once its intake is seeded from
+              the discovered agent registry. */}
+          <Route path="/AIHub/EuAiAct"          element={<Navigate to="/AIHub/PoliciesRisk?tab=packs" replace />} />
           <Route path="/Data" element={<DataDashboard />} />
           <Route path="/MessageSprawl" element={<MessageDashboard />} />
           <Route path="/EmailSprawl" element={<EmailDashboard />} />

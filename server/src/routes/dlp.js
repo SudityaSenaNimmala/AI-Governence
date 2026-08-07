@@ -167,6 +167,22 @@ export function mountDlp(app, db) {
   }));
 
   // Stream the captured content for a single event.
+  //
+  // SECURITY — UNAUTHENTICATED, KNOWN GAP, DEFERRED BY DECISION.
+  // This route returns raw captured prompt bodies, AI responses and uploaded file
+  // bytes (up to MAX_CONTENT_BYTES). POST /api/v1/dlp is gated by
+  // requireMachineAuth; this route, which serves the same bytes back out, is not
+  // gated at all. Port 8787 is published publicly by docker-compose and
+  // app.use(cors()) sends Access-Control-Allow-Origin: *, so any page a user
+  // visits can enumerate GET /api/v1/dlp and drain the corpus cross-origin.
+  //
+  // The fix is one word — add requireAdminAuth below — but it must land together
+  // with a credential the dashboard can actually send: the content viewer at
+  // AIHubPage.jsx:94 uses a bare fetch() with no Authorization header, so gating
+  // this route on its own breaks the "View" button in AI Activity. Scheduled with
+  // the session-auth work, not before.
+  //
+  // app.get('/api/v1/dlp/:id/content', requireAdminAuth, a(async (req, res) => {
   app.get('/api/v1/dlp/:id/content', a(async (req, res) => {
     const id = req.params.id;
 
@@ -177,13 +193,16 @@ export function mountDlp(app, db) {
     if (!row) return res.status(404).json({ error: 'no content captured for this event' });
 
     if (row.content_text != null && (row.content_blob == null || row.content_blob.length === 0)) {
-      res.setHeader('Content-Type', row.mime_type || 'text/plain; charset=utf-8');
+      // safeMimeType, not row.mime_type: the value is client-supplied at ingest.
+      res.setHeader('Content-Type', safeMimeType(row.mime_type, 'text/plain; charset=utf-8'));
+      res.setHeader('X-Content-Type-Options', 'nosniff');
       if (row.filename) res.setHeader('Content-Disposition', `inline; filename="${encodeFilename(row.filename)}"`);
       if (row.truncated) res.setHeader('X-Content-Truncated', '1');
       return res.send(row.content_text);
     }
     if (row.content_blob) {
-      res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+      res.setHeader('Content-Type', safeMimeType(row.mime_type, 'application/octet-stream'));
+      res.setHeader('X-Content-Type-Options', 'nosniff');
       if (row.filename) res.setHeader('Content-Disposition', `inline; filename="${encodeFilename(row.filename)}"`);
       if (row.truncated) res.setHeader('X-Content-Truncated', '1');
       const buf = Buffer.isBuffer(row.content_blob) ? row.content_blob : Buffer.from(row.content_blob.buffer || row.content_blob);
@@ -193,18 +212,42 @@ export function mountDlp(app, db) {
   }));
 
   // Query — recent events.
+  //
+  // Every filter value is coerced with String() before it reaches Mongo. Express's
+  // default extended query parser turns `?severity[$ne]=x` into an OBJECT, which
+  // used to land in the filter verbatim and be evaluated as a query operator:
+  // `?severity[$ne]=zzz` returned all 500 events instead of 0, and the same trick
+  // on machineId defeated per-machine scoping. String() collapses the object to
+  // harmless text so the filter can only ever mean equality.
+  //
+  // `severity` also accepts a comma list (e.g. "critical,high") validated against
+  // SEVERITY_VALUES. Callers that want only the events worth reviewing can now say
+  // so, instead of pulling the newest N of every severity and filtering client-side
+  // — which is how the dashboard ended up showing an empty "Sensitive prompts"
+  // table underneath a "1,196 high/critical" counter.
   app.get('/api/v1/dlp', a(async (req, res) => {
     const { service, severity, machineId, limit = 500 } = req.query;
     const filter = {};
-    if (service)    filter.ai_service = service;
-    if (severity)   filter.secret_class = severity;
-    if (machineId)  filter.machine_id = machineId;
+    if (service)   filter.ai_service = String(service);
+    if (machineId) filter.machine_id = String(machineId);
+    if (severity) {
+      // Unknown names are dropped rather than passed through, so a bogus value
+      // yields an empty result set instead of an unfiltered one.
+      const wanted = String(severity).split(',').map((s) => s.trim()).filter((s) => SEVERITY_VALUES.has(s));
+      if (wanted.length === 1)      filter.secret_class = wanted[0];
+      else if (wanted.length > 1)   filter.secret_class = { $in: wanted };
+      else                          filter.secret_class = '__no_such_severity__';
+    }
+
+    // Cap the page size: an unbounded Number(limit) let one request pull the whole
+    // collection, and NaN from a non-numeric value silently became "no limit".
+    const lim = Math.min(Math.max(Number(limit) || 500, 1), 2000);
 
     const [rows, platforms] = await Promise.all([
       db.collection('dlp_events')
         .find(filter)
         .sort({ occurred_at: -1 })
-        .limit(Number(limit))
+        .limit(lim)
         .project({ _id: 0 })
         .toArray(),
       db.collection('ai_platforms')
@@ -576,6 +619,40 @@ function normalizeExternalConvId(value) {
 
 function encodeFilename(name) {
   return String(name).replace(/[\r\n"\\]/g, '_');
+}
+
+// Severity names accepted by the ?severity= filter. Anything else is dropped, so a
+// caller cannot smuggle a query operator or a regex through this parameter.
+const SEVERITY_VALUES = new Set(['critical', 'high', 'moderate', 'medium', 'low']);
+
+// Response Content-Type allowlist for GET /api/v1/dlp/:id/content.
+//
+// mime_type arrives in the ingest body (validateEvent does not constrain it), so
+// echoing it back into a response header let a caller choose how the browser
+// interprets stored bytes. Posting content_text of "<script>…</script>" with
+// mime_type "text/html" made this route serve executable HTML on the API origin —
+// the same origin every other endpoint here lives on.
+//
+// An allowlist rather than a denylist, and deliberately NOT a `text/*` prefix
+// test: text/html and image/svg+xml both script, and both are "text-ish". Only
+// these exact types are echoed; anything else — including anything new an agent
+// starts sending — degrades to the caller-supplied fallback. Paired with
+// X-Content-Type-Options: nosniff so the browser cannot second-guess it.
+//
+// Covers every type actually present in dlp_content today (text/plain, docx,
+// png, jpeg, pdf, zip) plus the obvious near neighbours.
+const SAFE_MIME_TYPES = new Set([
+  'text/plain', 'text/plain; charset=utf-8', 'text/csv', 'application/json',
+  'application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+  'application/zip', 'application/x-zip-compressed', 'application/octet-stream',
+  'application/msword', 'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+]);
+function safeMimeType(mime, fallback) {
+  const m = String(mime || '').trim().toLowerCase();
+  return SAFE_MIME_TYPES.has(m) ? m : fallback;
 }
 
 function validateEvent(e) {

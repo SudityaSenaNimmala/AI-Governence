@@ -6,13 +6,27 @@ const router = Router();
 
 const DATA_CLASSIFICATIONS = ["unclassified", "internal", "confidential", "restricted"] as const;
 
+/** Neutralise regex metacharacters so caller text matches literally. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 router.get("/", async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit as string) || 200, 500);
     const filter: Record<string, any> = {};
-    if (req.query.data_classification) filter.data_classification = req.query.data_classification;
-    if (req.query.business_unit) filter.business_unit = { $regex: req.query.business_unit as string, $options: "i" };
-    if (req.query.platform) filter.platform = req.query.platform;
+    // String() on each: Express's extended query parser turns `?platform[$ne]=x`
+    // into an object, which Mongo would evaluate as a query operator.
+    if (req.query.data_classification) filter.data_classification = String(req.query.data_classification);
+    if (req.query.platform) filter.platform = String(req.query.platform);
+    // business_unit stays a substring search, but the needle is escaped first.
+    // Unescaped, the caller's text was compiled as a regex by Mongo with no
+    // timeout: `?business_unit=(` returned a 500 leaking the PCRE error, and a
+    // catastrophic pattern (planted alongside a long stored value via the PUT
+    // below) burns database CPU that affects every other collection.
+    if (req.query.business_unit) {
+      filter.business_unit = { $regex: escapeRegExp(String(req.query.business_unit)), $options: "i" };
+    }
 
     const records = await getDb().collection("agent_metadata")
       .find(filter, { projection: { _id: 0 } })

@@ -28,10 +28,20 @@ export function mountSdk(app, db) {
     res.status(201).json(project);
   }));
 
-  // List all SDK projects
+  // List all SDK projects.
+  //
+  // api_key is projected OUT, not just _id. It used to ship in full to every
+  // caller of this route, and POST /api/v1/sdk/events authenticates with exactly
+  // that value — so listing projects handed out the credential that the ingest
+  // endpoint checks, defeating the SDK's own auth.
+  //
+  // The full key is returned exactly once, by POST above, which is where the
+  // dashboard shows it for copying. api_key_prefix is enough to tell two projects
+  // apart in a list without being usable. The snippet builder already degrades to
+  // a "cfsk_••••" placeholder when the key is absent, so nothing breaks.
   app.get('/api/v1/sdk/projects', a(async (req, res) => {
     const projects = await col()
-      .find({}, { projection: { _id: 0 } })
+      .find({}, { projection: { _id: 0, api_key: 0 } })
       .sort({ created_at: -1 })
       .toArray();
     res.json(projects);
@@ -39,8 +49,15 @@ export function mountSdk(app, db) {
 
   // Delete a project
   app.delete('/api/v1/sdk/projects/:id', a(async (req, res) => {
-    await col().deleteOne({ id: req.params.id });
-    res.json({ ok: true });
+    const id = String(req.params.id);
+    // Delete the project's events too. Without this the events survived their
+    // parent: /sdk/events?project_id=<deleted> still returned rows, and
+    // /sdk/stats counted them, so the dashboard showed "1 project, 2 events"
+    // with one event belonging to nothing. Events first, so a failure midway
+    // leaves the project (and therefore a way to retry) rather than orphans.
+    const ev = await events().deleteMany({ project_id: id });
+    await col().deleteOne({ id });
+    res.json({ ok: true, events_deleted: ev.deletedCount });
   }));
 
   // SDK stats

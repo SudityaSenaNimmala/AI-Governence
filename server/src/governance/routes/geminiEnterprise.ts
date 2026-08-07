@@ -34,10 +34,11 @@ router.post("/connect", async (req, res) => {
   try {
     const { service_account_json, gcp_project_id, engine_id, location, collection, admin_email } = req.body;
 
-    if (!engine_id || !String(engine_id).trim()) {
-      res.status(400).json({ error: "engine_id (the Gemini Enterprise app ID / cid) is required" });
-      return;
-    }
+    // engine_id is OPTIONAL. Stored empty, it means "scan every app in the
+    // project" — GET /data enumerates them through the same credentials. It used
+    // to be rejected outright, which forced an org with several Gemini Enterprise
+    // apps to name one and left the agents in the others undiscovered.
+    // A supplied value still pins the scan to that single app.
     const loc = (location && String(location).trim()) || DEFAULT_LOCATION;
     const coll = (collection && String(collection).trim()) || DEFAULT_COLLECTION;
 
@@ -135,12 +136,57 @@ router.get("/data", async (req, res) => {
   try {
     const row = await loadKey(oauthKeyId);
     if (!row) { res.status(400).json({ error: "No Gemini Enterprise credentials found. Connect Gemini Enterprise first." }); return; }
-    if (!row.gemini_engine_id) { res.status(400).json({ error: "No Gemini Enterprise app ID configured. Reconnect with the app ID (cid)." }); return; }
 
     const { client, engineId, location, collection } = clientFromKey(row);
-    const result = await client.discoverGeminiEnterprise(engineId, location, collection);
 
-    res.json({ ...result, lastUpdated: new Date().toISOString() });
+    // Which engines (apps) to scan.
+    //
+    // A configured engine id still wins, so an existing connection behaves
+    // exactly as before. When none is set, every engine in the project is
+    // enumerated through the same OAuth credentials instead of the request being
+    // rejected — an organisation with several Gemini Enterprise apps previously
+    // had to pick one, and the agents in the rest were simply never seen.
+    let engineIds: string[] = engineId ? [engineId] : [];
+    const warnings: string[] = [];
+    if (!engineIds.length) {
+      const apps = await client.listAgentBuilderApps(location);
+      // Engine `name` is the full resource path; the id is its last segment.
+      engineIds = apps.map((a) => String(a.name || "").split("/").pop() || "").filter(Boolean);
+      if (!engineIds.length) {
+        res.status(400).json({
+          error: "No Gemini Enterprise app could be found in this project. Reconnect with the app ID (cid), " +
+                 "or grant the service account Discovery Engine Viewer so apps can be listed automatically.",
+        });
+        return;
+      }
+      console.log(`[GeminiEnterprise] Discovered ${engineIds.length} engine(s): ${engineIds.join(", ")}`);
+    }
+
+    // Merge results across engines. Each is scanned independently so one
+    // inaccessible app does not lose the others.
+    const merged = { engine: null as any, engines: [] as any[], agents: [] as any[], chats: [] as any[], knowledge: [] as any[], files: [] as any[] };
+    for (const eid of engineIds) {
+      try {
+        const r = await client.discoverGeminiEnterprise(eid, location, collection);
+        if (!merged.engine) merged.engine = r.engine;      // first, for back-compat
+        merged.engines.push(r.engine);
+        merged.agents.push(...r.agents);
+        merged.chats.push(...r.chats);
+        merged.knowledge.push(...r.knowledge);
+        merged.files.push(...(r.files || []));
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(`[GeminiEnterprise] Engine ${eid} failed: ${msg}`);
+        warnings.push(`Gemini Enterprise app ${eid}: ${msg}`);
+      }
+    }
+
+    if (!merged.engine) {
+      res.status(502).json({ error: "None of the Gemini Enterprise apps could be read.", warnings });
+      return;
+    }
+
+    res.json({ ...merged, warnings, engines_scanned: engineIds, lastUpdated: new Date().toISOString() });
   } catch (err) {
     if (err instanceof GoogleWorkspaceError && (err.status === 401 || err.status === 403)) {
       res.status(403).json({ error: "Google auth failed. Ensure the service account has the Discovery Engine Viewer role on the project." });

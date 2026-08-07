@@ -1,7 +1,13 @@
 import type { RiskLevel, RiskAssessment } from "../types/agent.js";
+import { complianceToRisk, scoreToLevel, RISK_SCALE_MARKER } from "../../lib/risk-scale.js";
 
-// Per PRD Section 4.2: Risk signals and weights
-// Score 0-100 where LOWER = HIGHER RISK (follows compliance scoring convention per PRD)
+// Per PRD Section 4.2: Risk signals and weights.
+//
+// NOTE ON DIRECTION: the deduction logic below still counts DOWN from 100 (a
+// compliance score, per the PRD). The value this module RETURNS is converted to
+// the product-wide forward risk scale — 0 = safe, 100 = maximum risk — by
+// complianceToRisk() at the end of assessRisk(). See server/src/lib/risk-scale.js
+// for why. Do not reintroduce local score→level bands here.
 
 const dangerousScopes = new Set([
   "Mail.ReadWrite", "Mail.ReadWrite.All", "Mail.Send",
@@ -232,25 +238,34 @@ export function assessRisk(params: {
     score += 8;
   }
 
-  // Clamp score
-  score = Math.max(0, Math.min(100, score));
-
-  // Determine level from score (lower = more risky)
-  let level: RiskLevel;
-  if (score <= 25) level = "critical";
-  else if (score <= 50) level = "high";
-  else if (score <= 75) level = "medium";
-  else level = "low";
+  // Everything above computes a COMPLIANCE score: it starts at 100 and deducts a
+  // penalty per failed control. That is a fine way to express "how many controls
+  // are satisfied", but it is the opposite of a risk score, and it was being
+  // published in a field called `risk_score` alongside forward-scaled rows from
+  // the endpoint scanner. Result on screen: "87 — Low" in green directly above
+  // "42 — High" in red, from the same column of the same table.
+  //
+  // Convert once, here at the boundary, instead of rewriting the deduction rules —
+  // the rules and their weights keep their existing reviewed behaviour, and every
+  // consumer downstream now sees one direction: higher = riskier.
+  const complianceScore = Math.max(0, Math.min(100, score));
+  const riskScore = complianceToRisk(complianceScore) as number;
+  const level = scoreToLevel(riskScore) as RiskLevel;
 
   if (recommendations.length === 0) {
     recommendations.push("Continue monitoring — agent is within acceptable risk parameters");
   }
 
   return {
-    score,
+    score: riskScore,
     level,
+    // Stamps the scale so a reader can tell a forward score from a legacy
+    // compliance score. Without this marker, normalizeStoredRisk() assumes the
+    // document is legacy and converts it — which is the safe default, since every
+    // risk object written before this change genuinely was one.
+    scale: RISK_SCALE_MARKER,
     factors,
     recommendations,
     computedAt: new Date().toISOString(),
-  };
+  } as RiskAssessment;
 }

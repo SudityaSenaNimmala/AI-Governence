@@ -120,6 +120,20 @@ export interface PowerPlatformEnvironment {
     displayName: string;
     environmentType: string; // Production, Sandbox, etc.
     states: { management: { id: string } };
+    /**
+     * Present only when the environment has a Dataverse database attached.
+     * `instanceUrl` is the org URL (https://org12345.crm.dynamics.com/) that a
+     * Dataverse token is scoped to — which is why discovering it removes the need
+     * to ask an admin to type one in. Environments without a database (some
+     * developer/trial ones) omit this entirely, so it must stay optional.
+     */
+    linkedEnvironmentMetadata?: {
+      instanceUrl?: string;
+      instanceApiUrl?: string;
+      friendlyName?: string;
+      domainName?: string;
+      state?: string;
+    };
   };
 }
 

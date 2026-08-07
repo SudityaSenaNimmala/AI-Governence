@@ -84,6 +84,18 @@ function MicrosoftForm({ onClose, mode }) {
   const [showScopes, setShowScopes] = useState(false);
   const [savedCredentials, setSavedCredentials] = useState(null);
   const [changeSecret, setChangeSecret] = useState(false);
+  // null = still checking; { configured, missing } once known. Drives whether the
+  // Connect button or the setup instructions are shown.
+  const [msAuth, setMsAuth] = useState(null);
+
+  useEffect(() => {
+    fetch("/api/auth/microsoft/status")
+      .then((r) => r.json())
+      .then(setMsAuth)
+      // A server too old to have the route is simply not configured, which is the
+      // honest reading — show the setup panel rather than a button that 404s.
+      .catch(() => setMsAuth({ configured: false, missing: ["MS_CLIENT_ID", "MS_CLIENT_SECRET", "MS_REDIRECT_URI"] }));
+  }, []);
 
   useEffect(() => {
     if (isUpdateMode) return;
@@ -171,45 +183,78 @@ function MicrosoftForm({ onClose, mode }) {
       )}
 
       <form onSubmit={handleSubmit}>
+        {/* Interactive admin consent replaces the tenant / client-ID / secret
+            fields. The admin clicks through to Microsoft, signs in and approves
+            once; we receive their tenant on the callback. They never see a client
+            ID because the app registration is CloudFuze's, not theirs.
+
+            The old three-field form is gone deliberately — keeping both would ask
+            every admin to choose between two things that look equivalent and are
+            not. Connections made the old way still work: the server reads
+            client_id/client_secret off the stored row either way. */}
         {!isUpdateMode && (
           <>
-            <div className="ag_form_group">
-              <label className="ag_form_label">Tenant ID <span style={{ color: "#ef4444" }}>*</span></label>
-              <input type="text" placeholder="e.g. contoso.onmicrosoft.com or GUID" value={tenantId} onChange={(e) => setTenantId(e.target.value)} className="ag_form_input" autoComplete="off" />
-            </div>
-            <div className="ag_form_group">
-              <label className="ag_form_label">Client ID (Entra App Registration) <span style={{ color: "#ef4444" }}>*</span></label>
-              <input type="text" placeholder="Application (client) ID from Entra" value={clientId} onChange={(e) => setClientId(e.target.value)} className="ag_form_input" autoComplete="off" />
-            </div>
-            <div className="ag_form_group">
-              <label className="ag_form_label">Client Secret <span style={{ color: "#ef4444" }}>*</span></label>
-              {hasSavedSecret ? (
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <div className="ag_form_input" style={{ flex: 1, color: "#999", background: "#f9fafb" }}>••••••••••••••••••••</div>
-                  <button type="button" onClick={() => { setChangeSecret(true); setClientSecret(""); }}
-                    style={{ background: "none", border: "1px solid #e5e7eb", borderRadius: 6, padding: "7px 14px", fontSize: 12, color: "#6366f1", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
-                    Change
-                  </button>
+            {msAuth === null ? (
+              <div style={{ padding: 14, fontSize: 12, color: "#999" }}>Checking sign-in availability…</div>
+            ) : msAuth.configured ? (
+              <div style={{ marginBottom: 16 }}>
+                <button
+                  type="button"
+                  onClick={() => { window.location.href = "/api/auth/microsoft/start"; }}
+                  style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, width: "100%",
+                           padding: "12px 18px", borderRadius: 8, border: "1px solid #d1d5db", background: "#fff",
+                           color: "#1f2937", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>
+                  {/* Microsoft's four-square mark, inline so it needs no asset. */}
+                  <svg width="18" height="18" viewBox="0 0 23 23" aria-hidden="true">
+                    <rect x="1"  y="1"  width="10" height="10" fill="#f25022" />
+                    <rect x="12" y="1"  width="10" height="10" fill="#7fba00" />
+                    <rect x="1"  y="12" width="10" height="10" fill="#00a4ef" />
+                    <rect x="12" y="12" width="10" height="10" fill="#ffb900" />
+                  </svg>
+                  Sign in with Microsoft
+                </button>
+                <div style={{ fontSize: 11.5, color: "#6b7280", marginTop: 8, lineHeight: 1.6 }}>
+                  You&apos;ll be asked to approve read-only access for your whole tenant. Requires a
+                  <strong> Global Administrator</strong> or <strong>Privileged Role Administrator</strong> account —
+                  tenant-wide consent cannot be granted by a standard user.
                 </div>
-              ) : (
-                <div style={{ position: "relative" }}>
-                  <input type={showSecret ? "text" : "password"} placeholder="Client secret value" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} className="ag_form_input" style={{ paddingRight: 40 }} autoComplete="off" />
-                  <button type="button" onClick={() => setShowSecret(!showSecret)} style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "#999", cursor: "pointer", padding: 4 }}>
-                    {showSecret ? <EyeOff size={16} /> : <Eye size={16} />}
-                  </button>
+              </div>
+            ) : (
+              /* Not configured: say exactly what is missing rather than showing a
+                 button that cannot work. */
+              <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 8, background: "#fffbeb",
+                            border: "1px solid #fde68a", fontSize: 12, color: "#92400e", lineHeight: 1.6 }}>
+                <strong>Microsoft sign-in is not configured on this server.</strong>
+                <div style={{ marginTop: 6 }}>
+                  Register the CloudFuze multi-tenant app in Entra, then set
+                  {" "}{(msAuth.missing || []).map((m) => <code key={m} style={{ marginRight: 6 }}>{m}</code>)}
+                  {" "}in the server environment and restart. See <code>.env.example</code> for the full steps.
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </>
         )}
 
         <div className="ag_form_group">
           <label className="ag_form_label">
             Dataverse Environment URL
-            {currentDvUrl && isUpdateMode ? <span style={{ color: "#22c55e", fontWeight: 400, fontSize: 11, marginLeft: 6 }}>connected</span> : <span style={{ color: "#999", fontWeight: 400, fontSize: 11, marginLeft: 6 }}>for Copilot Studio discovery</span>}
+            {currentDvUrl && isUpdateMode
+              ? <span style={{ color: "#22c55e", fontWeight: 400, fontSize: 11, marginLeft: 6 }}>connected</span>
+              : <span style={{ color: "#999", fontWeight: 400, fontSize: 11, marginLeft: 6 }}>optional — leave blank to scan every environment</span>}
           </label>
-          <input type="text" placeholder="e.g. org12345.crm.dynamics.com" value={dataverseEnvUrl} onChange={(e) => setDataverseEnvUrl(e.target.value)} className="ag_form_input" autoComplete="off" />
-          <div style={{ fontSize: 11, color: "#999", marginTop: 4 }}>Power Platform Admin Center &rarr; Environments &rarr; Environment URL</div>
+          <input type="text" placeholder="Leave blank to discover all environments automatically" value={dataverseEnvUrl} onChange={(e) => setDataverseEnvUrl(e.target.value)} className="ag_form_input" autoComplete="off" />
+          {/* Now genuinely optional. Discovery enumerates every environment in the
+              tenant through the Power Platform API using these same OAuth
+              credentials, and scans Copilot Studio in each — so typing one URL here
+              NARROWS the scan to that environment rather than enabling it. Kept as
+              an override for tenants where the app has not been registered as a
+              Power Platform management application, in which case the environment
+              list comes back empty. */}
+          <div style={{ fontSize: 11, color: "#999", marginTop: 4 }}>
+            Leave blank and every Dataverse environment in the tenant is discovered and scanned.
+            Fill it in only to restrict discovery to one environment, or if automatic listing is
+            blocked (the app must be registered with <code>New-PowerAppManagementApp</code>).
+          </div>
         </div>
 
         <div className="ag_form_group">
@@ -240,124 +285,37 @@ function MicrosoftForm({ onClose, mode }) {
 function GoogleForm({ onClose, mode }) {
   const { connectGoogle, googleKeyId } = useAgentAuth();
   const isUpdateMode = mode === "update";
-  const [saJson, setSaJson] = useState("");
-  const [projectId, setProjectId] = useState("");
-  const [adminEmail, setAdminEmail] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [localError, setLocalError] = useState(null);
-  const [showScopes, setShowScopes] = useState(false);
-  const [savedGoogle, setSavedGoogle] = useState(null);
-  const [useSaved, setUseSaved] = useState(false);
-  const [uploadedFileName, setUploadedFileName] = useState(null);
-  const fileInputRef = useRef(null);
-
-  const isAlreadyConnected = !!googleKeyId;
-
+  // null while checking. The sign-in button only appears once the server confirms
+  // a Google OAuth client is configured — otherwise the service-account form is
+  // the only path, which is also the correct fallback.
+  const [googleAuth, setGoogleAuth] = useState(null);
   useEffect(() => {
-    agentGovernanceApi.listOAuthKeys().then((keys) => {
-      if (keys && keys.length > 0) {
-        const gKey = keys.find((k) => k.vendor === "google");
-        if (gKey) {
-          setSavedGoogle(gKey);
-          setAdminEmail(gKey.google_admin_email || "");
-          setProjectId(gKey.google_project_id || "");
-          setUseSaved(true);
-        }
-      }
-    }).catch(() => {});
+    fetch("/api/auth/google/status")
+      .then((r) => r.json())
+      .then(setGoogleAuth)
+      .catch(() => setGoogleAuth({ configured: false }));
   }, []);
-
-  const handleFileUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setUploadedFileName(file.name);
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      const text = evt.target?.result;
-      if (typeof text === "string") {
-        setSaJson(text.trim());
-        setUseSaved(false);
-        setLocalError(null);
-        try {
-          const parsed = JSON.parse(text.trim());
-          if (parsed.project_id) setProjectId(parsed.project_id);
-          if (parsed.client_email && !adminEmail) {
-            const domain = parsed.client_email.split("@")[1];
-            if (domain && !domain.includes("iam.gserviceaccount.com")) setAdminEmail(parsed.client_email);
-          }
-        } catch { /* not valid json yet */ }
-      }
-    };
-    reader.readAsText(file);
-    e.target.value = "";
-  };
-
-  const handleJsonChange = (e) => {
-    const val = e.target.value;
-    setSaJson(val);
-    setUseSaved(false);
-    setLocalError(null);
-    try {
-      const parsed = JSON.parse(val.trim());
-      if (parsed.project_id && !projectId) setProjectId(parsed.project_id);
-    } catch { /* still typing */ }
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLocalError(null);
-
-    if (useSaved && savedGoogle) {
-      // Re-connect with existing stored key — just update admin email / project
-      setLoading(true);
-      try {
-        await connectGoogle("__USE_EXISTING__", projectId.trim() || undefined, adminEmail.trim() || undefined);
-        onClose();
-      } catch (err) {
-        setLocalError(err.message || "Failed to connect");
-      } finally {
-        setLoading(false);
-      }
-      return;
-    }
-
-    if (!saJson.trim()) { setLocalError("Service account JSON key is required"); return; }
-    try { JSON.parse(saJson.trim()); } catch { setLocalError("Invalid JSON — upload the .json key file or paste the complete file contents"); return; }
-
-    setLoading(true);
-    try {
-      await connectGoogle(saJson.trim(), projectId.trim() || undefined, adminEmail.trim() || undefined);
-      onClose();
-    } catch (err) {
-      setLocalError(err.message || "Failed to connect");
-    } finally {
-      setLoading(false);
-    }
-  };
+  // Everything the service-account form needed — the JSON key, project id, admin
+  // email, file upload, submit handler — was removed with the form. Google now
+  // connects only through interactive sign-in.
+  //
+  // googleKeyId from the context is the single source of truth for "is Google
+  // connected"; the old savedGoogle summary read service-account fields that no
+  // longer exist on an OAuth row.
+  //
+  // Survives the form's removal because the render still uses it: the
+  // collapsible "what this connection discovers" panel.
+  const [showScopes, setShowScopes] = useState(false);
 
   return (
     <div>
-      {savedGoogle && (
+      {googleKeyId && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, padding: "10px 14px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8 }}>
           <CheckCircle size={16} color="#22c55e" />
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "#166534" }}>Google Cloud credentials saved</div>
-            <div style={{ fontSize: 11, color: "#15803d" }}>
-              {savedGoogle.google_admin_email || savedGoogle.client_id_masked || "Service account stored"} &middot; {savedGoogle.google_project_id || ""}
-            </div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#166534" }}>Google is connected</div>
+            <div style={{ fontSize: 11, color: "#15803d" }}>Sign in again below to re-consent or switch account.</div>
           </div>
-          {!useSaved && (
-            <button type="button" onClick={() => setUseSaved(true)}
-              style={{ background: "none", border: "1px solid #bbf7d0", borderRadius: 6, padding: "4px 10px", fontSize: 11, color: "#166534", cursor: "pointer", fontFamily: "inherit" }}>
-              Use Saved
-            </button>
-          )}
-        </div>
-      )}
-
-      {isUpdateMode && !savedGoogle && (
-        <div style={{ marginBottom: 14, padding: 10, background: "#f0f4ff", border: "1px solid #c7d2fe", borderRadius: 8, fontSize: 12, color: "#3730a3", lineHeight: 1.5 }}>
-          Already connected to Google Cloud. Paste a new service account JSON to update credentials or switch project.
         </div>
       )}
 
@@ -379,73 +337,59 @@ function GoogleForm({ onClose, mode }) {
         </div>
       )}
 
-      <form onSubmit={handleSubmit}>
-        <div className="ag_form_group">
-          <label className="ag_form_label">Service Account JSON Key <span style={{ color: "#ef4444" }}>*</span></label>
+      {/* Sign in with Google is now the ONLY path — the service-account JSON form
+          was removed. The admin signs in once and consents; nothing to download,
+          no domain-wide delegation to configure, no project ID to look up.
 
-          {useSaved && savedGoogle ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-              <div className="ag_form_input" style={{ flex: 1, color: "#999", background: "#f9fafb", fontSize: 11 }}>
-                ••••••••  (saved credentials — key stored securely)
-              </div>
-              <button type="button" onClick={() => { setUseSaved(false); setSaJson(""); }}
-                style={{ background: "none", border: "1px solid #e5e7eb", borderRadius: 6, padding: "7px 14px", fontSize: 12, color: "#4285F4", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
-                Change
-              </button>
-            </div>
-          ) : (
-            <>
-              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                <button type="button" onClick={() => fileInputRef.current?.click()}
-                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", background: "#4285F4", color: "#fff", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
-                  <Upload size={12} /> Upload .json file
-                </button>
-                <input ref={fileInputRef} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={handleFileUpload} />
-                {uploadedFileName && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#16a34a" }}>
-                    <CheckCircle size={12} /> {uploadedFileName}
-                  </span>
-                )}
-              </div>
-              <textarea
-                placeholder='Upload the .json file above — or paste the full file contents here'
-                value={saJson} onChange={handleJsonChange}
-                className="ag_form_input"
-                style={{ minHeight: 100, fontFamily: "monospace", fontSize: 11, resize: "vertical" }}
-              />
-              <div style={{ fontSize: 11, color: "#999", marginTop: 4 }}>
-                GCP Console &rarr; IAM &amp; Admin &rarr; Service Accounts &rarr; Keys &rarr; Add Key &rarr; JSON
-              </div>
-            </>
-          )}
-        </div>
-
-        <div className="ag_form_group">
-          <label className="ag_form_label">
-            Workspace Admin Email <span style={{ color: "#ef4444" }}>*</span>
-            <span style={{ color: "#999", fontWeight: 400, fontSize: 11, marginLeft: 6 }}>required for Workspace discovery (Gemini, users, Chat)</span>
-          </label>
-          <input type="email" placeholder="e.g. admin@yourdomain.com" value={adminEmail} onChange={(e) => setAdminEmail(e.target.value)} className="ag_form_input" autoComplete="off" />
-        </div>
-
-        <div className="ag_form_group">
-          <label className="ag_form_label">
-            GCP Project ID
-            <span style={{ color: "#999", fontWeight: 400, fontSize: 11, marginLeft: 6 }}>optional — scans all accessible projects if empty</span>
-          </label>
-          <input type="text" placeholder="e.g. my-project-123456" value={projectId} onChange={(e) => setProjectId(e.target.value)} className="ag_form_input" autoComplete="off" />
-        </div>
-
-        {localError && (
-          <div style={{ background: "rgba(239, 68, 68, 0.08)", border: "1px solid rgba(239, 68, 68, 0.2)", borderRadius: 6, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "#ef4444", lineHeight: 1.5 }}>
-            {localError}
+          The consent requests exactly the scopes the discovery code calls
+          getToken() with (see SCOPES / REQUIRED_BY_DISCOVERY in googleOAuth.ts).
+          That equivalence is the whole point: with the service-account fallback
+          gone, a scope missing from the consent screen is a silent 403 that
+          empties one discovery source while the scan still reports success. */}
+      {googleAuth === null ? (
+        <div style={{ padding: 14, fontSize: 12, color: "#999" }}>Checking sign-in availability…</div>
+      ) : googleAuth.configured ? (
+        <div style={{ marginBottom: 16 }}>
+          <button
+            type="button"
+            onClick={() => { window.location.href = "/api/auth/google/start"; }}
+            style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, width: "100%",
+                     padding: "12px 18px", borderRadius: 8, border: "1px solid #d1d5db", background: "#fff",
+                     color: "#1f2937", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>
+            <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
+              <path fill="#4285F4" d="M45.1 24.5c0-1.6-.1-3.1-.4-4.5H24v8.5h11.8c-.5 2.7-2 5-4.4 6.6v5.5h7.1c4.1-3.8 6.6-9.4 6.6-16.1z"/>
+              <path fill="#34A853" d="M24 46c5.9 0 10.9-2 14.5-5.4l-7.1-5.5c-2 1.3-4.5 2.1-7.4 2.1-5.7 0-10.5-3.8-12.2-9H4.5v5.7C8.1 41.1 15.4 46 24 46z"/>
+              <path fill="#FBBC05" d="M11.8 28.2c-.4-1.3-.7-2.7-.7-4.2s.3-2.9.7-4.2v-5.7H4.5A22 22 0 0 0 2 24c0 3.6.9 6.9 2.5 9.9l7.3-5.7z"/>
+              <path fill="#EA4335" d="M24 10.8c3.2 0 6.1 1.1 8.4 3.3l6.3-6.3C34.9 4.2 29.9 2 24 2 15.4 2 8.1 6.9 4.5 14.1l7.3 5.7c1.7-5.2 6.5-9 12.2-9z"/>
+            </svg>
+            Sign in with Google
+          </button>
+          <div style={{ fontSize: 11.5, color: "#6b7280", marginTop: 8, lineHeight: 1.6 }}>
+            Sign in as a <strong>Workspace super-admin</strong> — the consent covers Chat spaces,
+            Gemini Gems, Vertex AI, Agent Builder and NotebookLM across every project.
           </div>
-        )}
+          <div style={{ fontSize: 11.5, color: "#92400e", marginTop: 8, padding: "8px 10px", borderRadius: 6,
+                        background: "#fffbeb", border: "1px solid #fde68a", lineHeight: 1.6 }}>
+            Access is granted <strong>as that account</strong>. If it is later suspended, or the grant is
+            revoked at myaccount.google.com/permissions, Google discovery stops until someone signs in again.
+          </div>
+        </div>
+      ) : (
+        <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 8, background: "#fffbeb",
+                      border: "1px solid #fde68a", fontSize: 12, color: "#92400e", lineHeight: 1.6 }}>
+          <strong>Google sign-in is not configured on this server.</strong>
+          <div style={{ marginTop: 6 }}>
+            Create an OAuth client in Google Cloud, then set
+            {" "}{(googleAuth.missing || []).map((m) => <code key={m} style={{ marginRight: 6 }}>{m}</code>)}
+            {" "}in the server environment and restart. See <code>.env.example</code> for the full steps.
+          </div>
+        </div>
+      )}
 
-        <button type="submit" disabled={loading} className="ag_connect_btn" style={{ background: "#4285F4" }}>
-          {loading ? "Verifying & Connecting..." : (useSaved && savedGoogle ? "Reconnect with Saved Credentials" : isAlreadyConnected ? "Update Google Credentials" : "Connect & Verify")}
-        </button>
-      </form>
+      {/* No local error surface here: this form no longer submits anything.
+          Consent failures come back through the redirect and are shown by the
+          banner in AgentGovernance.jsx, which is where the user is looking on
+          return anyway. */}
     </div>
   );
 }
@@ -913,11 +857,17 @@ function GeminiEnterpriseForm({ onClose }) {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLocalError(null);
-    if (!engineId.trim()) { setLocalError("Gemini Enterprise app ID (engine ID) is required"); return; }
+    // engineId intentionally NOT required: blank means "discover and scan every
+    // app in the project". The /preview path below still needs one, because a
+    // preview is scoped to a single app by definition.
     if (!projectId.trim()) { setLocalError("GCP Project ID is required"); return; }
 
     if (authMode === "token") {
       if (!accessToken.trim()) { setLocalError("Access token is required (run: gcloud auth print-access-token)"); return; }
+      // The access-token path goes through /preview, which is scoped to a single
+      // app by design, so an engine id IS needed here. The service-account path
+      // below can enumerate apps and therefore does not require one.
+      if (!engineId.trim()) { setLocalError("App ID (engine ID) is required when connecting with an access token"); return; }
       setLoading(true);
       try {
         const conn = {
@@ -986,10 +936,17 @@ function GeminiEnterpriseForm({ onClose }) {
       )}
 
       <div className="ag_form_group">
-        <label className="ag_form_label">Gemini Enterprise App ID (engine ID) <span style={{ color: "#ef4444" }}>*</span>
-          <span style={{ color: "#999", fontWeight: 400, fontSize: 11, marginLeft: 6 }}>e.g. agentspace-engine</span>
+        {/* No longer required. When blank, every engine in the project is
+            enumerated through the same service-account credentials and each is
+            scanned — an org with several Gemini Enterprise apps used to have to
+            name one, and the agents in the rest were never discovered. */}
+        <label className="ag_form_label">Gemini Enterprise App ID (engine ID)
+          <span style={{ color: "#999", fontWeight: 400, fontSize: 11, marginLeft: 6 }}>optional — leave blank to scan every app</span>
         </label>
-        <input type="text" placeholder="e.g. agentspace-engine" value={engineId} onChange={(e) => setEngineId(e.target.value)} className="ag_form_input" autoComplete="off" />
+        <input type="text" placeholder="Leave blank to discover all apps" value={engineId} onChange={(e) => setEngineId(e.target.value)} className="ag_form_input" autoComplete="off" />
+        <div style={{ fontSize: 11, color: "#999", marginTop: 4 }}>
+          Fill this in only to restrict the scan to one app.
+        </div>
       </div>
 
       <div style={{ display: "flex", gap: 12 }}>

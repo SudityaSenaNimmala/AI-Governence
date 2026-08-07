@@ -55,14 +55,30 @@ export const AWS_BEDROCK_PRICING: Record<string, { input: number; output: number
   "ai21.jamba-1-5-large":        { input: 2.00,  output: 8.00  },
 };
 
-export function findPricing(modelName: string, vendor: "azure" | "google" | "aws"): { input: number; output: number } {
+/**
+ * Look up per-1M-token pricing for a model.
+ *
+ * Returns `matched: false` when no table entry applies and the caller is getting
+ * a generic fallback rate. That flag is the point: the fallback for Azure is
+ * gpt-4o list price, so a deployment named e.g. "my-custom-model" was silently
+ * priced as gpt-4o and rendered as a firm dollar figure with no estimate marker —
+ * cost.ts only set `costEstimated` when the model name was literally "unknown".
+ * A number that looks measured but is a guess is worse than a visible estimate.
+ */
+export function findPricing(
+  modelName: string,
+  vendor: "azure" | "google" | "aws",
+): { input: number; output: number; matched: boolean } {
   const table = vendor === "azure" ? AZURE_PRICING : vendor === "aws" ? AWS_BEDROCK_PRICING : GOOGLE_PRICING;
   const lower = (modelName || "").toLowerCase();
 
   for (const [key, price] of Object.entries(table)) {
-    if (lower.includes(key)) return price;
+    if (lower.includes(key)) return { ...price, matched: true };
   }
-  return vendor === "azure" ? { input: 2.50, output: 10.00 } : vendor === "aws" ? { input: 1.00, output: 3.00 } : { input: 0.50, output: 1.50 };
+  const fallback = vendor === "azure" ? { input: 2.50, output: 10.00 }
+    : vendor === "aws" ? { input: 1.00, output: 3.00 }
+    : { input: 0.50, output: 1.50 };
+  return { ...fallback, matched: false };
 }
 
 /**

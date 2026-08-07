@@ -771,3 +771,48 @@
   background: #92400e;
   border-color: #92400e;
 }
+
+/* ── Group tabs (AI Hub top-level screens) ─────────────────────────────────────
+   Colours are literal, not var(--ag-*): those variables are declared on
+   .ag_page_container, so outside Agent Governance they resolve to nothing and the
+   whole declaration is dropped — a border defined that way renders as no border. */
+.aihub_group_tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  border-bottom: 1px solid #e5e7eb;
+  margin-bottom: 14px;
+}
+.aihub_group_tab {
+  padding: 9px 16px;
+  border: none;
+  background: none;
+  border-bottom: 2px solid transparent;
+  color: #6b7280;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.aihub_group_tab:hover { color: #111827; }
+.aihub_group_tab.active {
+  color: #0044cc;
+  border-bottom-color: #0044cc;
+  font-weight: 600;
+}
+.aihub_group_tab:focus-visible { outline: 2px solid #0044cc; outline-offset: -2px; }
+
+.aihub_group_hint {
+  margin: 0 0 16px;
+  font-size: 12px;
+  color: #6b7280;
+  max-width: 760px;
+}
+
+/* Narrow viewports: let the tab strip scroll rather than wrap into two rows that
+   push the content down and hide the active underline. */
+@media (max-width: 720px) {
+  .aihub_group_tabs { flex-wrap: nowrap; overflow-x: auto; }
+}

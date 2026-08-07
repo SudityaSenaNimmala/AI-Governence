@@ -538,6 +538,78 @@ export class GoogleWorkspaceClient {
     this.projectId = projectId || serviceAccountKey.project_id;
   }
 
+  /**
+   * Every GCP project this service account can see, via Cloud Resource Manager.
+   *
+   * The Google analogue of enumerating Power Platform environments. Without it the
+   * scan only ever covers ONE project — whatever the admin typed, or failing that
+   * the project the service-account key itself belongs to — so an organisation
+   * running Vertex AI across several projects had every agent outside that one
+   * project silently missing, from a scan that reported success.
+   *
+   * Uses the SAME service-account credentials, no extra field. Note the
+   * `cloud-platform.read-only` scope is requested WITHOUT a subject: project
+   * visibility belongs to the service account itself, not to an impersonated
+   * Workspace admin, and passing a subject here fails on non-Workspace projects.
+   *
+   * Returns [] on 401/403 rather than throwing — a service account with no
+   * resourcemanager.projects.list permission should degrade to single-project
+   * behaviour, not abort the whole Google scan.
+   */
+  async listAccessibleProjects(): Promise<Array<{ projectId: string; name: string }>> {
+    try {
+      // No explicit scope list: with an interactive-sign-in token, getToken()
+      // returns the stored access token regardless of what is asked for, but a
+      // service-account key would mint a token for ONLY the scope named here —
+      // and cloud-platform.read-only alone is not what the rest of the client
+      // uses. Requesting both keeps the two credential types consistent.
+      const token = await this.getToken([
+        "https://www.googleapis.com/auth/cloud-platform.read-only",
+        "https://www.googleapis.com/auth/cloud-platform",
+      ]);
+      const out: Array<{ projectId: string; name: string }> = [];
+      let pageToken: string | undefined;
+      // Bounded: an org with thousands of projects should not stall discovery.
+      for (let page = 0; page < 10; page++) {
+        const url = new URL("https://cloudresourcemanager.googleapis.com/v1/projects");
+        url.searchParams.set("pageSize", "200");
+        url.searchParams.set("filter", "lifecycleState:ACTIVE");
+        if (pageToken) url.searchParams.set("pageToken", pageToken);
+        const data = await this.fetchApi<{ projects?: Array<{ projectId: string; name: string; lifecycleState: string }>; nextPageToken?: string }>(
+          url.toString(), token,
+        );
+        for (const p of data.projects || []) {
+          if (p.lifecycleState !== "ACTIVE") continue;
+          // Skip `sys-…` projects. Google auto-creates one per Apps Script /
+          // AppSheet artefact; a Workspace domain accumulates dozens of them and
+          // none can hold a Vertex AI or Agent Builder resource. They are noise
+          // that pushes the real projects past the page limit, and — worse —
+          // sorting first alphabetically they were being chosen as the default
+          // project, which made every project-scoped scan return zero.
+          if (/^sys-\d+$/.test(p.projectId)) continue;
+          out.push({ projectId: p.projectId, name: p.name || p.projectId });
+        }
+        pageToken = data.nextPageToken;
+        if (!pageToken) break;
+      }
+      return out;
+    } catch (e) {
+      const status = e instanceof GoogleWorkspaceError ? e.status : 0;
+      console.warn(`[Google] Could not list projects (${status || "error"}) — falling back to the single configured project`);
+      return [];
+    }
+  }
+
+  /** Point this client at a different project for the project-scoped scans. */
+  setProject(projectId: string): void {
+    this.projectId = projectId;
+  }
+
+  /** The project currently being scanned. */
+  getProject(): string {
+    return this.projectId;
+  }
+
   // When set, the client authenticates with this user/OAuth access token instead
   // of exchanging the service-account JWT. Used by the Gemini Enterprise "access
   // token" connect path, where the user has read access but cannot mint an SA key.
@@ -3093,20 +3165,96 @@ export class GoogleWorkspaceClient {
     const warnings: string[] = [];
     const domain = this.adminEmail.split("@")[1] || "unknown";
 
-    // Run only the 5 pure-agent discovery calls in parallel
-    const [
-      chatBotsResult,
-      reasoningEnginesResult,
-      agentBuilderResult,
-      gemsResult,
-      notebookLMResult,
-    ] = await Promise.allSettled([
+    // Which GCP projects to scan.
+    //
+    // The three project-scoped discoveries below (Reasoning Engines, Agent
+    // Builder, NotebookLM) are per-project APIs, so scanning one project finds
+    // only that project's agents. Enumerating them means an org running Vertex AI
+    // across several projects gets a real inventory instead of a slice of one.
+    //
+    // Chat bots and Gems are Workspace-domain-scoped, not project-scoped, so they
+    // run ONCE regardless — repeating them per project would duplicate every bot
+    // n times.
+    //
+    // If enumeration is unavailable (no resourcemanager permission), this falls
+    // back to exactly the previous behaviour: the single configured project.
+    const configuredProject = this.getProject();
+    const discovered = await this.listAccessibleProjects();
+    const projectIds = discovered.length
+      ? [...new Set([configuredProject, ...discovered.map((p) => p.projectId)].filter(Boolean))]
+      : [configuredProject];
+    if (discovered.length > 1) {
+      console.log(`[Google] Scanning ${projectIds.length} GCP project(s): ${projectIds.join(", ")}`);
+    } else if (!discovered.length) {
+      warnings.push(
+        `Could not list GCP projects, so only "${configuredProject}" was scanned for Vertex AI agents. ` +
+        `Grant the service account resourcemanager.projects.list (Cloud Asset Viewer or Browser role) to cover every project.`,
+      );
+    }
+
+    // Project-scoped sweep.
+    //
+    // MUST stay sequential. The underlying scans read `this.projectId`, so running
+    // several sweeps concurrently would let them overwrite each other's project
+    // mid-flight — agents attributed to the wrong project, some projects scanned
+    // twice and others not at all, and no error to show for it. Within one
+    // project the three scans still run in parallel, which is where the latency
+    // actually is.
+    // agentBuilder accumulates { apps, dataStores } — NOT a flat array.
+    // discoverAgentBuilder() returns an object, so spreading it into a list would
+    // silently yield nothing; the type checker caught that, and the shape is kept
+    // explicit here so it stays caught.
+    const perProject = {
+      reasoningEngines: [] as VertexAIReasoningEngine[],
+      agentBuilderApps: [] as DiscoveryEngineApp[],
+      agentBuilderDataStores: [] as DiscoveryEngineDataStore[],
+      notebooks: [] as NotebookLMNotebook[],
+    };
+    for (const pid of projectIds) {
+      this.setProject(pid);
+      const [re, ab, nb] = await Promise.allSettled([
+        this.discoverReasoningEnginesOnly(),
+        this.discoverAgentBuilder(),
+        this.discoverNotebookLM(),
+      ]);
+      // A project the service account cannot read is expected (401/403) and stays
+      // quiet; anything else is surfaced, named by project.
+      const note = (label: string, r: PromiseSettledResult<unknown>) => {
+        if (r.status === "rejected") {
+          const status = r.reason instanceof GoogleWorkspaceError ? r.reason.status : 0;
+          if (status !== 401 && status !== 403) {
+            warnings.push(`${label} in project ${pid}: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`);
+          }
+        }
+      };
+      note("Reasoning Engines", re); note("Agent Builder", ab); note("NotebookLM", nb);
+      if (re.status === "fulfilled") perProject.reasoningEngines.push(...re.value);
+      if (ab.status === "fulfilled") {
+        perProject.agentBuilderApps.push(...ab.value.apps);
+        perProject.agentBuilderDataStores.push(...ab.value.dataStores);
+      }
+      if (nb.status === "fulfilled") perProject.notebooks.push(...nb.value);
+    }
+    this.setProject(configuredProject);   // restore for anything downstream
+
+    // Workspace-domain-scoped: run ONCE. Repeating these per project would list
+    // every Chat bot and Gem n times.
+    const [chatBotsResult, gemsResult] = await Promise.allSettled([
       this.discoverChatBots(),
-      this.discoverReasoningEnginesOnly(),
-      this.discoverAgentBuilder(),
       this.discoverGems(),
-      this.discoverNotebookLM(),
     ]);
+
+    // Re-wrapped as settled results so the existing per-source handling below
+    // keeps working unchanged — that code branches on `.status` and reads
+    // `.reason`. Built through a helper rather than an object literal because TS
+    // narrows a literal to the fulfilled arm, which makes the rejected branch
+    // `never` and errors on `.reason`. Per-project failures are already reported
+    // above, so these really are always fulfilled; the type just has to admit the
+    // branch the existing code checks.
+    const settled = <T>(value: T): PromiseSettledResult<T> => ({ status: "fulfilled", value });
+    const reasoningEnginesResult = settled(perProject.reasoningEngines);
+    const agentBuilderResult = settled({ apps: perProject.agentBuilderApps, dataStores: perProject.agentBuilderDataStores });
+    const notebookLMResult = settled(perProject.notebooks);
 
     // 1. Google Chat bots
     let chatBots: GoogleChatBot[] = [];

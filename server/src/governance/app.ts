@@ -5,6 +5,8 @@
 import { Router } from "express";
 import oauthKeysRouter from "./routes/oauthKeys.js";
 import authRouter from "./routes/auth.js";
+import msOAuthRouter from "./routes/msOAuth.js";
+import googleOAuthRouter from "./routes/googleOAuth.js";
 import discoveryRouter from "./routes/discovery.js";
 import lifecycleRouter from "./routes/lifecycle.js";
 import policiesRouter from "./routes/policies.js";
@@ -31,6 +33,9 @@ const governanceRouter = Router();
 
 governanceRouter.use("/api/oauth-keys", oauthKeysRouter);
 governanceRouter.use("/api/auth", authRouter);
+// Interactive admin sign-in — /start, /callback, /status.
+governanceRouter.use("/api/auth/microsoft", msOAuthRouter);
+governanceRouter.use("/api/auth/google", googleOAuthRouter);
 governanceRouter.use("/api/discovery", discoveryRouter);
 governanceRouter.use("/api/lifecycle", lifecycleRouter);
 governanceRouter.use("/api/policies", policiesRouter);

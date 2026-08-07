@@ -97,7 +97,36 @@ router.put("/:id", async (req, res) => {
  */
 router.delete("/:id", async (req, res) => {
   try {
-    await getDb().collection("policies").deleteOne({ id: req.params.id });
+    const db = getDb();
+    const existing = await db.collection("policies").findOne({ id: req.params.id });
+    if (!existing) {
+      res.status(404).json({ error: "Policy not found" });
+      return;
+    }
+
+    // A pack-derived rule cannot be deleted from here.
+    //
+    // Deleting it would remove the enforcement rule while the pack continues to
+    // report "deployed v1, N rules" — the pack claims coverage it no longer has,
+    // which is precisely the kind of silent gap a compliance tool exists to
+    // prevent. Worse, it is invisible: nothing on the Policy Packs screen would
+    // show that one of its controls had been removed underneath it.
+    //
+    // The two legitimate ways to stop a pack rule both keep pack state truthful:
+    //   disable one rule  PATCH /api/policy-packs/:id/rules/:ruleKey {enabled:false}
+    //   remove them all   POST  /api/policy-packs/:id/undeploy
+    if (existing.pack_id) {
+      res.status(409).json({
+        error: `"${existing.name}" comes from the ${existing.pack_id} policy pack and cannot be deleted here.`,
+        reason: "pack_managed",
+        pack_id: existing.pack_id,
+        rule_key: existing.rule_key ?? null,
+        remedy: "Disable this rule from its Policy Pack, or undeploy the pack to remove all of its rules.",
+      });
+      return;
+    }
+
+    await db.collection("policies").deleteOne({ id: req.params.id });
     res.json({ success: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to delete policy";
@@ -152,6 +181,102 @@ router.post("/seed-templates", async (_req, res) => {
  * POST /api/policies/evaluate — Evaluate all active policies against provided agents
  * Body: { agents: DiscoveredAgent[] }
  */
+/**
+ * POST /api/policies/simulate — DRY RUN. Evaluate policies and change nothing.
+ *
+ * Body: { policy_id?: string, limit?: number }
+ *   policy_id  simulate just this one (any status, so a DISABLED policy can be
+ *              tested before you turn it on — the main reason this exists)
+ *   omitted    simulate every active policy
+ *
+ * Why this is a separate route and not a flag on /evaluate: /evaluate is not a
+ * read. It upserts policy_violations, calls executePolicyActions() — which can
+ * flag, escalate, archive and SUSPEND an agent — emits webhooks and forwards to
+ * SIEM. Wiring a "Simulate" button to it would suspend production agents the
+ * moment someone clicked to preview a rule. This route shares the same evaluation
+ * engine and touches nothing else: no writes, no actions, no webhooks, no SIEM.
+ *
+ * Agents are read server-side from discovered_agents rather than taken from the
+ * request body, so the answer reflects the real fleet and cannot be shaped by the
+ * caller — /evaluate trusts a client-supplied array, which is fine for a scan the
+ * client just ran but wrong for a preview someone will make a decision on.
+ */
+router.post("/simulate", async (req, res) => {
+  try {
+    const db = getDb();
+    const policyId = req.body?.policy_id ? String(req.body.policy_id) : null;
+    const limit = Math.min(Math.max(Number(req.body?.limit) || 100, 1), 500);
+
+    // A specific policy is simulated whatever its status; without one, only the
+    // rules that are actually live.
+    const filter = policyId ? { id: policyId } : { status: "active" };
+    const policyRows = await db.collection("policies").find(filter).sort({ created_at: 1 }).toArray();
+    if (policyId && policyRows.length === 0) {
+      res.status(404).json({ error: `Unknown policy: ${policyId}` });
+      return;
+    }
+
+    const policies: PolicyDefinition[] = policyRows.map((r: any) => ({
+      id: r.id, name: r.name, description: r.description, type: r.type,
+      severity: r.severity, status: r.status, template: r.template,
+      conditions: r.conditions, actions: r.actions, scope: r.scope,
+    }));
+
+    const agents = await db.collection("discovered_agents")
+      .find({}).project({ _id: 0 }).toArray() as unknown as DiscoveredAgent[];
+
+    const violations = evaluateAllPolicies(policies, agents);
+
+    // Split new from already-known so the number reads honestly: "would flag 12"
+    // is alarming if 9 of them are already open violations you have seen before.
+    const openKeys = new Set(
+      (await db.collection("policy_violations")
+        .find({ resolved: { $ne: true } })
+        .project({ _id: 0, dedupe_key: 1 })
+        .toArray()).map((v: any) => v.dedupe_key),
+    );
+
+    const perPolicy = policies.map((p) => {
+      const mine = violations.filter((v) => v.policyId === p.id);
+      const fresh = mine.filter((v) => !openKeys.has(`${v.policyId}:${v.agentId}`));
+      return {
+        policy_id: p.id,
+        policy_name: p.name,
+        severity: p.severity,
+        status: p.status,
+        actions: (p.actions || []).map((a: any) => a.type || a),
+        would_flag: mine.length,
+        newly_flagged: fresh.length,
+        already_open: mine.length - fresh.length,
+        matches: mine.slice(0, limit).map((v) => ({
+          agent_id: v.agentId,
+          agent_name: v.agentName,
+          condition_triggered: v.conditionTriggered,
+          action_recommended: v.actionRecommended,
+          details: v.details,
+          already_open: openKeys.has(`${v.policyId}:${v.agentId}`),
+        })),
+      };
+    });
+
+    res.json({
+      applied: false,              // contract: this endpoint never changes state
+      agents_evaluated: agents.length,
+      policies_evaluated: policies.length,
+      total_would_flag: violations.length,
+      policies: perPolicy,
+      caveats: [
+        "Simulation only — no violations were recorded and no policy actions ran.",
+        `Evaluated against all ${agents.length} discovered agents as they are right now.`,
+        "Agents discovered after this run are not included until you simulate again.",
+      ],
+    });
+  } catch (err: any) {
+    console.error("[policies/simulate]", err?.message || err);
+    res.status(500).json({ error: "simulation failed" });
+  }
+});
+
 router.post("/evaluate", async (req, res) => {
   try {
     const { agents } = req.body as { agents: DiscoveredAgent[] };

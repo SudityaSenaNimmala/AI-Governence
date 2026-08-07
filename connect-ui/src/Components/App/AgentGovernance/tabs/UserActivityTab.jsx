@@ -11,6 +11,7 @@ import { useAgentAuth, useGovernance } from "../AgentGovernanceContext";
 import { agentGovernanceApi } from "../AgentGovernanceActions/AgentGovernanceActions";
 import { Section } from "../common/Section";
 import { Badge } from "../common/Badge";
+import { complianceToRisk, scoreToLevel } from "../common/riskScale";
 import { LoadingSpinner } from "../common/LoadingSpinner";
 
 // ═══════════════════════════════════════════════════
@@ -1333,9 +1334,16 @@ function computeDiscoveredAgentRisk(agent) {
     factors.push({ signal: "Wide deployment", weight: "low", description: `Deployed to ${agent.deployedTo.length} channels` });
   }
 
-  score = Math.max(0, Math.min(100, score));
-  const level = score >= 80 ? "low" : score >= 60 ? "medium" : score >= 40 ? "high" : "critical";
-  return { score, level, factors, recommendations };
+  // Everything above deducts from 100, i.e. it builds a COMPLIANCE score. Convert
+  // to the product-wide forward risk scale before returning, and derive the level
+  // with the shared function — this used its own inverted cut-points
+  // (>=80 low, >=60 medium, >=40 high) which agreed with neither the server nor
+  // the other client helper. Since this is the fallback in
+  // `a.risk || computeDiscoveredAgentRisk(a)`, the same agent could read "low"
+  // here and "medium" from the API.
+  const complianceScore = Math.max(0, Math.min(100, score));
+  const riskScore = complianceToRisk(complianceScore);
+  return { score: riskScore, level: scoreToLevel(riskScore), factors, recommendations };
 }
 
 function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [], applicationLabel, application = "copilot_studio", enabled = true, searchQuery = "", agentFilter = "all" }) {
@@ -1887,7 +1895,11 @@ function AzureRiskPanel({ oauthKeyId }) {
     if (sig.severity === "medium") return s - 5;
     return s;
   }, 100);
-  const overallLevel = overallScore >= 80 ? "low" : overallScore >= 60 ? "medium" : overallScore >= 40 ? "high" : "critical";
+  // Same conversion as computeDiscoveredAgentRisk: the reduce above is a
+  // deduct-from-100 compliance tally, so flip it to forward risk and use the
+  // shared bands rather than a fourth private copy of them.
+  const overallRisk = complianceToRisk(overallScore);
+  const overallLevel = scoreToLevel(overallRisk);
 
   return (
     <div>
@@ -1895,7 +1907,10 @@ function AzureRiskPanel({ oauthKeyId }) {
       <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
         <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "16px 24px", minWidth: 160 }}>
           <div style={{ fontSize: 11, color: "#999", marginBottom: 4 }}>Azure AI Risk Score</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: RISK_COLORS[overallLevel] }}>{Math.max(0, overallScore)}</div>
+          {/* overallRisk, not overallScore: the label says "Risk Score", and the
+              colour beside it is now derived from the forward scale. Printing the
+              compliance tally here would show a high number in green. */}
+          <div style={{ fontSize: 28, fontWeight: 700, color: RISK_COLORS[overallLevel] }}>{overallRisk}</div>
           <RiskBadge level={overallLevel} />
         </div>
         <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "16px 24px", minWidth: 120 }}>

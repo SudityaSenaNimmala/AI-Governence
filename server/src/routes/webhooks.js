@@ -96,8 +96,21 @@ export async function fireWebhooks(db, trigger, eventData) {
     const payload = template.format(eventData);
     const headers = { 'Content-Type': 'application/json' };
     if (hook.auth_header) {
-      const [key, ...val] = hook.auth_header.split(':');
-      headers[key.trim()] = val.join(':').trim();
+      // Validate before use. This splits "Name: value" and uses the left side as
+      // a header NAME, so a user who typed just "Bearer my-token" (rather than
+      // the placeholder's "Authorization: Bearer …") produced the header name
+      // "Bearer my-token" — which fetch rejects with "invalid header name",
+      // failing EVERY delivery for that webhook. The failure was only visible as
+      // status:"error" rows in webhook_log; the form accepted it happily.
+      const [rawKey, ...rest] = String(hook.auth_header).split(':');
+      const key = rawKey.trim();
+      const value = rest.join(':').trim();
+      // RFC 7230 token: no spaces, no separators, no control characters.
+      if (/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(key) && value) {
+        headers[key] = value;
+      } else {
+        console.warn(`[webhooks] hook ${hook.id} has a malformed auth_header; sending without it`);
+      }
     }
     fetch(hook.url, { method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(10000) })
       .then(async (res) => {
@@ -155,6 +168,29 @@ async function postViaConnection(db, hook, trigger, eventData) {
   }
 }
 
+/**
+ * Validate an "Name: value" auth header string. Returns an error message, or null
+ * when the value is absent or well-formed.
+ *
+ * Delivery splits this on ':' and uses the left side as a header NAME, so
+ * "Bearer my-token" — a very natural thing to type — becomes an invalid header
+ * name and makes fetch throw on every single delivery. That surfaced only as
+ * status:"error" rows in webhook_log, long after the user left the form.
+ */
+function validateAuthHeader(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const s = String(v);
+  const idx = s.indexOf(':');
+  if (idx < 1) return 'auth_header must be "Header-Name: value" (e.g. "Authorization: Bearer abc123")';
+  const key = s.slice(0, idx).trim();
+  const value = s.slice(idx + 1).trim();
+  if (!/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(key)) {
+    return `"${key}" is not a valid header name — did you mean "Authorization: ${s}"?`;
+  }
+  if (!value) return 'auth_header has a name but no value';
+  return null;
+}
+
 export function mountWebhooks(app, db) {
   const webhooks = () => db.collection('webhooks');
   const wlog = () => db.collection('webhook_log');
@@ -175,6 +211,10 @@ export function mountWebhooks(app, db) {
     const { name, url, template, triggers, auth_header, connection_type, channel_id, enabled = true } = req.body ?? {};
     if (!name) return res.status(400).json({ error: 'name required' });
     if (!connection_type && !url) return res.status(400).json({ error: 'url or connection_type required' });
+    // Reject a malformed auth header at save time rather than letting every future
+    // delivery fail silently in the background.
+    const authErr = validateAuthHeader(auth_header);
+    if (authErr) return res.status(400).json({ error: authErr });
     const hook = {
       id: crypto.randomUUID(), name, url: url || null, template: template || 'custom',
       triggers: triggers || [], auth_header: auth_header || null,
@@ -187,6 +227,8 @@ export function mountWebhooks(app, db) {
 
   app.put('/api/v1/webhooks/:id', a(async (req, res) => {
     const { name, url, template, triggers, auth_header, connection_type, channel_id, enabled } = req.body ?? {};
+    const authErr = validateAuthHeader(auth_header);
+    if (authErr) return res.status(400).json({ error: authErr });
     const update = { updated_at: new Date() };
     if (name !== undefined) update.name = name;
     if (url !== undefined) update.url = url;

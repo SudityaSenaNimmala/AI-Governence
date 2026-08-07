@@ -237,7 +237,18 @@ export function computeMetrics(result, scope = "all") {
 // Ensure every agent has the minimum shape the UI expects (risk + activity).
 // Agents loaded from the server may lack these if they were persisted before
 // client-side conversion added them, or if the server stores a leaner shape.
-const DEFAULT_RISK = { score: 0, level: "low", factors: [], recommendations: [], computedAt: new Date().toISOString() };
+// score: null / level: "not_assessed" — NOT 0 / "low".
+//
+// This default fires for any agent that arrives without a risk object. It used to
+// be {score: 0, level: "low"}, so an agent nobody had assessed rendered as
+// "0 — Low" in green: the safest possible agent in the fleet. For a governance
+// product that is the one failure mode that must never happen, because it turns
+// missing data into a reassuring answer, and the rows most likely to lack an
+// assessment are the ones from newly-connected or partially-scanned platforms.
+//
+// Consumers must treat level "not_assessed" as "we do not know" and render it
+// distinctly (see RiskLevelBadge), never as a passing grade.
+const DEFAULT_RISK = { score: null, level: "not_assessed", factors: [], recommendations: [], computedAt: null };
 const DEFAULT_ACTIVITY = { totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0, uniqueUsers: 0, userBreakdown: [] };
 
 function normalizeAgent(a) {
@@ -315,10 +326,17 @@ export function AgentGovernanceProvider({ children }) {
   }, []);
 
   // Load persisted agents on mount so the dashboard survives page refresh.
-  // Runs for ANY connected platform, not just Microsoft.
+  //
+  // Runs UNCONDITIONALLY — it used to require a key in localStorage first, which
+  // made the dashboard's contents depend on browser state rather than on what the
+  // server actually holds. On a fresh browser (or after clearing site data) the
+  // load was skipped and Agent Governance rendered "Connect a Cloud Platform"
+  // while /api/discovery/agents was serving 109 real agents to anyone who asked.
+  //
+  // The endpoint needs no credential and returns everything already discovered, so
+  // there is nothing to gate on: if the server has agents, show them.
   const isAnyKeyPresent = !!oauthKeyId || !!googleKeyId || !!openaiKeyId || !!claudeKeyId || !!geminiEnterpriseKeyId || !!awsKeyId;
   useEffect(() => {
-    if (!isAnyKeyPresent) return;
     (async () => {
       try {
         // Fetch all persisted agents (no oauth_key_id filter — returns everything)
@@ -341,6 +359,9 @@ export function AgentGovernanceProvider({ children }) {
         }
       } catch (e) { /* silently fail — no persisted data yet */ }
     })();
+    // isAnyKeyPresent stays in the deps so connecting a NEW platform refetches and
+    // picks up whatever that connection discovered — it just no longer gates the
+    // first load.
   }, [isAnyKeyPresent, tenantId]);
 
   const connect = useCallback(async (data) => {

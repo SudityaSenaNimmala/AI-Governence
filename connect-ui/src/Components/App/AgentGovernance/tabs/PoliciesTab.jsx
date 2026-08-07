@@ -52,6 +52,66 @@ const ACTION_TYPES = [
   { value: "archive", label: "Archive Agent" },
 ];
 
+/**
+ * Result of a single-policy dry run, shown inside that policy's card.
+ *
+ * Leads with the green "nothing changed" line. A panel that appears after
+ * clicking a button next to Active/Disabled and lists agents by name reads like
+ * something happened; it must say plainly that nothing did — especially for a
+ * policy whose action is `suspend`.
+ *
+ * "already flagged" is broken out because a raw total misleads: 12 hits sounds
+ * alarming when 9 are violations you have already seen and triaged.
+ */
+function PolicySimResult({ res, onClose }) {
+  if (res.error) {
+    return (
+      <div style={{ marginTop: 10, padding: "8px 12px", borderRadius: 6, background: "#fef2f2", border: "1px solid #fecaca", fontSize: 12, color: "#b91c1c" }}>
+        <AlertTriangle size={12} /> {res.error}
+        <button onClick={onClose} style={{ float: "right", border: "none", background: "none", cursor: "pointer", color: "#b91c1c" }}>×</button>
+      </div>
+    );
+  }
+  const n = res.would_flag || 0;
+  const tone = n === 0 ? "#16a34a" : res.severity === "critical" ? "#b91c1c" : "#b45309";
+  return (
+    <div style={{ marginTop: 10, border: "1px solid #e5e7eb", borderRadius: 8, background: "#fff", overflow: "hidden" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", background: "#f0fdf4", borderBottom: "1px solid #bbf7d0", fontSize: 11.5, color: "#166534" }}>
+        <ShieldCheck size={12} />
+        <span><strong>Simulation only — nothing was changed.</strong> No violations recorded, no actions run.</span>
+        <button onClick={onClose} style={{ marginLeft: "auto", border: "none", background: "none", cursor: "pointer", color: "#166534", fontSize: 15, lineHeight: 1 }}>×</button>
+      </div>
+
+      <div style={{ padding: "10px 12px" }}>
+        <div style={{ fontSize: 13, marginBottom: n ? 8 : 0 }}>
+          Would flag <strong style={{ color: tone, fontSize: 16 }}>{n}</strong> of {res.agents_evaluated} agents
+          {n > 0 && <> — action: <strong>{(res.actions || []).join(", ") || "flag"}</strong></>}
+          {res.already_open > 0 && <span style={{ color: "#6b7280" }}> · {res.newly_flagged} new, {res.already_open} already flagged</span>}
+        </div>
+
+        {n === 0 && <div style={{ fontSize: 11.5, color: "#6b7280" }}>No agent currently meets this policy&apos;s conditions.</div>}
+
+        {n > 0 && (
+          <div style={{ maxHeight: 170, overflowY: "auto", border: "1px solid #f3f4f6", borderRadius: 6 }}>
+            {res.matches.map((m, i) => (
+              <div key={i} style={{ display: "flex", gap: 8, padding: "5px 10px", fontSize: 11.5, borderBottom: i < res.matches.length - 1 ? "1px solid #f9fafb" : "none" }}>
+                <span style={{ fontWeight: 600, minWidth: 190, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.agent_name}</span>
+                <span style={{ color: "#6b7280", flex: 1 }}>{m.condition_triggered}</span>
+                {m.already_open && <span style={{ color: "#9ca3af", fontSize: 10 }}>already open</span>}
+              </div>
+            ))}
+            {n > res.matches.length && (
+              <div style={{ padding: "5px 10px", fontSize: 11, color: "#9ca3af" }}>
+                …and {n - res.matches.length} more not listed
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function PoliciesTab() {
   const { state } = useGovernance();
   const scanActive = state.discoveryStatus === "loading" || state.discoveryStatus === "success";
@@ -59,6 +119,8 @@ export function PoliciesTab() {
   const [loading, setLoading] = useState(true);
   const [evaluationResult, setEvaluationResult] = useState(null);
   const [evaluating, setEvaluating] = useState(false);
+  const [simulatingId, setSimulatingId] = useState(null);
+  const [simResults, setSimResults] = useState({});   // policyId → result | {error}
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [seeding, setSeeding] = useState(false);
 
@@ -144,6 +206,36 @@ export function PoliciesTab() {
     }
   };
 
+  /**
+   * Dry-run one policy.
+   *
+   * Hits POST /api/policies/simulate, NOT /evaluate. They look interchangeable and
+   * are not: /evaluate records violations, runs the policy's actions for real
+   * (including SUSPEND), emits webhooks and forwards to SIEM. /simulate shares the
+   * same evaluation engine and writes nothing.
+   *
+   * Agents come from the server, so this works even in a browser that has never
+   * run a scan — unlike "Run Policy Check", which posts the client's own scan
+   * result and is disabled without one.
+   */
+  const handleSimulate = async (policyId) => {
+    setSimulatingId(policyId);
+    try {
+      const res = await fetch("/api/policies/simulate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ policy_id: policyId }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Simulation failed (${res.status})`);
+      setSimResults((s) => ({ ...s, [policyId]: { ...body.policies[0], agents_evaluated: body.agents_evaluated } }));
+    } catch (e) {
+      setSimResults((s) => ({ ...s, [policyId]: { error: e.message } }));
+    } finally {
+      setSimulatingId(null);
+    }
+  };
+
   const handleEvaluate = async () => {
     if (!state.discoveryResult?.agents.length) return;
     setEvaluating(true);
@@ -158,6 +250,10 @@ export function PoliciesTab() {
   };
 
   const activePolicies = policies.filter((p) => p.status === "active").length;
+  // Split the count so a jump from 6 to 13 after deploying a pack is self-
+  // explanatory rather than looking like seven policies appeared from nowhere.
+  const fromPacks = policies.filter((p) => p.pack_id).length;
+  const packNames = [...new Set(policies.filter((p) => p.pack_id).map((p) => p.pack_id))];
   const hasAgents = !!state.discoveryResult?.agents.length;
 
   return (
@@ -279,7 +375,20 @@ export function PoliciesTab() {
         </Section>
       )}
 
-      <Section title={`Governance Policies (${policies.length} total, ${activePolicies} active)`}>
+      {fromPacks > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, padding: "8px 12px", borderRadius: 8,
+                      background: "#f3f7ff", border: "1px solid #c7d6f5", fontSize: 12, color: "#1e3a8a" }}>
+          <ShieldCheck size={13} />
+          <span>
+            <strong>{fromPacks} of these {policies.length} policies came from a deployed policy pack</strong>
+            {packNames.length > 0 && <> ({packNames.join(", ")})</>} and are enforced across the whole organisation,
+            exactly like the ones you wrote. Manage them from <strong>Policy Packs</strong> — disable a single rule
+            there, or undeploy the pack to remove them all.
+          </span>
+        </div>
+      )}
+
+      <Section title={`Governance Policies (${policies.length} total, ${activePolicies} active${fromPacks ? ` — ${policies.length - fromPacks} your own, ${fromPacks} from packs` : ""})`}>
         {loading && policies.length === 0 ? (
           <div style={{ textAlign: "center", padding: 40, color: "#999" }}>Loading policies...</div>
         ) : policies.length === 0 ? (
@@ -296,13 +405,34 @@ export function PoliciesTab() {
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     {statusIcon[p.status] || statusIcon.draft}
                     <span style={{ fontWeight: 700, fontSize: 14 }}>{p.name}</span>
-                    {p.template && <span style={{ fontSize: 10, padding: "2px 6px", background: "#6366f122", color: "#6366f1", borderRadius: 4 }}>template</span>}
+                    {/* A pack rule is enforced exactly like a hand-written one, so
+                        it belongs in this list — but where it came from has to be
+                        visible, because it is governed from the pack (disable or
+                        undeploy there) and cannot be deleted here. */}
+                    {p.pack_id
+                      ? <span title={`Deployed from the ${p.pack_id} policy pack — manage it there`}
+                              style={{ fontSize: 10, padding: "2px 6px", background: "#0044cc18", color: "#0044cc", borderRadius: 4, fontWeight: 600 }}>
+                          pack · {p.pack_id}
+                        </span>
+                      : p.template && <span style={{ fontSize: 10, padding: "2px 6px", background: "#6366f122", color: "#6366f1", borderRadius: 4 }}>template</span>}
                   </div>
                   <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                     <Badge text={p.severity} color={severityColor[p.severity] || "#6b7280"} />
                     <Badge text={p.type} color="#6366f1" />
+                    {/* Simulate is deliberately available on EVERY policy,
+                        including disabled and draft ones — previewing a rule you
+                        have not switched on yet is the main reason to have it. */}
+                    <button onClick={() => handleSimulate(p.id)} disabled={simulatingId === p.id}
+                            style={{ ...btnSmall, color: "#0044cc" }} title="Preview what this policy would do. Changes nothing.">
+                      <Play size={12} /> {simulatingId === p.id ? "Simulating…" : "Simulate"}
+                    </button>
                     <button onClick={() => handleToggleStatus(p)} style={{ ...btnSmall, color: p.status === "active" ? "#22c55e" : "#999" }}>{p.status === "active" ? "Active" : "Disabled"}</button>
-                    <button onClick={() => handleDeletePolicy(p.id)} style={{ ...btnSmall, color: "#ef4444" }}><Trash2 size={12} /></button>
+                    {/* Hidden, not merely disabled, for pack rules: the server
+                        rejects the delete with 409, so offering the button would
+                        only produce an error. The badge above says where to go. */}
+                    {!p.pack_id && (
+                      <button onClick={() => handleDeletePolicy(p.id)} style={{ ...btnSmall, color: "#ef4444" }}><Trash2 size={12} /></button>
+                    )}
                   </div>
                 </div>
                 <div style={{ fontSize: 12, color: "var(--ag-text-secondary)", marginTop: 8, lineHeight: 1.6 }}>{p.description}</div>
@@ -311,6 +441,8 @@ export function PoliciesTab() {
                     IF {p.conditions.map((c) => `${c.field} ${c.operator} ${c.value}`).join(" AND ")} &rarr; {p.actions?.map((a) => a.type).join(", ") || "flag"}
                   </div>
                 )}
+
+                {simResults[p.id] && <PolicySimResult res={simResults[p.id]} onClose={() => setSimResults((s) => ({ ...s, [p.id]: null }))} />}
               </div>
             ))}
           </div>

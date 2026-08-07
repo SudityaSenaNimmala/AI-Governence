@@ -37,7 +37,7 @@ interface ScanResult {
     onedrive: number;
     teams: number;
     exchange: number;
-    estimatedExposedDocs: number;
+    highRiskFindings: number;
   };
   findings: Finding[];
   error?: string;
@@ -305,6 +305,20 @@ router.post("/scan", async (req, res) => {
   }
 
   const db = getDb();
+
+  // Check the key EXISTS before accepting the scan.
+  //
+  // Only presence was checked, so `?oauth_key_id=none` returned 200
+  // {status:"running"}, inserted a scan document, and failed in the background
+  // when getValidToken() could not resolve it. Because /results returns the most
+  // recent scan regardless of status, that dead scan then MASKED the last good
+  // one — a real 376-finding assessment disappeared behind a typo.
+  const keyExists = await db.collection("oauth_keys").findOne({ id: String(oauthKeyId) });
+  if (!keyExists) {
+    res.status(404).json({ error: `Unknown oauth_key_id: ${oauthKeyId}. Connect a Microsoft tenant first.` });
+    return;
+  }
+
   const scanId = uuidv4();
   const scan: ScanResult = {
     id: scanId,
@@ -315,7 +329,7 @@ router.post("/scan", async (req, res) => {
     summary: {
       totalFindings: 0, critical: 0, high: 0, medium: 0, low: 0,
       sharepoint: 0, onedrive: 0, teams: 0, exchange: 0,
-      estimatedExposedDocs: 0,
+      highRiskFindings: 0,
     },
     findings: [],
   };
@@ -373,9 +387,22 @@ router.post("/scan", async (req, res) => {
         onedrive: allFindings.filter(f => f.category === "onedrive").length,
         teams: allFindings.filter(f => f.category === "teams").length,
         exchange: allFindings.filter(f => f.category === "exchange").length,
-        estimatedExposedDocs: allFindings.filter(f =>
+        // The count of findings that need attention — NOT a document estimate.
+        //
+        // This was `high+critical findings × 50`, surfaced in the UI banner as
+        // "~1,250 documents potentially exposed". Nothing counts documents
+        // anywhere in this scan; the 50 was invented, and a "~" is not enough of a
+        // hedge when the output is a specific four-digit number a customer will
+        // repeat to their auditor. Multiplying a finding count by a constant does
+        // not produce information — it just makes the finding count look like a
+        // measurement of exposure.
+        //
+        // Renamed as well as re-valued so no caller keeps reading a "docs" figure
+        // out of it. If real document counts are wanted, they have to come from
+        // Graph per overshared resource.
+        highRiskFindings: allFindings.filter(f =>
           f.severity === "critical" || f.severity === "high"
-        ).length * 50, // rough estimate
+        ).length,
       };
 
       const riskLevel = summary.critical > 0 ? "critical"
@@ -408,20 +435,43 @@ router.get("/results", async (req, res) => {
   const db = getDb();
 
   const filter: any = {};
-  if (oauthKeyId) filter.oauthKeyId = oauthKeyId;
+  if (oauthKeyId) filter.oauthKeyId = String(oauthKeyId);
 
-  const latest = await db.collection("copilot_readiness_scans")
+  // Prefer the most recent COMPLETED scan; fall back to the most recent scan of
+  // any status only when none has ever completed.
+  //
+  // Taking "latest by startedAt" unconditionally meant one failed run buried the
+  // last good assessment: a scan that errored seconds after starting became the
+  // newest document, and the dashboard replaced a real 376-finding report with a
+  // permanently-"running" shell that the UI then polled forever. A failed attempt
+  // should never destroy the last known-good answer.
+  const [completed] = await db.collection("copilot_readiness_scans")
+    .find({ ...filter, status: "completed" })
+    .sort({ startedAt: -1 })
+    .limit(1)
+    .project({ _id: 0 })
+    .toArray();
+
+  const [newest] = await db.collection("copilot_readiness_scans")
     .find(filter)
     .sort({ startedAt: -1 })
     .limit(1)
     .project({ _id: 0 })
     .toArray();
 
-  if (latest.length === 0) {
+  if (!completed && !newest) {
     res.json({ scan: null });
     return;
   }
-  res.json({ scan: latest[0] });
+
+  // If a newer scan is mid-flight or failed, say so alongside the good result
+  // rather than silently showing stale data as if it were current.
+  const scan = completed || newest;
+  const superseded = newest && completed && newest.id !== completed.id
+    ? { id: newest.id, status: newest.status, startedAt: newest.startedAt }
+    : null;
+
+  res.json({ scan, ...(superseded ? { latest_attempt: superseded } : {}) });
 });
 
 // Get scan by ID

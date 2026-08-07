@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { getDb } from "../db.js";
+import { googleClientFromKey } from "../services/googleCredentials.js";
 import { decrypt } from "../crypto.js";
 import { getValidToken } from "../services/tokenManager.js";
 import { AzureFoundryClient } from "../services/azureFoundryClient.js";
@@ -52,6 +53,11 @@ router.get("/azure", async (req: Request, res: Response) => {
             }
           }
           const pricing = findPricing(modelName, "azure");
+          // Also estimated when the model matched no pricing entry: the Azure
+          // fallback is gpt-4o list price, so an unrecognised deployment name was
+          // priced as gpt-4o and shown as a firm figure. modelEstimated alone only
+          // caught the literal "unknown" case.
+          if (!pricing.matched) modelEstimated = true;
           const cost = computeCost(dep.promptTokens, dep.completionTokens, pricing);
           allDeploymentCosts.push({
             resourceName: account.name, resourceId: account.id,
@@ -114,12 +120,9 @@ router.get("/google", async (req: Request, res: Response) => {
     const keyDoc = await db.collection("oauth_keys").findOne({ id: oauthKeyId, vendor: "google" });
     if (!keyDoc) return res.status(404).json({ error: "Google credentials not found" });
 
-    const serviceAccountJson = decrypt(keyDoc.client_secret);
-    const keyObj: GoogleServiceAccountKey = JSON.parse(serviceAccountJson);
-    const adminEmail = keyDoc.google_admin_email || keyObj.client_email;
-    const projectId = keyDoc.google_project_id || keyObj.project_id;
-
-    const client = new GoogleWorkspaceClient(keyObj, adminEmail, projectId);
+    // Handles both credential shapes — an interactive-sign-in row has no
+    // service-account JSON to parse.
+    const { client, projectId } = await googleClientFromKey(keyDoc);
     const metrics = await client.getVertexAIUsageMetrics(periodDays);
 
     const endpointCosts = metrics.endpoints.map((ep) => {
@@ -132,6 +135,9 @@ router.get("/google", async (req: Request, res: Response) => {
         inputCost: (ep.inputTokenCount * pricing.input) / 1_000_000,
         outputCost: (ep.outputTokenCount * pricing.output) / 1_000_000,
         totalCost: cost, pricingPerMillionInput: pricing.input, pricingPerMillionOutput: pricing.output,
+        // Vertex endpoints are matched by display name, which is user-chosen, so an
+        // unmatched one gets the generic Google fallback rate rather than a real price.
+        costEstimated: !pricing.matched,
         vendor: "Google", platform: "vertex_ai",
       };
     });

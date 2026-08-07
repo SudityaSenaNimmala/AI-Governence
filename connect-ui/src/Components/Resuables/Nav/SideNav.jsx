@@ -6,7 +6,6 @@ import {
   ChevronRight,
   CircleHelp,
   Database,
-  Gem,
   LayoutDashboard,
   Mail,
   MessageCircle,
@@ -19,11 +18,7 @@ import {
   Unplug,
   Workflow,
   Grip,
-  History,
-  Scale,
-  Activity,
-  Wallet,
-  Shuffle
+  Inbox,
 } from "lucide-react";
 import { useContext, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
@@ -110,32 +105,34 @@ const SideNav = (props) => {
       icon: <Bot size={18} />,
       title: "AI Hub",
       link: "#",
+      // Six entries, each a question rather than a table. The sub-screens they
+      // absorbed are tabs inside them (see TAB_GROUPS in AIHubPage.jsx) and every
+      // former URL still resolves via the redirects in App.jsx.
+      //
+      // Not listed, reachable by URL only, unchanged from before: Tools Catalog,
+      // Server Agents, AI Usage, Server Monitor. Policy Simulator now runs per pack
+      // from inside Policy Packs; EU AI Act returns as a Policies & Risk tab once
+      // its intake is seeded from the discovered agent registry.
       children: [
         { icon: <LayoutDashboard size={16} />, title: "Overview", link: "/AIHub/Overview" },
-        // { icon: <AppWindow size={16} />, title: "Tools Catalog", link: "/AIHub/Tools" },   // hidden for now
-        { icon: <ShieldCheck size={16} />, title: "Agents & MCP", link: "/AIHub/Agents" },
-        // { icon: <Database size={16} />, title: "Server Agents", link: "/AIHub/ServerAgents" },   // hidden for now
-        { icon: <Sparkles size={16} />, title: "AI Activity", link: "/AIHub/DLP" },
-        { icon: <History size={16} />, title: "Session Replay", link: "/AIHub/SessionReplay" },
-        // { icon: <Gem size={16} />, title: "AI Usage", link: "/AIHub/AIUsage" },  // hidden for now
-        { icon: <MessageCircle size={16} />, title: "Claude Usage", link: "/AIHub/ClaudeUsage" },
-        { icon: <ShieldCheck size={16} />, title: "Policy Packs", link: "/AIHub/PolicyPacks" },
-        // Policy Simulator now runs per pack from inside Policy Packs, so it has no
-        // standalone page. EU AI Act is hidden until its intake is seeded from the
-        // discovered agent registry.
-        // { icon: <Workflow size={16} />, title: "Policy Simulator", link: "/AIHub/PolicySimulator" },
-        // { icon: <Scale size={16} />, title: "EU AI Act", link: "/AIHub/EuAiAct" },
-        { icon: <Grip size={16} />, title: "AI Platforms", link: "/AIHub/Platforms" },
+        // Systems · Agents & MCP · Platforms
+        { icon: <Database size={16} />, title: "Inventory", link: "/AIHub/Inventory" },
+        // Prompts & DLP · Sessions · Claude Usage · Model Routing
+        { icon: <Sparkles size={16} />, title: "Activity", link: "/AIHub/Activity" },
+        // Policy Packs · Risk Scores
+        { icon: <ShieldCheck size={16} />, title: "Policies & Risk", link: "/AIHub/PoliciesRisk" },
+        // Top level, not a tab: an approval queue is somebody waiting on you.
+        { icon: <Inbox size={16} />, title: "Access Requests", link: "/AIHub/AccessRequests" },
+        // Left intact: its own tab bar already covers Discovery, User Activity,
+        // Stale Agents, Cost and Budget. "AI Budget" was this component's BudgetTab
+        // surfaced twice, so it is gone from the nav rather than duplicated.
         { icon: agentGovernanceIcon, title: "Agent Governance", link: "/AIHub/AgentGovernance" },
-        { icon: <Activity size={16} />, title: "Server Monitor", link: "/AIHub/ServerMonitor" },
-        { icon: <Wallet size={16} />, title: "AI Budget", link: "/AIHub/AIBudget" },
-        { icon: <ShieldCheck size={16} />, title: "Copilot Readiness", link: "/AIHub/CopilotReadiness" },
-        { icon: <Shuffle size={16} />, title: "Model Routing", link: "/AIHub/ModelRouting" },
-        { icon: <ShieldCheck size={16} />, title: "Risk Scores", link: "/AIHub/RiskScores" },
-        { icon: <Database size={16} />, title: "AI Registry", link: "/AIHub/AIRegistry" },
-        { icon: <ShieldCheck size={16} />, title: "Access Requests", link: "/AIHub/AccessRequests" },
-        { icon: <Unplug size={16} />, title: "Integrations", link: "/AIHub/Integrations" },
-        { icon: <Unplug size={16} />, title: "Developer SDK", link: "/AIHub/DeveloperSDK" },
+        // Integrations · Developer SDK · Copilot Readiness
+        // The flat entries this replaced (Server Monitor, AI Budget, Copilot
+        // Readiness, Model Routing, Risk Scores, AI Registry, Integrations,
+        // Developer SDK) are all still reachable — as tabs within the six groups
+        // above, or via the redirects in App.jsx. Nothing was dropped.
+        { icon: <Unplug size={16} />, title: "Setup", link: "/AIHub/Setup" },
       ],
     },
     ...(hasContentSprawl

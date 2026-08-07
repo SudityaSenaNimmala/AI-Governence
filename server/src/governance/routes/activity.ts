@@ -828,13 +828,24 @@ router.get("/azure/usage-details", async (req, res) => {
           const modelName = deploymentModelMap.get(dep.deploymentName) || dep.deploymentName;
           const pricing = findPricing(modelName, "azure");
 
-          // If only totalTokens is available (no split), estimate 40% input / 60% output for cost
+          // Azure Monitor sometimes reports only a total, with no prompt/completion
+          // split. The 40/60 assumption below is invented — nothing measures it —
+          // so it is FLAGGED rather than silently folded into a dollar figure. The
+          // inputCost/outputCost columns rendered from it were exact-looking money
+          // derived from a guessed ratio.
           let inputTokens = dep.promptTokens;
           let outputTokens = dep.completionTokens;
+          let splitEstimated = false;
           if (inputTokens === 0 && outputTokens === 0 && dep.totalTokens > 0) {
             inputTokens = Math.round(dep.totalTokens * 0.4);
             outputTokens = Math.round(dep.totalTokens * 0.6);
+            splitEstimated = true;
           }
+
+          // True when the cost cannot be stated as fact: either the in/out split
+          // was assumed, or the model matched no pricing entry and is being priced
+          // at a generic fallback rate.
+          const costEstimated = splitEstimated || !pricing.matched;
 
           const cost = computeCost(inputTokens, outputTokens, pricing);
 
@@ -852,6 +863,11 @@ router.get("/azure/usage-details", async (req, res) => {
             inputCost: (inputTokens * pricing.input) / 1_000_000,
             outputCost: (outputTokens * pricing.output) / 1_000_000,
             totalCost: cost,
+            // Surfaced so the UI can mark the figure rather than presenting an
+            // assumed split / fallback rate as a measurement.
+            costEstimated,
+            splitEstimated,
+            pricingMatched: pricing.matched,
             resourceName: oai.name,
             resourceId: oai.id,
           });

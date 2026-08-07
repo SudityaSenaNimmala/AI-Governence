@@ -2,6 +2,7 @@ import { Router } from "express";
 import { getDb } from "../db.js";
 import { encrypt, decrypt } from "../crypto.js";
 import { GoogleWorkspaceClient, GoogleWorkspaceError, type GoogleServiceAccountKey, type GoogleChatBot, type GoogleWorkspaceDiscoveryResult } from "../services/googleWorkspaceClient.js";
+import { googleClientFromKey } from "../services/googleCredentials.js";
 import crypto from "node:crypto";
 
 const router = Router();
@@ -271,12 +272,12 @@ router.get("/discover", async (req, res) => {
       return;
     }
 
-    const serviceAccountJson = decrypt(gKey.client_secret);
-    const keyObj: GoogleServiceAccountKey = JSON.parse(serviceAccountJson);
-    const adminEmail = gKey.google_admin_email || keyObj.client_email;
-    const projectId = gKey.google_project_id || keyObj.project_id;
+    // Shared loader: an interactive-sign-in row carries a refresh token and no
+    // service-account JSON, so parsing client_secret here threw a bare
+    // "reading 'split'" TypeError that named nothing useful.
+    const { client: gClient, adminEmail, projectId } = await googleClientFromKey(gKey);
 
-    const client = new GoogleWorkspaceClient(keyObj, adminEmail, projectId);
+    const client = gClient;
     const result = await client.discoverAll();
     res.json(transformForFrontend(result));
   } catch (err) {
@@ -296,12 +297,12 @@ router.get("/conversations", async (req, res) => {
     const gKey = await loadGoogleKey();
     if (!gKey) { res.status(400).json({ error: "No Google credentials found. Connect Google Cloud first." }); return; }
 
-    const serviceAccountJson = decrypt(gKey.client_secret);
-    const keyObj: GoogleServiceAccountKey = JSON.parse(serviceAccountJson);
-    const adminEmail = gKey.google_admin_email || keyObj.client_email;
-    const projectId = gKey.google_project_id || keyObj.project_id;
+    // Shared loader: an interactive-sign-in row carries a refresh token and no
+    // service-account JSON, so parsing client_secret here threw a bare
+    // "reading 'split'" TypeError that named nothing useful.
+    const { client: gClient, adminEmail, projectId } = await googleClientFromKey(gKey);
 
-    const client = new GoogleWorkspaceClient(keyObj, adminEmail, projectId);
+    const client = gClient;
     const conversations = await client.fetchAgentConversations(days);
 
     res.json({
@@ -329,12 +330,12 @@ router.get("/gemini-activity", async (req, res) => {
     const gKey = await loadGoogleKey();
     if (!gKey) { res.status(400).json({ error: "No Google credentials found. Connect Google Cloud first." }); return; }
 
-    const serviceAccountJson = decrypt(gKey.client_secret);
-    const keyObj: GoogleServiceAccountKey = JSON.parse(serviceAccountJson);
-    const adminEmail = gKey.google_admin_email || keyObj.client_email;
-    const projectId = gKey.google_project_id || keyObj.project_id;
+    // Shared loader: an interactive-sign-in row carries a refresh token and no
+    // service-account JSON, so parsing client_secret here threw a bare
+    // "reading 'split'" TypeError that named nothing useful.
+    const { client: gClient, adminEmail, projectId } = await googleClientFromKey(gKey);
 
-    const client = new GoogleWorkspaceClient(keyObj, adminEmail, projectId);
+    const client = gClient;
     const activity = await client.fetchGeminiActivity(days);
 
     res.json({ ...activity, totalEvents: activity.events.length, totalUsers: activity.userSummary.length, periodDays: days });
@@ -356,12 +357,12 @@ router.get("/gemini-vault", async (req, res) => {
     const gKey = await loadGoogleKey();
     if (!gKey) { res.status(400).json({ error: "No Google credentials found. Connect Google Cloud first." }); return; }
 
-    const serviceAccountJson = decrypt(gKey.client_secret);
-    const keyObj: GoogleServiceAccountKey = JSON.parse(serviceAccountJson);
-    const adminEmail = gKey.google_admin_email || keyObj.client_email;
-    const projectId = gKey.google_project_id || keyObj.project_id;
+    // Shared loader: an interactive-sign-in row carries a refresh token and no
+    // service-account JSON, so parsing client_secret here threw a bare
+    // "reading 'split'" TypeError that named nothing useful.
+    const { client: gClient, adminEmail, projectId } = await googleClientFromKey(gKey);
 
-    const client = new GoogleWorkspaceClient(keyObj, adminEmail, projectId);
+    const client = gClient;
     const vaultData = await client.fetchGeminiVaultData(days, userEmails);
 
     res.json({ ...vaultData, periodDays: days });
@@ -382,11 +383,10 @@ router.get("/usage", async (req, res) => {
     const gKey = await loadGoogleKey();
     if (!gKey) { res.status(400).json({ error: "No Google credentials found. Connect Google Cloud first." }); return; }
 
-    const keyObj: GoogleServiceAccountKey = JSON.parse(decrypt(gKey.client_secret));
-    const adminEmail = gKey.google_admin_email || keyObj.client_email;
-    const projectId = gKey.google_project_id || keyObj.project_id;
-
-    const client = new GoogleWorkspaceClient(keyObj, adminEmail, projectId);
+    // googleClientFromKey handles BOTH credential shapes. Parsing
+    // client_secret directly threw on interactive-sign-in rows, which have a
+    // refresh token and no service-account JSON at all.
+    const { client } = await googleClientFromKey(gKey);
     const usage = await client.getVertexAIUsageMetrics(days);
 
     res.json({ vendor: "Google / Vertex AI", period: `P${days}D`, ...usage });
@@ -407,11 +407,10 @@ router.get("/gemini-usage", async (req, res) => {
     const gKey = await loadGoogleKey();
     if (!gKey) { res.status(400).json({ error: "No Google credentials found. Connect Google Cloud first." }); return; }
 
-    const keyObj: GoogleServiceAccountKey = JSON.parse(decrypt(gKey.client_secret));
-    const adminEmail = gKey.google_admin_email || keyObj.client_email;
-    const projectId = gKey.google_project_id || keyObj.project_id;
-
-    const client = new GoogleWorkspaceClient(keyObj, adminEmail, projectId);
+    // googleClientFromKey handles BOTH credential shapes. Parsing
+    // client_secret directly threw on interactive-sign-in rows, which have a
+    // refresh token and no service-account JSON at all.
+    const { client } = await googleClientFromKey(gKey);
     const { platforms, perUser } = await client.fetchGeminiPerAppUsage(days);
 
     res.json({ vendor: "Google / Gemini", period: `P${days}D`, platforms, perUser, totalUsers: perUser.length, totalPlatforms: platforms.length });
@@ -443,13 +442,13 @@ router.get("/scan-platform", async (req, res) => {
       return;
     }
 
-    const serviceAccountJson = decrypt(gKey.client_secret);
-    const keyObj: GoogleServiceAccountKey = JSON.parse(serviceAccountJson);
-    const adminEmail = gKey.google_admin_email || keyObj.client_email;
-    const projectId = gKey.google_project_id || keyObj.project_id;
+    // Shared loader: an interactive-sign-in row carries a refresh token and no
+    // service-account JSON, so parsing client_secret here threw a bare
+    // "reading 'split'" TypeError that named nothing useful.
+    const { client: gClient, adminEmail, projectId } = await googleClientFromKey(gKey);
     const domain = adminEmail.split("@")[1] || "unknown";
 
-    const client = new GoogleWorkspaceClient(keyObj, adminEmail, projectId);
+    const client = gClient;
 
     switch (platform) {
       case "reasoning_engines": {
@@ -514,12 +513,12 @@ router.get("/user-activity", async (req, res) => {
     const gKey = await loadGoogleKey(oauthKeyId);
     if (!gKey) { res.status(400).json({ error: "No Google credentials found. Connect Google Cloud first." }); return; }
 
-    const serviceAccountJson = decrypt(gKey.client_secret);
-    const keyObj: GoogleServiceAccountKey = JSON.parse(serviceAccountJson);
-    const adminEmail = gKey.google_admin_email || keyObj.client_email;
-    const projectId = gKey.google_project_id || keyObj.project_id;
+    // Shared loader: an interactive-sign-in row carries a refresh token and no
+    // service-account JSON, so parsing client_secret here threw a bare
+    // "reading 'split'" TypeError that named nothing useful.
+    const { client: gClient, adminEmail, projectId } = await googleClientFromKey(gKey);
 
-    const client = new GoogleWorkspaceClient(keyObj, adminEmail, projectId);
+    const client = gClient;
 
     const [conversationsResult, discoveryResult] = await Promise.allSettled([
       client.fetchAgentConversations(7),
@@ -619,12 +618,12 @@ router.get("/agent-details", async (req, res) => {
     const gKey = await loadGoogleKey(oauthKeyId);
     if (!gKey) { res.status(400).json({ error: "No Google credentials found. Connect Google Cloud first." }); return; }
 
-    const serviceAccountJson = decrypt(gKey.client_secret);
-    const keyObj: GoogleServiceAccountKey = JSON.parse(serviceAccountJson);
-    const adminEmail = gKey.google_admin_email || keyObj.client_email;
-    const projectId = gKey.google_project_id || keyObj.project_id;
+    // Shared loader: an interactive-sign-in row carries a refresh token and no
+    // service-account JSON, so parsing client_secret here threw a bare
+    // "reading 'split'" TypeError that named nothing useful.
+    const { client: gClient, adminEmail, projectId } = await googleClientFromKey(gKey);
 
-    const client = new GoogleWorkspaceClient(keyObj, adminEmail, projectId);
+    const client = gClient;
     const details = await client.getAgentDetails(platform, agentId);
     res.json(details);
   } catch (err) {
@@ -643,11 +642,11 @@ router.get("/debug-gems", async (_req, res) => {
     const gKey = await loadGoogleKey();
     if (!gKey) { res.status(400).json({ error: "No Google credentials found." }); return; }
 
-    const serviceAccountJson = decrypt(gKey.client_secret);
-    const keyObj: GoogleServiceAccountKey = JSON.parse(serviceAccountJson);
-    const adminEmail = gKey.google_admin_email || keyObj.client_email;
-    const projectId = gKey.google_project_id || keyObj.project_id;
-    const client = new GoogleWorkspaceClient(keyObj, adminEmail, projectId);
+    // Shared loader: an interactive-sign-in row carries a refresh token and no
+    // service-account JSON, so parsing client_secret here threw a bare
+    // "reading 'split'" TypeError that named nothing useful.
+    const { client: gClient, adminEmail, projectId } = await googleClientFromKey(gKey);
+    const client = gClient;
     const results = await client.debugGeminiAudit();
     res.json(results);
   } catch (err) {

@@ -1,10 +1,10 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, useEffect, useRef, useMemo, useCallback, Fragment } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import SideNav from "../../Resuables/Nav/SideNav";
 import TopNav from "../../Resuables/Nav/TopNav";
 import AgentGovernance from "../AgentGovernance/AgentGovernance";
 import { AgentGovernanceProvider } from "../AgentGovernance/AgentGovernanceContext";
-import { BudgetTab } from "../AgentGovernance/tabs/BudgetTab";
+import { PoliciesTab } from "../AgentGovernance/tabs/PoliciesTab";
 import {
   Monitor, Scan, AlertTriangle, Wrench, Server, Shield, Clock, ChevronRight,
   Search, RefreshCw, Activity, FileText, MessageSquare, Eye, Trash2, Plus, X,
@@ -61,8 +61,24 @@ function Tag({ text, color="#6366f1" }) { return <span style={{display:"inline-b
 function Loading() { return <div className="aihub_loading"><RefreshCw size={18} className="aihub_spin"/> Loading...</div>; }
 function Err({msg}) { return <div className="aihub_error"><AlertTriangle size={14}/> {msg}</div>; }
 function Empty({icon,title,msg}) { return <div className="aihub_empty">{icon}<h4>{title}</h4><p>{msg}</p></div>; }
-function DataTable({ columns, rows, empty, onRow }) {
-  return (<div className="aihub_table_wrap"><table className="aihub_table"><thead><tr>{columns.map((c,i)=><th key={i} style={c.right?{textAlign:"right"}:undefined}>{c.label}</th>)}</tr></thead><tbody>{(!rows||!rows.length)?<tr><td colSpan={columns.length} className="aihub_table_empty">{empty||"No data"}</td></tr>:rows.map((r,i)=><tr key={r.id||r.tool_key||i} onClick={()=>onRow?.(r)} style={{cursor:onRow?"pointer":"default"}}>{columns.map((c,j)=><td key={j} style={c.right?{textAlign:"right"}:undefined}>{c.render?c.render(r):r[c.key]??"—"}</td>)}</tr>)}</tbody></table></div>);
+/**
+ * @param {function} [renderExpanded] - (row) => node. When supplied together with
+ *   `isExpanded`, the returned node renders in a full-width row directly beneath
+ *   its parent. Detail stays attached to the row it describes, which a side panel
+ *   cannot do once the table scrolls.
+ * @param {function} [isExpanded] - (row) => boolean.
+ */
+function DataTable({ columns, rows, empty, onRow, renderExpanded, isExpanded }) {
+  const rowKey=(r,i)=>r.id||r.tool_key||r.host||i;
+  return (<div className="aihub_table_wrap"><table className="aihub_table"><thead><tr>{columns.map((c,i)=><th key={i} style={c.right?{textAlign:"right"}:undefined}>{c.label}</th>)}</tr></thead><tbody>{(!rows||!rows.length)?<tr><td colSpan={columns.length} className="aihub_table_empty">{empty||"No data"}</td></tr>:rows.map((r,i)=>{
+    const open=isExpanded?.(r);
+    return (<Fragment key={rowKey(r,i)}>
+      <tr onClick={()=>onRow?.(r)} style={{cursor:onRow?"pointer":"default",background:open?"#f3f7ff":undefined}}>
+        {columns.map((c,j)=><td key={j} style={c.right?{textAlign:"right"}:undefined}>{c.render?c.render(r):r[c.key]??"—"}</td>)}
+      </tr>
+      {open&&renderExpanded&&<tr className="aihub_expanded_row"><td colSpan={columns.length} style={{padding:0,background:"#f9fafb"}}>{renderExpanded(r)}</td></tr>}
+    </Fragment>);
+  })}</tbody></table></div>);
 }
 function BarChart({ data, lk, vk, max=8 }) {
   const items=(data||[]).slice(0,max); const mx=Math.max(1,...items.map(d=>d[vk]||0));
@@ -266,14 +282,15 @@ function ToolsView() {
 // 4. AGENTS & MCP
 // ═══════════════════════════════════════════════════════════════════════════════
 function AgentsView() {
-  const [mcp,setMcp]=useState(null),[projects,setProjects]=useState(null),[configs,setConfigs]=useState(null),[hooks,setHooks]=useState(null),[e,setE]=useState(null);
+  // agent_config and desktop_hook_status are no longer fetched — the two tables
+  // that consumed them were removed, and leaving the requests in would cost two
+  // round-trips per mount for data nothing renders.
+  const [mcp,setMcp]=useState(null),[projects,setProjects]=useState(null),[e,setE]=useState(null);
   useEffect(()=>{
     Promise.all([
       apiFetch("/findings?type=mcp_server&latestOnly=true&limit=500"),
       apiFetch("/findings?type=agent_project&latestOnly=true&limit=500"),
-      apiFetch("/findings?type=agent_config&latestOnly=true&limit=500"),
-      apiFetch("/findings?type=desktop_hook_status&latestOnly=true&limit=500"),
-    ]).then(([m,p,c,h])=>{setMcp(m);setProjects(p);setConfigs(c);setHooks(h)}).catch(x=>setE(x.message));
+    ]).then(([m,p])=>{setMcp(m);setProjects(p)}).catch(x=>setE(x.message));
   },[]);
   if(e) return <Err msg={e}/>; if(!mcp) return <Loading/>;
 
@@ -281,10 +298,8 @@ function AgentsView() {
   const grouped={ai_agent:[],ai_coding_agent:[],ai_app:[]};
   (projects||[]).forEach(f=>{const c=f.payload?.primaryCategory||"ai_app";(grouped[c]||(grouped[c]=[])).push(f)});
 
-  const hookTone={injected:"#22c55e",already_injected:"#22c55e",failed:"#ef4444",pending:"#f59e0b"};
-
   return (<div>
-    <SectionHeader title="Agents & MCP" hint="AI agent projects, MCP servers, desktop hooks, and agent configs across all machines."/>
+    <SectionHeader title="Agents & MCP" hint="AI agent projects and the MCP servers they can reach, across all machines."/>
 
     {/* MCP Servers */}
     <div className="aihub_card">
@@ -313,29 +328,13 @@ function AgentsView() {
       </div>
     ))}
 
-    {/* Desktop hooks */}
-    <div className="aihub_card">
-      <SectionHeader title="Desktop hook coverage" hint="Whether the endpoint agent has injected the in-app monitoring hook into Electron AI apps."/>
-      <DataTable columns={[
-        {label:"Machine",render:r=><Mono>{(r.machine_id||"").slice(0,10)}</Mono>},
-        {label:"Product",render:r=><><span className="aihub_text_primary">{r.payload?.product||"—"}</span> <span className="aihub_text_muted">{r.payload?.vendor||""}</span></>},
-        {label:"Version",render:r=><><span>{r.payload?.appVersion||"—"}</span> <span className="aihub_text_muted">hook {r.payload?.hookVersion||"?"}</span></>},
-        {label:"Status",render:r=><Badge text={r.payload?.hookStatus||"unknown"} color={hookTone[r.payload?.hookStatus]||"#9ca3af"}/>},
-        {label:"Injected",render:r=>relTime(r.payload?.injectedAt)},
-      ]} rows={hooks||[]} empty="No desktop hooks found"/>
-    </div>
-
-    {/* Agent configs */}
-    <div className="aihub_card">
-      <SectionHeader title="Agent configurations" hint="Machine-level config files that grant capabilities to AI agents."/>
-      <DataTable columns={[
-        {label:"Machine",render:r=><Mono>{(r.machine_id||"").slice(0,10)}</Mono>},
-        {label:"Kind",render:r=>r.payload?.kind||"—"},
-        {label:"Vendor",render:r=>r.payload?.vendor||"—"},
-        {label:"Path",render:r=><Mono>{r.payload?.path||"—"}</Mono>},
-        {label:"Modified",render:r=>relTime(r.payload?.lastModified)},
-      ]} rows={configs||[]} empty="No agent configs found"/>
-    </div>
+    {/* "Desktop hook coverage" and "Agent configurations" were removed from this
+        view. Both were endpoint-diagnostic tables — which Electron apps the hook
+        injected into, and which config files exist on which machine — rather than
+        an inventory of AI systems, which is what this screen is for. Their
+        findings are still captured and stored; they are simply no longer surfaced
+        here. Re-add by restoring the two /findings fetches (types
+        desktop_hook_status and agent_config) alongside their tables. */}
   </div>);
 }
 
@@ -392,7 +391,13 @@ function DLPView() {
   const [summary,setS]=useState(null),[events,setEv]=useState(null),[files,setF]=useState(null),[e,setE]=useState(null);
   const [preview,setPreview]=useState(null);   // event row whose content is open
   useEffect(()=>{
-    Promise.all([apiFetch("/dlp/summary").catch(()=>null),apiFetch("/dlp?limit=200").catch(()=>[]),apiFetch("/dlp/files").catch(()=>[])]).then(([s,ev,f])=>{setS(s);setEv(ev);setF(f)}).catch(x=>setE(x.message));
+    // severity=critical,high server-side, NOT the newest 200 of everything.
+    // This table only ever shows high/critical (the filter below), so fetching
+    // unfiltered meant the 200 newest events could be entirely low/null and the
+    // table rendered "No high or critical prompt events yet" directly beneath a
+    // "High / critical: 1,196" stat card. The counter reads from /dlp/summary,
+    // which is computed over the whole collection, so the two disagreed.
+    Promise.all([apiFetch("/dlp/summary").catch(()=>null),apiFetch("/dlp?severity=critical,high&limit=200").catch(()=>[]),apiFetch("/dlp/files").catch(()=>[])]).then(([s,ev,f])=>{setS(s);setEv(ev);setF(f)}).catch(x=>setE(x.message));
   },[]);
   if(e) return <Err msg={e}/>; if(!events) return <Loading/>;
 
@@ -1676,10 +1681,28 @@ function CopilotReadinessView() {
         </div>
       </div>
 
-      {/* No Microsoft tenant connected */}
-      {oauthKeys.length === 0 && (
+      {/* No Microsoft tenant connected.
+          Two independent conditions used to render at once: this empty state fired
+          on `oauthKeys.length === 0` while the results block below fired on
+          `scan.status === "completed"`, so a tenant that had been disconnected
+          after a scan showed "No Microsoft 365 tenant connected" directly above a
+          full 376-finding report. Now the empty state only claims the screen when
+          there is genuinely nothing to show; if a previous scan exists it is kept
+          (it is real data and still useful) and labelled as historical instead. */}
+      {oauthKeys.length === 0 && !scan && (
         <Empty icon={<Shield size={32} />} title="No Microsoft 365 tenant connected"
           msg="Connect your Microsoft tenant in Agent Governance → Setup to run the Copilot Readiness Assessment." />
+      )}
+      {oauthKeys.length === 0 && scan && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, padding: "9px 14px",
+                      borderRadius: 8, background: "#fffbeb", border: "1px solid #fde68a", fontSize: 12.5, color: "#92400e" }}>
+          <AlertTriangle size={14} />
+          <span>
+            <strong>No Microsoft 365 tenant is connected, so this assessment cannot be re-run.</strong>{" "}
+            The results below are from the last completed scan{scan.completed_at ? ` (${relTime(scan.completed_at)})` : ""} and may be out of date.
+            Reconnect the tenant in Agent Governance → Setup to refresh them.
+          </span>
+        </div>
       )}
 
       {/* Scan results */}
@@ -1692,7 +1715,17 @@ function CopilotReadinessView() {
           <div>
             <div style={{ fontSize: 22, fontWeight: 700, color: sevColor[scan.riskLevel], textTransform: "uppercase" }}>{scan.riskLevel} Risk</div>
             <div style={{ fontSize: 13, color: "#475569", marginTop: 2 }}>
-              {scan.summary.totalFindings} finding{scan.summary.totalFindings !== 1 ? "s" : ""} · ~{scan.summary.estimatedExposedDocs.toLocaleString()} documents potentially exposed · Scanned in {((scan.durationMs || 0) / 1000).toFixed(1)}s
+              {/* A real count. This used to read "~N documents potentially
+                  exposed", computed as findings×50 — a number nothing measured,
+                  printed to four significant figures.
+                  Scans stored before the rename lack highRiskFindings, so fall
+                  back to critical+high, which those documents do carry. */}
+              {scan.summary.totalFindings} finding{scan.summary.totalFindings !== 1 ? "s" : ""}
+              {(() => {
+                const hi = scan.summary.highRiskFindings ?? ((scan.summary.critical || 0) + (scan.summary.high || 0));
+                return hi > 0 ? <> · {hi} high or critical</> : null;
+              })()}
+              {" "}· Scanned in {((scan.durationMs || 0) / 1000).toFixed(1)}s
             </div>
           </div>
         </div>
@@ -2158,7 +2191,17 @@ const IDENTITY_API = "/api/v1/identity";
 const RISK_COLORS = { low: "#22c55e", medium: "#f59e0b", high: "#ef4444", critical: "#991b1b" };
 const RISK_BG     = { low: "#f0fdf4", medium: "#fffbeb", high: "#fef2f2", critical: "#fef2f2" };
 
+// "not_assessed" renders as grey, with no number and no dot — deliberately not
+// green. A missing score is not a good score, and this badge used to print
+// "null — Unknown" in the same shape as a passing grade.
 function RiskLevelBadge({ level, score }) {
+  if (score == null || level === "not_assessed" || !level) {
+    return <span title="No risk assessment has run for this subject yet"
+                 style={{display:"inline-flex",alignItems:"center",gap:6,padding:"3px 10px",borderRadius:8,
+                         fontSize:12,fontWeight:600,background:"#f3f4f6",color:"#6b7280",border:"1px dashed #d1d5db"}}>
+      Not assessed
+    </span>;
+  }
   const c = RISK_COLORS[level] || "#6b7280";
   return <span style={{display:"inline-flex",alignItems:"center",gap:6,padding:"3px 10px",borderRadius:8,fontSize:12,fontWeight:700,background:c+"14",color:c,border:"1px solid "+c+"30"}}>
     <span style={{width:8,height:8,borderRadius:"50%",background:c,display:"inline-block"}}/> {score} — {(level||"unknown").charAt(0).toUpperCase()+(level||"").slice(1)}
@@ -2166,6 +2209,12 @@ function RiskLevelBadge({ level, score }) {
 }
 
 function ScoreBar({ score }) {
+  // An unscored subject gets an empty track, not a zero-width green bar — the
+  // latter is visually indistinguishable from "scored 0", i.e. perfectly safe.
+  if (score == null || !Number.isFinite(Number(score))) {
+    return <div title="Not assessed" style={{width:"100%",height:8,background:"#f3f4f6",borderRadius:4,
+                 border:"1px dashed #d1d5db",boxSizing:"border-box"}}/>;
+  }
   const c = score<=30?"#22c55e":score<=60?"#f59e0b":score<=80?"#ef4444":"#991b1b";
   return <div style={{width:"100%",height:8,background:"#f3f4f6",borderRadius:4,overflow:"hidden"}}>
     <div style={{width:score+"%",height:"100%",background:c,borderRadius:4,transition:"width 0.4s ease"}}/>
@@ -2191,8 +2240,9 @@ function RiskScoreView() {
   const [summary,setSummary]=useState(null);
   const [err,setErr]=useState(null);
   const [computing,setComputing]=useState(false);
-  const [selected,setSelected]=useState(null);
-  const [detail,setDetail]=useState(null);
+  const [selected,setSelected]=useState(null);      // id of the open row, or null
+  const [details,setDetails]=useState({});          // profileId → detail, cached
+  const [loadingId,setLoadingId]=useState(null);
 
   const loadAll=()=>{
     Promise.all([
@@ -2209,19 +2259,39 @@ function RiskScoreView() {
       // First resolve profiles, then compute scores
       await fetch(IDENTITY_API+"/resolve",{method:"POST"});
       await fetch(RISK_API+"/compute",{method:"POST"});
+      // Drop the cached breakdowns — recomputing changes exactly the numbers they
+      // show, so keeping them would leave an expanded row displaying the previous
+      // run's factors beside a freshly updated score in the same table.
+      setDetails({}); setSelected(null);
       loadAll();
     } catch(e) { setErr(e.message); }
     setComputing(false);
   };
 
-  const showDetail=async(profileId)=>{
+  /**
+   * Open or close one employee's breakdown.
+   *
+   * The detail (score history + recent events) is fetched on first open and then
+   * cached, so re-opening a row is instant and browsing the list does not refetch
+   * the same profile repeatedly.
+   *
+   * A failure here sets the per-row detail to null rather than the page-level
+   * error: one profile that will not load should not blank the whole table and
+   * lose the other employees' scores.
+   */
+  const toggleRow=async(profileId)=>{
+    if(selected===profileId){ setSelected(null); return; }
+    setSelected(profileId);
+    if(details[profileId]) return;                 // already cached
+    setLoadingId(profileId);
     try {
       const r=await fetch(RISK_API+"/"+profileId);
       if(!r.ok) throw new Error(""+r.status);
-      const d=await r.json();
-      setDetail(d);
-      setSelected(profileId);
-    } catch(e) { setErr(e.message); }
+      const json=await r.json();               // resolve BEFORE the state updater —
+      setDetails(d=>({...d,[profileId]:json})); // that callback is not async
+
+    } catch { setDetails(d=>({...d,[profileId]:null})); }
+    finally { setLoadingId(null); }
   };
 
   if(err) return <Err msg={err}/>;
@@ -2256,79 +2326,101 @@ function RiskScoreView() {
         </p>
       </div>
     ) : (
-      <div className="aihub_two_col">
-        {/* Employee List */}
-        <div className="aihub_card">
-          <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>Employees by Risk</h4>
-          <DataTable columns={[
-            {label:"Employee",render:r=><div>
-              <div className="aihub_text_primary">{r.display_name}</div>
-              <div className="aihub_text_muted">{r.email||r.hostname||"—"}</div>
+      <div className="aihub_card">
+        <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>Employees by Risk</h4>
+        <DataTable
+          columns={[
+            {label:"Employee",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
+              <ChevronRight size={13} style={{color:"#9ca3af",flexShrink:0,transition:"transform .15s",transform:selected===r.id?"rotate(90deg)":"none"}}/>
+              <div>
+                <div className="aihub_text_primary">{r.display_name}</div>
+                <div className="aihub_text_muted">{r.email||r.hostname||"—"}</div>
+              </div>
             </div>},
             {label:"Score",render:r=><RiskLevelBadge level={r.risk_level} score={r.risk_score}/>},
-            {label:"",render:r=><ScoreBar score={r.risk_score}/>},
-            {label:"Sources",render:r=><div style={{display:"flex",gap:3}}>{(r.sources||[]).map(s=><Tag key={s} text={s}/>)}</div>},
+            {label:"",render:r=><div style={{minWidth:120}}><ScoreBar score={r.risk_score}/></div>},
+            {label:"Sources",render:r=><div style={{display:"flex",gap:3,flexWrap:"wrap"}}>{(r.sources||[]).map(s=><Tag key={s} text={s}/>)}</div>},
             {label:"Computed",render:r=>relTime(r.risk_computed_at)},
-          ]} rows={realScores} onRow={(r)=>showDetail(r.id)}/>
-        </div>
-
-        {/* Detail Panel */}
-        <div>
-          {detail ? (
-            <div className="aihub_card">
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-                <div>
-                  <h4 style={{margin:0,fontSize:16,fontWeight:700}}>{detail.profile?.display_name}</h4>
-                  <div className="aihub_text_muted">{detail.profile?.email||detail.profile?.hostname||""}</div>
-                </div>
-                <RiskLevelBadge level={detail.profile?.risk_level} score={detail.profile?.risk_score}/>
-              </div>
-
-              <div style={{marginBottom:16}}>
-                <div style={{fontSize:13,fontWeight:600,color:"#374151",marginBottom:10}}>Risk Factors</div>
-                <FactorRow label="DLP Violations" factor={detail.profile?.risk_factors?.dlp_violations}/>
-                <FactorRow label="Override Bypasses" factor={detail.profile?.risk_factors?.enforcement_overrides}/>
-                <FactorRow label="Shadow AI Tools" factor={detail.profile?.risk_factors?.shadow_tools}/>
-                <FactorRow label="Data Sensitivity" factor={detail.profile?.risk_factors?.data_sensitivity}/>
-                <FactorRow label="Volume Anomaly" factor={detail.profile?.risk_factors?.volume_anomaly}/>
-              </div>
-
-              {detail.history && detail.history.length > 0 && (
-                <div style={{marginBottom:16}}>
-                  <div style={{fontSize:13,fontWeight:600,color:"#374151",marginBottom:8}}>Score History</div>
-                  <div style={{display:"flex",gap:4,alignItems:"flex-end",height:60}}>
-                    {detail.history.slice(0,30).reverse().map((h,i)=>{
-                      const c=h.score<=30?"#22c55e":h.score<=60?"#f59e0b":"#ef4444";
-                      return <div key={i} title={h.score+" — "+new Date(h.computed_at).toLocaleDateString()} style={{flex:1,minWidth:4,height:Math.max(h.score*0.6,2),background:c,borderRadius:2}}/>;
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {detail.recent_events && detail.recent_events.length > 0 && (
-                <div>
-                  <div style={{fontSize:13,fontWeight:600,color:"#374151",marginBottom:8}}>Recent Events</div>
-                  {detail.recent_events.slice(0,5).map((ev,i)=>(
-                    <div key={i} style={{padding:"8px 0",borderBottom:"1px solid #f3f4f6",fontSize:12}}>
-                      <div style={{display:"flex",justifyContent:"space-between"}}>
-                        <span style={{fontWeight:600}}>{ev.event_kind||ev.kind||"—"}</span>
-                        <span className="aihub_text_muted">{relTime(ev.occurred_at)}</span>
-                      </div>
-                      <div className="aihub_text_muted">{ev.ai_service||"—"} · {ev.secret_class||ev.highest_severity||"—"}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="aihub_card" style={{textAlign:"center",padding:"40px 20px",color:"#9ca3af"}}>
-              <Shield size={32} color="#d1d5db" style={{marginBottom:8}}/>
-              <div style={{fontSize:13}}>Click an employee to see their risk breakdown</div>
-            </div>
-          )}
-        </div>
+          ]}
+          rows={realScores}
+          onRow={r=>toggleRow(r.id)}
+          isExpanded={r=>selected===r.id}
+          renderExpanded={r=><RiskRowDetail detail={details[r.id]} loading={loadingId===r.id}/>}
+        />
       </div>
     )}
+  </div>);
+}
+
+/**
+ * Per-employee risk breakdown, expanded under their row.
+ *
+ * Fetched lazily — /risk-scores/:id returns score history and recent events, which
+ * is far more than a list needs, so it is pulled only when someone actually opens
+ * a row rather than for all employees up front.
+ */
+function RiskRowDetail({ detail, loading }) {
+  if (loading) return <div style={{padding:"18px 20px"}}><Loading/></div>;
+  if (!detail) return <div style={{padding:"18px 20px"}} className="aihub_text_muted">Could not load this breakdown.</div>;
+
+  const H=({children})=><div style={{fontSize:11,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:8}}>{children}</div>;
+  const f=detail.profile?.risk_factors||{};
+  // Every factor the scorer computes, so a zero reads as "measured, nothing found"
+  // rather than the row being silently absent.
+  const factors=[
+    ["DLP Violations",     f.dlp_violations],
+    ["Override Bypasses",  f.enforcement_overrides],
+    ["Shadow AI Tools",    f.shadow_tools],
+    ["Data Sensitivity",   f.data_sensitivity],
+    ["Volume Anomaly",     f.volume_anomaly],
+  ];
+
+  return (<div style={{padding:"16px 20px",borderTop:"1px solid #e5e7eb"}}>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))",gap:22}}>
+
+      <div>
+        <H>Risk factors</H>
+        {factors.map(([label,factor])=><FactorRow key={label} label={label} factor={factor}/>)}
+        <div className="aihub_text_muted" style={{fontSize:11,marginTop:8}}>
+          Each factor is capped at its own weight, so the total is a weighted blend rather than a sum.
+        </div>
+      </div>
+
+      <div>
+        {detail.history?.length>0 && <div style={{marginBottom:18}}>
+          <H>Score history</H>
+          <div style={{display:"flex",gap:3,alignItems:"flex-end",height:56}}>
+            {detail.history.slice(0,30).reverse().map((h,i)=>{
+              const c=h.score<=30?"#22c55e":h.score<=60?"#f59e0b":"#ef4444";
+              return <div key={i} title={`${h.score} — ${new Date(h.computed_at).toLocaleDateString()}`}
+                          style={{flex:1,minWidth:4,height:Math.max(h.score*0.55,2),background:c,borderRadius:2}}/>;
+            })}
+          </div>
+          <div className="aihub_text_muted" style={{fontSize:11,marginTop:4}}>
+            Oldest to newest, last {Math.min(detail.history.length,30)} computations.
+          </div>
+        </div>}
+
+        {detail.recent_events?.length>0 && <div>
+          <H>Recent events</H>
+          <div style={{maxHeight:180,overflowY:"auto"}}>
+            {detail.recent_events.slice(0,8).map((ev,i)=>(
+              <div key={i} style={{padding:"6px 0",borderBottom:"1px solid #f3f4f6",fontSize:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+                  <span style={{fontWeight:600}}>{ev.event_kind||ev.kind||"—"}</span>
+                  <span className="aihub_text_muted" style={{whiteSpace:"nowrap"}}>{relTime(ev.occurred_at)}</span>
+                </div>
+                <div className="aihub_text_muted">{ev.ai_service||"—"} · {ev.secret_class||ev.highest_severity||"—"}</div>
+              </div>
+            ))}
+          </div>
+        </div>}
+
+        {!detail.history?.length && !detail.recent_events?.length &&
+          <div className="aihub_text_muted" style={{fontSize:12}}>No score history or recent events recorded for this person yet.</div>}
+      </div>
+
+    </div>
   </div>);
 }
 
@@ -2344,6 +2436,13 @@ const CATEGORY_ICONS = {
   'chat-agent': '💬', 'mcp-server': '🔌', 'local-model': '🏠', 'ml-platform': '☁️',
   'automation': '⚙️', 'embedded-agent': '📎', 'marketplace-app': '🏪', 'agent-config': '📁', 'unknown': '❓',
 };
+
+// Where an inventory row came from. "Catalog" is the known-services list merged in
+// from /ai-platforms — a service we know exists and can block, but which nothing in
+// the org has been observed using; distinct from "Platform", which IS in the
+// registry because it has real recorded activity.
+const SOURCE_LABEL = { governance: "Gov", endpoint_scan: "Scan", platform_registry: "Platform", platform_catalog: "Catalog" };
+const SOURCE_TONE  = { governance: "#8b5cf6", endpoint_scan: "#0044cc", platform_registry: "#6b7280", platform_catalog: "#9ca3af" };
 
 function RegistryStatusBadge({ status }) {
   const label = status === 'approved' ? 'Allowed' : status === 'blocked' ? 'Blocked' : 'Unreviewed';
@@ -2376,6 +2475,29 @@ function RegistryToggle({ status, onChange }) {
   </div>);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// AI SYSTEMS — one table for the whole inventory, with risk detail in-row.
+//
+// This merges what used to be two sibling tabs, "AI Systems" and "Platforms".
+// They were two views of one question ("what AI exists here?") split by which
+// collection the row came from, so answering it meant reading both and joining
+// them by eye:
+//
+//   /api/v1/registry      125 rows — discovered agents, endpoint-scanned tools,
+//                         and the handful of platforms with real activity
+//   /api/v1/ai-platforms   93 rows — the catalog of known AI hosts and the
+//                         block/allow decision for each
+//
+// The registry deliberately includes a platform only when it has DLP activity or
+// is explicitly blocked (registry.js "Source C"), so the other ~88 catalog entries
+// were reachable ONLY from the Platforms tab — and the block control for a service
+// lived on a different screen from the risk assessment of that same service.
+//
+// Now: one table, catalog rows merged in and deduped against the registry, and
+// clicking any row expands the risk analysis and the allow/block control directly
+// beneath it. A side detail panel loses its anchor as soon as the table scrolls;
+// an inline expansion cannot.
+// ═══════════════════════════════════════════════════════════════════════════════
 function AIRegistryView() {
   const [allItems,setAllItems]=useState(null);
   const [summary,setSummary]=useState(null);
@@ -2386,15 +2508,73 @@ function AIRegistryView() {
   const [filterRisk,setFilterRisk]=useState("");
   const [hideInactive,setHideInactive]=useState(true);
   const [selected,setSelected]=useState(null);
+  const [showAdd,setShowAdd]=useState(false);
 
   // Fetch ALL data once on mount — filter client-side for instant response
   const loadAll=()=>{
     Promise.all([
       fetch(REGISTRY_API).then(r=>r.json()),
       fetch(`${REGISTRY_API}/summary`).then(r=>r.json()),
-    ]).then(([r,s])=>{setAllItems(r);setSummary(s);}).catch(x=>setErr(x.message));
+      fetch(`${API}/ai-platforms`).then(r=>r.json()).catch(()=>[]),
+    ]).then(([reg,s,plats])=>{
+      // Merge the platform catalog in, skipping anything the registry already
+      // covers. Dedup on product name AND host: the registry keys platform rows by
+      // host but names them by product, so matching on one alone double-lists a
+      // service (e.g. "OpenAI API" appearing once per known OpenAI host).
+      const seen=new Set();
+      for(const r of reg){
+        if(r.name) seen.add(String(r.name).toLowerCase());
+        if(r.source_host) seen.add(String(r.source_host).toLowerCase());
+      }
+      const extra=[];
+      for(const p of (Array.isArray(plats)?plats:[])){
+        const nameKey=String(p.product||p.host||"").toLowerCase();
+        if(!nameKey||seen.has(nameKey)||seen.has(String(p.host||"").toLowerCase())) continue;
+        seen.add(nameKey);
+        extra.push({
+          // `plat:` prefix keeps these distinct from registry ids, and the row's
+          // host is carried so the expansion can PATCH the right platform.
+          id:"plat:"+p.host,
+          name:p.product||p.host,
+          vendor:p.vendor||null,
+          platform:p.host,
+          host:p.host,
+          category:p.category||"ai-platform",
+          status:p.blocked?"blocked":p.governed?"approved":"unknown",
+          risk_score:null,        // never assessed — no activity to assess
+          risk_level:null,
+          risk_factors:[],
+          owner:null,
+          source:"platform_catalog",
+          source_detail:p.surface||"browser",
+          description:p.governance_note||null,
+          first_seen:p.added_at||null,
+          last_active:null,
+          activity:{total:0,last_active:null},
+          _catalogOnly:true,      // drives the "no usage recorded" note
+        });
+      }
+      setAllItems([...reg,...extra]); setSummary(s);
+    }).catch(x=>setErr(x.message));
   };
   useEffect(loadAll,[]);
+
+  // Catalog rows are governed through /ai-platforms (keyed by host); registry rows
+  // through /registry/:id/status. Same button, two backends.
+  const setRowStatus=async(row,status)=>{
+    if(row._catalogOnly){
+      await fetch(`${API}/ai-platforms/${encodeURIComponent(row.host)}`,{
+        method:"PATCH",headers:{"content-type":"application/json"},
+        body:JSON.stringify({blocked:status==="blocked",governed:status==="approved"}),
+      });
+    } else {
+      await fetch(`${REGISTRY_API}/${encodeURIComponent(row.id)}/status`,{
+        method:"PUT",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({status,product_name:row.name}),
+      });
+    }
+    loadAll();
+  };
 
   const updateStatus=async(id,status,productName)=>{
     await fetch(`${REGISTRY_API}/${encodeURIComponent(id)}/status`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status,product_name:productName})});
@@ -2421,10 +2601,19 @@ function AIRegistryView() {
   }).sort((a,b)=>(b.activity?.total||0)-(a.activity?.total||0));
 
   const categories=[...new Set(allItems.map(i=>i.category).filter(Boolean))].sort();
-  const detailItem=selected?allItems.find(i=>i.id===selected):null;
+  // No lookup needed any more — the expansion renders from the row object the
+  // table already holds, so `selected` is just the open row's id.
 
   return (<div>
-    <SectionHeader title="AI & Agent Registry" hint="Unified catalog of every AI system across your organization"/>
+    <SectionHeader
+      title="AI & Agent Registry"
+      hint="Every AI system across your organization — discovered agents, endpoint-scanned tools, and the known-services catalog."
+      action={<button className="aihub_action_btn" onClick={()=>setShowAdd(v=>!v)}>
+        {showAdd ? <><X size={13}/> Cancel</> : <><Plus size={13}/> Add AI platform</>}
+      </button>}
+    />
+
+    {showAdd && <AddPlatformForm onDone={()=>{setShowAdd(false);loadAll();}}/>}
 
     {/* Summary Cards — count from visible pool (respects hide-inactive toggle) */}
     {(()=>{
@@ -2460,16 +2649,21 @@ function AIRegistryView() {
         <option value="critical">Critical</option>
       </select>
       <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:"#6b7280",cursor:"pointer"}}>
-        <input type="checkbox" checked={!hideInactive} onChange={e=>setHideInactive(!e.target.checked)}/> Show inactive ({inactiveCount})
+        {/* Spelled out because the hidden rows are now mostly the merged
+            known-services catalog — entries with no recorded usage. Without saying
+            so, the merge looks like it did nothing: the table opens on the 13 rows
+            that have activity and gives no hint that 164 more are one click away. */}
+        <input type="checkbox" checked={!hideInactive} onChange={e=>setHideInactive(!e.target.checked)}/> Show unused ({inactiveCount}) — known services with no captured activity
       </label>
       <div style={{fontSize:12,color:"#9ca3af",marginLeft:"auto"}}>{items.length} results</div>
     </div>
 
-    <div className="aihub_two_col">
-      {/* Registry Table */}
-      <div className="aihub_card" style={{overflow:"auto"}}>
-        <DataTable columns={[
+    {/* One table. Click a row to expand its risk analysis and controls in place. */}
+    <div className="aihub_card" style={{overflow:"auto"}}>
+      <DataTable
+        columns={[
           {label:"AI System",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
+            <ChevronRight size={13} style={{color:"#9ca3af",flexShrink:0,transition:"transform .15s",transform:selected===r.id?"rotate(90deg)":"none"}}/>
             <span style={{fontSize:18}}>{CATEGORY_ICONS[r.category]||'❓'}</span>
             <div>
               <div className="aihub_text_primary">{r.name}</div>
@@ -2477,7 +2671,7 @@ function AIRegistryView() {
             </div>
           </div>},
           {label:"Status",render:r=><RegistryStatusBadge status={r.status}/>},
-          {label:"Risk",render:r=>r.risk_score!=null?<span style={{whiteSpace:"nowrap"}}><RiskLevelBadge level={r.risk_level} score={r.risk_score}/></span>:<span className="aihub_text_muted">—</span>},
+          {label:"Risk",render:r=><span style={{whiteSpace:"nowrap"}}><RiskLevelBadge level={r.risk_level} score={r.risk_score}/></span>},
           {label:"Owner",render:r=><div style={{whiteSpace:"nowrap"}}>
             <div style={{fontSize:12}}>{r.owner||"—"}</div>
             {r.is_orphaned&&<span style={{fontSize:10,color:"#ef4444",fontWeight:600}}>⚠ Orphaned</span>}
@@ -2486,97 +2680,210 @@ function AIRegistryView() {
             <div style={{fontSize:13,fontWeight:600}}>{r.activity?.total?.toLocaleString()||0}</div>
             <div className="aihub_text_muted">{r.activity?.last_active?relTime(r.activity.last_active):"never"}</div>
           </div>,right:true},
-          {label:"Source",render:r=><Tag text={r.source==="governance"?"Gov":r.source==="endpoint_scan"?"Scan":"Platform"} color={r.source==="governance"?"#8b5cf6":r.source==="endpoint_scan"?"#0044cc":"#6b7280"}/>},
-        ]} rows={items} onRow={r=>setSelected(r.id)} empty="No AI systems found matching your filters."/>
-      </div>
+          {label:"Source",render:r=><Tag text={SOURCE_LABEL[r.source]||"Platform"} color={SOURCE_TONE[r.source]||"#6b7280"}/>},
+        ]}
+        rows={items}
+        onRow={r=>setSelected(selected===r.id?null:r.id)}
+        isExpanded={r=>selected===r.id}
+        renderExpanded={r=><RegistryRowDetail row={r} onStatus={s=>setRowStatus(r,s)}/>}
+        empty="No AI systems found matching your filters."
+      />
+    </div>
+  </div>);
+}
 
-      {/* Detail Panel */}
+/**
+ * Add an AI platform by URL, so the endpoints start governing it.
+ *
+ * One host covers everything under it. content.js matches a tab with
+ * `h === ph || h.endsWith('.' + ph)`, so adding `example.com` governs
+ * `chat.example.com`, `api.example.com` and every other subdomain — you do not
+ * enumerate each agent, you claim the domain once.
+ *
+ * How it reaches the endpoints:
+ *   POST /api/v1/ai-platforms      upserts the row (host is the key)
+ *   extension: refreshPlatforms()  polls GET /ai-platforms?surface=browser
+ *   OS monitor: policy-sync        polls the pack config on its own cycle
+ *
+ * Both poll on a timer, so a new platform takes effect within a few minutes on
+ * every enrolled endpoint without anyone reinstalling anything. That delay is
+ * stated in the UI rather than implied — an admin who blocks a tool and sees it
+ * still working for two minutes should know that is expected, not broken.
+ *
+ * `capture_mode: "observe"` is the server default and this form keeps it: a newly
+ * added platform starts by recording activity, not blocking it. Blocking is a
+ * separate, deliberate click on the row afterwards, so adding a domain to the
+ * inventory can never accidentally cut off a tool the business depends on.
+ */
+function AddPlatformForm({ onDone }) {
+  // Category and governance_note are deliberately NOT collected here. Neither
+  // affects governance — nothing in the extension, service worker or agent branches
+  // on category, and governance_note is a display-only caveat — so asking for them
+  // at add time was two decisions that changed nothing. Both are optional on the
+  // POST (they default to null) and can be set later via PATCH if ever needed.
+  const [host,setHost]=useState("");
+  const [product,setProduct]=useState("");
+  const [vendor,setVendor]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState(null);
+  const [ok,setOk]=useState(null);
+
+  // Mirrors normalizeHost() on the server: strip scheme, path and port so an admin
+  // can paste a full URL out of the address bar and get the host we actually match.
+  const cleanHost=(v)=>String(v||"").trim().toLowerCase().replace(/^https?:\/\//,"").split("/")[0].split(":")[0];
+  const normalized=cleanHost(host);
+  const valid=/^[a-z0-9.-]+\.[a-z0-9]{2,}$/.test(normalized);
+
+  const submit=async()=>{
+    setBusy(true); setErr(null); setOk(null);
+    try {
+      const res=await fetch(`${API}/ai-platforms`,{
+        method:"POST",headers:{"content-type":"application/json"},
+        body:JSON.stringify({
+          host:normalized,
+          product:product.trim()||normalized,
+          vendor:vendor.trim()||null,
+          surface:"browser",
+          governed:1,
+          added_by:"admin",
+        }),
+      });
+      const body=await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(body.error||`Request failed (${res.status})`);
+      setOk(`${normalized} added — endpoints will pick it up on their next sync.`);
+      setHost(""); setProduct(""); setVendor("");
+      onDone?.();
+    } catch(e){ setErr(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const field={padding:"7px 11px",fontSize:12.5,border:"1px solid #e5e7eb",borderRadius:6,fontFamily:"inherit",width:"100%",boxSizing:"border-box"};
+  const lbl={fontSize:11,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:4,display:"block"};
+
+  return (<div className="aihub_card" style={{marginBottom:16,borderLeft:"3px solid #0044cc"}}>
+    <SectionHeader title="Add an AI platform" hint="Enter the domain. Everything under it — every subdomain and every agent hosted there — is governed by this one entry."/>
+
+    {err && <div className="aihub_error" style={{marginBottom:12}}><AlertTriangle size={14}/> {err}</div>}
+    {ok && <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,padding:"8px 12px",borderRadius:6,
+                        background:"#f0fdf4",border:"1px solid #bbf7d0",fontSize:12,color:"#166534"}}>
+      <Shield size={13}/> {ok}
+    </div>}
+
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:12,marginBottom:12}}>
       <div>
-        {detailItem ? (
-          <div className="aihub_card">
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
-              <div>
-                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-                  <span style={{fontSize:24}}>{CATEGORY_ICONS[detailItem.category]||'❓'}</span>
-                  <h4 style={{margin:0,fontSize:16,fontWeight:700}}>{detailItem.name}</h4>
-                </div>
-                <div className="aihub_text_muted">{detailItem.vendor}{detailItem.platform?" · "+detailItem.platform:""}</div>
-                {detailItem.description&&<div style={{fontSize:12,color:"#374151",marginTop:6}}>{detailItem.description}</div>}
-              </div>
-              <RegistryStatusBadge status={detailItem.status}/>
-            </div>
+        <label style={lbl}>Domain or URL *</label>
+        <input style={field} placeholder="lovable.dev  or  https://chat.acme.ai/x"
+               value={host} onChange={e=>setHost(e.target.value)}
+               onKeyDown={e=>{ if(e.key==="Enter"&&valid&&!busy) submit(); }}/>
+        {host && !valid && <div style={{fontSize:11,color:"#b91c1c",marginTop:4}}>Not a valid domain.</div>}
+        {host && valid && normalized!==host.trim().toLowerCase() &&
+          <div style={{fontSize:11,color:"#6b7280",marginTop:4}}>Will be saved as <Mono>{normalized}</Mono></div>}
+      </div>
+      <div>
+        <label style={lbl}>Display name</label>
+        <input style={field} placeholder={normalized||"Lovable"} value={product} onChange={e=>setProduct(e.target.value)}/>
+      </div>
+      <div>
+        <label style={lbl}>Vendor</label>
+        <input style={field} placeholder="Optional" value={vendor} onChange={e=>setVendor(e.target.value)}/>
+      </div>
+    </div>
 
-            {/* Allow / Block Toggle */}
-            <div style={{marginBottom:16}}>
-              <RegistryToggle status={detailItem.status} onChange={(s)=>updateStatus(detailItem.id,s,detailItem.name)}/>
-            </div>
+    <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+      <button className="aihub_action_btn" disabled={!valid||busy} onClick={submit}>
+        {busy?"Adding…":"Add platform"}
+      </button>
+      <span className="aihub_text_muted" style={{fontSize:11.5}}>
+        Starts in <strong>observe</strong> mode — usage is recorded, nothing is blocked.
+        Block it afterwards from its row. Endpoints sync within a few minutes.
+      </span>
+    </div>
+  </div>);
+}
 
-            {/* Info Grid */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:16,fontSize:12}}>
-              <div><span style={{color:"#9ca3af"}}>Category:</span> <span style={{fontWeight:600}}>{detailItem.category}</span></div>
-              <div><span style={{color:"#9ca3af"}}>Lifecycle:</span> <span style={{fontWeight:600}}>{detailItem.lifecycle}</span></div>
-              <div><span style={{color:"#9ca3af"}}>Owner:</span> <span style={{fontWeight:600}}>{detailItem.owner||"—"}</span></div>
-              <div><span style={{color:"#9ca3af"}}>Owner Email:</span> <span style={{fontWeight:600}}>{detailItem.owner_email||"—"}</span></div>
-              <div><span style={{color:"#9ca3af"}}>Model:</span> <span style={{fontWeight:600}}>{detailItem.model||"—"}</span></div>
-              <div><span style={{color:"#9ca3af"}}>Source:</span> <Tag text={detailItem.source_detail||detailItem.source}/></div>
-              <div><span style={{color:"#9ca3af"}}>First Seen:</span> <span>{detailItem.first_seen?relTime(detailItem.first_seen):"—"}</span></div>
-              <div><span style={{color:"#9ca3af"}}>Last Active:</span> <span>{detailItem.last_active?relTime(detailItem.last_active):"—"}</span></div>
-              {detailItem.machine_count&&<div><span style={{color:"#9ca3af"}}>Machines:</span> <span style={{fontWeight:600}}>{detailItem.machine_count}</span></div>}
-              {detailItem.is_orphaned&&<div style={{gridColumn:"1/-1",color:"#ef4444",fontWeight:600}}>⚠ Owner account is disabled — this system is orphaned</div>}
-            </div>
+/**
+ * The expanded body of one inventory row: what it is, how risky, and the one
+ * decision a reviewer is here to make (allow / block).
+ *
+ * Ordered by what the reviewer needs — the control first, then the evidence behind
+ * it. A catalog row that has never been used says so plainly rather than showing an
+ * empty "Risk analysis" heading: absence of activity is not absence of risk, and a
+ * blank section reads as a clean bill of health.
+ */
+function RegistryRowDetail({ row, onStatus }) {
+  const cell=(label,value)=>value?<div><span style={{color:"#9ca3af"}}>{label}:</span> <span style={{fontWeight:600}}>{value}</span></div>:null;
+  const H=({children})=><div style={{fontSize:11,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:6}}>{children}</div>;
+  return (<div style={{padding:"16px 20px",borderTop:"1px solid #e5e7eb"}}>
+    {row.description&&<div style={{fontSize:12,color:"#374151",marginBottom:12}}>{row.description}</div>}
 
-            {/* Risk */}
-            {detailItem.risk_score!=null&&(
-              <div style={{marginBottom:16}}>
-                <div style={{fontSize:13,fontWeight:600,color:"#374151",marginBottom:6}}>Risk Assessment</div>
-                <RiskLevelBadge level={detailItem.risk_level} score={detailItem.risk_score}/>
-                {detailItem.risk_factors?.length>0&&<div style={{marginTop:8}}>
-                  {detailItem.risk_factors.map((f,i)=><div key={i} style={{fontSize:11,color:"#6b7280",marginBottom:2}}>• {f.description||f.signal}</div>)}
-                </div>}
-              </div>
-            )}
+    <div style={{marginBottom:14}}>
+      <H>Decision</H>
+      <RegistryToggle status={row.status} onChange={onStatus}/>
+    </div>
 
-            {/* Data Access / Connectors */}
-            {detailItem.data_access?.length>0&&(
-              <div style={{marginBottom:16}}>
-                <div style={{fontSize:13,fontWeight:600,color:"#374151",marginBottom:6}}>Data Access</div>
-                <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-                  {detailItem.data_access.map((d,i)=><Tag key={i} text={d} color="#ef4444"/>)}
-                </div>
-              </div>
-            )}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:8,marginBottom:14,fontSize:12}}>
+      {cell("Category",row.category)}
+      {cell("Lifecycle",row.lifecycle)}
+      {cell("Owner",row.owner)}
+      {cell("Owner email",row.owner_email)}
+      {cell("Model",row.model)}
+      {cell("Source",row.source_detail||row.source)}
+      {cell("First seen",row.first_seen?relTime(row.first_seen):null)}
+      {cell("Last active",row.last_active?relTime(row.last_active):null)}
+      {cell("Machines",row.machine_count)}
+      {row.is_orphaned&&<div style={{gridColumn:"1/-1",color:"#ef4444",fontWeight:600}}>⚠ Owner account is disabled — this system is orphaned</div>}
+    </div>
 
-            {/* Permissions */}
-            {detailItem.permissions?.length>0&&(
-              <div style={{marginBottom:16}}>
-                <div style={{fontSize:13,fontWeight:600,color:"#374151",marginBottom:6}}>Permissions ({detailItem.permissions.length})</div>
-                <div style={{maxHeight:100,overflowY:"auto",fontSize:11,color:"#6b7280"}}>
-                  {detailItem.permissions.map((p,i)=><div key={i}>• {typeof p==='string'?p:p.scope||p.name||JSON.stringify(p)}</div>)}
-                </div>
-              </div>
-            )}
+    <div style={{marginBottom:14}}>
+      <H>Risk analysis</H>
+      {row.risk_score!=null?(<>
+        <RiskLevelBadge level={row.risk_level} score={row.risk_score}/>
+        <div style={{marginTop:8,maxWidth:640}}><ScoreBar score={row.risk_score}/></div>
+        {row.risk_factors?.length>0
+          ? <ul style={{margin:"10px 0 0",paddingLeft:18,fontSize:11.5,color:"#4b5563"}}>
+              {row.risk_factors.map((f,i)=><li key={i} style={{marginBottom:3}}>
+                <strong>{f.signal||"Signal"}</strong>{f.weight?` (${f.weight})`:""}{f.description?` — ${f.description}`:""}
+              </li>)}
+            </ul>
+          : <div className="aihub_text_muted" style={{fontSize:11.5,marginTop:8}}>Scored, but no individual signals were recorded for this system.</div>}
+        {row.risk_basis==="platform_baseline"&&<div style={{fontSize:11,color:"#b45309",marginTop:8}}>
+          Platform baseline — reflects the platform type, not an assessment of this specific system.
+        </div>}
+      </>):(
+        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+          <RiskLevelBadge level={null} score={null}/>
+          <span className="aihub_text_muted" style={{fontSize:11.5}}>
+            {row._catalogOnly
+              ? "In the known-services catalog, but no usage has been captured — nothing to assess yet."
+              : "No risk assessment has run for this system yet."}
+          </span>
+        </div>
+      )}
+    </div>
 
-            {/* Activity */}
-            <div>
-              <div style={{fontSize:13,fontWeight:600,color:"#374151",marginBottom:6}}>Activity</div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:12}}>
-                <div style={{background:"#f9fafb",padding:10,borderRadius:8,textAlign:"center"}}>
-                  <div style={{fontSize:18,fontWeight:700}}>{(detailItem.activity?.total||0).toLocaleString()}</div>
-                  <div className="aihub_text_muted">Total Events</div>
-                </div>
-                <div style={{background:"#f9fafb",padding:10,borderRadius:8,textAlign:"center"}}>
-                  <div style={{fontSize:18,fontWeight:700}}>{detailItem.activity?.unique_users||0}</div>
-                  <div className="aihub_text_muted">Users</div>
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="aihub_card" style={{textAlign:"center",padding:"40px 20px",color:"#9ca3af"}}>
-            <Monitor size={32} color="#d1d5db" style={{marginBottom:8}}/>
-            <div style={{fontSize:13}}>Click an AI system to see its full details</div>
-          </div>
-        )}
+    {row.data_access?.length>0&&<div style={{marginBottom:14}}>
+      <H>Data access</H>
+      <div style={{display:"flex",flexWrap:"wrap",gap:4}}>{row.data_access.map((d,i)=><Tag key={i} text={d} color="#ef4444"/>)}</div>
+    </div>}
+
+    {row.permissions?.length>0&&<div style={{marginBottom:14}}>
+      <H>Permissions</H>
+      <div style={{maxHeight:110,overflowY:"auto",fontSize:11,color:"#6b7280"}}>
+        {row.permissions.map((p,i)=><div key={i}>• {typeof p==='string'?p:p.scope||p.name||JSON.stringify(p)}</div>)}
+      </div>
+    </div>}
+
+    <div>
+      <H>Activity</H>
+      <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+        <div style={{background:"#fff",border:"1px solid #e5e7eb",padding:"8px 16px",borderRadius:8,textAlign:"center",minWidth:110}}>
+          <div style={{fontSize:17,fontWeight:700}}>{(row.activity?.total||0).toLocaleString()}</div>
+          <div className="aihub_text_muted">Total events</div>
+        </div>
+        <div style={{background:"#fff",border:"1px solid #e5e7eb",padding:"8px 16px",borderRadius:8,textAlign:"center",minWidth:110}}>
+          <div style={{fontSize:17,fontWeight:700}}>{row.activity?.unique_users||0}</div>
+          <div className="aihub_text_muted">Users</div>
+        </div>
       </div>
     </div>
   </div>);
@@ -3300,11 +3607,16 @@ function AIUsageView() {
       <SectionHeader title="Usage by AI Platform" hint="Prompt counts and estimated token usage per AI tool" />
       <DataTable
         columns={[
-          { label: "Platform", render: r => <div><div className="aihub_text_primary">{r.product || r.service}</div>{r.vendor && <div className="aihub_text_muted" style={{ fontSize: 11 }}>{r.vendor}</div>}</div> },
+          // r.ai_service, not r.service, and r.breakdown, not r.users — those two
+          // names never existed on this payload. 10 of 17 rows have a null
+          // `product`, so the Platform cell fell through to undefined and rendered
+          // blank; every per-user table read `p.users` and showed "No users" while
+          // `breakdown` held the real rows.
+          { label: "Platform", render: r => <div><div className="aihub_text_primary">{r.product || r.ai_service}</div>{r.vendor && <div className="aihub_text_muted" style={{ fontSize: 11 }}>{r.vendor}</div>}</div> },
           { label: "Prompts", key: "prompts", right: true },
           { label: "Est. Tokens", render: r => fmtTokens(r.est_total_tokens), right: true },
           { label: "Est. Cost", render: r => fmtUsd(r.est_cost_usd), right: true },
-          { label: "Users", render: r => (r.users || []).length, right: true },
+          { label: "Users", render: r => (r.breakdown || []).length, right: true },
         ]}
         rows={platforms}
         empty="No AI usage data yet. Install the browser extension to start capturing."
@@ -3313,16 +3625,20 @@ function AIUsageView() {
       {platforms.length > 0 && (<>
         <SectionHeader title="Usage by User" hint="Per-user breakdown across all AI platforms" />
         {platforms.map(p => (
-          <div key={p.service} style={{ marginBottom: 16 }}>
-            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>{p.product || p.service}</div>
+          // key={p.ai_service}: p.service was undefined for all 17 rows, so React
+          // saw seventeen children with the same undefined key.
+          <div key={p.ai_service} style={{ marginBottom: 16 }}>
+            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>{p.product || p.ai_service}</div>
             <DataTable
               columns={[
-                { label: "User", render: r => <span style={{ fontSize: 12 }}>{r.identity || r.hostname || "Unknown"}</span> },
+                // breakdown rows carry label / user / hostname — `identity` is not
+                // one of them. Prefer the human label the server already resolved.
+                { label: "User", render: r => <span style={{ fontSize: 12 }}>{r.label || r.user || r.hostname || "Unknown"}</span> },
                 { label: "Prompts", key: "prompts", right: true },
                 { label: "Est. Tokens", render: r => fmtTokens(r.est_total_tokens), right: true },
                 { label: "Est. Cost", render: r => fmtUsd(r.est_cost_usd), right: true },
               ]}
-              rows={p.users || []}
+              rows={p.breakdown || []}
               empty="No users"
             />
           </div>
@@ -3673,7 +3989,7 @@ function IntegrationsView() {
         <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>{editId?"Edit Webhook":"New Webhook"}</h4>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
           <div><label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Name</label><input value={fName} onChange={e=>setFName(e.target.value)} placeholder="e.g. Security Alerts Slack" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/></div>
-          <div><label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Send To</label><select value={fTemplate} onChange={e=>{setFTemplate(e.target.value);setFChannelId("");setChannels([]);if(e.target.value==='slack'||e.target.value==='teams')loadChannels(e.target.value);}} style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}>
+          <div><label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Send To</label><select value={fTemplate} onChange={e=>{setFTemplate(e.target.value);setFChannelId("");setChannelData(null);setChannelSearch("");if(e.target.value==='slack'||e.target.value==='teams')loadChannels(e.target.value);}} style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}>
             {configuredConnections.map(c=><option key={c.type} value={c.type}>{c.icon+" "+c.name}</option>)}
             <option value="custom">⚡ Custom Webhook URL</option>
           </select></div>
@@ -3931,7 +4247,7 @@ function PolicyPacksView() {
             <button className="aihub_filter_btn" disabled={busy} onClick={()=>toggle(detail.id,r.key,!r.enabled)}>{r.enabled?"Disable":"Enable"}</button>
             {r.tunable && <input type="number" defaultValue={r.tuned_value ?? r.conditions?.[0]?.value}
               min={r.tunable.min} max={r.tunable.max} title={r.tunable.label} disabled={busy}
-              style={{width:70,padding:"3px 6px",fontSize:12,border:"1px solid var(--ag-border)",borderRadius:4}}
+              style={{width:70,padding:"3px 6px",fontSize:12,border:"1px solid #e5e7eb",borderRadius:4}}
               onBlur={e=>{const v=e.target.value; if(v!=="") tune(detail.id,r.key,v);}}/>}
           </div>;
           if(r.enforcement==="attestation") return r.attestation
@@ -3962,7 +4278,7 @@ function PolicyPacksView() {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Sub-panels inside the simulation card — a nested .aihub_card would double the
 // border and padding, so these are flat bordered blocks instead.
-const SIM_PANEL={border:"1px solid var(--ag-border)",borderRadius:8,padding:"12px 14px",background:"#fff"};
+const SIM_PANEL={border:"1px solid #e5e7eb",borderRadius:8,padding:"12px 14px",background:"#fff"};
 
 function PackSimulation({ pack, onClose }) {
   const [opts,setOpts]=useState(null),[err,setErr]=useState(null);
@@ -4181,7 +4497,7 @@ function EuAiActView() {
       <button className="aihub_action_btn" onClick={()=>{setMode("wizard");setAnswers({});setLive(null);}}><Plus size={13}/> Classify a system</button>
       <a className="aihub_filter_btn" href={reportUrl} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}>Open compliance report</a>
       <input placeholder="Your name (compliance officer)" value={officer} onChange={e=>setOfficer(e.target.value)}
-             style={{padding:"5px 10px",fontSize:12,border:"1px solid var(--ag-border)",borderRadius:6,minWidth:210}}/>
+             style={{padding:"5px 10px",fontSize:12,border:"1px solid #e5e7eb",borderRadius:6,minWidth:210}}/>
     </div>
 
     {mode==="portfolio" && <div className="aihub_card">
@@ -4209,7 +4525,7 @@ function EuAiActView() {
         action={<button className="aihub_filter_btn" onClick={()=>setMode("portfolio")}><X size={13}/> Cancel</button>}/>
 
       <input placeholder="AI system name (e.g. HR CV Screener)" value={sysName} onChange={e=>setSysName(e.target.value)}
-             style={{padding:"7px 11px",fontSize:13,border:"1px solid var(--ag-border)",borderRadius:6,width:"100%",maxWidth:460,marginBottom:14}}/>
+             style={{padding:"7px 11px",fontSize:13,border:"1px solid #e5e7eb",borderRadius:6,width:"100%",maxWidth:460,marginBottom:14}}/>
 
       {["prohibited","high_risk","transparency","context"].map(sec=>{
         const qs=meta.tier_questions.filter(q=>q.section===sec);
@@ -4250,7 +4566,7 @@ function EuAiActView() {
       </div>
       {ovTier && <input placeholder="Why are you overriding the proposed tier? (required, recorded in the report)"
               value={ovWhy} onChange={e=>setOvWhy(e.target.value)}
-              style={{padding:"7px 11px",fontSize:12,border:"1px solid var(--ag-border)",borderRadius:6,width:"100%",marginBottom:10}}/>}
+              style={{padding:"7px 11px",fontSize:12,border:"1px solid #e5e7eb",borderRadius:6,width:"100%",marginBottom:10}}/>}
 
       <button className="aihub_action_btn" disabled={busy||!sysName||!officer||(!!ovTier&&!ovWhy)} onClick={save}>
         {busy?"Saving…":"Save classification"}
@@ -4270,7 +4586,7 @@ function EuAiActView() {
           <div className="aihub_text_muted" style={{fontSize:11,marginBottom:4}}>{q.help} · <Mono>{q.citation}</Mono></div>
           <textarea rows={q.kind==="list"?2:3} value={friaAns[q.id]||""}
                     onChange={e=>setFriaAns(a=>({...a,[q.id]:e.target.value}))}
-                    style={{width:"100%",padding:"7px 10px",fontSize:12,border:"1px solid var(--ag-border)",
+                    style={{width:"100%",padding:"7px 10px",fontSize:12,border:"1px solid #e5e7eb",
                             borderRadius:6,fontFamily:"inherit",resize:"vertical"}}/>
         </div>
       ))}
@@ -4282,6 +4598,10 @@ function EuAiActView() {
   </div>);
 }
 
+// ServerMonitorView below arrived from main while this branch was in flight.
+// It is kept as-is; only the flat PAGES map that followed it was replaced by
+// the TAB_GROUPS structure further down. ServerMonitor stays reachable by URL
+// (its route is commented out in App.jsx, exactly as it was upstream).
 function ServerMonitorView() {
   const [tab, setTab] = useState("setup");
   const [stats, setStats] = useState(null);
@@ -4602,49 +4922,169 @@ function ServerMonitorView() {
   );
 }
 
-const PAGES={
-  Overview:{title:"AI Overview",component:OverviewView},
-  AIUsage:{title:"AI Usage",component:AIUsageView},
-  ClaudeUsage:{title:"Claude Usage",component:ClaudeUsageView},
-  PolicyPacks:{title:"Policy Packs",component:PolicyPacksView},
-  // Policy Simulator is no longer a standalone page — it now runs per pack from
-  // Policy Packs ("Simulate" / "Run simulation"), so impact is seen next to the
-  // deploy decision rather than in a separate screen.
-  //
-  // EU AI Act is hidden until the intake is seeded from the discovered agent
-  // registry — as a blank 19-question form per system it is unusable at scale.
-  // The API (/api/eu-ai-act) and EuAiActView below are intact; re-enable by
-  // uncommenting this line plus the route in App.jsx and the SideNav entry.
-  // EuAiAct:{title:"EU AI Act",component:EuAiActView},
-  Machines:{title:"Machines",component:MachinesView},
-  Tools:{title:"Tools Catalog",component:ToolsView},
-  Agents:{title:"Agents & MCP",component:AgentsView},
-  ServerAgents:{title:"Server Agents",component:ServerAgentsView},
-  DLP:{title:"AI Activity",component:DLPView},
-  SessionReplay:{title:"Session Replay",component:SessionReplayView},
-  Platforms:{title:"AI Platforms",component:PlatformsView},
-  AgentGovernance:{title:"Agent Governance",component:AgentGovernance},
-  ServerMonitor:{title:"Server Monitor",component:ServerMonitorView},
-  CopilotReadiness:{title:"Copilot Readiness",component:CopilotReadinessView},
-  AIBudget:{title:"AI Budget",component:function AIBudgetPage(){return <AgentGovernanceProvider><BudgetTab/></AgentGovernanceProvider>;}},
-  ModelRouting:{title:"Model Routing",component:ModelRoutingView},
-  RiskScores:{title:"Risk Scores",component:RiskScoreView},
-  AIRegistry:{title:"AI Registry",component:AIRegistryView},
-  AccessRequests:{title:"Access Requests",component:AccessRequestsView},
-  Integrations:{title:"Integrations",component:IntegrationsView},
-  DeveloperSDK:{title:"Developer SDK",component:DeveloperSDKView},
+// ═══════════════════════════════════════════════════════════════════════════════
+// NAVIGATION — six top-level screens, each grouping related views behind tabs.
+//
+// The sidebar used to carry sixteen entries, which is a list you read rather than
+// navigate. They were organised per data table (one screen per endpoint) instead
+// of per question, so answering "who is risky" meant joining three screens by eye.
+// Each group below answers ONE question: what exists / what happened / what are we
+// enforcing / what do the cloud agents look like / how do I wire it up.
+//
+// Agent Governance stays exactly as it is. Its own tab bar is already this same
+// consolidation, and 10 of its 12 tabs read a shared context that fetches the
+// discovery data once — redistributing them across these groups would mount that
+// provider several times over, each refetching and holding divergent state.
+// Deleting the duplicate "AI Budget" entry is enough: BudgetTab already lives
+// inside Agent Governance, which is also where its Cost tab is.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Tabs are keyed by a URL slug, not by index, so ?tab= stays valid when tabs are
+// reordered or inserted. Deep links get pasted into tickets and audit notes; a
+// positional index would silently point somewhere else after any edit here.
+const TAB_GROUPS = {
+  Inventory: {
+    title: "Inventory",
+    hint: "Everything AI that exists in the organisation — the systems, the agents, and the platforms they run on.",
+    tabs: [
+      { slug: "systems", label: "AI Systems",   component: AIRegistryView },
+      { slug: "agents",  label: "Agents & MCP", component: AgentsView },
+      // Platforms folded into AI Systems: the known-services catalog is merged in
+      // there and deduped, so one table now answers "what AI exists here?" instead
+      // of two that had to be read together. Adding a platform, the block/allow
+      // decision and the risk analysis for a service now all sit in one place —
+      // previously they were spread across two tabs.
+      // PlatformsView is still defined (its session-replay panel has no equivalent
+      // in the merged table) but is no longer mounted anywhere.
+      // { slug: "platforms", label: "Platform detail", component: PlatformsView },
+    ],
+  },
+  Activity: {
+    title: "Activity",
+    hint: "What people actually did — prompts and detections, full session replays, per-person usage, and how requests are routed between models.",
+    tabs: [
+      { slug: "prompts",  label: "Prompts & DLP", component: DLPView },
+      { slug: "sessions", label: "Sessions",      component: SessionReplayView },
+      { slug: "claude",   label: "Claude Usage",  component: ClaudeUsageView },
+      { slug: "routing",  label: "Model Routing", component: ModelRoutingView },
+    ],
+  },
+  PoliciesRisk: {
+    // Named "Policies & Risk" rather than "Governance": sitting next to the
+    // existing "Agent Governance" entry, two things called governance would be a
+    // coin toss for the user. Renaming their established screen is the riskier fix.
+    title: "Policies & Risk",
+    hint: "The policies you are enforcing, the framework packs you can draw from, and who is risky.",
+    tabs: [
+      // Governance policies lead: these are the rules actually running against the
+      // agent fleet, so they are what someone opening this screen came to see.
+      // Policy Packs sits behind them as the library you deploy FROM — deploying a
+      // pack materialises its rules into this same list.
+      //
+      // Wrapped in AgentGovernanceProvider because PoliciesTab reads the shared
+      // discovery context. The provider is also mounted by the Agent Governance
+      // screen, but the two are never on screen together, so there is no duplicate
+      // in-flight state — just one fetch per screen visit.
+      { slug: "policies", label: "Policies", component: function PoliciesPage() {
+        return <AgentGovernanceProvider><PoliciesTab/></AgentGovernanceProvider>;
+      } },
+      { slug: "packs", label: "Policy Packs", component: PolicyPacksView },
+      { slug: "risk",  label: "Risk Scores",  component: RiskScoreView },
+      // EU AI Act belongs here as a 3rd tab once its intake is seeded from the
+      // discovered agent registry. EuAiActView above is intact and unmounted.
+      // { slug: "eu-ai-act", label: "EU AI Act", component: EuAiActView },
+    ],
+  },
+  Setup: {
+    title: "Setup",
+    hint: "Wiring and one-off assessments. Configure once, then rarely visit.",
+    tabs: [
+      { slug: "integrations", label: "Integrations",      component: IntegrationsView },
+      { slug: "sdk",          label: "Developer SDK",     component: DeveloperSDKView },
+      { slug: "copilot",      label: "Copilot Readiness", component: CopilotReadinessView },
+      // Machines is commented out because Policies & Risk → Risk Scores already
+      // lists every enrolled machine: all of its rows carry a hostname, sourced
+      // from the agent and the extension. /AIHub/Machines redirects there.
+      // MachinesView below is intact and unmounted.
+      // { slug: "machines", label: "Machines", component: MachinesView },
+    ],
+  },
 };
 
-export default function AIHubPage({page}) {
-  const config=PAGES[page]||PAGES.Overview;
-  const V=config.component;
+// Single-view screens. The trailing entries are not in the sidebar — they were
+// already hidden before this regrouping and stay reachable by URL only, so no
+// bookmark breaks and nothing new appears in the nav.
+const PAGES = {
+  Overview:        { title: "AI Overview",      component: OverviewView },
+  // Top-level rather than a Policies & Risk tab: this is an inbox, not reference
+  // material. Pending requests are somebody waiting on a decision, and a queue
+  // buried one click behind a tab is a queue that gets answered late.
+  AccessRequests:  { title: "Access Requests",  component: AccessRequestsView },
+  AgentGovernance: { title: "Agent Governance", component: AgentGovernance },
+
+  AIUsage:      { title: "AI Usage",      component: AIUsageView },
+  Tools:        { title: "Tools Catalog", component: ToolsView },
+  ServerAgents: { title: "Server Agents", component: ServerAgentsView },
+};
+
+/** Resolve ?tab= against a group, falling back to its first tab. */
+function resolveTab(group, slug) {
+  return group.tabs.find((t) => t.slug === slug) || group.tabs[0];
+}
+
+/**
+ * Tabbed group shell.
+ *
+ * Renders ONLY the active tab rather than mounting every tab hidden. Each view
+ * fetches on mount, so mounting all four would fire every request on arrival —
+ * the separate screens never did that, and this keeps the network cost of opening
+ * a group identical to opening the old single screen.
+ */
+function TabGroup({ group }) {
+  const [params, setParams] = useSearchParams();
+  const active = resolveTab(group, params.get("tab"));
+  const Body = active.component;
+
+  const select = (t) => {
+    if (t.slug === active.slug) return;
+    // replace:true — flipping tabs should not stack history entries, or Back has
+    // to be pressed once per tab the user glanced at before leaving the screen.
+    setParams({ tab: t.slug }, { replace: true });
+  };
+
+  return (<div>
+    <div className="aihub_group_tabs">
+      {group.tabs.map((t) => (
+        <button key={t.slug}
+                className={`aihub_group_tab ${t.slug === active.slug ? "active" : ""}`}
+                onClick={() => select(t)}>
+          {t.label}
+        </button>
+      ))}
+    </div>
+    {group.hint && <p className="aihub_group_hint">{group.hint}</p>}
+    <Body/>
+  </div>);
+}
+
+export default function AIHubPage({ page }) {
+  const [params] = useSearchParams();
+  const group = TAB_GROUPS[page];
+  const config = PAGES[page];
+
+  // Tab name in the header too, so the breadcrumb still says where you are.
+  const heading = group
+    ? `${group.title} — ${resolveTab(group, params.get("tab")).label}`
+    : (config || PAGES.Overview).title;
+  const Single = group ? null : (config || PAGES.Overview).component;
+
   return (
     <div className="cf_main_container">
       <SideNav activeTab="AI Hub"/>
       <div className="cf_main_content_place">
-        <TopNav pageName={config.title}/>
+        <TopNav pageName={heading}/>
         <div className="cf_main_content_place_main" style={{flexDirection:"column",padding:"16px 20px",overflowY:"auto"}}>
-          <V/>
+          {group ? <TabGroup group={group}/> : <Single/>}
         </div>
       </div>
     </div>

@@ -12,6 +12,21 @@ import { CostTab } from "./tabs/CostTab";
 import { ShieldCheck, RefreshCw, LogOut, Plus, Radar, Shield, Settings2, Activity, ChevronDown, Cloud, Bell, DollarSign } from "lucide-react";
 import "./css/AgentGovernance.css";
 
+// Band mid-points for PLATFORM BASELINES — see common/riskScale.js.
+//
+// The scan paths below (Gemini, Vertex, Chat, NotebookLM, Bedrock, SageMaker,
+// OpenAI, Claude) cannot assess an individual agent: the APIs they read do not
+// return permissions, connectors or activity. They previously stamped a bespoke
+// two-digit constant per platform — every Bedrock agent got 55, every Chat bot 80 —
+// on the INVERTED scale, so 80 meant "low" here while 80 meant "dangerous" in the
+// endpoint-scan rows of the same table.
+//
+// These now carry the shared forward scale plus basis:"platform_baseline", so the
+// value is honest about being an assertion about the platform type rather than a
+// measurement of the agent. Replace with a real assessRisk() result per platform as
+// each one starts returning assessable metadata.
+const BASELINE = { low: 15, medium: 45, high: 70, critical: 90 };
+
 const TABS = [
   { id: "overview",        label: "Overview",        icon: <Radar size={14} /> },
   { id: "discovery",       label: "Discovery",       icon: <Shield size={14} /> },
@@ -46,7 +61,7 @@ function convertGeminiEnterpriseToAgents(data) {
       llmModel: "Gemini",
       lifecycleStatus: a.state === "DISABLED" ? "stale" : "active",
       risk: {
-        score: 50, level: "medium",
+        score: BASELINE.medium, level: "medium", basis: "platform_baseline",
         factors: [{ signal: "Gemini Enterprise Agent", weight: "medium", description: `${a.type || "Agent"} with ${(a.dataStoreIds || []).length} data store(s)` }],
         recommendations: (a.dataStoreIds || []).length ? ["Review connected data stores and their access scope"] : [],
         computedAt: now,
@@ -85,7 +100,7 @@ function convertGoogleResultToAgents(googleResult) {
       permissions: [],
       environment: googleResult.projectId,
       lifecycleStatus: "active",
-      risk: { score: 50, level: "medium", factors: [], recommendations: [], computedAt: now },
+      risk: { score: BASELINE.medium, level: "medium", basis: "platform_baseline", factors: [], recommendations: [], computedAt: now },
       activity: { totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0, uniqueUsers: 0, userBreakdown: [] },
     });
   }
@@ -113,7 +128,7 @@ function convertGoogleResultToAgents(googleResult) {
       permissions: [],
       lifecycleStatus: "active",
       chatSpaceUri: (bot.spaceUris && bot.spaceUris[0]) || null,
-      risk: { score: 80, level: "low", factors: [], recommendations: [], computedAt: now },
+      risk: { score: BASELINE.low, level: "low", basis: "platform_baseline", factors: [], recommendations: [], computedAt: now },
       activity: {
         totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0,
         uniqueUsers: participants.length,
@@ -143,7 +158,7 @@ function convertGoogleResultToAgents(googleResult) {
       environment: googleResult.projectId,
       llmModel: "Gemini",
       lifecycleStatus: "active",
-      risk: { score: 45, level: "high", factors: [{ signal: "Gemini Agent", weight: "medium", description: "AI agent with data store access" }], recommendations: ["Review data store connections and access scope"], computedAt: now },
+      risk: { score: BASELINE.high, level: "high", basis: "platform_baseline", factors: [{ signal: "Gemini Agent", weight: "medium", description: "AI agent with data store access" }], recommendations: ["Review data store connections and access scope"], computedAt: now },
       activity: { totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0, uniqueUsers: 0, userBreakdown: [] },
     });
   }
@@ -167,7 +182,7 @@ function convertGoogleResultToAgents(googleResult) {
       permissions: (gem.sharedWith || []).map(s => ({ name: s.displayName || s.email, role: s.role })),
       lifecycleStatus: "active",
       risk: {
-        score: gem.shared ? 55 : 30,
+        score: gem.shared ? BASELINE.medium : BASELINE.low, basis: "platform_baseline",
         level: gem.shared ? "medium" : "low",
         factors: [{ signal: "Custom AI Gem", weight: gem.shared ? "medium" : "low", description: gem.shared ? `Shared Gem accessible by ${gem.sharedWith?.length || 0} users` : "Private Gem, single user" }],
         recommendations: gem.shared ? ["Review shared Gem instructions and data access"] : [],
@@ -202,7 +217,7 @@ function convertGoogleResultToAgents(googleResult) {
       permissions: [],
       environment: googleResult.projectId,
       lifecycleStatus: "active",
-      risk: { score: 40, level: "medium", factors: [{ signal: "Personal Knowledge Agent", weight: "medium", description: "AI-powered knowledge base with uploaded documents" }], recommendations: ["Review data sources for sensitive content"], computedAt: now },
+      risk: { score: BASELINE.medium, level: "medium", basis: "platform_baseline", factors: [{ signal: "Personal Knowledge Agent", weight: "medium", description: "AI-powered knowledge base with uploaded documents" }], recommendations: ["Review data sources for sensitive content"], computedAt: now },
       activity: { totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0, uniqueUsers: 1, userBreakdown: [] },
     });
   }
@@ -269,7 +284,7 @@ function convertAWSResultToAgents(merged) {
       permissions: [],
       lifecycleStatus: agent.agentStatus === "PREPARED" ? "active" : "stale",
       risk: {
-        score: 55, level: "medium",
+        score: BASELINE.medium, level: "medium", basis: "platform_baseline",
         factors: [{ signal: "AWS Bedrock Agent", weight: "medium", description: `AI agent with ${(agent.knowledgeBases || []).length} knowledge base(s)` }],
         recommendations: ["Review IAM permissions and knowledge base data sources"],
         computedAt: now,
@@ -300,7 +315,7 @@ function convertAWSResultToAgents(merged) {
       permissions: [],
       lifecycleStatus: "active",
       risk: {
-        score: 40, level: "low",
+        score: BASELINE.low, level: "low", basis: "platform_baseline",
         factors: [{ signal: "Foundation Model Access", weight: "low", description: `Access to ${model.modelId} via Bedrock` }],
         recommendations: [],
         computedAt: now,
@@ -330,7 +345,7 @@ function convertAWSResultToAgents(merged) {
       permissions: [],
       lifecycleStatus: ep.EndpointStatus === "InService" ? "active" : "stale",
       risk: {
-        score: 50, level: "medium",
+        score: BASELINE.medium, level: "medium", basis: "platform_baseline",
         factors: [{ signal: "SageMaker Endpoint", weight: "medium", description: "ML model serving endpoint" }],
         recommendations: ["Review endpoint IAM policy and VPC configuration"],
         computedAt: now,
@@ -381,8 +396,12 @@ function convertOpenAIResultToAgents(merged) {
     const hasFileSearch = toolTypes.includes("file_search");
     const hasCodeInterpreter = toolTypes.includes("code_interpreter");
     const hasFunctions = toolTypes.includes("function");
-    const riskScore = hasFunctions ? 75 : hasFileSearch || hasCodeInterpreter ? 55 : 40;
-    const riskLevel = riskScore >= 70 ? "high" : riskScore >= 50 ? "medium" : "low";
+    // Capability-based baseline: which tools the assistant has enabled is a real
+    // signal, but it is still three fixed buckets rather than a measurement, so it
+    // uses the shared band mid-points. riskLevel comes from scoreToLevel() instead
+    // of a private >=70/>=50 pair — that pair was a fifth set of cut-points.
+    const riskLevel = hasFunctions ? "high" : (hasFileSearch || hasCodeInterpreter) ? "medium" : "low";
+    const riskScore = BASELINE[riskLevel];
     const riskFactors = [];
     if (hasFunctions) riskFactors.push({ signal: "Function Tools", weight: "high", description: "Can call external APIs via function calling" });
     if (hasFileSearch) riskFactors.push({ signal: "File Search", weight: "medium", description: "Has access to uploaded files / vector stores" });
@@ -453,7 +472,7 @@ function convertOpenAIResultToAgents(merged) {
       shortUrl: gpt.short_url,
       categories: gpt.categories || [],
       risk: {
-        score: isPublic ? 65 : 35,
+        score: isPublic ? BASELINE.medium : BASELINE.low, basis: "platform_baseline",
         level: isPublic ? "medium" : "low",
         factors: isPublic ? [{ signal: "Public GPT", weight: "medium", description: `Publicly accessible Custom GPT with ${usersCount} users` }] : [],
         recommendations: isPublic ? ["Review GPT instructions and data sources for sensitive information"] : [],
@@ -487,7 +506,7 @@ function convertOpenAIResultToAgents(merged) {
       permissions: [],
       lifecycleStatus: hasBeenUsed ? "active" : "stale",
       risk: {
-        score: hasBeenUsed ? 60 : 35,
+        score: hasBeenUsed ? BASELINE.medium : BASELINE.low, basis: "platform_baseline",
         level: hasBeenUsed ? "medium" : "low",
         factors: [{ signal: "OpenAI API Key", weight: "medium", description: `API key grants access to OpenAI models and services` }],
         recommendations: ["Verify which applications use this key", "Rotate keys that have never been used"],
@@ -534,12 +553,17 @@ const CLAUDE_MODEL_PRICING = {
   "claude-3-haiku":    { input: 0.25,  output: 1.25  },
 };
 
+// Model-family baseline, keyed off a substring of the model id. That is a lookup
+// on the name, not an assessment of how the model is used, so it returns the shared
+// band mid-point plus a basis marker rather than a bespoke two-digit score. It was
+// also on the inverted scale (haiku 70 = "low"), which put it in direct conflict
+// with the endpoint scanner's forward scores in the same table.
 function getClaudeRisk(modelId) {
-  const lower = modelId.toLowerCase();
-  if (lower.includes("opus"))   return { score: 45, level: "high",   label: "Most capable — highest data sensitivity" };
-  if (lower.includes("sonnet")) return { score: 55, level: "medium", label: "Balanced capability and cost" };
-  if (lower.includes("haiku"))  return { score: 70, level: "low",    label: "Lightweight — lower risk profile" };
-  return { score: 55, level: "medium", label: "Claude model" };
+  const lower = String(modelId || "").toLowerCase();
+  if (lower.includes("opus"))   return { score: BASELINE.high,   level: "high",   basis: "platform_baseline", label: "Most capable — highest data sensitivity" };
+  if (lower.includes("sonnet")) return { score: BASELINE.medium, level: "medium", basis: "platform_baseline", label: "Balanced capability and cost" };
+  if (lower.includes("haiku"))  return { score: BASELINE.low,    level: "low",    basis: "platform_baseline", label: "Lightweight — lower risk profile" };
+  return { score: BASELINE.medium, level: "medium", basis: "platform_baseline", label: "Claude model" };
 }
 
 // ── Helper: convert Claude scan results → standard agent array ───────────────
@@ -566,8 +590,9 @@ function convertClaudeResultToAgents(merged) {
       permissions: [],
       lifecycleStatus: "active",
       risk: {
-        score: 55,
+        score: BASELINE.medium,
         level: "medium",
+        basis: "platform_baseline",
         factors: [{ signal: "Claude.ai Project", weight: "medium", description: "Team workspace with access to Claude models and uploaded files" }],
         recommendations: ["Review project members and uploaded file contents for sensitive data"],
         computedAt: now,
@@ -639,7 +664,7 @@ function convertClaudeResultToAgents(merged) {
       permissions: [],
       lifecycleStatus: "active",
       risk: {
-        score: isPrivate ? 40 : 60,
+        score: isPrivate ? BASELINE.low : BASELINE.medium, basis: "platform_baseline",
         level: isPrivate ? "low" : "medium",
         factors: [{ signal: "Claude.ai Project", weight: isPrivate ? "low" : "medium", description: isPrivate ? "Private project — single user" : `Shared project in org "${project.org_name}"` }],
         recommendations: isPrivate ? [] : ["Review project members and shared knowledge files"],
@@ -674,7 +699,7 @@ function convertClaudeResultToAgents(merged) {
       permissions: [],
       lifecycleStatus: isActive ? (hasBeenUsed ? "active" : "stale") : "stale",
       risk: {
-        score: hasBeenUsed ? 60 : 35,
+        score: hasBeenUsed ? BASELINE.medium : BASELINE.low, basis: "platform_baseline",
         level: hasBeenUsed ? "medium" : "low",
         factors: [{ signal: "Claude API Key", weight: "medium", description: `API key in workspace "${agentKey.workspace_name}" — grants access to Claude models` }],
         recommendations: ["Verify which applications use this key", "Rotate keys that have never been used"],
@@ -725,7 +750,15 @@ function AgentGovernanceInner() {
   const alertIntervalRef = useRef(null);
   const scopeCounts = getScopeCounts(state.discoveryResult);
 
-  const isAnyConnected = isAuthenticated || !!googleKeyId || !!openaiKeyId || !!claudeKeyId || !!geminiEnterpriseKeyId || !!awsKeyId;
+  // Having credentials in THIS browser is not the same as having governance data.
+  // The tabs used to be hidden unless a key sat in localStorage, so a fresh browser
+  // (or one whose site data was cleared) showed "Connect a Cloud Platform" over a
+  // server holding 109 discovered agents, 6 policies and 100 alerts. Persisted
+  // agents are real, already-discovered data and are worth showing on their own;
+  // the connect prompt belongs only where there is genuinely nothing.
+  const hasPersistedAgents = (state.discoveryResult?.agents?.length || 0) > 0;
+  const hasCredentials = isAuthenticated || !!googleKeyId || !!openaiKeyId || !!claudeKeyId || !!geminiEnterpriseKeyId || !!awsKeyId;
+  const isAnyConnected = hasCredentials || hasPersistedAgents;
 
   // Background alert monitoring — counts idle agents for the header badge
   const checkAlertCount = useCallback(async () => {
@@ -753,6 +786,32 @@ function AgentGovernanceInner() {
     alertIntervalRef.current = setInterval(checkAlertCount, 60000);
     return () => { if (alertIntervalRef.current) clearInterval(alertIntervalRef.current); };
   }, [checkAlertCount]);
+
+  // ── Returning from Microsoft admin consent ─────────────────────────────────
+  // The callback redirects here with ?ms_connect=success|error. Without this the
+  // admin lands back on an unchanged screen with no idea whether consent worked.
+  // The query string is stripped afterwards so a refresh does not replay the
+  // banner, and so the tenant id is not left sitting in the address bar.
+  const [msConnect, setMsConnect] = useState(null);
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    // Both providers report through the same banner; only the label differs.
+    const status = q.get("ms_connect") || q.get("google_connect");
+    if (!status) return;
+    const provider = q.get("ms_connect") ? "Microsoft" : "Google";
+    setMsConnect({
+      status,
+      provider,
+      reason: q.get("reason"),
+      // Microsoft returns a tenant guid; Google returns the Workspace domain.
+      tenant: q.get("tenant") || q.get("domain"),
+      email: q.get("email"),
+    });
+    window.history.replaceState({}, "", window.location.pathname);
+    // No reload here: arriving from the callback IS a full page load, so the
+    // context has already fetched oauth keys and can see the new connection.
+    // Reloading would double the load and discard the banner just set above.
+  }, []);
 
   // ── Run scan — all enabled platforms fired in parallel ──────────────────────
   const handleScan = async () => {
@@ -1025,6 +1084,43 @@ function AgentGovernanceInner() {
           )}
         </div>
       </div>
+
+      {/* Showing persisted data with no credentials in this browser. Say so:
+          Discovery/Alerts/Policies read stored data and work, but Cost and User
+          Activity call the cloud APIs live and will fail with "OAuth credentials
+          not found" until a platform is reconnected here. Better to explain that
+          up front than to let two tabs return a raw 500. */}
+      {msConnect && (
+        <div style={{ margin: "0 24px 12px", padding: "9px 14px", borderRadius: 8, display: "flex", alignItems: "center", gap: 8, fontSize: 12.5,
+                      background: msConnect.status === "success" ? "#f0fdf4" : "#fef2f2",
+                      border: `1px solid ${msConnect.status === "success" ? "#bbf7d0" : "#fecaca"}`,
+                      color: msConnect.status === "success" ? "#166534" : "#b91c1c" }}>
+          <ShieldCheck size={14} />
+          <span>
+            {msConnect.status === "success"
+              ? <><strong>{msConnect.provider} connected.</strong>{" "}
+                  {msConnect.tenant && <>Tenant <code>{msConnect.tenant}</code>{" "}</>}
+                  {msConnect.email && <>granted by <code>{msConnect.email}</code>{" "}</>}
+                  — run a scan to discover its agents.</>
+              : <><strong>{msConnect.provider} connection failed.</strong> {msConnect.reason || "Consent was not completed."}</>}
+          </span>
+          <button onClick={() => setMsConnect(null)}
+                  style={{ marginLeft: "auto", border: "none", background: "none", cursor: "pointer", color: "inherit", fontSize: 16, lineHeight: 1 }}>×</button>
+        </div>
+      )}
+
+      {hasPersistedAgents && !hasCredentials && (
+        <div style={{ margin: "0 24px 12px", padding: "9px 14px", borderRadius: 8,
+                      background: "#fffbeb", border: "1px solid #fde68a",
+                      fontSize: 12.5, color: "#92400e", display: "flex", alignItems: "center", gap: 8 }}>
+          <Bell size={14} />
+          <span>
+            <strong>Showing previously discovered agents.</strong> No cloud platform is connected in this
+            browser, so a new scan cannot run and the Cost and User Activity tabs — which query the cloud
+            APIs live — will be unavailable until you reconnect.
+          </span>
+        </div>
+      )}
 
       {isAnyConnected ? (
         <>

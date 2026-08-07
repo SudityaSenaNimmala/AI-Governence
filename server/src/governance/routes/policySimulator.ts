@@ -17,6 +17,7 @@
 import { Router } from "express";
 import { getDb } from "../db.js";
 import { getPack } from "../services/policyPacks.js";
+import { maskSensitive } from "../../lib/mask-sensitive.js";
 
 const router = Router();
 
@@ -56,17 +57,19 @@ function categoryFor(pattern: string): string {
  * original prompt had. So excerpts keep the shape of the request and mask anything
  * that looks like a secret or an identifier.
  */
+// Delegates to the shared masker in lib/mask-sensitive.js.
+//
+// The list that used to live here missed several classes the DETECTOR flags —
+// so the event was in scope for a simulation and its excerpt then printed the raw
+// value on the compliance screen. Confirmed gaps: a card written
+// "4111 - 1111 - 1111 - 1111" (the detector allows any run of separators, this
+// allowed exactly one), GCP/RSA private-key blocks, undashed SSNs, AWS secret
+// keys, Azure connection strings and non-JWT bearer tokens.
+//
+// Keeping two maskers in two files is how that drift happened, so there is now
+// one, and prompts.ts uses it too.
 function maskExcerpt(text: string, limit = 220): string {
-  let t = String(text || "").replace(/\s+/g, " ").trim();
-  t = t
-    .replace(/\b\d{3}-\d{2}-\d{4}\b/g, "[SSN]")
-    .replace(/\b(?:\d[ -]?){13,19}\b/g, "[CARD]")
-    .replace(/\b(sk-[A-Za-z0-9_-]{8,}|sk-ant-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|glpat-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|AIza[0-9A-Za-z_-]{10,}|hf_[A-Za-z0-9]{10,})\b/g, "[SECRET]")
-    .replace(/\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b/g, "[TOKEN]")
-    .replace(/\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b/g, "[IBAN]")
-    .replace(/\b[\w.+-]+@[\w-]+\.[\w.]{2,}\b/g, "[EMAIL]")
-    .replace(/\b(?:\+?1[ -]?)?\(?[2-9]\d{2}\)?[ -]?\d{3}[ -]?\d{4}\b/g, "[PHONE]");
-  return t.length > limit ? t.slice(0, limit) + "…" : t;
+  return maskSensitive(text, limit);
 }
 
 interface SimRule {

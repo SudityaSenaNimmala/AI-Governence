@@ -63,12 +63,11 @@ if (envCheck.status !== 0) {
       `Deploy never ships secrets.`);
 }
 
-// ADMIN_TOKEN gates the dashboard's admin-only routes (Session Replay playback,
-// etc.). Same "server owns its secrets" rule as above: generate it ONCE,
-// server-side, if it's not already there — never overwrite an existing value,
-// never print it, never let it pass through sh()'s command-echo. connect-ui
-// needs the SAME value baked in at build time (VITE_ADMIN_TOKEN), so it's read
-// back here rather than just generated blind on the host.
+// ADMIN_TOKEN gates the server's admin-only routes (Session Replay playback,
+// SIEM export, integration keys, approvals). Same "server owns its secrets" rule
+// as above: generate it ONCE, server-side, if it's not already there — never
+// overwrite an existing value, never print it, never let it pass through sh()'s
+// command-echo.
 console.log('• Ensuring server ADMIN_TOKEN exists (generated once if missing)…');
 // openssl, not node -e: the bare host only guarantees bash/tar/ssh/docker (per
 // the file header) — Node only exists INSIDE the containers this deploy builds.
@@ -77,18 +76,39 @@ const ensureToken = spawnSync('bash', ['-c',
   `echo ADMIN_TOKEN=\\$(openssl rand -hex 32) >> ${DIR}/.env"`,
 ], { cwd: root });
 if (ensureToken.status !== 0) die('failed to ensure ADMIN_TOKEN on the server');
-const tokenRead = spawnSync('bash', ['-c',
-  `${SSH} "grep '^ADMIN_TOKEN=' ${DIR}/.env | head -1 | cut -d= -f2-"`,
-], { cwd: root, encoding: 'utf8' });
-const ADMIN_TOKEN = tokenRead.stdout.trim();
-if (!ADMIN_TOKEN) die('could not read back ADMIN_TOKEN from the server .env');
+
+// The token is deliberately NOT read back, and deliberately NOT handed to the
+// Vite build.
+//
+// This step used to read ADMIN_TOKEN off the host and pass it as
+// VITE_ADMIN_TOKEN so the dashboard's replay player could send it. That leaked
+// the production admin token to every visitor: Vite substitutes
+// `import.meta.env.VITE_*` with a string literal at build time, so the value
+// landed in connect-ui/dist as
+//     headers:{Authorization:"Bearer <real prod token>"}
+// and dist is served publicly at http://<host>:3000/CloudFuze. Verified by
+// building with a sentinel value and grepping the bundle.
+//
+// Passing it "via the child process env, never in a shell string" — the old
+// comment here — guards the log/echo channel only. The bundler does not care how
+// the variable arrived. A browser-reachable admin credential unlocks session
+// replays (screen recordings of employees), SIEM export and approvals, so the
+// build gets nothing.
+//
+// Consequence, accepted on purpose: replay PLAYBACK is unavailable in a deployed
+// dashboard until the admin routes accept a real user session. adminFetch() in
+// AIHubPage.jsx already sends credentials:"same-origin", so the day the server
+// sets a session cookie this needs no change, and until then the player shows
+// its explicit "needs an admin credential" panel. A feature that requires an
+// admin credential must not work by giving that credential to everyone.
+//
+// Local development is unaffected: a developer can still put VITE_ADMIN_TOKEN in
+// connect-ui/.env.local, which is git-ignored and never part of a deploy.
 
 // 1. Build the frontend locally / on the runner (needs more RAM than the host).
-// VITE_ADMIN_TOKEN is passed via the child process env, never inlined into a
-// shell string, so it can never end up in a printed/logged command.
 console.log('• Building connect-ui (Vite)…');
 const buildResult = spawnSync('npm', ['--prefix', 'connect-ui', 'run', 'build'], {
-  cwd: root, stdio: 'inherit', env: { ...process.env, VITE_ADMIN_TOKEN: ADMIN_TOKEN },
+  cwd: root, stdio: 'inherit', env: { ...process.env, VITE_ADMIN_TOKEN: '' },
 });
 if (buildResult.status !== 0) die(`connect-ui build failed (exit ${buildResult.status})`);
 if (!existsSync(resolve(root, 'connect-ui/dist/index.html'))) die('connect-ui build produced no dist/index.html');

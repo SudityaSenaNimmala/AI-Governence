@@ -3,7 +3,15 @@ import { attachMachineIdentity } from '../lib/machine-identity.js';
 
 export function mountQueries(app, db) {
   app.get('/api/v1/overview', a(async (req, res) => {
-    const machines = await db.collection('machines').countDocuments({ platform: { $ne: null } });
+    // Count EVERY enrolled machine, matching GET /api/v1/machines below.
+    //
+    // This carried the same `{ platform: { $ne: null } }` predicate that route
+    // already documents as wrong: in Mongo it also excludes documents where the
+    // field is simply ABSENT, and a browser-extension enrollment never reports a
+    // platform. The roster was fixed; this counter was not, so the Overview card
+    // read "Enrolled machines 2" while the roster it links to listed 38 — the two
+    // screens disagreed by 19x, and the number shown was the smaller, wronger one.
+    const machines = await db.collection('machines').countDocuments({});
     const scans = await db.collection('scans').countDocuments();
     const findingsCount = await db.collection('findings').countDocuments();
     const uniqueToolKeys = await db.collection('findings').distinct('tool_key');

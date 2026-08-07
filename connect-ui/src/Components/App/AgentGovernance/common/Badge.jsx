@@ -22,7 +22,23 @@ export const riskColor = {
   medium: "#3b82f6",
   low: "#22c55e",
   informational: "#6b7280",
+  // Grey, never green. An agent with no assessment must not read as a safe agent;
+  // an unmapped level used to fall through to `undefined` here, which rendered a
+  // transparent "undefined22" background and looked like a benign chip.
+  not_assessed: "#9ca3af",
 };
+
+/**
+ * Text for a risk chip. Prints "Not assessed" instead of "undefined (null)" when
+ * nothing has been measured, so a missing score can never be mistaken for a low
+ * one. Pair with riskColor[level] for the colour.
+ */
+export function riskLabel(risk) {
+  const level = risk?.level;
+  const score = risk?.score;
+  if (score == null || level === "not_assessed" || !level) return "Not assessed";
+  return `${level} (${score})`;
+}
 
 export const statusColor = {
   sanctioned: "#22c55e",

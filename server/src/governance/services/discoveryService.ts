@@ -32,10 +32,27 @@ export interface DiscoveryTokens {
   azure?: string;
   cognitiveServices?: string;
   dataverseEnvUrl?: string;
+  /**
+   * EVERY Dataverse environment the app can reach, each with its own token — a
+   * Dataverse token is scoped to a single org URL, so a tenant with five
+   * environments needs five tokens.
+   *
+   * `dataverse` / `dataverseEnvUrl` above hold the first entry and remain for
+   * callers that still pass one environment. When this array is present the scan
+   * iterates all of it, which is the difference between "the agents in the
+   * environment someone typed" and an actual tenant inventory.
+   */
+  dataverseEnvs?: Array<{ url: string; token: string }>;
   tenantId?: string;
   googleServiceAccountKey?: string;
   googleAdminEmail?: string;
   googleProjectId?: string;
+  /**
+   * Present when the Google connection came from interactive sign-in rather than
+   * a service-account key. The client uses it directly instead of exchanging a
+   * signed JWT, so the same scans run either way.
+   */
+  googleAccessToken?: string;
 }
 
 // Timeout wrapper — kills any task that takes too long
@@ -116,10 +133,34 @@ export async function runDiscovery(
   report("Discovering agents across all platforms...");
 
   // ── Task A: Copilot Studio (Dataverse) ──────────
-  const taskA = (tokens.dataverse && tokens.dataverseEnvUrl) ? withTimeout((async (): Promise<TaskResult> => {
+  //
+  // Runs once PER ENVIRONMENT. A Dataverse token is scoped to one org URL, so a
+  // tenant with five environments needs five passes; scanning only the one an
+  // admin typed left every agent in the others undiscovered while the scan still
+  // reported success.
+  //
+  // `dvEnvList` falls back to the single-environment fields so an older caller
+  // that passes `dataverse` + `dataverseEnvUrl` behaves exactly as before.
+  const dvEnvList: Array<{ url: string; token: string }> =
+    tokens.dataverseEnvs?.length
+      ? tokens.dataverseEnvs
+      : (tokens.dataverse && tokens.dataverseEnvUrl
+          ? [{ url: tokens.dataverseEnvUrl, token: tokens.dataverse }]
+          : []);
+
+  const taskA = dvEnvList.length ? withTimeout((async (): Promise<TaskResult> => {
     const result: TaskResult = { agents: [], warnings: [] };
-    try {
-      const dvClient = new DataverseClient(tokens.dataverse!, tokens.dataverseEnvUrl!);
+    // One environment failing (no Application User, throttling, a deleted env)
+    // must not lose the agents already collected from the others. No wrapper
+    // try/catch is added here on purpose: the body below is a sequence of
+    // independent try/catch blocks that each already contain their own failures,
+    // so an extra outer try would only close on the first inner catch.
+    for (const dvEnv of dvEnvList) {
+      const dvToken = dvEnv.token;
+      const dvUrl = dvEnv.url;
+      console.log(`[DV] Scanning environment ${dvUrl}`);
+      try {
+      const dvClient = new DataverseClient(dvToken, dvUrl);
       const bots = await dvClient.discoverBots();
       console.log(`[DV] Bots found: ${bots.length}`);
 
@@ -154,8 +195,11 @@ export async function runDiscovery(
           else sessionUsers.set(s.userId, { count: 1, last: s.startTime });
         }
 
+        // dvUrl, not tokens.dataverseEnvUrl — the latter is the FIRST environment,
+        // so every agent from environments 2..n would be labelled with the wrong
+        // one. This string is what the UI shows as the agent's description.
         const botDescription = bot.description
-          || `${classification.label} agent in ${tokens.dataverseEnvUrl}`;
+          || `${classification.label} agent in ${dvUrl}`;
 
         result.agents.push({
           id: bot.botid, botId: bot.botid, name: bot.name,
@@ -183,7 +227,7 @@ export async function runDiscovery(
     // to reclassify personal agents and SharePoint agents
     if (result.agents.length > 0 && result.agents.every(a => a.platform === "copilot_studio")) {
       try {
-        const dvClient3 = new DataverseClient(tokens.dataverse!, tokens.dataverseEnvUrl!);
+        const dvClient3 = new DataverseClient(dvToken, dvUrl);
         const declBots = await dvClient3.discoverDeclarativeCopilots();
         const declBotMap = new Map(declBots.map(b => [b.botid, b]));
         let reclassified = 0;
@@ -213,7 +257,7 @@ export async function runDiscovery(
 
     // Look for agents in botcomponents that have parent bots not in the bots table (draft/unpublished agents)
     try {
-      const dvClient4 = new DataverseClient(tokens.dataverse!, tokens.dataverseEnvUrl!);
+      const dvClient4 = new DataverseClient(dvToken, dvUrl);
       const existingBotIds4 = new Set(result.agents.map(a => a.botId || a.id));
       const components = await dvClient4.discoverBotComponents();
       const missingParentIds = new Set<string>();
@@ -254,7 +298,7 @@ export async function runDiscovery(
 
     // Look for additional agents in msdyn tables that might not be in the bots table
     try {
-      const dvClient2 = new DataverseClient(tokens.dataverse!, tokens.dataverseEnvUrl!);
+      const dvClient2 = new DataverseClient(dvToken, dvUrl);
       const existingBotIds = new Set(result.agents.map(a => a.botId || a.id));
 
       const copilotAgents = await dvClient2.discoverCopilotAgents();
@@ -282,8 +326,12 @@ export async function runDiscovery(
       console.warn("[DV Extended] Error scanning msdyn tables:", e instanceof Error ? e.message : e);
     }
 
+    }   // end per-environment loop
+
+    console.log(`[DV] ${result.agents.length} agent(s) across ${dvEnvList.length} environment(s)`);
     return result;
-  })(), 60_000, "Copilot Studio") : Promise.resolve({ agents: [], warnings: ["Dataverse not configured."] } as TaskResult);
+  })(), 60_000 * Math.min(dvEnvList.length, 5), "Copilot Studio")
+    : Promise.resolve({ agents: [], warnings: ["Dataverse not configured."] } as TaskResult);
 
   // ── Task B: SharePoint Agents (Graph beta) ──────
   const taskB = withTimeout((async (): Promise<TaskResult> => {
@@ -704,11 +752,22 @@ export async function runDiscovery(
   // ── Task F: Connectors (Power Platform) ─────────
   const taskF = withTimeout((async () => {
     if (!tokens.powerPlatform) return { connectors: [] as AgentConnector[], envs: [] as string[], warnings: [] as string[] };
+    const ppWarnings: string[] = [];
     try {
       const ppClient = new PowerPlatformClient(tokens.powerPlatform);
       const envs = await ppClient.listEnvironments();
       const allConnectors: AgentConnector[] = [];
-      for (const env of envs.slice(0, 3)) {
+      // Was a silent envs.slice(0, 3): a tenant with more than three environments
+      // had its connectors sampled from an arbitrary three, with nothing shown to
+      // say so — and connector type is what drives connector risk scoring, so the
+      // gap was invisible AND load-bearing. The cap is raised and, when it does
+      // bite, it now reports which environments were skipped.
+      const CONNECTOR_ENV_CAP = 25;
+      const scanEnvs = envs.slice(0, CONNECTOR_ENV_CAP);
+      if (envs.length > CONNECTOR_ENV_CAP) {
+        ppWarnings.push(`Connector scan covered ${CONNECTOR_ENV_CAP} of ${envs.length} environments; the remainder were skipped for time.`);
+      }
+      for (const env of scanEnvs) {
         try {
           const conns = await ppClient.listConnections(env.name);
           for (const c of conns) {
@@ -718,7 +777,7 @@ export async function runDiscovery(
           }
         } catch {}
       }
-      return { connectors: allConnectors, envs: envs.map(e => e.name), warnings: [] as string[] };
+      return { connectors: allConnectors, envs: envs.map(e => e.name), warnings: ppWarnings };
     } catch (e) { return { connectors: [] as AgentConnector[], envs: [] as string[], warnings: [`Power Platform: ${e instanceof Error ? e.message : String(e)}`] }; }
   })(), TASK_TIMEOUT, "Connectors");
 
@@ -733,11 +792,20 @@ export async function runDiscovery(
   })(), 60_000, "Audit");
 
   // ── Task H: Google Workspace (only if connected) ─
-  const taskH = (tokens.googleServiceAccountKey && tokens.googleAdminEmail) ? withTimeout((async (): Promise<TaskResult> => {
+  // Runs for EITHER credential type: a service-account key, or an access token
+  // minted from an interactive sign-in. Both produce the same GoogleWorkspaceClient
+  // and therefore the same scans — only how it authenticates differs.
+  const googleConnected = Boolean(tokens.googleAdminEmail && (tokens.googleServiceAccountKey || tokens.googleAccessToken));
+  const taskH = googleConnected ? withTimeout((async (): Promise<TaskResult> => {
     const result: TaskResult = { agents: [], warnings: [] };
     try {
-      const key: GoogleServiceAccountKey = JSON.parse(tokens.googleServiceAccountKey!);
+      // With an access token there is no key to parse; the client only needs the
+      // shape for its project fallback, so a stub carries the project id.
+      const key: GoogleServiceAccountKey = tokens.googleServiceAccountKey
+        ? JSON.parse(tokens.googleServiceAccountKey)
+        : ({ client_email: tokens.googleAdminEmail, private_key: "", project_id: tokens.googleProjectId || "" } as GoogleServiceAccountKey);
       const gc = new GoogleWorkspaceClient(key, tokens.googleAdminEmail!, tokens.googleProjectId);
+      if (tokens.googleAccessToken) gc.useAccessToken(tokens.googleAccessToken, tokens.googleProjectId);
       const gr = await gc.discoverAll();
       result.warnings.push(...gr.warnings);
 

@@ -19,6 +19,7 @@
 import crypto from 'node:crypto';
 import { a } from '../util.js';
 import { fireWebhooks } from './webhooks.js';
+import { scoreToLevel } from '../lib/risk-scale.js';
 
 const WINDOW_DAYS = 90;
 const WEIGHTS = {
@@ -108,7 +109,26 @@ export function mountRiskScore(app, db) {
     const distribution = { low: 0, medium: 0, high: 0, critical: 0 };
     for (const p of allProfiles) distribution[p.risk_level] = (distribution[p.risk_level] || 0) + 1;
 
-    res.json({ total_employees: total, average_score: avgScore, distribution });
+    // Report the unmeasured population instead of quietly dropping it.
+    //
+    // The risk_score:{$ne:null} filter above correctly keeps unassessed people out
+    // of the average — but on its own it makes them invisible, so an org where
+    // most staff have no endpoint agent shows a small, healthy-looking cohort and
+    // no hint that the coverage is thin. "We measured 4 of 40 people" is a
+    // materially different statement from "we measured 4 people", and the second
+    // one is what this endpoint used to imply.
+    const notAssessed = await profiles().countDocuments({
+      $or: [{ risk_score: null }, { risk_score: { $exists: false } }],
+      display_name: { $not: /^Browser User/ },
+    });
+
+    res.json({
+      total_employees: total,
+      average_score: avgScore,
+      distribution,
+      not_assessed: notAssessed,
+      coverage_percent: (total + notAssessed) ? Math.round((total / (total + notAssessed)) * 100) : 0,
+    });
   }));
 
   // ── Get single employee score with history ──
@@ -142,17 +162,33 @@ function windowStart() {
   return new Date(Date.now() - WINDOW_DAYS * 86400000).toISOString();
 }
 
-function scoreLevel(score) {
-  if (score <= 30) return 'low';
-  if (score <= 60) return 'medium';
-  if (score <= 80) return 'high';
-  return 'critical';
-}
+// These bands moved to server/src/lib/risk-scale.js so the registry, the agent
+// assessor and this file cannot drift apart. The values are unchanged — they were
+// already the ones the dashboard's printed legend documents.
+const scoreLevel = scoreToLevel;
 
 async function computeScore(db, profile, sanctionedKeys) {
   const machineIds = profile.machine_ids || [];
   if (machineIds.length === 0) {
-    return { profile_id: profile.id, display_name: profile.display_name, score: 0, level: 'low', factors: {} };
+    // NOT score 0 / level 'low'.
+    //
+    // No enrolled machine means nothing was measured for this person, and this
+    // file's own header describes level 'low' as a "model AI citizen". Someone
+    // with no endpoint agent installed was therefore rendered as the safest
+    // employee in the org — and folded into average_score, dragging the org
+    // average toward "healthy" in proportion to how many people are UNMONITORED.
+    // That is precisely backwards for a governance tool.
+    //
+    // score: null + level: 'not_assessed' so the UI can say so, and the caller
+    // below excludes these from the average.
+    return {
+      profile_id: profile.id,
+      display_name: profile.display_name,
+      score: null,
+      level: 'not_assessed',
+      factors: {},
+      not_assessed_reason: 'No enrolled machine — nothing has been measured for this person',
+    };
   }
 
   const since = windowStart();

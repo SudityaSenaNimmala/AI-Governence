@@ -6,6 +6,7 @@
  */
 
 import type { DiscoveredAgent, AgentActivity, RiskAssessment } from "../types/agent.js";
+import { normalizeStoredRisk } from "../../lib/risk-scale.js";
 
 export interface PolicyDefinition {
   id: string;
@@ -102,13 +103,17 @@ export const POLICY_TEMPLATES: Omit<PolicyDefinition, "id">[] = [
   },
   {
     name: "High-Risk Auto Suspension",
-    description: "Automatically suspend agents with a risk score below 25 (critical risk). Requires manual review to reactivate.",
+    description: "Automatically suspend agents scoring above 75 (critical risk). Requires manual review to reactivate.",
     type: "risk",
     severity: "critical",
     status: "draft",
     template: "high_risk_suspension",
+    // greater_than 75, not less_than 25. resolveField() now returns a FORWARD risk
+    // score (0 = safe, 100 = maximum risk), so "critical" is the top of the range.
+    // Written the old way this rule suspended whatever scored below 25, which on
+    // the forward scale is the safest tenth of the fleet.
     conditions: [
-      { field: "risk_score", operator: "less_than", value: 25 },
+      { field: "risk_score", operator: "greater_than", value: 75 },
     ],
     actions: [{ type: "suspend" }, { type: "notify" }],
     scope: { type: "all" },
@@ -216,10 +221,23 @@ function isAgentInScope(scope: PolicyScope, agent: DiscoveredAgent): boolean {
 
 function resolveField(field: string, agent: DiscoveredAgent): unknown {
   switch (field) {
+    // Normalised, NOT agent.risk.score raw.
+    //
+    // Stored agents still carry the legacy compliance score (100 = fully
+    // compliant, so a HIGH number means SAFE); newly assessed ones carry the
+    // forward risk score (high = risky), tagged with risk.scale. Reading the raw
+    // field means one policy threshold silently means opposite things depending on
+    // when the agent was last scanned.
+    //
+    // That is not theoretical: the "High-Risk Auto Suspension" template is
+    // `risk_score less_than 25` — critical on the legacy scale — and its action is
+    // SUSPEND. Against re-scanned agents the same rule selects the SAFEST agents
+    // in the fleet and suspends them. Normalising here means a threshold always
+    // means the same thing, whichever scale the document was written under.
     case "risk_score":
-      return agent.risk.score;
+      return normalizeStoredRisk(agent.risk).score;
     case "risk_level":
-      return agent.risk.level;
+      return normalizeStoredRisk(agent.risk).level;
     case "is_orphaned":
       return agent.isOrphaned;
     case "has_owner":

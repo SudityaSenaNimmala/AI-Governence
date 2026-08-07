@@ -15,8 +15,41 @@ interface OAuthKeyDoc {
   id: string;
   vendor: string;
   client_id: string;
-  client_secret: string;
+  client_secret?: string;
   tenant_id: string | null;
+  /** "admin_consent" when the tenant connected via Sign in with Microsoft. */
+  auth_method?: string;
+}
+
+/**
+ * The client secret to authenticate with for this connection.
+ *
+ * Two kinds of row exist and they get their secret from different places:
+ *
+ *   auth_method: "admin_consent"  — the customer consented to OUR multi-tenant
+ *       app. The row holds only their tenant_id; the secret is the platform
+ *       app's and lives in the server environment. Reading it from env means
+ *       rotating MS_CLIENT_SECRET takes effect for every customer at once,
+ *       instead of leaving one stale encrypted copy per tenant that fails auth
+ *       silently and separately.
+ *
+ *   anything else — a legacy row where the customer registered their own Entra
+ *       app and pasted its credentials. That secret is theirs, is encrypted on
+ *       the row, and must keep being used.
+ */
+function resolveSecret(key: OAuthKeyDoc): string {
+  if (key.auth_method === "admin_consent") {
+    const secret = process.env.MS_CLIENT_SECRET || "";
+    if (!secret) {
+      throw new Error(
+        "This tenant connected via Sign in with Microsoft, but MS_CLIENT_SECRET is not set on the server. " +
+        "Restore the platform app credentials to restore access.",
+      );
+    }
+    return secret;
+  }
+  if (!key.client_secret) throw new Error("OAuth credentials are incomplete for this connection.");
+  return decrypt(key.client_secret);
 }
 
 /**
@@ -76,7 +109,7 @@ export async function acquireNewToken(oauthKeyId: string, scope: TokenScope = "g
     throw new Error("OAuth credentials not found");
   }
 
-  const clientSecret = decrypt(key.client_secret);
+  const clientSecret = resolveSecret(key);
 
   if (key.vendor === "microsoft") {
     return acquireMicrosoftToken(key.id, key.vendor, key.client_id, clientSecret, key.tenant_id, scope);
@@ -97,7 +130,7 @@ export async function getDataverseToken(oauthKeyId: string, envUrl: string): Pro
     throw new Error("OAuth credentials not found");
   }
 
-  const clientSecret = decrypt(key.client_secret);
+  const clientSecret = resolveSecret(key);
   const tenant = key.tenant_id || "common";
 
   // Dataverse token scope is the org URL itself

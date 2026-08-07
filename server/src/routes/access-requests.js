@@ -73,7 +73,10 @@ export function mountAccessRequests(app, db) {
   app.get('/api/v1/access-requests', a(async (req, res) => {
     const { status } = req.query;
     const filter = {};
-    if (status) filter.status = status;
+    // String(): `?status[$ne]=zzz` arrives as an object from Express's extended
+    // query parser and was evaluated by Mongo as an operator, returning every
+    // request regardless of status instead of none.
+    if (status) filter.status = String(status);
 
     const rows = await requests()
       .find(filter)
@@ -176,9 +179,15 @@ export function mountAccessRequests(app, db) {
       return res.status(400).json({ error: 'machine_id and tool_host required' });
     }
 
+    // String() on both, and this is the highest-impact instance in the file: this
+    // route is what the extension asks "is this blocked tool temporarily allowed
+    // for THIS machine". Passing the raw values let `?machine_id[$ne]=x` match any
+    // machine's exception, turning one person's approved 8-hour access into a
+    // fleet-wide bypass — exactly the per-machine scoping this file's header calls
+    // out as the security property.
     const exception = await exceptions().findOne({
-      machine_id,
-      tool_host,
+      machine_id: String(machine_id),
+      tool_host: String(tool_host),
       active: true,
       expires_at: { $gt: new Date() },
     });

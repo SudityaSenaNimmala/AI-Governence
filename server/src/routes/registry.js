@@ -11,6 +11,7 @@
 
 import { a } from '../util.js';
 import { fireWebhooks } from './webhooks.js';
+import { scoreToLevel, normalizeStoredRisk } from '../lib/risk-scale.js';
 
 // Normalize finding types to registry categories
 const CATEGORY_MAP = {
@@ -29,9 +30,11 @@ export function mountRegistry(app, db) {
 
   // ── Unified Registry — returns all AI systems from all sources ──
 
-  app.get('/api/v1/registry', a(async (req, res) => {
-    const { platform, status, risk_level, category, search } = req.query;
-
+  // Builds the unified registry: merges all sources, dedups, filters out the
+  // skip-listed vendors/types and invalid names. Both the list route and the
+  // summary route go through this, so a count can never disagree with the rows
+  // it claims to be counting — see the note on /registry/summary below.
+  async function buildRegistry() {
     // 1. Governance discovered agents
     const govAgents = await db.collection('discovered_agents')
       .find({}).project({ _id: 0 }).toArray().catch(() => []);
@@ -100,6 +103,7 @@ export function mountRegistry(app, db) {
       const key = agent.botId || agent.appId || agent.id || agent.name;
       if (!key) continue;
       const sanction = sanctionMap.get(key);
+      const risk = normalizeStoredRisk(agent.risk);
       registry.set('gov:' + key, {
         id: agent.id || key,
         name: agent.name || 'Unnamed Agent',
@@ -111,9 +115,15 @@ export function mountRegistry(app, db) {
         owner_email: agent.owner?.userPrincipalName || null,
         owner_active: agent.owner?.accountEnabled ?? true,
         is_orphaned: agent.isOrphaned || false,
-        risk_score: agent.risk?.score ?? null,
-        risk_level: agent.risk?.level || null,
-        risk_factors: agent.risk?.factors || [],
+        // normalizeStoredRisk(), NOT the raw stored score. These documents were
+        // persisted under the old compliance convention (87 meant "safe"), and
+        // most predate the marker assessRisk() now stamps. Reading them as forward
+        // would invert every historical row — the safest agent would render
+        // "critical". The helper converts unmarked documents and passes marked
+        // ones through, so old and new rows coexist on one scale.
+        risk_score: risk.score,
+        risk_level: risk.level,
+        risk_factors: risk.factors || [],
         status: sanction?.status || mapLifecycleToStatus(agent.lifecycleStatus),
         lifecycle: agent.lifecycleStatus || 'active',
         data_access: (agent.connectors || []).map(c => c.name || c.type).filter(Boolean),
@@ -175,8 +185,11 @@ export function mountRegistry(app, db) {
         owner_email: null,
         owner_active: true,
         is_orphaned: false,
+        // scoreToLevel(), not a local set of cut-points. This site used
+        // >=70/>=40 while riskService used a fourth set in the opposite
+        // direction, and both landed in this same column.
         risk_score: sample.risk_score ?? null,
-        risk_level: sample.risk_score != null ? (sample.risk_score >= 70 ? 'high' : sample.risk_score >= 40 ? 'medium' : 'low') : null,
+        risk_level: scoreToLevel(sample.risk_score),
         risk_factors: [],
         status: resolvedStatus,
         lifecycle: 'active',
@@ -246,8 +259,13 @@ export function mountRegistry(app, db) {
       });
     }
 
-    // Convert to array and apply filters
-    let results = [...registry.values()];
+    return [...registry.values()];
+  }
+
+  app.get('/api/v1/registry', a(async (req, res) => {
+    const { platform, status, risk_level, category, search } = req.query;
+
+    let results = await buildRegistry();
 
     if (platform)   results = results.filter(r => r.platform === platform || r.source_detail === platform);
     if (status)      results = results.filter(r => r.status === status);
@@ -263,7 +281,17 @@ export function mountRegistry(app, db) {
       );
     }
 
-    // Sort: highest risk first, then by name
+    // Sort: highest risk first, then by name.
+    //
+    // This comment was true of the intent and false of the behaviour. Governance
+    // rows carried an inverted score (87 = safe), so ordering by raw score
+    // descending put the SAFEST agents at the top: the first row served was
+    // "87 / low", while the one genuinely high-risk agent sat mid-list. Now that
+    // every row is forward-scaled the descending sort finally means what it says.
+    //
+    // Unscored agents sort LAST (-1) rather than first. They are unknown, not safe,
+    // but a triage list should lead with what is measured and known-bad; the "not
+    // assessed" rows are surfaced by their own badge rather than by position.
     results.sort((a, b) => {
       const ra = a.risk_score ?? -1, rb = b.risk_score ?? -1;
       if (rb !== ra) return rb - ra;
@@ -276,23 +304,40 @@ export function mountRegistry(app, db) {
   // ── Registry summary stats ──
 
   app.get('/api/v1/registry/summary', a(async (req, res) => {
-    // Quick counts from each source
-    const govCount = await db.collection('discovered_agents').countDocuments().catch(() => 0);
-    const findingsToolKeys = await db.collection('findings').distinct('tool_key').catch(() => []);
-    const platformCount = await db.collection('ai_platforms').countDocuments({ $or: [{ governed: true }, { blocked: true }] }).catch(() => 0);
-    const sanctions = await db.collection('sanctions').find({}).project({ _id: 0, status: 1 }).toArray().catch(() => []);
+    // Counted from the SAME rows /api/v1/registry serves, not from independent
+    // per-collection countDocuments().
+    //
+    // The old version summed discovered_agents + distinct(tool_key) + governed
+    // platforms and applied none of the dedup, SKIP_TYPES/SKIP_VENDORS filtering
+    // or name-validity checks the list applies — so it reported 130 systems for a
+    // list of 125. by_status was worse: it counted the `sanctions` collection,
+    // a different universe from the `status` field on the returned rows, and
+    // reported `unknown: 0` while the list held plenty of unknown rows.
+    //
+    // Deriving both from buildRegistry() makes disagreement impossible.
+    const rows = await buildRegistry();
 
     const statusCounts = { approved: 0, restricted: 0, blocked: 0, unknown: 0 };
-    for (const s of sanctions) statusCounts[s.status] = (statusCounts[s.status] || 0) + 1;
+    const bySource = { governance_agents: 0, endpoint_tools: 0, platform_services: 0 };
+    const riskCounts = { low: 0, medium: 0, high: 0, critical: 0, not_assessed: 0 };
+    const SOURCE_KEY = {
+      governance: 'governance_agents',
+      endpoint_scan: 'endpoint_tools',
+      platform_registry: 'platform_services',
+    };
+
+    for (const r of rows) {
+      statusCounts[r.status] = (statusCounts[r.status] || 0) + 1;
+      const key = SOURCE_KEY[r.source];
+      if (key) bySource[key] += 1;
+      riskCounts[r.risk_level || 'not_assessed'] = (riskCounts[r.risk_level || 'not_assessed'] || 0) + 1;
+    }
 
     res.json({
-      total_ai_systems: govCount + findingsToolKeys.length + platformCount,
-      by_source: {
-        governance_agents: govCount,
-        endpoint_tools: findingsToolKeys.length,
-        platform_services: platformCount,
-      },
+      total_ai_systems: rows.length,
+      by_source: bySource,
       by_status: statusCounts,
+      by_risk: riskCounts,
     });
   }));
 

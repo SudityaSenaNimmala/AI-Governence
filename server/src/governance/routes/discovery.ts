@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { getValidToken, getDataverseToken } from "../services/tokenManager.js";
 import { runDiscovery } from "../services/discoveryService.js";
+import { PowerPlatformClient } from "../services/powerPlatformClient.js";
+import { accessTokenFromRefresh } from "./googleOAuth.js";
 import { getDb } from "../db.js";
 import { decrypt } from "../crypto.js";
 
@@ -44,30 +46,83 @@ router.get("/run", async (req, res) => {
     // Acquire tokens for all APIs (Graph is required, others are best-effort)
     const graphToken = await getValidToken(oauthKeyId, "graph");
 
-    // Dataverse token — requires specific environment URL
-    let dataverseToken: string | undefined;
-    const dvEnvUrl = dataverseEnvUrl || undefined;
-    console.log("[Discovery] dataverse_env_url param:", JSON.stringify(dataverseEnvUrl), "| dvEnvUrl:", JSON.stringify(dvEnvUrl), "| oauthKeyId:", oauthKeyId);
-    if (dvEnvUrl) {
-      try {
-        console.log("[Discovery] Acquiring Dataverse token for:", dvEnvUrl);
-        dataverseToken = await getDataverseToken(oauthKeyId, dvEnvUrl);
-        console.log("[Discovery] Dataverse token acquired successfully, length:", dataverseToken?.length);
-      } catch (e) {
-        console.error("[Discovery] Dataverse token FAILED:", e instanceof Error ? e.message : e);
-        console.error("[Discovery] Stack:", e instanceof Error ? e.stack : "");
-      }
-    } else {
-      console.log("[Discovery] No dataverse_env_url provided — skipping Dataverse discovery");
-    }
+    // Surfaced to the caller alongside the agents, so a partial scan is visible
+    // rather than being reported as a clean one.
+    const discoveryWarnings: string[] = [];
 
-    // Power Platform token
+    // Power Platform token — acquired FIRST, because it is what lets us enumerate
+    // the tenant's environments and therefore find the Dataverse URLs below.
     let powerPlatformToken: string | undefined;
     try {
       powerPlatformToken = await getValidToken(oauthKeyId, "power_platform");
     } catch (e) {
       console.warn("Power Platform token failed (will skip connector discovery):", e instanceof Error ? e.message : e);
     }
+
+    // ── Dataverse environments: discover them ALL, do not ask for one ──────────
+    //
+    // This used to take a single dataverse_env_url typed by the admin, which made
+    // coverage depend on which environment they happened to remember. Every
+    // Copilot Studio agent in every other environment was invisible — and silently
+    // so, because the scan reported success. For a governance product "we found
+    // the agents in the one environment you named" is not an inventory.
+    //
+    // The environment list comes from the SAME OAuth credentials via the Power
+    // Platform BAP API, and each entry carries its own Dataverse org URL in
+    // properties.linkedEnvironmentMetadata.instanceUrl. A Dataverse token is
+    // scoped per-org URL, so one is minted per environment.
+    //
+    // An explicit dataverse_env_url still wins when supplied — it is the escape
+    // hatch for a tenant where the service principal has not been registered as a
+    // Power Platform management app (New-PowerAppManagementApp), in which case BAP
+    // returns 403 and the list comes back empty.
+    const dvEnvUrls: string[] = [];
+    if (dataverseEnvUrl) {
+      dvEnvUrls.push(dataverseEnvUrl);
+      console.log("[Discovery] Using explicitly supplied Dataverse env:", dataverseEnvUrl);
+    } else if (powerPlatformToken) {
+      try {
+        const ppClient = new PowerPlatformClient(powerPlatformToken);
+        const envs = await ppClient.listEnvironments();
+        for (const env of envs) {
+          const url = env.properties?.linkedEnvironmentMetadata?.instanceUrl;
+          if (url) dvEnvUrls.push(url.replace(/\/$/, ""));
+        }
+        console.log(`[Discovery] ${envs.length} Power Platform environment(s); ${dvEnvUrls.length} with Dataverse`);
+        if (envs.length > 0 && dvEnvUrls.length === 0) {
+          discoveryWarnings.push("Power Platform environments were found but none has a Dataverse database, so no Copilot Studio agents could be scanned.");
+        }
+      } catch (e) {
+        console.warn("[Discovery] Could not enumerate environments:", e instanceof Error ? e.message : e);
+      }
+    }
+
+    if (dvEnvUrls.length === 0) {
+      // Say so out loud. A scan that quietly skips Copilot Studio and still reports
+      // success is how a tenant ends up believing it has no agents.
+      discoveryWarnings.push(
+        "No Dataverse environment could be discovered, so Copilot Studio agents were not scanned. " +
+        "Register the app as a Power Platform management application (New-PowerAppManagementApp) so environments can be listed automatically.",
+      );
+    }
+
+    // One Dataverse token per environment — the token's scope IS the org URL.
+    const dataverseTokens: Array<{ url: string; token: string }> = [];
+    for (const url of dvEnvUrls) {
+      try {
+        dataverseTokens.push({ url, token: await getDataverseToken(oauthKeyId, url) });
+      } catch (e) {
+        // One environment the app has no Application User in must not abort the
+        // rest — record it and carry on.
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(`[Discovery] Dataverse token failed for ${url}: ${msg}`);
+        discoveryWarnings.push(`Could not access Dataverse environment ${url} — the app may not be an Application User there.`);
+      }
+    }
+    console.log(`[Discovery] Dataverse tokens acquired: ${dataverseTokens.length}/${dvEnvUrls.length}`);
+
+    const dataverseToken = dataverseTokens[0]?.token;
+    const dvEnvUrl = dataverseTokens[0]?.url;
 
     // O365 Audit token
     let auditToken: string | undefined;
@@ -97,22 +152,38 @@ router.get("/run", async (req, res) => {
     let googleServiceAccountKey: string | undefined;
     let googleAdminEmail: string | undefined;
     let googleProjectId: string | undefined;
+    // Set when the connection came from "Sign in with Google" instead of a
+    // service-account key — the client is driven by this access token rather than
+    // by a JWT exchange.
+    let googleAccessToken: string | undefined;
     if (googleOauthKeyId) {
       try {
         const googleKeyDoc = await db.collection("oauth_keys").findOne({
           id: googleOauthKeyId,
           vendor: "google",
         });
-        if (googleKeyDoc) {
+        if (!googleKeyDoc) {
+          console.warn("[Discovery] Google OAuth key not found or vendor is not 'google'");
+        } else if (googleKeyDoc.auth_method === "oauth" && googleKeyDoc.google_refresh_token) {
+          // Interactive sign-in: trade the stored refresh token for a short-lived
+          // access token. A failure here is reported rather than swallowed —
+          // the usual cause is the consenting admin revoking access or being
+          // suspended, and a silently Google-less scan would look like "you have
+          // no Google agents", which is a very different statement.
+          googleAccessToken = await accessTokenFromRefresh(googleKeyDoc.google_refresh_token);
+          googleAdminEmail = googleKeyDoc.google_admin_email || undefined;
+          googleProjectId = googleKeyDoc.google_project_id || undefined;
+          console.log("[Discovery] Google access token minted for:", googleAdminEmail);
+        } else {
           googleServiceAccountKey = decrypt(googleKeyDoc.client_secret);
           googleAdminEmail = googleKeyDoc.google_admin_email || undefined;
           googleProjectId = googleKeyDoc.google_project_id || undefined;
           console.log("[Discovery] Google Workspace credentials loaded for:", googleAdminEmail);
-        } else {
-          console.warn("[Discovery] Google OAuth key not found or vendor is not 'google'");
         }
       } catch (e) {
-        console.warn("Google Workspace credential load failed:", e instanceof Error ? e.message : e);
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn("Google Workspace credential load failed:", msg);
+        discoveryWarnings.push(`Google: ${msg}`);
       }
     }
 
@@ -125,10 +196,16 @@ router.get("/run", async (req, res) => {
       azure: azureToken,
       cognitiveServices: cognitiveServicesToken,
       dataverseEnvUrl: dvEnvUrl,
+      // Every Dataverse environment the app can reach, so Copilot Studio is
+      // scanned across the whole tenant. `dataverse`/`dataverseEnvUrl` above stay
+      // populated with the first entry for backward compatibility with callers
+      // that still pass a single environment.
+      dataverseEnvs: dataverseTokens,
       tenantId: tenantId || undefined,
       googleServiceAccountKey,
       googleAdminEmail,
       googleProjectId,
+      googleAccessToken,
     });
 
     // Persist discovered agents so the dashboard survives a page refresh.
@@ -146,7 +223,13 @@ router.get("/run", async (req, res) => {
       console.log(`[Discovery] Persisted ${result.agents.length} agents to discovered_agents`);
     }
 
-    res.json(result);
+    // Merge the environment-resolution warnings in, so a scan that could not reach
+    // Copilot Studio at all says so instead of returning a confident empty list.
+    res.json({
+      ...result,
+      warnings: [...discoveryWarnings, ...(result.warnings || [])],
+      dataverse_environments_scanned: dataverseTokens.map((t) => t.url),
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Discovery failed";
     console.error("Discovery error:", message);

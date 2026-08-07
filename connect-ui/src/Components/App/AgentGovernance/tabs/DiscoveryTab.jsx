@@ -5,7 +5,7 @@ import { useAgentAuth } from "../AgentGovernanceContext";
 import { agentGovernanceApi } from "../AgentGovernanceActions/AgentGovernanceActions";
 import { Section } from "../common/Section";
 import { StatCard } from "../common/StatCard";
-import { Badge, riskColor, statusColor, statusLabel } from "../common/Badge";
+import { Badge, riskColor, riskLabel, statusColor, statusLabel } from "../common/Badge";
 import { LoadingSpinner } from "../common/LoadingSpinner";
 import { AgentMetadataPanel } from "../common/AgentMetadataPanel";
 
@@ -78,7 +78,7 @@ function AgentDetailPanel({ agent, onClose }) {
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
             <span style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 600, background: platColor + "15", color: platColor }}>{platLabel}</span>
             <span style={{ fontSize: 11, color: "#999" }}>{agent.vendor || ""}</span>
-            <Badge text={agent.risk.level} color={riskColor[agent.risk.level]} />
+            <Badge text={riskLabel(agent.risk)} color={riskColor[agent.risk?.level] || riskColor.not_assessed} />
           </div>
         </div>
         <button onClick={onClose} style={{ color: "var(--ag-text-secondary)", fontSize: 12, background: "none", border: "1px solid var(--ag-border)", borderRadius: 6, padding: "4px 12px", cursor: "pointer" }}>Close</button>
@@ -449,7 +449,7 @@ function AgentOverviewTab({ agent, platColor }) {
         </div>
         <div style={{ background: "#f8f9fa", border: "1px solid var(--ag-border)", borderRadius: 8, padding: "10px 16px", minWidth: 100 }}>
           <div style={{ fontSize: 10, color: "#999" }}>Risk Score</div>
-          <div style={{ fontSize: 20, fontWeight: 700, color: riskColor[agent.risk.level] }}>{agent.risk.score}/100</div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: riskColor[agent.risk?.level] || riskColor.not_assessed }}>{agent.risk?.score == null ? "Not assessed" : `${agent.risk.score}/100`}</div>
         </div>
         {isAssistant && agent.connectors?.filter(c => c.type === "VectorStore").length > 0 && (
           <div style={{ background: "#f8f9fa", border: "1px solid var(--ag-border)", borderRadius: 8, padding: "10px 16px", minWidth: 100 }}>
@@ -1541,7 +1541,7 @@ function AgentTableView() {
                       {PLATFORM_LABELS[a.platform] || a.platform.replace(/_/g, " ")}
                     </span>
                   </td>
-                  <td style={{ padding: "10px" }}><Badge text={`${a.risk.level} (${a.risk.score})`} color={riskColor[a.risk.level]} /></td>
+                  <td style={{ padding: "10px" }}><Badge text={riskLabel(a.risk)} color={riskColor[a.risk?.level] || riskColor.not_assessed} /></td>
                   <td style={{ padding: "10px" }}><Badge text={statusLabel[a.lifecycleStatus] || a.lifecycleStatus} color={statusColor[a.lifecycleStatus] || "#6b7280"} /></td>
                   <td style={{ padding: "10px", fontSize: 11, color: "#999" }}>{a.owner ? <span style={{ color: a.owner.accountEnabled ? "#333" : "#ef4444" }}>{a.owner.displayName}</span> : "—"}</td>
                   <td style={{ padding: "10px" }}>
@@ -1898,6 +1898,14 @@ function GoogleVertexView() {
   const [expandedEndpoint, setExpandedEndpoint] = useState(null);
   const [showConnectModal, setShowConnectModal] = useState(false);
   const [connectedKeyId, setConnectedKeyId] = useState(googleKeyId);
+  // These two belong up here with the rest, NOT beside the workspace-users table
+  // that uses them. They were declared after the `loading` / `error` / `!data`
+  // early returns, so this component called 9 hooks while loading and 11 once data
+  // arrived — React throws "Rendered more hooks than during the previous render"
+  // on that transition. Latent only because no Google OAuth key is configured;
+  // guaranteed to crash Discovery → Google for any tenant that connects one.
+  const [showUsers, setShowUsers] = useState(false);
+  const [userSearch, setUserSearch] = useState("");
   const [activeSection, setActiveSection] = useState("agents"); // "agents" | "chat" | "infra"
 
   const loadData = async (keyId) => {
@@ -1966,8 +1974,6 @@ function GoogleVertexView() {
   const workspaceUsers = data.workspaceUsers || [];
   // per-user Gemini app breakdown, keyed by email for O(1) lookup
   const geminiUserMap = new Map((data.geminiUserAppUsage || []).map(u => [u.email, u]));
-  const [showUsers, setShowUsers] = useState(false);
-  const [userSearch, setUserSearch] = useState("");
   const GOOGLE_BLUE = "#4285F4";
   const GOOGLE_GREEN = "#34A853";
   const GOOGLE_RED = "#EA4335";
