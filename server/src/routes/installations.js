@@ -7,10 +7,11 @@
 import { a } from '../util.js';
 import { ENROLL_SECRET } from '../auth.js';
 import crypto from 'node:crypto';
-import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSync, cpSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
+import { execSync, spawnSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -115,24 +116,117 @@ export function mountInstallations(app, db) {
 
   // ── Download pre-built Windows installer (.exe) if available ──
 
+  // ── Build + serve Windows .exe installer (NSIS, on-the-fly) ──
+
+  let _exeCache = { serverUrl: null, hash: null, path: null };
+
   app.get('/api/v1/installations/agent-installer-exe', a(async (req, res) => {
-    // Try pre-built .exe first (built by NSIS during deploy)
-    const exePaths = [
-      join(__dirname, '..', '..', '..', 'agent', 'installer', 'CloudFuze-Agent-Installer.exe'),
-      join(__dirname, '..', '..', '..', 'agent', 'installer', 'CloudFuze-Agent-Setup.exe'),
-    ];
-    for (const exePath of exePaths) {
-      if (existsSync(exePath)) {
-        const stat = statSync(exePath);
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.setHeader('Content-Disposition', 'attachment; filename="CloudFuze-Agent-Setup.exe"');
-        res.setHeader('Content-Length', stat.size);
-        return res.send(readFileSync(exePath));
+    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+    const host = req.headers['x-forwarded-host'] || req.headers.host;
+    const serverUrl = `${proto}://${host}`;
+
+    const root = join(__dirname, '..', '..', '..');
+    const installerDir = join(root, 'agent', 'installer');
+    const nsiScript = join(installerDir, 'cloudfuze-agent.nsi');
+    const buildDir = join(installerDir, 'build');
+    const outExe = join(installerDir, 'CloudFuze-Agent-Installer.exe');
+
+    // Compute source hash to know if we need to rebuild
+    const agentDir = join(root, 'agent');
+    const srcHash = crypto.createHash('sha256');
+    srcHash.update(serverUrl + ':' + ENROLL_SECRET);
+    const SKIP = new Set(['node_modules', 'tests', '.git', 'package-lock.json', 'build', 'electron', 'browser-extension', 'installer']);
+    function walkHash(dir) {
+      for (const entry of readdirSync(dir).sort()) {
+        if (SKIP.has(entry)) continue;
+        const full = join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) walkHash(full);
+        else if (stat.size < 2 * 1024 * 1024) {
+          srcHash.update(entry + ':' + stat.size + ':' + stat.mtimeMs + '\n');
+        }
       }
     }
-    // Fallback: serve the zip package instead (always available, built live)
-    // Redirect to the zip endpoint so the user still gets a working download
-    res.redirect('/api/v1/installations/agent-installer?platform=windows');
+    walkHash(agentDir);
+    const currentHash = srcHash.digest('hex').slice(0, 16);
+
+    // Serve cached .exe if source + serverUrl haven't changed
+    if (_exeCache.hash === currentHash && _exeCache.serverUrl === serverUrl && _exeCache.path && existsSync(_exeCache.path)) {
+      const stat = statSync(_exeCache.path);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', 'attachment; filename="CloudFuze-Agent-Setup.exe"');
+      res.setHeader('Content-Length', stat.size);
+      return res.send(readFileSync(_exeCache.path));
+    }
+
+    // Find NSIS
+    const nsisLocations = [
+      'C:\\Program Files (x86)\\NSIS\\makensis.exe',
+      'C:\\Program Files\\NSIS\\makensis.exe',
+    ];
+    const nsisPath = nsisLocations.find(p => existsSync(p));
+    if (!nsisPath) {
+      return res.status(501).json({
+        error: 'NSIS not installed on this machine',
+        help: 'Install NSIS from https://nsis.sourceforge.io to enable .exe builds. Or use the zip download instead.',
+      });
+    }
+
+    if (!existsSync(nsiScript)) {
+      return res.status(500).json({ error: 'NSIS script not found (agent/installer/cloudfuze-agent.nsi)' });
+    }
+
+    // Prepare build directory with agent source
+    mkdirSync(join(buildDir, 'agent', 'src'), { recursive: true });
+    cpSync(join(agentDir, 'src'), join(buildDir, 'agent', 'src'), { recursive: true, force: true });
+    cpSync(join(agentDir, 'package.json'), join(buildDir, 'agent', 'package.json'), { force: true });
+
+    // Download portable Node.js if not already cached
+    const bundledNode = join(buildDir, 'node', 'node.exe');
+    if (!existsSync(bundledNode)) {
+      try {
+        execSync(
+          `powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://nodejs.org/dist/v22.15.0/node-v22.15.0-win-x64.zip' -OutFile 'node.zip'"`,
+          { cwd: buildDir, stdio: 'pipe', timeout: 120000 },
+        );
+        execSync(
+          `powershell -NoProfile -Command "Expand-Archive -Path 'node.zip' -DestinationPath '.' -Force"`,
+          { cwd: buildDir, stdio: 'pipe', timeout: 60000 },
+        );
+        mkdirSync(join(buildDir, 'node'), { recursive: true });
+        cpSync(join(buildDir, 'node-v22.15.0-win-x64'), join(buildDir, 'node'), { recursive: true, force: true });
+        execSync(`rm -rf "${join(buildDir, 'node-v22.15.0-win-x64')}" "${join(buildDir, 'node.zip')}"`, { stdio: 'pipe' });
+      } catch (e) {
+        return res.status(500).json({ error: 'Failed to download portable Node.js for bundling', detail: e.message });
+      }
+    }
+
+    // Run NSIS — needs native Windows paths (backslashes)
+    const winPath = p => p.replace(/\//g, '\\');
+    const result = spawnSync(nsisPath, [
+      `-DSERVER_URL=${serverUrl}`,
+      `-DENROLL_SECRET=${ENROLL_SECRET}`,
+      `-DBUILD_DIR=${winPath(buildDir)}`,
+      winPath(nsiScript),
+    ], { cwd: installerDir, stdio: 'pipe', timeout: 120000 });
+
+    if (result.status !== 0) {
+      const detail = [result.stdout, result.stderr].filter(Boolean).map(b => b.toString()).join('\n').slice(0, 500);
+      return res.status(500).json({ error: 'NSIS build failed', detail });
+    }
+
+    if (!existsSync(outExe)) {
+      return res.status(500).json({ error: 'NSIS produced no output .exe' });
+    }
+
+    // Cache for next request
+    _exeCache = { serverUrl, hash: currentHash, path: outExe };
+
+    const stat = statSync(outExe);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', 'attachment; filename="CloudFuze-Agent-Setup.exe"');
+    res.setHeader('Content-Length', stat.size);
+    res.send(readFileSync(outExe));
   }));
 
   // ── Download pre-configured desktop agent package ──
