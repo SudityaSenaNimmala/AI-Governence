@@ -113,6 +113,21 @@ export function mountInstallations(app, db) {
     res.send(zipBuffer);
   }));
 
+  // ── Download pre-built Windows installer (.exe) if available ──
+
+  app.get('/api/v1/installations/agent-installer-exe', a(async (req, res) => {
+    const exePath = join(__dirname, '..', '..', '..', 'agent', 'installer', 'CloudFuze-Agent-Setup.exe');
+    if (!existsSync(exePath)) {
+      return res.status(404).json({ error: 'Installer not built yet. Run agent/installer/build-installer.bat first.' });
+    }
+    const stat = statSync(exePath);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', 'attachment; filename="CloudFuze-Agent-Setup.exe"');
+    res.setHeader('Content-Length', stat.size);
+    const data = readFileSync(exePath);
+    res.send(data);
+  }));
+
   // ── Download pre-configured desktop agent package ──
 
   app.get('/api/v1/installations/agent-installer', a(async (req, res) => {
