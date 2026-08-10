@@ -5013,6 +5013,7 @@ function InstallationsView() {
   const [info,setInfo]=useState(null);
   const [err,setErr]=useState(null);
   const [copied,setCopied]=useState(null);
+  const [downloading,setDownloading]=useState(null); // 'extension' | 'windows' | 'macos' | 'linux'
 
   useEffect(()=>{
     fetch("/api/v1/installations/info").then(r=>r.json()).then(setInfo).catch(x=>setErr(x.message));
@@ -5022,6 +5023,21 @@ function InstallationsView() {
     const ta=document.createElement("textarea");ta.value=text;ta.style.cssText="position:fixed;left:-9999px";
     document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);
     setCopied(id);setTimeout(()=>setCopied(null),2000);
+  };
+
+  const download=async(url,filename,id)=>{
+    setDownloading(id);
+    try {
+      const r=await fetch(url);
+      if(!r.ok) throw new Error('Download failed');
+      const blob=await r.blob();
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(blob);
+      a.download=filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch(e) { alert('Download failed: '+e.message); }
+    setDownloading(null);
   };
 
   if(err) return <Err msg={err}/>;
@@ -5048,9 +5064,9 @@ function InstallationsView() {
         </div>
 
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
-          <a href="/api/v1/installations/agent-installer?platform=windows" download style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:"#0044cc",color:"#fff",fontSize:12,fontWeight:600,textDecoration:"none"}}>⬇ Windows</a>
-          <a href="/api/v1/installations/agent-installer?platform=macos" download style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:"#1e293b",color:"#fff",fontSize:12,fontWeight:600,textDecoration:"none"}}>⬇ macOS</a>
-          <a href="/api/v1/installations/agent-installer?platform=linux" download style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:"#1e293b",color:"#fff",fontSize:12,fontWeight:600,textDecoration:"none"}}>⬇ Linux</a>
+          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=windows','CloudFuze-Desktop-Agent-windows.zip','windows')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='windows'?"#6b7280":"#0044cc",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='windows'?0.5:1}}>{downloading==='windows'?'⏳ Preparing...':'⬇ Windows'}</button>
+          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=macos','CloudFuze-Desktop-Agent-macos.zip','macos')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='macos'?"#6b7280":"#1e293b",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='macos'?0.5:1}}>{downloading==='macos'?'⏳ Preparing...':'⬇ macOS'}</button>
+          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=linux','CloudFuze-Desktop-Agent-linux.zip','linux')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='linux'?"#6b7280":"#1e293b",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='linux'?0.5:1}}>{downloading==='linux'?'⏳ Preparing...':'⬇ Linux'}</button>
         </div>
 
         <details style={{fontSize:12,color:"#374151",marginBottom:10}}>
@@ -5088,7 +5104,7 @@ function InstallationsView() {
           Monitors AI tool usage in the browser — DLP scanning, model routing, access requests. Auto-detects the desktop agent for employee linking.
         </div>
 
-        <a href="/api/v1/installations/extension-package" download style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:"#0044cc",color:"#fff",fontSize:13,fontWeight:600,textDecoration:"none",marginBottom:14}}>⬇ Download Extension</a>
+        <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/extension-package','CloudFuze-Browser-Extension.zip','extension')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:downloading==='extension'?"#6b7280":"#0044cc",color:"#fff",fontSize:13,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",width:"100%",marginBottom:14,opacity:downloading&&downloading!=='extension'?0.5:1}}>{downloading==='extension'?'⏳ Preparing package...':'⬇ Download Extension'}</button>
 
         <details style={{fontSize:12,color:"#374151",marginBottom:10}}>
           <summary style={{cursor:"pointer",fontWeight:600,fontSize:13,marginBottom:6}}>Installation steps</summary>
