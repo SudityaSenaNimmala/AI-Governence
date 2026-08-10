@@ -2441,34 +2441,61 @@ const CATEGORY_ICONS = {
 const SOURCE_LABEL = { governance: "Gov", endpoint_scan: "Scan", platform_registry: "Platform", platform_catalog: "Catalog" };
 const SOURCE_TONE  = { governance: "#8b5cf6", endpoint_scan: "#0044cc", platform_registry: "#6b7280", platform_catalog: "#9ca3af" };
 
+// Coarse Tool/Agent split, derived from the existing `category` field (there is
+// no separate tool-vs-agent flag in the data — this groups the 12 categories
+// registry.js already assigns). "agent-config", "autonomous-agent",
+// "ide-assistant" and "mcp-server" all represent something that ACTS or
+// integrates into a workflow on the user's behalf, rather than something the
+// user directly chats with.
+//
+// KNOWN GRAY AREA: "desktop-app" covers both a plain chat client (e.g. the
+// Claude desktop app) and an agentic IDE (e.g. Cursor) identically — discovery
+// only sees "a running desktop process" either way, with nothing today
+// distinguishing the two. Both land in "AI Tool" here. Splitting them further
+// would need the scanner itself to tell them apart, not just this view.
+const AGENT_CATEGORIES = new Set(['autonomous-agent', 'agent-config', 'ide-assistant', 'mcp-server']);
+function systemTypeOf(category) {
+  return AGENT_CATEGORIES.has(category) ? 'agent' : 'tool';
+}
+
 function RegistryStatusBadge({ status }) {
   const label = status === 'approved' ? 'Allowed' : status === 'blocked' ? 'Blocked' : 'Unreviewed';
   const c = STATUS_COLORS[status] || "#f59e0b";
   return <span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 10px",borderRadius:8,fontSize:11,fontWeight:700,background:c+"14",color:c,border:"1px solid "+c+"30"}}>{label}</span>;
 }
 
-function RegistryToggle({ status, onChange }) {
+function RegistryToggle({ status, onChange, pending }) {
   const isUnreviewed = status === 'unknown' || status === 'restricted';
   const isAllowed = status === 'approved';
   const isBlocked = status === 'blocked';
 
+  // Shown next to the control while a decision is saving — the toggle's own
+  // `status` doesn't flip until the reload after the write completes, so
+  // without this the control looks unchanged and inert while a save is in
+  // flight, which reads as "my click didn't register" and invites more clicks.
+  const spinner = pending
+    ? <RefreshCw size={13} className="aihub_spin" style={{color:"#6b7280"}}/>
+    : null;
+
   if (isUnreviewed) {
     // First time — show both options side by side
     return (<div style={{display:"flex",alignItems:"center",gap:8}}>
-      <button onClick={()=>onChange('approved')} style={{padding:"6px 16px",borderRadius:8,fontSize:12,fontWeight:600,border:"1px solid #22c55e40",background:"#22c55e14",color:"#22c55e",cursor:"pointer"}}>Allow</button>
+      <button disabled={pending} onClick={()=>onChange('approved')} style={{padding:"6px 16px",borderRadius:8,fontSize:12,fontWeight:600,border:"1px solid #22c55e40",background:"#22c55e14",color:"#22c55e",cursor:pending?"default":"pointer",opacity:pending?0.6:1}}>Allow</button>
       <span style={{fontSize:11,color:"#f59e0b",fontWeight:600}}>Unreviewed</span>
-      <button onClick={()=>onChange('blocked')} style={{padding:"6px 16px",borderRadius:8,fontSize:12,fontWeight:600,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:"pointer"}}>Block</button>
+      <button disabled={pending} onClick={()=>onChange('blocked')} style={{padding:"6px 16px",borderRadius:8,fontSize:12,fontWeight:600,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:pending?"default":"pointer",opacity:pending?0.6:1}}>Block</button>
+      {spinner}
     </div>);
   }
 
   // After first decision — simple toggle between allowed and blocked
   return (<div style={{display:"flex",alignItems:"center",gap:10}}>
     <span style={{fontSize:12,fontWeight:isAllowed?700:400,color:isAllowed?"#22c55e":"#9ca3af"}}>Allowed</span>
-    <div onClick={()=>onChange(isAllowed?'blocked':'approved')}
-      style={{width:44,height:24,borderRadius:12,background:isAllowed?"#22c55e":"#ef4444",cursor:"pointer",position:"relative",transition:"background 0.2s"}}>
+    <div onClick={()=>{ if(!pending) onChange(isAllowed?'blocked':'approved'); }}
+      style={{width:44,height:24,borderRadius:12,background:isAllowed?"#22c55e":"#ef4444",cursor:pending?"default":"pointer",position:"relative",transition:"background 0.2s",opacity:pending?0.6:1}}>
       <div style={{width:18,height:18,borderRadius:9,background:"#fff",position:"absolute",top:3,left:isAllowed?3:23,transition:"left 0.2s",boxShadow:"0 1px 3px rgba(0,0,0,0.2)"}}/>
     </div>
     <span style={{fontSize:12,fontWeight:isBlocked?700:400,color:isBlocked?"#ef4444":"#9ca3af"}}>Blocked</span>
+    {spinner}
   </div>);
 }
 
@@ -2501,15 +2528,24 @@ function AIRegistryView() {
   const [err,setErr]=useState(null);
   const [search,setSearch]=useState("");
   const [filterStatus,setFilterStatus]=useState("");
+  const [filterType,setFilterType]=useState("");
   const [filterCategory,setFilterCategory]=useState("");
   const [filterRisk,setFilterRisk]=useState("");
+  // Ids currently mid-flight on an allow/block decision. The toggle's own
+  // `status` prop doesn't change until loadAll() finishes re-fetching, so
+  // without this a slow save looks identical to a click that did nothing —
+  // and the natural response is to click again.
+  const [pendingIds,setPendingIds]=useState(()=>new Set());
   const [hideInactive,setHideInactive]=useState(true);
   const [selected,setSelected]=useState(null);
   const [showAdd,setShowAdd]=useState(false);
 
-  // Fetch ALL data once on mount — filter client-side for instant response
+  // Fetch ALL data once on mount — filter client-side for instant response.
+  // Returns the promise chain (previously fire-and-forget) so a caller that
+  // needs to know when the refreshed data has actually landed — e.g. clearing
+  // a pending-decision spinner — can await it instead of just the write.
   const loadAll=()=>{
-    Promise.all([
+    return Promise.all([
       fetch(REGISTRY_API).then(r=>r.json()),
       fetch(`${REGISTRY_API}/summary`).then(r=>r.json()),
       fetch(`${API}/ai-platforms`).then(r=>r.json()).catch(()=>[]),
@@ -2558,19 +2594,31 @@ function AIRegistryView() {
 
   // Catalog rows are governed through /ai-platforms (keyed by host); registry rows
   // through /registry/:id/status. Same button, two backends.
+  //
+  // Marked pending for the FULL round trip — the write and the reload that
+  // brings the confirmed status back — not just the write. Clearing it right
+  // after the write would drop the spinner while the toggle still shows the
+  // stale status for one more render, which looks exactly like the click was
+  // dropped. try/finally so a failed request still clears it instead of
+  // leaving the toggle stuck disabled.
   const setRowStatus=async(row,status)=>{
-    if(row._catalogOnly){
-      await fetch(`${API}/ai-platforms/${encodeURIComponent(row.host)}`,{
-        method:"PATCH",headers:{"content-type":"application/json"},
-        body:JSON.stringify({blocked:status==="blocked",governed:status==="approved"}),
-      });
-    } else {
-      await fetch(`${REGISTRY_API}/${encodeURIComponent(row.id)}/status`,{
-        method:"PUT",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({status,product_name:row.name}),
-      });
+    setPendingIds(prev=>new Set(prev).add(row.id));
+    try{
+      if(row._catalogOnly){
+        await fetch(`${API}/ai-platforms/${encodeURIComponent(row.host)}`,{
+          method:"PATCH",headers:{"content-type":"application/json"},
+          body:JSON.stringify({blocked:status==="blocked",governed:status==="approved"}),
+        });
+      } else {
+        await fetch(`${REGISTRY_API}/${encodeURIComponent(row.id)}/status`,{
+          method:"PUT",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({status,product_name:row.name}),
+        });
+      }
+      await loadAll();
+    } finally {
+      setPendingIds(prev=>{ const next=new Set(prev); next.delete(row.id); return next; });
     }
-    loadAll();
   };
 
   const updateStatus=async(id,status,productName)=>{
@@ -2591,6 +2639,7 @@ function AIRegistryView() {
       if(filterStatus==='unknown') { if(r.status!=='unknown'&&r.status!=='restricted') return false; }
       else if(r.status!==filterStatus) return false;
     }
+    if(filterType && systemTypeOf(r.category)!==filterType) return false;
     if(filterCategory && r.category!==filterCategory) return false;
     if(filterRisk && r.risk_level!==filterRisk) return false;
     if(q && !(r.name||'').toLowerCase().includes(q) && !(r.vendor||'').toLowerCase().includes(q) && !(r.owner||'').toLowerCase().includes(q) && !(r.platform||'').toLowerCase().includes(q) && !(r.category||'').toLowerCase().includes(q)) return false;
@@ -2628,6 +2677,11 @@ function AIRegistryView() {
       <div className="aihub_search_box" style={{flex:1,minWidth:200}}>
         <Search size={14}/><input placeholder="Search name, vendor, owner..." value={search} onChange={e=>setSearch(e.target.value)} style={{border:"none",outline:"none",flex:1,fontSize:13}}/>
       </div>
+      <select value={filterType} onChange={e=>setFilterType(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12,fontWeight:600}}>
+        <option value="">AI Tools + Agents</option>
+        <option value="tool">AI Tools only</option>
+        <option value="agent">AI Agents only</option>
+      </select>
       <select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12}}>
         <option value="">All Statuses</option>
         <option value="approved">Allowed</option>
@@ -2682,7 +2736,7 @@ function AIRegistryView() {
         rows={items}
         onRow={r=>setSelected(selected===r.id?null:r.id)}
         isExpanded={r=>selected===r.id}
-        renderExpanded={r=><RegistryRowDetail row={r} onStatus={s=>setRowStatus(r,s)}/>}
+        renderExpanded={r=><RegistryRowDetail row={r} onStatus={s=>setRowStatus(r,s)} pending={pendingIds.has(r.id)}/>}
         empty="No AI systems found matching your filters."
       />
     </div>
@@ -2807,7 +2861,7 @@ function AddPlatformForm({ onDone }) {
  * empty "Risk analysis" heading: absence of activity is not absence of risk, and a
  * blank section reads as a clean bill of health.
  */
-function RegistryRowDetail({ row, onStatus }) {
+function RegistryRowDetail({ row, onStatus, pending }) {
   const cell=(label,value)=>value?<div><span style={{color:"#9ca3af"}}>{label}:</span> <span style={{fontWeight:600}}>{value}</span></div>:null;
   const H=({children})=><div style={{fontSize:11,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:6}}>{children}</div>;
   return (<div style={{padding:"16px 20px",borderTop:"1px solid #e5e7eb"}}>
@@ -2815,7 +2869,7 @@ function RegistryRowDetail({ row, onStatus }) {
 
     <div style={{marginBottom:14}}>
       <H>Decision</H>
-      <RegistryToggle status={row.status} onChange={onStatus}/>
+      <RegistryToggle status={row.status} onChange={onStatus} pending={pending}/>
     </div>
 
     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:8,marginBottom:14,fontSize:12}}>
