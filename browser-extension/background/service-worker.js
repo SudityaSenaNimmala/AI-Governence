@@ -51,6 +51,18 @@ const FLUSH_ALARM = 'cfai-flush';
 const FLUSH_INTERVAL_MIN = 1;       // chrome.alarms minimum
 const BATCH_SIZE = 50;
 
+// Identity beacon ports — agent tries these in order, we check all to find it
+const BEACON_PORTS = [19532, 19533, 19534, 19535, 19536];
+async function fetchBeacon() {
+  for (const port of BEACON_PORTS) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/cfai/identity`, { signal: AbortSignal.timeout(1000) });
+      if (res.ok) return res.json();
+    } catch {}
+  }
+  return null;
+}
+
 const PLATFORMS_ALARM = 'cfai-platforms-refresh';
 const PLATFORMS_REFRESH_MIN = 1;    // how often to pull the registry (1 = chrome.alarms min) so block/allow changes propagate fast
 
@@ -117,9 +129,8 @@ async function ensureToken() {
   let computerName = config.computerName;
   if (!computerName) {
     try {
-      const beaconRes = await fetch('http://127.0.0.1:19532/cfai/identity', { signal: AbortSignal.timeout(2000) });
-      if (beaconRes.ok) {
-        const beaconData = await beaconRes.json();
+      const beaconData = await fetchBeacon();
+      if (beaconData) {
         computerName = beaconData.hostname;
         // Persist for future enrollments
         config.computerName = computerName;
@@ -753,9 +764,8 @@ refreshRoutingRules().catch(() => {});
 setTimeout(async () => {
   try {
     console.info('[cfai] checking for desktop agent beacon...');
-    const res = await fetch('http://127.0.0.1:19532/cfai/identity', { signal: AbortSignal.timeout(3000) });
-    if (!res.ok) { console.info('[cfai] beacon responded but not ok:', res.status); return; }
-    const beacon = await res.json();
+    const beacon = await fetchBeacon();
+    if (!beacon) { console.info('[cfai] desktop agent not detected'); return; }
     if (!beacon.hostname) { console.info('[cfai] beacon has no hostname'); return; }
 
     const config = await getConfig();
