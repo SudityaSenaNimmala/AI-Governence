@@ -68,12 +68,20 @@ async function checkForUpdate({ serverUrl, token, log }) {
 
   const currentVersion = readCurrentVersion();
 
+  // First run — no version saved yet. Save the current server version
+  // so we don't immediately trigger an update on fresh installs.
+  if (!currentVersion) {
+    log?.info?.(`auto-updater: first run — saving current version (${serverVersion})`);
+    saveCurrentVersion(serverVersion);
+    return;
+  }
+
   if (currentVersion === serverVersion) {
     log?.info?.(`auto-updater: up to date (${serverVersion})`);
     return;
   }
 
-  log?.info?.(`auto-updater: update available! ${currentVersion || 'none'} → ${serverVersion}`);
+  log?.info?.(`auto-updater: update available! ${currentVersion} → ${serverVersion}`);
   await applyUpdate({ serverUrl, token, serverVersion, log });
 }
 
