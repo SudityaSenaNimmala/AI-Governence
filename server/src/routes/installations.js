@@ -6,6 +6,7 @@
 
 import { a } from '../util.js';
 import { ENROLL_SECRET } from '../auth.js';
+import crypto from 'node:crypto';
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +30,39 @@ export function mountInstallations(app, db) {
       agent_command: `node src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor`,
       agent_command_scan: `node src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output report.json`,
     });
+  }));
+
+  // ── Agent version check (for auto-updater) ──
+
+  let _agentVersionCache = { hash: null, computedAt: 0 };
+
+  app.get('/api/v1/installations/agent-version', a(async (req, res) => {
+    const agentDir = join(__dirname, '..', '..', '..', 'agent');
+    if (!existsSync(agentDir)) return res.status(500).json({ error: 'Agent source not found' });
+
+    // Cache the hash for 60 seconds — avoid re-hashing on every poll
+    if (Date.now() - _agentVersionCache.computedAt < 60000 && _agentVersionCache.hash) {
+      return res.json({ version: _agentVersionCache.hash });
+    }
+
+    // Hash all agent source files to create a version fingerprint
+    const hash = crypto.createHash('sha256');
+    const SKIP = new Set(['node_modules', 'tests', '.git', 'package-lock.json', 'build', 'electron', 'browser-extension']);
+    function walkHash(dir) {
+      for (const entry of readdirSync(dir).sort()) {
+        if (SKIP.has(entry)) continue;
+        const full = join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) walkHash(full);
+        else if (stat.size < 2 * 1024 * 1024) {
+          hash.update(entry + ':' + stat.size + ':' + stat.mtimeMs + '\n');
+        }
+      }
+    }
+    walkHash(agentDir);
+    const version = hash.digest('hex').slice(0, 16);
+    _agentVersionCache = { hash: version, computedAt: Date.now() };
+    res.json({ version });
   }));
 
   // ── Download pre-configured browser extension zip ──
@@ -97,9 +131,9 @@ export function mountInstallations(app, db) {
 
     // Install script per platform
     const installScripts = {
-      windows: `@echo off\r\necho Installing CloudFuze Desktop Agent...\r\ncd /d "%~dp0"\r\ncall npm install --production 2>nul\r\nif not exist "%USERPROFILE%\\.cloudfuze-aigov" mkdir "%USERPROFILE%\\.cloudfuze-aigov"\r\necho {"serverUrl":"${serverUrl}","enrollSecret":"${ENROLL_SECRET}"}> "%USERPROFILE%\\.cloudfuze-aigov\\auto-config.json"\r\nnode src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output NUL\r\necho.\r\necho Agent installed and enrolled!\r\necho To start monitoring: node src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor\r\npause\r\n`,
-      macos: `#!/bin/bash\nset -e\necho "Installing CloudFuze Desktop Agent..."\ncd "$(dirname "$0")"\nnpm install --production 2>/dev/null\nmkdir -p ~/.cloudfuze-aigov\necho '{"serverUrl":"${serverUrl}","enrollSecret":"${ENROLL_SECRET}"}' > ~/.cloudfuze-aigov/auto-config.json\nnode src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output /dev/null\necho ""\necho "Agent installed and enrolled!"\necho "To start monitoring: node src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor"\n`,
-      linux: `#!/bin/bash\nset -e\necho "Installing CloudFuze Desktop Agent..."\ncd "$(dirname "$0")"\nnpm install --production 2>/dev/null\nmkdir -p ~/.cloudfuze-aigov\necho '{"serverUrl":"${serverUrl}","enrollSecret":"${ENROLL_SECRET}"}' > ~/.cloudfuze-aigov/auto-config.json\nnode src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output /dev/null\necho ""\necho "Agent installed and enrolled!"\necho "To start monitoring: node src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor"\n`,
+      windows: `@echo off\r\necho CloudFuze Desktop Agent — Install / Update\r\necho.\r\n\r\nREM Stop old agent if running\r\nif exist "%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock" (\r\n  set /p OLD_PID=<"%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock"\r\n  echo Stopping previous agent (PID %OLD_PID%)...\r\n  taskkill /PID %OLD_PID% /F >nul 2>&1\r\n  del "%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock" >nul 2>&1\r\n  timeout /t 2 /nobreak >nul\r\n)\r\n\r\ncd /d "%~dp0\\agent"\r\necho Installing dependencies...\r\ncall npm install --production 2>nul\r\n\r\nif not exist "%USERPROFILE%\\.cloudfuze-aigov" mkdir "%USERPROFILE%\\.cloudfuze-aigov"\r\necho {"serverUrl":"${serverUrl}","enrollSecret":"${ENROLL_SECRET}"}> "%USERPROFILE%\\.cloudfuze-aigov\\auto-config.json"\r\n\r\necho Enrolling with server...\r\nnode src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output NUL\r\n\r\necho Starting agent in background...\r\nstart /B node src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor\r\necho.\r\necho CloudFuze agent is running.\r\npause\r\n`,
+      macos: `#!/bin/bash\nset -e\necho "CloudFuze Desktop Agent — Install / Update"\necho ""\n\n# Stop old agent if running\nif [ -f ~/.cloudfuze-aigov/monitor.lock ]; then\n  OLD_PID=$(cat ~/.cloudfuze-aigov/monitor.lock)\n  echo "Stopping previous agent (PID $OLD_PID)..."\n  kill "$OLD_PID" 2>/dev/null || true\n  rm -f ~/.cloudfuze-aigov/monitor.lock\n  sleep 2\nfi\n\ncd "$(dirname "$0")/agent"\necho "Installing dependencies..."\nnpm install --production 2>/dev/null\n\nmkdir -p ~/.cloudfuze-aigov\necho '{"serverUrl":"${serverUrl}","enrollSecret":"${ENROLL_SECRET}"}' > ~/.cloudfuze-aigov/auto-config.json\n\necho "Enrolling with server..."\nnode src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output /dev/null\n\necho "Starting agent in background..."\nnohup node src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor > /dev/null 2>&1 &\necho "CloudFuze agent is running (PID $!)."\n`,
+      linux: `#!/bin/bash\nset -e\necho "CloudFuze Desktop Agent — Install / Update"\necho ""\n\n# Stop old agent if running\nif [ -f ~/.cloudfuze-aigov/monitor.lock ]; then\n  OLD_PID=$(cat ~/.cloudfuze-aigov/monitor.lock)\n  echo "Stopping previous agent (PID $OLD_PID)..."\n  kill "$OLD_PID" 2>/dev/null || true\n  rm -f ~/.cloudfuze-aigov/monitor.lock\n  sleep 2\nfi\n\ncd "$(dirname "$0")/agent"\necho "Installing dependencies..."\nnpm install --production 2>/dev/null\n\nmkdir -p ~/.cloudfuze-aigov\necho '{"serverUrl":"${serverUrl}","enrollSecret":"${ENROLL_SECRET}"}' > ~/.cloudfuze-aigov/auto-config.json\n\necho "Enrolling with server..."\nnode src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output /dev/null\n\necho "Starting agent in background..."\nnohup node src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor > /dev/null 2>&1 &\necho "CloudFuze agent is running (PID $!)."\n`,
     };
 
     const files = [];

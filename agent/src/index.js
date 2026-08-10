@@ -272,9 +272,18 @@ async function main() {
     monitor.start();
     log.info('Monitor running. Ctrl+C to stop.');
 
+    // Auto-updater — checks for updates every hour, applies silently
+    const { startAutoUpdater } = await import('./auto-updater.js');
+    const updater = startAutoUpdater({
+      serverUrl: creds.serverUrl || values.server,
+      token: creds.token,
+      log: log.child('updater'),
+    });
+
     const shutdown = async (sig) => {
       log.info(`Received ${sig} — flushing pending events and exiting…`);
       monitor.stop();
+      try { updater?.stop(); } catch {}
       await releaseMonitorLock();
       // Give the reporter a moment to drain the final flush.
       setTimeout(() => process.exit(0), 500);
