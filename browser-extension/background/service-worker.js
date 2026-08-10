@@ -1534,4 +1534,21 @@ chrome.runtime.onStartup.addListener(() => {
   flushQueue();
   closeEngagementsOnStartup().catch(() => {});
 });
-chrome.runtime.onInstalled.addListener(() => { flushQueue(); });
+chrome.runtime.onInstalled.addListener(async () => {
+  flushQueue();
+  // Auto-configure from baked cfai-config.json (pre-configured download from admin dashboard)
+  try {
+    const r = await fetch(chrome.runtime.getURL('cfai-config.json'));
+    if (r.ok) {
+      const baked = await r.json();
+      if (baked.preConfigured && baked.serverUrl && baked.enrollSecret) {
+        const existing = await getConfig();
+        if (!existing.serverUrl) {
+          await setStored(STORAGE.CONFIG, { serverUrl: baked.serverUrl, enrollSecret: baked.enrollSecret });
+          console.info('[cfai] auto-configured from baked config:', baked.serverUrl);
+          await ensureToken();
+        }
+      }
+    }
+  } catch {} // No baked config — normal manual install
+});

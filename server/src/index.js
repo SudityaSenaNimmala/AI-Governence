@@ -25,6 +25,7 @@ import { mountRegistry } from './routes/registry.js';
 import { mountAccessRequests } from './routes/access-requests.js';
 import { mountWebhooks } from './routes/webhooks.js';
 import { mountConnections } from './routes/connections.js';
+import { mountInstallations } from './routes/installations.js';
 import { mountSdk } from './routes/sdk.js';
 import { mountLangfuseGateway } from './routes/langfuse-gateway.js';
 import { mountAiUsage } from './routes/ai-usage.js';
@@ -77,6 +78,7 @@ mountRegistry(app, db);
 mountAccessRequests(app, db);
 mountWebhooks(app, db);
 mountConnections(app, db);
+mountInstallations(app, db);
 mountSdk(app, db);
 // Developer SDK ingestion gateway. Developers' Langfuse SDKs point at
 // <server>/api/v1/lf with the credentials mountSdk issued; this relays to the

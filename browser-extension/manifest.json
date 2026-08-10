@@ -116,6 +116,7 @@
   "web_accessible_resources": [
     {
       "resources": [
+        "cfai-config.json",
         "content/fetch-blocker.js",
         "content/content.css",
         "vendor/pdf.worker.js",

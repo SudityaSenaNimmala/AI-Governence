@@ -4953,6 +4953,122 @@ function ServerMonitorView() {
 // Tabs are keyed by a URL slug, not by index, so ?tab= stays valid when tabs are
 // reordered or inserted. Deep links get pasted into tickets and audit notes; a
 // positional index would silently point somewhere else after any edit here.
+// ── Installations View ────────────────────────────────────────────────────
+
+function InstallationsView() {
+  const [info,setInfo]=useState(null);
+  const [err,setErr]=useState(null);
+  const [copied,setCopied]=useState(null);
+
+  useEffect(()=>{
+    fetch("/api/v1/installations/info").then(r=>r.json()).then(setInfo).catch(x=>setErr(x.message));
+  },[]);
+
+  const copy=(text,id)=>{
+    const ta=document.createElement("textarea");ta.value=text;ta.style.cssText="position:fixed;left:-9999px";
+    document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);
+    setCopied(id);setTimeout(()=>setCopied(null),2000);
+  };
+
+  if(err) return <Err msg={err}/>;
+  if(!info) return <Loading/>;
+
+  return (<div>
+    <SectionHeader title="Installations" hint="Download and deploy the browser extension and desktop agent to your employees' machines"/>
+
+    <div style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:10,padding:14,fontSize:12,color:"#1e40af",marginBottom:20,lineHeight:1.6}}>
+      <strong>Install order:</strong> Desktop Agent first, then Browser Extension. The agent runs an identity beacon on the machine that the extension auto-detects — this is how we link browser data to the right employee with zero configuration.
+    </div>
+
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
+
+      {/* Desktop Agent — FIRST */}
+      <div className="aihub_card" style={{border:"2px solid #0044cc20"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:32}}>💻</span>
+            <div>
+              <h4 style={{margin:0,fontSize:16,fontWeight:700}}>Step 1 — Desktop Agent</h4>
+              <div className="aihub_text_muted">Windows / macOS / Linux — endpoint scanning, OS monitoring, identity beacon</div>
+            </div>
+          </div>
+          <span style={{background:"#0044cc",color:"#fff",padding:"2px 10px",borderRadius:10,fontSize:11,fontWeight:700}}>Install First</span>
+        </div>
+
+        <div style={{background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:8,padding:12,fontSize:12,color:"#166534",marginBottom:16}}>
+          <strong>Zero configuration!</strong> The installer has your server URL and enrollment secret built in. Download, install, done.
+        </div>
+
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:16}}>
+          <a href="/api/v1/installations/agent-installer?platform=windows" download style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:"#0044cc",color:"#fff",fontSize:13,fontWeight:700,textDecoration:"none",cursor:"pointer"}}>
+            ⬇ Windows .exe
+          </a>
+          <a href="/api/v1/installations/agent-installer?platform=macos" download style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:"#374151",color:"#fff",fontSize:13,fontWeight:700,textDecoration:"none",cursor:"pointer"}}>
+            ⬇ macOS .pkg
+          </a>
+          <a href="/api/v1/installations/agent-installer?platform=linux" download style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:"#374151",color:"#fff",fontSize:13,fontWeight:700,textDecoration:"none",cursor:"pointer"}}>
+            ⬇ Linux .deb
+          </a>
+        </div>
+
+        <div style={{fontSize:13,fontWeight:700,color:"#374151",marginBottom:8}}>Installation Steps</div>
+        <ol style={{fontSize:12,color:"#374151",lineHeight:2,paddingLeft:20,margin:0}}>
+          <li>Download the installer for your platform above</li>
+          <li><strong>Windows:</strong> Double-click the .exe → follow the wizard → installs as a background service</li>
+          <li><strong>macOS:</strong> Open the .pkg → follow prompts → runs as a LaunchDaemon</li>
+          <li><strong>Linux:</strong> <code style={{background:"#f1f5f9",padding:"1px 6px",borderRadius:3}}>sudo dpkg -i cloudfuze-agent.deb</code></li>
+          <li>The agent auto-enrolls with the server and starts scanning immediately</li>
+          <li>A system tray icon appears confirming the agent is running</li>
+        </ol>
+
+        <div style={{fontSize:13,fontWeight:700,color:"#374151",marginTop:16,marginBottom:8}}>For IT / Mass Deployment</div>
+        <div style={{fontSize:12,color:"#6b7280",lineHeight:1.6}}>
+          Silent install: <code style={{background:"#f1f5f9",padding:"1px 6px",borderRadius:3}}>CloudFuze-Agent.exe /S</code><br/>
+          Deploy via <strong>Intune</strong> (Windows), <strong>Jamf</strong> (macOS), or <strong>Ansible</strong> (Linux).
+          See <code>docs/DEPLOYMENT.md</code> for the full rollout plan.
+        </div>
+      </div>
+
+      {/* Browser Extension — SECOND */}
+      <div className="aihub_card">
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
+          <span style={{fontSize:32}}>🌐</span>
+          <div>
+            <h4 style={{margin:0,fontSize:16,fontWeight:700}}>Step 2 — Browser Extension</h4>
+            <div className="aihub_text_muted">Chrome / Edge / Brave — DLP, model routing, access requests</div>
+          </div>
+        </div>
+
+        <div style={{background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:8,padding:12,fontSize:12,color:"#166534",marginBottom:16}}>
+          <strong>Zero configuration!</strong> The downloaded extension has your server URL and enrollment secret pre-baked. It auto-detects the desktop agent for employee identification.
+        </div>
+
+        <a href="/api/v1/installations/extension-package" download style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"12px 0",borderRadius:8,background:"#0044cc",color:"#fff",fontSize:14,fontWeight:700,textDecoration:"none",marginBottom:16,cursor:"pointer"}}>
+          ⬇ Download Extension ZIP
+        </a>
+
+        <div style={{fontSize:13,fontWeight:700,color:"#374151",marginBottom:8}}>Installation Steps</div>
+        <ol style={{fontSize:12,color:"#374151",lineHeight:2,paddingLeft:20,margin:0}}>
+          <li>Download the ZIP above</li>
+          <li>Extract the ZIP to a folder</li>
+          <li>Open Chrome → go to <code style={{background:"#f1f5f9",padding:"1px 6px",borderRadius:3}}>chrome://extensions</code></li>
+          <li>Turn on <strong>Developer mode</strong> (top-right toggle)</li>
+          <li>Click <strong>Load unpacked</strong> → select the extracted folder</li>
+          <li>Extension auto-enrolls and links with the desktop agent — no setup needed</li>
+        </ol>
+
+        <div style={{fontSize:13,fontWeight:700,color:"#374151",marginTop:16,marginBottom:8}}>For IT / Mass Deployment</div>
+        <div style={{fontSize:12,color:"#6b7280",lineHeight:1.6}}>
+          Use Chrome Enterprise policies to force-install across all managed browsers:
+          <div style={{background:"#1e293b",color:"#e2e8f0",borderRadius:6,padding:10,fontFamily:"monospace",fontSize:11,marginTop:6}}>
+            ExtensionInstallForcelist: {"<extension-id>;https://your-update-server/updates.xml"}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>);
+}
+
 const TAB_GROUPS = {
   Inventory: {
     title: "Inventory",
@@ -5010,6 +5126,7 @@ const TAB_GROUPS = {
     title: "Setup",
     hint: "Wiring and one-off assessments. Configure once, then rarely visit.",
     tabs: [
+      { slug: "installations", label: "Installations",     component: InstallationsView },
       { slug: "integrations", label: "Integrations",      component: IntegrationsView },
       { slug: "sdk",            label: "Developer SDK",    component: DeveloperSDKView, hidden: true },
       { slug: "server-monitor", label: "Server Monitor",  component: ServerMonitorView, hidden: true },
