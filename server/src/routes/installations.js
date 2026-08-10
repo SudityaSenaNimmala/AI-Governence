@@ -78,6 +78,61 @@ export function mountInstallations(app, db) {
     res.setHeader('Content-Disposition', 'attachment; filename="CloudFuze-Browser-Extension.zip"');
     res.send(zipBuffer);
   }));
+
+  // ── Download pre-configured desktop agent package ──
+
+  app.get('/api/v1/installations/agent-installer', a(async (req, res) => {
+    const platform = req.query.platform || 'windows';
+    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+    const host = req.headers['x-forwarded-host'] || req.headers.host;
+    const serverUrl = `${proto}://${host}`;
+
+    const agentDir = join(__dirname, '..', '..', '..', 'agent');
+    if (!existsSync(agentDir)) {
+      return res.status(500).json({ error: 'Agent source not found on server' });
+    }
+
+    // Baked config so the agent auto-enrolls on first run
+    const agentConfig = JSON.stringify({ serverUrl, enrollSecret: ENROLL_SECRET }, null, 2);
+
+    // Install script per platform
+    const installScripts = {
+      windows: `@echo off\r\necho Installing CloudFuze Desktop Agent...\r\ncd /d "%~dp0"\r\ncall npm install --production 2>nul\r\nif not exist "%USERPROFILE%\\.cloudfuze-aigov" mkdir "%USERPROFILE%\\.cloudfuze-aigov"\r\necho {"serverUrl":"${serverUrl}","enrollSecret":"${ENROLL_SECRET}"}> "%USERPROFILE%\\.cloudfuze-aigov\\auto-config.json"\r\nnode src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output NUL\r\necho.\r\necho Agent installed and enrolled!\r\necho To start monitoring: node src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor\r\npause\r\n`,
+      macos: `#!/bin/bash\nset -e\necho "Installing CloudFuze Desktop Agent..."\ncd "$(dirname "$0")"\nnpm install --production 2>/dev/null\nmkdir -p ~/.cloudfuze-aigov\necho '{"serverUrl":"${serverUrl}","enrollSecret":"${ENROLL_SECRET}"}' > ~/.cloudfuze-aigov/auto-config.json\nnode src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output /dev/null\necho ""\necho "Agent installed and enrolled!"\necho "To start monitoring: node src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor"\n`,
+      linux: `#!/bin/bash\nset -e\necho "Installing CloudFuze Desktop Agent..."\ncd "$(dirname "$0")"\nnpm install --production 2>/dev/null\nmkdir -p ~/.cloudfuze-aigov\necho '{"serverUrl":"${serverUrl}","enrollSecret":"${ENROLL_SECRET}"}' > ~/.cloudfuze-aigov/auto-config.json\nnode src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output /dev/null\necho ""\necho "Agent installed and enrolled!"\necho "To start monitoring: node src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor"\n`,
+    };
+
+    const files = [];
+
+    // Add install script
+    const scriptName = platform === 'windows' ? 'install.bat' : 'install.sh';
+    files.push({ name: scriptName, data: Buffer.from(installScripts[platform] || installScripts.windows, 'utf8') });
+
+    // Add baked credentials
+    files.push({ name: 'cloudfuze-config.json', data: Buffer.from(agentConfig, 'utf8') });
+
+    // Add agent source (skip heavy/unnecessary dirs)
+    const SKIP = new Set(['node_modules', 'tests', '.git', 'package-lock.json', 'build', 'electron', 'browser-extension']);
+    function walk(dir, prefix) {
+      for (const entry of readdirSync(dir)) {
+        if (SKIP.has(entry)) continue;
+        const full = join(dir, entry);
+        const rel = prefix ? prefix + '/' + entry : entry;
+        const stat = statSync(full);
+        if (stat.isDirectory()) walk(full, rel);
+        else if (stat.size < 2 * 1024 * 1024) {
+          files.push({ name: 'agent/' + rel, data: readFileSync(full) });
+        }
+      }
+    }
+    walk(agentDir, '');
+
+    const ext = { windows: 'zip', macos: 'zip', linux: 'zip' };
+    const zipBuffer = createZip(files);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="CloudFuze-Desktop-Agent-${platform}.${ext[platform] || 'zip'}"`);
+    res.send(zipBuffer);
+  }));
 }
 
 // Minimal ZIP builder (STORE, no compression) — same as connections.js
