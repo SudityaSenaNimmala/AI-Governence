@@ -105,6 +105,50 @@ if (ensureToken.status !== 0) die('failed to ensure ADMIN_TOKEN on the server');
 // Local development is unaffected: a developer can still put VITE_ADMIN_TOKEN in
 // connect-ui/.env.local, which is git-ignored and never part of a deploy.
 
+// 0.5 Rebuild Windows agent installer (.exe) if NSIS is available.
+//     The .exe is served by /api/v1/installations/agent-installer-exe.
+//     macOS/Linux get zip downloads built live from source (no pre-build needed).
+const nsisPath = 'C:\\Program Files (x86)\\NSIS\\makensis.exe';
+if (existsSync(nsisPath)) {
+  console.log('• Building Windows agent installer (NSIS)…');
+  // Read server URL from .env on the remote host — bake it into the installer
+  const serverUrlResult = spawnSync('bash', ['-c',
+    `${SSH} "grep '^PORT=' ${DIR}/.env | cut -d= -f2 || echo 8787"`
+  ], { cwd: root, encoding: 'utf8' });
+  const port = (serverUrlResult.stdout || '8787').trim();
+  const installerServerUrl = `http://${HOST}:${port}`;
+  // Read enroll secret from remote .env
+  const secretResult = spawnSync('bash', ['-c',
+    `${SSH} "grep '^ENROLL_SECRET=' ${DIR}/.env | cut -d= -f2 || echo dev-enroll-secret-change-me"`
+  ], { cwd: root, encoding: 'utf8' });
+  const enrollSecret = (secretResult.stdout || 'dev-enroll-secret-change-me').trim();
+
+  // Prepare build dir with agent source + Node.js
+  const installerDir = resolve(root, 'agent/installer');
+  const buildDir = resolve(installerDir, 'build');
+  // Agent source
+  sh(`mkdir -p "${buildDir}/agent/src" && cp -r agent/src/* "${buildDir}/agent/src/" && cp agent/package.json "${buildDir}/agent/"`);
+  // Check if Node.js is already downloaded
+  if (!existsSync(resolve(buildDir, 'node/node.exe'))) {
+    console.log('  (downloading portable Node.js for bundling — first time only)');
+    sh(`cd "${buildDir}" && powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://nodejs.org/dist/v22.15.0/node-v22.15.0-win-x64.zip' -OutFile node.zip" && powershell -NoProfile -Command "Expand-Archive -Path node.zip -DestinationPath . -Force" && mkdir -p node && cp -r node-v22.15.0-win-x64/* node/ && rm -rf node-v22.15.0-win-x64 node.zip`);
+  }
+  // Build .exe
+  const nsisResult = spawnSync(nsisPath, [
+    `-DSERVER_URL=${installerServerUrl}`,
+    `-DENROLL_SECRET=${enrollSecret}`,
+    `-DBUILD_DIR=${buildDir}`,
+    resolve(installerDir, 'cloudfuze-agent.nsi'),
+  ], { cwd: installerDir, stdio: 'inherit' });
+  if (nsisResult.status === 0) {
+    console.log('  ✓ Windows installer built');
+  } else {
+    console.warn('  ⚠ NSIS build failed — Windows .exe download will be unavailable');
+  }
+} else {
+  console.log('• Skipping Windows installer (NSIS not installed — install from nsis.sourceforge.io)');
+}
+
 // 1. Build the frontend locally / on the runner (needs more RAM than the host).
 console.log('• Building connect-ui (Vite)…');
 const buildResult = spawnSync('npm', ['--prefix', 'connect-ui', 'run', 'build'], {
