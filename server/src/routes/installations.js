@@ -116,16 +116,23 @@ export function mountInstallations(app, db) {
   // ── Download pre-built Windows installer (.exe) if available ──
 
   app.get('/api/v1/installations/agent-installer-exe', a(async (req, res) => {
-    const exePath = join(__dirname, '..', '..', '..', 'agent', 'installer', 'CloudFuze-Agent-Setup.exe');
-    if (!existsSync(exePath)) {
-      return res.status(404).json({ error: 'Installer not built yet. Run agent/installer/build-installer.bat first.' });
+    // Try pre-built .exe first (built by NSIS during deploy)
+    const exePaths = [
+      join(__dirname, '..', '..', '..', 'agent', 'installer', 'CloudFuze-Agent-Installer.exe'),
+      join(__dirname, '..', '..', '..', 'agent', 'installer', 'CloudFuze-Agent-Setup.exe'),
+    ];
+    for (const exePath of exePaths) {
+      if (existsSync(exePath)) {
+        const stat = statSync(exePath);
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Content-Disposition', 'attachment; filename="CloudFuze-Agent-Setup.exe"');
+        res.setHeader('Content-Length', stat.size);
+        return res.send(readFileSync(exePath));
+      }
     }
-    const stat = statSync(exePath);
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', 'attachment; filename="CloudFuze-Agent-Setup.exe"');
-    res.setHeader('Content-Length', stat.size);
-    const data = readFileSync(exePath);
-    res.send(data);
+    // Fallback: serve the zip package instead (always available, built live)
+    // Redirect to the zip endpoint so the user still gets a working download
+    res.redirect('/api/v1/installations/agent-installer?platform=windows');
   }));
 
   // ── Download pre-configured desktop agent package ──
