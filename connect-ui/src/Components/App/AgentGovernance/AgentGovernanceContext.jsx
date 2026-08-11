@@ -266,8 +266,16 @@ function normalizeAgents(agents) {
 const GovernanceContext = createContext(null);
 const AuthContext = createContext(null);
 
-export function AgentGovernanceProvider({ children }) {
-  const [govState, govDispatch] = useReducer(governanceReducer, governanceInitialState);
+/**
+ * @param {string} [initialTab] - seeds state.activeTab instead of "overview", so a
+ *   caller can deep-link into a specific tab (e.g. the AI Hub overview's LLM-spend
+ *   tile → ?tab=cost). Validated by the caller, which owns the tab list.
+ */
+export function AgentGovernanceProvider({ children, initialTab }) {
+  const [govState, govDispatch] = useReducer(
+    governanceReducer,
+    initialTab ? { ...governanceInitialState, activeTab: initialTab } : governanceInitialState
+  );
 
   const [oauthKeyId, setOauthKeyId] = useState(() => localStorage.getItem(STORAGE_KEY));
   const [tenantId, setTenantId] = useState(() => localStorage.getItem(TENANT_KEY));

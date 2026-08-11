@@ -135,6 +135,8 @@ function App() {
               somebody waiting on a decision, so it stays one click from anywhere. */}
           <Route path="/AIHub/AccessRequests" element={<AIHubPage page="AccessRequests" />} />
           <Route path="/AIHub/AgentGovernance" element={<AIHubPage page="AgentGovernance" />} />
+          {/* Projects (credentials) + Traces (what the connected apps reported). */}
+          <Route path="/AIHub/SDK" element={<AIHubPage page="SDK" />} />
           <Route path="/AIHub/Setup" element={<AIHubPage page="Setup" />} />
 
           {/* Reachable by URL only — hidden from the nav before this regrouping too. */}
@@ -154,7 +156,8 @@ function App() {
           <Route path="/AIHub/RiskScores"       element={<Navigate to="/AIHub/PoliciesRisk?tab=risk" replace />} />
           <Route path="/AIHub/ModelRouting"     element={<Navigate to="/AIHub/Activity?tab=routing" replace />} />
           <Route path="/AIHub/Integrations"     element={<Navigate to="/AIHub/Setup?tab=integrations" replace />} />
-          <Route path="/AIHub/DeveloperSDK"     element={<Navigate to="/AIHub/Setup?tab=sdk" replace />} />
+          {/* The Setup?tab=sdk screen is gone — its replacement is the SDK group. */}
+          <Route path="/AIHub/DeveloperSDK"     element={<Navigate to="/AIHub/SDK?tab=projects" replace />} />
           <Route path="/AIHub/CopilotReadiness" element={<Navigate to="/AIHub/Setup?tab=copilot" replace />} />
           {/* Machines has no tab of its own — Risk Scores already lists every
               enrolled machine by hostname, so send it straight there. */}

@@ -44,18 +44,24 @@
   font-weight: 700;
   color: #111827;
   line-height: 1.2;
+  text-align: left;
 }
 
 .aihub_stat_label {
   font-size: 12px;
   color: #6b7280;
   font-weight: 500;
+  /* .cf_main_content_place_main sets text-align:justify globally — without this,
+     a two-word label that wraps to a second line gets stretched, ugly
+     word-spacing on its last line. */
+  text-align: left;
 }
 
 .aihub_stat_sub {
   font-size: 10px;
   color: #9ca3af;
   margin-top: 2px;
+  text-align: left;
 }
 
 /* Section headers */
@@ -816,3 +822,275 @@
 @media (max-width: 720px) {
   .aihub_group_tabs { flex-wrap: nowrap; overflow-x: auto; }
 }
+
+/* ── Overview screen ───────────────────────────────────────────────────────────
+   Colours are the literal status hexes already used by SanctionBadge /
+   SeverityBadge / RiskBadge in AIHubPage.jsx (#22c55e #f59e0b #ef4444 #3b82f6
+   #9ca3af) plus the #0044cc accent — nothing new is invented here. */
+
+/* One endpoint failed but the screen still renders: say which, never blank. */
+.aihub_ov_warn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  margin-bottom: 14px;
+  border-radius: 8px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #92400e;
+  font-size: 12.5px;
+}
+
+/* Charts left, "needs attention" rail right. */
+.aihub_ov_grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.aihub_ov_main, .aihub_ov_side { min-width: 0; }
+@media (max-width: 1100px) {
+  .aihub_ov_grid { grid-template-columns: 1fr; }
+}
+
+/* Even 2-up row — .aihub_two_col is 3fr/2fr, these cards are peers. */
+.aihub_two_even {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+@media (max-width: 760px) {
+  .aihub_two_even { grid-template-columns: 1fr; }
+}
+
+/* Whole-card click target. */
+.aihub_card_click {
+  cursor: pointer;
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+.aihub_card_click:hover {
+  border-color: #0044cc;
+  box-shadow: 0 2px 12px rgba(0, 68, 204, 0.12);
+}
+.aihub_card_click:focus-visible {
+  outline: 2px solid #0044cc;
+  outline-offset: 2px;
+}
+
+/* Governance items banner — two clickable counts side by side. */
+.aihub_gov_banner {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 6px;
+  margin-bottom: 16px;
+}
+.aihub_gov_stat {
+  flex: 1 1 220px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  color: #9ca3af;
+  transition: background 0.15s;
+}
+.aihub_gov_stat:hover { background: #f3f7ff; }
+.aihub_gov_stat:hover .aihub_gov_txt { color: #0044cc; }
+.aihub_gov_stat:focus-visible { outline: 2px solid #0044cc; outline-offset: -2px; }
+.aihub_gov_num {
+  font-size: 20px;
+  font-weight: 700;
+  color: #111827;
+  line-height: 1;
+}
+.aihub_gov_txt {
+  font-size: 12.5px;
+  color: #6b7280;
+  font-weight: 500;
+}
+.aihub_gov_div {
+  width: 1px;
+  background: #e5e7eb;
+  margin: 6px 0;
+  flex: 0 0 1px;
+}
+
+/* Donut cards: headline total, then a ring with an empty centre. */
+.aihub_chart_total {
+  font-size: 26px;
+  font-weight: 700;
+  color: #0044cc;
+  line-height: 1.1;
+}
+.aihub_chart_total_label {
+  font-size: 11px;
+  color: #9ca3af;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 10px;
+}
+.aihub_donut_wrap {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+.aihub_donut { flex-shrink: 0; }
+
+/* Legend: swatch + label only, no counts (the detail page owns the breakdown). */
+.aihub_legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+.aihub_legend li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: #374151;
+}
+.aihub_legend_dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+/* Agent autonomy — one segmented bar. */
+.aihub_seg_bar {
+  display: flex;
+  height: 22px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #f3f4f6;
+}
+.aihub_seg { height: 100%; min-width: 3px; }
+.aihub_seg_empty { flex: 1; background: #f3f4f6; }
+.aihub_seg_legend {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+.aihub_seg_legend li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #6b7280;
+}
+.aihub_seg_legend strong { color: #111827; font-weight: 700; }
+
+/* Activity by severity — four soft-tinted chips. */
+.aihub_sev_chips {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.aihub_sev_chip {
+  border: 1px solid;
+  border-radius: 10px;
+  padding: 10px 12px;
+  text-align: center;
+}
+.aihub_sev_num {
+  display: block;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.aihub_sev_label {
+  font-size: 11px;
+  color: #6b7280;
+  text-transform: capitalize;
+}
+
+/* Needs attention list. */
+.aihub_attn_list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.aihub_attn_item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid #f3f4f6;
+  border-radius: 10px;
+  background: #fff;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.aihub_attn_item:hover { background: #f9fafb; border-color: #e5e7eb; }
+.aihub_attn_item:focus-visible { outline: 2px solid #0044cc; outline-offset: -2px; }
+.aihub_attn_icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.aihub_attn_text { min-width: 0; display: flex; flex-direction: column; }
+.aihub_attn_label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #111827;
+  text-transform: capitalize;
+}
+.aihub_attn_sub { font-size: 11px; color: #9ca3af; }
+.aihub_attn_chev { margin-left: auto; color: #9ca3af; flex-shrink: 0; }
+
+/* Quick links — static reference chips. */
+.aihub_quick_links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.aihub_quick_link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border: 1px solid #e5e7eb;
+  border-radius: 999px;
+  background: #fff;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.aihub_quick_link:hover {
+  border-color: #0044cc;
+  color: #0044cc;
+  background: #f3f7ff;
+}
+.aihub_quick_link:focus-visible { outline: 2px solid #0044cc; outline-offset: 1px; }

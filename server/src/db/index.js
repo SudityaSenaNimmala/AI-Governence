@@ -177,6 +177,42 @@ export async function applyInitialSchema(db) {
   await db.collection('sdk_projects').createIndex({ public_key: 1 }, { unique: true });
   await db.collection('sdk_projects').createIndex({ created_at: -1 });
 
+  // ── Local tracing store (CFAI_TRACING_BACKEND=local) ───────────────────────
+  // The developer SDK's traces when they are stored HERE rather than relayed to
+  // Langfuse Cloud. Parent (lf_traces) / child (lf_observations) / raw content
+  // (lf_observation_io), the same three-way split dlp_events / dlp_content uses:
+  // metadata and masked previews in one collection, unmasked prompt and
+  // completion text in another that only an admin route can read, and only when
+  // the project set capture_content.
+
+  // lf_traces — one doc per trace. {project_id, id} is the upsert key that makes
+  // Langfuse's create-then-update protocol converge on one document.
+  await db.collection('lf_traces').createIndex({ project_id: 1, id: 1 }, { unique: true });
+  await db.collection('lf_traces').createIndex({ project_id: 1, timestamp: -1 });
+  await db.collection('lf_traces').createIndex({ project_id: 1, user_id: 1, timestamp: -1 });
+  // Drives the retention sweeper (lib/tracing-retention.js). Deliberately NOT a
+  // TTL index: TTL would delete the trace and leave its lf_observations children
+  // — and their lf_observation_io content rows — behind with nothing pointing at
+  // them. The sweep deletes children first, parent last.
+  await db.collection('lf_traces').createIndex({ expires_at: 1 });
+
+  // lf_observations — spans, generations and events in ONE collection with a
+  // `type` discriminator, which is how Langfuse itself models them.
+  await db.collection('lf_observations').createIndex({ project_id: 1, id: 1 }, { unique: true });
+  await db.collection('lf_observations').createIndex({ project_id: 1, trace_id: 1, start_time: 1 });
+  await db.collection('lf_observations').createIndex({ project_id: 1, type: 1, start_time: -1 });
+  await db.collection('lf_observations').createIndex({ trace_id: 1 });
+  await db.collection('lf_observations').createIndex({ expires_at: 1 });
+
+  // lf_observation_io — raw input/output. Written ONLY for projects with
+  // capture_content: true, read only through the admin-gated
+  // GET /api/v1/tracing/observations/:id/io.
+  await db.collection('lf_observation_io').createIndex(
+    { project_id: 1, observation_id: 1 },
+    { unique: true },
+  );
+  await db.collection('lf_observation_io').createIndex({ expires_at: 1 });
+
   // employee_profiles
   await db.collection('employee_profiles').createIndex({ id: 1 }, { unique: true });
   await db.collection('employee_profiles').createIndex({ resolve_key: 1 }, { unique: true });

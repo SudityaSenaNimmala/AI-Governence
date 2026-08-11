@@ -30,6 +30,12 @@ import {
   currentBudgetMonth,
   verifyProjectSecret,
 } from './sdk.js';
+import {
+  tracingBackend,
+  ingestLocally,
+  checkRateLimit,
+  MAX_BATCH_ITEMS,
+} from '../lib/tracing-store.js';
 
 // Any casing of the reserved prefix — a developer sending `CFPROJ:x` must not
 // slip past a case-sensitive filter.
@@ -147,11 +153,11 @@ export function mountLangfuseGateway(app, db) {
 
   // Counters advance only on a relay Langfuse actually accepted. A rejected or
   // budget-blocked request costs nothing, so it must not consume budget either.
-  async function recordIngestion(project, count, costDelta) {
+  async function recordIngestion(project, count, costDelta, extraInc = {}) {
     const month = currentBudgetMonth();
     const rolled = project.budget_month !== month;
     const $set = { last_event_at: new Date().toISOString(), budget_month: month };
-    const $inc = { total_events: count, total_cost_usd: costDelta };
+    const $inc = { total_events: count, total_cost_usd: costDelta, ...extraInc };
     if (rolled) {
       // A new month: reset rather than increment. ($set and $inc may not touch
       // the same path — Mongo rejects that outright.)
@@ -164,12 +170,20 @@ export function mountLangfuseGateway(app, db) {
 
   // ── POST /api/v1/lf/api/public/ingestion ───────────────────────────────────
   // The batch endpoint the official Langfuse JS/Python SDKs call.
+  //
+  // Two backends behind ONE entry point, selected by CFAI_TRACING_BACKEND:
+  //   'local'    (default) — store in lf_traces / lf_observations on this server
+  //   'langfuse'           — relay to Langfuse Cloud, byte-for-byte as before
+  // Auth, tenancy and the monthly budget are shared: they run before the branch,
+  // so switching backends cannot switch off a control.
   app.post('/api/v1/lf/api/public/ingestion', a(async (req, res) => {
     const project = await authenticate(req);
     if (!project) return res.status(401).json(UNAUTHORIZED);
 
+    const local = tracingBackend() === 'local';
+
     const cfg = langfuseConfig();
-    if (!cfg.configured) {
+    if (!local && !cfg.configured) {
       console.warn('[langfuse] gateway hit with no LANGFUSE_* configuration — refusing relay');
       return res.status(503).json({ error: 'Langfuse not configured' });
     }
@@ -178,6 +192,18 @@ export function mountLangfuseGateway(app, db) {
     if (!Array.isArray(batch)) return res.status(400).json({ error: 'batch array required' });
     const count = batch.length;
     if (!count) return res.status(200).json({ successes: [], errors: [] });
+    if (count > MAX_BATCH_ITEMS) {
+      return res.status(413).json({ error: 'batch too large', limit: MAX_BATCH_ITEMS, received: count });
+    }
+
+    // Per-project rate limit. After auth (so it cannot be used to probe keys) and
+    // before any storage work.
+    const rate = checkRateLimit(project.id);
+    if (!rate.allowed) {
+      return res.status(429)
+        .set('Retry-After', String(rate.retryAfterSec))
+        .json({ error: 'rate limit exceeded', retry_after_seconds: rate.retryAfterSec });
+    }
 
     const overBudget = budgetCheck(project, count);
     if (overBudget) {
@@ -185,6 +211,35 @@ export function mountLangfuseGateway(app, db) {
       return res.status(429).json(overBudget.body);
     }
 
+    // ── Local backend ────────────────────────────────────────────────────────
+    if (local) {
+      let outcome;
+      try {
+        outcome = await ingestLocally(db, project, batch);
+      } catch (err) {
+        // 500 keeps the SDK's retry engaged, same as a failed relay would. The
+        // message is structural — a storage error can quote a document, so the
+        // error object is not echoed to the caller.
+        console.error(`[tracing] local ingest failed project=${project.id} batch=${count}: ${err.message}`);
+        return res.status(500).json({ error: 'ingestion failed' });
+      }
+
+      // Cost recorded here is only what the CLIENT supplied, matching the relay
+      // path's contract for the lifetime cost card. Estimated cost lives on the
+      // trace/observation documents and is flagged as estimated there.
+      await recordIngestion(project, count, costOfBatch(batch), {
+        total_traces: outcome.traces ?? 0,
+        total_observations: outcome.observations ?? 0,
+      });
+
+      console.log(
+        `[tracing] local ingest project=${project.id} batch=${count} ` +
+        `stored=${outcome.stored} rejected=${outcome.rejected} status=${outcome.status}`,
+      );
+      return res.status(outcome.status).json(outcome.body);
+    }
+
+    // ── Langfuse Cloud relay (unchanged) ─────────────────────────────────────
     stampBatch(batch, project);
 
     let upstream;

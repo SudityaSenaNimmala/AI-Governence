@@ -105,7 +105,7 @@ const SideNav = (props) => {
       icon: <Bot size={18} />,
       title: "AI Hub",
       link: "#",
-      // Six entries, each a question rather than a table. The sub-screens they
+      // Seven entries, each a question rather than a table. The sub-screens they
       // absorbed are tabs inside them (see TAB_GROUPS in AIHubPage.jsx) and every
       // former URL still resolves via the redirects in App.jsx.
       //
@@ -127,11 +127,16 @@ const SideNav = (props) => {
         // Stale Agents, Cost and Budget. "AI Budget" was this component's BudgetTab
         // surfaced twice, so it is gone from the nav rather than duplicated.
         { icon: agentGovernanceIcon, title: "Agent Governance", link: "/AIHub/AgentGovernance" },
-        // Integrations · Developer SDK · Copilot Readiness
+        // Projects (issue/revoke SDK credentials) · Traces (what those apps reported).
+        // This is the active-reporting path: an app that calls the SDK on purpose,
+        // as opposed to everything above, which is discovered passively.
+        { icon: <Boxes size={16} />, title: "SDK", link: "/AIHub/SDK" },
+        // Integrations · Copilot Readiness
         // The flat entries this replaced (Server Monitor, AI Budget, Copilot
-        // Readiness, Model Routing, Risk Scores, AI Registry, Integrations,
-        // Developer SDK) are all still reachable — as tabs within the six groups
-        // above, or via the redirects in App.jsx. Nothing was dropped.
+        // Readiness, Model Routing, Risk Scores, AI Registry, Integrations) are all
+        // still reachable — as tabs within the groups above, or via the redirects in
+        // App.jsx. The old "Developer SDK" tab is the one thing genuinely removed;
+        // /AIHub/DeveloperSDK now redirects to the SDK group.
         { icon: <Unplug size={16} />, title: "Setup", link: "/AIHub/Setup" },
       ],
     },

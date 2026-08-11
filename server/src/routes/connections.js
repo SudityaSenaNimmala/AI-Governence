@@ -11,6 +11,7 @@
 
 import crypto from 'node:crypto';
 import { a } from '../util.js';
+import { createZip } from '../lib/zip.js';
 import { createRequire } from 'node:module';
 import { writeFileSync, readFileSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -441,83 +442,6 @@ function buildManifestZip(manifest) {
   ]);
 }
 
-// Minimal ZIP file builder — produces a valid ZIP with no compression (STORE method)
-function createZip(files) {
-  const parts = [];
-  const centralDir = [];
-  let offset = 0;
-
-  for (const file of files) {
-    const nameBuf = Buffer.from(file.name, 'utf8');
-    const data = file.data;
-
-    // Local file header (30 bytes + name + data)
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0);   // signature
-    local.writeUInt16LE(20, 4);            // version needed
-    local.writeUInt16LE(0, 6);             // flags
-    local.writeUInt16LE(0, 8);             // compression: STORE
-    local.writeUInt16LE(0, 10);            // mod time
-    local.writeUInt16LE(0, 12);            // mod date
-    local.writeUInt32LE(crc32(data), 14);  // CRC-32
-    local.writeUInt32LE(data.length, 18);  // compressed size
-    local.writeUInt32LE(data.length, 22);  // uncompressed size
-    local.writeUInt16LE(nameBuf.length, 26); // name length
-    local.writeUInt16LE(0, 28);            // extra length
-
-    parts.push(local, nameBuf, data);
-
-    // Central directory entry (46 bytes + name)
-    const central = Buffer.alloc(46);
-    central.writeUInt32LE(0x02014b50, 0);  // signature
-    central.writeUInt16LE(20, 4);           // version made by
-    central.writeUInt16LE(20, 6);           // version needed
-    central.writeUInt16LE(0, 8);            // flags
-    central.writeUInt16LE(0, 10);           // compression
-    central.writeUInt16LE(0, 12);           // mod time
-    central.writeUInt16LE(0, 14);           // mod date
-    central.writeUInt32LE(crc32(data), 16); // CRC-32
-    central.writeUInt32LE(data.length, 20); // compressed size
-    central.writeUInt32LE(data.length, 24); // uncompressed size
-    central.writeUInt16LE(nameBuf.length, 28); // name length
-    central.writeUInt16LE(0, 30);           // extra length
-    central.writeUInt16LE(0, 32);           // comment length
-    central.writeUInt16LE(0, 34);           // disk start
-    central.writeUInt16LE(0, 36);           // internal attrs
-    central.writeUInt32LE(0, 38);           // external attrs
-    central.writeUInt32LE(offset, 42);      // local header offset
-
-    centralDir.push(central, nameBuf);
-    offset += 30 + nameBuf.length + data.length;
-  }
-
-  const centralDirBuf = Buffer.concat(centralDir);
-  const eocd = Buffer.alloc(22);
-  eocd.writeUInt32LE(0x06054b50, 0);           // signature
-  eocd.writeUInt16LE(0, 4);                     // disk number
-  eocd.writeUInt16LE(0, 6);                     // central dir disk
-  eocd.writeUInt16LE(files.length, 8);          // entries on disk
-  eocd.writeUInt16LE(files.length, 10);         // total entries
-  eocd.writeUInt32LE(centralDirBuf.length, 12); // central dir size
-  eocd.writeUInt32LE(offset, 16);               // central dir offset
-  eocd.writeUInt16LE(0, 20);                    // comment length
-
-  return Buffer.concat([...parts, centralDirBuf, eocd]);
-}
-
-// CRC-32 lookup table
-const crcTable = (() => {
-  const t = new Uint32Array(256);
-  for (let i = 0; i < 256; i++) {
-    let c = i;
-    for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-    t[i] = c;
-  }
-  return t;
-})();
-
-function crc32(buf) {
-  let crc = 0xFFFFFFFF;
-  for (let i = 0; i < buf.length; i++) crc = crcTable[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
-  return (crc ^ 0xFFFFFFFF) >>> 0;
-}
+// The ZIP writer this used to define inline now lives in ../lib/zip.js — the same
+// implementation was duplicated verbatim in routes/installations.js. Imported at
+// the top of this file.

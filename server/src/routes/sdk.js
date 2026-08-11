@@ -29,6 +29,7 @@ import crypto from 'node:crypto';
 import { a } from '../util.js';
 import { requireAdminAuth } from '../auth.js';
 import { langfuseConfig, langfuseFetch } from '../lib/langfuse.js';
+import { DEFAULT_RETENTION_DAYS } from '../lib/tracing-ingest.js';
 
 // Langfuse Cloud is usage-billed, so an SDK stuck in a retry loop is a bill, not
 // just noise. Every project therefore carries a monthly ingestion budget. 10k
@@ -52,6 +53,8 @@ const PUBLIC_PROJECT_FIELDS = [
   'created_at', 'revoked_at', 'last_event_at',
   'total_events', 'total_cost_usd',
   'events_this_month', 'budget_month', 'monthly_event_budget',
+  // Local tracing backend settings + counters.
+  'capture_content', 'retention_days', 'total_traces', 'total_observations',
 ];
 
 export function publicProject(doc = {}) {
@@ -249,6 +252,16 @@ export function mountSdk(app, db) {
       monthly_event_budget: DEFAULT_MONTHLY_EVENT_BUDGET,
       events_this_month: 0,
       budget_month: currentBudgetMonth(),
+      // ── Local tracing backend (CFAI_TRACING_BACKEND=local, the default) ─────
+      // Masked by default. With capture_content false the store keeps only
+      // maskSensitive() previews of input/output; raw prompt and completion text
+      // is never written anywhere. Turning it on is a deliberate, per-project
+      // act, and even then the raw text lands in its own collection behind an
+      // admin-only route.
+      capture_content: false,
+      retention_days: DEFAULT_RETENTION_DAYS,
+      total_traces: 0,
+      total_observations: 0,
       status: 'active',
     };
     await col().insertOne(project);

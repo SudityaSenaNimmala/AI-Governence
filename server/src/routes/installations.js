@@ -5,9 +5,10 @@
 // The agent command has the same values pre-filled.
 
 import { a } from '../util.js';
+import { createZip } from '../lib/zip.js';
 import { ENROLL_SECRET } from '../auth.js';
 import crypto from 'node:crypto';
-import { readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSync, cpSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSync, cpSync, rmSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
@@ -181,21 +182,29 @@ export function mountInstallations(app, db) {
     cpSync(join(agentDir, 'src'), join(buildDir, 'agent', 'src'), { recursive: true, force: true });
     cpSync(join(agentDir, 'package.json'), join(buildDir, 'agent', 'package.json'), { force: true });
 
-    // Download portable Node.js if not already cached
+    // Download portable Node.js if not already cached.
+    // Uses Node's own fetch rather than shelling out to Invoke-WebRequest —
+    // spawning powershell/cmd.exe here has been observed to fail with
+    // "spawnSync cmd.exe ENOENT" depending on the parent process's inherited
+    // environment, which a plain HTTP download doesn't depend on.
     const bundledNode = join(buildDir, 'node', 'node.exe');
     if (!existsSync(bundledNode)) {
+      const zipPath = join(buildDir, 'node.zip');
+      const extractedDir = join(buildDir, 'node-v22.15.0-win-x64');
       try {
-        execSync(
-          `powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://nodejs.org/dist/v22.15.0/node-v22.15.0-win-x64.zip' -OutFile 'node.zip'"`,
-          { cwd: buildDir, stdio: 'pipe', timeout: 120000 },
-        );
+        const nodeZipUrl = 'https://nodejs.org/dist/v22.15.0/node-v22.15.0-win-x64.zip';
+        const resp = await fetch(nodeZipUrl);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching ${nodeZipUrl}`);
+        writeFileSync(zipPath, Buffer.from(await resp.arrayBuffer()));
+
         execSync(
           `powershell -NoProfile -Command "Expand-Archive -Path 'node.zip' -DestinationPath '.' -Force"`,
           { cwd: buildDir, stdio: 'pipe', timeout: 60000 },
         );
         mkdirSync(join(buildDir, 'node'), { recursive: true });
-        cpSync(join(buildDir, 'node-v22.15.0-win-x64'), join(buildDir, 'node'), { recursive: true, force: true });
-        execSync(`rm -rf "${join(buildDir, 'node-v22.15.0-win-x64')}" "${join(buildDir, 'node.zip')}"`, { stdio: 'pipe' });
+        cpSync(extractedDir, join(buildDir, 'node'), { recursive: true, force: true });
+        rmSync(extractedDir, { recursive: true, force: true });
+        rmSync(zipPath, { force: true });
       } catch (e) {
         return res.status(500).json({ error: 'Failed to download portable Node.js for bundling', detail: e.message });
       }
@@ -473,60 +482,6 @@ export function mountInstallations(app, db) {
   }));
 }
 
-// Minimal ZIP builder (STORE, no compression) — same as connections.js
-function createZip(files) {
-  const parts = [];
-  const centralDir = [];
-  let offset = 0;
-
-  for (const file of files) {
-    const nameBuf = Buffer.from(file.name, 'utf8');
-    const data = file.data;
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(0, 8);
-    local.writeUInt32LE(crc32(data), 14);
-    local.writeUInt32LE(data.length, 18);
-    local.writeUInt32LE(data.length, 22);
-    local.writeUInt16LE(nameBuf.length, 26);
-    parts.push(local, nameBuf, data);
-
-    const central = Buffer.alloc(46);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(20, 4);
-    central.writeUInt16LE(20, 6);
-    central.writeUInt32LE(crc32(data), 16);
-    central.writeUInt32LE(data.length, 20);
-    central.writeUInt32LE(data.length, 24);
-    central.writeUInt16LE(nameBuf.length, 28);
-    central.writeUInt32LE(offset, 42);
-    centralDir.push(central, nameBuf);
-    offset += 30 + nameBuf.length + data.length;
-  }
-
-  const centralDirBuf = Buffer.concat(centralDir);
-  const eocd = Buffer.alloc(22);
-  eocd.writeUInt32LE(0x06054b50, 0);
-  eocd.writeUInt16LE(files.length, 8);
-  eocd.writeUInt16LE(files.length, 10);
-  eocd.writeUInt32LE(centralDirBuf.length, 12);
-  eocd.writeUInt32LE(offset, 16);
-  return Buffer.concat([...parts, centralDirBuf, eocd]);
-}
-
-const crcTable = (() => {
-  const t = new Uint32Array(256);
-  for (let i = 0; i < 256; i++) {
-    let c = i;
-    for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-    t[i] = c;
-  }
-  return t;
-})();
-
-function crc32(buf) {
-  let crc = 0xFFFFFFFF;
-  for (let i = 0; i < buf.length; i++) crc = crcTable[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
-  return (crc ^ 0xFFFFFFFF) >>> 0;
-}
+// The ZIP writer this used to define inline now lives in ../lib/zip.js — the same
+// implementation was duplicated verbatim in routes/connections.js. Imported at the
+// top of this file.

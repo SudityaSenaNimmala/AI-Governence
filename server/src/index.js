@@ -27,7 +27,11 @@ import { mountWebhooks } from './routes/webhooks.js';
 import { mountConnections } from './routes/connections.js';
 import { mountInstallations } from './routes/installations.js';
 import { mountSdk } from './routes/sdk.js';
+import { mountSdkDownload } from './routes/sdk-download.js';
 import { mountLangfuseGateway } from './routes/langfuse-gateway.js';
+import { mountTracing } from './routes/tracing.js';
+import { mountTracingIngestBodyLimit, tracingBackend } from './lib/tracing-store.js';
+import { startTracingRetentionSweeper } from './lib/tracing-retention.js';
 import { mountAiUsage } from './routes/ai-usage.js';
 import { mountClaudeUsage } from './routes/claude-usage.js';
 import { mountOtel } from './routes/otel.js';
@@ -47,6 +51,11 @@ await seedDefaultRoutingRules(db);
 
 const app = express();
 app.use(cors());
+// SDK tracing ingestion gets its own 5mb body cap, registered BEFORE the global
+// parser below. Order is load-bearing: body-parser no-ops once a body has already
+// been parsed, so a per-route limit mounted after the 50mb one would never fire.
+// The global limit itself is untouched — it is sized for DLP file uploads.
+mountTracingIngestBodyLimit(app);
 // Bumped to 50mb to fit a single 25MB-cap event with base64 overhead (~1.33x).
 // Per-event content is capped server-side in routes/dlp.js (MAX_CONTENT_BYTES).
 app.use(express.json({ limit: '50mb' }));
@@ -80,10 +89,18 @@ mountWebhooks(app, db);
 mountConnections(app, db);
 mountInstallations(app, db);
 mountSdk(app, db);
+// GET /api/v1/sdk/download — the JS SDK zipped from sdk-js/. Deliberately
+// unauthenticated (it is our own dependency-free client library, no secrets in
+// it) and therefore kept out of sdk.js, whose every route is admin-gated.
+mountSdkDownload(app);
 // Developer SDK ingestion gateway. Developers' Langfuse SDKs point at
 // <server>/api/v1/lf with the credentials mountSdk issued; this relays to the
 // real Langfuse Cloud project after stamping the per-project tenancy tag.
 mountLangfuseGateway(app, db);
+// Read API for traces stored locally (CFAI_TRACING_BACKEND=local, the default).
+// Namespaced /api/v1/tracing/* — /api/v1/traces/* is server-agents.js's unrelated
+// passive-interception pseudo-traces and must not be shadowed.
+mountTracing(app, db);
 
 // Auto-resolve employee profiles from enrolled machines on startup
 resolveProfiles(db, await db.collection('machines').find({}).project({ _id: 0 }).toArray())
@@ -110,9 +127,16 @@ app.use((err, req, res, next) => {
 // on an interval.
 startReplayRetentionSweeper(db);
 
+// Tracing retention. Same argument as above and the same shape: a TTL index would
+// delete the lf_traces parent and orphan its lf_observations children (and their
+// raw-content rows), so the sweep is explicit — children first, parent last.
+// Only meaningful for the local backend; relayed traces are Langfuse's to expire.
+if (tracingBackend() === 'local') startTracingRetentionSweeper(db);
+
 app.listen(PORT, () => {
   console.log(`AI Governance server listening on http://localhost:${PORT}`);
   console.log(`DB: MongoDB (${process.env.MONGODB_URI})`);
+  console.log(`Tracing backend: ${tracingBackend()} (CFAI_TRACING_BACKEND)`);
   if (!process.env.JWT_SECRET) {
     console.log(`\n[dev] JWT_SECRET (random per-process): ${JWT_SECRET}`);
     console.log(`[dev] ENROLL_SECRET: ${ENROLL_SECRET}`);

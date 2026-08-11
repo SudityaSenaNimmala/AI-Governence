@@ -29,12 +29,33 @@ import {
   _clearSdkReadCache,
 } from '../src/routes/sdk.js';
 import { mountLangfuseGateway, stampBatch, parseBasicAuth } from '../src/routes/langfuse-gateway.js';
+import { mountTracing } from '../src/routes/tracing.js';
+import {
+  mountTracingIngestBodyLimit,
+  tracingBackend,
+  checkRateLimit,
+  _resetTracingRateLimits,
+} from '../src/lib/tracing-store.js';
+import {
+  planIngestion,
+  normalizeEvent,
+  costForGeneration,
+  preview,
+  levelRank,
+  levelForRank,
+  MAX_BATCH_ITEMS,
+  DEFAULT_RETENTION_DAYS,
+} from '../src/lib/tracing-ingest.js';
+import { sweepExpiredTraces } from '../src/lib/tracing-retention.js';
 import { ADMIN_TOKEN } from '../src/auth.js';
 import { applyInitialSchema } from '../src/db/index.js';
 import { createFakeDb } from './helpers/fake-db.mjs';
 import { dropLegacySdkData } from '../scripts/drop-legacy-sdk-collections.mjs';
 
 const PROJECTS = 'sdk_projects';
+const TRACES = 'lf_traces';
+const OBSERVATIONS = 'lf_observations';
+const OBSERVATION_IO = 'lf_observation_io';
 const LF_BASE = 'https://langfuse.invalid-for-tests';
 
 // ── Langfuse env, owned by the test ──────────────────────────────────────────
@@ -77,16 +98,34 @@ function stubLangfuse(routes = {}) {
   return { calls, restore() { globalThis.fetch = real; } };
 }
 
-async function withServer(fn, { langfuse = true } = {}) {
+// `backend` selects CFAI_TRACING_BACKEND for the duration of the test.
+//
+// It defaults to 'langfuse' here, which is NOT the production default — in
+// production the env var is unset and that means 'local'. Every test in sections
+// 1–11 below is about the Langfuse Cloud relay, which is now the opt-in path, so
+// they pin it explicitly rather than being silently rerouted to local storage.
+// Section 12 exercises the default. The pin is set per test rather than read from
+// the environment for the same reason the Langfuse keys are: the suite must
+// behave identically on a machine that has the var set and one that does not.
+async function withServer(fn, { langfuse = true, backend = 'langfuse' } = {}) {
   const db = createFakeDb();
   await applyInitialSchema(db);
   _clearSdkReadCache();
+  _resetTracingRateLimits();
   setLangfuseEnv(langfuse);
+  const previousBackend = process.env.CFAI_TRACING_BACKEND;
+  if (backend === null) delete process.env.CFAI_TRACING_BACKEND;
+  else process.env.CFAI_TRACING_BACKEND = backend;
 
   const app = express();
+  // Mirrors src/index.js: the ingestion route's own 5mb parser is registered
+  // BEFORE the global 50mb one, because body-parser no-ops once a body has been
+  // parsed and a limit mounted afterwards would never fire.
+  mountTracingIngestBodyLimit(app);
   app.use(express.json({ limit: '50mb' }));
   mountSdk(app, db);
   mountLangfuseGateway(app, db);
+  mountTracing(app, db);
   app.use((err, req, res, next) => res.status(500).json({ error: err.message }));
 
   const server = app.listen(0);
@@ -148,7 +187,16 @@ async function withServer(fn, { langfuse = true } = {}) {
       return { status: res.status, ...(await json(res)) };
     },
 
+    // ── Local tracing read API ───────────────────────────────────────────────
+    async tracing(path, { admin = false } = {}) {
+      const res = await fetch(`${base}/api/v1/tracing${path}`, { headers: adminHeaders(admin) });
+      return { status: res.status, ...(await json(res)) };
+    },
+
     row(id) { return api.db._rows(PROJECTS).find((p) => p.id === id); },
+    trace(id) { return api.db._rows(TRACES).find((t) => t.id === id); },
+    observation(id) { return api.db._rows(OBSERVATIONS).find((o) => o.id === id); },
+    ioRow(id) { return api.db._rows(OBSERVATION_IO).find((r) => r.observation_id === id); },
   };
 
   try {
@@ -156,6 +204,9 @@ async function withServer(fn, { langfuse = true } = {}) {
   } finally {
     await new Promise((resolve) => server.close(resolve));
     _clearSdkReadCache();
+    _resetTracingRateLimits();
+    if (previousBackend === undefined) delete process.env.CFAI_TRACING_BACKEND;
+    else process.env.CFAI_TRACING_BACKEND = previousBackend;
   }
 }
 
@@ -505,7 +556,7 @@ test('an unreachable Langfuse becomes a 502, not an unhandled error', async () =
 
 // ── 8. Read path ─────────────────────────────────────────────────────────────
 
-const TRACES = {
+const LANGFUSE_TRACES = {
   data: [
     {
       id: 'trace-a',
@@ -532,7 +583,7 @@ const TRACES = {
   meta: { totalItems: 2 },
 };
 
-const OBSERVATIONS = {
+const LANGFUSE_OBSERVATIONS = {
   data: [{
     id: 'obs-a',
     type: 'GENERATION',
@@ -547,8 +598,8 @@ const OBSERVATIONS = {
 
 test('GET /sdk/events maps Langfuse traces onto the dashboard event shape', async () => {
   const stub = stubLangfuse({
-    '/api/public/traces': () => ({ status: 200, body: TRACES }),
-    '/api/public/observations': () => ({ status: 200, body: OBSERVATIONS }),
+    '/api/public/traces': () => ({ status: 200, body: LANGFUSE_TRACES }),
+    '/api/public/observations': () => ({ status: 200, body: LANGFUSE_OBSERVATIONS }),
   });
   try {
     await withServer(async (api) => {
@@ -753,4 +804,784 @@ test('drop-legacy-sdk-collections drops sdk_events and only pre-migration projec
   const again = await dropLegacySdkData(db);
   assert.equal(again.events_collection_dropped, false);
   assert.equal(again.legacy_projects_found, 0);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 12. LOCAL TRACING BACKEND (CFAI_TRACING_BACKEND=local — the default)
+//
+// Everything above this line is the Langfuse Cloud relay, which is now opt-in.
+// Everything below is the backend that ships on by default: the same wire
+// protocol, the same credentials, the same budget — stored in this server's own
+// Mongo instead of relayed. The SDK cannot tell the difference, and that is the
+// property most of these tests exist to hold.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const local = (fn) => () => withServer(fn, { backend: 'local', langfuse: false });
+
+// Wire helpers shaped exactly like the official Langfuse SDK's output.
+let seq = 0;
+const envelope = (type, body, timestamp) => ({
+  id: `evt-${++seq}`,
+  timestamp: timestamp ?? '2026-08-01T10:00:00.000Z',
+  type,
+  body,
+});
+const traceCreate = (body) => envelope('trace-create', { id: 'tr-1', name: 'chat', ...body });
+const genCreate = (body) => envelope('generation-create', {
+  id: 'gen-1', traceId: 'tr-1', name: 'answer', model: 'gpt-4o',
+  startTime: '2026-08-01T10:00:00.000Z', ...body,
+});
+const genUpdate = (body) => envelope('generation-update', {
+  id: 'gen-1', traceId: 'tr-1', endTime: '2026-08-01T10:00:02.000Z', ...body,
+});
+const spanCreate = (body) => envelope('span-create', {
+  id: 'sp-1', traceId: 'tr-1', name: 'retrieve',
+  startTime: '2026-08-01T10:00:00.500Z', ...body,
+});
+
+// ── 12a. The switch itself ───────────────────────────────────────────────────
+
+test('CFAI_TRACING_BACKEND defaults to local when the env var is unset', () => {
+  const previous = process.env.CFAI_TRACING_BACKEND;
+  try {
+    delete process.env.CFAI_TRACING_BACKEND;
+    assert.equal(tracingBackend(), 'local', 'local storage is the DEFAULT, not the fallback');
+
+    process.env.CFAI_TRACING_BACKEND = 'langfuse';
+    assert.equal(tracingBackend(), 'langfuse');
+    process.env.CFAI_TRACING_BACKEND = 'LANGFUSE';
+    assert.equal(tracingBackend(), 'langfuse', 'case must not decide the backend');
+
+    // A typo must not take ingestion down — it resolves to the default.
+    process.env.CFAI_TRACING_BACKEND = 'langfsue';
+    assert.equal(tracingBackend(), 'local');
+    process.env.CFAI_TRACING_BACKEND = '';
+    assert.equal(tracingBackend(), 'local');
+  } finally {
+    if (previous === undefined) delete process.env.CFAI_TRACING_BACKEND;
+    else process.env.CFAI_TRACING_BACKEND = previous;
+  }
+});
+
+test('local ingestion stores nothing in Langfuse and needs no Langfuse config', local(async (api) => {
+  const stub = stubLangfuse();
+  try {
+    const p = await seedProject(api);
+    // langfuse: false — the relay would have answered 503 here.
+    const res = await api.ingest([traceCreate(), genCreate(), genUpdate({ usage: { input: 100, output: 20 } })], p);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(stub.calls.length, 0, 'the local backend must never call Langfuse');
+    assert.ok(api.trace('tr-1'));
+  } finally { stub.restore(); }
+}));
+
+test('a project is created content-masked with 30-day retention', local(async (api) => {
+  const created = await seedProject(api);
+  assert.equal(created.capture_content, false, 'content capture must be OFF by default');
+  assert.equal(created.retention_days, DEFAULT_RETENTION_DAYS);
+  assert.equal(created.total_traces, 0);
+  assert.equal(created.total_observations, 0);
+}));
+
+// ── 12b. Storage shape ───────────────────────────────────────────────────────
+
+test('a trace and its generation are stored with rollups and an estimated cost', local(async (api) => {
+  const p = await seedProject(api);
+  const res = await api.ingest([
+    traceCreate({ userId: 'u-1', sessionId: 's-1', tags: ['prod'], input: 'hello there' }),
+    spanCreate({ input: { q: 'refunds' } }),
+    envelope('span-update', { id: 'sp-1', traceId: 'tr-1', endTime: '2026-08-01T10:00:01.000Z', output: { hits: 3 } }),
+    genCreate({ modelParameters: { temperature: 0 } }),
+    genUpdate({ output: 'an answer', usage: { input: 1000, output: 500 } }),
+  ], p);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.successes.length, 5);
+  assert.deepEqual(res.body.errors, []);
+
+  const trace = api.trace('tr-1');
+  assert.equal(trace.project_id, p.id, 'project_id is the tenant boundary in local mode');
+  assert.equal(trace.user_id, 'u-1');
+  assert.equal(trace.session_id, 's-1');
+  assert.equal(trace.stub, false);
+  assert.equal(trace.observation_count, 2);
+  assert.equal(trace.generation_count, 1);
+  assert.equal(trace.input_tokens, 1000);
+  assert.equal(trace.output_tokens, 500);
+  assert.equal(trace.total_tokens, 1500);
+  assert.ok(trace.received_at, 'the server always stamps its own arrival time');
+  assert.ok(trace.expires_at instanceof Date);
+
+  // gpt-4o at 2.50/10.00 per 1M: 1000 in + 500 out = 0.0025 + 0.005.
+  const gen = api.observation('gen-1');
+  assert.equal(gen.type, 'GENERATION');
+  assert.equal(gen.provider, 'openai');
+  assert.equal(gen.model, 'gpt-4o');
+  assert.equal(Math.round(gen.cost_details.total * 1e6), 7500);
+  assert.equal(gen.cost_estimated, true, 'a cost we computed must say so');
+  assert.equal(gen.latency_ms, 2000);
+  assert.equal(gen.usage_details.total, 1500);
+
+  const span = api.observation('sp-1');
+  assert.equal(span.type, 'SPAN');
+  assert.equal(span.latency_ms, 500);
+  assert.equal('model' in span, false, 'generation-only fields must not appear on a span');
+
+  // Lifetime counters count DOCUMENTS created, not events ingested.
+  const row = api.row(p.id);
+  assert.equal(row.total_traces, 1);
+  assert.equal(row.total_observations, 2);
+  assert.equal(row.total_events, 5);
+}));
+
+test('a client-supplied costDetails is trusted verbatim and never summed with ours', local(async (api) => {
+  const p = await seedProject(api);
+  await api.ingest([
+    traceCreate(),
+    genCreate(),
+    genUpdate({ usage: { input: 1000, output: 500 }, costDetails: { input: 1, output: 2, total: 3 } }),
+  ], p);
+
+  const gen = api.observation('gen-1');
+  assert.deepEqual(gen.cost_details, { input: 1, output: 2, total: 3 });
+  assert.equal(gen.cost_estimated, false);
+  assert.equal(api.trace('tr-1').total_cost_usd, 3, 'the computed figure must not be added on top');
+}));
+
+test('an unknown-but-plausible observation type is stored verbatim, not rejected', local(async (api) => {
+  const p = await seedProject(api);
+  const res = await api.ingest([
+    traceCreate(),
+    envelope('span-create', { id: 'ag-1', traceId: 'tr-1', type: 'AGENT', name: 'planner' }),
+    envelope('span-create', { id: 'tl-1', traceId: 'tr-1', type: 'TOOL', name: 'search' }),
+  ], p);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(api.observation('ag-1').type, 'AGENT');
+  assert.equal(api.observation('tl-1').type, 'TOOL');
+}));
+
+// ── 12c. Upsert merge — the create-then-update protocol ──────────────────────
+
+test('create then update merge onto ONE document, across separate batches', local(async (api) => {
+  const p = await seedProject(api);
+
+  await api.ingest([traceCreate(), genCreate()], p);
+  assert.equal(api.trace('tr-1').total_tokens, 0);
+  assert.equal(api.trace('tr-1').observation_count, 1);
+
+  // The SDK's second flush: the same ids, now carrying the result.
+  await api.ingest([genUpdate({ output: 'done', usage: { input: 300, output: 100 } })], p);
+
+  assert.equal(api.db._rows(OBSERVATIONS).length, 1, 'an update must not create a second document');
+  const gen = api.observation('gen-1');
+  assert.equal(gen.name, 'answer', 'a field the update omitted must survive');
+  assert.equal(gen.model, 'gpt-4o');
+  assert.equal(gen.output_preview, 'done');
+
+  const trace = api.trace('tr-1');
+  assert.equal(trace.observation_count, 1, 'the observation must be counted once, not twice');
+  assert.equal(trace.generation_count, 1);
+  assert.equal(trace.total_tokens, 400);
+}));
+
+test('replaying the identical batch does not double-count the rollup', local(async (api) => {
+  const p = await seedProject(api);
+  const batch = () => [traceCreate(), genCreate(), genUpdate({ usage: { input: 200, output: 50 } })];
+
+  await api.ingest(batch(), p);
+  const first = { ...api.trace('tr-1') };
+  // An SDK that retried a batch it had actually delivered (a timed-out 200) must
+  // not double every number on the dashboard.
+  await api.ingest(batch(), p);
+  const second = api.trace('tr-1');
+
+  assert.equal(second.observation_count, first.observation_count);
+  assert.equal(second.total_tokens, first.total_tokens);
+  assert.equal(second.total_tokens, 250);
+  assert.equal(second.total_cost_usd, first.total_cost_usd);
+}));
+
+test('a trace-update patches the trace without disturbing its rollups', local(async (api) => {
+  const p = await seedProject(api);
+  await api.ingest([traceCreate(), genCreate(), genUpdate({ usage: { input: 10, output: 10 } })], p);
+  await api.ingest([envelope('trace-update', { id: 'tr-1', output: 'final answer', tags: ['done'] })], p);
+
+  const trace = api.trace('tr-1');
+  assert.equal(trace.output_preview, 'final answer');
+  assert.equal(trace.name, 'chat', 'the create-time name must survive an update that omits it');
+  assert.deepEqual(trace.tags, ['done']);
+  assert.equal(trace.total_tokens, 20);
+  assert.equal(trace.observation_count, 1);
+}));
+
+// ── 12d. Out-of-order arrival ────────────────────────────────────────────────
+
+test('an observation arriving before its trace creates a stub, never a dropped event', local(async (api) => {
+  const p = await seedProject(api);
+
+  const res = await api.ingest([genCreate(), genUpdate({ usage: { input: 60, output: 40 } })], p);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+
+  const stub = api.trace('tr-1');
+  assert.ok(stub, 'the observation must not be dropped for want of a trace');
+  assert.equal(stub.stub, true);
+  assert.equal(stub.name, null);
+  assert.equal(stub.total_tokens, 100);
+  assert.equal(stub.observation_count, 1);
+
+  // The real trace event turns up later and fills the stub in.
+  await api.ingest([traceCreate({ userId: 'u-9' })], p);
+  const filled = api.trace('tr-1');
+  assert.equal(filled.stub, false);
+  assert.equal(filled.name, 'chat');
+  assert.equal(filled.user_id, 'u-9');
+  assert.equal(filled.total_tokens, 100, 'filling the stub must not reset what it accumulated');
+  assert.equal(filled.observation_count, 1);
+  assert.equal(api.db._rows(TRACES).length, 1);
+}));
+
+// ── 12e. Content masking ─────────────────────────────────────────────────────
+
+const SECRET_PROMPT = 'my card is 4111 1111 1111 1111 and email bob@acme.com, key sk-ant-abcdefgh12345';
+
+test('with capture_content false only a MASKED preview is stored, and no raw row at all', local(async (api) => {
+  const p = await seedProject(api);
+  assert.equal(api.row(p.id).capture_content, false);
+
+  await api.ingest([
+    traceCreate({ input: SECRET_PROMPT }),
+    genCreate({ input: SECRET_PROMPT }),
+    genUpdate({ output: 'the SSN is 123-45-6789' }),
+  ], p);
+
+  const gen = api.observation('gen-1');
+  assert.equal(gen.input_preview.includes('4111'), false, 'the card number survived masking');
+  assert.equal(gen.input_preview.includes('bob@acme.com'), false);
+  assert.equal(gen.input_preview.includes('sk-ant-'), false);
+  assert.match(gen.input_preview, /\[CARD\]/);
+  assert.match(gen.input_preview, /\[EMAIL\]/);
+  assert.match(gen.output_preview, /\[SSN\]/);
+  assert.equal(api.trace('tr-1').input_preview.includes('4111'), false);
+
+  // No raw content anywhere, and nothing raw hiding on the metadata document.
+  assert.equal(api.db._rows(OBSERVATION_IO).length, 0);
+  assert.equal('input' in gen, false);
+  assert.equal('output' in gen, false);
+  assert.equal(JSON.stringify(api.db._rows(OBSERVATIONS)).includes('4111 1111'), false);
+}));
+
+test('with capture_content true the raw text lands ONLY in the separate io collection', local(async (api) => {
+  const p = await seedProject(api);
+  api.row(p.id).capture_content = true;
+
+  await api.ingest([traceCreate(), genCreate({ input: SECRET_PROMPT }), genUpdate({ output: 'raw answer' })], p);
+
+  const io = api.ioRow('gen-1');
+  assert.ok(io, 'opting in must actually capture');
+  assert.equal(io.project_id, p.id);
+  assert.equal(io.input, SECRET_PROMPT, 'the raw value is stored unmodified');
+  assert.equal(io.output, 'raw answer');
+  assert.ok(io.expires_at instanceof Date, 'raw content must carry its own retention clock');
+
+  // Still masked on the metadata document — the split is the whole point.
+  const gen = api.observation('gen-1');
+  assert.equal(gen.input_preview.includes('4111'), false);
+  assert.equal('input' in gen, false, 'raw content must never be mixed into the metadata document');
+}));
+
+test('a preview is masked BEFORE it is truncated, and capped', () => {
+  const long = 'x'.repeat(400);
+  assert.equal(preview(long).length, 251);            // 250 + the ellipsis
+  // A value straddling the cut must not survive as a readable fragment.
+  assert.equal(preview('a'.repeat(245) + ' 4111111111111111').includes('4111'), false);
+  // Structured prompts are stringified so they are masked as text, not previewed
+  // as "[object Object]".
+  assert.match(preview([{ role: 'user', content: 'ssn 123-45-6789' }]), /\[SSN\]/);
+  assert.equal(preview(undefined), null);
+  assert.equal(preview(''), null);
+});
+
+// ── 12f. Partial failure ─────────────────────────────────────────────────────
+
+test('one malformed item is a 207 partial success, not a failed batch', local(async (api) => {
+  const p = await seedProject(api);
+  const res = await api.ingest([
+    traceCreate(),
+    { id: 'bad-1', type: 'trace-create', body: { name: 'no id' } },      // no body.id
+    { id: 'bad-2', type: 'generation-create', body: { id: 'x' } },       // no traceId
+    { id: 'bad-3', type: 'span-create', body: 'not an object' },
+    { id: 'bad-4' },                                                      // no type, no body
+    genCreate(),
+    genUpdate({ usage: { input: 5, output: 5 } }),
+  ], p);
+
+  assert.equal(res.status, 207, 'partial success is 207 — the shape the SDK expects');
+  assert.equal(res.body.successes.length, 3, 'the good items must still land');
+  assert.equal(res.body.errors.length, 4);
+  assert.deepEqual(res.body.errors.map((e) => e.id).sort(), ['bad-1', 'bad-2', 'bad-3', 'bad-4']);
+  for (const e of res.body.errors) assert.equal(typeof e.message, 'string');
+
+  assert.ok(api.trace('tr-1'));
+  assert.equal(api.trace('tr-1').total_tokens, 10);
+  assert.equal(api.db._rows(OBSERVATIONS).length, 1);
+}));
+
+test('score and evaluator events are reported as not-stored, not silently 200ed', local(async (api) => {
+  const p = await seedProject(api);
+  const res = await api.ingest([
+    traceCreate(),
+    envelope('score-create', { id: 'sc-1', traceId: 'tr-1', name: 'quality', value: 0.9 }),
+    envelope('span-create', { id: 'ev-1', traceId: 'tr-1', type: 'EVALUATOR', name: 'judge' }),
+  ], p);
+
+  assert.equal(res.status, 207);
+  assert.equal(res.body.successes.length, 1);
+  assert.equal(res.body.errors.length, 2, 'evals are out of scope — say so rather than pretend');
+  for (const e of res.body.errors) assert.match(e.message, /not stored by this backend/);
+  // Neither item was stored, and neither errored the whole batch.
+  assert.equal(api.db._rows(OBSERVATIONS).length, 0);
+  assert.ok(api.trace('tr-1'));
+}));
+
+test('a timestamp far in the future is a per-item error, not a poisoned batch', local(async (api) => {
+  const p = await seedProject(api);
+  const far = new Date(Date.now() + 72 * 3600 * 1000).toISOString();
+  const res = await api.ingest([
+    traceCreate(),
+    envelope('trace-create', { id: 'tr-future', name: 'wrong clock' }, far),
+  ], p);
+
+  assert.equal(res.status, 207);
+  assert.equal(res.body.errors.length, 1);
+  assert.match(res.body.errors[0].message, /48h in the future/);
+  assert.equal(api.trace('tr-future'), undefined);
+  assert.ok(api.trace('tr-1'), 'the good item still landed');
+}));
+
+test('an end before its start clamps to zero rather than a negative duration', local(async (api) => {
+  const p = await seedProject(api);
+  await api.ingest([
+    traceCreate(),
+    envelope('span-create', {
+      id: 'sp-back', traceId: 'tr-1', name: 'backwards',
+      startTime: '2026-08-01T10:00:05.000Z', endTime: '2026-08-01T10:00:01.000Z',
+    }),
+  ], p);
+  assert.equal(api.observation('sp-back').latency_ms, 0);
+}));
+
+// ── 12g. Guards on a new external surface ────────────────────────────────────
+
+test('a batch over the item cap is refused whole with 413', local(async (api) => {
+  const p = await seedProject(api);
+  const big = Array.from({ length: MAX_BATCH_ITEMS + 1 }, (_, i) =>
+    envelope('trace-create', { id: `t-${i}`, name: 'x' }));
+  const res = await api.ingest(big, p);
+  assert.equal(res.status, 413);
+  assert.equal(res.body.limit, MAX_BATCH_ITEMS);
+  assert.equal(api.db._rows(TRACES).length, 0);
+
+  // Exactly at the cap still goes through.
+  const ok = await api.ingest(big.slice(0, MAX_BATCH_ITEMS), p);
+  assert.equal(ok.status, 200);
+}));
+
+test('a body over the route 5mb cap is 413, not a generic 500', local(async (api) => {
+  const p = await seedProject(api);
+  // ~6MB of payload in one legal-looking event: under the global 50mb parser
+  // this would be accepted, which is exactly what the route-scoped cap prevents.
+  const res = await api.ingest([traceCreate({ input: 'a'.repeat(6 * 1024 * 1024) })], p);
+  assert.equal(res.status, 413, 'a 500 would tell the SDK to retry the same oversized body forever');
+  assert.equal(api.db._rows(TRACES).length, 0);
+}));
+
+test('the per-project rate limiter refills over time and reports Retry-After', () => {
+  _resetTracingRateLimits();
+  const t0 = 1_000_000;
+  // Burst capacity is 200.
+  for (let i = 0; i < 200; i++) {
+    assert.equal(checkRateLimit('p1', t0).allowed, true, `request ${i} inside the burst`);
+  }
+  const blocked = checkRateLimit('p1', t0);
+  assert.equal(blocked.allowed, false);
+  assert.ok(blocked.retryAfterSec >= 1, 'Retry-After must be a whole second, at least 1');
+
+  // Another project has its own bucket.
+  assert.equal(checkRateLimit('p2', t0).allowed, true);
+  // 50 tokens/sec refill.
+  assert.equal(checkRateLimit('p1', t0 + 1000).allowed, true);
+  _resetTracingRateLimits();
+});
+
+test('local ingestion still enforces auth and the monthly budget', local(async (api) => {
+  const p = await seedProject(api);
+  assert.equal((await api.ingest([traceCreate()], p, { authorization: null })).status, 401);
+  assert.equal(api.db._rows(TRACES).length, 0, 'an unauthenticated batch must store nothing');
+
+  const row = api.row(p.id);
+  row.monthly_event_budget = 1;
+  row.events_this_month = 1;
+  row.budget_month = currentBudgetMonth();
+  const res = await api.ingest([traceCreate()], p);
+  assert.equal(res.status, 429, 'switching backend must not switch off the budget');
+  assert.equal(api.db._rows(TRACES).length, 0);
+}));
+
+// ── 12h. Read API ────────────────────────────────────────────────────────────
+
+async function seedTraces(api, p) {
+  await api.ingest([
+    traceCreate({ userId: 'u-1', sessionId: 's-1', tags: ['prod'], input: 'hello' }),
+    spanCreate(),
+    envelope('span-update', { id: 'sp-1', traceId: 'tr-1', endTime: '2026-08-01T10:00:01.000Z' }),
+    genCreate({ startTime: '2026-08-01T10:00:01.000Z' }),
+    genUpdate({ output: 'answer', usage: { input: 100, output: 20 }, level: 'ERROR' }),
+  ], p);
+  await api.ingest([
+    envelope('trace-create', { id: 'tr-2', name: 'other', userId: 'u-2' }, '2026-08-02T10:00:00.000Z'),
+  ], p);
+  return p;
+}
+
+test('GET /tracing/traces lists rollups, newest first, with no raw content', local(async (api) => {
+  const p = await seedProject(api);
+  api.row(p.id).capture_content = true;
+  await seedTraces(api, p);
+
+  const res = await api.tracing(`/traces?project_id=${p.id}`);
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.traces.map((t) => t.id), ['tr-2', 'tr-1'], 'newest first');
+
+  const one = res.body.traces[1];
+  assert.equal(one.name, 'chat');
+  assert.equal(one.user_id, 'u-1');
+  assert.equal(one.observation_count, 2);
+  assert.equal(one.generation_count, 1);
+  assert.equal(one.total_tokens, 120);
+  assert.equal(one.level, 'ERROR', 'a trace inherits the worst level of its observations');
+  assert.equal(one.cost_estimated, true);
+  // Earliest observation start (00.500) to latest observation end (02.000).
+  // Derived from the $min/$max accumulators at read time, not stored raw.
+  assert.equal(one.latency_ms, 1500);
+  assert.equal(one.input_preview, 'hello');
+
+  // Storage accumulators are internal — they must not leak into the API.
+  assert.equal('span_start_ms' in one, false);
+  assert.equal('level_rank' in one, false);
+  // And no raw content, even for a capture_content project.
+  assert.equal(res.text.includes('"input"'), false);
+
+  assert.equal((await api.tracing('/traces')).status, 400, 'project_id is required');
+}));
+
+test('GET /tracing/traces filters and paginates by cursor', local(async (api) => {
+  const p = await seedProject(api);
+  await seedTraces(api, p);
+
+  assert.deepEqual((await api.tracing(`/traces?project_id=${p.id}&user_id=u-2`)).body.traces.map((t) => t.id), ['tr-2']);
+  assert.deepEqual((await api.tracing(`/traces?project_id=${p.id}&session_id=s-1`)).body.traces.map((t) => t.id), ['tr-1']);
+  assert.deepEqual((await api.tracing(`/traces?project_id=${p.id}&name=other`)).body.traces.map((t) => t.id), ['tr-2']);
+  assert.deepEqual((await api.tracing(`/traces?project_id=${p.id}&tags=prod`)).body.traces.map((t) => t.id), ['tr-1']);
+  assert.deepEqual((await api.tracing(`/traces?project_id=${p.id}&level=ERROR`)).body.traces.map((t) => t.id), ['tr-1']);
+  assert.deepEqual(
+    (await api.tracing(`/traces?project_id=${p.id}&from=2026-08-02T00:00:00.000Z`)).body.traces.map((t) => t.id),
+    ['tr-2'],
+  );
+  // A different project sees nothing — project_id is the tenant boundary.
+  assert.deepEqual((await api.tracing('/traces?project_id=someone-else')).body.traces, []);
+
+  const page1 = (await api.tracing(`/traces?project_id=${p.id}&limit=1`)).body;
+  assert.deepEqual(page1.traces.map((t) => t.id), ['tr-2']);
+  assert.ok(page1.next_cursor);
+  const page2 = (await api.tracing(`/traces?project_id=${p.id}&limit=1&cursor=${encodeURIComponent(page1.next_cursor)}`)).body;
+  assert.deepEqual(page2.traces.map((t) => t.id), ['tr-1']);
+  assert.equal(page2.next_cursor, null, 'the last page must not advertise another');
+}));
+
+test('GET /tracing/traces/:id returns a waterfall ordered by start with offsets', local(async (api) => {
+  const p = await seedProject(api);
+  await seedTraces(api, p);
+
+  const res = await api.tracing(`/traces/tr-1?project_id=${p.id}`);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.trace.id, 'tr-1');
+  assert.deepEqual(res.body.observations.map((o) => o.id), ['sp-1', 'gen-1'], 'ordered by start_time');
+
+  const [span, gen] = res.body.observations;
+  assert.equal(span.offset_ms, 500, 'offset is relative to the trace start, for the waterfall');
+  assert.equal(gen.offset_ms, 1000);
+  assert.equal(span.depth, 0);
+  assert.equal(gen.type, 'GENERATION');
+  assert.equal(gen.model, 'gpt-4o');
+  assert.equal(gen.has_io, false, 'a list never carries content, only whether content exists');
+  assert.equal('input' in gen, false);
+
+  assert.equal((await api.tracing(`/traces/nope?project_id=${p.id}`)).status, 404);
+  assert.equal((await api.tracing('/traces/tr-1')).status, 400);
+}));
+
+test('a cyclic parent chain cannot hang the trace detail route', local(async (api) => {
+  const p = await seedProject(api);
+  await api.ingest([
+    traceCreate(),
+    // parent_observation_id is client-supplied: a -> b -> a is a thing a caller
+    // can send, and it must not become an infinite walk.
+    envelope('span-create', { id: 'a', traceId: 'tr-1', name: 'a', parentObservationId: 'b', startTime: '2026-08-01T10:00:00.000Z' }),
+    envelope('span-create', { id: 'b', traceId: 'tr-1', name: 'b', parentObservationId: 'a', startTime: '2026-08-01T10:00:01.000Z' }),
+  ], p);
+
+  const res = await api.tracing(`/traces/tr-1?project_id=${p.id}`);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.observations.length, 2);
+  assert.ok(res.body.observations.every((o) => o.parent_cycle === true), 'the broken tree is surfaced, not flattened silently');
+  assert.ok(res.body.observations.every((o) => o.depth <= 50));
+}));
+
+test('GET /tracing/observations filters by type, model and trace', local(async (api) => {
+  const p = await seedProject(api);
+  await seedTraces(api, p);
+
+  const all = await api.tracing(`/observations?project_id=${p.id}`);
+  assert.equal(all.status, 200);
+  assert.deepEqual(all.body.observations.map((o) => o.id), ['gen-1', 'sp-1'], 'newest first');
+
+  const gens = await api.tracing(`/observations?project_id=${p.id}&type=GENERATION`);
+  assert.deepEqual(gens.body.observations.map((o) => o.id), ['gen-1']);
+  assert.equal(gens.body.observations[0].usage_details.input, 100);
+  assert.equal(gens.body.observations[0].has_io, false);
+
+  assert.deepEqual(
+    (await api.tracing(`/observations?project_id=${p.id}&model=gpt-4o`)).body.observations.map((o) => o.id),
+    ['gen-1'],
+  );
+  assert.deepEqual(
+    (await api.tracing(`/observations?project_id=${p.id}&trace_id=tr-2`)).body.observations, [],
+  );
+  assert.equal((await api.tracing('/observations')).status, 400);
+}));
+
+test('GET /tracing/observations/:id/io requires admin auth and is the ONLY raw-content route', local(async (api) => {
+  const p = await seedProject(api);
+  api.row(p.id).capture_content = true;
+  await api.ingest([traceCreate(), genCreate({ input: SECRET_PROMPT }), genUpdate({ output: 'raw answer' })], p);
+
+  // Unauthenticated: refused. This is the one route in the file that is gated,
+  // because it is the one route that returns unmasked prompt text.
+  const anon = await api.tracing(`/observations/gen-1/io?project_id=${p.id}`);
+  assert.equal(anon.status, 401);
+  assert.equal(anon.text.includes('4111'), false, 'a rejected request must not leak the content it refused');
+
+  const wrong = await fetch(`${api.base}/api/v1/tracing/observations/gen-1/io?project_id=${p.id}`, {
+    headers: { authorization: 'Bearer not-the-admin-token' },
+  });
+  assert.equal(wrong.status, 401);
+
+  const ok = await api.tracing(`/observations/gen-1/io?project_id=${p.id}`, { admin: true });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.input, SECRET_PROMPT);
+  assert.equal(ok.body.output, 'raw answer');
+
+  // The metadata list route stays open and stays masked — that split is the
+  // existing convention (GET /api/v1/dlp is open, its content route is not).
+  const list = await api.tracing(`/observations?project_id=${p.id}`);
+  assert.equal(list.status, 200);
+  assert.equal(list.body.observations[0].has_io, true);
+  assert.equal(list.text.includes('4111'), false, 'raw content must never appear in a list');
+
+  assert.equal((await api.tracing(`/observations/nope/io?project_id=${p.id}`, { admin: true })).status, 404);
+}));
+
+test('a masked project has no io row to fetch even for an admin', local(async (api) => {
+  const p = await seedProject(api);
+  await api.ingest([traceCreate(), genCreate({ input: SECRET_PROMPT })], p);
+  const res = await api.tracing(`/observations/gen-1/io?project_id=${p.id}`, { admin: true });
+  assert.equal(res.status, 404, 'content that was never captured cannot be produced by authenticating');
+}));
+
+// ── 12i. Retention ───────────────────────────────────────────────────────────
+
+test('the retention sweeper deletes children before the parent and leaves nothing orphaned', local(async (api) => {
+  const p = await seedProject(api);
+  api.row(p.id).capture_content = true;
+  await seedTraces(api, p);
+  await api.ingest([envelope('generation-create', {
+    id: 'gen-2', traceId: 'tr-2', model: 'gpt-4o', startTime: '2026-08-02T10:00:00.000Z', input: 'live',
+  })], p);
+
+  // Age tr-1 past its expiry; tr-2 stays live.
+  const past = new Date(Date.now() - 1000);
+  api.trace('tr-1').expires_at = past;
+  for (const o of api.db._rows(OBSERVATIONS)) if (o.trace_id === 'tr-1') o.expires_at = past;
+  for (const r of api.db._rows(OBSERVATION_IO)) if (r.observation_id !== 'gen-2') r.expires_at = past;
+
+  const result = await sweepExpiredTraces(api.db);
+  assert.equal(result.traces_deleted, 1);
+  assert.equal(result.observations_deleted, 2);
+  assert.ok(result.io_deleted >= 1, 'raw content must go with its observation');
+
+  assert.equal(api.trace('tr-1'), undefined);
+  assert.equal(api.observation('sp-1'), undefined);
+  assert.equal(api.observation('gen-1'), undefined);
+  assert.equal(api.ioRow('gen-1'), undefined);
+  // The live trace and its content are untouched.
+  assert.ok(api.trace('tr-2'));
+  assert.ok(api.observation('gen-2'));
+
+  // Idempotent: a second pass finds nothing left to do.
+  const again = await sweepExpiredTraces(api.db);
+  assert.equal(again.traces_deleted, 0);
+  assert.equal(again.errors, 0);
+}));
+
+test('an expired observation whose trace is already gone is still collected', local(async (api) => {
+  const p = await seedProject(api);
+  await api.ingest([genCreate()], p);            // creates a stub trace
+  const past = new Date(Date.now() - 1000);
+  api.observation('gen-1').expires_at = past;
+  api.db._rows(TRACES).length = 0;               // the parent vanished
+
+  const result = await sweepExpiredTraces(api.db);
+  assert.equal(result.orphans_deleted, 1, 'nothing may be left unreachable — that is why this is not a TTL index');
+  assert.equal(api.observation('gen-1'), undefined);
+}));
+
+test('retention_days on the project drives the stored expiry', local(async (api) => {
+  const p = await seedProject(api);
+  api.row(p.id).retention_days = 1;
+  await api.ingest([traceCreate(), genCreate()], p);
+
+  const days = (api.trace('tr-1').expires_at.getTime() - Date.now()) / 86_400_000;
+  assert.ok(days > 0.9 && days < 1.1, `expected ~1 day, got ${days}`);
+  const obsDays = (api.observation('gen-1').expires_at.getTime() - Date.now()) / 86_400_000;
+  assert.ok(obsDays > 0.9 && obsDays < 1.1);
+}));
+
+// ── 12j. The pure planner, without a server ──────────────────────────────────
+
+test('planIngestion never mixes $set and $inc on the same field path', () => {
+  const plan = planIngestion(
+    [traceCreate(), genCreate(), genUpdate({ usage: { input: 10, output: 5 } })],
+    { project: { id: 'p1' } },
+  );
+  const OPS = ['$set', '$setOnInsert', '$inc', '$min', '$max'];
+  for (const op of plan.operations) {
+    for (let i = 0; i < OPS.length; i++) {
+      for (let j = i + 1; j < OPS.length; j++) {
+        const a = Object.keys(op.update[OPS[i]] ?? {});
+        const b = new Set(Object.keys(op.update[OPS[j]] ?? {}));
+        for (const key of a) {
+          // Mongo rejects this outright — see routes/langfuse-gateway.js's budget
+          // rollover, which had to be written around the same restriction.
+          assert.equal(b.has(key), false, `${key} appears in both ${OPS[i]} and ${OPS[j]}`);
+        }
+      }
+    }
+  }
+  // Trace counters live in $setOnInsert on the upsert and $inc on the rollup —
+  // two DIFFERENT update documents, which is what makes that legal.
+  const traceOps = plan.operations.filter((o) => o.collection === TRACES);
+  assert.equal(traceOps.length, 2);
+  assert.equal(traceOps[0].update.$setOnInsert.observation_count, 0);
+  assert.equal(traceOps[1].update.$inc.observation_count, 1);
+});
+
+test('costForGeneration prices the vendors it knows and refuses to guess for the rest', () => {
+  // 1M in + 1M out of gpt-4o at 2.50 / 10.00.
+  const openai = costForGeneration({ model: 'gpt-4o', usage: { input: 1_000_000, output: 1_000_000 } });
+  assert.equal(openai.cost_details.total, 12.5);
+  assert.equal(openai.cost_estimated, true);
+
+  // gpt-4o-mini must not be priced as gpt-4o.
+  const mini = costForGeneration({ model: 'gpt-4o-mini', usage: { input: 1_000_000, output: 0 } });
+  assert.equal(mini.cost_details.total, 0.15);
+
+  const anthropic = costForGeneration({ model: 'claude-3-5-sonnet-20241022', usage: { input: 1_000_000, output: 0 } });
+  assert.equal(anthropic.cost_details.total, 3);
+
+  // Supplied cost wins outright and is NOT marked estimated.
+  const supplied = costForGeneration({
+    model: 'gpt-4o', usage: { input: 1_000_000, output: 1_000_000 },
+    costDetails: { total: 0.42 },
+  });
+  assert.equal(supplied.cost_details.total, 0.42);
+  assert.equal(supplied.cost_estimated, false);
+
+  // A vendor with no price table gets null, not another vendor's rates.
+  const unknown = costForGeneration({ model: 'llama-3-70b', usage: { input: 1000, output: 1000 } });
+  assert.equal(unknown.cost_details.total, null);
+  assert.equal(unknown.cost_estimated, false);
+
+  // No tokens, no cost, and no false precision.
+  assert.equal(costForGeneration({ model: 'gpt-4o', usage: {} }).cost_details.total, null);
+  assert.equal(costForGeneration({}).cost_estimated, false);
+});
+
+test('normalizeEvent rejects junk without throwing', () => {
+  assert.equal(normalizeEvent(null).ok, false);
+  assert.equal(normalizeEvent('nope').ok, false);
+  assert.equal(normalizeEvent({ type: 'trace-create' }).ok, false);          // no body
+  assert.equal(normalizeEvent({ body: { id: 'x' } }).ok, false);             // no type
+  assert.equal(normalizeEvent({ type: 'trace-create', body: [] }).ok, false);
+  // Unknown-but-harmless event types are accepted-and-ignored, not errors.
+  const log = normalizeEvent({ type: 'sdk-log', body: { message: 'hi' } });
+  assert.equal(log.ok, true);
+  assert.equal(log.kind, 'ignored');
+});
+
+test('trace level rank ordering survives Mongo $max, which string ordering would not', () => {
+  assert.ok(levelRank('ERROR') > levelRank('WARNING'));
+  assert.ok(levelRank('WARNING') > levelRank('DEFAULT'));
+  assert.ok(levelRank('DEFAULT') > levelRank('DEBUG'));
+  // Alphabetically 'WARNING' > 'ERROR', which is why the accumulator is numeric.
+  assert.ok('WARNING' > 'ERROR');
+  assert.equal(levelForRank(levelRank('ERROR')), 'ERROR');
+  assert.equal(levelForRank(undefined), 'DEFAULT');
+  assert.equal(levelRank('nonsense'), levelRank('DEFAULT'));
+});
+
+test('a reserved cfproj: tag is stripped in local mode too', () => {
+  const plan = planIngestion(
+    [envelope('trace-create', { id: 't', tags: ['prod', 'cfproj:someone-else', 'CFPROJ:x'] })],
+    { project: { id: 'p1' } },
+  );
+  assert.deepEqual(plan.operations[0].update.$set.tags, ['prod']);
+});
+
+// ── 12k. Schema ──────────────────────────────────────────────────────────────
+
+test('applyInitialSchema declares the tracing indexes, and none of them is a TTL', async () => {
+  const db = createFakeDb();
+  await applyInitialSchema(db);
+
+  const traceIdx = Object.fromEntries((await db.collection(TRACES).indexes()).map((i) => [i.name, i]));
+  assert.equal(traceIdx.project_id_1_id_1.unique, true);
+  assert.ok(traceIdx['project_id_1_timestamp_-1']);
+  assert.ok(traceIdx['project_id_1_user_id_1_timestamp_-1']);
+  assert.ok(traceIdx.expires_at_1, 'the sweeper queries this — it is NOT a TTL index');
+
+  const obsIdx = Object.fromEntries((await db.collection(OBSERVATIONS).indexes()).map((i) => [i.name, i]));
+  assert.equal(obsIdx.project_id_1_id_1.unique, true);
+  assert.ok(obsIdx.project_id_1_trace_id_1_start_time_1);
+  assert.ok(obsIdx['project_id_1_type_1_start_time_-1']);
+  assert.ok(obsIdx.trace_id_1);
+
+  const ioIdx = Object.fromEntries((await db.collection(OBSERVATION_IO).indexes()).map((i) => [i.name, i]));
+  assert.equal(ioIdx.project_id_1_observation_id_1.unique, true);
+
+  // No expireAfterSeconds anywhere: TTL would delete a parent trace and orphan
+  // its observations and their content rows.
+  for (const coll of [TRACES, OBSERVATIONS, OBSERVATION_IO]) {
+    for (const idx of await db.collection(coll).indexes()) {
+      assert.equal('expireAfterSeconds' in idx, false, `${coll}.${idx.name} must not be a TTL index`);
+    }
+  }
+});
+
+test('the {project_id,id} unique index keeps two projects from colliding on one trace id', async () => {
+  const db = createFakeDb();
+  await applyInitialSchema(db);
+  const col = db.collection(TRACES);
+  await col.insertOne({ project_id: 'p1', id: 'tr-1' });
+  // Same trace id, different tenant: legal, and must stay legal.
+  await col.insertOne({ project_id: 'p2', id: 'tr-1' });
+  await assert.rejects(() => col.insertOne({ project_id: 'p1', id: 'tr-1' }), (e) => e.code === 11000);
 });
