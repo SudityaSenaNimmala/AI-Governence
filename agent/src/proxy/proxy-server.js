@@ -273,17 +273,16 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
         // that have the CA cert). If TLS handshake fails (ungoverned container),
         // fall back to bridge + metadata logging.
         log?.info?.(`transparent: intercepting ${sniHost}${fromContainer ? ' (container)' : ''}`);
+        // Resume the underlying socket FIRST so TLS handshake data flows
+        clientSocket.resume();
         // Bridge to real destination via TLS, intercepting the plaintext in between.
-        // This avoids HTTP/1.1 vs HTTP/2 issues entirely — we don't parse HTTP at all.
-        // Instead we MITM at the TLS level: decrypt from client, re-encrypt to server,
-        // and capture the plaintext passing through.
         const clientTls = new tls.TLSSocket(clientSocket, {
           isServer: true,
           secureContext: secureContextFor(sniHost),
           ALPNProtocols: ['http/1.1', 'h2'],
         });
-        clientTls.push(peek);
-        clientSocket.resume();
+        // Push back the peeked ClientHello so TLS processes it
+        clientSocket.unshift(peek);
 
         let tlsFailed = false;
         clientTls.on('error', (err) => {
