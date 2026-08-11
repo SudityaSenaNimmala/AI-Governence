@@ -293,7 +293,10 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
           try { clientSocket.destroy(); } catch {}
         });
 
-        // Connect to real server
+        clientTls.on('secure', () => log?.info?.(`transparent: client TLS handshake complete for ${sniHost}`));
+        clientTls.on('error', (e) => log?.warn?.(`transparent: clientTls error: ${e.message}`));
+
+        // Connect to real server (independent TLS connection)
         const serverTls = tls.connect(443, sniHost, { servername: sniHost }, () => {
           log?.info?.(`transparent: connected to ${sniHost}:443, proxying`);
           const startedAt = Date.now();
