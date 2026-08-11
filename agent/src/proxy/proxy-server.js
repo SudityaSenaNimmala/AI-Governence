@@ -273,60 +273,73 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
         // that have the CA cert). If TLS handshake fails (ungoverned container),
         // fall back to bridge + metadata logging.
         log?.info?.(`transparent: intercepting ${sniHost}${fromContainer ? ' (container)' : ''}`);
-        // Create a TLS server that forces HTTP/1.1 via ALPN
-        const tlsOpts = {
+        // Bridge to real destination via TLS, intercepting the plaintext in between.
+        // This avoids HTTP/1.1 vs HTTP/2 issues entirely — we don't parse HTTP at all.
+        // Instead we MITM at the TLS level: decrypt from client, re-encrypt to server,
+        // and capture the plaintext passing through.
+        const clientTls = new tls.TLSSocket(clientSocket, {
           isServer: true,
           secureContext: secureContextFor(sniHost),
-          ALPNProtocols: ['http/1.1'],
-        };
-        const tlsSock = new tls.TLSSocket(clientSocket, tlsOpts);
-        tlsSock.push(peek);
+          ALPNProtocols: ['http/1.1', 'h2'],
+        });
+        clientTls.push(peek);
         clientSocket.resume();
 
         let tlsFailed = false;
-        tlsSock.on('error', (err) => {
+        clientTls.on('error', (err) => {
           if (tlsFailed) return;
           tlsFailed = true;
           log?.warn?.(`transparent: TLS failed for ${sniHost}: ${err?.code || err?.message}`);
           try { clientSocket.destroy(); } catch {}
         });
 
-        // After TLS handshake, check if client sent HTTP/2 preface despite ALPN
-        tlsSock.once('data', (firstChunk) => {
-          const isH2Preface = firstChunk.length >= 24 && firstChunk.toString('ascii', 0, 3) === 'PRI';
-          if (isH2Preface) {
-            log?.warn?.(`transparent: ${sniHost} sent HTTP/2 preface despite ALPN h1.1 — bridging instead`);
-            // Can't MITM HTTP/2 with http.createServer. Bridge the raw TLS.
-            const upstream = tls.connect(443, sniHost, { servername: sniHost }, () => {
-              upstream.write(firstChunk);
-              tlsSock.pipe(upstream);
-              upstream.pipe(tlsSock);
-            });
-            upstream.on('error', () => { try { tlsSock.destroy(); } catch {} });
-            tlsSock.on('error', () => { try { upstream.destroy(); } catch {} });
-            // Still log metadata
-            const startedAt = Date.now();
-            upstream.on('end', () => {
-              if (onApiCall) onApiCall({
-                host: sniHost, path: '/', method: 'POST',
-                requestHeaders: {}, requestBody: null,
-                responseStatus: 200, responseHeaders: {}, responseBody: null,
-                responseTruncated: true, startedAt, durationMs: Date.now() - startedAt,
-                peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress,
-                _containerMode: true, _bytesSent: 0, _bytesReceived: 0,
-              });
-            });
-            return;
-          }
+        // Connect to real server
+        const serverTls = tls.connect(443, sniHost, { servername: sniHost }, () => {
+          log?.info?.(`transparent: connected to ${sniHost}:443, proxying`);
+          const startedAt = Date.now();
+          let requestData = Buffer.alloc(0);
+          let responseData = Buffer.alloc(0);
+          const MAX_CAPTURE = 512 * 1024; // 512KB max capture
 
-          // HTTP/1.1 — parse normally
-          const inner = http.createServer(async (req, res) => {
-            const target = { hostname: sniHost, port: 443, path: req.url, protocol: 'https:' };
-            return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress, vault, tokenizePatterns: _tokenizePatterns, modelRouter });
+          // Client -> Server (capture request)
+          clientTls.on('data', (chunk) => {
+            if (requestData.length < MAX_CAPTURE) {
+              requestData = Buffer.concat([requestData, chunk.slice(0, MAX_CAPTURE - requestData.length)]);
+            }
+            try { serverTls.write(chunk); } catch {}
           });
-          // Push back the first chunk so the HTTP parser sees it
-          tlsSock.unshift(firstChunk);
-          inner.emit('connection', tlsSock);
+
+          // Server -> Client (capture response)
+          serverTls.on('data', (chunk) => {
+            if (responseData.length < MAX_CAPTURE) {
+              responseData = Buffer.concat([responseData, chunk.slice(0, MAX_CAPTURE - responseData.length)]);
+            }
+            try { clientTls.write(chunk); } catch {}
+          });
+
+          const logAndCleanup = () => {
+            if (onApiCall && requestData.length > 0) {
+              onApiCall({
+                host: sniHost, path: '/', method: 'POST',
+                requestHeaders: {}, requestBody: requestData,
+                responseStatus: 200, responseHeaders: { 'content-type': 'application/json' },
+                responseBody: responseData,
+                responseTruncated: responseData.length >= MAX_CAPTURE,
+                startedAt, durationMs: Date.now() - startedAt,
+                peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress,
+              });
+            }
+          };
+
+          serverTls.on('end', () => { logAndCleanup(); try { clientTls.end(); } catch {} });
+          clientTls.on('end', () => { try { serverTls.end(); } catch {} });
+          serverTls.on('error', () => { try { clientTls.destroy(); } catch {} });
+          clientTls.on('error', () => { try { serverTls.destroy(); } catch {} });
+        });
+
+        serverTls.on('error', (err) => {
+          log?.warn?.(`transparent: upstream TLS error for ${sniHost}: ${err?.message}`);
+          try { clientTls.destroy(); } catch {}
         });
       });
     };
