@@ -276,6 +276,7 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
         const tlsSock = new tls.TLSSocket(clientSocket, {
           isServer: true,
           secureContext: secureContextFor(sniHost),
+          ALPNProtocols: ['http/1.1'],  // Force HTTP/1.1 — our inner http.Server can't parse HTTP/2
         });
         tlsSock.push(peek);
         clientSocket.resume();
