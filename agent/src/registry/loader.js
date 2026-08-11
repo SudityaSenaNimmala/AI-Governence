@@ -51,7 +51,8 @@ function load() {
       const k = d.toLowerCase();
       byApiDomain.set(k, app);
       apiDomainList.push(k);
-      if (app.pinned) pinnedDomains.add(k);
+      // API endpoints are NEVER pinned — they work with custom CAs.
+      // Only web/desktop UI domains get pinned (vendor apps reject our CA).
     }
     for (const d of app.webDomains || []) {
       const k = d.toLowerCase();
