@@ -273,11 +273,13 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
         // that have the CA cert). If TLS handshake fails (ungoverned container),
         // fall back to bridge + metadata logging.
         log?.info?.(`transparent: intercepting ${sniHost}${fromContainer ? ' (container)' : ''}`);
-        const tlsSock = new tls.TLSSocket(clientSocket, {
+        // Create a TLS server that forces HTTP/1.1 via ALPN
+        const tlsOpts = {
           isServer: true,
           secureContext: secureContextFor(sniHost),
-          ALPNProtocols: ['http/1.1'],  // Force HTTP/1.1 — our inner http.Server can't parse HTTP/2
-        });
+          ALPNProtocols: ['http/1.1'],
+        };
+        const tlsSock = new tls.TLSSocket(clientSocket, tlsOpts);
         tlsSock.push(peek);
         clientSocket.resume();
 
@@ -286,19 +288,46 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
           if (tlsFailed) return;
           tlsFailed = true;
           log?.warn?.(`transparent: TLS failed for ${sniHost}: ${err?.code || err?.message}`);
-          // TLS handshake failed — client doesn't trust our CA.
-          // Can't fall back mid-connection (ClientHello already consumed).
-          // Connection is lost for this request. The client will retry and
-          // next time we could bridge, but for simplicity we just drop it.
-          // The govern command fixes this permanently for that container.
           try { clientSocket.destroy(); } catch {}
         });
 
-        const inner = http.createServer(async (req, res) => {
-          const target = { hostname: sniHost, port: 443, path: req.url, protocol: 'https:' };
-          return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress, vault, tokenizePatterns: _tokenizePatterns, modelRouter });
+        // After TLS handshake, check if client sent HTTP/2 preface despite ALPN
+        tlsSock.once('data', (firstChunk) => {
+          const isH2Preface = firstChunk.length >= 24 && firstChunk.toString('ascii', 0, 3) === 'PRI';
+          if (isH2Preface) {
+            log?.warn?.(`transparent: ${sniHost} sent HTTP/2 preface despite ALPN h1.1 — bridging instead`);
+            // Can't MITM HTTP/2 with http.createServer. Bridge the raw TLS.
+            const upstream = tls.connect(443, sniHost, { servername: sniHost }, () => {
+              upstream.write(firstChunk);
+              tlsSock.pipe(upstream);
+              upstream.pipe(tlsSock);
+            });
+            upstream.on('error', () => { try { tlsSock.destroy(); } catch {} });
+            tlsSock.on('error', () => { try { upstream.destroy(); } catch {} });
+            // Still log metadata
+            const startedAt = Date.now();
+            upstream.on('end', () => {
+              if (onApiCall) onApiCall({
+                host: sniHost, path: '/', method: 'POST',
+                requestHeaders: {}, requestBody: null,
+                responseStatus: 200, responseHeaders: {}, responseBody: null,
+                responseTruncated: true, startedAt, durationMs: Date.now() - startedAt,
+                peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress,
+                _containerMode: true, _bytesSent: 0, _bytesReceived: 0,
+              });
+            });
+            return;
+          }
+
+          // HTTP/1.1 — parse normally
+          const inner = http.createServer(async (req, res) => {
+            const target = { hostname: sniHost, port: 443, path: req.url, protocol: 'https:' };
+            return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress, vault, tokenizePatterns: _tokenizePatterns, modelRouter });
+          });
+          // Push back the first chunk so the HTTP parser sees it
+          tlsSock.unshift(firstChunk);
+          inner.emit('connection', tlsSock);
         });
-        inner.emit('connection', tlsSock);
       });
     };
 
