@@ -5325,8 +5325,7 @@ function ServerMonitorView() {
             { label: "Time", render: r => <span style={{ fontSize: 12 }}>{relTime(r.occurred_at)}</span> },
             { label: "Provider", render: r => <Tag text={r.provider || "?"} color={r.provider === "openai" ? "#10a37f" : r.provider === "anthropic" ? "#d97706" : "#6366f1"} /> },
             { label: "Model", render: r => <span style={{ fontSize: 12, fontWeight: 500 }}>{(r.model || "?").replace(/-\d{4}-\d{2}-\d{2}$/, "")}</span> },
-            { label: "Prompt", render: r => fmtTokens(r.prompt_tokens), right: true },
-            { label: "Completion", render: r => fmtTokens(r.completion_tokens), right: true },
+            { label: "Tokens", render: r => fmtTokens((r.prompt_tokens || 0) + (r.completion_tokens || 0)), right: true },
             { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
             { label: "Duration", render: r => <span>{r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "\u2014"}</span>, right: true },
           ]} rows={agentCalls} empty="No traces yet for this agent." onRow={r => setSelectedTrace(r.id)} />
@@ -5335,45 +5334,205 @@ function ServerMonitorView() {
 
       {tab === "traces" && selectedTrace && traceDetail && (
         <div>
-          <button onClick={() => setSelectedTrace(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0 }}>{"\u2190"} Back to traces</button>
-          <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 20 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+          <button onClick={() => setSelectedTrace(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+            <ChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Back to {selectedAgent?.container_name || "traces"}
+          </button>
+          <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 24 }}>
+            {/* Header */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
               <div>
-                <h3 style={{ margin: 0, fontSize: 16 }}>{traceDetail.user || "Unknown"} {"\u2014"} {(traceDetail.cmdline || "").split("/").pop()}</h3>
-                <div className="aihub_text_muted" style={{ fontSize: 12, marginTop: 4 }}>{traceDetail.trigger_source} {"\u00b7"} {traceDetail.cwd} {"\u00b7"} {new Date(traceDetail.started_at).toLocaleString()}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                  <Tag text={traceDetail.provider || "?"} color={traceDetail.provider === "openai" ? "#10a37f" : traceDetail.provider === "anthropic" ? "#d97706" : "#6366f1"} />
+                  <h3 style={{ margin: 0, fontSize: 16 }}>{(traceDetail.model || "?").replace(/-\d{4}-\d{2}-\d{2}$/, "")}</h3>
+                </div>
+                <div className="aihub_text_muted" style={{ fontSize: 12 }}>
+                  {traceDetail.host}{traceDetail.path || ""} | {new Date(traceDetail.occurred_at || traceDetail.started_at).toLocaleString()}
+                </div>
               </div>
-              <div style={{ display: "flex", gap: 12, textAlign: "right" }}>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{traceDetail.call_count}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>calls</div></div>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{(traceDetail.duration_ms / 1000).toFixed(1)}s</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>duration</div></div>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtTokens(traceDetail.total_tokens)}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>tokens</div></div>
+              <div style={{ display: "flex", gap: 16, textAlign: "right" }}>
+                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtTokens((traceDetail.prompt_tokens||0)+(traceDetail.completion_tokens||0))}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>tokens</div></div>
+                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{traceDetail.duration_ms ? (traceDetail.duration_ms/1000).toFixed(1)+"s" : "--"}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>duration</div></div>
                 <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtUsd(traceDetail.total_cost_usd)}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>cost</div></div>
               </div>
             </div>
-            <div style={{ borderTop: "1px solid #f3f4f6", paddingTop: 16 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", marginBottom: 8 }}>EXECUTION TIMELINE</div>
-              {(traceDetail.calls || []).map((call, i) => {
-                const totalDur = traceDetail.duration_ms || 1;
-                const barLeft = ((call.offset_ms || 0) / totalDur) * 100;
-                const barWidth = Math.max(((call.duration_ms || 100) / totalDur) * 100, 2);
-                const isErr = call.response_status >= 400;
-                const provColor = call.provider === "openai" ? "#10a37f" : call.provider === "anthropic" ? "#d97706" : "#6366f1";
-                return (
-                  <div key={i} style={{ marginBottom: 12, padding: 12, background: isErr ? "#fef2f2" : "#f9fafb", borderRadius: 8, border: "1px solid " + (isErr ? "#fecaca" : "#e5e7eb") }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                      <span style={{ background: provColor, color: "#fff", padding: "1px 6px", borderRadius: 4, fontSize: 10, fontWeight: 600 }}>{call.provider}</span>
-                      <span style={{ fontSize: 12, fontWeight: 600 }}>{call.model}</span>
-                      <span className="aihub_text_muted" style={{ fontSize: 11, marginLeft: "auto" }}>{call.duration_ms}ms {"\u00b7"} {fmtTokens((call.prompt_tokens||0)+(call.completion_tokens||0))} tokens {"\u00b7"} {fmtUsd(call.total_cost_usd)}</span>
-                      {isErr && <Badge text={call.response_status} color="#ef4444" />}
-                    </div>
-                    <div style={{ height: 6, background: "#e5e7eb", borderRadius: 3, position: "relative", marginBottom: 8 }}>
-                      <div style={{ position: "absolute", left: barLeft + "%", width: barWidth + "%", height: "100%", background: isErr ? "#ef4444" : provColor, borderRadius: 3 }} />
-                    </div>
-                    {call.prompt_text && <div style={{ fontSize: 11, color: "#374151", marginBottom: 4 }}><strong>Prompt:</strong> {call.prompt_text.length > 150 ? call.prompt_text.slice(0, 150) + "\u2026" : call.prompt_text}</div>}
-                    {call.response_text && <div style={{ fontSize: 11, color: "#6b7280" }}><strong>Response:</strong> {call.response_text.length > 150 ? call.response_text.slice(0, 150) + "\u2026" : call.response_text}</div>}
-                  </div>
-                );
-              })}
+
+            {/* Token breakdown */}
+            <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+              <div style={{ flex: 1, background: "#f0fdf4", borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 11, color: "#166534", fontWeight: 600, marginBottom: 2 }}>PROMPT TOKENS</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: "#166534" }}>{fmtTokens(traceDetail.prompt_tokens)}</div>
+              </div>
+              <div style={{ flex: 1, background: "#eff6ff", borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 11, color: "#1e40af", fontWeight: 600, marginBottom: 2 }}>COMPLETION TOKENS</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: "#1e40af" }}>{fmtTokens(traceDetail.completion_tokens)}</div>
+              </div>
+              <div style={{ flex: 1, background: "#fefce8", borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 11, color: "#854d0e", fontWeight: 600, marginBottom: 2 }}>RESPONSE STATUS</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: traceDetail.response_status >= 400 ? "#dc2626" : "#166534" }}>{traceDetail.response_status || 200}</div>
+              </div>
             </div>
+
+            {(() => {
+              // Parse the raw prompt/response to extract user input and assistant output
+              let userInput = null;
+              let assistantOutput = null;
+              let systemPrompt = null;
+              let toolCalls = [];
+
+              // Parse prompt_text — could be clean JSON or raw HTTP body
+              try {
+                const raw = typeof traceDetail.prompt_text === 'string' ? traceDetail.prompt_text : '';
+                // Try direct JSON parse first
+                let body = null;
+                try { body = JSON.parse(raw); } catch {
+                  // Truncated JSON — find last user message via regex
+                  const userMatch = raw.match(/"role"\s*:\s*"user"\s*,\s*"content"\s*:\s*"([^"]+)"/g);
+                  if (userMatch) {
+                    const lastMatch = userMatch[userMatch.length - 1];
+                    const contentMatch = lastMatch.match(/"content"\s*:\s*"([^"]+)"/);
+                    if (contentMatch) userInput = contentMatch[1];
+                  }
+                  // Don't extract tool calls from request — they're just definitions.
+                  // Actual tool calls come from the response (handled below).
+                }
+                if (body && Array.isArray(body?.messages)) {
+                  // Extract last user message
+                  const userMsgs = body.messages.filter(m => m.role === 'user');
+                  if (userMsgs.length > 0) {
+                    const last = userMsgs[userMsgs.length - 1];
+                    userInput = typeof last.content === 'string' ? last.content
+                      : Array.isArray(last.content) ? last.content.map(c => c.text || '').join('') : '';
+                  }
+                  // Extract system prompt
+                  const sysMsgs = body.messages.filter(m => m.role === 'system');
+                  if (sysMsgs.length > 0) {
+                    systemPrompt = typeof sysMsgs[0].content === 'string' ? sysMsgs[0].content
+                      : Array.isArray(sysMsgs[0].content) ? sysMsgs[0].content.map(c => c.text || '').join('') : '';
+                    if (systemPrompt.length > 200) systemPrompt = systemPrompt.slice(0, 200) + '...';
+                  }
+                  // Extract tool calls
+                  body.messages.forEach(m => {
+                    if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+                      m.tool_calls.forEach(tc => {
+                        toolCalls.push({ name: tc.function?.name, args: tc.function?.arguments });
+                      });
+                    }
+                  });
+                  // Extract tools available
+                  if (Array.isArray(body.tools)) {
+                    body.tools.forEach(t => {
+                      if (t.function?.name && !toolCalls.some(tc => tc.name === t.function.name)) {
+                        // Don't add available tools to toolCalls — only called ones
+                      }
+                    });
+                  }
+                }
+              } catch {
+                // Complete parse failure — show nothing rather than raw JSON
+                userInput = null;
+              }
+
+              // Parse response — could be JSON or pre-formatted text
+              try {
+                const raw = typeof traceDetail.response_text === 'string' ? traceDetail.response_text : '';
+                let parsed = false;
+
+                // Try JSON parse first
+                try {
+                  const body = JSON.parse(raw);
+                  const choice = body?.choices?.[0]?.message;
+                  if (choice?.content) {
+                    assistantOutput = choice.content;
+                    parsed = true;
+                  }
+                  if (Array.isArray(choice?.tool_calls)) {
+                    choice.tool_calls.forEach(tc => {
+                      toolCalls.push({ name: tc.function?.name, args: tc.function?.arguments });
+                    });
+                    if (!assistantOutput) parsed = true;
+                  }
+                } catch {}
+
+                // If JSON failed, check for [tool:name] format from cost-parser
+                if (!parsed && raw) {
+                  const toolPattern = /\[tool:(\w+)\]\s*(.*)/g;
+                  let match;
+                  while ((match = toolPattern.exec(raw)) !== null) {
+                    toolCalls.push({ name: match[1], args: match[2] || '' });
+                  }
+                  // Remove tool call text from output, keep any remaining text
+                  const cleanOutput = raw.replace(/\[tool:\w+\]\s*\{[^}]*\}/g, '').trim();
+                  if (cleanOutput) assistantOutput = cleanOutput;
+                }
+              } catch {
+                assistantOutput = traceDetail.response_text;
+              }
+
+              return (
+                <>
+                  {/* User Input */}
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "#166534", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                      <div style={{ width: 8, height: 8, borderRadius: 2, background: "#22c55e" }} /> USER INPUT
+                    </div>
+                    <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 14 }}>
+                      {userInput ? (
+                        <div style={{ fontSize: 14, lineHeight: 1.6, color: "#1f2937" }}>{userInput}</div>
+                      ) : (
+                        <span className="aihub_text_muted" style={{ fontSize: 12 }}>User input not available.</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Tool Calls (if any) */}
+                  {toolCalls.length > 0 && (
+                    <div style={{ marginBottom: 16 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: "#7c3aed", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                        <div style={{ width: 8, height: 8, borderRadius: 2, background: "#8b5cf6" }} /> TOOL CALLS ({toolCalls.length})
+                      </div>
+                      <div style={{ display: "grid", gap: 8 }}>
+                        {toolCalls.slice(-5).map((tc, i) => (
+                          <div key={i} style={{ background: "#f5f3ff", border: "1px solid #ddd6fe", borderRadius: 8, padding: 12 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#5b21b6", marginBottom: 4 }}>{tc.name || "unknown"}</div>
+                            <pre style={{ margin: 0, fontSize: 11, color: "#6b7280", whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 100, overflowY: "auto" }}>
+                              {(() => { try { return JSON.stringify(JSON.parse(tc.args || '{}'), null, 2); } catch { return tc.args || ''; } })()}
+                            </pre>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Assistant Output */}
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "#1e40af", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                      <div style={{ width: 8, height: 8, borderRadius: 2, background: "#3b82f6" }} /> ASSISTANT OUTPUT
+                    </div>
+                    <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 8, padding: 14 }}>
+                      {assistantOutput ? (
+                        <div style={{ fontSize: 14, lineHeight: 1.6, color: "#1f2937", whiteSpace: "pre-wrap" }}>{assistantOutput}</div>
+                      ) : (
+                        <span className="aihub_text_muted" style={{ fontSize: 12 }}>Assistant output not available.</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* System Prompt (collapsed) */}
+                  {systemPrompt && (
+                    <details style={{ marginBottom: 16 }}>
+                      <summary style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", cursor: "pointer", marginBottom: 6 }}>
+                        System Prompt ({systemPrompt.length} chars)
+                      </summary>
+                      <div style={{ background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, padding: 14, maxHeight: 200, overflowY: "auto" }}>
+                        <pre style={{ margin: 0, fontSize: 11, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "#6b7280" }}>
+                          {systemPrompt}
+                        </pre>
+                      </div>
+                    </details>
+                  )}
+                </>
+              );
+            })()}
           </div>
         </div>
       )}
