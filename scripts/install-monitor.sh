@@ -29,7 +29,7 @@ export HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy=""
 INSTALL_DIR="/opt/cloudfuze-monitor"
 DATA_DIR="/etc/cloudfuze"
 PROXY_PORT=8443
-PROXY_HOST="127.0.0.1"
+PROXY_HOST="0.0.0.0"
 REMOTE_MODE=false
 SERVICE_NAME="cloudfuze-monitor"
 ENROLL_TOKEN=""
@@ -59,13 +59,17 @@ while [[ $# -gt 0 ]]; do
       update-ca-certificates 2>/dev/null || true
       # Remove HTTPS_PROXY from /etc/environment
       sed -i '/cloudfuze-monitor/d' /etc/environment 2>/dev/null || true
-      sed -i '/HTTPS_PROXY.*8443/d' /etc/environment 2>/dev/null || true
-      # Remove firewall rules
-      iptables -S INPUT 2>/dev/null | grep "cloudfuze-monitor" | while read -r rule; do
-        iptables $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
+      sed -i '/HTTPS_PROXY/d' /etc/environment 2>/dev/null || true
+      sed -i '/https_proxy/d' /etc/environment 2>/dev/null || true
+      rm -f /etc/profile.d/cloudfuze-proxy.sh 2>/dev/null
+      # Remove all CloudFuze iptables DNAT rules
+      iptables -t nat -S PREROUTING 2>/dev/null | grep "9568\|cloudfuze" | while read -r rule; do
+        iptables -t nat $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
       done
+      # Remove UFW rule
+      ufw delete allow from 172.16.0.0/12 to any port 9568 2>/dev/null || true
       # Remove install dir
-      rm -rf "$INSTALL_DIR" "$DATA_DIR"
+      rm -rf "$INSTALL_DIR" "$DATA_DIR" /root/.cloudfuze-aigov
       rm -f /usr/local/bin/cloudfuze-monitor
       echo "CloudFuze Server Monitor uninstalled."
       exit 0;;
@@ -291,14 +295,9 @@ fi
 # Wait for startup + CA generation
 sleep 3
 
-# ── Proxy setup ──────────────────────────────────────────────────────────
-# Make proxy listen on 0.0.0.0 so governed containers can reach it.
-# No broad iptables rules — governance is per-container via 'cloudfuze-monitor govern'.
-if grep -q "PROXY_LISTEN_HOST=127.0.0.1" "/etc/systemd/system/${SERVICE_NAME}.service" 2>/dev/null; then
-  sed -i "s|PROXY_LISTEN_HOST=127.0.0.1|PROXY_LISTEN_HOST=0.0.0.0|" "/etc/systemd/system/${SERVICE_NAME}.service"
-  systemctl daemon-reload
-  systemctl restart "$SERVICE_NAME"
-  sleep 2
+# ── Open firewall for Docker containers to reach proxy ────────────────────
+if command -v ufw &>/dev/null; then
+  ufw allow from 172.16.0.0/12 to any port "$PROXY_PORT" comment "cloudfuze-monitor" 2>/dev/null || true
 fi
 
 # ── Create CLI tool ──────────────────────────────────────────────────────
@@ -395,70 +394,85 @@ case "$1" in
         continue
       fi
 
-      # Step 1: Add iptables rule for this container only
-      iptables -t nat -D PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-      iptables -t nat -A PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null
-      echo "  [OK] Traffic redirect added"
+      # Get gateway IP for DNAT target
+      GW_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' "$TARGET" 2>/dev/null)
+      if [[ -z "$GW_IP" ]]; then GW_IP="172.17.0.1"; fi
 
-      # Step 2: Inject CA cert + env vars into existing container
-      # NEVER recreates the container. Preserves all networks, ports, volumes.
-      # Uses docker cp + direct config edit (safe, no recreation needed).
-      echo "  Injecting CA cert..."
+      echo "  Gateway:   $GW_IP"
+      echo ""
 
-      # Copy CA cert into running container
-      docker exec "$TARGET" mkdir -p /certs 2>/dev/null
-      docker cp "$CA_FILE" "$TARGET:/certs/cloudfuze.crt" 2>/dev/null
-      if [[ $? -ne 0 ]]; then
-        echo "  [!] Failed to copy CA cert into container."
-        continue
-      fi
-      echo "  [OK] CA cert copied to container:/certs/cloudfuze.crt"
+      # Step 1: Copy CA cert into running container
+      echo "  [1/4] Copying CA cert..."
+      docker exec "$TARGET" mkdir -p /certs 2>/dev/null || true
+      # Use tar pipe to handle "device busy" edge case
+      tar -cf - -C "$(dirname "$CA_FILE")" "$(basename "$CA_FILE")" 2>/dev/null | docker exec -i "$TARGET" tar -xf - -C /certs/ 2>/dev/null
+      docker exec "$TARGET" mv /certs/ca.crt /certs/cloudfuze.crt 2>/dev/null || true
+      echo "  [OK] CA cert at /certs/cloudfuze.crt"
 
-      # Add env vars by editing container config directly
-      # This preserves ALL container settings (networks, ports, everything)
-      echo "  Adding env vars..."
+      # Step 2: Stop container, add env vars to config
+      echo "  [2/4] Adding env vars..."
       CID=$(docker inspect --format '{{.Id}}' "$TARGET" 2>/dev/null)
       CONFIG_FILE="/var/lib/docker/containers/$CID/config.v2.json"
-
-      if [[ ! -f "$CONFIG_FILE" ]]; then
-        echo "  [!] Container config not found. Skipping env var injection."
-        echo "  Container has CA cert but needs NODE_EXTRA_CA_CERTS env var."
-        echo "  Add to your deployment: -e NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt"
-        continue
-      fi
 
       docker stop "$TARGET" >/dev/null 2>&1
 
       python3 -c "
-import json, sys
+import json
 cfg_path = '$CONFIG_FILE'
-extra = ['NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt', 'SSL_CERT_FILE=/certs/cloudfuze.crt', 'REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt']
+proxy = 'HTTPS_PROXY=http://${GW_IP}:${PROXY_PORT}'
+proxy_lower = 'https_proxy=http://${GW_IP}:${PROXY_PORT}'
+extra = [proxy, proxy_lower, 'NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt', 'SSL_CERT_FILE=/certs/cloudfuze.crt', 'REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt']
+remove = {'HTTPS_PROXY', 'https_proxy', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'}
 with open(cfg_path, 'r') as f:
     cfg = json.load(f)
 env = cfg.get('Config', {}).get('Env', []) or []
-# Remove old cloudfuze entries if any
-env = [e for e in env if not e.startswith('NODE_EXTRA_CA_CERTS=') and not e.startswith('SSL_CERT_FILE=') and not e.startswith('REQUESTS_CA_BUNDLE=')]
+env = [e for e in env if e.split('=')[0] not in remove]
 env.extend(extra)
 cfg['Config']['Env'] = env
 with open(cfg_path, 'w') as f:
     json.dump(cfg, f)
 print('OK')
 " 2>/dev/null
+      echo "  [OK] Env vars added"
 
+      # Step 3: Start container
+      echo "  [3/4] Starting container..."
       docker start "$TARGET" >/dev/null 2>&1
-      sleep 2
+      sleep 3
 
-      if docker inspect --format '{{.State.Running}}' "$TARGET" 2>/dev/null | grep -q true; then
-        NEW_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TARGET" 2>/dev/null)
-        if [[ -n "$NEW_IP" && "$NEW_IP" != "$CONTAINER_IP" ]]; then
-          iptables -t nat -D PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-          iptables -t nat -D PREROUTING -s "$NEW_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-          iptables -t nat -A PREROUTING -s "$NEW_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null
-        fi
-        echo "  [OK] $TARGET -- fully governed (prompt, response, tokens, cost)"
-      else
+      if ! docker inspect --format '{{.State.Running}}' "$TARGET" 2>/dev/null | grep -q true; then
         echo "  [!] Container failed to start. Check: docker logs $TARGET"
+        echo "  Reverting env vars..."
+        docker stop "$TARGET" >/dev/null 2>&1
+        python3 -c "
+import json
+cfg_path = '$CONFIG_FILE'
+remove = {'HTTPS_PROXY', 'https_proxy', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'}
+with open(cfg_path, 'r') as f:
+    cfg = json.load(f)
+env = cfg.get('Config', {}).get('Env', []) or []
+env = [e for e in env if e.split('=')[0] not in remove]
+cfg['Config']['Env'] = env
+with open(cfg_path, 'w') as f:
+    json.dump(cfg, f)
+" 2>/dev/null
+        docker start "$TARGET" >/dev/null 2>&1
+        echo "  Reverted. Container restored."
+        continue
       fi
+
+      # Step 4: Add DNAT iptables rule for this container only
+      echo "  [4/4] Adding network rule..."
+      NEW_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TARGET" 2>/dev/null)
+      RULE_IP="${NEW_IP:-$CONTAINER_IP}"
+      iptables -t nat -D PREROUTING -s "$RULE_IP" -p tcp --dport 443 -j DNAT --to-destination "${GW_IP}:${PROXY_PORT}" 2>/dev/null || true
+      iptables -t nat -A PREROUTING -s "$RULE_IP" -p tcp --dport 443 -j DNAT --to-destination "${GW_IP}:${PROXY_PORT}" 2>/dev/null
+
+      echo ""
+      echo "  [OK] $TARGET -- fully governed"
+      echo "       Provider, model, tokens, cost, prompt, response -- all tracked."
+      echo ""
+      echo "  To remove: sudo cloudfuze-monitor ungovernable $TARGET"
 
       echo ""
       echo "  To remove governance:"
@@ -478,10 +492,12 @@ print('OK')
     CONTAINER_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TARGET" 2>/dev/null)
     PROXY_PORT=$(grep PROXY_LISTEN_PORT /etc/systemd/system/$SERVICE.service 2>/dev/null | head -1 | sed 's/.*=//' || echo "8443")
 
-    # Remove iptables rule
+    # Remove all DNAT rules for this container's IP
     if [[ -n "$CONTAINER_IP" ]]; then
-      iptables -t nat -D PREROUTING -s "$CONTAINER_IP" -p tcp --dport 443 -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null || true
-      echo "  [OK] Traffic redirect removed"
+      iptables -t nat -S PREROUTING 2>/dev/null | grep "$CONTAINER_IP" | while read -r rule; do
+        iptables -t nat $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
+      done
+      echo "  [OK] Network rules removed"
     fi
 
     # Remove env vars from container config and restart
@@ -489,23 +505,26 @@ print('OK')
     CONFIG_FILE="/var/lib/docker/containers/$CID/config.v2.json"
 
     if [[ -f "$CONFIG_FILE" ]]; then
+      echo "  Removing governance env vars..."
       docker stop "$TARGET" >/dev/null 2>&1
       python3 -c "
 import json
 cfg_path = '$CONFIG_FILE'
+remove = {'HTTPS_PROXY', 'https_proxy', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'}
 with open(cfg_path, 'r') as f:
     cfg = json.load(f)
 env = cfg.get('Config', {}).get('Env', []) or []
-env = [e for e in env if not e.startswith('NODE_EXTRA_CA_CERTS=') and not e.startswith('SSL_CERT_FILE=') and not e.startswith('REQUESTS_CA_BUNDLE=')]
+env = [e for e in env if e.split('=')[0] not in remove]
 cfg['Config']['Env'] = env
 with open(cfg_path, 'w') as f:
     json.dump(cfg, f)
 print('OK')
 " 2>/dev/null
       docker start "$TARGET" >/dev/null 2>&1
+      sleep 2
     fi
 
-    echo "  [OK] $TARGET -- governance removed"
+    echo "  [OK] $TARGET -- governance removed. Container restored."
     ;;
   uninstall)
     exec /opt/cloudfuze-monitor/scripts/install-monitor.sh --do-uninstall
@@ -586,12 +605,14 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
     if [[ "$DOCKER_CONTAINERS" -gt 0 ]]; then
       echo ""
       echo "  Docker detected: $DOCKER_CONTAINERS container(s) running."
-      echo "  To track AI calls from a specific container:"
+      echo "  Host processes are governed automatically."
+      echo "  To govern AI calls from Docker containers:"
       echo ""
       echo "    sudo cloudfuze-monitor govern"
       echo ""
-      echo "  This adds a lightweight network rule for that container only."
-      echo "  No files are changed inside the container. No restart needed."
+      echo "  This injects a CA cert, adds proxy config, and sets up"
+      echo "  network routing for that container. Container restarts once."
+      echo "  Full tracing: provider, model, tokens, cost, prompt, response."
       echo ""
     fi
   fi
