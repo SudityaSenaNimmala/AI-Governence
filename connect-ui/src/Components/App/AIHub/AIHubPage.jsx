@@ -5144,6 +5144,7 @@ function ServerMonitorView() {
   const [governed, setGoverned] = useState([]);
   const [selectedServer, setSelectedServer] = useState(null);
   const [selectedAgent, setSelectedAgent] = useState(null);
+  const [agentCalls, setAgentCalls] = useState([]);
   const [selectedTrace, setSelectedTrace] = useState(null);
   const [traceDetail, setTraceDetail] = useState(null);
   const [installCmd, setInstallCmd] = useState("");
@@ -5169,8 +5170,16 @@ function ServerMonitorView() {
   }, []);
 
   useEffect(() => {
+    if (!selectedAgent) { setAgentCalls([]); return; }
+    // Fetch individual calls for this agent's machine
+    apiFetch("/server-agents/calls?machineId=" + encodeURIComponent(selectedAgent.machine_id) + "&limit=200")
+      .then(calls => setAgentCalls(calls || []))
+      .catch(() => setAgentCalls([]));
+  }, [selectedAgent]);
+
+  useEffect(() => {
     if (!selectedTrace) { setTraceDetail(null); return; }
-    apiFetch("/traces/" + encodeURIComponent(selectedTrace)).then(setTraceDetail).catch(() => setTraceDetail(null));
+    apiFetch("/server-agents/calls/" + encodeURIComponent(selectedTrace)).then(setTraceDetail).catch(() => setTraceDetail(null));
   }, [selectedTrace]);
 
   const generateInstallCmd = async () => {
@@ -5216,7 +5225,7 @@ function ServerMonitorView() {
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
-        <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#22c55e" }} title="deploy indicator" />
+        <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#ef4444" }} title="deploy indicator" />
       </div>
       <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
         <StatCard icon={<Activity size={18} />} label="Total Calls" value={stats?.total_calls || 0} hint="All time" color="#3b82f6" />
@@ -5311,15 +5320,16 @@ function ServerMonitorView() {
           <button onClick={() => setSelectedAgent(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
             <ChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Back to {selectedServer.display_name}
           </button>
-          <SectionHeader title={selectedAgent.container_name} hint="Individual AI API calls from this agent" />
+          <SectionHeader title={selectedAgent.container_name} hint={`Individual AI API calls from this agent (${agentCalls.length} total)`} />
           <DataTable columns={[
-            { label: "Time", render: r => <span style={{ fontSize: 12 }}>{relTime(r.started_at || r.occurred_at)}</span> },
+            { label: "Time", render: r => <span style={{ fontSize: 12 }}>{relTime(r.occurred_at)}</span> },
             { label: "Provider", render: r => <Tag text={r.provider || "?"} color={r.provider === "openai" ? "#10a37f" : r.provider === "anthropic" ? "#d97706" : "#6366f1"} /> },
-            { label: "Model", render: r => <span style={{ fontSize: 12, fontWeight: 500 }}>{r.model || "?"}</span> },
-            { label: "Tokens", render: r => fmtTokens((r.prompt_tokens || 0) + (r.completion_tokens || 0)), right: true },
+            { label: "Model", render: r => <span style={{ fontSize: 12, fontWeight: 500 }}>{(r.model || "?").replace(/-\d{4}-\d{2}-\d{2}$/, "")}</span> },
+            { label: "Prompt", render: r => fmtTokens(r.prompt_tokens), right: true },
+            { label: "Completion", render: r => fmtTokens(r.completion_tokens), right: true },
             { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
             { label: "Duration", render: r => <span>{r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "\u2014"}</span>, right: true },
-          ]} rows={traces} empty="No traces yet for this agent." onRow={r => setSelectedTrace(r.trace_id || r.id)} />
+          ]} rows={agentCalls} empty="No traces yet for this agent." onRow={r => setSelectedTrace(r.id)} />
         </div>
       )}
 
