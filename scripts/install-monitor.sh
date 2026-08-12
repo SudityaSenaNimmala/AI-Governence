@@ -35,6 +35,7 @@ SERVICE_NAME="cloudfuze-monitor"
 ENROLL_TOKEN=""
 GOV_SERVER=""
 ALLOWED_IPS=""
+REFRESH_CLI_ONLY=false
 
 # ── Parse args ────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
