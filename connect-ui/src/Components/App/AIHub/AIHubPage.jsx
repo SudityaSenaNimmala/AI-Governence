@@ -5137,10 +5137,13 @@ function EuAiActView() {
 // the TAB_GROUPS structure further down. ServerMonitor stays reachable by URL
 // (its route is commented out in App.jsx, exactly as it was upstream).
 function ServerMonitorView() {
-  const [tab, setTab] = useState("setup");
+  const [tab, setTab] = useState("traces");
   const [stats, setStats] = useState(null);
   const [servers, setServers] = useState([]);
   const [traces, setTraces] = useState([]);
+  const [governed, setGoverned] = useState([]);
+  const [selectedServer, setSelectedServer] = useState(null);
+  const [selectedAgent, setSelectedAgent] = useState(null);
   const [selectedTrace, setSelectedTrace] = useState(null);
   const [traceDetail, setTraceDetail] = useState(null);
   const [installCmd, setInstallCmd] = useState("");
@@ -5153,12 +5156,13 @@ function ServerMonitorView() {
   useEffect(() => {
     (async () => {
       try {
-        const [s, srv, t] = await Promise.all([
+        const [s, srv, t, g] = await Promise.all([
           apiFetch("/traces/stats"),
           apiFetch("/monitor/servers"),
           apiFetch("/traces?limit=50"),
+          apiFetch("/monitor/governed").catch(() => []),
         ]);
-        setStats(s); setServers(srv); setTraces(t);
+        setStats(s); setServers(srv); setTraces(t); setGoverned(g);
       } catch (e) { console.error(e); }
       setLoading(false);
     })();
@@ -5212,7 +5216,7 @@ function ServerMonitorView() {
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
-        <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#ef4444" }} title="deploy indicator" />
+        <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#22c55e" }} title="deploy indicator" />
       </div>
       <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
         <StatCard icon={<Activity size={18} />} label="Total Calls" value={stats?.total_calls || 0} hint="All time" color="#3b82f6" />
@@ -5230,20 +5234,92 @@ function ServerMonitorView() {
         ))}
       </div>
 
-      {tab === "traces" && !selectedTrace && (
+      {tab === "traces" && !selectedServer && (
         <div>
-          <SectionHeader title="Agent Execution Traces" hint="Each trace groups LLM calls from the same process into a single execution timeline" />
+          <SectionHeader title="Servers" hint="Click a server to see governed agents and their traces" />
+          {servers.length === 0 ? (
+            <Empty icon={<Server size={24} />} title="No servers connected" msg="Install the server monitor to start capturing AI agent traces." />
+          ) : (
+            <div style={{ display: "grid", gap: 10 }}>
+              {servers.map(srv => {
+                const srvGoverned = governed.filter(g => g.machine_id === srv.machine_id);
+                return (
+                  <div key={srv.machine_id} onClick={() => setSelectedServer(srv)}
+                    style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 16, cursor: "pointer", transition: "border-color 0.2s" }}
+                    onMouseEnter={e => e.currentTarget.style.borderColor = "#3b82f6"}
+                    onMouseLeave={e => e.currentTarget.style.borderColor = "#e5e7eb"}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <div style={{ width: 8, height: 8, borderRadius: "50%", background: srv.status === "active" ? "#22c55e" : "#9ca3af" }} />
+                        <div>
+                          <div style={{ fontWeight: 600, fontSize: 15 }}>{srv.display_name || srv.hostname || srv.machine_id?.slice(0, 12)}</div>
+                          <div className="aihub_text_muted" style={{ fontSize: 12 }}>{srvGoverned.length} agent{srvGoverned.length !== 1 ? "s" : ""} governed | {srv.total_calls || 0} traces | {fmtUsd(srv.total_cost_usd)}</div>
+                        </div>
+                      </div>
+                      <ChevronRight size={16} style={{ color: "#9ca3af" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === "traces" && selectedServer && !selectedAgent && (
+        <div>
+          <button onClick={() => setSelectedServer(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+            <ChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Back to servers
+          </button>
+          <SectionHeader title={selectedServer.display_name || selectedServer.hostname} hint="Governed agents on this server. Click an agent to see its traces." />
+          {(() => {
+            const srvGoverned = governed.filter(g => g.machine_id === selectedServer.machine_id);
+            if (srvGoverned.length === 0) {
+              return <Empty icon={<Shield size={24} />} title="No governed agents" msg="Run 'sudo cloudfuze-monitor govern' on this server to start tracking Docker containers." />;
+            }
+            return (
+              <div style={{ display: "grid", gap: 10 }}>
+                {srvGoverned.map(agent => (
+                  <div key={agent.container_name} onClick={() => setSelectedAgent(agent)}
+                    style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 16, cursor: "pointer", transition: "border-color 0.2s" }}
+                    onMouseEnter={e => e.currentTarget.style.borderColor = "#3b82f6"}
+                    onMouseLeave={e => e.currentTarget.style.borderColor = "#e5e7eb"}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <div style={{ width: 32, height: 32, borderRadius: 8, background: "#eff6ff", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <Shield size={16} style={{ color: "#3b82f6" }} />
+                        </div>
+                        <div>
+                          <div style={{ fontWeight: 600, fontSize: 14 }}>{agent.container_name}</div>
+                          <div className="aihub_text_muted" style={{ fontSize: 12 }}>
+                            IP: {agent.container_ip || "?"} | {agent.total_calls || 0} traces | {fmtUsd(agent.total_cost_usd)}
+                          </div>
+                        </div>
+                      </div>
+                      <ChevronRight size={16} style={{ color: "#9ca3af" }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {tab === "traces" && selectedServer && selectedAgent && !selectedTrace && (
+        <div>
+          <button onClick={() => setSelectedAgent(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+            <ChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Back to {selectedServer.display_name}
+          </button>
+          <SectionHeader title={selectedAgent.container_name} hint="Individual AI API calls from this agent" />
           <DataTable columns={[
-            { label: "Time", render: r => <span style={{ fontSize: 12 }}>{relTime(r.started_at)}</span> },
-            { label: "User", render: r => <div><div className="aihub_text_primary">{r.user || "\u2014"}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>{(r.cmdline || "").split("/").pop()}</div></div> },
-            { label: "Provider", render: r => <div>{(r.providers || []).map(p => <Tag key={p} text={p} color={p === "openai" ? "#10a37f" : p === "anthropic" ? "#d97706" : "#6366f1"} />)}</div> },
-            { label: "Calls", key: "call_count", right: true },
-            { label: "Duration", render: r => <span>{r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "\u2014"}</span>, right: true },
-            { label: "Tokens", render: r => fmtTokens(r.total_tokens), right: true },
+            { label: "Time", render: r => <span style={{ fontSize: 12 }}>{relTime(r.started_at || r.occurred_at)}</span> },
+            { label: "Provider", render: r => <Tag text={r.provider || "?"} color={r.provider === "openai" ? "#10a37f" : r.provider === "anthropic" ? "#d97706" : "#6366f1"} /> },
+            { label: "Model", render: r => <span style={{ fontSize: 12, fontWeight: 500 }}>{r.model || "?"}</span> },
+            { label: "Tokens", render: r => fmtTokens((r.prompt_tokens || 0) + (r.completion_tokens || 0)), right: true },
             { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
-            { label: "Status", render: r => <Badge text={r.status} color={r.status === "error" ? "#ef4444" : "#22c55e"} /> },
-            { label: "Trigger", render: r => <span className="aihub_text_muted" style={{ fontSize: 11 }}>{r.trigger_source || "\u2014"}</span> },
-          ]} rows={traces} empty="No traces yet. Install the server monitor to start capturing." onRow={r => setSelectedTrace(r.trace_id)} />
+            { label: "Duration", render: r => <span>{r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "\u2014"}</span>, right: true },
+          ]} rows={traces} empty="No traces yet for this agent." onRow={r => setSelectedTrace(r.trace_id || r.id)} />
         </div>
       )}
 

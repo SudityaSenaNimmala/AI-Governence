@@ -517,6 +517,19 @@ with open(cfg_path, 'w') as f:
       iptables -t nat -D PREROUTING -s "$RULE_IP" -p tcp --dport 443 -j DNAT --to-destination "${GW_IP}:${PROXY_PORT}" 2>/dev/null || true
       iptables -t nat -A PREROUTING -s "$RULE_IP" -p tcp --dport 443 -j DNAT --to-destination "${GW_IP}:${PROXY_PORT}" 2>/dev/null
 
+      # Register with governance server
+      TOKEN_FILE="$DATA_DIR/monitor-token.json"
+      GOV_URL=$(grep GOV_SERVER_URL /etc/systemd/system/$SERVICE.service 2>/dev/null | head -1 | sed 's/.*=//')
+      if [[ -f "$TOKEN_FILE" && -n "$GOV_URL" ]]; then
+        TOKEN=$(python3 -c "import json; print(json.load(open('$TOKEN_FILE'))['token'])" 2>/dev/null)
+        if [[ -n "$TOKEN" ]]; then
+          curl -s -X POST "$GOV_URL/api/v1/monitor/governed" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"container_name\":\"$TARGET\",\"container_ip\":\"$RULE_IP\",\"gateway_ip\":\"$GW_IP\"}" >/dev/null 2>&1
+        fi
+      fi
+
       echo ""
       echo "  [OK] $TARGET -- fully governed"
       echo "       Provider, model, tokens, cost, prompt, response -- all tracked."
@@ -571,6 +584,17 @@ print('OK')
 " 2>/dev/null
       docker start "$TARGET" >/dev/null 2>&1
       sleep 2
+    fi
+
+    # Deregister from governance server
+    TOKEN_FILE="$DATA_DIR/monitor-token.json"
+    GOV_URL=$(grep GOV_SERVER_URL /etc/systemd/system/$SERVICE.service 2>/dev/null | head -1 | sed 's/.*=//')
+    if [[ -f "$TOKEN_FILE" && -n "$GOV_URL" ]]; then
+      TOKEN=$(python3 -c "import json; print(json.load(open('$TOKEN_FILE'))['token'])" 2>/dev/null)
+      if [[ -n "$TOKEN" ]]; then
+        curl -s -X DELETE "$GOV_URL/api/v1/monitor/governed/$TARGET" \
+          -H "Authorization: Bearer $TOKEN" >/dev/null 2>&1
+      fi
     fi
 
     echo "  [OK] $TARGET -- governance removed. Container restored."

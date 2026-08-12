@@ -242,6 +242,69 @@ export function mountServerAgents(app, db) {
     res.json({ totals, byUser, byProvider, byModel, byTrigger });
   }));
 
+  // ── Governed containers — register + list ───────────────────────────────
+  // Called by the 'govern' CLI command after setting up a container.
+  app.post('/api/v1/monitor/governed', requireMachineAuth, a(async (req, res) => {
+    const { container_name, container_ip, gateway_ip } = req.body || {};
+    if (!container_name) return res.status(400).json({ error: 'container_name required' });
+    await db.collection('governed_containers').updateOne(
+      { machine_id: req.machine.id, container_name },
+      { $set: { container_name, container_ip, gateway_ip, machine_id: req.machine.id, governed_at: new Date(), status: 'active' } },
+      { upsert: true },
+    );
+    res.json({ ok: true });
+  }));
+
+  // Remove governed container (called by 'ungovernable')
+  app.delete('/api/v1/monitor/governed/:name', requireMachineAuth, a(async (req, res) => {
+    await db.collection('governed_containers').updateOne(
+      { machine_id: req.machine.id, container_name: req.params.name },
+      { $set: { status: 'removed', removed_at: new Date() } },
+    );
+    res.json({ ok: true });
+  }));
+
+  // List governed containers for a server, with trace counts
+  app.get('/api/v1/monitor/governed', a(async (req, res) => {
+    const { machineId } = req.query;
+    const filter = { status: 'active' };
+    if (machineId) filter.machine_id = machineId;
+
+    const containers = await db.collection('governed_containers')
+      .find(filter)
+      .project({ _id: 0 })
+      .sort({ governed_at: -1 })
+      .toArray();
+
+    // Get trace counts per container by matching source_ip
+    for (const c of containers) {
+      if (c.container_ip) {
+        const count = await db.collection('server_agent_calls').countDocuments({
+          machine_id: c.machine_id,
+          source_ip: c.container_ip,
+        });
+        // Also count traces where source_ip is null (from current TLS bridge which doesn't set it)
+        const countNoIp = c.container_ip ? await db.collection('server_agent_calls').countDocuments({
+          machine_id: c.machine_id,
+          source_ip: null,
+        }) : 0;
+        c.trace_count = count + countNoIp;
+      } else {
+        c.trace_count = 0;
+      }
+
+      // Get latest cost summary
+      const costAgg = await db.collection('server_agent_calls').aggregate([
+        { $match: { machine_id: c.machine_id } },
+        { $group: { _id: null, total: { $sum: { $ifNull: ['$total_cost_usd', 0] } }, calls: { $sum: 1 } } },
+      ]).toArray();
+      c.total_cost_usd = costAgg[0]?.total || 0;
+      c.total_calls = costAgg[0]?.calls || 0;
+    }
+
+    res.json(containers);
+  }));
+
   // ── Traces — group calls into execution traces ─────────────────────────
   app.get('/api/v1/traces/stats', a(async (req, res) => {
     const now = new Date();
