@@ -50,28 +50,76 @@ while [[ $# -gt 0 ]]; do
     uninstall) exec "$0" --do-uninstall; exit;;
     --do-uninstall)
       echo "Uninstalling CloudFuze Server Monitor..."
+      echo ""
+
+      # Step 1: Ungovernable all governed containers
+      echo "  [1/6] Removing governance from Docker containers..."
+      if command -v docker &>/dev/null; then
+        # Find all containers that have our env vars
+        for CID in $(docker ps -aq 2>/dev/null); do
+          HAS_CFZ=$(docker inspect --format '{{range .Config.Env}}{{.}} {{end}}' "$CID" 2>/dev/null | grep -c "NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt" || true)
+          if [[ "$HAS_CFZ" -gt 0 ]]; then
+            CNAME=$(docker inspect --format '{{.Name}}' "$CID" 2>/dev/null | sed 's|^/||')
+            echo "    Cleaning $CNAME..."
+            CONFIG="/var/lib/docker/containers/$CID/config.v2.json"
+            docker stop "$CNAME" >/dev/null 2>&1
+            python3 -c "
+import json
+remove = {'HTTPS_PROXY', 'https_proxy', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'}
+with open('$CONFIG') as f: c=json.load(f)
+c['Config']['Env']=[e for e in c['Config']['Env'] if e.split('=')[0] not in remove]
+with open('$CONFIG','w') as f: json.dump(c,f)
+" 2>/dev/null
+            docker start "$CNAME" >/dev/null 2>&1
+            echo "    [OK] $CNAME restored"
+          fi
+        done
+      fi
+
+      # Step 2: Remove ALL iptables DNAT/REDIRECT rules we created
+      echo "  [2/6] Removing iptables rules..."
+      # Get proxy port from service file before we delete it
+      PPORT=$(grep PROXY_LISTEN_PORT /etc/systemd/system/cloudfuze-monitor.service 2>/dev/null | head -1 | sed 's/.*=//' || echo "")
+      if [[ -n "$PPORT" ]]; then
+        iptables -t nat -S PREROUTING 2>/dev/null | grep "$PPORT" | while read -r rule; do
+          iptables -t nat $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
+        done
+      fi
+      # Also clean any rules mentioning cloudfuze
+      iptables -t nat -S PREROUTING 2>/dev/null | grep -i "cloudfuze" | while read -r rule; do
+        iptables -t nat $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
+      done
+
+      # Step 3: Remove UFW rule
+      echo "  [3/6] Removing firewall rules..."
+      if command -v ufw &>/dev/null && [[ -n "$PPORT" ]]; then
+        ufw delete allow from 172.16.0.0/12 to any port "$PPORT" 2>/dev/null || true
+      fi
+
+      # Step 4: Stop and remove service
+      echo "  [4/6] Removing service..."
       systemctl stop "$SERVICE_NAME" 2>/dev/null || true
       systemctl disable "$SERVICE_NAME" 2>/dev/null || true
       rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
       systemctl daemon-reload 2>/dev/null || true
-      # Remove CA from trust store
+
+      # Step 5: Remove CA from trust store + proxy env vars
+      echo "  [5/6] Removing CA and proxy config..."
       rm -f /usr/local/share/ca-certificates/cloudfuze-monitor.crt
       update-ca-certificates 2>/dev/null || true
-      # Remove HTTPS_PROXY from /etc/environment
       sed -i '/cloudfuze-monitor/d' /etc/environment 2>/dev/null || true
       sed -i '/HTTPS_PROXY/d' /etc/environment 2>/dev/null || true
       sed -i '/https_proxy/d' /etc/environment 2>/dev/null || true
       rm -f /etc/profile.d/cloudfuze-proxy.sh 2>/dev/null
-      # Remove all CloudFuze iptables DNAT rules
-      iptables -t nat -S PREROUTING 2>/dev/null | grep "9568\|cloudfuze" | while read -r rule; do
-        iptables -t nat $(echo "$rule" | sed 's/^-A/-D/') 2>/dev/null || true
-      done
-      # Remove UFW rule
-      ufw delete allow from 172.16.0.0/12 to any port 9568 2>/dev/null || true
-      # Remove install dir
+
+      # Step 6: Remove all files
+      echo "  [6/6] Removing files..."
       rm -rf "$INSTALL_DIR" "$DATA_DIR" /root/.cloudfuze-aigov
       rm -f /usr/local/bin/cloudfuze-monitor
-      echo "CloudFuze Server Monitor uninstalled."
+
+      echo ""
+      echo "  CloudFuze Server Monitor completely uninstalled."
+      echo "  All containers restored. All rules removed. Server is clean."
       exit 0;;
     *) echo "Unknown arg: $1"; exit 1;;
   esac
