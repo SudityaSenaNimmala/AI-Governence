@@ -159,8 +159,9 @@ async function main() {
       completion_tokens: parsed.completion_tokens,
       cached_tokens:     parsed.cached_tokens,
       cost: parsed.cost,                          // { provider, family, *_cost_usd, total_cost_usd, pricing_version }
-      prompt_text:   parsed.prompt_text,
-      response_text: parsed.response_text,
+      // Use parsed text if available, otherwise store raw body for the dashboard
+      prompt_text:   parsed.prompt_text || (ev.requestBody ? ev.requestBody.toString('utf8').slice(0, 50000) : null),
+      response_text: parsed.response_text || (responseBody ? responseBody.toString('utf8').slice(0, 50000) : null),
       response_truncated: ev.responseTruncated,
 
       attribution,
