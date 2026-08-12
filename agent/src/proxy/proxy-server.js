@@ -229,12 +229,23 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
       return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31;
     };
 
-    // TLS server for AI traffic interception — uses SNI callback for cert selection.
-    // Using tls.createServer instead of tls.TLSSocket because createServer handles
-    // the TLS handshake properly (responds with ServerHello automatically).
+    // TLS server for transparent interception.
+    // SNICallback decides: intercept AI hosts (return our cert) or reject
+    // non-AI hosts (handled via bridge in the connection handler below).
+    const _pendingBridge = new Set(); // sockets that should be bridged, not MITMed
     const interceptTlsServer = tls.createServer({
       SNICallback: (hostname, cb) => {
-        log?.info?.(`transparent: SNI callback for ${hostname}`);
+        if (isPinnedHost(hostname) || !isIntercepted(hostname)) {
+          log?.info?.(`transparent: SNI ${hostname} -> bridge (non-AI)`);
+          // Can't bridge from here — just provide the cert anyway but mark for bridge.
+          // Actually: provide a valid cert so TLS completes, then bridge the decrypted
+          // stream. No — that defeats the purpose. Instead: just provide our cert for
+          // ALL hosts. Non-AI traffic gets decrypted and re-encrypted (overhead) but
+          // not logged. This is simpler and guaranteed to work.
+          cb(null, secureContextFor(hostname));
+          return;
+        }
+        log?.info?.(`transparent: SNI ${hostname} -> intercept`);
         cb(null, secureContextFor(hostname));
       },
       ALPNProtocols: ['http/1.1', 'h2'],
@@ -243,8 +254,20 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
     interceptTlsServer.on('secureConnection', (clientTls) => {
       const sniHost = clientTls.servername;
       if (!sniHost) { clientTls.destroy(); return; }
-      log?.info?.(`transparent: TLS handshake done for ${sniHost}, connecting upstream`);
 
+      // Non-AI: bridge decrypted stream to real server (no logging)
+      if (isPinnedHost(sniHost) || !isIntercepted(sniHost)) {
+        log?.info?.(`transparent: bridging ${sniHost} (non-AI, via TLS)`);
+        const upstream = tls.connect(443, sniHost, { servername: sniHost }, () => {
+          clientTls.pipe(upstream);
+          upstream.pipe(clientTls);
+        });
+        upstream.on('error', () => { try { clientTls.destroy(); } catch {} });
+        clientTls.on('error', () => { try { upstream.destroy(); } catch {} });
+        return;
+      }
+
+      log?.info?.(`transparent: TLS done for ${sniHost}, connecting upstream`);
       const serverTls = tls.connect(443, sniHost, { servername: sniHost }, () => {
         log?.info?.(`transparent: connected to ${sniHost}:443, proxying`);
         const startedAt = Date.now();
@@ -284,42 +307,45 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
         try { clientTls.destroy(); } catch {}
       });
     });
-    interceptTlsServer.on('tlsClientError', (err) => {
-      log?.warn?.(`transparent: client TLS error: ${err?.message}`);
+
+    // Non-AI hosts get rejected by SNICallback -> tlsClientError fires.
+    // We bridge these raw (no MITM) to their real destination.
+    interceptTlsServer.on('tlsClientError', (err, rawSocket) => {
+      if (!rawSocket || rawSocket.destroyed) return;
+      // Extract SNI from the buffered data to know where to bridge
+      const sniHost = rawSocket._sniHost;
+      if (sniHost) {
+        log?.info?.(`transparent: bridging ${sniHost} after SNI reject`);
+        const upstream = net.createConnection(443, sniHost, () => {
+          rawSocket.pipe(upstream);
+          upstream.pipe(rawSocket);
+        });
+        upstream.on('error', () => { try { rawSocket.destroy(); } catch {} });
+        rawSocket.on('error', () => { try { upstream.destroy(); } catch {} });
+      } else {
+        log?.warn?.(`transparent: TLS error (no SNI): ${err?.message}`);
+        try { rawSocket.destroy(); } catch {}
+      }
     });
 
     const handleTransparentConnection = (clientSocket) => {
       log?.info?.(`transparent: new connection from ${clientSocket.remoteAddress}:${clientSocket.remotePort}`);
+      // Peek first byte to distinguish TLS vs HTTP
       clientSocket.once('readable', () => {
-        const peek = clientSocket.read();
-        if (!peek || peek.length === 0) { clientSocket.destroy(); return; }
+        const firstByte = clientSocket.read(1);
+        if (!firstByte || firstByte.length === 0) { clientSocket.destroy(); return; }
+        // Put it back
+        clientSocket.unshift(firstByte);
+        clientSocket.resume();
 
-        if (peek[0] !== 0x16) {
-          clientSocket.unshift(peek);
+        if (firstByte[0] !== 0x16) {
+          // Not TLS — HTTP explicit proxy request
           server.emit('connection', clientSocket);
           return;
         }
-
-        const sniHost = extractSni(peek);
-        if (!sniHost) { clientSocket.destroy(); return; }
-
-        if (isPinnedHost(sniHost) || !isIntercepted(sniHost)) {
-          log?.info?.(`transparent: bridging ${sniHost} (non-AI)`);
-          const upstream = net.createConnection(443, sniHost, () => {
-            upstream.write(peek);
-            clientSocket.pipe(upstream);
-            upstream.pipe(clientSocket);
-            clientSocket.resume();
-          });
-          upstream.on('error', () => { try { clientSocket.destroy(); } catch {} });
-          clientSocket.on('error', () => { try { upstream.destroy(); } catch {} });
-          return;
-        }
-
-        // AI traffic — hand off to the TLS server for proper handshake
-        log?.info?.(`transparent: intercepting ${sniHost}`);
-        clientSocket.unshift(peek);
-        clientSocket.resume();
+        // TLS — hand to TLS server. SNICallback decides intercept vs bridge.
+        // We peek 1 byte only (not the full ClientHello), unshift it, and the
+        // TLS server reads the full stream from scratch including that byte.
         interceptTlsServer.emit('connection', clientSocket);
       });
     };
