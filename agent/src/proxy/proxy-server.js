@@ -284,16 +284,50 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
           try { clientTls.write(chunk); } catch {}
         });
 
+        // Parse HTTP message: split headers from body at \r\n\r\n
+        const splitHttp = (buf) => {
+          const str = buf.toString('utf8');
+          const sep = str.indexOf('\r\n\r\n');
+          if (sep === -1) return { firstLine: '', headers: {}, body: buf };
+          const headerBlock = str.slice(0, sep);
+          const bodyStart = sep + 4;
+          const lines = headerBlock.split('\r\n');
+          const firstLine = lines[0] || '';
+          const headers = {};
+          for (let i = 1; i < lines.length; i++) {
+            const colon = lines[i].indexOf(':');
+            if (colon > 0) headers[lines[i].slice(0, colon).trim().toLowerCase()] = lines[i].slice(colon + 1).trim();
+          }
+          return { firstLine, headers, body: buf.slice(Buffer.byteLength(str.slice(0, bodyStart), 'utf8')) };
+        };
+
+        let logged = false;
         const logAndCleanup = () => {
-          log?.info?.(`transparent: session ended for ${sniHost} — req=${requestData.length}B resp=${responseData.length}B dur=${Date.now() - startedAt}ms`);
-          log?.info?.(`transparent: req first 200 chars: ${requestData.toString('utf8', 0, 200).replace(/[\r\n]/g, ' ')}`);
-          log?.info?.(`transparent: resp first 200 chars: ${responseData.toString('utf8', 0, 200).replace(/[\r\n]/g, ' ')}`);
-          if (onApiCall && requestData.length > 0) {
+          if (logged || requestData.length === 0) return;
+          logged = true;
+
+          const req = splitHttp(requestData);
+          const resp = splitHttp(responseData);
+
+          // Parse method + path from first line: "POST /v1/chat/completions HTTP/1.1"
+          const reqParts = req.firstLine.split(' ');
+          const method = reqParts[0] || 'POST';
+          const path = reqParts[1] || '/';
+
+          // Parse status from response: "HTTP/1.1 200 OK"
+          const respParts = resp.firstLine.split(' ');
+          const status = parseInt(respParts[1]) || 200;
+
+          log?.info?.(`transparent: ${method} ${sniHost}${path} ${status} req=${req.body.length}B resp=${resp.body.length}B dur=${Date.now() - startedAt}ms`);
+
+          if (onApiCall) {
             onApiCall({
-              host: sniHost, path: '/', method: 'POST',
-              requestHeaders: {}, requestBody: requestData,
-              responseStatus: 200, responseHeaders: { 'content-type': 'application/json' },
-              responseBody: responseData,
+              host: sniHost, path, method,
+              requestHeaders: req.headers,
+              requestBody: req.body,
+              responseStatus: status,
+              responseHeaders: resp.headers,
+              responseBody: resp.body,
               responseTruncated: responseData.length >= MAX_CAPTURE,
               startedAt, durationMs: Date.now() - startedAt,
               peerPort: clientTls.remotePort, peerAddress: clientTls.remoteAddress,
@@ -302,7 +336,7 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
         };
         serverTls.on('end', () => { logAndCleanup(); try { clientTls.end(); } catch {} });
         clientTls.on('end', () => { logAndCleanup(); try { serverTls.end(); } catch {} });
-        serverTls.on('close', () => { if (requestData.length > 0) logAndCleanup(); });
+        serverTls.on('close', logAndCleanup);
         serverTls.on('error', () => { logAndCleanup(); try { clientTls.destroy(); } catch {} });
         clientTls.on('error', () => { try { serverTls.destroy(); } catch {} });
       });
