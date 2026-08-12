@@ -94,15 +94,39 @@ async function main() {
       return;
     }
 
+    // If response is chunked, decode the chunk framing
+    let responseBody = ev.responseBody;
+    if (responseBody && ev.responseHeaders?.['transfer-encoding'] === 'chunked') {
+      try {
+        const chunks = [];
+        let buf = responseBody;
+        while (buf.length > 0) {
+          const lineEnd = buf.indexOf('\r\n');
+          if (lineEnd === -1) break;
+          const sizeStr = buf.slice(0, lineEnd).toString('utf8').trim();
+          const size = parseInt(sizeStr, 16);
+          if (isNaN(size) || size === 0) break;
+          const start = lineEnd + 2;
+          if (start + size > buf.length) break;
+          chunks.push(buf.slice(start, start + size));
+          buf = buf.slice(start + size + 2); // skip \r\n after chunk
+        }
+        if (chunks.length > 0) responseBody = Buffer.concat(chunks);
+      } catch {}
+    }
+
     const parsed = parseApiCall({
       host: ev.host,
       path: ev.path,
       requestBody: ev.requestBody,
       requestHeaders: ev.requestHeaders,
-      responseBody: ev.responseBody,
+      responseBody: responseBody,
       responseHeaders: ev.responseHeaders,
     });
-    if (!parsed) return;     // not a known LLM endpoint, or no usage to bill
+    if (!parsed) {
+      log.warn(`parseApiCall returned null for ${ev.host}${ev.path} (reqBody=${ev.requestBody?.length || 0}B respBody=${responseBody?.length || 0}B)`);
+      return;
+    }
 
     // Attribute: peer port → PID → /proc.
     let attribution = null;
