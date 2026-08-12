@@ -330,24 +330,11 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
 
     const handleTransparentConnection = (clientSocket) => {
       log?.info?.(`transparent: new connection from ${clientSocket.remoteAddress}:${clientSocket.remotePort}`);
-      // Peek first byte to distinguish TLS vs HTTP
-      clientSocket.once('readable', () => {
-        const firstByte = clientSocket.read(1);
-        if (!firstByte || firstByte.length === 0) { clientSocket.destroy(); return; }
-        // Put it back
-        clientSocket.unshift(firstByte);
-        clientSocket.resume();
-
-        if (firstByte[0] !== 0x16) {
-          // Not TLS — HTTP explicit proxy request
-          server.emit('connection', clientSocket);
-          return;
-        }
-        // TLS — hand to TLS server. SNICallback decides intercept vs bridge.
-        // We peek 1 byte only (not the full ClientHello), unshift it, and the
-        // TLS server reads the full stream from scratch including that byte.
-        interceptTlsServer.emit('connection', clientSocket);
-      });
+      // All iptables-redirected traffic is TLS (port 443).
+      // Hand directly to TLS server — no peeking needed.
+      // SNICallback decides intercept (AI) vs bridge (non-AI).
+      clientSocket.resume();
+      interceptTlsServer.emit('connection', clientSocket);
     };
 
     // Replace the default HTTP server with a raw TCP server that peeks first byte.
