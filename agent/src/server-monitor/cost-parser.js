@@ -202,11 +202,23 @@ function parseOpenAI({ urlPath, reqJson, respJson, sseEvents }) {
   if (Array.isArray(reqJson?.messages)) {
     promptText = reqJson.messages.map((m) => {
       const role = m.role || 'user';
-      const content = typeof m.content === 'string'
-        ? m.content
-        : Array.isArray(m.content) ? m.content.map((c) => c.text || '').join('') : '';
+      let content = '';
+      if (typeof m.content === 'string') {
+        content = m.content;
+      } else if (Array.isArray(m.content)) {
+        content = m.content.map((c) => c.text || c.refusal || (c.type === 'image_url' ? '[image]' : '')).join('');
+      } else if (m.content === null || m.content === undefined) {
+        // Tool call messages have null content — show tool_calls instead
+        if (Array.isArray(m.tool_calls)) {
+          content = m.tool_calls.map((tc) => `[tool:${tc.function?.name || '?'}](${(tc.function?.arguments || '').slice(0, 200)})`).join(' ');
+        }
+      }
+      // Also capture tool results
+      if (m.role === 'tool' && m.content) {
+        content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content).slice(0, 500);
+      }
       return `[${role}] ${content}`;
-    }).join('\n');
+    }).filter(line => line.length > 3).join('\n');
   } else if (typeof reqJson?.prompt === 'string') {
     promptText = reqJson.prompt;
   } else if (typeof reqJson?.input === 'string') {
@@ -220,7 +232,15 @@ function parseOpenAI({ urlPath, reqJson, respJson, sseEvents }) {
   let usage = respJson?.usage || null;
 
   if (respJson?.choices?.length) {
-    responseText = respJson.choices.map((c) => c.message?.content || c.text || '').join('\n');
+    responseText = respJson.choices.map((c) => {
+      if (c.message?.content) return c.message.content;
+      if (c.text) return c.text;
+      // Tool call responses
+      if (Array.isArray(c.message?.tool_calls)) {
+        return c.message.tool_calls.map((tc) => `[tool:${tc.function?.name || '?'}] ${(tc.function?.arguments || '').slice(0, 500)}`).join('\n');
+      }
+      return '';
+    }).join('\n');
   } else if (sseEvents) {
     const collected = [];
     let finalUsage = null;
