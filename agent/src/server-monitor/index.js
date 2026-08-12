@@ -115,6 +115,11 @@ async function main() {
       } catch {}
     }
 
+    // Debug: log what we're passing to the parser
+    const reqBodyStr = ev.requestBody ? ev.requestBody.toString('utf8', 0, 100) : '(null)';
+    const respBodyStr = responseBody ? responseBody.toString('utf8', 0, 100) : '(null)';
+    log.info(`parseApiCall input: reqBody[${ev.requestBody?.length || 0}B]="${reqBodyStr}" respBody[${responseBody?.length || 0}B]="${respBodyStr}"`);
+
     const parsed = parseApiCall({
       host: ev.host,
       path: ev.path,
@@ -127,6 +132,7 @@ async function main() {
       log.warn(`parseApiCall returned null for ${ev.host}${ev.path} (reqBody=${ev.requestBody?.length || 0}B respBody=${responseBody?.length || 0}B)`);
       return;
     }
+    log.info(`parsed: provider=${parsed.provider} model=${parsed.model} promptText=${parsed.prompt_text?.length || 0} responseText=${parsed.response_text?.length || 0}`);
 
     // Attribute: peer port → PID → /proc.
     let attribution = null;
