@@ -285,6 +285,9 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
         });
 
         const logAndCleanup = () => {
+          log?.info?.(`transparent: session ended for ${sniHost} — req=${requestData.length}B resp=${responseData.length}B dur=${Date.now() - startedAt}ms`);
+          log?.info?.(`transparent: req first 200 chars: ${requestData.toString('utf8', 0, 200).replace(/[\r\n]/g, ' ')}`);
+          log?.info?.(`transparent: resp first 200 chars: ${responseData.toString('utf8', 0, 200).replace(/[\r\n]/g, ' ')}`);
           if (onApiCall && requestData.length > 0) {
             onApiCall({
               host: sniHost, path: '/', method: 'POST',
@@ -298,8 +301,9 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
           }
         };
         serverTls.on('end', () => { logAndCleanup(); try { clientTls.end(); } catch {} });
-        clientTls.on('end', () => { try { serverTls.end(); } catch {} });
-        serverTls.on('error', () => { try { clientTls.destroy(); } catch {} });
+        clientTls.on('end', () => { logAndCleanup(); try { serverTls.end(); } catch {} });
+        serverTls.on('close', () => { if (requestData.length > 0) logAndCleanup(); });
+        serverTls.on('error', () => { logAndCleanup(); try { clientTls.destroy(); } catch {} });
         clientTls.on('error', () => { try { serverTls.destroy(); } catch {} });
       });
       serverTls.on('error', (err) => {
