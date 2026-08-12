@@ -229,18 +229,71 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
       return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31;
     };
 
-    // Handle raw TLS connections that arrive on the same port via iptables REDIRECT.
-    // The HTTP server's 'connection' event fires for every new TCP socket BEFORE
-    // any HTTP parsing. We peek the first byte: 0x16 = TLS → handle as transparent.
-    // Anything else → let the HTTP server parse it normally (CONNECT / plain HTTP).
+    // TLS server for AI traffic interception — uses SNI callback for cert selection.
+    // Using tls.createServer instead of tls.TLSSocket because createServer handles
+    // the TLS handshake properly (responds with ServerHello automatically).
+    const interceptTlsServer = tls.createServer({
+      SNICallback: (hostname, cb) => {
+        log?.info?.(`transparent: SNI callback for ${hostname}`);
+        cb(null, secureContextFor(hostname));
+      },
+      ALPNProtocols: ['http/1.1', 'h2'],
+    });
+
+    interceptTlsServer.on('secureConnection', (clientTls) => {
+      const sniHost = clientTls.servername;
+      if (!sniHost) { clientTls.destroy(); return; }
+      log?.info?.(`transparent: TLS handshake done for ${sniHost}, connecting upstream`);
+
+      const serverTls = tls.connect(443, sniHost, { servername: sniHost }, () => {
+        log?.info?.(`transparent: connected to ${sniHost}:443, proxying`);
+        const startedAt = Date.now();
+        let requestData = Buffer.alloc(0);
+        let responseData = Buffer.alloc(0);
+        const MAX_CAPTURE = 512 * 1024;
+
+        clientTls.on('data', (chunk) => {
+          if (requestData.length < MAX_CAPTURE) requestData = Buffer.concat([requestData, chunk.slice(0, MAX_CAPTURE - requestData.length)]);
+          try { serverTls.write(chunk); } catch {}
+        });
+        serverTls.on('data', (chunk) => {
+          if (responseData.length < MAX_CAPTURE) responseData = Buffer.concat([responseData, chunk.slice(0, MAX_CAPTURE - responseData.length)]);
+          try { clientTls.write(chunk); } catch {}
+        });
+
+        const logAndCleanup = () => {
+          if (onApiCall && requestData.length > 0) {
+            onApiCall({
+              host: sniHost, path: '/', method: 'POST',
+              requestHeaders: {}, requestBody: requestData,
+              responseStatus: 200, responseHeaders: { 'content-type': 'application/json' },
+              responseBody: responseData,
+              responseTruncated: responseData.length >= MAX_CAPTURE,
+              startedAt, durationMs: Date.now() - startedAt,
+              peerPort: clientTls.remotePort, peerAddress: clientTls.remoteAddress,
+            });
+          }
+        };
+        serverTls.on('end', () => { logAndCleanup(); try { clientTls.end(); } catch {} });
+        clientTls.on('end', () => { try { serverTls.end(); } catch {} });
+        serverTls.on('error', () => { try { clientTls.destroy(); } catch {} });
+        clientTls.on('error', () => { try { serverTls.destroy(); } catch {} });
+      });
+      serverTls.on('error', (err) => {
+        log?.warn?.(`transparent: upstream error for ${sniHost}: ${err?.message}`);
+        try { clientTls.destroy(); } catch {}
+      });
+    });
+    interceptTlsServer.on('tlsClientError', (err) => {
+      log?.warn?.(`transparent: client TLS error: ${err?.message}`);
+    });
+
     const handleTransparentConnection = (clientSocket) => {
       log?.info?.(`transparent: new connection from ${clientSocket.remoteAddress}:${clientSocket.remotePort}`);
       clientSocket.once('readable', () => {
         const peek = clientSocket.read();
-        log?.info?.(`transparent: readable fired, got ${peek ? peek.length : 0} bytes, first byte: ${peek ? '0x' + peek[0].toString(16) : 'null'}`);
         if (!peek || peek.length === 0) { clientSocket.destroy(); return; }
 
-        // Not TLS? Put the data back and let the HTTP server handle it.
         if (peek[0] !== 0x16) {
           clientSocket.unshift(peek);
           server.emit('connection', clientSocket);
@@ -248,15 +301,9 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
         }
 
         const sniHost = extractSni(peek);
-        if (!sniHost) {
-          clientSocket.destroy();
-          return;
-        }
-
-        const fromContainer = isDockerIp(clientSocket.remoteAddress);
+        if (!sniHost) { clientSocket.destroy(); return; }
 
         if (isPinnedHost(sniHost) || !isIntercepted(sniHost)) {
-          // Non-AI traffic — bridge transparently
           log?.info?.(`transparent: bridging ${sniHost} (non-AI)`);
           const upstream = net.createConnection(443, sniHost, () => {
             upstream.write(peek);
@@ -269,35 +316,11 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
           return;
         }
 
-        // AI traffic — try MITM (works for host processes and governed containers
-        // that have the CA cert). If TLS handshake fails (ungoverned container),
-        // fall back to bridge + metadata logging.
-        log?.info?.(`transparent: intercepting ${sniHost}${fromContainer ? ' (container)' : ''}`);
-        const tlsSock = new tls.TLSSocket(clientSocket, {
-          isServer: true,
-          secureContext: secureContextFor(sniHost),
-        });
-        tlsSock.push(peek);
+        // AI traffic — hand off to the TLS server for proper handshake
+        log?.info?.(`transparent: intercepting ${sniHost}`);
+        clientSocket.unshift(peek);
         clientSocket.resume();
-
-        let tlsFailed = false;
-        tlsSock.on('error', (err) => {
-          if (tlsFailed) return;
-          tlsFailed = true;
-          log?.warn?.(`transparent: TLS failed for ${sniHost}: ${err?.code || err?.message}`);
-          // TLS handshake failed — client doesn't trust our CA.
-          // Can't fall back mid-connection (ClientHello already consumed).
-          // Connection is lost for this request. The client will retry and
-          // next time we could bridge, but for simplicity we just drop it.
-          // The govern command fixes this permanently for that container.
-          try { clientSocket.destroy(); } catch {}
-        });
-
-        const inner = http.createServer(async (req, res) => {
-          const target = { hostname: sniHost, port: 443, path: req.url, protocol: 'https:' };
-          return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress, vault, tokenizePatterns: _tokenizePatterns, modelRouter });
-        });
-        inner.emit('connection', tlsSock);
+        interceptTlsServer.emit('connection', clientSocket);
       });
     };
 

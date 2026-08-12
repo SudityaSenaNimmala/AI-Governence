@@ -5212,7 +5212,7 @@ function ServerMonitorView() {
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
-        <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#ef4444" }} title="deploy indicator" />
+        <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#22c55e" }} title="deploy indicator" />
       </div>
       <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
         <StatCard icon={<Activity size={18} />} label="Total Calls" value={stats?.total_calls || 0} hint="All time" color="#3b82f6" />
@@ -5497,7 +5497,12 @@ function InstallationsView() {
   const download=async(url,filename,id)=>{
     setDownloading(id);
     try {
-      const r=await fetch(url);
+      let r=await fetch(url);
+      // If .exe build unavailable (no NSIS), fall back to zip automatically
+      if(!r.ok && url.includes('agent-installer-exe')){
+        r=await fetch('/api/v1/installations/agent-installer?platform=windows');
+        filename='CloudFuze-Desktop-Agent-windows.zip';
+      }
       if(!r.ok) {
         const body=await r.json().catch(()=>({}));
         throw new Error(body.error ? `${body.error}${body.detail?': '+body.detail:''}` : `HTTP ${r.status}`);
