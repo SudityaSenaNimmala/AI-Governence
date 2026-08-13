@@ -125,7 +125,7 @@ export function parseApiCall({ host, path: urlPath, requestBody, requestHeaders,
     cachedTokens: parsed.cached_tokens || 0,
     providerHint: provider,
   });
-  const out = { provider, ...parsed, cost };
+  const out = { provider, ...parsed, cost, _reqJson: reqJson };
   if (discovered) out._discovered = discovered;
   return out;
 }
