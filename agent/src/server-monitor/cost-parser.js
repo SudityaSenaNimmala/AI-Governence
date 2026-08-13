@@ -71,9 +71,6 @@ export function providerForHost(host, urlPath = null) {
 export function parseApiCall({ host, path: urlPath, requestBody, requestHeaders, responseBody, responseHeaders }) {
   const reqBuf = maybeDecompress(requestBody, requestHeaders);
   const reqJson = safeJson(reqBuf);
-  // DEBUG: log whether reqJson parsed
-  if (requestBody && !reqJson) console.log(`[debug] safeJson failed for reqBuf[${reqBuf?.length || 0}B] (raw=${requestBody.length}B), first50="${(reqBuf || requestBody).toString('utf8', 0, 50)}", lastBytes="${(reqBuf || requestBody).toString('hex', Math.max(0, (reqBuf || requestBody).length - 10))}"`);
-  if (reqJson) console.log(`[debug] reqJson parsed OK, model=${reqJson.model}, messages=${Array.isArray(reqJson.messages) ? reqJson.messages.length : 'N/A'}`);
   const respBuf = maybeDecompress(responseBody, responseHeaders);
 
   const respStr = respBuf ? respBuf.toString('utf8', 0, 50) : '';
@@ -252,11 +249,6 @@ function parseOpenAI({ urlPath, reqJson, respJson, sseEvents, requestBody }) {
   } else if (sseEvents) {
     const collected = [];
     let finalUsage = null;
-    // DEBUG: log first 3 SSE events to understand structure
-    if (sseEvents.length > 0) {
-      console.log(`[debug] SSE events count=${sseEvents.length}, first=${JSON.stringify(sseEvents[0]).slice(0, 300)}`);
-      if (sseEvents.length > 1) console.log(`[debug] SSE event[1]=${JSON.stringify(sseEvents[1]).slice(0, 300)}`);
-    }
     for (const e of sseEvents) {
       // Chat streaming: each `data:` is `{choices:[{delta:{content:"..."}}]}`.
       const delta = e?.choices?.[0]?.delta?.content;
