@@ -100,7 +100,7 @@ export function parseApiCall({ host, path: urlPath, requestBody, requestHeaders,
   // as 'openai' — the only difference is the tag and the discovery breadcrumb.
   let parsed = null;
   if (provider === 'openai' || provider === 'openai-azure' || provider === 'local-openai-compatible' || provider === 'unknown:openai') {
-    parsed = parseOpenAI({ urlPath, reqJson, respJson, sseEvents });
+    parsed = parseOpenAI({ urlPath, reqJson, respJson, sseEvents, requestBody });
   } else if (provider === 'anthropic' || provider === 'unknown:anthropic') {
     parsed = parseAnthropic({ urlPath, reqJson, respJson, sseEvents });
   } else if (provider === 'google' || provider === 'unknown:google') {
@@ -195,7 +195,7 @@ export function detectAiShape({ reqJson, respJson, sseEvents, ndjsonEvents, urlP
 
 // ---- Provider-specific parsers ----
 
-function parseOpenAI({ urlPath, reqJson, respJson, sseEvents }) {
+function parseOpenAI({ urlPath, reqJson, respJson, sseEvents, requestBody }) {
   // /v1/chat/completions, /v1/completions, /v1/embeddings, /v1/responses
   if (!urlPath) return null;
   // Get model from request body, response body, or first SSE event
@@ -264,7 +264,7 @@ function parseOpenAI({ urlPath, reqJson, respJson, sseEvents }) {
   if (!usage && (sseEvents || respJson)) {
     // Estimate tokens from request/response size
     // Use full JSON stringified length — most reliable across all message formats
-    const reqStr = reqJson ? JSON.stringify(reqJson) : '';
+    const reqStr = reqJson ? JSON.stringify(reqJson) : (requestBody ? requestBody.toString('utf8').slice(0, 100000) : '');
     const respStr = typeof responseText === 'string' ? responseText : '';
     // ~4 chars per token for English text (rough but consistent)
     usage = {
