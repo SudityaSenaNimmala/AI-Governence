@@ -687,17 +687,10 @@ with open('$CONFIG_FILE','w') as f: json.dump(c,f)
       COMPOSE_FILE=$(echo "${CONFIGS[0]}" | xargs)
       BACKUP="${COMPOSE_FILE}.cloudfuze-backup"
 
-      if [[ -f "$BACKUP" ]]; then
-        echo "  Restoring compose file from backup..."
-        cp "$BACKUP" "$COMPOSE_FILE"
-        rm -f "$BACKUP"
-        echo "  [OK] Compose file restored"
-      else
-        # No backup — remove our lines manually
-        if grep -q "cloudfuze.crt" "$COMPOSE_FILE" 2>/dev/null; then
-          sed -i '/cloudfuze\.crt/d' "$COMPOSE_FILE" 2>/dev/null
-          echo "  [OK] Removed governance lines from compose file"
-        fi
+      # Remove only our specific lines (preserves all other changes)
+      if grep -q "cloudfuze.crt" "$COMPOSE_FILE" 2>/dev/null; then
+        sed -i '/cloudfuze\.crt/d' "$COMPOSE_FILE" 2>/dev/null
+        echo "  [OK] Removed governance lines from compose file"
       fi
 
       # Clean up override file if exists
