@@ -251,12 +251,11 @@ function parseOpenAI({ urlPath, reqJson, respJson, sseEvents, requestBody }) {
     let finalUsage = null;
     for (const e of sseEvents) {
       // Chat streaming: each `data:` is `{choices:[{delta:{content:"..."}}]}`.
-      const delta = e?.choices?.[0]?.delta?.content;
-      // Also check for tool_calls in delta (when the response is a tool call, content is null)
-      const toolDelta = e?.choices?.[0]?.delta?.tool_calls;
-      if (typeof delta === 'string') collected.push(delta);
-      else if (Array.isArray(toolDelta)) {
-        for (const tc of toolDelta) {
+      const d = e?.choices?.[0]?.delta;
+      if (typeof d?.content === 'string') collected.push(d.content);
+      else if (typeof d?.refusal === 'string') collected.push(`[REFUSED] ${d.refusal}`);
+      else if (Array.isArray(d?.tool_calls)) {
+        for (const tc of d.tool_calls) {
           if (tc?.function?.arguments) collected.push(tc.function.arguments);
         }
       }
@@ -303,7 +302,7 @@ function parseAnthropic({ urlPath, reqJson, respJson, sseEvents }) {
   if (reqJson) {
     const parts = [];
     if (typeof reqJson.system === 'string') parts.push(`[system] ${reqJson.system}`);
-    else if (Array.isArray(reqJson.system)) parts.push(`[system] ${reqJson.system.map((s) => s.text || '').join('')}`);
+    else if (Array.isArray(reqJson.system)) parts.push(`[system] ${reqJson.system.map((s) => typeof s === 'string' ? s : (s.text || '')).join('')}`);
     if (Array.isArray(reqJson.messages)) {
       for (const m of reqJson.messages) {
         const role = m.role || 'user';
@@ -320,13 +319,20 @@ function parseAnthropic({ urlPath, reqJson, respJson, sseEvents }) {
   let usage = respJson?.usage || null;
 
   if (Array.isArray(respJson?.content)) {
-    responseText = respJson.content.map((b) => b.text || '').join('');
+    responseText = respJson.content.map((b) => {
+      if (b.text) return b.text;
+      if (b.type === 'tool_use') return `[tool:${b.name}] ${JSON.stringify(b.input || {}).slice(0, 500)}`;
+      return '';
+    }).join('');
   } else if (sseEvents) {
     const collected = [];
     let finalUsage = null;
     for (const e of sseEvents) {
-      // Anthropic streaming events: `content_block_delta` with `{delta:{type:'text_delta', text:'...'}}`.
-      if (e?.type === 'content_block_delta' && e?.delta?.text) collected.push(e.delta.text);
+      // Anthropic streaming: text_delta has delta.text, input_json_delta has delta.partial_json (tool calls).
+      if (e?.type === 'content_block_delta') {
+        if (e.delta?.text) collected.push(e.delta.text);
+        else if (e.delta?.partial_json) collected.push(e.delta.partial_json);
+      }
       // `message_delta` events at the end carry final usage.
       if (e?.type === 'message_delta' && e?.usage) finalUsage = { ...(finalUsage || {}), ...e.usage };
       if (e?.type === 'message_start' && e?.message?.usage) finalUsage = { ...(finalUsage || {}), ...e.message.usage };
@@ -364,9 +370,20 @@ function parseGoogle({ urlPath, reqJson, respJson, sseEvents }) {
   }
 
   // Response — `candidates[0].content.parts[].text` + `usageMetadata`.
+  // Gemini streaming returns a JSON array [{candidates, usageMetadata}, ...], not SSE.
   let responseText = null;
   let usage = respJson?.usageMetadata || null;
-  if (respJson?.candidates?.length) {
+  if (Array.isArray(respJson)) {
+    // Streaming array format: each element has candidates + optional usageMetadata
+    const collected = [];
+    for (const chunk of respJson) {
+      if (chunk?.candidates?.[0]?.content?.parts) {
+        collected.push(chunk.candidates[0].content.parts.map((p) => p.text || '').join(''));
+      }
+      if (chunk?.usageMetadata) usage = chunk.usageMetadata;
+    }
+    if (collected.length) responseText = collected.join('');
+  } else if (respJson?.candidates?.length) {
     responseText = respJson.candidates.map((c) => {
       return Array.isArray(c.content?.parts) ? c.content.parts.map((p) => p.text || '').join('') : '';
     }).join('\n');
@@ -528,7 +545,9 @@ function safeJson(buf) {
     try {
       let str = buf.toString('utf8');
       if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
-      if (str[0] === '{') {
+      const open = str[0];
+      const close = open === '{' ? '}' : open === '[' ? ']' : null;
+      if (close) {
         let depth = 0;
         let inString = false;
         let escape = false;
@@ -538,8 +557,8 @@ function safeJson(buf) {
           if (ch === '\\' && inString) { escape = true; continue; }
           if (ch === '"') { inString = !inString; continue; }
           if (inString) continue;
-          if (ch === '{') depth++;
-          else if (ch === '}') { depth--; if (depth === 0) return JSON.parse(str.slice(0, i + 1)); }
+          if (ch === open) depth++;
+          else if (ch === close) { depth--; if (depth === 0) return JSON.parse(str.slice(0, i + 1)); }
         }
       }
     } catch {}
