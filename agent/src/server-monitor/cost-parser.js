@@ -262,35 +262,15 @@ function parseOpenAI({ urlPath, reqJson, respJson, sseEvents }) {
   // If no usage data (common with SSE streams that don't include_usage),
   // estimate tokens from the content so we still capture the trace.
   if (!usage && (sseEvents || respJson)) {
-    // For prompt tokens: use the full request JSON size (messages + system prompt)
-    // reqJson contains the entire request body including messages array
-    let promptChars = 0;
-    if (reqJson) {
-      // Count chars from all messages content
-      if (Array.isArray(reqJson.messages)) {
-        for (const m of reqJson.messages) {
-          if (typeof m.content === 'string') promptChars += m.content.length;
-          else if (Array.isArray(m.content)) {
-            for (const c of m.content) { if (c.text) promptChars += c.text.length; }
-          }
-          if (Array.isArray(m.tool_calls)) {
-            for (const tc of m.tool_calls) { promptChars += (tc.function?.arguments || '').length; }
-          }
-        }
-        // Add tool definitions
-        if (Array.isArray(reqJson.tools)) {
-          promptChars += JSON.stringify(reqJson.tools).length;
-        }
-      } else {
-        promptChars = JSON.stringify(reqJson).length;
-      }
-    }
+    // Estimate tokens from request/response size
+    // Use full JSON stringified length — most reliable across all message formats
+    const reqStr = reqJson ? JSON.stringify(reqJson) : '';
     const respStr = typeof responseText === 'string' ? responseText : '';
-    // Rough estimate: ~4 chars per token for English text
+    // ~4 chars per token for English text (rough but consistent)
     usage = {
-      prompt_tokens: Math.ceil(promptChars / 4),
+      prompt_tokens: Math.ceil(reqStr.length / 4),
       completion_tokens: Math.ceil(respStr.length / 4),
-      total_tokens: Math.ceil((promptChars + respStr.length) / 4),
+      total_tokens: Math.ceil((reqStr.length + respStr.length) / 4),
       _estimated: true,
     };
   }
