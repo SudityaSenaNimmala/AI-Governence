@@ -12,6 +12,7 @@
 import { a } from '../util.js';
 import { fireWebhooks } from './webhooks.js';
 import { scoreToLevel, normalizeStoredRisk } from '../lib/risk-scale.js';
+import { assessToolRisk } from '../lib/tool-risk.js';
 
 // Normalize finding types to registry categories
 const CATEGORY_MAP = {
@@ -49,12 +50,20 @@ export function mountRegistry(app, db) {
     const sanctionMap = new Map(sanctions.map(s => [s.tool_key, s]));
 
     // 4. DLP usage stats per service
+    // Overrides, sensitive-content count and machine spread are aggregated alongside
+    // the existing fields because they are what actually scores a browser/desktop-
+    // governed tool. block_count was already computed here and then discarded by
+    // every consumer, while the platform rows published risk_score: null — the signal
+    // was one line away from the field that said "unknown".
     const dlpStats = await db.collection('dlp_events').aggregate([
       { $group: {
         _id: '$ai_service',
         event_count: { $sum: 1 },
         last_event: { $max: '$occurred_at' },
         block_count: { $sum: { $cond: [{ $eq: ['$event_kind', 'enforcement_block'] }, 1, 0] } },
+        override_count: { $sum: { $cond: [{ $eq: ['$event_kind', 'enforcement_override'] }, 1, 0] } },
+        sensitive_count: { $sum: { $cond: [{ $in: ['$secret_class', ['critical', 'high']] }, 1, 0] } },
+        machines: { $addToSet: '$machine_id' },
       }},
     ]).toArray().catch(() => []);
     const dlpMap = new Map(dlpStats.map(d => [d._id, d]));
@@ -236,9 +245,25 @@ export function mountRegistry(app, db) {
         owner_email: null,
         owner_active: true,
         is_orphaned: false,
-        risk_score: null,
-        risk_level: null,
-        risk_factors: [],
+        // Scored from endpoint telemetry rather than left null.
+        //
+        // These tools are governed BY the browser extension and desktop agent, so
+        // that capture is their governance signal — there is no admin API to read
+        // permissions or connectors from. Publishing null meant four services with
+        // real captured traffic showed as blanks in the Overview risk breakdown; two
+        // of them had a 100% block rate on critical/high content.
+        ...(() => {
+          const r = assessToolRisk({
+            events: dlp?.event_count || 0,
+            blocks: dlp?.block_count || 0,
+            overrides: dlp?.override_count || 0,
+            sensitive: dlp?.sensitive_count || 0,
+            machines: (dlp?.machines || []).filter(Boolean).length,
+            status: plat.blocked ? 'blocked' : (plat.governed ? 'approved' : 'unknown'),
+            lastActive: dlp?.last_event || null,
+          });
+          return { risk_score: r.score, risk_level: r.level, risk_factors: r.factors, risk_basis: r.basis, risk_recommendations: r.recommendations };
+        })(),
         status: plat.blocked ? 'blocked' : 'approved',
         lifecycle: plat.blocked ? 'blocked' : 'active',
         data_access: [],

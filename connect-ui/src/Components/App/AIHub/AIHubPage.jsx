@@ -434,7 +434,12 @@ function OverviewView() {
                 hint={reg&&reg.total_ai_systems!=null?"In the AI registry":"Unique tools detected"} color="#8b5cf6" onClick={()=>nav(OV_ROUTE.tools)}/>
       <StatCard icon={<ShieldAlert size={18}/>} label="DLP events" value={dlp===false?"—":hiCrit} hint={dlp===false?"Summary unavailable":"High/critical this month"} color="#ef4444" onClick={()=>nav(OV_ROUTE.dlp)}/>
       <StatCard icon={<Bot size={18}/>} label="Autonomy" value={noAutonomy?"—":autonomy} hint={noAutonomy?"Counts unavailable":"Agents & MCP servers"} color="#f59e0b" onClick={()=>nav(OV_ROUTE.agents)}/>
-      <AgentGovernanceProvider><SpendCard onClick={()=>nav(OV_ROUTE.cost)}/></AgentGovernanceProvider>
+      {/* LLM spend removed. It reported per-vendor cost for whichever platform
+          happened to be connected, and Microsoft exposes no per-agent cost for
+          Copilot Studio or M365 Copilot at all — so the figure covered a different
+          slice of the estate depending on the connection, next to four cards that
+          each count the whole estate. Cost still lives in Agent Governance → Cost,
+          where its scope is explicit. */}
     </div>
 
     {/* 2. Open governance items — two real counts, no composite score */}
@@ -452,18 +457,22 @@ function OverviewView() {
       </button>
     </div>
 
+    {/* One flat grid of six equal cards.
+        Previously a 2fr/1fr split: four cards in a wide main column and two in a
+        narrow side column, so no two cards on screen were the same width and the
+        rows did not line up either. A single 3-column grid with grid-auto-rows:1fr
+        makes all six identical in both dimensions. */}
     <div className="aihub_ov_grid">
-      <div className="aihub_ov_main">
-        {/* 3. Tools by sanction / by risk */}
-        <div className="aihub_two_even">
-          <DonutCard title="Tools by sanction" hint="Allow/block decision per AI system." segments={sanctionSegs} unavailable={reg===false} onClick={()=>nav(OV_ROUTE.tools)}/>
-          <DonutCard title="Tools by risk level" hint="Assessed risk per AI system." segments={riskSegs} unavailable={reg===false} onClick={()=>nav(OV_ROUTE.tools)}/>
-        </div>
-
-        {/* 4. Autonomy / severity */}
-        <div className="aihub_two_even">
-          <AutonomyCard segments={autonomySegs} unavailable={noAutonomy} onClick={()=>nav(OV_ROUTE.agents)}/>
-          <ClickCard title="Activity by severity" hint="Prompt and upload detections." onClick={()=>nav(OV_ROUTE.dlp)}>
+      <DonutCard title="Tools by sanction" hint="Allow/block decision per AI system." segments={sanctionSegs} unavailable={reg===false} onClick={()=>nav(OV_ROUTE.tools)}/>
+      <DonutCard title="Tools by risk level" hint="Assessed risk per AI system." segments={riskSegs} unavailable={reg===false} onClick={()=>nav(OV_ROUTE.tools)}/>
+      <div className="aihub_card">
+        <SectionHeader title="Needs attention" hint="Open items — each one opens where it is handled."/>
+        {attn.length===0
+          ? <p className="aihub_text_muted">{warn.length>0?"Some panels could not load, so this list may be incomplete.":"Nothing outstanding right now."}</p>
+          : <ul className="aihub_attn_list">{attn.slice(0,4).map(a=><AttnItem key={a.key} tone={a.tone} icon={a.icon} label={a.label} sub={a.sub} onClick={()=>nav(a.to)}/>)}</ul>}
+      </div>
+      <AutonomyCard segments={autonomySegs} unavailable={noAutonomy} onClick={()=>nav(OV_ROUTE.agents)}/>
+      <ClickCard title="Activity by severity" hint="Prompt and upload detections." onClick={()=>nav(OV_ROUTE.dlp)}>
             {dlp===false
               ? <p className="aihub_text_muted">Severity counts unavailable.</p>
               : <div className="aihub_sev_chips">
@@ -474,25 +483,13 @@ function OverviewView() {
                     </div>
                   ))}
                 </div>}
-          </ClickCard>
-        </div>
-      </div>
-
-      {/* 5. Needs attention + quick links */}
-      <div className="aihub_ov_side">
-        <div className="aihub_card">
-          <SectionHeader title="Needs attention" hint="Open items — each one opens where it is handled."/>
-          {attn.length===0
-            ? <p className="aihub_text_muted">{warn.length>0?"Some panels could not load, so this list may be incomplete.":"Nothing outstanding right now."}</p>
-            : <ul className="aihub_attn_list">{attn.slice(0,4).map(a=><AttnItem key={a.key} tone={a.tone} icon={a.icon} label={a.label} sub={a.sub} onClick={()=>nav(a.to)}/>)}</ul>}
-        </div>
-        <div className="aihub_card">
-          <SectionHeader title="Quick links" hint="Frameworks and policy references."/>
-          <div className="aihub_quick_links">
-            {links.map(l=>l.href
-              ? <a key={l.label} className="aihub_quick_link" href={l.href} target="_blank" rel="noreferrer">{l.label}<ExternalLink size={11}/></a>
-              : <button key={l.label} className="aihub_quick_link" onClick={()=>nav(l.to)}>{l.label}<ChevronRight size={12}/></button>)}
-          </div>
+      </ClickCard>
+      <div className="aihub_card">
+        <SectionHeader title="Quick links" hint="Frameworks and policy references."/>
+        <div className="aihub_quick_links">
+          {links.map(l=>l.href
+            ? <a key={l.label} className="aihub_quick_link" href={l.href} target="_blank" rel="noreferrer">{l.label}<ExternalLink size={11}/></a>
+            : <button key={l.label} className="aihub_quick_link" onClick={()=>nav(l.to)}>{l.label}<ChevronRight size={12}/></button>)}
         </div>
       </div>
     </div>
@@ -2238,7 +2235,7 @@ function ModelRoutingView() {
     ]).then(([r,e,a,l])=>{ setRules(r); setEndpoints(e); setAnalytics(a); setRoutingLog(l); })
       .catch(x=>setErr(x.message));
   };
-  useEffect(loadAll,[]);
+  useEffect(()=>{ loadAll(); },[]);
 
   const deleteRule=async(id)=>{ if(!confirm("Delete this rule?")) return; await routingFetch(`/rules/${id}`,{method:"DELETE"}); loadAll(); };
   const toggleRule=async(r)=>{ await routingFetch(`/rules/${r.id}`,{method:"PUT",body:JSON.stringify({enabled:!r.enabled})}); loadAll(); };
@@ -2521,7 +2518,7 @@ function RiskScoreView() {
     ]).then(([s,sum])=>{ setScores(s); setSummary(sum); })
       .catch(x=>setErr(x.message));
   };
-  useEffect(loadAll,[]);
+  useEffect(()=>{ loadAll(); },[]);
 
   const compute=async()=>{
     setComputing(true);
@@ -2711,8 +2708,9 @@ const CATEGORY_ICONS = {
 // from /ai-platforms — a service we know exists and can block, but which nothing in
 // the org has been observed using; distinct from "Platform", which IS in the
 // registry because it has real recorded activity.
-const SOURCE_LABEL = { governance: "Gov", endpoint_scan: "Scan", platform_registry: "Platform", platform_catalog: "Catalog" };
-const SOURCE_TONE  = { governance: "#8b5cf6", endpoint_scan: "#0044cc", platform_registry: "#6b7280", platform_catalog: "#9ca3af" };
+// SOURCE_LABEL / SOURCE_TONE removed with the Source column. The expanded row
+// detail prints row.source_detail || row.source verbatim rather than as a tag, so
+// it needs neither map.
 
 // Coarse Tool/Agent split, derived from the existing `category` field (there is
 // no separate tool-vs-agent flag in the data — this groups the 12 categories
@@ -2863,7 +2861,16 @@ function AIRegistryView() {
       setAllItems([...reg,...extra]); setSummary(s);
     }).catch(x=>setErr(x.message));
   };
-  useEffect(loadAll,[]);
+  // Called inside the effect rather than passed as the effect.
+  //
+  // loadAll RETURNS the Promise.all chain above, and `useEffect(loadAll, [])`
+  // handed that Promise to React as the cleanup function. React then invoked it on
+  // unmount and threw "destroy is not a function", which crashed AIRegistryView —
+  // the component unmounted itself whenever you navigated away from the tab. The
+  // sibling loadAll effects in this file were written the same way and are fixed
+  // too: none of them returns a value today, but the shape is one `return` away
+  // from reintroducing the same crash.
+  useEffect(()=>{ loadAll(); },[]);
 
   // Catalog rows are governed through /ai-platforms (keyed by host); registry rows
   // through /registry/:id/status. Same button, two backends.
@@ -2951,9 +2958,9 @@ function AIRegistryView() {
         <Search size={14}/><input placeholder="Search name, vendor, owner..." value={search} onChange={e=>setSearch(e.target.value)} style={{border:"none",outline:"none",flex:1,fontSize:13}}/>
       </div>
       <select value={filterType} onChange={e=>setFilterType(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12,fontWeight:600}}>
-        <option value="">AI Tools + Agents</option>
-        <option value="tool">AI Tools only</option>
-        <option value="agent">AI Agents only</option>
+        <option value="">All</option>
+        <option value="tool">AI Tools</option>
+        <option value="agent">AI Agents</option>
       </select>
       <select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12}}>
         <option value="">All Statuses</option>
@@ -2972,14 +2979,9 @@ function AIRegistryView() {
         <option value="high">High</option>
         <option value="critical">Critical</option>
       </select>
-      <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:"#6b7280",cursor:"pointer"}}>
-        {/* Spelled out because the hidden rows are now mostly the merged
-            known-services catalog — entries with no recorded usage. Without saying
-            so, the merge looks like it did nothing: the table opens on the 13 rows
-            that have activity and gives no hint that 164 more are one click away. */}
-        <input type="checkbox" checked={!hideInactive} onChange={e=>setHideInactive(!e.target.checked)}/> Show unused ({inactiveCount}) — known services with no captured activity
-      </label>
-      <div style={{fontSize:12,color:"#9ca3af",marginLeft:"auto"}}>{items.length} results</div>
+      {/* "Show unused" checkbox and the results count both removed. The AI Systems
+          stat card above still toggles hideInactive and shows the row count, so this
+          row is filters only. */}
     </div>
 
     {/* One table. Click a row to expand its risk analysis and controls in place. */}
@@ -3004,7 +3006,13 @@ function AIRegistryView() {
             <div style={{fontSize:13,fontWeight:600}}>{r.activity?.total?.toLocaleString()||0}</div>
             <div className="aihub_text_muted">{r.activity?.last_active?relTime(r.activity.last_active):"never"}</div>
           </div>,right:true},
-          {label:"Source",render:r=><Tag text={SOURCE_LABEL[r.source]||"Platform"} color={SOURCE_TONE[r.source]||"#6b7280"}/>},
+          // Source column removed — how a system was discovered is an internal detail
+          // of the scan, not something an admin acts on from this table. It is still
+          // shown in the expanded row detail (RegistryRowDetail prints row.source).
+          //
+          // Line comment, not {/* … */}: inside a JS array that braced form is an
+          // empty OBJECT literal, not a comment, so it added a sixth column with no
+          // label and no render — a blank header and a stray "—" on every row.
         ]}
         rows={items}
         onRow={r=>setSelected(selected===r.id?null:r.id)}
@@ -3235,7 +3243,7 @@ function AccessRequestsView() {
       fetch(EXCEPTION_API).then(r=>r.json()),
     ]).then(([r,e])=>{setRequests(r);setExceptions(e);}).catch(x=>setErr(x.message));
   };
-  useEffect(loadAll,[]);
+  useEffect(()=>{ loadAll(); },[]);
 
   const approve=async(id)=>{
     const body={note:reviewNote};
@@ -4215,7 +4223,7 @@ function IntegrationsView() {
       fetch(WEBHOOK_API+"/log").then(r=>r.json()),
     ]).then(([c,h,t,l])=>{setConnections(c);setHooks(h);setTemplates(t.templates);setTriggersList(t.triggers);setLog(l);}).catch(x=>setErr(x.message));
   };
-  useEffect(loadAll,[]);
+  useEffect(()=>{ loadAll(); },[]);
 
   const [teamsManualUpload,setTeamsManualUpload]=useState(false);
   const [showHelp,setShowHelp]=useState(null); // 'slack' | 'teams' | null
@@ -5889,7 +5897,9 @@ function InstallationsView() {
 const TAB_GROUPS = {
   Inventory: {
     title: "Inventory",
-    hint: "Everything AI that exists in the organisation — the systems, the agents, and the platforms they run on.",
+    // No group hint: both tabs under it already carry their own description
+    // ("AI & Agent Registry" and "Agents & MCP"), so this restated the same thing
+    // one line above whichever tab was open.
     tabs: [
       { slug: "systems", label: "AI Systems",   component: AIRegistryView },
       { slug: "agents",  label: "Agents & MCP", component: AgentsView },

@@ -1,9 +1,20 @@
 /* AI Hub — matches connect-ui manage theme */
 
 /* Stat cards */
+/* KPI cards fill the row, whatever their count.
+ *
+ * Was auto-FILL, which creates as many tracks as fit whether or not there is an
+ * item for each. At Overview's width that laid out five tracks, so once the LLM
+ * spend card was removed the fourth card stopped mid-row and the empty fifth track
+ * showed as a gap on the right.
+ *
+ * auto-FIT collapses tracks with no item, so the cards present always stretch to
+ * the full width. Deliberately not repeat(4, …): this class is shared by around ten
+ * screens with differing card counts — several already override the columns inline —
+ * so a fixed count would fix Overview and misalign the rest. */
 .aihub_stat_grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 14px;
   margin-bottom: 20px;
 }
@@ -843,14 +854,32 @@
 }
 
 /* Charts left, "needs attention" rail right. */
+/* Six equal overview cards.
+ *
+ * Was minmax(0,2fr) / minmax(280px,1fr) — a wide main column of four cards beside a
+ * narrow side column of two, so no two cards shared a width and the two columns'
+ * rows never lined up. Three equal columns fixes the width; grid-auto-rows: 1fr
+ * plus stretch fixes the height, making every row as tall as its tallest card so
+ * all six render identically.
+ *
+ * min-height keeps a sparse card (Quick links, or Needs attention with nothing
+ * outstanding) from collapsing and dragging its whole row short. */
 .aihub_ov_grid {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: 1fr;
   gap: 16px;
-  align-items: start;
+  align-items: stretch;
+}
+.aihub_ov_grid > * {
+  min-width: 0;
+  min-height: 300px;
 }
 .aihub_ov_main, .aihub_ov_side { min-width: 0; }
 @media (max-width: 1100px) {
+  .aihub_ov_grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
   .aihub_ov_grid { grid-template-columns: 1fr; }
 }
 

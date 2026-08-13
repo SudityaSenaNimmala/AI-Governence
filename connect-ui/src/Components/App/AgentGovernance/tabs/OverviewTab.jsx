@@ -96,16 +96,20 @@ export function OverviewTab() {
           <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, padding: 16 }}>
             {riskData.length > 0 ? (
               <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
-                <ResponsiveContainer width={140} height={140}>
-                  <PieChart>
+                {/* PieChart directly, no ResponsiveContainer.
+                    Both dimensions were fixed at 140, which is exactly what
+                    ResponsiveContainer exists to avoid — recharts warned about it on
+                    every render ("width(140) and height(140) are both fixed
+                    numbers"), several times per page load. A fixed-size chart does
+                    not need the wrapper. */}
+                <PieChart width={140} height={140}>
                     <Pie data={riskData} cx="50%" cy="50%" innerRadius={35} outerRadius={60} dataKey="value" stroke="none">
                       {riskData.map((entry, i) => (
                         <Cell key={i} fill={entry.color} />
                       ))}
                     </Pie>
                     <Tooltip contentStyle={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 6, fontSize: 12 }} />
-                  </PieChart>
-                </ResponsiveContainer>
+                </PieChart>
                 <div>
                   {riskData.map((d) => (
                     <div key={d.name} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, Fragment } from "react";
 import {
   MessageSquare, FileText, Search, ChevronDown, ChevronRight,
   User, Bot, Clock, RefreshCw, AlertTriangle, Database, Globe,
@@ -1585,9 +1585,16 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                   const infoFactors = allFactors.filter(f => f.weight === "info");
 
                   return (
-                    <>
+                    // Keyed Fragment, not <>.
+                    //
+                    // Each row renders TWO siblings (the row and its expansion), so
+                    // the map returns a fragment — and the key was on the inner <tr>
+                    // instead of on the element actually being returned. React needs
+                    // it on the outermost node, and an anonymous <> cannot carry one,
+                    // which is what produced "Each child in a list should have a
+                    // unique key prop" for this panel.
+                    <Fragment key={agent.botId}>
                       <tr
-                        key={agent.botId}
                         style={{ borderBottom: isExpanded ? "none" : "1px solid var(--ag-border)", cursor: "pointer", background: isExpanded ? "#f8f9fb" : undefined }}
                         onClick={() => setExpandedBot(isExpanded ? null : agent.botId)}
                       >
@@ -1770,7 +1777,7 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                           </td>
                         </tr>
                       )}
-                    </>
+                    </Fragment>
                   );
                 })}
               </tbody>
