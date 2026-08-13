@@ -69,8 +69,9 @@ export function mountServerAgents(app, db) {
 
   // Recent calls — paginated, optionally filtered.
   app.get('/api/v1/server-agents/calls', a(async (req, res) => {
-    const { user, provider, model, trigger, machineId, limit = 200 } = req.query;
+    const { user, provider, model, trigger, machineId, sourceIp, limit = 200 } = req.query;
     const filter = {};
+    if (sourceIp)  filter.source_ip = sourceIp;
     if (user)      filter.user = user;
     if (provider)  filter.provider = provider;
     if (model)     filter.model = model;
@@ -277,30 +278,19 @@ export function mountServerAgents(app, db) {
       .sort({ governed_at: -1 })
       .toArray();
 
-    // Get trace counts per container by matching source_ip
+    // Get trace counts + cost per container by matching source_ip
     for (const c of containers) {
-      if (c.container_ip) {
-        const count = await db.collection('server_agent_calls').countDocuments({
-          machine_id: c.machine_id,
-          source_ip: c.container_ip,
-        });
-        // Also count traces where source_ip is null (from current TLS bridge which doesn't set it)
-        const countNoIp = c.container_ip ? await db.collection('server_agent_calls').countDocuments({
-          machine_id: c.machine_id,
-          source_ip: null,
-        }) : 0;
-        c.trace_count = count + countNoIp;
-      } else {
-        c.trace_count = 0;
-      }
+      const ipFilter = c.container_ip
+        ? { machine_id: c.machine_id, source_ip: c.container_ip }
+        : { machine_id: c.machine_id };
 
-      // Get latest cost summary
       const costAgg = await db.collection('server_agent_calls').aggregate([
-        { $match: { machine_id: c.machine_id } },
+        { $match: ipFilter },
         { $group: { _id: null, total: { $sum: { $ifNull: ['$total_cost_usd', 0] } }, calls: { $sum: 1 } } },
       ]).toArray();
       c.total_cost_usd = costAgg[0]?.total || 0;
       c.total_calls = costAgg[0]?.calls || 0;
+      c.trace_count = c.total_calls;
     }
 
     res.json(containers);

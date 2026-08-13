@@ -5177,7 +5177,9 @@ function ServerMonitorView() {
 
   const fetchAgentCalls = () => {
     if (!selectedAgent) { setAgentCalls([]); return; }
-    apiFetch("/server-agents/calls?machineId=" + encodeURIComponent(selectedAgent.machine_id) + "&limit=200")
+    const params = new URLSearchParams({ machineId: selectedAgent.machine_id, limit: 200 });
+    if (selectedAgent.container_ip) params.set("sourceIp", selectedAgent.container_ip);
+    apiFetch("/server-agents/calls?" + params.toString())
       .then(calls => setAgentCalls(calls || []))
       .catch(() => setAgentCalls([]));
   };
