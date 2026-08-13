@@ -3091,7 +3091,6 @@ function AIRegistryView() {
         columns={[
           {label:"AI System",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
             <ChevronRight size={13} style={{color:"#9ca3af",flexShrink:0,transition:"transform .15s",transform:selected===r.id?"rotate(90deg)":"none"}}/>
-            <span style={{fontSize:18}}>{CATEGORY_ICONS[r.category]||'❓'}</span>
             <div>
               <div className="aihub_text_primary">{r.name}</div>
               <div className="aihub_text_muted">{r.vendor||""}{r.platform?" · "+r.platform:""}</div>
