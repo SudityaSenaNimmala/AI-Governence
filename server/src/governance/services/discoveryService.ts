@@ -581,12 +581,21 @@ export async function runDiscovery(
         const description = appDef?.description || appDef?.shortDescription
           || `Teams ${isOrgPublished ? "org-published" : "sideloaded"} app`;
 
+        const createdByIdentity = appDef?.createdBy?.user;
+        const owner = createdByIdentity?.id ? userMap.get(createdByIdentity.id) : undefined;
+
         result.agents.push({
           id: app.id, appId: app.externalId || app.id,
           name: app.displayName, description,
           vendor: "Microsoft", category, platform,
           discoverySource: "graph_teams_catalog", firstSeen: new Date().toISOString(),
-          publishedStatus: "active", isOrphaned: false,
+          publishedStatus: "active",
+          owner: owner
+            ? { id: owner.id, displayName: owner.displayName, userPrincipalName: owner.userPrincipalName, accountEnabled: owner.accountEnabled ?? true }
+            : createdByIdentity
+              ? { id: createdByIdentity.id || "unknown", displayName: createdByIdentity.displayName || "Unknown", userPrincipalName: createdByIdentity.displayName || "unknown", accountEnabled: true }
+              : undefined,
+          isOrphaned: !owner && !createdByIdentity,
           connectors: [], permissions: [], deployedTo: ["Microsoft Teams"],
           lifecycleStatus: "active",
           risk: { score: 0, level: "medium", factors: [], recommendations: [], computedAt: new Date().toISOString() },
@@ -895,13 +904,28 @@ export async function runDiscovery(
       const azureClient = new AzureFoundryClient(tokens.azure!, tokens.cognitiveServices);
       const ar = await azureClient.discoverAll();
 
+      // RBAC-based ownership: ARM has no per-resource "creator" field, so we treat
+      // the user holding the Owner (or Contributor, as fallback) role assignment
+      // on a resource as its owner. Groups/service principals can't be resolved
+      // to a person and are left unowned.
+      const resolveAzureOwner = (resourceId: string): DiscoveredAgent["owner"] | undefined => {
+        const assignments = ar.accessControl.filter(a => a.resourceId === resourceId && a.principalType === "User");
+        const pick = assignments.find(a => a.roleName === "Owner") || assignments.find(a => a.roleName === "Contributor");
+        const user = pick ? userMap.get(pick.principalId) : undefined;
+        if (!user) return undefined;
+        return { id: user.id, displayName: user.displayName, userPrincipalName: user.userPrincipalName, accountEnabled: user.accountEnabled ?? true };
+      };
+
       for (const fa of ar.foundryAgents) {
-        result.agents.push({ id: fa.id, name: fa.name, description: fa.description || `Azure AI Foundry agent in ${fa.location}`, vendor: "Microsoft", category: "generative-ai", platform: "azure_foundry", discoverySource: "azure_management", firstSeen: fa.createdAt || new Date().toISOString(), lastModified: fa.updatedAt, publishedStatus: fa.provisioningState === "Succeeded" ? "active" : "draft", isOrphaned: false, connectors: [], permissions: [], environment: `${fa.subscriptionId}/${fa.resourceGroup}`, llmModel: fa.modelName, lifecycleStatus: fa.provisioningState === "Succeeded" ? "active" : "pending_approval", risk: { score: 0, level: "medium", factors: [], recommendations: [], computedAt: new Date().toISOString() }, activity: { totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0, uniqueUsers: 0, userBreakdown: [] } });
+        const owner = resolveAzureOwner(fa.id);
+        result.agents.push({ id: fa.id, name: fa.name, description: fa.description || `Azure AI Foundry agent in ${fa.location}`, vendor: "Microsoft", category: "generative-ai", platform: "azure_foundry", discoverySource: "azure_management", firstSeen: fa.createdAt || new Date().toISOString(), lastModified: fa.updatedAt, publishedStatus: fa.provisioningState === "Succeeded" ? "active" : "draft", owner, isOrphaned: !owner, connectors: [], permissions: [], environment: `${fa.subscriptionId}/${fa.resourceGroup}`, llmModel: fa.modelName, lifecycleStatus: fa.provisioningState === "Succeeded" ? "active" : "pending_approval", risk: { score: 0, level: "medium", factors: [], recommendations: [], computedAt: new Date().toISOString() }, activity: { totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0, uniqueUsers: 0, userBreakdown: [] } });
       }
       for (const oai of ar.openAIResources) {
-        result.agents.push({ id: oai.id, name: oai.name, description: `Azure OpenAI in ${oai.location}`, vendor: "Microsoft", category: "ai-platform", platform: "azure_foundry", discoverySource: "azure_management", firstSeen: oai.createdAt || new Date().toISOString(), publishedStatus: "active", isOrphaned: false, connectors: [], permissions: [], environment: `${oai.subscriptionId}/${oai.resourceGroup}`, llmModel: oai.deployments.map(d => d.modelName).join(", ") || undefined, lifecycleStatus: "active", risk: { score: 0, level: "medium", factors: [], recommendations: [], computedAt: new Date().toISOString() }, activity: { totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0, uniqueUsers: 0, userBreakdown: [] } });
+        const owner = resolveAzureOwner(oai.id);
+        result.agents.push({ id: oai.id, name: oai.name, description: `Azure OpenAI in ${oai.location}`, vendor: "Microsoft", category: "ai-platform", platform: "azure_foundry", discoverySource: "azure_management", firstSeen: oai.createdAt || new Date().toISOString(), publishedStatus: "active", owner, isOrphaned: !owner, connectors: [], permissions: [], environment: `${oai.subscriptionId}/${oai.resourceGroup}`, llmModel: oai.deployments.map(d => d.modelName).join(", ") || undefined, lifecycleStatus: "active", risk: { score: 0, level: "medium", factors: [], recommendations: [], computedAt: new Date().toISOString() }, activity: { totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0, uniqueUsers: 0, userBreakdown: [] } });
         for (const dep of oai.deployments) {
-          result.agents.push({ id: dep.id, name: `${oai.name} — ${dep.name}`, description: `${dep.modelName} deployment`, vendor: "Microsoft", category: "generative-ai", platform: "azure_foundry", discoverySource: "azure_management", firstSeen: new Date().toISOString(), publishedStatus: dep.provisioningState === "Succeeded" ? "active" : "draft", isOrphaned: false, connectors: [], permissions: [], environment: `${oai.subscriptionId}/${oai.resourceGroup}`, llmModel: dep.modelName, lifecycleStatus: dep.provisioningState === "Succeeded" ? "active" : "pending_approval", risk: { score: 0, level: "medium", factors: [], recommendations: [], computedAt: new Date().toISOString() }, activity: { totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0, uniqueUsers: 0, userBreakdown: [] } });
+          // Deployments inherit the parent OpenAI resource's RBAC — Azure doesn't assign roles at the deployment level.
+          result.agents.push({ id: dep.id, name: `${oai.name} — ${dep.name}`, description: `${dep.modelName} deployment`, vendor: "Microsoft", category: "generative-ai", platform: "azure_foundry", discoverySource: "azure_management", firstSeen: new Date().toISOString(), publishedStatus: dep.provisioningState === "Succeeded" ? "active" : "draft", owner, isOrphaned: !owner, connectors: [], permissions: [], environment: `${oai.subscriptionId}/${oai.resourceGroup}`, llmModel: dep.modelName, lifecycleStatus: dep.provisioningState === "Succeeded" ? "active" : "pending_approval", risk: { score: 0, level: "medium", factors: [], recommendations: [], computedAt: new Date().toISOString() }, activity: { totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0, uniqueUsers: 0, userBreakdown: [] } });
         }
       }
       for (const ep of ar.serverlessEndpoints) {

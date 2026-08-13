@@ -10,13 +10,57 @@ import { loadOrCreateCA } from './ca.js';
 import { installCA, uninstallCA } from './trust-win32.js';
 import { startProxy } from './proxy-server.js';
 import { activateSystemProxy, deactivateSystemProxy, STATE_PATH as PROXY_STATE_PATH } from './system-proxy-win32.js';
-import { start as startResolver, stop as stopResolver } from './process-resolver-win32.js';
+import { start as startResolver, stop as stopResolver, getProcessByLocalPort } from './process-resolver-win32.js';
 import { startPacServer } from './pac-server.js';
 import { spawnWatchdog } from './watchdog.js';
 import { Reporter } from '../os_monitor/reporter.js';
 import { DiscoveryReporter } from './discovery-reporter.js';
 import { parseApiCall } from '../server-monitor/cost-parser.js';
 import { ModelRouter } from './router.js';
+import { createReporter } from '../server-monitor/reporter.js';
+
+// Shape one /api/v1/server-agent-events event from an intercepted call plus
+// the parseApiCall() result. Kept pure (no I/O, no globals) so the mapping is
+// unit-testable — see agent/tests/proxy-api-report.test.mjs.
+//
+// The field names mirror what src/server-monitor/index.js sends, because both
+// paths POST to the same route and land in the same `server_agent_calls`
+// collection. Only `attribution` differs: the server daemon reads /proc for a
+// full parent chain, while the desktop side has the Windows TCP table, which
+// gives us the pid + image name of the connecting process and nothing more.
+//
+// KNOWN GAP (tracked separately, deliberately not solved here): there is no
+// session_id on this path. session_id/client_seq only exist on the browser
+// extension → /api/v1/dlp path, so desktop/API traffic captured here cannot be
+// grouped into a browser conversation.
+export function buildApiCallEvent({ call, parsed, proc = null }) {
+  const startedAt = call.startedAt || Date.now();
+  return {
+    occurred_at: new Date(startedAt).toISOString(),
+    duration_ms: call.durationMs ?? null,
+    response_status: call.responseStatus ?? null,
+    host: call.host,
+    path: call.path ?? null,
+    method: call.method ?? null,
+
+    provider: parsed.provider ?? null,
+    model:    parsed.model ?? null,
+    prompt_tokens:     parsed.prompt_tokens ?? null,
+    completion_tokens: parsed.completion_tokens ?? null,
+    cached_tokens:     parsed.cached_tokens ?? null,
+    cost: parsed.cost ?? null,
+    prompt_text:   parsed.prompt_text ?? null,
+    response_text: parsed.response_text ?? null,
+    response_truncated: !!call.responseTruncated,
+
+    attribution: proc ? {
+      pid: proc.pid ?? null,
+      exe: proc.name ?? null,
+      cmdline: null,
+      trigger_source: 'desktop_proxy',
+    } : null,
+  };
+}
 
 export async function runProxy({
   serverUrl,
@@ -68,10 +112,31 @@ export async function runProxy({
     discoveryReporter.start();
   }
 
+  // 4c. API-call reporter — ships the prompt/response/token/cost data that
+  //    parseApiCall already reassembles from the intercepted traffic to
+  //    /api/v1/server-agent-events. This is the SAME reporter and the same
+  //    endpoint the server-monitor daemon uses (see
+  //    src/server-monitor/index.js), deliberately reused rather than a second
+  //    pipeline: the server route already knows this event shape and persists
+  //    prompt_text / response_text verbatim.
+  //
+  //    Auth: the desktop proxy runs under the enrolled MACHINE token from
+  //    ~/.cloudfuze-aigov/credentials.json — the same credential the DLP and
+  //    discovery reporters use — and /api/v1/server-agent-events requires
+  //    exactly that (requireMachineAuth). No new identity is introduced.
+  let apiCallReporter = null;
+  if (serverUrl && token) {
+    apiCallReporter = createReporter({ serverUrl, token, log: log?.child?.('api-calls') ?? log });
+  }
+
   // onApiCall hook — called by the MITM with the captured request+response.
   // Runs parseApiCall to detect known providers AND unknown AI-shaped traffic.
-  // For known providers, the existing DLP/Reporter pipeline already handles it;
-  // we only act here on the _discovered breadcrumb (the "every AI app" path).
+  // Two things happen with the result:
+  //   1. the _discovered breadcrumb feeds the Discovery tray (the "every AI
+  //      app" path), and
+  //   2. the reassembled prompt_text / response_text / tokens / cost get
+  //      forwarded to the governance server. Before this, all of (2) was
+  //      computed and then thrown away on the desktop path.
   const onApiCall = (call) => {
     try {
       const parsed = parseApiCall({
@@ -82,7 +147,8 @@ export async function runProxy({
         responseBody:   call.responseBody,
         responseHeaders: call.responseHeaders,
       });
-      if (parsed?._discovered && discoveryReporter) {
+      if (!parsed) return;
+      if (parsed._discovered && discoveryReporter) {
         discoveryReporter.record({
           host:         parsed._discovered.host,
           wire_format:  parsed._discovered.wireFormat,
@@ -90,8 +156,18 @@ export async function runProxy({
           sample_model: parsed.model,
         });
       }
+      if (apiCallReporter) {
+        apiCallReporter.enqueue(buildApiCallEvent({
+          call,
+          parsed,
+          // Best-effort only: the snapshot cache may not hold this port. We do
+          // NOT do the async on-demand lookup here — the hook must stay
+          // synchronous and off the request's critical path.
+          proc: call.peerPort ? getProcessByLocalPort(call.peerPort) : null,
+        }));
+      }
     } catch (e) {
-      log?.warn?.(`proxy: discovery hook error: ${e?.message || e}`);
+      log?.warn?.(`proxy: api-call hook error: ${e?.message || e}`);
     }
   };
 
@@ -155,6 +231,9 @@ export async function runProxy({
     try { reporter?.stop(); } catch {}
     try { discoveryReporter?.stop(); } catch {}
     try { modelRouter?.stop(); } catch {}
+    // createReporter() buffers and flushes on an interval; drain() sends what
+    // is still queued before we exit.
+    try { await apiCallReporter?.drain(); } catch (e) { log?.warn?.(`proxy: api-call drain failed: ${e?.message || e}`); }
     // The detached watchdog will notice the parent is gone within POLL_MS
     // and exit on its own (it'll find STATE_PATH already removed → no-op).
     process.exit(0);
@@ -162,7 +241,7 @@ export async function runProxy({
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
 
-  return { ca, server, reporter, sysProxyState, pac, watchdogChild };
+  return { ca, server, reporter, apiCallReporter, sysProxyState, pac, watchdogChild };
 }
 
 /** `--proxy --uninstall` — restore system proxy + remove CA from trust store. */

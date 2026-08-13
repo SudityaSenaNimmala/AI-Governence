@@ -29,9 +29,15 @@ async function load() {
 async function detectDesktopAgent() {
   const statusEl = $('machineStatus');
   try {
-    const res = await fetch('http://127.0.0.1:19532/cfai/identity', { signal: AbortSignal.timeout(2000) });
-    if (!res.ok) throw new Error('not ok');
-    const data = await res.json();
+    const PORTS = [19532, 19533, 19534, 19535, 19536];
+    let data = null;
+    for (const port of PORTS) {
+      try {
+        const res = await fetch('http://127.0.0.1:' + port + '/cfai/identity', { signal: AbortSignal.timeout(1000) });
+        if (res.ok) { data = await res.json(); break; }
+      } catch {}
+    }
+    if (!data) throw new Error('not found');
     // Save to config so enrollment uses it
     const { [STORAGE.CONFIG]: config = {} } = await chrome.storage.local.get([STORAGE.CONFIG]);
     config.computerName = data.hostname;

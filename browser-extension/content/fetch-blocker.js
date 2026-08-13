@@ -387,14 +387,54 @@
   }
   // ── end AI response capture ────────────────────────────────────────────────
 
+  // ── AI response capture — page-side plumbing ───────────────────────────────
+  // Everything between this sentinel and the matching end sentinel is the
+  // TRANSPORT half of capture: which conversation a request belongs to, draining
+  // a teed body, and publishing the finished reply to the content script. Unlike
+  // the reassembly region above it is NOT pure — it names window, location and
+  // fetch — but every one of those is a plain global, so
+  // tests/load-response-assembler.mjs can slice this region out and drive it with
+  // stubs. Keep it free of anything else (no DOM queries, no chrome.*).
+
   // Cap on how much decoded response text we keep per call. Beyond this we keep
   // draining the stream (so the page is never starved) but stop buffering.
   const RESPONSE_MAX_CHARS = 1024 * 1024;
 
+  // ── Which conversation a reply belongs to ──────────────────────────────────
+  // Read AT REQUEST TIME (where the response is teed), never at end of stream: a
+  // long answer is frequently still streaming when the user has already clicked
+  // into another chat, and a URL read at the end would file the reply under
+  // whichever conversation happens to be on screen by then.
+  //
+  // The patterns are duplicated from content.js's CONV_ID_PATTERNS rather than
+  // shared, for the same reason everything in this file is duplicated: this code
+  // runs in the PAGE's JS world, which cannot see the content script's realm and
+  // has no module loader. Duplication of a read-only URL regex is the cheaper
+  // half of that trade — it derives an id, it never decides anything.
+  const CONV_ID_PATTERNS = [
+    /\/c\/([\w-]{8,})/,             // ChatGPT      /c/<id>
+    /\/chat\/([\w-]{8,})/,          // Claude, Poe  /chat/<uuid>
+    /\/app\/([\w-]{8,})/,           // Gemini       /app/<id>
+    /\/conversation\/([\w-]{8,})/,  // Copilot-style
+    /\/threads?\/([\w-]{8,})/,      // thread-style urls
+    /\/search\/([\w-]{8,})/,        // Perplexity   /search/<slug>
+  ];
+
+  function currentConvId() {
+    try {
+      const path = location.pathname || '';
+      for (const re of CONV_ID_PATTERNS) {
+        const m = path.match(re);
+        if (m) return m[1];
+      }
+    } catch (e) {}
+    return null;
+  }
+
   // Page world → content-script world. Same channel the existing block path
   // uses (a CustomEvent on window, which content.js already listens for), so
   // there is no second communication mechanism to reason about.
-  function publishAiResponse(url, site, raw, truncated, startedAt) {
+  function publishAiResponse(url, site, raw, truncated, startedAt, convId) {
     try {
       const result = assembleAiResponseText(raw, site);
       if (!result.text) return;
@@ -406,6 +446,9 @@
           url: String(url || ''),
           truncated: !!truncated,
           duration_ms: startedAt ? (Date.now() - startedAt) : null,
+          // An OPAQUE ID the site itself minted, captured when the request went
+          // out. Never a path, never a query string.
+          external_conv_id: convId || null,
         },
       }));
     } catch (e) {
@@ -424,7 +467,7 @@
   // Drain a cloned response body, buffering the decoded text, and publish ONE
   // event when the stream ends. Per-chunk work is a TextDecoder call and an
   // array push — no parsing, no regex, no DOM.
-  async function captureResponseStream(res, url, site, startedAt) {
+  async function captureResponseStream(res, url, site, startedAt, convId) {
     let reader;
     try { reader = res.body.getReader(); } catch (e) { return; }
     const decoder = new TextDecoder('utf-8');
@@ -446,7 +489,7 @@
     } catch (e) {
       // Stream aborted (user hit stop, tab navigated) — publish the partial.
     }
-    publishAiResponse(url, site, chunks.join(''), truncated, startedAt);
+    publishAiResponse(url, site, chunks.join(''), truncated, startedAt, convId);
   }
 
   /**
@@ -457,6 +500,10 @@
    */
   function withResponseCapture(promise, url, site) {
     const startedAt = Date.now();
+    // TEE TIME, not stream-end time — see the currentConvId() note above. This
+    // runs synchronously as the fetch is issued, which is the only moment the
+    // URL still describes the conversation this request came from.
+    const convId = currentConvId();
     return promise.then((response) => {
       try {
         if (!site || site === 'unsupported') return response;
@@ -464,13 +511,14 @@
         if (!response || !response.ok || !response.body) return response;
         const ct = response.headers && response.headers.get ? (response.headers.get('content-type') || '') : '';
         if (!CAPTURABLE_CONTENT_TYPE.test(ct)) return response;
-        captureResponseStream(response.clone(), url, site, startedAt);
+        captureResponseStream(response.clone(), url, site, startedAt, convId);
       } catch (e) {
         // Never break the page's fetch because capture failed.
       }
       return response;
     });
   }
+  // ── end AI response capture plumbing ───────────────────────────────────────
 
   const originalFetch = window.fetch;
 
@@ -587,6 +635,10 @@
           this._cfaiCapturing = true;
           const startedAt = Date.now();
           const url = this._cfaiUrl;
+          // Captured HERE, at send(), for the same reason the fetch path does it
+          // at tee time: `load` fires when the whole reply has arrived, which can
+          // be several chats later.
+          const convId = currentConvId();
           this.addEventListener('load', () => {
             try {
               if (this.status < 200 || this.status >= 300) return;
@@ -595,7 +647,7 @@
               const raw = this.responseText || '';
               if (!raw) return;
               const truncated = raw.length > RESPONSE_MAX_CHARS;
-              publishAiResponse(url, site, truncated ? raw.slice(0, RESPONSE_MAX_CHARS) : raw, truncated, startedAt);
+              publishAiResponse(url, site, truncated ? raw.slice(0, RESPONSE_MAX_CHARS) : raw, truncated, startedAt, convId);
             } catch (e) {}
           });
         }

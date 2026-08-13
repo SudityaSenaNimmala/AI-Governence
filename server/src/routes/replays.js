@@ -43,6 +43,9 @@ import { once } from 'node:events';
 
 import { a } from '../util.js';
 import { requireMachineAuth, requireAdminAuth } from '../auth.js';
+// One definition of "is this the same conversation id", shared with the DLP
+// ingest path that writes the same value onto every event.
+import { normalizeExternalConvId, backfillConversationId } from './dlp.js';
 
 const gunzip = promisify(zlib.gunzip);
 
@@ -139,6 +142,10 @@ const EVENTS_READ_BATCH = 16;
 
 const MAX_HOST_LEN = 253;
 const MAX_SESSION_ID_LEN = 128;
+// The AI site's own conversation id (ChatGPT /c/<id> etc.). Same cap the DLP
+// ingest path applies to the same value — see normalizeExternalConvId in
+// routes/dlp.js, which this file reuses so the two never drift apart.
+const MAX_EXTERNAL_CONV_ID_LEN = 200;
 const MAX_RECORDER_LEN = 80;
 const MAX_MASK_PROFILE_LEN = 40;
 const MAX_STOP_REASON_LEN = 200;
@@ -190,6 +197,11 @@ const CLEAN_STOP_REASONS = new Set([
   // stretch of using ONE AI service in ONE tab (the engagement rule). So a run
   // ends whenever that engagement does, and each of those endings is a CLEAN one:
   'engagement_rotated',    // the tab's engagement rotated; a new run opens
+  // The tab moved to a DIFFERENT chat of the same service. The engagement
+  // survives that by design, but a replay must not — one run per conversation is
+  // the whole point of the conversation view. REQUIRED here: without it every
+  // chat switch would be filed as an aborted recording.
+  'conversation_changed',
   'service_changed',       // the tab moved to a different AI service
   'idle_timeout',          // no visible-tab use for the idle window
   'max_session_ms',        // the engagement hit its hard cap
@@ -244,6 +256,11 @@ export function mountReplays(app, db) {
       // Normally exactly one id. Kept as an array for schema continuity with the
       // video phase and because /complete may report more.
       session_ids: sessionId ? [sessionId] : [],
+      // The AI site's own conversation id, when the recorder already knew it at
+      // registration (an existing chat being revisited). Null for a brand-new
+      // chat — the site has not minted an id yet — and filled in later by
+      // POST /:replay_id/conversation. SET-ONCE from there on: see that route.
+      external_conv_id: normalizeExternalConvId(b.external_conv_id),
       capture: CAPTURE_DOM_EVENTS,
       // Stored verbatim: which library version produced these events decides
       // whether a future player can still replay them.
@@ -492,6 +509,93 @@ export function mountReplays(app, db) {
     res.status(204).end();
   }));
 
+  // ── Bind a run to the AI site's own conversation ──────────────────────────
+  //
+  // For the run that started in a BRAND-NEW chat: the recorder registers before
+  // the site has minted /c/<id>, so it cannot send the id with the registration
+  // and calls this the moment it learns one.
+  //
+  // SET-ONCE, THEN IMMUTABLE. null → id is allowed exactly once; the same id
+  // again is an idempotent 204 (the recorder retries on any transport failure);
+  // a DIFFERENT id is refused with 409 rather than silently re-filing a stored
+  // recording under another conversation, which would move evidence. A run that
+  // is no longer recording is equally refused: its conversation membership is
+  // part of the finished record.
+  app.post('/api/v1/replays/:replay_id/conversation', requireMachineAuth, a(async (req, res) => {
+    const replayId = String(req.params.replay_id);
+    const convId = normalizeExternalConvId(req.body?.external_conv_id);
+    if (!convId) {
+      return res.status(400).json({ error: `external_conv_id required (string, 1..${MAX_EXTERNAL_CONV_ID_LEN} chars)` });
+    }
+
+    const run = await db.collection(COLL_RECORDINGS).findOne(
+      { recording_id: replayId },
+      {
+        projection: {
+          _id: 0, recording_id: 1, machine_id: 1, status: 1, capture: 1,
+          external_conv_id: 1,
+          // Needed for the event backfill below, not for the bind itself.
+          session_ids: 1,
+        },
+      },
+    );
+    if (!run) return res.status(404).json({ error: 'replay not found' });
+    // Same ownership rule as the chunks route: ownership comes from the JWT and a
+    // machine can only touch its own runs.
+    if (run.machine_id !== req.machine.id) {
+      return res.status(403).json({ error: 'replay belongs to another machine' });
+    }
+    if (run.capture !== CAPTURE_DOM_EVENTS) {
+      return res.status(409).json({ error: 'replay is not a dom_events capture' });
+    }
+
+    const stored = run.external_conv_id ?? null;
+    // Idempotent repeat — answered BEFORE the status check so a retry that lands
+    // just after the run completed still succeeds rather than looking like a
+    // conflict. The stored value is already what the caller is asking for.
+    if (stored === convId) return res.status(204).end();
+    if (stored !== null) {
+      return res.status(409).json({ error: 'replay is already bound to a different conversation' });
+    }
+    if (run.status !== STATUS_RECORDING) {
+      return res.status(409).json({ error: `replay is ${run.status}, not accepting a conversation binding` });
+    }
+
+    // Guarded on external_conv_id being absent/null in the FILTER, so two
+    // concurrent binds cannot both win: the loser matches nothing and is then
+    // reported against whatever actually landed.
+    const result = await db.collection(COLL_RECORDINGS).updateOne(
+      { recording_id: replayId, status: STATUS_RECORDING, external_conv_id: null },
+      { $set: { external_conv_id: convId, conversation_bound_at: new Date() } },
+    );
+    if (result.matchedCount === 0) {
+      const now = await db.collection(COLL_RECORDINGS).findOne(
+        { recording_id: replayId },
+        { projection: { _id: 0, external_conv_id: 1 } },
+      );
+      if ((now?.external_conv_id ?? null) === convId) return res.status(204).end();
+      return res.status(409).json({ error: 'replay is already bound to a different conversation' });
+    }
+
+    // The run now knows which conversation it covered; the TURNS of that same
+    // sitting may not. A run that registered before the site minted /c/<id> is
+    // exactly the case where the first prompt was stamped with no id at all, so
+    // adopt every still-unstamped event of this run's session into it. Bounded
+    // to one machine, one session and only null values — see
+    // backfillConversationId, which the `session_bind` ingest path calls too.
+    // A run is single-session while it is recording (session_ids only grows at
+    // /complete), so this is at most one session's worth of events.
+    for (const sid of (Array.isArray(run.session_ids) ? run.session_ids : [])) {
+      await backfillConversationId(db, {
+        machineId: run.machine_id,
+        sessionId: sid,
+        externalConvId: convId,
+      });
+    }
+
+    res.status(204).end();
+  }));
+
   // ── Finish (or abort) a run ───────────────────────────────────────────────
   app.post('/api/v1/replays/:replay_id/complete', requireMachineAuth, a(async (req, res) => {
     const replayId = String(req.params.replay_id);
@@ -590,6 +694,13 @@ export function mountReplays(app, db) {
     // covers. Served by the {session_ids:1, started_at:1} multikey index.
     const sessionId = normalizeShortString(req.query.session_id, MAX_SESSION_ID_LEN);
     if (sessionId) filter.session_ids = sessionId;
+
+    // "Which runs cover this conversation" — the scalar counterpart of the
+    // session filter above, served by the {external_conv_id:1, started_at:1}
+    // index. A run is scoped to at most one conversation, so this is an equality
+    // match rather than array containment.
+    const convId = normalizeExternalConvId(req.query.external_conv_id);
+    if (convId) filter.external_conv_id = convId;
 
     const machineId = normalizeShortString(req.query.machine_id, 200);
     if (machineId) filter.machine_id = machineId;
@@ -843,6 +954,10 @@ export function publicReplay(r) {
     recorder: r.recorder ?? null,
     mask_profile: r.mask_profile ?? null,
     session_ids: r.session_ids ?? [],
+    // The AI site's own conversation id this run covers, or null for a run that
+    // never learned one (and for every run stored before conversation scoping
+    // shipped — there is no backfill, so those simply stay ungrouped).
+    external_conv_id: r.external_conv_id ?? null,
     started_at: r.started_at ?? null,
     ended_at: r.ended_at ?? null,
     duration_ms: r.duration_ms ?? null,

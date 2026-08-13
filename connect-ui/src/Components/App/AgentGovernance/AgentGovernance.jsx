@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import { AgentGovernanceProvider, useAgentAuth, useGovernance, getScopeCounts, SCOPE_LABELS, SCOPE_COLORS } from "./AgentGovernanceContext";
 import { agentGovernanceApi } from "./AgentGovernanceActions/AgentGovernanceActions";
 import { ConnectTenantModal } from "./ConnectTenantModal";
@@ -1208,8 +1209,15 @@ function AgentGovernanceInner() {
 }
 
 export default function AgentGovernance() {
+  // ?tab=<id> seeds the opening tab, so /AIHub/AgentGovernance?tab=cost lands on Cost
+  // instead of Overview. Read once on mount only: after that the tab strip owns the
+  // state (SET_TAB), and the URL is deliberately not kept in sync — this is a
+  // deep-link entry point, not two-way routing.
+  const [params] = useSearchParams();
+  const requested = params.get("tab");
+  const initialTab = TABS.some((t) => t.id === requested) ? requested : undefined;
   return (
-    <AgentGovernanceProvider>
+    <AgentGovernanceProvider initialTab={initialTab}>
       <AgentGovernanceInner />
     </AgentGovernanceProvider>
   );

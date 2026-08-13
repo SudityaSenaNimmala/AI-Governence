@@ -21,6 +21,10 @@ COPY server/src /app/server/src
 COPY server/package.json /app/server/
 COPY server/tsconfig.json /app/server/
 COPY scripts /app/scripts
+# Served as a zip by GET /api/v1/sdk/download. Without this the endpoint 404s in
+# the container even though it works locally — the route resolves sdk-js/ three
+# levels up from server/src/routes, i.e. /app/sdk-js.
+COPY sdk-js /app/sdk-js
 WORKDIR /app/server
 ENV NODE_ENV=production
 EXPOSE 3001

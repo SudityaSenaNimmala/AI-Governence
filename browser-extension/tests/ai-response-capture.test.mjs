@@ -9,7 +9,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { loadResponseAssembler, assembleFromChunks, chunkify } from './load-response-assembler.mjs';
+import {
+  loadResponseAssembler, assembleFromChunks, chunkify,
+  loadResponseCapture, fakeStreamingResponse,
+} from './load-response-assembler.mjs';
 
 const api = loadResponseAssembler();
 
@@ -223,4 +226,59 @@ test('a very long response is still assembled in full (caller applies the cap)',
   for (let i = 0; i < 200; i++) frames.push({ choices: [{ delta: { content: chunk } }] });
   const r = api.assembleAiResponseText(sse(...frames), 'openai');
   assert.equal(r.text.length, 200 * 1000);
+});
+
+// ── which conversation a reply belongs to ───────────────────────────────────
+// Captured where the response is TEED — i.e. as the request goes out — and NOT
+// when the stream finishes. A long answer is routinely still streaming when the
+// user has already clicked into another chat, and a URL read at end-of-stream
+// would file that reply under whichever chat is on screen by then.
+
+/** One ChatGPT full-snapshot SSE frame carrying an assistant reply. */
+const assistantFrame = (text) => 'data: ' + JSON.stringify({
+  message: { author: { role: 'assistant' }, content: { content_type: 'text', parts: [text] } },
+}) + '\n\n';
+
+/** Let the DETACHED capture (captureResponseStream is deliberately not awaited —
+ * the page's own fetch must never wait for us) finish draining. */
+async function drain() {
+  for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+}
+
+test('the conversation id is read at tee time, not when the stream ends', async () => {
+  const c = loadResponseCapture({ pathname: '/c/conversation-aaaa' });
+  const stream = fakeStreamingResponse([assistantFrame('the answer to the question asked in chat A')]);
+
+  const promise = c.withResponseCapture(Promise.resolve(stream), 'https://chatgpt.com/backend-api/conversation', 'chatgpt');
+  // The user switches chats while the reply is still arriving.
+  c.setPath('/c/conversation-bbbb');
+  await promise;
+  await drain();
+
+  assert.equal(c.published.length, 1);
+  assert.equal(c.published[0].external_conv_id, 'conversation-aaaa',
+    'the chat the question was asked in — not the one on screen when it finished');
+  assert.equal(c.published[0].text, 'the answer to the question asked in chat A');
+});
+
+test('a request from a page with no conversation id publishes null, never a guess', async () => {
+  const c = loadResponseCapture({ pathname: '/' });
+  const stream = fakeStreamingResponse([assistantFrame('an answer')]);
+  await c.withResponseCapture(Promise.resolve(stream), 'https://chatgpt.com/backend-api/conversation', 'chatgpt');
+  await drain();
+  assert.equal(c.published.length, 1);
+  assert.equal(c.published[0].external_conv_id, null);
+});
+
+test('the published detail still carries no URL path beyond what it always did', async () => {
+  // The conversation id is an OPAQUE id, added alongside the existing fields —
+  // it must not have turned the detail into a general URL leak.
+  const c = loadResponseCapture({ pathname: '/c/conversation-aaaa' });
+  const stream = fakeStreamingResponse([assistantFrame('hi')]);
+  await c.withResponseCapture(Promise.resolve(stream), 'https://chatgpt.com/backend-api/conversation', 'chatgpt');
+  await drain();
+  assert.deepEqual(
+    Object.keys(c.published[0]).sort(),
+    ['duration_ms', 'external_conv_id', 'format', 'site', 'text', 'truncated', 'url'],
+  );
 });

@@ -167,6 +167,13 @@ export async function settle(rounds = 8) {
  *   responses     { [__cfai_kind]: value | (payload) => value } — a value, or a
  *                 function, or `null` to simulate no answer at all
  *   sessionId     what getSessionId() returns (settable via setSessionId)
+ *   conversationId what getConversationId() returns — content.js's _activeConvId,
+ *                 i.e. the conversation in effect at the last REAL user action.
+ *                 Two setters, and the difference between them is the feature:
+ *                   navigateTo(id)  the user clicked into another chat and did
+ *                                   nothing — the recorder must not see this
+ *                   interactIn(id)  the user submitted a prompt / uploaded a
+ *                                   file there — the recorder sees it now
  *   visible       initial tab visibility (settable via setVisible)
  *   now           starting fake clock
  *
@@ -185,6 +192,7 @@ export function makeReplayHarness({
   remainingDailyMs = 4 * 60 * 60 * 1000,
   responses = {},
   sessionId = null,
+  conversationId = null,
   visible = true,
   now = 1_700_000_000_000,
   host = 'chatgpt.com',
@@ -209,6 +217,12 @@ export function makeReplayHarness({
   const logs = { info: [], warn: [] };
   let clock = now;
   let currentSession = sessionId;
+  // What content.js's _activeConvId holds. Moved ONLY by interactIn() — the
+  // whole point of the mechanism is that navigation alone does not move it.
+  let activeConv = conversationId;
+  // Where the browser actually is. The recorder never reads this; it exists so a
+  // test can prove that navigating without interacting changes nothing.
+  let urlConv = conversationId;
   let currentVisible = visible;
   let uuidN = 0;
 
@@ -223,6 +237,7 @@ export function makeReplayHarness({
       policy,
     }),
     replayRegister: { ok: true },
+    replayBindConversation: { ok: true },
     replayChunk: { ok: true },
     replayComplete: { ok: true },
     replayDailyAccrued: { ok: true },
@@ -260,6 +275,7 @@ export function makeReplayHarness({
     host,
     doc: makeFakeDoc({ invalid: invalidSelectors }),
     getSessionId: () => currentSession,
+    getConversationId: () => activeConv,
     visible: () => currentVisible,
     showBanner: (id) => banners.push({ show: id === undefined ? null : id }),
     hideBanner: () => banners.push({ hide: true }),
@@ -326,6 +342,22 @@ export function makeReplayHarness({
     advance(ms) { clock += ms; return clock; },
     nowValue() { return clock; },
     setSessionId(id) { currentSession = id; },
+    /** The user clicked into another chat (or "New chat") and did nothing there.
+     * content.js updates only its URL-following local, never _activeConvId, so
+     * the recorder's view is unchanged — that IS the debounce. */
+    navigateTo(id) { urlConv = id ?? null; },
+    /** The user actually did something in a chat — a submitted prompt, a file
+     * upload. content.js's emit() re-reads the URL for exactly these kinds, so
+     * this is the only thing that moves what the recorder sees. */
+    interactIn(id) {
+      if (id !== undefined) urlConv = id ?? null;
+      activeConv = urlConv;
+      return activeConv;
+    },
+    /** What the recorder reads (content.js's _activeConvId). */
+    activeConvId() { return activeConv; },
+    /** Where the browser is. The recorder never sees this. */
+    urlConvId() { return urlConv; },
     setVisible(v) { currentVisible = v; },
     fireTimer() { return timerFn ? timerFn() : undefined; },
     hasTimer() { return typeof timerFn === 'function'; },

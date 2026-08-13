@@ -103,8 +103,20 @@
       if (key === _lastAiResponseKey) return;
       _lastAiResponseKey = key;
 
+      // WHICH CONVERSATION THIS REPLY BELONGS TO, captured by the page side when
+      // the request was TEED — not now. A long answer can still be streaming
+      // when the user clicks into another chat, so reading the URL (or the
+      // active-conversation variable, which the user's next prompt will have
+      // already moved) at end-of-stream would file the reply under the wrong
+      // conversation. Falls back to whatever emit() would have stamped when the
+      // page side could not determine one.
+      const teeConvId = typeof d.external_conv_id === 'string' && d.external_conv_id.trim()
+        ? d.external_conv_id.trim()
+        : null;
+
       emit({
         kind: 'ai_response',
+        ...(teeConvId ? { external_conv_id: teeConvId } : {}),
         content_text: text,
         content_length: text.length,
         length_bucket: lengthBucket(text.length),
@@ -403,6 +415,87 @@
 
   let _lastConvId = null;  // conversation id last seen in the URL
 
+  // ── The ACTIVE conversation — what the replay recorder is scoped to ─────────
+  // _lastConvId above follows the URL. This one deliberately does NOT: it is the
+  // conversation id that was in effect at the moment of the last REAL user
+  // interaction — a submitted prompt, a pasted prompt, a file upload — and it is
+  // updated in exactly one place, inside emit(), for exactly those kinds.
+  //
+  // WHY, and why this is not a timer. A user flicking through five old chats to
+  // find something must not produce five recordings; but the moment they type in
+  // one of them, that chat's recording must start. Both fall out of this variable
+  // with no debounce, no settle window and no timing logic anywhere: navigating
+  // without interacting never changes it, so the replay controller's
+  // conversation boundary never fires and nothing new is recorded — reading an
+  // old chat costs nothing. One prompt changes it, and the boundary fires then.
+  //
+  // It is deliberately NOT moved by an ai_response arriving: a reply is the
+  // model acting, not the user, and the reply can land after the user has
+  // already switched chats (the listener carries its own capture-time id for
+  // exactly that reason). Nor by a bare navigation, which is the whole point.
+  //
+  // 'prompt_typed' is emitted by agent/src/os_monitor, not by this file. It is
+  // kept here so the one definition of "a user composed something" is the same
+  // in both subsystems (server-side routes/dlp.js USER_KINDS lists all four too)
+  // and so it is already handled if this script ever starts emitting it.
+  const USER_ACTION_KINDS = new Set([
+    'prompt_submit',
+    'prompt_paste',
+    'prompt_typed',
+    'file_upload',
+  ]);
+  let _activeConvId = null;
+
+  // ── …and the kinds that must NOT read that cache at all ─────────────────────
+  // THE BUG THIS FIXES. A prompt that trips enforcement never reaches
+  // logPromptEvent() — the blocking branch deliberately skips it and emits only
+  // enforcement_block, carrying the blocked text. A blocked FILE upload skips
+  // emitFileUpload() the same way. So nothing on either path moves _activeConvId,
+  // and the enforcement record was stamped with whatever chat the user last
+  // successfully TYPED in: block something in chat B right after prompting in
+  // chat A and the evidence was filed under chat A.
+  //
+  // The cache exists to answer "which chat is the user composing in", debounced
+  // against mere navigation, so that clicking through old chats does not start
+  // recordings. These kinds ask a different question — "where did this thing that
+  // just happened, happen" — and the honest answer is a LIVE read of the URL at
+  // the moment of the event. There is nothing to debounce: a security event is
+  // not a composition.
+  //
+  // NOT ai_response: a reply is the model acting, and it can land after the user
+  // has already switched chats, so it carries its own capture-time id from the
+  // request tee (see the ai_response listener) and falls back to the cache.
+  // NOT session_bind: it is about a specific id by definition and supplies it.
+  //
+  // A live read that finds no id (a brand-new chat the site has not minted a URL
+  // for yet) stores null — the correct, safe outcome. Misattributing is worse
+  // than not attributing, and null is exactly how every other "no id extractable"
+  // case in this feature already degrades.
+  // Only kinds that actually go through emit() belong here. `access_request`
+  // used to be listed and was dead weight: the block modal sends it straight to
+  // the worker with its own chrome.runtime.sendMessage, and the worker relays it
+  // to /api/v1/access-requests — it never touches emit(), so it never had a
+  // conversation id to stamp in the first place. tests/conv-identity.test.mjs
+  // now derives the kind list from emit() call sites, so a dead entry here fails
+  // the build instead of looking like a rule.
+  const LIVE_CONV_ID_KINDS = new Set([
+    'model_routed',
+  ]);
+
+  /** Every enforcement_* kind (block / redact / decision / override / …) plus the
+   * explicit list above. Prefix-matched so a new enforcement action cannot
+   * silently opt itself back into the stale cache. */
+  function readsLiveConvId(kind) {
+    if (typeof kind !== 'string') return false;
+    return kind.startsWith('enforcement_') || LIVE_CONV_ID_KINDS.has(kind);
+  }
+
+  /** What the replay controller reads as getConversationId(). Never mints, never
+   * touches the URL — see the note above. */
+  function activeConvIdCached() {
+    return _activeConvId;
+  }
+
   function currentConvId() {
     try {
       const path = location.pathname || '';
@@ -433,7 +526,22 @@
 
   function emit(event) {
     try {
+      const kind = event && event.kind;
+      // THE ONLY PLACE _activeConvId MOVES. A real user action re-reads the URL;
+      // everything else (an AI reply arriving, an enforcement record, a routing
+      // decision, a bare SPA navigation) leaves it exactly where it was.
+      if (USER_ACTION_KINDS.has(kind)) _activeConvId = currentConvId();
+      // …and the kinds that read the URL LIVE without ever moving the cache —
+      // see readsLiveConvId(). Reading is not composing, so this must not look
+      // like a user action to the replay controller.
+      const convId = readsLiveConvId(kind) ? currentConvId() : _activeConvId;
       chrome.runtime.sendMessage({
+        // The conversation this specific action belonged to. Placed BEFORE the
+        // spread so an event that captured its own id — the ai_response
+        // listener, which records the conversation at the moment the request was
+        // teed rather than when the stream finished, and session_bind, which is
+        // about a specific id by definition — keeps it.
+        external_conv_id: convId,
         ...event,
         service: SERVICE,
         occurredAt: new Date().toISOString(),
@@ -463,6 +571,11 @@
   function isTabVisible() {
     try { return document.visibilityState !== 'hidden'; } catch (e) { return true; }
   }
+  // ── end conversation identity ─────────────────────────────────────────────
+  // A SENTINEL, not decoration: tests/load-conv-identity.mjs slices the region
+  // between this and the header above out of the shipped file and evaluates it,
+  // so the conversation-stamping rules are tested against the code that ships
+  // rather than a copy of it. The slice throws if either marker moves.
 
   // --- the session id this tab is in, as last reported by the worker ---
   // The replay controller (content/replay.js) needs it on every tick to keep one
@@ -593,28 +706,20 @@
   //   - Downgrade: user picks Opus for "hi" → routes to Haiku (save money)
   //   - Upgrade:   user picks Haiku for architecture design → routes to Sonnet (ensure quality)
 
-  const COMPLEX_RE = /\b(architect|design|implement|refactor|optimize|compare|evaluate|explain.in.detail|step.by.step|comprehensive|thorough|deep.dive|trade.?offs?|debug|investigate|root.cause|security.review|performance|scale|migration|analyze|algorithm|distributed|concurrency|microservice|infrastructure|deployment|kubernetes|terraform|database.schema|system.design|code.review|vulnerability|pentest|threat.model|roadmap|strategy|tutorial|walkthrough|guide.me|plan.for|build.a|create.a|develop|detailed|in.depth|end.to.end|full.stack|production|enterprise|advanced|complex|multi.step|pipeline|workflow|framework|integration|authentication|authorization|caching|monitoring|testing.strategy|api.design|data.model)\b/i;
-  const SIMPLE_RE  = /\b(commit.message|changelog|fix.typo|rename|format|lint|translate|convert|hello|hi|hey|thanks|thank.you|yes|no|ok|okay|define|spell|grammar|weather|time|date|joke|funny|meaning.of)\b/i;
-
+  // Complexity classification lives in content/complexity.js (window.__cfaiComplexity).
+  // It used to be two flat keyword regexes here with a character-length fallback,
+  // which routed short-but-hard prompts ("what's our architecture for X") to the
+  // cheapest model and bumped long-but-easy ones up a tier. See that file and
+  // tests/complexity.test.mjs.
   function classifyComplexity(text) {
-    if (!text) return 'simple';
-    const len = text.length;
-    const sample = len > 2000 ? text.slice(0, 2000) : text;
-
-    // Keywords FIRST — "Design distributed system" is complex even if short
-    if (COMPLEX_RE.test(sample)) return 'complex';
-    if (SIMPLE_RE.test(sample)) return 'simple';
-
-    // No keyword match — use length as heuristic
-    if (len < 300) return 'simple';
-    if (len > 8000) return 'complex';
-    const codeBlocks = (sample.match(/```/g) || []).length / 2;
-    if (codeBlocks >= 2) return 'complex';
-    if (codeBlocks >= 1 && len > 800) return 'complex';
-    if (len < 800) return 'simple';
-    return 'moderate';
+    const c = window.__cfaiComplexity;
+    // Load-order failure: hold no opinion. 'moderate' leaves a premium model
+    // alone rather than silently downgrading the user's choice on a bad load.
+    if (!c) return 'moderate';
+    try { return c.classify(text); } catch { return 'moderate'; }
   }
 
+  // ── Model tier detection (Smart Model Router) ────────────────────────────
   // Detect model tier from button text or model ID.
   // Handles current + future model names dynamically by keyword matching.
   function detectModelInfo(text) {
@@ -634,13 +739,21 @@
     // ChatGPT sometimes shows just "ChatGPT" with no version — treat as standard
     if (t.includes('chatgpt'))                                          return { provider: 'openai', tier: 'standard' };
 
-    // Google — "flash" before "pro"
+    // Google — Gemini renamed its lineup from Flash/Pro/Ultra to Flash/Thinking/Pro
+    // (confirmed against Google's own pricing/plan pages, 2026-08). "Thinking" is a
+    // reasoning mode layered on Flash, priced close to Flash; "Pro" is now the
+    // separate, priciest flagship gated behind a paid plan — so the tier order is
+    // Flash (cheapest) < Thinking (middle) < Pro (priciest), not a straight rename.
+    // "ultra" is kept as a legacy/back-compat match in case an older or
+    // enterprise surface still shows it.
     if (t.includes('flash') || t.includes('lite'))  return { provider: 'google', tier: 'economy' };
-    if (t.includes('pro'))                          return { provider: 'google', tier: 'standard' };
+    if (t.includes('thinking'))                     return { provider: 'google', tier: 'standard' };
+    if (t.includes('pro'))                          return { provider: 'google', tier: 'premium' };
     if (t.includes('ultra'))                        return { provider: 'google', tier: 'premium' };
 
     return null;
   }
+  // ── end model tier detection ─
 
   // Smart routing table: [provider][currentTier][complexity] → target
   // Uses UI DISPLAY NAMES (what the user sees in the dropdown), NOT API model IDs.
@@ -714,7 +827,7 @@
   const TIER_UI_NAME = {
     anthropic: { 3: 'Opus', 2: 'Sonnet', 1: 'Haiku' },
     openai:    { 3: 'GPT-4', 2: 'GPT-4o', 1: 'GPT-4o mini' },
-    google:    { 3: 'Ultra', 2: 'Pro', 1: 'Flash' },
+    google:    { 3: 'Pro', 2: 'Thinking', 1: 'Flash' },
   };
 
   const TIER_REASON = {
@@ -838,7 +951,7 @@
     // OpenAI
     'GPT-4', 'GPT-3', 'ChatGPT', 'o1', 'o3', 'o4',
     // Google
-    'Gemini', 'Flash', 'Ultra',
+    'Gemini', 'Flash', 'Ultra', 'Thinking',
     // Microsoft
     'Copilot',
     // Other
@@ -3667,6 +3780,11 @@
         // A cached read of what the WORKER last said this tab's session is. Never
         // mints, never blocks — see the conversation-identity region above.
         getSessionId: currentSessionIdCached,
+        // The conversation the user last actually DID something in. Not a live
+        // URL read: that is what keeps clicking through old chats from starting
+        // a recording per chat, with no timer involved. See the note on
+        // _activeConvId in the conversation-identity region.
+        getConversationId: activeConvIdCached,
         visible: isTabVisible,
         showBanner: showRecordingBanner,
         hideBanner: hideRecordingBanner,

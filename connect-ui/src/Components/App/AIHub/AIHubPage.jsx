@@ -3,13 +3,14 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import SideNav from "../../Resuables/Nav/SideNav";
 import TopNav from "../../Resuables/Nav/TopNav";
 import AgentGovernance from "../AgentGovernance/AgentGovernance";
-import { AgentGovernanceProvider } from "../AgentGovernance/AgentGovernanceContext";
+import { AgentGovernanceProvider, useAgentAuth } from "../AgentGovernance/AgentGovernanceContext";
+import { agentGovernanceApi } from "../AgentGovernance/AgentGovernanceActions/AgentGovernanceActions";
 import { PoliciesTab } from "../AgentGovernance/tabs/PoliciesTab";
 import {
   Monitor, Scan, AlertTriangle, Wrench, Server, Shield, Clock, ChevronRight,
   Search, RefreshCw, Activity, FileText, MessageSquare, Eye, Trash2, Plus, X,
   History, ArrowLeft, Bot, User, ShieldAlert, Film, PlayCircle, MonitorPlay,
-  Maximize2, Minimize2, Copy, Check,
+  Maximize2, Minimize2, Copy, Check, DollarSign, ExternalLink, Download,
 } from "lucide-react";
 import { sanitizeReplayEvents } from "./replaySanitize";
 import { createReplayHost, applyReplayIframeCsp } from "./rrwebHost";
@@ -29,7 +30,15 @@ function relTime(d) {
   if (ms < 86400000) return `${Math.floor(ms/3600000)}h ago`;
   return `${Math.floor(ms/86400000)}d ago`;
 }
-function fmtUsd(n) { return "$" + (n||0).toFixed(2); }
+// Test/low-volume traces routinely cost a fraction of a cent — toFixed(2) alone
+// rounds every one of those down to "$0.00", which reads as "no cost" even
+// though a real, non-zero cost was recorded. Below a cent, show enough
+// decimals to see the real number instead of silently rounding it to zero.
+function fmtUsd(n) {
+  const v = n || 0;
+  if (v > 0 && v < 0.01) return "$" + v.toFixed(6).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+  return "$" + v.toFixed(2);
+}
 function fmtTokens(n) { if (!n) return "—"; if (n>1e6) return (n/1e6).toFixed(1)+"M"; if (n>1e3) return (n/1e3).toFixed(1)+"K"; return n; }
 
 // Only surface the severities that matter to a reviewer.
@@ -203,25 +212,289 @@ function TextContent({ text, matches, contentType }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // 1. OVERVIEW
 // ═══════════════════════════════════════════════════════════════════════════════
+// Every widget on this screen is a click-through to the page that owns the detail —
+// the overview is a router, not a dead-end summary. Routes are collected here so a
+// tab rename breaks one line rather than eight call sites.
+const OV_ROUTE={
+  machines:"/AIHub/PoliciesRisk?tab=risk",
+  tools:"/AIHub/Inventory?tab=systems",
+  dlp:"/AIHub/Activity?tab=prompts",
+  agents:"/AIHub/Inventory?tab=agents",
+  access:"/AIHub/AccessRequests",
+  cost:"/AIHub/AgentGovernance?tab=cost",
+  policies:"/AIHub/PoliciesRisk?tab=policies",
+};
+// Same hex values as SanctionBadge / SeverityBadge / RiskBadge above — one status
+// colour per meaning across the whole screen.
+const SANCTION_TONE={approved:"#22c55e",restricted:"#f59e0b",blocked:"#ef4444",unknown:"#9ca3af"};
+const RISK_TONE={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e",not_assessed:"#9ca3af"};
+const SEV_TONE={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e"};
+const AUTONOMY_TONE={ai_app:"#0044cc",mcp:"#8b5cf6",ai_coding_agent:"#f59e0b",ai_agent:"#ef4444"};
+const VENDOR_LABEL={microsoft:"Azure OpenAI",google:"Vertex AI",openai:"OpenAI",claude:"Anthropic",gemini:"Gemini Enterprise"};
+
+/** Card that behaves like a link. role/tabIndex/keydown so it is reachable without a mouse. */
+function ClickCard({ title, hint, onClick, children }) {
+  return (<div className="aihub_card aihub_card_click" role="button" tabIndex={0}
+               onClick={onClick} onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();onClick();}}}>
+    <SectionHeader title={title} hint={hint}/>
+    {children}
+  </div>);
+}
+
+// Hand-rolled SVG donut, matching the hand-rolled BarChart above rather than pulling
+// a chart library into this file. The ring is dash-segments of a single circle, so the
+// centre is a plain cutout — no number or text inside it by design.
+function Donut({ segments, label, size=132, thickness=30 }) {
+  const total=segments.reduce((s,x)=>s+x.value,0);
+  const r=(size-thickness)/2, c=2*Math.PI*r;
+  let off=0;
+  return (<svg className="aihub_donut" width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label={label}>
+    <g transform={`rotate(-90 ${size/2} ${size/2})`}>
+      {total===0
+        ? <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#f3f4f6" strokeWidth={thickness}/>
+        : segments.filter(s=>s.value>0).map(s=>{
+            const len=c*(s.value/total);
+            const pct=Math.round((s.value/total)*100);
+            // <title> is a native SVG hover tooltip — no JS state, no positioning
+            // logic, and it doubles as the segment's accessible name.
+            const arc=(<circle key={s.key} cx={size/2} cy={size/2} r={r} fill="none" stroke={s.color}
+                              strokeWidth={thickness} strokeDasharray={`${len} ${c-len}`} strokeDashoffset={-off}>
+              <title>{`${s.label}: ${s.value.toLocaleString()} (${pct}%)`}</title>
+            </circle>);
+            off+=len; return arc;
+          })}
+    </g>
+  </svg>);
+}
+
+// Headline total on top, donut below, swatch+label legend beside it. The legend
+// deliberately carries no per-slice counts — the breakdown lives on the page this
+// card opens. Counts are still in the chart's aria-label for screen readers.
+function DonutCard({ title, hint, segments, onClick, unavailable }) {
+  const total=segments.reduce((s,x)=>s+x.value,0);
+  return (<ClickCard title={title} hint={hint} onClick={onClick}>
+    {unavailable ? <p className="aihub_text_muted">Not available right now — open the full list.</p> : <>
+      <div className="aihub_chart_total">{total.toLocaleString()}</div>
+      <div className="aihub_chart_total_label">total</div>
+      <div className="aihub_donut_wrap">
+        <Donut segments={segments} label={`${title} — ${segments.map(s=>`${s.label}: ${s.value}`).join(", ")}`}/>
+        <ul className="aihub_legend">
+          {segments.map(s=><li key={s.key}><span className="aihub_legend_dot" style={{background:s.color}}/>{s.label}</li>)}
+        </ul>
+      </div>
+    </>}
+  </ClickCard>);
+}
+
+// One stacked bar: proportional widths for apps / MCP servers / coding agents /
+// autonomous agents. Counts DO show in this legend — it is the only place they appear.
+function AutonomyCard({ segments, onClick, unavailable }) {
+  const total=segments.reduce((s,x)=>s+x.value,0);
+  return (<ClickCard title="Agent autonomy" hint="How much of the AI footprint can act on its own." onClick={onClick}>
+    {unavailable ? <p className="aihub_text_muted">Not available right now — open Agents & MCP.</p> : <>
+      <div className="aihub_seg_bar" role="img" aria-label={`Agent autonomy — ${segments.map(s=>`${s.label}: ${s.value}`).join(", ")}`}>
+        {total===0
+          ? <div className="aihub_seg_empty"/>
+          : segments.filter(s=>s.value>0).map(s=><div key={s.key} className="aihub_seg" title={`${s.label}: ${s.value.toLocaleString()} (${Math.round((s.value/total)*100)}%)`} style={{width:`${(s.value/total)*100}%`,background:s.color}}/>)}
+      </div>
+      <ul className="aihub_seg_legend">
+        {segments.map(s=><li key={s.key}><span className="aihub_legend_dot" style={{background:s.color}}/>{s.label}<strong>{s.value.toLocaleString()}</strong></li>)}
+      </ul>
+      {total===0 && <p className="aihub_text_muted" style={{marginTop:8}}>No agent projects or MCP servers detected yet.</p>}
+    </>}
+  </ClickCard>);
+}
+
+/** One row of "Needs attention". Real link semantics, one real destination each. */
+function AttnItem({ tone, icon, label, sub, onClick }) {
+  return (<li><button className="aihub_attn_item" onClick={onClick}>
+    <span className="aihub_attn_icon" style={{background:tone+"14",color:tone}}>{icon}</span>
+    <span className="aihub_attn_text"><span className="aihub_attn_label">{label}</span><span className="aihub_attn_sub">{sub}</span></span>
+    <ChevronRight size={14} className="aihub_attn_chev"/>
+  </button></li>);
+}
+
+// LLM spend KPI. Reads the same credentials and cost endpoints as Agent Governance →
+// Cost (see tabs/CostTab.jsx), but shows the RAW 30-day total: this tile deliberately
+// skips CostTab's subscription / free-tier subtraction. Must be mounted inside
+// <AgentGovernanceProvider> because it uses useAgentAuth(). With no vendor credential
+// it says "Not connected" rather than an invented $0, and still navigates through.
+function SpendCard({ onClick }) {
+  const { oauthKeyId, googleKeyId, openaiKeyId, claudeKeyId, geminiEnterpriseKeyId }=useAgentAuth();
+  const vendor=oauthKeyId?"microsoft":googleKeyId?"google":openaiKeyId?"openai":claudeKeyId?"claude":geminiEnterpriseKeyId?"gemini":null;
+  const [st,setSt]=useState({status:"none"});
+  useEffect(()=>{
+    if(!vendor){setSt({status:"none"});return;}
+    let dead=false; setSt({status:"loading"});
+    (async()=>{
+      try{
+        const d=vendor==="microsoft"?await agentGovernanceApi.fetchAzureCost(oauthKeyId,"P30D")
+          :vendor==="google"?await agentGovernanceApi.fetchGoogleCost(googleKeyId,30)
+          :vendor==="openai"?await agentGovernanceApi.fetchOpenAICost(openaiKeyId,"P30D")
+          :vendor==="claude"?await agentGovernanceApi.fetchClaudeUsage(claudeKeyId,"P30D")
+          :await agentGovernanceApi.fetchGeminiEnterpriseCost(geminiEnterpriseKeyId,30);
+        if(!dead) setSt({status:"ok",total:Number(d?.summary?.totalCost ?? d?.estimatedTotalCost ?? 0)});
+      }catch{ if(!dead) setSt({status:"error"}); }
+    })();
+    return ()=>{dead=true};
+  },[vendor,oauthKeyId,googleKeyId,openaiKeyId,claudeKeyId,geminiEnterpriseKeyId]);
+  const value=st.status==="ok"?fmtUsd(st.total):st.status==="loading"?"…":st.status==="error"?"—":"Not connected";
+  const hint=st.status==="ok"?`This month · ${VENDOR_LABEL[vendor]}`
+    :st.status==="loading"?"Reading provider usage…"
+    :st.status==="error"?"Cost unavailable — check the connection"
+    :"Connect a provider to see spend";
+  return <StatCard icon={<DollarSign size={18}/>} label="LLM spend" value={value} hint={hint} color="#22c55e" onClick={onClick}/>;
+}
+
 function OverviewView() {
-  const [d,setD]=useState(null),[e,setE]=useState(null);
   const nav=useNavigate();
-  useEffect(()=>{apiFetch("/overview").then(setD).catch(x=>setE(x.message))},[]);
-  if(e) return <Err msg={e}/>; if(!d) return <Loading/>;
+  const [d,setD]=useState(null),[e,setE]=useState(null);
+  const [reg,setReg]=useState(null),[dlp,setDlp]=useState(null),[mcp,setMcp]=useState(null);
+  const [proj,setProj]=useState(null),[reqs,setReqs]=useState(null),[hiEv,setHiEv]=useState(null);
+  const [warn,setWarn]=useState([]);
+  useEffect(()=>{
+    // /overview is the only hard dependency. Every other panel degrades on its own —
+    // a single failing endpoint must not blank the screen, and a failure is named in
+    // the banner rather than silently rendering as a zero.
+    const soft=(p,label,setter,fallback)=>p.then(setter).catch(()=>{setter(fallback);setWarn(w=>w.includes(label)?w:[...w,label]);});
+    apiFetch("/overview").then(setD).catch(x=>setE(x.message));
+    soft(apiFetch("/registry/summary"),"AI systems registry",setReg,false);
+    soft(apiFetch("/dlp/summary"),"prompt & DLP activity",setDlp,false);
+    soft(apiFetch("/findings?type=mcp_server&latestOnly=true&limit=500"),"MCP servers",setMcp,false);
+    soft(apiFetch("/findings?type=agent_project&latestOnly=true&limit=500"),"agent projects",setProj,false);
+    soft(apiFetch("/access-requests"),"access requests",setReqs,false);
+    soft(apiFetch("/dlp?severity=critical,high&limit=1"),"recent detections",setHiEv,false);
+  },[]);
+  if(e) return <Err msg={e}/>;
+  if(!d) return <Loading/>;
+
+  const byStatus=(reg&&reg.by_status)||{}, byRisk=(reg&&reg.by_risk)||{};
+  const sev={}; ((dlp&&dlp.bySeverity)||[]).forEach(s=>{sev[s.severity]=(sev[s.severity]||0)+(s.events||0)});
+  const hiCrit=(sev.critical||0)+(sev.high||0);
+  // Same bucketing AgentsView uses: payload.primaryCategory, defaulting to ai_app.
+  const cats={ai_agent:0,ai_coding_agent:0,ai_app:0};
+  (Array.isArray(proj)?proj:[]).forEach(f=>{const c=f.payload?.primaryCategory||"ai_app"; if(cats[c]!=null) cats[c]+=1;});
+  const mcpCount=Array.isArray(mcp)?mcp.length:0;
+  const autonomy=mcpCount+cats.ai_agent+cats.ai_coding_agent+cats.ai_app;
+  const pending=(Array.isArray(reqs)?reqs:[]).filter(r=>r.status==="pending").length;
+  const ev=Array.isArray(hiEv)?hiEv[0]:null;
+  const noAutonomy=mcp===false&&proj===false;   // both endpoints failed — 0 would be a lie
+
+  const sanctionSegs=[
+    {key:"approved",label:"Approved",value:byStatus.approved||0,color:SANCTION_TONE.approved},
+    {key:"restricted",label:"Restricted",value:byStatus.restricted||0,color:SANCTION_TONE.restricted},
+    {key:"blocked",label:"Blocked",value:byStatus.blocked||0,color:SANCTION_TONE.blocked},
+    {key:"unknown",label:"Unknown",value:byStatus.unknown||0,color:SANCTION_TONE.unknown},
+  ];
+  const riskSegs=[
+    {key:"critical",label:"Critical",value:byRisk.critical||0,color:RISK_TONE.critical},
+    {key:"high",label:"High",value:byRisk.high||0,color:RISK_TONE.high},
+    {key:"medium",label:"Medium",value:byRisk.medium||0,color:RISK_TONE.medium},
+    {key:"low",label:"Low",value:byRisk.low||0,color:RISK_TONE.low},
+    {key:"not_assessed",label:"Not assessed",value:byRisk.not_assessed||0,color:RISK_TONE.not_assessed},
+  ];
+  const autonomySegs=[
+    {key:"ai_app",label:"AI-using apps",value:cats.ai_app,color:AUTONOMY_TONE.ai_app},
+    {key:"mcp",label:"MCP servers",value:mcpCount,color:AUTONOMY_TONE.mcp},
+    {key:"ai_coding_agent",label:"AI coding agents",value:cats.ai_coding_agent,color:AUTONOMY_TONE.ai_coding_agent},
+    {key:"ai_agent",label:"Autonomous agents",value:cats.ai_agent,color:AUTONOMY_TONE.ai_agent},
+  ];
+
+  // Max 4 rows, only for things that are actually outstanding. Never renders captured
+  // prompt text — service, severity and time only.
+  const attn=[];
+  if(ev) attn.push({key:"ev",tone:SEV_TONE[ev.secret_class||ev.severity]||SEV_TONE.high,icon:<ShieldAlert size={14}/>,
+    label:`${(ev.secret_class||ev.severity||"high")} detection in ${ev.platform?.product||ev.ai_service||"an AI tool"}`,
+    sub:`Latest sensitive-data hit · ${relTime(ev.occurred_at)}`,to:OV_ROUTE.dlp});
+  if(pending>0) attn.push({key:"req",tone:"#f59e0b",icon:<Clock size={14}/>,
+    label:`${pending} access request${pending===1?"":"s"} awaiting review`,sub:"Employees stay blocked until reviewed",to:OV_ROUTE.access});
+  if(byStatus.unknown>0) attn.push({key:"unsanctioned",tone:"#8b5cf6",icon:<Wrench size={14}/>,
+    label:`${byStatus.unknown} tools with no sanction decision`,sub:"Approve, restrict or block them",to:OV_ROUTE.tools});
+  if(byRisk.not_assessed>0) attn.push({key:"risk",tone:"#0044cc",icon:<Shield size={14}/>,
+    label:`${byRisk.not_assessed} tools not risk-assessed`,sub:"No risk level recorded yet",to:OV_ROUTE.tools});
+
+  const links=[
+    {label:"EU AI Act",href:"https://artificialintelligenceact.eu/"},
+    {label:"NIST AI RMF",href:"https://www.nist.gov/itl/ai-risk-management-framework"},
+    {label:"ISO/IEC 42001",href:"https://www.iso.org/standard/81230.html"},
+    {label:"AI use policy",to:OV_ROUTE.policies},
+    {label:"Request a tool",to:OV_ROUTE.access},
+  ];
+
   return (<div>
-    <SectionHeader title="Overview" hint="Aggregate AI tool and agent footprint across enrolled machines."/>
+    <SectionHeader title="Overview" hint="Every AI tool, agent and activity across your organization — click any card to see the full detail."/>
+
+    {warn.length>0 && <div className="aihub_ov_warn"><AlertTriangle size={14}/> Could not load {warn.join(", ")}. Those panels may be incomplete.</div>}
+
+    {/* 1. KPI strip */}
     <div className="aihub_stat_grid">
-      <StatCard icon={<Monitor size={18}/>} label="Enrolled machines" value={d.totals.machines} color="#0044cc" onClick={()=>nav("/AIHub/Machines")}/>
-      <StatCard icon={<Wrench size={18}/>} label="Unique AI tools" value={d.totals.unique_tools} color="#8b5cf6"/>
+      <StatCard icon={<Monitor size={18}/>} label="Machines" value={d.totals.machines} hint="Reporting endpoints" color="#0044cc" onClick={()=>nav(OV_ROUTE.machines)}/>
+      <StatCard icon={<Wrench size={18}/>} label="AI tools & systems"
+                value={reg&&reg.total_ai_systems!=null?reg.total_ai_systems:d.totals.unique_tools}
+                hint={reg&&reg.total_ai_systems!=null?"In the AI registry":"Unique tools detected"} color="#8b5cf6" onClick={()=>nav(OV_ROUTE.tools)}/>
+      <StatCard icon={<ShieldAlert size={18}/>} label="DLP events" value={dlp===false?"—":hiCrit} hint={dlp===false?"Summary unavailable":"High/critical this month"} color="#ef4444" onClick={()=>nav(OV_ROUTE.dlp)}/>
+      <StatCard icon={<Bot size={18}/>} label="Autonomy" value={noAutonomy?"—":autonomy} hint={noAutonomy?"Counts unavailable":"Agents & MCP servers"} color="#f59e0b" onClick={()=>nav(OV_ROUTE.agents)}/>
+      <AgentGovernanceProvider><SpendCard onClick={()=>nav(OV_ROUTE.cost)}/></AgentGovernanceProvider>
     </div>
-    <div className="aihub_card">
-      <SectionHeader title="Top AI tools across the org" hint="Most-detected tools, ranked by machine count."/>
-      <DataTable columns={[
-        {label:"Product",render:r=><><div className="aihub_text_primary">{r.product||"—"}</div><div className="aihub_text_muted">{r.vendor||"Unknown"}</div></>},
-        {label:"Machines",key:"machines",right:true},
-        {label:"Findings",key:"findings",right:true},
-        {label:"Status",render:r=><SanctionBadge status={r.sanction}/>},
-      ]} rows={(d.topTools||[]).filter(t=>t.product)} empty="No named AI tools detected yet."/>
+
+    {/* 2. Open governance items — two real counts, no composite score */}
+    <div className="aihub_gov_banner">
+      <button className="aihub_gov_stat" onClick={()=>nav(OV_ROUTE.tools)}>
+        <span className="aihub_gov_num">{reg===false?"—":(byRisk.not_assessed||0)}</span>
+        <span className="aihub_gov_txt">tools not yet risk-assessed</span>
+        <ChevronRight size={14}/>
+      </button>
+      <span className="aihub_gov_div"/>
+      <button className="aihub_gov_stat" onClick={()=>nav(OV_ROUTE.access)}>
+        <span className="aihub_gov_num">{reqs===false?"—":pending}</span>
+        <span className="aihub_gov_txt">access requests pending</span>
+        <ChevronRight size={14}/>
+      </button>
+    </div>
+
+    <div className="aihub_ov_grid">
+      <div className="aihub_ov_main">
+        {/* 3. Tools by sanction / by risk */}
+        <div className="aihub_two_even">
+          <DonutCard title="Tools by sanction" hint="Allow/block decision per AI system." segments={sanctionSegs} unavailable={reg===false} onClick={()=>nav(OV_ROUTE.tools)}/>
+          <DonutCard title="Tools by risk level" hint="Assessed risk per AI system." segments={riskSegs} unavailable={reg===false} onClick={()=>nav(OV_ROUTE.tools)}/>
+        </div>
+
+        {/* 4. Autonomy / severity */}
+        <div className="aihub_two_even">
+          <AutonomyCard segments={autonomySegs} unavailable={noAutonomy} onClick={()=>nav(OV_ROUTE.agents)}/>
+          <ClickCard title="Activity by severity" hint="Prompt and upload detections." onClick={()=>nav(OV_ROUTE.dlp)}>
+            {dlp===false
+              ? <p className="aihub_text_muted">Severity counts unavailable.</p>
+              : <div className="aihub_sev_chips">
+                  {["critical","high","medium","low"].map(k=>(
+                    <div key={k} className="aihub_sev_chip" style={{background:SEV_TONE[k]+"14",borderColor:SEV_TONE[k]+"30"}}>
+                      <span className="aihub_sev_num" style={{color:SEV_TONE[k]}}>{(sev[k]||0).toLocaleString()}</span>
+                      <span className="aihub_sev_label">{k}</span>
+                    </div>
+                  ))}
+                </div>}
+          </ClickCard>
+        </div>
+      </div>
+
+      {/* 5. Needs attention + quick links */}
+      <div className="aihub_ov_side">
+        <div className="aihub_card">
+          <SectionHeader title="Needs attention" hint="Open items — each one opens where it is handled."/>
+          {attn.length===0
+            ? <p className="aihub_text_muted">{warn.length>0?"Some panels could not load, so this list may be incomplete.":"Nothing outstanding right now."}</p>
+            : <ul className="aihub_attn_list">{attn.slice(0,4).map(a=><AttnItem key={a.key} tone={a.tone} icon={a.icon} label={a.label} sub={a.sub} onClick={()=>nav(a.to)}/>)}</ul>}
+        </div>
+        <div className="aihub_card">
+          <SectionHeader title="Quick links" hint="Frameworks and policy references."/>
+          <div className="aihub_quick_links">
+            {links.map(l=>l.href
+              ? <a key={l.label} className="aihub_quick_link" href={l.href} target="_blank" rel="noreferrer">{l.label}<ExternalLink size={11}/></a>
+              : <button key={l.label} className="aihub_quick_link" onClick={()=>nav(l.to)}>{l.label}<ChevronRight size={12}/></button>)}
+          </div>
+        </div>
+      </div>
     </div>
   </div>);
 }
@@ -1947,7 +2220,7 @@ function RuleFormModal({rule,onSave,onClose}) {
 }
 
 function ModelRoutingView() {
-  const [tab,setTab]=useState("overview");
+  const [tab,setTab]=useState("rules");
   const [rules,setRules]=useState(null);
   const [endpoints,setEndpoints]=useState(null);
   const [analytics,setAnalytics]=useState(null);
@@ -1986,10 +2259,9 @@ function ModelRoutingView() {
 
   const activeRules=rules.filter(r=>r.enabled).length;
   const tabs=[
-    {id:"overview",label:"Overview"},
     {id:"rules",label:`Rules (${rules.length})`},
-    {id:"endpoints",label:`Endpoints (${(endpoints||[]).length})`},
-    {id:"log",label:"Routing Log"},
+    // {id:"endpoints",label:`Endpoints (${(endpoints||[]).length})`},  // hidden — proxy routing pivoted to browser extension approach
+    {id:"log",label:"Routing Log",hidden:true},
   ];
 
   return (<div>
@@ -2007,10 +2279,8 @@ function ModelRoutingView() {
     <div style={{display:"flex",gap:2,marginBottom:16,borderBottom:"2px solid #f3f4f6"}}>
       {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)}
         style={{padding:"8px 18px",fontSize:13,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0044cc":"2px solid transparent",
-          background:"none",color:tab===t.id?"#0044cc":"#6b7280",cursor:"pointer",marginBottom:-2}}>{t.label}</button>)}
+          background:"none",color:t.hidden?(tab===t.id?"#0044cc":"transparent"):(tab===t.id?"#0044cc":"#6b7280"),cursor:"pointer",marginBottom:-2}}>{t.label}</button>)}
     </div>
-
-    {/* ── Overview Tab ── */}
     {tab==="overview"&&(<div>
       {analytics?.total_routed===0 ? (
         <div className="aihub_card" style={{textAlign:"center",padding:"40px 20px"}}>
@@ -2444,34 +2714,61 @@ const CATEGORY_ICONS = {
 const SOURCE_LABEL = { governance: "Gov", endpoint_scan: "Scan", platform_registry: "Platform", platform_catalog: "Catalog" };
 const SOURCE_TONE  = { governance: "#8b5cf6", endpoint_scan: "#0044cc", platform_registry: "#6b7280", platform_catalog: "#9ca3af" };
 
+// Coarse Tool/Agent split, derived from the existing `category` field (there is
+// no separate tool-vs-agent flag in the data — this groups the 12 categories
+// registry.js already assigns). "agent-config", "autonomous-agent",
+// "ide-assistant" and "mcp-server" all represent something that ACTS or
+// integrates into a workflow on the user's behalf, rather than something the
+// user directly chats with.
+//
+// KNOWN GRAY AREA: "desktop-app" covers both a plain chat client (e.g. the
+// Claude desktop app) and an agentic IDE (e.g. Cursor) identically — discovery
+// only sees "a running desktop process" either way, with nothing today
+// distinguishing the two. Both land in "AI Tool" here. Splitting them further
+// would need the scanner itself to tell them apart, not just this view.
+const AGENT_CATEGORIES = new Set(['autonomous-agent', 'agent-config', 'ide-assistant', 'mcp-server']);
+function systemTypeOf(category) {
+  return AGENT_CATEGORIES.has(category) ? 'agent' : 'tool';
+}
+
 function RegistryStatusBadge({ status }) {
   const label = status === 'approved' ? 'Allowed' : status === 'blocked' ? 'Blocked' : 'Unreviewed';
   const c = STATUS_COLORS[status] || "#f59e0b";
   return <span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 10px",borderRadius:8,fontSize:11,fontWeight:700,background:c+"14",color:c,border:"1px solid "+c+"30"}}>{label}</span>;
 }
 
-function RegistryToggle({ status, onChange }) {
+function RegistryToggle({ status, onChange, pending }) {
   const isUnreviewed = status === 'unknown' || status === 'restricted';
   const isAllowed = status === 'approved';
   const isBlocked = status === 'blocked';
 
+  // Shown next to the control while a decision is saving — the toggle's own
+  // `status` doesn't flip until the reload after the write completes, so
+  // without this the control looks unchanged and inert while a save is in
+  // flight, which reads as "my click didn't register" and invites more clicks.
+  const spinner = pending
+    ? <RefreshCw size={13} className="aihub_spin" style={{color:"#6b7280"}}/>
+    : null;
+
   if (isUnreviewed) {
     // First time — show both options side by side
     return (<div style={{display:"flex",alignItems:"center",gap:8}}>
-      <button onClick={()=>onChange('approved')} style={{padding:"6px 16px",borderRadius:8,fontSize:12,fontWeight:600,border:"1px solid #22c55e40",background:"#22c55e14",color:"#22c55e",cursor:"pointer"}}>Allow</button>
+      <button disabled={pending} onClick={()=>onChange('approved')} style={{padding:"6px 16px",borderRadius:8,fontSize:12,fontWeight:600,border:"1px solid #22c55e40",background:"#22c55e14",color:"#22c55e",cursor:pending?"default":"pointer",opacity:pending?0.6:1}}>Allow</button>
       <span style={{fontSize:11,color:"#f59e0b",fontWeight:600}}>Unreviewed</span>
-      <button onClick={()=>onChange('blocked')} style={{padding:"6px 16px",borderRadius:8,fontSize:12,fontWeight:600,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:"pointer"}}>Block</button>
+      <button disabled={pending} onClick={()=>onChange('blocked')} style={{padding:"6px 16px",borderRadius:8,fontSize:12,fontWeight:600,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:pending?"default":"pointer",opacity:pending?0.6:1}}>Block</button>
+      {spinner}
     </div>);
   }
 
   // After first decision — simple toggle between allowed and blocked
   return (<div style={{display:"flex",alignItems:"center",gap:10}}>
     <span style={{fontSize:12,fontWeight:isAllowed?700:400,color:isAllowed?"#22c55e":"#9ca3af"}}>Allowed</span>
-    <div onClick={()=>onChange(isAllowed?'blocked':'approved')}
-      style={{width:44,height:24,borderRadius:12,background:isAllowed?"#22c55e":"#ef4444",cursor:"pointer",position:"relative",transition:"background 0.2s"}}>
+    <div onClick={()=>{ if(!pending) onChange(isAllowed?'blocked':'approved'); }}
+      style={{width:44,height:24,borderRadius:12,background:isAllowed?"#22c55e":"#ef4444",cursor:pending?"default":"pointer",position:"relative",transition:"background 0.2s",opacity:pending?0.6:1}}>
       <div style={{width:18,height:18,borderRadius:9,background:"#fff",position:"absolute",top:3,left:isAllowed?3:23,transition:"left 0.2s",boxShadow:"0 1px 3px rgba(0,0,0,0.2)"}}/>
     </div>
     <span style={{fontSize:12,fontWeight:isBlocked?700:400,color:isBlocked?"#ef4444":"#9ca3af"}}>Blocked</span>
+    {spinner}
   </div>);
 }
 
@@ -2504,15 +2801,24 @@ function AIRegistryView() {
   const [err,setErr]=useState(null);
   const [search,setSearch]=useState("");
   const [filterStatus,setFilterStatus]=useState("");
+  const [filterType,setFilterType]=useState("");
   const [filterCategory,setFilterCategory]=useState("");
   const [filterRisk,setFilterRisk]=useState("");
+  // Ids currently mid-flight on an allow/block decision. The toggle's own
+  // `status` prop doesn't change until loadAll() finishes re-fetching, so
+  // without this a slow save looks identical to a click that did nothing —
+  // and the natural response is to click again.
+  const [pendingIds,setPendingIds]=useState(()=>new Set());
   const [hideInactive,setHideInactive]=useState(true);
   const [selected,setSelected]=useState(null);
   const [showAdd,setShowAdd]=useState(false);
 
-  // Fetch ALL data once on mount — filter client-side for instant response
+  // Fetch ALL data once on mount — filter client-side for instant response.
+  // Returns the promise chain (previously fire-and-forget) so a caller that
+  // needs to know when the refreshed data has actually landed — e.g. clearing
+  // a pending-decision spinner — can await it instead of just the write.
   const loadAll=()=>{
-    Promise.all([
+    return Promise.all([
       fetch(REGISTRY_API).then(r=>r.json()),
       fetch(`${REGISTRY_API}/summary`).then(r=>r.json()),
       fetch(`${API}/ai-platforms`).then(r=>r.json()).catch(()=>[]),
@@ -2561,19 +2867,31 @@ function AIRegistryView() {
 
   // Catalog rows are governed through /ai-platforms (keyed by host); registry rows
   // through /registry/:id/status. Same button, two backends.
+  //
+  // Marked pending for the FULL round trip — the write and the reload that
+  // brings the confirmed status back — not just the write. Clearing it right
+  // after the write would drop the spinner while the toggle still shows the
+  // stale status for one more render, which looks exactly like the click was
+  // dropped. try/finally so a failed request still clears it instead of
+  // leaving the toggle stuck disabled.
   const setRowStatus=async(row,status)=>{
-    if(row._catalogOnly){
-      await fetch(`${API}/ai-platforms/${encodeURIComponent(row.host)}`,{
-        method:"PATCH",headers:{"content-type":"application/json"},
-        body:JSON.stringify({blocked:status==="blocked",governed:status==="approved"}),
-      });
-    } else {
-      await fetch(`${REGISTRY_API}/${encodeURIComponent(row.id)}/status`,{
-        method:"PUT",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({status,product_name:row.name}),
-      });
+    setPendingIds(prev=>new Set(prev).add(row.id));
+    try{
+      if(row._catalogOnly){
+        await fetch(`${API}/ai-platforms/${encodeURIComponent(row.host)}`,{
+          method:"PATCH",headers:{"content-type":"application/json"},
+          body:JSON.stringify({blocked:status==="blocked",governed:status==="approved"}),
+        });
+      } else {
+        await fetch(`${REGISTRY_API}/${encodeURIComponent(row.id)}/status`,{
+          method:"PUT",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({status,product_name:row.name}),
+        });
+      }
+      await loadAll();
+    } finally {
+      setPendingIds(prev=>{ const next=new Set(prev); next.delete(row.id); return next; });
     }
-    loadAll();
   };
 
   const updateStatus=async(id,status,productName)=>{
@@ -2594,6 +2912,7 @@ function AIRegistryView() {
       if(filterStatus==='unknown') { if(r.status!=='unknown'&&r.status!=='restricted') return false; }
       else if(r.status!==filterStatus) return false;
     }
+    if(filterType && systemTypeOf(r.category)!==filterType) return false;
     if(filterCategory && r.category!==filterCategory) return false;
     if(filterRisk && r.risk_level!==filterRisk) return false;
     if(q && !(r.name||'').toLowerCase().includes(q) && !(r.vendor||'').toLowerCase().includes(q) && !(r.owner||'').toLowerCase().includes(q) && !(r.platform||'').toLowerCase().includes(q) && !(r.category||'').toLowerCase().includes(q)) return false;
@@ -2631,6 +2950,11 @@ function AIRegistryView() {
       <div className="aihub_search_box" style={{flex:1,minWidth:200}}>
         <Search size={14}/><input placeholder="Search name, vendor, owner..." value={search} onChange={e=>setSearch(e.target.value)} style={{border:"none",outline:"none",flex:1,fontSize:13}}/>
       </div>
+      <select value={filterType} onChange={e=>setFilterType(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12,fontWeight:600}}>
+        <option value="">AI Tools + Agents</option>
+        <option value="tool">AI Tools only</option>
+        <option value="agent">AI Agents only</option>
+      </select>
       <select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12}}>
         <option value="">All Statuses</option>
         <option value="approved">Allowed</option>
@@ -2685,7 +3009,7 @@ function AIRegistryView() {
         rows={items}
         onRow={r=>setSelected(selected===r.id?null:r.id)}
         isExpanded={r=>selected===r.id}
-        renderExpanded={r=><RegistryRowDetail row={r} onStatus={s=>setRowStatus(r,s)}/>}
+        renderExpanded={r=><RegistryRowDetail row={r} onStatus={s=>setRowStatus(r,s)} pending={pendingIds.has(r.id)}/>}
         empty="No AI systems found matching your filters."
       />
     </div>
@@ -2810,7 +3134,7 @@ function AddPlatformForm({ onDone }) {
  * empty "Risk analysis" heading: absence of activity is not absence of risk, and a
  * blank section reads as a clean bill of health.
  */
-function RegistryRowDetail({ row, onStatus }) {
+function RegistryRowDetail({ row, onStatus, pending }) {
   const cell=(label,value)=>value?<div><span style={{color:"#9ca3af"}}>{label}:</span> <span style={{fontWeight:600}}>{value}</span></div>:null;
   const H=({children})=><div style={{fontSize:11,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:6}}>{children}</div>;
   return (<div style={{padding:"16px 20px",borderTop:"1px solid #e5e7eb"}}>
@@ -2818,7 +3142,7 @@ function RegistryRowDetail({ row, onStatus }) {
 
     <div style={{marginBottom:14}}>
       <H>Decision</H>
-      <RegistryToggle status={row.status} onChange={onStatus}/>
+      <RegistryToggle status={row.status} onChange={onStatus} pending={pending}/>
     </div>
 
     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:8,marginBottom:14,fontSize:12}}>
@@ -3056,435 +3380,631 @@ function AccessRequestsView() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// DEVELOPER SDK — Projects, API Keys, Traces
+// SDK — credential projects, and the traces the connected apps report back
 // ═══════════════════════════════════════════════════════════════════════════════
-function DeveloperSDKView() {
-  const [stats, setStats] = useState(null);
-  const [projects, setProjects] = useState([]);
-  const [events, setEvents] = useState([]);
-  const [selectedProject, setSelectedProject] = useState(null);
-  const [showCreate, setShowCreate] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [newDesc, setNewDesc] = useState("");
-  const [newLang] = useState("javascript");
-  const [createdKey, setCreatedKey] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [snippetLang, setSnippetLang] = useState("javascript");
-  const [showCode, setShowCode] = useState(false);
+// Two tabs, one story. Projects mints the pk-lf-… / sk-lf-… pair a developer drops
+// into their app; Traces shows what that app has reported since.
+//
+// AUTH SPLIT — mirrors the server exactly (server/src/routes/sdk.js and
+// server/src/routes/tracing.js), it is not an inconsistency:
+//   * /sdk/projects/*            → requireAdminAuth  → adminFetch
+//   * /tracing/traces*           → open (masked previews + rollups only) → apiFetch
+//   * /tracing/observations/:id/io → requireAdminAuth (raw prompt text) → adminFetch
+// adminFetch only sends a bearer token when VITE_ADMIN_TOKEN is set, so a build
+// with no token gets a 401 here. That is an expected local-dev state, so it is
+// rendered as configuration guidance (sdkAuthNotice below) rather than an error.
+//
+// REPLACES the old hidden DeveloperSDKView, which could not have worked: it read
+// api_key / selectedProject.api_key fields the server never returns, sent no
+// Authorization header at five admin-gated routes, and its snippets POSTed to
+// /api/v1/sdk/events after monkey-patching globalThis.fetch — passive interception,
+// which is explicitly not the approach this project took. Nothing is carried over.
 
-  const load = async () => {
-    try {
-      const [s, p] = await Promise.all([
-        fetch("/api/v1/sdk/stats").then(r => r.json()),
-        fetch("/api/v1/sdk/projects").then(r => r.json()),
-      ]);
-      setStats(s);
-      setProjects(p);
-    } catch {}
-    setLoading(false);
-  };
-  useEffect(() => { load(); }, []);
+const SDK_LANGS = ["javascript", "typescript", "python", "java", "go", "other"];
 
-  useEffect(() => {
-    if (!selectedProject) { setEvents([]); return; }
-    fetch(`/api/v1/sdk/events?project_id=${selectedProject.id}&limit=50`).then(r => r.json()).then(setEvents).catch(() => {});
-  }, [selectedProject]);
+// The SDK in a developer's app talks to the API server directly — it does not go
+// through this dashboard's /api dev proxy. connect-ui is served on :3000 in both
+// local dev and the docker deploy, while the API listens on :8787, so the port
+// swap below is the correct answer in both. Anything else (same-origin reverse
+// proxy) is already right as-is.
+function serverOrigin() {
+  const o=window.location.origin;
+  return o.includes(":3000")?o.replace(":3000",":8787"):o;
+}
 
-  const createProject = async () => {
-    if (!newName.trim()) return;
-    const res = await fetch("/api/v1/sdk/projects", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: newName, language: newLang, description: newDesc }),
-    });
-    const project = await res.json();
-    setCreatedKey(project);
-    setShowCreate(false);
-    setNewName("");
-    setNewDesc("");
-    load();
-  };
+// Left-border tone per observation type, in the same spirit as AUTONOMY_TONE.
+// An unrecognised-but-plausible type (AGENT/TOOL/CHAIN/… or something newer)
+// falls back to grey and renders as a generic span — never a crash, never a
+// dropped row.
+const OBS_TONE={GENERATION:"#0044cc",SPAN:"#8b5cf6",EVENT:"#f59e0b",AGENT:"#ef4444",TOOL:"#0891b2",CHAIN:"#6366f1",RETRIEVER:"#22c55e",EMBEDDING:"#14b8a6",GUARDRAIL:"#db2777"};
+function obsTone(t) { return OBS_TONE[String(t||"").toUpperCase()]||"#9ca3af"; }
 
-  const deleteProject = async (id) => {
-    if (!confirm("Delete this project? API key will stop working.")) return;
-    await fetch(`/api/v1/sdk/projects/${id}`, { method: "DELETE" });
-    setSelectedProject(null);
-    setCreatedKey(null);
-    load();
-  };
+// `level` is DEFAULT / WARNING / ERROR (DEBUG exists server-side too). Mapped onto
+// SeverityBadge's existing tones rather than inventing a second colour vocabulary.
+function levelBadge(level) {
+  const l=String(level||"").toUpperCase();
+  if(l==="ERROR") return <SeverityBadge sev="critical"/>;
+  if(l==="WARNING") return <SeverityBadge sev="medium"/>;
+  return <span className="aihub_text_muted">—</span>;
+}
 
-  const serverUrl = window.location.origin.includes(":3000")
-    ? window.location.origin.replace(":3000", ":8787")
-    : window.location.origin;
-
-  const fullSnippet = (apiKey, appName) => ({
-    javascript: `const _CF_URL = '${serverUrl}/api/v1/sdk/events';
-const _CF_KEY = '${apiKey}';
-const _CF_APP = '${appName}';
-const _CF_Q = [];
-const _cf_flush = () => {
-  if (!_CF_Q.length) return;
-  const batch = _CF_Q.splice(0, 50);
-  fetch(_CF_URL, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + _CF_KEY },
-    body: JSON.stringify({ events: batch }),
-  }).catch(() => {});
-};
-setInterval(_cf_flush, 5000);
-const _origFetch = globalThis.fetch;
-globalThis.fetch = async function(url, opts) {
-  const u = typeof url === 'string' ? url : url?.url || '';
-  const isAI = opts?.method === 'POST' && /openai\\.com|anthropic\\.com|generativelanguage\\.googleapis/.test(u);
-  const start = Date.now();
-  const res = await _origFetch.apply(this, arguments);
-  if (isAI) {
-    try {
-      const clone = res.clone();
-      const reqBody = opts?.body ? JSON.parse(opts.body) : {};
-      const resBody = await clone.json().catch(() => ({}));
-      const usage = resBody.usage || {};
-      const model = reqBody.model || resBody.model || 'unknown';
-      const provider = u.includes('openai') ? 'openai' : u.includes('anthropic') ? 'anthropic' : u.includes('google') ? 'google' : 'other';
-      const prompt = reqBody.messages?.[reqBody.messages.length-1]?.content || reqBody.prompt || '';
-      const response = resBody.choices?.[0]?.message?.content || resBody.content?.[0]?.text || '';
-      _CF_Q.push({
-        type: 'llm_call', provider, model,
-        prompt_tokens: usage.prompt_tokens || usage.input_tokens || null,
-        completion_tokens: usage.completion_tokens || usage.output_tokens || null,
-        total_cost_usd: null,
-        duration_ms: Date.now() - start,
-        status: res.ok ? 'ok' : 'error',
-        prompt_text: typeof prompt === 'string' ? prompt.slice(0, 500) : JSON.stringify(prompt).slice(0, 500),
-        response_text: typeof response === 'string' ? response.slice(0, 500) : '',
-        occurred_at: new Date().toISOString(),
-        metadata: { app: _CF_APP, status_code: res.status },
-      });
-    } catch {}
-  }
-  return res;
-};`,
-
-    python: `import threading, json, time
-from urllib.request import Request, urlopen
-
-_CF_URL = '${serverUrl}/api/v1/sdk/events'
-_CF_KEY = '${apiKey}'
-_CF_APP = '${appName}'
-_cf_queue = []
-
-def _cf_flush():
-    while True:
-        time.sleep(5)
-        if not _cf_queue: continue
-        batch, _cf_queue[:] = _cf_queue[:50], _cf_queue[50:]
-        try:
-            req = Request(_CF_URL, json.dumps({"events": batch}).encode(),
-                          {"Content-Type": "application/json", "Authorization": f"Bearer {_CF_KEY}"})
-            urlopen(req, timeout=5)
-        except: pass
-
-threading.Thread(target=_cf_flush, daemon=True).start()
-
-import openai
-_orig_create = openai.resources.chat.completions.Completions.create
-
-def _cf_create(self, *a, **kw):
-    start = time.time()
-    res = _orig_create(self, *a, **kw)
-    try:
-        usage = getattr(res, 'usage', None)
-        msg = res.choices[0].message.content if res.choices else ''
-        prompt = kw.get('messages', [{}])[-1].get('content', '') if kw.get('messages') else ''
-        _cf_queue.append({
-            "type": "llm_call", "provider": "openai", "model": kw.get("model", "unknown"),
-            "prompt_tokens": getattr(usage, 'prompt_tokens', None),
-            "completion_tokens": getattr(usage, 'completion_tokens', None),
-            "duration_ms": int((time.time() - start) * 1000),
-            "status": "ok", "prompt_text": str(prompt)[:500], "response_text": str(msg)[:500],
-            "occurred_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "metadata": {"app": _CF_APP},
-        })
-    except: pass
-    return res
-
-openai.resources.chat.completions.Completions.create = _cf_create`,
-
-    java: `package com.cloudfuze.agent.observability;
-
-import java.net.http.*;
-import java.net.URI;
-import java.util.concurrent.*;
-import java.util.*;
-import java.util.regex.*;
-
-public class CloudFuzeTracer {
-    private static final String CF_URL = System.getenv("CLOUDFUZE_URL") != null
-        ? System.getenv("CLOUDFUZE_URL") : "${serverUrl}/api/v1/sdk/events";
-    private static final String CF_KEY = System.getenv("CLOUDFUZE_API_KEY") != null
-        ? System.getenv("CLOUDFUZE_API_KEY") : "${apiKey}";
-    private static final String CF_APP = "${appName}";
-    private static final List<String> queue = Collections.synchronizedList(new ArrayList<>());
-    private static final HttpClient http = HttpClient.newHttpClient();
-    private static final Pattern AI_HOST = Pattern.compile("openai\\\\.com|anthropic\\\\.com|generativelanguage\\\\.googleapis");
-    private static final Pattern MODEL_PAT = Pattern.compile("\\"model\\"\\\\s*:\\\\s*\\"([^\\"]+)\\"");
-    private static final Pattern PROMPT_TOK = Pattern.compile("\\"prompt_tokens\\"\\\\s*:\\\\s*(\\\\d+)");
-    private static final Pattern COMP_TOK = Pattern.compile("\\"completion_tokens\\"\\\\s*:\\\\s*(\\\\d+)");
-
-    static {
-        Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "cloudfuze-flush");
-            t.setDaemon(true);
-            return t;
-        }).scheduleAtFixedRate(CloudFuzeTracer::flush, 5, 5, TimeUnit.SECONDS);
-
-        Runtime.getRuntime().addShutdownHook(new Thread(CloudFuzeTracer::flush));
-    }
-
-    private static void flush() {
-        if (queue.isEmpty()) return;
-        List<String> batch = new ArrayList<>(queue);
-        queue.clear();
-        try {
-            String body = "{\\"events\\":[" + String.join(",", batch) + "]}";
-            HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create(CF_URL))
-                .header("Content-Type", "application/json")
-                .header("Authorization", "Bearer " + CF_KEY)
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build();
-            http.sendAsync(req, HttpResponse.BodyHandlers.discarding());
-        } catch (Exception ignored) {}
-    }
-
-    public static void trace(String reqUrl, String reqBody, String resBody,
-                             long durationMs, int statusCode) {
-        try {
-            String provider = reqUrl.contains("openai") ? "openai"
-                : reqUrl.contains("anthropic") ? "anthropic"
-                : reqUrl.contains("google") ? "google" : "other";
-            String model = extract(MODEL_PAT, reqBody.length() > 0 ? reqBody : resBody, "unknown");
-            String promptTok = extract(PROMPT_TOK, resBody, null);
-            String compTok = extract(COMP_TOK, resBody, null);
-            String prompt = truncate(reqBody, 500);
-            String response = truncate(resBody, 500);
-
-            String event = String.format(
-                "{\\"type\\":\\"llm_call\\",\\"provider\\":\\"%s\\",\\"model\\":\\"%s\\","
-                + "%s%s"
-                + "\\"duration_ms\\":%d,\\"status\\":\\"%s\\","
-                + "\\"prompt_text\\":\\"%s\\",\\"response_text\\":\\"%s\\","
-                + "\\"occurred_at\\":\\"%s\\",\\"metadata\\":{\\"app\\":\\"%s\\"}}",
-                provider, model,
-                promptTok != null ? "\\"prompt_tokens\\":" + promptTok + "," : "",
-                compTok != null ? "\\"completion_tokens\\":" + compTok + "," : "",
-                durationMs, statusCode < 400 ? "ok" : "error",
-                escapeJson(prompt), escapeJson(response),
-                java.time.Instant.now().toString(), CF_APP);
-            queue.add(event);
-        } catch (Exception ignored) {}
-    }
-
-    public static boolean isAiUrl(String url) {
-        return url != null && AI_HOST.matcher(url).find();
-    }
-
-    private static String extract(Pattern p, String text, String fallback) {
-        if (text == null) return fallback;
-        java.util.regex.Matcher m = p.matcher(text);
-        return m.find() ? m.group(1) : fallback;
-    }
-
-    private static String truncate(String s, int max) {
-        if (s == null) return "";
-        return s.length() <= max ? s : s.substring(0, max);
-    }
-
-    private static String escapeJson(String s) {
-        if (s == null) return "";
-        return s.replace("\\\\", "\\\\\\\\").replace("\\"", "\\\\\\"")
-                .replace("\\n", "\\\\n").replace("\\r", "\\\\r").replace("\\t", "\\\\t");
-    }
-}`,
-  });
-
-  const copyText = (text) => {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.cssText = "position:fixed;left:-9999px";
-    document.body.appendChild(ta);
-    ta.select();
+function copyText(text) {
+  const fallback=()=>{
+    const ta=document.createElement("textarea");
+    ta.value=text; ta.style.position="fixed"; ta.style.left="-9999px";
+    document.body.appendChild(ta); ta.select();
     document.execCommand("copy");
     document.body.removeChild(ta);
   };
+  try{
+    const p=navigator.clipboard?.writeText(text);
+    if(p&&typeof p.catch==="function") p.catch(fallback); else if(!p) fallback();
+  }catch{ fallback(); }
+}
 
-  const CodeBox = ({ code }) => (
-    <div style={{ position: "relative" }}>
-      <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 16, fontFamily: "ui-monospace, monospace", fontSize: 11, lineHeight: 1.6, overflowX: "auto", whiteSpace: "pre" }}>{code}</div>
-      <CopyIcon onClick={() => copyText(code)} />
+// Not an error state: a checkout with no VITE_ADMIN_TOKEN is the normal starting
+// point, so this reads as setup instructions.
+function sdkAuthNotice(what) {
+  return (<div className="aihub_card" style={{borderLeft:"3px solid #f59e0b"}}>
+    <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+      <Shield size={18} color="#f59e0b" style={{flexShrink:0,marginTop:2}}/>
+      <div>
+        <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>Admin credential required</div>
+        <p className="aihub_text_muted" style={{fontSize:12.5,lineHeight:1.65,margin:0}}>
+          {what} is admin-only, and this build is not sending an admin token, so the server answered 401.
+          Add a line to <Mono>connect-ui/.env.local</Mono> and restart the dev server:
+        </p>
+        <pre className="aihub_content_pre" style={{marginTop:10,fontSize:12}}>VITE_ADMIN_TOKEN=dev-admin-token</pre>
+        <p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,marginTop:8,marginBottom:0}}>
+          <Mono>dev-admin-token</Mono> is the documented local default in <Mono>server/src/auth.js</Mono>.
+          A deployed server sets its own <Mono>ADMIN_TOKEN</Mono>, and that value goes here instead.
+          Nothing is hardcoded in the app — with no token set, no <Mono>Authorization</Mono> header is sent at all.
+        </p>
+      </div>
     </div>
-  );
+  </div>);
+}
 
-  const CopyIcon = ({ onClick }) => {
-    const [ok, setOk] = useState(false);
-    return (
-      <svg onClick={() => { onClick(); setOk(true); setTimeout(() => setOk(false), 2000); }}
-        width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={ok ? "#22c55e" : "#94a3b8"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-        style={{ position: "absolute", top: 10, right: 10, cursor: "pointer", transition: "stroke 0.2s" }}>
-        {ok ? <polyline points="20 6 9 17 4 12" /> : <><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></>}
-      </svg>
-    );
+// One numbered step of the "How a developer connects" checklist. There is no
+// shared numbered-step component in this app (checked AgentGovernance and
+// ConnectTenantModal), so this stays local to the SDK view instead of growing a
+// new CSS file for a single panel. A plain JSX-returning function, same shape as
+// sdkAuthNotice above, rather than a component — it needs no state and no
+// prop-types. The <ol> keeps role="list" explicitly because listStyle:none drops
+// list semantics in Safari/VoiceOver, and the number is real text so a screen
+// reader still announces it.
+function sdkStep(n, title, body) {
+  return (<li style={{display:"flex",gap:12,alignItems:"flex-start"}}>
+    <span style={{flexShrink:0,width:24,height:24,borderRadius:"50%",background:"#0044cc",color:"#fff",fontSize:12,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}}>{n}</span>
+    <div style={{minWidth:0,flex:1}}>
+      <div style={{fontSize:12.5,fontWeight:700,color:"#374151",marginBottom:6}}>{title}</div>
+      {body}
+    </div>
+  </li>);
+}
+
+// ── SDK → Projects ───────────────────────────────────────────────────────────
+function SdkProjectsView() {
+  const [rows,setRows]=useState(null);            // null = still loading
+  const [authFail,setAuthFail]=useState(false);
+  const [err,setErr]=useState(null);
+  const [showForm,setShowForm]=useState(false);
+  const [name,setName]=useState(""),[lang,setLang]=useState("javascript"),[desc,setDesc]=useState("");
+  const [busy,setBusy]=useState(false),[formErr,setFormErr]=useState(null);
+  // The ONLY place a raw secret_key ever lives. It arrives in the POST response,
+  // is displayed once, and is dropped when the panel is dismissed. It is never
+  // merged into `rows`, so no table render can reach it.
+  const [reveal,setReveal]=useState(null);
+  const [lastPk,setLastPk]=useState(null);        // public key only — safe to keep
+  const [copied,setCopied]=useState(null);
+  const [revoking,setRevoking]=useState(null);
+
+  const load=useCallback(async()=>{
+    setErr(null); setAuthFail(false);
+    try{
+      const res=await adminFetch("/sdk/projects");
+      if(res.status===401||res.status===403){ setAuthFail(true); setRows([]); return; }
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      const list=await res.json();
+      setRows(Array.isArray(list)?list:[]);
+    }catch(x){ setErr(x.message); setRows([]); }
+  },[]);
+  useEffect(()=>{ load(); },[load]);
+
+  const create=async(ev)=>{
+    ev.preventDefault();
+    if(!name.trim()) return;
+    setBusy(true); setFormErr(null);
+    try{
+      const res=await adminFetch("/sdk/projects",{
+        method:"POST",
+        headers:{"content-type":"application/json"},
+        body:JSON.stringify({name:name.trim(),language:lang,description:desc.trim()}),
+      });
+      if(res.status===401||res.status===403){ setAuthFail(true); setFormErr("Not authorised — see the note above about VITE_ADMIN_TOKEN."); setBusy(false); return; }
+      if(!res.ok){ const b=await res.json().catch(()=>({})); setFormErr(b.error||`HTTP ${res.status}`); setBusy(false); return; }
+      const p=await res.json();
+      setReveal({id:p.id,name:p.name,public_key:p.public_key,secret_key:p.secret_key});
+      setLastPk(p.public_key||null);
+      setShowForm(false); setName(""); setDesc(""); setCopied(null);
+      load();
+    }catch(x){ setFormErr(x.message); }
+    setBusy(false);
   };
 
-  const langLabels = { javascript: "JavaScript / Node.js", python: "Python", java: "Java" };
+  // Revoke, not delete — the server keeps the row with status:"revoked" so traces
+  // already tagged to it stay attributable. Same confirm-then-DELETE shape
+  // AccessRequestsView uses for its exceptions.
+  const revoke=async(p)=>{
+    if(!confirm(`Revoke "${p.name}"? Its keys stop working immediately and any app still using them will fail to report. Traces already recorded are kept.`)) return;
+    setRevoking(p.id);
+    try{
+      const res=await adminFetch(`/sdk/projects/${encodeURIComponent(p.id)}`,{method:"DELETE"});
+      if(!res.ok){ alert(`Revoke failed (HTTP ${res.status}).`); }
+      else { if(reveal?.id===p.id) setReveal(null); await load(); }
+    }catch(x){ alert(`Revoke failed: ${x.message}`); }
+    setRevoking(null);
+  };
 
-  if (loading) return <Loading />;
+  const copyBtn=(key,text)=>(
+    <button type="button" onClick={()=>{copyText(text);setCopied(key);setTimeout(()=>setCopied(null),1500);}}
+      title="Copy to clipboard"
+      style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",borderRadius:6,fontSize:11,fontWeight:600,fontFamily:"inherit",cursor:"pointer",border:"1px solid #d1d5db",background:"#fff",color:copied===key?"#16a34a":"#374151"}}>
+      {copied===key?<Check size={12}/>:<Copy size={12}/>}{copied===key?"Copied":"Copy"}
+    </button>
+  );
 
-  return (
-    <div>
-      {/* Stats */}
-      <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
-        <StatCard icon={<Server size={18} />} label="Projects" value={stats?.total_projects || 0} hint="Connected" color="#2563eb" />
-        <StatCard icon={<Activity size={18} />} label="Total Traces" value={stats?.total_events || 0} hint="All time" color="#8b5cf6" />
-        <StatCard icon={<Shield size={18} />} label="Active (24h)" value={stats?.active_projects || 0} hint="Sending data" color="#22c55e" />
-        <StatCard icon={<Clock size={18} />} label="Total Cost" value={fmtUsd(stats?.total_cost_usd)} hint="All time" color="#f59e0b" />
-      </div>
+  const origin=serverOrigin();
+  // While the one-time panel is open the snippet below carries the real secret —
+  // same single reveal window. Once dismissed it drops back to a placeholder,
+  // while the public key (not a credential on its own) stays for convenience.
+  const pk=reveal?.public_key||lastPk||"<their public_key>";
+  const sk=reveal?.secret_key||"<their secret_key — shown once at creation>";
+  const envBlock=`CF_AIGOV_URL=${origin}\nCF_AIGOV_PUBLIC_KEY=${pk}\nCF_AIGOV_SECRET_KEY=${sk}`;
+  // Where the unzipped folder is expected to sit, so the import path in step 4
+  // resolves. Kept as one string so the tree and the import can't drift apart.
+  const tree=`your-project/
+├─ ai-gov-sdk/          ← the folder you just downloaded
+│  ├─ src/index.js
+│  └─ examples/demo.mjs
+├─ your-app-code.js
+└─ package.json`;
+  // Relative import, not '@cloudfuze/ai-gov-sdk' — the package is not published,
+  // so the developer hand-places the folder from step 2 and imports it by path.
+  const snippet=`import { CloudFuzeTracer } from './ai-gov-sdk/src/index.js';
+// ^ adjust the number of ../ if your code file isn't in your project's root
 
-      {/* Created key banner */}
-      {createdKey && (
-        <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 12, padding: 20, marginBottom: 20 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-            <div style={{ fontWeight: 700, fontSize: 16, color: "#166534" }}>Project "{createdKey.name}" created!</div>
-            <button onClick={() => setCreatedKey(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "#6b7280", fontSize: 18 }}>×</button>
+const tracer = new CloudFuzeTracer({
+  baseUrl: process.env.CF_AIGOV_URL,
+  publicKey: process.env.CF_AIGOV_PUBLIC_KEY,
+  secretKey: process.env.CF_AIGOV_SECRET_KEY,
+});
+
+const trace = tracer.startTrace({ name: 'my-app', userId });
+const gen = trace.startGeneration({ name: 'answer', model: 'gpt-4o', input });
+gen.end({ output, usage: { input: 120, output: 45 } });
+await tracer.flush();`;
+
+  const live=(rows||[]).filter(p=>p.status!=="revoked");
+  const totTraces=(rows||[]).reduce((t,p)=>t+(Number(p.total_traces)||0),0);
+  const totCost=(rows||[]).reduce((t,p)=>t+(Number(p.total_cost_usd)||0),0);
+
+  return (<div>
+    <SectionHeader title="SDK Projects" hint="Credentials for apps that report their AI activity to this server."
+      action={<button type="button" onClick={()=>{setShowForm(s=>!s);setFormErr(null);}}
+        style={{display:"inline-flex",alignItems:"center",gap:6,padding:"7px 14px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",fontSize:12.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>
+        {showForm?<X size={14}/>:<Plus size={14}/>}{showForm?"Cancel":"New project"}
+      </button>}/>
+
+    {authFail&&sdkAuthNotice("Listing and creating SDK projects")}
+    {err&&<Err msg={`Couldn't load SDK projects: ${err}`}/>}
+
+    {/* ── One-time secret reveal ──────────────────────────────────────────────
+        Rendered from `reveal` alone. Dismissing it is the only way to clear the
+        secret from memory, so the wording has to make that consequence obvious. */}
+    {reveal&&(<div className="aihub_card" style={{border:"1px solid #f59e0b",background:"#fffbeb"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12}}>
+        <div style={{display:"flex",gap:10,minWidth:0}}>
+          <ShieldAlert size={20} color="#b45309" style={{flexShrink:0,marginTop:2}}/>
+          <div style={{minWidth:0}}>
+            <div style={{fontWeight:800,fontSize:14,color:"#92400e"}}>Copy the secret key now — it will never be shown again</div>
+            <p style={{fontSize:12.5,color:"#92400e",lineHeight:1.6,margin:"4px 0 0"}}>
+              The server stores only a hash of it. If it is lost, the only fix is to revoke
+              <strong> {reveal.name} </strong> and create a new project.
+            </p>
           </div>
-          <div style={{ fontSize: 13, color: "#166534", marginBottom: 6 }}>Your API key:</div>
-          <CodeBox code={createdKey.api_key} />
-          <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 6, marginBottom: 14 }}>Click into the project and use the "Code" button to get the integration snippet.</div>
         </div>
-      )}
-
-      {/* Projects list + Create button */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <SectionHeader title="SDK Projects" hint="Each project gets a unique API key for your application" />
-        <button onClick={() => setShowCreate(true)}
-          style={{ background: "#2563eb", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 14, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
-          <Plus size={14} /> New Project
+        <button type="button" onClick={()=>setReveal(null)} title="Dismiss — the secret is discarded"
+          style={{border:"1px solid #d1d5db",background:"#fff",borderRadius:6,padding:"4px 10px",fontSize:11.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer",flexShrink:0}}>
+          I have saved it
         </button>
       </div>
-
-      {/* Create project form */}
-      {showCreate && (
-        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 20, marginBottom: 16 }}>
-          <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 12 }}>Create New Project</div>
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4 }}>Project Name *</div>
-            <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="e.g. customer-support-bot"
-              style={{ width: "100%", padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 13 }} />
-          </div>
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4 }}>Description (optional)</div>
-            <input value={newDesc} onChange={e => setNewDesc(e.target.value)} placeholder="What does this app do?"
-              style={{ width: "100%", padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 13 }} />
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={createProject} disabled={!newName.trim()}
-              style={{ background: newName.trim() ? "#2563eb" : "#d1d5db", color: "#fff", border: "none", borderRadius: 8, padding: "8px 20px", fontSize: 13, fontWeight: 600, cursor: newName.trim() ? "pointer" : "default" }}>
-              Create & Generate Key
-            </button>
-            <button onClick={() => setShowCreate(false)}
-              style={{ background: "#fff", color: "#6b7280", border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 20px", fontSize: 13, cursor: "pointer" }}>
-              Cancel
-            </button>
-          </div>
+      <div style={{marginTop:14}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+          <span style={{fontSize:11,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4}}>Public key</span>
+          {copyBtn("pk",reveal.public_key||"")}
         </div>
-      )}
-
-      {/* Projects table */}
-      {!selectedProject && (
-        <DataTable
-          columns={[
-            { label: "Project", render: r => <div><div className="aihub_text_primary">{r.name}</div>{r.description && <div className="aihub_text_muted" style={{ fontSize: 11 }}>{r.description}</div>}</div> },
-            { label: "Language", render: r => <Tag text={r.language || "js"} /> },
-            { label: "Status", render: r => <Badge text={r.status} color={r.status === "active" ? "#22c55e" : "#9ca3af"} /> },
-            { label: "Events", key: "total_events", right: true },
-            { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
-            { label: "Last Event", render: r => relTime(r.last_event_at) },
-            { label: "Created", render: r => relTime(r.created_at) },
-            { label: "", render: r => <button onClick={e => { e.stopPropagation(); deleteProject(r.id); }} style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 12 }}>Delete</button> },
-          ]}
-          rows={projects}
-          empty="No projects yet. Click 'New Project' to create one and get your API key."
-          onRow={r => setSelectedProject(r)}
-        />
-      )}
-
-      {/* Project detail — events */}
-      {selectedProject && (
-        <div>
-          <button onClick={() => setSelectedProject(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0 }}>← Back to projects</button>
-          <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 20 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
-              <div>
-                <h3 style={{ margin: 0 }}>{selectedProject.name}</h3>
-                <div className="aihub_text_muted" style={{ fontSize: 12 }}>{selectedProject.description || "No description"}</div>
-              </div>
-              <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-                <button onClick={() => setShowCode(!showCode)}
-                  style={{ background: showCode ? "#1e293b" : "#fff", color: showCode ? "#fff" : "#374151", border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer" }}>
-                  {showCode ? "Hide Code" : "< > Code"}
-                </button>
-                <div style={{ textAlign: "right" }}>
-                  <div style={{ fontSize: 20, fontWeight: 700 }}>{selectedProject.total_events}</div>
-                  <div className="aihub_text_muted" style={{ fontSize: 11 }}>total events</div>
-                </div>
-              </div>
-            </div>
-
-            {/* Code snippet */}
-            {showCode && (
-              <div style={{ marginBottom: 20 }}>
-                <div style={{ display: "flex", gap: 4, marginBottom: 14 }}>
-                  {Object.entries(langLabels).map(([k, v]) => (
-                    <button key={k} onClick={() => setSnippetLang(k)}
-                      style={{ padding: "5px 12px", border: "1px solid " + (snippetLang === k ? "#2563eb" : "#e5e7eb"), borderRadius: 6, background: snippetLang === k ? "#eff6ff" : "#fff", color: snippetLang === k ? "#2563eb" : "#6b7280", fontSize: 11, fontWeight: snippetLang === k ? 600 : 400, cursor: "pointer" }}>
-                      {v}
-                    </button>
-                  ))}
-                </div>
-                <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Paste this at the top of your app (before any AI imports)</div>
-                <CodeBox code={fullSnippet(selectedProject.api_key || "cfsk_••••••••••••", selectedProject.name)[snippetLang] || "Select a language"} />
-                <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 12, marginTop: 10 }}>
-                  <div style={{ fontSize: 12, color: "#166534", lineHeight: 1.6 }}>
-                    {snippetLang === "java" ? (<>
-                      <strong>Add this class to your project.</strong> Set env vars <code style={{background:"#dcfce7",padding:"1px 4px",borderRadius:3}}>CLOUDFUZE_URL</code> and <code style={{background:"#dcfce7",padding:"1px 4px",borderRadius:3}}>CLOUDFUZE_API_KEY</code>. Then after each HTTP call to an AI API, call: <code style={{background:"#dcfce7",padding:"1px 4px",borderRadius:3}}>CloudFuzeTracer.trace(url, reqBody, resBody, durationMs, statusCode)</code> — or use <code style={{background:"#dcfce7",padding:"1px 4px",borderRadius:3}}>CloudFuzeTracer.isAiUrl(url)</code> to check if a URL is an AI endpoint first.
-                    </>) : (<>
-                      <strong>No installation needed.</strong> Just paste and run. This snippet automatically captures every AI API call — model, tokens, duration, prompt, response — and sends it to your CloudFuze dashboard.
-                    </>)}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <SectionHeader title="Recent Traces" hint="AI API calls captured from this project" />
-            <DataTable
-              columns={[
-                { label: "Time", render: r => <span style={{ fontSize: 12 }}>{relTime(r.occurred_at)}</span> },
-                { label: "Type", render: r => <Tag text={r.type} /> },
-                { label: "Provider", render: r => <Tag text={r.provider || "—"} color={r.provider === "openai" ? "#10a37f" : r.provider === "anthropic" ? "#d97706" : "#6366f1"} /> },
-                { label: "Model", render: r => <span style={{ fontSize: 12 }}>{r.model || "—"}</span> },
-                { label: "Tokens", render: r => fmtTokens((r.prompt_tokens || 0) + (r.completion_tokens || 0)), right: true },
-                { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
-                { label: "Duration", render: r => r.duration_ms ? r.duration_ms + "ms" : "—", right: true },
-                { label: "Status", render: r => <Badge text={r.status || "ok"} color={r.status === "error" ? "#ef4444" : "#22c55e"} /> },
-              ]}
-              rows={events}
-              empty="No events yet. Integrate the SDK and make an AI API call."
-            />
-          </div>
+        <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>{reveal.public_key}</pre>
+        <div style={{display:"flex",alignItems:"center",gap:8,margin:"12px 0 4px"}}>
+          <span style={{fontSize:11,fontWeight:700,color:"#b45309",textTransform:"uppercase",letterSpacing:.4}}>Secret key — shown once</span>
+          {copyBtn("sk",reveal.secret_key||"")}
         </div>
-      )}
+        <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0,borderColor:"#fbbf24",background:"#fffbeb"}}>{reveal.secret_key}</pre>
+      </div>
+    </div>)}
+
+    {/* ── Create form ─────────────────────────────────────────────────────── */}
+    {showForm&&(<form className="aihub_card" onSubmit={create}>
+      <SectionHeader title="New SDK project" hint="One project per app. The secret key is generated here and shown exactly once."/>
+      <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:12}}>
+        <label style={{display:"block"}}>
+          <span style={{fontSize:11.5,fontWeight:600,color:"#374151"}}>Name <span style={{color:"#ef4444"}}>*</span></span>
+          <input value={name} onChange={e=>setName(e.target.value)} required placeholder="checkout-assistant"
+            style={{width:"100%",marginTop:4,padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/>
+        </label>
+        <label style={{display:"block"}}>
+          <span style={{fontSize:11.5,fontWeight:600,color:"#374151"}}>Language</span>
+          <select value={lang} onChange={e=>setLang(e.target.value)}
+            style={{width:"100%",marginTop:4,padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box",background:"#fff"}}>
+            {SDK_LANGS.map(l=><option key={l} value={l}>{l}</option>)}
+          </select>
+        </label>
+      </div>
+      <label style={{display:"block",marginTop:12}}>
+        <span style={{fontSize:11.5,fontWeight:600,color:"#374151"}}>Description</span>
+        <input value={desc} onChange={e=>setDesc(e.target.value)} placeholder="What this app does (optional)"
+          style={{width:"100%",marginTop:4,padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/>
+      </label>
+      {formErr&&<div style={{marginTop:10}}><Err msg={formErr}/></div>}
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}>
+        <button type="button" onClick={()=>{setShowForm(false);setFormErr(null);}}
+          style={{padding:"7px 16px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",fontSize:12.5,fontFamily:"inherit",cursor:"pointer"}}>Cancel</button>
+        <button type="submit" disabled={busy||!name.trim()}
+          style={{padding:"7px 16px",borderRadius:8,border:"none",background:busy||!name.trim()?"#9ca3af":"#0044cc",color:"#fff",fontSize:12.5,fontWeight:600,fontFamily:"inherit",cursor:busy||!name.trim()?"default":"pointer"}}>
+          {busy?"Creating…":"Create project"}
+        </button>
+      </div>
+    </form>)}
+
+    {rows===null&&!authFail&&!err&&<Loading/>}
+
+    {rows!==null&&(<>
+      {!authFail&&rows.length>0&&(<div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(3,1fr)"}}>
+        <StatCard icon={<Server size={18}/>} label="Active projects" value={live.length} hint={`${rows.length-live.length} revoked`} color="#0044cc"/>
+        <StatCard icon={<Activity size={18}/>} label="Traces reported" value={totTraces} hint="lifetime, all projects" color="#8b5cf6"/>
+        <StatCard icon={<DollarSign size={18}/>} label="Reported cost" value={fmtUsd(totCost)} hint="as reported by the SDKs" color="#22c55e"/>
+      </div>)}
+
+      <div className="aihub_card">
+        <DataTable columns={[
+          {label:"Project",render:p=>(<><div className="aihub_text_primary">{p.name||"—"}</div>{p.description&&<div className="aihub_text_muted" style={{fontSize:11}}>{p.description}</div>}</>)},
+          {label:"Public key",render:p=><Mono>{p.public_key||"—"}</Mono>},
+          {label:"Language",render:p=>p.language?<Tag text={p.language}/>:<span className="aihub_text_muted">—</span>},
+          {label:"Status",render:p=><Badge text={p.status||"unknown"} color={p.status==="active"?"#22c55e":p.status==="revoked"?"#ef4444":"#9ca3af"}/>},
+          {label:"Created",render:p=>relTime(p.created_at)},
+          {label:"Last report",render:p=>p.last_event_at?relTime(p.last_event_at):<span className="aihub_text_muted">never</span>},
+          {label:"Traces",render:p=>(Number(p.total_traces)||0).toLocaleString(),right:true},
+          {label:"Observations",render:p=>(Number(p.total_observations)||0).toLocaleString(),right:true},
+          {label:"Cost",render:p=>fmtUsd(p.total_cost_usd),right:true},
+          {label:"",render:p=>p.status==="active"
+            ?<button type="button" onClick={()=>revoke(p)} disabled={revoking===p.id}
+               style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 12px",borderRadius:6,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",fontSize:11,fontWeight:600,fontFamily:"inherit",cursor:revoking===p.id?"default":"pointer"}}>
+               <Trash2 size={11}/>{revoking===p.id?"…":"Revoke"}</button>
+            :<span className="aihub_text_muted">—</span>,right:true},
+        ]} rows={rows} empty={authFail?"Can't list projects without an admin credential — see the note above.":"No SDK projects yet. Create one, hand the keys to a developer, and their app's activity shows up under the Traces tab."}/>
+      </div>
+    </>)}
+
+    {/* ── How a developer connects ──────────────────────────────────────────
+        A followable checklist, not a description: every step is something the
+        developer does, in order, and steps 3–4 fill themselves in with the real
+        keys the moment a project exists (placeholders before that). */}
+    <div className="aihub_card">
+      <SectionHeader title="How a developer connects" hint="Six steps, in order — hand them to whoever owns the app. Steps 3 and 4 fill in with the real keys as soon as you create a project."/>
+
+      <ol role="list" style={{listStyle:"none",margin:"4px 0 0",padding:0,display:"flex",flexDirection:"column",gap:20}}>
+
+        {sdkStep(1,"Download the SDK",<>
+          {/* Root-relative on purpose: /api is proxied to the API server by the
+              Vite dev server and by nginx in the deploy. Prefixing the app's
+              /CloudFuze base path here would 404. No auth on this route, so a
+              plain anchor is enough — same shape as the Teams manifest link. */}
+          <a href={`${API}/sdk/download`} download="ai-gov-sdk.zip" className="aihub_dl_btn" style={{marginTop:0}}>
+            <Download size={14}/>Download SDK (.zip)
+          </a>
+          <p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,margin:"8px 0 0"}}>
+            Not published to npm yet — that&apos;s why you&apos;re downloading a folder directly
+            instead of running <Mono>npm install</Mono>.
+          </p>
+        </>)}
+
+        {sdkStep(2,"Put the folder in your project",<>
+          <p className="aihub_text_muted" style={{fontSize:12,lineHeight:1.65,margin:"0 0 8px"}}>
+            Unzip the download. You&apos;ll get a folder called <Mono>ai-gov-sdk</Mono>. Move that whole
+            folder into the root of your own project — the same folder that has your project&apos;s
+            <Mono> package.json</Mono> (or main file) in it. For example:
+          </p>
+          <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>{tree}</pre>
+        </>)}
+
+        {sdkStep(3,"Set these three values",<>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>{copyBtn("env",envBlock)}</div>
+          <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>{envBlock}</pre>
+          {!reveal&&<p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,margin:"8px 0 0"}}>
+            The secret key is only ever visible in the panel shown at creation time. If it was not saved then,
+            revoke the project and create a new one.
+          </p>}
+        </>)}
+
+        {sdkStep(4,"Add the tracer to your code",<>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>{copyBtn("code",snippet)}</div>
+          <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>{snippet}</pre>
+          <p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,margin:"8px 0 0"}}>
+            The import path matches the folder location in step 2. Nothing is intercepted and nothing is
+            captured that the app does not pass in. Raw prompt and completion text is stored only for
+            projects created with content capture on; otherwise the server keeps masked previews only.
+          </p>
+        </>)}
+
+        {sdkStep(5,"Run it",
+          <p className="aihub_text_muted" style={{fontSize:12,lineHeight:1.65,margin:0}}>
+            Run your app the way you normally do. If you just want to test with our sample app instead of
+            your own code, run the file at <Mono>ai-gov-sdk/examples/demo.mjs</Mono> the same way
+            (<Mono>node ai-gov-sdk/examples/demo.mjs</Mono>) with the same 3 values set.
+          </p>)}
+
+        {sdkStep(6,"Confirm it worked",
+          <p className="aihub_text_muted" style={{fontSize:12,lineHeight:1.65,margin:0}}>
+            Come back here, click the <strong>Traces</strong> tab, and select this project — you should see
+            a new trace appear within a few seconds.
+          </p>)}
+
+      </ol>
     </div>
-  );
+  </div>);
+}
+
+// ── SDK → Traces ─────────────────────────────────────────────────────────────
+function SdkTracesView() {
+  const [params,setParams]=useSearchParams();
+  const projectId=params.get("project_id")||"";
+  const [projects,setProjects]=useState(null);   // null = loading
+  const [projAuthFail,setProjAuthFail]=useState(false);
+  const [manualId,setManualId]=useState(projectId);
+  const [rows,setRows]=useState(null);
+  const [err,setErr]=useState(null);
+  // One expanded trace at a time — same single-detail shape DLPView uses for its
+  // content preview, and it keeps the observation/IO state below unambiguous.
+  const [openId,setOpenId]=useState(null);
+  const [detail,setDetail]=useState(null);
+  const [detailErr,setDetailErr]=useState(null);
+  const [obsId,setObsId]=useState(null);
+  const [io,setIo]=useState(null);               // {status,input,output,message}
+
+  // The project id lives in the URL so a refresh (or a pasted link) keeps it.
+  // Merge rather than replace: TabGroup keeps ?tab= in the same query string.
+  const selectProject=(id)=>{
+    const next=new URLSearchParams(params);
+    if(id) next.set("project_id",id); else next.delete("project_id");
+    setParams(next,{replace:true});
+  };
+
+  useEffect(()=>{
+    let dead=false;
+    (async()=>{
+      try{
+        const res=await adminFetch("/sdk/projects");
+        if(res.status===401||res.status===403){ if(!dead){setProjAuthFail(true);setProjects([]);} return; }
+        if(!res.ok) throw new Error(`HTTP ${res.status}`);
+        const list=await res.json();
+        if(!dead) setProjects(Array.isArray(list)?list:[]);
+      }catch{ if(!dead){ setProjAuthFail(true); setProjects([]); } }
+    })();
+    return ()=>{dead=true};
+  },[]);
+
+  useEffect(()=>{
+    setOpenId(null); setDetail(null); setDetailErr(null); setObsId(null); setIo(null);
+    if(!projectId){ setRows(null); setErr(null); return; }
+    let dead=false; setRows(null); setErr(null);
+    apiFetch(`/tracing/traces?project_id=${encodeURIComponent(projectId)}&limit=50`)
+      .then(d=>{ if(!dead) setRows(Array.isArray(d?.traces)?d.traces:[]); })
+      .catch(x=>{ if(!dead) setErr(x.message); });
+    return ()=>{dead=true};
+  },[projectId]);
+
+  const openTrace=async(r)=>{
+    if(openId===r.id){ setOpenId(null); return; }
+    setOpenId(r.id); setDetail(null); setDetailErr(null); setObsId(null); setIo(null);
+    try{
+      const d=await apiFetch(`/tracing/traces/${encodeURIComponent(r.id)}?project_id=${encodeURIComponent(projectId)}`);
+      setDetail(d);
+    }catch(x){
+      setDetailErr(x.message==="404"
+        ?"This trace is no longer available — it may have passed the project's retention window."
+        :`Couldn't load this trace's steps (HTTP ${x.message}).`);
+    }
+  };
+
+  const pickObs=(o)=>{
+    setIo(null);
+    setObsId(cur=>cur===o.id?null:o.id);
+  };
+
+  // Admin-gated raw content, fetched one observation at a time and only when a
+  // human clicks. Every failure mode gets its own sentence — a blank box here
+  // would read as "there is no content" when it can just as easily mean 401.
+  const loadIo=async(o)=>{
+    setIo({status:"loading"});
+    try{
+      const res=await adminFetch(`/tracing/observations/${encodeURIComponent(o.id)}/io?project_id=${encodeURIComponent(projectId)}`);
+      if(res.status===401||res.status===403){ setIo({status:"error",message:"Admin credential required — set VITE_ADMIN_TOKEN in connect-ui/.env.local (local value: dev-admin-token) and restart the dev server."}); return; }
+      if(res.status===404){ setIo({status:"error",message:"Content unavailable — this project doesn't store raw content, so only the masked previews above exist."}); return; }
+      if(!res.ok){ setIo({status:"error",message:`Content unavailable (HTTP ${res.status}).`}); return; }
+      const d=await res.json();
+      setIo({status:"ok",input:d.input,output:d.output});
+    }catch(x){ setIo({status:"error",message:`Content unavailable: ${x.message}`}); }
+  };
+
+  const selected=(projects||[]).find(p=>p.id===projectId);
+
+  return (<div>
+    <SectionHeader title="SDK Traces" hint="What the connected apps have reported. Pick a project, then click a trace to see its steps."/>
+
+    {/* Project selector. With no admin token the project list itself is 401, so
+        this degrades to a plain id box rather than becoming unusable. */}
+    <div className="aihub_card">
+      {projects===null?<Loading/>:projAuthFail?(<div>
+        <div style={{fontSize:12.5,fontWeight:600,color:"#374151",marginBottom:6}}>Project ID</div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <input value={manualId} onChange={e=>setManualId(e.target.value)} placeholder="Paste a project id"
+            style={{flex:"1 1 320px",padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13}}/>
+          <button type="button" onClick={()=>selectProject(manualId.trim())}
+            style={{padding:"7px 16px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",fontSize:12.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>Load traces</button>
+        </div>
+        <p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,margin:"8px 0 0"}}>
+          The project drop-down needs an admin credential (<Mono>VITE_ADMIN_TOKEN</Mono> in <Mono>connect-ui/.env.local</Mono>,
+          local value <Mono>dev-admin-token</Mono>). Reading traces does not — paste a project id and this view works on its own.
+        </p>
+      </div>):projects.length===0?(
+        <Empty icon={<Server size={28} strokeWidth={1.5}/>} title="No SDK projects yet"
+          msg="Create one on the Projects tab first — traces are always scoped to a project."/>
+      ):(<div>
+        <div style={{fontSize:12.5,fontWeight:600,color:"#374151",marginBottom:6}}>Project</div>
+        <select value={projectId} onChange={e=>selectProject(e.target.value)}
+          style={{minWidth:320,padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,background:"#fff"}}>
+          <option value="">Select a project…</option>
+          {projects.map(p=><option key={p.id} value={p.id}>{p.name}{p.status==="revoked"?" (revoked)":""}</option>)}
+        </select>
+        {selected&&<span style={{marginLeft:10}}><Badge text={selected.status||"unknown"} color={selected.status==="active"?"#22c55e":"#ef4444"}/></span>}
+        {selected&&selected.capture_content===false&&<span style={{marginLeft:6}}><Badge text="content masked" color="#6b7280"/></span>}
+      </div>)}
+    </div>
+
+    {!projectId&&projects!==null&&(projAuthFail||projects.length>0)&&(
+      <div className="aihub_card"><Empty icon={<Activity size={28} strokeWidth={1.5}/>} title="Pick a project"
+        msg="Choose a project above to see the traces its app has reported."/></div>
+    )}
+
+    {projectId&&err&&<Err msg={`Couldn't load traces: ${err}`}/>}
+    {projectId&&!err&&rows===null&&<Loading/>}
+
+    {projectId&&rows!==null&&rows.length===0&&(
+      <div className="aihub_card"><Empty icon={<Activity size={28} strokeWidth={1.5}/>} title="No traces yet"
+        msg="Once a connected app sends data, it'll show up here. The Projects tab has the keys and the three setup steps."/></div>
+    )}
+
+    {projectId&&rows!==null&&rows.length>0&&(<div className="aihub_card">
+      <SectionHeader title={`${rows.length} most recent trace${rows.length===1?"":"s"}`} hint="Click a row to open its waterfall."/>
+      <DataTable
+        onRow={openTrace}
+        isExpanded={r=>r.id===openId}
+        columns={[
+          {label:"Trace",render:r=>(<><div className="aihub_text_primary">{r.name||"—"}</div><div className="aihub_text_muted" style={{fontSize:11}}>{r.environment||"default"}</div></>)},
+          {label:"When",render:r=>relTime(r.timestamp)},
+          {label:"User",render:r=>r.user_id?<Mono>{r.user_id}</Mono>:<span className="aihub_text_muted">—</span>},
+          {label:"Steps",render:r=>`${Number(r.observation_count)||0} (${Number(r.generation_count)||0} gen)`,right:true},
+          {label:"Tokens",render:r=>fmtTokens(r.total_tokens),right:true},
+          {label:"Cost",render:r=><span>{fmtUsd(r.total_cost_usd)}{r.cost_estimated?<span className="aihub_text_muted" style={{fontSize:10}}> (est.)</span>:null}</span>,right:true},
+          {label:"Latency",render:r=>r.latency_ms==null?"—":`${Math.round(r.latency_ms)}ms`,right:true},
+          {label:"Level",render:r=>levelBadge(r.level)},
+        ]}
+        rows={rows}
+        renderExpanded={r=>{
+          if(r.id!==openId) return null;
+          if(detailErr) return <div style={{padding:14}}><Err msg={detailErr}/></div>;
+          if(!detail) return <div style={{padding:14}}><Loading/></div>;
+          const obs=Array.isArray(detail.observations)?detail.observations:[];
+          // Waterfall scale: the trace's own latency when it has one, otherwise
+          // the furthest observation end, so a stub trace still draws.
+          const span=Math.max(1,Number(detail.trace?.latency_ms)||0,
+            ...obs.map(o=>(Number(o.offset_ms)||0)+(Number(o.latency_ms)||0)));
+          const active=obs.find(o=>o.id===obsId)||null;
+          return (<div style={{padding:"14px 16px"}}>
+            {(r.input_preview||r.output_preview)&&(<div style={{marginBottom:12,display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <div><div style={{fontSize:10.5,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4,marginBottom:3}}>Input preview</div>
+                <div className="aihub_text_muted" style={{fontSize:12,lineHeight:1.5}}>{r.input_preview||"—"}</div></div>
+              <div><div style={{fontSize:10.5,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4,marginBottom:3}}>Output preview</div>
+                <div className="aihub_text_muted" style={{fontSize:12,lineHeight:1.5}}>{r.output_preview||"—"}</div></div>
+            </div>)}
+
+            {obs.length===0
+              ?<p className="aihub_text_muted" style={{fontSize:12.5,margin:0}}>This trace has no recorded steps — the app opened it but never reported a span or generation.</p>
+              :(<div>
+                <div style={{fontSize:11,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4,marginBottom:6}}>
+                  {obs.length} step{obs.length===1?"":"s"} · {Math.round(span)}ms total
+                </div>
+                {obs.map(o=>{
+                  const off=Number(o.offset_ms)||0, dur=Number(o.latency_ms)||0;
+                  const left=Math.min(99,(off/span)*100);
+                  const width=Math.max(1,Math.min(100-left,(dur/span)*100));
+                  const tone=obsTone(o.type);
+                  const on=o.id===obsId;
+                  return (<div key={o.id}>
+                    <div role="button" tabIndex={0} onClick={()=>pickObs(o)}
+                      onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();pickObs(o);}}}
+                      style={{display:"flex",alignItems:"center",gap:10,padding:"5px 8px",borderRadius:6,cursor:"pointer",
+                        borderLeft:`3px solid ${tone}`,background:on?"#eef2ff":"transparent",marginLeft:(Number(o.depth)||0)*14}}>
+                      <div style={{flex:"0 0 210px",minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12}}>
+                        <span style={{fontWeight:600}}>{o.name||o.type||"step"}</span>
+                        <span className="aihub_text_muted" style={{marginLeft:6,fontSize:10.5}}>{String(o.type||"SPAN").toLowerCase()}</span>
+                      </div>
+                      <div style={{flex:1,position:"relative",height:10,background:"#f3f4f6",borderRadius:5,minWidth:80}}>
+                        <div title={`${Math.round(off)}ms → ${Math.round(off+dur)}ms`}
+                          style={{position:"absolute",left:`${left}%`,width:`${width}%`,top:0,bottom:0,borderRadius:5,background:tone,opacity:.85}}/>
+                      </div>
+                      <div style={{flex:"0 0 66px",textAlign:"right",fontSize:11}} className="aihub_text_muted">{dur?`${Math.round(dur)}ms`:"—"}</div>
+                      <div style={{flex:"0 0 74px",textAlign:"right"}}>{levelBadge(o.level)}</div>
+                    </div>
+                    {o.parent_cycle&&<div style={{marginLeft:14,fontSize:11,color:"#b45309"}}>Parent chain is circular — nesting shown flat.</div>}
+                  </div>);
+                })}
+                {detail.truncated&&<p className="aihub_text_muted" style={{fontSize:11,marginTop:8}}>Only the first 2,000 steps of this trace are shown.</p>}
+              </div>)}
+
+            {active&&(<div style={{marginTop:12,padding:12,border:"1px solid #e5e7eb",borderRadius:10,background:"#fff"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,marginBottom:8}}>
+                <div style={{fontSize:13,fontWeight:700}}>{active.name||active.type||"step"}</div>
+                <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                  <Tag text={String(active.type||"SPAN").toLowerCase()} color={obsTone(active.type)}/>
+                  {levelBadge(active.level)}
+                </div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:10,fontSize:12}}>
+                <div><div className="aihub_text_muted" style={{fontSize:10.5}}>Model</div><Mono>{active.model||"—"}</Mono></div>
+                <div><div className="aihub_text_muted" style={{fontSize:10.5}}>Latency</div>{active.latency_ms==null?"—":`${Math.round(active.latency_ms)}ms`}</div>
+                <div><div className="aihub_text_muted" style={{fontSize:10.5}}>Usage</div>
+                  {active.usage_details
+                    ?<div style={{fontSize:12}}>{fmtTokens(active.usage_details.input)} in · {fmtTokens(active.usage_details.output)} out
+                       <span className="aihub_text_muted"> ({fmtTokens(active.usage_details.total)} total)</span></div>
+                    :<Mono>—</Mono>}</div>
+                <div><div className="aihub_text_muted" style={{fontSize:10.5}}>Cost{active.cost_estimated?" (est.)":""}</div>
+                  {active.cost_details
+                    ?<div style={{fontSize:12}}>{fmtUsd(active.cost_details.total)}
+                       <span className="aihub_text_muted"> ({fmtUsd(active.cost_details.input)} in / {fmtUsd(active.cost_details.output)} out)</span></div>
+                    :<Mono>—</Mono>}</div>
+              </div>
+              {active.status_message&&<p style={{fontSize:12,color:"#b91c1c",margin:"8px 0 0"}}>{active.status_message}</p>}
+              <div style={{marginTop:10,display:"flex",gap:8,alignItems:"center"}}>
+                {active.has_io
+                  ?<button type="button" onClick={()=>loadIo(active)} disabled={io?.status==="loading"}
+                     style={{display:"inline-flex",alignItems:"center",gap:6,padding:"5px 12px",borderRadius:6,border:"1px solid #d1d5db",background:"#fff",fontSize:11.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>
+                     <Eye size={12}/>{io?.status==="loading"?"Loading…":"View content"}</button>
+                  :<span className="aihub_text_muted" style={{fontSize:11.5}}>No raw content stored for this step — previews only.</span>}
+              </div>
+              {io?.status==="error"&&<div style={{marginTop:8}}><Err msg={io.message}/></div>}
+              {io?.status==="ok"&&(<div style={{marginTop:10}}>
+                <div style={{fontSize:10.5,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4,marginBottom:3}}>Input</div>
+                <pre className="aihub_content_pre" style={{fontSize:12,padding:10,margin:0}}>{typeof io.input==="string"?io.input:JSON.stringify(io.input,null,2)||"—"}</pre>
+                <div style={{fontSize:10.5,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4,margin:"10px 0 3px"}}>Output</div>
+                <pre className="aihub_content_pre" style={{fontSize:12,padding:10,margin:0}}>{typeof io.output==="string"?io.output:JSON.stringify(io.output,null,2)||"—"}</pre>
+              </div>)}
+            </div>)}
+          </div>);
+        }}
+      />
+    </div>)}
+  </div>);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -4203,70 +4723,84 @@ function PolicyPacksView() {
       ]} rows={list} empty="No policy packs available."/>
     </div>
 
-    {simPack && <PackSimulation pack={simPack} onClose={()=>setSimId(null)}/>}
-
-    {openId && (!detail ? <Loading/> : <div className="aihub_card">
-      <SectionHeader
-        title={`${detail.framework} — ${detail.ruleCount} rules`}
-        hint={detail.description}
-        action={<div style={{display:"flex",gap:6}}>
-          {detail.monitored>0 && <button className="aihub_filter_btn" onClick={()=>setSimId(simId===detail.id?null:detail.id)}>
-            {simId===detail.id?"Hide simulation":"Run simulation"}
-          </button>}
-          <button className="aihub_filter_btn" onClick={()=>{setOpenId(null);setDetail(null);}}><X size={13}/> Close</button>
-        </div>}
-      />
-
-      <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:12,fontSize:11}}>
-        {Object.entries(ENFORCE_META).map(([k,m])=>(
-          <span key={k} style={{color:m.color}}>
-            <strong>{m.label}</strong> — {m.hint}
-          </span>
-        ))}
+    {/* Simulate Modal */}
+    {simPack && (
+      <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={()=>setSimId(null)}>
+        <div style={{background:"#fff",borderRadius:14,padding:28,width:800,maxHeight:"85vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.2)"}} onClick={e=>e.stopPropagation()}>
+          <PackSimulation pack={simPack} onClose={()=>setSimId(null)}/>
+        </div>
       </div>
+    )}
 
-      <DataTable columns={[
-        {label:"Rule",render:r=><>
-          <div className="aihub_text_primary">{r.title}</div>
-          <div className="aihub_text_muted">{r.citation}</div>
-        </>},
-        {label:"Type",render:r=><span style={{color:ENFORCE_META[r.enforcement].color,fontWeight:600,fontSize:11}}>{ENFORCE_META[r.enforcement].label}</span>},
-        {label:"Severity",render:r=><Badge text={r.severity} color={{critical:"#dc2626",high:"#ea580c",medium:"#d97706",low:"#65a30d"}[r.severity]||"#9ca3af"}/>},
-        {label:"State",render:r=>{
-          if(r.enforcement==="agent") return <span style={{fontSize:11,color:r.enabled?"#16a34a":"#9ca3af"}}>{r.enabled?"active":"disabled"}</span>;
-          if(r.enforcement==="dlp") return r.coverage_verified
-            ? <span style={{fontSize:11,color:"#16a34a"}}>patterns seen</span>
-            : <span style={{fontSize:11,color:"#b45309"}}>no events yet</span>;
-          return r.attestation
-            ? <span style={{fontSize:11,color:"#16a34a"}}>attested — {r.attestation.owner}</span>
-            : <span style={{fontSize:11,color:"#b45309"}}>outstanding</span>;
-        }},
-        {label:"",render:r=>{
-          if(!detail.deployed) return <span className="aihub_text_muted" style={{fontSize:11}}>deploy first</span>;
-          if(r.enforcement==="agent") return <div style={{display:"flex",gap:6,alignItems:"center"}}>
-            <button className="aihub_filter_btn" disabled={busy} onClick={()=>toggle(detail.id,r.key,!r.enabled)}>{r.enabled?"Disable":"Enable"}</button>
-            {r.tunable && <input type="number" defaultValue={r.tuned_value ?? r.conditions?.[0]?.value}
-              min={r.tunable.min} max={r.tunable.max} title={r.tunable.label} disabled={busy}
-              style={{width:70,padding:"3px 6px",fontSize:12,border:"1px solid #e5e7eb",borderRadius:4}}
-              onBlur={e=>{const v=e.target.value; if(v!=="") tune(detail.id,r.key,v);}}/>}
-          </div>;
-          if(r.enforcement==="attestation") return r.attestation
-            ? <button className="aihub_filter_btn" disabled={busy} onClick={()=>unattest(detail.id,r.key)}>Clear</button>
-            : <button className="aihub_action_btn warn" disabled={busy} onClick={()=>{
-                const owner=window.prompt(`Who is accountable for this control?\n\n${r.evidence||""}`);
-                if(owner) attest(detail.id,r.key,owner);
-              }}>Attest</button>;
-          return <span className="aihub_text_muted" style={{fontSize:11}}>{(r.patterns||[]).length} patterns</span>;
-        }},
-      ]} rows={detail.rules||[]} empty="No rules in this pack."/>
+    {/* Review Modal */}
+    {openId && (!detail ? <Loading/> : (
+      <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={()=>{setOpenId(null);setDetail(null);}}>
+        <div style={{background:"#fff",borderRadius:14,padding:28,width:900,maxHeight:"85vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.2)"}} onClick={e=>e.stopPropagation()}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+            <div>
+              <h3 style={{margin:"0 0 4px",fontSize:18,fontWeight:700}}>{detail.framework} — {detail.ruleCount} rules</h3>
+              <div className="aihub_text_muted">{detail.description}</div>
+            </div>
+            <div style={{display:"flex",gap:6}}>
+              {detail.monitored>0 && <button className="aihub_filter_btn" onClick={()=>setSimId(simId===detail.id?null:detail.id)}>
+                {simId===detail.id?"Hide simulation":"Run simulation"}
+              </button>}
+              <button onClick={()=>{setOpenId(null);setDetail(null);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:20,color:"#6b7280"}}>✕</button>
+            </div>
+          </div>
 
-      <p className="aihub_text_muted" style={{fontSize:11,marginTop:8}}>
-        Deploying creates {detail.enforceable} policies that the engine evaluates on every agent scan. The
-        {" "}{detail.monitored} monitored rules rely on prompt detection already running on enrolled endpoints —
-        their coverage is confirmed from observed events. The {detail.attestations} attestations require a named
-        owner and are never satisfied automatically.
-      </p>
-    </div>)}
+          <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:12,fontSize:11}}>
+            {Object.entries(ENFORCE_META).map(([k,m])=>(
+              <span key={k} style={{color:m.color}}>
+                <strong>{m.label}</strong> — {m.hint}
+              </span>
+            ))}
+          </div>
+
+          <DataTable columns={[
+            {label:"Rule",render:r=><>
+              <div className="aihub_text_primary">{r.title}</div>
+              <div className="aihub_text_muted">{r.citation}</div>
+            </>},
+            {label:"Type",render:r=><span style={{color:ENFORCE_META[r.enforcement].color,fontWeight:600,fontSize:11}}>{ENFORCE_META[r.enforcement].label}</span>},
+            {label:"Severity",render:r=><Badge text={r.severity} color={{critical:"#dc2626",high:"#ea580c",medium:"#d97706",low:"#65a30d"}[r.severity]||"#9ca3af"}/>},
+            {label:"State",render:r=>{
+              if(r.enforcement==="agent") return <span style={{fontSize:11,color:r.enabled?"#16a34a":"#9ca3af"}}>{r.enabled?"active":"disabled"}</span>;
+              if(r.enforcement==="dlp") return r.coverage_verified
+                ? <span style={{fontSize:11,color:"#16a34a"}}>patterns seen</span>
+                : <span style={{fontSize:11,color:"#b45309"}}>no events yet</span>;
+              return r.attestation
+                ? <span style={{fontSize:11,color:"#16a34a"}}>attested — {r.attestation.owner}</span>
+                : <span style={{fontSize:11,color:"#b45309"}}>outstanding</span>;
+            }},
+            {label:"",render:r=>{
+              if(!detail.deployed) return <span className="aihub_text_muted" style={{fontSize:11}}>deploy first</span>;
+              if(r.enforcement==="agent") return <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <button className="aihub_filter_btn" disabled={busy} onClick={()=>toggle(detail.id,r.key,!r.enabled)}>{r.enabled?"Disable":"Enable"}</button>
+                {r.tunable && <input type="number" defaultValue={r.tuned_value ?? r.conditions?.[0]?.value}
+                  min={r.tunable.min} max={r.tunable.max} title={r.tunable.label} disabled={busy}
+                  style={{width:70,padding:"3px 6px",fontSize:12,border:"1px solid #e5e7eb",borderRadius:4}}
+                  onBlur={e=>{const v=e.target.value; if(v!=="") tune(detail.id,r.key,v);}}/>}
+              </div>;
+              if(r.enforcement==="attestation") return r.attestation
+                ? <button className="aihub_filter_btn" disabled={busy} onClick={()=>unattest(detail.id,r.key)}>Clear</button>
+                : <button className="aihub_action_btn warn" disabled={busy} onClick={()=>{
+                    const owner=window.prompt(`Who is accountable for this control?\n\n${r.evidence||""}`);
+                    if(owner) attest(detail.id,r.key,owner);
+                  }}>Attest</button>;
+              return <span className="aihub_text_muted" style={{fontSize:11}}>{(r.patterns||[]).length} patterns</span>;
+            }},
+          ]} rows={detail.rules||[]} empty="No rules in this pack."/>
+
+          <p className="aihub_text_muted" style={{fontSize:11,marginTop:8}}>
+            Deploying creates {detail.enforceable} policies that the engine evaluates on every agent scan. The
+            {" "}{detail.monitored} monitored rules rely on prompt detection already running on enrolled endpoints —
+            their coverage is confirmed from observed events. The {detail.attestations} attestations require a named
+            owner and are never satisfied automatically.
+          </p>
+        </div>
+      </div>
+    ))}
   </div>);
 }
 
@@ -4603,10 +5137,14 @@ function EuAiActView() {
 // the TAB_GROUPS structure further down. ServerMonitor stays reachable by URL
 // (its route is commented out in App.jsx, exactly as it was upstream).
 function ServerMonitorView() {
-  const [tab, setTab] = useState("setup");
+  const [tab, setTab] = useState("traces");
   const [stats, setStats] = useState(null);
   const [servers, setServers] = useState([]);
   const [traces, setTraces] = useState([]);
+  const [governed, setGoverned] = useState([]);
+  const [selectedServer, setSelectedServer] = useState(null);
+  const [selectedAgent, setSelectedAgent] = useState(null);
+  const [agentCalls, setAgentCalls] = useState([]);
   const [selectedTrace, setSelectedTrace] = useState(null);
   const [traceDetail, setTraceDetail] = useState(null);
   const [installCmd, setInstallCmd] = useState("");
@@ -4616,23 +5154,53 @@ function ServerMonitorView() {
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  const fetchAll = async (silent) => {
+    try {
+      const [s, srv, t, g] = await Promise.all([
+        apiFetch("/traces/stats"),
+        apiFetch("/monitor/servers"),
+        apiFetch("/traces?limit=50"),
+        apiFetch("/monitor/governed").catch(() => []),
+      ]);
+      setStats(s); setServers(srv); setTraces(t); setGoverned(g);
+    } catch (e) { if (!silent) console.error(e); }
+    setLoading(false);
+  };
+
+  useEffect(() => { fetchAll(); }, []);
+
+  // Auto-refresh every 30 seconds
   useEffect(() => {
-    (async () => {
-      try {
-        const [s, srv, t] = await Promise.all([
-          apiFetch("/traces/stats"),
-          apiFetch("/monitor/servers"),
-          apiFetch("/traces?limit=50"),
-        ]);
-        setStats(s); setServers(srv); setTraces(t);
-      } catch (e) { console.error(e); }
-      setLoading(false);
-    })();
+    const interval = setInterval(() => fetchAll(true), 30000);
+    return () => clearInterval(interval);
   }, []);
+
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+
+  const fetchAgentCalls = () => {
+    if (!selectedAgent) { setAgentCalls([]); return; }
+    const params = new URLSearchParams({ machineId: selectedAgent.machine_id, limit: 1000 });
+    if (selectedAgent.container_ip) params.set("sourceIp", selectedAgent.container_ip);
+    if (dateFrom) params.set("from", new Date(dateFrom).toISOString());
+    if (dateTo) params.set("to", new Date(dateTo + "T23:59:59").toISOString());
+    apiFetch("/server-agents/calls?" + params.toString())
+      .then(calls => setAgentCalls(calls || []))
+      .catch(() => setAgentCalls([]));
+  };
+
+  useEffect(() => { fetchAgentCalls(); }, [selectedAgent, dateFrom, dateTo]);
+
+  // Auto-refresh agent calls every 15 seconds when viewing an agent
+  useEffect(() => {
+    if (!selectedAgent) return;
+    const interval = setInterval(fetchAgentCalls, 15000);
+    return () => clearInterval(interval);
+  }, [selectedAgent]);
 
   useEffect(() => {
     if (!selectedTrace) { setTraceDetail(null); return; }
-    apiFetch("/traces/" + encodeURIComponent(selectedTrace)).then(setTraceDetail).catch(() => setTraceDetail(null));
+    apiFetch("/server-agents/calls/" + encodeURIComponent(selectedTrace)).then(setTraceDetail).catch(() => setTraceDetail(null));
   }, [selectedTrace]);
 
   const generateInstallCmd = async () => {
@@ -4696,64 +5264,306 @@ function ServerMonitorView() {
         ))}
       </div>
 
-      {tab === "traces" && !selectedTrace && (
+      {tab === "traces" && !selectedServer && (
         <div>
-          <SectionHeader title="Agent Execution Traces" hint="Each trace groups LLM calls from the same process into a single execution timeline" />
+          <SectionHeader title="Servers" hint="Click a server to see governed agents and their traces" />
+          {servers.length === 0 ? (
+            <Empty icon={<Server size={24} />} title="No servers connected" msg="Install the server monitor to start capturing AI agent traces." />
+          ) : (
+            <div style={{ display: "grid", gap: 10 }}>
+              {servers.map(srv => {
+                const srvGoverned = governed.filter(g => g.machine_id === srv.machine_id);
+                return (
+                  <div key={srv.machine_id} onClick={() => setSelectedServer(srv)}
+                    style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 16, cursor: "pointer", transition: "border-color 0.2s" }}
+                    onMouseEnter={e => e.currentTarget.style.borderColor = "#3b82f6"}
+                    onMouseLeave={e => e.currentTarget.style.borderColor = "#e5e7eb"}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <div style={{ width: 8, height: 8, borderRadius: "50%", background: srv.status === "active" ? "#22c55e" : srv.status === "uninstalled" ? "#ef4444" : "#9ca3af" }} />
+                        <div>
+                          <div style={{ fontWeight: 600, fontSize: 15 }}>{srv.display_name || srv.hostname || srv.machine_id?.slice(0, 12)}</div>
+                          <div className="aihub_text_muted" style={{ fontSize: 12 }}>{srvGoverned.length} agent{srvGoverned.length !== 1 ? "s" : ""} governed | {srv.total_calls || 0} traces | {fmtUsd(srv.total_cost_usd)}</div>
+                        </div>
+                      </div>
+                      <ChevronRight size={16} style={{ color: "#9ca3af" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === "traces" && selectedServer && !selectedAgent && (
+        <div>
+          <button onClick={() => setSelectedServer(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+            <ChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Back to servers
+          </button>
+          <SectionHeader title={selectedServer.display_name || selectedServer.hostname} hint="Governed agents on this server. Click an agent to see its traces." />
+          {(() => {
+            const srvGoverned = governed.filter(g => g.machine_id === selectedServer.machine_id);
+            if (srvGoverned.length === 0) {
+              return <Empty icon={<Shield size={24} />} title="No governed agents" msg="Run 'sudo cloudfuze-monitor govern' on this server to start tracking Docker containers." />;
+            }
+            return (
+              <div style={{ display: "grid", gap: 10 }}>
+                {srvGoverned.map(agent => (
+                  <div key={agent.container_name} onClick={() => { setSelectedAgent(agent); setDateFrom(""); setDateTo(""); }}
+                    style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 16, cursor: "pointer", transition: "border-color 0.2s" }}
+                    onMouseEnter={e => e.currentTarget.style.borderColor = "#3b82f6"}
+                    onMouseLeave={e => e.currentTarget.style.borderColor = "#e5e7eb"}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <div style={{ width: 32, height: 32, borderRadius: 8, background: "#eff6ff", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <Shield size={16} style={{ color: "#3b82f6" }} />
+                        </div>
+                        <div>
+                          <div style={{ fontWeight: 600, fontSize: 14 }}>{agent.container_name}</div>
+                          <div className="aihub_text_muted" style={{ fontSize: 12 }}>
+                            IP: {agent.container_ip || "?"} | {agent.total_calls || 0} traces | {fmtUsd(agent.total_cost_usd)}
+                          </div>
+                        </div>
+                      </div>
+                      <ChevronRight size={16} style={{ color: "#9ca3af" }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {tab === "traces" && selectedServer && selectedAgent && !selectedTrace && (
+        <div>
+          <button onClick={() => setSelectedAgent(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+            <ChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Back to {selectedServer.display_name}
+          </button>
+          <SectionHeader title={selectedAgent.container_name} hint={`Individual AI API calls from this agent (${agentCalls.length} total)`} />
+          <div style={{ display: "flex", gap: 12, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
+            <label style={{ fontSize: 12, color: "#6b7280" }}>From:</label>
+            <input type="date" value={dateFrom} onChange={e => { setDateFrom(e.target.value); }} style={{ padding: "4px 8px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 12 }} />
+            <label style={{ fontSize: 12, color: "#6b7280" }}>To:</label>
+            <input type="date" value={dateTo} onChange={e => { setDateTo(e.target.value); }} style={{ padding: "4px 8px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 12 }} />
+            <button onClick={fetchAgentCalls} style={{ padding: "4px 12px", borderRadius: 6, border: "1px solid #d1d5db", background: "#fff", fontSize: 12, cursor: "pointer" }}>Filter</button>
+            {(dateFrom || dateTo) && <button onClick={() => { setDateFrom(""); setDateTo(""); }} style={{ padding: "4px 12px", borderRadius: 6, border: "none", background: "#f3f4f6", fontSize: 12, cursor: "pointer", color: "#6b7280" }}>Clear</button>}
+          </div>
+          <div style={{ maxHeight: 600, overflowY: "auto" }}>
           <DataTable columns={[
-            { label: "Time", render: r => <span style={{ fontSize: 12 }}>{relTime(r.started_at)}</span> },
-            { label: "User", render: r => <div><div className="aihub_text_primary">{r.user || "\u2014"}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>{(r.cmdline || "").split("/").pop()}</div></div> },
-            { label: "Provider", render: r => <div>{(r.providers || []).map(p => <Tag key={p} text={p} color={p === "openai" ? "#10a37f" : p === "anthropic" ? "#d97706" : "#6366f1"} />)}</div> },
-            { label: "Calls", key: "call_count", right: true },
-            { label: "Duration", render: r => <span>{r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "\u2014"}</span>, right: true },
-            { label: "Tokens", render: r => fmtTokens(r.total_tokens), right: true },
+            { label: "Time", render: r => <span style={{ fontSize: 12 }}>{relTime(r.occurred_at)}</span> },
+            { label: "Provider", render: r => <Tag text={r.provider || "?"} color={r.provider === "openai" ? "#10a37f" : r.provider === "anthropic" ? "#d97706" : "#6366f1"} /> },
+            { label: "Model", render: r => <span style={{ fontSize: 12, fontWeight: 500 }}>{(r.model || "?").replace(/-\d{4}-\d{2}-\d{2}$/, "")}</span> },
+            { label: "Tokens", render: r => fmtTokens((r.prompt_tokens || 0) + (r.completion_tokens || 0)), right: true },
             { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
-            { label: "Status", render: r => <Badge text={r.status} color={r.status === "error" ? "#ef4444" : "#22c55e"} /> },
-            { label: "Trigger", render: r => <span className="aihub_text_muted" style={{ fontSize: 11 }}>{r.trigger_source || "\u2014"}</span> },
-          ]} rows={traces} empty="No traces yet. Install the server monitor to start capturing." onRow={r => setSelectedTrace(r.trace_id)} />
+            { label: "Duration", render: r => <span>{r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "\u2014"}</span>, right: true },
+          ]} rows={agentCalls} empty="No traces yet for this agent." onRow={r => setSelectedTrace(r.id)} />
+          </div>
         </div>
       )}
 
       {tab === "traces" && selectedTrace && traceDetail && (
         <div>
-          <button onClick={() => setSelectedTrace(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0 }}>{"\u2190"} Back to traces</button>
-          <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 20 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+          <button onClick={() => setSelectedTrace(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+            <ChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Back to {selectedAgent?.container_name || "traces"}
+          </button>
+          <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 24 }}>
+            {/* Header */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
               <div>
-                <h3 style={{ margin: 0, fontSize: 16 }}>{traceDetail.user || "Unknown"} {"\u2014"} {(traceDetail.cmdline || "").split("/").pop()}</h3>
-                <div className="aihub_text_muted" style={{ fontSize: 12, marginTop: 4 }}>{traceDetail.trigger_source} {"\u00b7"} {traceDetail.cwd} {"\u00b7"} {new Date(traceDetail.started_at).toLocaleString()}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                  <Tag text={traceDetail.provider || "?"} color={traceDetail.provider === "openai" ? "#10a37f" : traceDetail.provider === "anthropic" ? "#d97706" : "#6366f1"} />
+                  <h3 style={{ margin: 0, fontSize: 16 }}>{(traceDetail.model || "?").replace(/-\d{4}-\d{2}-\d{2}$/, "")}</h3>
+                </div>
+                <div className="aihub_text_muted" style={{ fontSize: 12 }}>
+                  {traceDetail.host}{traceDetail.path || ""} | {new Date(traceDetail.occurred_at || traceDetail.started_at).toLocaleString()}
+                </div>
               </div>
-              <div style={{ display: "flex", gap: 12, textAlign: "right" }}>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{traceDetail.call_count}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>calls</div></div>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{(traceDetail.duration_ms / 1000).toFixed(1)}s</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>duration</div></div>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtTokens(traceDetail.total_tokens)}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>tokens</div></div>
+              <div style={{ display: "flex", gap: 16, textAlign: "right" }}>
+                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtTokens((traceDetail.prompt_tokens||0)+(traceDetail.completion_tokens||0))}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>tokens</div></div>
+                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{traceDetail.duration_ms ? (traceDetail.duration_ms/1000).toFixed(1)+"s" : "--"}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>duration</div></div>
                 <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtUsd(traceDetail.total_cost_usd)}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>cost</div></div>
               </div>
             </div>
-            <div style={{ borderTop: "1px solid #f3f4f6", paddingTop: 16 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", marginBottom: 8 }}>EXECUTION TIMELINE</div>
-              {(traceDetail.calls || []).map((call, i) => {
-                const totalDur = traceDetail.duration_ms || 1;
-                const barLeft = ((call.offset_ms || 0) / totalDur) * 100;
-                const barWidth = Math.max(((call.duration_ms || 100) / totalDur) * 100, 2);
-                const isErr = call.response_status >= 400;
-                const provColor = call.provider === "openai" ? "#10a37f" : call.provider === "anthropic" ? "#d97706" : "#6366f1";
-                return (
-                  <div key={i} style={{ marginBottom: 12, padding: 12, background: isErr ? "#fef2f2" : "#f9fafb", borderRadius: 8, border: "1px solid " + (isErr ? "#fecaca" : "#e5e7eb") }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                      <span style={{ background: provColor, color: "#fff", padding: "1px 6px", borderRadius: 4, fontSize: 10, fontWeight: 600 }}>{call.provider}</span>
-                      <span style={{ fontSize: 12, fontWeight: 600 }}>{call.model}</span>
-                      <span className="aihub_text_muted" style={{ fontSize: 11, marginLeft: "auto" }}>{call.duration_ms}ms {"\u00b7"} {fmtTokens((call.prompt_tokens||0)+(call.completion_tokens||0))} tokens {"\u00b7"} {fmtUsd(call.total_cost_usd)}</span>
-                      {isErr && <Badge text={call.response_status} color="#ef4444" />}
-                    </div>
-                    <div style={{ height: 6, background: "#e5e7eb", borderRadius: 3, position: "relative", marginBottom: 8 }}>
-                      <div style={{ position: "absolute", left: barLeft + "%", width: barWidth + "%", height: "100%", background: isErr ? "#ef4444" : provColor, borderRadius: 3 }} />
-                    </div>
-                    {call.prompt_text && <div style={{ fontSize: 11, color: "#374151", marginBottom: 4 }}><strong>Prompt:</strong> {call.prompt_text.length > 150 ? call.prompt_text.slice(0, 150) + "\u2026" : call.prompt_text}</div>}
-                    {call.response_text && <div style={{ fontSize: 11, color: "#6b7280" }}><strong>Response:</strong> {call.response_text.length > 150 ? call.response_text.slice(0, 150) + "\u2026" : call.response_text}</div>}
-                  </div>
-                );
-              })}
+
+            {/* Token breakdown */}
+            <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+              <div style={{ flex: 1, background: "#f0fdf4", borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 11, color: "#166534", fontWeight: 600, marginBottom: 2 }}>PROMPT TOKENS</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: "#166534" }}>{fmtTokens(traceDetail.prompt_tokens)}</div>
+              </div>
+              <div style={{ flex: 1, background: "#eff6ff", borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 11, color: "#1e40af", fontWeight: 600, marginBottom: 2 }}>COMPLETION TOKENS</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: "#1e40af" }}>{fmtTokens(traceDetail.completion_tokens)}</div>
+              </div>
+              <div style={{ flex: 1, background: "#fefce8", borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 11, color: "#854d0e", fontWeight: 600, marginBottom: 2 }}>RESPONSE STATUS</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: traceDetail.response_status >= 400 ? "#dc2626" : "#166534" }}>{traceDetail.response_status || 200}</div>
+              </div>
             </div>
+
+            {(() => {
+              // Parse the raw prompt/response to extract user input and assistant output
+              let userInput = null;
+              let assistantOutput = null;
+              let systemPrompt = null;
+              let toolCalls = [];
+
+              // Parse prompt_text — could be clean JSON or raw HTTP body
+              try {
+                const raw = typeof traceDetail.prompt_text === 'string' ? traceDetail.prompt_text : '';
+                // Try direct JSON parse first
+                let body = null;
+                try { body = JSON.parse(raw); } catch {
+                  // Truncated JSON — find last user message via regex
+                  const userMatch = raw.match(/"role"\s*:\s*"user"\s*,\s*"content"\s*:\s*"([^"]+)"/g);
+                  if (userMatch) {
+                    const lastMatch = userMatch[userMatch.length - 1];
+                    const contentMatch = lastMatch.match(/"content"\s*:\s*"([^"]+)"/);
+                    if (contentMatch) userInput = contentMatch[1];
+                  }
+                  // Don't extract tool calls from request — they're just definitions.
+                  // Actual tool calls come from the response (handled below).
+                }
+                if (body && Array.isArray(body?.messages)) {
+                  // Extract last user message
+                  const userMsgs = body.messages.filter(m => m.role === 'user');
+                  if (userMsgs.length > 0) {
+                    const last = userMsgs[userMsgs.length - 1];
+                    userInput = typeof last.content === 'string' ? last.content
+                      : Array.isArray(last.content) ? last.content.map(c => c.text || '').join('') : '';
+                  }
+                  // Extract system prompt
+                  const sysMsgs = body.messages.filter(m => m.role === 'system');
+                  if (sysMsgs.length > 0) {
+                    systemPrompt = typeof sysMsgs[0].content === 'string' ? sysMsgs[0].content
+                      : Array.isArray(sysMsgs[0].content) ? sysMsgs[0].content.map(c => c.text || '').join('') : '';
+                    if (systemPrompt.length > 200) systemPrompt = systemPrompt.slice(0, 200) + '...';
+                  }
+                  // Extract tool calls
+                  body.messages.forEach(m => {
+                    if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+                      m.tool_calls.forEach(tc => {
+                        toolCalls.push({ name: tc.function?.name, args: tc.function?.arguments });
+                      });
+                    }
+                  });
+                  // Extract tools available
+                  if (Array.isArray(body.tools)) {
+                    body.tools.forEach(t => {
+                      if (t.function?.name && !toolCalls.some(tc => tc.name === t.function.name)) {
+                        // Don't add available tools to toolCalls — only called ones
+                      }
+                    });
+                  }
+                }
+              } catch {
+                // Complete parse failure — show nothing rather than raw JSON
+                userInput = null;
+              }
+
+              // Parse response — could be JSON or pre-formatted text
+              try {
+                const raw = typeof traceDetail.response_text === 'string' ? traceDetail.response_text : '';
+                let parsed = false;
+
+                // Try JSON parse first
+                try {
+                  const body = JSON.parse(raw);
+                  const choice = body?.choices?.[0]?.message;
+                  if (choice?.content) {
+                    assistantOutput = choice.content;
+                    parsed = true;
+                  }
+                  if (Array.isArray(choice?.tool_calls)) {
+                    choice.tool_calls.forEach(tc => {
+                      toolCalls.push({ name: tc.function?.name, args: tc.function?.arguments });
+                    });
+                    if (!assistantOutput) parsed = true;
+                  }
+                } catch {}
+
+                // If JSON failed, check for [tool:name] format from cost-parser
+                if (!parsed && raw) {
+                  const toolPattern = /\[tool:(\w+)\]\s*(.*)/g;
+                  let match;
+                  while ((match = toolPattern.exec(raw)) !== null) {
+                    toolCalls.push({ name: match[1], args: match[2] || '' });
+                  }
+                  // Remove tool call text from output, keep any remaining text
+                  const cleanOutput = raw.replace(/\[tool:\w+\]\s*\{[^}]*\}/g, '').trim();
+                  if (cleanOutput) assistantOutput = cleanOutput;
+                }
+              } catch {
+                assistantOutput = traceDetail.response_text;
+              }
+
+              return (
+                <>
+                  {/* User Input */}
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "#166534", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                      <div style={{ width: 8, height: 8, borderRadius: 2, background: "#22c55e" }} /> USER INPUT
+                    </div>
+                    <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 14 }}>
+                      {userInput ? (
+                        <div style={{ fontSize: 14, lineHeight: 1.6, color: "#1f2937" }}>{userInput}</div>
+                      ) : (
+                        <span className="aihub_text_muted" style={{ fontSize: 12 }}>User input not available.</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Tool Calls (if any) */}
+                  {toolCalls.length > 0 && (
+                    <div style={{ marginBottom: 16 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: "#7c3aed", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                        <div style={{ width: 8, height: 8, borderRadius: 2, background: "#8b5cf6" }} /> TOOL CALLS ({toolCalls.length})
+                      </div>
+                      <div style={{ display: "grid", gap: 8 }}>
+                        {toolCalls.slice(-5).map((tc, i) => (
+                          <div key={i} style={{ background: "#f5f3ff", border: "1px solid #ddd6fe", borderRadius: 8, padding: 12 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#5b21b6", marginBottom: 4 }}>{tc.name || "unknown"}</div>
+                            <pre style={{ margin: 0, fontSize: 11, color: "#6b7280", whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 100, overflowY: "auto" }}>
+                              {(() => { try { return JSON.stringify(JSON.parse(tc.args || '{}'), null, 2); } catch { return tc.args || ''; } })()}
+                            </pre>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Assistant Output */}
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "#1e40af", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                      <div style={{ width: 8, height: 8, borderRadius: 2, background: "#3b82f6" }} /> ASSISTANT OUTPUT
+                    </div>
+                    <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 8, padding: 14 }}>
+                      {assistantOutput ? (
+                        <div style={{ fontSize: 14, lineHeight: 1.6, color: "#1f2937", whiteSpace: "pre-wrap" }}>{assistantOutput}</div>
+                      ) : (
+                        <span className="aihub_text_muted" style={{ fontSize: 12 }}>Assistant output not available.</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* System Prompt (collapsed) */}
+                  {systemPrompt && (
+                    <details style={{ marginBottom: 16 }}>
+                      <summary style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", cursor: "pointer", marginBottom: 6 }}>
+                        System Prompt ({systemPrompt.length} chars)
+                      </summary>
+                      <div style={{ background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, padding: 14, maxHeight: 200, overflowY: "auto" }}>
+                        <pre style={{ margin: 0, fontSize: 11, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "#6b7280" }}>
+                          {systemPrompt}
+                        </pre>
+                      </div>
+                    </details>
+                  )}
+                </>
+              );
+            })()}
           </div>
         </div>
       )}
@@ -4942,6 +5752,140 @@ function ServerMonitorView() {
 // Tabs are keyed by a URL slug, not by index, so ?tab= stays valid when tabs are
 // reordered or inserted. Deep links get pasted into tickets and audit notes; a
 // positional index would silently point somewhere else after any edit here.
+// ── Installations View ────────────────────────────────────────────────────
+
+function InstallationsView() {
+  const [info,setInfo]=useState(null);
+  const [err,setErr]=useState(null);
+  const [copied,setCopied]=useState(null);
+  const [downloading,setDownloading]=useState(null); // 'extension' | 'windows' | 'macos' | 'linux'
+
+  useEffect(()=>{
+    fetch("/api/v1/installations/info").then(r=>r.json()).then(setInfo).catch(x=>setErr(x.message));
+  },[]);
+
+  const copy=(text,id)=>{
+    const ta=document.createElement("textarea");ta.value=text;ta.style.cssText="position:fixed;left:-9999px";
+    document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta);
+    setCopied(id);setTimeout(()=>setCopied(null),2000);
+  };
+
+  const download=async(url,filename,id)=>{
+    setDownloading(id);
+    try {
+      let r=await fetch(url);
+      // If .exe build unavailable (no NSIS), fall back to zip automatically
+      if(!r.ok && url.includes('agent-installer-exe')){
+        r=await fetch('/api/v1/installations/agent-installer?platform=windows');
+        filename='CloudFuze-Desktop-Agent-windows.zip';
+      }
+      if(!r.ok) {
+        const body=await r.json().catch(()=>({}));
+        throw new Error(body.error ? `${body.error}${body.detail?': '+body.detail:''}` : `HTTP ${r.status}`);
+      }
+      const blob=await r.blob();
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(blob);
+      a.download=filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch(e) { alert('Download failed: '+e.message); }
+    setDownloading(null);
+  };
+
+  if(err) return <Err msg={err}/>;
+  if(!info) return <Loading/>;
+
+  return (<div>
+    <SectionHeader title="Installations" hint="Download and deploy the browser extension and desktop agent to your employees' machines"/>
+
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
+
+      {/* Desktop Agent */}
+      <div className="aihub_card">
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
+          <div style={{width:44,height:44,borderRadius:10,background:"#eff6ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22}}>💻</div>
+          <div>
+            <h4 style={{margin:0,fontSize:15,fontWeight:700}}>Desktop Agent</h4>
+            <div style={{fontSize:11,color:"#9ca3af"}}>Windows · macOS · Linux</div>
+          </div>
+          <div style={{marginLeft:"auto",fontSize:10,color:"#0044cc",background:"#eff6ff",padding:"3px 8px",borderRadius:6,fontWeight:600}}>Step 1</div>
+        </div>
+
+        <div style={{fontSize:12,color:"#6b7280",marginBottom:14,lineHeight:1.5}}>
+          Scans the machine for AI tools, monitors clipboard & prompts, and runs the identity beacon so the browser extension knows who this employee is.
+        </div>
+
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
+          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer-exe','CloudFuze-Agent-Setup.exe','windows')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='windows'?"#6b7280":"#0044cc",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='windows'?0.5:1}}>{downloading==='windows'?'⏳ Preparing...':'⬇ Windows'}</button>
+          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=macos','CloudFuze-Desktop-Agent-macos.zip','macos')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='macos'?"#6b7280":"#1e293b",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='macos'?0.5:1}}>{downloading==='macos'?'⏳ Preparing...':'⬇ macOS'}</button>
+          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=linux','CloudFuze-Desktop-Agent-linux.zip','linux')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='linux'?"#6b7280":"#1e293b",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='linux'?0.5:1}}>{downloading==='linux'?'⏳ Preparing...':'⬇ Linux'}</button>
+        </div>
+
+        <details style={{fontSize:12,color:"#374151",marginBottom:10}}>
+          <summary style={{cursor:"pointer",fontWeight:600,fontSize:13,marginBottom:6}}>Installation steps</summary>
+          <ol style={{lineHeight:2,paddingLeft:18,margin:0}}>
+            <li>Download the installer for your OS</li>
+            <li><strong>Windows:</strong> Double-click → follow wizard</li>
+            <li><strong>macOS:</strong> Open .pkg → follow prompts</li>
+            <li><strong>Linux:</strong> <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:11}}>sudo dpkg -i cloudfuze-agent.deb</code></li>
+            <li>Agent auto-enrolls and starts scanning</li>
+          </ol>
+        </details>
+
+        <details style={{fontSize:12,color:"#6b7280"}}>
+          <summary style={{cursor:"pointer",fontWeight:600,fontSize:12,color:"#374151"}}>IT mass deployment</summary>
+          <div style={{marginTop:6,lineHeight:1.6}}>
+            Silent: <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:11}}>CloudFuze-Agent.exe /S</code><br/>
+            Intune (Win) · Jamf (Mac) · Ansible (Linux)
+          </div>
+        </details>
+      </div>
+
+      {/* Browser Extension */}
+      <div className="aihub_card">
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
+          <div style={{width:44,height:44,borderRadius:10,background:"#f0fdf4",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22}}>🌐</div>
+          <div>
+            <h4 style={{margin:0,fontSize:15,fontWeight:700}}>Browser Extension</h4>
+            <div style={{fontSize:11,color:"#9ca3af"}}>Chrome · Edge · Brave</div>
+          </div>
+          <div style={{marginLeft:"auto",fontSize:10,color:"#166534",background:"#f0fdf4",padding:"3px 8px",borderRadius:6,fontWeight:600}}>Step 2</div>
+        </div>
+
+        <div style={{fontSize:12,color:"#6b7280",marginBottom:14,lineHeight:1.5}}>
+          Monitors AI tool usage in the browser — DLP scanning, model routing, access requests. Auto-detects the desktop agent for employee linking.
+        </div>
+
+        <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/extension-package','CloudFuze-Browser-Extension.zip','extension')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:downloading==='extension'?"#6b7280":"#0044cc",color:"#fff",fontSize:13,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",width:"100%",marginBottom:14,opacity:downloading&&downloading!=='extension'?0.5:1}}>{downloading==='extension'?'⏳ Preparing package...':'⬇ Download Extension'}</button>
+
+        <details style={{fontSize:12,color:"#374151",marginBottom:10}}>
+          <summary style={{cursor:"pointer",fontWeight:600,fontSize:13,marginBottom:6}}>Installation steps</summary>
+          <ol style={{lineHeight:2,paddingLeft:18,margin:0}}>
+            <li>Download and extract the ZIP</li>
+            <li>Chrome → <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:11}}>chrome://extensions</code></li>
+            <li>Enable <strong>Developer mode</strong></li>
+            <li><strong>Load unpacked</strong> → select folder</li>
+            <li>Auto-enrolls — no setup needed</li>
+          </ol>
+        </details>
+
+        <details style={{fontSize:12,color:"#6b7280"}}>
+          <summary style={{cursor:"pointer",fontWeight:600,fontSize:12,color:"#374151"}}>IT mass deployment</summary>
+          <div style={{marginTop:6,lineHeight:1.6}}>
+            Chrome Enterprise policy:<br/>
+            <code style={{background:"#f1f5f9",padding:"2px 6px",borderRadius:3,fontSize:10}}>ExtensionInstallForcelist</code>
+          </div>
+        </details>
+      </div>
+    </div>
+
+    <div style={{textAlign:"center",marginTop:14,fontSize:11,color:"#9ca3af"}}>
+      Both components are pre-configured with your server URL — zero employee setup required.
+    </div>
+  </div>);
+}
+
 const TAB_GROUPS = {
   Inventory: {
     title: "Inventory",
@@ -4995,13 +5939,27 @@ const TAB_GROUPS = {
       // { slug: "eu-ai-act", label: "EU AI Act", component: EuAiActView },
     ],
   },
+  SDK: {
+    title: "SDK",
+    hint: "Credentials for apps that report their AI activity here, and what they've reported.",
+    tabs: [
+      { slug: "projects", label: "Projects", component: SdkProjectsView },
+      { slug: "traces",   label: "Traces",   component: SdkTracesView },
+    ],
+  },
   Setup: {
     title: "Setup",
     hint: "Wiring and one-off assessments. Configure once, then rarely visit.",
     tabs: [
+      { slug: "installations", label: "Installations",     component: InstallationsView },
       { slug: "integrations", label: "Integrations",      component: IntegrationsView },
-      { slug: "sdk",          label: "Developer SDK",     component: DeveloperSDKView },
-      { slug: "copilot",      label: "Copilot Readiness", component: CopilotReadinessView },
+      // The old hidden "Developer SDK" tab is gone: its DeveloperSDKView could not
+      // work (api_key fields the server never returns, no Authorization header at
+      // admin-gated routes, snippets posting to a removed endpoint via a
+      // globalThis.fetch monkey-patch). It is replaced by the SDK group above, not
+      // duplicated — /AIHub/DeveloperSDK now redirects there.
+      { slug: "server-monitor", label: "Server Monitor",  component: ServerMonitorView, hidden: true },
+      // { slug: "copilot",      label: "Copilot Readiness", component: CopilotReadinessView },  // hidden — not working reliably
       // Machines is commented out because Policies & Risk → Risk Scores already
       // lists every enrolled machine: all of its rows carry a hostname, sourced
       // from the agent and the extension. /AIHub/Machines redirects there.
@@ -5057,6 +6015,7 @@ function TabGroup({ group }) {
       {group.tabs.map((t) => (
         <button key={t.slug}
                 className={`aihub_group_tab ${t.slug === active.slug ? "active" : ""}`}
+                style={t.hidden ? {color: t.slug === active.slug ? undefined : "transparent"} : undefined}
                 onClick={() => select(t)}>
           {t.label}
         </button>

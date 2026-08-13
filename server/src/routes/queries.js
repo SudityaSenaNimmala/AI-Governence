@@ -3,15 +3,14 @@ import { attachMachineIdentity } from '../lib/machine-identity.js';
 
 export function mountQueries(app, db) {
   app.get('/api/v1/overview', a(async (req, res) => {
-    // Count EVERY enrolled machine, matching GET /api/v1/machines below.
-    //
-    // This carried the same `{ platform: { $ne: null } }` predicate that route
-    // already documents as wrong: in Mongo it also excludes documents where the
-    // field is simply ABSENT, and a browser-extension enrollment never reports a
-    // platform. The roster was fixed; this counter was not, so the Overview card
-    // read "Enrolled machines 2" while the roster it links to listed 38 — the two
-    // screens disagreed by 19x, and the number shown was the smaller, wronger one.
-    const machines = await db.collection('machines').countDocuments({});
+    // Count only real desktop agents — machines with a real OS user and platform.
+    // Browser extensions, CLI sessions, test data, trackers and demo seeds are
+    // excluded. This is the "employees with the agent installed" number.
+    const machines = await db.collection('machines').countDocuments({
+      user: { $exists: true, $ne: null },
+      platform: { $exists: true, $ne: null },
+      hostname: { $not: /browser-extension|Claude Code CLI/i },
+    });
     const scans = await db.collection('scans').countDocuments();
     const findingsCount = await db.collection('findings').countDocuments();
     const uniqueToolKeys = await db.collection('findings').distinct('tool_key');

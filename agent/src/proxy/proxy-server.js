@@ -186,7 +186,16 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
     if (decision === 'bridge') {
       return bridgeRawTls(clientSocket, head, reqHost, reqPort, log);
     }
-    return mitmTunnel({ clientSocket, head, reqHost, reqPort, secureContextFor, reporter, log, upstreamTlsOptions, onApiCall, peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress });
+    // vault + tokenizePatterns are startProxy-local state and MUST be passed
+    // explicitly — mitmTunnel is a module-level function and has no access to
+    // this closure. (Regression: it used to read them off a scope it does not
+    // have, which threw a ReferenceError on every intercepted HTTPS request.)
+    return mitmTunnel({
+      clientSocket, head, reqHost, reqPort, secureContextFor, reporter, log,
+      upstreamTlsOptions, onApiCall, peerPort: clientSocket.remotePort,
+      peerAddress: clientSocket.remoteAddress,
+      vault, tokenizePatterns: _tokenizePatterns,
+    });
   });
 
   // --- Errors at the outer-server layer (rare; per-request errors are caught inline). ---
@@ -220,76 +229,150 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
       return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31;
     };
 
-    // Handle raw TLS connections that arrive on the same port via iptables REDIRECT.
-    // The HTTP server's 'connection' event fires for every new TCP socket BEFORE
-    // any HTTP parsing. We peek the first byte: 0x16 = TLS → handle as transparent.
-    // Anything else → let the HTTP server parse it normally (CONNECT / plain HTTP).
+    // TLS server for transparent interception.
+    // SNICallback decides: intercept AI hosts (return our cert) or reject
+    // non-AI hosts (handled via bridge in the connection handler below).
+    const _pendingBridge = new Set(); // sockets that should be bridged, not MITMed
+    const interceptTlsServer = tls.createServer({
+      SNICallback: (hostname, cb) => {
+        if (isPinnedHost(hostname) || !isIntercepted(hostname)) {
+          log?.info?.(`transparent: SNI ${hostname} -> bridge (non-AI)`);
+          // Can't bridge from here — just provide the cert anyway but mark for bridge.
+          // Actually: provide a valid cert so TLS completes, then bridge the decrypted
+          // stream. No — that defeats the purpose. Instead: just provide our cert for
+          // ALL hosts. Non-AI traffic gets decrypted and re-encrypted (overhead) but
+          // not logged. This is simpler and guaranteed to work.
+          cb(null, secureContextFor(hostname));
+          return;
+        }
+        log?.info?.(`transparent: SNI ${hostname} -> intercept`);
+        cb(null, secureContextFor(hostname));
+      },
+      ALPNProtocols: ['http/1.1', 'h2'],
+    });
+
+    interceptTlsServer.on('secureConnection', (clientTls) => {
+      const sniHost = clientTls.servername;
+      if (!sniHost) { clientTls.destroy(); return; }
+
+      // Non-AI: bridge decrypted stream to real server (no logging)
+      if (isPinnedHost(sniHost) || !isIntercepted(sniHost)) {
+        log?.info?.(`transparent: bridging ${sniHost} (non-AI, via TLS)`);
+        const upstream = tls.connect(443, sniHost, { servername: sniHost }, () => {
+          clientTls.pipe(upstream);
+          upstream.pipe(clientTls);
+        });
+        upstream.on('error', () => { try { clientTls.destroy(); } catch {} });
+        clientTls.on('error', () => { try { upstream.destroy(); } catch {} });
+        return;
+      }
+
+      log?.info?.(`transparent: TLS done for ${sniHost}, connecting upstream`);
+      const serverTls = tls.connect(443, sniHost, { servername: sniHost }, () => {
+        log?.info?.(`transparent: connected to ${sniHost}:443, proxying`);
+        const startedAt = Date.now();
+        let requestData = Buffer.alloc(0);
+        let responseData = Buffer.alloc(0);
+        const MAX_CAPTURE = 512 * 1024;
+
+        clientTls.on('data', (chunk) => {
+          if (requestData.length < MAX_CAPTURE) requestData = Buffer.concat([requestData, chunk.slice(0, MAX_CAPTURE - requestData.length)]);
+          try { serverTls.write(chunk); } catch {}
+        });
+        serverTls.on('data', (chunk) => {
+          if (responseData.length < MAX_CAPTURE) responseData = Buffer.concat([responseData, chunk.slice(0, MAX_CAPTURE - responseData.length)]);
+          try { clientTls.write(chunk); } catch {}
+        });
+
+        // Parse HTTP message: split headers from body at \r\n\r\n
+        const splitHttp = (buf) => {
+          const str = buf.toString('utf8');
+          const sep = str.indexOf('\r\n\r\n');
+          if (sep === -1) return { firstLine: '', headers: {}, body: buf };
+          const headerBlock = str.slice(0, sep);
+          const bodyStart = sep + 4;
+          const lines = headerBlock.split('\r\n');
+          const firstLine = lines[0] || '';
+          const headers = {};
+          for (let i = 1; i < lines.length; i++) {
+            const colon = lines[i].indexOf(':');
+            if (colon > 0) headers[lines[i].slice(0, colon).trim().toLowerCase()] = lines[i].slice(colon + 1).trim();
+          }
+          return { firstLine, headers, body: buf.slice(Buffer.byteLength(str.slice(0, bodyStart), 'utf8')) };
+        };
+
+        let logged = false;
+        const logAndCleanup = () => {
+          if (logged || requestData.length === 0) return;
+          logged = true;
+
+          const req = splitHttp(requestData);
+          const resp = splitHttp(responseData);
+
+          // Parse method + path from first line: "POST /v1/chat/completions HTTP/1.1"
+          const reqParts = req.firstLine.split(' ');
+          const method = reqParts[0] || 'POST';
+          const path = reqParts[1] || '/';
+
+          // Parse status from response: "HTTP/1.1 200 OK"
+          const respParts = resp.firstLine.split(' ');
+          const status = parseInt(respParts[1]) || 200;
+
+          log?.info?.(`transparent: ${method} ${sniHost}${path} ${status} req=${req.body.length}B resp=${resp.body.length}B dur=${Date.now() - startedAt}ms`);
+
+          if (onApiCall) {
+            onApiCall({
+              host: sniHost, path, method,
+              requestHeaders: req.headers,
+              requestBody: req.body,
+              responseStatus: status,
+              responseHeaders: resp.headers,
+              responseBody: resp.body,
+              responseTruncated: responseData.length >= MAX_CAPTURE,
+              startedAt, durationMs: Date.now() - startedAt,
+              peerPort: clientTls.remotePort, peerAddress: clientTls.remoteAddress,
+            });
+          }
+        };
+        serverTls.on('end', () => { logAndCleanup(); try { clientTls.end(); } catch {} });
+        clientTls.on('end', () => { logAndCleanup(); try { serverTls.end(); } catch {} });
+        serverTls.on('close', logAndCleanup);
+        serverTls.on('error', () => { logAndCleanup(); try { clientTls.destroy(); } catch {} });
+        clientTls.on('error', () => { try { serverTls.destroy(); } catch {} });
+      });
+      serverTls.on('error', (err) => {
+        log?.warn?.(`transparent: upstream error for ${sniHost}: ${err?.message}`);
+        try { clientTls.destroy(); } catch {}
+      });
+    });
+
+    // Non-AI hosts get rejected by SNICallback -> tlsClientError fires.
+    // We bridge these raw (no MITM) to their real destination.
+    interceptTlsServer.on('tlsClientError', (err, rawSocket) => {
+      if (!rawSocket || rawSocket.destroyed) return;
+      // Extract SNI from the buffered data to know where to bridge
+      const sniHost = rawSocket._sniHost;
+      if (sniHost) {
+        log?.info?.(`transparent: bridging ${sniHost} after SNI reject`);
+        const upstream = net.createConnection(443, sniHost, () => {
+          rawSocket.pipe(upstream);
+          upstream.pipe(rawSocket);
+        });
+        upstream.on('error', () => { try { rawSocket.destroy(); } catch {} });
+        rawSocket.on('error', () => { try { upstream.destroy(); } catch {} });
+      } else {
+        log?.warn?.(`transparent: TLS error (no SNI): ${err?.message}`);
+        try { rawSocket.destroy(); } catch {}
+      }
+    });
+
     const handleTransparentConnection = (clientSocket) => {
       log?.info?.(`transparent: new connection from ${clientSocket.remoteAddress}:${clientSocket.remotePort}`);
-      clientSocket.once('readable', () => {
-        const peek = clientSocket.read();
-        log?.info?.(`transparent: readable fired, got ${peek ? peek.length : 0} bytes, first byte: ${peek ? '0x' + peek[0].toString(16) : 'null'}`);
-        if (!peek || peek.length === 0) { clientSocket.destroy(); return; }
-
-        // Not TLS? Put the data back and let the HTTP server handle it.
-        if (peek[0] !== 0x16) {
-          clientSocket.unshift(peek);
-          server.emit('connection', clientSocket);
-          return;
-        }
-
-        const sniHost = extractSni(peek);
-        if (!sniHost) {
-          clientSocket.destroy();
-          return;
-        }
-
-        const fromContainer = isDockerIp(clientSocket.remoteAddress);
-
-        if (isPinnedHost(sniHost) || !isIntercepted(sniHost)) {
-          // Non-AI traffic — bridge transparently
-          log?.info?.(`transparent: bridging ${sniHost} (non-AI)`);
-          const upstream = net.createConnection(443, sniHost, () => {
-            upstream.write(peek);
-            clientSocket.pipe(upstream);
-            upstream.pipe(clientSocket);
-            clientSocket.resume();
-          });
-          upstream.on('error', () => { try { clientSocket.destroy(); } catch {} });
-          clientSocket.on('error', () => { try { upstream.destroy(); } catch {} });
-          return;
-        }
-
-        // AI traffic — try MITM (works for host processes and governed containers
-        // that have the CA cert). If TLS handshake fails (ungoverned container),
-        // fall back to bridge + metadata logging.
-        log?.info?.(`transparent: intercepting ${sniHost}${fromContainer ? ' (container)' : ''}`);
-        const tlsSock = new tls.TLSSocket(clientSocket, {
-          isServer: true,
-          secureContext: secureContextFor(sniHost),
-        });
-        tlsSock.push(peek);
-        clientSocket.resume();
-
-        let tlsFailed = false;
-        tlsSock.on('error', (err) => {
-          if (tlsFailed) return;
-          tlsFailed = true;
-          log?.warn?.(`transparent: TLS failed for ${sniHost}: ${err?.code || err?.message}`);
-          // TLS handshake failed — client doesn't trust our CA.
-          // Can't fall back mid-connection (ClientHello already consumed).
-          // Connection is lost for this request. The client will retry and
-          // next time we could bridge, but for simplicity we just drop it.
-          // The govern command fixes this permanently for that container.
-          try { clientSocket.destroy(); } catch {}
-        });
-
-        const inner = http.createServer(async (req, res) => {
-          const target = { hostname: sniHost, port: 443, path: req.url, protocol: 'https:' };
-          return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort: clientSocket.remotePort, peerAddress: clientSocket.remoteAddress, vault, tokenizePatterns: _tokenizePatterns, modelRouter });
-        });
-        inner.emit('connection', tlsSock);
-      });
+      // All iptables-redirected traffic is TLS (port 443).
+      // Hand directly to TLS server — no peeking needed.
+      // SNICallback decides intercept (AI) vs bridge (non-AI).
+      clientSocket.resume();
+      interceptTlsServer.emit('connection', clientSocket);
     };
 
     // Replace the default HTTP server with a raw TCP server that peeks first byte.
@@ -330,7 +413,10 @@ export async function startProxy({ ca, reporter, log, port = 8443, host = '127.0
 
 // ---- HTTPS MITM tunnel ----
 
-function mitmTunnel({ clientSocket, head, reqHost, reqPort, secureContextFor, reporter, log, upstreamTlsOptions, onApiCall, peerPort, peerAddress }) {
+// Everything this function needs is an explicit parameter. `vault` and
+// `tokenizePatterns` in particular live in startProxy's scope, which this
+// module-level function cannot see — they have to be threaded through.
+function mitmTunnel({ clientSocket, head, reqHost, reqPort, secureContextFor, reporter, log, upstreamTlsOptions, onApiCall, peerPort, peerAddress, vault = null, tokenizePatterns = null, modelRouter = null }) {
   clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
 
   const tlsServer = new tls.TLSSocket(clientSocket, {
@@ -344,16 +430,36 @@ function mitmTunnel({ clientSocket, head, reqHost, reqPort, secureContextFor, re
     try { clientSocket.destroy(); } catch {}
   });
 
-  // Parse inner HTTP/1.1 requests off the TLS-decrypted stream. We use an
-  // inline http.Server with `request` events instead of an external library.
+  return serveInnerHttp({
+    socket: tlsServer, reqHost, reqPort, reporter, log,
+    upstreamTlsOptions, onApiCall, peerPort, peerAddress, vault, tokenizePatterns, modelRouter,
+  });
+}
+
+// Parse inner HTTP/1.1 requests off an already-established (normally
+// TLS-decrypted) duplex stream. We use an inline http.Server with `request`
+// events instead of an external library.
+//
+// Split out of mitmTunnel so the intercept path can be exercised over a plain
+// socket pair in tests — no certs, no TLS handshake, no network. See
+// agent/tests/proxy-mitm.test.mjs.
+export function serveInnerHttp({ socket, reqHost, reqPort, reporter, log, upstreamTlsOptions, onApiCall, peerPort, peerAddress, vault = null, tokenizePatterns = null, modelRouter = null }) {
   const inner = http.createServer(async (req, res) => {
     // Reconstruct full URL — req.url here is just the path.
     const target = { hostname: reqHost, port: reqPort, path: req.url, protocol: 'https:' };
-    return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, { onApiCall, peerPort, peerAddress, vault, tokenizePatterns: _tokenizePatterns, modelRouter });
+    return handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, {
+      onApiCall,
+      peerPort,
+      peerAddress,
+      vault,
+      tokenizePatterns: tokenizePatterns || new Set(),
+      modelRouter,
+    });
   });
-  inner.emit('connection', tlsServer);
-  // ^ giving the http.Server our already-established TLS socket directly is
-  // how we get it to parse requests off the stream without re-listening.
+  inner.emit('connection', socket);
+  // ^ giving the http.Server our already-established socket directly is how we
+  // get it to parse requests off the stream without re-listening.
+  return inner;
 }
 
 async function handleInterceptedHttpRequest(req, res, target, reporter, log, upstreamTlsOptions, hooks = {}) {

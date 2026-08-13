@@ -1,0 +1,28 @@
+{
+  "name": "@cloudfuze/ai-gov-sdk",
+  "version": "0.1.0",
+  "description": "CloudFuze AI Governance tracing SDK — traces, spans and generations for LLM apps",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "demo": "node examples/demo.mjs"
+  },
+  "keywords": [
+    "llm",
+    "tracing",
+    "observability",
+    "governance"
+  ],
+  "license": "UNLICENSED"
+}

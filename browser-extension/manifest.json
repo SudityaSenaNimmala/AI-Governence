@@ -98,6 +98,7 @@
         "vendor/tesseract/tesseract.min.js",
         "vendor/rrweb-record.js",
         "content/patterns.js",
+        "content/complexity.js",
         "content/replay.js",
         "content/content.js"
       ],
@@ -115,6 +116,7 @@
   "web_accessible_resources": [
     {
       "resources": [
+        "cfai-config.json",
         "content/fetch-blocker.js",
         "content/content.css",
         "vendor/pdf.worker.js",
