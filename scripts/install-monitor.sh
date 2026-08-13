@@ -500,9 +500,26 @@ print('OK')
           echo "       This file persists across redeploys."
         fi
 
-        # Step 2: Redeploy the service (picks up the override automatically)
+        # Step 2: Redeploy the service using the SAME compose file(s) it was originally deployed with
         echo "  [2/3] Redeploying $COMPOSE_SVC..."
         cd "$COMPOSE_DIR"
+
+        # Detect which compose file(s) were used for this container
+        ORIG_CONFIG=$(docker inspect "$TARGET" --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' 2>/dev/null)
+        FILE_FLAGS=""
+        if [[ -n "$ORIG_CONFIG" ]]; then
+          # Build -f flags from the original config files (comma-separated)
+          IFS=',' read -ra CONFIGS <<< "$ORIG_CONFIG"
+          for cf in "${CONFIGS[@]}"; do
+            cf=$(echo "$cf" | xargs)
+            if [[ -f "$cf" ]]; then
+              FILE_FLAGS="$FILE_FLAGS -f $cf"
+            fi
+          done
+        fi
+        # Add our override file
+        FILE_FLAGS="$FILE_FLAGS -f $OVERRIDE_FILE"
+
         # Find the right env file
         ENV_FLAG=""
         if [[ ! -f ".env" ]]; then
@@ -514,9 +531,8 @@ print('OK')
             fi
           done
         fi
-        docker compose up -d "$COMPOSE_SVC" 2>&1 || docker-compose up -d "$COMPOSE_SVC" 2>&1
+        docker compose $FILE_FLAGS up -d "$COMPOSE_SVC" 2>&1 || docker-compose $FILE_FLAGS up -d "$COMPOSE_SVC" 2>&1
         DEPLOY_OK=$?
-        # Clean up temp .env if we created it
         if [[ "$ENV_FLAG" == "CREATED" ]]; then rm -f .env; fi
 
         if [[ $DEPLOY_OK -ne 0 ]]; then
@@ -632,15 +648,24 @@ print('OK')
 " 2>/dev/null || rm -f "$OVERRIDE_FILE"
           echo "  [OK] Service removed from override"
         fi
-        # Redeploy without override
+        # Redeploy without override, using original compose file(s)
         cd "$COMPOSE_DIR"
+        ORIG_CONFIG=$(docker inspect "$TARGET" --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' 2>/dev/null)
+        FILE_FLAGS=""
+        if [[ -n "$ORIG_CONFIG" ]]; then
+          IFS=',' read -ra CONFIGS <<< "$ORIG_CONFIG"
+          for cf in "${CONFIGS[@]}"; do
+            cf=$(echo "$cf" | xargs)
+            if [[ -f "$cf" ]]; then FILE_FLAGS="$FILE_FLAGS -f $cf"; fi
+          done
+        fi
         ENV_FLAG=""
         if [[ ! -f ".env" ]]; then
           for candidate in .env.prod .env.production .env.local .env.staging .env.dev; do
             if [[ -f "$candidate" ]]; then cp "$candidate" .env; ENV_FLAG="CREATED"; break; fi
           done
         fi
-        docker compose up -d "$COMPOSE_SVC" 2>/dev/null || docker-compose up -d "$COMPOSE_SVC" 2>/dev/null
+        docker compose $FILE_FLAGS up -d "$COMPOSE_SVC" 2>/dev/null || docker-compose $FILE_FLAGS up -d "$COMPOSE_SVC" 2>/dev/null
         if [[ "$ENV_FLAG" == "CREATED" ]]; then rm -f .env; fi
         echo "  [OK] $TARGET redeployed clean"
       fi
