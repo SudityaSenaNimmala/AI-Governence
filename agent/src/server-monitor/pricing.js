@@ -32,11 +32,16 @@ export const MODELS = [
   { match: /^claude-3-opus/,                    provider: 'anthropic', family: 'claude-3-opus',    input: 15.00, output: 75.00, cached_input: 1.50 },
 
   // ---- OpenAI ----
+  { match: /^gpt-4\.1-nano/,                    provider: 'openai',    family: 'gpt-4.1-nano',     input: 0.10,  output: 0.40,  cached_input: 0.025 },
+  { match: /^gpt-4\.1-mini/,                    provider: 'openai',    family: 'gpt-4.1-mini',     input: 0.40,  output: 1.60,  cached_input: 0.10 },
+  { match: /^gpt-4\.1/,                         provider: 'openai',    family: 'gpt-4.1',          input: 2.00,  output: 8.00,  cached_input: 0.50 },
   { match: /^gpt-4o-mini/,                      provider: 'openai',    family: 'gpt-4o-mini',      input: 0.15,  output: 0.60,  cached_input: 0.075 },
   { match: /^gpt-4o/,                           provider: 'openai',    family: 'gpt-4o',           input: 2.50,  output: 10.00, cached_input: 1.25 },
   { match: /^gpt-4-turbo/,                      provider: 'openai',    family: 'gpt-4-turbo',      input: 10.00, output: 30.00, cached_input: null },
-  { match: /^gpt-4(?!o|-turbo)/,                provider: 'openai',    family: 'gpt-4',            input: 30.00, output: 60.00, cached_input: null },
+  { match: /^gpt-4(?![\.\do]|-turbo)/,          provider: 'openai',    family: 'gpt-4',            input: 30.00, output: 60.00, cached_input: null },
   { match: /^gpt-3\.5-turbo/,                   provider: 'openai',    family: 'gpt-3.5-turbo',    input: 0.50,  output: 1.50,  cached_input: null },
+  { match: /^o3-mini/,                          provider: 'openai',    family: 'o3-mini',          input: 1.10,  output: 4.40,  cached_input: 0.55 },
+  { match: /^o3/,                               provider: 'openai',    family: 'o3',               input: 10.00, output: 40.00, cached_input: 2.50 },
   { match: /^o1-mini/,                          provider: 'openai',    family: 'o1-mini',          input: 3.00,  output: 12.00, cached_input: 1.50 },
   { match: /^o1-preview/,                       provider: 'openai',    family: 'o1-preview',       input: 15.00, output: 60.00, cached_input: 7.50 },
   { match: /^o1/,                               provider: 'openai',    family: 'o1',               input: 15.00, output: 60.00, cached_input: 7.50 },
