@@ -267,7 +267,8 @@ export function mountServerAgents(app, db) {
   // List governed containers for a server, with trace counts
   app.get('/api/v1/monitor/governed', a(async (req, res) => {
     const { machineId } = req.query;
-    const filter = { status: 'active' };
+    // Show all governed containers (including removed) — traces persist
+    const filter = {};
     if (machineId) filter.machine_id = machineId;
 
     const containers = await db.collection('governed_containers')
@@ -312,7 +313,7 @@ export function mountServerAgents(app, db) {
     const [totalCalls, recentCalls, enrolledCount] = await Promise.all([
       db.collection('server_agent_calls').countDocuments(),
       db.collection('server_agent_calls').countDocuments({ occurred_at: { $gte: dayAgo.toISOString() } }),
-      db.collection('monitored_servers').countDocuments({ status: { $ne: 'removed' } }),
+      db.collection('monitored_servers').countDocuments({}),
     ]);
     const costAgg = await db.collection('server_agent_calls').aggregate([
       { $group: { _id: null, total: { $sum: { $ifNull: ['$total_cost_usd', 0] } } } },
@@ -496,8 +497,9 @@ echo ""
   // disappears on uninstall). Enriched with call stats from server_agent_calls.
   app.get('/api/v1/monitor/servers', a(async (req, res) => {
     // 1. Get all server-monitor machines from enrollment (excludes removed)
+    // Show ALL servers including uninstalled — traces persist forever
     const enrolled = await db.collection('monitored_servers')
-      .find({ status: { $ne: 'removed' } })
+      .find({})
       .project({ _id: 0, id: 1, hostname: 1, last_seen: 1, first_seen: 1, proxy_port: 1, user: 1, display_name: 1 })
       .sort({ last_seen: -1 })
       .toArray();
@@ -520,13 +522,14 @@ echo ""
     const result = enrolled.map(m => {
       const s = statsMap.get(m.id) || {};
       const lastSeen = m.last_seen || m.first_seen;
-      const isActive = lastSeen && (new Date() - new Date(lastSeen)) < 300000; // 5 min
+      const isRemoved = m.status === 'removed';
+      const isActive = !isRemoved && lastSeen && (new Date() - new Date(lastSeen)) < 300000;
       return {
         machine_id: m.id,
         hostname: m.hostname,
         display_name: m.display_name || m.hostname || m.id,
         proxy_port: m.proxy_port || null,
-        status: isActive ? 'active' : 'inactive',
+        status: isRemoved ? 'uninstalled' : (isActive ? 'active' : 'inactive'),
         last_seen: lastSeen,
         first_seen: m.first_seen || null,
         total_calls: s.total_calls || 0,

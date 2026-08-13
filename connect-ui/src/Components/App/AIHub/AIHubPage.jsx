@@ -5154,27 +5154,41 @@ function ServerMonitorView() {
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  const fetchAll = async (silent) => {
+    try {
+      const [s, srv, t, g] = await Promise.all([
+        apiFetch("/traces/stats"),
+        apiFetch("/monitor/servers"),
+        apiFetch("/traces?limit=50"),
+        apiFetch("/monitor/governed").catch(() => []),
+      ]);
+      setStats(s); setServers(srv); setTraces(t); setGoverned(g);
+    } catch (e) { if (!silent) console.error(e); }
+    setLoading(false);
+  };
+
+  useEffect(() => { fetchAll(); }, []);
+
+  // Auto-refresh every 30 seconds
   useEffect(() => {
-    (async () => {
-      try {
-        const [s, srv, t, g] = await Promise.all([
-          apiFetch("/traces/stats"),
-          apiFetch("/monitor/servers"),
-          apiFetch("/traces?limit=50"),
-          apiFetch("/monitor/governed").catch(() => []),
-        ]);
-        setStats(s); setServers(srv); setTraces(t); setGoverned(g);
-      } catch (e) { console.error(e); }
-      setLoading(false);
-    })();
+    const interval = setInterval(() => fetchAll(true), 30000);
+    return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
+  const fetchAgentCalls = () => {
     if (!selectedAgent) { setAgentCalls([]); return; }
-    // Fetch individual calls for this agent's machine
     apiFetch("/server-agents/calls?machineId=" + encodeURIComponent(selectedAgent.machine_id) + "&limit=200")
       .then(calls => setAgentCalls(calls || []))
       .catch(() => setAgentCalls([]));
+  };
+
+  useEffect(() => { fetchAgentCalls(); }, [selectedAgent]);
+
+  // Auto-refresh agent calls every 15 seconds when viewing an agent
+  useEffect(() => {
+    if (!selectedAgent) return;
+    const interval = setInterval(fetchAgentCalls, 15000);
+    return () => clearInterval(interval);
   }, [selectedAgent]);
 
   useEffect(() => {
@@ -5259,7 +5273,7 @@ function ServerMonitorView() {
                     onMouseLeave={e => e.currentTarget.style.borderColor = "#e5e7eb"}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        <div style={{ width: 8, height: 8, borderRadius: "50%", background: srv.status === "active" ? "#22c55e" : "#9ca3af" }} />
+                        <div style={{ width: 8, height: 8, borderRadius: "50%", background: srv.status === "active" ? "#22c55e" : srv.status === "uninstalled" ? "#ef4444" : "#9ca3af" }} />
                         <div>
                           <div style={{ fontWeight: 600, fontSize: 15 }}>{srv.display_name || srv.hostname || srv.machine_id?.slice(0, 12)}</div>
                           <div className="aihub_text_muted" style={{ fontSize: 12 }}>{srvGoverned.length} agent{srvGoverned.length !== 1 ? "s" : ""} governed | {srv.total_calls || 0} traces | {fmtUsd(srv.total_cost_usd)}</div>

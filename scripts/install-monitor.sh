@@ -450,28 +450,96 @@ case "$1" in
       echo "  Gateway:   $GW_IP"
       echo ""
 
-      # Step 1: Copy CA cert into running container
-      echo "  [1/4] Copying CA cert..."
-      docker exec "$TARGET" mkdir -p /certs 2>/dev/null || true
-      # Use tar pipe to handle "device busy" edge case
-      tar -cf - -C "$(dirname "$CA_FILE")" "$(basename "$CA_FILE")" 2>/dev/null | docker exec -i "$TARGET" tar -xf - -C /certs/ 2>/dev/null
-      docker exec "$TARGET" mv /certs/ca.crt /certs/cloudfuze.crt 2>/dev/null || true
-      echo "  [OK] CA cert at /certs/cloudfuze.crt"
+      # Step 1: Create docker-compose.override.yml (PERMANENT — survives redeploys)
+      echo "  [1/3] Setting up persistent governance..."
+      if [[ -n "$COMPOSE_DIR" && -n "$COMPOSE_SVC" ]]; then
+        OVERRIDE_FILE="$COMPOSE_DIR/docker-compose.override.yml"
 
-      # Step 2: Stop container, add env vars to config
-      echo "  [2/4] Adding env vars..."
-      CID=$(docker inspect --format '{{.Id}}' "$TARGET" 2>/dev/null)
-      CONFIG_FILE="/var/lib/docker/containers/$CID/config.v2.json"
+        # Check if override already exists with other services
+        EXISTING_OVERRIDE=""
+        if [[ -f "$OVERRIDE_FILE" ]]; then
+          EXISTING_OVERRIDE=$(cat "$OVERRIDE_FILE")
+        fi
 
-      docker stop "$TARGET" >/dev/null 2>&1
+        # Build override content
+        if [[ -n "$EXISTING_OVERRIDE" ]] && echo "$EXISTING_OVERRIDE" | grep -q "cloudfuze"; then
+          echo "  Override already exists for this service."
+        else
+          # Create or append to override file
+          if [[ -f "$OVERRIDE_FILE" ]] && ! echo "$EXISTING_OVERRIDE" | grep -q "$COMPOSE_SVC"; then
+            # Append our service to existing override
+            python3 -c "
+import yaml, sys
+try:
+    with open('$OVERRIDE_FILE') as f:
+        data = yaml.safe_load(f) or {}
+except: data = {}
+if 'services' not in data: data['services'] = {}
+data['services']['$COMPOSE_SVC'] = {
+    'environment': [
+        'NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt',
+        'SSL_CERT_FILE=/certs/cloudfuze.crt',
+        'REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt'
+    ],
+    'volumes': [
+        '$CA_FILE:/certs/cloudfuze.crt:ro'
+    ]
+}
+with open('$OVERRIDE_FILE', 'w') as f:
+    yaml.dump(data, f, default_flow_style=False)
+print('OK')
+" 2>/dev/null || {
+              # Fallback if pyyaml not installed — write plain text
+              printf "services:\n  %s:\n    environment:\n      - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt\n      - SSL_CERT_FILE=/certs/cloudfuze.crt\n      - REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt\n    volumes:\n      - %s:/certs/cloudfuze.crt:ro\n" "$COMPOSE_SVC" "$CA_FILE" > "$OVERRIDE_FILE"
+            }
+          else
+            # Create fresh override
+            printf "services:\n  %s:\n    environment:\n      - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt\n      - SSL_CERT_FILE=/certs/cloudfuze.crt\n      - REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt\n    volumes:\n      - %s:/certs/cloudfuze.crt:ro\n" "$COMPOSE_SVC" "$CA_FILE" > "$OVERRIDE_FILE"
+          fi
+          echo "  [OK] Created $OVERRIDE_FILE"
+          echo "       This file persists across redeploys."
+        fi
 
-      python3 -c "
+        # Step 2: Redeploy the service (picks up the override automatically)
+        echo "  [2/3] Redeploying $COMPOSE_SVC..."
+        cd "$COMPOSE_DIR"
+        # Find the right env file
+        ENV_FLAG=""
+        if [[ ! -f ".env" ]]; then
+          for candidate in .env.prod .env.production .env.local .env.staging .env.dev; do
+            if [[ -f "$candidate" ]]; then
+              cp "$candidate" .env
+              ENV_FLAG="CREATED"
+              break
+            fi
+          done
+        fi
+        docker compose up -d "$COMPOSE_SVC" 2>&1 || docker-compose up -d "$COMPOSE_SVC" 2>&1
+        DEPLOY_OK=$?
+        # Clean up temp .env if we created it
+        if [[ "$ENV_FLAG" == "CREATED" ]]; then rm -f .env; fi
+
+        if [[ $DEPLOY_OK -ne 0 ]]; then
+          echo "  [!] Redeploy failed. Removing override..."
+          rm -f "$OVERRIDE_FILE"
+          continue
+        fi
+        sleep 3
+        echo "  [OK] Redeployed with CA cert + env vars"
+      else
+        # Not compose-managed — fall back to config.v2.json edit
+        echo "  Not compose-managed. Using config edit (won't survive redeploy)..."
+        docker exec "$TARGET" mkdir -p /certs 2>/dev/null || true
+        tar -cf - -C "$(dirname "$CA_FILE")" "$(basename "$CA_FILE")" 2>/dev/null | docker exec -i "$TARGET" tar -xf - -C /certs/ 2>/dev/null
+        docker exec "$TARGET" mv /certs/ca.crt /certs/cloudfuze.crt 2>/dev/null || true
+        CID=$(docker inspect --format '{{.Id}}' "$TARGET" 2>/dev/null)
+        CONFIG_FILE="/var/lib/docker/containers/$CID/config.v2.json"
+        docker stop "$TARGET" >/dev/null 2>&1
+        python3 -c "
 import json
 cfg_path = '$CONFIG_FILE'
-proxy = 'HTTPS_PROXY=http://${GW_IP}:${PROXY_PORT}'
-proxy_lower = 'https_proxy=http://${GW_IP}:${PROXY_PORT}'
-extra = [proxy, proxy_lower, 'NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt', 'SSL_CERT_FILE=/certs/cloudfuze.crt', 'REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt']
-remove = {'HTTPS_PROXY', 'https_proxy', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'}
+extra = ['NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt', 'SSL_CERT_FILE=/certs/cloudfuze.crt', 'REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt']
+remove = {'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'}
 with open(cfg_path, 'r') as f:
     cfg = json.load(f)
 env = cfg.get('Config', {}).get('Env', []) or []
@@ -480,38 +548,13 @@ env.extend(extra)
 cfg['Config']['Env'] = env
 with open(cfg_path, 'w') as f:
     json.dump(cfg, f)
-print('OK')
-" 2>/dev/null
-      echo "  [OK] Env vars added"
-
-      # Step 3: Start container
-      echo "  [3/4] Starting container..."
-      docker start "$TARGET" >/dev/null 2>&1
-      sleep 3
-
-      if ! docker inspect --format '{{.State.Running}}' "$TARGET" 2>/dev/null | grep -q true; then
-        echo "  [!] Container failed to start. Check: docker logs $TARGET"
-        echo "  Reverting env vars..."
-        docker stop "$TARGET" >/dev/null 2>&1
-        python3 -c "
-import json
-cfg_path = '$CONFIG_FILE'
-remove = {'HTTPS_PROXY', 'https_proxy', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'}
-with open(cfg_path, 'r') as f:
-    cfg = json.load(f)
-env = cfg.get('Config', {}).get('Env', []) or []
-env = [e for e in env if e.split('=')[0] not in remove]
-cfg['Config']['Env'] = env
-with open(cfg_path, 'w') as f:
-    json.dump(cfg, f)
 " 2>/dev/null
         docker start "$TARGET" >/dev/null 2>&1
-        echo "  Reverted. Container restored."
-        continue
+        sleep 3
       fi
 
-      # Step 4: Add DNAT iptables rule for this container only
-      echo "  [4/4] Adding network rule..."
+      # Step 3: Add DNAT iptables rule
+      echo "  [3/3] Adding network rule..."
       NEW_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TARGET" 2>/dev/null)
       RULE_IP="${NEW_IP:-$CONTAINER_IP}"
       iptables -t nat -D PREROUTING -s "$RULE_IP" -p tcp --dport 443 -j DNAT --to-destination "${GW_IP}:${PROXY_PORT}" 2>/dev/null || true
@@ -562,28 +605,60 @@ with open(cfg_path, 'w') as f:
       echo "  [OK] Network rules removed"
     fi
 
-    # Remove env vars from container config and restart
-    CID=$(docker inspect --format '{{.Id}}' "$TARGET" 2>/dev/null)
-    CONFIG_FILE="/var/lib/docker/containers/$CID/config.v2.json"
+    # Remove override file and redeploy clean
+    COMPOSE_DIR=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$TARGET" 2>/dev/null)
+    COMPOSE_SVC=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$TARGET" 2>/dev/null)
 
-    if [[ -f "$CONFIG_FILE" ]]; then
-      echo "  Removing governance env vars..."
-      docker stop "$TARGET" >/dev/null 2>&1
-      python3 -c "
-import json
-cfg_path = '$CONFIG_FILE'
-remove = {'HTTPS_PROXY', 'https_proxy', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'}
-with open(cfg_path, 'r') as f:
-    cfg = json.load(f)
-env = cfg.get('Config', {}).get('Env', []) or []
-env = [e for e in env if e.split('=')[0] not in remove]
-cfg['Config']['Env'] = env
-with open(cfg_path, 'w') as f:
-    json.dump(cfg, f)
+    if [[ -n "$COMPOSE_DIR" ]]; then
+      OVERRIDE_FILE="$COMPOSE_DIR/docker-compose.override.yml"
+      if [[ -f "$OVERRIDE_FILE" ]]; then
+        # Remove our service from the override (or delete if it's the only one)
+        if grep -c "^  " "$OVERRIDE_FILE" 2>/dev/null | grep -q "^1$"; then
+          rm -f "$OVERRIDE_FILE"
+          echo "  [OK] Override file removed"
+        else
+          # Multiple services — remove just ours
+          python3 -c "
+import yaml
+with open('$OVERRIDE_FILE') as f:
+    data = yaml.safe_load(f) or {}
+data.get('services', {}).pop('$COMPOSE_SVC', None)
+if data.get('services'):
+    with open('$OVERRIDE_FILE', 'w') as f:
+        yaml.dump(data, f, default_flow_style=False)
+else:
+    import os; os.remove('$OVERRIDE_FILE')
 print('OK')
+" 2>/dev/null || rm -f "$OVERRIDE_FILE"
+          echo "  [OK] Service removed from override"
+        fi
+        # Redeploy without override
+        cd "$COMPOSE_DIR"
+        ENV_FLAG=""
+        if [[ ! -f ".env" ]]; then
+          for candidate in .env.prod .env.production .env.local .env.staging .env.dev; do
+            if [[ -f "$candidate" ]]; then cp "$candidate" .env; ENV_FLAG="CREATED"; break; fi
+          done
+        fi
+        docker compose up -d "$COMPOSE_SVC" 2>/dev/null || docker-compose up -d "$COMPOSE_SVC" 2>/dev/null
+        if [[ "$ENV_FLAG" == "CREATED" ]]; then rm -f .env; fi
+        echo "  [OK] $TARGET redeployed clean"
+      fi
+    else
+      # Not compose-managed — clean config.v2.json
+      CID=$(docker inspect --format '{{.Id}}' "$TARGET" 2>/dev/null)
+      CONFIG_FILE="/var/lib/docker/containers/$CID/config.v2.json"
+      if [[ -f "$CONFIG_FILE" ]]; then
+        docker stop "$TARGET" >/dev/null 2>&1
+        python3 -c "
+import json
+remove = {'HTTPS_PROXY', 'https_proxy', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'}
+with open('$CONFIG_FILE') as f: c=json.load(f)
+c['Config']['Env']=[e for e in c['Config']['Env'] if e.split('=')[0] not in remove]
+with open('$CONFIG_FILE','w') as f: json.dump(c,f)
 " 2>/dev/null
-      docker start "$TARGET" >/dev/null 2>&1
-      sleep 2
+        docker start "$TARGET" >/dev/null 2>&1
+      fi
     fi
 
     # Deregister from governance server
