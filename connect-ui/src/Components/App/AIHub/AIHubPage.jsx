@@ -6013,12 +6013,22 @@ const TAB_GROUPS = {
   },
   Activity: {
     title: "Activity",
-    hint: "What people actually did — prompts and detections, full session replays, per-person usage, and how requests are routed between models.",
+    // No group hint: each tab under it already carries its own description, and this
+    // one had also gone stale — it still advertised "full session replays" after the
+    // Sessions tab was hidden.
     tabs: [
       { slug: "prompts",  label: "Prompts & DLP", component: DLPView },
-      { slug: "sessions", label: "Sessions",      component: SessionReplayView },
+      // Sessions hidden from the tab strip, to be restored. SessionReplayView and
+      // every endpoint behind it are untouched, so uncommenting this line brings it
+      // back. /AIHub/SessionReplay still redirects here and resolveTab falls back to
+      // the first tab, so the old URL lands on Prompts & DLP rather than breaking.
+      // { slug: "sessions", label: "Sessions",      component: SessionReplayView },
       { slug: "claude",   label: "Claude Usage",  component: ClaudeUsageView },
-      { slug: "routing",  label: "Model Routing", component: ModelRoutingView },
+      // Model Routing hidden from the tab strip, to be restored — same treatment as
+      // Sessions above. ModelRoutingView and its /api/v1/routing/* endpoints are
+      // untouched; /AIHub/ModelRouting still redirects here and lands on the first
+      // tab. Uncommenting this line is the whole of putting it back.
+      // { slug: "routing",  label: "Model Routing", component: ModelRoutingView },
     ],
   },
   PoliciesRisk: {

@@ -130,7 +130,12 @@ const SideNav = (props) => {
         // Projects (issue/revoke SDK credentials) · Traces (what those apps reported).
         // This is the active-reporting path: an app that calls the SDK on purpose,
         // as opposed to everything above, which is discovered passively.
-        { icon: <Boxes size={16} />, title: "SDK", link: "/AIHub/SDK" },
+        //
+        // Hidden from the nav, to be restored. Only this entry is commented out —
+        // the /AIHub/SDK route, the TAB_GROUPS.SDK definition, both views and every
+        // /api/v1/sdk/* endpoint are untouched, so the screen still answers on its
+        // URL and uncommenting this line is the whole of putting it back.
+        // { icon: <Boxes size={16} />, title: "SDK", link: "/AIHub/SDK" },
         // Integrations · Copilot Readiness
         // The flat entries this replaced (Server Monitor, AI Budget, Copilot
         // Readiness, Model Routing, Risk Scores, AI Registry, Integrations) are all
