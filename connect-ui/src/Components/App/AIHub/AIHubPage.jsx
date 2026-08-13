@@ -41,6 +41,48 @@ function fmtUsd(n) {
 }
 function fmtTokens(n) { if (!n) return "—"; if (n>1e6) return (n/1e6).toFixed(1)+"M"; if (n>1e3) return (n/1e3).toFixed(1)+"K"; return n; }
 
+// ── Client-side pricing (USD per 1M tokens) ──────────────────────────────
+// Cost is calculated here, not in the monitor, so pricing updates are instant
+// and all traces (old + new) always show correct costs.
+const PRICING = [
+  // Anthropic
+  { m: /^claude-opus-4/,         input: 15.00, output: 75.00, cached: 1.50 },
+  { m: /^claude-sonnet-4/,       input: 3.00,  output: 15.00, cached: 0.30 },
+  { m: /^claude-haiku-4/,        input: 1.00,  output: 5.00,  cached: 0.10 },
+  { m: /^claude-3-5-sonnet/,     input: 3.00,  output: 15.00, cached: 0.30 },
+  { m: /^claude-3-5-haiku/,      input: 0.80,  output: 4.00,  cached: 0.08 },
+  { m: /^claude-3-opus/,         input: 15.00, output: 75.00, cached: 1.50 },
+  // OpenAI
+  { m: /^gpt-4\.1-nano/,         input: 0.10,  output: 0.40,  cached: 0.025 },
+  { m: /^gpt-4\.1-mini/,         input: 0.40,  output: 1.60,  cached: 0.10 },
+  { m: /^gpt-4\.1/,              input: 2.00,  output: 8.00,  cached: 0.50 },
+  { m: /^gpt-4o-mini/,           input: 0.15,  output: 0.60,  cached: 0.075 },
+  { m: /^gpt-4o/,                input: 2.50,  output: 10.00, cached: 1.25 },
+  { m: /^gpt-4-turbo/,           input: 10.00, output: 30.00, cached: 10.00 },
+  { m: /^gpt-4(?![\.\do]|-turbo)/, input: 30.00, output: 60.00, cached: 30.00 },
+  { m: /^gpt-3\.5-turbo/,        input: 0.50,  output: 1.50,  cached: 0.50 },
+  { m: /^o3-mini/,               input: 1.10,  output: 4.40,  cached: 0.55 },
+  { m: /^o3/,                    input: 10.00, output: 40.00, cached: 2.50 },
+  { m: /^o1-mini/,               input: 3.00,  output: 12.00, cached: 1.50 },
+  { m: /^o1/,                    input: 15.00, output: 60.00, cached: 7.50 },
+  // Google
+  { m: /^gemini-2\.5-pro/,       input: 1.25,  output: 10.00, cached: 0.31 },
+  { m: /^gemini-2\.5-flash/,     input: 0.30,  output: 2.50,  cached: 0.075 },
+  { m: /^gemini-1\.5-pro/,       input: 1.25,  output: 5.00,  cached: 0.31 },
+  { m: /^gemini-1\.5-flash/,     input: 0.075, output: 0.30,  cached: 0.019 },
+];
+function calcCost(model, promptTokens = 0, completionTokens = 0, cachedTokens = 0) {
+  if (!model) return 0;
+  const p = PRICING.find(r => r.m.test(model));
+  if (!p) return 0;
+  const billed = Math.max(0, promptTokens - cachedTokens);
+  return (billed * p.input + cachedTokens * p.cached + completionTokens * p.output) / 1_000_000;
+}
+// Convenience: calculate cost from a trace/call object
+function traceCost(r) {
+  return calcCost(r.model, r.prompt_tokens || 0, r.completion_tokens || 0, r.cached_tokens || 0);
+}
+
 // Only surface the severities that matter to a reviewer.
 const HI_CRIT = new Set(["critical", "high"]);
 function isHiCrit(sev) { return HI_CRIT.has(String(sev||"").toLowerCase()); }
@@ -5311,7 +5353,7 @@ function ServerMonitorView() {
         <StatCard icon={<Activity size={18} />} label="Total Calls" value={stats?.total_calls || 0} hint="All time" color="#3b82f6" />
         <StatCard icon={<Clock size={18} />} label="Last 24h" value={stats?.calls_last_24h || 0} hint="Recent calls" color="#8b5cf6" />
         <StatCard icon={<Server size={18} />} label="Servers" value={stats?.connected_servers || 0} hint="Connected" color="#22c55e" />
-        <StatCard icon={<Shield size={18} />} label="Total Cost" value={fmtUsd(stats?.total_cost_usd)} hint="All time" color="#f59e0b" />
+        <StatCard icon={<Shield size={18} />} label="Total Cost" value={fmtUsd(stats?.total_cost_usd)} hint="Recalculated live" color="#f59e0b" />
       </div>
 
       <div style={{ display: "flex", gap: 2, marginBottom: 16, borderBottom: "1px solid #e5e7eb", paddingBottom: 0 }}>
@@ -5415,7 +5457,7 @@ function ServerMonitorView() {
             { label: "Provider", render: r => <Tag text={r.provider || "?"} color={r.provider === "openai" ? "#10a37f" : r.provider === "anthropic" ? "#d97706" : "#6366f1"} /> },
             { label: "Model", render: r => <span style={{ fontSize: 12, fontWeight: 500 }}>{(r.model || "?").replace(/-\d{4}-\d{2}-\d{2}$/, "")}</span> },
             { label: "Tokens", render: r => fmtTokens((r.prompt_tokens || 0) + (r.completion_tokens || 0)), right: true },
-            { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
+            { label: "Cost", render: r => fmtUsd(traceCost(r)), right: true },
             { label: "Duration", render: r => <span>{r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "\u2014"}</span>, right: true },
           ]} rows={agentCalls} empty="No traces yet for this agent." onRow={r => setSelectedTrace(r.id)} />
           </div>
@@ -5442,7 +5484,7 @@ function ServerMonitorView() {
               <div style={{ display: "flex", gap: 16, textAlign: "right" }}>
                 <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtTokens((traceDetail.prompt_tokens||0)+(traceDetail.completion_tokens||0))}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>tokens</div></div>
                 <div><div style={{ fontSize: 18, fontWeight: 700 }}>{traceDetail.duration_ms ? (traceDetail.duration_ms/1000).toFixed(1)+"s" : "--"}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>duration</div></div>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtUsd(traceDetail.total_cost_usd)}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>cost</div></div>
+                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtUsd(traceCost(traceDetail))}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>cost</div></div>
               </div>
             </div>
 
