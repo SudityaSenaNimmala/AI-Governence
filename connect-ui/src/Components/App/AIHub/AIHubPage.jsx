@@ -5384,7 +5384,7 @@ function ServerMonitorView() {
                         <div style={{ width: 8, height: 8, borderRadius: "50%", background: srv.status === "active" ? "#22c55e" : srv.status === "uninstalled" ? "#ef4444" : "#9ca3af" }} />
                         <div>
                           <div style={{ fontWeight: 600, fontSize: 15 }}>{srv.display_name || srv.hostname || srv.machine_id?.slice(0, 12)}</div>
-                          <div className="aihub_text_muted" style={{ fontSize: 12 }}>{srvGoverned.length} agent{srvGoverned.length !== 1 ? "s" : ""} governed | {srv.total_calls || 0} traces | {fmtUsd(srv.total_cost_usd)}</div>
+                          <div className="aihub_text_muted" style={{ fontSize: 12 }}>{srvGoverned.length} agent{srvGoverned.length !== 1 ? "s" : ""} governed | {srv.total_calls || 0} traces | {fmtUsd(srv.total_cost_usd)} | avg {srv.avg_latency_ms ? (srv.avg_latency_ms / 1000).toFixed(1) + "s" : "--"}</div>
                         </div>
                       </div>
                       <ChevronRight size={16} style={{ color: "#9ca3af" }} />
@@ -5423,7 +5423,7 @@ function ServerMonitorView() {
                         <div>
                           <div style={{ fontWeight: 600, fontSize: 14 }}>{agent.container_name}</div>
                           <div className="aihub_text_muted" style={{ fontSize: 12 }}>
-                            IP: {agent.container_ip || "?"} | {agent.total_calls || 0} traces | {fmtUsd(agent.total_cost_usd)}
+                            IP: {agent.container_ip || "?"} | {agent.total_calls || 0} traces | {fmtUsd(agent.total_cost_usd)} | avg {agent.avg_latency_ms ? (agent.avg_latency_ms / 1000).toFixed(1) + "s" : "--"}
                           </div>
                         </div>
                       </div>

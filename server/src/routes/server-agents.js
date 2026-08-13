@@ -336,10 +336,12 @@ export function mountServerAgents(app, db) {
 
       const costAgg = await db.collection('server_agent_calls').aggregate([
         { $match: ipFilter },
-        { $group: { _id: '$model', calls: { $sum: 1 }, prompt_tokens: { $sum: { $ifNull: ['$prompt_tokens', 0] } }, completion_tokens: { $sum: { $ifNull: ['$completion_tokens', 0] } }, cached_tokens: { $sum: { $ifNull: ['$cached_tokens', 0] } } } },
+        { $group: { _id: '$model', calls: { $sum: 1 }, prompt_tokens: { $sum: { $ifNull: ['$prompt_tokens', 0] } }, completion_tokens: { $sum: { $ifNull: ['$completion_tokens', 0] } }, cached_tokens: { $sum: { $ifNull: ['$cached_tokens', 0] } }, total_duration: { $sum: { $ifNull: ['$duration_ms', 0] } } } },
       ]).toArray();
       c.total_cost_usd = sumCost(costAgg);
       c.total_calls = costAgg.reduce((t, r) => t + (r.calls || 0), 0);
+      const totalDur = costAgg.reduce((t, r) => t + (r.total_duration || 0), 0);
+      c.avg_latency_ms = c.total_calls > 0 ? Math.round(totalDur / c.total_calls) : null;
       c.trace_count = c.total_calls;
     }
 
@@ -555,6 +557,7 @@ echo ""
         prompt_tokens: { $sum: { $ifNull: ['$prompt_tokens', 0] } },
         completion_tokens: { $sum: { $ifNull: ['$completion_tokens', 0] } },
         cached_tokens: { $sum: { $ifNull: ['$cached_tokens', 0] } },
+        total_duration: { $sum: { $ifNull: ['$duration_ms', 0] } },
         users: { $addToSet: '$user' },
         providers: { $addToSet: '$provider' },
         last_call: { $max: '$occurred_at' },
@@ -566,10 +569,11 @@ echo ""
       const mid = r._id.machine_id;
       const model = r._id.model;
       const cost = calcCost(model, r.prompt_tokens, r.completion_tokens, r.cached_tokens);
-      if (!statsMap.has(mid)) statsMap.set(mid, { total_calls: 0, total_cost_usd: 0, users: new Set(), providers: new Set(), models: new Set(), last_call: null });
+      if (!statsMap.has(mid)) statsMap.set(mid, { total_calls: 0, total_cost_usd: 0, total_duration: 0, users: new Set(), providers: new Set(), models: new Set(), last_call: null });
       const s = statsMap.get(mid);
       s.total_calls += r.calls;
       s.total_cost_usd += cost;
+      s.total_duration += r.total_duration || 0;
       r.users.filter(Boolean).forEach(u => s.users.add(u));
       r.providers.filter(Boolean).forEach(p => s.providers.add(p));
       if (model) s.models.add(model);
@@ -592,6 +596,7 @@ echo ""
         first_seen: m.first_seen || null,
         total_calls: s.total_calls || 0,
         total_cost_usd: s.total_cost_usd || 0,
+        avg_latency_ms: s.total_calls > 0 ? Math.round(s.total_duration / s.total_calls) : null,
         users: s.users ? [...s.users] : [],
         providers: s.providers ? [...s.providers] : [],
         models: s.models ? [...s.models] : [],
