@@ -345,8 +345,11 @@ fi
 sleep 3
 
 # ── Open firewall for Docker containers to reach proxy ────────────────────
+# Docker uses 172.16-31.x.x AND 192.168.x.x for container networks
 if command -v ufw &>/dev/null; then
   ufw allow from 172.16.0.0/12 to any port "$PROXY_PORT" comment "cloudfuze-monitor" 2>/dev/null || true
+  ufw allow from 192.168.0.0/16 to any port "$PROXY_PORT" comment "cloudfuze-monitor containers" 2>/dev/null || true
+  ufw allow from 10.0.0.0/8 to any port "$PROXY_PORT" comment "cloudfuze-monitor containers" 2>/dev/null || true
 fi
 
 # ── Create CLI tool ──────────────────────────────────────────────────────
