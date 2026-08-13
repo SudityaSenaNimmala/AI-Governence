@@ -198,6 +198,32 @@ async function main() {
     headers: { 'authorization': `Bearer ${enrollment.token}`, 'content-type': 'application/json' },
   }).catch(() => {});
 
+  // ── Docker event watcher: auto-flush conntrack when governed containers restart ──
+  // When a governed container is recreated/restarted by CI/CD, stale conntrack
+  // entries bypass the DNAT rule. This watcher detects container start events
+  // and flushes conntrack for that container's IP so DNAT takes effect immediately.
+  try {
+    const { spawn } = await import('node:child_process');
+    const dockerEvents = spawn('docker', ['events', '--filter', 'event=start', '--filter', 'type=container', '--format', '{{.Actor.Attributes.name}}'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    dockerEvents.stdout.on('data', (data) => {
+      const name = data.toString().trim();
+      if (!name) return;
+      // Get the container's IP and flush conntrack
+      const inspect = spawn('docker', ['inspect', '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', name], { stdio: ['ignore', 'pipe', 'ignore'] });
+      let ip = '';
+      inspect.stdout.on('data', (d) => { ip += d.toString().trim(); });
+      inspect.on('close', () => {
+        if (ip) {
+          spawn('conntrack', ['-D', '-s', ip], { stdio: 'ignore' }).on('close', () => {
+            log.info(`docker-watch: container ${name} started (IP=${ip}), conntrack flushed`);
+          });
+        }
+      });
+    });
+    dockerEvents.on('error', () => {}); // docker not available — ignore
+    log.info('docker-watch: monitoring container start events for conntrack flush');
+  } catch { /* docker events not available */ }
+
   // Tier 2 + Tier 3 supplementary captures — all best-effort, no-op when the
   // platform tooling isn't present.
   const gpuWatch    = startGpuWatch({ reporter: signalReporter, log });

@@ -657,6 +657,8 @@ with open('$CONFIG_FILE','w') as f: json.dump(c,f)
       RULE_IP="${NEW_IP:-$CONTAINER_IP}"
       iptables -t nat -D PREROUTING -s "$RULE_IP" -p tcp --dport 443 -j DNAT --to-destination "${GW_IP}:${PROXY_PORT}" 2>/dev/null || true
       iptables -t nat -A PREROUTING -s "$RULE_IP" -p tcp --dport 443 -j DNAT --to-destination "${GW_IP}:${PROXY_PORT}" 2>/dev/null
+      # Flush conntrack so existing/stale connections go through the new DNAT rule
+      conntrack -D -s "$RULE_IP" 2>/dev/null || true
 
       # Register with governance server
       TOKEN_FILE="$DATA_DIR/monitor-token.json"
