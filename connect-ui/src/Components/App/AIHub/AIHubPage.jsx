@@ -5175,16 +5175,21 @@ function ServerMonitorView() {
     return () => clearInterval(interval);
   }, []);
 
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+
   const fetchAgentCalls = () => {
     if (!selectedAgent) { setAgentCalls([]); return; }
-    const params = new URLSearchParams({ machineId: selectedAgent.machine_id, limit: 200 });
+    const params = new URLSearchParams({ machineId: selectedAgent.machine_id, limit: 1000 });
     if (selectedAgent.container_ip) params.set("sourceIp", selectedAgent.container_ip);
+    if (dateFrom) params.set("from", new Date(dateFrom).toISOString());
+    if (dateTo) params.set("to", new Date(dateTo + "T23:59:59").toISOString());
     apiFetch("/server-agents/calls?" + params.toString())
       .then(calls => setAgentCalls(calls || []))
       .catch(() => setAgentCalls([]));
   };
 
-  useEffect(() => { fetchAgentCalls(); }, [selectedAgent]);
+  useEffect(() => { fetchAgentCalls(); }, [selectedAgent, dateFrom, dateTo]);
 
   // Auto-refresh agent calls every 15 seconds when viewing an agent
   useEffect(() => {
@@ -5305,7 +5310,7 @@ function ServerMonitorView() {
             return (
               <div style={{ display: "grid", gap: 10 }}>
                 {srvGoverned.map(agent => (
-                  <div key={agent.container_name} onClick={() => setSelectedAgent(agent)}
+                  <div key={agent.container_name} onClick={() => { setSelectedAgent(agent); setDateFrom(""); setDateTo(""); }}
                     style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 16, cursor: "pointer", transition: "border-color 0.2s" }}
                     onMouseEnter={e => e.currentTarget.style.borderColor = "#3b82f6"}
                     onMouseLeave={e => e.currentTarget.style.borderColor = "#e5e7eb"}>
@@ -5337,6 +5342,15 @@ function ServerMonitorView() {
             <ChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Back to {selectedServer.display_name}
           </button>
           <SectionHeader title={selectedAgent.container_name} hint={`Individual AI API calls from this agent (${agentCalls.length} total)`} />
+          <div style={{ display: "flex", gap: 12, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
+            <label style={{ fontSize: 12, color: "#6b7280" }}>From:</label>
+            <input type="date" value={dateFrom} onChange={e => { setDateFrom(e.target.value); }} style={{ padding: "4px 8px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 12 }} />
+            <label style={{ fontSize: 12, color: "#6b7280" }}>To:</label>
+            <input type="date" value={dateTo} onChange={e => { setDateTo(e.target.value); }} style={{ padding: "4px 8px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 12 }} />
+            <button onClick={fetchAgentCalls} style={{ padding: "4px 12px", borderRadius: 6, border: "1px solid #d1d5db", background: "#fff", fontSize: 12, cursor: "pointer" }}>Filter</button>
+            {(dateFrom || dateTo) && <button onClick={() => { setDateFrom(""); setDateTo(""); }} style={{ padding: "4px 12px", borderRadius: 6, border: "none", background: "#f3f4f6", fontSize: 12, cursor: "pointer", color: "#6b7280" }}>Clear</button>}
+          </div>
+          <div style={{ maxHeight: 600, overflowY: "auto" }}>
           <DataTable columns={[
             { label: "Time", render: r => <span style={{ fontSize: 12 }}>{relTime(r.occurred_at)}</span> },
             { label: "Provider", render: r => <Tag text={r.provider || "?"} color={r.provider === "openai" ? "#10a37f" : r.provider === "anthropic" ? "#d97706" : "#6366f1"} /> },
@@ -5345,6 +5359,7 @@ function ServerMonitorView() {
             { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
             { label: "Duration", render: r => <span>{r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "\u2014"}</span>, right: true },
           ]} rows={agentCalls} empty="No traces yet for this agent." onRow={r => setSelectedTrace(r.id)} />
+          </div>
         </div>
       )}
 

@@ -69,7 +69,7 @@ export function mountServerAgents(app, db) {
 
   // Recent calls — paginated, optionally filtered.
   app.get('/api/v1/server-agents/calls', a(async (req, res) => {
-    const { user, provider, model, trigger, machineId, sourceIp, limit = 200 } = req.query;
+    const { user, provider, model, trigger, machineId, sourceIp, from, to, limit = 1000 } = req.query;
     const filter = {};
     if (sourceIp)  filter.source_ip = sourceIp;
     if (user)      filter.user = user;
@@ -77,7 +77,12 @@ export function mountServerAgents(app, db) {
     if (model)     filter.model = model;
     if (trigger)   filter.trigger_source = trigger;
     if (machineId) filter.machine_id = machineId;
-    const lim = Math.min(Number(limit) || 200, 1000);
+    if (from || to) {
+      filter.occurred_at = {};
+      if (from) filter.occurred_at.$gte = from;
+      if (to) filter.occurred_at.$lte = to;
+    }
+    const lim = Math.min(Number(limit) || 1000, 10000);
 
     const rows = await db.collection('server_agent_calls')
       .find(filter)
