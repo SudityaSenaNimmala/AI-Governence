@@ -70,6 +70,9 @@ export function providerForHost(host, urlPath = null) {
 // vendors are CAPTURED, just unlabeled until an admin promotes them.
 export function parseApiCall({ host, path: urlPath, requestBody, requestHeaders, responseBody, responseHeaders }) {
   const reqJson = safeJson(requestBody);
+  // DEBUG: log whether reqJson parsed
+  if (requestBody && !reqJson) console.log(`[debug] safeJson failed for requestBody[${requestBody.length}B], first50="${requestBody.toString('utf8', 0, 50)}"`);
+  if (reqJson) console.log(`[debug] reqJson parsed OK, model=${reqJson.model}, messages=${Array.isArray(reqJson.messages) ? reqJson.messages.length : 'N/A'}`);
   const respBuf = maybeDecompress(responseBody, responseHeaders);
 
   const respStr = respBuf ? respBuf.toString('utf8', 0, 50) : '';
@@ -248,10 +251,22 @@ function parseOpenAI({ urlPath, reqJson, respJson, sseEvents, requestBody }) {
   } else if (sseEvents) {
     const collected = [];
     let finalUsage = null;
+    // DEBUG: log first 3 SSE events to understand structure
+    if (sseEvents.length > 0) {
+      console.log(`[debug] SSE events count=${sseEvents.length}, first=${JSON.stringify(sseEvents[0]).slice(0, 300)}`);
+      if (sseEvents.length > 1) console.log(`[debug] SSE event[1]=${JSON.stringify(sseEvents[1]).slice(0, 300)}`);
+    }
     for (const e of sseEvents) {
       // Chat streaming: each `data:` is `{choices:[{delta:{content:"..."}}]}`.
       const delta = e?.choices?.[0]?.delta?.content;
+      // Also check for tool_calls in delta (when the response is a tool call, content is null)
+      const toolDelta = e?.choices?.[0]?.delta?.tool_calls;
       if (typeof delta === 'string') collected.push(delta);
+      else if (Array.isArray(toolDelta)) {
+        for (const tc of toolDelta) {
+          if (tc?.function?.arguments) collected.push(tc.function.arguments);
+        }
+      }
       // Some streams include `usage` on the final chunk (when stream_options.include_usage=true).
       if (e?.usage) finalUsage = e.usage;
     }
