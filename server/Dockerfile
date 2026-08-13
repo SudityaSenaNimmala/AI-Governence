@@ -25,6 +25,8 @@ COPY scripts /app/scripts
 # the container even though it works locally — the route resolves sdk-js/ three
 # levels up from server/src/routes, i.e. /app/sdk-js.
 COPY sdk-js /app/sdk-js
+# Extension source — served as a zip by GET /api/v1/installations/extension-package.
+COPY browser-extension /app/browser-extension
 WORKDIR /app/server
 ENV NODE_ENV=production
 EXPOSE 3001
