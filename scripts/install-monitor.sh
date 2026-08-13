@@ -450,85 +450,140 @@ case "$1" in
       echo "  Gateway:   $GW_IP"
       echo ""
 
-      # Step 1: Create docker-compose.override.yml (PERMANENT — survives redeploys)
-      echo "  [1/3] Setting up persistent governance..."
-      if [[ -n "$COMPOSE_DIR" && -n "$COMPOSE_SVC" ]]; then
-        OVERRIDE_FILE="$COMPOSE_DIR/docker-compose.override.yml"
+      # Step 1: Edit the ACTUAL compose file (permanent — survives all redeploys)
+      echo "  [1/3] Setting up permanent governance..."
 
-        # Check if override already exists with other services
-        EXISTING_OVERRIDE=""
-        if [[ -f "$OVERRIDE_FILE" ]]; then
-          EXISTING_OVERRIDE=$(cat "$OVERRIDE_FILE")
+      # Find the exact compose file used for this container
+      ORIG_CONFIG=$(docker inspect "$TARGET" --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' 2>/dev/null)
+
+      if [[ -n "$COMPOSE_DIR" && -n "$COMPOSE_SVC" && -n "$ORIG_CONFIG" ]]; then
+        # Use the first compose file from the label
+        IFS=',' read -ra CONFIGS <<< "$ORIG_CONFIG"
+        COMPOSE_FILE=$(echo "${CONFIGS[0]}" | xargs)
+
+        if [[ ! -f "$COMPOSE_FILE" ]]; then
+          echo "  [!] Compose file not found: $COMPOSE_FILE"
+          continue
         fi
 
-        # Build override content
-        if [[ -n "$EXISTING_OVERRIDE" ]] && echo "$EXISTING_OVERRIDE" | grep -q "cloudfuze"; then
-          echo "  Override already exists for this service."
+        echo "  Compose file: $COMPOSE_FILE"
+        echo "  Service: $COMPOSE_SVC"
+
+        # Check if already governed
+        if grep -q "cloudfuze.crt" "$COMPOSE_FILE" 2>/dev/null; then
+          echo "  Already governed in compose file."
         else
-          # Create or append to override file
-          if [[ -f "$OVERRIDE_FILE" ]] && ! echo "$EXISTING_OVERRIDE" | grep -q "$COMPOSE_SVC"; then
-            # Append our service to existing override
-            python3 -c "
-import yaml, sys
-try:
-    with open('$OVERRIDE_FILE') as f:
-        data = yaml.safe_load(f) or {}
-except: data = {}
-if 'services' not in data: data['services'] = {}
-data['services']['$COMPOSE_SVC'] = {
-    'environment': [
-        'NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt',
-        'SSL_CERT_FILE=/certs/cloudfuze.crt',
-        'REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt'
-    ],
-    'volumes': [
-        '$CA_FILE:/certs/cloudfuze.crt:ro'
-    ]
-}
-with open('$OVERRIDE_FILE', 'w') as f:
-    yaml.dump(data, f, default_flow_style=False)
-print('OK')
-" 2>/dev/null || {
-              # Fallback if pyyaml not installed — write plain text
-              printf "services:\n  %s:\n    environment:\n      - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt\n      - SSL_CERT_FILE=/certs/cloudfuze.crt\n      - REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt\n    volumes:\n      - %s:/certs/cloudfuze.crt:ro\n" "$COMPOSE_SVC" "$CA_FILE" > "$OVERRIDE_FILE"
-            }
-          else
-            # Create fresh override
-            printf "services:\n  %s:\n    environment:\n      - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt\n      - SSL_CERT_FILE=/certs/cloudfuze.crt\n      - REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt\n    volumes:\n      - %s:/certs/cloudfuze.crt:ro\n" "$COMPOSE_SVC" "$CA_FILE" > "$OVERRIDE_FILE"
+          # Backup the original
+          BACKUP="${COMPOSE_FILE}.cloudfuze-backup"
+          if [[ ! -f "$BACKUP" ]]; then
+            cp "$COMPOSE_FILE" "$BACKUP"
+            echo "  [OK] Backup: $BACKUP"
           fi
-          echo "  [OK] Created $OVERRIDE_FILE"
-          echo "       This file persists across redeploys."
+
+          # Add our env vars + volume to the service using python
+          python3 -c "
+import sys
+
+compose_file = '$COMPOSE_FILE'
+service = '$COMPOSE_SVC'
+ca_path = '$CA_FILE'
+vol_line = '      - ' + ca_path + ':/certs/cloudfuze.crt:ro'
+env_lines = [
+    '      - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt',
+    '      - SSL_CERT_FILE=/certs/cloudfuze.crt',
+    '      - REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt',
+]
+
+with open(compose_file, 'r') as f:
+    lines = f.readlines()
+
+result = []
+in_service = False
+service_indent = 0
+env_added = False
+vol_added = False
+i = 0
+
+while i < len(lines):
+    line = lines[i]
+    stripped = line.rstrip()
+    indent = len(line) - len(line.lstrip())
+
+    # Detect entering our service
+    if stripped.lstrip().startswith(service + ':'):
+        in_service = True
+        service_indent = indent
+        result.append(line)
+        i += 1
+        continue
+
+    # Detect leaving our service (another service at same or lower indent)
+    if in_service and indent <= service_indent and stripped.strip() and ':' in stripped and not stripped.strip().startswith('#') and not stripped.strip().startswith('-'):
+        # Before leaving, add missing sections
+        sp = ' ' * (service_indent + 4)
+        sp2 = ' ' * (service_indent + 6)
+        if not env_added:
+            result.append(sp + 'environment:\n')
+            for el in env_lines:
+                result.append(el + '\n')
+        if not vol_added:
+            result.append(sp + 'volumes:\n')
+            result.append(vol_line + '\n')
+        in_service = False
+
+    if in_service:
+        # Found environment section — append our env vars
+        if stripped.strip() == 'environment:' or stripped.strip().startswith('environment:'):
+            result.append(line)
+            i += 1
+            # Add our vars right after
+            for el in env_lines:
+                result.append(el + '\n')
+            env_added = True
+            continue
+
+        # Found volumes section — append our volume
+        if stripped.strip() == 'volumes:' or stripped.strip().startswith('volumes:'):
+            result.append(line)
+            i += 1
+            # Add our volume right after
+            result.append(vol_line + '\n')
+            vol_added = True
+            continue
+
+    result.append(line)
+    i += 1
+
+# If we ended while still in service (last service in file)
+if in_service:
+    sp = ' ' * (service_indent + 4)
+    if not env_added:
+        result.append(sp + 'environment:\n')
+        for el in env_lines:
+            result.append(el + '\n')
+    if not vol_added:
+        result.append(sp + 'volumes:\n')
+        result.append(vol_line + '\n')
+
+with open(compose_file, 'w') as f:
+    f.writelines(result)
+print('OK')
+" 2>/dev/null
+          echo "  [OK] Compose file updated (3 env vars + CA volume added)"
         fi
 
-        # Step 2: Redeploy the service using the SAME compose file(s) it was originally deployed with
+        # Step 2: Redeploy
         echo "  [2/3] Redeploying $COMPOSE_SVC..."
         cd "$COMPOSE_DIR"
-
-        # Detect which compose file(s) were used for this container
-        ORIG_CONFIG=$(docker inspect "$TARGET" --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' 2>/dev/null)
         FILE_FLAGS=""
-        if [[ -n "$ORIG_CONFIG" ]]; then
-          # Build -f flags from the original config files (comma-separated)
-          IFS=',' read -ra CONFIGS <<< "$ORIG_CONFIG"
-          for cf in "${CONFIGS[@]}"; do
-            cf=$(echo "$cf" | xargs)
-            if [[ -f "$cf" ]]; then
-              FILE_FLAGS="$FILE_FLAGS -f $cf"
-            fi
-          done
-        fi
-        # Add our override file
-        FILE_FLAGS="$FILE_FLAGS -f $OVERRIDE_FILE"
-
-        # Find the right env file
+        for cf in "${CONFIGS[@]}"; do
+          cf=$(echo "$cf" | xargs)
+          if [[ -f "$cf" ]]; then FILE_FLAGS="$FILE_FLAGS -f $cf"; fi
+        done
         ENV_FLAG=""
         if [[ ! -f ".env" ]]; then
           for candidate in .env.prod .env.production .env.local .env.staging .env.dev; do
-            if [[ -f "$candidate" ]]; then
-              cp "$candidate" .env
-              ENV_FLAG="CREATED"
-              break
-            fi
+            if [[ -f "$candidate" ]]; then cp "$candidate" .env; ENV_FLAG="CREATED"; break; fi
           done
         fi
         docker compose $FILE_FLAGS up -d "$COMPOSE_SVC" 2>&1 || docker-compose $FILE_FLAGS up -d "$COMPOSE_SVC" 2>&1
@@ -536,12 +591,15 @@ print('OK')
         if [[ "$ENV_FLAG" == "CREATED" ]]; then rm -f .env; fi
 
         if [[ $DEPLOY_OK -ne 0 ]]; then
-          echo "  [!] Redeploy failed. Removing override..."
-          rm -f "$OVERRIDE_FILE"
+          echo "  [!] Redeploy failed. Restoring backup..."
+          if [[ -f "$BACKUP" ]]; then cp "$BACKUP" "$COMPOSE_FILE"; fi
           continue
         fi
         sleep 3
-        echo "  [OK] Redeployed with CA cert + env vars"
+        # Clean up override file if it exists from previous approach
+        rm -f "$COMPOSE_DIR/docker-compose.override.yml" 2>/dev/null
+        echo "  [OK] Redeployed. Governance is permanent."
+        echo "       Every future redeploy will include CA cert + env vars."
       else
         # Not compose-managed — fall back to config.v2.json edit
         echo "  Not compose-managed. Using config edit (won't survive redeploy)..."
@@ -553,17 +611,11 @@ print('OK')
         docker stop "$TARGET" >/dev/null 2>&1
         python3 -c "
 import json
-cfg_path = '$CONFIG_FILE'
 extra = ['NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt', 'SSL_CERT_FILE=/certs/cloudfuze.crt', 'REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt']
 remove = {'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'}
-with open(cfg_path, 'r') as f:
-    cfg = json.load(f)
-env = cfg.get('Config', {}).get('Env', []) or []
-env = [e for e in env if e.split('=')[0] not in remove]
-env.extend(extra)
-cfg['Config']['Env'] = env
-with open(cfg_path, 'w') as f:
-    json.dump(cfg, f)
+with open('$CONFIG_FILE') as f: c=json.load(f)
+c['Config']['Env']=[e for e in c['Config']['Env'] if e.split('=')[0] not in remove]+extra
+with open('$CONFIG_FILE','w') as f: json.dump(c,f)
 " 2>/dev/null
         docker start "$TARGET" >/dev/null 2>&1
         sleep 3
@@ -625,50 +677,48 @@ with open(cfg_path, 'w') as f:
     COMPOSE_DIR=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$TARGET" 2>/dev/null)
     COMPOSE_SVC=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$TARGET" 2>/dev/null)
 
-    if [[ -n "$COMPOSE_DIR" ]]; then
-      OVERRIDE_FILE="$COMPOSE_DIR/docker-compose.override.yml"
-      if [[ -f "$OVERRIDE_FILE" ]]; then
-        # Remove our service from the override (or delete if it's the only one)
-        if grep -c "^  " "$OVERRIDE_FILE" 2>/dev/null | grep -q "^1$"; then
-          rm -f "$OVERRIDE_FILE"
-          echo "  [OK] Override file removed"
-        else
-          # Multiple services — remove just ours
-          python3 -c "
-import yaml
-with open('$OVERRIDE_FILE') as f:
-    data = yaml.safe_load(f) or {}
-data.get('services', {}).pop('$COMPOSE_SVC', None)
-if data.get('services'):
-    with open('$OVERRIDE_FILE', 'w') as f:
-        yaml.dump(data, f, default_flow_style=False)
-else:
-    import os; os.remove('$OVERRIDE_FILE')
-print('OK')
-" 2>/dev/null || rm -f "$OVERRIDE_FILE"
-          echo "  [OK] Service removed from override"
+    # Find and restore the compose file from backup
+    COMPOSE_DIR=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$TARGET" 2>/dev/null)
+    COMPOSE_SVC=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$TARGET" 2>/dev/null)
+    ORIG_CONFIG=$(docker inspect "$TARGET" --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' 2>/dev/null)
+
+    if [[ -n "$COMPOSE_DIR" && -n "$ORIG_CONFIG" ]]; then
+      IFS=',' read -ra CONFIGS <<< "$ORIG_CONFIG"
+      COMPOSE_FILE=$(echo "${CONFIGS[0]}" | xargs)
+      BACKUP="${COMPOSE_FILE}.cloudfuze-backup"
+
+      if [[ -f "$BACKUP" ]]; then
+        echo "  Restoring compose file from backup..."
+        cp "$BACKUP" "$COMPOSE_FILE"
+        rm -f "$BACKUP"
+        echo "  [OK] Compose file restored"
+      else
+        # No backup — remove our lines manually
+        if grep -q "cloudfuze.crt" "$COMPOSE_FILE" 2>/dev/null; then
+          sed -i '/cloudfuze\.crt/d' "$COMPOSE_FILE" 2>/dev/null
+          echo "  [OK] Removed governance lines from compose file"
         fi
-        # Redeploy without override, using original compose file(s)
-        cd "$COMPOSE_DIR"
-        ORIG_CONFIG=$(docker inspect "$TARGET" --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' 2>/dev/null)
-        FILE_FLAGS=""
-        if [[ -n "$ORIG_CONFIG" ]]; then
-          IFS=',' read -ra CONFIGS <<< "$ORIG_CONFIG"
-          for cf in "${CONFIGS[@]}"; do
-            cf=$(echo "$cf" | xargs)
-            if [[ -f "$cf" ]]; then FILE_FLAGS="$FILE_FLAGS -f $cf"; fi
-          done
-        fi
-        ENV_FLAG=""
-        if [[ ! -f ".env" ]]; then
-          for candidate in .env.prod .env.production .env.local .env.staging .env.dev; do
-            if [[ -f "$candidate" ]]; then cp "$candidate" .env; ENV_FLAG="CREATED"; break; fi
-          done
-        fi
-        docker compose $FILE_FLAGS up -d "$COMPOSE_SVC" 2>/dev/null || docker-compose $FILE_FLAGS up -d "$COMPOSE_SVC" 2>/dev/null
-        if [[ "$ENV_FLAG" == "CREATED" ]]; then rm -f .env; fi
-        echo "  [OK] $TARGET redeployed clean"
       fi
+
+      # Clean up override file if exists
+      rm -f "$COMPOSE_DIR/docker-compose.override.yml" 2>/dev/null
+
+      # Redeploy clean
+      cd "$COMPOSE_DIR"
+      FILE_FLAGS=""
+      for cf in "${CONFIGS[@]}"; do
+        cf=$(echo "$cf" | xargs)
+        if [[ -f "$cf" ]]; then FILE_FLAGS="$FILE_FLAGS -f $cf"; fi
+      done
+      ENV_FLAG=""
+      if [[ ! -f ".env" ]]; then
+        for candidate in .env.prod .env.production .env.local .env.staging .env.dev; do
+          if [[ -f "$candidate" ]]; then cp "$candidate" .env; ENV_FLAG="CREATED"; break; fi
+        done
+      fi
+      docker compose $FILE_FLAGS up -d "$COMPOSE_SVC" 2>/dev/null || docker-compose $FILE_FLAGS up -d "$COMPOSE_SVC" 2>/dev/null
+      if [[ "$ENV_FLAG" == "CREATED" ]]; then rm -f .env; fi
+      echo "  [OK] $TARGET redeployed clean"
     else
       # Not compose-managed — clean config.v2.json
       CID=$(docker inspect --format '{{.Id}}' "$TARGET" 2>/dev/null)
