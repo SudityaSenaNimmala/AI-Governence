@@ -261,7 +261,7 @@ function parseOpenAI({ urlPath, reqJson, respJson, sseEvents }) {
   // If no usage data (common with SSE streams that don't include_usage),
   // estimate tokens from the text content so we still capture the trace.
   if (!usage && (sseEvents || respJson)) {
-    const promptStr = typeof promptText === 'string' ? promptText : (requestBody ? requestBody.toString('utf8').slice(0, 50000) : '');
+    const promptStr = typeof promptText === 'string' ? promptText : (reqJson ? JSON.stringify(reqJson).slice(0, 50000) : '');
     const respStr = typeof responseText === 'string' ? responseText : '';
     // Rough estimate: ~4 chars per token for English
     usage = {
