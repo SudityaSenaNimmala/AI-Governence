@@ -480,93 +480,123 @@ case "$1" in
             echo "  [OK] Backup: $BACKUP"
           fi
 
-          # Add our env vars + volume to the service using python
+          # Add our env vars + volume using simple line-by-line insertion
+          # Strategy: find the 'volumes:' section of our service, add our volume.
+          # Find or create 'environment:' section, add our env vars.
           python3 -c "
-import sys
+import re, sys
 
 compose_file = '$COMPOSE_FILE'
 service = '$COMPOSE_SVC'
 ca_path = '$CA_FILE'
-vol_line = '      - ' + ca_path + ':/certs/cloudfuze.crt:ro'
-env_lines = [
-    '      - NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt',
-    '      - SSL_CERT_FILE=/certs/cloudfuze.crt',
-    '      - REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt',
-]
 
 with open(compose_file, 'r') as f:
-    lines = f.readlines()
+    content = f.read()
 
+lines = content.split('\n')
 result = []
 in_service = False
-service_indent = 0
-env_added = False
-vol_added = False
-i = 0
+svc_indent = 0
+added_env = False
+added_vol = False
 
+i = 0
 while i < len(lines):
     line = lines[i]
-    stripped = line.rstrip()
+    stripped = line.strip()
     indent = len(line) - len(line.lstrip())
 
-    # Detect entering our service
-    if stripped.lstrip().startswith(service + ':'):
+    # Detect our service start
+    if re.match(r'^(\s*)' + re.escape(service) + r'\s*:', line):
         in_service = True
-        service_indent = indent
+        svc_indent = indent
         result.append(line)
         i += 1
         continue
 
-    # Detect leaving our service (another service at same or lower indent)
-    if in_service and indent <= service_indent and stripped.strip() and ':' in stripped and not stripped.strip().startswith('#') and not stripped.strip().startswith('-'):
-        # Before leaving, add missing sections
-        sp = ' ' * (service_indent + 4)
-        sp2 = ' ' * (service_indent + 6)
-        if not env_added:
-            result.append(sp + 'environment:\n')
-            for el in env_lines:
-                result.append(el + '\n')
-        if not vol_added:
-            result.append(sp + 'volumes:\n')
-            result.append(vol_line + '\n')
+    # Detect we left the service (line at same or lower indent that's a key)
+    if in_service and stripped and indent <= svc_indent and ':' in stripped and not stripped.startswith('-') and not stripped.startswith('#'):
+        # Before leaving, add what's missing at the service level
+        prop_indent = ' ' * (svc_indent + 4)
+        item_indent = ' ' * (svc_indent + 6)
+        if not added_env:
+            result.append(prop_indent + 'environment:')
+            result.append(item_indent + '- NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt')
+            result.append(item_indent + '- SSL_CERT_FILE=/certs/cloudfuze.crt')
+            result.append(item_indent + '- REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt')
+        if not added_vol:
+            result.append(prop_indent + 'volumes:')
+            result.append(item_indent + '- ' + ca_path + ':/certs/cloudfuze.crt:ro')
         in_service = False
+        result.append(line)
+        i += 1
+        continue
 
     if in_service:
-        # Found environment section — append our env vars
-        if stripped.strip() == 'environment:' or stripped.strip().startswith('environment:'):
+        # Detect 'volumes:' at service property level (indent = svc_indent + 2 or + 4)
+        if stripped == 'volumes:' and indent > svc_indent:
             result.append(line)
             i += 1
-            # Add our vars right after
-            for el in env_lines:
-                result.append(el + '\n')
-            env_added = True
+            # Read existing volume items, add ours after
+            item_indent = ' ' * (indent + 2)
+            while i < len(lines) and lines[i].strip().startswith('-'):
+                result.append(lines[i])
+                i += 1
+            result.append(item_indent + '- ' + ca_path + ':/certs/cloudfuze.crt:ro')
+            added_vol = True
             continue
 
-        # Found volumes section — append our volume
-        if stripped.strip() == 'volumes:' or stripped.strip().startswith('volumes:'):
+        # Detect 'environment:' at service property level
+        if stripped == 'environment:' and indent > svc_indent:
             result.append(line)
             i += 1
-            # Add our volume right after
-            result.append(vol_line + '\n')
-            vol_added = True
+            item_indent = ' ' * (indent + 2)
+            while i < len(lines) and lines[i].strip().startswith('-'):
+                result.append(lines[i])
+                i += 1
+            result.append(item_indent + '- NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt')
+            result.append(item_indent + '- SSL_CERT_FILE=/certs/cloudfuze.crt')
+            result.append(item_indent + '- REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt')
+            added_env = True
+            continue
+
+        # Detect 'env_file:' — add environment section right after env_file block
+        if stripped == 'env_file:' or stripped.startswith('env_file:') and indent > svc_indent:
+            result.append(line)
+            i += 1
+            # Skip env_file items
+            while i < len(lines) and lines[i].strip().startswith('-'):
+                result.append(lines[i])
+                i += 1
+            # Add environment section here if not already added
+            if not added_env:
+                prop_indent = ' ' * indent
+                item_indent = ' ' * (indent + 2)
+                result.append(prop_indent + 'environment:')
+                result.append(item_indent + '- NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt')
+                result.append(item_indent + '- SSL_CERT_FILE=/certs/cloudfuze.crt')
+                result.append(item_indent + '- REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt')
+                added_env = True
             continue
 
     result.append(line)
     i += 1
 
-# If we ended while still in service (last service in file)
+# If file ended while still in service
 if in_service:
-    sp = ' ' * (service_indent + 4)
-    if not env_added:
-        result.append(sp + 'environment:\n')
-        for el in env_lines:
-            result.append(el + '\n')
-    if not vol_added:
-        result.append(sp + 'volumes:\n')
-        result.append(vol_line + '\n')
+    prop_indent = ' ' * (svc_indent + 4)
+    item_indent = ' ' * (svc_indent + 6)
+    if not added_env:
+        result.append(prop_indent + 'environment:')
+        result.append(item_indent + '- NODE_EXTRA_CA_CERTS=/certs/cloudfuze.crt')
+        result.append(item_indent + '- SSL_CERT_FILE=/certs/cloudfuze.crt')
+        result.append(item_indent + '- REQUESTS_CA_BUNDLE=/certs/cloudfuze.crt')
+    if not added_vol:
+        result.append(prop_indent + 'volumes:')
+        result.append(item_indent + '- ' + ca_path + ':/certs/cloudfuze.crt:ro')
 
 with open(compose_file, 'w') as f:
-    f.writelines(result)
+    f.write('\n'.join(result))
 print('OK')
 " 2>/dev/null
           echo "  [OK] Compose file updated (3 env vars + CA volume added)"
