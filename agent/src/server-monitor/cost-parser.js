@@ -198,7 +198,8 @@ export function detectAiShape({ reqJson, respJson, sseEvents, ndjsonEvents, urlP
 function parseOpenAI({ urlPath, reqJson, respJson, sseEvents }) {
   // /v1/chat/completions, /v1/completions, /v1/embeddings, /v1/responses
   if (!urlPath) return null;
-  const model = reqJson?.model || respJson?.model || null;
+  // Get model from request body, response body, or first SSE event
+  const model = reqJson?.model || respJson?.model || (sseEvents?.[0]?.model) || null;
 
   // Build prompt text from `messages` (chat) or `prompt` (legacy) or `input` (responses API).
   let promptText = null;
