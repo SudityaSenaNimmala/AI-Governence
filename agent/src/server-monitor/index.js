@@ -95,8 +95,11 @@ async function main() {
     }
 
     // If response is chunked, decode the chunk framing
+    // Check header OR detect chunk pattern (hex size + \r\n + data)
     let responseBody = ev.responseBody;
-    if (responseBody && ev.responseHeaders?.['transfer-encoding'] === 'chunked') {
+    const respStart = responseBody ? responseBody.toString('utf8', 0, 20) : '';
+    const looksChunked = /^[0-9a-fA-F]+\r\n/.test(respStart);
+    if (responseBody && (ev.responseHeaders?.['transfer-encoding'] === 'chunked' || looksChunked)) {
       try {
         const chunks = [];
         let buf = responseBody;
