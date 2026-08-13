@@ -10,7 +10,7 @@ import {
   Monitor, Scan, AlertTriangle, Wrench, Server, Shield, Clock, ChevronRight,
   Search, RefreshCw, Activity, FileText, MessageSquare, Eye, Trash2, Plus, X,
   History, ArrowLeft, Bot, User, ShieldAlert, Film, PlayCircle, MonitorPlay,
-  Maximize2, Minimize2, Copy, Check, DollarSign, ExternalLink, Download,
+  Maximize2, Minimize2, Copy, Check, DollarSign, ExternalLink, Download, Boxes,
 } from "lucide-react";
 import { sanitizeReplayEvents } from "./replaySanitize";
 import { createReplayHost, applyReplayIframeCsp } from "./rrwebHost";
@@ -555,46 +555,105 @@ function AgentsView() {
   // agent_config and desktop_hook_status are no longer fetched — the two tables
   // that consumed them were removed, and leaving the requests in would cost two
   // round-trips per mount for data nothing renders.
-  const [mcp,setMcp]=useState(null),[projects,setProjects]=useState(null),[e,setE]=useState(null);
+  const [mcp,setMcp]=useState(null),[projects,setProjects]=useState(null),[machines,setMachines]=useState(null),[e,setE]=useState(null);
+  // "" = every section stacked (the original default). Otherwise only the named
+  // section renders — clicking that section's stat card again clears it.
+  const [filterSection,setFilterSection]=useState("");
+  const [filterUser,setFilterUser]=useState("");
   useEffect(()=>{
     Promise.all([
       apiFetch("/findings?type=mcp_server&latestOnly=true&limit=500"),
       apiFetch("/findings?type=agent_project&latestOnly=true&limit=500"),
-    ]).then(([m,p])=>{setMcp(m);setProjects(p)}).catch(x=>setE(x.message));
+      // mcp_server / agent_project findings only carry machine_id, so the machine
+      // list is what resolves a finding to a person. Soft-failed on purpose:
+      // losing it should degrade every row to "Unknown", not blank the inventory.
+      apiFetch("/machines").catch(()=>[]),
+    ]).then(([m,p,mach])=>{setMcp(m);setProjects(p);setMachines(mach)}).catch(x=>setE(x.message));
   },[]);
-  if(e) return <Err msg={e}/>; if(!mcp) return <Loading/>;
+  if(e) return <Err msg={e}/>; if(!mcp||!machines) return <Loading/>;
 
+  const mcpAll=Array.isArray(mcp)?mcp:[];
+  const projectsAll=Array.isArray(projects)?projects:[];
   const catMap={ai_agent:{title:"Autonomous AI agents",hint:"Projects using agent frameworks (LangChain, AutoGen, CrewAI, LlamaIndex, MCP SDK)",color:"#ef4444"},ai_coding_agent:{title:"AI coding agents",hint:"Projects managed by Claude Code, Cursor, Aider, Continue",color:"#f59e0b"},ai_app:{title:"AI-using apps",hint:"Projects that call LLM APIs",color:"#0044cc"}};
   const grouped={ai_agent:[],ai_coding_agent:[],ai_app:[]};
-  (projects||[]).forEach(f=>{const c=f.payload?.primaryCategory||"ai_app";(grouped[c]||(grouped[c]=[])).push(f)});
+  projectsAll.forEach(f=>{const c=f.payload?.primaryCategory||"ai_app";(grouped[c]||(grouped[c]=[])).push(f)});
+
+  // machine_id → machine row. A finding pointing at a machine that was deleted or
+  // never enrolled keeps its row and lands in the "Unknown" bucket instead of
+  // disappearing from the inventory.
+  const UNKNOWN_USER="Unknown";
+  const machineById=new Map((Array.isArray(machines)?machines:[]).map(m=>[m.id,m]));
+  const userKey=r=>{const m=machineById.get(r.machine_id); return m?.user||m?.hostname||UNKNOWN_USER;};
+  const renderUser=r=>{
+    const m=machineById.get(r.machine_id);
+    const label=m?.user||m?.hostname;
+    if(label) return <><div className="aihub_text_primary">{label}</div>{m?.user&&m?.hostname&&<div className="aihub_text_muted">{m.hostname}</div>}</>;
+    // Unresolved: name the bucket, then the raw id so the row is still traceable.
+    return <><div className="aihub_text_muted">{UNKNOWN_USER}</div><Mono>{(r.machine_id||"").slice(0,10)||"—"}</Mono></>;
+  };
+
+  // Users actually present across both finding sets; "Unknown" sorts last so the
+  // real people stay at the top of the dropdown.
+  const userOptions=[...new Set([...mcpAll,...projectsAll].map(userKey))]
+    .sort((a,b)=>a===UNKNOWN_USER?1:b===UNKNOWN_USER?-1:a.localeCompare(b));
+
+  // Section toggle and user filter are independent dimensions — both apply.
+  const matchUser=r=>!filterUser||userKey(r)===filterUser;
+  const mcpRows=mcpAll.filter(matchUser);
+  const catRows=cat=>(grouped[cat]||[]).filter(matchUser);
+  const showSection=key=>filterSection===key; // nothing shows until a card is clicked
+  const toggleSection=key=>setFilterSection(filterSection===key?"":key);
+  const visibleCount=(showSection("mcp")?mcpRows.length:0)+Object.keys(catMap).reduce((n,c)=>n+(showSection(c)?catRows(c).length:0),0);
+  const totalHint=n=>filterUser?`of ${n} total`:undefined;
+
+  const machineCol={label:"Machine",render:r=><Mono>{(r.machine_id||"").slice(0,10)}</Mono>};
+  const userCol={label:"User",render:renderUser};
 
   return (<div>
-    <SectionHeader title="Agents & MCP" hint="AI agent projects and the MCP servers they can reach, across all machines."/>
+    <SectionHeader title="Agents & MCP" hint="AI agent projects and the MCP servers they can reach, across all machines."
+      action={<div style={{display:"flex",gap:10,alignItems:"center"}}>
+        <select value={filterUser} onChange={ev=>setFilterUser(ev.target.value)} aria-label="Filter by user" style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12,fontWeight:600}}>
+          <option value="">All users</option>
+          {userOptions.map(u=><option key={u} value={u}>{u}</option>)}
+        </select>
+        {filterSection&&<button className="aihub_filter_btn" onClick={()=>setFilterSection("")}>Clear selection</button>}
+      </div>}/>
+
+    {/* Summary cards — click one to open just that list, click again to show all.
+        Counts follow the visible pool, so they track the user filter. */}
+    <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(4, 1fr)"}}>
+      <StatCard icon={<Server size={18}/>} label="MCP servers" value={mcpRows.length} hint={totalHint(mcpAll.length)||"Capabilities granted to agents"} color={AUTONOMY_TONE.mcp} onClick={()=>toggleSection("mcp")}/>
+      <StatCard icon={<Bot size={18}/>} label="Autonomous agents" value={catRows("ai_agent").length} hint={totalHint(grouped.ai_agent.length)||"Agent frameworks"} color={catMap.ai_agent.color} onClick={()=>toggleSection("ai_agent")}/>
+      <StatCard icon={<Wrench size={18}/>} label="AI coding agents" value={catRows("ai_coding_agent").length} hint={totalHint(grouped.ai_coding_agent.length)||"Claude Code, Cursor, Aider"} color={catMap.ai_coding_agent.color} onClick={()=>toggleSection("ai_coding_agent")}/>
+      <StatCard icon={<Monitor size={18}/>} label="AI-using apps" value={catRows("ai_app").length} hint={totalHint(grouped.ai_app.length)||"Projects calling LLM APIs"} color={catMap.ai_app.color} onClick={()=>toggleSection("ai_app")}/>
+    </div>
 
     {/* MCP Servers */}
-    <div className="aihub_card">
+    {showSection("mcp")&&<div className="aihub_card">
       <SectionHeader title="MCP servers in use" hint="Each MCP server is a capability granted to an AI agent."/>
       <DataTable columns={[
-        {label:"Machine",render:r=><Mono>{(r.machine_id||"").slice(0,10)}</Mono>},
+        userCol,
+        machineCol,
         {label:"Client",render:r=>r.payload?.client||"—"},
         {label:"Server",render:r=><span className="aihub_text_primary">{r.payload?.serverName||"—"}</span>},
         {label:"Scopes",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.payload?.scopes||[]).map((s,i)=><Tag key={i} text={s}/>)}</div>},
         {label:"Command",render:r=><Mono>{[r.payload?.command,...(r.payload?.args||[])].filter(Boolean).join(" ").slice(0,60)}</Mono>},
         {label:"Config file",render:r=>r.payload?.configPath?<Mono title={r.payload.configPath}>{r.payload.configPath}</Mono>:<span className="aihub_text_muted">—</span>},
-      ]} rows={mcp} empty="No MCP servers found"/>
-    </div>
+      ]} rows={mcpRows} empty={filterUser?`No MCP servers for ${filterUser}`:"No MCP servers found"}/>
+    </div>}
 
     {/* Agent project categories */}
-    {Object.entries(catMap).map(([cat,cfg])=>(
+    {Object.entries(catMap).filter(([cat])=>showSection(cat)).map(([cat,cfg])=>(
       <div className="aihub_card" key={cat}>
         <SectionHeader title={cfg.title} hint={cfg.hint}/>
         <DataTable columns={[
-          {label:"Machine",render:r=><Mono>{(r.machine_id||"").slice(0,10)}</Mono>},
+          userCol,
+          machineCol,
           {label:"Path",render:r=><Mono>{r.payload?.path||"—"}</Mono>},
           {label:"Language",render:r=>r.payload?.language||"—"},
           {label:"Frameworks",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.payload?.frameworks||[]).map((f,i)=><Tag key={i} text={f} color={cfg.color}/>)}</div>},
           {label:"Modified",render:r=>relTime(r.payload?.lastModified)},
-        ]} rows={grouped[cat]||[]} empty={`No ${cfg.title.toLowerCase()} found`}/>
+        ]} rows={catRows(cat)} empty={filterUser?`No ${cfg.title.toLowerCase()} for ${filterUser}`:`No ${cfg.title.toLowerCase()} found`}/>
       </div>
     ))}
 
