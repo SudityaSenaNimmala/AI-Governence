@@ -169,10 +169,19 @@ export function computeMetrics(result, scope = "all") {
   const highRiskCount = agents.filter((a) => a.risk.level === "critical" || a.risk.level === "high").length;
   const now = Date.now();
   const staleThresholdMs = 30 * 24 * 60 * 60 * 1000;
+  // Stale = no recorded activity, or activity older than the threshold.
+  //
+  // `lastModified` is deliberately NOT a fallback here. It is an EDIT date, not a
+  // usage date, so an agent nobody has ever spoken to counted as active merely
+  // because a maker opened it last week — 41 of 132 agents on a live tenant were
+  // active for that reason alone, none of which had a single recorded interaction.
+  // Editing an agent is not using it, and the two must not be conflated in a metric
+  // whose whole purpose is finding agents nobody uses.
+  const lastUsed = (a) => (a.activity?.lastActiveTimestamp
+    ? new Date(a.activity.lastActiveTimestamp).getTime()
+    : null);
   const staleCount = agents.filter((a) => {
-    const lastActive = a.activity?.lastActiveTimestamp
-      ? new Date(a.activity.lastActiveTimestamp).getTime()
-      : a.lastModified ? new Date(a.lastModified).getTime() : null;
+    const lastActive = lastUsed(a);
     return !lastActive || (now - lastActive) > staleThresholdMs;
   }).length;
   const orphanedCount = agents.filter((a) => a.isOrphaned).length;
@@ -205,9 +214,9 @@ export function computeMetrics(result, scope = "all") {
         timestamp: result.scanTimestamp,
       });
     }
-    const aLastActive = a.activity?.lastActiveTimestamp
-      ? new Date(a.activity.lastActiveTimestamp).getTime()
-      : a.lastModified ? new Date(a.lastModified).getTime() : null;
+    // Same rule as staleCount above — shares lastUsed() so the timeline event and
+    // the headline number can never disagree about which agents are stale.
+    const aLastActive = lastUsed(a);
     if (!aLastActive || (now - aLastActive) > staleThresholdMs) {
       recentEvents.push({
         id: `stale-${a.id}`,

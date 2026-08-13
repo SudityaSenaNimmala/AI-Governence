@@ -5196,10 +5196,14 @@ function EuAiActView() {
 // the TAB_GROUPS structure further down. ServerMonitor stays reachable by URL
 // (its route is commented out in App.jsx, exactly as it was upstream).
 function ServerMonitorView() {
-  const [tab, setTab] = useState("setup");
+  const [tab, setTab] = useState("traces");
   const [stats, setStats] = useState(null);
   const [servers, setServers] = useState([]);
   const [traces, setTraces] = useState([]);
+  const [governed, setGoverned] = useState([]);
+  const [selectedServer, setSelectedServer] = useState(null);
+  const [selectedAgent, setSelectedAgent] = useState(null);
+  const [agentCalls, setAgentCalls] = useState([]);
   const [selectedTrace, setSelectedTrace] = useState(null);
   const [traceDetail, setTraceDetail] = useState(null);
   const [installCmd, setInstallCmd] = useState("");
@@ -5209,23 +5213,53 @@ function ServerMonitorView() {
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  const fetchAll = async (silent) => {
+    try {
+      const [s, srv, t, g] = await Promise.all([
+        apiFetch("/traces/stats"),
+        apiFetch("/monitor/servers"),
+        apiFetch("/traces?limit=50"),
+        apiFetch("/monitor/governed").catch(() => []),
+      ]);
+      setStats(s); setServers(srv); setTraces(t); setGoverned(g);
+    } catch (e) { if (!silent) console.error(e); }
+    setLoading(false);
+  };
+
+  useEffect(() => { fetchAll(); }, []);
+
+  // Auto-refresh every 30 seconds
   useEffect(() => {
-    (async () => {
-      try {
-        const [s, srv, t] = await Promise.all([
-          apiFetch("/traces/stats"),
-          apiFetch("/monitor/servers"),
-          apiFetch("/traces?limit=50"),
-        ]);
-        setStats(s); setServers(srv); setTraces(t);
-      } catch (e) { console.error(e); }
-      setLoading(false);
-    })();
+    const interval = setInterval(() => fetchAll(true), 30000);
+    return () => clearInterval(interval);
   }, []);
+
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+
+  const fetchAgentCalls = () => {
+    if (!selectedAgent) { setAgentCalls([]); return; }
+    const params = new URLSearchParams({ machineId: selectedAgent.machine_id, limit: 1000 });
+    if (selectedAgent.container_ip) params.set("sourceIp", selectedAgent.container_ip);
+    if (dateFrom) params.set("from", new Date(dateFrom).toISOString());
+    if (dateTo) params.set("to", new Date(dateTo + "T23:59:59").toISOString());
+    apiFetch("/server-agents/calls?" + params.toString())
+      .then(calls => setAgentCalls(calls || []))
+      .catch(() => setAgentCalls([]));
+  };
+
+  useEffect(() => { fetchAgentCalls(); }, [selectedAgent, dateFrom, dateTo]);
+
+  // Auto-refresh agent calls every 15 seconds when viewing an agent
+  useEffect(() => {
+    if (!selectedAgent) return;
+    const interval = setInterval(fetchAgentCalls, 15000);
+    return () => clearInterval(interval);
+  }, [selectedAgent]);
 
   useEffect(() => {
     if (!selectedTrace) { setTraceDetail(null); return; }
-    apiFetch("/traces/" + encodeURIComponent(selectedTrace)).then(setTraceDetail).catch(() => setTraceDetail(null));
+    apiFetch("/server-agents/calls/" + encodeURIComponent(selectedTrace)).then(setTraceDetail).catch(() => setTraceDetail(null));
   }, [selectedTrace]);
 
   const generateInstallCmd = async () => {
@@ -5271,7 +5305,7 @@ function ServerMonitorView() {
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
-        <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#22c55e" }} title="deploy indicator" />
+        <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#ef4444" }} title="deploy indicator" />
       </div>
       <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
         <StatCard icon={<Activity size={18} />} label="Total Calls" value={stats?.total_calls || 0} hint="All time" color="#3b82f6" />
@@ -5289,64 +5323,306 @@ function ServerMonitorView() {
         ))}
       </div>
 
-      {tab === "traces" && !selectedTrace && (
+      {tab === "traces" && !selectedServer && (
         <div>
-          <SectionHeader title="Agent Execution Traces" hint="Each trace groups LLM calls from the same process into a single execution timeline" />
+          <SectionHeader title="Servers" hint="Click a server to see governed agents and their traces" />
+          {servers.length === 0 ? (
+            <Empty icon={<Server size={24} />} title="No servers connected" msg="Install the server monitor to start capturing AI agent traces." />
+          ) : (
+            <div style={{ display: "grid", gap: 10 }}>
+              {servers.map(srv => {
+                const srvGoverned = governed.filter(g => g.machine_id === srv.machine_id);
+                return (
+                  <div key={srv.machine_id} onClick={() => setSelectedServer(srv)}
+                    style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 16, cursor: "pointer", transition: "border-color 0.2s" }}
+                    onMouseEnter={e => e.currentTarget.style.borderColor = "#3b82f6"}
+                    onMouseLeave={e => e.currentTarget.style.borderColor = "#e5e7eb"}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <div style={{ width: 8, height: 8, borderRadius: "50%", background: srv.status === "active" ? "#22c55e" : srv.status === "uninstalled" ? "#ef4444" : "#9ca3af" }} />
+                        <div>
+                          <div style={{ fontWeight: 600, fontSize: 15 }}>{srv.display_name || srv.hostname || srv.machine_id?.slice(0, 12)}</div>
+                          <div className="aihub_text_muted" style={{ fontSize: 12 }}>{srvGoverned.length} agent{srvGoverned.length !== 1 ? "s" : ""} governed | {srv.total_calls || 0} traces | {fmtUsd(srv.total_cost_usd)}</div>
+                        </div>
+                      </div>
+                      <ChevronRight size={16} style={{ color: "#9ca3af" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === "traces" && selectedServer && !selectedAgent && (
+        <div>
+          <button onClick={() => setSelectedServer(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+            <ChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Back to servers
+          </button>
+          <SectionHeader title={selectedServer.display_name || selectedServer.hostname} hint="Governed agents on this server. Click an agent to see its traces." />
+          {(() => {
+            const srvGoverned = governed.filter(g => g.machine_id === selectedServer.machine_id);
+            if (srvGoverned.length === 0) {
+              return <Empty icon={<Shield size={24} />} title="No governed agents" msg="Run 'sudo cloudfuze-monitor govern' on this server to start tracking Docker containers." />;
+            }
+            return (
+              <div style={{ display: "grid", gap: 10 }}>
+                {srvGoverned.map(agent => (
+                  <div key={agent.container_name} onClick={() => { setSelectedAgent(agent); setDateFrom(""); setDateTo(""); }}
+                    style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 16, cursor: "pointer", transition: "border-color 0.2s" }}
+                    onMouseEnter={e => e.currentTarget.style.borderColor = "#3b82f6"}
+                    onMouseLeave={e => e.currentTarget.style.borderColor = "#e5e7eb"}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <div style={{ width: 32, height: 32, borderRadius: 8, background: "#eff6ff", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <Shield size={16} style={{ color: "#3b82f6" }} />
+                        </div>
+                        <div>
+                          <div style={{ fontWeight: 600, fontSize: 14 }}>{agent.container_name}</div>
+                          <div className="aihub_text_muted" style={{ fontSize: 12 }}>
+                            IP: {agent.container_ip || "?"} | {agent.total_calls || 0} traces | {fmtUsd(agent.total_cost_usd)}
+                          </div>
+                        </div>
+                      </div>
+                      <ChevronRight size={16} style={{ color: "#9ca3af" }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {tab === "traces" && selectedServer && selectedAgent && !selectedTrace && (
+        <div>
+          <button onClick={() => setSelectedAgent(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+            <ChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Back to {selectedServer.display_name}
+          </button>
+          <SectionHeader title={selectedAgent.container_name} hint={`Individual AI API calls from this agent (${agentCalls.length} total)`} />
+          <div style={{ display: "flex", gap: 12, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
+            <label style={{ fontSize: 12, color: "#6b7280" }}>From:</label>
+            <input type="date" value={dateFrom} onChange={e => { setDateFrom(e.target.value); }} style={{ padding: "4px 8px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 12 }} />
+            <label style={{ fontSize: 12, color: "#6b7280" }}>To:</label>
+            <input type="date" value={dateTo} onChange={e => { setDateTo(e.target.value); }} style={{ padding: "4px 8px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 12 }} />
+            <button onClick={fetchAgentCalls} style={{ padding: "4px 12px", borderRadius: 6, border: "1px solid #d1d5db", background: "#fff", fontSize: 12, cursor: "pointer" }}>Filter</button>
+            {(dateFrom || dateTo) && <button onClick={() => { setDateFrom(""); setDateTo(""); }} style={{ padding: "4px 12px", borderRadius: 6, border: "none", background: "#f3f4f6", fontSize: 12, cursor: "pointer", color: "#6b7280" }}>Clear</button>}
+          </div>
+          <div style={{ maxHeight: 600, overflowY: "auto" }}>
           <DataTable columns={[
-            { label: "Time", render: r => <span style={{ fontSize: 12 }}>{relTime(r.started_at)}</span> },
-            { label: "User", render: r => <div><div className="aihub_text_primary">{r.user || "\u2014"}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>{(r.cmdline || "").split("/").pop()}</div></div> },
-            { label: "Provider", render: r => <div>{(r.providers || []).map(p => <Tag key={p} text={p} color={p === "openai" ? "#10a37f" : p === "anthropic" ? "#d97706" : "#6366f1"} />)}</div> },
-            { label: "Calls", key: "call_count", right: true },
-            { label: "Duration", render: r => <span>{r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "\u2014"}</span>, right: true },
-            { label: "Tokens", render: r => fmtTokens(r.total_tokens), right: true },
+            { label: "Time", render: r => <span style={{ fontSize: 12 }}>{relTime(r.occurred_at)}</span> },
+            { label: "Provider", render: r => <Tag text={r.provider || "?"} color={r.provider === "openai" ? "#10a37f" : r.provider === "anthropic" ? "#d97706" : "#6366f1"} /> },
+            { label: "Model", render: r => <span style={{ fontSize: 12, fontWeight: 500 }}>{(r.model || "?").replace(/-\d{4}-\d{2}-\d{2}$/, "")}</span> },
+            { label: "Tokens", render: r => fmtTokens((r.prompt_tokens || 0) + (r.completion_tokens || 0)), right: true },
             { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
-            { label: "Status", render: r => <Badge text={r.status} color={r.status === "error" ? "#ef4444" : "#22c55e"} /> },
-            { label: "Trigger", render: r => <span className="aihub_text_muted" style={{ fontSize: 11 }}>{r.trigger_source || "\u2014"}</span> },
-          ]} rows={traces} empty="No traces yet. Install the server monitor to start capturing." onRow={r => setSelectedTrace(r.trace_id)} />
+            { label: "Duration", render: r => <span>{r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "\u2014"}</span>, right: true },
+          ]} rows={agentCalls} empty="No traces yet for this agent." onRow={r => setSelectedTrace(r.id)} />
+          </div>
         </div>
       )}
 
       {tab === "traces" && selectedTrace && traceDetail && (
         <div>
-          <button onClick={() => setSelectedTrace(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0 }}>{"\u2190"} Back to traces</button>
-          <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 20 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+          <button onClick={() => setSelectedTrace(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+            <ChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Back to {selectedAgent?.container_name || "traces"}
+          </button>
+          <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 24 }}>
+            {/* Header */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
               <div>
-                <h3 style={{ margin: 0, fontSize: 16 }}>{traceDetail.user || "Unknown"} {"\u2014"} {(traceDetail.cmdline || "").split("/").pop()}</h3>
-                <div className="aihub_text_muted" style={{ fontSize: 12, marginTop: 4 }}>{traceDetail.trigger_source} {"\u00b7"} {traceDetail.cwd} {"\u00b7"} {new Date(traceDetail.started_at).toLocaleString()}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                  <Tag text={traceDetail.provider || "?"} color={traceDetail.provider === "openai" ? "#10a37f" : traceDetail.provider === "anthropic" ? "#d97706" : "#6366f1"} />
+                  <h3 style={{ margin: 0, fontSize: 16 }}>{(traceDetail.model || "?").replace(/-\d{4}-\d{2}-\d{2}$/, "")}</h3>
+                </div>
+                <div className="aihub_text_muted" style={{ fontSize: 12 }}>
+                  {traceDetail.host}{traceDetail.path || ""} | {new Date(traceDetail.occurred_at || traceDetail.started_at).toLocaleString()}
+                </div>
               </div>
-              <div style={{ display: "flex", gap: 12, textAlign: "right" }}>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{traceDetail.call_count}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>calls</div></div>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{(traceDetail.duration_ms / 1000).toFixed(1)}s</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>duration</div></div>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtTokens(traceDetail.total_tokens)}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>tokens</div></div>
+              <div style={{ display: "flex", gap: 16, textAlign: "right" }}>
+                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtTokens((traceDetail.prompt_tokens||0)+(traceDetail.completion_tokens||0))}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>tokens</div></div>
+                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{traceDetail.duration_ms ? (traceDetail.duration_ms/1000).toFixed(1)+"s" : "--"}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>duration</div></div>
                 <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtUsd(traceDetail.total_cost_usd)}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>cost</div></div>
               </div>
             </div>
-            <div style={{ borderTop: "1px solid #f3f4f6", paddingTop: 16 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", marginBottom: 8 }}>EXECUTION TIMELINE</div>
-              {(traceDetail.calls || []).map((call, i) => {
-                const totalDur = traceDetail.duration_ms || 1;
-                const barLeft = ((call.offset_ms || 0) / totalDur) * 100;
-                const barWidth = Math.max(((call.duration_ms || 100) / totalDur) * 100, 2);
-                const isErr = call.response_status >= 400;
-                const provColor = call.provider === "openai" ? "#10a37f" : call.provider === "anthropic" ? "#d97706" : "#6366f1";
-                return (
-                  <div key={i} style={{ marginBottom: 12, padding: 12, background: isErr ? "#fef2f2" : "#f9fafb", borderRadius: 8, border: "1px solid " + (isErr ? "#fecaca" : "#e5e7eb") }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                      <span style={{ background: provColor, color: "#fff", padding: "1px 6px", borderRadius: 4, fontSize: 10, fontWeight: 600 }}>{call.provider}</span>
-                      <span style={{ fontSize: 12, fontWeight: 600 }}>{call.model}</span>
-                      <span className="aihub_text_muted" style={{ fontSize: 11, marginLeft: "auto" }}>{call.duration_ms}ms {"\u00b7"} {fmtTokens((call.prompt_tokens||0)+(call.completion_tokens||0))} tokens {"\u00b7"} {fmtUsd(call.total_cost_usd)}</span>
-                      {isErr && <Badge text={call.response_status} color="#ef4444" />}
-                    </div>
-                    <div style={{ height: 6, background: "#e5e7eb", borderRadius: 3, position: "relative", marginBottom: 8 }}>
-                      <div style={{ position: "absolute", left: barLeft + "%", width: barWidth + "%", height: "100%", background: isErr ? "#ef4444" : provColor, borderRadius: 3 }} />
-                    </div>
-                    {call.prompt_text && <div style={{ fontSize: 11, color: "#374151", marginBottom: 4 }}><strong>Prompt:</strong> {call.prompt_text.length > 150 ? call.prompt_text.slice(0, 150) + "\u2026" : call.prompt_text}</div>}
-                    {call.response_text && <div style={{ fontSize: 11, color: "#6b7280" }}><strong>Response:</strong> {call.response_text.length > 150 ? call.response_text.slice(0, 150) + "\u2026" : call.response_text}</div>}
-                  </div>
-                );
-              })}
+
+            {/* Token breakdown */}
+            <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+              <div style={{ flex: 1, background: "#f0fdf4", borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 11, color: "#166534", fontWeight: 600, marginBottom: 2 }}>PROMPT TOKENS</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: "#166534" }}>{fmtTokens(traceDetail.prompt_tokens)}</div>
+              </div>
+              <div style={{ flex: 1, background: "#eff6ff", borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 11, color: "#1e40af", fontWeight: 600, marginBottom: 2 }}>COMPLETION TOKENS</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: "#1e40af" }}>{fmtTokens(traceDetail.completion_tokens)}</div>
+              </div>
+              <div style={{ flex: 1, background: "#fefce8", borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 11, color: "#854d0e", fontWeight: 600, marginBottom: 2 }}>RESPONSE STATUS</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: traceDetail.response_status >= 400 ? "#dc2626" : "#166534" }}>{traceDetail.response_status || 200}</div>
+              </div>
             </div>
+
+            {(() => {
+              // Parse the raw prompt/response to extract user input and assistant output
+              let userInput = null;
+              let assistantOutput = null;
+              let systemPrompt = null;
+              let toolCalls = [];
+
+              // Parse prompt_text — could be clean JSON or raw HTTP body
+              try {
+                const raw = typeof traceDetail.prompt_text === 'string' ? traceDetail.prompt_text : '';
+                // Try direct JSON parse first
+                let body = null;
+                try { body = JSON.parse(raw); } catch {
+                  // Truncated JSON — find last user message via regex
+                  const userMatch = raw.match(/"role"\s*:\s*"user"\s*,\s*"content"\s*:\s*"([^"]+)"/g);
+                  if (userMatch) {
+                    const lastMatch = userMatch[userMatch.length - 1];
+                    const contentMatch = lastMatch.match(/"content"\s*:\s*"([^"]+)"/);
+                    if (contentMatch) userInput = contentMatch[1];
+                  }
+                  // Don't extract tool calls from request — they're just definitions.
+                  // Actual tool calls come from the response (handled below).
+                }
+                if (body && Array.isArray(body?.messages)) {
+                  // Extract last user message
+                  const userMsgs = body.messages.filter(m => m.role === 'user');
+                  if (userMsgs.length > 0) {
+                    const last = userMsgs[userMsgs.length - 1];
+                    userInput = typeof last.content === 'string' ? last.content
+                      : Array.isArray(last.content) ? last.content.map(c => c.text || '').join('') : '';
+                  }
+                  // Extract system prompt
+                  const sysMsgs = body.messages.filter(m => m.role === 'system');
+                  if (sysMsgs.length > 0) {
+                    systemPrompt = typeof sysMsgs[0].content === 'string' ? sysMsgs[0].content
+                      : Array.isArray(sysMsgs[0].content) ? sysMsgs[0].content.map(c => c.text || '').join('') : '';
+                    if (systemPrompt.length > 200) systemPrompt = systemPrompt.slice(0, 200) + '...';
+                  }
+                  // Extract tool calls
+                  body.messages.forEach(m => {
+                    if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+                      m.tool_calls.forEach(tc => {
+                        toolCalls.push({ name: tc.function?.name, args: tc.function?.arguments });
+                      });
+                    }
+                  });
+                  // Extract tools available
+                  if (Array.isArray(body.tools)) {
+                    body.tools.forEach(t => {
+                      if (t.function?.name && !toolCalls.some(tc => tc.name === t.function.name)) {
+                        // Don't add available tools to toolCalls — only called ones
+                      }
+                    });
+                  }
+                }
+              } catch {
+                // Complete parse failure — show nothing rather than raw JSON
+                userInput = null;
+              }
+
+              // Parse response — could be JSON or pre-formatted text
+              try {
+                const raw = typeof traceDetail.response_text === 'string' ? traceDetail.response_text : '';
+                let parsed = false;
+
+                // Try JSON parse first
+                try {
+                  const body = JSON.parse(raw);
+                  const choice = body?.choices?.[0]?.message;
+                  if (choice?.content) {
+                    assistantOutput = choice.content;
+                    parsed = true;
+                  }
+                  if (Array.isArray(choice?.tool_calls)) {
+                    choice.tool_calls.forEach(tc => {
+                      toolCalls.push({ name: tc.function?.name, args: tc.function?.arguments });
+                    });
+                    if (!assistantOutput) parsed = true;
+                  }
+                } catch {}
+
+                // If JSON failed, check for [tool:name] format from cost-parser
+                if (!parsed && raw) {
+                  const toolPattern = /\[tool:(\w+)\]\s*(.*)/g;
+                  let match;
+                  while ((match = toolPattern.exec(raw)) !== null) {
+                    toolCalls.push({ name: match[1], args: match[2] || '' });
+                  }
+                  // Remove tool call text from output, keep any remaining text
+                  const cleanOutput = raw.replace(/\[tool:\w+\]\s*\{[^}]*\}/g, '').trim();
+                  if (cleanOutput) assistantOutput = cleanOutput;
+                }
+              } catch {
+                assistantOutput = traceDetail.response_text;
+              }
+
+              return (
+                <>
+                  {/* User Input */}
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "#166534", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                      <div style={{ width: 8, height: 8, borderRadius: 2, background: "#22c55e" }} /> USER INPUT
+                    </div>
+                    <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 14 }}>
+                      {userInput ? (
+                        <div style={{ fontSize: 14, lineHeight: 1.6, color: "#1f2937" }}>{userInput}</div>
+                      ) : (
+                        <span className="aihub_text_muted" style={{ fontSize: 12 }}>User input not available.</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Tool Calls (if any) */}
+                  {toolCalls.length > 0 && (
+                    <div style={{ marginBottom: 16 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: "#7c3aed", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                        <div style={{ width: 8, height: 8, borderRadius: 2, background: "#8b5cf6" }} /> TOOL CALLS ({toolCalls.length})
+                      </div>
+                      <div style={{ display: "grid", gap: 8 }}>
+                        {toolCalls.slice(-5).map((tc, i) => (
+                          <div key={i} style={{ background: "#f5f3ff", border: "1px solid #ddd6fe", borderRadius: 8, padding: 12 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#5b21b6", marginBottom: 4 }}>{tc.name || "unknown"}</div>
+                            <pre style={{ margin: 0, fontSize: 11, color: "#6b7280", whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 100, overflowY: "auto" }}>
+                              {(() => { try { return JSON.stringify(JSON.parse(tc.args || '{}'), null, 2); } catch { return tc.args || ''; } })()}
+                            </pre>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Assistant Output */}
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "#1e40af", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                      <div style={{ width: 8, height: 8, borderRadius: 2, background: "#3b82f6" }} /> ASSISTANT OUTPUT
+                    </div>
+                    <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 8, padding: 14 }}>
+                      {assistantOutput ? (
+                        <div style={{ fontSize: 14, lineHeight: 1.6, color: "#1f2937", whiteSpace: "pre-wrap" }}>{assistantOutput}</div>
+                      ) : (
+                        <span className="aihub_text_muted" style={{ fontSize: 12 }}>Assistant output not available.</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* System Prompt (collapsed) */}
+                  {systemPrompt && (
+                    <details style={{ marginBottom: 16 }}>
+                      <summary style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", cursor: "pointer", marginBottom: 6 }}>
+                        System Prompt ({systemPrompt.length} chars)
+                      </summary>
+                      <div style={{ background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, padding: 14, maxHeight: 200, overflowY: "auto" }}>
+                        <pre style={{ margin: 0, fontSize: 11, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "#6b7280" }}>
+                          {systemPrompt}
+                        </pre>
+                      </div>
+                    </details>
+                  )}
+                </>
+              );
+            })()}
           </div>
         </div>
       )}

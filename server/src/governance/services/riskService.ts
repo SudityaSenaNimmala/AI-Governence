@@ -236,6 +236,28 @@ export function assessRisk(params: {
   // BONUSES (increase score)
   if (hasVerifiedPublisher) {
     score += 8;
+    factors.push({
+      signal: "Verified publisher",
+      weight: "info",
+      description: "Publisher identity has been verified by Microsoft",
+    });
+  }
+
+  // isMicrosoftFirstParty was declared in the signature and destructured above, then
+  // never read — so it changed nothing, and a first-party Microsoft app scored
+  // identically to an unknown third-party one with the same permissions.
+  //
+  // Callers now pass a real value (appOwnerOrganizationId matched against
+  // Microsoft's own tenant), so the parameter finally does something. Weighted
+  // slightly above verified-publisher: a verified publisher is an identity claim,
+  // whereas first-party means the vendor operating the platform also owns the app.
+  if (isMicrosoftFirstParty) {
+    score += 10;
+    factors.push({
+      signal: "Microsoft first-party application",
+      weight: "info",
+      description: "Published by Microsoft itself rather than a third party",
+    });
   }
 
   // Everything above computes a COMPLIANCE score: it starts at 100 and deducts a

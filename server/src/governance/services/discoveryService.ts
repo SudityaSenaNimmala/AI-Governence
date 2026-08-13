@@ -53,6 +53,12 @@ export interface DiscoveryTokens {
    * signed JWT, so the same scans run either way.
    */
   googleAccessToken?: string;
+  /**
+   * Agent ids with a COMPLETED recertification. Supplied by the route, which has
+   * database access; this module only sees tokens. Absent means "treat everything
+   * as never reviewed", which is the old behaviour.
+   */
+  reviewedAgentIds?: Set<string>;
 }
 
 // Timeout wrapper — kills any task that takes too long
@@ -61,6 +67,73 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
     const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms);
     promise.then(v => { clearTimeout(timer); resolve(v); }).catch(e => { clearTimeout(timer); reject(e); });
   });
+}
+
+/**
+ * Like withTimeout, but a timeout KEEPS whatever the task accumulated instead of
+ * discarding it.
+ *
+ * The aggregation loop in PHASE 3 only reads `agents` from FULFILLED tasks — a
+ * rejected task contributes a warning and nothing else. So a task that ran five
+ * discovery approaches, found agents in the first four, and then overran on the
+ * fifth reported "timed out" and threw away every agent it had already found.
+ * The tenant looked like it had no personal/SharePoint/chat agents at all.
+ *
+ * Passing the SAME object the task mutates lets a timeout resolve with the
+ * partial set. Callers must build `partial` outside the task body for this to
+ * work — a `result` declared inside the async IIFE is unreachable from here.
+ */
+function withTimeoutPartial<T extends { warnings: string[]; agents?: unknown[] }>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+  partial: T,
+): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      const found = partial.agents ? `the ${partial.agents.length} agent(s) found` : "the results gathered";
+      partial.warnings.push(
+        `${label}: timed out after ${ms / 1000}s — kept ${found} before the cutoff, later checks were skipped.`,
+      );
+      resolve(partial);
+    }, ms);
+    promise
+      .then(v => { clearTimeout(timer); resolve(v); })
+      .catch(e => {
+        clearTimeout(timer);
+        partial.warnings.push(`${label}: ${e instanceof Error ? e.message : String(e)}`);
+        resolve(partial);
+      });
+  });
+}
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight.
+ *
+ * Results come back in input order so callers can merge them deterministically.
+ * Rejections resolve to null rather than failing the batch — one user with
+ * restricted mailbox/drive access must not abort a tenant-wide sweep.
+ */
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<Array<R | null>> {
+  const out: Array<R | null> = new Array(items.length).fill(null);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      try {
+        out[i] = await fn(items[i], i);
+      } catch {
+        out[i] = null;
+      }
+    }
+  });
+  await Promise.all(workers);
+  return out;
 }
 
 type TaskResult = { agents: DiscoveredAgent[]; warnings: string[] };
@@ -126,6 +199,47 @@ export async function runDiscovery(
   const hasE5 = org?.assignedPlans?.some(p => p.service === "exchange" && p.capabilityStatus === "Enabled");
   const userMap = new Map(users.map(u => [u.id, u]));
   console.log(`[Phase 1] Tenant: ${defaultDomain}, Users: ${users.length} — ${Date.now() - startTime}ms`);
+
+  // ── Publisher provenance, keyed by appId ──
+  //
+  // Risk scoring takes hasVerifiedPublisher and isMicrosoftFirstParty, and both
+  // were passed as literal `false` for every agent. So the verified-publisher bonus
+  // could never fire and a first-party Microsoft app scored the same as an unknown
+  // third-party one. With those two constant and most agents having no permissions
+  // or activity either, scores collapsed onto a handful of values — 47 agents
+  // landed on exactly the same number.
+  //
+  // Both facts are one Graph call away. appOwnerOrganizationId is the tenant that
+  // owns the app registration; Microsoft's own is a well-known constant, which is
+  // how a genuine first-party app is distinguished from one merely named "Microsoft
+  // something".
+  const MS_FIRST_PARTY_TENANT = "f8cdef31-a31e-4b4a-93e4-5f571e91255a";
+  const publisherByAppId = new Map<string, { verified: boolean; firstParty: boolean }>();
+  try {
+    const sps = await graphClient.getAllPages<{
+      appId?: string;
+      verifiedPublisher?: { displayName?: string } | null;
+      appOwnerOrganizationId?: string | null;
+    }>(
+      ENDPOINTS.servicePrincipals,
+      { $select: "appId,verifiedPublisher,appOwnerOrganizationId", $top: "999" },
+      // 15 pages, not 5. Graph did not honour $top=999 for this collection — it
+      // paged at 100 — so a 5-page cap silently stopped at 500 of the 963 service
+      // principals in a live tenant. Nearly half the directory was missing, and a
+      // miss is indistinguishable from "no verified publisher".
+      15,
+    );
+    for (const sp of sps) {
+      if (!sp.appId) continue;
+      publisherByAppId.set(sp.appId.toLowerCase(), {
+        verified: Boolean(sp.verifiedPublisher?.displayName),
+        firstParty: sp.appOwnerOrganizationId === MS_FIRST_PARTY_TENANT,
+      });
+    }
+    console.log(`[Phase 1] Publisher metadata for ${publisherByAppId.size} service principal(s)`);
+  } catch (e) {
+    console.warn("[Phase 1] Could not load publisher metadata:", e instanceof Error ? e.message : e);
+  }
 
   // ════════════════════════════════════════════════
   // PHASE 2: ALL discovery tasks in PARALLEL (with timeouts)
@@ -219,8 +333,24 @@ export async function runDiscovery(
         });
       }
     } catch (e) {
-      console.warn("[DV] Bots discovery error:", e instanceof Error ? e.message : String(e));
-      result.warnings.push(`Dataverse: ${e instanceof Error ? e.message : String(e)}`);
+      const raw = e instanceof Error ? e.message : String(e);
+      console.warn(`[DV] Bots discovery error in ${dvUrl}:`, raw);
+      // Name the environment and, for the one failure an operator can actually
+      // fix, say what to do about it.
+      //
+      // Entra issues a Dataverse token for any org URL, so a missing Application
+      // User is not caught when the token is minted — it surfaces here as
+      // "The user is not a member of the organization" (0x80072560). Reported as a
+      // bare "Dataverse: <message>" it named no environment, which is useless once
+      // a tenant has several: the operator cannot tell which org to go fix.
+      const notAMember = raw.includes("0x80072560") || raw.includes("not a member of the organization");
+      result.warnings.push(
+        notAMember
+          ? `Dataverse environment ${dvUrl} rejected the app: it has no Application User there. ` +
+            `Add one in Power Platform admin center → Environments → this environment → Settings → ` +
+            `Users + permissions → Application users → New, select the Agent Governance app, and give it a role that can read the bots table.`
+          : `Dataverse environment ${dvUrl}: ${raw}`,
+      );
     }
 
     // If bots were fetched with minimal fields, use discoverDeclarativeCopilots()
@@ -331,7 +461,12 @@ export async function runDiscovery(
     console.log(`[DV] ${result.agents.length} agent(s) across ${dvEnvList.length} environment(s)`);
     return result;
   })(), 60_000 * Math.min(dvEnvList.length, 5), "Copilot Studio")
-    : Promise.resolve({ agents: [], warnings: ["Dataverse not configured."] } as TaskResult);
+    // No warning here on purpose. routes/discovery.ts is the only caller, and it
+    // already pushes the actionable message ("...Register the app as a Power
+    // Platform management application...") for exactly this condition. Emitting a
+    // bare "Dataverse not configured." alongside it produced two warnings for one
+    // root cause, the second of which tells the operator nothing they can act on.
+    : Promise.resolve({ agents: [], warnings: [] } as TaskResult);
 
   // ── Task B: SharePoint Agents (Graph beta) ──────
   const taskB = withTimeout((async (): Promise<TaskResult> => {
@@ -483,8 +618,12 @@ export async function runDiscovery(
   })(), 60_000, "Teams Apps");
 
   // ── Task D: Personal + Chat + SharePoint Agents (multiple approaches) ──
-  const taskD = withTimeout((async (): Promise<TaskResult> => {
-    const result: TaskResult = { agents: [], warnings: [] };
+  //
+  // Declared outside the task body so a timeout can still return what the
+  // earlier approaches found — see withTimeoutPartial.
+  const taskDResult: TaskResult = { agents: [], warnings: [] };
+  const taskD = withTimeoutPartial((async (): Promise<TaskResult> => {
+    const result = taskDResult;
 
     // Approach 1: Try /beta/copilot/agents
     try {
@@ -611,14 +750,37 @@ export async function runDiscovery(
 
       let added = 0;
 
-      for (const user of sampleUsers) {
+      // Fetched with bounded concurrency, then merged sequentially below.
+      //
+      // This loop used to await one user at a time. At ~50 users x up to 2 pages
+      // that is up to 100 serial Graph round-trips, which on its own exceeded the
+      // 60s budget for this whole task — so the task always timed out and (before
+      // withTimeoutPartial) discarded every agent the earlier approaches had found.
+      //
+      // The merge stays sequential on purpose: the dedup below is
+      // check-then-insert on `existingNames`, and running that inside concurrent
+      // callbacks would let two users holding the same app both pass the check
+      // before either inserted, producing duplicate agents.
+      // Catch inside the worker rather than relying on mapLimit's null: that keeps
+      // the per-user failure REASON in the log, which the serial version had.
+      const perUser = await mapLimit(sampleUsers, 8, async (user) => {
         try {
-          const installed = await graphClient.getAllPages<{
+          return await graphClient.getAllPages<{
             id: string;
             teamsApp?: { id: string; displayName: string; distributionMethod: string; externalId?: string };
             teamsAppDefinition?: { id?: string; displayName?: string; description?: string; shortDescription?: string; bot?: { id: string }; createdBy?: any };
           }>(`/v1.0/users/${user.id}/teamwork/installedApps`, { $expand: "teamsApp,teamsAppDefinition" }, 2);
+        } catch (userErr) {
+          console.warn(`[Copilot] Failed to scan user ${user.userPrincipalName}:`, userErr instanceof Error ? userErr.message : "");
+          return null;
+        }
+      });
 
+      for (let ui = 0; ui < sampleUsers.length; ui++) {
+        const user = sampleUsers[ui];
+        const installed = perUser[ui];
+        if (!installed) continue;
+        {
           for (const inst of installed) {
             const app = inst.teamsApp;
             const def = inst.teamsAppDefinition;
@@ -660,8 +822,6 @@ export async function runDiscovery(
               activity: { totalInvocations: 0, invocationsLast7Days: 0, invocationsLast30Days: 0, invocationsLast90Days: 0, uniqueUsers: 0, userBreakdown: [] },
             });
           }
-        } catch (userErr) {
-          console.warn(`[Copilot] Failed to scan user ${user.userPrincipalName}:`, userErr instanceof Error ? userErr.message : "");
         }
       }
       if (added > 0) console.log(`[Copilot] Found ${added} agents via user-installed apps`);
@@ -680,13 +840,23 @@ export async function runDiscovery(
       )].slice(0, 10);
 
       let found5 = 0;
-      for (const userId of creatorsToScan) {
-        try {
-          // Search user's OneDrive for .agent files or Copilot agent folders
-          const items = await graphClient.getAllPages<any>(
-            `/v1.0/users/${userId}/drive/root/search(q='.agent')`,
-            {}, 1
-          );
+      // Same reasoning as Approach 4: fetch concurrently, merge sequentially so
+      // the existingIds5/existingNames5 check-then-insert dedup stays correct.
+      // OneDrive search is the slowest call in this task, so serial scanning of
+      // 10 creators was a large share of the 60s overrun.
+      const perCreator = await mapLimit(creatorsToScan, 5, (userId) =>
+        graphClient.getAllPages<any>(
+          `/v1.0/users/${userId}/drive/root/search(q='.agent')`,
+          {}, 1,
+        ),
+      );
+
+      for (let ci = 0; ci < creatorsToScan.length; ci++) {
+        const userId = creatorsToScan[ci];
+        // null = OneDrive access restricted for this user; skip quietly as before.
+        const items = perCreator[ci];
+        if (!items) continue;
+        {
           for (const item of items) {
             if (!item.name?.endsWith(".agent") && !item.name?.endsWith(".json")) continue;
             if (existingIds5.has(item.id)) continue;
@@ -710,8 +880,6 @@ export async function runDiscovery(
             });
             found5++;
           }
-        } catch {
-          // OneDrive access might be restricted for some users
         }
       }
       if (found5 > 0) console.log(`[Copilot] Found ${found5} agents in user OneDrives`);
@@ -725,7 +893,7 @@ export async function runDiscovery(
     console.log(`[Copilot] Total: ${personalCount} personal, ${spCount} SharePoint, ${chatCount} chat agents`);
 
     return result;
-  })(), 60_000, "Copilot Agents");
+  })(), 60_000, "Copilot Agents", taskDResult);
 
   // ── Task E: Azure AI Foundry ────────────────────
   // Discovers Azure AI agents, OpenAI resources + deployments, and serverless endpoints.
@@ -774,13 +942,20 @@ export async function runDiscovery(
   })(), 45_000, "Azure") : Promise.resolve({ agents: [], warnings: [] } as TaskResult);
 
   // ── Task F: Connectors (Power Platform) ─────────
-  const taskF = withTimeout((async () => {
-    if (!tokens.powerPlatform) return { connectors: [] as AgentConnector[], envs: [] as string[], warnings: [] as string[] };
-    const ppWarnings: string[] = [];
+  // Declared outside so a timeout keeps whatever was collected — this task used the
+  // discarding wrapper and, on a live tenant, actually timed out at 30s and threw
+  // away every connector it had already read. Connector type drives connector risk
+  // scoring and the copilot_studio base level, so losing them silently flattened
+  // those scores toward a default with nothing on screen to say why.
+  const taskFResult = { connectors: [] as AgentConnector[], envs: [] as string[], warnings: [] as string[] };
+  const taskF = withTimeoutPartial((async () => {
+    if (!tokens.powerPlatform) return taskFResult;
+    const ppWarnings = taskFResult.warnings;
     try {
       const ppClient = new PowerPlatformClient(tokens.powerPlatform);
       const envs = await ppClient.listEnvironments();
-      const allConnectors: AgentConnector[] = [];
+      const allConnectors = taskFResult.connectors;
+      taskFResult.envs = envs.map(e => e.name);
       // Was a silent envs.slice(0, 3): a tenant with more than three environments
       // had its connectors sampled from an arbitrary three, with nothing shown to
       // say so — and connector type is what drives connector risk scoring, so the
@@ -791,19 +966,26 @@ export async function runDiscovery(
       if (envs.length > CONNECTOR_ENV_CAP) {
         ppWarnings.push(`Connector scan covered ${CONNECTOR_ENV_CAP} of ${envs.length} environments; the remainder were skipped for time.`);
       }
-      for (const env of scanEnvs) {
-        try {
-          const conns = await ppClient.listConnections(env.name);
-          for (const c of conns) {
-            const apiId = c.properties?.apiId || "";
-            const ct = apiId.split("/").pop() || c.type || "unknown";
-            allConnectors.push({ name: c.properties?.displayName || c.name, type: CONNECTOR_RISK_MAP[ct]?.category || ct });
-          }
-        } catch {}
+      // Concurrent, not serial. One BAP round-trip per environment, awaited one at
+      // a time, is what pushed this past its 30s budget.
+      const perEnv = await mapLimit(scanEnvs, 6, (env) => ppClient.listConnections(env.name));
+      for (const conns of perEnv) {
+        if (!conns) continue;   // that environment refused or errored; others stand
+        for (const c of conns) {
+          const apiId = c.properties?.apiId || "";
+          const ct = apiId.split("/").pop() || c.type || "unknown";
+          allConnectors.push({ name: c.properties?.displayName || c.name, type: CONNECTOR_RISK_MAP[ct]?.category || ct });
+        }
       }
-      return { connectors: allConnectors, envs: envs.map(e => e.name), warnings: ppWarnings };
-    } catch (e) { return { connectors: [] as AgentConnector[], envs: [] as string[], warnings: [`Power Platform: ${e instanceof Error ? e.message : String(e)}`] }; }
-  })(), TASK_TIMEOUT, "Connectors");
+      return taskFResult;
+    } catch (e) {
+      ppWarnings.push(`Power Platform: ${e instanceof Error ? e.message : String(e)}`);
+      return taskFResult;
+    }
+    // Budget raised alongside the parallelism: listEnvironments now tries the admin
+    // scope before falling back, so the fixed cost before any connector is read is
+    // higher than when 30s was chosen.
+  })(), 60_000, "Connectors", taskFResult);
 
   // ── Task G: Audit events ────────────────────────
   const taskG = withTimeout((async () => {
@@ -1127,13 +1309,22 @@ export async function runDiscovery(
       ? Math.floor((now - new Date(agent.firstSeen).getTime()) / 86400000)
       : undefined;
 
+    // Look up by appId first, then id: Teams apps carry the Entra appId in
+    // `appId`, while service-principal-derived agents use it as their `id`.
+    const provenance =
+      publisherByAppId.get(String(agent.appId || "").toLowerCase()) ||
+      publisherByAppId.get(String(agent.id || "").toLowerCase());
+
     agent.risk = assessRisk({
       baseRiskLevel,
       permissions: agent.permissions,
       consentType: agent.consentType,
       uniqueUsers: agent.activity.uniqueUsers,
-      hasVerifiedPublisher: false,
-      isMicrosoftFirstParty: false,
+      // Real values now, from the Phase 1 servicePrincipals lookup. Absent from the
+      // map (not a service principal, or beyond the page cap) falls back to false,
+      // which is the conservative direction: no unearned bonus.
+      hasVerifiedPublisher: provenance?.verified ?? false,
+      isMicrosoftFirstParty: provenance?.firstParty ?? false,
       hasHttpConnector: hasHttp,
       daysSinceLastActivity,
       isOrphaned: agent.isOrphaned,
@@ -1142,7 +1333,11 @@ export async function runDiscovery(
       agentDescription: agent.description,
       conversationCount: agent.activity.totalInvocations || 0,
       agentAgeDays: firstSeenDays,
-      neverReviewed: true,
+      // Was hardcoded true, so every agent took the -8 "never reviewed" penalty
+      // even after a recertification campaign had been completed for it — the
+      // review had no effect on the score it was supposed to improve. The set is
+      // supplied by the caller, which is the layer with database access.
+      neverReviewed: !tokens.reviewedAgentIds?.has(agent.id),
     });
 
     if (agent.lifecycleStatus !== "suspended") {

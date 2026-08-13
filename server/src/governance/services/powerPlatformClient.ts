@@ -43,18 +43,48 @@ export class PowerPlatformClient {
    * Per PRD: Support environment selection during onboarding. Default to production environments.
    */
   async listEnvironments(): Promise<PowerPlatformEnvironment[]> {
-    const url = `${BAP_BASE}/providers/Microsoft.BusinessAppPlatform/environments?api-version=2023-06-01`;
-    try {
-      const response = await this.fetchWithRetry(url);
-      const data = await response.json();
-      return data.value || [];
-    } catch (e) {
-      if (e instanceof PowerPlatformError && (e.status === 403 || e.status === 401)) {
-        console.warn("No access to Power Platform environments — may need Power Platform admin role");
-        return [];
+    // The admin scope is tried FIRST, and it is the one that works for us.
+    //
+    // `/providers/Microsoft.BusinessAppPlatform/environments` is caller-scoped: it
+    // returns the environments the *identity making the call* has been given
+    // access to. Our token is app-only, and a service principal is not a user with
+    // environment membership, so that endpoint answers HTTP 200 `{"value":[]}` —
+    // success with nothing in it. Discovery then reported "no Dataverse
+    // environment could be discovered" and told the operator to run
+    // New-PowerAppManagementApp, which was never the actual blocker.
+    //
+    // `/scopes/admin/environments` is the tenant-wide view. Verified against a
+    // live tenant with only the Graph application permissions this app already
+    // has: it returned all three environments, each with
+    // properties.linkedEnvironmentMetadata.instanceUrl populated, with no
+    // PowerShell registration step.
+    //
+    // The caller-scoped call is kept as a fallback so a delegated user token — the
+    // case where the admin scope legitimately 403s — still works.
+    const adminUrl = `${BAP_BASE}/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments?api-version=2023-06-01`;
+    const userUrl = `${BAP_BASE}/providers/Microsoft.BusinessAppPlatform/environments?api-version=2023-06-01`;
+
+    for (const [scope, url] of [["admin", adminUrl], ["caller", userUrl]] as const) {
+      try {
+        const response = await this.fetchWithRetry(url);
+        const data = await response.json();
+        const envs: PowerPlatformEnvironment[] = data.value || [];
+        // An empty admin result is not a reason to stop — fall through and let the
+        // caller-scoped attempt answer, in case this token is delegated.
+        if (envs.length > 0) {
+          console.log(`[PowerPlatform] ${envs.length} environment(s) via ${scope} scope`);
+          return envs;
+        }
+        console.log(`[PowerPlatform] ${scope} scope returned no environments`);
+      } catch (e) {
+        if (e instanceof PowerPlatformError && (e.status === 403 || e.status === 401)) {
+          console.warn(`[PowerPlatform] ${scope} scope denied (${e.status}) — trying next`);
+          continue;
+        }
+        throw e;
       }
-      throw e;
     }
+    return [];
   }
 
   /**

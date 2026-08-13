@@ -69,10 +69,14 @@ export function providerForHost(host, urlPath = null) {
 // mechanism that gives the "govern every AI app" claim teeth — unknown
 // vendors are CAPTURED, just unlabeled until an admin promotes them.
 export function parseApiCall({ host, path: urlPath, requestBody, requestHeaders, responseBody, responseHeaders }) {
-  const reqJson = safeJson(requestBody);
+  const reqBuf = maybeDecompress(requestBody, requestHeaders);
+  const reqJson = safeJson(reqBuf);
   const respBuf = maybeDecompress(responseBody, responseHeaders);
 
-  const isSse = (responseHeaders?.['content-type'] || '').includes('text/event-stream');
+  const respStr = respBuf ? respBuf.toString('utf8', 0, 50) : '';
+  // Detect SSE by content-type header OR by body starting with "data:"
+  const isSse = (responseHeaders?.['content-type'] || '').includes('text/event-stream')
+    || respStr.trimStart().startsWith('data:');
   // Ollama uses NDJSON streaming (one JSON object per line) instead of SSE.
   const isNdjsonStream = (responseHeaders?.['content-type'] || '').includes('application/x-ndjson');
   const respJson = (isSse || isNdjsonStream) ? null : safeJson(respBuf);
@@ -97,7 +101,7 @@ export function parseApiCall({ host, path: urlPath, requestBody, requestHeaders,
   // as 'openai' — the only difference is the tag and the discovery breadcrumb.
   let parsed = null;
   if (provider === 'openai' || provider === 'openai-azure' || provider === 'local-openai-compatible' || provider === 'unknown:openai') {
-    parsed = parseOpenAI({ urlPath, reqJson, respJson, sseEvents });
+    parsed = parseOpenAI({ urlPath, reqJson, respJson, sseEvents, requestBody: reqBuf || requestBody });
   } else if (provider === 'anthropic' || provider === 'unknown:anthropic') {
     parsed = parseAnthropic({ urlPath, reqJson, respJson, sseEvents });
   } else if (provider === 'google' || provider === 'unknown:google') {
@@ -121,7 +125,7 @@ export function parseApiCall({ host, path: urlPath, requestBody, requestHeaders,
     cachedTokens: parsed.cached_tokens || 0,
     providerHint: provider,
   });
-  const out = { provider, ...parsed, cost };
+  const out = { provider, ...parsed, cost, _reqJson: reqJson };
   if (discovered) out._discovered = discovered;
   return out;
 }
@@ -192,21 +196,34 @@ export function detectAiShape({ reqJson, respJson, sseEvents, ndjsonEvents, urlP
 
 // ---- Provider-specific parsers ----
 
-function parseOpenAI({ urlPath, reqJson, respJson, sseEvents }) {
+function parseOpenAI({ urlPath, reqJson, respJson, sseEvents, requestBody }) {
   // /v1/chat/completions, /v1/completions, /v1/embeddings, /v1/responses
   if (!urlPath) return null;
-  const model = reqJson?.model || respJson?.model || null;
+  // Get model from request body, response body, or first SSE event
+  const model = reqJson?.model || respJson?.model || (sseEvents?.[0]?.model) || null;
 
   // Build prompt text from `messages` (chat) or `prompt` (legacy) or `input` (responses API).
   let promptText = null;
   if (Array.isArray(reqJson?.messages)) {
     promptText = reqJson.messages.map((m) => {
       const role = m.role || 'user';
-      const content = typeof m.content === 'string'
-        ? m.content
-        : Array.isArray(m.content) ? m.content.map((c) => c.text || '').join('') : '';
+      let content = '';
+      if (typeof m.content === 'string') {
+        content = m.content;
+      } else if (Array.isArray(m.content)) {
+        content = m.content.map((c) => c.text || c.refusal || (c.type === 'image_url' ? '[image]' : '')).join('');
+      } else if (m.content === null || m.content === undefined) {
+        // Tool call messages have null content — show tool_calls instead
+        if (Array.isArray(m.tool_calls)) {
+          content = m.tool_calls.map((tc) => `[tool:${tc.function?.name || '?'}](${(tc.function?.arguments || '').slice(0, 200)})`).join(' ');
+        }
+      }
+      // Also capture tool results
+      if (m.role === 'tool' && m.content) {
+        content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content).slice(0, 500);
+      }
       return `[${role}] ${content}`;
-    }).join('\n');
+    }).filter(line => line.length > 3).join('\n');
   } else if (typeof reqJson?.prompt === 'string') {
     promptText = reqJson.prompt;
   } else if (typeof reqJson?.input === 'string') {
@@ -220,14 +237,28 @@ function parseOpenAI({ urlPath, reqJson, respJson, sseEvents }) {
   let usage = respJson?.usage || null;
 
   if (respJson?.choices?.length) {
-    responseText = respJson.choices.map((c) => c.message?.content || c.text || '').join('\n');
+    responseText = respJson.choices.map((c) => {
+      if (c.message?.content) return c.message.content;
+      if (c.text) return c.text;
+      // Tool call responses
+      if (Array.isArray(c.message?.tool_calls)) {
+        return c.message.tool_calls.map((tc) => `[tool:${tc.function?.name || '?'}] ${(tc.function?.arguments || '').slice(0, 500)}`).join('\n');
+      }
+      return '';
+    }).join('\n');
   } else if (sseEvents) {
     const collected = [];
     let finalUsage = null;
     for (const e of sseEvents) {
       // Chat streaming: each `data:` is `{choices:[{delta:{content:"..."}}]}`.
-      const delta = e?.choices?.[0]?.delta?.content;
-      if (typeof delta === 'string') collected.push(delta);
+      const d = e?.choices?.[0]?.delta;
+      if (typeof d?.content === 'string') collected.push(d.content);
+      else if (typeof d?.refusal === 'string') collected.push(`[REFUSED] ${d.refusal}`);
+      else if (Array.isArray(d?.tool_calls)) {
+        for (const tc of d.tool_calls) {
+          if (tc?.function?.arguments) collected.push(tc.function.arguments);
+        }
+      }
       // Some streams include `usage` on the final chunk (when stream_options.include_usage=true).
       if (e?.usage) finalUsage = e.usage;
     }
@@ -235,7 +266,22 @@ function parseOpenAI({ urlPath, reqJson, respJson, sseEvents }) {
     if (finalUsage) usage = finalUsage;
   }
 
-  if (!usage) return null;     // can't price without tokens; skip
+  // If no usage data (common with SSE streams that don't include_usage),
+  // estimate tokens from the content so we still capture the trace.
+  if (!usage && (sseEvents || respJson)) {
+    // Estimate tokens from request/response size
+    // Use full JSON stringified length — most reliable across all message formats
+    const reqStr = reqJson ? JSON.stringify(reqJson) : (requestBody ? requestBody.toString('utf8').slice(0, 100000) : '');
+    const respStr = typeof responseText === 'string' ? responseText : '';
+    // ~4 chars per token for English text (rough but consistent)
+    usage = {
+      prompt_tokens: Math.ceil(reqStr.length / 4),
+      completion_tokens: Math.ceil(respStr.length / 4),
+      total_tokens: Math.ceil((reqStr.length + respStr.length) / 4),
+      _estimated: true,
+    };
+  }
+  if (!usage) return null;
   return {
     model,
     prompt_tokens: usage.prompt_tokens ?? usage.input_tokens ?? 0,
@@ -256,7 +302,7 @@ function parseAnthropic({ urlPath, reqJson, respJson, sseEvents }) {
   if (reqJson) {
     const parts = [];
     if (typeof reqJson.system === 'string') parts.push(`[system] ${reqJson.system}`);
-    else if (Array.isArray(reqJson.system)) parts.push(`[system] ${reqJson.system.map((s) => s.text || '').join('')}`);
+    else if (Array.isArray(reqJson.system)) parts.push(`[system] ${reqJson.system.map((s) => typeof s === 'string' ? s : (s.text || '')).join('')}`);
     if (Array.isArray(reqJson.messages)) {
       for (const m of reqJson.messages) {
         const role = m.role || 'user';
@@ -273,13 +319,20 @@ function parseAnthropic({ urlPath, reqJson, respJson, sseEvents }) {
   let usage = respJson?.usage || null;
 
   if (Array.isArray(respJson?.content)) {
-    responseText = respJson.content.map((b) => b.text || '').join('');
+    responseText = respJson.content.map((b) => {
+      if (b.text) return b.text;
+      if (b.type === 'tool_use') return `[tool:${b.name}] ${JSON.stringify(b.input || {}).slice(0, 500)}`;
+      return '';
+    }).join('');
   } else if (sseEvents) {
     const collected = [];
     let finalUsage = null;
     for (const e of sseEvents) {
-      // Anthropic streaming events: `content_block_delta` with `{delta:{type:'text_delta', text:'...'}}`.
-      if (e?.type === 'content_block_delta' && e?.delta?.text) collected.push(e.delta.text);
+      // Anthropic streaming: text_delta has delta.text, input_json_delta has delta.partial_json (tool calls).
+      if (e?.type === 'content_block_delta') {
+        if (e.delta?.text) collected.push(e.delta.text);
+        else if (e.delta?.partial_json) collected.push(e.delta.partial_json);
+      }
       // `message_delta` events at the end carry final usage.
       if (e?.type === 'message_delta' && e?.usage) finalUsage = { ...(finalUsage || {}), ...e.usage };
       if (e?.type === 'message_start' && e?.message?.usage) finalUsage = { ...(finalUsage || {}), ...e.message.usage };
@@ -317,9 +370,20 @@ function parseGoogle({ urlPath, reqJson, respJson, sseEvents }) {
   }
 
   // Response — `candidates[0].content.parts[].text` + `usageMetadata`.
+  // Gemini streaming returns a JSON array [{candidates, usageMetadata}, ...], not SSE.
   let responseText = null;
   let usage = respJson?.usageMetadata || null;
-  if (respJson?.candidates?.length) {
+  if (Array.isArray(respJson)) {
+    // Streaming array format: each element has candidates + optional usageMetadata
+    const collected = [];
+    for (const chunk of respJson) {
+      if (chunk?.candidates?.[0]?.content?.parts) {
+        collected.push(chunk.candidates[0].content.parts.map((p) => p.text || '').join(''));
+      }
+      if (chunk?.usageMetadata) usage = chunk.usageMetadata;
+    }
+    if (collected.length) responseText = collected.join('');
+  } else if (respJson?.candidates?.length) {
     responseText = respJson.candidates.map((c) => {
       return Array.isArray(c.content?.parts) ? c.content.parts.map((p) => p.text || '').join('') : '';
     }).join('\n');
@@ -468,7 +532,38 @@ function parseBedrock({ urlPath, reqJson, respJson, sseEvents }) {
 
 function safeJson(buf) {
   if (!buf || buf.length === 0) return null;
-  try { return JSON.parse(buf.toString('utf8')); } catch { return null; }
+  try {
+    let str = buf.toString('utf8');
+    // Strip BOM if present
+    if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
+    // Strip null bytes (can appear from buffer concatenation)
+    if (str.includes('\0')) str = str.replace(/\0/g, '');
+    return JSON.parse(str);
+  } catch (e) {
+    // Buffer may contain multiple HTTP requests concatenated (TLS bridge).
+    // Try to extract just the first JSON object by finding the matching closing brace.
+    try {
+      let str = buf.toString('utf8');
+      if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
+      const open = str[0];
+      const close = open === '{' ? '}' : open === '[' ? ']' : null;
+      if (close) {
+        let depth = 0;
+        let inString = false;
+        let escape = false;
+        for (let i = 0; i < str.length; i++) {
+          const ch = str[i];
+          if (escape) { escape = false; continue; }
+          if (ch === '\\' && inString) { escape = true; continue; }
+          if (ch === '"') { inString = !inString; continue; }
+          if (inString) continue;
+          if (ch === open) depth++;
+          else if (ch === close) { depth--; if (depth === 0) return JSON.parse(str.slice(0, i + 1)); }
+        }
+      }
+    } catch {}
+    return null;
+  }
 }
 
 function maybeDecompress(buf, headers) {

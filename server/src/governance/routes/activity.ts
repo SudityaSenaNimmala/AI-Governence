@@ -5,6 +5,7 @@ import { AuditClient } from "../services/auditClient.js";
 import { GraphClient } from "../services/graphClient.js";
 import { AzureFoundryClient } from "../services/azureFoundryClient.js";
 import { findPricing, computeCost } from "../services/pricingUtils.js";
+import { PowerPlatformClient } from "../services/powerPlatformClient.js";
 import { getDb } from "../db.js";
 
 const router = Router();
@@ -13,6 +14,64 @@ interface OAuthKeyRow {
   id: string;
   tenant_id: string | null;
   dataverse_env_url: string | null;
+}
+
+/**
+ * Pick a Dataverse environment for the activity routes to query.
+ *
+ * These routes used to read `dataverse_env_url` off the query string or the
+ * oauth_keys row and 400 when both were absent. Rows created by the interactive
+ * admin-consent flow hold only tenant_id/client_id/auth_method, and the UI sends
+ * no env URL — so every call from a Sign-in-with-Microsoft connection failed with
+ * "Dataverse environment URL is required" and the User Activity tab stayed empty.
+ * Nothing was misconfigured; the routes simply predate automatic discovery.
+ *
+ * Precedence: explicit query param, then the value stored on the row, then
+ * discovery via the Power Platform admin scope.
+ *
+ * Each candidate is then PROVEN before use. Entra issues a Dataverse token for
+ * any org URL whether or not the app is an Application User there, so holding a
+ * token means nothing — a tenant can list four environments and grant access to
+ * one. Candidates that reject the read are collected in `skipped` so callers can
+ * say which were passed over rather than silently reporting no data.
+ */
+async function resolveDataverseEnv(
+  oauthKeyId: string,
+  keyDoc: { dataverse_env_url?: string | null },
+  explicit?: string,
+): Promise<{ url: string; token: string; skipped: string[] } | null> {
+  const candidates: string[] = [];
+  if (explicit) {
+    candidates.push(explicit);
+  } else if (keyDoc.dataverse_env_url) {
+    candidates.push(keyDoc.dataverse_env_url);
+  } else {
+    try {
+      const ppToken = await getValidToken(oauthKeyId, "power_platform");
+      const envs = await new PowerPlatformClient(ppToken).listEnvironments();
+      for (const env of envs) {
+        const url = env.properties?.linkedEnvironmentMetadata?.instanceUrl;
+        if (url) candidates.push(url.replace(/\/$/, ""));
+      }
+      console.log(`[Activity] ${candidates.length} Dataverse environment(s) discovered`);
+    } catch (e) {
+      console.warn("[Activity] Could not enumerate environments:", e instanceof Error ? e.message : e);
+    }
+  }
+
+  const skipped: string[] = [];
+  for (const url of candidates) {
+    try {
+      const token = await getDataverseToken(oauthKeyId, url);
+      // One cheap read is the only reliable proof the org will answer us.
+      await new DataverseClient(token, url).discoverBots();
+      return { url, token, skipped };
+    } catch (e) {
+      skipped.push(url);
+      console.warn(`[Activity] Environment ${url} unusable:`, e instanceof Error ? e.message : e);
+    }
+  }
+  return null;
 }
 
 /**
@@ -36,13 +95,20 @@ router.get("/chats", async (req, res) => {
       return;
     }
 
-    const dvUrl = dataverseEnvUrl || keyDoc.dataverse_env_url;
-    if (!dvUrl) {
-      res.status(400).json({ error: "Dataverse environment URL is required for chat transcripts" });
+    const env = await resolveDataverseEnv(oauthKeyId, keyDoc, dataverseEnvUrl);
+    if (!env) {
+      // 200, not 400. Having no readable Dataverse environment is a normal state
+      // for a tenant without Copilot Studio, and the caller asked a well-formed
+      // question — answering "bad request" made the UI log an error for a
+      // condition the operator cannot fix by changing the request.
+      res.json({
+        transcripts: [], total: 0,
+        message: "No readable Dataverse environment. Add the app as an Application User in a Power Platform environment to see chat transcripts.",
+      });
       return;
     }
-
-    const dvToken = await getDataverseToken(oauthKeyId, dvUrl);
+    const dvUrl = env.url;
+    const dvToken = env.token;
     const dvClient = new DataverseClient(dvToken, dvUrl);
 
     const limit = parseInt(req.query.limit as string || "1000", 10);
@@ -277,13 +343,17 @@ router.get("/knowledge", async (req, res) => {
       return;
     }
 
-    const dvUrl = dataverseEnvUrl || keyDoc.dataverse_env_url;
-    if (!dvUrl) {
-      res.status(400).json({ error: "Dataverse environment URL is required" });
+    const env = await resolveDataverseEnv(oauthKeyId, keyDoc, dataverseEnvUrl);
+    if (!env) {
+      // See the /chats handler: 200 with an explanation, not 400.
+      res.json({
+        results: [], totalBots: 0,
+        message: "No readable Dataverse environment. Add the app as an Application User in a Power Platform environment to see knowledge sources.",
+      });
       return;
     }
-
-    const dvToken = await getDataverseToken(oauthKeyId, dvUrl);
+    const dvUrl = env.url;
+    const dvToken = env.token;
     const dvClient = new DataverseClient(dvToken, dvUrl);
 
     if (botId) {
@@ -451,13 +521,16 @@ router.get("/risk-summary", async (req, res) => {
       return;
     }
 
-    const dvUrl = dataverseEnvUrl || keyDoc.dataverse_env_url;
-    if (!dvUrl) {
-      res.json({ agents: [], message: "Dataverse not configured" });
+    const env = await resolveDataverseEnv(oauthKeyId, keyDoc, dataverseEnvUrl);
+    if (!env) {
+      res.json({
+        agents: [],
+        message: "No readable Dataverse environment. Add the app as an Application User in a Power Platform environment.",
+      });
       return;
     }
-
-    const dvToken = await getDataverseToken(oauthKeyId, dvUrl);
+    const dvUrl = env.url;
+    const dvToken = env.token;
     const dvClient = new DataverseClient(dvToken, dvUrl);
     const dataverseBots = await dvClient.discoverBots();
 

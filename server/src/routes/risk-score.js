@@ -30,6 +30,14 @@ const WEIGHTS = {
   volume_anomaly: 10,
 };
 
+/**
+ * Profiles the endpoint scanner created from a browser extension it could not yet
+ * match to a named account. Defined once so the list and summary endpoints cannot
+ * drift apart again — they previously each carried their own copy of this rule,
+ * and only one of them applied it.
+ */
+const UNIDENTIFIED_NAME = /^Browser User/;
+
 export function mountRiskScore(app, db) {
   const scores    = () => db.collection('risk_scores');
   const profiles  = () => db.collection('employee_profiles');
@@ -94,7 +102,16 @@ export function mountRiskScore(app, db) {
       .project({ _id: 0, id: 1, display_name: 1, email: 1, hostname: 1, department: 1,
         risk_score: 1, risk_level: 1, risk_factors: 1, risk_computed_at: 1, sources: 1 })
       .toArray();
-    res.json(allProfiles);
+
+    // Tag each row as identified or not, using the SAME rule the summary applies.
+    //
+    // This endpoint returned every scored profile while /summary silently excluded
+    // "Browser User (hash)" ones, so the same screen reported 18 people in the table
+    // and 3 in the header. Both numbers were defensible in isolation and impossible
+    // to reconcile on screen. The filter stays out of this endpoint — dropping rows
+    // here would hide real people whose extension has not yet been matched to an
+    // account — but the flag lets the caller group them and the two counts add up.
+    res.json(allProfiles.map(p => ({ ...p, is_identified: !UNIDENTIFIED_NAME.test(p.display_name || '') })));
   }));
 
   // ── Summary stats (MUST be before /:profileId to avoid Express param conflict) ──
@@ -102,9 +119,19 @@ export function mountRiskScore(app, db) {
   app.get('/api/v1/risk-scores/summary', a(async (req, res) => {
     const allProfiles = await profiles().find({
       risk_score: { $ne: null },
-      display_name: { $not: /^Browser User/ },
+      display_name: { $not: UNIDENTIFIED_NAME },
     }).project({ _id: 0, risk_score: 1, risk_level: 1 }).toArray();
     const total = allProfiles.length;
+
+    // Scored, but not attributable to a named person. Counted separately rather
+    // than dropped: excluding them from the average is right (an unnamed row cannot
+    // be actioned), but omitting them entirely is what made the header disagree
+    // with the table below it. GET /api/v1/risk-scores returns these with
+    // is_identified: false, so total_employees + unidentified equals its row count.
+    const unidentified = await profiles().countDocuments({
+      risk_score: { $ne: null },
+      display_name: UNIDENTIFIED_NAME,
+    });
     const avgScore = total ? Math.round(allProfiles.reduce((s, p) => s + p.risk_score, 0) / total) : 0;
     const distribution = { low: 0, medium: 0, high: 0, critical: 0 };
     for (const p of allProfiles) distribution[p.risk_level] = (distribution[p.risk_level] || 0) + 1;
@@ -126,6 +153,7 @@ export function mountRiskScore(app, db) {
       total_employees: total,
       average_score: avgScore,
       distribution,
+      unidentified,
       not_assessed: notAssessed,
       coverage_percent: (total + notAssessed) ? Math.round((total / (total + notAssessed)) * 100) : 0,
     });

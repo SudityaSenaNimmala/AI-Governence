@@ -3753,8 +3753,20 @@ export function UserActivityTab() {
                 {agentFilesOnly ? "No agent-related file activity" : searchQuery ? "No files match your search" : "No file activity found"}
               </h3>
               <p style={{ fontSize: 13, maxWidth: 500, margin: "0 auto" }}>
+                {/* Provider-aware. `isGoogle` already existed here but the copy
+                    ignored it, so a Google Cloud connection was told its file
+                    activity would arrive "from SharePoint and OneDrive … O365 audit
+                    log" — products that tenant does not use, naming a log it has no
+                    access to. Every branch below that mentions a Microsoft surface
+                    is now gated. */}
                 {isOpenAI
                   ? "No files uploaded to OpenAI yet. Upload files to your Assistants vector stores — they will appear here with agent cross-references."
+                  : isGoogle
+                  ? (agentFilesOnly
+                      ? "No file events found on Drive files used as agent knowledge sources. Try disabling the filter to see all files."
+                      : searchQuery
+                      ? "Try adjusting your search criteria."
+                      : "No Google Drive file activity recorded for these agents. Agent deploy and update events are tracked separately from file access.")
                   : agentFilesOnly && knowledgeDiag.siteUrls.length === 0
                   ? "Your agents don't have SharePoint/OneDrive knowledge sources configured. Add a SharePoint site as a knowledge source in Copilot Studio, then file events on that site will be linked to the agent."
                   : agentFilesOnly

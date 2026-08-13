@@ -58,7 +58,10 @@ router.get("/stats/summary", async (req, res) => {
       { $project: { _id: 0, business_unit: "$_id", count: 1 } },
     ]).toArray();
 
-    res.json({ total, byClassification, byBusinessUnit });
+    // Same reasoning as the sensitivity summary: an empty collection and a fully
+    // unclassified estate both returned total: 0 with empty breakdowns, so "nobody
+    // has classified anything yet" was indistinguishable from a real measurement.
+    res.json({ total, byClassification, byBusinessUnit, never_populated: total === 0 });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to get stats" });
   }

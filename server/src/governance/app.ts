@@ -6,6 +6,7 @@ import { Router } from "express";
 import oauthKeysRouter from "./routes/oauthKeys.js";
 import authRouter from "./routes/auth.js";
 import msOAuthRouter from "./routes/msOAuth.js";
+import msProvisionRouter from "./routes/msProvision.js";
 import googleOAuthRouter from "./routes/googleOAuth.js";
 import discoveryRouter from "./routes/discovery.js";
 import lifecycleRouter from "./routes/lifecycle.js";
@@ -33,6 +34,10 @@ const governanceRouter = Router();
 
 governanceRouter.use("/api/oauth-keys", oauthKeysRouter);
 governanceRouter.use("/api/auth", authRouter);
+// Mounted BEFORE msOAuthRouter: both live under /api/auth/microsoft, and this one
+// owns the /provision/* subtree. Express matches in mount order, so putting the
+// broader router first would let its own /callback shadow /provision/callback.
+governanceRouter.use("/api/auth/microsoft/provision", msProvisionRouter);
 // Interactive admin sign-in — /start, /callback, /status.
 governanceRouter.use("/api/auth/microsoft", msOAuthRouter);
 governanceRouter.use("/api/auth/google", googleOAuthRouter);

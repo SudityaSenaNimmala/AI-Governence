@@ -229,7 +229,12 @@ router.get("/summary", async (req, res) => {
     };
     if (stats.avg_coverage != null) stats.avg_coverage = Math.round(stats.avg_coverage);
     delete stats._id;
-    res.json(stats);
+    // Distinguish "nothing has been scanned" from "scanned, and everything is clean".
+    //
+    // Both produced an identical all-zeros payload, so the UI rendered a reassuring
+    // 0% / 0 uncovered for a tenant where sensitivity had never run once. Zero
+    // findings and zero coverage are opposite states and must not look the same.
+    res.json({ ...stats, never_scanned: (stats.total_agents || 0) === 0 });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to get sensitivity summary" });
   }

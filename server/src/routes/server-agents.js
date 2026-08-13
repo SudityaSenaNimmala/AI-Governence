@@ -69,14 +69,20 @@ export function mountServerAgents(app, db) {
 
   // Recent calls — paginated, optionally filtered.
   app.get('/api/v1/server-agents/calls', a(async (req, res) => {
-    const { user, provider, model, trigger, machineId, limit = 200 } = req.query;
+    const { user, provider, model, trigger, machineId, sourceIp, from, to, limit = 1000 } = req.query;
     const filter = {};
+    if (sourceIp)  filter.source_ip = sourceIp;
     if (user)      filter.user = user;
     if (provider)  filter.provider = provider;
     if (model)     filter.model = model;
     if (trigger)   filter.trigger_source = trigger;
     if (machineId) filter.machine_id = machineId;
-    const lim = Math.min(Number(limit) || 200, 1000);
+    if (from || to) {
+      filter.occurred_at = {};
+      if (from) filter.occurred_at.$gte = from;
+      if (to) filter.occurred_at.$lte = to;
+    }
+    const lim = Math.min(Number(limit) || 1000, 10000);
 
     const rows = await db.collection('server_agent_calls')
       .find(filter)
@@ -242,6 +248,59 @@ export function mountServerAgents(app, db) {
     res.json({ totals, byUser, byProvider, byModel, byTrigger });
   }));
 
+  // ── Governed containers — register + list ───────────────────────────────
+  // Called by the 'govern' CLI command after setting up a container.
+  app.post('/api/v1/monitor/governed', requireMachineAuth, a(async (req, res) => {
+    const { container_name, container_ip, gateway_ip } = req.body || {};
+    if (!container_name) return res.status(400).json({ error: 'container_name required' });
+    await db.collection('governed_containers').updateOne(
+      { machine_id: req.machine.id, container_name },
+      { $set: { container_name, container_ip, gateway_ip, machine_id: req.machine.id, governed_at: new Date(), status: 'active' } },
+      { upsert: true },
+    );
+    res.json({ ok: true });
+  }));
+
+  // Remove governed container (called by 'ungovernable')
+  app.delete('/api/v1/monitor/governed/:name', requireMachineAuth, a(async (req, res) => {
+    await db.collection('governed_containers').updateOne(
+      { machine_id: req.machine.id, container_name: req.params.name },
+      { $set: { status: 'removed', removed_at: new Date() } },
+    );
+    res.json({ ok: true });
+  }));
+
+  // List governed containers for a server, with trace counts
+  app.get('/api/v1/monitor/governed', a(async (req, res) => {
+    const { machineId } = req.query;
+    // Show all governed containers (including removed) — traces persist
+    const filter = {};
+    if (machineId) filter.machine_id = machineId;
+
+    const containers = await db.collection('governed_containers')
+      .find(filter)
+      .project({ _id: 0 })
+      .sort({ governed_at: -1 })
+      .toArray();
+
+    // Get trace counts + cost per container by matching source_ip
+    for (const c of containers) {
+      const ipFilter = c.container_ip
+        ? { machine_id: c.machine_id, source_ip: c.container_ip }
+        : { machine_id: c.machine_id };
+
+      const costAgg = await db.collection('server_agent_calls').aggregate([
+        { $match: ipFilter },
+        { $group: { _id: null, total: { $sum: { $ifNull: ['$total_cost_usd', 0] } }, calls: { $sum: 1 } } },
+      ]).toArray();
+      c.total_cost_usd = costAgg[0]?.total || 0;
+      c.total_calls = costAgg[0]?.calls || 0;
+      c.trace_count = c.total_calls;
+    }
+
+    res.json(containers);
+  }));
+
   // ── Traces — group calls into execution traces ─────────────────────────
   app.get('/api/v1/traces/stats', a(async (req, res) => {
     const now = new Date();
@@ -249,7 +308,7 @@ export function mountServerAgents(app, db) {
     const [totalCalls, recentCalls, enrolledCount] = await Promise.all([
       db.collection('server_agent_calls').countDocuments(),
       db.collection('server_agent_calls').countDocuments({ occurred_at: { $gte: dayAgo.toISOString() } }),
-      db.collection('monitored_servers').countDocuments({ status: { $ne: 'removed' } }),
+      db.collection('monitored_servers').countDocuments({}),
     ]);
     const costAgg = await db.collection('server_agent_calls').aggregate([
       { $group: { _id: null, total: { $sum: { $ifNull: ['$total_cost_usd', 0] } } } },
@@ -433,8 +492,9 @@ echo ""
   // disappears on uninstall). Enriched with call stats from server_agent_calls.
   app.get('/api/v1/monitor/servers', a(async (req, res) => {
     // 1. Get all server-monitor machines from enrollment (excludes removed)
+    // Show ALL servers including uninstalled — traces persist forever
     const enrolled = await db.collection('monitored_servers')
-      .find({ status: { $ne: 'removed' } })
+      .find({})
       .project({ _id: 0, id: 1, hostname: 1, last_seen: 1, first_seen: 1, proxy_port: 1, user: 1, display_name: 1 })
       .sort({ last_seen: -1 })
       .toArray();
@@ -457,13 +517,14 @@ echo ""
     const result = enrolled.map(m => {
       const s = statsMap.get(m.id) || {};
       const lastSeen = m.last_seen || m.first_seen;
-      const isActive = lastSeen && (new Date() - new Date(lastSeen)) < 300000; // 5 min
+      const isRemoved = m.status === 'removed';
+      const isActive = !isRemoved && lastSeen && (new Date() - new Date(lastSeen)) < 300000;
       return {
         machine_id: m.id,
         hostname: m.hostname,
         display_name: m.display_name || m.hostname || m.id,
         proxy_port: m.proxy_port || null,
-        status: isActive ? 'active' : 'inactive',
+        status: isRemoved ? 'uninstalled' : (isActive ? 'active' : 'inactive'),
         last_seen: lastSeen,
         first_seen: m.first_seen || null,
         total_calls: s.total_calls || 0,

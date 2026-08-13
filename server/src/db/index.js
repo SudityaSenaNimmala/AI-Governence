@@ -58,6 +58,10 @@ export async function applyInitialSchema(db) {
   await db.collection('monitored_servers').createIndex({ id: 1 }, { unique: true });
   await db.collection('monitored_servers').createIndex({ status: 1 });
 
+  // governed_containers — Docker containers under governance
+  await db.collection('governed_containers').createIndex({ machine_id: 1, container_name: 1 }, { unique: true });
+  await db.collection('governed_containers').createIndex({ status: 1 });
+
   // ai_sessions — one doc per conversation (browser extension session_id)
   await db.collection('ai_sessions').createIndex({ session_id: 1 }, { unique: true });
   await db.collection('ai_sessions').createIndex({ machine_id: 1, started_at: -1 });
