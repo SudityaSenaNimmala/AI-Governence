@@ -2993,7 +2993,7 @@ function AIRegistryView() {
       } else {
         await fetch(`${REGISTRY_API}/${encodeURIComponent(row.id)}/status`,{
           method:"PUT",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({status,product_name:row.name}),
+          body:JSON.stringify({status,product_name:row.name,matched_hosts:row.matched_hosts||[]}),
         });
       }
       await loadAll();
@@ -3002,8 +3002,8 @@ function AIRegistryView() {
     }
   };
 
-  const updateStatus=async(id,status,productName)=>{
-    await fetch(`${REGISTRY_API}/${encodeURIComponent(id)}/status`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status,product_name:productName})});
+  const updateStatus=async(id,status,productName,matchedHosts)=>{
+    await fetch(`${REGISTRY_API}/${encodeURIComponent(id)}/status`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status,product_name:productName,matched_hosts:matchedHosts||[]})});
     loadAll();
   };
 
@@ -3107,13 +3107,6 @@ function AIRegistryView() {
             <div style={{fontSize:13,fontWeight:600}}>{r.activity?.total?.toLocaleString()||0}</div>
             <div className="aihub_text_muted">{r.activity?.last_active?relTime(r.activity.last_active):"never"}</div>
           </div>,right:true},
-          // Source column removed — how a system was discovered is an internal detail
-          // of the scan, not something an admin acts on from this table. It is still
-          // shown in the expanded row detail (RegistryRowDetail prints row.source).
-          //
-          // Line comment, not {/* … */}: inside a JS array that braced form is an
-          // empty OBJECT literal, not a comment, so it added a sixth column with no
-          // label and no render — a blank header and a stray "—" on every row.
         ]}
         rows={items}
         onRow={r=>setSelected(selected===r.id?null:r.id)}
@@ -3266,6 +3259,14 @@ function RegistryRowDetail({ row, onStatus, pending }) {
       {cell("Machines",row.machine_count)}
       {row.is_orphaned&&<div style={{gridColumn:"1/-1",color:"#ef4444",fontWeight:600}}>⚠ Owner account is disabled — this system is orphaned</div>}
     </div>
+
+    {row.matched_hosts?.length>0&&<div style={{marginBottom:14}}>
+      <H>Enforced hosts</H>
+      <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+        {row.matched_hosts.map((h,i)=><span key={i} style={{fontSize:11,fontFamily:"monospace",padding:"2px 8px",borderRadius:5,background:row.status==='blocked'?"#fef2f2":"#f0fdf4",border:"1px solid "+(row.status==='blocked'?"#fca5a5":"#bbf7d0"),color:row.status==='blocked'?"#dc2626":"#16a34a"}}>{h}</span>)}
+      </div>
+      <div className="aihub_text_muted" style={{fontSize:10.5,marginTop:4}}>Blocking/allowing this system affects {row.matched_hosts.length===1?"this host":"all "+row.matched_hosts.length+" hosts"} in the extension.</div>
+    </div>}
 
     <div style={{marginBottom:14}}>
       <H>Risk analysis</H>

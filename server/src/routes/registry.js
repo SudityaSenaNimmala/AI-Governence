@@ -82,12 +82,21 @@ export function mountRegistry(app, db) {
       if (!productHosts.has(key)) productHosts.set(key, []);
       productHosts.get(key).push({ host: p.host, blocked: !!p.blocked, governed: !!p.governed });
     }
-    function getProductStatus(productName) {
-      if (!productName) return 'unknown';
+    // vendor → [{ host, blocked, governed }] for matching by vendor name
+    const vendorHosts = new Map();
+    for (const p of platforms) {
+      if (!p.vendor) continue;
+      const key = p.vendor.toLowerCase();
+      if (!vendorHosts.has(key)) vendorHosts.set(key, []);
+      vendorHosts.get(key).push({ host: p.host, blocked: !!p.blocked, governed: !!p.governed });
+    }
+
+    function resolveProductHosts(productName, vendorName) {
+      if (!productName) return { status: 'unknown', hosts: [] };
       const lower = productName.toLowerCase();
-      // Exact match first
+      // Exact product match first
       let hosts = productHosts.get(lower);
-      // Partial match: "Gemini" should find "Google Gemini"
+      // Partial product match: "Gemini" should find "Google Gemini"
       if (!hosts || hosts.length === 0) {
         for (const [key, val] of productHosts) {
           if (key.includes(lower) || lower.includes(key)) {
@@ -95,14 +104,32 @@ export function mountRegistry(app, db) {
           }
         }
       }
-      if (!hosts || hosts.length === 0) return 'unknown';
+      // Match by vendor name: "Claude" → vendor "Anthropic", "ChatGPT" → vendor "OpenAI"
+      if (!hosts || hosts.length === 0) {
+        // Try the vendor param first, then check if the product name matches a vendor
+        const vn = (vendorName || '').toLowerCase();
+        if (vn && vendorHosts.has(vn)) hosts = vendorHosts.get(vn);
+        if (!hosts || hosts.length === 0) {
+          // Try the product name as a vendor match (e.g. "Claude" → host contains "claude")
+          for (const p of platforms) {
+            if (p.host && p.host.toLowerCase().includes(lower)) {
+              if (!hosts) hosts = [];
+              hosts.push({ host: p.host, blocked: !!p.blocked, governed: !!p.governed });
+            }
+          }
+        }
+      }
+      if (!hosts || hosts.length === 0) return { status: 'unknown', hosts: [] };
+      // Deduplicate by host
+      const seen = new Set();
+      hosts = hosts.filter(h => { if (seen.has(h.host)) return false; seen.add(h.host); return true; });
       const allBlocked = hosts.every(h => h.blocked);
-      if (allBlocked) return 'blocked';
+      if (allBlocked) return { status: 'blocked', hosts: hosts.map(h => h.host) };
       const allUnblocked = hosts.every(h => !h.blocked);
-      if (allUnblocked) return 'approved';
-      // Mixed: some blocked, some not → still blocked (majority rule)
-      return 'blocked';
+      if (allUnblocked) return { status: 'approved', hosts: hosts.map(h => h.host) };
+      return { status: 'blocked', hosts: hosts.map(h => h.host) };
     }
+    function getProductStatus(productName, vendorName) { return resolveProductHosts(productName, vendorName).status; }
 
     // Build unified registry
     const registry = new Map(); // key → entry
@@ -113,9 +140,11 @@ export function mountRegistry(app, db) {
       if (!key) continue;
       const sanction = sanctionMap.get(key);
       const risk = normalizeStoredRisk(agent.risk);
+      const govResolved = resolveProductHosts(agent.name, agent.vendor);
       registry.set('gov:' + key, {
         id: agent.id || key,
         name: agent.name || 'Unnamed Agent',
+        matched_hosts: govResolved.hosts,
         description: agent.description || null,
         platform: agent.platform || 'unknown',
         category: mapGovPlatform(agent.platform),
@@ -179,13 +208,15 @@ export function mountRegistry(app, db) {
       const machineCount = new Set(fList.map(f => f.machine_id)).size;
 
       // Status comes from ai_platforms (source of truth for enforcement)
-      const resolvedStatus = getProductStatus(name) !== 'unknown'
-        ? getProductStatus(name)
+      const resolved = resolveProductHosts(name, sample.vendor);
+      const resolvedStatus = resolved.status !== 'unknown'
+        ? resolved.status
         : (sanction?.status || 'unknown');
 
       registry.set('scan:' + tk, {
         id: tk,
         name,
+        matched_hosts: resolved.hosts,
         description: null,
         platform: sample.type === 'ide_extension' ? sample.ide : (sample.platform || 'endpoint'),
         category: CATEGORY_MAP[sample.type] || 'unknown',
@@ -234,8 +265,10 @@ export function mountRegistry(app, db) {
       if (!dlp && !plat.blocked) continue;
 
       const key = 'plat:' + plat.host;
+      const platResolved = resolveProductHosts(plat.product);
       registry.set(key, {
         id: plat.host,
+        matched_hosts: platResolved.hosts.length ? platResolved.hosts : [plat.host],
         name: plat.product || plat.host,
         description: null,
         platform: 'web',
@@ -384,56 +417,33 @@ export function mountRegistry(app, db) {
     );
 
     // ENFORCE via ai_platforms — the same collection the browser extension
-    // and proxy already read. PATCH /api/v1/ai-platforms/:host is the existing
-    // endpoint; we update the DB directly here (same logic) to avoid a self-call.
+    // and proxy already read. The UI sends matched_hosts (resolved during
+    // buildRegistry) so we update the exact hosts — no fuzzy matching needed.
     const patch = { blocked: isBlocked ? 1 : 0, updated_at: new Date() };
     if (status === 'approved') patch.governed = 1;
 
-    // Strategy 1: id is a host (e.g. "chatgpt.com")
-    let matched = await db.collection('ai_platforms').updateOne({ host: id }, { $set: patch });
+    let matched = { matchedCount: 0, modifiedCount: 0 };
+    const hosts = req.body.matched_hosts;
 
-    // Strategy 2: look up the registry entry's actual product name, then match ai_platforms
-    if (matched.matchedCount === 0) {
-      // The id could be a tool_key (openai:chatgpt), a UUID, or a product name.
-      // We need to find the PRODUCT NAME this registry entry represents, then
-      // find all ai_platforms with that product.
-
-      // First: get the product name from the request body or look it up
-      const productName = req.body.product_name; // UI can send this
-      const candidates = [];
-      if (productName) candidates.push(productName);
-      candidates.push(id); // raw id
-      if (id.includes(':')) {
-        candidates.push(id.split(':').pop()); // "chatgpt" from "openai:chatgpt"
-        candidates.push(id.split(':')[0]);    // "openai" from "openai:chatgpt"
-      }
-
-      // Dynamic matching — find the ai_platforms product that corresponds
-      // to this registry entry, then update ALL hosts with that product.
-      // No hardcoded maps — reads product names directly from ai_platforms.
-      const allPlatforms = await db.collection('ai_platforms').find({}).project({ _id: 0, product: 1 }).toArray();
-      const allProducts = [...new Set(allPlatforms.map(p => p.product).filter(Boolean))];
-
-      // Find the matching product name
-      let matchedProduct = null;
-      for (const name of candidates) {
-        const lower = name.toLowerCase();
-        // Exact match first
-        matchedProduct = allProducts.find(p => p.toLowerCase() === lower);
-        if (matchedProduct) break;
-        // Partial: "Gemini" matches "Google Gemini" but NOT "Gemini in Gmail"
-        matchedProduct = allProducts.find(p => {
-          const pl = p.toLowerCase();
-          return (pl.includes(lower) || lower.includes(pl)) && !pl.includes(' in ');
-        });
-        if (matchedProduct) break;
-      }
-
-      if (matchedProduct) {
-        matched = await db.collection('ai_platforms').updateMany(
-          { product: matchedProduct },
-          { $set: patch },
-        );
+    if (Array.isArray(hosts) && hosts.length > 0) {
+      // Direct: UI told us exactly which hosts to update
+      matched = await db.collection('ai_platforms').updateMany(
+        { host: { $in: hosts } },
+        { $set: patch },
+      );
+    } else {
+      // Fallback: try id as host, then product name matching
+      matched = await db.collection('ai_platforms').updateOne({ host: id }, { $set: patch });
+      if (matched.matchedCount === 0) {
+        const productName = req.body.product_name || id;
+        const allPlatforms = await db.collection('ai_platforms').find({}).project({ _id: 0, product: 1 }).toArray();
+        const allProducts = [...new Set(allPlatforms.map(p => p.product).filter(Boolean))];
+        const lower = productName.toLowerCase();
+        const matchedProduct = allProducts.find(p => p.toLowerCase() === lower)
+          || allProducts.find(p => { const pl = p.toLowerCase(); return (pl.includes(lower) || lower.includes(pl)) && !pl.includes(' in '); });
+        if (matchedProduct) {
+          matched = await db.collection('ai_platforms').updateMany({ product: matchedProduct }, { $set: patch });
+        }
       }
     }
 
