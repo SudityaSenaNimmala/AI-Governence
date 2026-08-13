@@ -258,7 +258,20 @@ function parseOpenAI({ urlPath, reqJson, respJson, sseEvents }) {
     if (finalUsage) usage = finalUsage;
   }
 
-  if (!usage) return null;     // can't price without tokens; skip
+  // If no usage data (common with SSE streams that don't include_usage),
+  // estimate tokens from the text content so we still capture the trace.
+  if (!usage && (sseEvents || respJson)) {
+    const promptStr = typeof promptText === 'string' ? promptText : (requestBody ? requestBody.toString('utf8').slice(0, 50000) : '');
+    const respStr = typeof responseText === 'string' ? responseText : '';
+    // Rough estimate: ~4 chars per token for English
+    usage = {
+      prompt_tokens: Math.ceil(promptStr.length / 4),
+      completion_tokens: Math.ceil(respStr.length / 4),
+      total_tokens: Math.ceil((promptStr.length + respStr.length) / 4),
+      _estimated: true,
+    };
+  }
+  if (!usage) return null;
   return {
     model,
     prompt_tokens: usage.prompt_tokens ?? usage.input_tokens ?? 0,
