@@ -5346,9 +5346,6 @@ function ServerMonitorView() {
 
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
-        <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#ef4444" }} title="deploy indicator" />
-      </div>
       <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
         <StatCard icon={<Activity size={18} />} label="Total Calls" value={stats?.total_calls || 0} hint="All time" color="#3b82f6" />
         <StatCard icon={<Clock size={18} />} label="Last 24h" value={stats?.calls_last_24h || 0} hint="Recent calls" color="#8b5cf6" />
@@ -6059,7 +6056,7 @@ const TAB_GROUPS = {
       // admin-gated routes, snippets posting to a removed endpoint via a
       // globalThis.fetch monkey-patch). It is replaced by the SDK group above, not
       // duplicated — /AIHub/DeveloperSDK now redirects there.
-      { slug: "server-monitor", label: "Server Monitor",  component: ServerMonitorView, hidden: true },
+      { slug: "server-monitor", label: "Server Monitor",  component: ServerMonitorView },
       // { slug: "copilot",      label: "Copilot Readiness", component: CopilotReadinessView },  // hidden — not working reliably
       // Machines is commented out because Policies & Risk → Risk Scores already
       // lists every enrolled machine: all of its rows carry a hostname, sourced
