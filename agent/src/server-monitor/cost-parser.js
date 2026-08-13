@@ -523,7 +523,18 @@ function parseBedrock({ urlPath, reqJson, respJson, sseEvents }) {
 
 function safeJson(buf) {
   if (!buf || buf.length === 0) return null;
-  try { return JSON.parse(buf.toString('utf8')); } catch { return null; }
+  try {
+    let str = buf.toString('utf8');
+    // Strip BOM if present
+    if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
+    // Strip null bytes (can appear from buffer concatenation)
+    if (str.includes('\0')) str = str.replace(/\0/g, '');
+    return JSON.parse(str);
+  } catch (e) {
+    // DEBUG: log parse error
+    console.log(`[debug] JSON.parse error: ${e.message?.slice(0, 200)}`);
+    return null;
+  }
 }
 
 function maybeDecompress(buf, headers) {
