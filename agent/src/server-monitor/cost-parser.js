@@ -531,8 +531,26 @@ function safeJson(buf) {
     if (str.includes('\0')) str = str.replace(/\0/g, '');
     return JSON.parse(str);
   } catch (e) {
-    // DEBUG: log parse error
-    console.log(`[debug] JSON.parse error: ${e.message?.slice(0, 200)}`);
+    // Buffer may contain multiple HTTP requests concatenated (TLS bridge).
+    // Try to extract just the first JSON object by finding the matching closing brace.
+    try {
+      let str = buf.toString('utf8');
+      if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
+      if (str[0] === '{') {
+        let depth = 0;
+        let inString = false;
+        let escape = false;
+        for (let i = 0; i < str.length; i++) {
+          const ch = str[i];
+          if (escape) { escape = false; continue; }
+          if (ch === '\\' && inString) { escape = true; continue; }
+          if (ch === '"') { inString = !inString; continue; }
+          if (inString) continue;
+          if (ch === '{') depth++;
+          else if (ch === '}') { depth--; if (depth === 0) return JSON.parse(str.slice(0, i + 1)); }
+        }
+      }
+    } catch {}
     return null;
   }
 }
