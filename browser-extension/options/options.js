@@ -88,13 +88,6 @@ async function save() {
     const hostname = detectedName
       ? detectedName + '-browser-extension'
       : navigator.userAgent.split(/[\s/(]/)[0] + '-browser-extension';
-    const enrollBody = { machineId, hostname, enrollSecret };
-    if (employeeEmail) enrollBody.employeeEmail = employeeEmail;
-    const res = await fetch(`${serverUrl.replace(/\/$/, '')}/api/v1/enroll`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(enrollBody),
-    const hostname = navigator.userAgent.split(/[\s/(]/)[0] + '-browser-extension';
     // Prefer the typed email; else auto-detect the signed-in browser account.
     let user = userEmail;
     if (!user && chrome.identity?.getProfileUserInfo) {
