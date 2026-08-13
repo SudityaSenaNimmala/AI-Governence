@@ -13,6 +13,44 @@ import { requireMachineAuth } from '../auth.js';
 const MAX_PROMPT_BYTES   = 5 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 
+// ── Client-authoritative pricing (USD per 1M tokens) ─────────────────────
+// Cost is always recalculated from model + tokens, never from stored values.
+const PRICING = [
+  { m: /^claude-opus-4/,           input: 15.00, output: 75.00, cached: 1.50 },
+  { m: /^claude-sonnet-4/,         input: 3.00,  output: 15.00, cached: 0.30 },
+  { m: /^claude-haiku-4/,          input: 1.00,  output: 5.00,  cached: 0.10 },
+  { m: /^claude-3-5-sonnet/,       input: 3.00,  output: 15.00, cached: 0.30 },
+  { m: /^claude-3-5-haiku/,        input: 0.80,  output: 4.00,  cached: 0.08 },
+  { m: /^claude-3-opus/,           input: 15.00, output: 75.00, cached: 1.50 },
+  { m: /^gpt-4\.1-nano/,           input: 0.10,  output: 0.40,  cached: 0.025 },
+  { m: /^gpt-4\.1-mini/,           input: 0.40,  output: 1.60,  cached: 0.10 },
+  { m: /^gpt-4\.1/,                input: 2.00,  output: 8.00,  cached: 0.50 },
+  { m: /^gpt-4o-mini/,             input: 0.15,  output: 0.60,  cached: 0.075 },
+  { m: /^gpt-4o/,                  input: 2.50,  output: 10.00, cached: 1.25 },
+  { m: /^gpt-4-turbo/,             input: 10.00, output: 30.00, cached: 10.00 },
+  { m: /^gpt-4(?![\.\do]|-turbo)/, input: 30.00, output: 60.00, cached: 30.00 },
+  { m: /^gpt-3\.5-turbo/,          input: 0.50,  output: 1.50,  cached: 0.50 },
+  { m: /^o3-mini/,                 input: 1.10,  output: 4.40,  cached: 0.55 },
+  { m: /^o3/,                      input: 10.00, output: 40.00, cached: 2.50 },
+  { m: /^o1-mini/,                 input: 3.00,  output: 12.00, cached: 1.50 },
+  { m: /^o1/,                      input: 15.00, output: 60.00, cached: 7.50 },
+  { m: /^gemini-2\.5-pro/,         input: 1.25,  output: 10.00, cached: 0.31 },
+  { m: /^gemini-2\.5-flash/,       input: 0.30,  output: 2.50,  cached: 0.075 },
+  { m: /^gemini-1\.5-pro/,         input: 1.25,  output: 5.00,  cached: 0.31 },
+  { m: /^gemini-1\.5-flash/,       input: 0.075, output: 0.30,  cached: 0.019 },
+];
+function calcCost(model, promptTokens = 0, completionTokens = 0, cachedTokens = 0) {
+  if (!model) return 0;
+  const p = PRICING.find(r => r.m.test(model));
+  if (!p) return 0;
+  const billed = Math.max(0, promptTokens - cachedTokens);
+  return (billed * p.input + cachedTokens * p.cached + completionTokens * p.output) / 1_000_000;
+}
+// Sum cost across an array of calls/traces that have model + token fields
+function sumCost(rows) {
+  return rows.reduce((t, r) => t + calcCost(r.model || r._id, r.prompt_tokens || 0, r.completion_tokens || 0, r.cached_tokens || 0), 0);
+}
+
 export function mountServerAgents(app, db) {
   app.post('/api/v1/server-agent-events', requireMachineAuth, a(async (req, res) => {
     const events = req.body?.events;
@@ -168,82 +206,89 @@ export function mountServerAgents(app, db) {
 
   // Summary — totals, broken down by user, provider, model, trigger_source.
   app.get('/api/v1/server-agents/summary', a(async (req, res) => {
-    const totalsAgg = await db.collection('server_agent_calls').aggregate([
+    // Group by model to recalculate cost from tokens
+    const totalsPerModel = await db.collection('server_agent_calls').aggregate([
       {
         $group: {
-          _id: null,
+          _id: '$model',
           calls: { $sum: 1 },
-          total_cost_usd: { $sum: { $ifNull: ['$total_cost_usd', 0] } },
           prompt_tokens: { $sum: { $ifNull: ['$prompt_tokens', 0] } },
           completion_tokens: { $sum: { $ifNull: ['$completion_tokens', 0] } },
+          cached_tokens: { $sum: { $ifNull: ['$cached_tokens', 0] } },
           distinct_users: { $addToSet: '$user' },
           distinct_machines: { $addToSet: '$machine_id' },
-          distinct_models: { $addToSet: '$model' },
         },
       },
     ]).toArray();
 
-    const totals = totalsAgg[0] ? {
-      calls: totalsAgg[0].calls,
-      total_cost_usd: totalsAgg[0].total_cost_usd,
-      prompt_tokens: totalsAgg[0].prompt_tokens,
-      completion_tokens: totalsAgg[0].completion_tokens,
-      distinct_users: totalsAgg[0].distinct_users.filter(Boolean).length,
-      distinct_machines: totalsAgg[0].distinct_machines.filter(Boolean).length,
-      distinct_models: totalsAgg[0].distinct_models.filter(Boolean).length,
-    } : { calls: 0, total_cost_usd: 0, prompt_tokens: 0, completion_tokens: 0, distinct_users: 0, distinct_machines: 0, distinct_models: 0 };
+    const allUsers = new Set(); const allMachines = new Set(); const allModels = new Set();
+    let totalCalls = 0, totalPrompt = 0, totalCompletion = 0, totalCostUsd = 0;
+    for (const r of totalsPerModel) {
+      totalCalls += r.calls;
+      totalPrompt += r.prompt_tokens;
+      totalCompletion += r.completion_tokens;
+      totalCostUsd += calcCost(r._id, r.prompt_tokens, r.completion_tokens, r.cached_tokens);
+      r.distinct_users.filter(Boolean).forEach(u => allUsers.add(u));
+      r.distinct_machines.filter(Boolean).forEach(m => allMachines.add(m));
+      if (r._id) allModels.add(r._id);
+    }
+    const totals = {
+      calls: totalCalls, total_cost_usd: totalCostUsd,
+      prompt_tokens: totalPrompt, completion_tokens: totalCompletion,
+      distinct_users: allUsers.size, distinct_machines: allMachines.size, distinct_models: allModels.size,
+    };
 
-    const byUser = await db.collection('server_agent_calls').aggregate([
-      {
-        $group: {
-          _id: { $ifNull: ['$user', '(unknown)'] },
-          calls: { $sum: 1 },
-          cost_usd: { $sum: { $ifNull: ['$total_cost_usd', 0] } },
-        },
-      },
-      { $project: { _id: 0, user: '$_id', calls: 1, cost_usd: 1 } },
-      { $sort: { cost_usd: -1 } },
+    // byUser — group by user+model to recalculate cost
+    const byUserRaw = await db.collection('server_agent_calls').aggregate([
+      { $group: { _id: { user: { $ifNull: ['$user', '(unknown)'] }, model: '$model' }, calls: { $sum: 1 }, prompt_tokens: { $sum: { $ifNull: ['$prompt_tokens', 0] } }, completion_tokens: { $sum: { $ifNull: ['$completion_tokens', 0] } }, cached_tokens: { $sum: { $ifNull: ['$cached_tokens', 0] } } } },
+    ]).toArray();
+    const userMap = new Map();
+    for (const r of byUserRaw) {
+      const u = r._id.user;
+      if (!userMap.has(u)) userMap.set(u, { user: u, calls: 0, cost_usd: 0 });
+      const e = userMap.get(u);
+      e.calls += r.calls;
+      e.cost_usd += calcCost(r._id.model, r.prompt_tokens, r.completion_tokens, r.cached_tokens);
+    }
+    const byUser = [...userMap.values()].sort((a, b) => b.cost_usd - a.cost_usd).slice(0, 25);
+
+    // byProvider — group by provider+model
+    const byProvRaw = await db.collection('server_agent_calls').aggregate([
+      { $group: { _id: { provider: { $ifNull: ['$provider', '(unknown)'] }, model: '$model' }, calls: { $sum: 1 }, prompt_tokens: { $sum: { $ifNull: ['$prompt_tokens', 0] } }, completion_tokens: { $sum: { $ifNull: ['$completion_tokens', 0] } }, cached_tokens: { $sum: { $ifNull: ['$cached_tokens', 0] } } } },
+    ]).toArray();
+    const provMap = new Map();
+    for (const r of byProvRaw) {
+      const p = r._id.provider;
+      if (!provMap.has(p)) provMap.set(p, { provider: p, calls: 0, cost_usd: 0 });
+      const e = provMap.get(p);
+      e.calls += r.calls;
+      e.cost_usd += calcCost(r._id.model, r.prompt_tokens, r.completion_tokens, r.cached_tokens);
+    }
+    const byProvider = [...provMap.values()].sort((a, b) => b.cost_usd - a.cost_usd);
+
+    // byModel — already grouped by model
+    const byModelRaw = await db.collection('server_agent_calls').aggregate([
+      { $group: { _id: { $ifNull: ['$model', '(unknown)'] }, calls: { $sum: 1 }, prompt_tokens: { $sum: { $ifNull: ['$prompt_tokens', 0] } }, completion_tokens: { $sum: { $ifNull: ['$completion_tokens', 0] } }, cached_tokens: { $sum: { $ifNull: ['$cached_tokens', 0] } } } },
       { $limit: 25 },
     ]).toArray();
+    const byModel = byModelRaw.map(r => ({
+      model: r._id, calls: r.calls, prompt_tokens: r.prompt_tokens, completion_tokens: r.completion_tokens,
+      cost_usd: calcCost(r._id, r.prompt_tokens, r.completion_tokens, r.cached_tokens),
+    })).sort((a, b) => b.cost_usd - a.cost_usd);
 
-    const byProvider = await db.collection('server_agent_calls').aggregate([
-      {
-        $group: {
-          _id: { $ifNull: ['$provider', '(unknown)'] },
-          calls: { $sum: 1 },
-          cost_usd: { $sum: '$total_cost_usd' },
-        },
-      },
-      { $project: { _id: 0, provider: '$_id', calls: 1, cost_usd: 1 } },
-      { $sort: { cost_usd: -1 } },
+    // byTrigger — group by trigger+model
+    const byTrigRaw = await db.collection('server_agent_calls').aggregate([
+      { $group: { _id: { trigger: { $ifNull: ['$trigger_source', '(unknown)'] }, model: '$model' }, calls: { $sum: 1 }, prompt_tokens: { $sum: { $ifNull: ['$prompt_tokens', 0] } }, completion_tokens: { $sum: { $ifNull: ['$completion_tokens', 0] } }, cached_tokens: { $sum: { $ifNull: ['$cached_tokens', 0] } } } },
     ]).toArray();
-
-    const byModel = await db.collection('server_agent_calls').aggregate([
-      {
-        $group: {
-          _id: { $ifNull: ['$model', '(unknown)'] },
-          calls: { $sum: 1 },
-          cost_usd: { $sum: '$total_cost_usd' },
-          prompt_tokens: { $sum: '$prompt_tokens' },
-          completion_tokens: { $sum: '$completion_tokens' },
-        },
-      },
-      { $project: { _id: 0, model: '$_id', calls: 1, cost_usd: 1, prompt_tokens: 1, completion_tokens: 1 } },
-      { $sort: { cost_usd: -1 } },
-      { $limit: 25 },
-    ]).toArray();
-
-    const byTrigger = await db.collection('server_agent_calls').aggregate([
-      {
-        $group: {
-          _id: { $ifNull: ['$trigger_source', '(unknown)'] },
-          calls: { $sum: 1 },
-          cost_usd: { $sum: '$total_cost_usd' },
-        },
-      },
-      { $project: { _id: 0, trigger_source: '$_id', calls: 1, cost_usd: 1 } },
-      { $sort: { cost_usd: -1 } },
-    ]).toArray();
+    const trigMap = new Map();
+    for (const r of byTrigRaw) {
+      const t = r._id.trigger;
+      if (!trigMap.has(t)) trigMap.set(t, { trigger_source: t, calls: 0, cost_usd: 0 });
+      const e = trigMap.get(t);
+      e.calls += r.calls;
+      e.cost_usd += calcCost(r._id.model, r.prompt_tokens, r.completion_tokens, r.cached_tokens);
+    }
+    const byTrigger = [...trigMap.values()].sort((a, b) => b.cost_usd - a.cost_usd);
 
     res.json({ totals, byUser, byProvider, byModel, byTrigger });
   }));
@@ -291,10 +336,12 @@ export function mountServerAgents(app, db) {
 
       const costAgg = await db.collection('server_agent_calls').aggregate([
         { $match: ipFilter },
-        { $group: { _id: null, total: { $sum: { $ifNull: ['$total_cost_usd', 0] } }, calls: { $sum: 1 } } },
+        { $group: { _id: '$model', calls: { $sum: 1 }, prompt_tokens: { $sum: { $ifNull: ['$prompt_tokens', 0] } }, completion_tokens: { $sum: { $ifNull: ['$completion_tokens', 0] } }, cached_tokens: { $sum: { $ifNull: ['$cached_tokens', 0] } }, total_duration: { $sum: { $ifNull: ['$duration_ms', 0] } } } },
       ]).toArray();
-      c.total_cost_usd = costAgg[0]?.total || 0;
-      c.total_calls = costAgg[0]?.calls || 0;
+      c.total_cost_usd = sumCost(costAgg);
+      c.total_calls = costAgg.reduce((t, r) => t + (r.calls || 0), 0);
+      const totalDur = costAgg.reduce((t, r) => t + (r.total_duration || 0), 0);
+      c.avg_latency_ms = c.total_calls > 0 ? Math.round(totalDur / c.total_calls) : null;
       c.trace_count = c.total_calls;
     }
 
@@ -310,10 +357,12 @@ export function mountServerAgents(app, db) {
       db.collection('server_agent_calls').countDocuments({ occurred_at: { $gte: dayAgo.toISOString() } }),
       db.collection('monitored_servers').countDocuments({}),
     ]);
+    // Recalculate cost from model + tokens (not stored cost)
     const costAgg = await db.collection('server_agent_calls').aggregate([
-      { $group: { _id: null, total: { $sum: { $ifNull: ['$total_cost_usd', 0] } } } },
+      { $group: { _id: '$model', prompt_tokens: { $sum: { $ifNull: ['$prompt_tokens', 0] } }, completion_tokens: { $sum: { $ifNull: ['$completion_tokens', 0] } }, cached_tokens: { $sum: { $ifNull: ['$cached_tokens', 0] } } } },
     ]).toArray();
-    res.json({ total_calls: totalCalls, calls_last_24h: recentCalls, connected_servers: enrolledCount, total_cost_usd: costAgg[0]?.total || 0 });
+    const totalCost = sumCost(costAgg);
+    res.json({ total_calls: totalCalls, calls_last_24h: recentCalls, connected_servers: enrolledCount, total_cost_usd: totalCost });
   }));
 
   app.get('/api/v1/traces', a(async (req, res) => {
@@ -342,7 +391,7 @@ export function mountServerAgents(app, db) {
     const first = calls[0], last = calls[calls.length - 1];
     const dur = new Date(last.occurred_at).getTime() + (last.duration_ms || 0) - new Date(first.occurred_at).getTime();
     const tokens = calls.reduce((s, c) => s + (c.prompt_tokens || 0) + (c.completion_tokens || 0), 0);
-    const cost = calls.reduce((s, c) => s + (c.total_cost_usd || 0), 0);
+    const cost = sumCost(calls);
     res.json({
       trace_id: req.params.traceId, machine_id: machineId, pid, user: first.user, cmdline: first.cmdline, cwd: first.cwd, trigger_source: first.trigger_source, started_at: first.occurred_at,
       duration_ms: dur, call_count: calls.length, total_tokens: tokens, total_cost_usd: Math.round(cost * 1e6) / 1e6,
@@ -500,18 +549,36 @@ echo ""
       .toArray();
 
     // 2. Get call stats per machine from server_agent_calls
-    const callStats = await db.collection('server_agent_calls').aggregate([
+    // Two-level aggregation: group by machine+model to get tokens, then roll up per machine
+    const perModelStats = await db.collection('server_agent_calls').aggregate([
       { $group: {
-        _id: '$machine_id',
-        total_calls: { $sum: 1 },
-        total_cost_usd: { $sum: { $ifNull: ['$total_cost_usd', 0] } },
+        _id: { machine_id: '$machine_id', model: '$model' },
+        calls: { $sum: 1 },
+        prompt_tokens: { $sum: { $ifNull: ['$prompt_tokens', 0] } },
+        completion_tokens: { $sum: { $ifNull: ['$completion_tokens', 0] } },
+        cached_tokens: { $sum: { $ifNull: ['$cached_tokens', 0] } },
+        total_duration: { $sum: { $ifNull: ['$duration_ms', 0] } },
         users: { $addToSet: '$user' },
         providers: { $addToSet: '$provider' },
-        models: { $addToSet: '$model' },
         last_call: { $max: '$occurred_at' },
       }},
     ]).toArray();
-    const statsMap = new Map(callStats.map(s => [s._id, s]));
+    // Roll up per machine
+    const statsMap = new Map();
+    for (const r of perModelStats) {
+      const mid = r._id.machine_id;
+      const model = r._id.model;
+      const cost = calcCost(model, r.prompt_tokens, r.completion_tokens, r.cached_tokens);
+      if (!statsMap.has(mid)) statsMap.set(mid, { total_calls: 0, total_cost_usd: 0, total_duration: 0, users: new Set(), providers: new Set(), models: new Set(), last_call: null });
+      const s = statsMap.get(mid);
+      s.total_calls += r.calls;
+      s.total_cost_usd += cost;
+      s.total_duration += r.total_duration || 0;
+      r.users.filter(Boolean).forEach(u => s.users.add(u));
+      r.providers.filter(Boolean).forEach(p => s.providers.add(p));
+      if (model) s.models.add(model);
+      if (!s.last_call || r.last_call > s.last_call) s.last_call = r.last_call;
+    }
 
     // 3. Merge enrollment + call stats
     const result = enrolled.map(m => {
@@ -529,9 +596,10 @@ echo ""
         first_seen: m.first_seen || null,
         total_calls: s.total_calls || 0,
         total_cost_usd: s.total_cost_usd || 0,
-        users: (s.users || []).filter(Boolean),
-        providers: (s.providers || []).filter(Boolean),
-        models: (s.models || []).filter(Boolean),
+        avg_latency_ms: s.total_calls > 0 ? Math.round(s.total_duration / s.total_calls) : null,
+        users: s.users ? [...s.users] : [],
+        providers: s.providers ? [...s.providers] : [],
+        models: s.models ? [...s.models] : [],
       };
     });
 
@@ -553,7 +621,7 @@ function groupIntoTraces(calls, gapMs) {
   for (const e of traceMap.values()) {
     const f = e.calls[0], l = e.calls[e.calls.length - 1];
     const dur = new Date(l.occurred_at).getTime() + (l.duration_ms || 0) - new Date(f.occurred_at).getTime();
-    traces.push({ trace_id: e.traceId, machine_id: f.machine_id, pid: f.pid, user: f.user, cmdline: f.cmdline, trigger_source: f.trigger_source, started_at: f.occurred_at, duration_ms: dur, call_count: e.calls.length, total_tokens: e.calls.reduce((s, c) => s + (c.prompt_tokens || 0) + (c.completion_tokens || 0), 0), total_cost_usd: Math.round(e.calls.reduce((s, c) => s + (c.total_cost_usd || 0), 0) * 1e6) / 1e6, status: e.calls.some(c => c.response_status >= 400) ? 'error' : 'ok', providers: [...new Set(e.calls.map(c => c.provider).filter(Boolean))], models: [...new Set(e.calls.map(c => c.model).filter(Boolean))] });
+    traces.push({ trace_id: e.traceId, machine_id: f.machine_id, pid: f.pid, user: f.user, cmdline: f.cmdline, trigger_source: f.trigger_source, started_at: f.occurred_at, duration_ms: dur, call_count: e.calls.length, total_tokens: e.calls.reduce((s, c) => s + (c.prompt_tokens || 0) + (c.completion_tokens || 0), 0), total_cost_usd: Math.round(sumCost(e.calls) * 1e6) / 1e6, status: e.calls.some(c => c.response_status >= 400) ? 'error' : 'ok', providers: [...new Set(e.calls.map(c => c.provider).filter(Boolean))], models: [...new Set(e.calls.map(c => c.model).filter(Boolean))] });
   }
   return traces.sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime());
 }

@@ -5354,9 +5354,6 @@ function ServerMonitorView() {
 
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
-        <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#ef4444" }} title="deploy indicator" />
-      </div>
       <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
         <StatCard icon={<Activity size={18} />} label="Total Calls" value={stats?.total_calls || 0} hint="All time" color="#3b82f6" />
         <StatCard icon={<Clock size={18} />} label="Last 24h" value={stats?.calls_last_24h || 0} hint="Recent calls" color="#8b5cf6" />
@@ -5392,7 +5389,7 @@ function ServerMonitorView() {
                         <div style={{ width: 8, height: 8, borderRadius: "50%", background: srv.status === "active" ? "#22c55e" : srv.status === "uninstalled" ? "#ef4444" : "#9ca3af" }} />
                         <div>
                           <div style={{ fontWeight: 600, fontSize: 15 }}>{srv.display_name || srv.hostname || srv.machine_id?.slice(0, 12)}</div>
-                          <div className="aihub_text_muted" style={{ fontSize: 12 }}>{srvGoverned.length} agent{srvGoverned.length !== 1 ? "s" : ""} governed | {srv.total_calls || 0} traces | {fmtUsd(srv.total_cost_usd)}</div>
+                          <div className="aihub_text_muted" style={{ fontSize: 12 }}>{srvGoverned.length} agent{srvGoverned.length !== 1 ? "s" : ""} governed | {srv.total_calls || 0} traces | {fmtUsd(srv.total_cost_usd)} | avg {srv.avg_latency_ms ? (srv.avg_latency_ms / 1000).toFixed(1) + "s" : "--"}</div>
                         </div>
                       </div>
                       <ChevronRight size={16} style={{ color: "#9ca3af" }} />
@@ -5431,7 +5428,7 @@ function ServerMonitorView() {
                         <div>
                           <div style={{ fontWeight: 600, fontSize: 14 }}>{agent.container_name}</div>
                           <div className="aihub_text_muted" style={{ fontSize: 12 }}>
-                            IP: {agent.container_ip || "?"} | {agent.total_calls || 0} traces | {fmtUsd(agent.total_cost_usd)}
+                            IP: {agent.container_ip || "?"} | {agent.total_calls || 0} traces | {fmtUsd(agent.total_cost_usd)} | avg {agent.avg_latency_ms ? (agent.avg_latency_ms / 1000).toFixed(1) + "s" : "--"}
                           </div>
                         </div>
                       </div>
@@ -6069,7 +6066,7 @@ const TAB_GROUPS = {
       // admin-gated routes, snippets posting to a removed endpoint via a
       // globalThis.fetch monkey-patch). It is replaced by the SDK group above, not
       // duplicated — /AIHub/DeveloperSDK now redirects there.
-      { slug: "server-monitor", label: "Server Monitor",  component: ServerMonitorView, hidden: true },
+      { slug: "server-monitor", label: "Server Monitor",  component: ServerMonitorView },
       // { slug: "copilot",      label: "Copilot Readiness", component: CopilotReadinessView },  // hidden — not working reliably
       // Machines is commented out because Policies & Risk → Risk Scores already
       // lists every enrolled machine: all of its rows carry a hostname, sourced
