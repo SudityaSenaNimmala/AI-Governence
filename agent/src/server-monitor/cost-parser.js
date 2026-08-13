@@ -72,7 +72,10 @@ export function parseApiCall({ host, path: urlPath, requestBody, requestHeaders,
   const reqJson = safeJson(requestBody);
   const respBuf = maybeDecompress(responseBody, responseHeaders);
 
-  const isSse = (responseHeaders?.['content-type'] || '').includes('text/event-stream');
+  const respStr = respBuf ? respBuf.toString('utf8', 0, 50) : '';
+  // Detect SSE by content-type header OR by body starting with "data:"
+  const isSse = (responseHeaders?.['content-type'] || '').includes('text/event-stream')
+    || respStr.trimStart().startsWith('data:');
   // Ollama uses NDJSON streaming (one JSON object per line) instead of SSE.
   const isNdjsonStream = (responseHeaders?.['content-type'] || '').includes('application/x-ndjson');
   const respJson = (isSse || isNdjsonStream) ? null : safeJson(respBuf);
