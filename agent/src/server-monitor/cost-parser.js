@@ -69,9 +69,10 @@ export function providerForHost(host, urlPath = null) {
 // mechanism that gives the "govern every AI app" claim teeth — unknown
 // vendors are CAPTURED, just unlabeled until an admin promotes them.
 export function parseApiCall({ host, path: urlPath, requestBody, requestHeaders, responseBody, responseHeaders }) {
-  const reqJson = safeJson(requestBody);
+  const reqBuf = maybeDecompress(requestBody, requestHeaders);
+  const reqJson = safeJson(reqBuf);
   // DEBUG: log whether reqJson parsed
-  if (requestBody && !reqJson) console.log(`[debug] safeJson failed for requestBody[${requestBody.length}B], first50="${requestBody.toString('utf8', 0, 50)}"`);
+  if (requestBody && !reqJson) console.log(`[debug] safeJson failed for reqBuf[${reqBuf?.length || 0}B] (raw=${requestBody.length}B), first50="${(reqBuf || requestBody).toString('utf8', 0, 50)}", lastBytes="${(reqBuf || requestBody).toString('hex', Math.max(0, (reqBuf || requestBody).length - 10))}"`);
   if (reqJson) console.log(`[debug] reqJson parsed OK, model=${reqJson.model}, messages=${Array.isArray(reqJson.messages) ? reqJson.messages.length : 'N/A'}`);
   const respBuf = maybeDecompress(responseBody, responseHeaders);
 
@@ -103,7 +104,7 @@ export function parseApiCall({ host, path: urlPath, requestBody, requestHeaders,
   // as 'openai' — the only difference is the tag and the discovery breadcrumb.
   let parsed = null;
   if (provider === 'openai' || provider === 'openai-azure' || provider === 'local-openai-compatible' || provider === 'unknown:openai') {
-    parsed = parseOpenAI({ urlPath, reqJson, respJson, sseEvents, requestBody });
+    parsed = parseOpenAI({ urlPath, reqJson, respJson, sseEvents, requestBody: reqBuf || requestBody });
   } else if (provider === 'anthropic' || provider === 'unknown:anthropic') {
     parsed = parseAnthropic({ urlPath, reqJson, respJson, sseEvents });
   } else if (provider === 'google' || provider === 'unknown:google') {
