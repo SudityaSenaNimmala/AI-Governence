@@ -5,6 +5,7 @@ import { PowerPlatformClient } from "../services/powerPlatformClient.js";
 import { accessTokenFromRefresh } from "./googleOAuth.js";
 import { getDb } from "../db.js";
 import { decrypt } from "../crypto.js";
+import { normalizeStoredRisk } from "../../lib/risk-scale.js";
 
 const router = Router();
 
@@ -187,9 +188,28 @@ router.get("/run", async (req, res) => {
       }
     }
 
+    // Which agents have actually been recertified.
+    //
+    // Risk scoring penalises "never reviewed", and that flag used to be hardcoded
+    // true — so completing a recertification campaign had no effect on the score it
+    // exists to improve. Resolved here because this is the layer with database
+    // access; discoveryService only receives tokens.
+    const reviewedAgentIds = new Set<string>(
+      (await getDb().collection("recertification_campaigns")
+        .find({ status: { $ne: "pending" }, responded_at: { $ne: null } })
+        .project({ agent_id: 1, _id: 0 })
+        .toArray())
+        .map((r: any) => String(r.agent_id))
+        .filter(Boolean),
+    );
+    if (reviewedAgentIds.size > 0) {
+      console.log(`[Discovery] ${reviewedAgentIds.size} agent(s) have a completed recertification`);
+    }
+
     // Run the full discovery pipeline
     const result = await runDiscovery({
       graph: graphToken,
+      reviewedAgentIds,
       dataverse: dataverseToken,
       powerPlatform: powerPlatformToken,
       audit: auditToken,
@@ -244,15 +264,45 @@ router.get("/run", async (req, res) => {
 router.get("/agents", async (req, res) => {
   try {
     const db = getDb();
+    const col = db.collection("discovered_agents");
     const oauthKeyId = req.query.oauth_key_id as string | undefined;
+    // ?all=1 returns the full history. Kept as an escape hatch for debugging and
+    // for anything that legitimately wants retired agents.
+    const includeAll = String(req.query.all || "") === "1";
+
     const filter: any = {};
     if (oauthKeyId) filter.oauth_key_id = oauthKeyId;
-    const agents = await db.collection("discovered_agents")
-      .find(filter)
-      .sort({ updated_at: -1 })
-      .toArray();
-    // Strip MongoDB _id
-    const clean = agents.map(({ _id, ...rest }: any) => rest);
+
+    // Default to the MOST RECENT scan rather than everything ever stored.
+    //
+    // Rows are upserted and never removed, so this collection is an append-only
+    // history: it held 181 agents across scans dating back to June while the
+    // latest scan found 68. The dashboard read all of them, which inflated the
+    // agent count and the Stale Agents badge with agents from other tenants and
+    // long-deleted apps. A scan is a statement about what exists NOW, so that is
+    // what this returns.
+    if (!includeAll) {
+      const newest = await col.find(filter).sort({ scan_batch: -1 }).limit(1)
+        .project({ scan_batch: 1 }).toArray();
+      const batch = newest[0]?.scan_batch;
+      // Only narrow when a batch stamp exists. Rows written before this change
+      // have none, and filtering on a missing field would return nothing at all.
+      if (batch) filter.scan_batch = batch;
+    }
+
+    const agents = await col.find(filter).sort({ updated_at: -1 }).toArray();
+
+    const clean = agents.map(({ _id, ...rest }: any) => ({
+      ...rest,
+      // Normalise on the way out, as registry.js and policyEngine.ts already do.
+      //
+      // Rows written before RISK_SCALE_MARKER existed hold a COMPLIANCE score
+      // (higher = safer) in a field every consumer now reads as risk. Served raw,
+      // 31 of them contradicted themselves on screen — score 73 labelled "medium"
+      // when 73 is the "high" band — because the score came from the old scale and
+      // the label from the new one.
+      risk: normalizeStoredRisk(rest.risk),
+    }));
     res.json({ agents: clean, warnings: [] });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to load agents";
@@ -274,13 +324,18 @@ router.post("/agents", async (req, res) => {
     }
     const db = getDb();
     const col = db.collection("discovered_agents");
+    // One stamp for the whole request, so every agent from this scan shares it and
+    // GET can identify "the current inventory" without guessing from timestamps.
+    // The dashboard persists a scan in a single call (AgentGovernance.jsx:949 posts
+    // the merged multi-platform result), so one request really is one scan.
+    const scanBatch = new Date();
     let upserted = 0;
     for (const agent of agents) {
       const key = agent.id || agent.appId || agent.name;
       if (!key) continue;
       await col.updateOne(
         { agent_key: key },
-        { $set: { ...agent, agent_key: key, updated_at: new Date() } },
+        { $set: { ...agent, agent_key: key, scan_batch: scanBatch, updated_at: scanBatch } },
         { upsert: true },
       );
       upserted++;

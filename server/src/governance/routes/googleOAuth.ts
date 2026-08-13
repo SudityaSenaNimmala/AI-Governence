@@ -72,6 +72,14 @@ const SCOPES = [
   "https://www.googleapis.com/auth/cloud-platform",
   "https://www.googleapis.com/auth/cloud-platform.read-only",
 
+  // ── Workspace user list (workspaceUsers) ─────────────────────────────────
+  // googleWorkspaceClient.ts calls the Admin SDK directory API with this scope,
+  // but it was never requested at consent — so the call 403'd silently and
+  // workspaceUsers came back 0 on a domain that plainly has users. Nothing was
+  // wrong with the data; the app had simply never asked for permission to read
+  // it. Sensitive scope, so it does appear on the consent screen.
+  "https://www.googleapis.com/auth/admin.directory.user.readonly",
+
   // Identifies WHO consented, so the row records whose departure breaks it.
   "openid", "email",
 ];
@@ -98,6 +106,10 @@ const REQUIRED_BY_DISCOVERY = [
   "https://www.googleapis.com/auth/drive.readonly",
   "https://www.googleapis.com/auth/cloud-platform",
   "https://www.googleapis.com/auth/cloud-platform.read-only",
+  // Listed so the boot check below actually guards it. The drift this check exists
+  // to catch had already happened and went unnoticed precisely because the scope
+  // was absent from BOTH lists — the assertion can only compare what it knows about.
+  "https://www.googleapis.com/auth/admin.directory.user.readonly",
 ];
 {
   const missing = REQUIRED_BY_DISCOVERY.filter((s) => !SCOPES.includes(s));

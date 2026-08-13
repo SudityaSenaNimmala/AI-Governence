@@ -796,12 +796,18 @@ function AgentGovernanceInner() {
   useEffect(() => {
     const q = new URLSearchParams(window.location.search);
     // Both providers report through the same banner; only the label differs.
-    const status = q.get("ms_connect") || q.get("google_connect");
+    const status = q.get("ms_connect") || q.get("google_connect") || q.get("ms_provision");
     if (!status) return;
-    const provider = q.get("ms_connect") ? "Microsoft" : "Google";
+    // ms_provision is the Power Platform leg, which reports how many environments
+    // it made ready rather than a single tenant id.
+    const isProvision = Boolean(q.get("ms_provision"));
+    const provider = q.get("google_connect") ? "Google" : "Microsoft";
     setMsConnect({
       status,
       provider,
+      isProvision,
+      ready: q.get("ready"),
+      environments: q.get("environments"),
       reason: q.get("reason"),
       // Microsoft returns a tenant guid; Google returns the Workspace domain.
       tenant: q.get("tenant") || q.get("domain"),
@@ -1092,17 +1098,33 @@ function AgentGovernanceInner() {
           up front than to let two tabs return a raw 500. */}
       {msConnect && (
         <div style={{ margin: "0 24px 12px", padding: "9px 14px", borderRadius: 8, display: "flex", alignItems: "center", gap: 8, fontSize: 12.5,
-                      background: msConnect.status === "success" ? "#f0fdf4" : "#fef2f2",
-                      border: `1px solid ${msConnect.status === "success" ? "#bbf7d0" : "#fecaca"}`,
-                      color: msConnect.status === "success" ? "#166534" : "#b91c1c" }}>
+                      background: msConnect.status === "success" ? "#f0fdf4" : msConnect.status === "partial" || msConnect.status === "needs_consent" ? "#fffbeb" : "#fef2f2",
+                      border: `1px solid ${msConnect.status === "success" ? "#bbf7d0" : msConnect.status === "partial" || msConnect.status === "needs_consent" ? "#fde68a" : "#fecaca"}`,
+                      color: msConnect.status === "success" ? "#166534" : msConnect.status === "partial" || msConnect.status === "needs_consent" ? "#92400e" : "#b91c1c" }}>
           <ShieldCheck size={14} />
           <span>
-            {msConnect.status === "success"
-              ? <><strong>{msConnect.provider} connected.</strong>{" "}
-                  {msConnect.tenant && <>Tenant <code>{msConnect.tenant}</code>{" "}</>}
-                  {msConnect.email && <>granted by <code>{msConnect.email}</code>{" "}</>}
-                  — run a scan to discover its agents.</>
-              : <><strong>{msConnect.provider} connection failed.</strong> {msConnect.reason || "Consent was not completed."}</>}
+            {msConnect.isProvision
+              // Partial is the common, expected outcome, not an error: a tenant-level
+              // admin can be absent from an individual environment, so some
+              // environments are provisioned and others are not.
+              //
+              // The connection itself is reported first whenever it succeeded. The
+              // admin performed one action, so leading with a Power Platform problem
+              // would read as though connecting Microsoft had failed — it did not.
+              ? (msConnect.status === "error"
+                  ? <><strong>Microsoft connected.</strong> Power Platform setup did not complete: {msConnect.reason || "unknown reason"} Copilot Studio agents will be missing until it does.</>
+                  : msConnect.status === "needs_consent"
+                    ? <><strong>Microsoft connected.</strong> {msConnect.reason || "Power Platform access needs one extra approval."} Everything else is already scanning.</>
+                    : <><strong>Microsoft connected and Power Platform access granted.</strong>{" "}
+                        {msConnect.ready} of {msConnect.environments} environment(s) ready
+                        {msConnect.reason ? <> — {msConnect.reason}</> : null}
+                        {" "}— run a scan to discover its agents.</>)
+              : msConnect.status === "success"
+                ? <><strong>{msConnect.provider} connected.</strong>{" "}
+                    {msConnect.tenant && <>Tenant <code>{msConnect.tenant}</code>{" "}</>}
+                    {msConnect.email && <>granted by <code>{msConnect.email}</code>{" "}</>}
+                    — run a scan to discover its agents.</>
+                : <><strong>{msConnect.provider} connection failed.</strong> {msConnect.reason || "Consent was not completed."}</>}
           </span>
           <button onClick={() => setMsConnect(null)}
                   style={{ marginLeft: "auto", border: "none", background: "none", cursor: "pointer", color: "inherit", fontSize: 16, lineHeight: 1 }}>×</button>

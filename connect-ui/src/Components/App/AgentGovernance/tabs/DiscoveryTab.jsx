@@ -1395,6 +1395,31 @@ function AgentTableView() {
           {result.warnings.map((w, i) => (
             <div key={i} style={{ fontSize: 11, color: "#78350f", padding: "2px 0" }}>• {w}</div>
           ))}
+          {/* Every Dataverse warning above describes work an admin would otherwise
+              do by hand — registering the management app, or adding an Application
+              User in each environment. Both are automated behind this one sign-in,
+              so the remedy belongs next to the warning that prompts it rather than
+              buried in documentation. */}
+          {oauthKeyId && result.warnings.some(w =>
+            /Dataverse|Application User|Power Platform/i.test(String(w))) && (
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #f59e0b33" }}>
+              <button
+                onClick={() => {
+                  // force_consent=1: reaching this button means the silent attempt
+                  // during connect did not get a grant, so show the approval screen.
+                  window.location.href =
+                    `/api/auth/microsoft/provision/start?key_id=${encodeURIComponent(oauthKeyId)}&force_consent=1`;
+                }}
+                style={{ padding: "6px 12px", fontSize: 11.5, fontWeight: 600, borderRadius: 6,
+                         border: "1px solid #b45309", background: "#fff7ed", color: "#92400e", cursor: "pointer" }}>
+                Grant Power Platform access
+              </button>
+              <span style={{ fontSize: 10.5, color: "#78350f", marginLeft: 10 }}>
+                Sign in once as a Power Platform or Global Administrator — we register the
+                management app and create the Application User in every environment for you.
+              </span>
+            </div>
+          )}
         </div>
       )}
 

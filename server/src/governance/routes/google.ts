@@ -452,18 +452,34 @@ router.get("/scan-platform", async (req, res) => {
 
     switch (platform) {
       case "reasoning_engines": {
-        const raw = await client.discoverReasoningEnginesOnly();
+        // Swept across every accessible project, not just the configured one.
+        // Calling discoverReasoningEnginesOnly() directly returned 4 of the 61
+        // engines this tenant actually has, because 57 live in two other projects —
+        // and the hardcoded `warnings: []` below meant the UI showed a clean,
+        // successful scan that had silently missed 93% of the inventory.
+        const swept = await client.forEachProject(
+          () => client.discoverReasoningEnginesOnly(),
+          "Reasoning Engines",
+        );
+        const raw = swept.items;
         const vertexReasoningEngines = raw.map(re => ({
           id: re.name, name: re.name, displayName: re.displayName, description: re.description || "",
           region: re.name.split("/locations/")[1]?.split("/")[0] || "us-central1",
           createTime: re.createTime, updateTime: re.updateTime,
           pythonVersion: (re as any).spec?.packageSpec?.pythonVersion, labels: (re as any).labels || {},
         }));
-        res.json({ platform, vertexReasoningEngines, projectId, domain, warnings: [] });
+        res.json({ platform, vertexReasoningEngines, projectId, domain, projectsScanned: swept.projectIds, warnings: swept.warnings });
         break;
       }
       case "agent_builder": {
-        const raw = await client.discoverAgentBuilder();
+        // Same project sweep. discoverAgentBuilder returns { apps, dataStores }, not
+        // a flat array, so only `apps` is accumulated here — spreading the object
+        // would yield nothing.
+        const sweptAb = await client.forEachProject(
+          async () => (await client.discoverAgentBuilder()).apps,
+          "Agent Builder",
+        );
+        const raw = { apps: sweptAb.items };
         const agentBuilderApps = raw.apps.map(app => ({
           id: app.name, name: app.name, displayName: app.displayName,
           solutionType: ((app as any).solutionType || "").replace("SOLUTION_TYPE_", "").toLowerCase(),
@@ -471,7 +487,7 @@ router.get("/scan-platform", async (req, res) => {
           createTime: (app as any).createTime, updateTime: (app as any).updateTime,
           location: app.name.split("/locations/")[1]?.split("/")[0] || "global",
         }));
-        res.json({ platform, agentBuilderApps, projectId, domain, warnings: [] });
+        res.json({ platform, agentBuilderApps, projectId, domain, projectsScanned: sweptAb.projectIds, warnings: sweptAb.warnings });
         break;
       }
       case "chat_bots": {
@@ -486,13 +502,18 @@ router.get("/scan-platform", async (req, res) => {
         break;
       }
       case "notebooklm": {
-        const raw = await client.discoverNotebookLM();
+        // Project-scoped, so swept like the two above.
+        const sweptNb = await client.forEachProject(
+          () => client.discoverNotebookLM(),
+          "NotebookLM",
+        );
+        const raw = sweptNb.items;
         const notebookLMNotebooks = raw.map(nb => ({
           id: nb.name, name: nb.name, displayName: (nb as any).displayName || nb.name.split("/").pop() || "Notebook",
           createTime: (nb as any).createTime, updateTime: (nb as any).updateTime,
           creator: (nb as any).creator, sourceCount: (nb as any).sourceCount || 0,
         }));
-        res.json({ platform, notebookLMNotebooks, projectId, domain, warnings: [] });
+        res.json({ platform, notebookLMNotebooks, projectId, domain, projectsScanned: sweptNb.projectIds, warnings: sweptNb.warnings });
         break;
       }
     }
@@ -520,9 +541,19 @@ router.get("/user-activity", async (req, res) => {
 
     const client = gClient;
 
-    const [conversationsResult, discoveryResult] = await Promise.allSettled([
+    const [conversationsResult, discoveryResult, driveActivityResult] = await Promise.allSettled([
       client.fetchAgentConversations(7),
       client.discoverAll(),
+      // Domain-wide Drive audit events. The per-agent details below only surface
+      // files an agent is grounded on; this is what users actually did to documents,
+      // and it was never fetched — which is why File Activity had nothing real in it
+      // for a Google connection.
+      //
+      // Window is configurable because the Reports API retains 180 days, unlike the
+      // 7-day O365 streaming feed. Defaulting to 7 kept parity with the Microsoft
+      // side, but on a quiet domain that is indistinguishable from a broken query —
+      // being able to ask for more is how you tell the two apart.
+      client.fetchDriveActivity(Math.min(Math.max(parseInt(String(req.query.days || "7"), 10) || 7, 1), 180)),
     ]);
 
     const chats: Array<any> = [];
@@ -541,12 +572,42 @@ router.get("/user-activity", async (req, res) => {
 
     const knowledge: Array<any> = [];
     const files: Array<any> = [];
+    // Agent deploy/update events, kept separately rather than discarded — they are
+    // real and useful, just not file activity. Returned so the UI can show them as
+    // a lifecycle timeline instead of fake filenames.
+    const lifecycleEvents: Array<any> = [];
+
+    // Domain-wide Drive events first, so genuine user file activity leads the list
+    // rather than being appended after per-agent knowledge files.
+    if (driveActivityResult.status === "fulfilled") {
+      for (const act of driveActivityResult.value) {
+        files.push({
+          id: act.id, fileName: act.target, filePath: act.docType || "Drive",
+          userName: act.user, userId: act.user,
+          operation: act.operation, workload: "google_drive", timestamp: act.timestamp,
+          visibility: act.visibility, docId: act.docId,
+          relatedAgents: [],
+        });
+      }
+    } else {
+      console.warn("[Google] Drive audit failed:", driveActivityResult.reason instanceof Error ? driveActivityResult.reason.message : driveActivityResult.reason);
+    }
 
     if (discoveryResult.status === "fulfilled") {
       const result = discoveryResult.value;
       const agentInputs: Array<{ platform: string; id: string; name: string }> = [];
       for (const ab of result.agentBuilderApps || []) agentInputs.push({ platform: "agent_builder", id: ab.name, name: ab.displayName });
-      for (const re of result.vertexReasoningEngines || []) agentInputs.push({ platform: "reasoning_engine", id: re.name, name: re.displayName });
+      // displayName is optional on a reasoning engine — several in a live project
+      // have none, and passing it through undefined surfaced literal "undefined" as
+      // the agent name on every row derived from them. Falls back to the resource
+      // id's last segment, which is at least identifying.
+      for (const re of result.vertexReasoningEngines || []) {
+        agentInputs.push({
+          platform: "reasoning_engine",
+          id: re.name,
+          name: re.displayName || re.name.split("/").pop() || "Reasoning Engine",
+        });
+      }
       for (const gem of result.gems || []) agentInputs.push({ platform: "gemini_gem", id: gem.id, name: gem.name });
       for (const nb of result.notebookLMNotebooks || []) agentInputs.push({ platform: "notebooklm", id: nb.name, name: (nb as { displayName?: string }).displayName || nb.name.split("/").pop() || "Notebook" });
       for (const bot of result.chatBots || []) agentInputs.push({ platform: "google_chat", id: bot.botName, name: bot.botDisplayName });
@@ -569,9 +630,33 @@ router.get("/user-activity", async (req, res) => {
             });
           }
           for (const act of (details.fileActivity || [])) {
+            // Agent lifecycle events are NOT file activity.
+            //
+            // Every fetch*Details method synthesises entries from the agent's own
+            // createTime/updateTime with `user: "system"` and `target` set to the
+            // AGENT's display name. Mapped straight into `files` with
+            // `fileName: act.target`, the File Activity table listed "Reasoning
+            // Engine", "GTM Agent", "Migration Knowledge Agent" as filenames,
+            // operation Deployed/Updated, user system, Used By Agent "—". No file
+            // was involved anywhere in the row.
+            //
+            // Split on the actor rather than the operation name: "Created" and
+            // "Updated" are emitted for BOTH real Drive documents and agent
+            // lifecycle, so operation alone cannot tell them apart, whereas every
+            // lifecycle push hardcodes "system" and every genuine file entry carries
+            // a real address. Same rule as the conversation fix — file activity
+            // requires an actor.
+            const isLifecycle = !act.user || act.user === "system";
+            if (isLifecycle) {
+              lifecycleEvents.push({
+                id: act.id, agentId: agent.id, agentName: agent.name,
+                platform: agent.platform, operation: act.operation, timestamp: act.timestamp,
+              });
+              continue;
+            }
             files.push({
               id: act.id, fileName: act.target, filePath: agent.name,
-              userName: act.user || "unknown", userId: act.user || "",
+              userName: act.user, userId: act.user,
               operation: act.operation, workload: agent.platform, timestamp: act.timestamp,
               relatedAgents: [{ name: agent.name, botId: agent.id }],
             });
@@ -593,6 +678,8 @@ router.get("/user-activity", async (req, res) => {
       chats, chatsLastUpdated: new Date().toISOString(),
       files, filesLastUpdated: new Date().toISOString(),
       knowledge, knowledgeLastUpdated: new Date().toISOString(),
+      // Split out of `files` — agent deploy/update events, not file access.
+      lifecycleEvents, lifecycleEventsLastUpdated: new Date().toISOString(),
     });
   } catch (err) {
     if (err instanceof GoogleWorkspaceError && (err.status === 401 || err.status === 403)) {

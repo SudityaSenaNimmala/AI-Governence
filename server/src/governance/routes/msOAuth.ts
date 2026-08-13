@@ -24,6 +24,7 @@ import { Router } from "express";
 import crypto from "node:crypto";
 import { getDb } from "../db.js";
 import { v4 as uuidv4 } from "uuid";
+import { msProvisionConfigured } from "./msProvision.js";
 
 const router = Router();
 
@@ -152,6 +153,25 @@ router.get("/callback", async (req, res) => {
       { upsert: true },
     );
 
+    // Continue straight into Power Platform provisioning instead of returning to
+    // the dashboard here.
+    //
+    // Admin consent covers Graph, but Copilot Studio also needs the app registered
+    // as a Power Platform management application and an Application User in each
+    // Dataverse environment — neither of which an app-only token may do. Those need
+    // a delegated token, and the moment to collect one is NOW: the admin is signed
+    // in, in this browser, and /adminconsent has just granted this app's delegated
+    // permissions tenant-wide as well (an AllPrincipals oauth2PermissionGrant), so
+    // the authorize call below normally completes without showing them anything.
+    //
+    // Sending them back to the dashboard first is what turned this into two
+    // separate sign-ins. chained=1 tells the provisioning callback to report the
+    // connection as successful regardless of how provisioning goes, so one action
+    // reads as one outcome.
+    if (msProvisionConfigured()) {
+      res.redirect(`/api/auth/microsoft/provision/start?key_id=${encodeURIComponent(id)}&chained=1`);
+      return;
+    }
     back({ ms_connect: "success", tenant, key_id: id });
   } catch (err) {
     console.error("[msOAuth] callback failed:", err instanceof Error ? err.message : err);

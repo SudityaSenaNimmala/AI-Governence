@@ -432,7 +432,7 @@ router.delete("/clear-token-cache", async (_req, res) => {
 
 router.post("/block", async (req, res) => {
   try {
-    const { agent_id, agent_name, platform, reason } = req.body;
+    const { agent_id, agent_name, platform, reason, oauth_key_id } = req.body;
     if (!agent_id) {
       res.status(400).json({ error: "agent_id is required" });
       return;
@@ -446,6 +446,10 @@ router.post("/block", async (req, res) => {
           agent_name: agent_name || null,
           platform: platform || null,
           reason: reason || "Blocked by admin",
+          // Provenance, so a block can be attributed to the connection it came
+          // from. Rows written before this have none, which is why the read path
+          // falls back to checking whether the agent still appears in any scan.
+          oauth_key_id: oauth_key_id || null,
           blocked: true,
           blocked_at: new Date(),
           unblocked_at: null,
@@ -483,9 +487,35 @@ router.get("/blocked-agents", async (_req, res) => {
     const db = getDb();
     const list = await db.collection("blocked_agents")
       .find({ blocked: true })
-      .project({ _id: 0, agent_id: 1, agent_name: 1, platform: 1, reason: 1, blocked_at: 1 })
+      .project({ _id: 0, agent_id: 1, agent_name: 1, platform: 1, reason: 1, blocked_at: 1, oauth_key_id: 1 })
       .toArray();
-    res.json(list);
+
+    // Flag blocks whose agent no longer appears in any scan, WITHOUT removing them.
+    //
+    // This list is what the browser extension enforces against, so filtering it is
+    // the one change that must not be made here: dropping a row silently lifts a
+    // block an admin deliberately applied. A block outliving its connection is
+    // correct behaviour — the agent may still be reachable even if we stopped
+    // scanning the tenant that revealed it.
+    //
+    // What was actually wrong is that such rows were indistinguishable from live
+    // ones, so a block on an agent from a Google connection removed in June sat in
+    // the UI forever with nothing to indicate it was unmanageable. Marked, not
+    // deleted; clearing one stays an explicit admin action via /unblock.
+    const ids = list.map(b => b.agent_id).filter(Boolean);
+    const known = new Set<string>();
+    if (ids.length > 0) {
+      const rows = await db.collection("discovered_agents")
+        .find({ $or: [{ id: { $in: ids } }, { agent_key: { $in: ids } }] })
+        .project({ _id: 0, id: 1, agent_key: 1 })
+        .toArray();
+      for (const r of rows) {
+        if (r.id) known.add(String(r.id));
+        if (r.agent_key) known.add(String(r.agent_key));
+      }
+    }
+
+    res.json(list.map(b => ({ ...b, orphaned: !known.has(String(b.agent_id)) })));
   } catch (err) {
     res.json([]);
   }

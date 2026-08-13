@@ -128,13 +128,24 @@ router.get("/google", async (req: Request, res: Response) => {
     const endpointCosts = metrics.endpoints.map((ep) => {
       const pricing = findPricing(ep.displayName, "google");
       const cost = computeCost(ep.inputTokenCount, ep.outputTokenCount, pricing);
+      // Requests happened, but Vertex reported no token counts for this endpoint —
+      // its token metrics are only published for some model families.
+      //
+      // Cost is UNKNOWN here, not zero. Multiplying 0 tokens by a rate produced
+      // $0.00 for an endpoint with 10 real predictions, and the Cost tab presented
+      // that as "this agent costs nothing" rather than "we could not measure it".
+      // Under-reporting spend as zero is the one direction a cost view must not fail
+      // in, so these are surfaced as null and counted separately.
+      const tokensUnavailable = ep.predictionCount > 0 && ep.inputTokenCount === 0 && ep.outputTokenCount === 0;
       return {
         endpointId: ep.endpointId, displayName: ep.displayName, modelName: ep.displayName,
         inputTokens: ep.inputTokenCount, outputTokens: ep.outputTokenCount, totalTokens: ep.totalTokenCount,
         requestCount: ep.predictionCount,
-        inputCost: (ep.inputTokenCount * pricing.input) / 1_000_000,
-        outputCost: (ep.outputTokenCount * pricing.output) / 1_000_000,
-        totalCost: cost, pricingPerMillionInput: pricing.input, pricingPerMillionOutput: pricing.output,
+        tokensUnavailable,
+        inputCost: tokensUnavailable ? null : (ep.inputTokenCount * pricing.input) / 1_000_000,
+        outputCost: tokensUnavailable ? null : (ep.outputTokenCount * pricing.output) / 1_000_000,
+        totalCost: tokensUnavailable ? null : cost,
+        pricingPerMillionInput: pricing.input, pricingPerMillionOutput: pricing.output,
         // Vertex endpoints are matched by display name, which is user-chosen, so an
         // unmatched one gets the generic Google fallback rate rather than a real price.
         costEstimated: !pricing.matched,
@@ -150,17 +161,30 @@ router.get("/google", async (req: Request, res: Response) => {
           vendor: ec.vendor, platform: ec.platform, model_name: ec.modelName,
           input_tokens: ec.inputTokens, output_tokens: ec.outputTokens,
           total_tokens: ec.totalTokens, request_count: ec.requestCount,
+          // null, not 0, when tokens were unavailable — history must not record a
+          // measured-zero for something that was never measured.
           input_cost: ec.inputCost, output_cost: ec.outputCost, total_cost: ec.totalCost,
+          cost_unavailable: ec.tokensUnavailable,
           period: `P${periodDays}D`, recorded_at: new Date(),
         });
       } catch { /* table may not exist yet */ }
     }
 
-    const totalCost = endpointCosts.reduce((s, e) => s + e.totalCost, 0);
+    // ?? 0 so an unmeasurable endpoint does not turn the whole total into NaN.
+    const totalCost = endpointCosts.reduce((s, e) => s + (e.totalCost ?? 0), 0);
+    const unmeasured = endpointCosts.filter(e => e.tokensUnavailable);
     res.json({
       vendor: "Google", period: `P${periodDays}D`, projectId,
       endpoints: endpointCosts,
-      summary: { totalInputTokens: metrics.totalInputTokens, totalOutputTokens: metrics.totalOutputTokens, totalTokens: metrics.totalTokens, totalPredictions: metrics.totalPredictions, totalCost: Math.round(totalCost * 10000) / 10000 },
+      summary: {
+        totalInputTokens: metrics.totalInputTokens, totalOutputTokens: metrics.totalOutputTokens,
+        totalTokens: metrics.totalTokens, totalPredictions: metrics.totalPredictions,
+        totalCost: Math.round(totalCost * 10000) / 10000,
+        // The total above is a LOWER BOUND when this is non-zero. Stated explicitly
+        // so the UI can say so instead of presenting a partial sum as complete.
+        endpointsWithUnknownCost: unmeasured.length,
+        requestsWithUnknownCost: unmeasured.reduce((s, e) => s + (e.requestCount || 0), 0),
+      },
       fetchedAt: new Date().toISOString(),
     });
   } catch (err: any) {

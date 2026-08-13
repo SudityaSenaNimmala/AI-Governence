@@ -610,6 +610,139 @@ export class GoogleWorkspaceClient {
     return this.projectId;
   }
 
+  /**
+   * Real Google Drive file activity, from the Admin SDK Reports audit log.
+   *
+   * This is what the File Activity tab was missing. The only Reports application
+   * this client ever queried was `gemini_in_workspace_apps`; the `drive` feed —
+   * which carries actual view/edit/download/create events with the acting user and
+   * the document title — was never called, despite admin.reports.audit.readonly
+   * being granted all along. So a Google connection had nothing genuine to show
+   * there, and the rows it did show turned out to be agent deploy events.
+   *
+   * Domain-scoped (`users/all`), so it needs a Workspace admin — the same identity
+   * the other Reports calls use. Reports retains 180 days, unlike the 7-day O365
+   * streaming feed, so one call can return real history.
+   */
+  async fetchDriveActivity(daysBack = 7, maxPages = 5): Promise<Array<{
+    id: string; timestamp: string; user: string; operation: string;
+    target: string; docId?: string; docType?: string; visibility?: string;
+  }>> {
+    const out: Array<{
+      id: string; timestamp: string; user: string; operation: string;
+      target: string; docId?: string; docType?: string; visibility?: string;
+    }> = [];
+
+    const token = await this.getToken([
+      "https://www.googleapis.com/auth/admin.reports.audit.readonly",
+    ], this.adminEmail);
+
+    const since = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
+    let pageToken: string | undefined;
+    let pages = 0;
+
+    do {
+      const params = new URLSearchParams({ startTime: since, maxResults: "1000" });
+      if (pageToken) params.set("pageToken", pageToken);
+      const url = `https://admin.googleapis.com/admin/reports/v1/activity/users/all/applications/drive?${params}`;
+
+      const data = await this.fetchSafe<{
+        items?: Array<{
+          id?: { time?: string; uniqueQualifier?: string };
+          actor?: { email?: string };
+          events?: Array<{ name?: string; parameters?: Array<{ name?: string; value?: string }> }>;
+        }>;
+        nextPageToken?: string;
+      }>(url, token);
+
+      if (!data?.items?.length) break;
+
+      for (const item of data.items) {
+        const user = item.actor?.email;
+        const ts = item.id?.time;
+        // Same rule applied everywhere else now: an event with no actor is not user
+        // activity, so it is dropped rather than attributed to "system".
+        if (!user || !ts) continue;
+
+        for (const ev of (item.events || [])) {
+          const p = (name: string) => ev.parameters?.find(x => x.name === name)?.value;
+          const title = p("doc_title");
+          if (!title) continue;   // not a document event
+          out.push({
+            id: `${item.id?.uniqueQualifier || ts}-${ev.name}`,
+            timestamp: ts,
+            user,
+            operation: ev.name || "access",
+            target: title,
+            docId: p("doc_id"),
+            docType: p("doc_type"),
+            visibility: p("visibility"),
+          });
+        }
+      }
+
+      pageToken = data.nextPageToken;
+      pages++;
+    } while (pageToken && pages < maxPages);
+
+    console.log(`[Google] Drive audit: ${out.length} file event(s) over ${daysBack}d`);
+    return out;
+  }
+
+  /**
+   * Run a PROJECT-SCOPED discovery across every accessible GCP project.
+   *
+   * discoverAll() already sweeps projects this way, which is why it reported 61
+   * reasoning engines across three projects. The per-platform scan endpoint called
+   * the underlying discover* methods directly and therefore saw only the one
+   * project currently set — 4 of those 61, with `warnings: []` so nothing said two
+   * projects had been skipped. Extracted here so both paths share one definition of
+   * "every project" instead of drifting.
+   *
+   * MUST stay sequential: the scans read `this.projectId`, so concurrent sweeps
+   * would overwrite each other's project mid-flight and attribute agents to the
+   * wrong one. The original project is restored before returning.
+   *
+   * Only for project-scoped APIs. Workspace-domain-scoped discoveries (Chat bots,
+   * Gems) must run once — putting them through this would list every bot n times.
+   */
+  async forEachProject<T>(
+    scan: () => Promise<T[]>,
+    label: string,
+  ): Promise<{ items: T[]; projectIds: string[]; warnings: string[] }> {
+    const warnings: string[] = [];
+    const configured = this.getProject();
+    const discovered = await this.listAccessibleProjects();
+    const projectIds = discovered.length
+      ? [...new Set([configured, ...discovered.map(p => p.projectId)].filter(Boolean))]
+      : [configured];
+
+    if (!discovered.length) {
+      warnings.push(
+        `Could not list GCP projects, so only "${configured}" was scanned for ${label}. ` +
+        `Grant resourcemanager.projects.list (Browser or Cloud Asset Viewer) to cover every project.`,
+      );
+    }
+
+    const items: T[] = [];
+    for (const pid of projectIds) {
+      this.setProject(pid);
+      try {
+        items.push(...(await scan()));
+      } catch (e) {
+        // A project the caller cannot read is expected and stays quiet; anything
+        // else is named by project so a partial inventory is never silent.
+        const status = e instanceof GoogleWorkspaceError ? e.status : 0;
+        if (status !== 401 && status !== 403) {
+          warnings.push(`${label} in project ${pid}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+    this.setProject(configured);
+    if (projectIds.length > 1) console.log(`[Google] ${label}: swept ${projectIds.length} project(s)`);
+    return { items, projectIds, warnings };
+  }
+
   // When set, the client authenticates with this user/OAuth access token instead
   // of exchanging the service-account JWT. Used by the Gemini Enterprise "access
   // token" connect path, where the user has read access but cannot mint an SA key.
@@ -2190,20 +2323,40 @@ export class GoogleWorkspaceClient {
       const logs = await this.fetchConversationLogs(daysBack);
       if (logs.length > 0) {
         console.log(`[Google] Also found ${logs.length} Cloud Logging entries`);
-        // Convert log entries to conversations (simplified)
+
+        // A log entry only becomes a conversation when it actually IS one.
+        //
+        // Every field here used to fall back to a placeholder, so a log line with
+        // no user and no prompt still produced a complete-looking conversation:
+        // user "System" <system>, agent "Cloud Log", and — because the text fell
+        // back to JSON.stringify(payload) — a "user message" reading
+        // "[google.cloud.discoveryengine.v1main.DocumentService.ListDocuments]
+        // ListDocuments is not available...". On a live tenant that produced 200
+        // conversations, 200 of them attributed to `system` against one "bot"
+        // called Cloud Log. An admin reviewing user interactions in a governance
+        // tool was reading GCP API errors and had no way to tell.
+        //
+        // Requirements now: a real actor, AND real conversational content. Entries
+        // failing either are skipped and counted, not dressed up.
+        let skipped = 0;
         for (const entry of logs) {
           const payload = entry.jsonPayload || {};
-          const textPayload = entry.textPayload || "";
-          const text = String(
-            payload.text || payload.query || payload.response || payload.message || textPayload ||
-            (typeof payload === "object" ? JSON.stringify(payload) : String(payload))
-          ).slice(0, 500);
+          const actor = payload.userEmail || entry.labels?.principal_email;
+          // Only genuine prompt/response fields — never the serialised payload,
+          // which is what turned diagnostics into "messages".
+          const content = payload.text || payload.query || payload.response || payload.message;
 
+          if (!actor || !content) { skipped++; continue; }
+
+          const text = String(content).slice(0, 500);
           allConversations.push({
             id: entry.insertId || `log-${entry.timestamp}`,
-            agentName: String(payload.agentName || entry.resource?.labels?.engine_id || "Cloud Log"),
-            userName: String(payload.userEmail || entry.labels?.principal_email || "System"),
-            userEmail: String(payload.userEmail || "system"),
+            // No "Cloud Log" placeholder: without an engine label we cannot say
+            // which agent this belongs to, and inventing a name creates a phantom
+            // agent in the UI that exists nowhere in the inventory.
+            agentName: String(payload.agentName || entry.resource?.labels?.engine_id || "Unattributed agent"),
+            userName: String(actor),
+            userEmail: String(actor),
             startTime: entry.timestamp,
             lastMessageTime: entry.timestamp,
             messageCount: 1,
@@ -2211,12 +2364,15 @@ export class GoogleWorkspaceClient {
               id: entry.insertId || entry.timestamp,
               timestamp: entry.timestamp,
               from: "user" as const,
-              fromName: "System",
+              fromName: String(actor),
               text,
             }],
             source: "cloud_logging",
             severity: entry.severity || "INFO",
           });
+        }
+        if (skipped > 0) {
+          console.log(`[Google] Skipped ${skipped} of ${logs.length} Cloud Logging entries — diagnostics, not conversations (no actor or no prompt text)`);
         }
       }
     } catch {

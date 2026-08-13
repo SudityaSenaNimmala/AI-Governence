@@ -20,7 +20,11 @@ export default defineConfig({
         // /api call from the dev server failed with ECONNREFUSED.
         // 127.0.0.1 rather than localhost: on Node 18+ localhost can resolve to
         // ::1 first and the proxy does not always fall back to IPv4.
-        target: "http://127.0.0.1:3001",
+        // Reverted to 8787 a second time: commit 4900cfc set this back to 3001
+        // while keeping the comment above that explains why 3001 is wrong. If it
+        // needs to be configurable, read it from an env var rather than editing
+        // the literal — this has now regressed twice through merges.
+        target: "http://127.0.0.1:8787",
         changeOrigin: true,
       },
     },
