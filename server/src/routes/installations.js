@@ -15,6 +15,18 @@ import { dirname } from 'node:path';
 import { execSync, spawnSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const SERVER_PORT = process.env.PORT || '8787';
+
+// Build the API server URL from the request. Uses the request's hostname
+// but the server's own PORT — not the frontend port the request may have
+// arrived through (nginx on 3000 proxies /api to here on 8787).
+function apiServerUrl(req) {
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  const rawHost = req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
+  // Strip any port from the host (could be frontend port 3000 or missing entirely)
+  const hostname = rawHost.replace(/:\d+$/, '');
+  return `${proto}://${hostname}:${SERVER_PORT}`;
+}
 
 export function mountInstallations(app, db) {
 
@@ -22,9 +34,7 @@ export function mountInstallations(app, db) {
 
   app.get('/api/v1/installations/info', a(async (req, res) => {
     // Determine the server's external URL from the request
-    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-    const host = req.headers['x-forwarded-host'] || req.headers.host;
-    const serverUrl = `${proto}://${host}`;
+    const serverUrl = apiServerUrl(req);
 
     res.json({
       server_url: serverUrl,
@@ -70,9 +80,7 @@ export function mountInstallations(app, db) {
   // ── Download pre-configured browser extension zip ──
 
   app.get('/api/v1/installations/extension-package', a(async (req, res) => {
-    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-    const host = req.headers['x-forwarded-host'] || req.headers.host;
-    const serverUrl = `${proto}://${host}`;
+    const serverUrl = apiServerUrl(req);
 
     // The extension source lives at ../../browser-extension relative to server/src/routes
     const extDir = join(__dirname, '..', '..', '..', 'browser-extension');
@@ -122,9 +130,7 @@ export function mountInstallations(app, db) {
   let _exeCache = { serverUrl: null, hash: null, path: null };
 
   app.get('/api/v1/installations/agent-installer-exe', a(async (req, res) => {
-    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-    const host = req.headers['x-forwarded-host'] || req.headers.host;
-    const serverUrl = `${proto}://${host}`;
+    const serverUrl = apiServerUrl(req);
 
     const root = join(__dirname, '..', '..', '..');
     const installerDir = join(root, 'agent', 'installer');
@@ -242,9 +248,7 @@ export function mountInstallations(app, db) {
 
   app.get('/api/v1/installations/agent-installer', a(async (req, res) => {
     const platform = req.query.platform || 'windows';
-    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-    const host = req.headers['x-forwarded-host'] || req.headers.host;
-    const serverUrl = `${proto}://${host}`;
+    const serverUrl = apiServerUrl(req);
 
     const agentDir = join(__dirname, '..', '..', '..', 'agent');
     if (!existsSync(agentDir)) {
