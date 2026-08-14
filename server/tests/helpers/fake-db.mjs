@@ -103,9 +103,65 @@ function assertNoConflict(update) {
 }
 
 // '$field' → doc.field, anything else → the literal.
+// Dotted field paths, so a second $group stage can key on '$_id.machine_id' the
+// way the aggregation framework does. Without this, `doc['_id.machine_id']` is
+// undefined and every document collapses into one group keyed on undefined —
+// silently wrong, which is exactly what this file promises not to do.
+function getPath(doc, path) {
+  return path.split('.').reduce((v, k) => (v === null || v === undefined ? undefined : v[k]), doc);
+}
+
 function resolve(expr, doc) {
-  if (typeof expr === 'string' && expr.startsWith('$')) return doc[expr.slice(1)];
+  if (typeof expr === 'string' && expr.startsWith('$')) return getPath(doc, expr.slice(1));
+
+  if (expr && typeof expr === 'object' && !Array.isArray(expr) && !(expr instanceof Date)) {
+    const keys = Object.keys(expr);
+    const ops = keys.filter((k) => k.startsWith('$'));
+    if (ops.length > 0) {
+      if (keys.length > 1) throw new Error(`fake-db: mixed operator/literal expression {${keys.join(', ')}}`);
+      return applyExprOperator(ops[0], expr[ops[0]], doc);
+    }
+    // A literal document of sub-expressions — how a compound $group _id is
+    // written, e.g. { machine_id: '$machine_id', tool_key: '$tool_key' }. This
+    // used to fall through to `return expr`, so the group key was the SPEC rather
+    // than the values and every document landed in a single group.
+    return Object.fromEntries(keys.map((k) => [k, resolve(expr[k], doc)]));
+  }
+
   return expr;
+}
+
+function applyExprOperator(op, arg, doc) {
+  switch (op) {
+    case '$ifNull': {
+      const [value, fallback] = arg;
+      const v = resolve(value, doc);
+      return v === null || v === undefined ? resolve(fallback, doc) : v;
+    }
+    // Numeric coercion with explicit onError/onNull, which is how the analytics
+    // rollups sum fields that have occasionally been stored as strings.
+    case '$convert': {
+      const v = resolve(arg.input, doc);
+      const onError = () => {
+        if ('onError' in arg) return resolve(arg.onError, doc);
+        throw new Error(`fake-db: $convert to '${arg.to}' failed and no onError was given`);
+      };
+      if (v === null || v === undefined) {
+        return 'onNull' in arg ? resolve(arg.onNull, doc) : null;
+      }
+      if (['double', 'decimal', 'int', 'long'].includes(arg.to)) {
+        // Mongo errors on a non-numeric string; JS Number('') would say 0.
+        if (typeof v === 'string' && v.trim() === '') return onError();
+        const n = Number(v);
+        if (!Number.isFinite(n)) return onError();
+        return arg.to === 'int' || arg.to === 'long' ? Math.trunc(n) : n;
+      }
+      if (arg.to === 'string') return String(v);
+      throw new Error(`fake-db: unsupported $convert target '${arg.to}'`);
+    }
+    default:
+      throw new Error(`fake-db: unsupported aggregation operator ${op}`);
+  }
 }
 
 function runPipeline(docs, pipeline) {

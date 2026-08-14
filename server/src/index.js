@@ -4,7 +4,7 @@ import './env.js';
 
 import express from 'express';
 import cors from 'cors';
-import { openDb, applyInitialSchema } from './db.js';
+import { openDb, applyInitialSchema, ensureAnalyticsIndexes } from './db.js';
 import { mountReports } from './routes/reports.js';
 import { mountQueries } from './routes/queries.js';
 import { mountSanctions } from './routes/sanctions.js';
@@ -132,6 +132,12 @@ startReplayRetentionSweeper(db);
 // raw-content rows), so the sweep is explicit — children first, parent last.
 // Only meaningful for the local backend; relayed traces are Langfuse's to expire.
 if (tracingBackend() === 'local') startTracingRetentionSweeper(db);
+
+// Analytics indexes build in the background, once the port is open. Awaiting them
+// before listen() would put an index build in front of the deploy health check.
+ensureAnalyticsIndexes(db).catch((err) => {
+  console.warn(`[db] analytics indexes not created: ${err.message} (reads still work, just slower)`);
+});
 
 app.listen(PORT, () => {
   console.log(`AI Governance server listening on http://localhost:${PORT}`);

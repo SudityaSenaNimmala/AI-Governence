@@ -102,6 +102,20 @@ function surfaceFor(aiService, source) {
   return null;
 }
 
+// Coerce a stored field to a number inside an aggregation, the way the old
+// in-Node loops did with `Number(x) || 0`. A bare field reference is not
+// equivalent: $sum silently ignores a value that is not numeric, and these
+// collections do carry the odd numeric-looking string (content_length from the
+// extension, token counts from older agent builds), which would then vanish
+// from the total instead of being counted.
+const num = (field) => ({ $convert: { input: field, to: 'double', onError: 0, onNull: 0 } });
+
+// Budget for the two heavy reads below. A slow or wedged cluster has to produce
+// an error the UI can render, not a request that hangs until the browser gives
+// up: a spinner that never resolves is indistinguishable from a broken page, and
+// it is what this tab showed in production.
+const READ_BUDGET_MS = Number(process.env.CLAUDE_USAGE_BUDGET_MS || 20_000);
+
 function estimate(prompts, totalChars, rate) {
   const inputTokens = totalChars > 0
     ? Math.round(totalChars / CHARS_PER_TOKEN)
@@ -279,23 +293,55 @@ export function mountClaudeUsage(app, db) {
         .map((m) => m.id),
     );
 
+    // GROUPED IN MONGO, NOT IN NODE.
+    //
+    // Both of these used to be .find().toArray() over the whole matching set, with
+    // the counting done in the JS loops further down. Measured against the real
+    // cluster, the ai_token_usage fetch alone took 60.7s to return 19,357 documents
+    // — a collection scan (there was no index on `source`) plus 19k documents over
+    // the wire — and the equivalent $group returns 24 groups in 97ms. That single
+    // read is why the Claude Usage tab never finished loading, and why hitting it a
+    // few times left the whole server unresponsive: the row loop is synchronous, so
+    // it blocks the event loop for every other request too.
+    //
+    // The loops below only ever counted rows and summed numbers per
+    // (service, source, machine, email, model) — so grouping on exactly those keys
+    // gives the same answer from a few dozen documents instead of tens of thousands.
     const promptQuery = { event_kind: { $in: PROMPT_KINDS }, source: { $in: sources } };
     if (since) promptQuery.occurred_at = { $gte: since };
-    const events = await db.collection('dlp_events')
-      .find(promptQuery)
-      .project({ _id: 0, ai_service: 1, source: 1, machine_id: 1, content_length: 1 })
-      .toArray();
+    const events = (await db.collection('dlp_events').aggregate([
+      { $match: promptQuery },
+      {
+        $group: {
+          _id: { ai_service: '$ai_service', source: '$source', machine_id: '$machine_id' },
+          prompts: { $sum: 1 },
+          chars: { $sum: num('$content_length') },
+        },
+      },
+    ], { maxTimeMS: READ_BUDGET_MS }).toArray())
+      .map((g) => ({ ...g._id, prompts: g.prompts, chars: g.chars }));
 
     const usageQuery = { source: { $in: sources } };
     if (since) usageQuery.occurred_at = { $gte: since };
-    const usageRows = await db.collection('ai_token_usage')
-      .find(usageQuery)
-      .project({
-        _id: 0, ai_service: 1, source: 1, machine_id: 1, user_email: 1, model: 1,
-        input_tokens: 1, output_tokens: 1, cache_read_tokens: 1,
-        cache_creation_tokens: 1, total_tokens: 1, cost_usd: 1,
-      })
-      .toArray();
+    const usageRows = (await db.collection('ai_token_usage').aggregate([
+      { $match: usageQuery },
+      {
+        $group: {
+          _id: {
+            ai_service: '$ai_service', source: '$source', machine_id: '$machine_id',
+            user_email: '$user_email', model: '$model',
+          },
+          requests: { $sum: 1 },
+          input_tokens: { $sum: num('$input_tokens') },
+          output_tokens: { $sum: num('$output_tokens') },
+          cache_read_tokens: { $sum: num('$cache_read_tokens') },
+          cache_creation_tokens: { $sum: num('$cache_creation_tokens') },
+          total_tokens: { $sum: num('$total_tokens') },
+          cost_usd: { $sum: num('$cost_usd') },
+        },
+      },
+    ], { maxTimeMS: READ_BUDGET_MS }).toArray())
+      .map(({ _id, ...sums }) => ({ ..._id, ...sums }));
 
     // surface -> { users: Map<key, row> }
     const surfaces = new Map();
@@ -404,8 +450,10 @@ export function mountClaudeUsage(app, db) {
           && supersededByTranscript(e.machine_id, null, e.ai_service)) continue;
       const ident = identityFor(e.machine_id, null);
       const u = ensureUser(ensure(surface), ident);
-      u.prompts += 1;
-      u.chars += Number(e.content_length) || 0;
+      // += the group's totals, not 1: one `e` is now every prompt event that shared
+      // a (service, source, machine) triple, not a single event.
+      u.prompts += e.prompts;
+      u.chars += e.chars;
     }
 
     for (const r of usageRows) {
@@ -422,7 +470,9 @@ export function mountClaudeUsage(app, db) {
       u.measured.cache_creation_tokens += Number(r.cache_creation_tokens) || 0;
       u.measured.total_tokens += Number(r.total_tokens) || 0;
       u.measured.cost_usd += Number(r.cost_usd) || 0;
-      u.measured.requests += 1;
+      // Same as above: one `r` is a group of API requests now, so the request count
+      // comes from the group rather than being incremented once per row.
+      u.measured.requests += r.requests;
       if (r.model) u.models.add(r.model);
     }
 

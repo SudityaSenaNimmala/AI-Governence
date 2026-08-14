@@ -224,6 +224,29 @@ export async function applyInitialSchema(db) {
   await db.collection('employee_profiles').createIndex({ email: 1 });
 }
 
+// Indexes for the Claude Usage rollups, created AFTER the server is listening.
+//
+// Deliberately not part of applyInitialSchema: that runs before app.listen, so a
+// slow build there delays every request and can fail a deploy health check. None
+// of these are required for correctness — they only make the reads cheap — so a
+// failure is logged and the server carries on.
+//
+// `ai_token_usage` had no index at all, which cost twice over: GET /claude-usage
+// scanned the collection to filter by source (60.7s for 19k rows, measured), and
+// POST /claude-usage/tokens scanned it again for EVERY upserted row, since the
+// upsert matches on request_id.
+export async function ensureAnalyticsIndexes(db) {
+  await db.collection('ai_token_usage').createIndex({ request_id: 1 });
+  await db.collection('ai_token_usage').createIndex({ source: 1, occurred_at: 1 });
+  await db.collection('ai_token_usage').createIndex({ machine_id: 1 });
+  // Ordered to serve the prompt rollup end to end: equality on source and
+  // event_kind, range on occurred_at, then the three fields the $group reads, so
+  // the aggregation can be answered from the index without touching documents.
+  await db.collection('dlp_events').createIndex({
+    source: 1, event_kind: 1, occurred_at: 1, ai_service: 1, machine_id: 1, content_length: 1,
+  });
+}
+
 // Stable identifier for one logical AI tool, e.g. "openai:chatgpt".
 // Lets the dashboard join findings from different detectors into one row.
 export function toolKeyFor(finding) {

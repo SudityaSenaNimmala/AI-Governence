@@ -151,9 +151,17 @@ if (existsSync(nsisPath)) {
 
 // 1. Build the frontend locally / on the runner (needs more RAM than the host).
 console.log('• Building connect-ui (Vite)…');
+// shell: true — on Windows the executable is npm.cmd, and spawnSync without a shell
+// cannot resolve a bare "npm": it returns status null with error ENOENT, which this
+// script reported as "connect-ui build failed (exit null)". That reads as a compile
+// error and sent us looking at the frontend, when the build had never been started.
+// Every other spawn here goes through `bash -c`; this was the one that did not.
 const buildResult = spawnSync('npm', ['--prefix', 'connect-ui', 'run', 'build'], {
-  cwd: root, stdio: 'inherit', env: { ...process.env, VITE_ADMIN_TOKEN: '' },
+  cwd: root, stdio: 'inherit', shell: true, env: { ...process.env, VITE_ADMIN_TOKEN: '' },
 });
+// Surface the spawn error itself, not just the exit code — an ENOENT here means the
+// command never ran, which is a different problem from a build that failed.
+if (buildResult.error) die(`could not start the connect-ui build: ${buildResult.error.code || buildResult.error.message}`);
 if (buildResult.status !== 0) die(`connect-ui build failed (exit ${buildResult.status})`);
 if (!existsSync(resolve(root, 'connect-ui/dist/index.html'))) die('connect-ui build produced no dist/index.html');
 
