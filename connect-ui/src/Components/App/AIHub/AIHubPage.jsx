@@ -5879,12 +5879,7 @@ function InstallationsView() {
   const download=async(url,filename,id)=>{
     setDownloading(id);
     try {
-      let r=await fetch(url);
-      // If .exe build unavailable (no NSIS), fall back to zip automatically
-      if(!r.ok && url.includes('agent-installer-exe')){
-        r=await fetch('/api/v1/installations/agent-installer?platform=windows');
-        filename='CloudFuze-Desktop-Agent-windows.zip';
-      }
+      const r=await fetch(url);
       if(!r.ok) {
         const body=await r.json().catch(()=>({}));
         throw new Error(body.error ? `${body.error}${body.detail?': '+body.detail:''}` : `HTTP ${r.status}`);
@@ -5923,7 +5918,7 @@ function InstallationsView() {
         </div>
 
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
-          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer-exe','CloudFuze-Agent-Setup.exe','windows')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='windows'?"#6b7280":"#0044cc",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='windows'?0.5:1}}>{downloading==='windows'?'⏳ Preparing...':'⬇ Windows'}</button>
+          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=windows','CloudFuze-Desktop-Agent-windows.zip','windows')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='windows'?"#6b7280":"#0044cc",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='windows'?0.5:1}}>{downloading==='windows'?'⏳ Preparing...':'⬇ Windows'}</button>
           <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=macos','CloudFuze-Desktop-Agent-macos.zip','macos')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='macos'?"#6b7280":"#1e293b",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='macos'?0.5:1}}>{downloading==='macos'?'⏳ Preparing...':'⬇ macOS'}</button>
           <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=linux','CloudFuze-Desktop-Agent-linux.zip','linux')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='linux'?"#6b7280":"#1e293b",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='linux'?0.5:1}}>{downloading==='linux'?'⏳ Preparing...':'⬇ Linux'}</button>
         </div>
@@ -5932,10 +5927,9 @@ function InstallationsView() {
           <summary style={{cursor:"pointer",fontWeight:600,fontSize:13,marginBottom:6}}>Installation steps</summary>
           <ol style={{lineHeight:2,paddingLeft:18,margin:0}}>
             <li>Download the installer for your OS</li>
-            <li><strong>Windows:</strong> Double-click → follow wizard</li>
-            <li><strong>macOS:</strong> Open .pkg → follow prompts</li>
-            <li><strong>Linux:</strong> <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:11}}>sudo dpkg -i cloudfuze-agent.deb</code></li>
-            <li>Agent auto-enrolls and starts scanning</li>
+            <li><strong>Windows:</strong> Extract zip → double-click <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:11}}>install.bat</code></li>
+            <li><strong>macOS/Linux:</strong> Extract zip → run <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:11}}>bash install.sh</code></li>
+            <li>Agent auto-enrolls, installs dependencies, and starts scanning</li>
           </ol>
         </details>
 
