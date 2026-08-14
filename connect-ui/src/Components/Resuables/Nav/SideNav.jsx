@@ -27,6 +27,21 @@ import { GlobalContext } from "../../../GlobalContext/GlobalContext";
 import { SET_SIDEBAR_COLLAPSED } from "../../../GlobalContext/action.types";
 import "./css/Nav.css";
 
+// Pending access request count — polled so the badge updates without a refresh.
+function usePendingRequestCount() {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    const load = () => fetch("/api/v1/access-requests")
+      .then(r => r.ok ? r.json() : [])
+      .then(list => setCount((list || []).filter(r => r.status === "pending").length))
+      .catch(() => {});
+    load();
+    const id = setInterval(load, 30000);
+    return () => clearInterval(id);
+  }, []);
+  return count;
+}
+
 const SideNav = (props) => {
   const { dispatch, globalContext } = useContext(GlobalContext);
   const { user } = globalContext;
@@ -35,6 +50,7 @@ const SideNav = (props) => {
   const [isProductDropdownOpen, setIsProductDropdownOpen] = useState(false);
   const collapsed = globalContext?.sidebarCollapsed ?? false;
   const { pathname } = useLocation();
+  const pendingRequestCount = usePendingRequestCount();
 
   const getActiveProduct = () => {
     if (pathname.startsWith("/Migrations/Content")) return "Content Migration";
@@ -325,6 +341,9 @@ const SideNav = (props) => {
                               )}
                               <span className="cf_sideNav_sublabel">
                                 {child.title}
+                                {child.title === "Access Requests" && pendingRequestCount > 0 && (
+                                  <span style={{marginLeft:6,background:"#ef4444",color:"#fff",fontSize:10,fontWeight:700,borderRadius:10,padding:"1px 6px",minWidth:16,textAlign:"center",display:"inline-block",lineHeight:"16px"}}>{pendingRequestCount}</span>
+                                )}
                               </span>
                             </Link>
                           </li>

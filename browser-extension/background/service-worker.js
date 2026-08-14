@@ -1543,22 +1543,26 @@ chrome.alarms.clear('cfai-recording-watchdog').catch(() => {});
 chrome.runtime.onStartup.addListener(() => {
   flushQueue();
   closeEngagementsOnStartup().catch(() => {});
+  autoConfigFromBaked();
 });
-chrome.runtime.onInstalled.addListener(async () => {
-  flushQueue();
-  // Auto-configure from baked cfai-config.json (pre-configured download from admin dashboard)
+// Auto-configure from baked cfai-config.json and enroll.
+// Runs on install, update, AND startup so re-loading the extension or
+// restarting the browser always picks up the baked config.
+async function autoConfigFromBaked() {
   try {
     const r = await fetch(chrome.runtime.getURL('cfai-config.json'));
-    if (r.ok) {
-      const baked = await r.json();
-      if (baked.preConfigured && baked.serverUrl && baked.enrollSecret) {
-        const existing = await getConfig();
-        if (!existing.serverUrl) {
-          await setStored(STORAGE.CONFIG, { serverUrl: baked.serverUrl, enrollSecret: baked.enrollSecret });
-          console.info('[cfai] auto-configured from baked config:', baked.serverUrl);
-          await ensureToken();
-        }
-      }
-    }
-  } catch {} // No baked config — normal manual install
+    if (!r.ok) { console.info('[cfai] no baked cfai-config.json'); return; }
+    const baked = await r.json();
+    if (!baked.preConfigured || !baked.serverUrl || !baked.enrollSecret) return;
+    // Always apply — stale storage from a previous install must not block it.
+    await setStored(STORAGE.CONFIG, { serverUrl: baked.serverUrl, enrollSecret: baked.enrollSecret });
+    await chrome.storage.local.remove([STORAGE.TOKEN]); // clear stale token
+    console.info('[cfai] auto-configured from baked config:', baked.serverUrl);
+    const token = await ensureToken();
+    console.info('[cfai] auto-enroll result:', token ? 'OK' : 'FAILED');
+  } catch (e) { console.warn('[cfai] auto-config error:', e?.message || e); }
+}
+chrome.runtime.onInstalled.addListener(() => {
+  flushQueue();
+  autoConfigFromBaked();
 });

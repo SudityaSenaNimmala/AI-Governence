@@ -15,6 +15,18 @@ import { dirname } from 'node:path';
 import { execSync, spawnSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const SERVER_PORT = process.env.PORT || '8787';
+
+// Build the API server URL from the request. Uses the request's hostname
+// but the server's own PORT — not the frontend port the request may have
+// arrived through (nginx on 3000 proxies /api to here on 8787).
+function apiServerUrl(req) {
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  const rawHost = req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
+  // Strip any port from the host (could be frontend port 3000 or missing entirely)
+  const hostname = rawHost.replace(/:\d+$/, '');
+  return `${proto}://${hostname}:${SERVER_PORT}`;
+}
 
 export function mountInstallations(app, db) {
 
@@ -22,9 +34,7 @@ export function mountInstallations(app, db) {
 
   app.get('/api/v1/installations/info', a(async (req, res) => {
     // Determine the server's external URL from the request
-    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-    const host = req.headers['x-forwarded-host'] || req.headers.host;
-    const serverUrl = `${proto}://${host}`;
+    const serverUrl = apiServerUrl(req);
 
     res.json({
       server_url: serverUrl,
@@ -57,7 +67,7 @@ export function mountInstallations(app, db) {
         const stat = statSync(full);
         if (stat.isDirectory()) walkHash(full);
         else if (stat.size < 2 * 1024 * 1024) {
-          hash.update(entry + ':' + stat.size + ':' + stat.mtimeMs + '\n');
+          hash.update(readFileSync(full));
         }
       }
     }
@@ -70,9 +80,7 @@ export function mountInstallations(app, db) {
   // ── Download pre-configured browser extension zip ──
 
   app.get('/api/v1/installations/extension-package', a(async (req, res) => {
-    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-    const host = req.headers['x-forwarded-host'] || req.headers.host;
-    const serverUrl = `${proto}://${host}`;
+    const serverUrl = apiServerUrl(req);
 
     // The extension source lives at ../../browser-extension relative to server/src/routes
     const extDir = join(__dirname, '..', '..', '..', 'browser-extension');
@@ -165,9 +173,7 @@ export function mountInstallations(app, db) {
   let _exeCache = { serverUrl: null, hash: null, path: null };
 
   app.get('/api/v1/installations/agent-installer-exe', a(async (req, res) => {
-    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-    const host = req.headers['x-forwarded-host'] || req.headers.host;
-    const serverUrl = `${proto}://${host}`;
+    const serverUrl = apiServerUrl(req);
 
     const root = join(__dirname, '..', '..', '..');
     const installerDir = join(root, 'agent', 'installer');
@@ -348,9 +354,7 @@ export function mountInstallations(app, db) {
 
   app.get('/api/v1/installations/agent-installer', a(async (req, res) => {
     const platform = req.query.platform || 'windows';
-    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-    const host = req.headers['x-forwarded-host'] || req.headers.host;
-    const serverUrl = `${proto}://${host}`;
+    const serverUrl = apiServerUrl(req);
 
     const agentDir = join(__dirname, '..', '..', '..', 'agent');
     if (!existsSync(agentDir)) {
@@ -362,97 +366,80 @@ export function mountInstallations(app, db) {
 
     // Install script per platform
     const installScripts = {
-      windows: [
-        '@echo off',
-        'title CloudFuze Desktop Agent',
-        'echo ============================================',
-        'echo    CloudFuze Desktop Agent — Install',
-        'echo ============================================',
-        'echo.',
-        '',
-        'REM Use bundled Node.js if available, otherwise fall back to system Node',
-        'set "BUNDLED_NODE=%~dp0node\\node.exe"',
-        'set "BUNDLED_NPM=%~dp0node\\npm.cmd"',
-        'if exist "%BUNDLED_NODE%" (',
-        '  set "NODE=%BUNDLED_NODE%"',
-        '  set "NPM=%BUNDLED_NPM%"',
-        '  echo [OK] Using bundled Node.js',
-        ') else (',
-        '  where node >nul 2>&1',
-        '  if %ERRORLEVEL% neq 0 (',
-        '    echo [..] Node.js not found — downloading portable version...',
-        '    powershell -NoProfile -Command "Invoke-WebRequest -Uri \'https://nodejs.org/dist/v22.15.0/node-v22.15.0-win-x64.zip\' -OutFile \'%~dp0node.zip\'"',
-        '    if not exist "%~dp0node.zip" (',
-        '      echo [ERROR] Failed to download Node.js.',
-        '      echo Please install Node.js manually from https://nodejs.org',
-        '      pause',
-        '      exit /b 1',
-        '    )',
-        '    echo [..] Extracting Node.js...',
-        '    powershell -NoProfile -Command "Expand-Archive -Path \'%~dp0node.zip\' -DestinationPath \'%~dp0\' -Force"',
-        '    ren "%~dp0node-v22.15.0-win-x64" node',
-        '    del "%~dp0node.zip"',
-        '    set "NODE=%~dp0node\\node.exe"',
-        '    set "NPM=%~dp0node\\npm.cmd"',
-        '    echo [OK] Node.js downloaded and ready',
-        '  ) else (',
-        '    set "NODE=node"',
-        '    set "NPM=npm"',
-        '    echo [OK] Using system Node.js',
-        '  )',
-        ')',
-        'echo.',
-        '',
-        'REM Stop old agent if running',
-        'if exist "%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock" (',
-        '  set /p OLD_PID=<"%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock"',
-        '  echo [..] Stopping previous agent...',
-        '  taskkill /PID %OLD_PID% /F >nul 2>&1',
-        '  del "%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock" >nul 2>&1',
-        '  timeout /t 2 /nobreak >nul',
-        '  echo [OK] Previous agent stopped',
-        ')',
-        'echo.',
-        '',
-        'REM Navigate to agent folder',
-        'cd /d "%~dp0\\agent"',
-        'if not exist "src\\index.js" (',
-        '  echo [ERROR] Agent source files not found!',
-        '  echo Expected: %~dp0\\agent\\src\\index.js',
-        '  echo.',
-        '  pause',
-        '  exit /b 1',
-        ')',
-        '',
-        'echo [..] Installing dependencies (this may take a minute)...',
-        'call %NPM% install --production 2>nul',
-        'echo [OK] Dependencies installed',
-        'echo.',
-        '',
-        'if not exist "%USERPROFILE%\\.cloudfuze-aigov" mkdir "%USERPROFILE%\\.cloudfuze-aigov"',
-        `echo {"serverUrl":"${serverUrl}","enrollSecret":"${ENROLL_SECRET}"}> "%USERPROFILE%\\.cloudfuze-aigov\\auto-config.json"`,
-        '',
-        `echo [..] Enrolling with server (${serverUrl})...`,
-        `%NODE% src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output NUL`,
-        'if %ERRORLEVEL% neq 0 (',
-        '  echo [WARNING] Enrollment had issues but continuing...',
-        ')',
-        'echo [OK] Enrolled',
-        'echo.',
-        '',
-        'echo [..] Starting agent in background...',
-        `start "" /B %NODE% src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor`,
-        'echo.',
-        'echo ============================================',
-        'echo    CloudFuze agent is installed and running!',
-        'echo ============================================',
-        'echo.',
-        'echo The agent runs in the background and will',
-        'echo auto-update when new versions are available.',
-        'echo You can close this window.',
-        'echo.',
-        'pause',
-      ].join('\r\n'),
+      windows: `@echo off
+title CloudFuze Desktop Agent - Installing...
+echo.
+echo  ============================================
+echo     CloudFuze Desktop Agent - Install
+echo  ============================================
+echo.
+echo  Please wait...
+echo.
+
+REM -- Find Node.js --
+set "NODE="
+set "NPM="
+if exist "%~dp0node\\node.exe" set "NODE=%~dp0node\\node.exe" & set "NPM=%~dp0node\\npm.cmd" & echo  [OK] Using bundled Node.js & goto FOUND_NODE
+where node >nul 2>&1 && set "NODE=node" & set "NPM=npm" & echo  [OK] Using system Node.js & goto FOUND_NODE
+echo  [..] Node.js not found - downloading (~30 MB)...
+powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://nodejs.org/dist/v22.15.0/node-v22.15.0-win-x64.zip' -OutFile '%~dp0node.zip'"
+if not exist "%~dp0node.zip" echo  [ERROR] Download failed. Install Node.js from nodejs.org & goto DONE
+echo  [..] Extracting...
+powershell -NoProfile -Command "Expand-Archive -Path '%~dp0node.zip' -DestinationPath '%~dp0' -Force"
+if exist "%~dp0node-v22.15.0-win-x64" ren "%~dp0node-v22.15.0-win-x64" node
+del "%~dp0node.zip" 2>nul
+if not exist "%~dp0node\\node.exe" echo  [ERROR] Extraction failed. & goto DONE
+set "NODE=%~dp0node\\node.exe"
+set "NPM=%~dp0node\\npm.cmd"
+echo  [OK] Node.js ready
+
+:FOUND_NODE
+echo.
+
+REM -- Check source --
+if not exist "%~dp0agent\\src\\index.js" echo  [ERROR] Agent source not found! & goto DONE
+
+REM -- Stop old agent --
+taskkill /IM node.exe /FI "WINDOWTITLE eq CloudFuze*" /F >nul 2>&1
+if exist "%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock" del "%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock" >nul 2>&1
+
+REM -- Install dependencies --
+echo  [..] Installing dependencies (may take a minute)...
+cd /d "%~dp0agent"
+call "%NPM%" install --production >nul 2>&1
+echo  [OK] Dependencies installed
+
+REM -- Save config --
+if not exist "%USERPROFILE%\\.cloudfuze-aigov" mkdir "%USERPROFILE%\\.cloudfuze-aigov"
+> "%USERPROFILE%\\.cloudfuze-aigov\\auto-config.json" echo {"serverUrl":"${serverUrl}","enrollSecret":"${ENROLL_SECRET}"}
+
+REM -- Enroll --
+echo  [..] Enrolling with server...
+"%NODE%" src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output NUL 2>nul
+echo  [OK] Enrolled
+
+REM -- Create hidden launcher --
+> "%~dp0agent\\start-agent.vbs" echo Set ws = CreateObject("WScript.Shell")
+>> "%~dp0agent\\start-agent.vbs" echo ws.Run """%NODE%"" ""%~dp0agent\\src\\index.js"" --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor", 0, False
+
+REM -- Auto-start on boot --
+reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v CloudFuzeAgent /d "wscript.exe \\"%~dp0agent\\start-agent.vbs\\"" /f >nul 2>&1
+echo  [OK] Auto-start registered
+
+REM -- Start now --
+echo  [..] Starting agent...
+start "" wscript.exe "%~dp0agent\\start-agent.vbs"
+echo.
+echo  ============================================
+echo     Installation complete!
+echo  ============================================
+echo.
+
+:DONE
+echo.
+echo  Press any key to close this window...
+pause >nul
+`.replace(/\n/g, '\r\n'),
       macos: [
         '#!/bin/bash',
         'set -e',
@@ -495,14 +482,31 @@ export function mountInstallations(app, db) {
         `echo "[..] Enrolling with server (${serverUrl})..."`,
         `"$NODE" src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output /dev/null || echo "[WARNING] Enrollment issue"`,
         'echo "[OK] Enrolled"',
-        'echo "[..] Starting agent..."',
-        `nohup "$NODE" src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor > /dev/null 2>&1 &`,
+        '# Register auto-start on boot (macOS LaunchAgent)',
+        'PLIST=~/Library/LaunchAgents/com.cloudfuze.agent.plist',
+        'mkdir -p ~/Library/LaunchAgents',
+        `cat > "$PLIST" << PLISTEOF`,
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+        '<plist version="1.0"><dict>',
+        '  <key>Label</key><string>com.cloudfuze.agent</string>',
+        `  <key>ProgramArguments</key><array><string>$NODE</string><string>$SCRIPT_DIR/agent/src/index.js</string><string>--server</string><string>${serverUrl}</string><string>--enroll-secret</string><string>${ENROLL_SECRET}</string><string>--monitor</string></array>`,
+        `  <key>WorkingDirectory</key><string>$SCRIPT_DIR/agent</string>`,
+        '  <key>RunAtLoad</key><true/>',
+        '  <key>KeepAlive</key><true/>',
+        '  <key>StandardOutPath</key><string>/tmp/cloudfuze-agent.log</string>',
+        '  <key>StandardErrorPath</key><string>/tmp/cloudfuze-agent.log</string>',
+        '</dict></plist>',
+        'PLISTEOF',
+        'launchctl unload "$PLIST" 2>/dev/null || true',
+        'launchctl load "$PLIST"',
+        'echo "[OK] Auto-start registered"',
         'echo ""',
         'echo "============================================"',
         'echo "   CloudFuze agent is installed and running!"',
         'echo "============================================"',
         'echo ""',
-        'echo "Auto-updates are enabled. You can close this window."',
+        'echo "Agent starts automatically on boot."',
       ].join('\n'),
       linux: [
         '#!/bin/bash',
@@ -544,6 +548,10 @@ export function mountInstallations(app, db) {
         `echo "[..] Enrolling with server (${serverUrl})..."`,
         `"$NODE" src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output /dev/null || echo "[WARNING] Enrollment issue"`,
         'echo "[OK] Enrolled"',
+        '# Register auto-start on boot (crontab @reboot)',
+        `CRON_CMD="@reboot cd $SCRIPT_DIR/agent && $NODE src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor > /dev/null 2>&1"`,
+        '(crontab -l 2>/dev/null | grep -v cloudfuze; echo "$CRON_CMD # cloudfuze") | crontab -',
+        'echo "[OK] Auto-start registered"',
         'echo "[..] Starting agent..."',
         `nohup "$NODE" src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor > /dev/null 2>&1 &`,
         'echo ""',
@@ -551,7 +559,7 @@ export function mountInstallations(app, db) {
         'echo "   CloudFuze agent is installed and running!"',
         'echo "============================================"',
         'echo ""',
-        'echo "Auto-updates are enabled. You can close this terminal."',
+        'echo "Agent starts automatically on boot."',
       ].join('\n'),
     };
 

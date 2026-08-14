@@ -14,7 +14,7 @@
 //
 // If anything fails (network, disk, bad zip), the current agent keeps running.
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, createWriteStream, readdirSync, statSync, copyFileSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, createWriteStream, readdirSync, statSync, copyFileSync, cpSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -132,35 +132,55 @@ async function applyUpdate({ serverUrl, token, serverVersion, log }) {
 
   log?.info?.('auto-updater: extracted, applying update...');
 
-  // Save new version BEFORE restarting
+  // Copy new agent source files over the current installation (silent, in-place).
+  // The extracted zip has agent/src/, agent/package.json. Copy them over ours.
+  const agentRoot = join(dirname(dirname(import.meta.url.replace('file:///', '').replace('file://', ''))));
+  const extractedAgent = join(extractDir, 'agent');
+  const sourceDir = existsSync(extractedAgent) ? extractedAgent : extractDir;
+
+  // Copy source files
+  const srcFrom = join(sourceDir, 'src');
+  const srcTo = join(agentRoot, 'src');
+  if (existsSync(srcFrom)) {
+    cpSync(srcFrom, srcTo, { recursive: true, force: true });
+    log?.info?.('auto-updater: source files updated');
+  }
+  // Copy package.json if it changed
+  const pkgFrom = join(sourceDir, 'package.json');
+  if (existsSync(pkgFrom)) {
+    copyFileSync(pkgFrom, join(agentRoot, 'package.json'));
+  }
+
+  // Run npm install silently (in case dependencies changed)
+  try {
+    const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const npmResult = spawn(npm, ['install', '--production', '--no-audit', '--no-fund'], {
+      cwd: agentRoot, stdio: 'pipe',
+    });
+    await new Promise((resolve) => npmResult.on('exit', resolve));
+    log?.info?.('auto-updater: dependencies updated');
+  } catch (e) {
+    log?.warn?.('auto-updater: npm install failed (non-fatal):', e?.message);
+  }
+
+  // Save new version
   saveCurrentVersion(serverVersion);
 
-  // Run the install script from the extracted update
-  // This will: kill old agent → npm install → start new agent
-  const scriptName = process.platform === 'win32' ? 'install.bat' : 'install.sh';
-  const scriptPath = join(extractDir, scriptName);
-
-  if (!existsSync(scriptPath)) {
-    log?.warn?.('auto-updater: install script not found in update package');
-    return;
+  // Restart: launch a new agent process, then exit this one.
+  // No visible window — the new process inherits our hidden state.
+  const node = process.execPath;
+  const indexJs = join(agentRoot, 'src', 'index.js');
+  const configPath = join(homedir(), '.cloudfuze-aigov', 'auto-config.json');
+  let args = [indexJs, '--monitor'];
+  if (existsSync(configPath)) {
+    try {
+      const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
+      if (cfg.serverUrl) args.push('--server', cfg.serverUrl);
+      if (cfg.enrollSecret) args.push('--enroll-secret', cfg.enrollSecret);
+    } catch {}
   }
 
-  log?.info?.('auto-updater: launching install script — this process will exit');
-
-  if (process.platform === 'win32') {
-    spawn('cmd', ['/c', scriptPath], {
-      cwd: extractDir,
-      detached: true,
-      stdio: 'ignore',
-    }).unref();
-  } else {
-    spawn('bash', [scriptPath], {
-      cwd: extractDir,
-      detached: true,
-      stdio: 'ignore',
-    }).unref();
-  }
-
-  // Give the new process time to start before we exit
-  setTimeout(() => process.exit(0), 3000);
+  log?.info?.('auto-updater: restarting agent silently');
+  spawn(node, args, { cwd: agentRoot, detached: true, stdio: 'ignore' }).unref();
+  setTimeout(() => process.exit(0), 2000);
 }

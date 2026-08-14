@@ -2179,7 +2179,14 @@
                   actionsDiv.querySelector('.cfai-block-dismiss')?.addEventListener('click', (e) => { e.stopPropagation(); close(); });
                 }
               });
-              setTimeout(() => ui.querySelector('#cfai-request-reason')?.focus(), 0);
+              // Stop keyboard events from leaking to the AI tool's input behind the popup
+              const reasonEl = ui.querySelector('#cfai-request-reason');
+              if (reasonEl) {
+                for (const evt of ['keydown','keyup','keypress','input']) {
+                  reasonEl.addEventListener(evt, e => e.stopPropagation());
+                }
+                setTimeout(() => reasonEl.focus(), 0);
+              }
             }
           });
         }

@@ -2993,7 +2993,7 @@ function AIRegistryView() {
       } else {
         await fetch(`${REGISTRY_API}/${encodeURIComponent(row.id)}/status`,{
           method:"PUT",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({status,product_name:row.name}),
+          body:JSON.stringify({status,product_name:row.name,matched_hosts:row.matched_hosts||[]}),
         });
       }
       await loadAll();
@@ -3002,8 +3002,8 @@ function AIRegistryView() {
     }
   };
 
-  const updateStatus=async(id,status,productName)=>{
-    await fetch(`${REGISTRY_API}/${encodeURIComponent(id)}/status`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status,product_name:productName})});
+  const updateStatus=async(id,status,productName,matchedHosts)=>{
+    await fetch(`${REGISTRY_API}/${encodeURIComponent(id)}/status`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status,product_name:productName,matched_hosts:matchedHosts||[]})});
     loadAll();
   };
 
@@ -3091,7 +3091,6 @@ function AIRegistryView() {
         columns={[
           {label:"AI System",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
             <ChevronRight size={13} style={{color:"#9ca3af",flexShrink:0,transition:"transform .15s",transform:selected===r.id?"rotate(90deg)":"none"}}/>
-            <span style={{fontSize:18}}>{CATEGORY_ICONS[r.category]||'❓'}</span>
             <div>
               <div className="aihub_text_primary">{r.name}</div>
               <div className="aihub_text_muted">{r.vendor||""}{r.platform?" · "+r.platform:""}</div>
@@ -3107,13 +3106,6 @@ function AIRegistryView() {
             <div style={{fontSize:13,fontWeight:600}}>{r.activity?.total?.toLocaleString()||0}</div>
             <div className="aihub_text_muted">{r.activity?.last_active?relTime(r.activity.last_active):"never"}</div>
           </div>,right:true},
-          // Source column removed — how a system was discovered is an internal detail
-          // of the scan, not something an admin acts on from this table. It is still
-          // shown in the expanded row detail (RegistryRowDetail prints row.source).
-          //
-          // Line comment, not {/* … */}: inside a JS array that braced form is an
-          // empty OBJECT literal, not a comment, so it added a sixth column with no
-          // label and no render — a blank header and a stray "—" on every row.
         ]}
         rows={items}
         onRow={r=>setSelected(selected===r.id?null:r.id)}
@@ -3266,6 +3258,14 @@ function RegistryRowDetail({ row, onStatus, pending }) {
       {cell("Machines",row.machine_count)}
       {row.is_orphaned&&<div style={{gridColumn:"1/-1",color:"#ef4444",fontWeight:600}}>⚠ Owner account is disabled — this system is orphaned</div>}
     </div>
+
+    {row.matched_hosts?.length>0&&<div style={{marginBottom:14}}>
+      <H>Enforced hosts</H>
+      <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+        {row.matched_hosts.map((h,i)=><span key={i} style={{fontSize:11,fontFamily:"monospace",padding:"2px 8px",borderRadius:5,background:row.status==='blocked'?"#fef2f2":"#f0fdf4",border:"1px solid "+(row.status==='blocked'?"#fca5a5":"#bbf7d0"),color:row.status==='blocked'?"#dc2626":"#16a34a"}}>{h}</span>)}
+      </div>
+      <div className="aihub_text_muted" style={{fontSize:10.5,marginTop:4}}>Blocking/allowing this system affects {row.matched_hosts.length===1?"this host":"all "+row.matched_hosts.length+" hosts"} in the extension.</div>
+    </div>}
 
     <div style={{marginBottom:14}}>
       <H>Risk analysis</H>
@@ -5936,12 +5936,7 @@ function InstallationsView() {
   const download=async(url,filename,id)=>{
     setDownloading(id);
     try {
-      let r=await fetch(url);
-      // If .exe build unavailable (no NSIS), fall back to zip automatically
-      if(!r.ok && url.includes('agent-installer-exe')){
-        r=await fetch('/api/v1/installations/agent-installer?platform=windows');
-        filename='CloudFuze-Desktop-Agent-windows.zip';
-      }
+      const r=await fetch(url);
       if(!r.ok) {
         const body=await r.json().catch(()=>({}));
         throw new Error(body.error ? `${body.error}${body.detail?': '+body.detail:''}` : `HTTP ${r.status}`);
@@ -5980,7 +5975,7 @@ function InstallationsView() {
         </div>
 
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
-          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer-exe','CloudFuze-Agent-Setup.exe','windows')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='windows'?"#6b7280":"#0044cc",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='windows'?0.5:1}}>{downloading==='windows'?'⏳ Preparing...':'⬇ Windows'}</button>
+          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=windows','CloudFuze-Desktop-Agent-windows.zip','windows')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='windows'?"#6b7280":"#0044cc",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='windows'?0.5:1}}>{downloading==='windows'?'⏳ Preparing...':'⬇ Windows'}</button>
           <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=macos','CloudFuze-Desktop-Agent-macos.zip','macos')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='macos'?"#6b7280":"#1e293b",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='macos'?0.5:1}}>{downloading==='macos'?'⏳ Preparing...':'⬇ macOS'}</button>
           <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=linux','CloudFuze-Desktop-Agent-linux.zip','linux')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='linux'?"#6b7280":"#1e293b",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='linux'?0.5:1}}>{downloading==='linux'?'⏳ Preparing...':'⬇ Linux'}</button>
         </div>
@@ -5989,10 +5984,9 @@ function InstallationsView() {
           <summary style={{cursor:"pointer",fontWeight:600,fontSize:13,marginBottom:6}}>Installation steps</summary>
           <ol style={{lineHeight:2,paddingLeft:18,margin:0}}>
             <li>Download the installer for your OS</li>
-            <li><strong>Windows:</strong> Double-click → follow wizard</li>
-            <li><strong>macOS:</strong> Open .pkg → follow prompts</li>
-            <li><strong>Linux:</strong> <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:11}}>sudo dpkg -i cloudfuze-agent.deb</code></li>
-            <li>Agent auto-enrolls and starts scanning</li>
+            <li><strong>Windows:</strong> Extract zip → double-click <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:11}}>install.bat</code></li>
+            <li><strong>macOS/Linux:</strong> Extract zip → run <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:11}}>bash install.sh</code></li>
+            <li>Agent auto-enrolls, installs dependencies, and starts scanning</li>
           </ol>
         </details>
 
