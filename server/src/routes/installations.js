@@ -260,124 +260,109 @@ export function mountInstallations(app, db) {
 
     // Install script per platform
     const installScripts = {
-      windows: [
-        '@echo off',
-        'setlocal enabledelayedexpansion',
-        'title CloudFuze Desktop Agent',
-        'echo ============================================',
-        'echo    CloudFuze Desktop Agent - Install',
-        'echo ============================================',
-        'echo.',
-        '',
-        'REM -- Find Node.js --',
-        'set "NODE="',
-        'set "NPM="',
-        '',
-        'REM 1. Bundled Node.js (from a previous install)',
-        'if exist "%~dp0node\\node.exe" (',
-        '  set "NODE=%~dp0node\\node.exe"',
-        '  set "NPM=%~dp0node\\npm.cmd"',
-        '  echo [OK] Using bundled Node.js',
-        '  goto :node_ready',
-        ')',
-        '',
-        'REM 2. System Node.js',
-        'where node >nul 2>&1',
-        'if !ERRORLEVEL! equ 0 (',
-        '  set "NODE=node"',
-        '  set "NPM=npm"',
-        '  echo [OK] Using system Node.js',
-        '  goto :node_ready',
-        ')',
-        '',
-        'REM 3. Download portable Node.js',
-        'echo [..] Node.js not found - downloading portable version...',
-        'echo     This is a one-time download (~30 MB)...',
-        'powershell -NoProfile -Command "Invoke-WebRequest -Uri \'https://nodejs.org/dist/v22.15.0/node-v22.15.0-win-x64.zip\' -OutFile \'%~dp0node.zip\'"',
-        'if not exist "%~dp0node.zip" (',
-        '  echo.',
-        '  echo [ERROR] Failed to download Node.js.',
-        '  echo Please install Node.js from https://nodejs.org and try again.',
-        '  echo.',
-        '  pause',
-        '  exit /b 1',
-        ')',
-        'echo [..] Extracting...',
-        'powershell -NoProfile -Command "Expand-Archive -Path \'%~dp0node.zip\' -DestinationPath \'%~dp0\' -Force"',
-        'if exist "%~dp0node-v22.15.0-win-x64" ren "%~dp0node-v22.15.0-win-x64" node',
-        'del "%~dp0node.zip" 2>nul',
-        'if exist "%~dp0node\\node.exe" (',
-        '  set "NODE=%~dp0node\\node.exe"',
-        '  set "NPM=%~dp0node\\npm.cmd"',
-        '  echo [OK] Node.js ready',
-        ') else (',
-        '  echo [ERROR] Node.js extraction failed.',
-        '  pause',
-        '  exit /b 1',
-        ')',
-        '',
-        ':node_ready',
-        'echo.',
-        '',
-        'REM -- Stop old agent if running --',
-        'if exist "%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock" (',
-        '  set /p OLD_PID=<"%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock"',
-        '  echo [..] Stopping previous agent...',
-        '  taskkill /PID !OLD_PID! /F >nul 2>&1',
-        '  del "%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock" >nul 2>&1',
-        '  timeout /t 2 /nobreak >nul',
-        '  echo [OK] Previous agent stopped',
-        ')',
-        '',
-        'REM -- Check agent source --',
-        'if not exist "%~dp0agent\\src\\index.js" (',
-        '  echo [ERROR] Agent source files not found!',
-        '  echo Expected: %~dp0agent\\src\\index.js',
-        '  pause',
-        '  exit /b 1',
-        ')',
-        '',
-        'REM -- Install dependencies --',
-        'echo [..] Installing dependencies (this may take a minute)...',
-        'cd /d "%~dp0agent"',
-        'call "!NPM!" install --production 2>nul',
-        'echo [OK] Dependencies installed',
-        'echo.',
-        '',
-        'REM -- Save config and enroll --',
-        'if not exist "%USERPROFILE%\\.cloudfuze-aigov" mkdir "%USERPROFILE%\\.cloudfuze-aigov"',
-        `echo {"serverUrl":"${serverUrl}","enrollSecret":"${ENROLL_SECRET}"}> "%USERPROFILE%\\.cloudfuze-aigov\\auto-config.json"`,
-        '',
-        `echo [..] Enrolling with server (${serverUrl})...`,
-        `"!NODE!" src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output NUL`,
-        'if !ERRORLEVEL! neq 0 (',
-        '  echo [WARNING] Enrollment had issues but continuing...',
-        ')',
-        'echo [OK] Enrolled',
-        'echo.',
-        '',
-        'REM -- Create hidden launcher (no terminal window on boot) --',
-        'set "LAUNCHER=%~dp0agent\\start-agent.vbs"',
-        `>>"!LAUNCHER!" echo Set ws = CreateObject("WScript.Shell")`,
-        `>>"!LAUNCHER!" echo ws.Run """!NODE!"" ""%~dp0agent\\src\\index.js"" --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor", 0, False`,
-        '',
-        'REM -- Register auto-start on boot --',
-        'echo [..] Registering auto-start...',
-        'reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v CloudFuzeAgent /d "wscript.exe \\"!LAUNCHER!\\"" /f >nul 2>&1',
-        'echo [OK] Agent will start automatically on boot',
-        'echo.',
-        '',
-        'REM -- Start agent now (hidden, no terminal window) --',
-        'echo [..] Starting agent...',
-        'start "" wscript.exe "!LAUNCHER!"',
-        'echo.',
-        'echo ============================================',
-        'echo    CloudFuze agent is installed and running!',
-        'echo ============================================',
-        'echo.',
-        'echo This window will close in 5 seconds...',
-        'timeout /t 5 /nobreak >nul',
-      ].join('\r\n'),
+      windows: `@echo off
+title CloudFuze Desktop Agent
+call :main
+goto :eof
+
+:main
+echo ============================================
+echo    CloudFuze Desktop Agent - Install
+echo ============================================
+echo.
+
+REM -- Find Node.js --
+if exist "%~dp0node\\node.exe" (
+  set "NODE=%~dp0node\\node.exe"
+  set "NPM=%~dp0node\\npm.cmd"
+  echo [OK] Using bundled Node.js
+  goto node_ok
+)
+where node >nul 2>&1
+if %ERRORLEVEL% equ 0 (
+  set "NODE=node"
+  set "NPM=npm"
+  echo [OK] Using system Node.js
+  goto node_ok
+)
+echo [..] Node.js not found - downloading (~30 MB, one-time)...
+powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://nodejs.org/dist/v22.15.0/node-v22.15.0-win-x64.zip' -OutFile '%~dp0node.zip'"
+if not exist "%~dp0node.zip" (
+  echo [ERROR] Download failed. Install Node.js from https://nodejs.org
+  pause
+  goto :eof
+)
+echo [..] Extracting...
+powershell -NoProfile -Command "Expand-Archive -Path '%~dp0node.zip' -DestinationPath '%~dp0' -Force"
+if exist "%~dp0node-v22.15.0-win-x64" ren "%~dp0node-v22.15.0-win-x64" node
+del "%~dp0node.zip" 2>nul
+if not exist "%~dp0node\\node.exe" (
+  echo [ERROR] Extraction failed.
+  pause
+  goto :eof
+)
+set "NODE=%~dp0node\\node.exe"
+set "NPM=%~dp0node\\npm.cmd"
+echo [OK] Node.js ready
+
+:node_ok
+echo.
+
+REM -- Stop old agent --
+if exist "%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock" (
+  echo [..] Stopping previous agent...
+  for /f %%p in (%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock) do taskkill /PID %%p /F >nul 2>&1
+  del "%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock" >nul 2>&1
+  timeout /t 2 /nobreak >nul
+  echo [OK] Stopped
+)
+
+REM -- Check source --
+if not exist "%~dp0agent\\src\\index.js" (
+  echo [ERROR] Agent source not found at %~dp0agent\\src\\index.js
+  pause
+  goto :eof
+)
+
+REM -- Install dependencies --
+echo [..] Installing dependencies...
+cd /d "%~dp0agent"
+call "%NPM%" install --production 2>nul
+echo [OK] Dependencies installed
+echo.
+
+REM -- Save config --
+if not exist "%USERPROFILE%\\.cloudfuze-aigov" mkdir "%USERPROFILE%\\.cloudfuze-aigov"
+echo {"serverUrl":"${serverUrl}","enrollSecret":"${ENROLL_SECRET}"}> "%USERPROFILE%\\.cloudfuze-aigov\\auto-config.json"
+
+REM -- Enroll --
+echo [..] Enrolling with server...
+"%NODE%" src/index.js --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --output NUL
+echo [OK] Enrolled
+echo.
+
+REM -- Create VBS launcher for hidden start --
+echo Set ws = CreateObject("WScript.Shell") > "%~dp0agent\\start-agent.vbs"
+echo ws.Run """%NODE%"" ""%~dp0agent\\src\\index.js"" --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor", 0, False >> "%~dp0agent\\start-agent.vbs"
+
+REM -- Auto-start on boot --
+echo [..] Registering auto-start...
+reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v CloudFuzeAgent /d "wscript.exe \\"%~dp0agent\\start-agent.vbs\\"" /f >nul 2>&1
+echo [OK] Starts automatically on boot
+echo.
+
+REM -- Start now --
+echo [..] Starting agent...
+start "" wscript.exe "%~dp0agent\\start-agent.vbs"
+echo.
+echo ============================================
+echo    CloudFuze agent is installed and running!
+echo ============================================
+echo.
+echo Window closes in 5 seconds...
+timeout /t 5 /nobreak >nul
+goto :eof
+`.replace(/\n/g, '\r\n'),
       macos: [
         '#!/bin/bash',
         'set -e',
