@@ -18,6 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=builder /build/agent /app/agent
 COPY --from=builder /build/server/node_modules /app/server/node_modules
 COPY server/src /app/server/src
+# registry-snapshot.json lives here. Without this line only server/src is copied, so
+# the snapshot fallback in routes/registry.js finds nothing and the Inventory page
+# 503s instead of rendering — which is exactly the case it exists to cover.
+COPY server/data /app/server/data
 COPY server/package.json /app/server/
 COPY server/tsconfig.json /app/server/
 COPY scripts /app/scripts

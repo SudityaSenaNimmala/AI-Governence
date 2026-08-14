@@ -249,10 +249,27 @@ export function mountClaudeUsage(app, db) {
       if (m.claude_account_email) emailToMachine.set(m.claude_account_email, m);
     }
 
-    // A person is identified by their machine when we can resolve one, so every
-    // surface on that machine folds into the same row.
-    const personKeyFor = (machine, fallback) =>
-      machine ? `machine:${machine.id}` : `unlinked:${fallback}`;
+    // A person is identified by OS user + hostname first, and only by machine id
+    // when that is unavailable.
+    //
+    // Keying on machine id alone split one human across rows: the .exe tracker and
+    // the browser extension enrol as SEPARATE machine records, so the same person on
+    // the same laptop appeared twice — 1,118 prompts on one row and 20 on another,
+    // both "SatyaPinniti" on host "SATYA". That is fine for an inventory and wrong
+    // for the thing this table is for: deciding whose Team licence is underused.
+    // Split rows make a heavy user look like two light ones.
+    const personKeyFor = (machine, fallback) => {
+      const user = machine?.user && !GENERIC_USER.test(machine.user) ? machine.user : null;
+      const host = machine?.hostname || null;
+      if (user && host) return `person:${String(user).toLowerCase()}@${String(host).toLowerCase()}`;
+      return machine ? `machine:${machine.id}` : `unlinked:${fallback}`;
+    };
+
+    // A browser reporting its own user agent as the hostname, e.g. an extension that
+    // enrolled before it could read the OS user. "Mozilla" is what every major
+    // browser's UA starts with, so it is the value that actually shows up.
+    const UA_HOSTNAME = /^(mozilla|chrome|safari|firefox|edge|opera)$/i;
+    const isNamed = (r) => Boolean(r.user) || Boolean(r.hostname && !UA_HOSTNAME.test(r.hostname));
 
     // Exclude debug/test enrollments, same rule the AI Usage report uses.
     const EXCLUDE_RE = /debug/i;
@@ -318,14 +335,23 @@ export function mountClaudeUsage(app, db) {
       // account is that machine's stable owner. A Claude display name is per
       // Claude-account and changes whenever someone signs in as someone else —
       // using it would relabel the machine's owner after every account switch.
-      const label = osUser || meta?.display_name || fallbackEmail || meta?.hostname
+      // "-browser-extension" is an enrolment suffix the extension appends to the
+      // hostname it registers, not part of anyone's name. Left in, the table read
+      // "SudityaSena-browser-extension", which names the capture method rather than
+      // the person and reads as a different individual from a "SudityaSena" row
+      // enrolled by the .exe.
+      const cleanHost = meta?.hostname ? String(meta.hostname).replace(/-browser-extension$/i, '') : null;
+      const label = osUser || meta?.display_name || fallbackEmail || cleanHost
         || String(machineId || 'unknown').slice(0, 12);
 
       return {
         key: personKeyFor(meta, fallbackEmail || machineId),
         label,
         user: osUser || fallbackEmail || null,
-        hostname: meta?.hostname || null,
+        // Cleaned here too, not just in the label: the System column renders this,
+        // and "SudityaSena-browser-extension" names the capture method rather than
+        // the machine.
+        hostname: cleanHost,
         email: meta?.claude_account_email || (fallbackEmail ? String(fallbackEmail).toLowerCase() : null),
         attributed: !!(osUser || fallbackEmail),
         linked: !!meta,
@@ -410,6 +436,13 @@ export function mountClaudeUsage(app, db) {
     // a single row no matter how many Claude surfaces they used.
     const systems = new Map();
 
+    // Tallied at the point of exclusion, not by filtering `systems` afterwards.
+    // Skipping these in the surface loop means they never reach the rollup, so a
+    // post-hoc filter counts zero and the excluded usage disappears with nothing
+    // saying it existed — the opposite of the intent.
+    const excludedKeys = new Set();
+    let excludedPrompts = 0;
+
     const surfacesOut = [];
     for (const s of surfaces.values()) {
       const breakdown = [];
@@ -419,6 +452,14 @@ export function mountClaudeUsage(app, db) {
       };
 
       for (const [personKey, u] of s.users) {
+        // Same isNamed rule as the per-person table, applied here too.
+        //
+        // Filtering only `systems` left the two tables disagreeing: the surface tab
+        // read "Claude (Browser) · 70 prompts" while the browser column above summed
+        // to 58, the difference being UA-only enrolments listed in one place and not
+        // the other. Two totals for the same thing on one screen is worse than
+        // either choice made consistently.
+        if (!isNamed(u)) { excludedKeys.add(personKey); excludedPrompts += u.prompts || 0; continue; }
         const models = [...u.models];
         const hasMeasured = u.measured.total_tokens > 0 || u.measured.requests > 0;
         // Only estimate where nothing was measured — never stack an estimate on
@@ -449,6 +490,11 @@ export function mountClaudeUsage(app, db) {
             hostname: u.hostname,
             email: u.email,
             user: u.user,
+            // Carried through so a per-person row can say whether the name was
+            // resolved from an OS account or only inferred from a hostname. Absent,
+            // it read as undefined — and any consumer testing !attributed would have
+            // labelled every person "unattributed", including the ones we are sure of.
+            attributed: u.attributed,
             prompts: 0,
             measured_tokens: 0,
             measured_cost_usd: 0,
@@ -516,7 +562,20 @@ export function mountClaudeUsage(app, db) {
       period_days: days,
       sources,
       sources_mode: allSources ? 'all' : 'tracker',
+      // Rows that name somebody. The test is whether the enrolment resolved to a
+      // person, NOT whether it came from the extension — an extension enrolment that
+      // registered as "SudityaSena" is a real colleague and belongs here.
+      //
+      // What gets excluded is an enrolment whose hostname is the browser's own user
+      // agent, so it reads "Mozilla" once the suffix is stripped. Those name nobody,
+      // cannot inform a licence decision, and sitting beside real people they invite
+      // revoking a seat from a row that is not a seat.
+      //
+      // Counted, not dropped silently: unattributed_rows/unattributed_prompts say
+      // how much usage sits outside the named rows, so totals still reconcile.
       systems: [...systems.values()].sort((x, y) => y.prompts - x.prompts),
+      unattributed_rows: excludedKeys.size,
+      unattributed_prompts: excludedPrompts,
       surfaces: surfacesOut,
       totals,
       assumptions: {

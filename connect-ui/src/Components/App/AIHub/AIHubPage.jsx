@@ -4121,34 +4121,72 @@ function SdkTracesView() {
 //    everywhere; tokens/cost are MEASURED for Claude Code (the CLI reports them)
 //    and ESTIMATED elsewhere. The two are never added together.
 // ═══════════════════════════════════════════════════════════════════════════════
+// Windows the API already accepts via ?days=N. "" means no filter — the endpoint
+// then reports period_days: null and counts everything ever recorded.
+const CLAUDE_PERIODS = [
+  { value: "7",  label: "Last 7 days" },
+  { value: "30", label: "Last 30 days" },
+  { value: "90", label: "Last 3 months" },
+  { value: "",   label: "All time" },
+];
+
 function ClaudeUsageView() {
   const [data,setData]=useState(null),[e,setE]=useState(null),[sel,setSel]=useState(null);
+  // Defaults to 30 days rather than all time. Without a window the totals are
+  // cumulative since tracking began but nothing on screen said so, so a four-figure
+  // measured cost read as this month's spend.
+  const [days,setDays]=useState("30");
+  // Always sources=all — the browser extension is counted, not excluded.
+  //
+  // Tracker-only mode did not deduplicate, it DROPPED whatever only the extension
+  // saw: browser 19 vs 72 prompts, desktop 36 vs 56, over the same 90 days. That
+  // undercount is unusable for deciding whose Team seat is idle, which is what this
+  // table is for. The double-count it was avoiding is handled properly upstream now
+  // — person_key folds one human's enrolments into one row — so there is nothing
+  // left for a toggle to protect against.
   useEffect(()=>{
-    apiFetch("/claude-usage").then(d=>{ setData(d); if(d.surfaces?.length) setSel(d.surfaces[0].surface); }).catch(x=>setE(x.message));
-  },[]);
-  if(e) return <Err msg={e}/>; if(!data) return <Loading/>;
+    setData(null); setE(null);
+    apiFetch(`/claude-usage?sources=all${days?`&days=${days}`:""}`)
+      .then(d=>{ setData(d); if(d.surfaces?.length) setSel(s=>s||d.surfaces[0].surface); })
+      .catch(x=>setE(x.message));
+  },[days]);
+
+  const periodPicker=(
+    <select value={days} onChange={ev=>setDays(ev.target.value)}
+            style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12,fontWeight:600}}>
+      {CLAUDE_PERIODS.map(p=><option key={p.label} value={p.value}>{p.label}</option>)}
+    </select>
+  );
+
+  // Header renders in every state so the picker stays usable while loading or after
+  // an error — otherwise a slow window would strand you with no way to pick another.
+  if(e) return (<div><SectionHeader title="Claude Usage" action={periodPicker}/><Err msg={e}/></div>);
+  if(!data) return (<div><SectionHeader title="Claude Usage" action={periodPicker}/><Loading/></div>);
 
   const surfaces=data.surfaces||[];
   const selected=surfaces.find(s=>s.surface===sel)||null;
   const t=data.totals||{};
-  const a=data.assumptions||{};
+  // data.assumptions no longer read here — the footnote that printed
+  // chars_per_token and output_ratio was its only consumer. The API still returns
+  // it for anyone who needs the estimation basis.
 
   return (<div>
-    <SectionHeader title="Claude Usage" hint="Prompts per user across Claude, Claude Desktop, Claude Code CLI and Claude Code on the web. Prompt counts are measured. Tokens and cost are measured for Claude Code and estimated elsewhere — the two are shown separately and never summed."/>
-
-    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,padding:"7px 12px",borderRadius:6,background:"#f1f5f9",border:"1px solid #e2e8f0",fontSize:12,color:"#475569"}}>
-      <Shield size={13}/>
-      <span>
-        Source: <strong>{data.sources_mode === "all" ? "all capture pipelines" : "Claude Usage Tracker (.exe) + Claude Code telemetry"}</strong>
-        {data.sources_mode !== "all" && " — browser-extension and OS-monitor events are excluded so each prompt is counted once."}
-      </span>
-    </div>
+    {/* Explanatory copy removed: the header hint, the source banner, the Surfaces
+        hint and the measured/estimated footnote. The period picker carries the only
+        piece of that text a reader still needs — which window the numbers cover. */}
+    <SectionHeader title="Claude Usage" action={periodPicker}/>
 
     <div className="aihub_stat_grid">
       <StatCard icon={<MessageSquare size={18}/>} label="Claude prompts" value={(t.prompts||0).toLocaleString()} hint="all surfaces" color="#8b5cf6"/>
-      <StatCard icon={<Activity size={18}/>} label="Measured tokens" value={fmtTokens(t.measured_tokens)} hint={`${(t.measured_requests||0).toLocaleString()} Claude Code requests`} color="#0044cc"/>
-      <StatCard icon={<Wrench size={18}/>} label="Measured cost" value={fmtUsd(t.measured_cost_usd)} hint="reported by Claude Code" color="#22c55e"/>
-      <StatCard icon={<Clock size={18}/>} label="Est. tokens" value={fmtTokens(t.estimated_tokens)} hint={`≈${fmtUsd(t.estimated_cost_usd)} · browser & desktop`} color="#f59e0b"/>
+      {/* "Estimated", not "Measured", for the money.
+          The token counts really are measured — Claude Code reports them. The dollar
+          figure is not: it prices those tokens at pay-as-you-go API rates, and on a
+          Team or Max plan seats are flat-rate and nothing is billed per token. So it
+          is what this usage WOULD have cost on the API, which is a useful number, but
+          calling it measured cost stated it as money spent. */}
+      <StatCard icon={<Activity size={18}/>} label="Tokens" value={fmtTokens(t.measured_tokens)} hint={`${(t.measured_requests||0).toLocaleString()} Claude Code requests · includes cached context re-read each turn`} color="#0044cc"/>
+      <StatCard icon={<Wrench size={18}/>} label="Estimated cost" value={fmtUsd(t.measured_cost_usd)} hint="at API list rates — Team seats are not billed per token" color="#22c55e"/>
+      <StatCard icon={<Clock size={18}/>} label="Est. tokens" value={fmtTokens(t.estimated_tokens)} hint={`≈${fmtUsd(t.estimated_cost_usd)} · browser & desktop, prompt text only`} color="#f59e0b"/>
     </div>
 
     {!(t.prompts>0) && (
@@ -4158,20 +4196,44 @@ function ClaudeUsageView() {
     )}
 
     <>
-      <SectionHeader title="By person / system" hint="One row per person per machine. Claude Code reports usage against a signed-in account while desktop and browser report an OS user — the tracker links them, so the same person counts once."/>
+      <SectionHeader title="By system"/>
       <div className="aihub_card" style={{marginBottom:18}}>
         <DataTable columns={[
-          {label:"Person",render:r=><><div className="aihub_text_primary">{r.label}</div>{r.email&&r.email!==r.label&&<div className="aihub_text_muted">{r.email}</div>}</>},
+          // Email deliberately not shown.
+          //
+          // The row is keyed on machine + OS user (person_key is
+          // "machine:<id>"), but `email` came from a separately claimed Claude
+          // account on that machine — so a row for OS user SatyaPinniti on host
+          // SATYA was displaying soumya.gande@cloudfuze.com underneath it. The
+          // claim is a machine-level fact, not proof of who typed the prompt, and
+          // presenting it as the person's address attributes one colleague's usage
+          // to another. Machine and OS user are what the tracker actually observes,
+          // so those are what is shown. The field is untouched in the API.
+          {label:"User",render:r=><div className="aihub_text_primary">{r.user||r.label}</div>},
           {label:"System",render:r=>r.hostname?<Mono>{r.hostname}</Mono>:<span className="aihub_text_muted">—</span>},
           {label:"Desktop",render:r=>(r.by_surface?.["Claude Desktop"]||0),right:true},
           {label:"Browser",render:r=>(r.by_surface?.["Claude (browser)"]||0),right:true},
           {label:"Code CLI",render:r=>(r.by_surface?.["Claude Code (CLI)"]||0),right:true},
           {label:"Total prompts",render:r=><strong>{(r.prompts||0).toLocaleString()}</strong>,right:true},
-          {label:"Measured cost",render:r=>r.measured_cost_usd>0?fmtUsd(r.measured_cost_usd):<span className="aihub_text_muted">—</span>,right:true},
+          // Both cost fields, summed — not measured_cost_usd alone.
+          //
+          // Reading only the measured figure meant a browser-only person showed "—"
+          // while holding a real estimated_cost_usd: Suditya had 39 prompts and
+          // $0.0153, displayed as a dash. On a licence-reclamation screen a dash
+          // reads as "no usage", which is the opposite of true.
+          //
+          // The two were originally kept apart because one is measured and one is
+          // inferred. That distinction lived in the column label, and the label is
+          // now "Estimated cost" for both — on a Team plan neither is money spent,
+          // both are API-rate estimates — so summing no longer overstates confidence.
+          {label:"Estimated cost",render:r=>{
+            const total=(r.measured_cost_usd||0)+(r.estimated_cost_usd||0);
+            return total>0?fmtUsd(total):<span className="aihub_text_muted">—</span>;
+          },right:true},
         ]} rows={data.systems||[]} empty="No Claude usage recorded yet."/>
       </div>
 
-      <SectionHeader title="Surfaces" hint="Claude Desktop, Claude in the browser and Claude Code CLI are always listed — a zero means tracked with no activity yet, not untracked. Select one to see per-user prompt counts."/>
+      <SectionHeader title="Surfaces"/>
       <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}}>
         {surfaces.map(s=>(
           <button key={s.surface} className={`aihub_filter_btn ${sel===s.surface?"active":""}`} onClick={()=>setSel(s.surface)}
@@ -4183,30 +4245,25 @@ function ClaudeUsageView() {
       </div>
 
       {selected && <div className="aihub_card">
-        <SectionHeader
-          title={`${selected.surface} — usage by user`}
-          hint={
-            selected.measured_tokens>0
-              ? `${(selected.prompts||0).toLocaleString()} prompts · ${fmtTokens(selected.measured_tokens)} measured tokens · ${fmtUsd(selected.measured_cost_usd)} measured cost (reported by Claude Code)`
-              : `${(selected.prompts||0).toLocaleString()} prompts · ${fmtTokens(selected.estimated_tokens)} estimated tokens · ≈${fmtUsd(selected.estimated_cost_usd)} estimated cost`
-          }
-        />
+        {/* Sub-line removed. The surface buttons above already carry the prompt
+            count, and the table below carries the per-user tokens and cost. */}
+        <SectionHeader title={`${selected.surface} — usage by user`}/>
         <DataTable columns={[
           {label:"User",render:r=><><div className="aihub_text_primary">{r.label||r.user||r.hostname||"—"}</div>{!r.attributed&&<div className="aihub_text_muted">unattributed</div>}</>},
           {label:"Prompts",key:"prompts",right:true},
           {label:"Tokens",render:r=>fmtTokens(r.tokens),right:true},
           {label:"Cost",render:r=>fmtUsd(r.cost_usd),right:true},
-          {label:"Basis",render:r=>r.measured
-            ? <span style={{color:"#16a34a",fontWeight:600,fontSize:11}}>measured</span>
-            : <span style={{color:"#b45309",fontWeight:600,fontSize:11}}>estimated</span>},
-          {label:"Model",render:r=>(r.models&&r.models.length)?<Mono>{r.models[0]}</Mono>:"—"},
+          // Basis and Model columns removed. Line comments, not {/* … */} — inside a
+          // JS array the braced form is an empty object literal, which renders as a
+          // blank extra column.
+          //
+          // Basis said measured/estimated per row; the note under the table already
+          // explains which surfaces are which, and every browser and desktop row was
+          // "estimated" regardless. Model was "—" on those same rows, since only
+          // Claude Code reports one.
         ]} rows={selected.breakdown||[]} empty={`No ${selected.surface} prompts recorded yet.`}/>
       </div>}
 
-      <p className="aihub_text_muted" style={{fontSize:11,marginTop:4}}>
-        Measured rows come from Claude Code's own reporting (real token counts and cost). Estimated rows infer
-        input ≈ prompt length ÷ {a.chars_per_token||4} chars/token with output assumed at {a.output_ratio||3}× input; actual billing may differ.
-      </p>
     </>
   </div>);
 }
@@ -5944,6 +6001,66 @@ function InstallationsView() {
           <div style={{marginTop:6,lineHeight:1.6}}>
             Silent: <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:11}}>CloudFuze-Agent.exe /S</code><br/>
             Intune (Win) · Jamf (Mac) · Ansible (Linux)
+          </div>
+        </details>
+      </div>
+
+      {/* Claude Usage Tracker — a separate deliverable from the Desktop Agent above.
+          Kept as its own card, not a variant of it: the agent monitors every AI tool
+          on the machine, this watches Claude only (claude_tracker/config.js pins
+          DESKTOP_PROCESSES to ['Claude']). Deploying it asks colleagues for much
+          narrower consent, so the two must not share a button. */}
+      <div className="aihub_card">
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
+          <div style={{fontSize:26}}>🧠</div>
+          <div>
+            <h4 style={{margin:0,fontSize:15,fontWeight:700}}>Claude Usage Tracker</h4>
+            <div style={{fontSize:11,color:"#6b7280"}}>Desktop: Windows · Extension: Chrome · Edge · Brave</div>
+          </div>
+          <div style={{marginLeft:"auto",fontSize:10,fontWeight:700,color:"#8b5cf6",background:"#8b5cf614",border:"1px solid #8b5cf630",borderRadius:999,padding:"3px 9px"}}>Claude only</div>
+        </div>
+
+        <div style={{fontSize:12,color:"#4b5563",marginBottom:14,lineHeight:1.5}}>
+          Tracks Claude usage per person — Claude Desktop, Claude in the browser and Claude Code CLI.
+          It does not scan for other AI tools and does not monitor other sites. Also switches on Claude Code
+          telemetry so token counts come from the CLI instead of being estimated.
+        </div>
+
+        {/* Two downloads, deliberately separate. The .exe covers Claude Desktop and
+            Claude Code CLI; the extension covers Claude in the browser. An admin may
+            want either or both, and neither can see anything but Claude. */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(2,minmax(0,1fr))",gap:8}}>
+          <button disabled={!!downloading}
+                  onClick={()=>download('/api/v1/installations/claude-tracker','CloudFuze-Claude-Usage-Tracker.zip','claude')}
+                  style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='claude'?"#6b7280":"#8b5cf6",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='claude'?0.5:1}}>
+            {downloading==='claude'?'⏳ Preparing...':'⬇ Desktop (.exe)'}
+          </button>
+          <button disabled={!!downloading}
+                  onClick={()=>download('/api/v1/installations/extension-package?flavour=claude','CloudFuze-Claude-Extension.zip','claude-ext')}
+                  style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='claude-ext'?"#6b7280":"#7c3aed",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='claude-ext'?0.5:1}}>
+            {downloading==='claude-ext'?'⏳ Preparing...':'⬇ Extension'}
+          </button>
+        </div>
+
+        <details style={{marginTop:12}}>
+          <summary style={{fontSize:11,color:"#6b7280",cursor:"pointer"}}>Installation steps</summary>
+          <div style={{fontSize:11,fontWeight:700,color:"#374151",marginTop:8}}>Desktop (.exe) — Claude Desktop + Claude Code CLI</div>
+          <ol style={{fontSize:11,color:"#4b5563",margin:"4px 0 0",paddingLeft:18,lineHeight:1.7}}>
+            <li>Unzip anywhere — keep the <code>.exe</code> and <code>prompt-watcher.ps1</code> together</li>
+            <li>Double-click <strong>CloudFuzeClaudeTracker.exe</strong></li>
+            <li>It enrols itself and starts reporting — leave it running</li>
+            <li>Restart any open Claude Code session so CLI telemetry takes effect</li>
+          </ol>
+          <div style={{fontSize:11,fontWeight:700,color:"#374151",marginTop:10}}>Extension — Claude in the browser</div>
+          <ol style={{fontSize:11,color:"#4b5563",margin:"4px 0 0",paddingLeft:18,lineHeight:1.7}}>
+            <li>Unzip the folder and keep it somewhere permanent</li>
+            <li><code>chrome://extensions</code> → enable <strong>Developer mode</strong></li>
+            <li><strong>Load unpacked</strong> → select the unzipped folder</li>
+            <li>It enrols on first load — no configuration needed</li>
+          </ol>
+          <div style={{fontSize:10.5,color:"#92400e",background:"#fffbeb",border:"1px solid #fde68a",borderRadius:6,padding:"6px 9px",marginTop:8}}>
+            The two files must stay in the same folder — the tracker looks for
+            prompt-watcher.ps1 beside the executable and exits if it is missing.
           </div>
         </details>
       </div>

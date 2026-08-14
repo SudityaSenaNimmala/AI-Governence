@@ -109,9 +109,52 @@ export function mountInstallations(app, db) {
     }
     walk(extDir, '');
 
+    // ?flavour=claude — a Claude-only build.
+    //
+    // The narrowing is done in the MANIFEST, not in configuration or a runtime flag,
+    // because the point is an extension that CANNOT read anything but Claude. Chrome
+    // enforces host_permissions and content_script matches; a setting the background
+    // worker consults could be changed later, and an admin who told colleagues "this
+    // only watches Claude" would have been made to say something untrue.
+    //
+    // Three things have to change together — missing any one leaves the build able to
+    // see every site:
+    //   host_permissions       — drop <all_urls> and every non-Claude origin
+    //   content_scripts        — including the SECOND block, which injects
+    //                            fingerprint.js on <all_urls>
+    //   web_accessible_resources — its matches are <all_urls> too
+    if (String(req.query.flavour || '') === 'claude') {
+      const CLAUDE = 'https://claude.ai/*';
+      const mi = files.findIndex((f) => f.name === 'manifest.json');
+      if (mi === -1) {
+        return res.status(500).json({ error: 'Extension manifest.json not found in source' });
+      }
+      const m = JSON.parse(files[mi].data.toString('utf8'));
+
+      // The service worker POSTs captures to the server, and an MV3 worker needs the
+      // target origin permitted. Derived from this request rather than hardcoded, so
+      // a build downloaded from the deployed host reaches that host.
+      let serverOrigin = null;
+      try { serverOrigin = new URL(serverUrl).origin + '/*'; } catch { /* leave null */ }
+
+      m.name = 'CloudFuze Claude Usage Tracker';
+      m.description = 'Tracks Claude usage only. Reads claude.ai and nothing else.';
+      m.host_permissions = [CLAUDE, ...(serverOrigin ? [serverOrigin] : [])];
+
+      m.content_scripts = (m.content_scripts || [])
+        .map((cs) => ({ ...cs, matches: (cs.matches || []).includes(CLAUDE) || (cs.matches || []).includes('<all_urls>') ? [CLAUDE] : [] }))
+        .filter((cs) => cs.matches.length > 0);
+
+      m.web_accessible_resources = (m.web_accessible_resources || [])
+        .map((war) => ({ ...war, matches: [CLAUDE] }));
+
+      files[mi] = { name: 'manifest.json', data: Buffer.from(JSON.stringify(m, null, 2), 'utf8') };
+    }
+
+    const claudeOnly = String(req.query.flavour || '') === 'claude';
     const zipBuffer = createZip(files);
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', 'attachment; filename="CloudFuze-Browser-Extension.zip"');
+    res.setHeader('Content-Disposition', `attachment; filename="${claudeOnly ? 'CloudFuze-Claude-Extension.zip' : 'CloudFuze-Browser-Extension.zip'}"`);
     res.send(zipBuffer);
   }));
 
@@ -239,6 +282,69 @@ export function mountInstallations(app, db) {
   }));
 
   // ── Download pre-configured desktop agent package ──
+
+  // ── Claude Usage Tracker (.exe) ─────────────────────────────────────────────
+  //
+  // A separate download from the desktop agent, and deliberately so. The agent
+  // scans for every AI tool and monitors clipboard and prompts across all of them;
+  // this tracker watches Claude only — agent/src/claude_tracker/config.js pins
+  // DESKTOP_PROCESSES to ['Claude']. An admin deploying it to colleagues is asking
+  // for far narrower consent than the full agent needs, so the two must not be
+  // reachable through one button.
+  //
+  // Serves the prebuilt artifact rather than building on demand: the binary is a
+  // ~85 MB Node SEA and postject injection takes minutes, which is not something to
+  // do inside a request. `npm run build:claude-tracker` in agent/ produces it.
+  app.get('/api/v1/installations/claude-tracker', a(async (req, res) => {
+    const agentDir = join(__dirname, '..', '..', '..', 'agent');
+    const platform = process.platform;
+    const arch = process.arch;
+    const buildDir = join(agentDir, 'build', `claude-tracker-${platform}-${arch}`);
+
+    if (!existsSync(buildDir)) {
+      // 501, not 500: nothing is broken, the artifact simply has not been built on
+      // this host. Says exactly which command produces it and where it looked.
+      // `detail` as well as `help`: the UI's download() shows error + detail in its
+      // alert and ignores every other field, so guidance placed only in `help` would
+      // never reach the admin who needs it.
+      const guidance = 'Run "npm run build:claude-tracker" in the agent/ directory, with CFAI_SERVER_URL and CFAI_ENROLL_SECRET set so the binary points at this server.';
+      return res.status(501).json({
+        error: 'Claude Usage Tracker has not been built on this server',
+        detail: guidance,
+        help: guidance,
+        expected_path: buildDir,
+      });
+    }
+
+    // prompt-watcher.ps1 is not optional — findWatcherScript() in the tracker looks
+    // for it beside the executable and exits if it is absent. Shipping the exe alone
+    // produces a tracker that dies on launch, so a missing script is a hard error
+    // rather than a partial zip.
+    const files = [];
+    let sawExe = false;
+    let sawWatcher = false;
+    for (const name of readdirSync(buildDir)) {
+      const full = join(buildDir, name);
+      if (!statSync(full).isFile()) continue;
+      if (/\.exe$/i.test(name)) sawExe = true;
+      if (/^prompt-watcher\.ps1$/i.test(name)) sawWatcher = true;
+      files.push({ name, data: readFileSync(full), mtime: statSync(full).mtime });
+    }
+
+    if (!sawExe || !sawWatcher) {
+      return res.status(500).json({
+        error: 'Claude Usage Tracker build is incomplete',
+        detail: `${sawExe ? '' : 'missing the .exe; '}${sawWatcher ? '' : 'missing prompt-watcher.ps1, which the tracker requires beside the executable'}`.trim(),
+        help: 'Rebuild with "npm run build:claude-tracker" in agent/.',
+      });
+    }
+
+    const zip = createZip(files);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="CloudFuze-Claude-Usage-Tracker.zip"');
+    res.setHeader('Content-Length', zip.length);
+    res.send(zip);
+  }));
 
   app.get('/api/v1/installations/agent-installer', a(async (req, res) => {
     const platform = req.query.platform || 'windows';

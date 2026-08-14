@@ -21,6 +21,7 @@
     "build:bundle": "node scripts/build.mjs bundle",
     "build:sea": "node scripts/build.mjs sea",
     "build": "node scripts/build.mjs all",
+    "claude-tracker": "node src/claude_tracker/index.js",
     "build:claude-tracker": "node scripts/build-claude-tracker.mjs"
   },
   "dependencies": {

@@ -13,6 +13,11 @@ import { a } from '../util.js';
 import { fireWebhooks } from './webhooks.js';
 import { scoreToLevel, normalizeStoredRisk } from '../lib/risk-scale.js';
 import { assessToolRisk } from '../lib/tool-risk.js';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Normalize finding types to registry categories
 const CATEGORY_MAP = {
@@ -35,6 +40,81 @@ export function mountRegistry(app, db) {
   // skip-listed vendors/types and invalid names. Both the list route and the
   // summary route go through this, so a count can never disagree with the rows
   // it claims to be counting — see the note on /registry/summary below.
+  // ── Snapshot fallback ───────────────────────────────────────────────────────
+  //
+  // buildRegistry() reads five collections and aggregates dlp_events on every
+  // request, with no caching. When the database is slow it does not degrade, it
+  // hangs: /api/v1/registry and /summary returned nothing after 120s on both the
+  // deployed host and locally, while every other endpoint answered in under a
+  // second. The Inventory page then shows "Loading..." forever, because the two
+  // calls it depends on never resolve.
+  //
+  // data/registry-snapshot.json is a real capture of this tenant's inventory —
+  // 260 systems with their actual scores, not fabricated rows. Served when the live
+  // build exceeds its budget so the screen always has data.
+  //
+  // Live data still wins whenever the database is healthy: the snapshot is only
+  // reached on timeout or error, and `stale: true` in the response says which one
+  // you are looking at rather than passing a snapshot off as current.
+  const SNAPSHOT_PATH = join(__dirname, '..', '..', 'data', 'registry-snapshot.json');
+  const BUILD_BUDGET_MS = Number(process.env.REGISTRY_BUILD_BUDGET_MS || 6000);
+  // REGISTRY_SNAPSHOT_FIRST=1 answers from the snapshot without attempting the live
+  // build at all, so the page paints with no wait.
+  //
+  // For a live demo, waiting out the budget and then falling back is still a visible
+  // stall — the fallback removes the infinite spinner but not the pause. This makes
+  // it instant. Off by default: it stops serving current data, which is only the
+  // right trade when someone is watching and the database is known to be unwell.
+  const SNAPSHOT_FIRST = process.env.REGISTRY_SNAPSHOT_FIRST === '1';
+  // Circuit breaker, so instant responses do not depend on an env var being set on
+  // the host. deploy.mjs deliberately never ships server/.env, so a flag set locally
+  // would not reach production — the one place this matters most. After a failed or
+  // over-budget build the live path is skipped for this long, then retried, so the
+  // page self-heals when the database recovers instead of needing a redeploy.
+  const UNHEALTHY_FOR_MS = Number(process.env.REGISTRY_UNHEALTHY_FOR_MS || 120_000);
+  let _unhealthyUntil = 0;
+  let _snapshot = null;
+
+  function loadSnapshot() {
+    if (_snapshot) return _snapshot;
+    try {
+      _snapshot = JSON.parse(readFileSync(SNAPSHOT_PATH, 'utf8'));
+    } catch {
+      _snapshot = null;   // absent is fine — callers fall through to their own error
+    }
+    return _snapshot;
+  }
+
+  // Resolves to null rather than rejecting, so callers branch on the value instead
+  // of wrapping every call site in try/catch.
+  function buildRegistryWithBudget() {
+    const haveSnapshot = Boolean(loadSnapshot());
+    if (haveSnapshot && (SNAPSHOT_FIRST || Date.now() < _unhealthyUntil)) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      let settled = false;
+      const fail = (why) => {
+        settled = true;
+        // Only trip the breaker when there is a snapshot to fall back to. Without
+        // one, tripping would turn a slow page into a 503 and lose the data that a
+        // patient caller would still have received.
+        if (haveSnapshot) _unhealthyUntil = Date.now() + UNHEALTHY_FOR_MS;
+        console.warn(`[registry] ${why} — serving snapshot, skipping live build for ${UNHEALTHY_FOR_MS / 1000}s`);
+        resolve(null);
+      };
+      const timer = setTimeout(() => { if (!settled) fail(`live build exceeded ${BUILD_BUDGET_MS}ms`); }, BUILD_BUDGET_MS);
+      buildRegistry().then((r) => {
+        if (settled) return;
+        settled = true; clearTimeout(timer);
+        _unhealthyUntil = 0;   // healthy again
+        resolve(r);
+      }).catch((e) => {
+        if (settled) return;
+        clearTimeout(timer);
+        fail(`live build failed: ${e?.message || e}`);
+      });
+    });
+  }
+
   async function buildRegistry() {
     // 1. Governance discovered agents
     const govAgents = await db.collection('discovered_agents')
@@ -290,7 +370,22 @@ export function mountRegistry(app, db) {
   app.get('/api/v1/registry', a(async (req, res) => {
     const { platform, status, risk_level, category, search } = req.query;
 
-    let results = await buildRegistry();
+    const live = await buildRegistryWithBudget();
+    let stale = false;
+    let results = live;
+    if (!results) {
+      const snap = loadSnapshot();
+      if (!snap) {
+        return res.status(503).json({
+          error: 'Registry is temporarily unavailable',
+          detail: 'The live build timed out and no snapshot is present on this server.',
+        });
+      }
+      results = snap.systems;
+      stale = true;
+      // Filters below still apply to snapshot rows — the shape is identical, so the
+      // page behaves the same whichever source it got.
+    }
 
     if (platform)   results = results.filter(r => r.platform === platform || r.source_detail === platform);
     if (status)      results = results.filter(r => r.status === status);
@@ -323,6 +418,13 @@ export function mountRegistry(app, db) {
       return (a.name || '').localeCompare(b.name || '');
     });
 
+    // Header, not a body field: this route returns a bare array and the UI iterates
+    // it directly, so wrapping it in an object to carry a flag would break every
+    // caller. A header says which source answered without changing the contract.
+    if (stale) {
+      res.setHeader('X-Registry-Stale', '1');
+      res.setHeader('X-Registry-Captured-At', loadSnapshot()?.captured_at || '');
+    }
     res.json(results);
   }));
 
@@ -340,7 +442,23 @@ export function mountRegistry(app, db) {
     // reported `unknown: 0` while the list held plenty of unknown rows.
     //
     // Deriving both from buildRegistry() makes disagreement impossible.
-    const rows = await buildRegistry();
+    const live = await buildRegistryWithBudget();
+    if (!live) {
+      // The snapshot carries its own precomputed summary, derived from the very rows
+      // in the same file — so the fallback keeps the "cannot disagree" property that
+      // the comment above is about.
+      const snap = loadSnapshot();
+      if (!snap) {
+        return res.status(503).json({
+          error: 'Registry summary is temporarily unavailable',
+          detail: 'The live build timed out and no snapshot is present on this server.',
+        });
+      }
+      res.setHeader('X-Registry-Stale', '1');
+      res.setHeader('X-Registry-Captured-At', snap.captured_at || '');
+      return res.json(snap.summary);
+    }
+    const rows = live;
 
     const statusCounts = { approved: 0, restricted: 0, blocked: 0, unknown: 0 };
     const bySource = { governance_agents: 0, endpoint_tools: 0, platform_services: 0 };
