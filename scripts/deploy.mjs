@@ -37,7 +37,18 @@ const cfg = (k, d) => process.env[k] || dotenv[k] || d;
 const SSH_TARGET = cfg('DEPLOY_SSH');
 const KEY = cfg('DEPLOY_KEY', resolve(homedir(), '.ssh/ai_gov_deploy'));
 const DIR = cfg('DEPLOY_DIR', '/opt/ai-gov');
-const HOST = SSH_TARGET ? SSH_TARGET.split('@').pop() : null;
+// Accepts user@host:port as well as DEPLOY_SSH_PORT, because port 22 is not a
+// given: the cftools.live host refuses it outright (verified — 443 and 8787
+// answer, 22 does not) whether that is a firewall or sshd listening elsewhere.
+// Without this the script could only ever report a connection timeout.
+const rawHost = SSH_TARGET ? SSH_TARGET.split('@').pop() : null;
+const hostPortMatch = rawHost ? /^(.+):(\d+)$/.exec(rawHost) : null;
+const HOST = hostPortMatch ? hostPortMatch[1] : rawHost;
+const SSH_PORT = (cfg('DEPLOY_SSH_PORT', '') || (hostPortMatch ? hostPortMatch[2] : '') || '22').trim();
+// The user@host the ssh command actually gets — the :port form is not valid there.
+const SSH_USER_HOST = SSH_TARGET && hostPortMatch
+  ? `${SSH_TARGET.split('@')[0]}@${HOST}`
+  : SSH_TARGET;
 
 // Deployment topology that is NOT the same on every host.
 //
@@ -62,9 +73,25 @@ function sh(cmd) {
 // --- preflight ---
 if (!SSH_TARGET) die('DEPLOY_SSH is not set (e.g. DEPLOY_SSH=root@165.22.223.59). Put it in .env or the environment.');
 if (!existsSync(KEY)) die(`SSH key not found: ${KEY}`);
-const SSH = `ssh -i "${KEY}" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 ${SSH_TARGET}`;
+const SSH = `ssh -i "${KEY}" -p ${SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 ${SSH_USER_HOST}`;
 
-console.log(`\n▶ Deploying to ${SSH_TARGET}:${DIR}\n`);
+console.log(`\n▶ Deploying to ${SSH_USER_HOST}:${DIR} (ssh port ${SSH_PORT})\n`);
+
+// Fail on the real problem, before spending two minutes building a frontend that
+// cannot be shipped. BatchMode means a key is the only credential accepted, so a
+// reachable-but-unauthorized host and an unreachable one are worth telling apart:
+// the first is a key to install, the second is a firewall or a different port.
+const reach = spawnSync('bash', ['-c', `${SSH} -o ConnectTimeout=15 'echo SSH_OK'`], { cwd: root, encoding: 'utf8' });
+if (!String(reach.stdout || '').includes('SSH_OK')) {
+  const err = String(reach.stderr || '').trim().split('\n').pop() || 'no response';
+  const timedOut = /timed out|refused|No route/i.test(err);
+  die(`cannot reach ${SSH_USER_HOST} on port ${SSH_PORT}: ${err}\n`
+    + (timedOut
+      ? `  Port ${SSH_PORT} is not accepting connections from here. Check which port sshd listens on\n`
+        + `  ("ss -tlnp | grep sshd" on the host) and set DEPLOY_SSH_PORT, or open the port to this IP.`
+      : `  The host answered but refused this key. Add the public half of ${KEY} to\n`
+        + `  the host's ~/.ssh/authorized_keys, or point DEPLOY_KEY at a key it already accepts.`));
+}
 
 // Secrets (MONGODB_URI, ENCRYPTION_KEY, JWT_SECRET, …) live ONLY in the
 // server's own ${DIR}/.env. We never ship or overwrite it — verify it's there.
