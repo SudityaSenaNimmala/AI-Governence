@@ -243,6 +243,25 @@ export function mountClaudeUsage(app, db) {
       .toArray();
     const machineMap = new Map(machines.map((m) => [m.id, m]));
 
+    // The enrolment→employee map that routes/identity.js already maintains.
+    //
+    // The .exe and the browser extension enrol as SEPARATE machine records, and the
+    // extension's carries no OS user — only a hostname it suffixes, e.g.
+    // "SudityaSena-browser-extension". resolveProfiles() links those back to the
+    // agent profile for the same host (and, when the extension reported one, by
+    // employee email), which is exactly the "these enrolments are one human"
+    // question this table needs answered. It was being answered twice, differently:
+    // Suditya appeared as two rows, 39 browser prompts under the extension's machine
+    // id and 1 desktop prompt under person:sudityanimmala@sudityasena, while a single
+    // profile already held all six of those machine ids.
+    const profiles = await db.collection('employee_profiles')
+      .find({}).project({ _id: 0, hostname: 1, os_user: 1, display_name: 1, machine_ids: 1 })
+      .toArray();
+    const profileByMachine = new Map();
+    for (const p of profiles) {
+      for (const id of p.machine_ids || []) profileByMachine.set(id, p);
+    }
+
     // ONE PERSON PER SYSTEM.
     //
     // The same human arrives under two different identities: the tracker reports
@@ -263,8 +282,8 @@ export function mountClaudeUsage(app, db) {
       if (m.claude_account_email) emailToMachine.set(m.claude_account_email, m);
     }
 
-    // A person is identified by OS user + hostname first, and only by machine id
-    // when that is unavailable.
+    // A person is identified by the MACHINE they work on, and only by enrolment id
+    // when no machine name is available.
     //
     // Keying on machine id alone split one human across rows: the .exe tracker and
     // the browser extension enrol as SEPARATE machine records, so the same person on
@@ -272,10 +291,25 @@ export function mountClaudeUsage(app, db) {
     // both "SatyaPinniti" on host "SATYA". That is fine for an inventory and wrong
     // for the thing this table is for: deciding whose Team licence is underused.
     // Split rows make a heavy user look like two light ones.
+    //
+    // Keying on user@hostname fixed that only where every enrolment knew the OS
+    // user. The extension does not: its record has user null, so it fell back to the
+    // machine id and split again — and one person's own laptop can hold six
+    // enrolments (agent, tracker, and one per browser profile). The host is the one
+    // identifier all of them agree on, which is what "one person per system" means.
+    // The profile's hostname wins when there is one, since that also catches an
+    // extension matched to its owner by email rather than by hostname.
+    //
+    // Accepted consequence: two people sharing one hostname become one row. That is
+    // the same trade-off the heading already makes, and a real shared machine cannot
+    // be split by any field we hold.
+    const cleanHostOf = (h) => (h
+      ? String(h).replace(/-?browser-?extension$/i, '').trim().toLowerCase()
+      : null);
     const personKeyFor = (machine, fallback) => {
-      const user = machine?.user && !GENERIC_USER.test(machine.user) ? machine.user : null;
-      const host = machine?.hostname || null;
-      if (user && host) return `person:${String(user).toLowerCase()}@${String(host).toLowerCase()}`;
+      const profile = machine ? profileByMachine.get(machine.id) : null;
+      const host = cleanHostOf(profile?.hostname || machine?.hostname);
+      if (host && !UA_HOSTNAME.test(host)) return `host:${host}`;
       return machine ? `machine:${machine.id}` : `unlinked:${fallback}`;
     };
 
@@ -376,7 +410,13 @@ export function mountClaudeUsage(app, db) {
       }
       const fallbackEmail = email;
 
-      const osUser = meta?.user && !GENERIC_USER.test(meta.user) ? meta.user : null;
+      // The employee this enrolment belongs to, when identity.js has resolved one.
+      // An extension record carries no OS user of its own, so without this the row
+      // it produces is named after a hostname while the same person's agent row is
+      // named after them — two names for one human, side by side.
+      const profile = meta ? profileByMachine.get(meta.id) : null;
+      const osUser = (meta?.user && !GENERIC_USER.test(meta.user) ? meta.user : null)
+        || (profile?.os_user || null);
       // Prefer the OS username: this row is "a person on a machine", and the OS
       // account is that machine's stable owner. A Claude display name is per
       // Claude-account and changes whenever someone signs in as someone else —
@@ -386,8 +426,12 @@ export function mountClaudeUsage(app, db) {
       // "SudityaSena-browser-extension", which names the capture method rather than
       // the person and reads as a different individual from a "SudityaSena" row
       // enrolled by the .exe.
-      const cleanHost = meta?.hostname ? String(meta.hostname).replace(/-browser-extension$/i, '') : null;
-      const label = osUser || meta?.display_name || fallbackEmail || cleanHost
+      // The profile's hostname when there is one, so every enrolment on a machine
+      // reports the same system name rather than each browser's own suffixed copy.
+      const cleanHost = (profile?.hostname || meta?.hostname)
+        ? String(profile?.hostname || meta.hostname).replace(/-?browser-?extension$/i, '')
+        : null;
+      const label = osUser || meta?.display_name || profile?.display_name || fallbackEmail || cleanHost
         || String(machineId || 'unknown').slice(0, 12);
 
       return {
