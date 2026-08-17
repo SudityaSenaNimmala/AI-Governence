@@ -550,17 +550,31 @@ export function mountRegistry(app, db) {
         { $set: patch },
       );
     } else {
-      // Fallback: try id as host, then product name matching
+      // Fallback: try id as host, then product/vendor/host-substring matching
       matched = await db.collection('ai_platforms').updateOne({ host: id }, { $set: patch });
       if (matched.matchedCount === 0) {
         const productName = req.body.product_name || id;
-        const allPlatforms = await db.collection('ai_platforms').find({}).project({ _id: 0, product: 1 }).toArray();
-        const allProducts = [...new Set(allPlatforms.map(p => p.product).filter(Boolean))];
+        const allPlatforms = await db.collection('ai_platforms').find({}).project({ _id: 0, host: 1, product: 1, vendor: 1 }).toArray();
         const lower = productName.toLowerCase();
-        const matchedProduct = allProducts.find(p => p.toLowerCase() === lower)
-          || allProducts.find(p => { const pl = p.toLowerCase(); return (pl.includes(lower) || lower.includes(pl)) && !pl.includes(' in '); });
-        if (matchedProduct) {
-          matched = await db.collection('ai_platforms').updateMany({ product: matchedProduct }, { $set: patch });
+        // 1. Exact product match
+        let matchHosts = allPlatforms.filter(p => p.product?.toLowerCase() === lower).map(p => p.host);
+        // 2. Partial product match (e.g. "Gemini" → "Google Gemini")
+        if (!matchHosts.length) matchHosts = allPlatforms.filter(p => {
+          const pl = (p.product || '').toLowerCase();
+          return (pl.includes(lower) || lower.includes(pl)) && !pl.includes(' in ');
+        }).map(p => p.host);
+        // 3. Vendor match (e.g. "Claude" → vendor "Anthropic" → claude.ai)
+        if (!matchHosts.length) matchHosts = allPlatforms.filter(p =>
+          p.vendor?.toLowerCase() === lower
+        ).map(p => p.host);
+        // 4. Host substring (e.g. "Claude" → host contains "claude")
+        if (!matchHosts.length) matchHosts = allPlatforms.filter(p =>
+          p.host?.toLowerCase().includes(lower)
+        ).map(p => p.host);
+        if (matchHosts.length) {
+          matched = await db.collection('ai_platforms').updateMany(
+            { host: { $in: matchHosts } }, { $set: patch },
+          );
         }
       }
     }
