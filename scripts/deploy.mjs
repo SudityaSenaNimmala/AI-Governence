@@ -105,24 +105,35 @@ if (ensureToken.status !== 0) die('failed to ensure ADMIN_TOKEN on the server');
 // Local development is unaffected: a developer can still put VITE_ADMIN_TOKEN in
 // connect-ui/.env.local, which is git-ignored and never part of a deploy.
 
+// 0.4 Installer config, read ONCE from the server's own .env.
+//
+// Both installer builds below bake these in, so a downloaded binary always
+// reports to the host it was deployed from. They used to be read inside the NSIS
+// block, which meant the tracker build could not see them.
+console.log('• Reading installer config from the server .env…');
+const portResult = spawnSync('bash', ['-c',
+  `${SSH} "grep '^PORT=' ${DIR}/.env | cut -d= -f2 || echo 8787"`
+], { cwd: root, encoding: 'utf8' });
+const port = (portResult.stdout || '').trim() || '8787';
+const installerServerUrl = `http://${HOST}:${port}`;
+
+const secretResult = spawnSync('bash', ['-c',
+  `${SSH} "grep '^ENROLL_SECRET=' ${DIR}/.env | cut -d= -f2 || echo dev-enroll-secret-change-me"`
+], { cwd: root, encoding: 'utf8' });
+const enrollSecret = (secretResult.stdout || '').trim() || 'dev-enroll-secret-change-me';
+console.log(`  installers will report to ${installerServerUrl}`);
+if (/^dev-enroll-secret/.test(enrollSecret)) {
+  // Loud, because the failure is silent: a binary carrying the dev secret installs
+  // and runs, and simply never enrolls.
+  console.warn('  ⚠ no ENROLL_SECRET on the server — installers will be built with the DEV secret and will NOT enroll');
+}
+
 // 0.5 Rebuild Windows agent installer (.exe) if NSIS is available.
 //     The .exe is served by /api/v1/installations/agent-installer-exe.
 //     macOS/Linux get zip downloads built live from source (no pre-build needed).
 const nsisPath = 'C:\\Program Files (x86)\\NSIS\\makensis.exe';
 if (existsSync(nsisPath)) {
   console.log('• Building Windows agent installer (NSIS)…');
-  // Read server URL from .env on the remote host — bake it into the installer
-  const serverUrlResult = spawnSync('bash', ['-c',
-    `${SSH} "grep '^PORT=' ${DIR}/.env | cut -d= -f2 || echo 8787"`
-  ], { cwd: root, encoding: 'utf8' });
-  const port = (serverUrlResult.stdout || '8787').trim();
-  const installerServerUrl = `http://${HOST}:${port}`;
-  // Read enroll secret from remote .env
-  const secretResult = spawnSync('bash', ['-c',
-    `${SSH} "grep '^ENROLL_SECRET=' ${DIR}/.env | cut -d= -f2 || echo dev-enroll-secret-change-me"`
-  ], { cwd: root, encoding: 'utf8' });
-  const enrollSecret = (secretResult.stdout || 'dev-enroll-secret-change-me').trim();
-
   // Prepare build dir with agent source + Node.js
   const installerDir = resolve(root, 'agent/installer');
   const buildDir = resolve(installerDir, 'build');
@@ -147,6 +158,48 @@ if (existsSync(nsisPath)) {
   }
 } else {
   console.log('• Skipping Windows installer (NSIS not installed — install from nsis.sourceforge.io)');
+}
+
+// 0.6 Build the Claude Usage Tracker (.exe) and STAGE IT SOMEWHERE THE DEPLOY
+//     CAN SHIP.
+//
+// Two reasons this exists. First, the tracker used to be built by hand, which
+// meant whatever binary was lying in agent/build/ got served — in practice one
+// baked with http://localhost:8787 and the dev enroll secret, which installs
+// happily on a colleague's laptop and reports nowhere. Building here means the
+// URL and secret above are always the deployed server's.
+//
+// Second, and the reason the download 501'd in production: agent/build/ never
+// reached the host. The tar below excludes '*/build' and .dockerignore excludes
+// '**/build', so the artifact was stripped twice over and no amount of local
+// building could fix it. Staging into agent/prebuilt/ — matched by neither rule —
+// is what actually ships it.
+//
+// Node SEA builds for the platform it runs ON, so only a Windows machine can
+// produce the .exe employees need. Non-Windows deploys skip it rather than
+// quietly shipping a linux binary under a name that promises otherwise.
+const TRACKER_TARGET = 'win32-x64';
+if (process.platform === 'win32') {
+  console.log('• Building Claude Usage Tracker (.exe)…');
+  const trackerBuild = spawnSync('npm', ['--prefix', 'agent', 'run', 'build:claude-tracker'], {
+    cwd: root,
+    stdio: 'inherit',
+    shell: true,   // npm is npm.cmd here — see the connect-ui build below
+    env: { ...process.env, CFAI_SERVER_URL: installerServerUrl, CFAI_ENROLL_SECRET: enrollSecret },
+  });
+  const built = resolve(root, `agent/build/claude-tracker-${TRACKER_TARGET}`);
+  if (trackerBuild.status === 0 && existsSync(built)) {
+    sh(`rm -rf "agent/prebuilt/claude-tracker-${TRACKER_TARGET}" && mkdir -p agent/prebuilt ` +
+       `&& cp -r "agent/build/claude-tracker-${TRACKER_TARGET}" agent/prebuilt/`);
+    console.log('  ✓ Claude Usage Tracker staged for shipping');
+  } else {
+    // Warn, never die: the tracker is one download, and failing the whole deploy
+    // over it would hold back everything else. The endpoint answers 501 with
+    // instructions when the artifact is absent, so the failure stays visible.
+    console.warn('  ⚠ Claude Usage Tracker build failed — the .exe download will be unavailable');
+  }
+} else {
+  console.log(`• Skipping Claude Usage Tracker (needs a Windows host to produce the .exe; this is ${process.platform})`);
 }
 
 // 1. Build the frontend locally / on the runner (needs more RAM than the host).

@@ -303,22 +303,54 @@ export function mountInstallations(app, db) {
   // do inside a request. `npm run build:claude-tracker` in agent/ produces it.
   app.get('/api/v1/installations/claude-tracker', a(async (req, res) => {
     const agentDir = join(__dirname, '..', '..', '..', 'agent');
-    const platform = process.platform;
-    const arch = process.arch;
-    const buildDir = join(agentDir, 'build', `claude-tracker-${platform}-${arch}`);
 
-    if (!existsSync(buildDir)) {
-      // 501, not 500: nothing is broken, the artifact simply has not been built on
-      // this host. Says exactly which command produces it and where it looked.
+    // The TARGET machine's platform, not this server's.
+    //
+    // This used to resolve `process.platform`, which is the platform the API runs
+    // on — linux-x64 in the container. The tracker is for employees' Windows
+    // desktops, so the server would look for a linux build that has no reason to
+    // exist and 501 even with the .exe sitting right there. Defaults to Windows
+    // because that is what the Setup button offers; ?target= serves another build.
+    const target = String(req.query.target || 'win32-x64');
+    if (!/^[a-z0-9]+-[a-z0-9]+$/i.test(target)) {
+      return res.status(400).json({ error: `invalid target "${target}" — expected <platform>-<arch>, e.g. win32-x64` });
+    }
+
+    // prebuilt/ is what a deploy ships (scripts/deploy.mjs stages it there because
+    // build/ is excluded from both the deploy tar and .dockerignore). build/ is
+    // where a local `npm run build:claude-tracker` writes, so a developer's own
+    // build still serves without any staging step.
+    const candidates = [
+      join(agentDir, 'prebuilt', `claude-tracker-${target}`),
+      join(agentDir, 'build', `claude-tracker-${target}`),
+    ];
+    const buildDir = candidates.find((d) => existsSync(d));
+
+    if (!buildDir) {
+      // 501, not 500: nothing is broken, the artifact simply has not been built for
+      // this target on this host. Says which command produces it, where it looked,
+      // and which targets ARE present — the last one turns "it doesn't work" into
+      // "it was built for the wrong platform" without a support round trip.
       // `detail` as well as `help`: the UI's download() shows error + detail in its
       // alert and ignores every other field, so guidance placed only in `help` would
       // never reach the admin who needs it.
-      const guidance = 'Run "npm run build:claude-tracker" in the agent/ directory, with CFAI_SERVER_URL and CFAI_ENROLL_SECRET set so the binary points at this server.';
+      const available = [];
+      for (const dir of [join(agentDir, 'prebuilt'), join(agentDir, 'build')]) {
+        if (!existsSync(dir)) continue;
+        for (const name of readdirSync(dir)) {
+          const m = /^claude-tracker-(.+)$/.exec(name);
+          if (m && statSync(join(dir, name)).isDirectory()) available.push(m[1]);
+        }
+      }
+      const guidance = 'Deploy from a Windows machine (scripts/deploy.mjs builds and ships it), or run "npm run build:claude-tracker" in agent/ with CFAI_SERVER_URL and CFAI_ENROLL_SECRET set so the binary points at this server.';
       return res.status(501).json({
-        error: 'Claude Usage Tracker has not been built on this server',
-        detail: guidance,
+        error: `Claude Usage Tracker has not been built for ${target} on this server`,
+        detail: available.length
+          ? `${guidance} Available targets: ${[...new Set(available)].join(', ')}.`
+          : guidance,
         help: guidance,
-        expected_path: buildDir,
+        expected_path: candidates[0],
+        available_targets: [...new Set(available)],
       });
     }
 
