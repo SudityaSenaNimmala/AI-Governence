@@ -838,6 +838,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     getStored(STORAGE.BLOCKED, []).then(list => sendResponse({ blocked: list }));
     return true;
   }
+  // Access exception check — relay through service worker to avoid mixed-content
+  if (msg.__cfai_kind === 'checkAccessException') {
+    (async () => {
+      try {
+        const config = await getConfig();
+        if (!config.serverUrl) { sendResponse({ allowed: false }); return; }
+        const machineId = await getOrCreateMachineId();
+        const res = await fetch(
+          `${config.serverUrl.replace(/\/$/, '')}/api/v1/access-exceptions/check?machine_id=${encodeURIComponent(machineId)}&tool_host=${encodeURIComponent(msg.tool_host)}`,
+        );
+        if (res.ok) {
+          sendResponse(await res.json());
+        } else {
+          sendResponse({ allowed: false });
+        }
+      } catch { sendResponse({ allowed: false }); }
+    })();
+    return true;
+  }
   // Access request — relay from content script to server
   if (msg.kind === 'access_request') {
     (async () => {
@@ -1353,6 +1372,7 @@ const CONTROL_TYPES = new Set([
 const CONTROL_KINDS = new Set([
   'classifyHost',
   'knownAiTool',
+  'checkAccessException',
   'currentSessionId',
   'replayPolicy',
   'replayRegister',
