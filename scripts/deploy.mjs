@@ -77,6 +77,29 @@ const ensureToken = spawnSync('bash', ['-c',
 ], { cwd: root });
 if (ensureToken.status !== 0) die('failed to ensure ADMIN_TOKEN on the server');
 
+// ENROLL_SECRET gates POST /api/v1/enroll — the credential every browser
+// extension and tracker binary presents to join the fleet. Same rule as
+// ADMIN_TOKEN above: generated ONCE on the server, never overwritten, never
+// printed, never passed through sh()'s command echo.
+//
+// Generated rather than left unset, because unset is not neutral here: auth.js
+// falls back to 'dev-enroll-secret-change-me', a value committed to this
+// repository, so the deployed fleet would accept an enrolment from anyone who
+// read the source. Production was running exactly that, confirmed from the
+// cfai-config.json the server itself hands out with the extension package.
+//
+// Consequence, stated because it is not obvious: an extension installed with the
+// old default keeps working — it holds a machine token from its first enrolment —
+// but a RE-enrolment (reinstall, new browser profile, cleared storage) needs a
+// package downloaded after this ran. The download bakes the secret at request
+// time, so re-downloading is the whole fix.
+console.log('• Ensuring server ENROLL_SECRET exists (generated once if missing)…');
+const ensureEnroll = spawnSync('bash', ['-c',
+  `${SSH} "grep -q '^ENROLL_SECRET=' ${DIR}/.env || ` +
+  `echo ENROLL_SECRET=\\$(openssl rand -hex 32) >> ${DIR}/.env"`,
+], { cwd: root });
+if (ensureEnroll.status !== 0) die('failed to ensure ENROLL_SECRET on the server');
+
 // The token is deliberately NOT read back, and deliberately NOT handed to the
 // Vite build.
 //

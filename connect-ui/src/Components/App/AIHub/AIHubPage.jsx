@@ -12,20 +12,6 @@ import {
   History, ArrowLeft, Bot, User, ShieldAlert, Film, PlayCircle, MonitorPlay,
   Maximize2, Minimize2, Copy, Check, DollarSign, ExternalLink, Download, Boxes,
 } from "lucide-react";
-// DEMO SNAPSHOTS — Agents & MCP and Claude Usage render from these, with no
-// request at all, so neither tab can sit on "Loading...".
-//
-// Both files are REAL responses captured from the API (GET /findings?type=mcp_server,
-// GET /findings?type=agent_project, GET /machines, and GET /claude-usage?sources=all
-// for each period the picker offers), so the figures on screen are the ones the
-// live endpoints returned — they are simply frozen instead of fetched.
-//
-// This is a deliberate, temporary swap for demo reliability. The endpoints behind
-// them still exist and are fast (0.17s and 0.40s); to go back to live data, restore
-// the fetches marked "LIVE FETCH — restore to un-freeze" in AgentsView and
-// ClaudeUsageView below and delete the two imports.
-import DEMO_AGENTS_MCP from "./demoData/agentsMcp.json";
-import DEMO_CLAUDE_USAGE from "./demoData/claudeUsage.json";
 import { sanitizeReplayEvents } from "./replaySanitize";
 import { createReplayHost, applyReplayIframeCsp } from "./rrwebHost";
 import "./AIHub.css";
@@ -611,29 +597,21 @@ function AgentsView() {
   // agent_config and desktop_hook_status are no longer fetched — the two tables
   // that consumed them were removed, and leaving the requests in would cost two
   // round-trips per mount for data nothing renders.
-  // Seeded from the frozen snapshot, so the first render already has data and the
-  // <Loading/> branch below is never reached.
-  const [mcp,setMcp]=useState(DEMO_AGENTS_MCP.mcp),[projects,setProjects]=useState(DEMO_AGENTS_MCP.projects),[machines,setMachines]=useState(DEMO_AGENTS_MCP.machines),[e,setE]=useState(null);
+  const [mcp,setMcp]=useState(null),[projects,setProjects]=useState(null),[machines,setMachines]=useState(null),[e,setE]=useState(null);
   // "" = every section stacked (the original default). Otherwise only the named
   // section renders — clicking that section's stat card again clears it.
   const [filterSection,setFilterSection]=useState("");
   const [filterUser,setFilterUser]=useState("");
-  // LIVE FETCH — restore to un-freeze. The three requests this tab used to make:
-  //
-  //   useEffect(()=>{
-  //     Promise.all([
-  //       apiFetch("/findings?type=mcp_server&latestOnly=true&limit=500"),
-  //       apiFetch("/findings?type=agent_project&latestOnly=true&limit=500"),
-  //       // mcp_server / agent_project findings only carry machine_id, so the machine
-  //       // list is what resolves a finding to a person. Soft-failed on purpose:
-  //       // losing it should degrade every row to "Unknown", not blank the inventory.
-  //       apiFetch("/machines").catch(()=>[]),
-  //     ]).then(([m,p,mach])=>{setMcp(m);setProjects(p);setMachines(mach)}).catch(x=>setE(x.message));
-  //   },[]);
-  //
-  // Nothing is requested now: the state above already holds the captured
-  // responses. setMcp/setProjects/setMachines are kept so restoring the block is a
-  // straight uncomment.
+  useEffect(()=>{
+    Promise.all([
+      apiFetch("/findings?type=mcp_server&latestOnly=true&limit=500"),
+      apiFetch("/findings?type=agent_project&latestOnly=true&limit=500"),
+      // mcp_server / agent_project findings only carry machine_id, so the machine
+      // list is what resolves a finding to a person. Soft-failed on purpose:
+      // losing it should degrade every row to "Unknown", not blank the inventory.
+      apiFetch("/machines").catch(()=>[]),
+    ]).then(([m,p,mach])=>{setMcp(m);setProjects(p);setMachines(mach)}).catch(x=>setE(x.message));
+  },[]);
   if(e) return <Err msg={e}/>; if(!mcp||!machines) return <Loading/>;
 
   const mcpAll=Array.isArray(mcp)?mcp:[];
@@ -4153,10 +4131,7 @@ const CLAUDE_PERIODS = [
 ];
 
 function ClaudeUsageView() {
-  // Seeded from the frozen 30-day snapshot to match the default period below, so
-  // the first render already has data and <Loading/> is never reached.
-  const [data,setData]=useState(DEMO_CLAUDE_USAGE["30"]),[e,setE]=useState(null);
-  const [sel,setSel]=useState(DEMO_CLAUDE_USAGE["30"].surfaces?.[0]?.surface??null);
+  const [data,setData]=useState(null),[e,setE]=useState(null),[sel,setSel]=useState(null);
   // Defaults to 30 days rather than all time. Without a window the totals are
   // cumulative since tracking began but nothing on screen said so, so a four-figure
   // measured cost read as this month's spend.
@@ -4169,23 +4144,11 @@ function ClaudeUsageView() {
   // table is for. The double-count it was avoiding is handled properly upstream now
   // — person_key folds one human's enrolments into one row — so there is nothing
   // left for a toggle to protect against.
-  // The picker still works: a snapshot was captured for every period it offers, so
-  // switching windows swaps frozen payloads instead of issuing a request. No
-  // setData(null) — blanking the state first is what put a spinner on screen.
-  //
-  // LIVE FETCH — restore to un-freeze:
-  //
-  //   useEffect(()=>{
-  //     setData(null); setE(null);
-  //     apiFetch(`/claude-usage?sources=all${days?`&days=${days}`:""}`)
-  //       .then(d=>{ setData(d); if(d.surfaces?.length) setSel(s=>s||d.surfaces[0].surface); })
-  //       .catch(x=>setE(x.message));
-  //   },[days]);
   useEffect(()=>{
-    const d=DEMO_CLAUDE_USAGE[days];
-    if(!d) return;   // an unknown period keeps the current view rather than blanking it
-    setE(null); setData(d);
-    if(d.surfaces?.length) setSel(s=>s||d.surfaces[0].surface);
+    setData(null); setE(null);
+    apiFetch(`/claude-usage?sources=all${days?`&days=${days}`:""}`)
+      .then(d=>{ setData(d); if(d.surfaces?.length) setSel(s=>s||d.surfaces[0].surface); })
+      .catch(x=>setE(x.message));
   },[days]);
 
   const periodPicker=(
