@@ -22,6 +22,9 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PromptWatcher } from '../os_monitor/prompt-watcher.js';
+// Shared with the full agent, deliberately: the extension probes one fixed set of
+// localhost ports, so two implementations would be two chances to drift apart.
+import { startIdentityBeacon } from '../identity-beacon.js';
 import { ensureClaudeCodeTelemetry } from './claude-code-settings.js';
 import { detectClaudeAccount } from './claude-account.js';
 import { readNewActivity } from './transcript-reader.js';
@@ -219,6 +222,34 @@ async function main() {
   }
 
   const creds = await enroll();
+
+  // Identity beacon — the same localhost server the full agent runs.
+  //
+  // Without it a browser extension on this machine cannot discover which machine
+  // it is on. Its enrolment falls back to navigator.userAgent, so it registers as
+  // "Mozilla-browser-extension" with no OS user — and the Claude Usage table
+  // either lists that person as a second, differently-named row or, when Chrome
+  // supplies no profile email, drops them into unattributed and shows nothing at
+  // all. With the beacon the extension enrols as "<HOSTNAME>-browser-extension",
+  // which is what routes/identity.js matches back to this machine's profile and
+  // what folds both enrolments into one person.
+  //
+  // Worth doing before a rollout rather than after: the hostname is baked at the
+  // extension's FIRST enrolment and never revisited, so an extension that
+  // enrolled while no beacon was listening keeps calling itself Mozilla until its
+  // storage is cleared.
+  //
+  // Listens on 127.0.0.1 only, serves one GET, and returns hostname / user /
+  // machineId — the same three fields this tracker just sent to the server.
+  try {
+    // This log object is a plain {info,warn,error}; the beacon calls through
+    // optional chaining, so it needs no child-logger support.
+    startIdentityBeacon({ machineId: creds.machineId, log });
+  } catch (err) {
+    // Never fatal: the beacon is a convenience for the extension, and prompt
+    // tracking — the reason this binary exists — does not depend on it.
+    log.warn(`identity beacon not started: ${err?.message || err}`);
+  }
 
   // Claude Code CLI -> real tokens + cost.
   try {
