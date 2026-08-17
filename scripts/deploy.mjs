@@ -39,6 +39,19 @@ const KEY = cfg('DEPLOY_KEY', resolve(homedir(), '.ssh/ai_gov_deploy'));
 const DIR = cfg('DEPLOY_DIR', '/opt/ai-gov');
 const HOST = SSH_TARGET ? SSH_TARGET.split('@').pop() : null;
 
+// Deployment topology that is NOT the same on every host.
+//
+// PUBLIC_SERVER_URL  the origin users and installers actually reach, when a proxy
+//                    or TLS terminator sits in front (e.g.
+//                    https://agentgovernence.cftools.live). Used for the health
+//                    check, for the URL baked into installers, and passed to
+//                    compose so the server bakes the same one.
+// CONNECT_UI_PORT    host port the frontend container publishes. 3000 is not
+//                    always free — the cftools.live host already had it taken, so
+//                    that deployment uses 34441 with nginx in front.
+const PUBLIC_URL = (cfg('PUBLIC_SERVER_URL', '') || '').trim().replace(/\/+$/, '');
+const CONNECT_UI_PORT = (cfg('CONNECT_UI_PORT', '3000') || '3000').trim();
+
 function die(msg) { console.error(`✗ ${msg}`); process.exit(1); }
 function sh(cmd) {
   console.log(`  $ ${cmd.length > 120 ? cmd.slice(0, 117) + '...' : cmd}`);
@@ -138,7 +151,11 @@ const portResult = spawnSync('bash', ['-c',
   `${SSH} "grep '^PORT=' ${DIR}/.env | cut -d= -f2 || echo 8787"`
 ], { cwd: root, encoding: 'utf8' });
 const port = (portResult.stdout || '').trim() || '8787';
-const installerServerUrl = `http://${HOST}:${port}`;
+// Prefer the proxied origin. Deriving http://<host>:<port> is right only when the
+// API port is the address clients can actually reach; behind TLS it hands out a
+// plaintext port from an HTTPS page, and behind a firewall it hands out a port
+// nobody outside can open.
+const installerServerUrl = PUBLIC_URL || `http://${HOST}:${port}`;
 
 const secretResult = spawnSync('bash', ['-c',
   `${SSH} "grep '^ENROLL_SECRET=' ${DIR}/.env | cut -d= -f2 || echo dev-enroll-secret-change-me"`
@@ -244,25 +261,53 @@ if (!existsSync(resolve(root, 'connect-ui/dist/index.html'))) die('connect-ui bu
 // 2. Stream source (incl. built dist, excl. node_modules) to the host.
 //    NOTE: .env is intentionally NOT shipped, and we delete everything in the
 //    remote dir EXCEPT .env so the server's secrets survive every deploy.
-console.log('• Shipping source to host (preserving server .env)…');
+//    The tracker binary is preserved the same way, for a different reason: only a
+//    Windows deploy can build it, and the GitHub Actions runner is Linux. Without
+//    this, the next push to main would wipe an .exe a Windows deploy had shipped
+//    and the download would 501 again — with nothing in the log to say why. An
+//    incoming build always wins; the stash only fills a gap.
+console.log('• Shipping source to host (preserving server .env and any shipped installer)…');
 const excludes = "--exclude='*/node_modules' --exclude='*/.vite' --exclude='*/coverage' --exclude='*/build' --exclude='*/out'";
+const STASH = `${DIR}/.prebuilt-stash`;
+const remoteUnpack = [
+  `mkdir -p ${DIR}`,
+  `rm -rf ${STASH}`,
+  `if [ -d ${DIR}/agent/prebuilt ]; then mv ${DIR}/agent/prebuilt ${STASH}; fi`,
+  `find ${DIR} -mindepth 1 -maxdepth 1 ! -name .env ! -name .prebuilt-stash -exec rm -rf {} +`,
+  `tar xzf - -C ${DIR}`,
+  `if [ -d ${STASH} ] && [ ! -d ${DIR}/agent/prebuilt ]; then mkdir -p ${DIR}/agent && mv ${STASH} ${DIR}/agent/prebuilt; fi`,
+  `rm -rf ${STASH}`,
+].join(' && ');
 sh(`tar czf - ${excludes} agent server connect-ui browser-extension scripts sdk-js docker-compose.yml .dockerignore ` +
-   `| ${SSH} "mkdir -p ${DIR} && find ${DIR} -mindepth 1 -maxdepth 1 ! -name .env -exec rm -rf {} + && tar xzf - -C ${DIR}"`);
+   `| ${SSH} "${remoteUnpack}"`);
 
 // 3. Build images natively on the host (sequential — small box) and bring up.
+//
+// Topology is passed on the command line rather than written into the server's
+// .env, keeping that file exactly what it has always been — the secrets the
+// deploy never touches — while local config stays the single source for which
+// port the frontend publishes and which origin the server advertises.
 console.log('• Building images on host + starting stack…');
-sh(`${SSH} "cd ${DIR} && docker compose build server && docker compose build connect-ui && docker compose up -d"`);
+const composeEnv = `CONNECT_UI_PORT='${CONNECT_UI_PORT}'`
+  + (PUBLIC_URL ? ` PUBLIC_SERVER_URL='${PUBLIC_URL}'` : '');
+sh(`${SSH} "cd ${DIR} && ${composeEnv} docker compose build server && ${composeEnv} docker compose build connect-ui && ${composeEnv} docker compose up -d"`);
 
-// 4. Health check over the public endpoint.
+// 4. Health check over the address users actually reach.
+//
+// Checking the proxied origin when there is one is the point: it exercises nginx,
+// TLS and the route to the container, so a stack that is up but unreachable — the
+// only failure a user would ever notice — fails the deploy instead of passing it.
 console.log('• Health check…');
+const healthUrl = PUBLIC_URL ? `${PUBLIC_URL}/api/v1/health` : `http://${HOST}:8787/api/v1/health`;
 let ok = false;
 for (let i = 1; i <= 15; i++) {
-  const r = spawnSync('bash', ['-c', `curl -s -m 10 -o /dev/null -w '%{http_code}' http://${HOST}:8787/api/v1/health`], { encoding: 'utf8' });
+  const r = spawnSync('bash', ['-c', `curl -s -m 10 -o /dev/null -w '%{http_code}' ${healthUrl}`], { encoding: 'utf8' });
   if (r.stdout.trim() === '200') { ok = true; break; }
   spawnSync('bash', ['-c', 'sleep 3']);
 }
-if (!ok) die(`server did not pass health check at http://${HOST}:8787/api/v1/health`);
+if (!ok) die(`server did not pass health check at ${healthUrl}`);
 
 console.log(`\n✓ Deploy complete — live:`);
-console.log(`    API        http://${HOST}:8787/api/v1/health`);
-console.log(`    connect-ui http://${HOST}:3000/CloudFuze/\n`);
+console.log(`    API        ${healthUrl}`);
+console.log(`    connect-ui ${PUBLIC_URL ? `${PUBLIC_URL}/CloudFuze/` : `http://${HOST}:${CONNECT_UI_PORT}/CloudFuze/`}`);
+console.log(`    installers report to ${installerServerUrl}\n`);

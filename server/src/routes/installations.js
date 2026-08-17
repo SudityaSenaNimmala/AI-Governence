@@ -17,10 +17,24 @@ import { execSync, spawnSync } from 'node:child_process';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_PORT = process.env.PORT || '8787';
 
-// Build the API server URL from the request. Uses the request's hostname
-// but the server's own PORT — not the frontend port the request may have
-// arrived through (nginx on 3000 proxies /api to here on 8787).
+// The address a downloaded extension or tracker will call home on. Baked into
+// every installer at download time, so getting it wrong produces a package that
+// installs cleanly and reports nowhere.
+//
+// PUBLIC_SERVER_URL wins whenever it is set, because derivation cannot get this
+// right behind a TLS terminator. On the cftools.live deployment the dashboard is
+// served at https://agentgovernence.cftools.live/CloudFuze/ and nginx proxies
+// /api to the API — but the rule below appends the API's own port, producing
+// https://<domain>:8787, and 8787 speaks plain HTTP. Verified: that URL fails to
+// connect while https://<domain>/api/v1/health and a POST to /api/v1/enroll both
+// answer through the proxy. Setting PUBLIC_SERVER_URL=https://<domain> is what
+// makes installers use the proxied origin, with TLS and no extra port to open.
+const PUBLIC_SERVER_URL = (process.env.PUBLIC_SERVER_URL || '').trim().replace(/\/+$/, '');
+
+// Falls back to the request's hostname with the server's own PORT — not the
+// frontend port the request may have arrived through (nginx proxies /api here).
 function apiServerUrl(req) {
+  if (PUBLIC_SERVER_URL) return PUBLIC_SERVER_URL;
   const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
   const rawHost = req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
   // Strip any port from the host (could be frontend port 3000 or missing entirely)

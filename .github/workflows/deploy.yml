@@ -46,13 +46,23 @@ jobs:
           echo "${{ secrets.SSH_KEY_B64 }}" | base64 -d > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           echo "key fingerprint (expect ...I1FXkSy...):"; ssh-keygen -l -f ~/.ssh/deploy_key || echo "!! key did not parse — SSH_KEY_B64 missing/wrong"
-          IP="165.22.223.59"
+          IP="208.70.248.68"
           ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts 2>/dev/null || true
           echo "Testing SSH connectivity to root@$IP ..."
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 "root@$IP" 'echo SSH_OK'
 
       - name: Deploy (code only — server keeps its own .env)
         env:
-          DEPLOY_SSH: root@165.22.223.59
+          DEPLOY_SSH: root@208.70.248.68
           DEPLOY_KEY: /home/runner/.ssh/deploy_key
+          # Deployment topology. The runner has no repo .env to read these from,
+          # so they are set here and must match the host: 3000 is taken on this
+          # box, and nginx terminates TLS in front of the published port.
+          CONNECT_UI_PORT: '34441'
+          PUBLIC_SERVER_URL: https://agentgovernence.cftools.live
         run: node scripts/deploy.mjs
+        # NOTE: this runner is Linux, so it CANNOT build the Claude Usage Tracker
+        # .exe — Node SEA builds only for the platform it runs on. deploy.mjs skips
+        # that step here and says so. The binary already on the host is preserved
+        # across these deploys (see the ship step in scripts/deploy.mjs); a NEW one
+        # requires running `npm run deploy` from a Windows machine.
