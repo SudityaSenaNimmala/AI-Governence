@@ -150,26 +150,27 @@
   async function applyPlatformPolicy(platforms) {
     const hit = platformBlockMatch(platforms);
     if (hit) {
-      // Check if this machine has a temporary access exception
+      // Check if this machine has a temporary access exception.
+      // Routed through the service worker to avoid mixed-content blocks
+      // (HTTPS page → HTTP server fetch is silently blocked by Chrome).
       try {
-        const config = await new Promise(r => chrome.storage.local.get(['cfai.config', 'cfai.machineId'], r));
-        const serverUrl = (config['cfai.config']?.serverUrl || '').replace(/\/$/, '');
-        const machineId = config['cfai.machineId'];
-        if (serverUrl && machineId) {
-          const res = await fetch(`${serverUrl}/api/v1/access-exceptions/check?machine_id=${encodeURIComponent(machineId)}&tool_host=${encodeURIComponent(location.hostname)}`);
-          if (res.ok) {
-            const data = await res.json();
-            if (data.allowed) {
-              // Exception active — don't block
-              PLATFORM_BLOCKED = false;
-              BLOCKED_PLATFORM = null;
-              removePlatformBanner();
-              console.info('[cfai] access exception active for', location.hostname, '— expires:', data.expires_at);
-              return;
-            }
-          }
+        const resp = await new Promise((resolve) => {
+          chrome.runtime.sendMessage(
+            { __cfai_kind: 'checkAccessException', tool_host: location.hostname },
+            (r) => {
+              if (chrome.runtime.lastError) return resolve(null);
+              resolve(r);
+            },
+          );
+        });
+        if (resp && resp.allowed) {
+          PLATFORM_BLOCKED = false;
+          BLOCKED_PLATFORM = null;
+          removePlatformBanner();
+          console.info('[cfai] access exception active for', location.hostname, '— expires:', resp.expires_at);
+          return;
         }
-      } catch {} // Server unavailable — enforce the block
+      } catch {} // Service worker unavailable — enforce the block
     }
     PLATFORM_BLOCKED = !!hit;
     BLOCKED_PLATFORM = hit;
