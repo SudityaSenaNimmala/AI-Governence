@@ -57,7 +57,7 @@ export function mountRegistry(app, db) {
   // reached on timeout or error, and `stale: true` in the response says which one
   // you are looking at rather than passing a snapshot off as current.
   const SNAPSHOT_PATH = join(__dirname, '..', '..', 'data', 'registry-snapshot.json');
-  const BUILD_BUDGET_MS = Number(process.env.REGISTRY_BUILD_BUDGET_MS || 6000);
+  const BUILD_BUDGET_MS = Number(process.env.REGISTRY_BUILD_BUDGET_MS || 15000);
   // REGISTRY_SNAPSHOT_FIRST=1 answers from the snapshot without attempting the live
   // build at all, so the page paints with no wait.
   //
