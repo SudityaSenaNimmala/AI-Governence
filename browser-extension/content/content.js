@@ -2518,11 +2518,15 @@
     }
 
     if (framework) {
-      // Deliberate: no execCommand/textContent fallback here. Those can mutate
-      // the DOM without updating the editor's model, which would make the box
-      // look clean to our own detector while the app still sends the original.
-      return fail('this composer is a ' + framework + ' editor and it did not accept the paste; ' +
-                  'refusing DOM-only fallbacks that could desync its content model');
+      // Paste didn't work — try execCommand('insertText') which goes through
+      // the browser's editing API. Most modern editors (including Gemini's)
+      // hook into this, unlike raw textContent which bypasses the model.
+      selectAllIn(el);
+      await nextTick(0);
+      execInsertText(text);
+      await afterFrame();
+      if (check('execCommand (framework)', true).ok) return succeed('execCommand (framework)');
+      return fail('this composer is a ' + framework + ' editor — paste and execCommand both failed');
     }
 
     // Plain contenteditable — the DOM really is the content, so the older

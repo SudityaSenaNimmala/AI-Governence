@@ -119,9 +119,29 @@ function Empty({icon,title,msg}) { return <div className="aihub_empty">{icon}<h4
  *   cannot do once the table scrolls.
  * @param {function} [isExpanded] - (row) => boolean.
  */
-function DataTable({ columns, rows, empty, onRow, renderExpanded, isExpanded }) {
+function DataTable({ columns, rows, empty, onRow, renderExpanded, isExpanded, paginate }) {
+  const [page,setPage]=useState(0);
+  const [pageSize,setPageSize]=useState(paginate||0);
+  // Reset page when rows change
+  useEffect(()=>setPage(0),[rows?.length]);
   const rowKey=(r,i)=>r.id||r.tool_key||r.host||i;
-  return (<div className="aihub_table_wrap"><table className="aihub_table"><thead><tr>{columns.map((c,i)=><th key={i} style={c.right?{textAlign:"right"}:undefined}>{c.label}</th>)}</tr></thead><tbody>{(!rows||!rows.length)?<tr><td colSpan={columns.length} className="aihub_table_empty">{empty||"No data"}</td></tr>:rows.map((r,i)=>{
+  const allRows=rows||[];
+  const usePaging=pageSize>0&&allRows.length>pageSize;
+  const visibleRows=usePaging?allRows.slice(page*pageSize,(page+1)*pageSize):allRows;
+  const totalPages=usePaging?Math.ceil(allRows.length/pageSize):1;
+
+  // Page numbers to show: current ± 2, plus first/last
+  const pageNums=[];
+  if(usePaging){
+    const add=n=>{if(n>=0&&n<totalPages&&!pageNums.includes(n))pageNums.push(n)};
+    add(0);
+    for(let i=Math.max(0,page-2);i<=Math.min(totalPages-1,page+2);i++) add(i);
+    add(totalPages-1);
+    pageNums.sort((a,b)=>a-b);
+  }
+
+  return (<div>
+    <div className="aihub_table_wrap"><table className="aihub_table"><thead><tr>{columns.map((c,i)=><th key={i} style={c.right?{textAlign:"right"}:undefined}>{c.label}</th>)}</tr></thead><tbody>{(!visibleRows.length)?<tr><td colSpan={columns.length} className="aihub_table_empty">{empty||"No data"}</td></tr>:visibleRows.map((r,i)=>{
     const open=isExpanded?.(r);
     return (<Fragment key={rowKey(r,i)}>
       <tr onClick={()=>onRow?.(r)} style={{cursor:onRow?"pointer":"default",background:open?"#f3f7ff":undefined}}>
@@ -129,7 +149,24 @@ function DataTable({ columns, rows, empty, onRow, renderExpanded, isExpanded }) 
       </tr>
       {open&&renderExpanded&&<tr className="aihub_expanded_row"><td colSpan={columns.length} style={{padding:0,background:"#f9fafb"}}>{renderExpanded(r)}</td></tr>}
     </Fragment>);
-  })}</tbody></table></div>);
+  })}</tbody></table></div>
+    {(usePaging||paginate>0)&&<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 4px",fontSize:12,color:"#6b7280"}}>
+      <div style={{display:"flex",alignItems:"center",gap:6}}>
+        <span>{allRows.length} rows</span>
+        <select value={pageSize} onChange={e=>{setPageSize(Number(e.target.value));setPage(0);}} style={{padding:"3px 6px",border:"1px solid #e5e7eb",borderRadius:6,fontSize:11}}>
+          {[10,25,50,100].map(n=><option key={n} value={n}>{n} / page</option>)}
+        </select>
+      </div>
+      {usePaging&&<div style={{display:"flex",alignItems:"center",gap:2}}>
+        <button disabled={page===0} onClick={()=>setPage(page-1)} style={{padding:"4px 8px",border:"1px solid #e5e7eb",borderRadius:6,fontSize:11,cursor:page===0?"default":"pointer",opacity:page===0?0.4:1,background:"#fff"}}>Prev</button>
+        {pageNums.map((n,i)=>{
+          const gap=i>0&&n-pageNums[i-1]>1;
+          return <Fragment key={n}>{gap&&<span style={{padding:"0 2px"}}>…</span>}<button onClick={()=>setPage(n)} style={{padding:"4px 8px",border:"1px solid "+(n===page?"#0044cc":"#e5e7eb"),borderRadius:6,fontSize:11,cursor:"pointer",background:n===page?"#0044cc":"#fff",color:n===page?"#fff":"#374151",fontWeight:n===page?700:400}}>{n+1}</button></Fragment>;
+        })}
+        <button disabled={page>=totalPages-1} onClick={()=>setPage(page+1)} style={{padding:"4px 8px",border:"1px solid #e5e7eb",borderRadius:6,fontSize:11,cursor:page>=totalPages-1?"default":"pointer",opacity:page>=totalPages-1?0.4:1,background:"#fff"}}>Next</button>
+      </div>}
+    </div>}
+  </div>);
 }
 function BarChart({ data, lk, vk, max=8 }) {
   const items=(data||[]).slice(0,max); const mx=Math.max(1,...items.map(d=>d[vk]||0));
@@ -760,33 +797,44 @@ function ServerAgentsView() {
 // ═══════════════════════════════════════════════════════════════════════════════
 function DLPView() {
   const [summary,setS]=useState(null),[events,setEv]=useState(null),[files,setF]=useState(null),[e,setE]=useState(null);
-  const [preview,setPreview]=useState(null);   // event row whose content is open
+  const [preview,setPreview]=useState(null);
+  const [section,setSection]=useState(""); // "", "prompts", "files", "services"
+  const [sevFilter,setSevFilter]=useState("high"); // "all" or "high"
   useEffect(()=>{
-    // severity=critical,high server-side, NOT the newest 200 of everything.
-    // This table only ever shows high/critical (the filter below), so fetching
-    // unfiltered meant the 200 newest events could be entirely low/null and the
-    // table rendered "No high or critical prompt events yet" directly beneath a
-    // "High / critical: 1,196" stat card. The counter reads from /dlp/summary,
-    // which is computed over the whole collection, so the two disagreed.
-    Promise.all([apiFetch("/dlp/summary").catch(()=>null),apiFetch("/dlp?severity=critical,high&limit=200").catch(()=>[]),apiFetch("/dlp/files").catch(()=>[])]).then(([s,ev,f])=>{setS(s);setEv(ev);setF(f)}).catch(x=>setE(x.message));
+    Promise.all([apiFetch("/dlp/summary").catch(()=>null),apiFetch("/dlp?limit=5000").catch(()=>[]),apiFetch("/dlp/files?limit=5000").catch(()=>[])]).then(([s,ev,f])=>{setS(s);setEv(ev);setF(f)}).catch(x=>setE(x.message));
   },[]);
   if(e) return <Err msg={e}/>; if(!events) return <Loading/>;
 
-  // Server returns byKind as {event_kind, events} and bySeverity as {severity, events}.
-  const promptCount=(summary?.byKind||[]).filter(k=>k.event_kind!=="file_upload").reduce((s,k)=>s+(k.events||0),0);
-  const fileCount=(summary?.byKind||[]).filter(k=>k.event_kind==="file_upload").reduce((s,k)=>s+(k.events||0),0);
-  const highCrit=(summary?.bySeverity||[]).filter(s=>s.severity==="critical"||s.severity==="high").reduce((s,k)=>s+(k.events||0),0);
+  const allPrompts=(events||[]).filter(ev=>ev.event_kind!=="file_upload");
+  const allFiles=files||[];
+  const promptCount=allPrompts.length;
+  const fileCount=allFiles.length;
+  const highCrit=allPrompts.filter(ev=>isHiCrit(ev.secret_class||ev.highest_severity)).length + allFiles.filter(f=>isHiCrit(f.severity||f.highest_severity)).length;
+  const serviceCount=(summary?.byService||[]).length;
   const sourceTone={browser_extension:"#0044cc",desktop_hook:"#8b5cf6",os_monitor:"#f59e0b"};
+  const toggle=k=>setSection(section===k?"":k);
+
+  const promptRows=sevFilter==="all"?allPrompts:allPrompts.filter(ev=>isHiCrit(ev.secret_class||ev.highest_severity));
+  const fileRows=sevFilter==="all"?allFiles:allFiles.filter(f=>isHiCrit(f.severity||f.highest_severity));
 
   return (<div>
-    <SectionHeader title="AI Activity (DLP)" hint="Clipboard, typed prompts, and file upload events captured by the OS monitor and browser extension."/>
-    <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(3,1fr)"}}>
-      <StatCard icon={<MessageSquare size={18}/>} label="Prompt events" value={promptCount} hint="paste + submit" color="#0044cc"/>
-      <StatCard icon={<FileText size={18}/>} label="File uploads" value={fileCount} hint="picker + drop + clipboard" color="#f59e0b"/>
-      <StatCard icon={<AlertTriangle size={18}/>} label="High / critical" value={highCrit} hint="needs review" color="#ef4444"/>
+    <SectionHeader title="AI Activity (DLP)" hint="Clipboard, typed prompts, and file upload events captured by the OS monitor and browser extension."
+      action={<div style={{display:"flex",gap:10,alignItems:"center"}}>
+        <select value={sevFilter} onChange={ev=>setSevFilter(ev.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12,fontWeight:600}}>
+          <option value="high">High & Critical only</option>
+          <option value="all">All severities</option>
+        </select>
+        {section&&<button className="aihub_filter_btn" onClick={()=>setSection("")}>Clear selection</button>}
+      </div>}/>
+
+    <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(4,1fr)"}}>
+      <StatCard icon={<AlertTriangle size={18}/>} label="High / critical" value={highCrit} hint="total flagged" color="#ef4444"/>
+      <StatCard icon={<MessageSquare size={18}/>} label="Prompt events" value={promptRows.length} hint={sevFilter==="high"?"high & critical":"all severities"} color="#0044cc" onClick={()=>toggle("prompts")}/>
+      <StatCard icon={<FileText size={18}/>} label="File uploads" value={fileRows.length} hint={sevFilter==="high"?"high & critical":"all severities"} color="#f59e0b" onClick={()=>toggle("files")}/>
+      <StatCard icon={<Server size={18}/>} label="AI services" value={serviceCount} hint="breakdown" color="#8b5cf6" onClick={()=>toggle("services")}/>
     </div>
 
-    {summary?.byService?.length>0&&<div className="aihub_card">
+    {section==="services"&&summary?.byService?.length>0&&<div className="aihub_card">
       <SectionHeader title="Activity by AI service"/>
       <DataTable columns={[
         {label:"Service",key:"ai_service"},
@@ -797,8 +845,8 @@ function DLPView() {
       ]} rows={summary.byService||[]}/>
     </div>}
 
-    <div className="aihub_card">
-      <SectionHeader title="Sensitive prompts" hint="High & critical severity only. Click View to see the captured prompt."/>
+    {section==="prompts"&&<div className="aihub_card">
+      <SectionHeader title="Sensitive prompts" hint={sevFilter==="high"?"High & critical severity only":"All severities"}/>
       <DataTable onRow={r=>{ if(r.has_content) setPreview(r); }} columns={[
         {label:"When",render:r=>relTime(r.occurred_at)},
         {label:"Service",render:r=><ServiceCell row={r}/>},
@@ -806,13 +854,12 @@ function DLPView() {
         {label:"Kind",render:r=><Tag text={r.event_kind}/>},
         {label:"Pattern",render:r=><Mono>{r.pattern_matched||"—"}</Mono>},
         {label:"Severity",render:r=><SeverityBadge sev={r.secret_class||r.highest_severity}/>},
-        {label:"Length",render:r=>r.content_length||"—",right:true},
         {label:"",render:r=><ViewBtn has={r.has_content} onClick={()=>setPreview(r)}/>,right:true},
-      ]} rows={(events||[]).filter(e=>e.event_kind!=="file_upload"&&isHiCrit(e.secret_class||e.highest_severity))} empty="No high or critical prompt events yet."/>
-    </div>
+      ]} rows={promptRows} empty="No prompt events matching this filter." paginate={25}/>
+    </div>}
 
-    <div className="aihub_card">
-      <SectionHeader title="File uploads" hint="High & critical severity only. Click Open to view the file inline."/>
+    {section==="files"&&<div className="aihub_card">
+      <SectionHeader title="File uploads" hint={sevFilter==="high"?"High & critical severity only":"All severities"}/>
       <DataTable onRow={r=>{ if(r.has_content) setPreview(r); }} columns={[
         {label:"When",render:r=>relTime(r.occurred_at)},
         {label:"Service",render:r=><ServiceCell row={r}/>},
@@ -822,8 +869,8 @@ function DLPView() {
         {label:"Size",render:r=>r.metadata?.size_bucket||"—",right:true},
         {label:"Via",render:r=><Badge text={r.metadata?.via||"—"}/>},
         {label:"",render:r=><ViewBtn has={r.has_content} onClick={()=>setPreview(r)} label="Open"/>,right:true},
-      ]} rows={(files||[]).filter(f=>isHiCrit(f.severity||f.highest_severity))} empty="No high or critical file upload events yet."/>
-    </div>
+      ]} rows={fileRows} empty="No file upload events matching this filter." paginate={25}/>
+    </div>}
 
     {preview && <ContentDrawer eventId={preview.id} meta={preview} onClose={()=>setPreview(null)}/>}
   </div>);
@@ -2958,6 +3005,26 @@ function AIRegistryView() {
           activity:{total:0,last_active:null},
           _catalogOnly:true,      // drives the "no usage recorded" note
         });
+      }
+      // Cross-reference registry statuses with fresh ai_platforms data.
+      // The registry may return stale snapshot data where everything is "allowed",
+      // but ai_platforms is always live. If a platform is blocked there, override
+      // the registry row's status so the toggle shows the real state.
+      const blockedHosts=new Set((Array.isArray(plats)?plats:[]).filter(p=>p.blocked).map(p=>p.host));
+      const platByHost=new Map((Array.isArray(plats)?plats:[]).map(p=>[p.host,p]));
+      for(const r of reg){
+        // Match by matched_hosts, or by name/host substring
+        const hosts=r.matched_hosts||[];
+        let isBlocked=hosts.some(h=>blockedHosts.has(h));
+        if(!isBlocked && !hosts.length){
+          // Try to find by host substring (e.g. "Claude" → claude.ai)
+          const lower=(r.name||"").toLowerCase();
+          for(const [h,p] of platByHost){
+            if(h.includes(lower)&&p.blocked){isBlocked=true;break;}
+          }
+        }
+        if(isBlocked && r.status!=='blocked') r.status='blocked';
+        else if(!isBlocked && r.status==='blocked') r.status='approved';
       }
       setAllItems([...reg,...extra]); setSummary(s);
     }).catch(x=>setErr(x.message));
