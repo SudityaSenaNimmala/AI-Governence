@@ -124,6 +124,70 @@ test('the period filter bounds the window it says it does', async () => {
   });
 });
 
+// The roster half of the table: a paid seat with no usage is the row the whole
+// screen exists to produce, so absence of usage must not mean absence of a row.
+test('an enrolled person with no usage is listed at zero', async () => {
+  await withServer(async (db) => {
+    await seed(db);
+    // Same shape the tracker enrols with: real hostname, real OS user, no events.
+    await db.collection('machines').insertOne({
+      id: 'm2', hostname: 'IDLE-PC', user: 'QuietColleague', platform: 'win32',
+      last_seen: new Date('2026-08-10T09:00:00Z'),
+    });
+  }, async ({ get }) => {
+    const body = await (await get('/api/v1/claude-usage?days=30')).json();
+
+    const idle = body.systems.find((s) => s.label === 'QuietColleague');
+    assert.ok(idle, 'an enrolled machine with no prompts still gets a row');
+    assert.equal(idle.prompts, 0);
+    assert.equal(idle.active, false);
+    assert.equal(idle.hostname, 'IDLE-PC');
+    assert.equal(idle.last_seen, '2026-08-10T09:00:00.000Z', 'last contact is reported, so "installed but idle" is distinguishable from "gone"');
+    assert.deepEqual(idle.by_surface, {});
+
+    assert.equal(body.totals.enrolled_users, 2);
+    assert.equal(body.totals.active_users, 1);
+    assert.equal(body.totals.idle_users, 1);
+    // The person who DID use Claude is unaffected.
+    assert.equal(body.systems.find((s) => s.label === 'SatyaPinniti').prompts, 5);
+  });
+});
+
+test('idle rows sort last, so the decision collects at the bottom', async () => {
+  await withServer(async (db) => {
+    await seed(db);
+    for (const [id, host, user] of [['a', 'AAA-PC', 'Zoe'], ['b', 'BBB-PC', 'Adam']]) {
+      await db.collection('machines').insertOne({ id, hostname: host, user, platform: 'win32' });
+    }
+  }, async ({ get }) => {
+    const rows = (await (await get('/api/v1/claude-usage?days=30')).json()).systems;
+    assert.equal(rows[0].label, 'SatyaPinniti', 'the busiest seat is first');
+    // Ties break on name, not Map insertion order, so the list is stable between
+    // requests rather than reshuffling for no reason.
+    assert.deepEqual(rows.slice(1).map((r) => r.label), ['Adam', 'Zoe']);
+  });
+});
+
+test('rows that name nobody are not invented as colleagues', async () => {
+  await withServer(async (db) => {
+    await db.collection('machines').insertOne({ id: 'real', hostname: 'REAL-PC', user: 'Someone', platform: 'win32' });
+    // Seed/smoke-test records: a hostname and nothing else. Real enrolments always
+    // carry an OS user, so this is what separates them.
+    await db.collection('machines').insertOne({ id: 'seed1', hostname: 'prod-ai-server-1' });
+    await db.collection('machines').insertOne({ id: 'seed2', hostname: 'qa-test-host' });
+    // A browser that enrolled before it could learn the machine name.
+    await db.collection('machines').insertOne({ id: 'ua', hostname: 'Mozilla-browser-extension' });
+    // Claude Code's synthetic per-account record — an account, not a system.
+    await db.collection('machines').insertOne({ id: 'clicode:x@y.com', hostname: 'Claude Code CLI', user: 'x@y.com' });
+    // Debug enrolments are excluded by the same rule the rest of the route uses.
+    await db.collection('machines').insertOne({ id: 'dbg', hostname: 'debug-box', user: 'tester', platform: 'win32' });
+  }, async ({ get }) => {
+    const body = await (await get('/api/v1/claude-usage?days=30')).json();
+    assert.deepEqual(body.systems.map((s) => s.label), ['Someone']);
+    assert.equal(body.totals.enrolled_users, 1);
+  });
+});
+
 test('the three primary surfaces are always present, even at zero', async () => {
   await withServer(async (db) => {
     await db.collection('machines').insertOne({ id: 'm1', hostname: 'SATYA', user: 'SatyaPinniti' });

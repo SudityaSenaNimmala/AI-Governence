@@ -237,7 +237,7 @@ export function mountClaudeUsage(app, db) {
     // machine_id -> { hostname, user, claude_account_email, claude_accounts, display_name }
     const machines = await db.collection('machines')
       .find({}).project({
-        _id: 0, id: 1, hostname: 1, user: 1,
+        _id: 0, id: 1, hostname: 1, user: 1, last_seen: 1,
         claude_account_email: 1, claude_accounts: 1, display_name: 1,
       })
       .toArray();
@@ -634,6 +634,94 @@ export function mountClaudeUsage(app, db) {
       totals.estimated_cost_usd += agg.estimated_cost_usd;
     }
 
+    // EVERY ENROLLED PERSON, INCLUDING THE ONES WITH NOTHING TO SHOW.
+    //
+    // Rows above are built from usage, so somebody who never opened Claude produced
+    // no events and therefore no row. But an empty row is precisely the row this
+    // table exists to surface: a paid seat with no usage is the evidence for
+    // reclaiming it, and a missing row is indistinguishable from "not tracked" —
+    // the one reading nobody should have to guess at.
+    //
+    // The roster is every machine that resolves to a person, keyed exactly as the
+    // usage rows are, so an enrolment that DID report keeps its numbers and only
+    // genuine absences get a zero row.
+    //
+    // Skipped, each for its own reason: debug/test enrolments (same rule as the
+    // rest of this route); the synthetic clicode: records, which are a Claude
+    // ACCOUNT rather than a system and whose usage is already folded into a real
+    // machine; and extensions whose hostname is the browser's user agent, which
+    // name nobody and are reported in unattributed_rows instead of being dressed up
+    // as a colleague.
+    //
+    // NOTE ON SCOPE, because it decides what this list can prove: this is everyone
+    // ENROLLED, not everyone LICENSED. The server learns of a person when the
+    // tracker or extension enrols; it has no copy of the Claude Team seat list. A
+    // colleague who never installs anything cannot appear here at all — so read a
+    // zero row as "installed and idle", and treat "absent entirely" as "not
+    // deployed to yet".
+    const CLI_HOSTNAME = /^claude code cli$/i;
+    const asIso = (v) => {
+      if (!v) return null;
+      const d = v instanceof Date ? v : new Date(v);
+      return Number.isNaN(d.getTime()) ? null : d.toISOString();
+    };
+    for (const m of machines) {
+      if (excluded.has(m.id)) continue;
+      if (typeof m.id === 'string' && m.id.startsWith('clicode:')) continue;
+      if (CLI_HOSTNAME.test(m.hostname || '')) continue;
+
+      const key = personKeyFor(m, m.id);
+      // A machine: key means the hostname named nobody — a UA-only extension.
+      if (!key.startsWith('host:')) continue;
+
+      const lastSeen = asIso(m.last_seen);
+      const existing = systems.get(key);
+      if (existing) {
+        // One person can hold several enrolments; keep the freshest contact time.
+        if (lastSeen && (!existing.last_seen || lastSeen > existing.last_seen)) existing.last_seen = lastSeen;
+        continue;
+      }
+
+      const profile = profileByMachine.get(m.id) || null;
+      const osUser = (m.user && !GENERIC_USER.test(m.user) ? m.user : null) || profile?.os_user || null;
+
+      // A zero row has to NAME somebody, or it cannot support the decision this
+      // table is for — nobody revokes a seat from "prod-ai-server-1".
+      //
+      // The OS username is the test, and it separates the two populations cleanly
+      // in the real data: every genuine enrolment carries one (the tracker sends
+      // os.userInfo().username, and an extension inherits it from its machine's
+      // profile once the identity beacon lets it enrol under the real hostname),
+      // while every seed and smoke-test record — alice-laptop, bob-desktop,
+      // carol-mac, test-host, qa-test-host, port-check-host, prod-ai-server-1 —
+      // has user: null. A name blacklist would have been guesswork that ages
+      // badly; this is a property of how real enrolments happen.
+      //
+      // Consequence worth knowing: an extension-only machine that never reached a
+      // beacon has no name either, so it stays out. Installing the tracker there
+      // is what makes that person appear — which is the same action that makes
+      // their usage measurable in the first place.
+      if (!osUser) continue;
+
+      // Case preserved for display — cleanHostOf lowercases for key comparison only.
+      const host = String(profile?.hostname || m.hostname || '').replace(/-?browser-?extension$/i, '') || null;
+      systems.set(key, {
+        person_key: key,
+        label: osUser || profile?.display_name || host || String(m.id).slice(0, 12),
+        hostname: host,
+        email: m.claude_account_email || null,
+        user: osUser,
+        attributed: Boolean(osUser),
+        prompts: 0,
+        measured_tokens: 0,
+        measured_cost_usd: 0,
+        estimated_tokens: 0,
+        estimated_cost_usd: 0,
+        by_surface: {},
+        last_seen: lastSeen,
+      });
+    }
+
     // Backfill the primary surfaces so the UI always shows Desktop, Browser and
     // CLI — a zero there means "tracked, nothing yet", not "missing".
     for (const name of CANONICAL_SURFACES) {
@@ -650,7 +738,14 @@ export function mountClaudeUsage(app, db) {
       return y.prompts - x.prompts;
     });
 
+    // Two different counts, both named, because the table now holds both kinds of
+    // row: `users` is who actually used Claude in the window (unchanged meaning),
+    // `enrolled_users` is everyone listed. The gap between them is the number of
+    // seats worth reviewing.
     totals.users = seenUsers.size;
+    totals.active_users = seenUsers.size;
+    totals.enrolled_users = systems.size;
+    totals.idle_users = Math.max(0, systems.size - seenUsers.size);
 
     res.json({
       period_days: days,
@@ -667,7 +762,13 @@ export function mountClaudeUsage(app, db) {
       //
       // Counted, not dropped silently: unattributed_rows/unattributed_prompts say
       // how much usage sits outside the named rows, so totals still reconcile.
-      systems: [...systems.values()].sort((x, y) => y.prompts - x.prompts),
+      // Busiest first, so the idle seats collect at the bottom where the decision
+      // is. Ties break on name rather than Map insertion order, which would
+      // otherwise reshuffle the zero rows between requests for no reason.
+      // `active` is stated rather than left to be inferred from prompts === 0.
+      systems: [...systems.values()]
+        .map((r) => ({ ...r, active: r.prompts > 0 }))
+        .sort((x, y) => (y.prompts - x.prompts) || String(x.label || '').localeCompare(String(y.label || ''))),
       unattributed_rows: excludedKeys.size,
       unattributed_prompts: excludedPrompts,
       surfaces: surfacesOut,

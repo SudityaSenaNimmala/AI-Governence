@@ -4189,11 +4189,17 @@ function ClaudeUsageView() {
       <StatCard icon={<Activity size={18}/>} label="Tokens" value={fmtTokens(t.measured_tokens)} hint={`${(t.measured_requests||0).toLocaleString()} Claude Code requests · includes cached context re-read each turn`} color="#0044cc"/>
       <StatCard icon={<Wrench size={18}/>} label="Estimated cost" value={fmtUsd(t.measured_cost_usd)} hint="at API list rates — Team seats are not billed per token" color="#22c55e"/>
       <StatCard icon={<Clock size={18}/>} label="Est. tokens" value={fmtTokens(t.estimated_tokens)} hint={`≈${fmtUsd(t.estimated_cost_usd)} · browser & desktop, prompt text only`} color="#f59e0b"/>
+      {/* The seat-reclamation number. Idle is the one worth reading, so it leads the
+          hint — "3 used Claude, 11 did not" is the decision, and the table below
+          lists the eleven by name. Counts everyone TRACKED, not everyone licensed:
+          the server only knows a person once the tracker or extension enrols. */}
+      <StatCard icon={<User size={18}/>} label="Seats tracked" value={(t.enrolled_users||0).toLocaleString()}
+                hint={`${(t.idle_users||0).toLocaleString()} with no usage this period · ${(t.active_users||0).toLocaleString()} active`} color="#ef4444"/>
     </div>
 
     {!(t.prompts>0) && (
       <div className="aihub_card" style={{marginBottom:14}}>
-        <Empty icon={<MessageSquare size={32} strokeWidth={1.5}/>} title="No Claude prompts recorded yet" msg="Run the Claude Usage Tracker (.exe) on a machine and send a prompt. Surfaces below stay listed at zero so you can see what is being tracked."/>
+        <Empty icon={<MessageSquare size={32} strokeWidth={1.5}/>} title="No Claude prompts recorded yet" msg="Run the Claude Usage Tracker (.exe) on a machine and send a prompt. Enrolled machines are still listed below at zero — that is what an unused seat looks like."/>
       </div>
     )}
 
@@ -4232,7 +4238,15 @@ function ClaudeUsageView() {
             const total=(r.measured_cost_usd||0)+(r.estimated_cost_usd||0);
             return total>0?fmtUsd(total):<span className="aihub_text_muted">—</span>;
           },right:true},
-        ]} rows={data.systems||[]} empty="No Claude usage recorded yet."/>
+          // Separates "installed and idle" from "we stopped hearing from this
+          // machine". Both show 0 prompts, and only the first is evidence for
+          // reclaiming a seat — the second means the tracker is not running, so
+          // the zero says nothing about whether the person uses Claude.
+          {label:"Last seen",render:r=>r.last_seen
+            ? <span className={r.active?undefined:"aihub_text_muted"}>{relTime(r.last_seen)}</span>
+            : <span className="aihub_text_muted">—</span>},
+        ]} rows={data.systems||[]}
+           empty="No machines enrolled yet — install the Claude Usage Tracker to start tracking seats."/>
       </div>
 
       <SectionHeader title="Surfaces"/>
