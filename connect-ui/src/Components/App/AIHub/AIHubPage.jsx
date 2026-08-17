@@ -2996,7 +2996,9 @@ function AIRegistryView() {
           body:JSON.stringify({status,product_name:row.name,matched_hosts:row.matched_hosts||[]}),
         });
       }
-      await loadAll();
+      // Update local state immediately — don't reload from registry (it's slow
+      // and may return stale snapshot data, reverting the toggle visually).
+      setAllItems(prev=>(prev||[]).map(r=>r.id===row.id?{...r,status}:r));
     } finally {
       setPendingIds(prev=>{ const next=new Set(prev); next.delete(row.id); return next; });
     }
