@@ -139,6 +139,25 @@ ensureAnalyticsIndexes(db).catch((err) => {
   console.warn(`[db] analytics indexes not created: ${err.message} (reads still work, just slower)`);
 });
 
+// Claude Usage Tracker installer, built here rather than by hand on somebody's
+// Windows laptop and copied over. Background and after listen for the same reason
+// as the indexes above: it takes minutes, and nothing else should wait for it.
+//
+// Only when PUBLIC_SERVER_URL is set. The alternative is deriving an address from
+// a request, and an installer that reports to the wrong host is worse than a
+// download that says it has not been built — the first fails silently on an
+// employee's machine, the second says exactly what to do.
+if (process.env.PUBLIC_SERVER_URL) {
+  const { ensureClaudeTracker } = await import('./lib/tracker-build.js');
+  ensureClaudeTracker({
+    serverUrl: process.env.PUBLIC_SERVER_URL,
+    enrollSecret: ENROLL_SECRET,
+    log: console,
+  }).catch((err) => console.warn(`[tracker] installer preparation failed: ${err.message}`));
+} else {
+  console.log('[tracker] PUBLIC_SERVER_URL not set — skipping installer build (set it so downloads point at the right host)');
+}
+
 app.listen(PORT, () => {
   console.log(`AI Governance server listening on http://localhost:${PORT}`);
   console.log(`DB: MongoDB (${process.env.MONGODB_URI})`);

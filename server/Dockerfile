@@ -7,6 +7,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 make g++ ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY agent ./agent
+# Build tools for the Claude Usage Tracker installer, which the server now builds
+# itself (src/lib/tracker-build.js) instead of waiting for someone to compile it on
+# a Windows machine and copy 85 MB onto the host.
+#
+# Installed INTO agent/, not server/: the build script lives at
+# agent/scripts/build-claude-tracker.mjs and imports esbuild and postject, and ESM
+# resolves from the importing file — /app/agent/... never looks inside
+# /app/server/node_modules. Versions match agent/package.json devDependencies.
+#
+# Installed in an ISOLATED project and then placed into agent/node_modules, rather
+# than `npm install` inside agent/ — that form also installs the project's existing
+# dependencies, which here means compiling better-sqlite3 and pulling tesseract and
+# pdf-parse into an image that never uses them. This way only these two packages
+# (and esbuild's platform binary) are added.
+WORKDIR /tools
+RUN npm init -y > /dev/null \
+    && npm install --no-audit --no-fund esbuild@^0.24.0 postject@^1.0.0-alpha.6 \
+    && mkdir -p /build/agent/node_modules \
+    && cp -R /tools/node_modules/. /build/agent/node_modules/
+WORKDIR /build
 COPY server/package.json server/package-lock.json ./server/
 WORKDIR /build/server
 RUN npm install --no-audit --no-fund
