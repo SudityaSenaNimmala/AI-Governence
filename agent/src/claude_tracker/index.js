@@ -11,6 +11,16 @@
 //      and splits claude.ai/code into its own surface.
 //   4. Batches prompt events to /api/v1/dlp every 15s.
 //
+// HOW IT RUNS. Double-clicking the exe installs it (see service.js) and hands
+// off to a detached, windowless copy that starts again at every logon. Tracking
+// therefore does not depend on a console window staying open — closing the
+// install window, or any window, stops nothing. Modes:
+//   (none)        install, relaunch in the background, report, exit
+//   --service     the background run: no console, logs to tracker.log
+//   --console     run in this window, logging to stdout (debugging)
+//   --status      report whether it is installed, running, and where the log is
+//   --uninstall   stop it and remove the logon entry
+//
 // What it deliberately does NOT do: no prompt text leaves the machine (only a
 // character count), no DLP scanning, no file/attachment watching, no traffic
 // interception, no browser-history reading. Prompt counts and lengths only.
@@ -32,14 +42,24 @@ import {
   SERVER_URL, ENROLL_SECRET, VERSION,
   DESKTOP_PROCESSES, BROWSER_PROCESSES, FLUSH_INTERVAL_MS,
 } from './config.js';
+import {
+  IS_PACKAGED, INSTALL_DIR, INSTALLED_EXE, LOG_PATH,
+  acquireSingleInstanceLock, waitForLockRelease, fileLogger,
+  registerAutostart, isAutostartRegistered, stopRunningInstances,
+  installFiles, relaunchDetached, uninstall,
+} from './service.js';
 
 const STATE_DIR = join(os.homedir(), '.cloudfuze-claude-tracker');
 const CREDS_PATH = join(STATE_DIR, 'credentials.json');
 
+// Swapped for a file writer in --service mode, where there is no console to
+// write to. Kept behind a function rather than reassigning `log` so that every
+// module already holding a reference to `log` follows the switch.
+let sink = null;
 const log = {
-  info: (m) => console.log(`[claude-tracker] ${m}`),
-  warn: (m) => console.warn(`[claude-tracker] WARN ${m}`),
-  error: (m) => console.error(`[claude-tracker] ERROR ${m}`),
+  info: (m) => (sink ? sink(`[claude-tracker] ${m}`) : console.log(`[claude-tracker] ${m}`)),
+  warn: (m) => (sink ? sink(`[claude-tracker] WARN ${m}`) : console.warn(`[claude-tracker] WARN ${m}`)),
+  error: (m) => (sink ? sink(`[claude-tracker] ERROR ${m}`) : console.error(`[claude-tracker] ERROR ${m}`)),
 };
 
 // Locate prompt-watcher.ps1. In a SEA build there is no source tree, so we look
@@ -50,6 +70,10 @@ function findWatcherScript() {
   const candidates = [
     join(dirname(process.execPath), 'prompt-watcher.ps1'),
     join(dirname(process.execPath), 'resources', 'prompt-watcher.ps1'),
+    // The installed copy, for a --service start from the logon entry. Listed
+    // after the exe's own folder so a developer running the build output still
+    // gets the script sitting next to it rather than a stale installed one.
+    join(INSTALL_DIR, 'prompt-watcher.ps1'),
   ];
   try {
     candidates.push(join(dirname(fileURLToPath(import.meta.url)), '..', 'os_monitor', 'prompt-watcher.ps1'));
@@ -205,14 +229,9 @@ class Poster {
   }
 }
 
-async function main() {
+async function runTracker() {
   log.info(`CloudFuze Claude Usage Tracker v${VERSION}`);
   log.info(`server: ${SERVER_URL}`);
-
-  if (process.platform !== 'win32') {
-    log.error('This tracker relies on Windows UI Automation and only runs on Windows.');
-    process.exit(1);
-  }
 
   const watcherScript = findWatcherScript();
   if (!watcherScript) {
@@ -361,6 +380,119 @@ async function main() {
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+}
+
+// ── modes ────────────────────────────────────────────────────────────────────
+
+// The double-click path. Everything it does is per-user: LOCALAPPDATA for the
+// files, HKCU for the logon entry. No admin prompt, which is what lets the
+// person who downloaded it install it themselves.
+async function runInstaller() {
+  const line = (m) => console.log(m);
+  line('');
+  line(`  CloudFuze Claude Usage Tracker v${VERSION}`);
+  line(`  Server: ${SERVER_URL}`);
+  line('');
+
+  // Locate the helper BEFORE touching anything: installing a binary that cannot
+  // start is worse than not installing, because autostart would then fail
+  // invisibly at every logon.
+  const watcherScript = findWatcherScript();
+  if (!watcherScript) {
+    line('  SETUP FAILED');
+    line('  prompt-watcher.ps1 is missing. Extract the whole ZIP and keep both');
+    line('  files in the same folder, then double-click the .exe again.');
+    return await hold(20);
+  }
+
+  try {
+    line('  Installing…');
+    await stopRunningInstances();
+    await waitForLockRelease();
+
+    const files = await installFiles(watcherScript);
+    line(`    files      ${files.dir}`);
+
+    await registerAutostart(files.exe);
+    line('    autostart  registered for this user (starts at logon)');
+
+    const pid = relaunchDetached(files.exe);
+    line(`    running    background process ${pid ?? '(started)'}`);
+    line('');
+    line('  Done. Tracking is running in the background.');
+    line('  You can close this window — it does NOT stop tracking.');
+    line('');
+    line(`  Log:       ${LOG_PATH}`);
+    line('  Stop it:   run the exe with  --uninstall');
+    line('');
+  } catch (err) {
+    line('');
+    line(`  SETUP FAILED: ${err?.message || err}`);
+    line('  Nothing was left running. Send the message above to IT.');
+    line('');
+  }
+
+  await hold(20);
+}
+
+// Double-clicking gives a window that vanishes the instant the process exits, so
+// a summary nobody can read is the same as no summary. Counts down instead.
+async function hold(seconds) {
+  for (let s = seconds; s > 0; s--) {
+    process.stdout.write(`\r  This window closes in ${s}s…   `);
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  process.stdout.write('\r'.padEnd(40) + '\n');
+}
+
+async function runStatus() {
+  const installed = existsSync(INSTALLED_EXE);
+  const autostart = await isAutostartRegistered();
+  // The lock is held by a live tracker, so failing to take it means one is up.
+  const free = await acquireSingleInstanceLock();
+  if (free) free.close();
+
+  console.log('');
+  console.log(`  installed   ${installed ? INSTALLED_EXE : 'no'}`);
+  console.log(`  autostart   ${autostart ? 'registered (HKCU Run)' : 'not registered'}`);
+  console.log(`  running     ${free ? 'no' : 'yes'}`);
+  console.log(`  log         ${existsSync(LOG_PATH) ? LOG_PATH : '(none yet)'}`);
+  console.log('');
+}
+
+async function main() {
+  if (process.platform !== 'win32') {
+    log.error('This tracker relies on Windows UI Automation and only runs on Windows.');
+    process.exit(1);
+  }
+
+  const argv = new Set(process.argv.slice(2));
+
+  if (argv.has('--uninstall')) {
+    const r = await uninstall();
+    console.log('');
+    console.log(`  Stopped and removed from logon startup.`);
+    console.log(`  Files left in place: ${r.dir}`);
+    console.log('');
+    return;
+  }
+
+  if (argv.has('--status')) return await runStatus();
+
+  // A dev run (`node src/claude_tracker/index.js`) has nothing sensible to
+  // install, so it behaves as it always did: foreground, logging to the console.
+  const background = argv.has('--service');
+  if (!background && (argv.has('--console') || !IS_PACKAGED)) return await runTracker();
+  if (!background) return await runInstaller();
+
+  // --service: the detached run.
+  sink = fileLogger();
+  const lock = await acquireSingleInstanceLock();
+  if (!lock) {
+    log.info('another tracker instance is already running — exiting');
+    return;
+  }
+  await runTracker();
 }
 
 main().catch((err) => {

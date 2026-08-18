@@ -151,6 +151,18 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   AI-site page could inject markup into our own model-routing toast. Fix: build the
   page-derived model name with `textContent`, not string-concatenated `innerHTML`.
 
+- [ ] **Tracker heartbeat so "Last seen" reflects liveness, not enrolment time**
+  `POST /api/v1/dlp` never touches `machines.last_seen` — only enrol, identity, otel and
+  scan-report paths do. A tracker-only machine therefore shows its enrolment timestamp
+  forever, so an install that died seconds after enrolling is indistinguishable from a
+  healthy one that has simply been idle.
+
+- [ ] **Surface unattributed enrolments in the Claude Usage UI so hidden prompts are re-linkable**
+  `GET /api/v1/claude-usage` already returns `unattributed_rows` / `unattributed_prompts`
+  for enrolments whose hostname is a browser user agent, but `ClaudeUsageView` renders
+  neither. Prompts that reached the server vanish from the page with nothing saying they
+  exist; add a visible row and a way to claim it to a person.
+
 ---
 
 ## P2 — enterprise distribution

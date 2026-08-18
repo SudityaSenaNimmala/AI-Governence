@@ -214,9 +214,17 @@ async function stage() {
     `  - Only claude.ai is looked at. Other sites are ignored entirely: the URL is\n` +
     `    checked BEFORE any text box is read.\n\n` +
     `HOW TO RUN\n` +
-    `  Keep both files in the same folder, then double-click ${binaryName}\n` +
-    `  (or run it from a terminal to watch the log).\n` +
-    `  Leave the window open — closing it stops tracking. Ctrl+C to stop.\n\n` +
+    `  Extract BOTH files to the same folder, then double-click ${binaryName}.\n` +
+    `  It installs itself and starts tracking in the background.\n` +
+    `  Close the setup window when it says Done — that does NOT stop tracking.\n` +
+    `  It starts again automatically every time you log in.\n\n` +
+    `WHERE IT INSTALLS\n` +
+    `  %LOCALAPPDATA%\\CloudFuze\\ClaudeTracker\\\n` +
+    `  Log file: %LOCALAPPDATA%\\CloudFuze\\ClaudeTracker\\tracker.log\n\n` +
+    `OTHER COMMANDS (optional, from a terminal)\n` +
+    `  ${binaryName} --status      is it installed and running?\n` +
+    `  ${binaryName} --console     run in this window, log to screen\n` +
+    `  ${binaryName} --uninstall   stop it and remove it from startup\n\n` +
     `REQUIREMENTS\n` +
     `  Windows 10/11. No admin rights needed. No configuration needed.\n\n` +
     `NOTE\n` +
