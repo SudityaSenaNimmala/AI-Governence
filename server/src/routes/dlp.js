@@ -321,43 +321,46 @@ export function mountDlp(app, db) {
 
   // Summary — counts by service, by severity, broken down by event_kind
   app.get('/api/v1/dlp/summary', a(async (req, res) => {
-    const byService = await db.collection('dlp_events').aggregate([
-      {
-        $group: {
-          _id: '$ai_service',
-          events: { $sum: 1 },
-          file_uploads: { $sum: { $cond: [{ $eq: ['$event_kind', 'file_upload'] }, 1, 0] } },
-          prompts: { $sum: { $cond: [{ $in: ['$event_kind', ['prompt_paste', 'prompt_submit', 'prompt_typed']] }, 1, 0] } },
-          machines: { $addToSet: '$machine_id' },
+    // Run all four queries in parallel instead of sequentially
+    const [byService, bySeverity, byKind, recentCritical] = await Promise.all([
+      db.collection('dlp_events').aggregate([
+        {
+          $group: {
+            _id: '$ai_service',
+            events: { $sum: 1 },
+            file_uploads: { $sum: { $cond: [{ $eq: ['$event_kind', 'file_upload'] }, 1, 0] } },
+            prompts: { $sum: { $cond: [{ $in: ['$event_kind', ['prompt_paste', 'prompt_submit', 'prompt_typed']] }, 1, 0] } },
+            machines: { $addToSet: '$machine_id' },
+          },
         },
-      },
-      { $project: { _id: 0, ai_service: '$_id', events: 1, file_uploads: 1, prompts: 1, machines: { $size: '$machines' } } },
-      { $sort: { events: -1 } },
-    ]).toArray();
+        { $project: { _id: 0, ai_service: '$_id', events: 1, file_uploads: 1, prompts: 1, machines: { $size: '$machines' } } },
+        { $sort: { events: -1 } },
+      ]).toArray(),
 
-    const bySeverity = await db.collection('dlp_events').aggregate([
-      {
-        $group: {
-          _id: { $ifNull: ['$secret_class', 'none'] },
-          events: { $sum: 1 },
+      db.collection('dlp_events').aggregate([
+        {
+          $group: {
+            _id: { $ifNull: ['$secret_class', 'none'] },
+            events: { $sum: 1 },
+          },
         },
-      },
-      { $project: { _id: 0, severity: '$_id', events: 1 } },
-      { $sort: { events: -1 } },
-    ]).toArray();
+        { $project: { _id: 0, severity: '$_id', events: 1 } },
+        { $sort: { events: -1 } },
+      ]).toArray(),
 
-    const byKind = await db.collection('dlp_events').aggregate([
-      { $group: { _id: '$event_kind', events: { $sum: 1 } } },
-      { $project: { _id: 0, event_kind: '$_id', events: 1 } },
-      { $sort: { events: -1 } },
-    ]).toArray();
+      db.collection('dlp_events').aggregate([
+        { $group: { _id: '$event_kind', events: { $sum: 1 } } },
+        { $project: { _id: 0, event_kind: '$_id', events: 1 } },
+        { $sort: { events: -1 } },
+      ]).toArray(),
 
-    const recentCritical = await db.collection('dlp_events')
-      .find({ secret_class: { $in: ['critical', 'high'] } })
-      .sort({ occurred_at: -1 })
-      .limit(25)
-      .project({ _id: 0, id: 1, occurred_at: 1, ai_service: 1, pattern_matched: 1, event_kind: 1, machine_id: 1, user: 1, hostname: 1, metadata_json: 1 })
-      .toArray();
+      db.collection('dlp_events')
+        .find({ secret_class: { $in: ['critical', 'high'] } })
+        .sort({ occurred_at: -1 })
+        .limit(25)
+        .project({ _id: 0, id: 1, occurred_at: 1, ai_service: 1, pattern_matched: 1, event_kind: 1, machine_id: 1, user: 1, hostname: 1, metadata_json: 1 })
+        .toArray(),
+    ]);
     await attachMachineIdentity(db, recentCritical);
 
     res.json({

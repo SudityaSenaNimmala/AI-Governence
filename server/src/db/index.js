@@ -245,6 +245,10 @@ export async function ensureAnalyticsIndexes(db) {
   await db.collection('dlp_events').createIndex({
     source: 1, event_kind: 1, occurred_at: 1, ai_service: 1, machine_id: 1, content_length: 1,
   });
+  // Speed up /api/v1/dlp?severity= and /dlp/summary recentCritical query
+  await db.collection('dlp_events').createIndex({ secret_class: 1, occurred_at: -1 });
+  // Speed up /api/v1/findings?type= (Inventory → Agents & MCP, AI Systems)
+  await db.collection('findings').createIndex({ type: 1, detected_at: -1 });
 }
 
 // Stable identifier for one logical AI tool, e.g. "openai:chatgpt".
