@@ -14,10 +14,13 @@ deliberately does not trigger on `main` itself, or every push would run CI twice
 
 sshd on the deploy host is not reachable from the internet. Of ports 22, 2222,
 2022, 22022, 443 and 8787, only 443 and 8787 answer — and both are nginx / the
-API, not SSH. That is why the earlier SSH-based workflow was deleted in `cc18c68`:
-it produced a red run on every push and could never have connected. Allowing
-GitHub-hosted runners through a firewall is not a fix either — their IPs are a
-large rotating range, so allowing them means allowing the internet.
+API, not SSH. The block is confirmed to be host-side, not CloudFuze egress:
+outbound 22 from a CloudFuze workstation is open (`github.com:22` completes an SSH
+handshake from the same machine that times out against the host). That is why the
+earlier SSH-based workflow was deleted in `cc18c68` — it produced a red run on
+every push and could never have connected. Allowing GitHub-hosted runners through
+a firewall is not a fix either: their IPs are a large rotating range, so allowing
+them means allowing the internet.
 
 A **self-hosted runner installed on the deploy host** dials *out* to GitHub. No
 inbound port, no firewall change, and no SSH private key stored in repository
@@ -31,41 +34,37 @@ split `scripts/deploy.mjs` uses.
 
 ### 1. Install the runner on the deploy host
 
-On the host (`root@208.70.248.68`), get the registration token from
-**GitHub → repo → Settings → Actions → Runners → New self-hosted runner → Linux**,
-then:
+**This step can only be done from the host itself.** sshd here is not reachable
+from a CloudFuze workstation, which is the whole reason for the runner — so use
+the provider's web console, or any machine that does have shell access.
+
+`scripts/install-github-runner.sh` does all of it. Grab a registration token from
+[Settings → Actions → Runners → New self-hosted runner](https://github.com/SudityaSenaNimmala/AI-Governence/settings/actions/runners/new)
+(pick Linux / x64; **the token expires in about an hour**, so copy it immediately
+before running), then on the host:
 
 ```bash
-useradd -m -s /bin/bash ghrunner || true
-usermod -aG docker ghrunner          # needs docker without sudo
-mkdir -p /home/ghrunner/actions-runner && cd /home/ghrunner/actions-runner
-curl -o actions-runner.tar.gz -L \
-  https://github.com/actions/runner/releases/latest/download/actions-runner-linux-x64.tar.gz
-tar xzf actions-runner.tar.gz
-chown -R ghrunner:ghrunner /home/ghrunner/actions-runner
-
-sudo -u ghrunner ./config.sh \
-  --url https://github.com/SudityaSenaNimmala/AI-Governence \
-  --token <REGISTRATION_TOKEN> \
-  --name ai-gov-prod \
-  --labels ai-gov \
-  --unattended
-
-./svc.sh install ghrunner    # run as a service so it survives reboots
-./svc.sh start
-./svc.sh status
+curl -fsSL https://raw.githubusercontent.com/SudityaSenaNimmala/AI-Governence/main/scripts/install-github-runner.sh \
+  -o /tmp/install-github-runner.sh
+sudo bash /tmp/install-github-runner.sh --token <REGISTRATION_TOKEN>
 ```
 
-The `ai-gov` label matters: `deploy.yml` targets
-`runs-on: [self-hosted, linux, ai-gov]`, so a runner without it is never picked.
+Or, if the repo is already checked out on the host:
+`sudo bash scripts/install-github-runner.sh --token <REGISTRATION_TOKEN>`
 
-`config.sh` refuses to run as root, hence the separate `ghrunner` user.
+What it does, and why each part matters:
 
-### 2. Give the runner write access to the deploy dir
+| Step | Why |
+|---|---|
+| Refuses to start unless `docker`, the compose v2 plugin, and `/opt/ai-gov/.env` are all present | These are what the deploy needs. Failing here costs seconds; failing mid-deploy can leave `/opt/ai-gov` half-populated. |
+| Creates an unprivileged `ghrunner` user and adds it to the `docker` group | `config.sh` refuses to run as root. |
+| `chown -R ghrunner /opt/ai-gov` | The workflow wipes and repopulates that directory. Contents of `.env` are untouched — only its owner changes. |
+| Registers with the label **`ai-gov`** | `deploy.yml` targets `runs-on: [self-hosted, linux, ai-gov]`. A runner without that label is never picked and the job queues forever with no explanation. |
+| Installs it as a systemd service | Survives a reboot. |
+| Verifies `docker ps`, `docker compose version` and write access **as `ghrunner`** | Group membership only applies to new sessions, so this is the check that actually catches a broken install. |
 
-```bash
-chown -R ghrunner:ghrunner /opt/ai-gov
-```
+Re-running it is safe — it skips whatever is already in place. Pass `--help` for
+the flags (`--name`, `--labels`, `--deploy-dir`, `--user`, `--version`).
 
 `/opt/ai-gov/.env` must already exist and hold `JWT_SECRET`, `MONGODB_URI`,
 `ENCRYPTION_KEY` and `ENROLL_SECRET`. **The deploy never ships or overwrites it** —
@@ -73,16 +72,7 @@ no app or database secret is stored in GitHub. `ADMIN_TOKEN` and `ENROLL_SECRET`
 are the one exception to "by hand": the workflow generates them *into that file*
 if missing, never overwriting an existing value.
 
-### 3. Confirm the runner can use docker
-
-```bash
-sudo -u ghrunner docker ps
-sudo -u ghrunner docker compose version
-```
-
-Both must work without a password prompt.
-
-### 4. Optional repository variables
+### 2. Optional repository variables
 
 `deploy.yml` hardcodes today's production values as defaults. Override them under
 **Settings → Secrets and variables → Actions → Variables** (variables, not
@@ -94,7 +84,7 @@ secrets — none of these is sensitive):
 | `CONNECT_UI_PORT` | `34441` | Port 3000 is already taken on this box; nginx fronts 34441 on 443. |
 | `PUBLIC_SERVER_URL` | `https://agentgovernence.cftools.live` | The origin users and installers actually reach. Unset, the server bakes `http://<host>:8787` into every installer — a port that speaks plain HTTP. |
 
-### 5. Try it
+### 3. Try it
 
 Use **Actions → Deploy to server → Run workflow** before relying on a push. It
 runs the identical path.
@@ -132,9 +122,11 @@ in every run and neither blocks a deploy:
   runs them *without* the skip pattern, so they stay visible — that job going
   green is the signal to delete the skip pattern.
 
-Everything else is a hard gate: 215 server tests, 59 agent tests, 16 sdk-js
+Everything else is a hard gate: 207 server tests, 59 agent tests, 16 sdk-js
 tests, 352 browser-extension tests, and the `connect-ui` production build,
 including a check that no bearer-token literal was baked into the bundle.
+(Counts as of the commit that added this file — they are here to show the scale
+of the gate, not as figures to keep updated.)
 
 ## `npm run deploy` still works
 
