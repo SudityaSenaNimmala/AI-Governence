@@ -4285,7 +4285,6 @@ function ClaudeUsageView() {
           // to another. Machine and OS user are what the tracker actually observes,
           // so those are what is shown. The field is untouched in the API.
           {label:"User",render:r=><div className="aihub_text_primary">{r.user||r.label}</div>},
-          {label:"System",render:r=>r.hostname?<Mono>{r.hostname}</Mono>:<span className="aihub_text_muted">—</span>},
           {label:"Desktop",render:r=>(r.by_surface?.["Claude Desktop"]||0),right:true},
           {label:"Browser",render:r=>(r.by_surface?.["Claude (browser)"]||0),right:true},
           {label:"Code CLI",render:r=>(r.by_surface?.["Claude Code (CLI)"]||0),right:true},
