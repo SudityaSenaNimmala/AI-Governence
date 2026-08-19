@@ -725,10 +725,30 @@ test('the toolbar click no longer calls the deleted arm path', () => {
 // when the policy changes. These assert the observable effect: an /enroll POST that
 // carries the MANAGED secret, proving managed policy overrides local config.
 
-test('a managed-policy change re-provisions: clears the token and re-enrolls with the managed secret', async () => {
+test('with no desktop-agent beacon, enrollment is DEFERRED — no "Mozilla-browser-extension" record', async () => {
+  // The attribution bug: enrolling before the beacon is up produced an
+  // unnameable "Mozilla-browser-extension" record. Within the grace window and
+  // with no beacon answering, the worker must NOT enroll — it waits.
   chrome._managed.serverUrl = 'https://gov.example.test';
   chrome._managed.enrollSecret = 'managed-secret';
   chrome._store['cfai.token'] = 'stale-jwt';
+  delete chrome._store['cfai.firstEnrollAt'];
+  delete chrome._store['cfai.config'];              // no cached computerName
+  server.reset();                                    // /cfai/identity is unrouted → beacon returns null
+
+  for (const fn of chrome._listeners.storageChanged) fn({ enrollSecret: { newValue: 'managed-secret' } }, 'managed');
+  await settle();
+
+  assert.equal(server.of('/api/v1/enroll').length, 0,
+    'no beacon → deferred, so it never enrolls as an unattributable UA hostname');
+});
+
+test('a managed-policy change re-provisions: re-enrolls with the managed secret once the beacon is found', async () => {
+  chrome._managed.serverUrl = 'https://gov.example.test';
+  chrome._managed.enrollSecret = 'managed-secret';
+  chrome._store['cfai.token'] = 'stale-jwt';
+  // Desktop agent beacon is up on this machine — the extension links to it.
+  server.route('/cfai/identity', jsonResponse(200, { hostname: 'TESTPC', user: 'alice', machineId: 'm-1' }));
   server.reset();
 
   // Fire the real storage.onChanged handler the worker registered, area 'managed'.
@@ -739,6 +759,8 @@ test('a managed-policy change re-provisions: clears the token and re-enrolls wit
   assert.ok(enrolls.length >= 1, 'it enrolled in response to the policy change');
   assert.equal(enrolls.at(-1).body.enrollSecret, 'managed-secret',
     'the managed secret overrides the locally-saved one');
+  assert.equal(enrolls.at(-1).body.hostname, 'TESTPC-browser-extension',
+    'it attributes to the beacon hostname, not the browser UA');
   assert.equal(chrome._store['cfai.token'], 'test-jwt', 'a fresh token replaced the stale one');
 });
 

@@ -27,6 +27,10 @@ const STORAGE = {
   TOKEN:     'cfai.token',
   USER:      'cfai.user',              // last identity sent to the server
   MACHINE_ID:'cfai.machineId',
+  FIRST_ENROLL_AT:'cfai.firstEnrollAt', // when we first tried to enroll — used to
+                                        // wait for the desktop agent beacon before
+                                        // enrolling as an unattributable UA hostname
+
   QUEUE:     'cfai.queue',
   PLATFORMS: 'cfai.platforms',         // mirror of GET /api/v1/ai-platforms
   PLATFORMS_AT: 'cfai.platforms_at',   // timestamp of last refresh
@@ -50,6 +54,11 @@ const STORAGE = {
 const FLUSH_ALARM = 'cfai-flush';
 const FLUSH_INTERVAL_MIN = 1;       // chrome.alarms minimum
 const BATCH_SIZE = 50;
+
+// How long to keep retrying the desktop agent's identity beacon before giving up
+// and enrolling this browser as an unlinked (browser-only) machine. Covers a slow
+// agent start at logon so the extension attributes to the real user, not "Mozilla".
+const ENROLL_BEACON_GRACE_MS = 5 * 60 * 1000;
 
 // Identity beacon ports — agent tries these in order, we check all to find it
 const BEACON_PORTS = [19532, 19533, 19534, 19535, 19536];
@@ -167,6 +176,24 @@ async function ensureToken() {
         console.info('[cfai] auto-detected hostname from desktop agent:', computerName);
       }
     } catch { /* agent not running — proceed without linking */ }
+  }
+
+  // Don't enroll as an unattributable "<UA>-browser-extension" (e.g.
+  // "Mozilla-browser-extension") just because the desktop agent's beacon was slow
+  // to come up at logon. Such a record carries no hostname the server can match to
+  // a person, so it lands as an anonymous "Browser User (…)" row forever. Instead
+  // defer for a grace window and let the periodic flush alarm retry — the beacon
+  // normally appears within seconds. Only after the window do we accept this is a
+  // browser-only machine (no agent) and enroll unlinked so its usage is not lost.
+  if (!computerName) {
+    const now = Date.now();
+    let firstAt = await getStored(STORAGE.FIRST_ENROLL_AT);
+    if (!firstAt) { firstAt = now; await setStored(STORAGE.FIRST_ENROLL_AT, firstAt); }
+    if (now - firstAt < ENROLL_BEACON_GRACE_MS) {
+      console.info('[cfai] desktop agent beacon not found yet — deferring enroll to stay attributable');
+      return null;
+    }
+    console.info('[cfai] beacon grace elapsed — enrolling unlinked (treated as a browser-only machine)');
   }
 
   const hostname = computerName
