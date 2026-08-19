@@ -1123,3 +1123,15 @@
   background: #f3f7ff;
 }
 .aihub_quick_link:focus-visible { outline: 2px solid #0044cc; outline-offset: 1px; }
+
+/* Build stamp — bottom-right of every AI Hub page, deliberately quiet.
+   Says which commit is serving the bundle, so a deploy can be confirmed from the
+   UI instead of by reloading and hoping. Fed by VITE_BUILD_SHA at build time. */
+.aihub_build_stamp {
+  margin: 20px 0 2px;
+  text-align: right;
+  font-size: 11px;
+  color: #9ca3af;
+  font-variant-numeric: tabular-nums;
+  user-select: all;   /* so it can be copied into a bug report in one click */
+}

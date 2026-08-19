@@ -6338,6 +6338,13 @@ function TabGroup({ group }) {
   </div>);
 }
 
+// Which build is actually live. Vite inlines import.meta.env.VITE_* as a string
+// literal at build time, and .github/workflows/ci.yml passes the commit SHA, so
+// a deploy can be confirmed from the page itself rather than by guessing whether
+// the push landed. Empty in a local dev server, where nothing injects it — hence
+// the "dev" fallback rather than an empty stamp.
+const BUILD_SHA = String(import.meta.env.VITE_BUILD_SHA || "").slice(0, 7);
+
 export default function AIHubPage({ page }) {
   const [params] = useSearchParams();
   const group = TAB_GROUPS[page];
@@ -6356,6 +6363,7 @@ export default function AIHubPage({ page }) {
         <TopNav pageName={heading}/>
         <div className="cf_main_content_place_main" style={{flexDirection:"column",padding:"16px 20px",overflowY:"auto"}}>
           {group ? <TabGroup group={group}/> : <Single/>}
+          <p className="aihub_build_stamp">build {BUILD_SHA || "dev"}</p>
         </div>
       </div>
     </div>

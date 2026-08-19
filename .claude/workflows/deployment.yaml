@@ -1,42 +1,47 @@
 # GStack workflow: deployment
-# The ship flow for the AI-Governance app stack (server + connect-ui) via Docker.
+# The ship flow for the AI-Governance app stack (server + connect-ui + mongo).
 #
 # Trigger: pushing to `main`.
-# Gate:    exactly ONE question after commit + push — "Do you want to deploy?"
-#          If yes, deploy directly to the Docker host and the feature goes live.
+# Gate:    CI. There is no human deploy gate any more — pushing to `main` IS the
+#          deploy. `.github/workflows/deploy.yml` runs `ci.yml` and, on green,
+#          ships to the host and health-checks it.
 #
-# This replaces the old multi-step deploy gate per the owner's decision:
-# commit → push to main → one deploy question → live.
+# This replaces the previous "one deploy question" gate. That question is now
+# wrong to ask: by the time it could be asked, the deploy has already started.
+# See docs/AUTO_DEPLOY.md.
 
 name: deployment
-description: Commit + push to main, then one deploy question; on yes, `npm run deploy` ships server + connect-ui via Docker and it's live.
+description: Commit + push to main. GitHub Actions runs CI and, on green, ships server + connect-ui to the host automatically. devops-engineer pushes, then watches the run and reports the real outcome.
 owner: devops-engineer
 
 target:
-  services: [server, connect-ui]
-  mechanism: "docker compose (docker-compose.yml at repo root) via `npm run deploy`"
-  host: "Docker host — local by default, or remote via DOCKER_HOST=ssh://user@host"
+  services: [server, connect-ui, mongo]
+  mechanism: "GitHub Actions — .github/workflows/deploy.yml, on a self-hosted runner on the deploy host"
+  manual_fallback: "`npm run deploy` (scripts/deploy.mjs) from a machine that can reach the host; uses DEPLOY_SSH in .env, NOT DOCKER_HOST"
   live_urls:
-    - "API:        http://<host>:8787"
-    - "connect-ui: http://<host>:3000/CloudFuze"
+    - "API:        https://agentgovernence.cftools.live/api/v1/health"
+    - "connect-ui: https://agentgovernence.cftools.live/CloudFuze/"
 
 preflight:
-  - "Build/tests green for changed subprojects (server/agent node --test, connect-ui build)."
-  - ".env exists on the deploy host with JWT_SECRET set (see .env.example)."
-  - "Docker + compose plugin available on the target host."
+  - "Run the suites for what changed (server / agent / sdk-js / browser-extension `npm test`, connect-ui `npm run build`). A red main blocks the deploy automatically — do not create one."
+  - "The self-hosted runner on the host is online. A queued deploy job means it is not."
+  - "/opt/ai-gov/.env exists on the host with JWT_SECRET, MONGODB_URI, ENCRYPTION_KEY, ENROLL_SECRET. The deploy never ships or overwrites it."
 
 flow:
   - step: commit_and_push
     action: "Stage intended files, commit (message ends with the required Co-Authored-By line), and push to `main`."
-    note: "The user's 'commit and push' instruction is the authorization — no separate commit-gate questions."
+    note: "The user's 'commit and push' instruction is the authorization — no separate commit-gate questions. State plainly, as you push, that this deploys to production."
 
-  - step: deploy_gate
-    question: "Do you want to deploy to the server now?"
-    on_no: "Stop. Changes are on main but not deployed."
-    on_yes: "Run `npm run deploy` (docker compose build + up on the Docker host). Report the live URLs and health-check result."
+  - step: watch_the_run
+    action: "`gh run watch --exit-status` (or `gh run list --workflow=\"Deploy to server\" --limit 1`). Report the real outcome."
+    on_green: "Report the live URLs above. The workflow's own health check hit the proxied origin, so nginx, TLS and the route into the container were all exercised."
+    on_red: "Name the failing job and step and surface the actual error. Do not retry blindly."
+    on_queued: "The self-hosted runner on the host is offline. Not deployed — say so."
 
 rules:
-  - "Only ONE question is asked (the deploy question). Do not re-introduce the old branch / dev-vs-prod prompts."
-  - "Deploy goes to whatever DOCKER_HOST points at — confirm with the user which host that is if it's ambiguous or production."
-  - "On a red build or a failed health check, stop and surface the error. Do not report 'live' unless the health check passed."
+  - "Ask NO deploy question. The old 'Do you want to deploy to the server now?' is retired. Do not re-introduce branch / dev-vs-prod prompts either."
+  - "A change that should land on main but NOT deploy is no longer possible by pushing. Offer a branch + PR instead."
+  - "Never report 'live' unless the workflow's health check actually passed."
+  - "The workflow does NOT rebuild the Windows Claude Usage Tracker .exe or the NSIS installer — Node SEA is platform-bound and the runner is Linux. A new binary needs `npm run deploy` from Windows. The one on the host survives every auto-deploy."
+  - "connect-ui lint and three known-failing agent tests are advisory in ci.yml, not gates. Do not treat them as deploy failures; do flag it if the advisory job goes green, since that means the skip pattern can go."
   - "Report every command and its real output."

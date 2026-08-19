@@ -1,0 +1,174 @@
+name: Deploy to server
+
+# Push to main -> CI -> live, with no human step in between.
+#
+# WHY A SELF-HOSTED RUNNER AND NOT SSH
+#   The previous version of this file connected in over SSH from a GitHub-hosted
+#   runner, and was deleted in cc18c68 because it could never work: sshd on the
+#   deploy host is not reachable from the internet (verified — of ports
+#   22/2222/2022/22022/443/8787 only 443 and 8787 answer, and both are nginx/the
+#   API). A firewall that admits only known addresses also cannot admit a GitHub
+#   runner, whose IPs are a large rotating range.
+#   A self-hosted runner installed ON the host dials OUT to GitHub instead, so it
+#   needs no inbound port, no firewall change, and no SSH key in repository
+#   secrets. See docs/AUTO_DEPLOY.md for the one-time install.
+#
+# WHAT THE RUNNER NEEDS (one-time — docs/AUTO_DEPLOY.md has the commands)
+#   - labels: self-hosted, linux, ai-gov
+#   - docker + docker compose usable by the runner's user
+#   - write access to DEPLOY_DIR (default /opt/ai-gov)
+#   - DEPLOY_DIR/.env already present, holding JWT_SECRET, MONGODB_URI,
+#     ENCRYPTION_KEY, ENROLL_SECRET. This deploy NEVER ships or overwrites it —
+#     no app or database secret is ever stored in GitHub.
+#
+# NOT BUILT HERE: the Claude Usage Tracker .exe and the NSIS installer. Node SEA
+# builds only for the platform it runs on, so a Windows machine running
+# `npm run deploy` is still the only way to produce a NEW tracker binary. The one
+# already on the host survives every run of this workflow (see the stash below).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-server
+  # NOT cancel-in-progress. A deploy cancelled midway through the wipe-and-unpack
+  # step below leaves DEPLOY_DIR half-populated and the site down. Queue instead.
+  cancel-in-progress: false
+
+jobs:
+  # Same tests and the same connect-ui build a PR gets — and the deploy waits on
+  # it, so a red main never reaches the server.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: ci
+    runs-on: [self-hosted, linux, ai-gov]
+    env:
+      DEPLOY_DIR: ${{ vars.DEPLOY_DIR || '/opt/ai-gov' }}
+      # Deployment topology — set as repository VARIABLES (not secrets; neither
+      # is sensitive) under Settings -> Secrets and variables -> Actions ->
+      # Variables. The defaults are the current production values.
+      #   CONNECT_UI_PORT    3000 is already taken on this box, so the frontend
+      #                      publishes 34441 and nginx serves it on 443.
+      #   PUBLIC_SERVER_URL  the origin users and installers actually reach.
+      #                      Without it the server bakes http://<host>:8787 into
+      #                      every installer — a port that speaks plain HTTP.
+      CONNECT_UI_PORT: ${{ vars.CONNECT_UI_PORT || '34441' }}
+      PUBLIC_SERVER_URL: ${{ vars.PUBLIC_SERVER_URL || 'https://agentgovernence.cftools.live' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Built by the ci workflow on a GitHub-hosted runner. It is not rebuilt
+      # here because the Vite build OOMs on this box.
+      - uses: actions/download-artifact@v4
+        with:
+          name: connect-ui-dist
+          path: connect-ui/dist
+
+      - name: Sanity-check the bundle arrived
+        run: test -f connect-ui/dist/index.html || { echo "::error::no connect-ui/dist/index.html"; exit 1; }
+
+      - name: Verify the server keeps its own .env
+        run: |
+          set -euo pipefail
+          if [ ! -f "$DEPLOY_DIR/.env" ]; then
+            echo "::error::No $DEPLOY_DIR/.env on this host. Create it ONCE by hand with"
+            echo "::error::JWT_SECRET, MONGODB_URI, ENCRYPTION_KEY, ENROLL_SECRET (see .env.example)."
+            echo "::error::The deploy never ships secrets."
+            exit 1
+          fi
+
+      - name: Ensure ADMIN_TOKEN and ENROLL_SECRET exist (generated once, never overwritten)
+        run: |
+          set -euo pipefail
+          # Same contract as scripts/deploy.mjs: generated server-side if absent,
+          # never overwritten, never printed. ENROLL_SECRET especially — left
+          # unset, auth.js falls back to 'dev-enroll-secret-change-me', a value
+          # committed to this repository, and anyone who read the source could
+          # enrol a machine into the fleet.
+          grep -q '^ADMIN_TOKEN='   "$DEPLOY_DIR/.env" || echo "ADMIN_TOKEN=$(openssl rand -hex 32)"   >> "$DEPLOY_DIR/.env"
+          grep -q '^ENROLL_SECRET=' "$DEPLOY_DIR/.env" || echo "ENROLL_SECRET=$(openssl rand -hex 32)" >> "$DEPLOY_DIR/.env"
+
+      - name: Ship this checkout into the deploy dir
+        run: |
+          set -euo pipefail
+          STASH="$DEPLOY_DIR/.prebuilt-stash"
+
+          # The tracker .exe can only be produced by a Windows `npm run deploy`,
+          # and this runner is Linux. Without stashing it, the first push to main
+          # after a Windows deploy would wipe the binary and the download would
+          # 501 with nothing in the log to say why. An incoming build always
+          # wins; the stash only fills a gap.
+          rm -rf "$STASH"
+          if [ -d "$DEPLOY_DIR/agent/prebuilt" ]; then
+            mv "$DEPLOY_DIR/agent/prebuilt" "$STASH"
+          fi
+
+          # Remove stale files so a source file deleted in git really disappears
+          # from the host. .env and the stash are the only survivors.
+          find "$DEPLOY_DIR" -mindepth 1 -maxdepth 1 \
+            ! -name .env ! -name .prebuilt-stash -exec rm -rf {} +
+
+          # The same file set scripts/deploy.mjs ships. connect-ui/dist is NOT
+          # excluded — that is the bundle downloaded above.
+          tar cf - \
+            --exclude='*/node_modules' --exclude='*/.vite' \
+            --exclude='*/coverage' --exclude='*/build' --exclude='*/out' \
+            agent server connect-ui browser-extension scripts sdk-js \
+            docker-compose.yml .dockerignore \
+            | tar xf - -C "$DEPLOY_DIR"
+
+          if [ -d "$STASH" ] && [ ! -d "$DEPLOY_DIR/agent/prebuilt" ]; then
+            mkdir -p "$DEPLOY_DIR/agent"
+            mv "$STASH" "$DEPLOY_DIR/agent/prebuilt"
+          fi
+          rm -rf "$STASH"
+
+      - name: Build images and bring the stack up
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+          # Sequential, not one `compose build` — this is a small (~1 GB) box and
+          # building both images at once has run it out of memory.
+          docker compose build server
+          docker compose build connect-ui
+          docker compose up -d
+          docker compose ps
+
+      - name: Health check over the address users actually reach
+        run: |
+          set -euo pipefail
+          # Checking the PROXIED origin is the point: it exercises nginx, TLS and
+          # the route into the container, so a stack that is up but unreachable —
+          # the only failure a user would notice — fails the deploy.
+          URL="${PUBLIC_SERVER_URL%/}/api/v1/health"
+          for i in $(seq 1 20); do
+            code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$URL" || true)
+            if [ "$code" = "200" ]; then
+              echo "healthy after attempt $i: $URL"
+              exit 0
+            fi
+            echo "attempt $i: HTTP ${code:-none}"
+            sleep 3
+          done
+          echo "::error::server did not pass the health check at $URL"
+          (cd "$DEPLOY_DIR" && docker compose logs --tail 60 server) || true
+          exit 1
+
+      - name: Summary
+        run: |
+          {
+            echo "### Deployed ${GITHUB_SHA:0:7} to production"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| API | ${PUBLIC_SERVER_URL%/}/api/v1/health |"
+            echo "| connect-ui | ${PUBLIC_SERVER_URL%/}/CloudFuze/ |"
+            echo "| frontend port on host | ${CONNECT_UI_PORT} |"
+            echo
+            echo "The Claude Usage Tracker .exe was **not** rebuilt (Linux runner);"
+            echo "the binary already on the host was preserved."
+          } >> "$GITHUB_STEP_SUMMARY"

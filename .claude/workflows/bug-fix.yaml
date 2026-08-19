@@ -4,7 +4,7 @@
 # Trigger: "use gstack — fix <bug>"  (for trivial one-liners use "quick fix — ...")
 
 name: bug-fix
-description: Reproduce → diagnose → fix → test → targeted review → gated ship, for a defect.
+description: Reproduce → diagnose → fix → test → targeted review → CI-gated ship, for a defect.
 stack:
   server: "Node 20 ESM, Express 4 (tsx), JWT auth, SQLite/Mongo/Postgres — port 8787"
   agent: "Node CLI scanner (pdf-parse, tesseract OCR, mammoth, xlsx)"
@@ -37,7 +37,7 @@ steps:
   - id: ship
     agent: devops-engineer
     depends_on: [review]
-    description: Two-step commit gate and three-step deploy gate, one question at a time. Never auto-approve.
+    description: Commit + push to `main`, then verify the automatic deploy. Ask no deploy question.
     gate:
-      type: human-approval
-      note: "Commit? -> which branch? then Deploy? -> which branch? -> dev or production?"
+      type: ci
+      note: "Pushing to `main` IS the deploy (.github/workflows/deploy.yml — CI, then ship + health check). State that the push deploys, watch the run, report the real outcome. Never report 'live' without a passed health check."

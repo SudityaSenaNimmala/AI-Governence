@@ -5,26 +5,30 @@
 This repo has a **GStack** multi-agent pipeline in `.claude/agents/` and `.claude/workflows/`. Use it or work directly based on **size and risk** — not on how the request is phrased.
 
 ### Default routing (by size/risk)
-- **GStack (full pipeline)** — new features, cross-subproject changes, anything touching auth (`JWT_SECRET`), storage schema/migrations, PII/data capture, SIEM/OTel forwarding, or the browser extension. Route through the `new-feature` workflow (design → implement → test → security audit → code review → docs → gated ship).
+- **GStack (full pipeline)** — new features, cross-subproject changes, anything touching auth (`JWT_SECRET`), storage schema/migrations, PII/data capture, SIEM/OTel forwarding, or the browser extension. Route through the `new-feature` workflow (design → implement → test → security audit → code review → docs → CI-gated ship).
 - **GStack (bug-fix pipeline)** — real defects that need reproduction and a regression test. Route through `bug-fix`.
 - **Direct** — trivial, low-risk changes: typos, copy, a one-line fix, a config tweak, a comment. Just do it; no pipeline.
 
 ### Overrides (explicit user intent wins over the default)
 - **"use gstack"** — force the full pipeline even for a small change.
-- **"quick fix"** — skip the pipeline and make the change directly, even if it looks medium-sized. (Still respect the commit/deploy gates below.)
+- **"quick fix"** — skip the pipeline and make the change directly, even if it looks medium-sized. (Still respect the ship flow below — a push to `main` deploys.)
 
 ### Design gate
 For GStack features, the **architect** presents a design and STOPS. Do not implement until the human replies **"Proceed"** (or requests changes). Never rubber-stamp your own design.
 
-### Ship flow: commit → push → ONE deploy question → live
-The deploy model for this repo is: **commit, push to `main`, then exactly one question.** `devops-engineer` owns it.
+### Ship flow: commit → push → live (automatic)
+**Pushing to `main` IS the deploy.** `.github/workflows/deploy.yml` runs CI and, on green, ships to the host and health-checks it — there is no manual deploy step and no deploy question. `devops-engineer` owns the push and the verification. Setup and full detail: `docs/AUTO_DEPLOY.md`.
 
-1. **Commit + push.** When the user says to commit/push/ship, stage the intended files (not blind `git add -A`), commit (message ends with the required Co-Authored-By line), and `git push origin main`. The user's instruction to commit-and-push is the authorization — no separate commit-gate questions.
-2. **Single deploy question:** **"Do you want to deploy to the server now?"**
-   - **No** → stop; changes are on `main`, not deployed.
-   - **Yes** → run `npm run deploy` (docker compose build + up on the Docker host: `server` + `connect-ui`). Live at `http://<host>:8787` and `http://<host>:3000/CloudFuze`.
+1. **Before pushing,** run the relevant test suites locally. A red `main` now blocks the deploy automatically, but the point is not to create one.
+2. **Commit + push.** When the user says to commit/push/ship, stage the intended files (not blind `git add -A`), commit (message ends with the required Co-Authored-By line), and `git push origin main`. The user's instruction to commit-and-push is the authorization. State plainly, as you push, that this deploys.
+3. **Watch the run and report the real outcome** — `gh run watch --exit-status`, or `gh run list --workflow="Deploy to server" --limit 1`. Live at `https://agentgovernence.cftools.live/api/v1/health` and `https://agentgovernence.cftools.live/CloudFuze/`.
 
-Rules: ask ONLY the one deploy question — do not re-introduce branch / dev-vs-prod prompts. Verify changed subprojects build/test green before deploying; refuse on a red build or a failed health check and say why. If `DOCKER_HOST` targets production (or is ambiguous), confirm the host once before shipping. Never report "live" unless the deploy health check passed.
+Rules:
+- **Ask no deploy question.** The old "Do you want to deploy to the server now?" is gone — by the time it could be asked, the deploy has already started. Asking it is now wrong.
+- If the user wants a change on `main` but *not* deployed, that is no longer possible by pushing. Say so and offer a branch + PR instead.
+- Never report "live" unless the workflow's health check actually passed. On red, name the failing job and step. If the run sits **queued**, the self-hosted runner on the host is offline — that is not "deployed".
+- Two things the workflow does NOT do: it does not rebuild the Windows Claude Usage Tracker `.exe`/NSIS installer (Node SEA is platform-bound and the runner is Linux — a new binary still needs `npm run deploy` from Windows; the existing one survives every auto-deploy), and it does not gate on `connect-ui` lint or three known-failing agent tests (both advisory in `ci.yml`, each documented there with its reason).
+- `npm run deploy` still works for an out-of-band deploy from a machine that can reach the host. It uses `DEPLOY_SSH` in `.env`, **not** `DOCKER_HOST`.
 
 ## Roadmap auto-update (ask-then-edit)
 

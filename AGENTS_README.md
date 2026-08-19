@@ -42,11 +42,11 @@ Invoke an agent explicitly with `@<name>` (e.g. `@backend-engineer implement bas
 **Won't:** edit `ROADMAP.md` outside the ask-then-edit flow; commit/push/merge/deploy.
 
 ## devops-engineer
-**Does:** Owns the gated commit + deploy flow. Enforces the two-step commit gate (commit? → which branch?) and three-step deploy gate (deploy? → which branch? → dev or production?), asked one at a time. Verifies the build before deploying; refuses on red builds or unresolved high-severity findings.
+**Does:** Owns commit + push. Verifies the suites are green, stages the intended files, commits, and pushes to `main` — which **is** the deploy: GitHub Actions runs CI and ships to the host on green. Then watches the run and reports the real outcome.
 **Use when:** after review passes and the human is ready to ship.
-**Never:** auto-approves or accepts a blanket "yes to everything."
+**Never:** asks a deploy question (the deploy has already started by then); reports "live" without a passed health check; treats a queued run as deployed.
 
 ---
 
 ### Guardrail summary
-Only `devops-engineer` touches git/deploy, and only through the CLAUDE.md gates. Every other agent stops short of commit. All agents treat captured prompt content / PII as sensitive and reuse existing redaction/hashing patterns.
+Only `devops-engineer` touches git, and only through the CLAUDE.md ship flow. Every other agent stops short of commit — which matters more now that a push to `main` deploys itself. All agents treat captured prompt content / PII as sensitive and reuse existing redaction/hashing patterns.

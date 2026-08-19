@@ -1,10 +1,19 @@
-# AI-Governance app stack — backend API + connect-ui frontend.
-# Used by the GStack deploy flow (`npm run deploy`).
+# AI-Governance app stack — backend API + connect-ui frontend + mongo.
 #
-#   docker compose up -d --build
+# Brought up two ways, both of which run compose ON the deploy host:
+#   - automatically, by .github/workflows/deploy.yml on every push to `main`
+#     (see docs/AUTO_DEPLOY.md)
+#   - manually, by `npm run deploy` (scripts/deploy.mjs) over SSH
 #
-# Set secrets in a local .env file (see .env.example). For a REMOTE Docker host,
-# export DOCKER_HOST=ssh://user@host before running (the deploy script honors it).
+# Neither uses DOCKER_HOST. scripts/deploy.mjs targets the host via DEPLOY_SSH and
+# runs compose there natively — buildx-over-SSH drops the connection on this box,
+# and the Vite build OOMs on it, which is why the frontend is built elsewhere and
+# shipped as a prebuilt dist/.
+#
+#   docker compose up -d --build        # on the host, for a hand-run
+#
+# Secrets live in the host's own .env next to this file (see .env.example). No
+# deploy path ever ships or overwrites it.
 
 services:
   server:
