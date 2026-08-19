@@ -22,7 +22,7 @@
 import os from 'node:os';
 import net from 'node:net';
 import { existsSync, statSync } from 'node:fs';
-import { copyFile, mkdir, appendFile, rename, rm } from 'node:fs/promises';
+import { copyFile, mkdir, appendFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, basename, dirname } from 'node:path';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -44,6 +44,21 @@ export const LOG_PATH = join(INSTALL_DIR, 'tracker.log');
 
 const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const RUN_VALUE = 'CloudFuzeClaudeTracker';
+
+// ── machine-wide (fleet) install ──────────────────────────────────────────────
+// The double-click path above is per-user (LOCALAPPDATA + HKCU) and opens a
+// console. That is wrong for a silent Intune/SYSTEM-context push, which has no
+// interactive user and must cover EVERY account on the machine. The fleet path
+// instead copies to ProgramData (readable by all users) and registers ONE
+// Scheduled Task that fires at logon for any interactive user, running in THAT
+// user's session — which is the only place the keystroke/UIA capture can see
+// anything. Requires admin, which SYSTEM (how Intune runs) already has.
+export const SYSTEM_INSTALL_DIR = join(
+  process.env.ProgramData || 'C:\\ProgramData',
+  'CloudFuze', 'ClaudeTracker',
+);
+export const SYSTEM_INSTALLED_EXE = join(SYSTEM_INSTALL_DIR, EXE_NAME);
+export const TASK_NAME = 'CloudFuze\\ClaudeTracker';
 
 // A port of its own, deliberately outside the identity beacon's 19532-19536
 // range. Binding it IS the single-instance lock: the OS releases it when the
@@ -193,4 +208,120 @@ export async function uninstall() {
   const removedKey = await unregisterAutostart();
   await stopRunningInstances();
   return { removedKey, dir: INSTALL_DIR };
+}
+
+// ── fleet install (silent, all users) ─────────────────────────────────────────
+
+// The Scheduled Task definition. Two choices make it work fleet-wide:
+//   • a GROUP principal (BUILTIN\Users, SID S-1-5-32-545) with a bare LogonTrigger
+//     (no UserId) → the task fires for EVERY user at their logon, not just one;
+//   • LeastPrivilege + the implicit InteractiveToken → each run lands in that
+//     user's own interactive session, which is where keystrokes/UIA are visible.
+// ExecutionTimeLimit PT0S removes the default 72h kill, since this is long-running.
+export function buildLogonTaskXml(exePath) {
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>CloudFuze Claude Usage Tracker - starts at logon for every user.</Description>
+    <URI>\\${esc(TASK_NAME)}</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <GroupId>S-1-5-32-545</GroupId>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>${esc(exePath)}</Command>
+      <Arguments>--service</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+`;
+}
+
+// Copy the binary + helper to the machine-wide ProgramData location.
+export async function installFilesSystem(watcherScriptSource) {
+  await mkdir(SYSTEM_INSTALL_DIR, { recursive: true });
+
+  const alreadyInPlace = process.execPath.toLowerCase() === SYSTEM_INSTALLED_EXE.toLowerCase();
+  if (!alreadyInPlace) await copyFile(process.execPath, SYSTEM_INSTALLED_EXE);
+
+  if (!watcherScriptSource || !existsSync(watcherScriptSource)) {
+    throw new Error('prompt-watcher.ps1 not found next to the executable — keep both files together');
+  }
+  const watcherDest = join(SYSTEM_INSTALL_DIR, 'prompt-watcher.ps1');
+  if (watcherScriptSource.toLowerCase() !== watcherDest.toLowerCase()) {
+    await copyFile(watcherScriptSource, watcherDest);
+  }
+  return { dir: SYSTEM_INSTALL_DIR, exe: SYSTEM_INSTALLED_EXE, watcher: watcherDest, skipped: alreadyInPlace };
+}
+
+// Register (or replace) the all-users logon task. schtasks reads a /XML file as
+// UTF-16 and rejects it as "malformed" without a byte-order mark, so write the
+// BOM (﻿) explicitly — Node's 'utf16le' encoder does not add one.
+export async function registerSystemAutostart(exePath) {
+  const xml = buildLogonTaskXml(exePath);
+  const xmlPath = join(SYSTEM_INSTALL_DIR, 'logon-task.xml');
+  await writeFile(xmlPath, String.fromCharCode(0xFEFF) + xml, 'utf16le');
+  await execFileAsync('schtasks', ['/Create', '/TN', TASK_NAME, '/XML', xmlPath, '/F']);
+}
+
+export async function unregisterSystemAutostart() {
+  try {
+    await execFileAsync('schtasks', ['/Delete', '/TN', TASK_NAME, '/F']);
+    return true;
+  } catch {
+    return false;   // not present is fine
+  }
+}
+
+export async function isSystemAutostartRegistered() {
+  try {
+    await execFileAsync('schtasks', ['/Query', '/TN', TASK_NAME]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Kick the task now so a user already logged in when Intune deploys does not have
+// to wait until their next logon. Best-effort: no interactive session → no-op.
+export async function runSystemTaskNow() {
+  try {
+    await execFileAsync('schtasks', ['/Run', '/TN', TASK_NAME]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function uninstallSystem() {
+  const removedTask = await unregisterSystemAutostart();
+  await stopRunningInstances();
+  return { removedTask, dir: SYSTEM_INSTALL_DIR };
 }

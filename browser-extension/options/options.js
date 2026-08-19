@@ -8,17 +8,34 @@ const STORAGE = {
   QUEUE: 'cfai.queue',
 };
 
+// Enterprise policy (Intune / Group Policy) pushed via chrome.storage.managed.
+// When present it is authoritative — the worker uses it over any locally-saved
+// values — so we surface it here and lock the fields so nobody edits around it.
+async function getManaged() {
+  try {
+    if (!chrome.storage?.managed) return {};
+    return (await chrome.storage.managed.get(['serverUrl', 'enrollSecret', 'userEmail'])) || {};
+  } catch { return {}; }
+}
+
 async function load() {
   const { [STORAGE.CONFIG]: config = {}, [STORAGE.QUEUE]: queue = [], [STORAGE.TOKEN]: token } =
     await chrome.storage.local.get([STORAGE.CONFIG, STORAGE.QUEUE, STORAGE.TOKEN]);
-  $('serverUrl').value = config.serverUrl || '';
-  $('userEmail').value = config.userEmail || '';
+  const managed = await getManaged();
+  const eff = { ...config, ...Object.fromEntries(Object.entries(managed).filter(([, v]) => v)) };
+  $('serverUrl').value = eff.serverUrl || '';
+  $('userEmail').value = eff.userEmail || '';
   // Never display the actual secret, but show a "saved" placeholder so the
   // user knows they don't need to retype it.
   $('enrollSecret').value = '';
-  $('enrollSecret').placeholder = config.enrollSecret
+  $('enrollSecret').placeholder = (eff.enrollSecret || managed.enrollSecret)
     ? '•••••••• (saved — leave blank to keep)'
     : 'paste secret from IT';
+
+  // If this browser is managed by policy, lock the provisioned fields and say so.
+  const isManaged = !!(managed.serverUrl || managed.enrollSecret);
+  ['serverUrl', 'enrollSecret', 'userEmail', 'save'].forEach((id) => { if ($(id)) $(id).disabled = isManaged; });
+  if (isManaged) setStatus('Configured by your organization (managed policy). These settings are locked.', 'ok');
   $('queueStat').textContent =
     `${queue.length} events pending · token ${token ? 'present' : 'not enrolled'}`;
 

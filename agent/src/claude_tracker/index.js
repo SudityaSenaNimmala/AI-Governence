@@ -44,9 +44,12 @@ import {
 } from './config.js';
 import {
   IS_PACKAGED, INSTALL_DIR, INSTALLED_EXE, LOG_PATH,
+  SYSTEM_INSTALL_DIR, SYSTEM_INSTALLED_EXE,
   acquireSingleInstanceLock, waitForLockRelease, fileLogger,
   registerAutostart, isAutostartRegistered, stopRunningInstances,
   installFiles, relaunchDetached, uninstall,
+  installFilesSystem, registerSystemAutostart, unregisterSystemAutostart,
+  isSystemAutostartRegistered, runSystemTaskNow, uninstallSystem,
 } from './service.js';
 
 const STATE_DIR = join(os.homedir(), '.cloudfuze-claude-tracker');
@@ -331,6 +334,11 @@ async function runTracker() {
           user,
           occurredAt: p.occurredAt || new Date().toISOString(),
           clientEventId: p.uuid,          // makes replay idempotent
+          // Lets the server tell a VS Code / Cursor session from a terminal one.
+          // Transcripts do not record that; only Claude Code's OTel does, so the
+          // server joins the two on this id. Named claude_session_id rather than
+          // session_id deliberately — the latter drives Session Replay.
+          claude_session_id: p.sessionId || null,
           metadata: { via: 'transcript', tracker_version: VERSION },
         });
       }
@@ -435,6 +443,40 @@ async function runInstaller() {
   await hold(20);
 }
 
+// The Intune / silent path. NO console UI, NO countdown, NO HKCU: everything is
+// machine-wide (ProgramData + an all-users logon Scheduled Task) so a single
+// SYSTEM-context push covers every account on the box with zero clicks. Prints
+// terse lines (captured in the Intune install log) and exits 0 on success so
+// Intune records it as installed. Refuses to run from a dev `node` process, which
+// would register a task pointing at node.exe.
+async function runSystemInstaller() {
+  if (!IS_PACKAGED) {
+    console.error('--install-system requires the packaged .exe, not a dev node run.');
+    process.exitCode = 1;
+    return;
+  }
+  const watcherScript = findWatcherScript();
+  if (!watcherScript) {
+    console.error('SETUP FAILED: prompt-watcher.ps1 missing next to the .exe. Package both files together.');
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    await stopRunningInstances();
+    const files = await installFilesSystem(watcherScript);
+    console.log(`files      ${files.dir}`);
+    await registerSystemAutostart(files.exe);
+    console.log(`autostart  all-users logon task "${'CloudFuze\\ClaudeTracker'}" registered`);
+    // Start now for anyone already logged in; harmless no-op if nobody is.
+    const started = await runSystemTaskNow();
+    console.log(`running    ${started ? 'started in the active session' : 'will start at next logon'}`);
+    console.log('Done. Silent fleet install complete.');
+  } catch (err) {
+    console.error(`SETUP FAILED: ${err?.message || err}`);
+    process.exitCode = 1;
+  }
+}
+
 // Double-clicking gives a window that vanishes the instant the process exits, so
 // a summary nobody can read is the same as no summary. Counts down instead.
 async function hold(seconds) {
@@ -448,15 +490,19 @@ async function hold(seconds) {
 async function runStatus() {
   const installed = existsSync(INSTALLED_EXE);
   const autostart = await isAutostartRegistered();
+  const systemInstalled = existsSync(SYSTEM_INSTALLED_EXE);
+  const systemAutostart = await isSystemAutostartRegistered();
   // The lock is held by a live tracker, so failing to take it means one is up.
   const free = await acquireSingleInstanceLock();
   if (free) free.close();
 
   console.log('');
-  console.log(`  installed   ${installed ? INSTALLED_EXE : 'no'}`);
-  console.log(`  autostart   ${autostart ? 'registered (HKCU Run)' : 'not registered'}`);
-  console.log(`  running     ${free ? 'no' : 'yes'}`);
-  console.log(`  log         ${existsSync(LOG_PATH) ? LOG_PATH : '(none yet)'}`);
+  console.log(`  installed        ${installed ? INSTALLED_EXE : 'no'}`);
+  console.log(`  autostart        ${autostart ? 'registered (HKCU Run)' : 'not registered'}`);
+  console.log(`  fleet installed  ${systemInstalled ? SYSTEM_INSTALLED_EXE : 'no'}`);
+  console.log(`  fleet autostart  ${systemAutostart ? 'registered (all-users logon task)' : 'not registered'}`);
+  console.log(`  running          ${free ? 'no' : 'yes'}`);
+  console.log(`  log              ${existsSync(LOG_PATH) ? LOG_PATH : '(none yet)'}`);
   console.log('');
 }
 
@@ -467,6 +513,15 @@ async function main() {
   }
 
   const argv = new Set(process.argv.slice(2));
+
+  // Silent, all-users install/uninstall — how Intune (SYSTEM context) deploys it.
+  if (argv.has('--install-system')) return await runSystemInstaller();
+  if (argv.has('--uninstall-system')) {
+    const r = await uninstallSystem();
+    console.log(`Removed all-users logon task (${r.removedTask ? 'was present' : 'not present'}).`);
+    console.log(`Files left in place: ${r.dir}`);
+    return;
+  }
 
   if (argv.has('--uninstall')) {
     const r = await uninstall();

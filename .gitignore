@@ -24,3 +24,9 @@ agent/installer/build/
 # tar and .dockerignore, which is why it cannot live there. It is a build output,
 # rebuilt on every deploy, and must never be committed.
 agent/prebuilt/
+
+# Extension signing key (stable ID) — never commit the private key
+.deploy-keys/
+
+# Baked pilot config (contains enroll secret) — never commit
+browser-extension/cfai-config.json
