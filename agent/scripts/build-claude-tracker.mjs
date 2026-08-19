@@ -196,6 +196,18 @@ async function stage() {
   );
   console.log('   copied prompt-watcher.ps1');
 
+  // Windows one-click installer scripts, so the downloaded package can be run
+  // (silent all-users --install-system) or diagnosed without a terminal. Only
+  // meaningful for the Windows build; skipped silently if the sources are absent.
+  if (platform === 'win32') {
+    for (const cmd of ['Install-CloudFuze.cmd', 'Uninstall-CloudFuze.cmd', 'Diagnose-CloudFuze.cmd']) {
+      try {
+        await copyFile(join(agentRoot, 'installer', 'windows', cmd), join(outDir, cmd));
+        console.log(`   copied ${cmd}`);
+      } catch { /* script not present in this checkout — not fatal */ }
+    }
+  }
+
   await writeFile(join(outDir, 'README.txt'),
     `CloudFuze Claude Usage Tracker\n` +
     `Platform: ${platform}-${arch}\n` +
