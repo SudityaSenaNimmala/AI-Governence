@@ -1,6 +1,9 @@
 name: CI
 
-# Tests, lint and the production frontend build.
+# The HARD GATE: unit tests and the production frontend build. Every job here is
+# blocking — if it is in this file, it can stop a deploy. Checks worth seeing but
+# not worth blocking on (lint, the known-failing tests) live in advisory.yml
+# precisely so they can never reach this file's conclusion.
 #
 # Runs on every push to a non-main branch and every PR. On main it is NOT
 # triggered directly — deploy.yml calls it via `workflow_call` so a push to main
@@ -32,12 +35,13 @@ jobs:
           # 152 tests ran before the loader was added, 215 after. tsx is the same
           # loader the server starts under in production.
           - project: server
+            cache: npm
             install: npm ci --no-audit --no-fund
             test: npm test
           # KNOWN FAILURES, deliberately skipped so this gate can block a broken
           # deploy without being permanently red. Each is a real open issue, not
-          # a flake, and the `known-failures` job below still runs them so they
-          # stay visible in every run:
+          # a flake, and the `known-failing tests` job in advisory.yml still runs
+          # them so they stay visible in every run:
           #   "override safety" / "roleplay bypass"  guardrails.test.js — the
           #       injection-override-safety and roleplay patterns do not match
           #       the phrasings the test feeds them (a detection gap in a DLP
@@ -48,16 +52,20 @@ jobs:
           #       is what needs updating, not the code.
           # Remove a name from this pattern the moment its issue is closed.
           - project: agent
+            cache: npm
             install: npm ci --no-audit --no-fund
             test: >-
               node --test
               --test-skip-pattern='^(override safety|roleplay bypass|GAP: a streamed call with no usage block)'
               "tests/**/*.test.*"
-          # No package-lock.json in sdk-js, so `npm ci` would fail outright.
+          # No package-lock.json in sdk-js: `npm ci` would fail outright, and an
+          # empty `cache` keeps setup-node from failing on the missing lockfile.
           - project: sdk-js
+            cache: ''
             install: npm install --no-audit --no-fund
             test: npm test
           - project: browser-extension
+            cache: npm
             install: npm ci --no-audit --no-fund
             test: npm test
     steps:
@@ -66,7 +74,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
+          # Per-project, because sdk-js has no package-lock.json: with
+          # `cache: npm` setup-node resolves cache-dependency-path and FAILS the
+          # step outright when the glob matches nothing ("Some specified paths
+          # were not resolved"), which is what broke this job on 73f3739 and
+          # 1c29d75 and took the whole deploy down with it. Empty disables the
+          # cache for that one project.
+          cache: ${{ matrix.cache }}
           cache-dependency-path: ${{ matrix.project }}/package-lock.json
 
       - name: Install ${{ matrix.project }} deps
@@ -130,44 +144,3 @@ jobs:
           path: connect-ui/dist
           retention-days: 7
           if-no-files-found: error
-
-  # ── Non-blocking: reported, never gates a deploy ──────────────────────────
-  lint:
-    name: lint connect-ui (advisory)
-    runs-on: ubuntu-latest
-    # 4,173 pre-existing eslint errors under --max-warnings 0. Reported so the
-    # number can come down; not a gate, because it would block every deploy.
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: connect-ui/package-lock.json
-      - working-directory: connect-ui
-        run: npm ci --no-audit --no-fund
-      - working-directory: connect-ui
-        run: npm run lint
-
-  known-failures:
-    name: known-failing tests (advisory)
-    runs-on: ubuntu-latest
-    # Runs the agent suite WITHOUT the skip pattern, so the three quarantined
-    # failures above are visible in every run instead of silently forgotten.
-    # Goes green by itself the day they are fixed — that is the signal to drop
-    # them from the skip pattern in the `test` job.
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: agent/package-lock.json
-      - working-directory: agent
-        run: npm ci --no-audit --no-fund
-      - working-directory: agent
-        env:
-          JWT_SECRET: ci-test-secret-not-used-anywhere
-        run: npm test

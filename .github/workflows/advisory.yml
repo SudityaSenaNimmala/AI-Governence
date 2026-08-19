@@ -1,0 +1,61 @@
+name: Advisory checks
+
+# Things worth SEEING but never worth blocking a deploy on.
+#
+# These lived in ci.yml as jobs with `continue-on-error: true`. They are a
+# separate workflow now for one reason: deploy.yml consumes ci.yml through
+# `uses:`, and a called workflow's conclusion is the only signal the calling job
+# gets. Relying on continue-on-error to keep a known-red job from tainting that
+# conclusion is a bet, and losing it means no deploy ever runs — with the cause
+# buried in a job nobody expected to matter. Kept out of ci.yml entirely, they
+# cannot block a deploy no matter how they conclude.
+#
+# So these runs go RED on purpose today. Red here means "still true", not
+# "someone broke something". Both should eventually go green, and each one going
+# green is a signal:
+#   - lint green            → the --max-warnings 0 backlog is cleared
+#   - known-failing green   → delete the skip pattern from ci.yml's agent entry
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: lint connect-ui
+    runs-on: ubuntu-latest
+    # 4,173 pre-existing eslint errors under --max-warnings 0. Gating a deploy on
+    # this would block every deploy indefinitely.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: connect-ui/package-lock.json
+      - working-directory: connect-ui
+        run: npm ci --no-audit --no-fund
+      - working-directory: connect-ui
+        run: npm run lint
+
+  known-failures:
+    name: known-failing tests
+    runs-on: ubuntu-latest
+    # Runs the agent suite WITHOUT ci.yml's skip pattern, so the three
+    # quarantined failures stay visible instead of being silently forgotten.
+    # Expected red until they are fixed; see the comments on the agent entry in
+    # ci.yml for what each one is.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: agent/package-lock.json
+      - working-directory: agent
+        run: npm ci --no-audit --no-fund
+      - working-directory: agent
+        env:
+          JWT_SECRET: ci-test-secret-not-used-anywhere
+        run: npm test

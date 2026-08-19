@@ -1,10 +1,11 @@
 # Auto-deploy: push to `main` → live
 
-Two workflows in `.github/workflows/`:
+Three workflows in `.github/workflows/`:
 
 | File | Trigger | What it does |
 |---|---|---|
-| `ci.yml` | push to any branch except `main`, every PR, and called by `deploy.yml` | Runs the four test suites, builds `connect-ui/dist`, uploads it as an artifact. Lint and the known-failing tests run too, but advisory only. |
+| `ci.yml` | push to any branch except `main`, every PR, and called by `deploy.yml` | The hard gate: the four test suites, plus `connect-ui/dist` built and uploaded as an artifact. Every job in it is blocking. |
+| `advisory.yml` | every push and PR | Lint and the known-failing tests. Expected red today. Kept OUT of `ci.yml` so it can never block a deploy — see the note in that file. |
 | `deploy.yml` | push to `main`, or **Run workflow** | Calls `ci.yml`, waits for it to pass, then ships the checkout to the host and rebuilds the stack. |
 
 A push to `main` therefore runs CI **once** and only deploys if it is green. `ci.yml`
@@ -118,9 +119,9 @@ in every run and neither blocks a deploy:
 - `connect-ui` lint has 4,173 pre-existing errors under `--max-warnings 0`.
   Gating on it would block every deploy indefinitely.
 - Three agent tests fail on `main` today and are named in a skip pattern in
-  `ci.yml`, with the reason for each. The `known-failing tests (advisory)` job
-  runs them *without* the skip pattern, so they stay visible — that job going
-  green is the signal to delete the skip pattern.
+  `ci.yml`, with the reason for each. The `known-failing tests` job in
+  `advisory.yml` runs them *without* the skip pattern, so they stay visible —
+  that job going green is the signal to delete the skip pattern.
 
 Everything else is a hard gate: 207 server tests, 59 agent tests, 16 sdk-js
 tests, 352 browser-extension tests, and the `connect-ui` production build,
