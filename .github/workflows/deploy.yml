@@ -37,6 +37,11 @@ concurrency:
   # step below leaves DEPLOY_DIR half-populated and the site down. Queue instead.
   cancel-in-progress: false
 
+permissions:
+  # Read-only: nothing in this workflow pushes to git. Layer 1 (image
+  # tag rollback) needs no git access at all; there is no Layer 2 anymore.
+  contents: read
+
 jobs:
   # Same tests and the same connect-ui build a PR gets — and the deploy waits on
   # it, so a red main never reaches the server.
@@ -127,14 +132,63 @@ jobs:
           fi
           rm -rf "$STASH"
 
-      - name: Build images and bring the stack up
+      - name: Back up the database before deploying
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+          # Only if mongo is already up — a first-ever deploy has nothing to back
+          # up yet. mongo:7 here runs with no auth configured (docker-compose.yml
+          # sets no MONGO_INITDB_ROOT_USERNAME), so no credentials to guess or
+          # template — this really is the exact command that runs.
+          if ! docker compose ps --status running -q mongo | grep -q .; then
+            echo "mongo not running yet (first deploy) — nothing to back up"
+            exit 0
+          fi
+          mkdir -p "$DEPLOY_DIR/backups"
+          BACKUP_FILE="$DEPLOY_DIR/backups/pre-deploy-${GITHUB_SHA}.archive.gz"
+          docker compose exec -T mongo mongodump --archive --gzip --db=aigov > "$BACKUP_FILE"
+          SIZE=$(stat -c%s "$BACKUP_FILE" 2>/dev/null || echo 0)
+          # A cutoff of 100 bytes only catches a dump that produced nothing at
+          # all (empty archive header) or failed silently — not a judgement
+          # about how much data SHOULD be there.
+          if [ "$SIZE" -lt 100 ]; then
+            echo "::error::pre-deploy backup is suspiciously small ($SIZE bytes) at $BACKUP_FILE — refusing to deploy without a real backup"
+            exit 1
+          fi
+          echo "pre-deploy backup OK: $BACKUP_FILE ($SIZE bytes)"
+
+      - name: Snapshot the currently running images as ":previous"
+        run: |
+          set -euo pipefail
+          # Must run BEFORE the build step below — `docker compose build` moves
+          # the ":latest" tag onto the new image immediately, so ":previous" has
+          # to be pinned to the OLD image before that happens or there is
+          # nothing left to restore from on a failed health check. `|| true`
+          # covers the first-ever deploy, where ":latest" doesn't exist yet.
+          docker tag cloudfuze/ai-gov-server:latest cloudfuze/ai-gov-server:previous || true
+          docker tag cloudfuze/ai-gov-connect-ui:latest cloudfuze/ai-gov-connect-ui:previous || true
+
+      - name: Build new images (does not touch the running stack)
         run: |
           set -euo pipefail
           cd "$DEPLOY_DIR"
           # Sequential, not one `compose build` — this is a small (~1 GB) box and
           # building both images at once has run it out of memory.
+          #
+          # A failure here stops before the "Swap" step below ever runs, so the
+          # currently running containers — still on the ":previous" image tagged
+          # above — are never touched. Nothing to restore; the job just fails.
           docker compose build server
           docker compose build connect-ui
+
+      - name: Record failure stage (build)
+        if: failure()
+        run: echo "DEPLOY_FAILURE_STAGE=build" >> "$GITHUB_ENV"
+
+      - name: Swap to the new images
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
           docker compose up -d
           docker compose ps
 
@@ -157,6 +211,22 @@ jobs:
           echo "::error::server did not pass the health check at $URL"
           (cd "$DEPLOY_DIR" && docker compose logs --tail 60 server) || true
           exit 1
+
+      - name: Layer 1 — restart the previous version (health check failed)
+        if: failure() && env.DEPLOY_FAILURE_STAGE != 'build'
+        run: |
+          set -euo pipefail
+          echo "DEPLOY_FAILURE_STAGE=healthcheck" >> "$GITHUB_ENV"
+          cd "$DEPLOY_DIR"
+          # Point ":latest" back at the image that was running before this
+          # deploy, then `up -d` recreates the containers from it. This never
+          # touches git — it's the seconds-scale layer. `|| true` covers the
+          # (should-be-impossible-here) case where no ":previous" tag exists.
+          docker tag cloudfuze/ai-gov-server:previous cloudfuze/ai-gov-server:latest || true
+          docker tag cloudfuze/ai-gov-connect-ui:previous cloudfuze/ai-gov-connect-ui:latest || true
+          docker compose up -d
+          docker compose ps
+          echo "::error::health check failed — production was rolled back to the last known-good container image. main is left untouched; a human needs to push a fix."
 
       - name: Summary
         run: |

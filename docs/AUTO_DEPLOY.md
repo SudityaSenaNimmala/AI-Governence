@@ -105,6 +105,32 @@ Mirrors `scripts/deploy.mjs` exactly, minus the SSH hop:
    Checking the *proxied* origin exercises nginx, TLS and the route into the
    container, so a stack that is up but unreachable fails the deploy.
 
+## Automatic failure recovery
+
+One layer, automatic — no manual step is required to keep production up:
+
+- **Image rollback (seconds).** Before building the new images, the deploy job
+  tags the currently running `server`/`connect-ui` images as `:previous`. If
+  the build, the swap, or the health check then fails, it retags `:previous`
+  back to `:latest` and runs `docker compose up -d` again, restoring the exact
+  containers that were live before this push. This never touches git — `main`
+  is left exactly as pushed, and a human pushes the fix.
+
+  (An earlier version of this workflow also auto-reverted the failed commits
+  on `main` via a `git push`. That layer was removed for least privilege — the
+  workflow no longer needs `contents: write` at all. If a deploy fails, check
+  the run's logs and push a fix by hand.)
+
+**Not handled:** a database migration that partially applied before a later
+step failed. Rolling back the container image does not undo that — check the
+database by hand in that case.
+
+Also backed up: a pre-deploy MongoDB dump (`mongodump --archive --gzip
+--db=aigov`, no credentials needed — this stack runs mongo with no auth
+configured) is written to `$DEPLOY_DIR/backups/pre-deploy-<sha>.archive.gz`
+before the build step, and the deploy refuses to proceed if the resulting file
+is under 100 bytes.
+
 ## Two things this does NOT do
 
 **It does not rebuild the Claude Usage Tracker `.exe` or the NSIS installer.**
