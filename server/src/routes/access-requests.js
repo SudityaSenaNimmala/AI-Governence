@@ -13,6 +13,70 @@
 import crypto from 'node:crypto';
 import { a } from '../util.js';
 import { fireWebhooks } from './webhooks.js';
+import { UNIDENTIFIED_NAME } from './risk-score.js';
+
+// Who a machine belongs to. Two independent sources, both keyed by machine_id:
+// `employee_profiles` carries the admin-curated display name, `machines` the
+// identity captured at enrolment (OS username / signed-in email + hostname).
+// Batched into two queries because the dashboard polls both list routes — a
+// per-row lookup would be one round trip per request.
+async function identityByMachine(db, machineIds) {
+  const ids = [...new Set((machineIds || []).filter(Boolean))];
+  if (ids.length === 0) return new Map();
+
+  const [profiles, machines] = await Promise.all([
+    db.collection('employee_profiles')
+      .find({ machine_ids: { $in: ids } })
+      .project({ _id: 0, machine_ids: 1, display_name: 1 })
+      .toArray(),
+    db.collection('machines')
+      .find({ id: { $in: ids } })
+      .project({ _id: 0, id: 1, user: 1, hostname: 1 })
+      .toArray(),
+  ]);
+
+  const map = new Map(ids.map((id) => [id, { display_name: null, user: null, hostname: null }]));
+  for (const m of machines) {
+    const e = map.get(m.id);
+    if (e) { e.user = m.user ?? null; e.hostname = m.hostname ?? null; }
+  }
+  for (const p of profiles) {
+    if (!p.display_name) continue;
+    for (const mid of p.machine_ids || []) {
+      const e = map.get(mid);
+      if (e) e.display_name = p.display_name;
+    }
+  }
+  return map;
+}
+
+// The name to show for a row, best identification first. Two rules stacked:
+// a PERSON always beats a DEVICE, and within each of those the more specific
+// source wins.
+//
+//   1. a curated profile name — a human named this person
+//   2. the row's OWN user, stamped by the extension at submit time. It beats the
+//      machine lookup so a shared or re-imaged device still names the person who
+//      actually asked, not whoever the box is enrolled to.
+//   3. the user on the enrolment record
+//   4. a PLACEHOLDER profile name ("Browser User (a1b2c3d4)"), which the identity
+//      scanner mints for an extension install it could not match to an account.
+//      Not a person, so it loses to every real username above — showing it
+//      instead of "AnilVoruganti" is strictly less useful. But it outranks the
+//      hostnames below it, because the browser-extension hostname is the
+//      synthetic "Mozilla-browser-extension" that EVERY such install shares,
+//      while the hash at least tells two installs apart. Nothing is lost either
+//      way: UserCell renders the hostname underneath whatever name it gets.
+//   5. hostnames — a device, not a person, and the last thing worth printing.
+function employeeNameFor(row, ident) {
+  const profile = ident?.display_name || null;
+  const named = profile && !UNIDENTIFIED_NAME.test(profile) ? profile : null;
+  return named
+    || row?.user || ident?.user
+    || profile
+    || row?.hostname || ident?.hostname
+    || 'Unknown';
+}
 
 export function mountAccessRequests(app, db) {
   const requests   = () => db.collection('access_requests');
@@ -85,18 +149,20 @@ export function mountAccessRequests(app, db) {
       .project({ _id: 0 })
       .toArray();
 
-    // Resolve employee names from profiles
-    const profiles = await db.collection('employee_profiles')
-      .find({}).project({ _id: 0, machine_ids: 1, display_name: 1 }).toArray();
-    const machineToName = new Map();
-    for (const p of profiles) {
-      for (const mid of p.machine_ids || []) machineToName.set(mid, p.display_name);
-    }
+    // Resolve who asked. `user` / `hostname` are filled in from the enrolment
+    // record when the request itself carries neither — an older request, or one
+    // from a build of the extension that did not detect a user yet.
+    const idents = await identityByMachine(db, rows.map((r) => r.machine_id));
 
-    const enriched = rows.map(r => ({
-      ...r,
-      employee_name: machineToName.get(r.machine_id) || r.user || r.hostname || 'Unknown',
-    }));
+    const enriched = rows.map((r) => {
+      const ident = idents.get(r.machine_id);
+      return {
+        ...r,
+        employee_name: employeeNameFor(r, ident),
+        user:     r.user ?? ident?.user ?? null,
+        hostname: r.hostname ?? ident?.hostname ?? null,
+      };
+    });
 
     res.json(enriched);
   }));
@@ -219,7 +285,30 @@ export function mountAccessRequests(app, db) {
       .project({ _id: 0 })
       .toArray();
 
-    res.json(rows);
+    // An exception stores only the MACHINE it was granted to, so the person has
+    // to come from the request that created it (where the extension stamped the
+    // detected user), with the enrolment record as the fallback. Without this
+    // the admin's "who currently has access" list showed nothing but a
+    // truncated device hash.
+    const reqIds = [...new Set(rows.map((r) => r.request_id).filter(Boolean))];
+    const srcReqs = reqIds.length
+      ? await requests().find({ id: { $in: reqIds } })
+          .project({ _id: 0, id: 1, user: 1, hostname: 1 })
+          .toArray()
+      : [];
+    const reqById = new Map(srcReqs.map((r) => [r.id, r]));
+    const idents = await identityByMachine(db, rows.map((r) => r.machine_id));
+
+    res.json(rows.map((r) => {
+      const src = reqById.get(r.request_id);
+      const ident = idents.get(r.machine_id);
+      return {
+        ...r,
+        employee_name: employeeNameFor(src, ident),
+        user:     src?.user ?? ident?.user ?? null,
+        hostname: src?.hostname ?? ident?.hostname ?? null,
+      };
+    }));
   }));
 
   // ── Revoke an exception early ──

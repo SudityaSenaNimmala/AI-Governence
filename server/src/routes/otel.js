@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { a } from '../util.js';
+import { rememberSessionClient } from '../lib/claude-sessions.js';
 
 // Ingests OpenTelemetry from the Claude Code CLI (and other OTel-emitting CLIs).
 // Two event kinds are consumed:
@@ -96,8 +97,15 @@ export function mountOtel(app, db) {
           if (name === 'claude_code.user_prompt') {
             const { email, sessionId, machineId } = identify(a2, resAttrs);
             const promptLen = Number(a2['prompt_length'] ?? a2['prompt.length'] ?? 0) || 0;
+            const terminalType = a2['terminal.type'] || null;
 
             await touchMachine(machineId, email, now);
+            // Remember which client this session ran in. The tracker reads the
+            // same sessions from local transcripts — which carry no client
+            // information at all — and those rows supersede these, so without
+            // this map the IDE/terminal split would vanish on exactly the
+            // machines that are best instrumented. See rememberSessionClient.
+            await rememberSessionClient(db, sessionId, terminalType, now);
 
             await db.collection('dlp_events').insertOne({
               id: crypto.randomUUID(),
@@ -109,11 +117,19 @@ export function mountOtel(app, db) {
               secret_class: null,
               content_length: promptLen,
               pattern_matched: null,
+              // Top-level, not only inside metadata_json: the Claude Usage
+              // rollup groups on this in Mongo, and a value reachable only by
+              // parsing a JSON string would force that aggregation back into a
+              // per-row Node loop — the exact shape that took one read 60.7s.
+              // Still written to metadata_json as well, so anything already
+              // reading it there is unaffected.
+              terminal: terminalType,
+              claude_session_id: sessionId,
               metadata_json: JSON.stringify({
                 via: 'otel',
                 session_id: sessionId,
                 model: a2['model'] || null,
-                terminal: a2['terminal.type'] || null,
+                terminal: terminalType,
               }),
               received_at: now,
             });

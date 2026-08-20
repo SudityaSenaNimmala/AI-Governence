@@ -35,8 +35,12 @@ const WEIGHTS = {
  * match to a named account. Defined once so the list and summary endpoints cannot
  * drift apart again — they previously each carried their own copy of this rule,
  * and only one of them applied it.
+ *
+ * Exported because it is not only a risk-score concern: it is the org-wide test
+ * for "this display name is a placeholder, not a person", and routes/access-requests.js
+ * needs it to keep such a name from outranking a real detected username.
  */
-const UNIDENTIFIED_NAME = /^Browser User/;
+export const UNIDENTIFIED_NAME = /^Browser User/;
 
 export function mountRiskScore(app, db) {
   const scores    = () => db.collection('risk_scores');

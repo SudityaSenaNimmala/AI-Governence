@@ -46,6 +46,14 @@ async function listTranscripts() {
   return out;
 }
 
+// Claude Code names each transcript <session-id>.jsonl, so the filename is the
+// session id. Used as the fallback for lines that omit the field (older CLI
+// builds, and the occasional summary/mode record).
+function sessionIdFromPath(path) {
+  const base = path.split(/[\\/]/).pop() || '';
+  return base.endsWith('.jsonl') ? base.slice(0, -'.jsonl'.length) : null;
+}
+
 function sumUsage(u) {
   const input = Number(u.input_tokens) || 0;
   const output = Number(u.output_tokens) || 0;
@@ -99,6 +107,13 @@ export async function readNewActivity({ log } = {}) {
             uuid: o.uuid || `${path}:${startAt}:${prompts.length}`,
             occurredAt: ts,
             length: text.length,
+            // Which Claude Code session this turn belongs to. The server joins
+            // on it to learn whether the session ran in the VS Code / Cursor
+            // extension or a plain terminal — the transcripts themselves never
+            // say (their `entrypoint` reads "cli" either way), and only OTel
+            // reports it. Taken from the line when present and otherwise from
+            // the filename, which IS the session id.
+            sessionId: o.sessionId || sessionIdFromPath(path),
           });
         }
       }

@@ -2,6 +2,10 @@ import crypto from 'node:crypto';
 import { a } from '../util.js';
 import { requireMachineAuth } from '../auth.js';
 import { machineIdentity } from '../lib/machine-identity.js';
+import {
+  CLAUDE_CODE_SURFACE, CLAUDE_CODE_SURFACE_LEGACY,
+  classifyClient, clientSortKey, UNKNOWN_CLIENT,
+} from '../lib/claude-clients.js';
 
 // Claude-only usage: prompts per user across every Claude surface, with REAL
 // tokens and cost where we have them and clearly-flagged estimates where we
@@ -75,13 +79,14 @@ const ALL_SOURCES = [...TRACKER_SOURCES, 'browser_extension', 'os_monitor'];
 // indistinguishable from one that isn't being tracked at all, which is the whole
 // question this page exists to answer. Extra surfaces (e.g. Claude Code on the
 // web) are appended after these when they have data.
-const CANONICAL_SURFACES = ['Claude Desktop', 'Claude (browser)', 'Claude Code (CLI)'];
+const CANONICAL_SURFACES = ['Claude Desktop', 'Claude (browser)', CLAUDE_CODE_SURFACE];
 
 function emptySurface(surface) {
   return {
     surface, users: 0, prompts: 0,
     measured_tokens: 0, measured_cost_usd: 0, measured_requests: 0,
     estimated_tokens: 0, estimated_cost_usd: 0,
+    clients: [],
     breakdown: [],
   };
 }
@@ -90,7 +95,12 @@ function emptySurface(surface) {
 // for anything that isn't Claude, which is how non-Claude traffic is excluded.
 function surfaceFor(aiService, source) {
   const svc = String(aiService || '');
-  if (svc === 'Claude Code') return 'Claude Code (CLI)';
+  // One surface for Claude Code however it was launched. The VS Code / Cursor
+  // extension is the same binary, the same account and the same billing as a
+  // terminal run, so splitting it out as a fourth surface would list one person
+  // twice for what is one tool. The client is reported UNDER this surface
+  // instead — see the `clients` breakdown.
+  if (svc === 'Claude Code') return CLAUDE_CODE_SURFACE;
   if (svc === 'Claude Code (web)') return 'Claude Code (browser)';
   if (svc === 'Claude Desktop') return 'Claude Desktop';
   if (svc === 'Claude') {
@@ -346,8 +356,15 @@ export function mountClaudeUsage(app, db) {
     const events = (await db.collection('dlp_events').aggregate([
       { $match: promptQuery },
       {
+        // `terminal` joins the group key so the per-client split costs no extra
+        // read. It is a TOP-LEVEL field for exactly this reason: the value also
+        // lives inside metadata_json, but $group cannot reach into a JSON string
+        // without a per-document parse, which is what the move to $group removed.
         $group: {
-          _id: { ai_service: '$ai_service', source: '$source', machine_id: '$machine_id' },
+          _id: {
+            ai_service: '$ai_service', source: '$source',
+            machine_id: '$machine_id', terminal: '$terminal',
+          },
           prompts: { $sum: 1 },
           chars: { $sum: num('$content_length') },
         },
@@ -459,6 +476,8 @@ export function mountClaudeUsage(app, db) {
           prompts: 0,
           chars: 0,
           models: new Set(),
+          // client label -> prompts, for this person on this surface.
+          clients: new Map(),
           measured: {
             input_tokens: 0, output_tokens: 0, cache_read_tokens: 0,
             cache_creation_tokens: 0, total_tokens: 0, cost_usd: 0, requests: 0,
@@ -495,9 +514,16 @@ export function mountClaudeUsage(app, db) {
       const ident = identityFor(e.machine_id, null);
       const u = ensureUser(ensure(surface), ident);
       // += the group's totals, not 1: one `e` is now every prompt event that shared
-      // a (service, source, machine) triple, not a single event.
+      // a (service, source, machine, terminal) key, not a single event.
       u.prompts += e.prompts;
       u.chars += e.chars;
+
+      // Which client produced them. Only Claude Code reports this, so every other
+      // surface would otherwise grow a meaningless single "Unknown" row.
+      if (surface === CLAUDE_CODE_SURFACE) {
+        const client = classifyClient(e.terminal);
+        u.clients.set(client, (u.clients.get(client) || 0) + e.prompts);
+      }
     }
 
     for (const r of usageRows) {
@@ -544,6 +570,8 @@ export function mountClaudeUsage(app, db) {
         prompts: 0, measured_tokens: 0, measured_cost_usd: 0, measured_requests: 0,
         estimated_tokens: 0, estimated_cost_usd: 0,
       };
+      // client label -> { prompts, users } across everyone on this surface.
+      const surfaceClients = new Map();
 
       for (const [personKey, u] of s.users) {
         // Same isNamed rule as the per-person table, applied here too.
@@ -560,6 +588,23 @@ export function mountClaudeUsage(app, db) {
         // top of real numbers for the same user/surface.
         const est = hasMeasured ? null : estimate(u.prompts, u.chars, rateFor(models[0]));
 
+        // Prompts by client for this person, busiest first. Tokens and cost are
+        // deliberately absent: only prompt events carry the client, so a cost
+        // figure here would be a guess wearing the same styling as the one
+        // measured number in the product.
+        const clients = [...u.clients.entries()]
+          .map(([client, prompts]) => ({ client, prompts }))
+          .sort((x, y) => (clientSortKey(x.client) - clientSortKey(y.client))
+            || (y.prompts - x.prompts)
+            || String(x.client).localeCompare(String(y.client)));
+
+        for (const { client, prompts } of clients) {
+          const entry = surfaceClients.get(client) || { client, prompts: 0, users: 0 };
+          entry.prompts += prompts;
+          entry.users += 1;
+          surfaceClients.set(client, entry);
+        }
+
         const row = {
           person_key: personKey,
           label: u.label,
@@ -568,6 +613,7 @@ export function mountClaudeUsage(app, db) {
           email: u.email,
           attributed: u.attributed,
           prompts: u.prompts,
+          clients,
           models,
           measured: hasMeasured,
           tokens: hasMeasured ? u.measured.total_tokens : est.total_tokens,
@@ -603,6 +649,13 @@ export function mountClaudeUsage(app, db) {
         if (u.email && !sys.email) sys.email = u.email;
         sys.prompts += u.prompts;
         sys.by_surface[s.surface] = (sys.by_surface[s.surface] || 0) + u.prompts;
+        // The name this surface had before IDE clients were broken out, kept as
+        // an alias for one release. Renaming a key that consumers already index
+        // by turns their column into a blank rather than an error, which is the
+        // kind of break nobody notices until a report is wrong.
+        if (s.surface === CLAUDE_CODE_SURFACE) {
+          sys.by_surface[CLAUDE_CODE_SURFACE_LEGACY] = sys.by_surface[s.surface];
+        }
         if (hasMeasured) {
           sys.measured_tokens += u.measured.total_tokens;
           sys.measured_cost_usd += u.measured.cost_usd;
@@ -624,7 +677,17 @@ export function mountClaudeUsage(app, db) {
       }
 
       breakdown.sort((x, y) => y.prompts - x.prompts);
-      surfacesOut.push({ surface: s.surface, users: breakdown.length, ...agg, breakdown });
+      surfacesOut.push({
+        surface: s.surface,
+        users: breakdown.length,
+        ...agg,
+        clients: [...surfaceClients.values()].sort(
+          (x, y) => (clientSortKey(x.client) - clientSortKey(y.client))
+            || (y.prompts - x.prompts)
+            || String(x.client).localeCompare(String(y.client)),
+        ),
+        breakdown,
+      });
 
       totals.prompts += agg.prompts;
       totals.measured_tokens += agg.measured_tokens;
@@ -778,6 +841,7 @@ export function mountClaudeUsage(app, db) {
         output_ratio: OUTPUT_RATIO,
         default_prompt_tokens: DEFAULT_PROMPT_TOKENS,
         note: 'Prompt counts are measured on every surface. Tokens and cost are MEASURED for Claude Code (reported by the CLI itself) and ESTIMATED elsewhere from captured prompt length. The two are never summed together.',
+        clients_note: `Claude Code prompts are split by client (VS Code / Cursor / Terminal) under "${CLAUDE_CODE_SURFACE}". The client comes from Claude Code's own terminal.type telemetry; local transcripts do not record it, so a session whose telemetry never arrived reads "${UNKNOWN_CLIENT}" rather than being counted as a terminal. Tokens and cost are NOT split by client — only prompt events carry it.`,
         sources_note: allSources
           ? 'Including browser-extension and os_monitor events — the same person may be counted twice across sources.'
           : 'Counting only the Claude Usage Tracker exe and Claude Code telemetry. Browser-extension and os_monitor events are excluded so each prompt is counted once, by one pipeline.',

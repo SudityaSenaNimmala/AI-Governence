@@ -11,6 +11,7 @@ import {
   Search, RefreshCw, Activity, FileText, MessageSquare, Eye, Trash2, Plus, X,
   History, ArrowLeft, Bot, User, ShieldAlert, Film, PlayCircle, MonitorPlay,
   Maximize2, Minimize2, Copy, Check, DollarSign, ExternalLink, Download, Boxes,
+  ChevronDown,
 } from "lucide-react";
 import { sanitizeReplayEvents } from "./replaySanitize";
 import { createReplayHost, applyReplayIframeCsp } from "./rrwebHost";
@@ -86,12 +87,206 @@ function traceCost(r) {
 // Only surface the severities that matter to a reviewer.
 const HI_CRIT = new Set(["critical", "high"]);
 function isHiCrit(sev) { return HI_CRIT.has(String(sev||"").toLowerCase()); }
+const SEV_RANK = { critical: 4, high: 3, medium: 2, low: 1 };
+function sevOf(e) { return e?.secret_class || e?.highest_severity || e?.severity || null; }
+function worstSev(events) {
+  let best = null;
+  for (const e of events) {
+    const s = sevOf(e);
+    if (s && (!best || (SEV_RANK[s] || 0) > (SEV_RANK[best] || 0))) best = s;
+  }
+  return best;
+}
+
+// ── Enforcement grouping ─────────────────────────────────────────────────────
+// One user action can emit several DLP events, and listing them flat makes the
+// table look like it repeats itself: a typed prompt and the block that stopped
+// it are two rows a few hundred ms apart, and a browser block plus the choice
+// the person made at the modal are two more. This folds each such set into ONE
+// row that states the OUTCOME, with the members still reachable by expanding —
+// nothing is hidden, and nothing is deleted from the audit trail.
+//
+// TWO JOINS, DELIBERATELY DIFFERENT IN CONFIDENCE:
+//
+//   EXACT — the browser extension stamps a correlation id on the block and
+//   echoes it as `decision_for` on whatever the user then chose
+//   (enforcement_decision / enforcement_redact). That is a real key, so the
+//   pairing is certain.
+//
+//   INFERRED — the OS monitor has no such id: its keystroke enforcer and its
+//   prompt capture are separate subsystems that never learn each other's event
+//   ids. So a prompt pairs with a block only on same machine + same service +
+//   within PAIR_WINDOW_MS + non-conflicting pattern, greedily nearest-first,
+//   each event used at most once. Measured against production data this pairs 43
+//   of 85 blocks; the remaining 42 have no prompt event to pair with and keep
+//   their own rows.
+//
+// ANYTHING NOT CONFIDENTLY PAIRED IS LEFT ALONE. On a DLP screen an invented
+// pairing — "this prompt was blocked" about a prompt that wasn't — is worse than
+// two honest rows. The real fix for the inferred half is a correlation id from
+// the agent's enforcer, which would make this join exact too.
+const PAIR_WINDOW_MS = 2000;
+// Block → the user's answer at the modal. Wide because it measures a HUMAN
+// deciding, not two subsystems reporting the same instant: observed 1.2s–25.9s
+// in production. Bounded by causal order and pattern agreement instead of time.
+const OUTCOME_WINDOW_MS = 30000;
+
+// Equal patterns, or one side recorded none. The OS monitor's prompt capture
+// sometimes stores an empty pattern list for an event its enforcer did flag
+// (seen 0–1ms apart in production data), so an empty side must not veto a pair
+// the timestamps make obvious.
+function patternsCompatible(a, b) {
+  const x = String(a||"").trim(), y = String(b||"").trim();
+  return !x || !y || x === y;
+}
+
+function groupMembers(row) { return [row, ...(row._children || [])]; }
+// The member whose captured text the View button should open. The prompt itself
+// is preferred over an enforcement event that merely echoed it.
+function contentMember(row) {
+  const ms = groupMembers(row).filter(e => e.has_content);
+  return ms.find(e => String(e.event_kind).startsWith("prompt_")) || ms[0] || null;
+}
+function groupPattern(row) {
+  const pats = new Set();
+  for (const e of groupMembers(row)) {
+    for (const p of String(e.pattern_matched||"").split(",")) if (p.trim()) pats.add(p.trim());
+  }
+  return [...pats].join(", ") || "—";
+}
+
+/** Fold paired events into single rows. Returns primaries with `_children`. */
+function groupDlpEvents(rows) {
+  const evs = [...(rows||[])].sort((a,b)=>new Date(b.occurred_at)-new Date(a.occurred_at));
+  const claimed = new Set();            // folded into another row
+  const children = new Map();           // primary id -> members
+  const exact = new Set();              // primaries joined on a real key
+  const addChild = (primary, child) => {
+    if (!children.has(primary.id)) children.set(primary.id, []);
+    children.get(primary.id).push(child);
+    claimed.add(child.id);
+  };
+
+  // EXACT — decision_for points at the block carrying that correlation id.
+  const blockByCorr = new Map();
+  for (const e of evs) {
+    const c = e.metadata?.correlation_id;
+    if (c && e.event_kind === "enforcement_block") blockByCorr.set(c, e);
+  }
+  for (const e of evs) {
+    const ref = e.metadata?.decision_for;
+    if (!ref) continue;
+    const block = blockByCorr.get(ref);
+    if (block && block.id !== e.id && !claimed.has(block.id)) { addChild(block, e); exact.add(block.id); }
+  }
+
+  // INFERRED, browser extension — an outcome whose block carries no correlation
+  // id, which is every event ingested before the server started persisting it.
+  // Pairs to the most recent PRECEDING block on the same machine and service
+  // with a compatible pattern. Safer than it looks: causal order is guaranteed
+  // (the modal cannot be answered before it opens), the pattern must agree, and
+  // each block is consumed once. The window is wide because the gap is a person
+  // deciding at a modal — measured at 1.2s to 25.9s across production data.
+  const OUTCOME_KINDS = new Set(["enforcement_decision","enforcement_redact","enforcement_override"]);
+  const extBlocks = evs.filter(e=>e.source==="browser_extension" && e.event_kind==="enforcement_block");
+  for (const o of evs) {
+    if (o.source !== "browser_extension" || !OUTCOME_KINDS.has(o.event_kind) || claimed.has(o.id)) continue;
+    let best = null;
+    for (const b of extBlocks) {
+      if (claimed.has(b.id) || children.has(b.id)) continue;
+      if (b.machine_id !== o.machine_id || b.ai_service !== o.ai_service) continue;
+      if (!patternsCompatible(o.pattern_matched, b.pattern_matched)) continue;
+      const dt = new Date(o.occurred_at) - new Date(b.occurred_at);
+      if (dt < 0 || dt > OUTCOME_WINDOW_MS) continue;
+      if (!best || dt < best.dt) best = { dt, b };
+    }
+    if (best) addChild(best.b, o);
+  }
+
+  // INFERRED — OS monitor prompt ↔ block, nearest pair first.
+  const osBlocks  = evs.filter(e=>e.source==="os_monitor" && e.event_kind==="enforcement_block" && !claimed.has(e.id));
+  const osPrompts = evs.filter(e=>e.source==="os_monitor" && String(e.event_kind).startsWith("prompt_") && !claimed.has(e.id));
+  const candidates = [];
+  for (const b of osBlocks) for (const p of osPrompts) {
+    if (p.machine_id !== b.machine_id || p.ai_service !== b.ai_service) continue;
+    if (!patternsCompatible(p.pattern_matched, b.pattern_matched)) continue;
+    const dt = Math.abs(new Date(p.occurred_at) - new Date(b.occurred_at));
+    if (dt > PAIR_WINDOW_MS) continue;
+    candidates.push({ dt, b, p });
+  }
+  candidates.sort((x,y)=>x.dt-y.dt);
+  const promptTaken = new Set();
+  for (const { b, p } of candidates) {
+    if (claimed.has(b.id) || promptTaken.has(p.id)) continue;
+    // The PROMPT leads: it carries the captured text (so View still works) and
+    // the higher severity. The block it triggered becomes its outcome.
+    addChild(p, b);
+    promptTaken.add(p.id);
+  }
+
+  return evs.filter(e=>!claimed.has(e.id))
+    .map(e=>({ ...e, _children: children.get(e.id) || [], _exact: exact.has(e.id) }));
+}
 // Prefer the resolved AI platform (e.g. "Gemini in Gmail" / Google) over the raw
 // request host (e.g. "mail.google.com"), which is what the OS monitor records.
 function ServiceCell({ row }) {
   const name = row.platform?.product || row.ai_service || "—";
   const vendor = row.platform?.vendor;
   return (<><div className="aihub_text_primary">{name}</div>{vendor && <div className="aihub_text_muted">{vendor}</div>}</>);
+}
+
+// WHO did it. Every activity row carries `user` (the OS username for the desktop
+// agent, the signed-in email for the browser extension) and `hostname`, resolved
+// server-side by attachMachineIdentity — a row's own stamp wins over the machine
+// lookup, so a shared device still names the right person. Access-request rows
+// carry an admin-curated `employee_name` on top of that and it wins.
+// Neither name nor host is guaranteed on a machine that was never enrolled, so
+// the machine id is the last resort: the row stays traceable instead of showing
+// a bare dash the admin can do nothing with.
+function UserCell({ row }) {
+  const name = row?.employee_name || row?.user || null;
+  const host = row?.hostname || null;
+  if (name) return (<><div className="aihub_text_primary">{name}</div>{host && host !== name && <div className="aihub_text_muted">{host}</div>}</>);
+  if (host) return <div className="aihub_text_primary">{host}</div>;
+  const mid = row?.machine_id;
+  return mid ? <Mono>{String(mid).slice(0,10)}</Mono> : <span className="aihub_text_muted">—</span>;
+}
+
+// When a row stands for more than one event, the control that reveals the rest.
+// Lives in the When cell: the Kind column it used to sit in is gone, and the
+// members it opens are all near-simultaneous, so time is where a reader looks.
+function GroupToggle({ row, open, onToggle }) {
+  const n = (row._children||[]).length;
+  if (!n) return null;
+  return (
+    <button onClick={e=>{e.stopPropagation();onToggle();}}
+      style={{display:"inline-flex",alignItems:"center",gap:2,marginTop:3,padding:0,border:"none",background:"none",
+        color:"#0044cc",fontSize:10,fontWeight:600,cursor:"pointer"}}>
+      {n+1} events {open ? <ChevronDown size={11}/> : <ChevronRight size={11}/>}
+    </button>
+  );
+}
+// The folded-away members, in the order they happened, so the sequence that
+// produced the outcome is legible: prompt → block → what the person chose.
+function GroupDetail({ row, onView }) {
+  const ms = [...groupMembers(row)].sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
+  return (<div style={{padding:"10px 14px"}}>
+    <div className="aihub_text_muted" style={{fontSize:11,fontWeight:600,marginBottom:6}}>
+      {row._exact ? "Events correlated by id" : "Events grouped by time, machine and pattern"}
+    </div>
+    <table className="aihub_table" style={{fontSize:11}}><tbody>
+      {ms.map(e=>(<tr key={e.id}>
+        <td style={{whiteSpace:"nowrap"}}>{new Date(e.occurred_at).toLocaleTimeString()}</td>
+        <td><Tag text={e.event_kind}/></td>
+        <td>{e.metadata?.decision || e.metadata?.mechanism || e.metadata?.blocked_for
+          ? <span className="aihub_text_muted">{String(e.metadata.decision||e.metadata.mechanism||e.metadata.blocked_for).replace(/_/g," ")}</span>
+          : <span className="aihub_text_muted">—</span>}</td>
+        <td><Mono>{e.pattern_matched||"—"}</Mono></td>
+        <td><SeverityBadge sev={sevOf(e)}/></td>
+        <td style={{textAlign:"right"}}><ViewBtn has={e.has_content} onClick={()=>onView(e)}/></td>
+      </tr>))}
+    </tbody></table>
+  </div>);
 }
 
 // ── Shared UI ────────────────────────────────────────────────────────────────
@@ -238,7 +433,9 @@ function ContentDrawer({ eventId, meta, onClose }) {
         <header className="aihub_drawer_head">
           <div style={{minWidth:0}}>
             <div className="aihub_drawer_title">{title}</div>
-            <div className="aihub_drawer_sub">{[service,meta?.event_kind,meta?.occurred_at&&relTime(meta.occurred_at)].filter(Boolean).join(" · ")}</div>
+            {/* The person leads the line: the first question about a flagged
+                prompt is whose it was, and the drawer is where an admin lands. */}
+            <div className="aihub_drawer_sub">{[meta?.user||meta?.hostname,service,meta?.event_kind,meta?.occurred_at&&relTime(meta.occurred_at)].filter(Boolean).join(" · ")}</div>
             <div style={{display:"flex",gap:6,marginTop:8,flexWrap:"wrap"}}>
               {meta?.source && <Badge text={(meta.source||"").replace(/_/g," ")}/>}
               {sev && <SeverityBadge sev={sev}/>}
@@ -910,7 +1107,8 @@ function DLPView() {
   const [summary,setS]=useState(null),[events,setEv]=useState(null),[files,setF]=useState(null),[e,setE]=useState(null);
   const [preview,setPreview]=useState(null);
   const [section,setSection]=useState(""); // "", "prompts", "files", "services"
-  const [sevFilter,setSevFilter]=useState("high"); // "all" or "high"
+  const [openRows,setOpenRows]=useState(()=>new Set()); // grouped rows expanded to show their members
+  const toggleRow=id=>setOpenRows(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;});
   useEffect(()=>{
     Promise.all([apiFetch("/dlp/summary").catch(()=>null),apiFetch("/dlp?limit=5000").catch(()=>[]),apiFetch("/dlp/files?limit=5000").catch(()=>[])]).then(([s,ev,f])=>{setS(s);setEv(ev);setF(f)}).catch(x=>setE(x.message));
   },[]);
@@ -918,30 +1116,35 @@ function DLPView() {
 
   const allPrompts=(events||[]).filter(ev=>ev.event_kind!=="file_upload");
   const allFiles=files||[];
-  const promptCount=allPrompts.length;
-  const fileCount=allFiles.length;
   const highCrit=allPrompts.filter(ev=>isHiCrit(ev.secret_class||ev.highest_severity)).length + allFiles.filter(f=>isHiCrit(f.severity||f.highest_severity)).length;
   const serviceCount=(summary?.byService||[]).length;
   const sourceTone={browser_extension:"#0052e0",desktop_hook:"#8b5cf6",os_monitor:"#f59e0b"};
   const toggle=k=>setSection(section===k?"":k);
 
-  const promptRows=sevFilter==="all"?allPrompts:allPrompts.filter(ev=>isHiCrit(ev.secret_class||ev.highest_severity));
-  const fileRows=sevFilter==="all"?allFiles:allFiles.filter(f=>isHiCrit(f.severity||f.highest_severity));
+  // High and critical only, always. The severity dropdown that used to switch
+  // this to "all severities" is gone: low and medium detections are noise on a
+  // reviewer's screen — 1842 of 2000 events carry no severity class at all — and
+  // an "all" mode that buries 148 real findings under them is a worse default
+  // than no choice. Nothing is deleted; the events are still stored and still
+  // feed Claude Usage, Conversations and the per-service breakdown. This is a
+  // view-level scope, not a retention policy.
+  const promptRows=allPrompts.filter(ev=>isHiCrit(ev.secret_class||ev.highest_severity));
+  const fileRows=allFiles.filter(f=>isHiCrit(f.severity||f.highest_severity));
+  // Grouped AFTER the severity narrowing, so a row never folds in a member the
+  // table excludes — the expanded members are always exactly the rows shown, and
+  // the "N events" count never disagrees with the table.
+  const promptGroups=groupDlpEvents(promptRows);
 
   return (<div>
-    <SectionHeader title="AI Activity (DLP)" hint="Clipboard, typed prompts, and file upload events captured by the OS monitor and browser extension."
-      action={<div style={{display:"flex",gap:10,alignItems:"center"}}>
-        <select value={sevFilter} onChange={ev=>setSevFilter(ev.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12,fontWeight:600}}>
-          <option value="high">High & Critical only</option>
-          <option value="all">All severities</option>
-        </select>
-        {section&&<button className="aihub_filter_btn" onClick={()=>setSection("")}>Clear selection</button>}
-      </div>}/>
+    {/* The severity scope moves into the hint now that it is fixed — with no
+        dropdown on screen, an unstated filter is an invisible one. */}
+    <SectionHeader title="AI Activity (DLP)" hint="Clipboard, typed prompts, and file upload events captured by the OS monitor and browser extension. High and critical severity only."
+      action={section?<button className="aihub_filter_btn" onClick={()=>setSection("")}>Clear selection</button>:null}/>
 
     <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(4,1fr)"}}>
       <StatCard icon={<AlertTriangle size={18}/>} label="High / critical" value={highCrit} hint="total flagged" color="#ef4444"/>
-      <StatCard icon={<MessageSquare size={18}/>} label="Prompt events" value={promptRows.length} hint={sevFilter==="high"?"high & critical":"all severities"} color="#0052e0" onClick={()=>toggle("prompts")}/>
-      <StatCard icon={<FileText size={18}/>} label="File uploads" value={fileRows.length} hint={sevFilter==="high"?"high & critical":"all severities"} color="#f59e0b" onClick={()=>toggle("files")}/>
+      <StatCard icon={<MessageSquare size={18}/>} label="Prompt events" value={promptRows.length} hint="high & critical" color="#0052e0" onClick={()=>toggle("prompts")}/>
+      <StatCard icon={<FileText size={18}/>} label="File uploads" value={fileRows.length} hint="high & critical" color="#f59e0b" onClick={()=>toggle("files")}/>
       <StatCard icon={<Server size={18}/>} label="AI services" value={serviceCount} hint="breakdown" color="#8b5cf6" onClick={()=>toggle("services")}/>
     </div>
 
@@ -957,28 +1160,34 @@ function DLPView() {
     </div>}
 
     {section==="prompts"&&<div className="aihub_card">
-      <SectionHeader title="Sensitive prompts" hint={sevFilter==="high"?"High & critical severity only":"All severities"}/>
-      <DataTable onRow={r=>{ if(r.has_content) setPreview(r); }} columns={[
-        {label:"When",render:r=>relTime(r.occurred_at)},
+      {/* Rows are user ACTIONS, not raw events — a prompt and the block it
+          triggered are one action. Both counts are stated so the difference from
+          the "Prompt events" card above is visible rather than mysterious. */}
+      <SectionHeader title="Sensitive prompts"
+        hint={`${promptGroups.length} actions from ${promptRows.length} events · high & critical severity only`}/>
+      <DataTable onRow={r=>{ const c=contentMember(r); if(c) setPreview(c); }}
+        isExpanded={r=>openRows.has(r.id)}
+        renderExpanded={r=><GroupDetail row={r} onView={setPreview}/>}
+        columns={[
+        {label:"Time",render:r=><><div>{relTime(r.occurred_at)}</div><GroupToggle row={r} open={openRows.has(r.id)} onToggle={()=>toggleRow(r.id)}/></>},
+        {label:"User",render:r=><UserCell row={r}/>},
         {label:"Service",render:r=><ServiceCell row={r}/>},
         {label:"Source",render:r=><Badge text={(r.source||"").replace(/_/g," ")} color={sourceTone[r.source]||"#9ca3af"}/>},
-        {label:"Kind",render:r=><Tag text={r.event_kind}/>},
-        {label:"Pattern",render:r=><Mono>{r.pattern_matched||"—"}</Mono>},
-        {label:"Severity",render:r=><SeverityBadge sev={r.secret_class||r.highest_severity}/>},
-        {label:"",render:r=><ViewBtn has={r.has_content} onClick={()=>setPreview(r)}/>,right:true},
-      ]} rows={promptRows} empty="No prompt events matching this filter." paginate={25}/>
+        {label:"Pattern",render:r=><Mono>{groupPattern(r)}</Mono>},
+        {label:"Severity",render:r=><SeverityBadge sev={worstSev(groupMembers(r))}/>},
+        {label:"",render:r=>{const c=contentMember(r); return <ViewBtn has={!!c} onClick={()=>setPreview(c)}/>;},right:true},
+      ]} rows={promptGroups} empty="No prompt events matching this filter." paginate={25}/>
     </div>}
 
     {section==="files"&&<div className="aihub_card">
-      <SectionHeader title="File uploads" hint={sevFilter==="high"?"High & critical severity only":"All severities"}/>
+      <SectionHeader title="File uploads" hint="High & critical severity only"/>
       <DataTable onRow={r=>{ if(r.has_content) setPreview(r); }} columns={[
-        {label:"When",render:r=>relTime(r.occurred_at)},
+        {label:"Time",render:r=>relTime(r.occurred_at)},
+        {label:"User",render:r=><UserCell row={r}/>},
         {label:"Service",render:r=><ServiceCell row={r}/>},
         {label:"Filename",render:r=><Mono>{r.metadata?.filename||"—"}</Mono>},
         {label:"Class",render:r=><Tag text={r.file_class||"—"}/>},
         {label:"Severity",render:r=><SeverityBadge sev={r.severity||r.highest_severity}/>},
-        {label:"Size",render:r=>r.metadata?.size_bucket||"—",right:true},
-        {label:"Via",render:r=><Badge text={r.metadata?.via||"—"}/>},
         {label:"",render:r=><ViewBtn has={r.has_content} onClick={()=>setPreview(r)} label="Open"/>,right:true},
       ]} rows={fileRows} empty="No file upload events matching this filter." paginate={25}/>
     </div>}
@@ -3591,8 +3800,13 @@ function AccessRequestsView() {
                   <span style={{fontSize:16,fontWeight:700}}>{r.tool_name||r.tool_host}</span>
                   {r.tool_vendor&&<Tag text={r.tool_vendor}/>}
                 </div>
+                {/* Name the device too, but only when it adds something: on a
+                    machine with no detected user employee_name IS the hostname,
+                    and repeating it reads like two different facts. */}
                 <div className="aihub_text_muted" style={{marginBottom:6}}>
-                  Requested by <strong>{r.employee_name}</strong> · {relTime(r.submitted_at)}
+                  Requested by <strong>{r.employee_name}</strong>
+                  {r.hostname&&r.hostname!==r.employee_name&&<> on {r.hostname}</>}
+                  {" · "}{relTime(r.submitted_at)}
                 </div>
                 {r.reason&&<div style={{fontSize:13,color:"#374151",background:"#f5f6f8",padding:"8px 12px",borderRadius:8,marginBottom:8}}>"{r.reason}"</div>}
               </div>
@@ -3638,6 +3852,7 @@ function AccessRequestsView() {
     {tab==="active"&&(<div className="aihub_card">
       <DataTable columns={[
         {label:"Tool",render:r=><div className="aihub_text_primary">{r.tool_name||r.tool_host}</div>},
+        {label:"Employee",render:r=><UserCell row={r}/>},
         {label:"Machine",render:r=><Mono>{r.machine_id?.slice(0,12)}</Mono>},
         {label:"Granted",render:r=>relTime(r.granted_at)},
         {label:"Expires",render:r=>{
@@ -3656,7 +3871,7 @@ function AccessRequestsView() {
     {tab==="history"&&(<div className="aihub_card">
       <DataTable columns={[
         {label:"Tool",render:r=><div className="aihub_text_primary">{r.tool_name||r.tool_host}</div>},
-        {label:"Employee",render:r=>r.employee_name||"—"},
+        {label:"Employee",render:r=><UserCell row={r}/>},
         {label:"Reason",render:r=><div style={{fontSize:12,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.reason||"—"}</div>},
         {label:"Status",render:r=><Badge text={r.status} color={r.status==="approved"?"#22c55e":r.status==="rejected"?"#ef4444":r.status==="revoked"?"#f59e0b":"#9ca3af"}/>},
         {label:"Reviewed",render:r=>r.reviewed_at?relTime(r.reviewed_at):"—"},
@@ -4309,6 +4524,11 @@ const CLAUDE_PERIODS = [
   { value: "",   label: "All time" },
 ];
 
+// Must match CLAUDE_CODE_SURFACE in server/src/lib/claude-clients.js. Claude Code
+// in the VS Code / Cursor extension is the same product as Claude Code in a
+// terminal, so it is one surface with the client shown underneath.
+const CLAUDE_CODE_SURFACE = "Claude Code (CLI/extension)";
+
 function ClaudeUsageView() {
   const [data,setData]=useState(null),[e,setE]=useState(null),[sel,setSel]=useState(null);
   // Defaults to 30 days rather than all time. Without a window the totals are
@@ -4397,7 +4617,10 @@ function ClaudeUsageView() {
           {label:"User",render:r=><div className="aihub_text_primary">{r.user||r.label}</div>},
           {label:"Desktop",render:r=>(r.by_surface?.["Claude Desktop"]||0),right:true},
           {label:"Browser",render:r=>(r.by_surface?.["Claude (browser)"]||0),right:true},
-          {label:"Code CLI",render:r=>(r.by_surface?.["Claude Code (CLI)"]||0),right:true},
+          // Reads the new key first, the pre-rename one second. The API emits both
+          // for one release, and this way the column keeps working whichever the
+          // server it is talking to happens to send.
+          {label:"Code CLI/ext",render:r=>(r.by_surface?.[CLAUDE_CODE_SURFACE]??r.by_surface?.["Claude Code (CLI)"]??0),right:true},
           {label:"Total prompts",render:r=><strong>{(r.prompts||0).toLocaleString()}</strong>,right:true},
           // Both cost fields, summed — not measured_cost_usd alone.
           //
@@ -4436,12 +4659,50 @@ function ClaudeUsageView() {
         ))}
       </div>
 
+      {/* Which client the Claude Code prompts came from. Only that surface reports
+          it, so the strip is absent everywhere else rather than showing a single
+          meaningless "Unknown" bar. Percentages are of this surface's prompts —
+          the question being answered is "how much of our Claude Code use is the
+          IDE extension?", which is a share, not a count. */}
+      {selected?.clients?.length>0 && (
+        <div className="aihub_card" style={{marginBottom:14}}>
+          <SectionHeader title="By client"/>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {selected.clients.map(c=>{
+              const pct=selected.prompts?Math.round((c.prompts/selected.prompts)*100):0;
+              const unknown=c.client==="Unknown";
+              return (
+                <div key={c.client} className="aihub_filter_btn" style={{cursor:"default",opacity:unknown?0.62:1}}>
+                  <strong>{c.client}</strong> · {(c.prompts||0).toLocaleString()} prompts · {pct}%
+                  <span className="aihub_text_muted"> · {c.users} {c.users===1?"person":"people"}</span>
+                </div>
+              );
+            })}
+          </div>
+          {selected.clients.some(c=>c.client==="Unknown") && (
+            <div className="aihub_text_muted" style={{marginTop:10,fontSize:12}}>
+              “Unknown” means Claude Code’s telemetry for that session never reached the server,
+              so the client was not reported. Those prompts are still counted — they are not
+              assumed to be terminal sessions.
+            </div>
+          )}
+        </div>
+      )}
+
       {selected && <div className="aihub_card">
         {/* Sub-line removed. The surface buttons above already carry the prompt
             count, and the table below carries the per-user tokens and cost. */}
         <SectionHeader title={`${selected.surface} — usage by user`}/>
         <DataTable columns={[
           {label:"User",render:r=><><div className="aihub_text_primary">{r.label||r.user||r.hostname||"—"}</div>{!r.attributed&&<div className="aihub_text_muted">unattributed</div>}</>},
+          // Per-person client mix, so "the team uses the extension" can be checked
+          // against who actually does. Rendered as "VS Code 41 · Terminal 12"
+          // rather than one winner, because people genuinely split across both.
+          ...(selected.clients?.length>0?[{label:"Client",render:r=>(
+            r.clients?.length
+              ? <span>{r.clients.map(c=>`${c.client} ${c.prompts}`).join(" · ")}</span>
+              : <span className="aihub_text_muted">—</span>
+          )}]:[]),
           {label:"Prompts",key:"prompts",right:true},
           {label:"Tokens",render:r=>fmtTokens(r.tokens),right:true},
           {label:"Cost",render:r=>fmtUsd(r.cost_usd),right:true},
@@ -6321,10 +6582,12 @@ const TAB_GROUPS = {
     // Sessions tab was hidden.
     tabs: [
       { slug: "prompts",  label: "Prompts & DLP", component: DLPView },
-      // Sessions hidden from the tab strip, to be restored. SessionReplayView and
-      // every endpoint behind it are untouched, so uncommenting this line brings it
-      // back. /AIHub/SessionReplay still redirects here and resolveTab falls back to
-      // the first tab, so the old URL lands on Prompts & DLP rather than breaking.
+      // Sessions hidden from the tab strip again after review: the capture holds
+      // conversation groupings but zero rrweb recordings, so the replay half of the
+      // view has nothing to play. SessionReplayView and every endpoint behind it are
+      // untouched, so uncommenting this line brings it back. /AIHub/SessionReplay
+      // still redirects here and resolveTab falls back to the first tab, so the old
+      // URL lands on Prompts & DLP rather than breaking.
       // { slug: "sessions", label: "Sessions",      component: SessionReplayView },
       { slug: "claude",   label: "Claude Usage",  component: ClaudeUsageView },
       // Model Routing hidden from the tab strip, to be restored — same treatment as
