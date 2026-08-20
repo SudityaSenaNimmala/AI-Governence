@@ -17,7 +17,7 @@ This repo has a **GStack** multi-agent pipeline in `.claude/agents/` and `.claud
 For GStack features, the **architect** presents a design and STOPS. Do not implement until the human replies **"Proceed"** (or requests changes). Never rubber-stamp your own design.
 
 ### Ship flow: commit → push → live (automatic)
-**Pushing to `main` IS the deploy.** `.github/workflows/deploy.yml` runs CI and, on green, ships to the host and health-checks it — there is no manual deploy step and no deploy question. `devops-engineer` owns the push and the verification. Setup and full detail: `docs/AUTO_DEPLOY.md`.
+**Pushing to `main` IS the deploy.** `.github/workflows/deploy.yml` is the only workflow file in this repo — it runs its own `test` and `frontend` jobs and, on green, ships to the host and health-checks it — there is no manual deploy step and no deploy question. `devops-engineer` owns the push and the verification. Setup and full detail: `docs/AUTO_DEPLOY.md`.
 
 1. **Before pushing,** run the relevant test suites locally. A red `main` now blocks the deploy automatically, but the point is not to create one.
 2. **Commit + push.** When the user says to commit/push/ship, stage the intended files (not blind `git add -A`), commit (message ends with the required Co-Authored-By line), and `git push origin main`. The user's instruction to commit-and-push is the authorization. State plainly, as you push, that this deploys.
@@ -27,7 +27,7 @@ Rules:
 - **Ask no deploy question.** The old "Do you want to deploy to the server now?" is gone — by the time it could be asked, the deploy has already started. Asking it is now wrong.
 - If the user wants a change on `main` but *not* deployed, that is no longer possible by pushing. Say so and offer a branch + PR instead.
 - Never report "live" unless the workflow's health check actually passed. On red, name the failing job and step. If the run sits **queued**, the self-hosted runner on the host is offline — that is not "deployed".
-- Two things the workflow does NOT do: it does not rebuild the Windows Claude Usage Tracker `.exe`/NSIS installer (Node SEA is platform-bound and the runner is Linux — a new binary still needs `npm run deploy` from Windows; the existing one survives every auto-deploy), and it does not gate on `connect-ui` lint or three known-failing agent tests (both advisory in `ci.yml`, each documented there with its reason).
+- Two things the workflow does NOT do: it does not rebuild the Windows Claude Usage Tracker `.exe`/NSIS installer (Node SEA is platform-bound and the runner is Linux — a new binary still needs `npm run deploy` from Windows; the existing one survives every auto-deploy), and it does not run `connect-ui` lint or the agent suite's three known-failing tests at all anymore — `ci.yml` and `advisory.yml`, which used to report those as advisory-only, were removed so `deploy.yml` is the only workflow. Run them by hand if you want that signal.
 - `npm run deploy` still works for an out-of-band deploy from a machine that can reach the host. It uses `DEPLOY_SSH` in `.env`, **not** `DOCKER_HOST`.
 
 ## Roadmap auto-update (ask-then-edit)

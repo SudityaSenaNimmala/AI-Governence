@@ -1,15 +1,22 @@
 # Auto-deploy: push to `main` → live
 
-Three workflows in `.github/workflows/`:
+**`deploy.yml` is the only workflow file in `.github/workflows/`.** It used to
+call a separate `ci.yml` (with `advisory.yml` running lint and known-failing
+tests alongside, never gating anything) as a reusable workflow, but both were
+folded directly into `deploy.yml` and deleted — this repo intentionally runs
+one workflow, not several, so there is nothing else to reason about.
 
-| File | Trigger | What it does |
-|---|---|---|
-| `ci.yml` | push to any branch except `main`, every PR, and called by `deploy.yml` | The hard gate: the four test suites, plus `connect-ui/dist` built and uploaded as an artifact. Every job in it is blocking. |
-| `advisory.yml` | every push and PR | Lint and the known-failing tests. Expected red today. Kept OUT of `ci.yml` so it can never block a deploy — see the note in that file. |
-| `deploy.yml` | push to `main`, or **Run workflow** | Calls `ci.yml`, waits for it to pass, then ships the checkout to the host and rebuilds the stack. |
+| Job (all in `deploy.yml`) | What it does |
+|---|---|
+| `test` | The four test suites (server, agent, sdk-js, browser-extension), matrixed. Blocking. |
+| `frontend` | Builds `connect-ui/dist` and uploads it as an artifact for `deploy` to consume. Blocking. |
+| `deploy` | Waits on `test` and `frontend`, then ships the checkout to the host and rebuilds the stack. |
 
-A push to `main` therefore runs CI **once** and only deploys if it is green. `ci.yml`
-deliberately does not trigger on `main` itself, or every push would run CI twice.
+Triggered by push to `main`, or **Run workflow**. `connect-ui` lint and the
+three known-failing agent tests that `advisory.yml` used to report no longer
+run anywhere — they never gated a deploy, so nothing here replaces them. Run
+`npm run lint` (in `connect-ui`) or `npm test` (in `agent`) by hand if you want
+that signal back.
 
 ## Why a self-hosted runner
 

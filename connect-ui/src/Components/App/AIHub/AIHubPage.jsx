@@ -6713,10 +6713,11 @@ function TabGroup({ group }) {
 }
 
 // Which build is actually live. Vite inlines import.meta.env.VITE_* as a string
-// literal at build time, and .github/workflows/ci.yml passes the commit SHA, so
-// a deploy can be confirmed from the page itself rather than by guessing whether
-// the push landed. Empty in a local dev server, where nothing injects it — hence
-// the "dev" fallback rather than an empty stamp.
+// literal at build time, and .github/workflows/deploy.yml's `frontend` job
+// passes the commit SHA, so a deploy can be confirmed from the page itself
+// rather than by guessing whether the push landed. Empty in a local dev
+// server, where nothing injects it — hence the "dev" fallback rather than an
+// empty stamp.
 const BUILD_SHA = String(import.meta.env.VITE_BUILD_SHA || "").slice(0, 7);
 
 export default function AIHubPage({ page }) {

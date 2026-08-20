@@ -1,6 +1,14 @@
 name: Deploy to server
 
-# Push to main -> CI -> live, with no human step in between.
+# Push to main -> test -> build -> live, with no human step in between.
+#
+# THE ONLY WORKFLOW IN THIS REPO
+#   ci.yml and advisory.yml were removed and folded in here (the `test` and
+#   `frontend` jobs below are what ci.yml used to contain) so there is exactly
+#   one workflow to reason about: this file. advisory.yml's lint/known-failing
+#   checks were never a deploy gate, so nothing here replaces them - if you
+#   want them back, run them by hand (npm run lint in connect-ui; npm test in
+#   agent) rather than reintroducing a second workflow file.
 #
 # WHY A SELF-HOSTED RUNNER AND NOT SSH
 #   The previous version of this file connected in over SSH from a GitHub-hosted
@@ -43,13 +51,120 @@ permissions:
   contents: read
 
 jobs:
-  # Same tests and the same connect-ui build a PR gets — and the deploy waits on
-  # it, so a red main never reaches the server.
-  ci:
-    uses: ./.github/workflows/ci.yml
+  # ── Blocking: unit tests ──────────────────────────────────────────────────
+  # Folded in from the old ci.yml verbatim. The deploy job below waits on this
+  # (and `frontend`), so a red test run never reaches the server.
+  test:
+    name: test (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # server's own `npm test` runs the suite under tsx. It has to: several
+          # suites reach src/governance/**/*.ts through their import chain, and a
+          # bare `node --test` throws ERR_UNKNOWN_FILE_EXTENSION on the first .ts
+          # file it meets.
+          - project: server
+            cache: npm
+            install: npm ci --no-audit --no-fund
+            test: npm test
+          # KNOWN FAILURES, deliberately skipped so this gate can block a broken
+          # deploy without being permanently red. Each is a real open issue, not
+          # a flake:
+          #   "override safety" / "roleplay bypass"  guardrails.test.js — the
+          #       injection-override-safety and roleplay patterns do not match
+          #       the phrasings the test feeds them (a detection gap in a DLP
+          #       product; fixing it is a product change, not a CI change).
+          #   "GAP: a streamed call with no usage block …"  proxy-api-report —
+          #       this test PINS the old behaviour (parsed === null). It fails
+          #       because the behaviour it pinned has since changed, so the test
+          #       is what needs updating, not the code.
+          # Remove a name from this pattern the moment its issue is closed.
+          - project: agent
+            cache: npm
+            install: npm ci --no-audit --no-fund
+            test: >-
+              node --test
+              --test-skip-pattern='^(override safety|roleplay bypass|GAP: a streamed call with no usage block)'
+              "tests/**/*.test.*"
+          # No package-lock.json in sdk-js: `npm ci` would fail outright, and an
+          # empty `cache` keeps setup-node from failing on the missing lockfile.
+          - project: sdk-js
+            cache: ''
+            install: npm install --no-audit --no-fund
+            test: npm test
+          - project: browser-extension
+            cache: npm
+            install: npm ci --no-audit --no-fund
+            test: npm test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: ${{ matrix.cache }}
+          cache-dependency-path: ${{ matrix.project }}/package-lock.json
+
+      - name: Install ${{ matrix.project }} deps
+        working-directory: ${{ matrix.project }}
+        run: ${{ matrix.install }}
+
+      - name: Test ${{ matrix.project }}
+        working-directory: ${{ matrix.project }}
+        # The suites sign machine tokens at import time, so JWT_SECRET must be
+        # set — any value works, it never leaves the runner.
+        env:
+          JWT_SECRET: ci-test-secret-not-used-anywhere
+        run: ${{ matrix.test }}
+
+  # ── Blocking: the bundle the deploy ships ─────────────────────────────────
+  frontend:
+    name: build connect-ui
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: connect-ui/package-lock.json
+
+      - name: Install connect-ui deps
+        working-directory: connect-ui
+        run: npm ci --no-audit --no-fund
+
+      - name: Build connect-ui
+        working-directory: connect-ui
+        # VITE_ADMIN_TOKEN is forced EMPTY on purpose. Vite inlines every
+        # import.meta.env.VITE_* as a string literal, and dist/ is served
+        # publicly at /CloudFuze — so a real admin token here would hand every
+        # visitor a credential that unlocks session replays, SIEM export and
+        # approvals.
+        env:
+          VITE_ADMIN_TOKEN: ''
+          VITE_BUILD_SHA: ${{ github.sha }}
+        run: npm run build
+
+      - name: Check the bundle carries no admin token
+        run: |
+          if grep -rlE 'Bearer [A-Fa-f0-9]{32,}' connect-ui/dist >/dev/null 2>&1; then
+            echo "::error::a bearer-token-shaped literal is baked into connect-ui/dist"
+            exit 1
+          fi
+          echo "clean"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: connect-ui-dist
+          path: connect-ui/dist
+          retention-days: 7
+          if-no-files-found: error
 
   deploy:
-    needs: ci
+    needs: [test, frontend]
     runs-on: [self-hosted, linux, ai-gov]
     env:
       DEPLOY_DIR: ${{ vars.DEPLOY_DIR || '/opt/ai-gov' }}
@@ -66,8 +181,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Built by the ci workflow on a GitHub-hosted runner. It is not rebuilt
-      # here because the Vite build OOMs on this box.
+      # Built by the `frontend` job above on a GitHub-hosted runner. It is not
+      # rebuilt here because the Vite build OOMs on this box.
       - uses: actions/download-artifact@v4
         with:
           name: connect-ui-dist

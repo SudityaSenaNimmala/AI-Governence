@@ -45,8 +45,8 @@ Tests: `node --test` under `server/tests/` and `agent/tests/`.
 5. **Ship:** say `Commit and deploy.` → `devops-engineer` commits and pushes to `main`. **That push IS the deploy** — GitHub Actions runs the test suites and the `connect-ui` build, then ships to the host and health-checks it. No question is asked. The agent watches the run and reports the outcome; live at `https://agentgovernence.cftools.live/api/v1/health` and `https://agentgovernence.cftools.live/CloudFuze/`.
 
 ### Auto-deploy
-- `.github/workflows/deploy.yml` — push to `main` → `ci.yml` → ship + health check. Setup, what is gated, and why it uses a self-hosted runner rather than SSH: **`docs/AUTO_DEPLOY.md`**.
-- Hard gates: the four test suites and the `connect-ui` production build. Advisory only: `connect-ui` lint and three known-failing agent tests.
+- `.github/workflows/deploy.yml` is the **only** workflow file in this repo — push to `main` runs its own `test` and `frontend` jobs, then ships + health-checks. Setup and why it uses a self-hosted runner rather than SSH: **`docs/AUTO_DEPLOY.md`**.
+- Hard gates: the four test suites and the `connect-ui` production build, all in `deploy.yml` itself now. `ci.yml` and `advisory.yml` were removed — `connect-ui` lint and the three known-failing agent tests they used to report advisory-only no longer run anywhere; run them by hand if you want that signal.
 - Secrets live only in the host's own `/opt/ai-gov/.env` — none are stored in GitHub, and the deploy never overwrites that file.
 - A run stuck in **queued** means the self-hosted runner on the host is offline. That is not deployed.
 - `npm run deploy` still works for an out-of-band deploy from a machine that can reach the host (`DEPLOY_SSH` in `.env`, **not** `DOCKER_HOST`), and is the only path that rebuilds the Windows tracker `.exe` — the Actions runner is Linux and Node SEA is platform-bound.
