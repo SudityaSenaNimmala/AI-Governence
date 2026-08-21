@@ -205,6 +205,19 @@ export function mountDlp(app, db) {
               decision:       e.decision ?? null,
               decision_for:   e.decision_for ?? null,
               blocked_for:    e.blocked_for ?? null,
+              // The two file-only fields, for a block whose subject is an ATTACHMENT
+              // rather than a prompt: which file (filename) and which mechanism held
+              // it (blocked_by, e.g. the desktop attachment hold). Both were dropped
+              // here alongside the fields above.
+              //
+              // Bare `e.filename`, NOT `e.filename ?? null`, unlike its neighbours:
+              // JSON.stringify omits an undefined value entirely, so a block with no
+              // file attached carries no filename KEY at all rather than an explicit
+              // null. A present-but-null key reads as "there was a file and we lost
+              // its name", which is a different and wrong claim. Matches the
+              // isFileUpload branch above, which resolves filename the same way.
+              filename: e.filename,
+              blocked_by: e.blocked_by,
               mechanism:      e.mechanism ?? null,
               reason:         e.reason ?? null,
             } : {}),

@@ -41,7 +41,7 @@
     { name: 'credit-card',        class: 'pii',     regex: /\b(?:\d[ -]*?){13,16}\b/g, severity: 'high',
       validate: luhnCheck },
     { name: 'iban',               class: 'pii',     regex: /\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b/g, severity: 'high' },
-    { name: 'us-phone',           class: 'pii',     regex: /\b(?:\+?1[ -]?)?\(?[2-9]\d{2}\)?[ -]?\d{3}[ -]?\d{4}\b/g, severity: 'low' },
+    { name: 'us-phone',           class: 'pii',     regex: /\b(?:\+?1[ -]?)?\(?[2-9]\d{2}\)?[ -]?\d{3}[ -]?\d{4}\b/g, severity: 'high' },
 
     // ----- internal hints (customize per organization) -----
     { name: 'cloudfuze-customer-id', class: 'internal', regex: /\bCF-CUST-[A-Z0-9]{6,}\b/g, severity: 'high' },
@@ -436,9 +436,10 @@
 
   // Iterates activePatterns(), not PATTERNS: a pattern the server policy disables
   // must not be detected here either, or a "disabled" rule would still report.
-  // Severity comes from effectiveSeverity() so a pack can raise or lower it
-  // without editing this file. With no policy mirrored yet, activePatterns()
-  // returns everything, which is the safe default.
+  // Severity comes from effectiveSeverity() so a pack can raise it (never
+  // lower it — see the function's own comment) without editing this file.
+  // With no policy mirrored yet, activePatterns() returns everything, which
+  // is the safe default.
   function scanAll(text) {
     if (!text || typeof text !== 'string') return [];
     const matches = [];

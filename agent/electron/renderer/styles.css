@@ -626,3 +626,43 @@ code {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+/* ═══ Block dialog (Tokenize & Send) ═══ */
+.block-dialog {
+  width: 420px; max-width: 90vw;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  text-align: center;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.block-dialog-icon { font-size: 32px; margin-bottom: 8px; }
+.block-dialog h3 { margin: 0 0 8px; font-size: 16px; color: var(--text); }
+.block-dialog p { margin: 0 0 14px; font-size: 12.5px; color: var(--text-muted); line-height: 1.5; }
+.block-dialog .pattern-chip {
+  display: inline-block; padding: 3px 10px; border-radius: 999px;
+  background: var(--danger-bg); color: var(--danger); font-size: 11.5px; font-weight: 600;
+  margin-bottom: 14px;
+}
+.block-dialog .preview-box {
+  background: var(--success-bg); border: 1px solid var(--success);
+  border-radius: var(--radius-sm); padding: 10px 12px; margin-bottom: 14px;
+  text-align: left;
+}
+.block-dialog .preview-label {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase;
+  color: var(--success); margin-bottom: 4px;
+}
+.block-dialog .preview-text { font-size: 12.5px; color: var(--text); font-family: monospace; word-break: break-word; }
+.block-dialog .actions { display: flex; gap: 8px; justify-content: center; margin-top: 4px; }
+.block-dialog button {
+  padding: 9px 18px; border-radius: var(--radius-sm); font-size: 12.5px; font-weight: 600;
+  cursor: pointer; border: 1px solid var(--border);
+}
+.block-dialog .btn-tokenize { background: var(--success); color: #0f1117; border: none; }
+.block-dialog .btn-tokenize:hover { filter: brightness(1.08); }
+.block-dialog .btn-tokenize:disabled { opacity: 0.6; cursor: default; }
+.block-dialog .btn-dismiss { background: transparent; color: var(--text-muted); }
+.block-dialog .btn-dismiss:hover { background: var(--bg-hover); }
+.block-dialog .footnote { margin-top: 12px; font-size: 10.5px; color: var(--text-dim); }

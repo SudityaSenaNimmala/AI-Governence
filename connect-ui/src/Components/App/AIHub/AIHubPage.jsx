@@ -280,7 +280,15 @@ function GroupDetail({ row, onView }) {
         <td><Tag text={e.event_kind}/></td>
         <td>{e.metadata?.decision || e.metadata?.mechanism || e.metadata?.blocked_for
           ? <span className="aihub_text_muted">{String(e.metadata.decision||e.metadata.mechanism||e.metadata.blocked_for).replace(/_/g," ")}</span>
-          : <span className="aihub_text_muted">—</span>}</td>
+          : <span className="aihub_text_muted">—</span>}
+          {/* WHICH file an attachment block was about. The cell above says what
+              was stopped ("file upload") but never which document, and a block
+              on an attachment is always about one specific file — desktop
+              attachment holds included. Appended rather than given its own
+              column so the folded-row layout above is untouched, and only
+              rendered when a filename exists, so prompt-only blocks look
+              exactly as they did. */}
+          {e.metadata?.filename && <> <Mono>{e.metadata.filename}</Mono></>}</td>
         <td><Mono>{e.pattern_matched||"—"}</Mono></td>
         <td><SeverityBadge sev={sevOf(e)}/></td>
         <td style={{textAlign:"right"}}><ViewBtn has={e.has_content} onClick={()=>onView(e)}/></td>
@@ -6712,10 +6720,11 @@ function TabGroup({ group }) {
 }
 
 // Which build is actually live. Vite inlines import.meta.env.VITE_* as a string
-// literal at build time, and .github/workflows/ci.yml passes the commit SHA, so
-// a deploy can be confirmed from the page itself rather than by guessing whether
-// the push landed. Empty in a local dev server, where nothing injects it — hence
-// the "dev" fallback rather than an empty stamp.
+// literal at build time, and .github/workflows/deploy.yml's `frontend` job
+// passes the commit SHA, so a deploy can be confirmed from the page itself
+// rather than by guessing whether the push landed. Empty in a local dev
+// server, where nothing injects it — hence the "dev" fallback rather than an
+// empty stamp.
 const BUILD_SHA = String(import.meta.env.VITE_BUILD_SHA || "").slice(0, 7);
 
 export default function AIHubPage({ page }) {

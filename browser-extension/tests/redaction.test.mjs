@@ -269,7 +269,7 @@ describe('redact(): pattern-name filter has no severity gate', () => {
   test('backward compatibility: a severity Set still filters by severity', () => {
     const r = P.redact(TEXT, new Set(['high', 'critical']));
     assert.ok(!r.redacted.includes('AKIAIOSFODNN7EXAMPLE'), 'critical masked');
-    assert.ok(r.redacted.includes('555-867-5309'), 'low severity left alone');
+    assert.ok(!r.redacted.includes('555-867-5309'), 'us-phone is high severity, masked too');
     assert.ok(r.redacted.includes('CF-1234'), 'low severity left alone');
   });
 });

@@ -170,6 +170,15 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   neither. Prompts that reached the server vanish from the page with nothing saying they
   exist; add a visible row and a way to claim it to a person.
 
+- [ ] **Fix substring false-positives in detectModelInfo's tier keyword matching**
+  `detectModelInfo` (browser-extension/content/content.js) matches provider/tier keywords
+  via plain substring `.includes()`, so "Gemini" contains "mini" (misdetected as OpenAI
+  economy tier, checked before the Google rules ever run) and "prompt"/"professional"/etc.
+  contain "pro" (misdetected as Google premium tier). Found while porting this logic to the
+  desktop model router (agent/src/os_monitor/enforcer-win.ps1), which faithfully replicates
+  the same bug for parity — fixing it here should be mirrored there too. Needs word-boundary
+  matching or a stricter token check instead of raw substring search.
+
 ---
 
 ## P2 — enterprise distribution
@@ -247,6 +256,7 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   in the extension. Needs a settings screen so an admin can tune routing behavior
   per tenant without a code change.
 
+
 - [ ] **Stamp a correlation id on OS-monitor enforcement events**
   Today the enforcer and the keystroke prompt capture never learn each other's event
   ids, so the Activity table pairs a prompt with the block it triggered by a
@@ -260,6 +270,18 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   terms or the arithmetic rule: `capital of France`, `what time is it in Tokyo` and
   `who wrote Hamlet` all bill at the standard tier. Needs terms that cannot misfire —
   "who is responsible for our GDPR compliance" must not become simple.
+
+- [ ] **Tokenize & Send support for IDE apps (Cursor/VSCode/Copilot)**
+  The desktop enforcer's mask-and-auto-send flow (`enforcer-win.ps1`) excludes
+  `_ideApps` from UIA-based masking entirely, since UIA in an IDE reads code/
+  terminal content, not a single composer field. IDE users blocked for a
+  sensitive paste currently have no Tokenize & Send option at all.
+
+- [ ] **Tokenize & Send support for multi-line prompts**
+  `ComputeMaskCandidate` in `enforcer-win.ps1` rejects any composer text
+  containing `\n`/`\r` as unmaskable ("multiline"), so a blocked multi-line
+  prompt always falls back to "remove it yourself and resend" with no
+  Tokenize & Send option.
 
 ---
 

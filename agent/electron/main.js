@@ -1,7 +1,7 @@
 // CloudFuze AI Governance — Electron main process
 // System tray app that wraps the existing OsMonitor for background DLP monitoring.
 
-const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell, dialog } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell, dialog, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -52,6 +52,7 @@ function copyDirSync(src, dest) {
 // ── State ──────────────────────────────────────────────────────────────────────
 let tray = null;
 let mainWindow = null;
+let dialogWindow = null;  // the non-activating Tokenize & Send popup — see showBlockDialogWindow()
 let monitorProcess = null;  // child_process running the OsMonitor
 let isMonitoring = false;
 let recentAlerts = [];      // last 100 DLP events for the dashboard
@@ -117,10 +118,25 @@ function startMonitor() {
     return;
   }
 
+  // Settings reach the monitor child through the environment — there is no IPC
+  // channel to it (its stdio is child → parent log lines only). Mirrors
+  // src/os_monitor/settings-env.js, which is the decoding side; that file is
+  // ESM and this process is CommonJS, so the encoding is repeated here rather
+  // than imported. 'false' is the only value that disables the enforcer.
+  // Model routing has no setting at all — it is always on whenever the
+  // enforcer itself runs, same as the rest of its keystroke-level behavior.
   monitorProcess = spawn('node', [monitorRunner], {
     cwd: path.join(__dirname, '..'),  // agent/ dir so relative imports work
-    env: { ...process.env, NODE_NO_WARNINGS: '1' },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      NODE_NO_WARNINGS: '1',
+      CFAI_ENFORCER_ENABLED: settings.monitorEnforcer === false ? 'false' : 'true',
+      CFAI_MODEL_ROUTER_ENABLED: 'true',
+    },
+    // stdin is 'pipe' (not 'ignore') so the Tokenize dialog can send
+    // {cmd:"tokenize", block_id} down through monitor-runner.mjs to the
+    // enforcer — see tokenizeBlock() / the 'tokenize-block' IPC handler below.
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
 
   isMonitoring = true;
@@ -168,7 +184,81 @@ function stopMonitor() {
   monitorProcess.on('exit', () => clearTimeout(killTimer));
 }
 
+// The Tokenize & Send popup. This must NEVER take keyboard focus — confirmed
+// live that bringing the MAIN window forward instead (mainWindow.focus())
+// stole focus from the AI app, and after the enforcer's 3s "focus left the AI
+// app" grace period, it cleared the pending rewrite entirely: the dialog was
+// then holding a block_id for an offer that no longer existed, which is
+// exactly the permanently-stuck "Masking…" button this replaces.
+// focusable:false + showInactive() is what keeps the AI app itself focused
+// the whole time the popup is visible.
+function showBlockDialogWindow(data) {
+  const send = () => { if (dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.webContents.send('block-dialog', data); };
+  if (!dialogWindow || dialogWindow.isDestroyed()) {
+    const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+    const w = 440, h = 480;
+    dialogWindow = new BrowserWindow({
+      width: w,
+      height: h,
+      x: Math.round((sw - w) / 2),
+      y: Math.round((sh - h) / 2),
+      frame: false,
+      resizable: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      focusable: false,
+      show: false,
+      backgroundColor: '#1c1f2e',
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+      },
+    });
+    dialogWindow.loadFile(path.join(__dirname, 'renderer', 'block-dialog.html'));
+    dialogWindow.webContents.once('did-finish-load', send);
+    dialogWindow.on('closed', () => { dialogWindow = null; });
+  } else {
+    send();
+  }
+  dialogWindow.showInactive();
+}
+
 function parseMonitorLine(line) {
+  // Structured lines (block dialog / rewrite result) are a distinct, always-
+  // JSON channel — checked first so they never fall into the plain-text
+  // regex heuristics below, which cannot parse them reliably.
+  if (line.startsWith('@@CFAI-BLOCK ')) {
+    try {
+      const parsed = JSON.parse(line.slice('@@CFAI-BLOCK '.length));
+      // An attachment block has nothing actionable to offer in the center
+      // dialog — no Tokenize option (that masks text, not files) and no
+      // retraction button (out of scope, see the design doc) — it's just a
+      // "Got it." The toast index.js already fires for the same event says
+      // the same thing without stealing focus over the conversation, so
+      // skip the dialog here rather than showing both. Confirmed live: a
+      // user reported seeing both fire for the same attachment block, and
+      // the dialog added nothing the toast hadn't already said.
+      if (parsed.reason !== 'attachment') showBlockDialogWindow(parsed);
+    }
+    catch { /* malformed — drop, nothing else can be done with it */ }
+    return;
+  }
+  if (line.startsWith('@@CFAI-REWRITE ')) {
+    try {
+      const parsed = JSON.parse(line.slice('@@CFAI-REWRITE '.length));
+      if (dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.webContents.send('rewrite-result', parsed);
+      if (parsed.result === 'ok' && dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.close();
+    }
+    catch { /* malformed — drop */ }
+    return;
+  }
+  if (line.startsWith('@@CFAI-ROUTE ')) {
+    // Model routing is silent by design — no dialog, nothing for the user to
+    // act on. index.js already reports it to the server; this channel exists
+    // so the line is never mis-parsed by the plain-text heuristics below.
+    return;
+  }
+
   // Parse structured log lines from the agent's stderr.
   // Format: 2026-06-22T10:00:00.000Z INFO  [os_monitor] ...
   const alert = {
@@ -492,6 +582,18 @@ function setupIPC() {
   ipcMain.handle('run-injection', () => {
     runAsarInjection();
     return { started: true };
+  });
+
+  // Tokenize & Send button in the block dialog. Only a block_id ever crosses
+  // this path — see enforcer.js's tokenize() for why that's the whole point.
+  ipcMain.handle('tokenize-block', (_event, blockId) => {
+    if (!monitorProcess?.stdin || monitorProcess.stdin.destroyed) return { sent: false };
+    try {
+      monitorProcess.stdin.write(JSON.stringify({ cmd: 'tokenize', block_id: blockId }) + '\n');
+      return { sent: true };
+    } catch (err) {
+      return { sent: false, error: err.message };
+    }
   });
 
   ipcMain.handle('get-auto-launch', () => getAutoLaunchEnabled());

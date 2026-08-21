@@ -3497,9 +3497,11 @@
 
     // Poll the prompt input every 500ms. If sensitive content is detected,
     // activate the global blocker. This is lightweight and React-proof.
-    // Only activate the global blocker for genuine block-patterns.
-    // Tokenize-only patterns are handled by the popup at send time —
-    // the global blocker must NOT intercept sidebar clicks, navigation, etc.
+    // scanForBlockers only reports high/critical matches (BLOCK_SEVERITIES) —
+    // anything below that threshold is invisible here, not "handled elsewhere".
+    // There is no separate tokenize-only pattern class today: every match the
+    // block modal shows can be sent via "Tokenize & Send", which reuses this
+    // same scan.
     setInterval(() => {
       if (!ENFORCE) return;
       const el = findActivePromptInput() || findPromptInputs()[0];
@@ -3593,8 +3595,9 @@
 
     // PRIMARY ENFORCEMENT — block Enter directly on the input element.
     // This fires before React's delegation because it's on the element itself.
-    // Tokenize-patterns are filtered out by scanForBlockers — they pass through
-    // and are handled by the fetch-blocker at the network level.
+    // scanForBlockers only matches high/critical severity (BLOCK_SEVERITIES).
+    // A match below that threshold is simply never flagged here — the
+    // fetch-blocker does not pick up any slack for it.
     el.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         const captured = readInputText(el);

@@ -20,7 +20,7 @@ const PATTERNS = [
   { name: 'us-ssn',             class: 'pii',       regex: /\b\d{3}-\d{2}-\d{4}\b/g,                             severity: 'critical' },
   { name: 'credit-card',        class: 'pii',       regex: /\b(?:\d[ -]*?){13,16}\b/g,                           severity: 'high',     validate: luhnCheck },
   { name: 'iban',               class: 'pii',       regex: /\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b/g,                  severity: 'high'     },
-  { name: 'us-phone',           class: 'pii',       regex: /\b(?:\+?1[ -]?)?\(?[2-9]\d{2}\)?[ -]?\d{3}[ -]?\d{4}\b/g, severity: 'low' },
+  { name: 'us-phone',           class: 'pii',       regex: /\b(?:\+?1[ -]?)?\(?[2-9]\d{2}\)?[ -]?\d{3}[ -]?\d{4}\b/g, severity: 'high' },
   { name: 'cloudfuze-customer-id', class: 'internal', regex: /\bCF-CUST-[A-Z0-9]{6,}\b/g,                        severity: 'high'     },
   { name: 'internal-jira-key',     class: 'internal', regex: /\b(CF|GOV|SEC)-\d{2,}\b/g,                         severity: 'low'      },
 
@@ -59,6 +59,29 @@ const PATTERNS = [
 
 const SEVERITY_ORDER = ['low', 'moderate', 'high', 'critical'];
 
+// Fixed mask labels, keyed by pattern name — mirrors browser-extension's
+// REDACT_LABELS (browser-extension/content/patterns.js). Only patterns that
+// are an actual DATA SPAN get a label: guardrail patterns (injection-*,
+// jailbreak-*, toxicity-*, bias-*) describe behavior, not a value, so there is
+// nothing to substitute — masking "ignore all previous instructions" doesn't
+// defang it, the phrase IS the payload. A pattern with no entry here can never
+// be offered for masking; see getBlockPatterns() below.
+const REDACT_LABELS = {
+  'openai-api-key':        '[API-KEY]',
+  'anthropic-api-key':     '[API-KEY]',
+  'google-api-key':        '[API-KEY]',
+  'huggingface-token':     '[API-KEY]',
+  'github-pat':            '[GITHUB-TOKEN]',
+  'gitlab-pat':             '[GITLAB-TOKEN]',
+  'aws-access-key':        '[AWS-KEY]',
+  'slack-token':           '[SLACK-TOKEN]',
+  'jwt':                   '[JWT]',
+  'us-ssn':                '[SSN]',
+  'iban':                  '[IBAN]',
+  'us-phone':              '[PHONE]',
+  'cloudfuze-customer-id': '[CUSTOMER-ID]',
+};
+
 // Patterns the desktop keystroke-blocker enforces on. High/critical only, and
 // we exclude any pattern that needs a JS validator (credit-card → Luhn): the
 // blocker runs the regex in .NET where we can't replicate the validator, and
@@ -67,7 +90,7 @@ const SEVERITY_ORDER = ['low', 'moderate', 'high', 'critical'];
 // its .NET Regex engine without us duplicating the catalog.
 export const BLOCK_PATTERNS = PATTERNS
   .filter((p) => (p.severity === 'high' || p.severity === 'critical') && !p.validate)
-  .map((p) => ({ name: p.name, source: p.regex.source, severity: p.severity }));
+  .map((p) => ({ name: p.name, source: p.regex.source, severity: p.severity, label: REDACT_LABELS[p.name] || null }));
 
 // ── Server-driven pattern policy ─────────────────────────────────────────────
 // policy-sync.js mirrors GET /api/policy-packs/extension-config here, so a
@@ -85,8 +108,7 @@ function isEnabled(name) {
   return !p || p.enabled !== false;
 }
 
-// A pack may grade a pattern higher than the catalog does (a phone number is a
-// HIPAA identifier even though the catalog calls it 'low'). Only ever stricter.
+// A pack may grade a pattern higher than the catalog does. Only ever stricter.
 const SEV_RANK = { low: 1, moderate: 2, medium: 2, high: 3, critical: 4 };
 function effectiveSeverity(p) {
   const override = POLICY?.patterns?.[p.name]?.severity;
@@ -136,7 +158,12 @@ export function getBlockPatterns() {
       const sev = effectiveSeverity(p);
       return (sev === 'high' || sev === 'critical') && !p.validate;
     })
-    .map((p) => ({ name: p.name, source: p.regex.source, severity: effectiveSeverity(p) }));
+    .map((p) => ({
+      name: p.name,
+      source: p.regex.source,
+      severity: effectiveSeverity(p),
+      label: REDACT_LABELS[p.name] || null,
+    }));
 }
 
 function luhnCheck(numStr) {

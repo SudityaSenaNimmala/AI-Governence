@@ -21,6 +21,9 @@ contextBridge.exposeInMainWorld('api', {
   // ASAR injection
   runInjection: () => ipcRenderer.invoke('run-injection'),
 
+  // Tokenize & Send dialog
+  tokenizeBlock: (blockId) => ipcRenderer.invoke('tokenize-block', blockId),
+
   // Auto-launch
   getAutoLaunch: () => ipcRenderer.invoke('get-auto-launch'),
   setAutoLaunch: (enable) => ipcRenderer.invoke('set-auto-launch', enable),
@@ -60,5 +63,15 @@ contextBridge.exposeInMainWorld('api', {
     const handler = (_event, data) => callback(data);
     ipcRenderer.on('scan-result', handler);
     return () => ipcRenderer.removeListener('scan-result', handler);
+  },
+  onBlockDialog: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('block-dialog', handler);
+    return () => ipcRenderer.removeListener('block-dialog', handler);
+  },
+  onRewriteResult: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('rewrite-result', handler);
+    return () => ipcRenderer.removeListener('rewrite-result', handler);
   },
 });
