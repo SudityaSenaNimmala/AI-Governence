@@ -240,11 +240,23 @@ export async function ensureAnalyticsIndexes(db) {
   await db.collection('ai_token_usage').createIndex({ source: 1, occurred_at: 1 });
   await db.collection('ai_token_usage').createIndex({ machine_id: 1 });
   // Ordered to serve the prompt rollup end to end: equality on source and
-  // event_kind, range on occurred_at, then the three fields the $group reads, so
-  // the aggregation can be answered from the index without touching documents.
+  // event_kind, range on occurred_at, then the fields the $group reads, so the
+  // aggregation can be answered from the index without touching documents.
+  //
+  // `terminal` is in here because the rollup now groups on it too (the per-client
+  // IDE/terminal split). Left out, the index stops covering the aggregation and
+  // every prompt row has to be fetched — quietly undoing the reason this index
+  // exists.
   await db.collection('dlp_events').createIndex({
-    source: 1, event_kind: 1, occurred_at: 1, ai_service: 1, machine_id: 1, content_length: 1,
+    source: 1, event_kind: 1, occurred_at: 1,
+    ai_service: 1, machine_id: 1, terminal: 1, content_length: 1,
   });
+  // Speed up /api/v1/dlp?severity= and /dlp/summary recentCritical query
+  await db.collection('dlp_events').createIndex({ secret_class: 1, occurred_at: -1 });
+  // Speed up /api/v1/findings?type= (Inventory → Agents & MCP, AI Systems)
+  await db.collection('findings').createIndex({ type: 1, detected_at: -1 });
+  // The session -> client join, read once per ingest batch.
+  await db.collection('claude_code_sessions').createIndex({ session_id: 1 }, { unique: true });
 }
 
 // Stable identifier for one logical AI tool, e.g. "openai:chatgpt".

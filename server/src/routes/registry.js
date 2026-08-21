@@ -74,6 +74,11 @@ export function mountRegistry(app, db) {
   const UNHEALTHY_FOR_MS = Number(process.env.REGISTRY_UNHEALTHY_FOR_MS || 120_000);
   let _unhealthyUntil = 0;
   let _snapshot = null;
+  // Short-lived cache for the live build — avoids re-running the 5-collection
+  // query on every tab switch or page refresh within 30 seconds.
+  let _liveCache = null;
+  let _liveCacheAt = 0;
+  const LIVE_CACHE_TTL_MS = 30_000;
 
   function loadSnapshot() {
     if (_snapshot) return _snapshot;
@@ -88,6 +93,8 @@ export function mountRegistry(app, db) {
   // Resolves to null rather than rejecting, so callers branch on the value instead
   // of wrapping every call site in try/catch.
   function buildRegistryWithBudget() {
+    // Serve from short-lived cache if fresh
+    if (_liveCache && Date.now() - _liveCacheAt < LIVE_CACHE_TTL_MS) return Promise.resolve(_liveCache);
     const haveSnapshot = Boolean(loadSnapshot());
     if (haveSnapshot && (SNAPSHOT_FIRST || Date.now() < _unhealthyUntil)) return Promise.resolve(null);
     return new Promise((resolve) => {
@@ -106,6 +113,7 @@ export function mountRegistry(app, db) {
         if (settled) return;
         settled = true; clearTimeout(timer);
         _unhealthyUntil = 0;   // healthy again
+        _liveCache = r; _liveCacheAt = Date.now();
         resolve(r);
       }).catch((e) => {
         if (settled) return;
@@ -116,41 +124,35 @@ export function mountRegistry(app, db) {
   }
 
   async function buildRegistry() {
-    // 1. Governance discovered agents
-    const govAgents = await db.collection('discovered_agents')
-      .find({}).project({ _id: 0 }).toArray().catch(() => []);
-
-    // 2. Endpoint scan findings (deduplicated by tool_key)
-    const findings = await db.collection('findings')
-      .find({}).project({ _id: 0 }).toArray().catch(() => []);
-
-    // 3. Sanctions (approval status)
-    const sanctions = await db.collection('sanctions')
-      .find({}).project({ _id: 0 }).toArray().catch(() => []);
+    // Run all 5 collection reads in parallel — was sequential, costing 15s+
+    const [govAgents, findings, sanctions, dlpStats, platforms] = await Promise.all([
+      // 1. Governance discovered agents
+      db.collection('discovered_agents')
+        .find({}).project({ _id: 0 }).toArray().catch(() => []),
+      // 2. Endpoint scan findings (deduplicated by tool_key)
+      db.collection('findings')
+        .find({}).project({ _id: 0 }).toArray().catch(() => []),
+      // 3. Sanctions (approval status)
+      db.collection('sanctions')
+        .find({}).project({ _id: 0 }).toArray().catch(() => []),
+      // 4. DLP usage stats per service
+      db.collection('dlp_events').aggregate([
+        { $group: {
+          _id: '$ai_service',
+          event_count: { $sum: 1 },
+          last_event: { $max: '$occurred_at' },
+          block_count: { $sum: { $cond: [{ $eq: ['$event_kind', 'enforcement_block'] }, 1, 0] } },
+          override_count: { $sum: { $cond: [{ $eq: ['$event_kind', 'enforcement_override'] }, 1, 0] } },
+          sensitive_count: { $sum: { $cond: [{ $in: ['$secret_class', ['critical', 'high']] }, 1, 0] } },
+          machines: { $addToSet: '$machine_id' },
+        }},
+      ]).toArray().catch(() => []),
+      // 5. AI Platforms
+      db.collection('ai_platforms')
+        .find({}).project({ _id: 0 }).toArray().catch(() => []),
+    ]);
     const sanctionMap = new Map(sanctions.map(s => [s.tool_key, s]));
-
-    // 4. DLP usage stats per service
-    // Overrides, sensitive-content count and machine spread are aggregated alongside
-    // the existing fields because they are what actually scores a browser/desktop-
-    // governed tool. block_count was already computed here and then discarded by
-    // every consumer, while the platform rows published risk_score: null — the signal
-    // was one line away from the field that said "unknown".
-    const dlpStats = await db.collection('dlp_events').aggregate([
-      { $group: {
-        _id: '$ai_service',
-        event_count: { $sum: 1 },
-        last_event: { $max: '$occurred_at' },
-        block_count: { $sum: { $cond: [{ $eq: ['$event_kind', 'enforcement_block'] }, 1, 0] } },
-        override_count: { $sum: { $cond: [{ $eq: ['$event_kind', 'enforcement_override'] }, 1, 0] } },
-        sensitive_count: { $sum: { $cond: [{ $in: ['$secret_class', ['critical', 'high']] }, 1, 0] } },
-        machines: { $addToSet: '$machine_id' },
-      }},
-    ]).toArray().catch(() => []);
     const dlpMap = new Map(dlpStats.map(d => [d._id, d]));
-
-    // 5. AI Platforms
-    const platforms = await db.collection('ai_platforms')
-      .find({}).project({ _id: 0 }).toArray().catch(() => []);
     const platformMap = new Map(platforms.map(p => [p.host, p]));
     // Build product→blocked lookup from ai_platforms (source of truth).
     // A product is "blocked" only if ALL its hosts are blocked.
@@ -502,15 +504,18 @@ export function mountRegistry(app, db) {
       platform_registry: 'platform_services',
     };
 
+    let activeCount = 0;
     for (const r of rows) {
       statusCounts[r.status] = (statusCounts[r.status] || 0) + 1;
       const key = SOURCE_KEY[r.source];
       if (key) bySource[key] += 1;
       riskCounts[r.risk_level || 'not_assessed'] = (riskCounts[r.risk_level || 'not_assessed'] || 0) + 1;
+      if ((r.activity?.total || 0) > 0) activeCount += 1;
     }
 
     res.json({
       total_ai_systems: rows.length,
+      active_ai_systems: activeCount,
       by_source: bySource,
       by_status: statusCounts,
       by_risk: riskCounts,

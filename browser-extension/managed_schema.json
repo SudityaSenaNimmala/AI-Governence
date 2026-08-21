@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "properties": {
+    "serverUrl": {
+      "title": "Governance server URL",
+      "description": "Base URL of the CloudFuze AI-Governance server, e.g. https://agentgovernence.cftools.live",
+      "type": "string"
+    },
+    "enrollSecret": {
+      "title": "Enrollment secret",
+      "description": "Shared secret used to enroll this browser with the governance server. Provisioned by IT; never shown to the user.",
+      "type": "string"
+    },
+    "userEmail": {
+      "title": "User email (optional)",
+      "description": "Override identity for attribution. Normally left empty so the desktop agent's identity beacon supplies the real user automatically.",
+      "type": "string"
+    },
+    "employeeEmail": {
+      "title": "Employee email (optional)",
+      "description": "Optional employee directory email attached at enrollment.",
+      "type": "string"
+    },
+    "computerName": {
+      "title": "Computer name (optional)",
+      "description": "Override machine name. Normally left empty so the desktop agent's identity beacon supplies it automatically.",
+      "type": "string"
+    }
+  }
+}

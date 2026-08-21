@@ -74,9 +74,10 @@ function emptyResponse(status) {
 
 function makeChrome() {
   const store = {};
+  const managedStore = {};
   const listeners = {
     alarm: [], message: [], tabRemoved: [], navCommitted: [], navHistory: [],
-    startup: [], installed: [], actionClicked: [],
+    startup: [], installed: [], actionClicked: [], storageChanged: [],
   };
   const alarmsCreated = [];
   const alarmsCleared = [];
@@ -90,6 +91,15 @@ function makeChrome() {
         set: async (obj) => { Object.assign(store, obj); },
         remove: async (keys) => { for (const k of (Array.isArray(keys) ? keys : [keys])) delete store[k]; },
       },
+      // Enterprise policy (Intune / Group Policy) surfaces here read-only. Empty by
+      // default, as on an unmanaged machine; tests can seed chrome._managed to
+      // simulate a pushed policy.
+      managed: {
+        get: async (keys) => Object.fromEntries(
+          (Array.isArray(keys) ? keys : [keys]).map((k) => [k, managedStore[k]]),
+        ),
+      },
+      onChanged: { addListener: (fn) => listeners.storageChanged.push(fn) },
     },
     runtime: {
       lastError: undefined,
@@ -121,6 +131,7 @@ function makeChrome() {
     scripting: { executeScript: async () => {}, insertCSS: async () => {} },
     notifications: { create: () => {} },
     _store: store,
+    _managed: managedStore,
     _listeners: listeners,
     _alarmsCreated: alarmsCreated,
     _alarmsCleared: alarmsCleared,
@@ -706,4 +717,69 @@ test('the toolbar click no longer calls the deleted arm path', () => {
   }
   assert.equal(chrome._optionsOpened, before + chrome._listeners.actionClicked.length,
     'it opens the options page instead — a toolbar icon that does nothing reads as broken');
+});
+
+// --- Enterprise managed-policy provisioning (Intune / Group Policy) ------------
+// The admin pushes serverUrl + enrollSecret into chrome.storage.managed. The worker
+// must treat that as authoritative and enroll with zero user action, and re-enroll
+// when the policy changes. These assert the observable effect: an /enroll POST that
+// carries the MANAGED secret, proving managed policy overrides local config.
+
+test('with no desktop-agent beacon, enrollment is DEFERRED — no "Mozilla-browser-extension" record', async () => {
+  // The attribution bug: enrolling before the beacon is up produced an
+  // unnameable "Mozilla-browser-extension" record. Within the grace window and
+  // with no beacon answering, the worker must NOT enroll — it waits.
+  chrome._managed.serverUrl = 'https://gov.example.test';
+  chrome._managed.enrollSecret = 'managed-secret';
+  chrome._store['cfai.token'] = 'stale-jwt';
+  delete chrome._store['cfai.firstEnrollAt'];
+  delete chrome._store['cfai.config'];              // no cached computerName
+  server.reset();                                    // /cfai/identity is unrouted → beacon returns null
+
+  for (const fn of chrome._listeners.storageChanged) fn({ enrollSecret: { newValue: 'managed-secret' } }, 'managed');
+  await settle();
+
+  assert.equal(server.of('/api/v1/enroll').length, 0,
+    'no beacon → deferred, so it never enrolls as an unattributable UA hostname');
+});
+
+test('a managed-policy change re-provisions: re-enrolls with the managed secret once the beacon is found', async () => {
+  chrome._managed.serverUrl = 'https://gov.example.test';
+  chrome._managed.enrollSecret = 'managed-secret';
+  chrome._store['cfai.token'] = 'stale-jwt';
+  // Desktop agent beacon is up on this machine — the extension links to it.
+  server.route('/cfai/identity', jsonResponse(200, { hostname: 'TESTPC', user: 'alice', machineId: 'm-1' }));
+  server.reset();
+
+  // Fire the real storage.onChanged handler the worker registered, area 'managed'.
+  for (const fn of chrome._listeners.storageChanged) fn({ enrollSecret: { newValue: 'managed-secret' } }, 'managed');
+  await settle();
+
+  const enrolls = server.of('/api/v1/enroll');
+  assert.ok(enrolls.length >= 1, 'it enrolled in response to the policy change');
+  assert.equal(enrolls.at(-1).body.enrollSecret, 'managed-secret',
+    'the managed secret overrides the locally-saved one');
+  assert.equal(enrolls.at(-1).body.hostname, 'TESTPC-browser-extension',
+    'it attributes to the beacon hostname, not the browser UA');
+  assert.equal(chrome._store['cfai.token'], 'test-jwt', 'a fresh token replaced the stale one');
+});
+
+test('a non-managed storage change is ignored — no spurious re-enrollment', async () => {
+  server.reset();
+  for (const fn of chrome._listeners.storageChanged) fn({ 'cfai.queue': { newValue: [] } }, 'local');
+  await settle();
+  assert.equal(server.of('/api/v1/enroll').length, 0, 'local-area writes never trigger enrollment');
+});
+
+test('with no managed policy present, managed auto-config is a no-op on install', async () => {
+  delete chrome._managed.serverUrl;
+  delete chrome._managed.enrollSecret;
+  chrome._store['cfai.token'] = 'keep-jwt';
+  server.reset();
+  // autoConfigFromManaged runs inside onInstalled; fire it and confirm it does not enroll
+  // (ensureToken short-circuits on the existing token, and managed carries no serverUrl).
+  for (const fn of chrome._listeners.installed) fn({ reason: 'install' });
+  await settle();
+  assert.equal(server.of('/api/v1/enroll').length, 0,
+    'no managed serverUrl/secret → managed path does not enroll');
 });

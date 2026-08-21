@@ -1,139 +1,209 @@
-/* AI Hub — matches connect-ui manage theme */
+/* ═══════════════════════════════════════════════════════════════════════════════
+   AI Hub — Premium Design System
+   CloudFuze AI Governance Dashboard
+   ═══════════════════════════════════════════════════════════════════════════════ */
 
-/* Stat cards */
-/* KPI cards fill the row, whatever their count.
- *
- * Was auto-FILL, which creates as many tracks as fit whether or not there is an
- * item for each. At Overview's width that laid out five tracks, so once the LLM
- * spend card was removed the fourth card stopped mid-row and the empty fifth track
- * showed as a gap on the right.
- *
- * auto-FIT collapses tracks with no item, so the cards present always stretch to
- * the full width. Deliberately not repeat(4, …): this class is shared by around ten
- * screens with differing card counts — several already override the columns inline —
- * so a fixed count would fix Overview and misalign the rest. */
+/* ── Design tokens ────────────────────────────────────────────────────────────── */
+:root {
+  --ah-accent: #0052e0;
+  --ah-accent-hover: #0041b3;
+  --ah-accent-soft: rgba(0, 82, 224, 0.08);
+  --ah-accent-glow: rgba(0, 82, 224, 0.15);
+  --ah-border: #e2e5ea;
+  --ah-border-light: #eff1f3;
+  --ah-surface: #ffffff;
+  --ah-surface-raised: #fafbfc;
+  --ah-surface-sunken: #f5f6f8;
+  --ah-text: #111827;
+  --ah-text-secondary: #4b5563;
+  --ah-text-muted: #8b919e;
+  --ah-text-faint: #b0b6c0;
+  --ah-shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --ah-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --ah-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+  --ah-shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.08), 0 2px 8px rgba(0, 0, 0, 0.04);
+  --ah-shadow-accent: 0 4px 16px rgba(0, 82, 224, 0.12), 0 1px 4px rgba(0, 82, 224, 0.06);
+  --ah-radius-sm: 8px;
+  --ah-radius-md: 12px;
+  --ah-radius-lg: 16px;
+  --ah-radius-pill: 999px;
+  --ah-transition-fast: 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  --ah-transition-medium: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  --ah-gradient-accent: linear-gradient(135deg, #0052e0, #6366f1);
+  --ah-gradient-surface: linear-gradient(180deg, #fafbfc 0%, #ffffff 100%);
+}
+
+/* ── Stat cards ────────────────────────────────────────────────────────────────── */
 .aihub_stat_grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 14px;
-  margin-bottom: 20px;
+  gap: 16px;
+  margin-bottom: 24px;
 }
 
 .aihub_stat_card {
   display: flex;
   align-items: center;
-  gap: 14px;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  padding: 18px 20px;
-  transition: box-shadow 0.15s;
+  gap: 16px;
+  background: var(--ah-surface);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-lg);
+  padding: 20px 22px;
+  transition: all var(--ah-transition-medium);
+  box-shadow: var(--ah-shadow-xs);
+  position: relative;
+  overflow: hidden;
+}
+/* Animated shimmer placeholder for loading numbers */
+@keyframes aihub_shimmer_sweep {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+.aihub_shimmer_block {
+  display: inline-block;
+  border-radius: 6px;
+  background: linear-gradient(90deg, #e2e5ea 25%, #f0f1f3 50%, #e2e5ea 75%);
+  background-size: 200% 100%;
+  animation: aihub_shimmer_sweep 1.5s ease-in-out infinite;
+}
+
+/* Subtle top-edge gradient accent line */
+.aihub_stat_card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--ah-gradient-accent);
+  opacity: 0;
+  transition: opacity var(--ah-transition-medium);
 }
 .aihub_stat_card:hover {
-  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  box-shadow: var(--ah-shadow-md);
+  transform: translateY(-1px);
+}
+.aihub_stat_card:hover::before {
+  opacity: 1;
 }
 .aihub_stat_card_clickable {
-  transition: box-shadow 0.15s, border-color 0.15s;
+  transition: all var(--ah-transition-medium);
+  cursor: pointer;
 }
 .aihub_stat_card_clickable:hover {
-  border-color: #0044cc;
-  box-shadow: 0 2px 12px rgba(0,68,204,0.12);
+  border-color: var(--ah-accent);
+  box-shadow: var(--ah-shadow-accent);
+  transform: translateY(-2px);
 }
 
 .aihub_stat_icon {
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--ah-radius-md);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  transition: transform var(--ah-transition-medium);
+}
+.aihub_stat_card:hover .aihub_stat_icon {
+  transform: scale(1.08);
 }
 
 .aihub_stat_value {
-  font-size: 22px;
-  font-weight: 700;
-  color: #111827;
-  line-height: 1.2;
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--ah-text);
+  line-height: 1.1;
   text-align: left;
+  letter-spacing: -0.025em;
 }
 
 .aihub_stat_label {
   font-size: 12px;
-  color: #6b7280;
+  color: var(--ah-text-secondary);
   font-weight: 500;
-  /* .cf_main_content_place_main sets text-align:justify globally — without this,
-     a two-word label that wraps to a second line gets stretched, ugly
-     word-spacing on its last line. */
   text-align: left;
+  letter-spacing: 0.01em;
+  margin-top: 2px;
 }
 
 .aihub_stat_sub {
-  font-size: 10px;
-  color: #9ca3af;
-  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--ah-text-muted);
+  margin-top: 3px;
   text-align: left;
 }
 
-/* Section headers */
+/* ── Section headers ───────────────────────────────────────────────────────────── */
 .aihub_section_header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 14px;
+  margin-bottom: 16px;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
 }
 
 .aihub_section_title {
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 700;
-  color: #111827;
+  color: var(--ah-text);
   margin: 0;
+  letter-spacing: -0.015em;
 }
 
 .aihub_section_subtitle {
-  font-size: 12px;
-  color: #9ca3af;
-  margin: 2px 0 0;
+  font-size: 12.5px;
+  color: var(--ah-text-muted);
+  margin: 3px 0 0;
 }
 
-/* Cards */
+/* ── Cards ──────────────────────────────────────────────────────────────────────── */
 .aihub_card {
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  padding: 18px;
-  margin-bottom: 16px;
+  background: var(--ah-surface);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-lg);
+  padding: 22px;
+  margin-bottom: 18px;
+  box-shadow: var(--ah-shadow-xs);
+  transition: box-shadow var(--ah-transition-medium);
+}
+.aihub_card:hover {
+  box-shadow: var(--ah-shadow-sm);
 }
 
 /* Two column layout */
 .aihub_two_col {
   display: grid;
   grid-template-columns: 3fr 2fr;
-  gap: 16px;
-  margin-bottom: 16px;
+  gap: 18px;
+  margin-bottom: 18px;
 }
 @media (max-width: 900px) {
   .aihub_two_col { grid-template-columns: 1fr; }
 }
 
-/* Badge */
+/* ── Badge ──────────────────────────────────────────────────────────────────────── */
 .aihub_badge {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: var(--ah-radius-pill);
   font-size: 11px;
   font-weight: 600;
   border: 1px solid;
   white-space: nowrap;
+  letter-spacing: 0.01em;
+  line-height: 1.4;
 }
 
-/* Table */
+/* ── Table ──────────────────────────────────────────────────────────────────────── */
 .aihub_table_wrap {
   overflow-x: auto;
-  border-radius: 10px;
-  border: 1px solid #e5e7eb;
+  border-radius: var(--ah-radius-md);
+  border: 1px solid var(--ah-border);
+  box-shadow: var(--ah-shadow-xs);
 }
 
 .aihub_table {
@@ -143,96 +213,113 @@
 }
 
 .aihub_table thead tr {
-  background: #f9fafb;
-  border-bottom: 2px solid #e5e7eb;
+  background: linear-gradient(180deg, var(--ah-surface-raised) 0%, var(--ah-surface-sunken) 100%);
+  border-bottom: 2px solid var(--ah-border);
 }
 
 .aihub_table th {
   text-align: left;
-  padding: 10px 14px;
-  color: #6b7280;
+  padding: 11px 16px;
+  color: var(--ah-text-secondary);
   font-weight: 600;
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.05em;
   white-space: nowrap;
 }
 
 .aihub_table td {
-  padding: 10px 14px;
-  color: #374151;
-  border-bottom: 1px solid #f3f4f6;
+  padding: 12px 16px;
+  color: var(--ah-text-secondary);
+  border-bottom: 1px solid var(--ah-border-light);
 }
 
 .aihub_table tbody tr:last-child td {
   border-bottom: none;
 }
 
+.aihub_table tbody tr {
+  transition: background var(--ah-transition-fast);
+}
+
 .aihub_table tbody tr:hover {
-  background: #f9fafb;
+  background: var(--ah-accent-soft);
 }
 
 .aihub_table_empty {
   text-align: center;
-  padding: 40px !important;
-  color: #9ca3af;
+  padding: 50px !important;
+  color: var(--ah-text-muted);
+  font-style: italic;
 }
 
-/* Text helpers */
+/* ── Text helpers ──────────────────────────────────────────────────────────────── */
 .aihub_text_primary {
   font-weight: 600;
-  color: #111827;
+  color: var(--ah-text);
 }
 
 .aihub_text_muted {
   font-size: 12px;
-  color: #9ca3af;
+  color: var(--ah-text-muted);
 }
 
 .aihub_text_mono {
-  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
-  color: #6b7280;
+  color: var(--ah-text-secondary);
+  background: var(--ah-surface-sunken);
+  padding: 1px 5px;
+  border-radius: 4px;
 }
 
-/* Search box */
+/* ── Search box ────────────────────────────────────────────────────────────────── */
 .aihub_search_box {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #fff;
-  color: #9ca3af;
+  gap: 8px;
+  padding: 7px 14px;
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-text-muted);
+  transition: all var(--ah-transition-fast);
+  box-shadow: var(--ah-shadow-xs);
+}
+.aihub_search_box:focus-within {
+  border-color: var(--ah-accent);
+  box-shadow: 0 0 0 3px var(--ah-accent-glow);
 }
 
 .aihub_search_box input {
   border: none;
   outline: none;
   font-size: 13px;
-  color: #374151;
+  color: var(--ah-text);
   background: transparent;
-  width: 180px;
+  width: 200px;
   font-family: inherit;
 }
+.aihub_search_box input::placeholder {
+  color: var(--ah-text-faint);
+}
 
-/* Bar chart */
+/* ── Bar chart ─────────────────────────────────────────────────────────────────── */
 .aihub_bar_chart {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .aihub_bar_row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 
 .aihub_bar_label {
   font-size: 12px;
-  color: #374151;
+  color: var(--ah-text-secondary);
   width: 120px;
   flex-shrink: 0;
   text-overflow: ellipsis;
@@ -242,153 +329,185 @@
 
 .aihub_bar_track {
   flex: 1;
-  height: 8px;
-  background: #f3f4f6;
-  border-radius: 4px;
+  height: 10px;
+  background: var(--ah-surface-sunken);
+  border-radius: 5px;
   overflow: hidden;
 }
 
 .aihub_bar_fill {
   height: 100%;
-  background: linear-gradient(90deg, #0044cc, #6366f1);
-  border-radius: 4px;
-  transition: width 0.3s ease;
+  background: var(--ah-gradient-accent);
+  border-radius: 5px;
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .aihub_bar_value {
   font-size: 12px;
-  font-weight: 600;
-  color: #374151;
+  font-weight: 700;
+  color: var(--ah-text);
   min-width: 40px;
   text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
-/* Loading / Error / Empty */
+/* ── Loading / Error / Empty ───────────────────────────────────────────────────── */
 .aihub_loading {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 60px;
-  color: #9ca3af;
+  gap: 10px;
+  padding: 80px;
+  color: var(--ah-text-muted);
   font-size: 14px;
+  font-weight: 500;
 }
 
 .aihub_spin {
-  animation: aihub_rotate 1s linear infinite;
+  animation: aihub_rotate 0.8s linear infinite;
 }
 @keyframes aihub_rotate { to { transform: rotate(360deg); } }
+
+/* Shimmer animation for loading states */
+@keyframes aihub_shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
 
 .aihub_error {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 20px;
-  background: #fef2f2;
+  gap: 10px;
+  padding: 20px 24px;
+  background: linear-gradient(135deg, #fef2f2 0%, #fff5f5 100%);
   border: 1px solid #fecaca;
-  border-radius: 10px;
+  border-radius: var(--ah-radius-md);
   color: #dc2626;
   font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 2px 8px rgba(220, 38, 38, 0.06);
 }
 
-/* Filter buttons (Tools catalog status tabs) */
+/* ── Filter buttons ────────────────────────────────────────────────────────────── */
 .aihub_filter_btn {
-  padding: 5px 14px;
-  border-radius: 6px;
-  border: 1px solid #e5e7eb;
-  background: #fff;
-  color: #6b7280;
+  padding: 6px 16px;
+  border-radius: var(--ah-radius-pill);
+  border: 1px solid var(--ah-border);
+  background: var(--ah-surface);
+  color: var(--ah-text-secondary);
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
   font-family: inherit;
   text-transform: capitalize;
-  transition: all 0.15s;
+  transition: all var(--ah-transition-fast);
+  box-shadow: var(--ah-shadow-xs);
 }
 .aihub_filter_btn:hover {
-  background: #f3f4f6;
-  color: #374151;
+  background: var(--ah-surface-sunken);
+  color: var(--ah-text);
+  border-color: #d0d5dd;
+  transform: translateY(-1px);
 }
 .aihub_filter_btn.active {
-  background: #0044cc;
+  background: var(--ah-gradient-accent);
   color: #fff;
-  border-color: #0044cc;
+  border-color: transparent;
+  box-shadow: var(--ah-shadow-accent);
 }
 
-/* View / Open button (DLP content preview) */
+/* ── View button ───────────────────────────────────────────────────────────────── */
 .aihub_view_btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 8px;
-  border: 1px solid #c7d6f5;
-  border-radius: 6px;
-  background: #f3f7ff;
-  color: #0044cc;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid rgba(0, 82, 224, 0.25);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-accent-soft);
+  color: var(--ah-accent);
   font-size: 12px;
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--ah-transition-fast);
 }
-.aihub_view_btn:hover { background: #0044cc; color: #fff; border-color: #0044cc; }
+.aihub_view_btn:hover {
+  background: var(--ah-accent);
+  color: #fff;
+  border-color: var(--ah-accent);
+  box-shadow: var(--ah-shadow-accent);
+  transform: translateY(-1px);
+}
 
-/* DLP content drawer */
+/* ── DLP content drawer ────────────────────────────────────────────────────────── */
 .aihub_drawer_overlay {
   position: fixed;
   inset: 0;
   z-index: 1000;
   display: flex;
   justify-content: flex-end;
-  background: rgba(15, 23, 42, 0.4);
-  backdrop-filter: blur(2px);
+  background: rgba(15, 23, 42, 0.5);
+  backdrop-filter: blur(4px);
+  animation: aihub_fade_in 0.2s ease-out;
+}
+@keyframes aihub_fade_in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 .aihub_drawer {
   position: relative;
   width: 100%;
-  max-width: 640px;
+  max-width: 680px;
   height: 100%;
-  background: #fff;
-  box-shadow: -8px 0 30px rgba(0, 0, 0, 0.15);
+  background: var(--ah-surface);
+  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.18);
   display: flex;
   flex-direction: column;
+  animation: aihub_slide_in 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+@keyframes aihub_slide_in {
+  from { transform: translateX(40px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
 }
 .aihub_drawer_head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  padding: 16px 20px;
-  border-bottom: 1px solid #e5e7eb;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--ah-border);
+  background: var(--ah-surface-raised);
 }
-.aihub_drawer_title { font-size: 14px; font-weight: 600; color: #111827; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.aihub_drawer_sub { font-size: 12px; color: #6b7280; margin-top: 2px; }
+.aihub_drawer_title { font-size: 15px; font-weight: 700; color: var(--ah-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aihub_drawer_sub { font-size: 12px; color: var(--ah-text-muted); margin-top: 3px; }
 .aihub_drawer_close {
   flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: #6b7280;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-text-muted);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  transition: all var(--ah-transition-fast);
 }
-.aihub_drawer_close:hover { background: #f3f4f6; color: #111827; }
+.aihub_drawer_close:hover { background: var(--ah-surface-sunken); color: var(--ah-text); border-color: #d0d5dd; }
 .aihub_drawer_body { flex: 1; overflow: auto; }
 .aihub_content_pre {
   font-size: 12.5px;
-  line-height: 1.6;
+  line-height: 1.7;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  color: #1f2937;
+  color: var(--ah-text);
   white-space: pre-wrap;
   word-break: break-word;
-  background: #f9fafb;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  padding: 16px;
+  background: var(--ah-surface-sunken);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+  padding: 18px;
   margin: 0;
 }
 .aihub_content_mark {
@@ -396,98 +515,106 @@
   color: #991b1b;
   box-shadow: 0 0 0 1px #fca5a5;
   border-radius: 3px;
-  padding: 0 2px;
+  padding: 1px 3px;
+  font-weight: 600;
 }
 .aihub_dl_btn {
-  margin-top: 16px;
+  margin-top: 18px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 0 16px;
-  height: 36px;
-  border-radius: 6px;
-  background: #0044cc;
+  padding: 0 18px;
+  height: 38px;
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-accent);
   color: #fff;
   font-size: 13px;
   font-weight: 600;
   text-decoration: none;
+  transition: all var(--ah-transition-fast);
+  box-shadow: var(--ah-shadow-sm);
 }
-.aihub_dl_btn:hover { background: #0037a6; }
+.aihub_dl_btn:hover { background: var(--ah-accent-hover); transform: translateY(-1px); box-shadow: var(--ah-shadow-accent); }
 
 .aihub_empty {
   text-align: center;
-  padding: 50px 20px;
-  color: #9ca3af;
+  padding: 60px 24px;
+  color: var(--ah-text-muted);
 }
 .aihub_empty h4 {
-  font-size: 16px;
-  font-weight: 600;
-  color: #6b7280;
-  margin: 12px 0 6px;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--ah-text-secondary);
+  margin: 14px 0 8px;
 }
 .aihub_empty p {
   font-size: 13px;
-  max-width: 400px;
+  max-width: 420px;
   margin: 0 auto;
-  line-height: 1.6;
+  line-height: 1.65;
+  color: var(--ah-text-muted);
 }
 
-/* ── Session Replay ───────────────────────────────────────────────────────── */
+/* ── Session Replay ───────────────────────────────────────────────────────────── */
 
-/* Filter bar (service / date range / severity) */
 .aihub_filter_bar {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
   gap: 16px;
-  margin-bottom: 14px;
+  margin-bottom: 16px;
 }
 .aihub_filter_group {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
 }
 .aihub_filter_label {
   font-size: 11px;
   font-weight: 600;
-  color: #6b7280;
+  color: var(--ah-text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.05em;
 }
 .aihub_select {
-  height: 30px;
-  min-width: 160px;
-  padding: 0 8px;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  background: #fff;
-  color: #374151;
+  height: 32px;
+  min-width: 170px;
+  padding: 0 10px;
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-text);
   font-size: 12px;
   font-family: inherit;
   cursor: pointer;
+  box-shadow: var(--ah-shadow-xs);
+  transition: all var(--ah-transition-fast);
 }
+.aihub_select:hover { border-color: #d0d5dd; }
 .aihub_select:focus-visible {
-  outline: 2px solid #0044cc;
-  outline-offset: 1px;
+  outline: none;
+  border-color: var(--ah-accent);
+  box-shadow: 0 0 0 3px var(--ah-accent-glow);
 }
 
 .aihub_back_btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  background: #fff;
-  color: #374151;
+  gap: 7px;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-text-secondary);
   font-size: 12px;
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--ah-transition-fast);
+  box-shadow: var(--ah-shadow-xs);
 }
-.aihub_back_btn:hover { background: #f3f4f6; color: #111827; }
+.aihub_back_btn:hover { background: var(--ah-surface-sunken); color: var(--ah-text); transform: translateX(-2px); }
 
 /* Session metadata header */
 .aihub_replay_meta {
@@ -498,15 +625,15 @@
 .aihub_replay_meta_label {
   font-size: 11px;
   font-weight: 600;
-  color: #9ca3af;
+  color: var(--ah-text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.05em;
   margin-bottom: 4px;
 }
 .aihub_replay_ids {
   margin-top: 14px;
   padding-top: 12px;
-  border-top: 1px solid #f3f4f6;
+  border-top: 1px solid var(--ah-border-light);
   font-size: 11px;
   word-break: break-all;
 }
@@ -515,7 +642,7 @@
 .aihub_transcript {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 .aihub_msg_row { display: flex; }
 .aihub_msg_row.user { justify-content: flex-end; }
@@ -523,36 +650,39 @@
 .aihub_msg_bubble {
   max-width: 78%;
   min-width: 260px;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  padding: 10px 12px;
-  background: #fff;
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+  padding: 12px 14px;
+  background: var(--ah-surface);
+  transition: all var(--ah-transition-fast);
+  box-shadow: var(--ah-shadow-xs);
 }
 .aihub_msg_bubble.user {
-  background: #f3f7ff;
-  border-color: #c7d6f5;
+  background: linear-gradient(135deg, #eff4ff, #f3f7ff);
+  border-color: rgba(0, 82, 224, 0.2);
 }
 .aihub_msg_bubble.assistant {
-  background: #f9fafb;
-  border-color: #e5e7eb;
+  background: var(--ah-surface-raised);
+  border-color: var(--ah-border);
 }
 .aihub_msg_head {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  color: #6b7280;
+  color: var(--ah-text-muted);
 }
 .aihub_msg_who {
   font-size: 12px;
-  font-weight: 600;
-  color: #374151;
+  font-weight: 700;
+  color: var(--ah-text);
 }
 .aihub_msg_time {
   font-size: 11px;
-  color: #9ca3af;
+  color: var(--ah-text-faint);
   margin-left: auto;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 .aihub_msg_chips {
   display: flex;
@@ -570,23 +700,24 @@
 }
 .aihub_msg_content {
   margin-top: 10px;
-  border-top: 1px solid #e5e7eb;
-  padding-top: 4px;
+  border-top: 1px solid var(--ah-border-light);
+  padding-top: 6px;
 }
 
-/* Enforcement / decision events — a system note, not conversation content */
+/* Enforcement / decision events */
 .aihub_sys_note {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
-  padding: 6px 10px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
   font-size: 12px;
   margin: 0 auto;
   width: 100%;
   max-width: 92%;
+  background: var(--ah-surface-raised);
 }
 
 @media (max-width: 900px) {
@@ -594,29 +725,20 @@
   .aihub_sys_note { max-width: 100%; }
 }
 
-/* ── Video session recording ───────────────────────────────────────────────── */
+/* ── Video session recording ──────────────────────────────────────────────────── */
 
-/* Player column + transcript side by side. The video card sticks to the top of
-   the scroll container so it stays visible while the transcript scrolls. */
 .aihub_replay_split {
   display: grid;
-  /* Wide enough that rrweb-player's own control bar (timestamps + speed
-     buttons) doesn't clip — 420px was sized for the old video thumbnail and
-     is too narrow for the interactive DOM replay's controls. */
   grid-template-columns: minmax(360px, 720px) minmax(0, 1fr);
-  gap: 16px;
+  gap: 18px;
   align-items: start;
 }
 .aihub_replay_video_col { position: sticky; top: 0; z-index: 2; }
 @media (max-width: 1100px) {
   .aihub_replay_split { grid-template-columns: 1fr; }
-  /* Stacked: pinning a full-width video would eat the viewport. */
   .aihub_replay_video_col { position: static; }
 }
 
-/* Maximized: replay takes the full row, transcript hides rather than
-   shrinking to nothing. The player re-sizes itself (ResizeObserver in
-   ReplayPlayer), so this is a pure CSS toggle. */
 .aihub_replay_split.aihub_replay_split_max {
   grid-template-columns: 1fr;
 }
@@ -627,26 +749,22 @@
 .aihub_replay_maximize_btn {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  margin-bottom: 8px;
-  padding: 4px 10px;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  background: #fff;
-  color: #374151;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding: 5px 12px;
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-text-secondary);
   font-size: 12px;
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
+  transition: all var(--ah-transition-fast);
+  box-shadow: var(--ah-shadow-xs);
 }
-.aihub_replay_maximize_btn:hover { background: #f9fafb; }
+.aihub_replay_maximize_btn:hover { background: var(--ah-surface-sunken); transform: translateY(-1px); }
 
-/* The CSP-isolated iframe rrwebHost.js mounts the player into. Iframes do not
-   stretch to their container's width like a block <div> — with no rule here
-   it renders at the browser's default 300px, clipping the wider content the
-   player is actually sized to (ReplayPlayer's ResizeObserver reads THIS
-   element's clientWidth, so this rule is what makes that measurement mean
-   anything). setHeight() is set inline by JS per-recording; width stays 100%. */
 .aihub_replay_host {
   display: block;
   width: 100%;
@@ -659,125 +777,124 @@
   display: block;
   width: 100%;
   max-height: 60vh;
-  border-radius: 8px;
+  border-radius: var(--ah-radius-md);
   background: #111827;
   outline: none;
 }
-.aihub_rec_video:focus-visible { outline: 2px solid #0044cc; outline-offset: 2px; }
+.aihub_rec_video:focus-visible { outline: 2px solid var(--ah-accent); outline-offset: 2px; }
 
 .aihub_rec_tabs {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 .aihub_rec_meta {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 12px 16px;
-  margin-top: 12px;
+  margin-top: 14px;
 }
 .aihub_rec_hint {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 10px;
+  margin-top: 12px;
   font-size: 11px;
-  color: #6b7280;
+  color: var(--ah-text-muted);
 }
-/* Retention already deleted the media — say so instead of a broken player. */
 .aihub_rec_gone {
   display: flex;
   flex-direction: column;
   align-items: center;
   text-align: center;
-  gap: 4px;
-  padding: 28px 16px;
-  border: 1px dashed #e5e7eb;
-  border-radius: 8px;
-  background: #f9fafb;
-  color: #9ca3af;
+  gap: 6px;
+  padding: 32px 20px;
+  border: 1px dashed var(--ah-border);
+  border-radius: var(--ah-radius-md);
+  background: var(--ah-surface-raised);
+  color: var(--ah-text-muted);
 }
-.aihub_rec_gone_title { font-size: 13px; font-weight: 600; color: #374151; }
-.aihub_rec_gone p { margin: 0; font-size: 12px; max-width: 320px; }
+.aihub_rec_gone_title { font-size: 14px; font-weight: 700; color: var(--ah-text-secondary); }
+.aihub_rec_gone p { margin: 0; font-size: 12px; max-width: 340px; }
 
-/* Forensic export link — deliberately understated; this is not the play path. */
-.aihub_rec_dl { color: #0044cc; font-weight: 600; text-decoration: none; }
-.aihub_rec_dl:hover { text-decoration: underline; }
+.aihub_rec_dl { color: var(--ah-accent); font-weight: 600; text-decoration: none; transition: color var(--ah-transition-fast); }
+.aihub_rec_dl:hover { text-decoration: underline; color: var(--ah-accent-hover); }
 
-/* One-line note for sessions the server confirms have no recording. */
 .aihub_rec_none {
   display: flex;
   align-items: center;
   gap: 6px;
   margin-bottom: 12px;
   font-size: 11px;
-  color: #9ca3af;
+  color: var(--ah-text-muted);
 }
 
-/* A turn that maps to a moment in the active clip. */
 .aihub_seekable { cursor: pointer; }
-.aihub_msg_bubble.aihub_seekable:hover { border-color: #93b4f0; }
+.aihub_msg_bubble.aihub_seekable:hover { border-color: rgba(0, 82, 224, 0.35); box-shadow: var(--ah-shadow-sm); }
 .aihub_jump_btn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 1px 7px;
-  border: 1px solid #c7d6f5;
-  border-radius: 5px;
-  background: #f3f7ff;
-  color: #0044cc;
+  padding: 2px 8px;
+  border: 1px solid rgba(0, 82, 224, 0.25);
+  border-radius: 6px;
+  background: var(--ah-accent-soft);
+  color: var(--ah-accent);
   font-size: 11px;
   font-weight: 600;
   font-family: inherit;
   font-variant-numeric: tabular-nums;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--ah-transition-fast);
 }
-.aihub_jump_btn:hover { background: #e3ecff; }
-.aihub_jump_btn:focus-visible { outline: 2px solid #0044cc; outline-offset: 1px; }
+.aihub_jump_btn:hover { background: rgba(0, 82, 224, 0.15); }
+.aihub_jump_btn:focus-visible { outline: 2px solid var(--ah-accent); outline-offset: 1px; }
 
-/* Applied imperatively by the playback-sync effect, not by React state. */
 .aihub_msg_row.aihub_msg_synced .aihub_msg_bubble,
 .aihub_sys_note.aihub_msg_synced {
-  border-color: #0044cc;
-  box-shadow: 0 0 0 3px rgba(0, 68, 204, 0.14);
+  border-color: var(--ah-accent);
+  box-shadow: 0 0 0 3px var(--ah-accent-glow);
 }
 
-/* Primary / destructive action buttons (Policy Packs deploy, undeploy, accept).
-   Previously these reused .ag_btn_primary from Agent Governance, which this
-   stylesheet does not define — the button rendered unstyled and was invisible
-   against the white table row. */
+/* ── Action buttons ────────────────────────────────────────────────────────────── */
 .aihub_action_btn {
-  padding: 5px 14px;
-  border-radius: 6px;
-  border: 1px solid #0044cc;
-  background: #0044cc;
+  padding: 6px 16px;
+  border-radius: var(--ah-radius-sm);
+  border: 1px solid var(--ah-accent);
+  background: var(--ah-accent);
   color: #fff;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   font-family: inherit;
   white-space: nowrap;
-  transition: all 0.15s;
+  transition: all var(--ah-transition-fast);
+  box-shadow: var(--ah-shadow-sm);
 }
 .aihub_action_btn:hover:not(:disabled) {
-  background: #0037a6;
-  border-color: #0037a6;
+  background: var(--ah-accent-hover);
+  border-color: var(--ah-accent-hover);
+  transform: translateY(-1px);
+  box-shadow: var(--ah-shadow-accent);
+}
+.aihub_action_btn:active:not(:disabled) {
+  transform: translateY(0);
 }
 .aihub_action_btn:disabled {
-  opacity: 0.55;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
 .aihub_action_btn.danger {
-  background: #fff;
+  background: var(--ah-surface);
   color: #b91c1c;
   border-color: #fecaca;
 }
 .aihub_action_btn.danger:hover:not(:disabled) {
   background: #fef2f2;
   border-color: #f87171;
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.1);
 }
 
 .aihub_action_btn.warn {
@@ -789,86 +906,75 @@
   border-color: #92400e;
 }
 
-/* ── Group tabs (AI Hub top-level screens) ─────────────────────────────────────
-   Colours are literal, not var(--ag-*): those variables are declared on
-   .ag_page_container, so outside Agent Governance they resolve to nothing and the
-   whole declaration is dropped — a border defined that way renders as no border. */
+/* ── Group tabs (top-level screens) ────────────────────────────────────────────── */
 .aihub_group_tabs {
   display: flex;
   flex-wrap: wrap;
   gap: 0;
-  border-bottom: 1px solid #e5e7eb;
-  margin-bottom: 14px;
+  border-bottom: 2px solid var(--ah-border-light);
+  margin-bottom: 18px;
+  position: relative;
 }
 .aihub_group_tab {
-  padding: 9px 16px;
+  padding: 10px 20px;
   border: none;
   background: none;
   border-bottom: 2px solid transparent;
-  color: #6b7280;
+  margin-bottom: -2px;
+  color: var(--ah-text-muted);
   font-size: 13px;
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
   white-space: nowrap;
-  transition: all 0.15s;
+  transition: all var(--ah-transition-fast);
+  position: relative;
 }
-.aihub_group_tab:hover { color: #111827; }
+.aihub_group_tab:hover {
+  color: var(--ah-text);
+  background: var(--ah-surface-raised);
+  border-radius: var(--ah-radius-sm) var(--ah-radius-sm) 0 0;
+}
 .aihub_group_tab.active {
-  color: #0044cc;
-  border-bottom-color: #0044cc;
-  font-weight: 600;
+  color: var(--ah-accent);
+  border-bottom-color: var(--ah-accent);
+  font-weight: 700;
 }
-.aihub_group_tab:focus-visible { outline: 2px solid #0044cc; outline-offset: -2px; }
+.aihub_group_tab:focus-visible { outline: 2px solid var(--ah-accent); outline-offset: -2px; }
 
 .aihub_group_hint {
-  margin: 0 0 16px;
-  font-size: 12px;
-  color: #6b7280;
+  margin: 0 0 18px;
+  font-size: 13px;
+  color: var(--ah-text-muted);
   max-width: 760px;
+  line-height: 1.5;
 }
 
-/* Narrow viewports: let the tab strip scroll rather than wrap into two rows that
-   push the content down and hide the active underline. */
 @media (max-width: 720px) {
   .aihub_group_tabs { flex-wrap: nowrap; overflow-x: auto; }
 }
 
-/* ── Overview screen ───────────────────────────────────────────────────────────
-   Colours are the literal status hexes already used by SanctionBadge /
-   SeverityBadge / RiskBadge in AIHubPage.jsx (#22c55e #f59e0b #ef4444 #3b82f6
-   #9ca3af) plus the #0044cc accent — nothing new is invented here. */
+/* ── Overview screen ──────────────────────────────────────────────────────────── */
 
-/* One endpoint failed but the screen still renders: say which, never blank. */
 .aihub_ov_warn {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 9px 14px;
-  margin-bottom: 14px;
-  border-radius: 8px;
-  background: #fffbeb;
+  gap: 10px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border-radius: var(--ah-radius-sm);
+  background: linear-gradient(135deg, #fffbeb 0%, #fefce8 100%);
   border: 1px solid #fde68a;
   color: #92400e;
-  font-size: 12.5px;
+  font-size: 13px;
+  font-weight: 500;
 }
 
-/* Charts left, "needs attention" rail right. */
-/* Six equal overview cards.
- *
- * Was minmax(0,2fr) / minmax(280px,1fr) — a wide main column of four cards beside a
- * narrow side column of two, so no two cards shared a width and the two columns'
- * rows never lined up. Three equal columns fixes the width; grid-auto-rows: 1fr
- * plus stretch fixes the height, making every row as tall as its tallest card so
- * all six render identically.
- *
- * min-height keeps a sparse card (Quick links, or Needs attention with nothing
- * outstanding) from collapsing and dragging its whole row short. */
 .aihub_ov_grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   grid-auto-rows: 1fr;
-  gap: 16px;
+  gap: 18px;
   align-items: stretch;
 }
 .aihub_ov_grid > * {
@@ -883,243 +989,286 @@
   .aihub_ov_grid { grid-template-columns: 1fr; }
 }
 
-/* Even 2-up row — .aihub_two_col is 3fr/2fr, these cards are peers. */
 .aihub_two_even {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+  gap: 18px;
 }
 @media (max-width: 760px) {
   .aihub_two_even { grid-template-columns: 1fr; }
 }
 
-/* Whole-card click target. */
+/* Clickable card — premium hover effect */
 .aihub_card_click {
   cursor: pointer;
-  transition: box-shadow 0.15s, border-color 0.15s;
+  transition: all var(--ah-transition-medium);
 }
 .aihub_card_click:hover {
-  border-color: #0044cc;
-  box-shadow: 0 2px 12px rgba(0, 68, 204, 0.12);
+  border-color: var(--ah-accent);
+  box-shadow: var(--ah-shadow-accent);
+  transform: translateY(-2px);
+}
+.aihub_card_click:active {
+  transform: translateY(0);
 }
 .aihub_card_click:focus-visible {
-  outline: 2px solid #0044cc;
+  outline: 2px solid var(--ah-accent);
   outline-offset: 2px;
 }
 
-/* Governance items banner — two clickable counts side by side. */
+/* Governance items banner */
 .aihub_gov_banner {
   display: flex;
   align-items: stretch;
   flex-wrap: wrap;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
+  background: var(--ah-surface);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-lg);
   padding: 6px;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
+  box-shadow: var(--ah-shadow-xs);
 }
 .aihub_gov_stat {
   flex: 1 1 220px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
+  gap: 10px;
+  padding: 12px 16px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--ah-radius-md);
   background: none;
   font-family: inherit;
   text-align: left;
   cursor: pointer;
-  color: #9ca3af;
-  transition: background 0.15s;
+  color: var(--ah-text-muted);
+  transition: all var(--ah-transition-fast);
 }
-.aihub_gov_stat:hover { background: #f3f7ff; }
-.aihub_gov_stat:hover .aihub_gov_txt { color: #0044cc; }
-.aihub_gov_stat:focus-visible { outline: 2px solid #0044cc; outline-offset: -2px; }
+.aihub_gov_stat:hover { background: var(--ah-accent-soft); }
+.aihub_gov_stat:hover .aihub_gov_txt { color: var(--ah-accent); }
+.aihub_gov_stat:focus-visible { outline: 2px solid var(--ah-accent); outline-offset: -2px; }
 .aihub_gov_num {
-  font-size: 20px;
-  font-weight: 700;
-  color: #111827;
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--ah-text);
   line-height: 1;
+  letter-spacing: -0.02em;
 }
 .aihub_gov_txt {
-  font-size: 12.5px;
-  color: #6b7280;
+  font-size: 13px;
+  color: var(--ah-text-secondary);
   font-weight: 500;
 }
 .aihub_gov_div {
   width: 1px;
-  background: #e5e7eb;
+  background: var(--ah-border);
   margin: 6px 0;
   flex: 0 0 1px;
 }
 
-/* Donut cards: headline total, then a ring with an empty centre. */
+/* Donut cards */
 .aihub_chart_total {
-  font-size: 26px;
-  font-weight: 700;
-  color: #0044cc;
+  font-size: 28px;
+  font-weight: 800;
+  background: var(--ah-gradient-accent);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
   line-height: 1.1;
+  letter-spacing: -0.03em;
 }
 .aihub_chart_total_label {
   font-size: 11px;
-  color: #9ca3af;
+  color: var(--ah-text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-bottom: 10px;
+  letter-spacing: 0.06em;
+  margin-bottom: 12px;
+  font-weight: 600;
 }
 .aihub_donut_wrap {
   display: flex;
   align-items: center;
-  gap: 18px;
+  gap: 20px;
   flex-wrap: wrap;
 }
-.aihub_donut { flex-shrink: 0; }
+.aihub_donut {
+  flex-shrink: 0;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.08));
+}
 
-/* Legend: swatch + label only, no counts (the detail page owns the breakdown). */
+/* Legend */
 .aihub_legend {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 8px;
   min-width: 0;
 }
 .aihub_legend li {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   font-size: 12.5px;
-  color: #374151;
+  color: var(--ah-text-secondary);
+  font-weight: 500;
 }
 .aihub_legend_dot {
   width: 10px;
   height: 10px;
   border-radius: 3px;
   flex-shrink: 0;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
 }
 
-/* Agent autonomy — one segmented bar. */
+/* Agent autonomy — segmented bar */
 .aihub_seg_bar {
   display: flex;
-  height: 22px;
-  border-radius: 6px;
+  height: 26px;
+  border-radius: var(--ah-radius-sm);
   overflow: hidden;
-  background: #f3f4f6;
+  background: var(--ah-surface-sunken);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.06);
 }
-.aihub_seg { height: 100%; min-width: 3px; }
-.aihub_seg_empty { flex: 1; background: #f3f4f6; }
+.aihub_seg { height: 100%; min-width: 3px; transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1); }
+.aihub_seg_empty { flex: 1; background: var(--ah-surface-sunken); }
 .aihub_seg_legend {
   list-style: none;
-  margin: 12px 0 0;
+  margin: 14px 0 0;
   padding: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 16px;
+  gap: 8px 18px;
 }
 .aihub_seg_legend li {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   font-size: 12px;
-  color: #6b7280;
+  color: var(--ah-text-secondary);
 }
-.aihub_seg_legend strong { color: #111827; font-weight: 700; }
+.aihub_seg_legend strong { color: var(--ah-text); font-weight: 800; }
 
-/* Activity by severity — four soft-tinted chips. */
+/* Activity by severity chips */
 .aihub_sev_chips {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 12px;
 }
 .aihub_sev_chip {
   border: 1px solid;
-  border-radius: 10px;
-  padding: 10px 12px;
+  border-radius: var(--ah-radius-md);
+  padding: 14px 14px;
   text-align: center;
+  transition: all var(--ah-transition-fast);
+}
+.aihub_sev_chip:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--ah-shadow-sm);
 }
 .aihub_sev_num {
   display: block;
-  font-size: 20px;
-  font-weight: 700;
+  font-size: 22px;
+  font-weight: 800;
   line-height: 1.2;
+  letter-spacing: -0.02em;
 }
 .aihub_sev_label {
   font-size: 11px;
-  color: #6b7280;
+  color: var(--ah-text-secondary);
   text-transform: capitalize;
+  font-weight: 500;
+  margin-top: 2px;
+  display: block;
 }
 
-/* Needs attention list. */
+/* Needs attention list */
 .aihub_attn_list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 .aihub_attn_item {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 10px;
-  border: 1px solid #f3f4f6;
-  border-radius: 10px;
-  background: #fff;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--ah-border-light);
+  border-radius: var(--ah-radius-md);
+  background: var(--ah-surface);
   font-family: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: all var(--ah-transition-fast);
 }
-.aihub_attn_item:hover { background: #f9fafb; border-color: #e5e7eb; }
-.aihub_attn_item:focus-visible { outline: 2px solid #0044cc; outline-offset: -2px; }
+.aihub_attn_item:hover { background: var(--ah-surface-raised); border-color: var(--ah-border); transform: translateX(3px); }
+.aihub_attn_item:focus-visible { outline: 2px solid var(--ah-accent); outline-offset: -2px; }
 .aihub_attn_icon {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--ah-radius-sm);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
 }
-.aihub_attn_text { min-width: 0; display: flex; flex-direction: column; }
+.aihub_attn_text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .aihub_attn_label {
   font-size: 12.5px;
   font-weight: 600;
-  color: #111827;
+  color: var(--ah-text);
   text-transform: capitalize;
 }
-.aihub_attn_sub { font-size: 11px; color: #9ca3af; }
-.aihub_attn_chev { margin-left: auto; color: #9ca3af; flex-shrink: 0; }
+.aihub_attn_sub { font-size: 11px; color: var(--ah-text-muted); }
+.aihub_attn_chev { margin-left: auto; color: var(--ah-text-faint); flex-shrink: 0; transition: transform var(--ah-transition-fast); }
+.aihub_attn_item:hover .aihub_attn_chev { transform: translateX(3px); color: var(--ah-accent); }
 
-/* Quick links — static reference chips. */
+/* Quick links */
 .aihub_quick_links {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
 }
 .aihub_quick_link {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 11px;
-  border: 1px solid #e5e7eb;
-  border-radius: 999px;
-  background: #fff;
-  color: #374151;
+  gap: 6px;
+  padding: 7px 14px;
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-pill);
+  background: var(--ah-surface);
+  color: var(--ah-text-secondary);
   font-size: 12px;
   font-weight: 500;
   font-family: inherit;
   text-decoration: none;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--ah-transition-fast);
+  box-shadow: var(--ah-shadow-xs);
 }
 .aihub_quick_link:hover {
-  border-color: #0044cc;
-  color: #0044cc;
-  background: #f3f7ff;
+  border-color: var(--ah-accent);
+  color: var(--ah-accent);
+  background: var(--ah-accent-soft);
+  transform: translateY(-1px);
+  box-shadow: var(--ah-shadow-accent);
 }
-.aihub_quick_link:focus-visible { outline: 2px solid #0044cc; outline-offset: 1px; }
+.aihub_quick_link:focus-visible { outline: 2px solid var(--ah-accent); outline-offset: 1px; }
+
+/* ── Expanded row (table detail) ──────────────────────────────────────────────── */
+.aihub_expanded_row td {
+  border-bottom: 1px solid var(--ah-border-light) !important;
+}
+/* Build stamp — bottom-right of every AI Hub page, deliberately quiet. */
+.aihub_build_stamp {
+  margin: 20px 0 2px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--ah-text-muted);
+  font-variant-numeric: tabular-nums;
+  user-select: all;
+}

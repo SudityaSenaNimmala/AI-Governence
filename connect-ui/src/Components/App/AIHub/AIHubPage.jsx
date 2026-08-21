@@ -10,7 +10,8 @@ import {
   Monitor, Scan, AlertTriangle, Wrench, Server, Shield, Clock, ChevronRight,
   Search, RefreshCw, Activity, FileText, MessageSquare, Eye, Trash2, Plus, X,
   History, ArrowLeft, Bot, User, ShieldAlert, Film, PlayCircle, MonitorPlay,
-  Maximize2, Minimize2, Copy, Check, DollarSign, ExternalLink, Boxes,
+  Maximize2, Minimize2, Copy, Check, DollarSign, ExternalLink, Download, Boxes,
+  ChevronDown,
 } from "lucide-react";
 import { sanitizeReplayEvents } from "./replaySanitize";
 import { createReplayHost, applyReplayIframeCsp } from "./rrwebHost";
@@ -86,6 +87,146 @@ function traceCost(r) {
 // Only surface the severities that matter to a reviewer.
 const HI_CRIT = new Set(["critical", "high"]);
 function isHiCrit(sev) { return HI_CRIT.has(String(sev||"").toLowerCase()); }
+const SEV_RANK = { critical: 4, high: 3, medium: 2, low: 1 };
+function sevOf(e) { return e?.secret_class || e?.highest_severity || e?.severity || null; }
+function worstSev(events) {
+  let best = null;
+  for (const e of events) {
+    const s = sevOf(e);
+    if (s && (!best || (SEV_RANK[s] || 0) > (SEV_RANK[best] || 0))) best = s;
+  }
+  return best;
+}
+
+// ── Enforcement grouping ─────────────────────────────────────────────────────
+// One user action can emit several DLP events, and listing them flat makes the
+// table look like it repeats itself: a typed prompt and the block that stopped
+// it are two rows a few hundred ms apart, and a browser block plus the choice
+// the person made at the modal are two more. This folds each such set into ONE
+// row that states the OUTCOME, with the members still reachable by expanding —
+// nothing is hidden, and nothing is deleted from the audit trail.
+//
+// TWO JOINS, DELIBERATELY DIFFERENT IN CONFIDENCE:
+//
+//   EXACT — the browser extension stamps a correlation id on the block and
+//   echoes it as `decision_for` on whatever the user then chose
+//   (enforcement_decision / enforcement_redact). That is a real key, so the
+//   pairing is certain.
+//
+//   INFERRED — the OS monitor has no such id: its keystroke enforcer and its
+//   prompt capture are separate subsystems that never learn each other's event
+//   ids. So a prompt pairs with a block only on same machine + same service +
+//   within PAIR_WINDOW_MS + non-conflicting pattern, greedily nearest-first,
+//   each event used at most once. Measured against production data this pairs 43
+//   of 85 blocks; the remaining 42 have no prompt event to pair with and keep
+//   their own rows.
+//
+// ANYTHING NOT CONFIDENTLY PAIRED IS LEFT ALONE. On a DLP screen an invented
+// pairing — "this prompt was blocked" about a prompt that wasn't — is worse than
+// two honest rows. The real fix for the inferred half is a correlation id from
+// the agent's enforcer, which would make this join exact too.
+const PAIR_WINDOW_MS = 2000;
+// Block → the user's answer at the modal. Wide because it measures a HUMAN
+// deciding, not two subsystems reporting the same instant: observed 1.2s–25.9s
+// in production. Bounded by causal order and pattern agreement instead of time.
+const OUTCOME_WINDOW_MS = 30000;
+
+// Equal patterns, or one side recorded none. The OS monitor's prompt capture
+// sometimes stores an empty pattern list for an event its enforcer did flag
+// (seen 0–1ms apart in production data), so an empty side must not veto a pair
+// the timestamps make obvious.
+function patternsCompatible(a, b) {
+  const x = String(a||"").trim(), y = String(b||"").trim();
+  return !x || !y || x === y;
+}
+
+function groupMembers(row) { return [row, ...(row._children || [])]; }
+// The member whose captured text the View button should open. The prompt itself
+// is preferred over an enforcement event that merely echoed it.
+function contentMember(row) {
+  const ms = groupMembers(row).filter(e => e.has_content);
+  return ms.find(e => String(e.event_kind).startsWith("prompt_")) || ms[0] || null;
+}
+function groupPattern(row) {
+  const pats = new Set();
+  for (const e of groupMembers(row)) {
+    for (const p of String(e.pattern_matched||"").split(",")) if (p.trim()) pats.add(p.trim());
+  }
+  return [...pats].join(", ") || "—";
+}
+
+/** Fold paired events into single rows. Returns primaries with `_children`. */
+function groupDlpEvents(rows) {
+  const evs = [...(rows||[])].sort((a,b)=>new Date(b.occurred_at)-new Date(a.occurred_at));
+  const claimed = new Set();            // folded into another row
+  const children = new Map();           // primary id -> members
+  const exact = new Set();              // primaries joined on a real key
+  const addChild = (primary, child) => {
+    if (!children.has(primary.id)) children.set(primary.id, []);
+    children.get(primary.id).push(child);
+    claimed.add(child.id);
+  };
+
+  // EXACT — decision_for points at the block carrying that correlation id.
+  const blockByCorr = new Map();
+  for (const e of evs) {
+    const c = e.metadata?.correlation_id;
+    if (c && e.event_kind === "enforcement_block") blockByCorr.set(c, e);
+  }
+  for (const e of evs) {
+    const ref = e.metadata?.decision_for;
+    if (!ref) continue;
+    const block = blockByCorr.get(ref);
+    if (block && block.id !== e.id && !claimed.has(block.id)) { addChild(block, e); exact.add(block.id); }
+  }
+
+  // INFERRED, browser extension — an outcome whose block carries no correlation
+  // id, which is every event ingested before the server started persisting it.
+  // Pairs to the most recent PRECEDING block on the same machine and service
+  // with a compatible pattern. Safer than it looks: causal order is guaranteed
+  // (the modal cannot be answered before it opens), the pattern must agree, and
+  // each block is consumed once. The window is wide because the gap is a person
+  // deciding at a modal — measured at 1.2s to 25.9s across production data.
+  const OUTCOME_KINDS = new Set(["enforcement_decision","enforcement_redact","enforcement_override"]);
+  const extBlocks = evs.filter(e=>e.source==="browser_extension" && e.event_kind==="enforcement_block");
+  for (const o of evs) {
+    if (o.source !== "browser_extension" || !OUTCOME_KINDS.has(o.event_kind) || claimed.has(o.id)) continue;
+    let best = null;
+    for (const b of extBlocks) {
+      if (claimed.has(b.id) || children.has(b.id)) continue;
+      if (b.machine_id !== o.machine_id || b.ai_service !== o.ai_service) continue;
+      if (!patternsCompatible(o.pattern_matched, b.pattern_matched)) continue;
+      const dt = new Date(o.occurred_at) - new Date(b.occurred_at);
+      if (dt < 0 || dt > OUTCOME_WINDOW_MS) continue;
+      if (!best || dt < best.dt) best = { dt, b };
+    }
+    if (best) addChild(best.b, o);
+  }
+
+  // INFERRED — OS monitor prompt ↔ block, nearest pair first.
+  const osBlocks  = evs.filter(e=>e.source==="os_monitor" && e.event_kind==="enforcement_block" && !claimed.has(e.id));
+  const osPrompts = evs.filter(e=>e.source==="os_monitor" && String(e.event_kind).startsWith("prompt_") && !claimed.has(e.id));
+  const candidates = [];
+  for (const b of osBlocks) for (const p of osPrompts) {
+    if (p.machine_id !== b.machine_id || p.ai_service !== b.ai_service) continue;
+    if (!patternsCompatible(p.pattern_matched, b.pattern_matched)) continue;
+    const dt = Math.abs(new Date(p.occurred_at) - new Date(b.occurred_at));
+    if (dt > PAIR_WINDOW_MS) continue;
+    candidates.push({ dt, b, p });
+  }
+  candidates.sort((x,y)=>x.dt-y.dt);
+  const promptTaken = new Set();
+  for (const { b, p } of candidates) {
+    if (claimed.has(b.id) || promptTaken.has(p.id)) continue;
+    // The PROMPT leads: it carries the captured text (so View still works) and
+    // the higher severity. The block it triggered becomes its outcome.
+    addChild(p, b);
+    promptTaken.add(p.id);
+  }
+
+  return evs.filter(e=>!claimed.has(e.id))
+    .map(e=>({ ...e, _children: children.get(e.id) || [], _exact: exact.has(e.id) }));
+}
 // Prefer the resolved AI platform (e.g. "Gemini in Gmail" / Google) over the raw
 // request host (e.g. "mail.google.com"), which is what the OS monitor records.
 function ServiceCell({ row }) {
@@ -94,21 +235,92 @@ function ServiceCell({ row }) {
   return (<><div className="aihub_text_primary">{name}</div>{vendor && <div className="aihub_text_muted">{vendor}</div>}</>);
 }
 
+// WHO did it. Every activity row carries `user` (the OS username for the desktop
+// agent, the signed-in email for the browser extension) and `hostname`, resolved
+// server-side by attachMachineIdentity — a row's own stamp wins over the machine
+// lookup, so a shared device still names the right person. Access-request rows
+// carry an admin-curated `employee_name` on top of that and it wins.
+// Neither name nor host is guaranteed on a machine that was never enrolled, so
+// the machine id is the last resort: the row stays traceable instead of showing
+// a bare dash the admin can do nothing with.
+function UserCell({ row }) {
+  const name = row?.employee_name || row?.user || null;
+  const host = row?.hostname || null;
+  if (name) return (<><div className="aihub_text_primary">{name}</div>{host && host !== name && <div className="aihub_text_muted">{host}</div>}</>);
+  if (host) return <div className="aihub_text_primary">{host}</div>;
+  const mid = row?.machine_id;
+  return mid ? <Mono>{String(mid).slice(0,10)}</Mono> : <span className="aihub_text_muted">—</span>;
+}
+
+// When a row stands for more than one event, the control that reveals the rest.
+// Lives in the When cell: the Kind column it used to sit in is gone, and the
+// members it opens are all near-simultaneous, so time is where a reader looks.
+function GroupToggle({ row, open, onToggle }) {
+  const n = (row._children||[]).length;
+  if (!n) return null;
+  return (
+    <button onClick={e=>{e.stopPropagation();onToggle();}}
+      style={{display:"inline-flex",alignItems:"center",gap:2,marginTop:3,padding:0,border:"none",background:"none",
+        color:"#0044cc",fontSize:10,fontWeight:600,cursor:"pointer"}}>
+      {n+1} events {open ? <ChevronDown size={11}/> : <ChevronRight size={11}/>}
+    </button>
+  );
+}
+// The folded-away members, in the order they happened, so the sequence that
+// produced the outcome is legible: prompt → block → what the person chose.
+function GroupDetail({ row, onView }) {
+  const ms = [...groupMembers(row)].sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
+  return (<div style={{padding:"10px 14px"}}>
+    <div className="aihub_text_muted" style={{fontSize:11,fontWeight:600,marginBottom:6}}>
+      {row._exact ? "Events correlated by id" : "Events grouped by time, machine and pattern"}
+    </div>
+    <table className="aihub_table" style={{fontSize:11}}><tbody>
+      {ms.map(e=>(<tr key={e.id}>
+        <td style={{whiteSpace:"nowrap"}}>{new Date(e.occurred_at).toLocaleTimeString()}</td>
+        <td><Tag text={e.event_kind}/></td>
+        <td>{e.metadata?.decision || e.metadata?.mechanism || e.metadata?.blocked_for
+          ? <span className="aihub_text_muted">{String(e.metadata.decision||e.metadata.mechanism||e.metadata.blocked_for).replace(/_/g," ")}</span>
+          : <span className="aihub_text_muted">—</span>}
+          {/* WHICH file an attachment block was about. The cell above says what
+              was stopped ("file upload") but never which document, and a block
+              on an attachment is always about one specific file — desktop
+              attachment holds included. Appended rather than given its own
+              column so the folded-row layout above is untouched, and only
+              rendered when a filename exists, so prompt-only blocks look
+              exactly as they did. */}
+          {e.metadata?.filename && <> <Mono>{e.metadata.filename}</Mono></>}</td>
+        <td><Mono>{e.pattern_matched||"—"}</Mono></td>
+        <td><SeverityBadge sev={sevOf(e)}/></td>
+        <td style={{textAlign:"right"}}><ViewBtn has={e.has_content} onClick={()=>onView(e)}/></td>
+      </tr>))}
+    </tbody></table>
+  </div>);
+}
+
 // ── Shared UI ────────────────────────────────────────────────────────────────
-function StatCard({ icon, label, value, hint, color="#0044cc", onClick }) {
-  return (<div className={`aihub_stat_card${onClick?" aihub_stat_card_clickable":""}`} onClick={onClick} style={onClick?{cursor:"pointer"}:undefined}><div className="aihub_stat_icon" style={{background:color+"12",color}}>{icon}</div><div><div className="aihub_stat_value">{typeof value==="number"?value.toLocaleString():value}</div><div className="aihub_stat_label">{label}</div>{hint&&<div className="aihub_stat_sub">{hint}</div>}</div>{onClick&&<div style={{marginLeft:"auto",color:"#9ca3af",display:"flex",alignItems:"center"}}><ChevronRight size={16}/></div>}</div>);
+function StatCard({ icon, label, value, hint, color="#0052e0", onClick }) {
+  const loading = value === "…" || value === "..." || value == null;
+  return (<div className={`aihub_stat_card${onClick?" aihub_stat_card_clickable":""}`} onClick={onClick} style={onClick?{cursor:"pointer"}:undefined}>
+    <div className="aihub_stat_icon" style={{background:color+"14",color}}>{icon}</div>
+    <div style={{flex:1,minWidth:0}}>
+      <div className="aihub_stat_value">{loading?<span className="aihub_shimmer_block" style={{width:52,height:24,borderRadius:6}}/>:(typeof value==="number"?value.toLocaleString():value)}</div>
+      <div className="aihub_stat_label">{label}</div>
+      {hint&&<div className="aihub_stat_sub">{hint}</div>}
+    </div>
+    {onClick&&<div style={{marginLeft:"auto",color:"#b0b6c0",display:"flex",alignItems:"center",transition:"transform 0.2s"}}><ChevronRight size={16}/></div>}
+  </div>);
 }
 function SectionHeader({ title, hint, action }) {
   return (<div className="aihub_section_header"><div><h3 className="aihub_section_title">{title}</h3>{hint&&<p className="aihub_section_subtitle">{hint}</p>}</div>{action}</div>);
 }
 function Badge({ text, color="#6b7280" }) {
-  return <span className="aihub_badge" style={{background:color+"14",color,borderColor:color+"30"}}>{text}</span>;
+  return <span className="aihub_badge" style={{background:color+"12",color,borderColor:color+"25"}}>{text}</span>;
 }
 function RiskBadge({ score }) { if(score==null) return <span className="aihub_text_muted">—</span>; const c=score>=70?"#ef4444":score>=40?"#f59e0b":"#22c55e"; return <Badge text={score} color={c}/>; }
 function SanctionBadge({ status }) { const c={approved:"#22c55e",restricted:"#f59e0b",blocked:"#ef4444",unknown:"#9ca3af"}; return <Badge text={status||"unknown"} color={c[status]||c.unknown}/>; }
 function SeverityBadge({ sev }) { const c={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e"}; return <Badge text={sev||"—"} color={c[sev]||"#9ca3af"}/>; }
 function Mono({ children }) { return <span className="aihub_text_mono">{children}</span>; }
-function Tag({ text, color="#6366f1" }) { return <span style={{display:"inline-block",padding:"1px 6px",borderRadius:4,fontSize:10,fontWeight:600,background:color+"14",color,marginRight:3,marginBottom:2}}>{text}</span>; }
+function Tag({ text, color="#6366f1" }) { return <span style={{display:"inline-block",padding:"2px 8px",borderRadius:6,fontSize:10,fontWeight:600,background:color+"12",color,marginRight:4,marginBottom:2,letterSpacing:"0.02em"}}>{text}</span>; }
 function Loading() { return <div className="aihub_loading"><RefreshCw size={18} className="aihub_spin"/> Loading...</div>; }
 function Err({msg}) { return <div className="aihub_error"><AlertTriangle size={14}/> {msg}</div>; }
 function Empty({icon,title,msg}) { return <div className="aihub_empty">{icon}<h4>{title}</h4><p>{msg}</p></div>; }
@@ -144,26 +356,26 @@ function DataTable({ columns, rows, empty, onRow, renderExpanded, isExpanded, pa
     <div className="aihub_table_wrap"><table className="aihub_table"><thead><tr>{columns.map((c,i)=><th key={i} style={c.right?{textAlign:"right"}:undefined}>{c.label}</th>)}</tr></thead><tbody>{(!visibleRows.length)?<tr><td colSpan={columns.length} className="aihub_table_empty">{empty||"No data"}</td></tr>:visibleRows.map((r,i)=>{
     const open=isExpanded?.(r);
     return (<Fragment key={rowKey(r,i)}>
-      <tr onClick={()=>onRow?.(r)} style={{cursor:onRow?"pointer":"default",background:open?"#f3f7ff":undefined}}>
+      <tr onClick={()=>onRow?.(r)} style={{cursor:onRow?"pointer":"default",background:open?"rgba(0,82,224,0.04)":undefined}}>
         {columns.map((c,j)=><td key={j} style={c.right?{textAlign:"right"}:undefined}>{c.render?c.render(r):r[c.key]??"—"}</td>)}
       </tr>
-      {open&&renderExpanded&&<tr className="aihub_expanded_row"><td colSpan={columns.length} style={{padding:0,background:"#f9fafb"}}>{renderExpanded(r)}</td></tr>}
+      {open&&renderExpanded&&<tr className="aihub_expanded_row"><td colSpan={columns.length} style={{padding:0,background:"#f5f6f8"}}>{renderExpanded(r)}</td></tr>}
     </Fragment>);
   })}</tbody></table></div>
-    {(usePaging||paginate>0)&&<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 4px",fontSize:12,color:"#6b7280"}}>
-      <div style={{display:"flex",alignItems:"center",gap:6}}>
-        <span>{allRows.length} rows</span>
-        <select value={pageSize} onChange={e=>{setPageSize(Number(e.target.value));setPage(0);}} style={{padding:"3px 6px",border:"1px solid #e5e7eb",borderRadius:6,fontSize:11}}>
+    {(usePaging||paginate>0)&&<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 6px",fontSize:12,color:"#4b5563"}}>
+      <div style={{display:"flex",alignItems:"center",gap:8}}>
+        <span style={{fontWeight:500}}>{allRows.length.toLocaleString()} rows</span>
+        <select value={pageSize} onChange={e=>{setPageSize(Number(e.target.value));setPage(0);}} style={{padding:"4px 8px",border:"1px solid #e2e5ea",borderRadius:8,fontSize:11,background:"#fff",cursor:"pointer",fontFamily:"inherit"}}>
           {[10,25,50,100].map(n=><option key={n} value={n}>{n} / page</option>)}
         </select>
       </div>
-      {usePaging&&<div style={{display:"flex",alignItems:"center",gap:2}}>
-        <button disabled={page===0} onClick={()=>setPage(page-1)} style={{padding:"4px 8px",border:"1px solid #e5e7eb",borderRadius:6,fontSize:11,cursor:page===0?"default":"pointer",opacity:page===0?0.4:1,background:"#fff"}}>Prev</button>
+      {usePaging&&<div style={{display:"flex",alignItems:"center",gap:4}}>
+        <button disabled={page===0} onClick={()=>setPage(page-1)} style={{padding:"5px 12px",border:"1px solid #e2e5ea",borderRadius:8,fontSize:11,cursor:page===0?"default":"pointer",opacity:page===0?0.35:1,background:"#fff",fontWeight:600,fontFamily:"inherit",transition:"all 0.15s"}}>Prev</button>
         {pageNums.map((n,i)=>{
           const gap=i>0&&n-pageNums[i-1]>1;
-          return <Fragment key={n}>{gap&&<span style={{padding:"0 2px"}}>…</span>}<button onClick={()=>setPage(n)} style={{padding:"4px 8px",border:"1px solid "+(n===page?"#0044cc":"#e5e7eb"),borderRadius:6,fontSize:11,cursor:"pointer",background:n===page?"#0044cc":"#fff",color:n===page?"#fff":"#374151",fontWeight:n===page?700:400}}>{n+1}</button></Fragment>;
+          return <Fragment key={n}>{gap&&<span style={{padding:"0 4px",color:"#b0b6c0"}}>...</span>}<button onClick={()=>setPage(n)} style={{padding:"5px 10px",border:"1px solid "+(n===page?"#0052e0":"#e2e5ea"),borderRadius:8,fontSize:11,cursor:"pointer",background:n===page?"linear-gradient(135deg, #0052e0, #6366f1)":"#fff",color:n===page?"#fff":"#4b5563",fontWeight:n===page?700:500,fontFamily:"inherit",transition:"all 0.15s",boxShadow:n===page?"0 2px 6px rgba(0,82,224,0.2)":"none"}}>{n+1}</button></Fragment>;
         })}
-        <button disabled={page>=totalPages-1} onClick={()=>setPage(page+1)} style={{padding:"4px 8px",border:"1px solid #e5e7eb",borderRadius:6,fontSize:11,cursor:page>=totalPages-1?"default":"pointer",opacity:page>=totalPages-1?0.4:1,background:"#fff"}}>Next</button>
+        <button disabled={page>=totalPages-1} onClick={()=>setPage(page+1)} style={{padding:"5px 12px",border:"1px solid #e2e5ea",borderRadius:8,fontSize:11,cursor:page>=totalPages-1?"default":"pointer",opacity:page>=totalPages-1?0.35:1,background:"#fff",fontWeight:600,fontFamily:"inherit",transition:"all 0.15s"}}>Next</button>
       </div>}
     </div>}
   </div>);
@@ -229,7 +441,9 @@ function ContentDrawer({ eventId, meta, onClose }) {
         <header className="aihub_drawer_head">
           <div style={{minWidth:0}}>
             <div className="aihub_drawer_title">{title}</div>
-            <div className="aihub_drawer_sub">{[service,meta?.event_kind,meta?.occurred_at&&relTime(meta.occurred_at)].filter(Boolean).join(" · ")}</div>
+            {/* The person leads the line: the first question about a flagged
+                prompt is whose it was, and the drawer is where an admin lands. */}
+            <div className="aihub_drawer_sub">{[meta?.user||meta?.hostname,service,meta?.event_kind,meta?.occurred_at&&relTime(meta.occurred_at)].filter(Boolean).join(" · ")}</div>
             <div style={{display:"flex",gap:6,marginTop:8,flexWrap:"wrap"}}>
               {meta?.source && <Badge text={(meta.source||"").replace(/_/g," ")}/>}
               {sev && <SeverityBadge sev={sev}/>}
@@ -242,7 +456,7 @@ function ContentDrawer({ eventId, meta, onClose }) {
           {state.status==="loading" && <div className="aihub_loading"><RefreshCw size={16} className="aihub_spin"/> Loading content…</div>}
           {state.status==="error" && <div style={{padding:16}}><div className="aihub_error"><AlertTriangle size={14}/> {state.error}</div><p className="aihub_text_muted" style={{fontSize:12,marginTop:10}}>Older events captured before content storage was enabled won't have a preview available.</p></div>}
           {state.status==="ok" && state.kind==="text" && <TextContent text={state.text} matches={meta?.metadata?.matches} contentType={state.contentType}/>}
-          {state.status==="ok" && state.kind==="image" && <div style={{padding:16,display:"flex",justifyContent:"center",background:"#f9fafb",minHeight:"100%"}}><img src={url} alt={filename||""} style={{maxWidth:"100%",borderRadius:6}}/></div>}
+          {state.status==="ok" && state.kind==="image" && <div style={{padding:16,display:"flex",justifyContent:"center",background:"#f5f6f8",minHeight:"100%"}}><img src={url} alt={filename||""} style={{maxWidth:"100%",borderRadius:6}}/></div>}
           {state.status==="ok" && state.kind==="pdf" && <iframe src={url} title="PDF preview" style={{width:"100%",height:"100%",border:0}}/>}
           {state.status==="ok" && state.kind==="binary" && (
             <div style={{padding:28,textAlign:"center",display:"flex",flexDirection:"column",alignItems:"center"}}>
@@ -308,7 +522,7 @@ const OV_ROUTE={
 const SANCTION_TONE={approved:"#22c55e",restricted:"#f59e0b",blocked:"#ef4444",unknown:"#9ca3af"};
 const RISK_TONE={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e",not_assessed:"#9ca3af"};
 const SEV_TONE={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e"};
-const AUTONOMY_TONE={ai_app:"#0044cc",mcp:"#8b5cf6",ai_coding_agent:"#f59e0b",ai_agent:"#ef4444"};
+const AUTONOMY_TONE={ai_app:"#0052e0",mcp:"#8b5cf6",ai_coding_agent:"#f59e0b",ai_agent:"#ef4444"};
 const VENDOR_LABEL={microsoft:"Azure OpenAI",google:"Vertex AI",openai:"OpenAI",claude:"Anthropic",gemini:"Gemini Enterprise"};
 
 /** Card that behaves like a link. role/tabIndex/keydown so it is reachable without a mouse. */
@@ -326,52 +540,117 @@ function ClickCard({ title, hint, onClick, children }) {
 function Donut({ segments, label, size=132, thickness=30 }) {
   const total=segments.reduce((s,x)=>s+x.value,0);
   const r=(size-thickness)/2, c=2*Math.PI*r;
+  const [tip,setTip]=useState(null); // {label,value,pct,color,x,y}
   let off=0;
-  return (<svg className="aihub_donut" width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label={label}>
-    <g transform={`rotate(-90 ${size/2} ${size/2})`}>
-      {total===0
-        ? <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#f3f4f6" strokeWidth={thickness}/>
-        : segments.filter(s=>s.value>0).map(s=>{
-            const len=c*(s.value/total);
-            const pct=Math.round((s.value/total)*100);
-            // <title> is a native SVG hover tooltip — no JS state, no positioning
-            // logic, and it doubles as the segment's accessible name. Each arc
-            // deep-links to just that slice's rows — not the whole card to one
-            // generic destination.
-            const arc=(<circle key={s.key} cx={size/2} cy={size/2} r={r} fill="none" stroke={s.color}
-                              strokeWidth={thickness} strokeDasharray={`${len} ${c-len}`} strokeDashoffset={-off}
-                              onClick={s.onClick} style={s.onClick?{cursor:"pointer"}:undefined}>
-              <title>{`${s.label}: ${s.value.toLocaleString()} (${pct}%)`}</title>
-            </circle>);
-            off+=len; return arc;
-          })}
-    </g>
-  </svg>);
+  return (<div style={{position:"relative",display:"inline-block",flexShrink:0}}>
+    <svg className="aihub_donut" width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label={label}
+      onMouseLeave={()=>setTip(null)}>
+      <g transform={`rotate(-90 ${size/2} ${size/2})`}>
+        {total===0
+          ? <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#f3f4f6" strokeWidth={thickness}/>
+          : segments.filter(s=>s.value>0).map(s=>{
+              const len=c*(s.value/total);
+              const pct=Math.round((s.value/total)*100);
+              const mid=off+len/2;
+              const angle=(mid/c)*360-90;
+              const rad=angle*Math.PI/180;
+              const tx=size/2+Math.cos(rad)*(r*0.6);
+              const ty=size/2+Math.sin(rad)*(r*0.6);
+              const arc=(<circle key={s.key} cx={size/2} cy={size/2} r={r} fill="none" stroke={s.color}
+                                strokeWidth={thickness} strokeDasharray={`${len} ${c-len}`} strokeDashoffset={-off}
+                                style={{cursor:"pointer",transition:"opacity 0.15s"}}
+                                onMouseEnter={()=>setTip({label:s.label,value:s.value,pct,color:s.color,x:tx,y:ty})}
+                                />);
+              off+=len; return arc;
+            })}
+      </g>
+    </svg>
+    {tip&&<div style={{
+      position:"absolute",left:tip.x,top:tip.y,transform:"translate(-50%,-120%)",
+      background:"#111827",color:"#fff",borderRadius:10,padding:"8px 14px",
+      fontSize:12,fontWeight:600,whiteSpace:"nowrap",pointerEvents:"none",
+      boxShadow:"0 4px 16px rgba(0,0,0,0.18)",zIndex:10,
+      animation:"polFadeIn 0.12s ease-out",
+    }}>
+      <div style={{display:"flex",alignItems:"center",gap:7}}>
+        <span style={{width:8,height:8,borderRadius:3,background:tip.color,flexShrink:0}}/>
+        {tip.label}
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between",gap:16,marginTop:4,fontSize:11,color:"rgba(255,255,255,0.65)"}}>
+        <span>{tip.value.toLocaleString()}</span>
+        <span>{tip.pct}%</span>
+      </div>
+      <div style={{position:"absolute",bottom:-5,left:"50%",transform:"translateX(-50%)",width:10,height:10,background:"#111827",borderRadius:2,rotate:"45deg"}}/>
+    </div>}
+  </div>);
 }
 
 // Headline total on top, donut below, swatch+label legend beside it. The legend
 // deliberately carries no per-slice counts — the breakdown lives on the page this
 // card opens. Counts are still in the chart's aria-label for screen readers.
-// No whole-card onClick any more — the two donuts on Overview used to both send
-// any click to the exact same unfiltered list, which made clicking a specific
-// slice pointless (you always landed in the same place no matter what you
-// clicked). Now each slice/legend row carries its own destination, and there is
-// no card-level fallback that would swallow that distinction.
-function DonutCard({ title, hint, segments, unavailable }) {
+function DonutCard({ title, hint, segments, onClick, unavailable }) {
   const total=segments.reduce((s,x)=>s+x.value,0);
-  return (<div className="aihub_card">
-    <SectionHeader title={title} hint={hint}/>
-    {unavailable ? <p className="aihub_text_muted">Not available right now — open the full list.</p> : <>
+  const loading = unavailable;
+  return (<ClickCard title={title} hint={hint} onClick={onClick}>
+    {loading ? <>
+      <div><span className="aihub_shimmer_block" style={{width:64,height:28,borderRadius:6}}/></div>
+      <div className="aihub_chart_total_label">total</div>
+      <div className="aihub_donut_wrap">
+        <div style={{width:132,height:132,borderRadius:"50%",background:"#f3f4f6"}}/>
+        <ul className="aihub_legend">
+          {segments.map(s=><li key={s.key}><span className="aihub_legend_dot" style={{background:"#e2e5ea"}}/><span className="aihub_shimmer_block" style={{width:70,height:14,borderRadius:4}}/></li>)}
+        </ul>
+      </div>
+    </> : <>
       <div className="aihub_chart_total">{total.toLocaleString()}</div>
       <div className="aihub_chart_total_label">total</div>
       <div className="aihub_donut_wrap">
         <Donut segments={segments} label={`${title} — ${segments.map(s=>`${s.label}: ${s.value}`).join(", ")}`}/>
         <ul className="aihub_legend">
-          {segments.map(s=><li key={s.key} onClick={s.onClick} style={s.onClick?{cursor:"pointer"}:undefined}><span className="aihub_legend_dot" style={{background:s.color}}/>{s.label}</li>)}
+          {segments.map(s=><li key={s.key}><span className="aihub_legend_dot" style={{background:s.color}}/>{s.label} <strong style={{marginLeft:"auto",fontWeight:700,color:"#111"}}>{s.value.toLocaleString()}</strong></li>)}
         </ul>
       </div>
     </>}
-  </div>);
+  </ClickCard>);
+}
+
+/** Single card with toggle buttons to switch between two donut views. */
+function ToggleDonutCard({ views, onClick, unavailable }) {
+  const [active,setActive]=useState(0);
+  const v=views[active];
+  const total=v.segments.reduce((s,x)=>s+x.value,0);
+  return (<ClickCard title={v.title} hint={v.hint} onClick={onClick}>
+    {/* Toggle pills */}
+    <div style={{display:"flex",gap:4,marginBottom:14}}>
+      {views.map((vw,i)=>(
+        <button key={vw.key} onClick={e=>{e.stopPropagation();setActive(i);}}
+          style={{padding:"4px 12px",borderRadius:20,border:"1px solid "+(i===active?"#0052e0":"#e2e5ea"),
+            background:i===active?"#0052e0":"#fff",color:i===active?"#fff":"#6b7280",
+            fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit",transition:"all 0.15s"}}>
+          {vw.label}
+        </button>
+      ))}
+    </div>
+    {unavailable ? <>
+      <div><span className="aihub_shimmer_block" style={{width:64,height:28,borderRadius:6}}/></div>
+      <div className="aihub_chart_total_label">total</div>
+      <div className="aihub_donut_wrap">
+        <div style={{width:132,height:132,borderRadius:"50%",background:"#f3f4f6"}}/>
+        <ul className="aihub_legend">
+          {v.segments.map(s=><li key={s.key}><span className="aihub_legend_dot" style={{background:"#e2e5ea"}}/><span className="aihub_shimmer_block" style={{width:70,height:14,borderRadius:4}}/></li>)}
+        </ul>
+      </div>
+    </> : <>
+      <div className="aihub_chart_total">{total.toLocaleString()}</div>
+      <div className="aihub_chart_total_label">total</div>
+      <div className="aihub_donut_wrap">
+        <Donut segments={v.segments} label={`${v.title} — ${v.segments.map(s=>`${s.label}: ${s.value}`).join(", ")}`}/>
+        <ul className="aihub_legend">
+          {v.segments.map(s=><li key={s.key}><span className="aihub_legend_dot" style={{background:s.color}}/>{s.label} <strong style={{marginLeft:"auto",fontWeight:700,color:"#111"}}>{s.value.toLocaleString()}</strong></li>)}
+        </ul>
+      </div>
+    </>}
+  </ClickCard>);
 }
 
 // One stacked bar: proportional widths for apps / MCP servers / coding agents /
@@ -379,7 +658,10 @@ function DonutCard({ title, hint, segments, unavailable }) {
 function AutonomyCard({ segments, onClick, unavailable }) {
   const total=segments.reduce((s,x)=>s+x.value,0);
   return (<ClickCard title="Agent autonomy" hint="How much of the AI footprint can act on its own." onClick={onClick}>
-    {unavailable ? <p className="aihub_text_muted">Not available right now — open Agents & MCP.</p> : <>
+    {unavailable ? <div>
+      <div className="aihub_seg_bar" style={{background:"#f3f4f6"}}><div className="aihub_seg_empty"/></div>
+      <ul className="aihub_seg_legend">{segments.map(s=><li key={s.key}><span className="aihub_legend_dot" style={{background:"#e2e5ea"}}/><span className="aihub_shimmer_block" style={{width:60,height:12,borderRadius:4}}/></li>)}</ul>
+    </div> : <>
       <div className="aihub_seg_bar" role="img" aria-label={`Agent autonomy — ${segments.map(s=>`${s.label}: ${s.value}`).join(", ")}`}>
         {total===0
           ? <div className="aihub_seg_empty"/>
@@ -439,11 +721,12 @@ function OverviewView() {
   const [d,setD]=useState(null),[e,setE]=useState(null);
   const [reg,setReg]=useState(null),[dlp,setDlp]=useState(null),[mcp,setMcp]=useState(null);
   const [proj,setProj]=useState(null),[reqs,setReqs]=useState(null),[hiEv,setHiEv]=useState(null);
+  const [toolsCount,setToolsCount]=useState(null);
+  const [toolsStatus,setToolsStatus]=useState({}); // {approved:N, restricted:N, blocked:N, unknown:N}
+  const [toolsRisk,setToolsRisk]=useState({}); // {critical:N, high:N, medium:N, low:N, not_assessed:N}
+  const [dlpCount,setDlpCount]=useState(null);
   const [warn,setWarn]=useState([]);
   useEffect(()=>{
-    // /overview is the only hard dependency. Every other panel degrades on its own —
-    // a single failing endpoint must not blank the screen, and a failure is named in
-    // the banner rather than silently rendering as a zero.
     const soft=(p,label,setter,fallback)=>p.then(setter).catch(()=>{setter(fallback);setWarn(w=>w.includes(label)?w:[...w,label]);});
     apiFetch("/overview").then(setD).catch(x=>setE(x.message));
     soft(apiFetch("/registry/summary"),"AI systems registry",setReg,false);
@@ -452,13 +735,52 @@ function OverviewView() {
     soft(apiFetch("/findings?type=agent_project&latestOnly=true&limit=500"),"agent projects",setProj,false);
     soft(apiFetch("/access-requests"),"access requests",setReqs,false);
     soft(apiFetch("/dlp?severity=critical,high&limit=1"),"recent detections",setHiEv,false);
+    // Exact same count DLPView shows: fetch actual events + files, count high/critical
+    Promise.all([apiFetch("/dlp?limit=5000").catch(()=>[]),apiFetch("/dlp/files?limit=5000").catch(()=>[])]).then(([ev,f])=>{
+      const prompts=(ev||[]).filter(e=>e.event_kind!=="file_upload");
+      const files=f||[];
+      setDlpCount(prompts.filter(e=>isHiCrit(e.secret_class||e.highest_severity)).length+files.filter(e=>isHiCrit(e.severity||e.highest_severity)).length);
+    }).catch(()=>{});
+    // Exact same merge the Inventory page does: registry + deduped platform catalog
+    Promise.all([apiFetch("/registry"),apiFetch("/ai-platforms").catch(()=>[])]).then(([regList,plats])=>{
+      const seen=new Set();
+      const allRows=[...(regList||[])];
+      for(const r of allRows){if(r.name) seen.add(String(r.name).toLowerCase()); if(r.source_host) seen.add(String(r.source_host).toLowerCase());}
+      // Cross-reference blocked status from ai_platforms — same as Inventory
+      const blockedHosts=new Set((Array.isArray(plats)?plats:[]).filter(p=>p.blocked).map(p=>p.host));
+      const platByHost=new Map((Array.isArray(plats)?plats:[]).map(p=>[p.host,p]));
+      for(const r of allRows){
+        const hosts=r.matched_hosts||[];
+        let isBlocked=hosts.some(h=>blockedHosts.has(h));
+        if(!isBlocked&&!hosts.length){
+          const lower=(r.name||"").toLowerCase();
+          for(const [h,p] of platByHost){if(h.includes(lower)&&p.blocked){isBlocked=true;break;}}
+        }
+        if(isBlocked&&r.status!=="blocked") r.status="blocked";
+        else if(!isBlocked&&r.status==="blocked") r.status="approved";
+      }
+      for(const p of (Array.isArray(plats)?plats:[])){
+        const k=String(p.product||p.host||"").toLowerCase();
+        if(!k||seen.has(k)||seen.has(String(p.host||"").toLowerCase())) continue;
+        seen.add(k);
+        allRows.push({status:p.blocked?"blocked":p.governed?"approved":"unknown",risk_level:null});
+      }
+      setToolsCount(allRows.length);
+      const st={approved:0,restricted:0,blocked:0,unknown:0};
+      const rk={critical:0,high:0,medium:0,low:0,not_assessed:0};
+      for(const r of allRows){
+        st[r.status]=(st[r.status]||0)+1;
+        rk[r.risk_level||"not_assessed"]=(rk[r.risk_level||"not_assessed"]||0)+1;
+      }
+      setToolsStatus(st);
+      setToolsRisk(rk);
+    }).catch(()=>{});
   },[]);
   if(e) return <Err msg={e}/>;
   if(!d) return <Loading/>;
 
-  const byStatus=(reg&&reg.by_status)||{}, byRisk=(reg&&reg.by_risk)||{};
+  const byStatus=toolsStatus, byRisk=toolsRisk;
   const sev={}; ((dlp&&dlp.bySeverity)||[]).forEach(s=>{sev[s.severity]=(sev[s.severity]||0)+(s.events||0)});
-  const hiCrit=(sev.critical||0)+(sev.high||0);
   // Same bucketing AgentsView uses: payload.primaryCategory, defaulting to ai_app.
   const cats={ai_agent:0,ai_coding_agent:0,ai_app:0};
   (Array.isArray(proj)?proj:[]).forEach(f=>{const c=f.payload?.primaryCategory||"ai_app"; if(cats[c]!=null) cats[c]+=1;});
@@ -468,43 +790,17 @@ function OverviewView() {
   const ev=Array.isArray(hiEv)?hiEv[0]:null;
   const noAutonomy=mcp===false&&proj===false;   // both endpoints failed — 0 would be a lie
 
-  // Each slice deep-links to Inventory pre-filtered to that exact value — the
-  // two donuts used to both just open the same unfiltered list regardless of
-  // where you clicked, which made clicking a specific slice pointless. Restricted
-  // has no filter of its own on the Inventory screen (it's grouped under
-  // "Unreviewed" there along with unknown), so it deep-links to the same
-  // status=unknown filter as Unknown does — that is genuinely where those rows
-  // surface, not a placeholder.
   const sanctionSegs=[
-    {key:"approved",label:"Approved",value:byStatus.approved||0,color:SANCTION_TONE.approved,onClick:()=>nav(`${OV_ROUTE.tools}&status=approved`)},
-    {key:"restricted",label:"Restricted",value:byStatus.restricted||0,color:SANCTION_TONE.restricted,onClick:()=>nav(`${OV_ROUTE.tools}&status=unknown`)},
-    {key:"blocked",label:"Blocked",value:byStatus.blocked||0,color:SANCTION_TONE.blocked,onClick:()=>nav(`${OV_ROUTE.tools}&status=blocked`)},
-    {key:"unknown",label:"Unknown",value:byStatus.unknown||0,color:SANCTION_TONE.unknown,onClick:()=>nav(`${OV_ROUTE.tools}&status=unknown`)},
+    {key:"approved",label:"Allowed",value:byStatus.approved||0,color:SANCTION_TONE.approved},
+    {key:"unreviewed",label:"Unreviewed",value:(byStatus.restricted||0)+(byStatus.unknown||0),color:SANCTION_TONE.restricted},
+    {key:"blocked",label:"Blocked",value:byStatus.blocked||0,color:SANCTION_TONE.blocked},
   ];
-  // A second "tools sliced a different way" donut still describes the exact same
-  // 260-system inventory as the sanction one — same total, same population, just
-  // grouped by a different column. This one is deliberately a different KIND of
-  // information: real activity (from DLP events, already fetched above for the
-  // severity chips), not another static inventory count. Top 5 services by event
-  // volume, the long tail folded into "Other" rather than a 20-slice donut.
-  const dlpServices=(dlp&&Array.isArray(dlp.byService))?[...dlp.byService].sort((a,b)=>(b.events||0)-(a.events||0)):[];
-  const SERVICE_TOP_N=5;
-  const topServices=dlpServices.slice(0,SERVICE_TOP_N);
-  const otherServiceEvents=dlpServices.slice(SERVICE_TOP_N).reduce((s,d)=>s+(d.events||0),0);
-  // Reuses this file's existing provider-brand hexes (ServerAgentsView's
-  // providerTone, CostTab's VENDOR_META) for the services that match a known
-  // vendor, rather than inventing new ones; "Other" reuses the same neutral gray
-  // the sanction/risk donuts already use for their own catch-all buckets.
-  const SERVICE_COLOR={chatgpt:"#10a37f",openai:"#10a37f",claude:"#D4622A",anthropic:"#D4622A",gemini:"#4285F4",google:"#4285F4",copilot:"#0078D4",microsoft:"#0078D4",perplexity:"#8b5cf6",cursor:"#6366f1"};
-  const FALLBACK_SERVICE_COLORS=["#10a37f","#D4622A","#4285F4","#8b5cf6","#6366f1"];
-  const colorForService=(name,i)=>{
-    const lower=(name||"").toLowerCase();
-    const hit=Object.keys(SERVICE_COLOR).find(k=>lower.includes(k));
-    return hit?SERVICE_COLOR[hit]:FALLBACK_SERVICE_COLORS[i%FALLBACK_SERVICE_COLORS.length];
-  };
-  const serviceSegs=[
-    ...topServices.map((s,i)=>({key:s.ai_service||`svc${i}`,label:s.ai_service||"Unknown",value:s.events||0,color:colorForService(s.ai_service,i),onClick:()=>nav(OV_ROUTE.dlp)})),
-    ...(otherServiceEvents>0?[{key:"other",label:"Other",value:otherServiceEvents,color:"#9ca3af",onClick:()=>nav(OV_ROUTE.dlp)}]:[]),
+  const riskSegs=[
+    {key:"critical",label:"Critical",value:byRisk.critical||0,color:RISK_TONE.critical},
+    {key:"high",label:"High",value:byRisk.high||0,color:RISK_TONE.high},
+    {key:"medium",label:"Medium",value:byRisk.medium||0,color:RISK_TONE.medium},
+    {key:"low",label:"Low",value:byRisk.low||0,color:RISK_TONE.low},
+    {key:"not_assessed",label:"Not assessed",value:byRisk.not_assessed||0,color:RISK_TONE.not_assessed},
   ];
   const autonomySegs=[
     {key:"ai_app",label:"AI-using apps",value:cats.ai_app,color:AUTONOMY_TONE.ai_app},
@@ -523,8 +819,8 @@ function OverviewView() {
     label:`${pending} access request${pending===1?"":"s"} awaiting review`,sub:"Employees stay blocked until reviewed",to:OV_ROUTE.access});
   if(byStatus.unknown>0) attn.push({key:"unsanctioned",tone:"#8b5cf6",icon:<Wrench size={14}/>,
     label:`${byStatus.unknown} tools with no sanction decision`,sub:"Approve, restrict or block them",to:OV_ROUTE.tools});
-  if(byRisk.not_assessed>0) attn.push({key:"risk",tone:"#0044cc",icon:<Shield size={14}/>,
-    label:`${byRisk.not_assessed} tools not risk-assessed`,sub:"No risk level recorded yet",to:OV_ROUTE.tools});
+  if(byRisk.not_assessed>0) attn.push({key:"risk",tone:"#0052e0",icon:<Shield size={14}/>,
+    label:`${byRisk.not_assessed} tools not risk-assessed`,sub:"No risk level recorded yet",to:"/AIHub/Inventory?tab=systems&showAll=1&risk=not_assessed"});
 
   const links=[
     {label:"EU AI Act",href:"https://artificialintelligenceact.eu/"},
@@ -541,24 +837,18 @@ function OverviewView() {
 
     {/* 1. KPI strip */}
     <div className="aihub_stat_grid">
-      <StatCard icon={<Monitor size={18}/>} label="Machines" value={d.totals.machines} hint="Reporting endpoints" color="#0044cc" onClick={()=>nav(OV_ROUTE.machines)}/>
+      <StatCard icon={<Monitor size={18}/>} label="Machines" value={d.totals.machines} hint="Reporting endpoints" color="#0052e0" onClick={()=>nav(OV_ROUTE.machines)}/>
       <StatCard icon={<Wrench size={18}/>} label="AI tools & systems"
-                value={reg&&reg.total_ai_systems!=null?reg.total_ai_systems:d.totals.unique_tools}
-                hint={reg&&reg.total_ai_systems!=null?"In the AI registry":"Unique tools detected"} color="#8b5cf6" onClick={()=>nav(OV_ROUTE.tools)}/>
-      <StatCard icon={<ShieldAlert size={18}/>} label="DLP events" value={dlp===false?"—":hiCrit} hint={dlp===false?"Summary unavailable":"High/critical this month"} color="#ef4444" onClick={()=>nav(OV_ROUTE.dlp)}/>
+                value={toolsCount!=null?toolsCount:"…"}
+                hint="In the AI registry" color="#8b5cf6" onClick={()=>nav("/AIHub/Inventory?tab=systems&showAll=1")}/>
+      <StatCard icon={<ShieldAlert size={18}/>} label="DLP events" value={dlpCount!=null?dlpCount:"…"} hint="High/critical flagged" color="#ef4444" onClick={()=>nav(OV_ROUTE.dlp)}/>
       <StatCard icon={<Bot size={18}/>} label="Autonomy" value={noAutonomy?"—":autonomy} hint={noAutonomy?"Counts unavailable":"Agents & MCP servers"} color="#f59e0b" onClick={()=>nav(OV_ROUTE.agents)}/>
-      {/* LLM spend removed. It reported per-vendor cost for whichever platform
-          happened to be connected, and Microsoft exposes no per-agent cost for
-          Copilot Studio or M365 Copilot at all — so the figure covered a different
-          slice of the estate depending on the connection, next to four cards that
-          each count the whole estate. Cost still lives in Agent Governance → Cost,
-          where its scope is explicit. */}
     </div>
 
-    {/* 2. Open governance items — two real counts, no composite score */}
+    {/* 2. Open governance items — two real counts */}
     <div className="aihub_gov_banner">
-      <button className="aihub_gov_stat" onClick={()=>nav(OV_ROUTE.tools)}>
-        <span className="aihub_gov_num">{reg===false?"—":(byRisk.not_assessed||0)}</span>
+      <button className="aihub_gov_stat" onClick={()=>nav("/AIHub/Inventory?tab=systems&showAll=1&risk=not_assessed")}>
+        <span className="aihub_gov_num">{toolsCount==null?<span className="aihub_shimmer_block" style={{width:24,height:20,borderRadius:4}}/>:(byRisk.not_assessed||0)}</span>
         <span className="aihub_gov_txt">tools not yet risk-assessed</span>
         <ChevronRight size={14}/>
       </button>
@@ -570,35 +860,27 @@ function OverviewView() {
       </button>
     </div>
 
-    {/* One flat grid of six equal cards — see AIHub.css for why (grid-auto-rows
-        makes every row as tall as its tallest card). The second donut is
-        "Activity by AI service", not another static inventory cut of the same
-        260 tools — two donuts describing the same population made clicking
-        a specific slice pointless, since both always opened the same list. */}
+    {/* 3. Six equal insight cards */}
     <div className="aihub_ov_grid">
-      <DonutCard title="Tools by sanction" hint="Allow/block decision per AI system. Click a slice to see just those tools." segments={sanctionSegs} unavailable={reg===false}/>
-      <DonutCard title="Activity by AI service" hint="Real usage this month, not another tool count. Click a slice to see the activity log." segments={serviceSegs} unavailable={dlp===false}/>
+      <ToggleDonutCard
+        views={[
+          {key:"sanction",label:"By Status",title:"Tools by sanction",hint:"Allow/block decision per AI system.",segments:sanctionSegs},
+          {key:"risk",label:"By Risk",title:"Tools by risk level",hint:"Assessed risk per AI system.",segments:riskSegs},
+        ]}
+        unavailable={toolsCount==null}
+        onClick={()=>nav(OV_ROUTE.tools)}
+      />
       <div className="aihub_card">
-        <SectionHeader title="Needs attention" hint="Open items — each one opens where it is handled."/>
+        <SectionHeader title="Needs attention" hint="Open items — each one links to where it is handled."/>
         {attn.length===0
-          ? <p className="aihub_text_muted">{warn.length>0?"Some panels could not load, so this list may be incomplete.":"Nothing outstanding right now."}</p>
+          ? <div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"24px 0",color:"#b0b6c0"}}>
+              <Shield size={28} strokeWidth={1.5}/>
+              <p style={{margin:"10px 0 0",fontSize:13,fontWeight:500,color:"#4b5563"}}>{warn.length>0?"Some panels could not load.":"All clear — nothing outstanding."}</p>
+            </div>
           : <ul className="aihub_attn_list">{attn.slice(0,4).map(a=><AttnItem key={a.key} tone={a.tone} icon={a.icon} label={a.label} sub={a.sub} onClick={()=>nav(a.to)}/>)}</ul>}
       </div>
-      <AutonomyCard segments={autonomySegs} unavailable={noAutonomy} onClick={()=>nav(OV_ROUTE.agents)}/>
-      <ClickCard title="Activity by severity" hint="Prompt and upload detections." onClick={()=>nav(OV_ROUTE.dlp)}>
-        {dlp===false
-          ? <p className="aihub_text_muted">Severity counts unavailable.</p>
-          : <div className="aihub_sev_chips">
-              {["critical","high","medium","low"].map(k=>(
-                <div key={k} className="aihub_sev_chip" style={{background:SEV_TONE[k]+"14",borderColor:SEV_TONE[k]+"30"}}>
-                  <span className="aihub_sev_num" style={{color:SEV_TONE[k]}}>{(sev[k]||0).toLocaleString()}</span>
-                  <span className="aihub_sev_label">{k}</span>
-                </div>
-              ))}
-            </div>}
-      </ClickCard>
       <div className="aihub_card">
-        <SectionHeader title="Quick links" hint="Frameworks and policy references."/>
+        <SectionHeader title="Quick links" hint="Frameworks and compliance references."/>
         <div className="aihub_quick_links">
           {links.map(l=>l.href
             ? <a key={l.label} className="aihub_quick_link" href={l.href} target="_blank" rel="noreferrer">{l.label}<ExternalLink size={11}/></a>
@@ -616,7 +898,7 @@ function MachinesView() {
   const [rows,setRows]=useState(null),[e,setE]=useState(null),[q,setQ]=useState("");
   useEffect(()=>{apiFetch("/machines").then(setRows).catch(x=>setE(x.message))},[]);
   if(e) return <Err msg={e}/>; if(!rows) return <Loading/>;
-  const platTone={win32:"#0044cc",darwin:"#6b7280",linux:"#f59e0b"};
+  const platTone={win32:"#0052e0",darwin:"#6b7280",linux:"#f59e0b"};
   const filtered=q?rows.filter(r=>[r.hostname,r.user,r.platform].join(" ").toLowerCase().includes(q.toLowerCase())):rows;
   return (<div>
     <SectionHeader title="Enrolled machines" hint={`${filtered.length} of ${rows.length} machines`} action={<div className="aihub_search_box"><Search size={14}/><input placeholder="Search hostname, user, OS..." value={q} onChange={e=>setQ(e.target.value)}/></div>}/>
@@ -687,7 +969,7 @@ function AgentsView() {
 
   const mcpAll=Array.isArray(mcp)?mcp:[];
   const projectsAll=Array.isArray(projects)?projects:[];
-  const catMap={ai_agent:{title:"Autonomous AI agents",hint:"Projects using agent frameworks (LangChain, AutoGen, CrewAI, LlamaIndex, MCP SDK)",color:"#ef4444"},ai_coding_agent:{title:"AI coding agents",hint:"Projects managed by Claude Code, Cursor, Aider, Continue",color:"#f59e0b"},ai_app:{title:"AI-using apps",hint:"Projects that call LLM APIs",color:"#0044cc"}};
+  const catMap={ai_agent:{title:"Autonomous AI agents",hint:"Projects using agent frameworks (LangChain, AutoGen, CrewAI, LlamaIndex, MCP SDK)",color:"#ef4444"},ai_coding_agent:{title:"AI coding agents",hint:"Projects managed by Claude Code, Cursor, Aider, Continue",color:"#f59e0b"},ai_app:{title:"AI-using apps",hint:"Projects that call LLM APIs",color:"#0052e0"}};
   const grouped={ai_agent:[],ai_coding_agent:[],ai_app:[]};
   projectsAll.forEach(f=>{const c=f.payload?.primaryCategory||"ai_app";(grouped[c]||(grouped[c]=[])).push(f)});
 
@@ -791,13 +1073,13 @@ function ServerAgentsView() {
   if(e) return <Err msg={e}/>; if(summary===null&&calls===null) return <Loading/>;
   if(!summary?.totals) return <div className="aihub_card"><Empty icon={<Server size={32} strokeWidth={1.5}/>} title="No Server Agent Data" msg="Install the server-monitor daemon on a Linux server to capture LLM API calls."/></div>;
 
-  const triggerTone={interactive_shell:"#0044cc",cron:"#8b5cf6",systemd:"#0891b2",ssh:"#f59e0b",ci:"#22c55e",container:"#6366f1",login:"#9ca3af"};
+  const triggerTone={interactive_shell:"#0052e0",cron:"#8b5cf6",systemd:"#0891b2",ssh:"#f59e0b",ci:"#22c55e",container:"#6366f1",login:"#9ca3af"};
   const providerTone={openai:"#10a37f",anthropic:"#d4622a",google:"#4285f4","openai-azure":"#0078d4","aws-bedrock":"#ff9900"};
 
   return (<div>
     <SectionHeader title="Server Agents" hint="LLM API calls intercepted from backend servers."/>
     <div className="aihub_stat_grid">
-      <StatCard icon={<Activity size={18}/>} label="Calls observed" value={summary.totals.calls||0} color="#0044cc"/>
+      <StatCard icon={<Activity size={18}/>} label="Calls observed" value={summary.totals.calls||0} color="#0052e0"/>
       <StatCard icon={<Wrench size={18}/>} label="Total cost (USD)" value={fmtUsd(summary.totals.total_cost_usd)} color="#22c55e"/>
       <StatCard icon={<Monitor size={18}/>} label="Distinct users" value={summary.totals.distinct_users||0} color="#8b5cf6"/>
       <StatCard icon={<Server size={18}/>} label="Distinct machines" value={summary.totals.distinct_machines||0} color="#f59e0b"/>
@@ -833,7 +1115,8 @@ function DLPView() {
   const [summary,setS]=useState(null),[events,setEv]=useState(null),[files,setF]=useState(null),[e,setE]=useState(null);
   const [preview,setPreview]=useState(null);
   const [section,setSection]=useState(""); // "", "prompts", "files", "services"
-  const [sevFilter,setSevFilter]=useState("high"); // "all" or "high"
+  const [openRows,setOpenRows]=useState(()=>new Set()); // grouped rows expanded to show their members
+  const toggleRow=id=>setOpenRows(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;});
   useEffect(()=>{
     Promise.all([apiFetch("/dlp/summary").catch(()=>null),apiFetch("/dlp?limit=5000").catch(()=>[]),apiFetch("/dlp/files?limit=5000").catch(()=>[])]).then(([s,ev,f])=>{setS(s);setEv(ev);setF(f)}).catch(x=>setE(x.message));
   },[]);
@@ -841,30 +1124,35 @@ function DLPView() {
 
   const allPrompts=(events||[]).filter(ev=>ev.event_kind!=="file_upload");
   const allFiles=files||[];
-  const promptCount=allPrompts.length;
-  const fileCount=allFiles.length;
   const highCrit=allPrompts.filter(ev=>isHiCrit(ev.secret_class||ev.highest_severity)).length + allFiles.filter(f=>isHiCrit(f.severity||f.highest_severity)).length;
   const serviceCount=(summary?.byService||[]).length;
-  const sourceTone={browser_extension:"#0044cc",desktop_hook:"#8b5cf6",os_monitor:"#f59e0b"};
+  const sourceTone={browser_extension:"#0052e0",desktop_hook:"#8b5cf6",os_monitor:"#f59e0b"};
   const toggle=k=>setSection(section===k?"":k);
 
-  const promptRows=sevFilter==="all"?allPrompts:allPrompts.filter(ev=>isHiCrit(ev.secret_class||ev.highest_severity));
-  const fileRows=sevFilter==="all"?allFiles:allFiles.filter(f=>isHiCrit(f.severity||f.highest_severity));
+  // High and critical only, always. The severity dropdown that used to switch
+  // this to "all severities" is gone: low and medium detections are noise on a
+  // reviewer's screen — 1842 of 2000 events carry no severity class at all — and
+  // an "all" mode that buries 148 real findings under them is a worse default
+  // than no choice. Nothing is deleted; the events are still stored and still
+  // feed Claude Usage, Conversations and the per-service breakdown. This is a
+  // view-level scope, not a retention policy.
+  const promptRows=allPrompts.filter(ev=>isHiCrit(ev.secret_class||ev.highest_severity));
+  const fileRows=allFiles.filter(f=>isHiCrit(f.severity||f.highest_severity));
+  // Grouped AFTER the severity narrowing, so a row never folds in a member the
+  // table excludes — the expanded members are always exactly the rows shown, and
+  // the "N events" count never disagrees with the table.
+  const promptGroups=groupDlpEvents(promptRows);
 
   return (<div>
-    <SectionHeader title="AI Activity (DLP)" hint="Clipboard, typed prompts, and file upload events captured by the OS monitor and browser extension."
-      action={<div style={{display:"flex",gap:10,alignItems:"center"}}>
-        <select value={sevFilter} onChange={ev=>setSevFilter(ev.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12,fontWeight:600}}>
-          <option value="high">High & Critical only</option>
-          <option value="all">All severities</option>
-        </select>
-        {section&&<button className="aihub_filter_btn" onClick={()=>setSection("")}>Clear selection</button>}
-      </div>}/>
+    {/* The severity scope moves into the hint now that it is fixed — with no
+        dropdown on screen, an unstated filter is an invisible one. */}
+    <SectionHeader title="AI Activity (DLP)" hint="Clipboard, typed prompts, and file upload events captured by the OS monitor and browser extension. High and critical severity only."
+      action={section?<button className="aihub_filter_btn" onClick={()=>setSection("")}>Clear selection</button>:null}/>
 
     <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(4,1fr)"}}>
       <StatCard icon={<AlertTriangle size={18}/>} label="High / critical" value={highCrit} hint="total flagged" color="#ef4444"/>
-      <StatCard icon={<MessageSquare size={18}/>} label="Prompt events" value={promptRows.length} hint={sevFilter==="high"?"high & critical":"all severities"} color="#0044cc" onClick={()=>toggle("prompts")}/>
-      <StatCard icon={<FileText size={18}/>} label="File uploads" value={fileRows.length} hint={sevFilter==="high"?"high & critical":"all severities"} color="#f59e0b" onClick={()=>toggle("files")}/>
+      <StatCard icon={<MessageSquare size={18}/>} label="Prompt events" value={promptRows.length} hint="high & critical" color="#0052e0" onClick={()=>toggle("prompts")}/>
+      <StatCard icon={<FileText size={18}/>} label="File uploads" value={fileRows.length} hint="high & critical" color="#f59e0b" onClick={()=>toggle("files")}/>
       <StatCard icon={<Server size={18}/>} label="AI services" value={serviceCount} hint="breakdown" color="#8b5cf6" onClick={()=>toggle("services")}/>
     </div>
 
@@ -880,29 +1168,34 @@ function DLPView() {
     </div>}
 
     {section==="prompts"&&<div className="aihub_card">
-      <SectionHeader title="Sensitive prompts" hint={sevFilter==="high"?"High & critical severity only":"All severities"}/>
-      <DataTable onRow={r=>{ if(r.has_content) setPreview(r); }} columns={[
-        {label:"When",render:r=>relTime(r.occurred_at)},
+      {/* Rows are user ACTIONS, not raw events — a prompt and the block it
+          triggered are one action. Both counts are stated so the difference from
+          the "Prompt events" card above is visible rather than mysterious. */}
+      <SectionHeader title="Sensitive prompts"
+        hint={`${promptGroups.length} actions from ${promptRows.length} events · high & critical severity only`}/>
+      <DataTable onRow={r=>{ const c=contentMember(r); if(c) setPreview(c); }}
+        isExpanded={r=>openRows.has(r.id)}
+        renderExpanded={r=><GroupDetail row={r} onView={setPreview}/>}
+        columns={[
+        {label:"Time",render:r=><><div>{relTime(r.occurred_at)}</div><GroupToggle row={r} open={openRows.has(r.id)} onToggle={()=>toggleRow(r.id)}/></>},
+        {label:"User",render:r=><UserCell row={r}/>},
         {label:"Service",render:r=><ServiceCell row={r}/>},
         {label:"Source",render:r=><Badge text={(r.source||"").replace(/_/g," ")} color={sourceTone[r.source]||"#9ca3af"}/>},
-        {label:"Kind",render:r=><Tag text={eventKindLabel(r)}/>},
-        {label:"Filename",render:r=>r.metadata?.filename?<Mono>{r.metadata.filename}</Mono>:"—"},
-        {label:"Pattern",render:r=><Mono>{r.pattern_matched||"—"}</Mono>},
-        {label:"Severity",render:r=><SeverityBadge sev={r.secret_class||r.highest_severity}/>},
-        {label:"",render:r=><ViewBtn has={r.has_content} onClick={()=>setPreview(r)}/>,right:true},
-      ]} rows={promptRows} empty="No prompt events matching this filter." paginate={25}/>
+        {label:"Pattern",render:r=><Mono>{groupPattern(r)}</Mono>},
+        {label:"Severity",render:r=><SeverityBadge sev={worstSev(groupMembers(r))}/>},
+        {label:"",render:r=>{const c=contentMember(r); return <ViewBtn has={!!c} onClick={()=>setPreview(c)}/>;},right:true},
+      ]} rows={promptGroups} empty="No prompt events matching this filter." paginate={25}/>
     </div>}
 
     {section==="files"&&<div className="aihub_card">
-      <SectionHeader title="File uploads" hint={sevFilter==="high"?"High & critical severity only":"All severities"}/>
+      <SectionHeader title="File uploads" hint="High & critical severity only"/>
       <DataTable onRow={r=>{ if(r.has_content) setPreview(r); }} columns={[
-        {label:"When",render:r=>relTime(r.occurred_at)},
+        {label:"Time",render:r=>relTime(r.occurred_at)},
+        {label:"User",render:r=><UserCell row={r}/>},
         {label:"Service",render:r=><ServiceCell row={r}/>},
         {label:"Filename",render:r=><Mono>{r.metadata?.filename||"—"}</Mono>},
         {label:"Class",render:r=><Tag text={r.file_class||"—"}/>},
         {label:"Severity",render:r=><SeverityBadge sev={r.severity||r.highest_severity}/>},
-        {label:"Size",render:r=>r.metadata?.size_bucket||"—",right:true},
-        {label:"Via",render:r=><Badge text={r.metadata?.via||"—"}/>},
         {label:"",render:r=><ViewBtn has={r.has_content} onClick={()=>setPreview(r)} label="Open"/>,right:true},
       ]} rows={fileRows} empty="No file upload events matching this filter." paginate={25}/>
     </div>}
@@ -938,13 +1231,13 @@ function PlatformsView() {
   const llmDisc=rows.filter(r=>r.source==="classifier").length;
   const blockedCount=rows.filter(r=>r.blocked).length;
   const riskC={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e"};
-  const surfaceC={browser:"#0044cc",desktop:"#8b5cf6",cli:"#f59e0b",all:"#22c55e"};
+  const surfaceC={browser:"#0052e0",desktop:"#8b5cf6",cli:"#f59e0b",all:"#22c55e"};
   const filtered=q?rows.filter(r=>[r.host,r.vendor,r.product,r.category].join(" ").toLowerCase().includes(q.toLowerCase())):rows;
 
   return (<div>
     <SectionHeader title="AI Platforms" hint="Registry of known AI platforms used by the organization."/>
     <div className="aihub_stat_grid">
-      <StatCard icon={<Server size={18}/>} label="Total" value={rows.length} color="#0044cc"/>
+      <StatCard icon={<Server size={18}/>} label="Total" value={rows.length} color="#0052e0"/>
       <StatCard icon={<Shield size={18}/>} label="Governed" value={governed} color="#22c55e"/>
       <StatCard icon={<Plus size={18}/>} label="Admin-added" value={adminAdded} color="#8b5cf6"/>
       <StatCard icon={<Scan size={18}/>} label="LLM-discovered" value={llmDisc} color="#f59e0b"/>
@@ -1015,12 +1308,6 @@ function systemNote(m) {
 // Field resolvers. The session/message payloads are still settling on the server
 // side, so read the top-level column first and fall back to metadata — that way
 // the transcript keeps rendering whichever shape the API actually returns.
-// enforcement_block covers several distinct blocked_for reasons (a typed
-// prompt, a paste, an attached file) that all share the same event_kind —
-// distinguish them here rather than showing the raw internal kind string in
-// the Prompts & DLP table.
-const BLOCKED_FOR_LABELS={file_upload:"File upload blocked",prompt_submit:"Prompt blocked",prompt_paste:"Paste blocked",platform:"Platform blocked"};
-function eventKindLabel(r) { return r.event_kind==="enforcement_block" ? (BLOCKED_FOR_LABELS[r.metadata?.blocked_for]||"Blocked") : r.event_kind; }
 function msgMatches(m) { const x=m.matches??m.metadata?.matches; return Array.isArray(x)?x:[]; }
 function msgSeverity(m) { return m.secret_class||m.highest_severity||m.metadata?.highest_severity||m.severity||null; }
 function sessionSeverity(s) { return s.highest_severity||s.severity||s.secret_class||null; }
@@ -1889,7 +2176,7 @@ function SessionTranscriptView({ session, machines, onBack }) {
     />
     <div className="aihub_card">
       <div className="aihub_replay_meta">
-        <div><div className="aihub_replay_meta_label">AI service</div><div><Badge text={meta.ai_service||"unknown"} color="#0044cc"/></div></div>
+        <div><div className="aihub_replay_meta_label">AI service</div><div><Badge text={meta.ai_service||"unknown"} color="#0052e0"/></div></div>
         <div><div className="aihub_replay_meta_label">Machine / user</div><div className="aihub_text_primary">{userLabel}</div></div>
         <div><div className="aihub_replay_meta_label">Started</div><div className="aihub_text_primary">{fmtTime(meta.started_at)}</div></div>
         <div><div className="aihub_replay_meta_label">Last activity</div><div className="aihub_text_primary">{fmtTime(meta.last_activity_at)}</div></div>
@@ -1991,7 +2278,7 @@ function SessionListView({ onOpen, machines }) {
       action={<div className="aihub_search_box"><Search size={14}/><input placeholder="Search machine or service..." value={q} onChange={e=>setQ(e.target.value)}/></div>}
     />
     <div className="aihub_stat_grid">
-      <StatCard icon={<History size={18}/>} label="Sessions" value={totalSessions} color="#0044cc"/>
+      <StatCard icon={<History size={18}/>} label="Sessions" value={totalSessions} color="#0052e0"/>
       <StatCard icon={<MessageSquare size={18}/>} label="Messages captured" value={totalMessages} color="#8b5cf6"/>
       <StatCard icon={<AlertTriangle size={18}/>} label="High / critical sessions" value={hiCrit} hint="needs review" color="#ef4444"/>
       <StatCard icon={<Monitor size={18}/>} label="Distinct machines" value={distinctMachines} color="#f59e0b"/>
@@ -2029,7 +2316,7 @@ function SessionListView({ onOpen, machines }) {
       <DataTable onRow={r=>onOpen(r)} columns={[
         {label:"When",render:r=>relTime(r.last_activity_at||r.started_at)},
         {label:"Machine / user",render:r=><><div className="aihub_text_primary">{machineLabel(machines,r.machine_id)}</div><div className="aihub_text_muted">{r.machine_id}</div></>},
-        {label:"AI service",render:r=><Badge text={r.ai_service||"unknown"} color="#0044cc"/>},
+        {label:"AI service",render:r=><Badge text={r.ai_service||"unknown"} color="#0052e0"/>},
         {label:"Messages",render:r=>r.message_count??0,right:true},
         {label:"Highest severity",render:r=>{const s=sessionSeverity(r);return s?<SeverityBadge sev={s}/>:<span className="aihub_text_muted">—</span>;}},
         {label:"",render:()=><span className="aihub_view_btn"><Eye size={13}/> Replay</span>,right:true},
@@ -2287,7 +2574,7 @@ function MultiSelect({options,value=[],onChange,label}) {
         const sel=value.includes(o);
         return <button key={o} type="button" onClick={()=>onChange(sel?value.filter(v=>v!==o):[...value,o])}
           style={{padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:600,border:"1px solid",cursor:"pointer",
-            background:sel?"#0044cc14":"#fff",color:sel?"#0044cc":"#6b7280",borderColor:sel?"#0044cc30":"#e5e7eb"}}>{o}</button>;
+            background:sel?"#0044cc14":"#fff",color:sel?"#0052e0":"#6b7280",borderColor:sel?"#0044cc30":"#e2e5ea"}}>{o}</button>;
       })}
     </div>
   </div>);
@@ -2352,7 +2639,7 @@ function RuleFormModal({rule,onSave,onClose}) {
         </div>
       </div>
 
-      <div style={{background:"#f9fafb",borderRadius:10,padding:14,marginBottom:14}}>
+      <div style={{background:"#f5f6f8",borderRadius:10,padding:14,marginBottom:14}}>
         <div style={{fontSize:13,fontWeight:700,color:"#111827",marginBottom:10}}>Conditions <span style={{fontWeight:400,color:"#9ca3af"}}>(all must match)</span></div>
         <MultiSelect label="Data Sensitivity" options={SEVERITY_OPTIONS} value={condSensitivity} onChange={setCondSensitivity}/>
         <MultiSelect label="Prompt Complexity" options={COMPLEXITY_OPTIONS} value={condComplexity} onChange={setCondComplexity}/>
@@ -2385,7 +2672,7 @@ function RuleFormModal({rule,onSave,onClose}) {
           <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:6}}>
             {[...MODEL_SUGGESTIONS.openai.slice(0,4),...MODEL_SUGGESTIONS.anthropic.slice(0,3),...MODEL_SUGGESTIONS.google.slice(0,2)].map(m=>
               <button key={m} type="button" onClick={()=>setActionModel(m)}
-                style={{padding:"2px 8px",borderRadius:5,fontSize:10,border:"1px solid #e5e7eb",background:actionModel===m?"#0044cc14":"#fff",color:actionModel===m?"#0044cc":"#6b7280",cursor:"pointer"}}>{m}</button>
+                style={{padding:"2px 8px",borderRadius:5,fontSize:10,border:"1px solid #e5e7eb",background:actionModel===m?"#0044cc14":"#fff",color:actionModel===m?"#0052e0":"#6b7280",cursor:"pointer"}}>{m}</button>
             )}
           </div>
         </div>
@@ -2399,7 +2686,7 @@ function RuleFormModal({rule,onSave,onClose}) {
       <div style={{display:"flex",justifyContent:"flex-end",gap:10}}>
         <button onClick={onClose} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>Cancel</button>
         <button onClick={handleSave} disabled={saving||!name.trim()||!actionModel.trim()}
-          style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:saving||!name.trim()||!actionModel.trim()?0.5:1}}>{saving?"Saving...":isEdit?"Save Changes":"Create Rule"}</button>
+          style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:saving||!name.trim()||!actionModel.trim()?0.5:1}}>{saving?"Saving...":isEdit?"Save Changes":"Create Rule"}</button>
       </div>
     </div>
   </div>);
@@ -2455,17 +2742,17 @@ function ModelRoutingView() {
 
     {/* Stat Cards */}
     <div className="aihub_stat_grid">
-      <StatCard icon={<Activity size={18}/>} label="Requests Routed" value={analytics?.total_routed||0} hint={`${analytics?.last_24h||0} in last 24h`} color="#0044cc"/>
+      <StatCard icon={<Activity size={18}/>} label="Requests Routed" value={analytics?.total_routed||0} hint={`${analytics?.last_24h||0} in last 24h`} color="#0052e0"/>
       <StatCard icon={<Shield size={18}/>} label="Active Rules" value={activeRules} hint={`${rules.length} total`} color="#8b5cf6"/>
       <StatCard icon={<Server size={18}/>} label="Endpoints" value={analytics?.active_endpoints||0} color="#22c55e"/>
       <StatCard icon={<Activity size={18}/>} label="Last 7 Days" value={analytics?.last_7d||0} color="#f59e0b"/>
     </div>
 
     {/* Tabs */}
-    <div style={{display:"flex",gap:2,marginBottom:16,borderBottom:"2px solid #f3f4f6"}}>
+    <div style={{display:"flex",gap:2,marginBottom:16,borderBottom:"2px solid #eff1f3"}}>
       {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)}
         style={{padding:"8px 18px",fontSize:13,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0044cc":"2px solid transparent",
-          background:"none",color:t.hidden?(tab===t.id?"#0044cc":"transparent"):(tab===t.id?"#0044cc":"#6b7280"),cursor:"pointer",marginBottom:-2}}>{t.label}</button>)}
+          background:"none",color:t.hidden?(tab===t.id?"#0052e0":"transparent"):(tab===t.id?"#0052e0":"#6b7280"),cursor:"pointer",marginBottom:-2}}>{t.label}</button>)}
     </div>
     {tab==="overview"&&(<div>
       {analytics?.total_routed===0 ? (
@@ -2475,7 +2762,7 @@ function ModelRoutingView() {
           <p style={{color:"#9ca3af",fontSize:13,maxWidth:400,margin:"0 auto 16px"}}>
             Create routing rules to automatically swap expensive models for cheaper ones on simple tasks, route sensitive data to private endpoints, and set up failover.
           </p>
-          <button onClick={()=>{setTab("rules");setShowRuleForm(true);}} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>
+          <button onClick={()=>{setTab("rules");setShowRuleForm(true);}} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>
             <Plus size={14} style={{verticalAlign:"middle",marginRight:4}}/> Create First Rule
           </button>
         </div>
@@ -2485,7 +2772,7 @@ function ModelRoutingView() {
             <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>Model Swaps</h4>
             {(analytics?.by_model||[]).length?<DataTable columns={[
               {label:"Original Model",render:r=><Mono>{r.from||"—"}</Mono>},
-              {label:"Routed To",render:r=><Badge text={r.to||"—"} color="#0044cc"/>},
+              {label:"Routed To",render:r=><Badge text={r.to||"—"} color="#0052e0"/>},
               {label:"Count",key:"count",right:true},
             ]} rows={analytics.by_model}/>:<div className="aihub_text_muted" style={{padding:16}}>No data yet</div>}
           </div>
@@ -2498,7 +2785,7 @@ function ModelRoutingView() {
               <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>By Complexity</h4>
               <div style={{display:"flex",gap:8}}>
                 {(analytics?.by_complexity||[]).map(c=>
-                  <div key={c.complexity} style={{flex:1,textAlign:"center",padding:12,borderRadius:8,background:"#f9fafb"}}>
+                  <div key={c.complexity} style={{flex:1,textAlign:"center",padding:12,borderRadius:8,background:"#f5f6f8"}}>
                     <div style={{fontSize:20,fontWeight:700,color:"#111827"}}>{c.count}</div>
                     <div style={{fontSize:11,color:"#6b7280",textTransform:"capitalize"}}>{c.complexity||"unknown"}</div>
                   </div>
@@ -2514,7 +2801,7 @@ function ModelRoutingView() {
     {tab==="rules"&&(<div>
       <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
         <button onClick={()=>{setEditRule(null);setShowRuleForm(true);}}
-          style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>
+          style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>
           <Plus size={14}/> Add Rule
         </button>
       </div>
@@ -2533,10 +2820,10 @@ function ModelRoutingView() {
             if(c.prompt_tokens_lt!=null) tags.push("tokens<"+c.prompt_tokens_lt);
             return <div style={{display:"flex",flexWrap:"wrap",gap:3}}>{tags.map(t=><Tag key={t} text={t}/>)}</div>;
           }},
-          {label:"Route To",render:r=><Badge text={r.action?.model||"—"} color="#0044cc"/>},
+          {label:"Route To",render:r=><Badge text={r.action?.model||"—"} color="#0052e0"/>},
           {label:"Status",render:r=><Badge text={r.enabled?"Active":"Disabled"} color={r.enabled?"#22c55e":"#9ca3af"}/>},
           {label:"Actions",render:r=><div style={{display:"flex",gap:6}}>
-            <button onClick={()=>{setEditRule(r);setShowRuleForm(true);}} style={{background:"none",border:"none",cursor:"pointer",color:"#0044cc",fontSize:12,fontWeight:600}}>Edit</button>
+            <button onClick={()=>{setEditRule(r);setShowRuleForm(true);}} style={{background:"none",border:"none",cursor:"pointer",color:"#0052e0",fontSize:12,fontWeight:600}}>Edit</button>
             <button onClick={()=>toggleRule(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#f59e0b",fontSize:12,fontWeight:600}}>{r.enabled?"Disable":"Enable"}</button>
             <button onClick={()=>deleteRule(r.id)} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",fontSize:12,fontWeight:600}}>Delete</button>
           </div>},
@@ -2561,13 +2848,13 @@ function ModelRoutingView() {
     {tab==="endpoints"&&(<div>
       <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
         <button onClick={()=>setShowEpForm(!showEpForm)}
-          style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>
+          style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>
           <Plus size={14}/> Add Endpoint
         </button>
       </div>
 
       {showEpForm&&(
-        <div className="aihub_card" style={{marginBottom:16,background:"#f9fafb"}}>
+        <div className="aihub_card" style={{marginBottom:16,background:"#f5f6f8"}}>
           <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>Register Endpoint</h4>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
             <div>
@@ -2599,7 +2886,7 @@ function ModelRoutingView() {
             </div>
             <div style={{display:"flex",alignItems:"flex-end",gap:8}}>
               <button onClick={saveEndpoint} disabled={!epName.trim()}
-                style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:!epName.trim()?0.5:1}}>Save</button>
+                style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:!epName.trim()?0.5:1}}>Save</button>
               <button onClick={()=>setShowEpForm(false)} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>Cancel</button>
             </div>
           </div>
@@ -2625,7 +2912,7 @@ function ModelRoutingView() {
         <DataTable columns={[
           {label:"Time",render:r=>relTime(r.timestamp)},
           {label:"Original Model",render:r=><Mono>{r.original_model||"—"}</Mono>},
-          {label:"Routed To",render:r=><Badge text={r.routed_model||"—"} color="#0044cc"/>},
+          {label:"Routed To",render:r=><Badge text={r.routed_model||"—"} color="#0052e0"/>},
           {label:"Rule",render:r=><div className="aihub_text_muted">{r.rule_name||"—"}</div>},
           {label:"Sensitivity",render:r=>r.sensitivity?<SeverityBadge sev={r.sensitivity}/>:<span className="aihub_text_muted">—</span>},
           {label:"Complexity",render:r=>r.complexity?<Badge text={r.complexity} color={r.complexity==="simple"?"#22c55e":r.complexity==="complex"?"#ef4444":"#f59e0b"}/>:<span className="aihub_text_muted">—</span>},
@@ -2759,7 +3046,7 @@ function RiskScoreView() {
 
   return (<div>
     <SectionHeader title="AI Risk Scores" hint="Per-employee AI safety score — 0 (safe) to 100 (critical)"
-      action={<button onClick={compute} disabled={computing} style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:computing?0.5:1}}>
+      action={<button onClick={compute} disabled={computing} style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:computing?0.5:1}}>
         <RefreshCw size={14} className={computing?"aihub_spin":""}/> {computing?"Computing...":"Compute Scores"}
       </button>}
     />
@@ -2767,7 +3054,7 @@ function RiskScoreView() {
     {/* Summary Cards */}
     {summary && <div className="aihub_stat_grid">
       <StatCard icon={<Shield size={18}/>} label="Average Score" value={summary.average_score} hint={summary.average_score<=30?"Low Risk":summary.average_score<=60?"Medium":"High"} color={summary.average_score<=30?"#22c55e":summary.average_score<=60?"#f59e0b":"#ef4444"}/>
-      <StatCard icon={<Activity size={18}/>} label="Total Employees" value={summary.total_employees} color="#0044cc"/>
+      <StatCard icon={<Activity size={18}/>} label="Total Employees" value={summary.total_employees} color="#0052e0"/>
       <StatCard icon={<Shield size={18}/>} label="Low Risk" value={summary.distribution?.low||0} hint="Score 0-30" color="#22c55e"/>
       <StatCard icon={<AlertTriangle size={18}/>} label="Medium Risk" value={summary.distribution?.medium||0} hint="Score 31-60" color="#f59e0b"/>
       <StatCard icon={<AlertTriangle size={18}/>} label="High + Critical" value={(summary.distribution?.high||0)+(summary.distribution?.critical||0)} hint="Score 61-100" color="#ef4444"/>
@@ -2983,43 +3270,19 @@ function RegistryToggle({ status, onChange, pending }) {
 // an inline expansion cannot.
 // ═══════════════════════════════════════════════════════════════════════════════
 function AIRegistryView() {
-  // ?status= / ?risk= let a link (e.g. Overview's sanction/risk donut slices)
-  // deep-link straight into a specific filtered view, instead of every link
-  // landing on the same unfiltered list regardless of what was clicked.
-  const [params]=useSearchParams();
+  const [sp]=useSearchParams();
   const [allItems,setAllItems]=useState(null);
   const [summary,setSummary]=useState(null);
   const [err,setErr]=useState(null);
   const [search,setSearch]=useState("");
-  const [filterStatus,setFilterStatus]=useState(()=>params.get("status")||"");
+  const [filterStatus,setFilterStatus]=useState("");
   const [filterType,setFilterType]=useState("");
   const [filterCategory,setFilterCategory]=useState("");
-  const [filterRisk,setFilterRisk]=useState(()=>params.get("risk")||"");
-  // Ids currently mid-flight on an allow/block decision. The toggle's own
-  // `status` prop doesn't change until loadAll() finishes re-fetching, so
-  // without this a slow save looks identical to a click that did nothing —
-  // and the natural response is to click again.
+  const [filterRisk,setFilterRisk]=useState(sp.get("risk")||"");
   const [pendingIds,setPendingIds]=useState(()=>new Set());
-  // A status/risk deep-link means someone wants to see exactly those rows right
-  // now — silently hiding the "unused" ones would defeat the click that brought
-  // them here (this was a real gap: a previous version left "hide unused" on
-  // even when arriving via an Unreviewed filter, and 2 of 3 unreviewed tools
-  // were invisible until it was unchecked by hand).
-  const [hideInactive,setHideInactive]=useState(()=>!(params.get("status")||params.get("risk")));
+  const [hideInactive,setHideInactive]=useState(!sp.get("showAll"));
   const [selected,setSelected]=useState(null);
   const [showAdd,setShowAdd]=useState(false);
-
-  // The mount-time check above only covers arriving via a fresh link (e.g. an
-  // Overview donut slice). It missed the equally common case of picking a
-  // status/risk value from the dropdowns on THIS page after already being here
-  // — confirmed live: filtering to a specific risk level with "hide unused"
-  // still checked silently dropped a real, correctly-scoped row (a platform
-  // with zero captured activity), so the list read as "3 results" for a filter
-  // Overview correctly reported as 4. Re-running this on every change, not just
-  // once at mount, closes it for both paths.
-  useEffect(()=>{
-    if(filterStatus||filterRisk) setHideInactive(false);
-  },[filterStatus,filterRisk]);
 
   // Fetch ALL data once on mount — filter client-side for instant response.
   // Returns the promise chain (previously fire-and-forget) so a caller that
@@ -3153,14 +3416,7 @@ function AIRegistryView() {
     }
     if(filterType && systemTypeOf(r.category)!==filterType) return false;
     if(filterCategory && r.category!==filterCategory) return false;
-    if(filterRisk) {
-      // Rows with no assessed risk carry risk_level: null/undefined, never the
-      // literal string "not_assessed" — that string only exists as a display
-      // label. An exact-match filter would silently match zero rows for this
-      // option (which the Overview "Not assessed" donut slice deep-links to).
-      if(filterRisk==='not_assessed') { if(r.risk_level) return false; }
-      else if(r.risk_level!==filterRisk) return false;
-    }
+    if(filterRisk) { if(filterRisk==="not_assessed"?!!r.risk_level:(r.risk_level!==filterRisk)) return false; }
     if(q && !(r.name||'').toLowerCase().includes(q) && !(r.vendor||'').toLowerCase().includes(q) && !(r.owner||'').toLowerCase().includes(q) && !(r.platform||'').toLowerCase().includes(q) && !(r.category||'').toLowerCase().includes(q)) return false;
     return true;
   }).sort((a,b)=>(b.activity?.total||0)-(a.activity?.total||0));
@@ -3184,7 +3440,7 @@ function AIRegistryView() {
     {(()=>{
       const pool=hideInactive?allItems.filter(r=>(r.activity?.total||0)>0):allItems;
       return <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(4, 1fr)"}}>
-        <StatCard icon={<Monitor size={18}/>} label="AI Systems" value={pool.length} hint={hideInactive?`+${inactiveCount} inactive`:`${activeCount} active`} color="#0044cc" onClick={()=>setHideInactive(!hideInactive)}/>
+        <StatCard icon={<Monitor size={18}/>} label="AI Systems" value={pool.length} hint={hideInactive?`+${inactiveCount} inactive`:`${activeCount} active`} color="#0052e0" onClick={()=>setHideInactive(!hideInactive)}/>
         <StatCard icon={<Shield size={18}/>} label="Allowed" value={pool.filter(i=>i.status==='approved').length} color="#22c55e" onClick={()=>setFilterStatus(filterStatus==='approved'?'':'approved')}/>
         <StatCard icon={<AlertTriangle size={18}/>} label="Unreviewed" value={pool.filter(i=>i.status==='unknown'||i.status==='restricted').length} hint="Need decision" color="#f59e0b" onClick={()=>setFilterStatus(filterStatus==='unknown'?'':'unknown')}/>
         <StatCard icon={<AlertTriangle size={18}/>} label="Blocked" value={pool.filter(i=>i.status==='blocked').length} color="#ef4444" onClick={()=>setFilterStatus(filterStatus==='blocked'?'':'blocked')}/>
@@ -3217,7 +3473,7 @@ function AIRegistryView() {
         <option value="medium">Medium</option>
         <option value="high">High</option>
         <option value="critical">Critical</option>
-        <option value="not_assessed">Not assessed</option>
+        <option value="not_assessed">Not yet assessed</option>
       </select>
       {/* "Show unused" checkbox and the results count both removed. The AI Systems
           stat card above still toggles hideInactive and shows the row count, so this
@@ -3251,6 +3507,7 @@ function AIRegistryView() {
         isExpanded={r=>selected===r.id}
         renderExpanded={r=><RegistryRowDetail row={r} onStatus={s=>setRowStatus(r,s)} pending={pendingIds.has(r.id)}/>}
         empty="No AI systems found matching your filters."
+        paginate={25}
       />
     </div>
   </div>);
@@ -3524,14 +3781,14 @@ function AccessRequestsView() {
     <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(3, 1fr)"}}>
       <StatCard icon={<Clock size={18}/>} label="Pending" value={pending.length} hint="Awaiting your review" color="#f59e0b"/>
       <StatCard icon={<Shield size={18}/>} label="Active Exceptions" value={(exceptions||[]).length} hint="Temporary access granted" color="#22c55e"/>
-      <StatCard icon={<Activity size={18}/>} label="Total Requests" value={requests.length} color="#0044cc"/>
+      <StatCard icon={<Activity size={18}/>} label="Total Requests" value={requests.length} color="#0052e0"/>
     </div>
 
     {/* Tabs */}
-    <div style={{display:"flex",gap:2,marginBottom:16,borderBottom:"2px solid #f3f4f6"}}>
+    <div style={{display:"flex",gap:2,marginBottom:16,borderBottom:"2px solid #eff1f3"}}>
       {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)}
-        style={{padding:"8px 18px",fontSize:13,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0044cc":"2px solid transparent",
-          background:"none",color:tab===t.id?"#0044cc":"#6b7280",cursor:"pointer",marginBottom:-2}}>{t.label}</button>)}
+        style={{padding:"10px 20px",fontSize:13,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0052e0":"2px solid transparent",
+          background:tab===t.id?"none":"none",color:tab===t.id?"#0052e0":"#8b919e",cursor:"pointer",marginBottom:-2,fontFamily:"inherit",transition:"all 0.15s",letterSpacing:"-0.01em"}}>{t.label}</button>)}
     </div>
 
     {/* Pending Tab */}
@@ -3551,10 +3808,15 @@ function AccessRequestsView() {
                   <span style={{fontSize:16,fontWeight:700}}>{r.tool_name||r.tool_host}</span>
                   {r.tool_vendor&&<Tag text={r.tool_vendor}/>}
                 </div>
+                {/* Name the device too, but only when it adds something: on a
+                    machine with no detected user employee_name IS the hostname,
+                    and repeating it reads like two different facts. */}
                 <div className="aihub_text_muted" style={{marginBottom:6}}>
-                  Requested by <strong>{r.employee_name}</strong> · {relTime(r.submitted_at)}
+                  Requested by <strong>{r.employee_name}</strong>
+                  {r.hostname&&r.hostname!==r.employee_name&&<> on {r.hostname}</>}
+                  {" · "}{relTime(r.submitted_at)}
                 </div>
-                {r.reason&&<div style={{fontSize:13,color:"#374151",background:"#f9fafb",padding:"8px 12px",borderRadius:8,marginBottom:8}}>"{r.reason}"</div>}
+                {r.reason&&<div style={{fontSize:13,color:"#374151",background:"#f5f6f8",padding:"8px 12px",borderRadius:8,marginBottom:8}}>"{r.reason}"</div>}
               </div>
             </div>
 
@@ -3562,13 +3824,13 @@ function AccessRequestsView() {
               <div style={{background:"#f0f9ff",borderRadius:10,padding:14,marginTop:8}}>
                 <div style={{fontSize:13,fontWeight:600,marginBottom:8}}>Set expiry (required)</div>
                 <div style={{display:"flex",gap:8,marginBottom:10}}>
-                  <button onClick={()=>setExpiryMode("hours")} style={{padding:"5px 12px",borderRadius:6,fontSize:12,border:"1px solid",cursor:"pointer",background:expiryMode==="hours"?"#0044cc14":"#fff",color:expiryMode==="hours"?"#0044cc":"#6b7280",borderColor:expiryMode==="hours"?"#0044cc40":"#e5e7eb"}}>Hours</button>
-                  <button onClick={()=>setExpiryMode("date")} style={{padding:"5px 12px",borderRadius:6,fontSize:12,border:"1px solid",cursor:"pointer",background:expiryMode==="date"?"#0044cc14":"#fff",color:expiryMode==="date"?"#0044cc":"#6b7280",borderColor:expiryMode==="date"?"#0044cc40":"#e5e7eb"}}>Date</button>
+                  <button onClick={()=>setExpiryMode("hours")} style={{padding:"5px 12px",borderRadius:6,fontSize:12,border:"1px solid",cursor:"pointer",background:expiryMode==="hours"?"#0044cc14":"#fff",color:expiryMode==="hours"?"#0052e0":"#6b7280",borderColor:expiryMode==="hours"?"#0044cc40":"#e2e5ea"}}>Hours</button>
+                  <button onClick={()=>setExpiryMode("date")} style={{padding:"5px 12px",borderRadius:6,fontSize:12,border:"1px solid",cursor:"pointer",background:expiryMode==="date"?"#0044cc14":"#fff",color:expiryMode==="date"?"#0052e0":"#6b7280",borderColor:expiryMode==="date"?"#0044cc40":"#e2e5ea"}}>Date</button>
                 </div>
                 {expiryMode==="hours"?(
                   <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:10}}>
                     {["4","8","24","72","168"].map(h=>
-                      <button key={h} onClick={()=>setExpiryHours(h)} style={{padding:"4px 10px",borderRadius:6,fontSize:11,border:"1px solid",cursor:"pointer",background:expiryHours===h?"#0044cc14":"#fff",color:expiryHours===h?"#0044cc":"#6b7280",borderColor:expiryHours===h?"#0044cc40":"#e5e7eb"}}>{h==="168"?"7 days":h+"h"}</button>
+                      <button key={h} onClick={()=>setExpiryHours(h)} style={{padding:"4px 10px",borderRadius:6,fontSize:11,border:"1px solid",cursor:"pointer",background:expiryHours===h?"#0044cc14":"#fff",color:expiryHours===h?"#0052e0":"#6b7280",borderColor:expiryHours===h?"#0044cc40":"#e2e5ea"}}>{h==="168"?"7 days":h+"h"}</button>
                     )}
                     <input type="number" value={expiryHours} onChange={e=>setExpiryHours(e.target.value)} style={{width:60,padding:"4px 8px",border:"1px solid #e5e7eb",borderRadius:6,fontSize:12}} min="1"/>
                     <span style={{fontSize:12,color:"#6b7280"}}>hours</span>
@@ -3585,7 +3847,7 @@ function AccessRequestsView() {
               </div>
             ):(
               <div style={{display:"flex",gap:8,marginTop:8}}>
-                <button onClick={()=>setApproving(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:600}}>Review</button>
+                <button onClick={()=>setApproving(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:600,borderRadius:8}}>Review</button>
                 <button onClick={()=>reject(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:"pointer",fontSize:12,fontWeight:600}}>Reject</button>
               </div>
             )}
@@ -3598,6 +3860,7 @@ function AccessRequestsView() {
     {tab==="active"&&(<div className="aihub_card">
       <DataTable columns={[
         {label:"Tool",render:r=><div className="aihub_text_primary">{r.tool_name||r.tool_host}</div>},
+        {label:"Employee",render:r=><UserCell row={r}/>},
         {label:"Machine",render:r=><Mono>{r.machine_id?.slice(0,12)}</Mono>},
         {label:"Granted",render:r=>relTime(r.granted_at)},
         {label:"Expires",render:r=>{
@@ -3616,7 +3879,7 @@ function AccessRequestsView() {
     {tab==="history"&&(<div className="aihub_card">
       <DataTable columns={[
         {label:"Tool",render:r=><div className="aihub_text_primary">{r.tool_name||r.tool_host}</div>},
-        {label:"Employee",render:r=>r.employee_name||"—"},
+        {label:"Employee",render:r=><UserCell row={r}/>},
         {label:"Reason",render:r=><div style={{fontSize:12,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.reason||"—"}</div>},
         {label:"Status",render:r=><Badge text={r.status} color={r.status==="approved"?"#22c55e":r.status==="rejected"?"#ef4444":r.status==="revoked"?"#f59e0b":"#9ca3af"}/>},
         {label:"Reviewed",render:r=>r.reviewed_at?relTime(r.reviewed_at):"—"},
@@ -3664,7 +3927,7 @@ function serverOrigin() {
 // An unrecognised-but-plausible type (AGENT/TOOL/CHAIN/… or something newer)
 // falls back to grey and renders as a generic span — never a crash, never a
 // dropped row.
-const OBS_TONE={GENERATION:"#0044cc",SPAN:"#8b5cf6",EVENT:"#f59e0b",AGENT:"#ef4444",TOOL:"#0891b2",CHAIN:"#6366f1",RETRIEVER:"#22c55e",EMBEDDING:"#14b8a6",GUARDRAIL:"#db2777"};
+const OBS_TONE={GENERATION:"#0052e0",SPAN:"#8b5cf6",EVENT:"#f59e0b",AGENT:"#ef4444",TOOL:"#0891b2",CHAIN:"#6366f1",RETRIEVER:"#22c55e",EMBEDDING:"#14b8a6",GUARDRAIL:"#db2777"};
 function obsTone(t) { return OBS_TONE[String(t||"").toUpperCase()]||"#9ca3af"; }
 
 // `level` is DEFAULT / WARNING / ERROR (DEBUG exists server-side too). Mapped onto
@@ -3723,7 +3986,7 @@ function sdkAuthNotice(what) {
 // reader still announces it.
 function sdkStep(n, title, body) {
   return (<li style={{display:"flex",gap:12,alignItems:"flex-start"}}>
-    <span style={{flexShrink:0,width:24,height:24,borderRadius:"50%",background:"#0044cc",color:"#fff",fontSize:12,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}}>{n}</span>
+    <span style={{flexShrink:0,width:24,height:24,borderRadius:"50%",background:"#0052e0",color:"#fff",fontSize:12,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}}>{n}</span>
     <div style={{minWidth:0,flex:1}}>
       <div style={{fontSize:12.5,fontWeight:700,color:"#374151",marginBottom:6}}>{title}</div>
       {body}
@@ -3809,7 +4072,18 @@ function SdkProjectsView() {
   const pk=reveal?.public_key||lastPk||"<their public_key>";
   const sk=reveal?.secret_key||"<their secret_key — shown once at creation>";
   const envBlock=`CF_AIGOV_URL=${origin}\nCF_AIGOV_PUBLIC_KEY=${pk}\nCF_AIGOV_SECRET_KEY=${sk}`;
-  const snippet=`import { CloudFuzeTracer } from '@cloudfuze/ai-gov-sdk';
+  // Where the unzipped folder is expected to sit, so the import path in step 4
+  // resolves. Kept as one string so the tree and the import can't drift apart.
+  const tree=`your-project/
+├─ ai-gov-sdk/          ← the folder you just downloaded
+│  ├─ src/index.js
+│  └─ examples/demo.mjs
+├─ your-app-code.js
+└─ package.json`;
+  // Relative import, not '@cloudfuze/ai-gov-sdk' — the package is not published,
+  // so the developer hand-places the folder from step 2 and imports it by path.
+  const snippet=`import { CloudFuzeTracer } from './ai-gov-sdk/src/index.js';
+// ^ adjust the number of ../ if your code file isn't in your project's root
 
 const tracer = new CloudFuzeTracer({
   baseUrl: process.env.CF_AIGOV_URL,
@@ -3829,7 +4103,7 @@ await tracer.flush();`;
   return (<div>
     <SectionHeader title="SDK Projects" hint="Credentials for apps that report their AI activity to this server."
       action={<button type="button" onClick={()=>{setShowForm(s=>!s);setFormErr(null);}}
-        style={{display:"inline-flex",alignItems:"center",gap:6,padding:"7px 14px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",fontSize:12.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>
+        style={{display:"inline-flex",alignItems:"center",gap:6,padding:"7px 14px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",fontSize:12.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>
         {showForm?<X size={14}/>:<Plus size={14}/>}{showForm?"Cancel":"New project"}
       </button>}/>
 
@@ -3897,7 +4171,7 @@ await tracer.flush();`;
         <button type="button" onClick={()=>{setShowForm(false);setFormErr(null);}}
           style={{padding:"7px 16px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",fontSize:12.5,fontFamily:"inherit",cursor:"pointer"}}>Cancel</button>
         <button type="submit" disabled={busy||!name.trim()}
-          style={{padding:"7px 16px",borderRadius:8,border:"none",background:busy||!name.trim()?"#9ca3af":"#0044cc",color:"#fff",fontSize:12.5,fontWeight:600,fontFamily:"inherit",cursor:busy||!name.trim()?"default":"pointer"}}>
+          style={{padding:"7px 16px",borderRadius:8,border:"none",background:busy||!name.trim()?"#9ca3af":"#0052e0",color:"#fff",fontSize:12.5,fontWeight:600,fontFamily:"inherit",cursor:busy||!name.trim()?"default":"pointer"}}>
           {busy?"Creating…":"Create project"}
         </button>
       </div>
@@ -3907,7 +4181,7 @@ await tracer.flush();`;
 
     {rows!==null&&(<>
       {!authFail&&rows.length>0&&(<div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(3,1fr)"}}>
-        <StatCard icon={<Server size={18}/>} label="Active projects" value={live.length} hint={`${rows.length-live.length} revoked`} color="#0044cc"/>
+        <StatCard icon={<Server size={18}/>} label="Active projects" value={live.length} hint={`${rows.length-live.length} revoked`} color="#0052e0"/>
         <StatCard icon={<Activity size={18}/>} label="Traces reported" value={totTraces} hint="lifetime, all projects" color="#8b5cf6"/>
         <StatCard icon={<DollarSign size={18}/>} label="Reported cost" value={fmtUsd(totCost)} hint="as reported by the SDKs" color="#22c55e"/>
       </div>)}
@@ -3934,25 +4208,37 @@ await tracer.flush();`;
 
     {/* ── How a developer connects ──────────────────────────────────────────
         A followable checklist, not a description: every step is something the
-        developer does, in order, and steps 2–3 fill themselves in with the real
+        developer does, in order, and steps 3–4 fill themselves in with the real
         keys the moment a project exists (placeholders before that). */}
     <div className="aihub_card">
-      <SectionHeader title="How a developer connects" hint="Five steps, in order — hand them to whoever owns the app. Steps 2 and 3 fill in with the real keys as soon as you create a project."/>
+      <SectionHeader title="How a developer connects" hint="Six steps, in order — hand them to whoever owns the app. Steps 3 and 4 fill in with the real keys as soon as you create a project."/>
 
       <ol role="list" style={{listStyle:"none",margin:"4px 0 0",padding:0,display:"flex",flexDirection:"column",gap:20}}>
 
-        {sdkStep(1,"Download the SDK from npm",<>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>{copyBtn("install","npm install @cloudfuze/ai-gov-sdk")}</div>
-          <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>npm install @cloudfuze/ai-gov-sdk</pre>
+        {sdkStep(1,"Download the SDK",<>
+          {/* Root-relative on purpose: /api is proxied to the API server by the
+              Vite dev server and by nginx in the deploy. Prefixing the app's
+              /CloudFuze base path here would 404. No auth on this route, so a
+              plain anchor is enough — same shape as the Teams manifest link. */}
+          <a href={`${API}/sdk/download`} download="ai-gov-sdk.zip" className="aihub_dl_btn" style={{marginTop:0}}>
+            <Download size={14}/>Download SDK (.zip)
+          </a>
           <p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,margin:"8px 0 0"}}>
-            Run this inside your project. npm fetches the SDK folder from{" "}
-            <a href="https://www.npmjs.com/package/@cloudfuze/ai-gov-sdk" target="_blank" rel="noreferrer">the published package</a>{" "}
-            and places it in <Mono>node_modules/@cloudfuze/ai-gov-sdk</Mono> — that is the download step,
-            there is nothing to unzip or move by hand.
+            Not published to npm yet — that&apos;s why you&apos;re downloading a folder directly
+            instead of running <Mono>npm install</Mono>.
           </p>
         </>)}
 
-        {sdkStep(2,"Set these three values",<>
+        {sdkStep(2,"Put the folder in your project",<>
+          <p className="aihub_text_muted" style={{fontSize:12,lineHeight:1.65,margin:"0 0 8px"}}>
+            Unzip the download. You&apos;ll get a folder called <Mono>ai-gov-sdk</Mono>. Move that whole
+            folder into the root of your own project — the same folder that has your project&apos;s
+            <Mono> package.json</Mono> (or main file) in it. For example:
+          </p>
+          <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>{tree}</pre>
+        </>)}
+
+        {sdkStep(3,"Set these three values",<>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>{copyBtn("env",envBlock)}</div>
           <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>{envBlock}</pre>
           {!reveal&&<p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,margin:"8px 0 0"}}>
@@ -3961,22 +4247,24 @@ await tracer.flush();`;
           </p>}
         </>)}
 
-        {sdkStep(3,"Add the tracer to your code",<>
+        {sdkStep(4,"Add the tracer to your code",<>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>{copyBtn("code",snippet)}</div>
           <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>{snippet}</pre>
           <p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,margin:"8px 0 0"}}>
-            Nothing is intercepted and nothing is captured that the app does not pass in. Raw prompt and
-            completion text is stored only for projects created with content capture on; otherwise the
-            server keeps masked previews only.
+            The import path matches the folder location in step 2. Nothing is intercepted and nothing is
+            captured that the app does not pass in. Raw prompt and completion text is stored only for
+            projects created with content capture on; otherwise the server keeps masked previews only.
           </p>
         </>)}
 
-        {sdkStep(4,"Run it",
+        {sdkStep(5,"Run it",
           <p className="aihub_text_muted" style={{fontSize:12,lineHeight:1.65,margin:0}}>
-            Run your app the way you normally do, with the same 3 values set as environment variables.
+            Run your app the way you normally do. If you just want to test with our sample app instead of
+            your own code, run the file at <Mono>ai-gov-sdk/examples/demo.mjs</Mono> the same way
+            (<Mono>node ai-gov-sdk/examples/demo.mjs</Mono>) with the same 3 values set.
           </p>)}
 
-        {sdkStep(5,"Confirm it worked",
+        {sdkStep(6,"Confirm it worked",
           <p className="aihub_text_muted" style={{fontSize:12,lineHeight:1.65,margin:0}}>
             Come back here, click the <strong>Traces</strong> tab, and select this project — you should see
             a new trace appear within a few seconds.
@@ -4083,7 +4371,7 @@ function SdkTracesView() {
           <input value={manualId} onChange={e=>setManualId(e.target.value)} placeholder="Paste a project id"
             style={{flex:"1 1 320px",padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13}}/>
           <button type="button" onClick={()=>selectProject(manualId.trim())}
-            style={{padding:"7px 16px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",fontSize:12.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>Load traces</button>
+            style={{padding:"7px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",fontSize:12.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>Load traces</button>
         </div>
         <p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,margin:"8px 0 0"}}>
           The project drop-down needs an admin credential (<Mono>VITE_ADMIN_TOKEN</Mono> in <Mono>connect-ui/.env.local</Mono>,
@@ -4244,6 +4532,11 @@ const CLAUDE_PERIODS = [
   { value: "",   label: "All time" },
 ];
 
+// Must match CLAUDE_CODE_SURFACE in server/src/lib/claude-clients.js. Claude Code
+// in the VS Code / Cursor extension is the same product as Claude Code in a
+// terminal, so it is one surface with the client shown underneath.
+const CLAUDE_CODE_SURFACE = "Claude Code (CLI/extension)";
+
 function ClaudeUsageView() {
   const [data,setData]=useState(null),[e,setE]=useState(null),[sel,setSel]=useState(null);
   // Defaults to 30 days rather than all time. Without a window the totals are
@@ -4298,7 +4591,7 @@ function ClaudeUsageView() {
           Team or Max plan seats are flat-rate and nothing is billed per token. So it
           is what this usage WOULD have cost on the API, which is a useful number, but
           calling it measured cost stated it as money spent. */}
-      <StatCard icon={<Activity size={18}/>} label="Tokens" value={fmtTokens(t.measured_tokens)} hint={`${(t.measured_requests||0).toLocaleString()} Claude Code requests · includes cached context re-read each turn`} color="#0044cc"/>
+      <StatCard icon={<Activity size={18}/>} label="Tokens" value={fmtTokens(t.measured_tokens)} hint={`${(t.measured_requests||0).toLocaleString()} Claude Code requests · includes cached context re-read each turn`} color="#0052e0"/>
       <StatCard icon={<Wrench size={18}/>} label="Estimated cost" value={fmtUsd(t.measured_cost_usd)} hint="at API list rates — Team seats are not billed per token" color="#22c55e"/>
       <StatCard icon={<Clock size={18}/>} label="Est. tokens" value={fmtTokens(t.estimated_tokens)} hint={`≈${fmtUsd(t.estimated_cost_usd)} · browser & desktop, prompt text only`} color="#f59e0b"/>
       {/* The seat-reclamation number. Idle is the one worth reading, so it leads the
@@ -4330,10 +4623,12 @@ function ClaudeUsageView() {
           // to another. Machine and OS user are what the tracker actually observes,
           // so those are what is shown. The field is untouched in the API.
           {label:"User",render:r=><div className="aihub_text_primary">{r.user||r.label}</div>},
-          {label:"System",render:r=>r.hostname?<Mono>{r.hostname}</Mono>:<span className="aihub_text_muted">—</span>},
           {label:"Desktop",render:r=>(r.by_surface?.["Claude Desktop"]||0),right:true},
           {label:"Browser",render:r=>(r.by_surface?.["Claude (browser)"]||0),right:true},
-          {label:"Code CLI",render:r=>(r.by_surface?.["Claude Code (CLI)"]||0),right:true},
+          // Reads the new key first, the pre-rename one second. The API emits both
+          // for one release, and this way the column keeps working whichever the
+          // server it is talking to happens to send.
+          {label:"Code CLI/ext",render:r=>(r.by_surface?.[CLAUDE_CODE_SURFACE]??r.by_surface?.["Claude Code (CLI)"]??0),right:true},
           {label:"Total prompts",render:r=><strong>{(r.prompts||0).toLocaleString()}</strong>,right:true},
           // Both cost fields, summed — not measured_cost_usd alone.
           //
@@ -4372,12 +4667,50 @@ function ClaudeUsageView() {
         ))}
       </div>
 
+      {/* Which client the Claude Code prompts came from. Only that surface reports
+          it, so the strip is absent everywhere else rather than showing a single
+          meaningless "Unknown" bar. Percentages are of this surface's prompts —
+          the question being answered is "how much of our Claude Code use is the
+          IDE extension?", which is a share, not a count. */}
+      {selected?.clients?.length>0 && (
+        <div className="aihub_card" style={{marginBottom:14}}>
+          <SectionHeader title="By client"/>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {selected.clients.map(c=>{
+              const pct=selected.prompts?Math.round((c.prompts/selected.prompts)*100):0;
+              const unknown=c.client==="Unknown";
+              return (
+                <div key={c.client} className="aihub_filter_btn" style={{cursor:"default",opacity:unknown?0.62:1}}>
+                  <strong>{c.client}</strong> · {(c.prompts||0).toLocaleString()} prompts · {pct}%
+                  <span className="aihub_text_muted"> · {c.users} {c.users===1?"person":"people"}</span>
+                </div>
+              );
+            })}
+          </div>
+          {selected.clients.some(c=>c.client==="Unknown") && (
+            <div className="aihub_text_muted" style={{marginTop:10,fontSize:12}}>
+              “Unknown” means Claude Code’s telemetry for that session never reached the server,
+              so the client was not reported. Those prompts are still counted — they are not
+              assumed to be terminal sessions.
+            </div>
+          )}
+        </div>
+      )}
+
       {selected && <div className="aihub_card">
         {/* Sub-line removed. The surface buttons above already carry the prompt
             count, and the table below carries the per-user tokens and cost. */}
         <SectionHeader title={`${selected.surface} — usage by user`}/>
         <DataTable columns={[
           {label:"User",render:r=><><div className="aihub_text_primary">{r.label||r.user||r.hostname||"—"}</div>{!r.attributed&&<div className="aihub_text_muted">unattributed</div>}</>},
+          // Per-person client mix, so "the team uses the extension" can be checked
+          // against who actually does. Rendered as "VS Code 41 · Terminal 12"
+          // rather than one winner, because people genuinely split across both.
+          ...(selected.clients?.length>0?[{label:"Client",render:r=>(
+            r.clients?.length
+              ? <span>{r.clients.map(c=>`${c.client} ${c.prompts}`).join(" · ")}</span>
+              : <span className="aihub_text_muted">—</span>
+          )}]:[]),
           {label:"Prompts",key:"prompts",right:true},
           {label:"Tokens",render:r=>fmtTokens(r.tokens),right:true},
           {label:"Cost",render:r=>fmtUsd(r.cost_usd),right:true},
@@ -4589,13 +4922,13 @@ function IntegrationsView() {
     <SectionHeader title="Integrations" hint="Connect CloudFuze to your existing tools — notifications, ticketing, identity, and cloud platforms"/>
 
     {/* Tabs: Webhooks | Delivery Log | Connections */}
-    <div style={{display:"flex",gap:2,marginBottom:16,borderBottom:"2px solid #f3f4f6"}}>
+    <div style={{display:"flex",gap:2,marginBottom:16,borderBottom:"2px solid #eff1f3"}}>
       {[
         {id:"webhooks",label:"Webhooks ("+hooks.length+")"},
         {id:"log",label:"Delivery Log"},
         {id:"connections",label:"Connections ("+configuredCount+"/"+((connections||[]).length)+")"},
       ].map(t=>
-        <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"8px 18px",fontSize:13,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0044cc":"2px solid transparent",background:"none",color:tab===t.id?"#0044cc":"#6b7280",cursor:"pointer",marginBottom:-2}}>{t.label}</button>
+        <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"10px 20px",fontSize:13,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0052e0":"2px solid transparent",background:"none",color:tab===t.id?"#0052e0":"#8b919e",cursor:"pointer",marginBottom:-2,fontFamily:"inherit",transition:"all 0.15s"}}>{t.label}</button>
       )}
     </div>
 
@@ -4604,7 +4937,7 @@ function IntegrationsView() {
       <div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:14,marginBottom:16}}>
           {(connections||[]).map(c=>(
-            <div key={c.type} style={{border:"1px solid "+(c.status==='configured'?"#22c55e30":"#e5e7eb"),borderRadius:12,padding:18,background:c.status==='configured'?"#f0fdf4":"#fff"}}>
+            <div key={c.type} style={{border:"1px solid "+(c.status==='configured'?"#22c55e30":"#e2e5ea"),borderRadius:12,padding:18,background:c.status==='configured'?"#f0fdf4":"#fff"}}>
               <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
                 <span style={{fontSize:30}}>{c.icon}</span>
                 <div>
@@ -4618,7 +4951,7 @@ function IntegrationsView() {
                   <button onClick={()=>disconnect(c.type)} style={{fontSize:11,color:"#ef4444",background:"none",border:"none",cursor:"pointer"}}>Disconnect</button>
                 </div>
               ):(
-                <button onClick={()=>setConfigType(c.type)} style={{width:"100%",padding:"8px 0",borderRadius:8,border:"1px solid #0044cc30",background:"#0044cc08",color:"#0044cc",fontSize:13,fontWeight:600,cursor:"pointer"}}>Configure</button>
+                <button onClick={()=>setConfigType(c.type)} style={{width:"100%",padding:"8px 0",borderRadius:8,border:"1px solid #0044cc30",background:"#0044cc08",color:"#0052e0",fontSize:13,fontWeight:600,cursor:"pointer"}}>Configure</button>
               )}
             </div>
           ))}
@@ -4626,12 +4959,12 @@ function IntegrationsView() {
 
         {/* Slack Config Form */}
         {configType==='slack'&&(
-          <div className="aihub_card" style={{background:"#f9fafb"}}>
+          <div className="aihub_card" style={{background:"#f5f6f8"}}>
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
               <h4 style={{margin:0,fontSize:14,fontWeight:700}}>Connect Slack</h4>
               <div style={{position:"relative"}}>
-                <button onClick={()=>setShowHelp('slack')} style={{background:"none",border:"1px solid #0044cc30",borderRadius:"50%",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:"#0044cc",fontWeight:700,fontSize:14}}>?</button>
-                {!cfgSlackToken&&<div style={{position:"absolute",right:36,top:4,whiteSpace:"nowrap",fontSize:11,color:"#0044cc",fontWeight:600,animation:"cfai-fade-in .3s"}}>Need help? Click here →</div>}
+                <button onClick={()=>setShowHelp('slack')} style={{background:"none",border:"1px solid #0044cc30",borderRadius:"50%",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:"#0052e0",fontWeight:700,fontSize:14}}>?</button>
+                {!cfgSlackToken&&<div style={{position:"absolute",right:36,top:4,whiteSpace:"nowrap",fontSize:11,color:"#0052e0",fontWeight:600,animation:"cfai-fade-in .3s"}}>Need help? Click here →</div>}
               </div>
             </div>
             <div style={{marginBottom:12}}>
@@ -4640,19 +4973,19 @@ function IntegrationsView() {
             </div>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
               <button onClick={()=>setConfigType(null)} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>Cancel</button>
-              <button onClick={()=>saveConnection('slack')} disabled={!cfgSlackToken||cfgSaving} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:!cfgSlackToken||cfgSaving?0.5:1}}>{cfgSaving?"Verifying...":"Connect"}</button>
+              <button onClick={()=>saveConnection('slack')} disabled={!cfgSlackToken||cfgSaving} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:!cfgSlackToken||cfgSaving?0.5:1}}>{cfgSaving?"Verifying...":"Connect"}</button>
             </div>
           </div>
         )}
 
         {/* Teams Config Form */}
         {configType==='teams'&&(
-          <div className="aihub_card" style={{background:"#f9fafb"}}>
+          <div className="aihub_card" style={{background:"#f5f6f8"}}>
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
               <h4 style={{margin:0,fontSize:14,fontWeight:700}}>Connect Microsoft Teams</h4>
               <div style={{position:"relative"}}>
-                <button onClick={()=>setShowHelp('teams')} style={{background:"none",border:"1px solid #0044cc30",borderRadius:"50%",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:"#0044cc",fontWeight:700,fontSize:14}}>?</button>
-                {!cfgTeamsClientId&&<div style={{position:"absolute",right:36,top:4,whiteSpace:"nowrap",fontSize:11,color:"#0044cc",fontWeight:600,animation:"cfai-fade-in .3s"}}>Need help? Click here →</div>}
+                <button onClick={()=>setShowHelp('teams')} style={{background:"none",border:"1px solid #0044cc30",borderRadius:"50%",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:"#0052e0",fontWeight:700,fontSize:14}}>?</button>
+                {!cfgTeamsClientId&&<div style={{position:"absolute",right:36,top:4,whiteSpace:"nowrap",fontSize:11,color:"#0052e0",fontWeight:600,animation:"cfai-fade-in .3s"}}>Need help? Click here →</div>}
               </div>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
@@ -4680,14 +5013,14 @@ function IntegrationsView() {
                   After upload, webhooks will auto-install the bot in any team you select.
                 </div>
                 <a href={CONNECTIONS_API+"/teams/manifest"} download="CloudFuze-Alerts-Bot.zip"
-                  style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",fontSize:13,fontWeight:600,textDecoration:"none",cursor:"pointer"}}>
+                  style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",fontSize:13,fontWeight:600,textDecoration:"none",cursor:"pointer"}}>
                   ⬇ Download Manifest ZIP
                 </a>
               </div>
             )}
             <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
               <button onClick={()=>{setConfigType(null);setTeamsManualUpload(false);}} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>{teamsManualUpload?"Done":"Cancel"}</button>
-              {!teamsManualUpload&&<button onClick={()=>saveConnection('teams')} disabled={!cfgTeamsClientId||!cfgTeamsSecret||!cfgTeamsTenant||cfgSaving} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:(!cfgTeamsClientId||!cfgTeamsSecret||!cfgTeamsTenant||cfgSaving)?0.5:1}}>{cfgSaving?"Verifying...":"Connect"}</button>}
+              {!teamsManualUpload&&<button onClick={()=>saveConnection('teams')} disabled={!cfgTeamsClientId||!cfgTeamsSecret||!cfgTeamsTenant||cfgSaving} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:(!cfgTeamsClientId||!cfgTeamsSecret||!cfgTeamsTenant||cfgSaving)?0.5:1}}>{cfgSaving?"Verifying...":"Connect"}</button>}
             </div>
           </div>
         )}
@@ -4704,14 +5037,14 @@ function IntegrationsView() {
           </div>
 
           {showHelp==='slack'&&(<div style={{fontSize:13,color:"#374151",lineHeight:1.8}}>
-            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 1 — Create a Slack App</div>
+            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 1 — Create a Slack App</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Go to <strong>api.slack.com/apps</strong></li>
               <li>Click <strong>Create New App</strong> → <strong>Blank app</strong></li>
               <li>App name: <code style={{background:"#f1f5f9",padding:"1px 6px",borderRadius:3}}>CloudFuze Alerts</code></li>
               <li>Pick your workspace → <strong>Create App</strong></li>
             </ol>
-            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 2 — Add Bot Permissions</div>
+            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 2 — Add Bot Permissions</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Left sidebar → <strong>OAuth & Permissions</strong></li>
               <li>Scroll to <strong>Bot Token Scopes</strong></li>
@@ -4724,7 +5057,7 @@ function IntegrationsView() {
                 </div>
               </li>
             </ol>
-            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 3 — Install & Copy Token</div>
+            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 3 — Install & Copy Token</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Scroll up → <strong>Install to Workspace</strong> → <strong>Allow</strong></li>
               <li>Copy the <strong>Bot User OAuth Token</strong> (starts with <code>xoxb-</code>)</li>
@@ -4736,25 +5069,25 @@ function IntegrationsView() {
           </div>)}
 
           {showHelp==='teams'&&(<div style={{fontSize:13,color:"#374151",lineHeight:1.8}}>
-            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 1 — Create Azure Bot Resource</div>
+            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 1 — Create Azure Bot Resource</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Go to <strong>portal.azure.com</strong></li>
               <li>Search <strong>"Azure Bot"</strong> in the top search bar → click under Marketplace → <strong>Create</strong></li>
               <li>Fill in: Bot handle: <code style={{background:"#f1f5f9",padding:"1px 6px",borderRadius:3}}>CloudFuze-Alerts-Bot</code>, Type: <strong>Multi Tenant</strong></li>
               <li>Click <strong>Review + Create</strong> → <strong>Create</strong></li>
             </ol>
-            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 2 — Get App ID & Secret</div>
+            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 2 — Get App ID & Secret</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Go to <strong>Azure Portal</strong> → <strong>App registrations</strong> → find your bot</li>
               <li>Copy the <strong>Application (client) ID</strong> and <strong>Directory (tenant) ID</strong></li>
               <li>Go to <strong>Certificates & secrets</strong> → <strong>New client secret</strong> → copy the <strong>Value</strong></li>
             </ol>
-            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 3 — Enable Teams Channel</div>
+            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 3 — Enable Teams Channel</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Go to the <strong>Azure Bot</strong> resource (not App registration)</li>
               <li>Left sidebar → <strong>Channels</strong> → select <strong>Microsoft Teams</strong> → <strong>Apply</strong></li>
             </ol>
-            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 4 — Add API Permissions</div>
+            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 4 — Add API Permissions</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Go to <strong>App registrations</strong> → your bot → <strong>API permissions</strong></li>
               <li>Click <strong>Add a permission</strong> → <strong>Microsoft Graph</strong> → <strong>Application permissions</strong></li>
@@ -4770,7 +5103,7 @@ function IntegrationsView() {
               </li>
               <li>Click <strong>Grant admin consent for [your org]</strong></li>
             </ol>
-            <div style={{fontWeight:700,fontSize:14,color:"#0044cc",marginBottom:8}}>Step 5 — Connect in CloudFuze</div>
+            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 5 — Connect in CloudFuze</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Paste <strong>Client ID</strong>, <strong>Tenant ID</strong>, and <strong>Client Secret</strong> below</li>
               <li>Click <strong>Connect</strong></li>
@@ -4783,7 +5116,7 @@ function IntegrationsView() {
           </div>)}
 
           <div style={{display:"flex",justifyContent:"flex-end",marginTop:16}}>
-            <button onClick={()=>setShowHelp(null)} style={{padding:"8px 24px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>Got it</button>
+            <button onClick={()=>setShowHelp(null)} style={{padding:"8px 24px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>Got it</button>
           </div>
         </div>
       </div>
@@ -4797,9 +5130,9 @@ function IntegrationsView() {
           setFTemplate(defaultType);
           setShowForm(true);
           if(defaultType==='slack'||defaultType==='teams') loadChannels(defaultType);
-        }} style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}><Plus size={14}/> Add Webhook</button>
+        }} style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}><Plus size={14}/> Add Webhook</button>
       </div>
-      {showForm&&(<div className="aihub_card" style={{marginBottom:16,background:"#f9fafb"}}>
+      {showForm&&(<div className="aihub_card" style={{marginBottom:16,background:"#f5f6f8"}}>
         <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>{editId?"Edit Webhook":"New Webhook"}</h4>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
           <div><label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Name</label><input value={fName} onChange={e=>setFName(e.target.value)} placeholder="e.g. Security Alerts Slack" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/></div>
@@ -4814,10 +5147,10 @@ function IntegrationsView() {
           <div style={{marginBottom:12}}>
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}}>
               <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Channel {fChannelId&&<span style={{fontWeight:400,color:"#22c55e"}}> ✓ selected</span>}</label>
-              <button type="button" onClick={()=>loadChannels(fTemplate)} disabled={loadingChannels} style={{fontSize:11,color:"#0044cc",background:"none",border:"none",cursor:"pointer",fontWeight:600}}>{loadingChannels?"Loading...":"↻ Refresh"}</button>
+              <button type="button" onClick={()=>loadChannels(fTemplate)} disabled={loadingChannels} style={{fontSize:11,color:"#0052e0",background:"none",border:"none",cursor:"pointer",fontWeight:600}}>{loadingChannels?"Loading...":"↻ Refresh"}</button>
             </div>
             {loadingChannels?(
-              <div style={{padding:"16px",background:"#f9fafb",borderRadius:8,fontSize:12,color:"#6b7280",textAlign:"center"}}>Loading from {fTemplate==='slack'?'Slack':'Microsoft Teams'}...</div>
+              <div style={{padding:"16px",background:"#f5f6f8",borderRadius:8,fontSize:12,color:"#6b7280",textAlign:"center"}}>Loading from {fTemplate==='slack'?'Slack':'Microsoft Teams'}...</div>
             ):channelData?(()=>{
               const q=channelSearch.toLowerCase();
 
@@ -4837,7 +5170,7 @@ function IntegrationsView() {
                   }
                 };
                 return (<div style={{border:"1px solid #e5e7eb",borderRadius:8,overflow:"hidden"}}>
-                  <div style={{padding:"8px 10px",borderBottom:"1px solid #e5e7eb",background:"#f9fafb"}}>
+                  <div style={{padding:"8px 10px",borderBottom:"1px solid #e5e7eb",background:"#f5f6f8"}}>
                     <input value={channelSearch} onChange={e=>setChannelSearch(e.target.value)} placeholder={"Search "+filteredTeams.length+" teams..."} style={{width:"100%",border:"none",background:"transparent",outline:"none",fontSize:12,boxSizing:"border-box"}}/>
                   </div>
                   <div style={{maxHeight:300,overflowY:"auto"}}>
@@ -4853,7 +5186,7 @@ function IntegrationsView() {
                           :(teamChannels[t.team_id]||[]).map(ch=>(
                             <div key={ch.id} onClick={()=>setFChannelId(ch.id)}
                               style={{padding:"7px 12px 7px 36px",fontSize:12,cursor:"pointer",borderBottom:"1px solid #f9fafb",
-                                background:fChannelId===ch.id?"#0044cc10":"#fff",color:fChannelId===ch.id?"#0044cc":"#374151",fontWeight:fChannelId===ch.id?600:400}}>
+                                background:fChannelId===ch.id?"#0044cc10":"#fff",color:fChannelId===ch.id?"#0052e0":"#374151",fontWeight:fChannelId===ch.id?600:400}}>
                               # {ch.name}
                             </div>
                           ))
@@ -4867,7 +5200,7 @@ function IntegrationsView() {
                 // Slack — flat list
                 const chs=(channelData.channels||[]).filter(ch=>!q||ch.name.toLowerCase().includes(q));
                 return (<div style={{border:"1px solid #e5e7eb",borderRadius:8,overflow:"hidden"}}>
-                  <div style={{padding:"8px 10px",borderBottom:"1px solid #e5e7eb",background:"#f9fafb"}}>
+                  <div style={{padding:"8px 10px",borderBottom:"1px solid #e5e7eb",background:"#f5f6f8"}}>
                     <input value={channelSearch} onChange={e=>setChannelSearch(e.target.value)} placeholder={"Search "+chs.length+" channels..."} style={{width:"100%",border:"none",background:"transparent",outline:"none",fontSize:12,boxSizing:"border-box"}}/>
                   </div>
                   <div style={{maxHeight:300,overflowY:"auto"}}>
@@ -4875,7 +5208,7 @@ function IntegrationsView() {
                     {chs.map(ch=>(
                       <div key={ch.id} onClick={()=>setFChannelId(ch.id)}
                         style={{padding:"7px 12px",fontSize:12,cursor:"pointer",borderBottom:"1px solid #f9fafb",
-                          background:fChannelId===ch.id?"#0044cc10":"#fff",color:fChannelId===ch.id?"#0044cc":"#374151",fontWeight:fChannelId===ch.id?600:400}}>
+                          background:fChannelId===ch.id?"#0044cc10":"#fff",color:fChannelId===ch.id?"#0052e0":"#374151",fontWeight:fChannelId===ch.id?600:400}}>
                         {ch.name} {ch.is_private&&<span style={{fontSize:10,color:"#9ca3af"}}>🔒</span>}
                       </div>
                     ))}
@@ -4894,15 +5227,15 @@ function IntegrationsView() {
           <div style={{marginBottom:12}}><label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Auth Header <span style={{fontWeight:400,color:"#9ca3af"}}>(optional)</span></label><input value={fAuth} onChange={e=>setFAuth(e.target.value)} placeholder="Authorization: Bearer your-token" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/></div>
         </>)}
 
-        <div style={{marginBottom:12}}><label style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:6,display:"block"}}>Triggers</label><div style={{display:"flex",flexWrap:"wrap",gap:6}}>{triggersList.map(t=>{const sel=fTriggers.includes(t);return <button key={t} type="button" onClick={()=>setFTriggers(sel?fTriggers.filter(x=>x!==t):[...fTriggers,t])} style={{padding:"4px 12px",borderRadius:6,fontSize:11,fontWeight:600,border:"1px solid",cursor:"pointer",background:sel?"#0044cc14":"#fff",color:sel?"#0044cc":"#6b7280",borderColor:sel?"#0044cc30":"#e5e7eb"}}>{TL[t]||t}</button>;})}</div></div>
-        <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}><button onClick={closeForm} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>Cancel</button><button onClick={save} disabled={!fName} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0044cc",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:!fName?0.5:1}}>{editId?"Update":"Save"}</button></div>
+        <div style={{marginBottom:12}}><label style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:6,display:"block"}}>Triggers</label><div style={{display:"flex",flexWrap:"wrap",gap:6}}>{triggersList.map(t=>{const sel=fTriggers.includes(t);return <button key={t} type="button" onClick={()=>setFTriggers(sel?fTriggers.filter(x=>x!==t):[...fTriggers,t])} style={{padding:"4px 12px",borderRadius:6,fontSize:11,fontWeight:600,border:"1px solid",cursor:"pointer",background:sel?"#0044cc14":"#fff",color:sel?"#0052e0":"#6b7280",borderColor:sel?"#0044cc30":"#e2e5ea"}}>{TL[t]||t}</button>;})}</div></div>
+        <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}><button onClick={closeForm} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>Cancel</button><button onClick={save} disabled={!fName} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:!fName?0.5:1}}>{editId?"Update":"Save"}</button></div>
       </div>)}
       <div className="aihub_card"><DataTable columns={[
         {label:"Webhook",render:r=><div><div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:16}}>{TI[r.template]||"⚡"}</span><div className="aihub_text_primary">{r.name}</div></div><div className="aihub_text_muted" style={{fontSize:11}}>{r.url?.slice(0,50)}{r.url?.length>50?"...":""}</div></div>},
         {label:"Template",render:r=><Tag text={templates?.[r.template]?.name||r.template}/>},
         {label:"Triggers",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:3}}>{(r.triggers||[]).map(t=><Tag key={t} text={TL[t]||t} color="#6366f1"/>)}</div>},
         {label:"Status",render:r=><Badge text={r.enabled?"Active":"Disabled"} color={r.enabled?"#22c55e":"#9ca3af"}/>},
-        {label:"Actions",render:r=><div style={{display:"flex",gap:6,whiteSpace:"nowrap"}}><button onClick={()=>startEdit(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#0044cc",fontSize:12,fontWeight:600}}>Edit</button><button onClick={()=>test(r.id)} disabled={testing===r.id} style={{background:"none",border:"none",cursor:"pointer",color:"#6366f1",fontSize:12,fontWeight:600}}>{testing===r.id?"Testing...":"Test"}</button><button onClick={()=>toggle(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#f59e0b",fontSize:12,fontWeight:600}}>{r.enabled?"Disable":"Enable"}</button><button onClick={()=>remove(r.id)} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",fontSize:12,fontWeight:600}}>Delete</button></div>},
+        {label:"Actions",render:r=><div style={{display:"flex",gap:6,whiteSpace:"nowrap"}}><button onClick={()=>startEdit(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#0052e0",fontSize:12,fontWeight:600}}>Edit</button><button onClick={()=>test(r.id)} disabled={testing===r.id} style={{background:"none",border:"none",cursor:"pointer",color:"#6366f1",fontSize:12,fontWeight:600}}>{testing===r.id?"Testing...":"Test"}</button><button onClick={()=>toggle(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#f59e0b",fontSize:12,fontWeight:600}}>{r.enabled?"Disable":"Enable"}</button><button onClick={()=>remove(r.id)} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",fontSize:12,fontWeight:600}}>Delete</button></div>},
       ]} rows={hooks} empty="No webhooks configured. Click 'Add Webhook' to connect to Slack, Teams, Jira, or any tool."/></div>
     </div>)}
 
@@ -4935,7 +5268,7 @@ async function packFetch(path, opts) {
 
 const ENFORCE_META = {
   agent:       { label:"Enforced",   color:"#16a34a", hint:"Evaluated automatically against discovered AI agents." },
-  dlp:         { label:"Monitored",  color:"#0044cc", hint:"Detected in prompts by the endpoint agent / extension. Coverage is verified against observed events, not toggled from here." },
+  dlp:         { label:"Monitored",  color:"#0052e0", hint:"Detected in prompts by the endpoint agent / extension. Coverage is verified against observed events, not toggled from here." },
   attestation: { label:"Attestation",color:"#b45309", hint:"A control software cannot decide — record who owns it and the evidence." },
 };
 
@@ -4985,7 +5318,7 @@ function PolicyPacksView() {
       </div>}
 
     <div className="aihub_stat_grid">
-      <StatCard icon={<Shield size={18}/>} label="Frameworks" value={list.length} color="#0044cc"/>
+      <StatCard icon={<Shield size={18}/>} label="Frameworks" value={list.length} color="#0052e0"/>
       <StatCard icon={<Wrench size={18}/>} label="Deployed" value={deployedCount} hint={`of ${list.length}`} color="#22c55e"/>
       <StatCard icon={<FileText size={18}/>} label="Total rules" value={totalRules} hint="across all packs" color="#8b5cf6"/>
       <StatCard icon={<Activity size={18}/>} label="Live enforced rules" value={liveRules} hint="evaluated automatically" color="#f59e0b"/>
@@ -5201,7 +5534,7 @@ function PackSimulation({ pack, onClose }) {
         <StatCard icon={<AlertTriangle size={18}/>} label="Would be blocked" value={(result.would_block_total||0).toLocaleString()} hint={`of ${(result.events_in_scope||0).toLocaleString()} in scope`} color="#b91c1c"/>
         <StatCard icon={<MessageSquare size={18}/>} label="People impacted" value={result.unique_users_impacted} color="#8b5cf6"/>
         <StatCard icon={<Activity size={18}/>} label="Interruptions / person / day" value={result.productivity.blocks_per_user_per_day} hint={`${result.productivity.impact_level} impact`} color={impactColor[result.productivity.impact_level]||"#f59e0b"}/>
-        <StatCard icon={<Wrench size={18}/>} label="vs enforcement today" value={result.comparison.delta_percent!=null?`${result.comparison.delta_percent>0?"+":""}${result.comparison.delta_percent}%`:"—"} hint={`now ${result.comparison.current_enforcement_events}`} color="#0044cc"/>
+        <StatCard icon={<Wrench size={18}/>} label="vs enforcement today" value={result.comparison.delta_percent!=null?`${result.comparison.delta_percent>0?"+":""}${result.comparison.delta_percent}%`:"—"} hint={`now ${result.comparison.current_enforcement_events}`} color="#0052e0"/>
       </div>
 
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:14}}>
@@ -5314,7 +5647,7 @@ function EuAiActView() {
     {err && <div className="aihub_error" style={{marginBottom:12}}><AlertTriangle size={14}/> {err}</div>}
 
     <div className="aihub_stat_grid">
-      <StatCard icon={<FileText size={18}/>} label="Systems classified" value={s.total_assessed} color="#0044cc"/>
+      <StatCard icon={<FileText size={18}/>} label="Systems classified" value={s.total_assessed} color="#0052e0"/>
       <StatCard icon={<AlertTriangle size={18}/>} label="Prohibited in use" value={s.prohibited_in_use} hint={s.prohibited_in_use?"must not be deployed":"none"} color={s.prohibited_in_use?"#b91c1c":"#16a34a"}/>
       <StatCard icon={<Shield size={18}/>} label="High risk" value={s.by_tier.high} hint="full obligations" color="#c2410c"/>
       <StatCard icon={<Clock size={18}/>} label="FRIAs complete" value={`${s.fria_complete}/${s.fria_required}`} hint="Article 27" color="#8b5cf6"/>
@@ -5360,7 +5693,7 @@ function EuAiActView() {
         const title={prohibited:"1. Prohibited practices (Article 5)",high_risk:"2. High-risk use cases (Annex III)",
                      transparency:"3. Transparency obligations (Article 50)",context:"4. Your role and context"}[sec];
         return (<div key={sec} style={{marginBottom:16}}>
-          <div style={{fontSize:12,fontWeight:700,color:"#0044cc",marginBottom:6}}>{title}</div>
+          <div style={{fontSize:12,fontWeight:700,color:"#0052e0",marginBottom:6}}>{title}</div>
           {qs.map(q=>(
             <div key={q.id} style={{padding:"8px 0",borderBottom:"1px solid #f1f5f9"}}>
               <div style={{fontSize:12.5,marginBottom:3}}>{q.question}</div>
@@ -5568,7 +5901,7 @@ function ServerMonitorView() {
                   <div key={srv.machine_id} onClick={() => setSelectedServer(srv)}
                     style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 16, cursor: "pointer", transition: "border-color 0.2s" }}
                     onMouseEnter={e => e.currentTarget.style.borderColor = "#3b82f6"}
-                    onMouseLeave={e => e.currentTarget.style.borderColor = "#e5e7eb"}>
+                    onMouseLeave={e => e.currentTarget.style.borderColor = "#e2e5ea"}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                         <div style={{ width: 8, height: 8, borderRadius: "50%", background: srv.status === "active" ? "#22c55e" : srv.status === "uninstalled" ? "#ef4444" : "#9ca3af" }} />
@@ -5604,7 +5937,7 @@ function ServerMonitorView() {
                   <div key={agent.container_name} onClick={() => { setSelectedAgent(agent); setDateFrom(""); setDateTo(""); }}
                     style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 16, cursor: "pointer", transition: "border-color 0.2s" }}
                     onMouseEnter={e => e.currentTarget.style.borderColor = "#3b82f6"}
-                    onMouseLeave={e => e.currentTarget.style.borderColor = "#e5e7eb"}>
+                    onMouseLeave={e => e.currentTarget.style.borderColor = "#e2e5ea"}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                         <div style={{ width: 32, height: 32, borderRadius: 8, background: "#eff6ff", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -6095,7 +6428,7 @@ function InstallationsView() {
             <h4 style={{margin:0,fontSize:15,fontWeight:700}}>Desktop Agent</h4>
             <div style={{fontSize:11,color:"#9ca3af"}}>Windows · macOS · Linux</div>
           </div>
-          <div style={{marginLeft:"auto",fontSize:10,color:"#0044cc",background:"#eff6ff",padding:"3px 8px",borderRadius:6,fontWeight:600}}>Step 1</div>
+          <div style={{marginLeft:"auto",fontSize:10,color:"#0052e0",background:"#eff6ff",padding:"3px 8px",borderRadius:6,fontWeight:600}}>Step 1</div>
         </div>
 
         <div style={{fontSize:12,color:"#6b7280",marginBottom:14,lineHeight:1.5}}>
@@ -6103,7 +6436,7 @@ function InstallationsView() {
         </div>
 
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
-          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=windows','CloudFuze-Desktop-Agent-windows.zip','windows')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='windows'?"#6b7280":"#0044cc",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='windows'?0.5:1}}>{downloading==='windows'?'⏳ Preparing...':'⬇ Windows'}</button>
+          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=windows','CloudFuze-Desktop-Agent-windows.zip','windows')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='windows'?"#6b7280":"#0052e0",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='windows'?0.5:1}}>{downloading==='windows'?'⏳ Preparing...':'⬇ Windows'}</button>
           <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=macos','CloudFuze-Desktop-Agent-macos.zip','macos')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='macos'?"#6b7280":"#1e293b",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='macos'?0.5:1}}>{downloading==='macos'?'⏳ Preparing...':'⬇ macOS'}</button>
           <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=linux','CloudFuze-Desktop-Agent-linux.zip','linux')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='linux'?"#6b7280":"#1e293b",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='linux'?0.5:1}}>{downloading==='linux'?'⏳ Preparing...':'⬇ Linux'}</button>
         </div>
@@ -6202,7 +6535,7 @@ function InstallationsView() {
           Monitors AI tool usage in the browser — DLP scanning, model routing, access requests. Auto-detects the desktop agent for employee linking.
         </div>
 
-        <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/extension-package','CloudFuze-Browser-Extension.zip','extension')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:downloading==='extension'?"#6b7280":"#0044cc",color:"#fff",fontSize:13,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",width:"100%",marginBottom:14,opacity:downloading&&downloading!=='extension'?0.5:1}}>{downloading==='extension'?'⏳ Preparing package...':'⬇ Download Extension'}</button>
+        <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/extension-package','CloudFuze-Browser-Extension.zip','extension')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:downloading==='extension'?"#6b7280":"#0052e0",color:"#fff",fontSize:13,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",width:"100%",marginBottom:14,opacity:downloading&&downloading!=='extension'?0.5:1}}>{downloading==='extension'?'⏳ Preparing package...':'⬇ Download Extension'}</button>
 
         <details style={{fontSize:12,color:"#374151",marginBottom:10}}>
           <summary style={{cursor:"pointer",fontWeight:600,fontSize:13,marginBottom:6}}>Installation steps</summary>
@@ -6257,10 +6590,12 @@ const TAB_GROUPS = {
     // Sessions tab was hidden.
     tabs: [
       { slug: "prompts",  label: "Prompts & DLP", component: DLPView },
-      // Sessions hidden from the tab strip, to be restored. SessionReplayView and
-      // every endpoint behind it are untouched, so uncommenting this line brings it
-      // back. /AIHub/SessionReplay still redirects here and resolveTab falls back to
-      // the first tab, so the old URL lands on Prompts & DLP rather than breaking.
+      // Sessions hidden from the tab strip again after review: the capture holds
+      // conversation groupings but zero rrweb recordings, so the replay half of the
+      // view has nothing to play. SessionReplayView and every endpoint behind it are
+      // untouched, so uncommenting this line brings it back. /AIHub/SessionReplay
+      // still redirects here and resolveTab falls back to the first tab, so the old
+      // URL lands on Prompts & DLP rather than breaking.
       // { slug: "sessions", label: "Sessions",      component: SessionReplayView },
       { slug: "claude",   label: "Claude Usage",  component: ClaudeUsageView },
       // Model Routing hidden from the tab strip, to be restored — same treatment as
@@ -6289,7 +6624,9 @@ const TAB_GROUPS = {
       { slug: "policies", label: "Policies", component: function PoliciesPage() {
         return <AgentGovernanceProvider><PoliciesTab/></AgentGovernanceProvider>;
       } },
-      { slug: "packs", label: "Policy Packs", component: PolicyPacksView },
+      // Policy Packs merged into the Policies tab — the "Policy Packs" button
+      // inside PoliciesTab opens an inline drawer with deploy/undeploy.
+      // PolicyPacksView is still defined and reachable by direct URL.
       { slug: "risk",  label: "Risk Scores",  component: RiskScoreView },
       // EU AI Act belongs here as a 3rd tab once its intake is seeded from the
       // discovered agent registry. EuAiActView above is intact and unmounted.
@@ -6383,6 +6720,14 @@ function TabGroup({ group }) {
   </div>);
 }
 
+// Which build is actually live. Vite inlines import.meta.env.VITE_* as a string
+// literal at build time, and .github/workflows/deploy.yml's `frontend` job
+// passes the commit SHA, so a deploy can be confirmed from the page itself
+// rather than by guessing whether the push landed. Empty in a local dev
+// server, where nothing injects it — hence the "dev" fallback rather than an
+// empty stamp.
+const BUILD_SHA = String(import.meta.env.VITE_BUILD_SHA || "").slice(0, 7);
+
 export default function AIHubPage({ page }) {
   const [params] = useSearchParams();
   const group = TAB_GROUPS[page];
@@ -6399,8 +6744,9 @@ export default function AIHubPage({ page }) {
       <SideNav activeTab="AI Hub"/>
       <div className="cf_main_content_place">
         <TopNav pageName={heading}/>
-        <div className="cf_main_content_place_main" style={{flexDirection:"column",padding:"16px 20px",overflowY:"auto"}}>
+        <div className="cf_main_content_place_main" style={{flexDirection:"column",padding:"20px 24px",overflowY:"auto",background:"#f8f9fb"}}>
           {group ? <TabGroup group={group}/> : <Single/>}
+          <p className="aihub_build_stamp">build {BUILD_SHA || "dev"}</p>
         </div>
       </div>
     </div>

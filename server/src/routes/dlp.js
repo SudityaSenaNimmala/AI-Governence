@@ -4,6 +4,7 @@ import { requireMachineAuth } from '../auth.js';
 import { emitWebhook } from './webhooks.js';
 import { siemForward } from '../lib/siem-forward.js';
 import { attachMachineIdentity, machineIdentity } from '../lib/machine-identity.js';
+import { lookupSessionClients } from '../lib/claude-sessions.js';
 
 // Hard cap on per-event content size. Anything bigger gets stored truncated
 // with a `truncated=1` flag so the dashboard can warn the admin.
@@ -21,6 +22,17 @@ export function mountDlp(app, db) {
     // e.user still wins — e.g. the browser extension's signed-in identity).
     const identity = await machineIdentity(db, req.machine.id);
 
+    // Which client each Claude Code session ran in, resolved once per batch.
+    //
+    // The tracker reads prompts from local transcripts, and those carry no
+    // client information — only OTel reports `terminal.type`. Both know the
+    // session id, so it is the join. Looked up in one query rather than per
+    // event: a batch holds up to 200 events and this handler is already the
+    // hottest write path in the server.
+    const sessionClients = await lookupSessionClients(
+      db, events.map((e) => e?.claude_session_id),
+    );
+
     let stored = 0;
     let bound = 0;
     for (const e of events) {
@@ -35,6 +47,9 @@ export function mountDlp(app, db) {
       // into metadata_json.
       const sessionId = normalizeSessionId(e.session_id);
       const clientSeq = normalizeClientSeq(e.client_seq);
+      // Normalised with the same rule as session_id — it arrives from the same
+      // untrusted client and is stored in a column that gets grouped on.
+      const claudeSessionId = normalizeSessionId(e.claude_session_id);
 
       // `session_bind` is not a DLP event. It only tells us that this browser
       // session_id corresponds to the AI site's own conversation id, so it
@@ -71,6 +86,10 @@ export function mountDlp(app, db) {
 
       const isFileUpload = e.kind === 'file_upload';
       const isAiResponse = e.kind === 'ai_response';
+      // Prefix-matched, mirroring the rule content.js already applies to its own
+      // enforcement kinds, so a new enforcement_* action is covered the day it
+      // ships rather than silently losing its provenance fields.
+      const isEnforcement = String(e.kind || '').startsWith('enforcement_');
       const secretClass    = isFileUpload ? e.severity   : highestSeverityClass(e.matches);
       const patternMatched = isFileUpload ? e.file_class : (e.matches || []).map((m) => m.pattern).join(',');
       const contentLength  = isFileUpload ? (e.size ?? null) : (e.content_length ?? null);
@@ -114,6 +133,13 @@ export function mountDlp(app, db) {
         // allowlist of fields, so a field added here cannot reach the syslog feed
         // by accident, and this one is deliberately not added to it.
         external_conv_id: normalizeExternalConvId(e.external_conv_id),
+        // The Claude Code session this prompt belongs to, and which client that
+        // session ran in. DELIBERATELY NOT `session_id`: that column drives
+        // Session Replay, and any event carrying it creates a session record
+        // (see upsertSession below) — putting CLI sessions there would fill the
+        // replay list with conversations that have no recording and never will.
+        claude_session_id: claudeSessionId,
+        terminal: claudeSessionId ? (sessionClients.get(claudeSessionId) ?? null) : null,
         secret_class: secretClass,
         content_length: contentLength,
         pattern_matched: patternMatched,
@@ -152,17 +178,49 @@ export function mountDlp(app, db) {
             length_bucket: e.length_bucket,
             highest_severity: e.highest_severity,
             tab_host: e.tabHost,
-            // blocked_for/filename/blocked_by: enforcement_block/override
-            // events for a file attachment (browser extension's existing
-            // content-based file block, and the desktop attachment-hold
-            // feature) — both were being silently dropped here, since this
-            // catch-all branch only had prompt-shaped fields. undefined
-            // values are omitted by JSON.stringify, so this is a no-op for
-            // every other kind that lands in this branch (prompt_submit,
-            // enforcement_disarmed, etc.).
-            blocked_for: e.blocked_for,
-            filename: e.filename,
-            blocked_by: e.blocked_by,
+            // ENFORCEMENT PROVENANCE — everything that distinguishes one
+            // enforcement_* event from another. Without it every such event
+            // collapsed into "something was enforced": the dashboard could not
+            // say WHAT was stopped (blocked_for), HOW (mechanism), or what the
+            // person then chose (decision). A block and the user's response to
+            // it therefore rendered as two identical-looking rows, which is
+            // exactly the "these look like duplicates" report that found this.
+            //
+            // correlation_id / decision_for are the two ends of the pairing the
+            // clients ALREADY stamp (content.js emitEnforcement → emitDecision):
+            // the block carries the id, the outcome references it. Both are
+            // needed to pair a block with its outcome, and both were dropped.
+            //
+            // WHY correlation_id RATHER THAN REUSING THE TOP-LEVEL
+            // client_event_id COLUMN: that column is the dedupe key — an event
+            // arriving with it UPSERTS over the row of the same id. A block and
+            // its outcome deliberately share this correlation value, so routing
+            // it there would make the outcome overwrite the block and destroy
+            // the very pair we are trying to reconstruct.
+            //
+            // NOT forwarded to SIEM: normalizeDlpEvent (lib/cef.js) maps its own
+            // explicit allowlist, so nothing added here reaches the syslog feed.
+            ...(isEnforcement ? {
+              correlation_id: e.client_event_id ?? null,
+              decision:       e.decision ?? null,
+              decision_for:   e.decision_for ?? null,
+              blocked_for:    e.blocked_for ?? null,
+              // The two file-only fields, for a block whose subject is an ATTACHMENT
+              // rather than a prompt: which file (filename) and which mechanism held
+              // it (blocked_by, e.g. the desktop attachment hold). Both were dropped
+              // here alongside the fields above.
+              //
+              // Bare `e.filename`, NOT `e.filename ?? null`, unlike its neighbours:
+              // JSON.stringify omits an undefined value entirely, so a block with no
+              // file attached carries no filename KEY at all rather than an explicit
+              // null. A present-but-null key reads as "there was a file and we lost
+              // its name", which is a different and wrong claim. Matches the
+              // isFileUpload branch above, which resolves filename the same way.
+              filename: e.filename,
+              blocked_by: e.blocked_by,
+              mechanism:      e.mechanism ?? null,
+              reason:         e.reason ?? null,
+            } : {}),
           },
         ),
         received_at: new Date(),
@@ -332,43 +390,46 @@ export function mountDlp(app, db) {
 
   // Summary — counts by service, by severity, broken down by event_kind
   app.get('/api/v1/dlp/summary', a(async (req, res) => {
-    const byService = await db.collection('dlp_events').aggregate([
-      {
-        $group: {
-          _id: '$ai_service',
-          events: { $sum: 1 },
-          file_uploads: { $sum: { $cond: [{ $eq: ['$event_kind', 'file_upload'] }, 1, 0] } },
-          prompts: { $sum: { $cond: [{ $in: ['$event_kind', ['prompt_paste', 'prompt_submit', 'prompt_typed']] }, 1, 0] } },
-          machines: { $addToSet: '$machine_id' },
+    // Run all four queries in parallel instead of sequentially
+    const [byService, bySeverity, byKind, recentCritical] = await Promise.all([
+      db.collection('dlp_events').aggregate([
+        {
+          $group: {
+            _id: '$ai_service',
+            events: { $sum: 1 },
+            file_uploads: { $sum: { $cond: [{ $eq: ['$event_kind', 'file_upload'] }, 1, 0] } },
+            prompts: { $sum: { $cond: [{ $in: ['$event_kind', ['prompt_paste', 'prompt_submit', 'prompt_typed']] }, 1, 0] } },
+            machines: { $addToSet: '$machine_id' },
+          },
         },
-      },
-      { $project: { _id: 0, ai_service: '$_id', events: 1, file_uploads: 1, prompts: 1, machines: { $size: '$machines' } } },
-      { $sort: { events: -1 } },
-    ]).toArray();
+        { $project: { _id: 0, ai_service: '$_id', events: 1, file_uploads: 1, prompts: 1, machines: { $size: '$machines' } } },
+        { $sort: { events: -1 } },
+      ]).toArray(),
 
-    const bySeverity = await db.collection('dlp_events').aggregate([
-      {
-        $group: {
-          _id: { $ifNull: ['$secret_class', 'none'] },
-          events: { $sum: 1 },
+      db.collection('dlp_events').aggregate([
+        {
+          $group: {
+            _id: { $ifNull: ['$secret_class', 'none'] },
+            events: { $sum: 1 },
+          },
         },
-      },
-      { $project: { _id: 0, severity: '$_id', events: 1 } },
-      { $sort: { events: -1 } },
-    ]).toArray();
+        { $project: { _id: 0, severity: '$_id', events: 1 } },
+        { $sort: { events: -1 } },
+      ]).toArray(),
 
-    const byKind = await db.collection('dlp_events').aggregate([
-      { $group: { _id: '$event_kind', events: { $sum: 1 } } },
-      { $project: { _id: 0, event_kind: '$_id', events: 1 } },
-      { $sort: { events: -1 } },
-    ]).toArray();
+      db.collection('dlp_events').aggregate([
+        { $group: { _id: '$event_kind', events: { $sum: 1 } } },
+        { $project: { _id: 0, event_kind: '$_id', events: 1 } },
+        { $sort: { events: -1 } },
+      ]).toArray(),
 
-    const recentCritical = await db.collection('dlp_events')
-      .find({ secret_class: { $in: ['critical', 'high'] } })
-      .sort({ occurred_at: -1 })
-      .limit(25)
-      .project({ _id: 0, id: 1, occurred_at: 1, ai_service: 1, pattern_matched: 1, event_kind: 1, machine_id: 1, user: 1, hostname: 1, metadata_json: 1 })
-      .toArray();
+      db.collection('dlp_events')
+        .find({ secret_class: { $in: ['critical', 'high'] } })
+        .sort({ occurred_at: -1 })
+        .limit(25)
+        .project({ _id: 0, id: 1, occurred_at: 1, ai_service: 1, pattern_matched: 1, event_kind: 1, machine_id: 1, user: 1, hostname: 1, metadata_json: 1 })
+        .toArray(),
+    ]);
     await attachMachineIdentity(db, recentCritical);
 
     res.json({

@@ -196,6 +196,18 @@ async function stage() {
   );
   console.log('   copied prompt-watcher.ps1');
 
+  // Windows one-click installer scripts, so the downloaded package can be run
+  // (silent all-users --install-system) or diagnosed without a terminal. Only
+  // meaningful for the Windows build; skipped silently if the sources are absent.
+  if (platform === 'win32') {
+    for (const cmd of ['Install-CloudFuze.cmd', 'Uninstall-CloudFuze.cmd', 'Diagnose-CloudFuze.cmd']) {
+      try {
+        await copyFile(join(agentRoot, 'installer', 'windows', cmd), join(outDir, cmd));
+        console.log(`   copied ${cmd}`);
+      } catch { /* script not present in this checkout — not fatal */ }
+    }
+  }
+
   await writeFile(join(outDir, 'README.txt'),
     `CloudFuze Claude Usage Tracker\n` +
     `Platform: ${platform}-${arch}\n` +
@@ -214,9 +226,17 @@ async function stage() {
     `  - Only claude.ai is looked at. Other sites are ignored entirely: the URL is\n` +
     `    checked BEFORE any text box is read.\n\n` +
     `HOW TO RUN\n` +
-    `  Keep both files in the same folder, then double-click ${binaryName}\n` +
-    `  (or run it from a terminal to watch the log).\n` +
-    `  Leave the window open — closing it stops tracking. Ctrl+C to stop.\n\n` +
+    `  Extract BOTH files to the same folder, then double-click ${binaryName}.\n` +
+    `  It installs itself and starts tracking in the background.\n` +
+    `  Close the setup window when it says Done — that does NOT stop tracking.\n` +
+    `  It starts again automatically every time you log in.\n\n` +
+    `WHERE IT INSTALLS\n` +
+    `  %LOCALAPPDATA%\\CloudFuze\\ClaudeTracker\\\n` +
+    `  Log file: %LOCALAPPDATA%\\CloudFuze\\ClaudeTracker\\tracker.log\n\n` +
+    `OTHER COMMANDS (optional, from a terminal)\n` +
+    `  ${binaryName} --status      is it installed and running?\n` +
+    `  ${binaryName} --console     run in this window, log to screen\n` +
+    `  ${binaryName} --uninstall   stop it and remove it from startup\n\n` +
     `REQUIREMENTS\n` +
     `  Windows 10/11. No admin rights needed. No configuration needed.\n\n` +
     `NOTE\n` +

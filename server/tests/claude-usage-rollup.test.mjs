@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import express from 'express';
 
 import { mountClaudeUsage } from '../src/routes/claude-usage.js';
+import { CLAUDE_CODE_SURFACE } from '../src/lib/claude-clients.js';
 import { createFakeDb } from './helpers/fake-db.mjs';
 
 const iso = (daysAgo) => new Date(Date.now() - daysAgo * 86400_000).toISOString();
@@ -91,7 +92,7 @@ test('prompts and requests sum per group, not once per returned row', async () =
     assert.equal(browser.estimated_tokens, 1200);
     assert.equal(browser.measured_tokens, 0, 'an estimate never lands in the measured column');
 
-    const cli = body.surfaces.find((s) => s.surface === 'Claude Code (CLI)');
+    const cli = body.surfaces.find((s) => s.surface === CLAUDE_CODE_SURFACE);
     assert.equal(cli.prompts, 2);
     assert.equal(cli.measured_requests, 2);
     assert.equal(cli.estimated_tokens, 0, 'measured usage is never also estimated');
@@ -106,7 +107,14 @@ test('one person on one machine is a single row across surfaces', async () => {
     const [person] = body.systems;
     assert.equal(person.label, 'SatyaPinniti');
     assert.equal(person.prompts, 5);
-    assert.deepEqual(person.by_surface, { 'Claude (browser)': 3, 'Claude Code (CLI)': 2 });
+    // The pre-rename key is emitted alongside the new one for a release, so a
+    // consumer already indexing by 'Claude Code (CLI)' keeps reading a number
+    // instead of silently getting a blank column.
+    assert.deepEqual(person.by_surface, {
+      'Claude (browser)': 3,
+      [CLAUDE_CODE_SURFACE]: 2,
+      'Claude Code (CLI)': 2,
+    });
     assert.equal(body.totals.users, 1);
     assert.equal(body.unattributed_rows, 0);
   });
@@ -188,13 +196,94 @@ test('rows that name nobody are not invented as colleagues', async () => {
   });
 });
 
+// Claude Code prompts carry the client they were typed in (`terminal`, from the
+// CLI's own terminal.type telemetry). These pin down that the split is reported,
+// that it does not leak into surfaces that cannot have one, and — the one that
+// matters most — that a prompt whose client was never reported reads Unknown
+// instead of being quietly counted as a terminal session, which would understate
+// IDE usage while looking precise.
+const clientSeed = async (db) => {
+  await db.collection('machines').insertOne({
+    id: 'm1', hostname: 'SATYA', user: 'SatyaPinniti', platform: 'win32',
+  });
+  const cli = (id, terminal, when) => db.collection('dlp_events').insertOne({
+    id, machine_id: 'm1', event_kind: 'prompt_submit',
+    source: 'claude_code_cli', ai_service: 'Claude Code',
+    content_length: 100, terminal, occurred_at: when,
+  });
+  await cli('v1', 'vscode', iso(1));
+  await cli('v2', 'vscode', iso(1));
+  await cli('v3', 'vscode', iso(2));
+  await cli('c1', 'cursor', iso(1));
+  await cli('t1', 'xterm-256color', iso(1));
+  await cli('u1', null, iso(1));           // telemetry never arrived for this one
+
+  // A browser prompt, which has no client concept at all.
+  await db.collection('dlp_events').insertOne({
+    id: 'b1', machine_id: 'm1', event_kind: 'prompt_submit',
+    source: 'claude_tracker', ai_service: 'Claude',
+    content_length: 400, occurred_at: iso(1),
+  });
+};
+
+test('Claude Code prompts are split by client', async () => {
+  await withServer(clientSeed, async ({ get }) => {
+    const body = await (await get('/api/v1/claude-usage?days=30')).json();
+    const code = body.surfaces.find((s) => s.surface === CLAUDE_CODE_SURFACE);
+
+    assert.equal(code.prompts, 6, 'every Claude Code prompt is counted once');
+    const byClient = Object.fromEntries(code.clients.map((c) => [c.client, c.prompts]));
+    assert.deepEqual(byClient, {
+      'VS Code': 3,
+      Cursor: 1,
+      Terminal: 1,
+      Unknown: 1,
+    });
+    // The split has to add back up to the surface, or one of the two is wrong.
+    assert.equal(
+      code.clients.reduce((n, c) => n + c.prompts, 0), code.prompts,
+      'client counts reconcile with the surface total',
+    );
+  });
+});
+
+test('IDE clients sort ahead of Terminal, and Unknown sorts last', async () => {
+  await withServer(clientSeed, async ({ get }) => {
+    const body = await (await get('/api/v1/claude-usage?days=30')).json();
+    const code = body.surfaces.find((s) => s.surface === CLAUDE_CODE_SURFACE);
+    assert.deepEqual(code.clients.map((c) => c.client), ['VS Code', 'Cursor', 'Terminal', 'Unknown']);
+  });
+});
+
+test('surfaces with no client concept report an empty split, not an Unknown row', async () => {
+  await withServer(clientSeed, async ({ get }) => {
+    const body = await (await get('/api/v1/claude-usage?days=30')).json();
+    const browser = body.surfaces.find((s) => s.surface === 'Claude (browser)');
+    assert.equal(browser.prompts, 1);
+    assert.deepEqual(browser.clients, [], 'a browser prompt has no client to report');
+  });
+});
+
+test('the per-person breakdown carries that person\'s own client mix', async () => {
+  await withServer(clientSeed, async ({ get }) => {
+    const body = await (await get('/api/v1/claude-usage?days=30')).json();
+    const code = body.surfaces.find((s) => s.surface === CLAUDE_CODE_SURFACE);
+    const [person] = code.breakdown;
+    assert.equal(person.label, 'SatyaPinniti');
+    assert.deepEqual(
+      Object.fromEntries(person.clients.map((c) => [c.client, c.prompts])),
+      { 'VS Code': 3, Cursor: 1, Terminal: 1, Unknown: 1 },
+    );
+  });
+});
+
 test('the three primary surfaces are always present, even at zero', async () => {
   await withServer(async (db) => {
     await db.collection('machines').insertOne({ id: 'm1', hostname: 'SATYA', user: 'SatyaPinniti' });
   }, async ({ get }) => {
     const body = await (await get('/api/v1/claude-usage?days=30')).json();
     const names = body.surfaces.map((s) => s.surface);
-    for (const expected of ['Claude Desktop', 'Claude (browser)', 'Claude Code (CLI)']) {
+    for (const expected of ['Claude Desktop', 'Claude (browser)', CLAUDE_CODE_SURFACE]) {
       assert.ok(names.includes(expected), `${expected} is reported even with no activity`);
     }
     assert.equal(body.totals.prompts, 0);

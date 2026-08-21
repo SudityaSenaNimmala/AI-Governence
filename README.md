@@ -62,6 +62,16 @@ npm install
 npm run dev   # opens http://localhost:8080
 ```
 
+## Shipping
+
+A push to `main` deploys itself: `.github/workflows/deploy.yml` runs the test
+suites and the `connect-ui` production build, then ships to the host and rebuilds
+the stack — no manual step. Setup, what is and is not gated, and why it uses a
+self-hosted runner instead of SSH: **`docs/AUTO_DEPLOY.md`**.
+
+`npm run deploy` is still supported for a deploy from a machine that can reach the
+host, and remains the only path that rebuilds the Windows tracker `.exe`.
+
 ## Important — read this before deploying
 
 - **Transparency:** the agent is visible (system tray icon, opt-in install where

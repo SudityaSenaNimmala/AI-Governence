@@ -1,9 +1,18 @@
-import { useState, useEffect, useCallback } from "react";
-import { ShieldCheck, Plus, Play, Trash2, AlertTriangle, CheckCircle, Clock, Edit2 } from "lucide-react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
+import { ShieldCheck, Plus, Play, Trash2, AlertTriangle, CheckCircle, Clock, Edit2, X, ChevronRight, Boxes } from "lucide-react";
 import { useGovernance } from "../AgentGovernanceContext";
 import { Section } from "../common/Section";
 import { Badge } from "../common/Badge";
 import { agentGovernanceApi } from "../AgentGovernanceActions/AgentGovernanceActions";
+
+const PACK_API = "/api";
+async function packFetch(path, opts) {
+  const r = await fetch(`${PACK_API}${path}`, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `${r.status}`);
+  return body;
+}
 
 const severityColor = {
   critical: "#ef4444",
@@ -112,6 +121,662 @@ function PolicySimResult({ res, onClose }) {
   );
 }
 
+const PACK_DESCRIPTIONS = {
+  gdpr: "General Data Protection Regulation — EU data privacy law. Enforces data minimisation, consent verification, cross-border transfer controls, and right-to-erasure compliance for AI systems processing personal data.",
+  hipaa: "Health Insurance Portability and Accountability Act — US healthcare privacy. Ensures AI agents handling PHI have minimum-necessary access, audit trails, encryption at rest, and breach notification readiness.",
+  "soc-2": "SOC 2 Trust Services Criteria — security, availability, confidentiality. Validates that AI systems meet access control, change management, incident response, and vendor oversight requirements.",
+  "ccpa-cpra": "California Consumer Privacy Act / California Privacy Rights Act — consumer data rights. Covers opt-out enforcement, data inventory, automated decision-making disclosure, and data retention limits for AI.",
+  "eu-ai-act": "EU Artificial Intelligence Act — risk-based AI regulation. Classifies AI systems by risk tier, enforces transparency obligations, human oversight requirements, and conformity assessments for high-risk AI.",
+  "iso-iec-42001": "ISO/IEC 42001 — AI Management System standard. Covers AI governance structure, risk assessment methodology, performance monitoring, and continuous improvement of AI deployments.",
+  "nist-ai-rmf": "NIST AI Risk Management Framework — US federal AI guidelines. Maps AI risks across govern, map, measure, and manage functions with controls for bias, security, transparency, and accountability.",
+};
+function getPackDesc(id) { return PACK_DESCRIPTIONS[id] || "A compliance framework policy pack with pre-built rules. Deploy to enforce its rules across your AI systems automatically."; }
+
+/** One row in the Policy Packs modal — with per-pack busy state and Learn more. */
+function PackRow({ pk, busyId, onDeploy, onUndeploy }) {
+  const [expanded, setExpanded] = useState(false);
+  const isBusy = busyId === pk.id;
+  const otherBusy = busyId && busyId !== pk.id;
+  const desc = getPackDesc(pk.id);
+
+  return (
+    <div style={{
+      border: "1px solid " + (pk.deployed ? "#22c55e30" : "#e2e5ea"), borderRadius: 12,
+      background: pk.deployed ? "#f0fdf4" : "#fff", overflow: "hidden",
+      transition: "all 0.2s",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 16px" }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontWeight: 700, fontSize: 14, color: "#111" }}>{pk.framework}</span>
+            {pk.deployed && <span style={{ fontSize: 9.5, padding: "2px 7px", background: "#22c55e18", color: "#16a34a", borderRadius: 4, fontWeight: 600 }}>deployed</span>}
+          </div>
+          <div style={{ fontSize: 11.5, color: "#6b7280", marginTop: 3 }}>
+            {pk.ruleCount} rules · {pk.enforceable} enforced · {pk.monitored || 0} monitored · {pk.attestations || 0} attestations
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+          <button onClick={() => setExpanded(!expanded)}
+            style={{ ...cardBtn, color: "#0052e0", background: "#0052e00a", border: "1px solid #0052e020", padding: "7px 12px" }}>
+            {expanded ? "Less" : "Learn more"}
+          </button>
+          {pk.deployed ? (
+            <button onClick={() => onUndeploy(pk.id)} disabled={isBusy || otherBusy}
+              style={{ ...cardBtn, color: "#ef4444", background: "#ef44440a", border: "1px solid #ef444420", padding: "7px 14px", opacity: otherBusy ? 0.4 : 1 }}>
+              {isBusy ? "..." : "Undeploy"}
+            </button>
+          ) : (
+            <button onClick={() => onDeploy(pk.id)} disabled={isBusy || otherBusy}
+              style={{ ...cardBtn, color: "#fff", background: "#8b5cf6", border: "1px solid #8b5cf6", padding: "7px 14px", opacity: otherBusy ? 0.4 : 1 }}>
+              {isBusy ? "..." : "Deploy"}
+            </button>
+          )}
+        </div>
+      </div>
+      {expanded && (
+        <div style={{ padding: "0 16px 14px", borderTop: "1px solid #f3f4f6", marginTop: 0 }}>
+          <p style={{ margin: "12px 0 0", fontSize: 12.5, color: "#4b5563", lineHeight: 1.65 }}>{desc}</p>
+          <div style={{ display: "flex", gap: 10, marginTop: 10, fontSize: 11, color: "#8b919e" }}>
+            <span><strong style={{ color: "#16a34a" }}>{pk.enforceable}</strong> auto-enforced on agents</span>
+            <span>·</span>
+            <span><strong style={{ color: "#0052e0" }}>{pk.monitored || 0}</strong> monitored via endpoint DLP</span>
+            <span>·</span>
+            <span><strong style={{ color: "#b45309" }}>{pk.attestations || 0}</strong> require human sign-off</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Keyframes injected once — spawn (pop in) and smash (crush out). */
+const CARD_ANIMS = `
+@keyframes polSpawn {
+  0%   { opacity: 0; transform: scale(0.3) rotate(-8deg); }
+  50%  { opacity: 1; transform: scale(1.06) rotate(1deg); }
+  70%  { transform: scale(0.97) rotate(0deg); }
+  100% { transform: scale(1) rotate(0deg); }
+}
+@keyframes polSmash {
+  0%   { opacity: 1; transform: scale(1) rotate(0deg); }
+  20%  { transform: scale(1.05) rotate(1deg); }
+  100% { opacity: 0; transform: scale(0) rotate(-15deg); }
+}
+@keyframes polTense {
+  0%   { transform: rotate(0deg); }
+  2%   { transform: rotate(1.2deg); }
+  4%   { transform: rotate(-1.2deg); }
+  6%   { transform: rotate(1deg); }
+  8%   { transform: rotate(-1deg); }
+  10%  { transform: rotate(0.6deg); }
+  12%  { transform: rotate(-0.6deg); }
+  14%  { transform: rotate(0deg); }
+  100% { transform: rotate(0deg); }
+}
+@keyframes polProgress {
+  0%   { width: 0%; }
+  15%  { width: 30%; }
+  40%  { width: 55%; }
+  70%  { width: 80%; }
+  100% { width: 95%; }
+}
+.pol_sim_track {
+  height: 28px; border-radius: 8px; overflow: hidden;
+  background: #f3f4f6; border: 1px solid #e2e5ea;
+  position: relative; flex: 1;
+}
+.pol_sim_track .pol_sim_fill {
+  height: 100%; border-radius: 8px;
+  background: linear-gradient(90deg, #0052e0, #6366f1);
+  animation: polProgress 2s ease-out forwards;
+}
+.pol_sim_track .pol_sim_label {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; font-size: 10.5px; font-weight: 700;
+  color: #fff; mix-blend-mode: difference; pointer-events: none;
+}
+.pol_sim_result {
+  display: flex; align-items: center; gap: 6px; flex: 1;
+  padding: 5px 10px; border-radius: 8px; font-size: 11px; font-weight: 600;
+  cursor: pointer; border: 1px solid; transition: opacity 0.15s;
+}
+.pol_sim_result:hover { opacity: 0.85; }
+.pol_card_hint {
+  position: absolute; bottom: 52px; left: 0; right: 0;
+  text-align: center; font-size: 10.5px; font-weight: 600;
+  color: #8b919e; letter-spacing: 0.02em;
+  opacity: 0; transition: opacity 0.2s;
+  pointer-events: none;
+}
+.pol_card_front:hover .pol_card_hint { opacity: 1; }`;
+let animsInjected = false;
+function ensureAnims() {
+  if (animsInjected) return;
+  animsInjected = true;
+  const s = document.createElement("style");
+  s.textContent = CARD_ANIMS;
+  document.head.appendChild(s);
+}
+
+/** Three-state simulate button: idle → animated progress bar → compact result chip.
+ *  Clicking the result chip opens a detail modal; × dismisses it. */
+function SimButton({ simulating, result, onRun, onClear }) {
+  const [showDetail, setShowDetail] = useState(false);
+
+  if (simulating) {
+    return (
+      <div className="pol_sim_track">
+        <div className="pol_sim_fill" />
+        <div className="pol_sim_label">Simulating...</div>
+      </div>
+    );
+  }
+  if (result) {
+    if (result.error) {
+      return (
+        <div className="pol_sim_result" onClick={onClear}
+          style={{ background: "#fef2f210", color: "#b91c1c", borderColor: "#fecaca" }}>
+          <AlertTriangle size={12} /> Failed
+          <span style={{ marginLeft: "auto", fontSize: 10, opacity: 0.6 }}>dismiss</span>
+        </div>
+      );
+    }
+    const n = result.would_flag || 0;
+    const ok = n === 0;
+    return (<>
+      <div className="pol_sim_result" onClick={() => setShowDetail(true)}
+        style={{ background: ok ? "#f0fdf410" : "#fffbeb10", color: ok ? "#16a34a" : "#b45309", borderColor: ok ? "#bbf7d0" : "#fde68a" }}>
+        {ok ? <CheckCircle size={12} /> : <AlertTriangle size={12} />}
+        {ok ? "All clear" : `${n} flagged`}
+        <span onClick={e => { e.stopPropagation(); onClear(); }} style={{ marginLeft: "auto", fontSize: 13, opacity: 0.5, lineHeight: 1, padding: "0 2px", cursor: "pointer" }}>×</span>
+      </div>
+      {showDetail && createPortal(<SimDetailModal result={result} onClose={() => setShowDetail(false)} onClear={onClear} />, document.body)}
+    </>);
+  }
+  return (
+    <button onClick={onRun} title="Preview what this policy would do"
+      style={{ ...cardBtn, color: "#0052e0", background: "#0052e00a", border: "1px solid #0052e020", flex: 1 }}>
+      <Play size={12} /> Simulate
+    </button>
+  );
+}
+
+/** Full simulation result — same wide clean layout as PolicyDetail / PackGroupCard detail. */
+function SimDetailModal({ result, onClose, onClear }) {
+  const n = result.would_flag || 0;
+  const ok = n === 0;
+  const tone = ok ? "#16a34a" : "#b45309";
+  const matches = result.matches || [];
+  useEffect(() => {
+    const k = e => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  }, [onClose]);
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center",
+      background: "rgba(15,23,42,0.45)", backdropFilter: "blur(4px)",
+      animation: "polFadeIn 0.15s ease-out",
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: "#fff", borderRadius: 16, width: "100%", maxWidth: 720, maxHeight: "85vh", overflow: "auto",
+        boxShadow: "0 20px 60px rgba(0,0,0,0.18)", animation: "polSlideUp 0.2s ease-out",
+      }}>
+        {/* Accent bar */}
+        <div style={{ height: 4, background: ok ? "#22c55e" : "linear-gradient(90deg, #f59e0b, #ef4444)", borderRadius: "16px 16px 0 0" }} />
+
+        {/* Header */}
+        <div style={{ padding: "20px 28px 0" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16 }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "#111", letterSpacing: "-0.02em" }}>Simulation Result</h3>
+              <p style={{ margin: "4px 0 0", fontSize: 13, color: "#8b919e" }}>Dry run only — no violations recorded, no actions executed.</p>
+            </div>
+            <button onClick={onClose} style={{ width: 32, height: 32, border: "1px solid #e2e5ea", borderRadius: 8, background: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "#6b7280", flexShrink: 0 }}><X size={16} /></button>
+          </div>
+        </div>
+
+        <div style={{ padding: "20px 28px 28px" }}>
+          {/* Stat cards row */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 20 }}>
+            <div style={{ background: ok ? "#f0fdf4" : "#fffbeb", border: "1px solid " + (ok ? "#bbf7d0" : "#fde68a"), borderRadius: 12, padding: "16px 18px" }}>
+              <div style={{ fontSize: 32, fontWeight: 800, color: tone, lineHeight: 1 }}>{n}</div>
+              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>would be flagged</div>
+            </div>
+            <div style={{ background: "#f5f6f8", border: "1px solid #e2e5ea", borderRadius: 12, padding: "16px 18px" }}>
+              <div style={{ fontSize: 32, fontWeight: 800, color: "#111", lineHeight: 1 }}>{result.agents_evaluated || 0}</div>
+              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>agents evaluated</div>
+            </div>
+            <div style={{ background: "#f5f6f8", border: "1px solid #e2e5ea", borderRadius: 12, padding: "16px 18px" }}>
+              <div style={{ fontSize: 32, fontWeight: 800, color: "#111", lineHeight: 1 }}>{(result.actions || []).length}</div>
+              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>actions configured</div>
+            </div>
+          </div>
+
+          {(result.actions || []).length > 0 && (
+            <div style={{ background: "#f5f6f8", borderRadius: 10, padding: "12px 16px", marginBottom: 16, fontSize: 13, color: "#4b5563" }}>
+              <span style={{ fontWeight: 700, color: "#111" }}>Actions: </span>{result.actions.join(", ")}
+              {result.already_open > 0 && <span style={{ color: "#8b919e" }}> · {result.newly_flagged || 0} new, {result.already_open} already open</span>}
+            </div>
+          )}
+
+          {ok && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "20px", borderRadius: 12, background: "#f0fdf4", border: "1px solid #bbf7d0" }}>
+              <CheckCircle size={22} color="#16a34a" />
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 14, color: "#16a34a" }}>All clear</div>
+                <div style={{ fontSize: 12, color: "#6b7280", marginTop: 1 }}>No agent currently meets this policy's conditions.</div>
+              </div>
+            </div>
+          )}
+
+          {n > 0 && matches.length > 0 && (<>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#8b919e", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>Agents that would be flagged ({matches.length}{n > matches.length ? ` of ${n}` : ""})</div>
+            <div style={{ border: "1px solid #e2e5ea", borderRadius: 12, overflow: "hidden" }}>
+              <div style={{ maxHeight: 340, overflowY: "auto" }}>
+                {matches.map((m, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 18px", borderBottom: i < matches.length - 1 ? "1px solid #f3f4f6" : "none" }}>
+                    <div style={{ width: 8, height: 8, borderRadius: "50%", background: tone, flexShrink: 0 }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#111" }}>{m.agent_name}</div>
+                      <div style={{ fontSize: 11.5, color: "#8b919e", marginTop: 1 }}>{m.condition_triggered}</div>
+                    </div>
+                    {m.already_open && <span style={{ fontSize: 10, padding: "2px 8px", background: "#f5f6f8", borderRadius: 4, color: "#8b919e" }}>already flagged</span>}
+                  </div>
+                ))}
+              </div>
+              {n > matches.length && (
+                <div style={{ padding: "10px 18px", fontSize: 12, color: "#8b919e", background: "#fafbfc", borderTop: "1px solid #f3f4f6" }}>...and {n - matches.length} more not listed</div>
+              )}
+            </div>
+          </>)}
+
+          {/* Footer actions */}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 20 }}>
+            <button onClick={() => { onClose(); onClear(); }} style={{ ...btnSecondary, padding: "9px 18px" }}>Dismiss result</button>
+            <button onClick={onClose} style={{ ...btnPrimary, background: "#0052e0", padding: "9px 18px" }}>Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Compact card for the grid. Click opens detail; delete flips the card. */
+function PolicyCard({ policy: p, simulatingId, simResult, onSimulate, onDelete, onToggle, onClearSim, spawning, smashing, collapsing, onSmashEnd, onCollapseEnd }) {
+  const [open, setOpen] = useState(false);
+  const [flipped, setFlipped] = useState(false);
+  const sColor = severityColor[p.severity] || "#9ca3af";
+  const isActive = p.status === "active";
+  const CARD_H = 168;
+
+  useEffect(() => { ensureAnims(); }, []);
+
+  // Smash animation ended → tell parent to start collapsing the slot
+  const handleAnimEnd = (e) => {
+    if (e.animationName === "polSmash" && smashing) onSmashEnd(p.id);
+  };
+  // Collapse transition ended → tell parent to remove from DOM
+  const handleTransEnd = (e) => {
+    if (collapsing && e.propertyName === "height") onCollapseEnd(p.id);
+  };
+
+  const outerAnim = spawning ? "polSpawn 0.45s cubic-bezier(0.34,1.56,0.64,1) both"
+    : smashing ? "polSmash 0.4s cubic-bezier(0.55,0,1,0.45) both"
+    : "none";
+
+  // Collapsing: shrink height + gap contribution to zero smoothly
+  const collapseStyle = collapsing ? {
+    height: 0, minHeight: 0, overflow: "hidden", opacity: 0,
+    marginTop: -7, marginBottom: -7, /* eat the grid gap */
+    transition: "height 0.35s cubic-bezier(0.4,0,0.2,1), opacity 0.2s, margin 0.35s cubic-bezier(0.4,0,0.2,1)",
+  } : {};
+
+  return (<>
+    <div style={{
+      perspective: 1000, height: CARD_H, animation: outerAnim, ...collapseStyle,
+      /* Vibrate the whole card when flipped — keeps the inner transform/transition clean */
+      ...(flipped && !smashing ? { animation: "polTense 2.5s 0.5s linear infinite" } : {}),
+    }}
+         onAnimationEnd={handleAnimEnd} onTransitionEnd={handleTransEnd}>
+      <div style={{
+        position: "relative", width: "100%", height: "100%",
+        transformStyle: "preserve-3d",
+        transition: "transform 0.45s cubic-bezier(0.4, 0, 0.2, 1)",
+        transform: flipped ? "rotateY(180deg)" : "none",
+      }}>
+        {/* ─── FRONT FACE ─── */}
+        <div className="pol_card_front" onClick={() => !flipped && setOpen(true)} style={{
+          position: "absolute", inset: 0,
+          backfaceVisibility: "hidden", WebkitBackfaceVisibility: "hidden",
+          background: "var(--ag-bg-card, #fff)", borderRadius: 14,
+          border: "1px solid var(--ag-border, #e2e5ea)",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+          padding: "18px 20px", cursor: "pointer", overflow: "hidden",
+          opacity: p.status === "disabled" ? 0.65 : 1,
+          display: "flex", flexDirection: "column",
+        }}
+        onMouseEnter={e => { if (!flipped) { e.currentTarget.style.boxShadow = "0 6px 20px rgba(0,0,0,0.08)"; e.currentTarget.style.borderColor = sColor + "60"; } }}
+        onMouseLeave={e => { e.currentTarget.style.boxShadow = "0 1px 3px rgba(0,0,0,0.04)"; e.currentTarget.style.borderColor = "var(--ag-border, #e2e5ea)"; }}>
+          <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: sColor }} />
+
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+            <div style={{ width: 8, height: 8, borderRadius: "50%", background: isActive ? "#22c55e" : "#d1d5db", flexShrink: 0 }} />
+            <span style={{ fontWeight: 700, fontSize: 13.5, color: "var(--ag-text, #111)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{p.name}</span>
+          </div>
+
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+            <Badge text={p.severity} color={sColor} />
+            <Badge text={p.type} color="#6366f1" />
+            {p.pack_id
+              ? <span style={{ fontSize: 9.5, padding: "2px 7px", background: "#8b5cf614", color: "#8b5cf6", borderRadius: 4, fontWeight: 600 }}>pack</span>
+              : <span style={{ fontSize: 9.5, padding: "2px 7px", background: "#0052e012", color: "#0052e0", borderRadius: 4, fontWeight: 600 }}>custom</span>}
+          </div>
+
+          <div className="pol_card_hint">click for more info</div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: "auto" }} onClick={e => e.stopPropagation()}>
+            <SimButton simulating={simulatingId === p.id} result={simResult} onRun={() => onSimulate(p.id)} onClear={onClearSim} />
+            {!p.pack_id && (
+              <button onClick={() => setFlipped(true)}
+                title="Delete policy"
+                style={{ ...cardBtn, color: "#ef4444", background: "#ef44440a", border: "1px solid #ef444420", width: 34, justifyContent: "center", padding: "6px 0" }}>
+                <Trash2 size={13} />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* ─── BACK FACE (delete confirmation) ─── */}
+        <div style={{
+          position: "absolute", inset: 0, transform: "rotateY(180deg)",
+          backfaceVisibility: "hidden", WebkitBackfaceVisibility: "hidden",
+          borderRadius: 14, border: "1px solid #fecaca",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+          background: "linear-gradient(135deg, #fef2f2 0%, #fff5f5 100%)",
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+          padding: "24px 20px", textAlign: "center", gap: 14,
+        }}>
+          <div style={{ width: 44, height: 44, borderRadius: 12, background: "#ef44441a", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Trash2 size={20} color="#ef4444" />
+          </div>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14, color: "#111", marginBottom: 4 }}>Delete this policy?</div>
+            <div style={{ fontSize: 12, color: "#6b7280", lineHeight: 1.5, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setFlipped(false)}
+              style={{ ...cardBtn, color: "#4b5563", background: "#fff", border: "1px solid #e2e5ea", padding: "8px 18px" }}>
+              Cancel
+            </button>
+            <button onClick={() => { onDelete(p.id); }}
+              style={{ ...cardBtn, color: "#fff", background: "#ef4444", border: "1px solid #ef4444", padding: "8px 18px" }}>
+              <Trash2 size={12} /> Delete
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {open && <PolicyDetail policy={p} sColor={sColor} simulatingId={simulatingId} simResult={simResult}
+      onSimulate={onSimulate} onDelete={onDelete} onToggle={onToggle} onClearSim={onClearSim} onClose={() => setOpen(false)} />}
+  </>);
+}
+
+/** One card representing an entire deployed pack (grouped). */
+function PackGroupCard({ group: g, spawning, smashing, collapsing, onUndeploy, onSmashEnd, onCollapseEnd, simulating, simResult, onSimulate, onClearSim }) {
+  const [open, setOpen] = useState(false);
+  const [flipped, setFlipped] = useState(false);
+  const CARD_H = 168;
+  const ruleCount = g.policies.length;
+  const activeCount = g.policies.filter(p => p.status === "active").length;
+  // Highest severity in the pack
+  const sevOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+  const topSev = g.policies.reduce((best, p) => (sevOrder[p.severity] ?? 9) < (sevOrder[best] ?? 9) ? p.severity : best, "low");
+  const sColor = severityColor[topSev] || "#8b5cf6";
+
+  useEffect(() => { ensureAnims(); }, []);
+
+  const handleAnimEnd = (e) => { if (e.animationName === "polSmash" && smashing) onSmashEnd(); };
+  const handleTransEnd = (e) => { if (collapsing && e.propertyName === "height") onCollapseEnd(); };
+
+  const outerAnim = spawning ? "polSpawn 0.45s cubic-bezier(0.34,1.56,0.64,1) both"
+    : smashing ? "polSmash 0.4s cubic-bezier(0.55,0,1,0.45) both" : "none";
+  const collapseStyle = collapsing ? {
+    height: 0, minHeight: 0, overflow: "hidden", opacity: 0,
+    marginTop: -7, marginBottom: -7,
+    transition: "height 0.35s cubic-bezier(0.4,0,0.2,1), opacity 0.2s, margin 0.35s cubic-bezier(0.4,0,0.2,1)",
+  } : {};
+
+  return (<>
+    <div style={{
+      perspective: 1000, height: CARD_H, animation: outerAnim, ...collapseStyle,
+      ...(flipped && !smashing ? { animation: "polTense 2.5s 0.5s linear infinite" } : {}),
+    }} onAnimationEnd={handleAnimEnd} onTransitionEnd={handleTransEnd}>
+      <div style={{
+        position: "relative", width: "100%", height: "100%",
+        transformStyle: "preserve-3d",
+        transition: "transform 0.45s cubic-bezier(0.4, 0, 0.2, 1)",
+        transform: flipped ? "rotateY(180deg)" : "none",
+      }}>
+        {/* FRONT */}
+        <div className="pol_card_front" onClick={() => !flipped && setOpen(true)} style={{
+          position: "absolute", inset: 0,
+          backfaceVisibility: "hidden", WebkitBackfaceVisibility: "hidden",
+          background: "linear-gradient(135deg, #f5f3ff 0%, #fff 100%)", borderRadius: 14,
+          border: "1px solid #8b5cf630",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+          padding: "18px 20px", cursor: "pointer", overflow: "hidden",
+          display: "flex", flexDirection: "column",
+        }}
+        onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 6px 20px rgba(139,92,246,0.12)"; e.currentTarget.style.borderColor = "#8b5cf660"; }}
+        onMouseLeave={e => { e.currentTarget.style.boxShadow = "0 1px 3px rgba(0,0,0,0.04)"; e.currentTarget.style.borderColor = "#8b5cf630"; }}>
+          <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: "linear-gradient(90deg, #8b5cf6, #6366f1)" }} />
+
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+            <Boxes size={14} color="#8b5cf6" style={{ flexShrink: 0 }} />
+            <span style={{ fontWeight: 700, fontSize: 13.5, color: "#111", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+              {g.packId.replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase())}
+            </span>
+          </div>
+
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+            <Badge text={`${ruleCount} rules`} color="#8b5cf6" />
+            <Badge text={`${activeCount} active`} color="#22c55e" />
+            <span style={{ fontSize: 9.5, padding: "2px 7px", background: "#8b5cf614", color: "#8b5cf6", borderRadius: 4, fontWeight: 600 }}>pack</span>
+          </div>
+
+          <div className="pol_card_hint">click for more info</div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: "auto" }} onClick={e => e.stopPropagation()}>
+            <SimButton simulating={simulating} result={simResult} onRun={onSimulate} onClear={onClearSim} />
+            <button onClick={() => setFlipped(true)}
+              title="Undeploy this pack"
+              style={{ ...cardBtn, color: "#ef4444", background: "#ef44440a", border: "1px solid #ef444420", width: 34, justifyContent: "center", padding: "6px 0" }}>
+              <Trash2 size={13} />
+            </button>
+          </div>
+        </div>
+
+        {/* BACK — undeploy confirmation */}
+        <div style={{
+          position: "absolute", inset: 0, transform: "rotateY(180deg)",
+          backfaceVisibility: "hidden", WebkitBackfaceVisibility: "hidden",
+          borderRadius: 14, border: "1px solid #fecaca",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+          background: "linear-gradient(135deg, #fef2f2 0%, #fff5f5 100%)",
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+          padding: "24px 20px", textAlign: "center", gap: 14,
+        }}>
+          <div style={{ width: 44, height: 44, borderRadius: 12, background: "#ef44441a", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Trash2 size={20} color="#ef4444" />
+          </div>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14, color: "#111", marginBottom: 4 }}>Undeploy this pack?</div>
+            <div style={{ fontSize: 12, color: "#6b7280" }}>Removes all {ruleCount} rules</div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setFlipped(false)}
+              style={{ ...cardBtn, color: "#4b5563", background: "#fff", border: "1px solid #e2e5ea", padding: "8px 18px" }}>
+              Cancel
+            </button>
+            <button onClick={() => { onUndeploy(); }}
+              style={{ ...cardBtn, color: "#fff", background: "#ef4444", border: "1px solid #ef4444", padding: "8px 18px" }}>
+              <Trash2 size={12} /> Undeploy
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {/* Detail modal showing all rules in the pack */}
+    {open && (
+      <div onClick={() => setOpen(false)} style={{
+        position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center",
+        background: "rgba(15,23,42,0.45)", backdropFilter: "blur(4px)",
+        animation: "polFadeIn 0.15s ease-out",
+      }}>
+        <div onClick={e => e.stopPropagation()} style={{
+          background: "#fff", borderRadius: 16, width: "100%", maxWidth: 560, maxHeight: "85vh", overflow: "auto",
+          boxShadow: "0 20px 60px rgba(0,0,0,0.18)", animation: "polSlideUp 0.2s ease-out",
+        }}>
+          <div style={{ height: 4, background: "linear-gradient(90deg, #8b5cf6, #6366f1)", borderRadius: "16px 16px 0 0" }} />
+          <div style={{ padding: "20px 24px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "#111" }}>
+                  {g.packId.replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase())}
+                </h3>
+                <div style={{ fontSize: 12, color: "#8b919e", marginTop: 3 }}>{ruleCount} rules · {activeCount} active</div>
+              </div>
+              <button onClick={() => setOpen(false)} style={{ width: 32, height: 32, border: "1px solid #e2e5ea", borderRadius: 8, background: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "#6b7280" }}><X size={16} /></button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {g.policies.map(p => (
+                <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", border: "1px solid #e2e5ea", borderRadius: 10, background: "#fafbfc" }}>
+                  <div style={{ width: 6, height: 6, borderRadius: "50%", background: p.status === "active" ? "#22c55e" : "#d1d5db", flexShrink: 0 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "#111", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                    {p.description && <div style={{ fontSize: 11, color: "#8b919e", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.description}</div>}
+                  </div>
+                  <Badge text={p.severity} color={severityColor[p.severity] || "#9ca3af"} />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
+  </>);
+}
+
+/** Full-detail overlay for a single policy. */
+function PolicyDetail({ policy: p, sColor, simulatingId, simResult, onSimulate, onDelete, onToggle, onClearSim, onClose }) {
+  const isActive = p.status === "active";
+  useEffect(() => {
+    const k = e => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  }, [onClose]);
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center",
+      background: "rgba(15,23,42,0.45)", backdropFilter: "blur(4px)",
+      animation: "polFadeIn 0.15s ease-out",
+    }}>
+      <style>{`@keyframes polFadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes polSlideUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }`}</style>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: "#fff", borderRadius: 16, width: "100%", maxWidth: 560, maxHeight: "85vh", overflow: "auto",
+        boxShadow: "0 20px 60px rgba(0,0,0,0.18)", animation: "polSlideUp 0.2s ease-out",
+        position: "relative",
+      }}>
+        {/* Accent bar */}
+        <div style={{ height: 4, background: sColor, borderRadius: "16px 16px 0 0" }} />
+
+        {/* Header */}
+        <div style={{ padding: "20px 24px 0" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <div style={{ width: 10, height: 10, borderRadius: "50%", background: isActive ? "#22c55e" : "#d1d5db", boxShadow: isActive ? "0 0 6px rgba(34,197,94,0.4)" : "none" }} />
+                <span style={{ fontSize: 11, fontWeight: 600, color: isActive ? "#16a34a" : "#9ca3af", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                  {p.status}
+                </span>
+              </div>
+              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "#111", letterSpacing: "-0.02em" }}>{p.name}</h3>
+            </div>
+            <button onClick={onClose} style={{
+              width: 32, height: 32, border: "1px solid #e2e5ea", borderRadius: 8, background: "#fff", cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center", color: "#6b7280", flexShrink: 0,
+            }}><X size={16} /></button>
+          </div>
+
+          {/* Tags */}
+          <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
+            <Badge text={p.severity} color={sColor} />
+            <Badge text={p.type} color="#6366f1" />
+            {p.pack_id
+              ? <span style={{ fontSize: 10, padding: "2px 8px", background: "#8b5cf612", color: "#8b5cf6", borderRadius: 6, fontWeight: 600 }}>pack · {p.pack_id}</span>
+              : <span style={{ fontSize: 10, padding: "2px 8px", background: "#0052e012", color: "#0052e0", borderRadius: 6, fontWeight: 600 }}>custom</span>}
+          </div>
+        </div>
+
+        {/* Body */}
+        <div style={{ padding: "16px 24px 24px" }}>
+          {/* Description */}
+          {p.description && (
+            <div style={{ fontSize: 13, color: "#4b5563", lineHeight: 1.65, marginBottom: 16 }}>{p.description}</div>
+          )}
+
+          {/* Condition logic */}
+          {p.conditions && p.conditions.length > 0 && (
+            <div style={{ background: "#f5f6f8", borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: "#8b919e", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Rule Logic</div>
+              <div style={{ fontSize: 12, fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#6366f1", lineHeight: 1.6 }}>
+                IF {p.conditions.map((c) => `${c.field} ${c.operator} ${c.value}`).join(" AND ")} &rarr; {p.actions?.map((a) => a.type).join(", ") || "flag"}
+              </div>
+            </div>
+          )}
+
+          {/* Detail fields */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
+            <div style={{ background: "#f5f6f8", borderRadius: 8, padding: "10px 12px" }}>
+              <div style={{ fontSize: 10, fontWeight: 600, color: "#8b919e", textTransform: "uppercase", letterSpacing: "0.04em" }}>Actions</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "#111", marginTop: 3 }}>{p.actions?.map(a => a.type).join(", ") || "flag"}</div>
+            </div>
+            <div style={{ background: "#f5f6f8", borderRadius: 8, padding: "10px 12px" }}>
+              <div style={{ fontSize: 10, fontWeight: 600, color: "#8b919e", textTransform: "uppercase", letterSpacing: "0.04em" }}>Scope</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "#111", marginTop: 3 }}>{p.scope?.type || "all agents"}</div>
+            </div>
+          </div>
+
+          {/* Action buttons */}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={() => onSimulate(p.id)} disabled={simulatingId === p.id}
+              style={{ ...btnPrimary, background: "#0052e0", flex: 1 }}>
+              <Play size={14} /> {simulatingId === p.id ? "Simulating..." : "Simulate"}
+            </button>
+            <button onClick={() => onToggle(p)}
+              style={{ ...btnSecondary, color: isActive ? "#22c55e" : "#6b7280", borderColor: isActive ? "#22c55e40" : "var(--ag-border, #e2e5ea)", flex: 1 }}>
+              {isActive ? <CheckCircle size={14} /> : <Clock size={14} />} {isActive ? "Active" : "Disabled"}
+            </button>
+            {!p.pack_id && (
+              <button onClick={() => { if (confirm(`Delete "${p.name}"?`)) { onDelete(p.id); onClose(); } }}
+                style={{ ...btnSecondary, color: "#ef4444", borderColor: "#ef444430" }}>
+                <Trash2 size={14} /> Delete
+              </button>
+            )}
+          </div>
+
+          {/* Simulation result */}
+          {simResult && <PolicySimResult res={simResult} onClose={onClearSim} />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function PoliciesTab() {
   const { state } = useGovernance();
   const scanActive = state.discoveryStatus === "loading" || state.discoveryStatus === "success";
@@ -123,6 +788,14 @@ export function PoliciesTab() {
   const [simResults, setSimResults] = useState({});   // policyId → result | {error}
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [seeding, setSeeding] = useState(false);
+  const [showPacks, setShowPacks] = useState(false);
+  const [packs, setPacks] = useState(null);
+  const [packsBusyId, setPacksBusyId] = useState(null); // ID of the pack currently deploying/undeploying
+  const [filter, setFilter] = useState("all"); // "all" | "custom" | "pack"
+  // Animation state: spawn (pop-in), smash (crush-out), collapse (slot shrinks)
+  const [spawnIds, setSpawnIds] = useState(new Set());
+  const [smashingId, setSmashingId] = useState(null);
+  const [collapsingId, setCollapsingId] = useState(null);
 
   const [formName, setFormName] = useState("");
   const [formDescription, setFormDescription] = useState("");
@@ -168,6 +841,8 @@ export function PoliciesTab() {
       parsedValue = Number(formConditionValue);
     }
     try {
+      // Snapshot current IDs so we can detect the new one after reload
+      const before = new Set(policies.map(p => p.id));
       await agentGovernanceApi.createPolicy({
         name: formName.trim(),
         description: formDescription.trim(),
@@ -181,19 +856,64 @@ export function PoliciesTab() {
       setShowCreateForm(false);
       setFormName("");
       setFormDescription("");
-      await loadPolicies();
+      const fresh = await agentGovernanceApi.listPolicies();
+      const newIds = new Set(fresh.filter(p => !before.has(p.id)).map(p => p.id));
+      // Push newly created policies to the end so the spawn animation appears last
+      const existing = fresh.filter(p => !newIds.has(p.id));
+      const created = fresh.filter(p => newIds.has(p.id));
+      setSpawnIds(newIds);
+      setPolicies([...existing, ...created]);
+      if (newIds.size) setTimeout(() => setSpawnIds(new Set()), 600);
     } catch (e) {
       console.error("Failed to create policy:", e);
     }
   };
 
-  const handleDeletePolicy = async (id) => {
+  // Three-phase delete: smash → collapse slot → remove from state
+  const startSmash = (id) => { setSmashingId(id); };
+  // Called when smash animation ends — start collapsing the grid slot
+  const startCollapse = (id) => {
+    setSmashingId(null);
+    setCollapsingId(id);
+    // Fire the API delete in parallel with the collapse animation
+    agentGovernanceApi.deletePolicy(id).catch(e => console.error("Failed to delete policy:", e));
+  };
+  // Called when the collapse transition ends — remove from DOM
+  const finishRemove = (id) => {
+    setPolicies((prev) => prev.filter((p) => p.id !== id));
+    setCollapsingId(null);
+  };
+  const handleDeletePolicy = (id) => { startSmash(id); };
+
+  // ── Policy Packs helpers ──
+  const loadPacks = async () => {
+    try { setPacks(await packFetch("/policy-packs")); } catch (e) { console.error("Failed to load packs:", e); }
+  };
+  const openPacksModal = () => { setShowPacks(true); loadPacks(); };
+  const deployPack = async (packId) => {
+    setPacksBusyId(packId);
     try {
-      await agentGovernanceApi.deletePolicy(id);
-      setPolicies((prev) => prev.filter((p) => p.id !== id));
-    } catch (e) {
-      console.error("Failed to delete policy:", e);
-    }
+      const beforePackIds = new Set(policies.filter(p => p.pack_id).map(p => p.pack_id));
+      await packFetch(`/policy-packs/${packId}/deploy`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      await loadPacks();
+      const fresh = await agentGovernanceApi.listPolicies();
+      setPolicies(fresh);
+      if (!beforePackIds.has(packId)) {
+        const newPackPolicyIds = new Set(fresh.filter(p => p.pack_id === packId).map(p => p.id));
+        setSpawnIds(newPackPolicyIds);
+        if (newPackPolicyIds.size) setTimeout(() => setSpawnIds(new Set()), 600);
+      }
+    } catch (e) { console.error("Deploy failed:", e); }
+    finally { setPacksBusyId(null); }
+  };
+  const undeployPack = async (id) => {
+    setPacksBusyId(id);
+    try {
+      await packFetch(`/policy-packs/${id}/undeploy`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      await loadPacks();
+      await loadPolicies();
+    } catch (e) { console.error("Undeploy failed:", e); }
+    finally { setPacksBusyId(null); }
   };
 
   const handleToggleStatus = async (policy) => {
@@ -236,6 +956,36 @@ export function PoliciesTab() {
     }
   };
 
+  // Simulate all policies in a pack group, aggregate results
+  const handleSimulatePack = async (group) => {
+    const key = "pack:" + group.packId;
+    setSimulatingId(key);
+    try {
+      let totalFlagged = 0, totalEvaluated = 0, allMatches = [], allActions = new Set();
+      for (const p of group.policies) {
+        const res = await fetch("/api/policies/simulate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ policy_id: p.id }),
+        });
+        const body = await res.json();
+        if (!res.ok) continue;
+        const pol = body.policies?.[0];
+        if (pol) {
+          totalFlagged += pol.would_flag || 0;
+          totalEvaluated = Math.max(totalEvaluated, body.agents_evaluated || 0);
+          (pol.matches || []).forEach(m => allMatches.push(m));
+          (pol.actions || []).forEach(a => allActions.add(a));
+        }
+      }
+      setSimResults(s => ({ ...s, [key]: { would_flag: totalFlagged, agents_evaluated: totalEvaluated, matches: allMatches, actions: [...allActions] } }));
+    } catch (e) {
+      setSimResults(s => ({ ...s, [key]: { error: e.message } }));
+    } finally {
+      setSimulatingId(null);
+    }
+  };
+
   const handleEvaluate = async () => {
     if (!state.discoveryResult?.agents.length) return;
     setEvaluating(true);
@@ -250,20 +1000,37 @@ export function PoliciesTab() {
   };
 
   const activePolicies = policies.filter((p) => p.status === "active").length;
-  // Split the count so a jump from 6 to 13 after deploying a pack is self-
-  // explanatory rather than looking like seven policies appeared from nowhere.
-  const fromPacks = policies.filter((p) => p.pack_id).length;
-  const packNames = [...new Set(policies.filter((p) => p.pack_id).map((p) => p.pack_id))];
-  const hasAgents = !!state.discoveryResult?.agents.length;
+
+  // Build card list: individual custom policies + one grouped card per pack
+  const customPolicies = policies.filter(p => !p.pack_id);
+  const packGroups = {};
+  policies.filter(p => p.pack_id).forEach(p => {
+    if (!packGroups[p.pack_id]) packGroups[p.pack_id] = { packId: p.pack_id, policies: [] };
+    packGroups[p.pack_id].policies.push(p);
+  });
+  const packGroupList = Object.values(packGroups);
+  // Count for the section title
+  const cardCount = customPolicies.length + packGroupList.length;
+
+  const filteredCustom = filter === "pack" ? [] : customPolicies;
+  const filteredPacks = filter === "custom" ? [] : packGroupList;
+  const filteredCount = filteredCustom.length + filteredPacks.length;
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
-        <button onClick={() => setShowCreateForm(!showCreateForm)} style={btnPrimary}><Plus size={14} /> Create Policy</button>
-        <button onClick={handleEvaluate} disabled={evaluating || !hasAgents} style={{ ...btnPrimary, background: hasAgents ? "#22c55e" : "#999" }}>
-          <Play size={14} /> {evaluating ? "Evaluating..." : "Run Policy Check"}
-        </button>
-        {!hasAgents && <span style={{ fontSize: 11, color: "#999", alignSelf: "center" }}>Run discovery scan first to evaluate policies</span>}
+      <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap", alignItems: "center" }}>
+        <button onClick={() => setShowCreateForm(!showCreateForm)} style={btnPrimary}><Plus size={14} /> Custom Policy</button>
+        <button onClick={openPacksModal} style={{ ...btnPrimary, background: "#8b5cf6" }}><Boxes size={14} /> Policy Packs</button>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button onClick={() => setFilter(filter === "custom" ? "all" : "custom")}
+            style={{ ...countPill, background: filter === "custom" ? "#0052e0" : "#fff", color: filter === "custom" ? "#fff" : "#0052e0", borderColor: filter === "custom" ? "#0052e0" : "#0052e030" }}>
+            {customPolicies.length} Custom
+          </button>
+          <button onClick={() => setFilter(filter === "pack" ? "all" : "pack")}
+            style={{ ...countPill, background: filter === "pack" ? "#8b5cf6" : "#fff", color: filter === "pack" ? "#fff" : "#8b5cf6", borderColor: filter === "pack" ? "#8b5cf6" : "#8b5cf630" }}>
+            {packGroupList.length} Packs
+          </button>
+        </div>
       </div>
 
       {showCreateForm && (
@@ -329,133 +1096,88 @@ export function PoliciesTab() {
         </Section>
       )}
 
-      {evaluationResult && (
-        <Section title={`Policy Evaluation Results (${evaluationResult.totalViolations} violations)`}>
-          <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
-            {["critical", "high", "medium", "low"].map((sev) => (
-              <div key={sev} style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 8, padding: "10px 16px", minWidth: 100 }}>
-                <div style={{ fontSize: 11, color: "var(--ag-text-secondary)", marginBottom: 2 }}>{sev.charAt(0).toUpperCase() + sev.slice(1)}</div>
-                <div style={{ fontSize: 22, fontWeight: 700, color: severityColor[sev] }}>{evaluationResult.bySeverity[sev]}</div>
-              </div>
-            ))}
-          </div>
-          {evaluationResult.violations.length > 0 && (
-            <div style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderRadius: 10, overflow: "hidden" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                <thead>
-                  <tr style={{ borderBottom: "2px solid var(--ag-border)" }}>
-                    <th style={thStyle}>Severity</th>
-                    <th style={thStyle}>Policy</th>
-                    <th style={thStyle}>Agent</th>
-                    <th style={thStyle}>Condition</th>
-                    <th style={thStyle}>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {evaluationResult.violations.slice(0, 50).map((v, i) => (
-                    <tr key={i} style={{ borderBottom: "1px solid var(--ag-border)" }}>
-                      <td style={tdStyle}><Badge text={v.severity} color={severityColor[v.severity] || "#6b7280"} /></td>
-                      <td style={tdStyle}><span style={{ fontWeight: 600 }}>{v.policyName}</span></td>
-                      <td style={tdStyle}>{v.agentName}</td>
-                      <td style={{ ...tdStyle, fontFamily: "monospace", fontSize: 10 }}>{v.conditionTriggered}</td>
-                      <td style={tdStyle}><Badge text={v.actionRecommended} color="#6366f1" /></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {evaluationResult.violations.length === 0 && (
-            <div style={{ textAlign: "center", padding: 30, color: "#22c55e", fontSize: 13 }}>
-              <CheckCircle size={32} style={{ marginBottom: 8 }} />
-              <div style={{ fontWeight: 600 }}>All agents are compliant!</div>
-              <div style={{ color: "#999", marginTop: 4, fontSize: 12 }}>No policy violations detected across {evaluationResult.totalAgents} agents.</div>
-            </div>
-          )}
-        </Section>
-      )}
-
-      {fromPacks > 0 && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, padding: "8px 12px", borderRadius: 8,
-                      background: "#f3f7ff", border: "1px solid #c7d6f5", fontSize: 12, color: "#1e3a8a" }}>
-          <ShieldCheck size={13} />
-          <span>
-            <strong>{fromPacks} of these {policies.length} policies came from a deployed policy pack</strong>
-            {packNames.length > 0 && <> ({packNames.join(", ")})</>} and are enforced across the whole organisation,
-            exactly like the ones you wrote. Manage them from <strong>Policy Packs</strong> — disable a single rule
-            there, or undeploy the pack to remove them all.
-          </span>
-        </div>
-      )}
-
-      <Section title={`Governance Policies (${policies.length} total, ${activePolicies} active${fromPacks ? ` — ${policies.length - fromPacks} your own, ${fromPacks} from packs` : ""})`}>
+      <div>
         {loading && policies.length === 0 ? (
           <div style={{ textAlign: "center", padding: 40, color: "#999" }}>Loading policies...</div>
-        ) : policies.length === 0 ? (
+        ) : cardCount === 0 ? (
           <div style={{ textAlign: "center", padding: 40 }}>
             <ShieldCheck size={40} style={{ color: "#999", marginBottom: 12, opacity: 0.3 }} />
             <div style={{ fontSize: 14, fontWeight: 600, color: "#333", marginBottom: 8 }}>No policies configured</div>
-            <div style={{ fontSize: 12, color: "#999", marginBottom: 16 }}>Click <strong>"Create Policy"</strong> to add a custom governance policy.</div>
+            <div style={{ fontSize: 12, color: "#999", marginBottom: 16 }}>Click <strong>"Custom Policy"</strong> or deploy a <strong>Policy Pack</strong>.</div>
           </div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {policies.map((p) => (
-              <div key={p.id} style={{ background: "var(--ag-bg-card)", border: "1px solid var(--ag-border)", borderLeft: `3px solid ${severityColor[p.severity] || "var(--ag-border)"}`, borderRadius: 8, padding: 16, opacity: p.status === "disabled" ? 0.6 : 1 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    {statusIcon[p.status] || statusIcon.draft}
-                    <span style={{ fontWeight: 700, fontSize: 14 }}>{p.name}</span>
-                    {/* A pack rule is enforced exactly like a hand-written one, so
-                        it belongs in this list — but where it came from has to be
-                        visible, because it is governed from the pack (disable or
-                        undeploy there) and cannot be deleted here. */}
-                    {p.pack_id
-                      ? <span title={`Deployed from the ${p.pack_id} policy pack — manage it there`}
-                              style={{ fontSize: 10, padding: "2px 6px", background: "#0044cc18", color: "#0044cc", borderRadius: 4, fontWeight: 600 }}>
-                          pack · {p.pack_id}
-                        </span>
-                      : p.template && <span style={{ fontSize: 10, padding: "2px 6px", background: "#6366f122", color: "#6366f1", borderRadius: 4 }}>template</span>}
-                  </div>
-                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                    <Badge text={p.severity} color={severityColor[p.severity] || "#6b7280"} />
-                    <Badge text={p.type} color="#6366f1" />
-                    {/* Simulate is deliberately available on EVERY policy,
-                        including disabled and draft ones — previewing a rule you
-                        have not switched on yet is the main reason to have it. */}
-                    <button onClick={() => handleSimulate(p.id)} disabled={simulatingId === p.id}
-                            style={{ ...btnSmall, color: "#0044cc" }} title="Preview what this policy would do. Changes nothing.">
-                      <Play size={12} /> {simulatingId === p.id ? "Simulating…" : "Simulate"}
-                    </button>
-                    <button onClick={() => handleToggleStatus(p)} style={{ ...btnSmall, color: p.status === "active" ? "#22c55e" : "#999" }}>{p.status === "active" ? "Active" : "Disabled"}</button>
-                    {/* Hidden, not merely disabled, for pack rules: the server
-                        rejects the delete with 409, so offering the button would
-                        only produce an error. The badge above says where to go. */}
-                    {!p.pack_id && (
-                      <button onClick={() => handleDeletePolicy(p.id)} style={{ ...btnSmall, color: "#ef4444" }}><Trash2 size={12} /></button>
-                    )}
-                  </div>
-                </div>
-                <div style={{ fontSize: 12, color: "var(--ag-text-secondary)", marginTop: 8, lineHeight: 1.6 }}>{p.description}</div>
-                {p.conditions && p.conditions.length > 0 && (
-                  <div style={{ fontSize: 11, color: "#6366f1", marginTop: 8, fontFamily: "monospace" }}>
-                    IF {p.conditions.map((c) => `${c.field} ${c.operator} ${c.value}`).join(" AND ")} &rarr; {p.actions?.map((a) => a.type).join(", ") || "flag"}
-                  </div>
-                )}
-
-                {simResults[p.id] && <PolicySimResult res={simResults[p.id]} onClose={() => setSimResults((s) => ({ ...s, [p.id]: null }))} />}
-              </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
+            {filteredCustom.map((p) => (
+              <PolicyCard key={p.id} policy={p} simulatingId={simulatingId} simResult={simResults[p.id]}
+                spawning={spawnIds.has(p.id)} smashing={smashingId === p.id} collapsing={collapsingId === p.id}
+                onSimulate={handleSimulate} onDelete={startSmash} onSmashEnd={startCollapse} onCollapseEnd={finishRemove}
+                onToggle={handleToggleStatus}
+                onClearSim={() => setSimResults((s) => ({ ...s, [p.id]: null }))} />
             ))}
+            {filteredPacks.map((g) => {
+              const packSimKey = "pack:" + g.packId;
+              return (
+              <PackGroupCard key={g.packId} group={g}
+                spawning={g.policies.some(p => spawnIds.has(p.id))}
+                smashing={smashingId === packSimKey}
+                collapsing={collapsingId === packSimKey}
+                simulating={simulatingId === packSimKey}
+                simResult={simResults[packSimKey]}
+                onSimulate={() => handleSimulatePack(g)}
+                onClearSim={() => setSimResults(s => ({ ...s, [packSimKey]: null }))}
+                onUndeploy={() => startSmash(packSimKey)}
+                onSmashEnd={() => startCollapse(packSimKey)}
+                onCollapseEnd={() => {
+                  undeployPack(g.packId).then(() => {
+                    setCollapsingId(null);
+                  });
+                }} />
+              );
+            })}
           </div>
         )}
-      </Section>
+      </div>
+
+      {/* ── Policy Packs modal ── */}
+      {showPacks && (
+        <div onClick={() => setShowPacks(false)} style={{
+          position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center",
+          background: "rgba(15,23,42,0.45)", backdropFilter: "blur(4px)",
+        }}>
+          <div onClick={e => e.stopPropagation()} style={{
+            background: "#fff", borderRadius: 16, width: "100%", maxWidth: 660, maxHeight: "80vh", overflow: "auto",
+            boxShadow: "0 20px 60px rgba(0,0,0,0.18)", animation: "polSlideUp 0.2s ease-out",
+          }}>
+            <div style={{ padding: "20px 24px", borderBottom: "1px solid #e2e5ea", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: "#111" }}>Policy Packs</h3>
+                <div style={{ fontSize: 12, color: "#8b919e", marginTop: 3 }}>Deploy a compliance framework to add its rules as policies</div>
+              </div>
+              <button onClick={() => setShowPacks(false)} style={{ width: 32, height: 32, border: "1px solid #e2e5ea", borderRadius: 8, background: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "#6b7280" }}><X size={16} /></button>
+            </div>
+            <div style={{ padding: "16px 24px 24px" }}>
+              {!packs ? <div style={{ textAlign: "center", padding: 30, color: "#999", fontSize: 13 }}>Loading packs...</div> : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {(packs.packs || []).map(pk => (
+                    <PackRow key={pk.id} pk={pk} busyId={packsBusyId} onDeploy={deployPack} onUndeploy={undeployPack} />
+                  ))}
+                  {(packs.packs || []).length === 0 && <div style={{ textAlign: "center", padding: 20, color: "#999", fontSize: 13 }}>No policy packs available.</div>}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );
 }
 
-const btnPrimary = { display: "flex", alignItems: "center", gap: 5, background: "#6366f1", color: "#fff", padding: "8px 14px", borderRadius: 6, fontSize: 12, fontWeight: 600, border: "none", cursor: "pointer", fontFamily: "inherit" };
-const btnSecondary = { display: "flex", alignItems: "center", gap: 5, background: "transparent", border: "1px solid var(--ag-border)", color: "#666", padding: "8px 14px", borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: "pointer", fontFamily: "inherit" };
+const btnPrimary = { display: "flex", alignItems: "center", justifyContent: "center", gap: 6, background: "#6366f1", color: "#fff", padding: "9px 16px", borderRadius: 8, fontSize: 12, fontWeight: 600, border: "none", cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" };
+const btnSecondary = { display: "flex", alignItems: "center", justifyContent: "center", gap: 6, background: "transparent", border: "1px solid var(--ag-border)", color: "#666", padding: "9px 16px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" };
 const btnSmall = { display: "flex", alignItems: "center", gap: 3, background: "transparent", border: "none", padding: "4px 8px", borderRadius: 4, fontSize: 11, fontWeight: 500, cursor: "pointer", fontFamily: "inherit" };
+const cardBtn = { display: "flex", alignItems: "center", gap: 5, padding: "7px 12px", borderRadius: 8, fontSize: 11.5, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" };
+const countPill = { display: "inline-flex", alignItems: "center", gap: 5, padding: "6px 14px", borderRadius: 20, fontSize: 12, fontWeight: 700, border: "1px solid", cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s", letterSpacing: "-0.01em" };
 const fieldLabel = { display: "block", fontSize: 11, fontWeight: 500, color: "#666", marginBottom: 4 };
 const fieldInput = { width: "100%", background: "#fff", border: "1px solid var(--ag-border)", borderRadius: 6, padding: "8px 10px", fontSize: 12, color: "#333", outline: "none", fontFamily: "inherit" };
 const thStyle = { textAlign: "left", padding: "8px 12px", color: "#666", fontWeight: 600, fontSize: 11 };

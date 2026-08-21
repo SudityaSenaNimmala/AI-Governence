@@ -1,10 +1,11 @@
 # GStack workflow: new-feature
 # Full pipeline for a non-trivial feature in the AI-Governance monorepo.
 # Trigger: "use gstack — implement <feature>"
-# Human review is required at the design gate and at every commit/deploy gate.
+# Human review is required at the design gate. The ship step needs no approval
+# question: pushing to `main` IS the deploy, and CI is the gate.
 
 name: new-feature
-description: Design → implement → test → audit → review → document → gated ship, for a non-trivial feature.
+description: Design → implement → test → audit → review → document → CI-gated ship, for a non-trivial feature.
 stack:
   server: "Node 20 ESM, Express 4 (tsx), JWT auth, SQLite/Mongo/Postgres — port 8787"
   agent: "Node CLI scanner (pdf-parse, tesseract OCR, mammoth, xlsx)"
@@ -55,7 +56,7 @@ steps:
   - id: ship
     agent: devops-engineer
     depends_on: [docs]
-    description: Enforce the two-step commit gate and three-step deploy gate. Never auto-approve.
+    description: Commit + push to `main`, then verify the automatic deploy. Ask no deploy question.
     gate:
-      type: human-approval
-      note: "Commit gate (commit? -> which branch?) and deploy gate (deploy? -> which branch? -> dev or production?) are asked one at a time. Production = merge to main."
+      type: ci
+      note: "The user's commit-and-push instruction is the authorization. Pushing to `main` triggers .github/workflows/deploy.yml — CI, then ship + health check. State that the push deploys, watch the run, and report the real outcome. A queued run means the self-hosted runner is offline; that is not deployed."

@@ -151,6 +151,25 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   AI-site page could inject markup into our own model-routing toast. Fix: build the
   page-derived model name with `textContent`, not string-concatenated `innerHTML`.
 
+- [ ] **Tracker heartbeat so "Last seen" reflects liveness, not enrolment time**
+  `POST /api/v1/dlp` never touches `machines.last_seen` — only enrol, identity, otel and
+  scan-report paths do. A tracker-only machine therefore shows its enrolment timestamp
+  forever, so an install that died seconds after enrolling is indistinguishable from a
+  healthy one that has simply been idle.
+
+- [ ] **Include tracker source in the installer freshness stamp**
+  `stampFor()` in `server/src/lib/tracker-build.js` hashes only serverUrl, enrollSecret,
+  target and node version. A change to the tracker's own source does not move the stamp, so
+  a container that already holds a `.built-with` marker keeps serving an installer built
+  from older code — and logs `installer already built` while doing it. Hash the tracker
+  sources (or the bundle) into the stamp as well.
+
+- [ ] **Surface unattributed enrolments in the Claude Usage UI so hidden prompts are re-linkable**
+  `GET /api/v1/claude-usage` already returns `unattributed_rows` / `unattributed_prompts`
+  for enrolments whose hostname is a browser user agent, but `ClaudeUsageView` renders
+  neither. Prompts that reached the server vanish from the page with nothing saying they
+  exist; add a visible row and a way to claim it to a person.
+
 - [ ] **Fix substring false-positives in detectModelInfo's tier keyword matching**
   `detectModelInfo` (browser-extension/content/content.js) matches provider/tier keywords
   via plain substring `.includes()`, so "Gemini" contains "mini" (misdetected as OpenAI

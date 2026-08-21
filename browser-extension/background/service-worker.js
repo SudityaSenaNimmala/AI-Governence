@@ -27,6 +27,10 @@ const STORAGE = {
   TOKEN:     'cfai.token',
   USER:      'cfai.user',              // last identity sent to the server
   MACHINE_ID:'cfai.machineId',
+  FIRST_ENROLL_AT:'cfai.firstEnrollAt', // when we first tried to enroll — used to
+                                        // wait for the desktop agent beacon before
+                                        // enrolling as an unattributable UA hostname
+
   QUEUE:     'cfai.queue',
   PLATFORMS: 'cfai.platforms',         // mirror of GET /api/v1/ai-platforms
   PLATFORMS_AT: 'cfai.platforms_at',   // timestamp of last refresh
@@ -50,6 +54,11 @@ const STORAGE = {
 const FLUSH_ALARM = 'cfai-flush';
 const FLUSH_INTERVAL_MIN = 1;       // chrome.alarms minimum
 const BATCH_SIZE = 50;
+
+// How long to keep retrying the desktop agent's identity beacon before giving up
+// and enrolling this browser as an unlinked (browser-only) machine. Covers a slow
+// agent start at logon so the extension attributes to the real user, not "Mozilla".
+const ENROLL_BEACON_GRACE_MS = 5 * 60 * 1000;
 
 // Identity beacon ports — agent tries these in order, we check all to find it
 const BEACON_PORTS = [19532, 19533, 19534, 19535, 19536];
@@ -83,8 +92,36 @@ async function getStored(key, fallback = null) {
 async function setStored(key, value) {
   await chrome.storage.local.set({ [key]: value });
 }
+// Enterprise policy (Intune / Group Policy / Jamf) is delivered to the extension
+// through chrome.storage.managed — a READ-ONLY area the admin populates via the
+// browser's ExtensionSettings/3rdparty policy, keyed to this extension's ID. It is
+// only present when such a policy exists; otherwise .get() rejects or returns {}.
+// These are the only keys an admin may push (see managed_schema.json).
+const MANAGED_KEYS = ['serverUrl', 'enrollSecret', 'userEmail', 'employeeEmail', 'computerName'];
+async function getManagedConfig() {
+  try {
+    if (typeof chrome === 'undefined' || !chrome.storage?.managed) return {};
+    const all = await chrome.storage.managed.get(MANAGED_KEYS);
+    const out = {};
+    for (const k of MANAGED_KEYS) {
+      if (typeof all?.[k] === 'string' && all[k].trim() !== '') out[k] = all[k].trim();
+    }
+    return out;
+  } catch {
+    // No managed policy configured on this machine — normal for unmanaged installs.
+    return {};
+  }
+}
+
+// Config precedence: admin-enforced managed policy WINS over locally-saved values
+// for the fields it defines (serverUrl/enrollSecret/userEmail/employeeEmail/
+// computerName). Runtime-detected fields the beacon writes to local
+// (detectedUser, detectedMachineId, and computerName when policy omits it) survive
+// because managed simply doesn't carry them.
 async function getConfig() {
-  return getStored(STORAGE.CONFIG, { serverUrl: '', enrollSecret: '', userEmail: '' });
+  const local = await getStored(STORAGE.CONFIG, {});
+  const managed = await getManagedConfig();
+  return { serverUrl: '', enrollSecret: '', userEmail: '', ...local, ...managed };
 }
 // Resolve a real user identity so usage attributes to a person, not the browser.
 // 1) admin/user-configured identity (works in every browser, incl. Firefox);
@@ -139,6 +176,24 @@ async function ensureToken() {
         console.info('[cfai] auto-detected hostname from desktop agent:', computerName);
       }
     } catch { /* agent not running — proceed without linking */ }
+  }
+
+  // Don't enroll as an unattributable "<UA>-browser-extension" (e.g.
+  // "Mozilla-browser-extension") just because the desktop agent's beacon was slow
+  // to come up at logon. Such a record carries no hostname the server can match to
+  // a person, so it lands as an anonymous "Browser User (…)" row forever. Instead
+  // defer for a grace window and let the periodic flush alarm retry — the beacon
+  // normally appears within seconds. Only after the window do we accept this is a
+  // browser-only machine (no agent) and enroll unlinked so its usage is not lost.
+  if (!computerName) {
+    const now = Date.now();
+    let firstAt = await getStored(STORAGE.FIRST_ENROLL_AT);
+    if (!firstAt) { firstAt = now; await setStored(STORAGE.FIRST_ENROLL_AT, firstAt); }
+    if (now - firstAt < ENROLL_BEACON_GRACE_MS) {
+      console.info('[cfai] desktop agent beacon not found yet — deferring enroll to stay attributable');
+      return null;
+    }
+    console.info('[cfai] beacon grace elapsed — enrolling unlinked (treated as a browser-only machine)');
   }
 
   const hostname = computerName
@@ -1564,6 +1619,7 @@ chrome.runtime.onStartup.addListener(() => {
   flushQueue();
   closeEngagementsOnStartup().catch(() => {});
   autoConfigFromBaked();
+  autoConfigFromManaged();
 });
 // Auto-configure from baked cfai-config.json and enroll.
 // Runs on install, update, AND startup so re-loading the extension or
@@ -1582,7 +1638,36 @@ async function autoConfigFromBaked() {
     console.info('[cfai] auto-enroll result:', token ? 'OK' : 'FAILED');
   } catch (e) { console.warn('[cfai] auto-config error:', e?.message || e); }
 }
+
+// Zero-touch enterprise provisioning: when an admin pushes serverUrl + enrollSecret
+// through managed policy (Intune / Group Policy), enroll automatically — no options
+// page, no user action. getConfig() already layers managed policy over local, so we
+// only need to clear any stale token and re-run enrollment when policy is present.
+async function autoConfigFromManaged() {
+  try {
+    const managed = await getManagedConfig();
+    if (!managed.serverUrl || !managed.enrollSecret) {
+      console.info('[cfai] no managed policy (serverUrl/enrollSecret) present');
+      return;
+    }
+    console.info('[cfai] managed policy detected, auto-enrolling against', managed.serverUrl);
+    const token = await ensureToken();
+    console.info('[cfai] managed auto-enroll result:', token ? 'OK' : 'FAILED');
+  } catch (e) { console.warn('[cfai] managed auto-config error:', e?.message || e); }
+}
+
+// Re-enroll if the admin changes policy after install (e.g. rotates the secret or
+// points at a new server). Managed storage fires onChanged in the 'managed' area.
+chrome.storage.onChanged?.addListener((changes, area) => {
+  if (area !== 'managed') return;
+  const touched = MANAGED_KEYS.some((k) => k in changes);
+  if (!touched) return;
+  console.info('[cfai] managed policy changed, re-provisioning');
+  chrome.storage.local.remove([STORAGE.TOKEN]).finally(() => { autoConfigFromManaged(); });
+});
+
 chrome.runtime.onInstalled.addListener(() => {
   flushQueue();
   autoConfigFromBaked();
+  autoConfigFromManaged();
 });
