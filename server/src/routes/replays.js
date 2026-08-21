@@ -216,6 +216,18 @@ const CLEAN_STOP_REASONS = new Set([
 ]);
 
 export function mountReplays(app, db) {
+  // Block ALL replay endpoints when session_replay feature is off
+  app.use('/api/v1/replays', (req, res, next) => {
+    const v = process.env.FEAT_SESSION_REPLAY;
+    if (v === 'false' || v === '0') return res.status(403).json({ error: 'Session replay is disabled' });
+    next();
+  });
+  app.use('/api/v1/replay-policy', (req, res, next) => {
+    const v = process.env.FEAT_SESSION_REPLAY;
+    if (v === 'false' || v === '0') return res.status(403).json({ error: 'Session replay is disabled' });
+    next();
+  });
+
   // ── Policy — what the recorder is allowed to capture ───────────────────────
   app.get('/api/v1/replay-policy', requireMachineAuth, a(async (req, res) => {
     res.json(REPLAY_POLICY);
@@ -223,6 +235,11 @@ export function mountReplays(app, db) {
 
   // ── Start a run ───────────────────────────────────────────────────────────
   app.post('/api/v1/replays', requireMachineAuth, a(async (req, res) => {
+    // Feature flag gate — reject recording when session_replay is disabled
+    const featVal = process.env.FEAT_SESSION_REPLAY;
+    if (featVal === 'false' || featVal === '0') {
+      return res.status(403).json({ error: 'Session replay is disabled' });
+    }
     const b = req.body ?? {};
 
     const tabHost = normalizeShortString(b.tab_host, MAX_HOST_LEN);
@@ -321,6 +338,10 @@ export function mountReplays(app, db) {
 
   // ── Upload one chunk of events ────────────────────────────────────────────
   app.post('/api/v1/replays/:replay_id/chunks/:seq', requireMachineAuth, a(async (req, res) => {
+    const featVal = process.env.FEAT_SESSION_REPLAY;
+    if (featVal === 'false' || featVal === '0') {
+      return res.status(403).json({ error: 'Session replay is disabled' });
+    }
     const replayId = String(req.params.replay_id);
     const b = req.body ?? {};
 

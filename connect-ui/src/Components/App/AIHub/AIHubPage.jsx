@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import SideNav from "../../Resuables/Nav/SideNav";
 import TopNav from "../../Resuables/Nav/TopNav";
 import AgentGovernance from "../AgentGovernance/AgentGovernance";
+import { isFeatureEnabled, getMissingDeps, getFeatureDef } from "../../../featureFlags";
 import { AgentGovernanceProvider, useAgentAuth } from "../AgentGovernance/AgentGovernanceContext";
 import { agentGovernanceApi } from "../AgentGovernance/AgentGovernanceActions/AgentGovernanceActions";
 import { PoliciesTab } from "../AgentGovernance/tabs/PoliciesTab";
@@ -307,7 +308,7 @@ function StatCard({ icon, label, value, hint, color="#0052e0", onClick }) {
       <div className="aihub_stat_label">{label}</div>
       {hint&&<div className="aihub_stat_sub">{hint}</div>}
     </div>
-    {onClick&&<div style={{marginLeft:"auto",color:"#b0b6c0",display:"flex",alignItems:"center",transition:"transform 0.2s"}}><ChevronRight size={16}/></div>}
+    {onClick&&<div style={{marginLeft:"auto",color:"#9ca3af",display:"flex",alignItems:"center",transition:"transform 0.2s"}}><ChevronRight size={16}/></div>}
   </div>);
 }
 function SectionHeader({ title, hint, action }) {
@@ -320,7 +321,7 @@ function RiskBadge({ score }) { if(score==null) return <span className="aihub_te
 function SanctionBadge({ status }) { const c={approved:"#22c55e",restricted:"#f59e0b",blocked:"#ef4444",unknown:"#9ca3af"}; return <Badge text={status||"unknown"} color={c[status]||c.unknown}/>; }
 function SeverityBadge({ sev }) { const c={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e"}; return <Badge text={sev||"—"} color={c[sev]||"#9ca3af"}/>; }
 function Mono({ children }) { return <span className="aihub_text_mono">{children}</span>; }
-function Tag({ text, color="#6366f1" }) { return <span style={{display:"inline-block",padding:"2px 8px",borderRadius:6,fontSize:10,fontWeight:600,background:color+"12",color,marginRight:4,marginBottom:2,letterSpacing:"0.02em"}}>{text}</span>; }
+function Tag({ text, color="#6366f1" }) { return <span style={{display:"inline-block",padding:"2px 8px",borderRadius:6,fontSize:11.7,fontWeight:600,background:color+"12",color,marginRight:4,marginBottom:2,letterSpacing:"0.02em"}}>{text}</span>; }
 function Loading() { return <div className="aihub_loading"><RefreshCw size={18} className="aihub_spin"/> Loading...</div>; }
 function Err({msg}) { return <div className="aihub_error"><AlertTriangle size={14}/> {msg}</div>; }
 function Empty({icon,title,msg}) { return <div className="aihub_empty">{icon}<h4>{title}</h4><p>{msg}</p></div>; }
@@ -362,20 +363,20 @@ function DataTable({ columns, rows, empty, onRow, renderExpanded, isExpanded, pa
       {open&&renderExpanded&&<tr className="aihub_expanded_row"><td colSpan={columns.length} style={{padding:0,background:"#f5f6f8"}}>{renderExpanded(r)}</td></tr>}
     </Fragment>);
   })}</tbody></table></div>
-    {(usePaging||paginate>0)&&<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 6px",fontSize:12,color:"#4b5563"}}>
+    {(usePaging||paginate>0)&&<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 6px",fontSize:13.2,color:"#4b5563"}}>
       <div style={{display:"flex",alignItems:"center",gap:8}}>
         <span style={{fontWeight:500}}>{allRows.length.toLocaleString()} rows</span>
-        <select value={pageSize} onChange={e=>{setPageSize(Number(e.target.value));setPage(0);}} style={{padding:"4px 8px",border:"1px solid #e2e5ea",borderRadius:8,fontSize:11,background:"#fff",cursor:"pointer",fontFamily:"inherit"}}>
+        <select value={pageSize} onChange={e=>{setPageSize(Number(e.target.value));setPage(0);}} style={{padding:"4px 8px",border:"1px solid #e2e5ea",borderRadius:8,fontSize:12.7,background:"#fff",cursor:"pointer",fontFamily:"inherit"}}>
           {[10,25,50,100].map(n=><option key={n} value={n}>{n} / page</option>)}
         </select>
       </div>
       {usePaging&&<div style={{display:"flex",alignItems:"center",gap:4}}>
-        <button disabled={page===0} onClick={()=>setPage(page-1)} style={{padding:"5px 12px",border:"1px solid #e2e5ea",borderRadius:8,fontSize:11,cursor:page===0?"default":"pointer",opacity:page===0?0.35:1,background:"#fff",fontWeight:600,fontFamily:"inherit",transition:"all 0.15s"}}>Prev</button>
+        <button disabled={page===0} onClick={()=>setPage(page-1)} style={{padding:"5px 12px",border:"1px solid #e2e5ea",borderRadius:8,fontSize:12.7,cursor:page===0?"default":"pointer",opacity:page===0?0.35:1,background:"#fff",fontWeight:600,fontFamily:"inherit",transition:"all 0.15s"}}>Prev</button>
         {pageNums.map((n,i)=>{
           const gap=i>0&&n-pageNums[i-1]>1;
-          return <Fragment key={n}>{gap&&<span style={{padding:"0 4px",color:"#b0b6c0"}}>...</span>}<button onClick={()=>setPage(n)} style={{padding:"5px 10px",border:"1px solid "+(n===page?"#0052e0":"#e2e5ea"),borderRadius:8,fontSize:11,cursor:"pointer",background:n===page?"linear-gradient(135deg, #0052e0, #6366f1)":"#fff",color:n===page?"#fff":"#4b5563",fontWeight:n===page?700:500,fontFamily:"inherit",transition:"all 0.15s",boxShadow:n===page?"0 2px 6px rgba(0,82,224,0.2)":"none"}}>{n+1}</button></Fragment>;
+          return <Fragment key={n}>{gap&&<span style={{padding:"0 4px",color:"#9ca3af"}}>...</span>}<button onClick={()=>setPage(n)} style={{padding:"5px 10px",border:"1px solid "+(n===page?"#0052e0":"#e2e5ea"),borderRadius:8,fontSize:12.7,cursor:"pointer",background:n===page?"linear-gradient(135deg, #0052e0, #6366f1)":"#fff",color:n===page?"#fff":"#4b5563",fontWeight:n===page?700:500,fontFamily:"inherit",transition:"all 0.15s",boxShadow:n===page?"0 2px 6px rgba(0,82,224,0.2)":"none"}}>{n+1}</button></Fragment>;
         })}
-        <button disabled={page>=totalPages-1} onClick={()=>setPage(page+1)} style={{padding:"5px 12px",border:"1px solid #e2e5ea",borderRadius:8,fontSize:11,cursor:page>=totalPages-1?"default":"pointer",opacity:page>=totalPages-1?0.35:1,background:"#fff",fontWeight:600,fontFamily:"inherit",transition:"all 0.15s"}}>Next</button>
+        <button disabled={page>=totalPages-1} onClick={()=>setPage(page+1)} style={{padding:"5px 12px",border:"1px solid #e2e5ea",borderRadius:8,fontSize:12.7,cursor:page>=totalPages-1?"default":"pointer",opacity:page>=totalPages-1?0.35:1,background:"#fff",fontWeight:600,fontFamily:"inherit",transition:"all 0.15s"}}>Next</button>
       </div>}
     </div>}
   </div>);
@@ -454,7 +455,7 @@ function ContentDrawer({ eventId, meta, onClose }) {
         </header>
         <div className="aihub_drawer_body">
           {state.status==="loading" && <div className="aihub_loading"><RefreshCw size={16} className="aihub_spin"/> Loading content…</div>}
-          {state.status==="error" && <div style={{padding:16}}><div className="aihub_error"><AlertTriangle size={14}/> {state.error}</div><p className="aihub_text_muted" style={{fontSize:12,marginTop:10}}>Older events captured before content storage was enabled won't have a preview available.</p></div>}
+          {state.status==="error" && <div style={{padding:16}}><div className="aihub_error"><AlertTriangle size={14}/> {state.error}</div><p className="aihub_text_muted" style={{fontSize:13.2,marginTop:10}}>Older events captured before content storage was enabled won't have a preview available.</p></div>}
           {state.status==="ok" && state.kind==="text" && <TextContent text={state.text} matches={meta?.metadata?.matches} contentType={state.contentType}/>}
           {state.status==="ok" && state.kind==="image" && <div style={{padding:16,display:"flex",justifyContent:"center",background:"#f5f6f8",minHeight:"100%"}}><img src={url} alt={filename||""} style={{maxWidth:"100%",borderRadius:6}}/></div>}
           {state.status==="ok" && state.kind==="pdf" && <iframe src={url} title="PDF preview" style={{width:"100%",height:"100%",border:0}}/>}
@@ -462,7 +463,7 @@ function ContentDrawer({ eventId, meta, onClose }) {
             <div style={{padding:28,textAlign:"center",display:"flex",flexDirection:"column",alignItems:"center"}}>
               <FileText size={28} strokeWidth={1.5}/>
               <div style={{marginTop:10,fontWeight:600,color:"#374151"}}>{filename||"Binary file"}</div>
-              <div className="aihub_text_muted" style={{marginTop:4,fontSize:12}}>{state.contentType||"application/octet-stream"} · can't render inline</div>
+              <div className="aihub_text_muted" style={{marginTop:4,fontSize:13.2}}>{state.contentType||"application/octet-stream"} · can't render inline</div>
               <a href={url} download={filename||"download.bin"} className="aihub_dl_btn">Download file</a>
             </div>
           )}
@@ -492,12 +493,12 @@ function TextContent({ text, matches, contentType }) {
     <div style={{padding:"16px 20px"}}>
       {Array.isArray(matches)&&matches.length>0 && (
         <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:12,alignItems:"center"}}>
-          <span className="aihub_text_muted" style={{fontSize:11,fontWeight:600}}>Matched:</span>
+          <span className="aihub_text_muted" style={{fontSize:12.7,fontWeight:600}}>Matched:</span>
           {matches.map((m,i)=><Badge key={i} text={`${m.pattern}${m.count>1?` ×${m.count}`:""}`} color="#ef4444"/>)}
         </div>
       )}
       <pre className="aihub_content_pre">{parts.map((p,i)=>p.hit?<mark key={i} className="aihub_content_mark">{p.text}</mark>:<span key={i}>{p.text}</span>)}</pre>
-      <div className="aihub_text_muted" style={{marginTop:10,fontSize:11}}>{text.length.toLocaleString()} chars · {contentType}</div>
+      <div className="aihub_text_muted" style={{marginTop:10,fontSize:12.7}}>{text.length.toLocaleString()} chars · {contentType}</div>
     </div>
   );
 }
@@ -568,7 +569,7 @@ function Donut({ segments, label, size=132, thickness=30 }) {
     {tip&&<div style={{
       position:"absolute",left:tip.x,top:tip.y,transform:"translate(-50%,-120%)",
       background:"#111827",color:"#fff",borderRadius:10,padding:"8px 14px",
-      fontSize:12,fontWeight:600,whiteSpace:"nowrap",pointerEvents:"none",
+      fontSize:13.2,fontWeight:600,whiteSpace:"nowrap",pointerEvents:"none",
       boxShadow:"0 4px 16px rgba(0,0,0,0.18)",zIndex:10,
       animation:"polFadeIn 0.12s ease-out",
     }}>
@@ -576,7 +577,7 @@ function Donut({ segments, label, size=132, thickness=30 }) {
         <span style={{width:8,height:8,borderRadius:3,background:tip.color,flexShrink:0}}/>
         {tip.label}
       </div>
-      <div style={{display:"flex",justifyContent:"space-between",gap:16,marginTop:4,fontSize:11,color:"rgba(255,255,255,0.65)"}}>
+      <div style={{display:"flex",justifyContent:"space-between",gap:16,marginTop:4,fontSize:12.7,color:"rgba(255,255,255,0.65)"}}>
         <span>{tip.value.toLocaleString()}</span>
         <span>{tip.pct}%</span>
       </div>
@@ -626,7 +627,7 @@ function ToggleDonutCard({ views, onClick, unavailable }) {
         <button key={vw.key} onClick={e=>{e.stopPropagation();setActive(i);}}
           style={{padding:"4px 12px",borderRadius:20,border:"1px solid "+(i===active?"#0052e0":"#e2e5ea"),
             background:i===active?"#0052e0":"#fff",color:i===active?"#fff":"#6b7280",
-            fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"inherit",transition:"all 0.15s"}}>
+            fontSize:12.7,fontWeight:600,cursor:"pointer",fontFamily:"inherit",transition:"all 0.15s"}}>
           {vw.label}
         </button>
       ))}
@@ -873,9 +874,9 @@ function OverviewView() {
       <div className="aihub_card">
         <SectionHeader title="Needs attention" hint="Open items — each one links to where it is handled."/>
         {attn.length===0
-          ? <div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"24px 0",color:"#b0b6c0"}}>
+          ? <div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"24px 0",color:"#9ca3af"}}>
               <Shield size={28} strokeWidth={1.5}/>
-              <p style={{margin:"10px 0 0",fontSize:13,fontWeight:500,color:"#4b5563"}}>{warn.length>0?"Some panels could not load.":"All clear — nothing outstanding."}</p>
+              <p style={{margin:"10px 0 0",fontSize:13.7,fontWeight:500,color:"#4b5563"}}>{warn.length>0?"Some panels could not load.":"All clear — nothing outstanding."}</p>
             </div>
           : <ul className="aihub_attn_list">{attn.slice(0,4).map(a=><AttnItem key={a.key} tone={a.tone} icon={a.icon} label={a.label} sub={a.sub} onClick={()=>nav(a.to)}/>)}</ul>}
       </div>
@@ -1007,7 +1008,7 @@ function AgentsView() {
   return (<div>
     <SectionHeader title="Agents & MCP" hint="AI agent projects and the MCP servers they can reach, across all machines."
       action={<div style={{display:"flex",gap:10,alignItems:"center"}}>
-        <select value={filterUser} onChange={ev=>setFilterUser(ev.target.value)} aria-label="Filter by user" style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12,fontWeight:600}}>
+        <select value={filterUser} onChange={ev=>setFilterUser(ev.target.value)} aria-label="Filter by user" style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.2,fontWeight:600}}>
           <option value="">All users</option>
           {userOptions.map(u=><option key={u} value={u}>{u}</option>)}
         </select>
@@ -1255,7 +1256,7 @@ function PlatformsView() {
         {label:"Governed",render:r=><Badge text={r.governed?"on":"off"} color={r.governed?"#22c55e":"#9ca3af"}/>,right:true},
         {label:"Access",render:r=>(
           <button onClick={()=>toggleBlocked(r)} disabled={busy===r.host} title={r.blocked?"Click to allow":"Click to block (users can't send prompts)"}
-            style={{cursor:busy===r.host?"default":"pointer",padding:"3px 10px",borderRadius:6,fontSize:12,fontWeight:600,fontFamily:"inherit",
+            style={{cursor:busy===r.host?"default":"pointer",padding:"3px 10px",borderRadius:6,fontSize:13.2,fontWeight:600,fontFamily:"inherit",
               border:`1px solid ${r.blocked?"#fca5a5":"#bbf7d0"}`,background:r.blocked?"#fef2f2":"#f0fdf4",color:r.blocked?"#dc2626":"#16a34a",opacity:busy===r.host?0.6:1}}>
             {busy===r.host?"…":r.blocked?"Blocked":"Allowed"}
           </button>
@@ -1350,8 +1351,8 @@ function InlineContent({ eventId, meta }) {
     {state.kind==="binary" && (
       <div style={{padding:16,textAlign:"center"}}>
         <FileText size={22} strokeWidth={1.5}/>
-        <div style={{marginTop:6,fontWeight:600,color:"#374151",fontSize:13}}>{filename||"Binary file"}</div>
-        <div className="aihub_text_muted" style={{marginTop:2,fontSize:11}}>{state.contentType||"application/octet-stream"} · cannot render inline</div>
+        <div style={{marginTop:6,fontWeight:600,color:"#374151",fontSize:13.7}}>{filename||"Binary file"}</div>
+        <div className="aihub_text_muted" style={{marginTop:2,fontSize:12.7}}>{state.contentType||"application/octet-stream"} · cannot render inline</div>
         <a href={url} download={filename||"download.bin"} className="aihub_dl_btn">Download file</a>
       </div>
     )}
@@ -2144,7 +2145,7 @@ function SessionTranscriptView({ session, machines, onBack }) {
           <div style={{marginBottom:12}}><Badge text={`Showing the first ${messages.length.toLocaleString()} turns — this session is longer`} color="#f59e0b"/></div>
         )}
         {hasPlayer && (
-          <p className="aihub_text_muted" style={{fontSize:11,margin:"0 0 12px"}}>
+          <p className="aihub_text_muted" style={{fontSize:12.7,margin:"0 0 12px"}}>
             Turns inside the selected run show a timecode — click a turn to seek the replay there. The turn matching playback is highlighted as the replay plays.
           </p>
         )}
@@ -2306,7 +2307,7 @@ function SessionListView({ onOpen, machines }) {
               style={!sevAvailable?{opacity:0.5,cursor:"not-allowed"}:undefined}
               onClick={()=>setSev(s)}>{s}</button>
           ))}
-          {!sevAvailable && <span className="aihub_text_muted" style={{fontSize:11}}>per-session severity not reported yet</span>}
+          {!sevAvailable && <span className="aihub_text_muted" style={{fontSize:12.7}}>per-session severity not reported yet</span>}
         </div>
       </div>
     </div>
@@ -2407,21 +2408,21 @@ function CopilotReadinessView() {
       {/* Header + Scan button */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
         <div>
-          <h2 style={{ margin: 0, fontSize: 20 }}>Copilot Readiness Assessment</h2>
-          <p className="aihub_text_muted" style={{ margin: "4px 0 0", fontSize: 13 }}>
+          <h2 style={{ margin: 0, fontSize:19.7 }}>Copilot Readiness Assessment</h2>
+          <p className="aihub_text_muted" style={{ margin: "4px 0 0", fontSize:13.7 }}>
             Scan your Microsoft 365 environment for overshared data before enabling Copilot
           </p>
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           {oauthKeys.length > 1 && (
             <select value={selectedKey} onChange={e => setSelectedKey(e.target.value)}
-              style={{ padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 13 }}>
+              style={{ padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize:13.7 }}>
               <option value="">Select tenant...</option>
               {oauthKeys.map(k => <option key={k.id} value={k.id}>{k.tenant_id || k.id}</option>)}
             </select>
           )}
           <button onClick={runScan} disabled={scanning || !selectedKey}
-            style={{ background: scanning ? "#9ca3af" : "#2563eb", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 14, fontWeight: 600, cursor: scanning ? "default" : "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+            style={{ background: scanning ? "#9ca3af" : "#2563eb", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize:14.2, fontWeight: 600, cursor: scanning ? "default" : "pointer", display: "flex", alignItems: "center", gap: 6 }}>
             {scanning ? <><RefreshCw size={14} className="aihub_spin" /> Scanning...</> : <><Scan size={14} /> Run Assessment</>}
           </button>
         </div>
@@ -2441,7 +2442,7 @@ function CopilotReadinessView() {
       )}
       {oauthKeys.length === 0 && scan && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, padding: "9px 14px",
-                      borderRadius: 8, background: "#fffbeb", border: "1px solid #fde68a", fontSize: 12.5, color: "#92400e" }}>
+                      borderRadius: 8, background: "#fffbeb", border: "1px solid #fde68a", fontSize:13.2, color: "#92400e" }}>
           <AlertTriangle size={14} />
           <span>
             <strong>No Microsoft 365 tenant is connected, so this assessment cannot be re-run.</strong>{" "}
@@ -2455,12 +2456,12 @@ function CopilotReadinessView() {
       {scan && scan.status === "completed" && (<>
         {/* Risk score banner */}
         <div style={{ background: sevColor[scan.riskLevel] + "10", border: "1px solid " + sevColor[scan.riskLevel] + "40", borderRadius: 12, padding: 20, marginBottom: 20, display: "flex", alignItems: "center", gap: 16 }}>
-          <div style={{ width: 60, height: 60, borderRadius: "50%", background: sevColor[scan.riskLevel] + "20", color: sevColor[scan.riskLevel], display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, fontWeight: 700 }}>
+          <div style={{ width: 60, height: 60, borderRadius: "50%", background: sevColor[scan.riskLevel] + "20", color: sevColor[scan.riskLevel], display: "flex", alignItems: "center", justifyContent: "center", fontSize:28.2, fontWeight: 700 }}>
             {scan.riskLevel === "critical" ? "!" : scan.riskLevel === "high" ? "⚠" : scan.riskLevel === "none" ? "✓" : "~"}
           </div>
           <div>
-            <div style={{ fontSize: 22, fontWeight: 700, color: sevColor[scan.riskLevel], textTransform: "uppercase" }}>{scan.riskLevel} Risk</div>
-            <div style={{ fontSize: 13, color: "#475569", marginTop: 2 }}>
+            <div style={{ fontSize:22.2, fontWeight: 700, color: sevColor[scan.riskLevel], textTransform: "uppercase" }}>{scan.riskLevel} Risk</div>
+            <div style={{ fontSize:13.7, color: "#475569", marginTop: 2 }}>
               {/* A real count. This used to read "~N documents potentially
                   exposed", computed as findings×50 — a number nothing measured,
                   printed to four significant figures.
@@ -2487,7 +2488,7 @@ function CopilotReadinessView() {
         {/* Severity breakdown */}
         <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
           {[["critical", scan.summary.critical], ["high", scan.summary.high], ["medium", scan.summary.medium], ["low", scan.summary.low]].map(([sev, count]) => (
-            <div key={sev} style={{ padding: "6px 12px", borderRadius: 6, background: sevColor[sev] + "14", color: sevColor[sev], fontSize: 12, fontWeight: 600 }}>
+            <div key={sev} style={{ padding: "6px 12px", borderRadius: 6, background: sevColor[sev] + "14", color: sevColor[sev], fontSize:13.2, fontWeight: 600 }}>
               {sev}: {count}
             </div>
           ))}
@@ -2499,16 +2500,16 @@ function CopilotReadinessView() {
           columns={[
             { label: "Sev", render: r => <div style={{ width: 8, height: 8, borderRadius: "50%", background: sevColor[r.severity] }} />, },
             { label: "Category", render: r => <span>{catIcon[r.category] || ""} {r.category}</span> },
-            { label: "Finding", render: r => <div><div className="aihub_text_primary" style={{ fontSize: 13 }}>{r.title}</div><div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 2 }}>{r.description.length > 120 ? r.description.slice(0, 120) + "…" : r.description}</div></div> },
-            { label: "Exposed To", render: r => <span style={{ fontSize: 12 }}>{r.exposedTo}</span> },
-            { label: "Remediation", render: r => <span className="aihub_text_muted" style={{ fontSize: 11 }}>{r.remediation.length > 80 ? r.remediation.slice(0, 80) + "…" : r.remediation}</span> },
+            { label: "Finding", render: r => <div><div className="aihub_text_primary" style={{ fontSize:13.7 }}>{r.title}</div><div className="aihub_text_muted" style={{ fontSize:12.7, marginTop: 2 }}>{r.description.length > 120 ? r.description.slice(0, 120) + "…" : r.description}</div></div> },
+            { label: "Exposed To", render: r => <span style={{ fontSize:13.2 }}>{r.exposedTo}</span> },
+            { label: "Remediation", render: r => <span className="aihub_text_muted" style={{ fontSize:12.7 }}>{r.remediation.length > 80 ? r.remediation.slice(0, 80) + "…" : r.remediation}</span> },
           ]}
           rows={scan.findings || []}
           empty="No oversharing risks found — your environment looks clean!"
         />
 
         {/* Scan metadata */}
-        <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 16 }}>
+        <div className="aihub_text_muted" style={{ fontSize:12.7, marginTop: 16 }}>
           Scan ID: {scan.id} · Started: {new Date(scan.startedAt).toLocaleString()} · Duration: {((scan.durationMs || 0) / 1000).toFixed(1)}s
         </div>
       </>)}
@@ -2517,7 +2518,7 @@ function CopilotReadinessView() {
       {scan && scan.status === "running" && (
         <div style={{ textAlign: "center", padding: 60 }}>
           <RefreshCw size={32} className="aihub_spin" style={{ color: "#2563eb", marginBottom: 12 }} />
-          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>Scanning your Microsoft 365 environment...</div>
+          <div style={{ fontSize:16.2, fontWeight: 600, marginBottom: 4 }}>Scanning your Microsoft 365 environment...</div>
           <div className="aihub_text_muted">Checking SharePoint, OneDrive, Teams, and Exchange for overshared permissions. This usually takes 1-2 minutes.</div>
         </div>
       )}
@@ -2531,9 +2532,9 @@ function CopilotReadinessView() {
       {!scan && oauthKeys.length > 0 && !scanning && (
         <div style={{ textAlign: "center", padding: 60, background: "#f8fafc", borderRadius: 12, border: "1px solid #e5e7eb" }}>
           <Shield size={40} style={{ color: "#9ca3af", marginBottom: 12 }} />
-          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>No assessment run yet</div>
+          <div style={{ fontSize:16.2, fontWeight: 600, marginBottom: 4 }}>No assessment run yet</div>
           <div className="aihub_text_muted" style={{ marginBottom: 16 }}>Click "Run Assessment" to scan your Microsoft 365 environment for oversharing risks before enabling Copilot.</div>
-          <div style={{ fontSize: 12, color: "#6b7280", maxWidth: 500, margin: "0 auto", lineHeight: 1.6 }}>
+          <div style={{ fontSize:13.2, color: "#6b7280", maxWidth: 500, margin: "0 auto", lineHeight: 1.6 }}>
             The scan checks: SharePoint site permissions, OneDrive org-wide shares, public Teams channels, and Exchange delegate access.
             It reads permissions only — no data is modified.
           </div>
@@ -2568,12 +2569,12 @@ const MODEL_SUGGESTIONS = {
 
 function MultiSelect({options,value=[],onChange,label}) {
   return (<div style={{marginBottom:10}}>
-    {label&&<div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:4}}>{label}</div>}
+    {label&&<div style={{fontSize:13.2,fontWeight:600,color:"#374151",marginBottom:4}}>{label}</div>}
     <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
       {options.map(o=>{
         const sel=value.includes(o);
         return <button key={o} type="button" onClick={()=>onChange(sel?value.filter(v=>v!==o):[...value,o])}
-          style={{padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:600,border:"1px solid",cursor:"pointer",
+          style={{padding:"3px 10px",borderRadius:6,fontSize:12.7,fontWeight:600,border:"1px solid",cursor:"pointer",
             background:sel?"#0044cc14":"#fff",color:sel?"#0052e0":"#6b7280",borderColor:sel?"#0044cc30":"#e2e5ea"}}>{o}</button>;
       })}
     </div>
@@ -2618,75 +2619,75 @@ function RuleFormModal({rule,onSave,onClose}) {
   return (<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onClose}>
     <div style={{background:"#fff",borderRadius:14,padding:24,width:560,maxHeight:"85vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.15)"}} onClick={e=>e.stopPropagation()}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
-        <h3 style={{margin:0,fontSize:16,fontWeight:700}}>{isEdit?"Edit Rule":"Create Routing Rule"}</h3>
+        <h3 style={{margin:0,fontSize:16.2,fontWeight:700}}>{isEdit?"Edit Rule":"Create Routing Rule"}</h3>
         <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer"}}><X size={18} color="#6b7280"/></button>
       </div>
 
       <div style={{marginBottom:12}}>
-        <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Rule Name *</label>
+        <label style={{fontSize:13.2,fontWeight:600,color:"#374151"}}>Rule Name *</label>
         <input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Route simple tasks to cheap model"
-          style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+          style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,marginTop:4,boxSizing:"border-box"}}/>
       </div>
       <div style={{display:"flex",gap:12,marginBottom:12}}>
         <div style={{flex:1}}>
-          <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Priority (lower = first)</label>
-          <input type="number" value={priority} onChange={e=>setPriority(e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+          <label style={{fontSize:13.2,fontWeight:600,color:"#374151"}}>Priority (lower = first)</label>
+          <input type="number" value={priority} onChange={e=>setPriority(e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,marginTop:4,boxSizing:"border-box"}}/>
         </div>
         <div style={{flex:1,display:"flex",alignItems:"flex-end",paddingBottom:4}}>
-          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13}}>
+          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13.7}}>
             <input type="checkbox" checked={enabled} onChange={e=>setEnabled(e.target.checked)}/> Enabled
           </label>
         </div>
       </div>
 
       <div style={{background:"#f5f6f8",borderRadius:10,padding:14,marginBottom:14}}>
-        <div style={{fontSize:13,fontWeight:700,color:"#111827",marginBottom:10}}>Conditions <span style={{fontWeight:400,color:"#9ca3af"}}>(all must match)</span></div>
+        <div style={{fontSize:13.7,fontWeight:700,color:"#111827",marginBottom:10}}>Conditions <span style={{fontWeight:400,color:"#9ca3af"}}>(all must match)</span></div>
         <MultiSelect label="Data Sensitivity" options={SEVERITY_OPTIONS} value={condSensitivity} onChange={setCondSensitivity}/>
         <MultiSelect label="Prompt Complexity" options={COMPLEXITY_OPTIONS} value={condComplexity} onChange={setCondComplexity}/>
         <MultiSelect label="Provider" options={PROVIDER_OPTIONS} value={condProvider} onChange={setCondProvider}/>
         <div style={{marginBottom:10}}>
-          <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Original Model (comma-separated patterns)</label>
+          <label style={{fontSize:13.2,fontWeight:600,color:"#374151"}}>Original Model (comma-separated patterns)</label>
           <input value={condModel} onChange={e=>setCondModel(e.target.value)} placeholder="e.g. gpt-4, claude-opus"
-            style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+            style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,marginTop:4,boxSizing:"border-box"}}/>
         </div>
         <div style={{display:"flex",gap:12}}>
           <div style={{flex:1}}>
-            <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Tokens &gt;</label>
+            <label style={{fontSize:13.2,fontWeight:600,color:"#374151"}}>Tokens &gt;</label>
             <input type="number" value={condTokensGt} onChange={e=>setCondTokensGt(e.target.value)} placeholder="e.g. 500"
-              style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+              style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,marginTop:4,boxSizing:"border-box"}}/>
           </div>
           <div style={{flex:1}}>
-            <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Tokens &lt;</label>
+            <label style={{fontSize:13.2,fontWeight:600,color:"#374151"}}>Tokens &lt;</label>
             <input type="number" value={condTokensLt} onChange={e=>setCondTokensLt(e.target.value)} placeholder="e.g. 200"
-              style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+              style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,marginTop:4,boxSizing:"border-box"}}/>
           </div>
         </div>
       </div>
 
       <div style={{background:"#f0f9ff",borderRadius:10,padding:14,marginBottom:18}}>
-        <div style={{fontSize:13,fontWeight:700,color:"#111827",marginBottom:10}}>Action — Route To</div>
+        <div style={{fontSize:13.7,fontWeight:700,color:"#111827",marginBottom:10}}>Action — Route To</div>
         <div style={{marginBottom:10}}>
-          <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Target Model *</label>
+          <label style={{fontSize:13.2,fontWeight:600,color:"#374151"}}>Target Model *</label>
           <input value={actionModel} onChange={e=>setActionModel(e.target.value)} placeholder="e.g. gpt-4o-mini"
-            style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+            style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,marginTop:4,boxSizing:"border-box"}}/>
           <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:6}}>
             {[...MODEL_SUGGESTIONS.openai.slice(0,4),...MODEL_SUGGESTIONS.anthropic.slice(0,3),...MODEL_SUGGESTIONS.google.slice(0,2)].map(m=>
               <button key={m} type="button" onClick={()=>setActionModel(m)}
-                style={{padding:"2px 8px",borderRadius:5,fontSize:10,border:"1px solid #e5e7eb",background:actionModel===m?"#0044cc14":"#fff",color:actionModel===m?"#0052e0":"#6b7280",cursor:"pointer"}}>{m}</button>
+                style={{padding:"2px 8px",borderRadius:5,fontSize:11.7,border:"1px solid #e5e7eb",background:actionModel===m?"#0044cc14":"#fff",color:actionModel===m?"#0052e0":"#6b7280",cursor:"pointer"}}>{m}</button>
             )}
           </div>
         </div>
         <div>
-          <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Target Host <span style={{fontWeight:400,color:"#9ca3af"}}>(optional, for private endpoints)</span></label>
+          <label style={{fontSize:13.2,fontWeight:600,color:"#374151"}}>Target Host <span style={{fontWeight:400,color:"#9ca3af"}}>(optional, for private endpoints)</span></label>
           <input value={actionHost} onChange={e=>setActionHost(e.target.value)} placeholder="e.g. my-company.openai.azure.com"
-            style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+            style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,marginTop:4,boxSizing:"border-box"}}/>
         </div>
       </div>
 
       <div style={{display:"flex",justifyContent:"flex-end",gap:10}}>
-        <button onClick={onClose} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>Cancel</button>
+        <button onClick={onClose} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13.7}}>Cancel</button>
         <button onClick={handleSave} disabled={saving||!name.trim()||!actionModel.trim()}
-          style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:saving||!name.trim()||!actionModel.trim()?0.5:1}}>{saving?"Saving...":isEdit?"Save Changes":"Create Rule"}</button>
+          style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13.7,fontWeight:600,opacity:saving||!name.trim()||!actionModel.trim()?0.5:1}}>{saving?"Saving...":isEdit?"Save Changes":"Create Rule"}</button>
       </div>
     </div>
   </div>);
@@ -2751,7 +2752,7 @@ function ModelRoutingView() {
     {/* Tabs */}
     <div style={{display:"flex",gap:2,marginBottom:16,borderBottom:"2px solid #eff1f3"}}>
       {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)}
-        style={{padding:"8px 18px",fontSize:13,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0044cc":"2px solid transparent",
+        style={{padding:"8px 18px",fontSize:13.7,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0044cc":"2px solid transparent",
           background:"none",color:t.hidden?(tab===t.id?"#0052e0":"transparent"):(tab===t.id?"#0052e0":"#6b7280"),cursor:"pointer",marginBottom:-2}}>{t.label}</button>)}
     </div>
     {tab==="overview"&&(<div>
@@ -2759,17 +2760,17 @@ function ModelRoutingView() {
         <div className="aihub_card" style={{textAlign:"center",padding:"40px 20px"}}>
           <Activity size={40} color="#d1d5db" style={{marginBottom:12}}/>
           <h4 style={{margin:"0 0 8px",color:"#374151"}}>No routing activity yet</h4>
-          <p style={{color:"#9ca3af",fontSize:13,maxWidth:400,margin:"0 auto 16px"}}>
+          <p style={{color:"#9ca3af",fontSize:13.7,maxWidth:400,margin:"0 auto 16px"}}>
             Create routing rules to automatically swap expensive models for cheaper ones on simple tasks, route sensitive data to private endpoints, and set up failover.
           </p>
-          <button onClick={()=>{setTab("rules");setShowRuleForm(true);}} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>
+          <button onClick={()=>{setTab("rules");setShowRuleForm(true);}} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13.7,fontWeight:600}}>
             <Plus size={14} style={{verticalAlign:"middle",marginRight:4}}/> Create First Rule
           </button>
         </div>
       ):(
         <div className="aihub_two_col">
           <div className="aihub_card">
-            <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>Model Swaps</h4>
+            <h4 style={{margin:"0 0 12px",fontSize:14.2,fontWeight:700}}>Model Swaps</h4>
             {(analytics?.by_model||[]).length?<DataTable columns={[
               {label:"Original Model",render:r=><Mono>{r.from||"—"}</Mono>},
               {label:"Routed To",render:r=><Badge text={r.to||"—"} color="#0052e0"/>},
@@ -2778,16 +2779,16 @@ function ModelRoutingView() {
           </div>
           <div>
             <div className="aihub_card" style={{marginBottom:16}}>
-              <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>By Rule</h4>
+              <h4 style={{margin:"0 0 12px",fontSize:14.2,fontWeight:700}}>By Rule</h4>
               <BarChart data={(analytics?.by_rule||[]).map(r=>({label:r.name||"unknown",count:r.count}))} lk="label" vk="count"/>
             </div>
             <div className="aihub_card">
-              <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>By Complexity</h4>
+              <h4 style={{margin:"0 0 12px",fontSize:14.2,fontWeight:700}}>By Complexity</h4>
               <div style={{display:"flex",gap:8}}>
                 {(analytics?.by_complexity||[]).map(c=>
                   <div key={c.complexity} style={{flex:1,textAlign:"center",padding:12,borderRadius:8,background:"#f5f6f8"}}>
-                    <div style={{fontSize:20,fontWeight:700,color:"#111827"}}>{c.count}</div>
-                    <div style={{fontSize:11,color:"#6b7280",textTransform:"capitalize"}}>{c.complexity||"unknown"}</div>
+                    <div style={{fontSize:19.7,fontWeight:700,color:"#111827"}}>{c.count}</div>
+                    <div style={{fontSize:12.7,color:"#6b7280",textTransform:"capitalize"}}>{c.complexity||"unknown"}</div>
                   </div>
                 )}
               </div>
@@ -2801,7 +2802,7 @@ function ModelRoutingView() {
     {tab==="rules"&&(<div>
       <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
         <button onClick={()=>{setEditRule(null);setShowRuleForm(true);}}
-          style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>
+          style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13.7,fontWeight:600}}>
           <Plus size={14}/> Add Rule
         </button>
       </div>
@@ -2823,9 +2824,9 @@ function ModelRoutingView() {
           {label:"Route To",render:r=><Badge text={r.action?.model||"—"} color="#0052e0"/>},
           {label:"Status",render:r=><Badge text={r.enabled?"Active":"Disabled"} color={r.enabled?"#22c55e":"#9ca3af"}/>},
           {label:"Actions",render:r=><div style={{display:"flex",gap:6}}>
-            <button onClick={()=>{setEditRule(r);setShowRuleForm(true);}} style={{background:"none",border:"none",cursor:"pointer",color:"#0052e0",fontSize:12,fontWeight:600}}>Edit</button>
-            <button onClick={()=>toggleRule(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#f59e0b",fontSize:12,fontWeight:600}}>{r.enabled?"Disable":"Enable"}</button>
-            <button onClick={()=>deleteRule(r.id)} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",fontSize:12,fontWeight:600}}>Delete</button>
+            <button onClick={()=>{setEditRule(r);setShowRuleForm(true);}} style={{background:"none",border:"none",cursor:"pointer",color:"#0052e0",fontSize:13.2,fontWeight:600}}>Edit</button>
+            <button onClick={()=>toggleRule(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#f59e0b",fontSize:13.2,fontWeight:600}}>{r.enabled?"Disable":"Enable"}</button>
+            <button onClick={()=>deleteRule(r.id)} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",fontSize:13.2,fontWeight:600}}>Delete</button>
           </div>},
         ]} rows={rules} empty="No routing rules yet. Click 'Add Rule' to create one."/>
       </div>
@@ -2833,8 +2834,8 @@ function ModelRoutingView() {
       {/* Example rules hint */}
       {rules.length===0&&(
         <div className="aihub_card" style={{background:"#f0f9ff",border:"1px solid #bfdbfe"}}>
-          <h4 style={{margin:"0 0 10px",fontSize:14,fontWeight:700,color:"#1e40af"}}>Example Routing Rules</h4>
-          <div style={{fontSize:13,color:"#374151",lineHeight:1.8}}>
+          <h4 style={{margin:"0 0 10px",fontSize:14.2,fontWeight:700,color:"#1e40af"}}>Example Routing Rules</h4>
+          <div style={{fontSize:13.7,color:"#374151",lineHeight:1.8}}>
             <strong>Cost Optimization:</strong> When complexity = "simple" → route to gpt-4o-mini (saves ~66x on token cost)<br/>
             <strong>Data Protection:</strong> When sensitivity = "critical" or "high" → route to your private Azure endpoint<br/>
             <strong>Compliance:</strong> When provider = "openai" and model contains "gpt-4" → route to EU-hosted deployment<br/>
@@ -2848,46 +2849,46 @@ function ModelRoutingView() {
     {tab==="endpoints"&&(<div>
       <div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
         <button onClick={()=>setShowEpForm(!showEpForm)}
-          style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>
+          style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13.7,fontWeight:600}}>
           <Plus size={14}/> Add Endpoint
         </button>
       </div>
 
       {showEpForm&&(
         <div className="aihub_card" style={{marginBottom:16,background:"#f5f6f8"}}>
-          <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>Register Endpoint</h4>
+          <h4 style={{margin:"0 0 12px",fontSize:14.2,fontWeight:700}}>Register Endpoint</h4>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
             <div>
-              <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Name *</label>
+              <label style={{fontSize:13.2,fontWeight:600,color:"#374151"}}>Name *</label>
               <input value={epName} onChange={e=>setEpName(e.target.value)} placeholder="e.g. Azure OpenAI Frankfurt"
-                style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+                style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,marginTop:4,boxSizing:"border-box"}}/>
             </div>
             <div>
-              <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Provider</label>
+              <label style={{fontSize:13.2,fontWeight:600,color:"#374151"}}>Provider</label>
               <select value={epProvider} onChange={e=>setEpProvider(e.target.value)}
-                style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}>
+                style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,marginTop:4,boxSizing:"border-box"}}>
                 {PROVIDER_OPTIONS.map(p=><option key={p} value={p}>{p}</option>)}
               </select>
             </div>
             <div>
-              <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Host</label>
+              <label style={{fontSize:13.2,fontWeight:600,color:"#374151"}}>Host</label>
               <input value={epHost} onChange={e=>setEpHost(e.target.value)} placeholder="e.g. my-company.openai.azure.com"
-                style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+                style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,marginTop:4,boxSizing:"border-box"}}/>
             </div>
             <div>
-              <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Models (comma-separated)</label>
+              <label style={{fontSize:13.2,fontWeight:600,color:"#374151"}}>Models (comma-separated)</label>
               <input value={epModels} onChange={e=>setEpModels(e.target.value)} placeholder="e.g. gpt-4o, gpt-4o-mini"
-                style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+                style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,marginTop:4,boxSizing:"border-box"}}/>
             </div>
             <div>
-              <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Region</label>
+              <label style={{fontSize:13.2,fontWeight:600,color:"#374151"}}>Region</label>
               <input value={epRegion} onChange={e=>setEpRegion(e.target.value)} placeholder="e.g. eu-west, us-east"
-                style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/>
+                style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,marginTop:4,boxSizing:"border-box"}}/>
             </div>
             <div style={{display:"flex",alignItems:"flex-end",gap:8}}>
               <button onClick={saveEndpoint} disabled={!epName.trim()}
-                style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:!epName.trim()?0.5:1}}>Save</button>
-              <button onClick={()=>setShowEpForm(false)} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>Cancel</button>
+                style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13.7,fontWeight:600,opacity:!epName.trim()?0.5:1}}>Save</button>
+              <button onClick={()=>setShowEpForm(false)} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13.7}}>Cancel</button>
             </div>
           </div>
         </div>
@@ -2941,12 +2942,12 @@ function RiskLevelBadge({ level, score }) {
   if (score == null || level === "not_assessed" || !level) {
     return <span title="No risk assessment has run for this subject yet"
                  style={{display:"inline-flex",alignItems:"center",gap:6,padding:"3px 10px",borderRadius:8,
-                         fontSize:12,fontWeight:600,background:"#f3f4f6",color:"#6b7280",border:"1px dashed #d1d5db"}}>
+                         fontSize:13.2,fontWeight:600,background:"#f3f4f6",color:"#6b7280",border:"1px dashed #d1d5db"}}>
       Not assessed
     </span>;
   }
   const c = RISK_COLORS[level] || "#6b7280";
-  return <span style={{display:"inline-flex",alignItems:"center",gap:6,padding:"3px 10px",borderRadius:8,fontSize:12,fontWeight:700,background:c+"14",color:c,border:"1px solid "+c+"30"}}>
+  return <span style={{display:"inline-flex",alignItems:"center",gap:6,padding:"3px 10px",borderRadius:8,fontSize:13.2,fontWeight:700,background:c+"14",color:c,border:"1px solid "+c+"30"}}>
     <span style={{width:8,height:8,borderRadius:"50%",background:c,display:"inline-block"}}/> {score} — {(level||"unknown").charAt(0).toUpperCase()+(level||"").slice(1)}
   </span>;
 }
@@ -2969,12 +2970,12 @@ function FactorRow({ label, factor }) {
   const pct = Math.min(factor.score, 100);
   const c = pct > 60 ? "#ef4444" : pct > 30 ? "#f59e0b" : "#22c55e";
   return <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
-    <div style={{width:140,fontSize:12,color:"#6b7280",flexShrink:0}}>{label}</div>
+    <div style={{width:140,fontSize:13.2,color:"#6b7280",flexShrink:0}}>{label}</div>
     <div style={{flex:1,height:6,background:"#f3f4f6",borderRadius:3,overflow:"hidden"}}>
       <div style={{width:pct+"%",height:"100%",background:c,borderRadius:3}}/>
     </div>
-    <div style={{width:50,fontSize:12,fontWeight:600,color:c,textAlign:"right"}}>{factor.raw}</div>
-    <div style={{width:40,fontSize:11,color:"#9ca3af",textAlign:"right"}}>{factor.weight}%</div>
+    <div style={{width:50,fontSize:13.2,fontWeight:600,color:c,textAlign:"right"}}>{factor.raw}</div>
+    <div style={{width:40,fontSize:12.7,color:"#9ca3af",textAlign:"right"}}>{factor.weight}%</div>
   </div>;
 }
 
@@ -3046,7 +3047,7 @@ function RiskScoreView() {
 
   return (<div>
     <SectionHeader title="AI Risk Scores" hint="Per-employee AI safety score — 0 (safe) to 100 (critical)"
-      action={<button onClick={compute} disabled={computing} style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:computing?0.5:1}}>
+      action={<button onClick={compute} disabled={computing} style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13.7,fontWeight:600,opacity:computing?0.5:1}}>
         <RefreshCw size={14} className={computing?"aihub_spin":""}/> {computing?"Computing...":"Compute Scores"}
       </button>}
     />
@@ -3064,13 +3065,13 @@ function RiskScoreView() {
       <div className="aihub_card" style={{textAlign:"center",padding:"40px 20px"}}>
         <Shield size={40} color="#d1d5db" style={{marginBottom:12}}/>
         <h4 style={{margin:"0 0 8px",color:"#374151"}}>No risk scores computed yet</h4>
-        <p style={{color:"#9ca3af",fontSize:13,maxWidth:400,margin:"0 auto 16px"}}>
+        <p style={{color:"#9ca3af",fontSize:13.7,maxWidth:400,margin:"0 auto 16px"}}>
           Click "Compute Scores" to analyze employee AI behavior and generate risk scores from DLP events, tool usage, and violation history.
         </p>
       </div>
     ) : (
       <div className="aihub_card">
-        <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>Employees by Risk</h4>
+        <h4 style={{margin:"0 0 12px",fontSize:14.2,fontWeight:700}}>Employees by Risk</h4>
         <DataTable
           columns={[
             {label:"Employee",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
@@ -3106,7 +3107,7 @@ function RiskRowDetail({ detail, loading }) {
   if (loading) return <div style={{padding:"18px 20px"}}><Loading/></div>;
   if (!detail) return <div style={{padding:"18px 20px"}} className="aihub_text_muted">Could not load this breakdown.</div>;
 
-  const H=({children})=><div style={{fontSize:11,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:8}}>{children}</div>;
+  const H=({children})=><div style={{fontSize:12.7,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:8}}>{children}</div>;
   const f=detail.profile?.risk_factors||{};
   // Every factor the scorer computes, so a zero reads as "measured, nothing found"
   // rather than the row being silently absent.
@@ -3124,7 +3125,7 @@ function RiskRowDetail({ detail, loading }) {
       <div>
         <H>Risk factors</H>
         {factors.map(([label,factor])=><FactorRow key={label} label={label} factor={factor}/>)}
-        <div className="aihub_text_muted" style={{fontSize:11,marginTop:8}}>
+        <div className="aihub_text_muted" style={{fontSize:12.7,marginTop:8}}>
           Each factor is capped at its own weight, so the total is a weighted blend rather than a sum.
         </div>
       </div>
@@ -3139,7 +3140,7 @@ function RiskRowDetail({ detail, loading }) {
                           style={{flex:1,minWidth:4,height:Math.max(h.score*0.55,2),background:c,borderRadius:2}}/>;
             })}
           </div>
-          <div className="aihub_text_muted" style={{fontSize:11,marginTop:4}}>
+          <div className="aihub_text_muted" style={{fontSize:12.7,marginTop:4}}>
             Oldest to newest, last {Math.min(detail.history.length,30)} computations.
           </div>
         </div>}
@@ -3148,7 +3149,7 @@ function RiskRowDetail({ detail, loading }) {
           <H>Recent events</H>
           <div style={{maxHeight:180,overflowY:"auto"}}>
             {detail.recent_events.slice(0,8).map((ev,i)=>(
-              <div key={i} style={{padding:"6px 0",borderBottom:"1px solid #f3f4f6",fontSize:12}}>
+              <div key={i} style={{padding:"6px 0",borderBottom:"1px solid #f3f4f6",fontSize:13.2}}>
                 <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
                   <span style={{fontWeight:600}}>{ev.event_kind||ev.kind||"—"}</span>
                   <span className="aihub_text_muted" style={{whiteSpace:"nowrap"}}>{relTime(ev.occurred_at)}</span>
@@ -3160,7 +3161,7 @@ function RiskRowDetail({ detail, loading }) {
         </div>}
 
         {!detail.history?.length && !detail.recent_events?.length &&
-          <div className="aihub_text_muted" style={{fontSize:12}}>No score history or recent events recorded for this person yet.</div>}
+          <div className="aihub_text_muted" style={{fontSize:13.2}}>No score history or recent events recorded for this person yet.</div>}
       </div>
 
     </div>
@@ -3208,7 +3209,7 @@ function systemTypeOf(category) {
 function RegistryStatusBadge({ status }) {
   const label = status === 'approved' ? 'Allowed' : status === 'blocked' ? 'Blocked' : 'Unreviewed';
   const c = STATUS_COLORS[status] || "#f59e0b";
-  return <span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 10px",borderRadius:8,fontSize:11,fontWeight:700,background:c+"14",color:c,border:"1px solid "+c+"30"}}>{label}</span>;
+  return <span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 10px",borderRadius:8,fontSize:12.7,fontWeight:700,background:c+"14",color:c,border:"1px solid "+c+"30"}}>{label}</span>;
 }
 
 function RegistryToggle({ status, onChange, pending }) {
@@ -3227,21 +3228,21 @@ function RegistryToggle({ status, onChange, pending }) {
   if (isUnreviewed) {
     // First time — show both options side by side
     return (<div style={{display:"flex",alignItems:"center",gap:8}}>
-      <button disabled={pending} onClick={()=>onChange('approved')} style={{padding:"6px 16px",borderRadius:8,fontSize:12,fontWeight:600,border:"1px solid #22c55e40",background:"#22c55e14",color:"#22c55e",cursor:pending?"default":"pointer",opacity:pending?0.6:1}}>Allow</button>
-      <span style={{fontSize:11,color:"#f59e0b",fontWeight:600}}>Unreviewed</span>
-      <button disabled={pending} onClick={()=>onChange('blocked')} style={{padding:"6px 16px",borderRadius:8,fontSize:12,fontWeight:600,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:pending?"default":"pointer",opacity:pending?0.6:1}}>Block</button>
+      <button disabled={pending} onClick={()=>onChange('approved')} style={{padding:"6px 16px",borderRadius:8,fontSize:13.2,fontWeight:600,border:"1px solid #22c55e40",background:"#22c55e14",color:"#22c55e",cursor:pending?"default":"pointer",opacity:pending?0.6:1}}>Allow</button>
+      <span style={{fontSize:12.7,color:"#f59e0b",fontWeight:600}}>Unreviewed</span>
+      <button disabled={pending} onClick={()=>onChange('blocked')} style={{padding:"6px 16px",borderRadius:8,fontSize:13.2,fontWeight:600,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:pending?"default":"pointer",opacity:pending?0.6:1}}>Block</button>
       {spinner}
     </div>);
   }
 
   // After first decision — simple toggle between allowed and blocked
   return (<div style={{display:"flex",alignItems:"center",gap:10}}>
-    <span style={{fontSize:12,fontWeight:isAllowed?700:400,color:isAllowed?"#22c55e":"#9ca3af"}}>Allowed</span>
+    <span style={{fontSize:13.2,fontWeight:isAllowed?700:400,color:isAllowed?"#22c55e":"#9ca3af"}}>Allowed</span>
     <div onClick={()=>{ if(!pending) onChange(isAllowed?'blocked':'approved'); }}
       style={{width:44,height:24,borderRadius:12,background:isAllowed?"#22c55e":"#ef4444",cursor:pending?"default":"pointer",position:"relative",transition:"background 0.2s",opacity:pending?0.6:1}}>
       <div style={{width:18,height:18,borderRadius:9,background:"#fff",position:"absolute",top:3,left:isAllowed?3:23,transition:"left 0.2s",boxShadow:"0 1px 3px rgba(0,0,0,0.2)"}}/>
     </div>
-    <span style={{fontSize:12,fontWeight:isBlocked?700:400,color:isBlocked?"#ef4444":"#9ca3af"}}>Blocked</span>
+    <span style={{fontSize:13.2,fontWeight:isBlocked?700:400,color:isBlocked?"#ef4444":"#9ca3af"}}>Blocked</span>
     {spinner}
   </div>);
 }
@@ -3450,24 +3451,24 @@ function AIRegistryView() {
     {/* Filters */}
     <div className="aihub_card" style={{display:"flex",flexWrap:"wrap",gap:10,alignItems:"center",padding:12,marginBottom:16}}>
       <div className="aihub_search_box" style={{flex:1,minWidth:200}}>
-        <Search size={14}/><input placeholder="Search name, vendor, owner..." value={search} onChange={e=>setSearch(e.target.value)} style={{border:"none",outline:"none",flex:1,fontSize:13}}/>
+        <Search size={14}/><input placeholder="Search name, vendor, owner..." value={search} onChange={e=>setSearch(e.target.value)} style={{border:"none",outline:"none",flex:1,fontSize:13.7}}/>
       </div>
-      <select value={filterType} onChange={e=>setFilterType(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12,fontWeight:600}}>
+      <select value={filterType} onChange={e=>setFilterType(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.2,fontWeight:600}}>
         <option value="">All</option>
         <option value="tool">AI Tools</option>
         <option value="agent">AI Agents</option>
       </select>
-      <select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12}}>
+      <select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.2}}>
         <option value="">All Statuses</option>
         <option value="approved">Allowed</option>
         <option value="unknown">Unreviewed</option>
         <option value="blocked">Blocked</option>
       </select>
-      <select value={filterCategory} onChange={e=>setFilterCategory(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12}}>
+      <select value={filterCategory} onChange={e=>setFilterCategory(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.2}}>
         <option value="">All Categories</option>
         {categories.map(c=><option key={c} value={c}>{c}</option>)}
       </select>
-      <select value={filterRisk} onChange={e=>setFilterRisk(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12}}>
+      <select value={filterRisk} onChange={e=>setFilterRisk(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.2}}>
         <option value="">All Risk Levels</option>
         <option value="low">Low</option>
         <option value="medium">Medium</option>
@@ -3494,11 +3495,11 @@ function AIRegistryView() {
           {label:"Status",render:r=><RegistryStatusBadge status={r.status}/>},
           {label:"Risk",render:r=><span style={{whiteSpace:"nowrap"}}><RiskLevelBadge level={r.risk_level} score={r.risk_score}/></span>},
           {label:"Owner",render:r=><div style={{whiteSpace:"nowrap"}}>
-            <div style={{fontSize:12}}>{r.owner||"—"}</div>
-            {r.is_orphaned&&<span style={{fontSize:10,color:"#ef4444",fontWeight:600}}>⚠ Orphaned</span>}
+            <div style={{fontSize:13.2}}>{r.owner||"—"}</div>
+            {r.is_orphaned&&<span style={{fontSize:11.7,color:"#ef4444",fontWeight:600}}>⚠ Orphaned</span>}
           </div>},
           {label:"Activity",render:r=><div style={{textAlign:"right",whiteSpace:"nowrap"}}>
-            <div style={{fontSize:13,fontWeight:600}}>{r.activity?.total?.toLocaleString()||0}</div>
+            <div style={{fontSize:13.7,fontWeight:600}}>{r.activity?.total?.toLocaleString()||0}</div>
             <div className="aihub_text_muted">{r.activity?.last_active?relTime(r.activity.last_active):"never"}</div>
           </div>,right:true},
         ]}
@@ -3578,15 +3579,15 @@ function AddPlatformForm({ onDone }) {
     finally { setBusy(false); }
   };
 
-  const field={padding:"7px 11px",fontSize:12.5,border:"1px solid #e5e7eb",borderRadius:6,fontFamily:"inherit",width:"100%",boxSizing:"border-box"};
-  const lbl={fontSize:11,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:4,display:"block"};
+  const field={padding:"7px 11px",fontSize:13.2,border:"1px solid #e5e7eb",borderRadius:6,fontFamily:"inherit",width:"100%",boxSizing:"border-box"};
+  const lbl={fontSize:12.7,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:4,display:"block"};
 
   return (<div className="aihub_card" style={{marginBottom:16,borderLeft:"3px solid #0044cc"}}>
     <SectionHeader title="Add an AI platform" hint="Enter the domain. Everything under it — every subdomain and every agent hosted there — is governed by this one entry."/>
 
     {err && <div className="aihub_error" style={{marginBottom:12}}><AlertTriangle size={14}/> {err}</div>}
     {ok && <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,padding:"8px 12px",borderRadius:6,
-                        background:"#f0fdf4",border:"1px solid #bbf7d0",fontSize:12,color:"#166534"}}>
+                        background:"#f0fdf4",border:"1px solid #bbf7d0",fontSize:13.2,color:"#166534"}}>
       <Shield size={13}/> {ok}
     </div>}
 
@@ -3596,9 +3597,9 @@ function AddPlatformForm({ onDone }) {
         <input style={field} placeholder="lovable.dev  or  https://chat.acme.ai/x"
                value={host} onChange={e=>setHost(e.target.value)}
                onKeyDown={e=>{ if(e.key==="Enter"&&valid&&!busy) submit(); }}/>
-        {host && !valid && <div style={{fontSize:11,color:"#b91c1c",marginTop:4}}>Not a valid domain.</div>}
+        {host && !valid && <div style={{fontSize:12.7,color:"#b91c1c",marginTop:4}}>Not a valid domain.</div>}
         {host && valid && normalized!==host.trim().toLowerCase() &&
-          <div style={{fontSize:11,color:"#6b7280",marginTop:4}}>Will be saved as <Mono>{normalized}</Mono></div>}
+          <div style={{fontSize:12.7,color:"#6b7280",marginTop:4}}>Will be saved as <Mono>{normalized}</Mono></div>}
       </div>
       <div>
         <label style={lbl}>Display name</label>
@@ -3614,7 +3615,7 @@ function AddPlatformForm({ onDone }) {
       <button className="aihub_action_btn" disabled={!valid||busy} onClick={submit}>
         {busy?"Adding…":"Add platform"}
       </button>
-      <span className="aihub_text_muted" style={{fontSize:11.5}}>
+      <span className="aihub_text_muted" style={{fontSize:12.7}}>
         Starts in <strong>observe</strong> mode — usage is recorded, nothing is blocked.
         Block it afterwards from its row. Endpoints sync within a few minutes.
       </span>
@@ -3633,16 +3634,16 @@ function AddPlatformForm({ onDone }) {
  */
 function RegistryRowDetail({ row, onStatus, pending }) {
   const cell=(label,value)=>value?<div><span style={{color:"#9ca3af"}}>{label}:</span> <span style={{fontWeight:600}}>{value}</span></div>:null;
-  const H=({children})=><div style={{fontSize:11,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:6}}>{children}</div>;
+  const H=({children})=><div style={{fontSize:12.7,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:6}}>{children}</div>;
   return (<div style={{padding:"16px 20px",borderTop:"1px solid #e5e7eb"}}>
-    {row.description&&<div style={{fontSize:12,color:"#374151",marginBottom:12}}>{row.description}</div>}
+    {row.description&&<div style={{fontSize:13.2,color:"#374151",marginBottom:12}}>{row.description}</div>}
 
     <div style={{marginBottom:14}}>
       <H>Decision</H>
       <RegistryToggle status={row.status} onChange={onStatus} pending={pending}/>
     </div>
 
-    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:8,marginBottom:14,fontSize:12}}>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:8,marginBottom:14,fontSize:13.2}}>
       {cell("Category",row.category)}
       {cell("Lifecycle",row.lifecycle)}
       {cell("Owner",row.owner)}
@@ -3658,9 +3659,9 @@ function RegistryRowDetail({ row, onStatus, pending }) {
     {row.matched_hosts?.length>0&&<div style={{marginBottom:14}}>
       <H>Enforced hosts</H>
       <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-        {row.matched_hosts.map((h,i)=><span key={i} style={{fontSize:11,fontFamily:"monospace",padding:"2px 8px",borderRadius:5,background:row.status==='blocked'?"#fef2f2":"#f0fdf4",border:"1px solid "+(row.status==='blocked'?"#fca5a5":"#bbf7d0"),color:row.status==='blocked'?"#dc2626":"#16a34a"}}>{h}</span>)}
+        {row.matched_hosts.map((h,i)=><span key={i} style={{fontSize:12.7,fontFamily:"monospace",padding:"2px 8px",borderRadius:5,background:row.status==='blocked'?"#fef2f2":"#f0fdf4",border:"1px solid "+(row.status==='blocked'?"#fca5a5":"#bbf7d0"),color:row.status==='blocked'?"#dc2626":"#16a34a"}}>{h}</span>)}
       </div>
-      <div className="aihub_text_muted" style={{fontSize:10.5,marginTop:4}}>Blocking/allowing this system affects {row.matched_hosts.length===1?"this host":"all "+row.matched_hosts.length+" hosts"} in the extension.</div>
+      <div className="aihub_text_muted" style={{fontSize:12.2,marginTop:4}}>Blocking/allowing this system affects {row.matched_hosts.length===1?"this host":"all "+row.matched_hosts.length+" hosts"} in the extension.</div>
     </div>}
 
     <div style={{marginBottom:14}}>
@@ -3669,19 +3670,19 @@ function RegistryRowDetail({ row, onStatus, pending }) {
         <RiskLevelBadge level={row.risk_level} score={row.risk_score}/>
         <div style={{marginTop:8,maxWidth:640}}><ScoreBar score={row.risk_score}/></div>
         {row.risk_factors?.length>0
-          ? <ul style={{margin:"10px 0 0",paddingLeft:18,fontSize:11.5,color:"#4b5563"}}>
+          ? <ul style={{margin:"10px 0 0",paddingLeft:18,fontSize:12.7,color:"#4b5563"}}>
               {row.risk_factors.map((f,i)=><li key={i} style={{marginBottom:3}}>
                 <strong>{f.signal||"Signal"}</strong>{f.weight?` (${f.weight})`:""}{f.description?` — ${f.description}`:""}
               </li>)}
             </ul>
-          : <div className="aihub_text_muted" style={{fontSize:11.5,marginTop:8}}>Scored, but no individual signals were recorded for this system.</div>}
-        {row.risk_basis==="platform_baseline"&&<div style={{fontSize:11,color:"#b45309",marginTop:8}}>
+          : <div className="aihub_text_muted" style={{fontSize:12.7,marginTop:8}}>Scored, but no individual signals were recorded for this system.</div>}
+        {row.risk_basis==="platform_baseline"&&<div style={{fontSize:12.7,color:"#b45309",marginTop:8}}>
           Platform baseline — reflects the platform type, not an assessment of this specific system.
         </div>}
       </>):(
         <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
           <RiskLevelBadge level={null} score={null}/>
-          <span className="aihub_text_muted" style={{fontSize:11.5}}>
+          <span className="aihub_text_muted" style={{fontSize:12.7}}>
             {row._catalogOnly
               ? "In the known-services catalog, but no usage has been captured — nothing to assess yet."
               : "No risk assessment has run for this system yet."}
@@ -3697,7 +3698,7 @@ function RegistryRowDetail({ row, onStatus, pending }) {
 
     {row.permissions?.length>0&&<div style={{marginBottom:14}}>
       <H>Permissions</H>
-      <div style={{maxHeight:110,overflowY:"auto",fontSize:11,color:"#6b7280"}}>
+      <div style={{maxHeight:110,overflowY:"auto",fontSize:12.7,color:"#6b7280"}}>
         {row.permissions.map((p,i)=><div key={i}>• {typeof p==='string'?p:p.scope||p.name||JSON.stringify(p)}</div>)}
       </div>
     </div>}
@@ -3706,11 +3707,11 @@ function RegistryRowDetail({ row, onStatus, pending }) {
       <H>Activity</H>
       <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
         <div style={{background:"#fff",border:"1px solid #e5e7eb",padding:"8px 16px",borderRadius:8,textAlign:"center",minWidth:110}}>
-          <div style={{fontSize:17,fontWeight:700}}>{(row.activity?.total||0).toLocaleString()}</div>
+          <div style={{fontSize:16.7,fontWeight:700}}>{(row.activity?.total||0).toLocaleString()}</div>
           <div className="aihub_text_muted">Total events</div>
         </div>
         <div style={{background:"#fff",border:"1px solid #e5e7eb",padding:"8px 16px",borderRadius:8,textAlign:"center",minWidth:110}}>
-          <div style={{fontSize:17,fontWeight:700}}>{row.activity?.unique_users||0}</div>
+          <div style={{fontSize:16.7,fontWeight:700}}>{row.activity?.unique_users||0}</div>
           <div className="aihub_text_muted">Users</div>
         </div>
       </div>
@@ -3787,8 +3788,8 @@ function AccessRequestsView() {
     {/* Tabs */}
     <div style={{display:"flex",gap:2,marginBottom:16,borderBottom:"2px solid #eff1f3"}}>
       {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)}
-        style={{padding:"10px 20px",fontSize:13,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0052e0":"2px solid transparent",
-          background:tab===t.id?"none":"none",color:tab===t.id?"#0052e0":"#8b919e",cursor:"pointer",marginBottom:-2,fontFamily:"inherit",transition:"all 0.15s",letterSpacing:"-0.01em"}}>{t.label}</button>)}
+        style={{padding:"10px 20px",fontSize:13.7,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0052e0":"2px solid transparent",
+          background:tab===t.id?"none":"none",color:tab===t.id?"#0052e0":"#6b7280",cursor:"pointer",marginBottom:-2,fontFamily:"inherit",transition:"all 0.15s",letterSpacing:"-0.01em"}}>{t.label}</button>)}
     </div>
 
     {/* Pending Tab */}
@@ -3797,7 +3798,7 @@ function AccessRequestsView() {
         <div className="aihub_card" style={{textAlign:"center",padding:"40px 20px"}}>
           <Shield size={40} color="#d1d5db" style={{marginBottom:12}}/>
           <h4 style={{margin:"0 0 8px",color:"#374151"}}>No pending requests</h4>
-          <p style={{color:"#9ca3af",fontSize:13}}>When employees request access to a blocked tool, their requests appear here.</p>
+          <p style={{color:"#9ca3af",fontSize:13.7}}>When employees request access to a blocked tool, their requests appear here.</p>
         </div>
       ):(
         <div className="aihub_card">
@@ -3805,7 +3806,7 @@ function AccessRequestsView() {
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
               <div>
                 <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-                  <span style={{fontSize:16,fontWeight:700}}>{r.tool_name||r.tool_host}</span>
+                  <span style={{fontSize:16.2,fontWeight:700}}>{r.tool_name||r.tool_host}</span>
                   {r.tool_vendor&&<Tag text={r.tool_vendor}/>}
                 </div>
                 {/* Name the device too, but only when it adds something: on a
@@ -3816,39 +3817,39 @@ function AccessRequestsView() {
                   {r.hostname&&r.hostname!==r.employee_name&&<> on {r.hostname}</>}
                   {" · "}{relTime(r.submitted_at)}
                 </div>
-                {r.reason&&<div style={{fontSize:13,color:"#374151",background:"#f5f6f8",padding:"8px 12px",borderRadius:8,marginBottom:8}}>"{r.reason}"</div>}
+                {r.reason&&<div style={{fontSize:13.7,color:"#374151",background:"#f5f6f8",padding:"8px 12px",borderRadius:8,marginBottom:8}}>"{r.reason}"</div>}
               </div>
             </div>
 
             {approving===r.id?(
               <div style={{background:"#f0f9ff",borderRadius:10,padding:14,marginTop:8}}>
-                <div style={{fontSize:13,fontWeight:600,marginBottom:8}}>Set expiry (required)</div>
+                <div style={{fontSize:13.7,fontWeight:600,marginBottom:8}}>Set expiry (required)</div>
                 <div style={{display:"flex",gap:8,marginBottom:10}}>
-                  <button onClick={()=>setExpiryMode("hours")} style={{padding:"5px 12px",borderRadius:6,fontSize:12,border:"1px solid",cursor:"pointer",background:expiryMode==="hours"?"#0044cc14":"#fff",color:expiryMode==="hours"?"#0052e0":"#6b7280",borderColor:expiryMode==="hours"?"#0044cc40":"#e2e5ea"}}>Hours</button>
-                  <button onClick={()=>setExpiryMode("date")} style={{padding:"5px 12px",borderRadius:6,fontSize:12,border:"1px solid",cursor:"pointer",background:expiryMode==="date"?"#0044cc14":"#fff",color:expiryMode==="date"?"#0052e0":"#6b7280",borderColor:expiryMode==="date"?"#0044cc40":"#e2e5ea"}}>Date</button>
+                  <button onClick={()=>setExpiryMode("hours")} style={{padding:"5px 12px",borderRadius:6,fontSize:13.2,border:"1px solid",cursor:"pointer",background:expiryMode==="hours"?"#0044cc14":"#fff",color:expiryMode==="hours"?"#0052e0":"#6b7280",borderColor:expiryMode==="hours"?"#0044cc40":"#e2e5ea"}}>Hours</button>
+                  <button onClick={()=>setExpiryMode("date")} style={{padding:"5px 12px",borderRadius:6,fontSize:13.2,border:"1px solid",cursor:"pointer",background:expiryMode==="date"?"#0044cc14":"#fff",color:expiryMode==="date"?"#0052e0":"#6b7280",borderColor:expiryMode==="date"?"#0044cc40":"#e2e5ea"}}>Date</button>
                 </div>
                 {expiryMode==="hours"?(
                   <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:10}}>
                     {["4","8","24","72","168"].map(h=>
-                      <button key={h} onClick={()=>setExpiryHours(h)} style={{padding:"4px 10px",borderRadius:6,fontSize:11,border:"1px solid",cursor:"pointer",background:expiryHours===h?"#0044cc14":"#fff",color:expiryHours===h?"#0052e0":"#6b7280",borderColor:expiryHours===h?"#0044cc40":"#e2e5ea"}}>{h==="168"?"7 days":h+"h"}</button>
+                      <button key={h} onClick={()=>setExpiryHours(h)} style={{padding:"4px 10px",borderRadius:6,fontSize:12.7,border:"1px solid",cursor:"pointer",background:expiryHours===h?"#0044cc14":"#fff",color:expiryHours===h?"#0052e0":"#6b7280",borderColor:expiryHours===h?"#0044cc40":"#e2e5ea"}}>{h==="168"?"7 days":h+"h"}</button>
                     )}
-                    <input type="number" value={expiryHours} onChange={e=>setExpiryHours(e.target.value)} style={{width:60,padding:"4px 8px",border:"1px solid #e5e7eb",borderRadius:6,fontSize:12}} min="1"/>
-                    <span style={{fontSize:12,color:"#6b7280"}}>hours</span>
+                    <input type="number" value={expiryHours} onChange={e=>setExpiryHours(e.target.value)} style={{width:60,padding:"4px 8px",border:"1px solid #e5e7eb",borderRadius:6,fontSize:13.2}} min="1"/>
+                    <span style={{fontSize:13.2,color:"#6b7280"}}>hours</span>
                   </div>
                 ):(
-                  <input type="datetime-local" value={expiryDate} onChange={e=>setExpiryDate(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12,marginBottom:10}}/>
+                  <input type="datetime-local" value={expiryDate} onChange={e=>setExpiryDate(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.2,marginBottom:10}}/>
                 )}
-                <input value={reviewNote} onChange={e=>setReviewNote(e.target.value)} placeholder="Note (optional)" style={{width:"100%",padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12,marginBottom:10,boxSizing:"border-box"}}/>
+                <input value={reviewNote} onChange={e=>setReviewNote(e.target.value)} placeholder="Note (optional)" style={{width:"100%",padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.2,marginBottom:10,boxSizing:"border-box"}}/>
                 <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
-                  <button onClick={()=>{setApproving(null);setReviewNote("");}} style={{padding:"6px 16px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:12}}>Cancel</button>
-                  <button onClick={()=>reject(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:"pointer",fontSize:12,fontWeight:600}}>Reject</button>
-                  <button onClick={()=>approve(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"none",background:"#22c55e",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:600}}>Approve</button>
+                  <button onClick={()=>{setApproving(null);setReviewNote("");}} style={{padding:"6px 16px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13.2}}>Cancel</button>
+                  <button onClick={()=>reject(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:"pointer",fontSize:13.2,fontWeight:600}}>Reject</button>
+                  <button onClick={()=>approve(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"none",background:"#22c55e",color:"#fff",cursor:"pointer",fontSize:13.2,fontWeight:600}}>Approve</button>
                 </div>
               </div>
             ):(
               <div style={{display:"flex",gap:8,marginTop:8}}>
-                <button onClick={()=>setApproving(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:600,borderRadius:8}}>Review</button>
-                <button onClick={()=>reject(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:"pointer",fontSize:12,fontWeight:600}}>Reject</button>
+                <button onClick={()=>setApproving(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13.2,fontWeight:600,borderRadius:8}}>Review</button>
+                <button onClick={()=>reject(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:"pointer",fontSize:13.2,fontWeight:600}}>Reject</button>
               </div>
             )}
           </div>))}
@@ -3871,7 +3872,7 @@ function AccessRequestsView() {
           if(h<24) return <Badge text={h+"h left"} color="#f59e0b"/>;
           return <Badge text={Math.floor(h/24)+"d left"} color="#22c55e"/>;
         }},
-        {label:"",render:r=><button onClick={()=>revoke(r.request_id)} style={{padding:"4px 12px",borderRadius:6,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:"pointer",fontSize:11,fontWeight:600}}>Revoke</button>},
+        {label:"",render:r=><button onClick={()=>revoke(r.request_id)} style={{padding:"4px 12px",borderRadius:6,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:"pointer",fontSize:12.7,fontWeight:600}}>Revoke</button>},
       ]} rows={exceptions||[]} empty="No active access exceptions."/>
     </div>)}
 
@@ -3884,7 +3885,7 @@ function AccessRequestsView() {
         {label:"Status",render:r=><Badge text={r.status} color={r.status==="approved"?"#22c55e":r.status==="rejected"?"#ef4444":r.status==="revoked"?"#f59e0b":"#9ca3af"}/>},
         {label:"Reviewed",render:r=>r.reviewed_at?relTime(r.reviewed_at):"—"},
         {label:"Expires",render:r=>r.expires_at?new Date(r.expires_at).toLocaleDateString():"—"},
-        {label:"Note",render:r=><div className="aihub_text_muted" style={{fontSize:11}}>{r.review_note||"—"}</div>},
+        {label:"Note",render:r=><div className="aihub_text_muted" style={{fontSize:12.7}}>{r.review_note||"—"}</div>},
       ]} rows={history} empty="No request history yet."/>
     </div>)}
   </div>);
@@ -3960,13 +3961,13 @@ function sdkAuthNotice(what) {
     <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
       <Shield size={18} color="#f59e0b" style={{flexShrink:0,marginTop:2}}/>
       <div>
-        <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>Admin credential required</div>
-        <p className="aihub_text_muted" style={{fontSize:12.5,lineHeight:1.65,margin:0}}>
+        <div style={{fontWeight:700,fontSize:14.2,marginBottom:4}}>Admin credential required</div>
+        <p className="aihub_text_muted" style={{fontSize:13.2,lineHeight:1.65,margin:0}}>
           {what} is admin-only, and this build is not sending an admin token, so the server answered 401.
           Add a line to <Mono>connect-ui/.env.local</Mono> and restart the dev server:
         </p>
-        <pre className="aihub_content_pre" style={{marginTop:10,fontSize:12}}>VITE_ADMIN_TOKEN=dev-admin-token</pre>
-        <p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,marginTop:8,marginBottom:0}}>
+        <pre className="aihub_content_pre" style={{marginTop:10,fontSize:13.2}}>VITE_ADMIN_TOKEN=dev-admin-token</pre>
+        <p className="aihub_text_muted" style={{fontSize:12.7,lineHeight:1.6,marginTop:8,marginBottom:0}}>
           <Mono>dev-admin-token</Mono> is the documented local default in <Mono>server/src/auth.js</Mono>.
           A deployed server sets its own <Mono>ADMIN_TOKEN</Mono>, and that value goes here instead.
           Nothing is hardcoded in the app — with no token set, no <Mono>Authorization</Mono> header is sent at all.
@@ -3986,9 +3987,9 @@ function sdkAuthNotice(what) {
 // reader still announces it.
 function sdkStep(n, title, body) {
   return (<li style={{display:"flex",gap:12,alignItems:"flex-start"}}>
-    <span style={{flexShrink:0,width:24,height:24,borderRadius:"50%",background:"#0052e0",color:"#fff",fontSize:12,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}}>{n}</span>
+    <span style={{flexShrink:0,width:24,height:24,borderRadius:"50%",background:"#0052e0",color:"#fff",fontSize:13.2,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}}>{n}</span>
     <div style={{minWidth:0,flex:1}}>
-      <div style={{fontSize:12.5,fontWeight:700,color:"#374151",marginBottom:6}}>{title}</div>
+      <div style={{fontSize:13.2,fontWeight:700,color:"#374151",marginBottom:6}}>{title}</div>
       {body}
     </div>
   </li>);
@@ -4060,7 +4061,7 @@ function SdkProjectsView() {
   const copyBtn=(key,text)=>(
     <button type="button" onClick={()=>{copyText(text);setCopied(key);setTimeout(()=>setCopied(null),1500);}}
       title="Copy to clipboard"
-      style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",borderRadius:6,fontSize:11,fontWeight:600,fontFamily:"inherit",cursor:"pointer",border:"1px solid #d1d5db",background:"#fff",color:copied===key?"#16a34a":"#374151"}}>
+      style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",borderRadius:6,fontSize:12.7,fontWeight:600,fontFamily:"inherit",cursor:"pointer",border:"1px solid #d1d5db",background:"#fff",color:copied===key?"#16a34a":"#374151"}}>
       {copied===key?<Check size={12}/>:<Copy size={12}/>}{copied===key?"Copied":"Copy"}
     </button>
   );
@@ -4103,7 +4104,7 @@ await tracer.flush();`;
   return (<div>
     <SectionHeader title="SDK Projects" hint="Credentials for apps that report their AI activity to this server."
       action={<button type="button" onClick={()=>{setShowForm(s=>!s);setFormErr(null);}}
-        style={{display:"inline-flex",alignItems:"center",gap:6,padding:"7px 14px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",fontSize:12.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>
+        style={{display:"inline-flex",alignItems:"center",gap:6,padding:"7px 14px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",fontSize:13.2,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>
         {showForm?<X size={14}/>:<Plus size={14}/>}{showForm?"Cancel":"New project"}
       </button>}/>
 
@@ -4118,29 +4119,29 @@ await tracer.flush();`;
         <div style={{display:"flex",gap:10,minWidth:0}}>
           <ShieldAlert size={20} color="#b45309" style={{flexShrink:0,marginTop:2}}/>
           <div style={{minWidth:0}}>
-            <div style={{fontWeight:800,fontSize:14,color:"#92400e"}}>Copy the secret key now — it will never be shown again</div>
-            <p style={{fontSize:12.5,color:"#92400e",lineHeight:1.6,margin:"4px 0 0"}}>
+            <div style={{fontWeight:800,fontSize:14.2,color:"#92400e"}}>Copy the secret key now — it will never be shown again</div>
+            <p style={{fontSize:13.2,color:"#92400e",lineHeight:1.6,margin:"4px 0 0"}}>
               The server stores only a hash of it. If it is lost, the only fix is to revoke
               <strong> {reveal.name} </strong> and create a new project.
             </p>
           </div>
         </div>
         <button type="button" onClick={()=>setReveal(null)} title="Dismiss — the secret is discarded"
-          style={{border:"1px solid #d1d5db",background:"#fff",borderRadius:6,padding:"4px 10px",fontSize:11.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer",flexShrink:0}}>
+          style={{border:"1px solid #d1d5db",background:"#fff",borderRadius:6,padding:"4px 10px",fontSize:12.7,fontWeight:600,fontFamily:"inherit",cursor:"pointer",flexShrink:0}}>
           I have saved it
         </button>
       </div>
       <div style={{marginTop:14}}>
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-          <span style={{fontSize:11,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4}}>Public key</span>
+          <span style={{fontSize:12.7,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4}}>Public key</span>
           {copyBtn("pk",reveal.public_key||"")}
         </div>
-        <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>{reveal.public_key}</pre>
+        <pre className="aihub_content_pre" style={{fontSize:13.2,padding:12,margin:0}}>{reveal.public_key}</pre>
         <div style={{display:"flex",alignItems:"center",gap:8,margin:"12px 0 4px"}}>
-          <span style={{fontSize:11,fontWeight:700,color:"#b45309",textTransform:"uppercase",letterSpacing:.4}}>Secret key — shown once</span>
+          <span style={{fontSize:12.7,fontWeight:700,color:"#b45309",textTransform:"uppercase",letterSpacing:.4}}>Secret key — shown once</span>
           {copyBtn("sk",reveal.secret_key||"")}
         </div>
-        <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0,borderColor:"#fbbf24",background:"#fffbeb"}}>{reveal.secret_key}</pre>
+        <pre className="aihub_content_pre" style={{fontSize:13.2,padding:12,margin:0,borderColor:"#fbbf24",background:"#fffbeb"}}>{reveal.secret_key}</pre>
       </div>
     </div>)}
 
@@ -4149,29 +4150,29 @@ await tracer.flush();`;
       <SectionHeader title="New SDK project" hint="One project per app. The secret key is generated here and shown exactly once."/>
       <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:12}}>
         <label style={{display:"block"}}>
-          <span style={{fontSize:11.5,fontWeight:600,color:"#374151"}}>Name <span style={{color:"#ef4444"}}>*</span></span>
+          <span style={{fontSize:12.7,fontWeight:600,color:"#374151"}}>Name <span style={{color:"#ef4444"}}>*</span></span>
           <input value={name} onChange={e=>setName(e.target.value)} required placeholder="checkout-assistant"
-            style={{width:"100%",marginTop:4,padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/>
+            style={{width:"100%",marginTop:4,padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,boxSizing:"border-box"}}/>
         </label>
         <label style={{display:"block"}}>
-          <span style={{fontSize:11.5,fontWeight:600,color:"#374151"}}>Language</span>
+          <span style={{fontSize:12.7,fontWeight:600,color:"#374151"}}>Language</span>
           <select value={lang} onChange={e=>setLang(e.target.value)}
-            style={{width:"100%",marginTop:4,padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box",background:"#fff"}}>
+            style={{width:"100%",marginTop:4,padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,boxSizing:"border-box",background:"#fff"}}>
             {SDK_LANGS.map(l=><option key={l} value={l}>{l}</option>)}
           </select>
         </label>
       </div>
       <label style={{display:"block",marginTop:12}}>
-        <span style={{fontSize:11.5,fontWeight:600,color:"#374151"}}>Description</span>
+        <span style={{fontSize:12.7,fontWeight:600,color:"#374151"}}>Description</span>
         <input value={desc} onChange={e=>setDesc(e.target.value)} placeholder="What this app does (optional)"
-          style={{width:"100%",marginTop:4,padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/>
+          style={{width:"100%",marginTop:4,padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,boxSizing:"border-box"}}/>
       </label>
       {formErr&&<div style={{marginTop:10}}><Err msg={formErr}/></div>}
       <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}>
         <button type="button" onClick={()=>{setShowForm(false);setFormErr(null);}}
-          style={{padding:"7px 16px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",fontSize:12.5,fontFamily:"inherit",cursor:"pointer"}}>Cancel</button>
+          style={{padding:"7px 16px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",fontSize:13.2,fontFamily:"inherit",cursor:"pointer"}}>Cancel</button>
         <button type="submit" disabled={busy||!name.trim()}
-          style={{padding:"7px 16px",borderRadius:8,border:"none",background:busy||!name.trim()?"#9ca3af":"#0052e0",color:"#fff",fontSize:12.5,fontWeight:600,fontFamily:"inherit",cursor:busy||!name.trim()?"default":"pointer"}}>
+          style={{padding:"7px 16px",borderRadius:8,border:"none",background:busy||!name.trim()?"#9ca3af":"#0052e0",color:"#fff",fontSize:13.2,fontWeight:600,fontFamily:"inherit",cursor:busy||!name.trim()?"default":"pointer"}}>
           {busy?"Creating…":"Create project"}
         </button>
       </div>
@@ -4188,7 +4189,7 @@ await tracer.flush();`;
 
       <div className="aihub_card">
         <DataTable columns={[
-          {label:"Project",render:p=>(<><div className="aihub_text_primary">{p.name||"—"}</div>{p.description&&<div className="aihub_text_muted" style={{fontSize:11}}>{p.description}</div>}</>)},
+          {label:"Project",render:p=>(<><div className="aihub_text_primary">{p.name||"—"}</div>{p.description&&<div className="aihub_text_muted" style={{fontSize:12.7}}>{p.description}</div>}</>)},
           {label:"Public key",render:p=><Mono>{p.public_key||"—"}</Mono>},
           {label:"Language",render:p=>p.language?<Tag text={p.language}/>:<span className="aihub_text_muted">—</span>},
           {label:"Status",render:p=><Badge text={p.status||"unknown"} color={p.status==="active"?"#22c55e":p.status==="revoked"?"#ef4444":"#9ca3af"}/>},
@@ -4199,7 +4200,7 @@ await tracer.flush();`;
           {label:"Cost",render:p=>fmtUsd(p.total_cost_usd),right:true},
           {label:"",render:p=>p.status==="active"
             ?<button type="button" onClick={()=>revoke(p)} disabled={revoking===p.id}
-               style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 12px",borderRadius:6,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",fontSize:11,fontWeight:600,fontFamily:"inherit",cursor:revoking===p.id?"default":"pointer"}}>
+               style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 12px",borderRadius:6,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",fontSize:12.7,fontWeight:600,fontFamily:"inherit",cursor:revoking===p.id?"default":"pointer"}}>
                <Trash2 size={11}/>{revoking===p.id?"…":"Revoke"}</button>
             :<span className="aihub_text_muted">—</span>,right:true},
         ]} rows={rows} empty={authFail?"Can't list projects without an admin credential — see the note above.":"No SDK projects yet. Create one, hand the keys to a developer, and their app's activity shows up under the Traces tab."}/>
@@ -4223,25 +4224,25 @@ await tracer.flush();`;
           <a href={`${API}/sdk/download`} download="ai-gov-sdk.zip" className="aihub_dl_btn" style={{marginTop:0}}>
             <Download size={14}/>Download SDK (.zip)
           </a>
-          <p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,margin:"8px 0 0"}}>
+          <p className="aihub_text_muted" style={{fontSize:12.7,lineHeight:1.6,margin:"8px 0 0"}}>
             Not published to npm yet — that&apos;s why you&apos;re downloading a folder directly
             instead of running <Mono>npm install</Mono>.
           </p>
         </>)}
 
         {sdkStep(2,"Put the folder in your project",<>
-          <p className="aihub_text_muted" style={{fontSize:12,lineHeight:1.65,margin:"0 0 8px"}}>
+          <p className="aihub_text_muted" style={{fontSize:13.2,lineHeight:1.65,margin:"0 0 8px"}}>
             Unzip the download. You&apos;ll get a folder called <Mono>ai-gov-sdk</Mono>. Move that whole
             folder into the root of your own project — the same folder that has your project&apos;s
             <Mono> package.json</Mono> (or main file) in it. For example:
           </p>
-          <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>{tree}</pre>
+          <pre className="aihub_content_pre" style={{fontSize:13.2,padding:12,margin:0}}>{tree}</pre>
         </>)}
 
         {sdkStep(3,"Set these three values",<>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>{copyBtn("env",envBlock)}</div>
-          <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>{envBlock}</pre>
-          {!reveal&&<p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,margin:"8px 0 0"}}>
+          <pre className="aihub_content_pre" style={{fontSize:13.2,padding:12,margin:0}}>{envBlock}</pre>
+          {!reveal&&<p className="aihub_text_muted" style={{fontSize:12.7,lineHeight:1.6,margin:"8px 0 0"}}>
             The secret key is only ever visible in the panel shown at creation time. If it was not saved then,
             revoke the project and create a new one.
           </p>}
@@ -4249,8 +4250,8 @@ await tracer.flush();`;
 
         {sdkStep(4,"Add the tracer to your code",<>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>{copyBtn("code",snippet)}</div>
-          <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>{snippet}</pre>
-          <p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,margin:"8px 0 0"}}>
+          <pre className="aihub_content_pre" style={{fontSize:13.2,padding:12,margin:0}}>{snippet}</pre>
+          <p className="aihub_text_muted" style={{fontSize:12.7,lineHeight:1.6,margin:"8px 0 0"}}>
             The import path matches the folder location in step 2. Nothing is intercepted and nothing is
             captured that the app does not pass in. Raw prompt and completion text is stored only for
             projects created with content capture on; otherwise the server keeps masked previews only.
@@ -4258,14 +4259,14 @@ await tracer.flush();`;
         </>)}
 
         {sdkStep(5,"Run it",
-          <p className="aihub_text_muted" style={{fontSize:12,lineHeight:1.65,margin:0}}>
+          <p className="aihub_text_muted" style={{fontSize:13.2,lineHeight:1.65,margin:0}}>
             Run your app the way you normally do. If you just want to test with our sample app instead of
             your own code, run the file at <Mono>ai-gov-sdk/examples/demo.mjs</Mono> the same way
             (<Mono>node ai-gov-sdk/examples/demo.mjs</Mono>) with the same 3 values set.
           </p>)}
 
         {sdkStep(6,"Confirm it worked",
-          <p className="aihub_text_muted" style={{fontSize:12,lineHeight:1.65,margin:0}}>
+          <p className="aihub_text_muted" style={{fontSize:13.2,lineHeight:1.65,margin:0}}>
             Come back here, click the <strong>Traces</strong> tab, and select this project — you should see
             a new trace appear within a few seconds.
           </p>)}
@@ -4366,14 +4367,14 @@ function SdkTracesView() {
         this degrades to a plain id box rather than becoming unusable. */}
     <div className="aihub_card">
       {projects===null?<Loading/>:projAuthFail?(<div>
-        <div style={{fontSize:12.5,fontWeight:600,color:"#374151",marginBottom:6}}>Project ID</div>
+        <div style={{fontSize:13.2,fontWeight:600,color:"#374151",marginBottom:6}}>Project ID</div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
           <input value={manualId} onChange={e=>setManualId(e.target.value)} placeholder="Paste a project id"
-            style={{flex:"1 1 320px",padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13}}/>
+            style={{flex:"1 1 320px",padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7}}/>
           <button type="button" onClick={()=>selectProject(manualId.trim())}
-            style={{padding:"7px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",fontSize:12.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>Load traces</button>
+            style={{padding:"7px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",fontSize:13.2,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>Load traces</button>
         </div>
-        <p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,margin:"8px 0 0"}}>
+        <p className="aihub_text_muted" style={{fontSize:12.7,lineHeight:1.6,margin:"8px 0 0"}}>
           The project drop-down needs an admin credential (<Mono>VITE_ADMIN_TOKEN</Mono> in <Mono>connect-ui/.env.local</Mono>,
           local value <Mono>dev-admin-token</Mono>). Reading traces does not — paste a project id and this view works on its own.
         </p>
@@ -4381,9 +4382,9 @@ function SdkTracesView() {
         <Empty icon={<Server size={28} strokeWidth={1.5}/>} title="No SDK projects yet"
           msg="Create one on the Projects tab first — traces are always scoped to a project."/>
       ):(<div>
-        <div style={{fontSize:12.5,fontWeight:600,color:"#374151",marginBottom:6}}>Project</div>
+        <div style={{fontSize:13.2,fontWeight:600,color:"#374151",marginBottom:6}}>Project</div>
         <select value={projectId} onChange={e=>selectProject(e.target.value)}
-          style={{minWidth:320,padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,background:"#fff"}}>
+          style={{minWidth:320,padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,background:"#fff"}}>
           <option value="">Select a project…</option>
           {projects.map(p=><option key={p.id} value={p.id}>{p.name}{p.status==="revoked"?" (revoked)":""}</option>)}
         </select>
@@ -4411,12 +4412,12 @@ function SdkTracesView() {
         onRow={openTrace}
         isExpanded={r=>r.id===openId}
         columns={[
-          {label:"Trace",render:r=>(<><div className="aihub_text_primary">{r.name||"—"}</div><div className="aihub_text_muted" style={{fontSize:11}}>{r.environment||"default"}</div></>)},
+          {label:"Trace",render:r=>(<><div className="aihub_text_primary">{r.name||"—"}</div><div className="aihub_text_muted" style={{fontSize:12.7}}>{r.environment||"default"}</div></>)},
           {label:"When",render:r=>relTime(r.timestamp)},
           {label:"User",render:r=>r.user_id?<Mono>{r.user_id}</Mono>:<span className="aihub_text_muted">—</span>},
           {label:"Steps",render:r=>`${Number(r.observation_count)||0} (${Number(r.generation_count)||0} gen)`,right:true},
           {label:"Tokens",render:r=>fmtTokens(r.total_tokens),right:true},
-          {label:"Cost",render:r=><span>{fmtUsd(r.total_cost_usd)}{r.cost_estimated?<span className="aihub_text_muted" style={{fontSize:10}}> (est.)</span>:null}</span>,right:true},
+          {label:"Cost",render:r=><span>{fmtUsd(r.total_cost_usd)}{r.cost_estimated?<span className="aihub_text_muted" style={{fontSize:11.7}}> (est.)</span>:null}</span>,right:true},
           {label:"Latency",render:r=>r.latency_ms==null?"—":`${Math.round(r.latency_ms)}ms`,right:true},
           {label:"Level",render:r=>levelBadge(r.level)},
         ]}
@@ -4433,16 +4434,16 @@ function SdkTracesView() {
           const active=obs.find(o=>o.id===obsId)||null;
           return (<div style={{padding:"14px 16px"}}>
             {(r.input_preview||r.output_preview)&&(<div style={{marginBottom:12,display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-              <div><div style={{fontSize:10.5,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4,marginBottom:3}}>Input preview</div>
-                <div className="aihub_text_muted" style={{fontSize:12,lineHeight:1.5}}>{r.input_preview||"—"}</div></div>
-              <div><div style={{fontSize:10.5,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4,marginBottom:3}}>Output preview</div>
-                <div className="aihub_text_muted" style={{fontSize:12,lineHeight:1.5}}>{r.output_preview||"—"}</div></div>
+              <div><div style={{fontSize:12.2,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4,marginBottom:3}}>Input preview</div>
+                <div className="aihub_text_muted" style={{fontSize:13.2,lineHeight:1.5}}>{r.input_preview||"—"}</div></div>
+              <div><div style={{fontSize:12.2,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4,marginBottom:3}}>Output preview</div>
+                <div className="aihub_text_muted" style={{fontSize:13.2,lineHeight:1.5}}>{r.output_preview||"—"}</div></div>
             </div>)}
 
             {obs.length===0
-              ?<p className="aihub_text_muted" style={{fontSize:12.5,margin:0}}>This trace has no recorded steps — the app opened it but never reported a span or generation.</p>
+              ?<p className="aihub_text_muted" style={{fontSize:13.2,margin:0}}>This trace has no recorded steps — the app opened it but never reported a span or generation.</p>
               :(<div>
-                <div style={{fontSize:11,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4,marginBottom:6}}>
+                <div style={{fontSize:12.7,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4,marginBottom:6}}>
                   {obs.length} step{obs.length===1?"":"s"} · {Math.round(span)}ms total
                 </div>
                 {obs.map(o=>{
@@ -4456,59 +4457,59 @@ function SdkTracesView() {
                       onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();pickObs(o);}}}
                       style={{display:"flex",alignItems:"center",gap:10,padding:"5px 8px",borderRadius:6,cursor:"pointer",
                         borderLeft:`3px solid ${tone}`,background:on?"#eef2ff":"transparent",marginLeft:(Number(o.depth)||0)*14}}>
-                      <div style={{flex:"0 0 210px",minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12}}>
+                      <div style={{flex:"0 0 210px",minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:13.2}}>
                         <span style={{fontWeight:600}}>{o.name||o.type||"step"}</span>
-                        <span className="aihub_text_muted" style={{marginLeft:6,fontSize:10.5}}>{String(o.type||"SPAN").toLowerCase()}</span>
+                        <span className="aihub_text_muted" style={{marginLeft:6,fontSize:12.2}}>{String(o.type||"SPAN").toLowerCase()}</span>
                       </div>
                       <div style={{flex:1,position:"relative",height:10,background:"#f3f4f6",borderRadius:5,minWidth:80}}>
                         <div title={`${Math.round(off)}ms → ${Math.round(off+dur)}ms`}
                           style={{position:"absolute",left:`${left}%`,width:`${width}%`,top:0,bottom:0,borderRadius:5,background:tone,opacity:.85}}/>
                       </div>
-                      <div style={{flex:"0 0 66px",textAlign:"right",fontSize:11}} className="aihub_text_muted">{dur?`${Math.round(dur)}ms`:"—"}</div>
+                      <div style={{flex:"0 0 66px",textAlign:"right",fontSize:12.7}} className="aihub_text_muted">{dur?`${Math.round(dur)}ms`:"—"}</div>
                       <div style={{flex:"0 0 74px",textAlign:"right"}}>{levelBadge(o.level)}</div>
                     </div>
-                    {o.parent_cycle&&<div style={{marginLeft:14,fontSize:11,color:"#b45309"}}>Parent chain is circular — nesting shown flat.</div>}
+                    {o.parent_cycle&&<div style={{marginLeft:14,fontSize:12.7,color:"#b45309"}}>Parent chain is circular — nesting shown flat.</div>}
                   </div>);
                 })}
-                {detail.truncated&&<p className="aihub_text_muted" style={{fontSize:11,marginTop:8}}>Only the first 2,000 steps of this trace are shown.</p>}
+                {detail.truncated&&<p className="aihub_text_muted" style={{fontSize:12.7,marginTop:8}}>Only the first 2,000 steps of this trace are shown.</p>}
               </div>)}
 
             {active&&(<div style={{marginTop:12,padding:12,border:"1px solid #e5e7eb",borderRadius:10,background:"#fff"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,marginBottom:8}}>
-                <div style={{fontSize:13,fontWeight:700}}>{active.name||active.type||"step"}</div>
+                <div style={{fontSize:13.7,fontWeight:700}}>{active.name||active.type||"step"}</div>
                 <div style={{display:"flex",gap:6,alignItems:"center"}}>
                   <Tag text={String(active.type||"SPAN").toLowerCase()} color={obsTone(active.type)}/>
                   {levelBadge(active.level)}
                 </div>
               </div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:10,fontSize:12}}>
-                <div><div className="aihub_text_muted" style={{fontSize:10.5}}>Model</div><Mono>{active.model||"—"}</Mono></div>
-                <div><div className="aihub_text_muted" style={{fontSize:10.5}}>Latency</div>{active.latency_ms==null?"—":`${Math.round(active.latency_ms)}ms`}</div>
-                <div><div className="aihub_text_muted" style={{fontSize:10.5}}>Usage</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:10,fontSize:13.2}}>
+                <div><div className="aihub_text_muted" style={{fontSize:12.2}}>Model</div><Mono>{active.model||"—"}</Mono></div>
+                <div><div className="aihub_text_muted" style={{fontSize:12.2}}>Latency</div>{active.latency_ms==null?"—":`${Math.round(active.latency_ms)}ms`}</div>
+                <div><div className="aihub_text_muted" style={{fontSize:12.2}}>Usage</div>
                   {active.usage_details
-                    ?<div style={{fontSize:12}}>{fmtTokens(active.usage_details.input)} in · {fmtTokens(active.usage_details.output)} out
+                    ?<div style={{fontSize:13.2}}>{fmtTokens(active.usage_details.input)} in · {fmtTokens(active.usage_details.output)} out
                        <span className="aihub_text_muted"> ({fmtTokens(active.usage_details.total)} total)</span></div>
                     :<Mono>—</Mono>}</div>
-                <div><div className="aihub_text_muted" style={{fontSize:10.5}}>Cost{active.cost_estimated?" (est.)":""}</div>
+                <div><div className="aihub_text_muted" style={{fontSize:12.2}}>Cost{active.cost_estimated?" (est.)":""}</div>
                   {active.cost_details
-                    ?<div style={{fontSize:12}}>{fmtUsd(active.cost_details.total)}
+                    ?<div style={{fontSize:13.2}}>{fmtUsd(active.cost_details.total)}
                        <span className="aihub_text_muted"> ({fmtUsd(active.cost_details.input)} in / {fmtUsd(active.cost_details.output)} out)</span></div>
                     :<Mono>—</Mono>}</div>
               </div>
-              {active.status_message&&<p style={{fontSize:12,color:"#b91c1c",margin:"8px 0 0"}}>{active.status_message}</p>}
+              {active.status_message&&<p style={{fontSize:13.2,color:"#b91c1c",margin:"8px 0 0"}}>{active.status_message}</p>}
               <div style={{marginTop:10,display:"flex",gap:8,alignItems:"center"}}>
                 {active.has_io
                   ?<button type="button" onClick={()=>loadIo(active)} disabled={io?.status==="loading"}
-                     style={{display:"inline-flex",alignItems:"center",gap:6,padding:"5px 12px",borderRadius:6,border:"1px solid #d1d5db",background:"#fff",fontSize:11.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>
+                     style={{display:"inline-flex",alignItems:"center",gap:6,padding:"5px 12px",borderRadius:6,border:"1px solid #d1d5db",background:"#fff",fontSize:12.7,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>
                      <Eye size={12}/>{io?.status==="loading"?"Loading…":"View content"}</button>
-                  :<span className="aihub_text_muted" style={{fontSize:11.5}}>No raw content stored for this step — previews only.</span>}
+                  :<span className="aihub_text_muted" style={{fontSize:12.7}}>No raw content stored for this step — previews only.</span>}
               </div>
               {io?.status==="error"&&<div style={{marginTop:8}}><Err msg={io.message}/></div>}
               {io?.status==="ok"&&(<div style={{marginTop:10}}>
-                <div style={{fontSize:10.5,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4,marginBottom:3}}>Input</div>
-                <pre className="aihub_content_pre" style={{fontSize:12,padding:10,margin:0}}>{typeof io.input==="string"?io.input:JSON.stringify(io.input,null,2)||"—"}</pre>
-                <div style={{fontSize:10.5,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4,margin:"10px 0 3px"}}>Output</div>
-                <pre className="aihub_content_pre" style={{fontSize:12,padding:10,margin:0}}>{typeof io.output==="string"?io.output:JSON.stringify(io.output,null,2)||"—"}</pre>
+                <div style={{fontSize:12.2,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4,marginBottom:3}}>Input</div>
+                <pre className="aihub_content_pre" style={{fontSize:13.2,padding:10,margin:0}}>{typeof io.input==="string"?io.input:JSON.stringify(io.input,null,2)||"—"}</pre>
+                <div style={{fontSize:12.2,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:.4,margin:"10px 0 3px"}}>Output</div>
+                <pre className="aihub_content_pre" style={{fontSize:13.2,padding:10,margin:0}}>{typeof io.output==="string"?io.output:JSON.stringify(io.output,null,2)||"—"}</pre>
               </div>)}
             </div>)}
           </div>);
@@ -4560,7 +4561,7 @@ function ClaudeUsageView() {
 
   const periodPicker=(
     <select value={days} onChange={ev=>setDays(ev.target.value)}
-            style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:12,fontWeight:600}}>
+            style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.2,fontWeight:600}}>
       {CLAUDE_PERIODS.map(p=><option key={p.label} value={p.value}>{p.label}</option>)}
     </select>
   );
@@ -4759,7 +4760,7 @@ function AIUsageView() {
           // `product`, so the Platform cell fell through to undefined and rendered
           // blank; every per-user table read `p.users` and showed "No users" while
           // `breakdown` held the real rows.
-          { label: "Platform", render: r => <div><div className="aihub_text_primary">{r.product || r.ai_service}</div>{r.vendor && <div className="aihub_text_muted" style={{ fontSize: 11 }}>{r.vendor}</div>}</div> },
+          { label: "Platform", render: r => <div><div className="aihub_text_primary">{r.product || r.ai_service}</div>{r.vendor && <div className="aihub_text_muted" style={{ fontSize:12.7 }}>{r.vendor}</div>}</div> },
           { label: "Prompts", key: "prompts", right: true },
           { label: "Est. Tokens", render: r => fmtTokens(r.est_total_tokens), right: true },
           { label: "Est. Cost", render: r => fmtUsd(r.est_cost_usd), right: true },
@@ -4775,12 +4776,12 @@ function AIUsageView() {
           // key={p.ai_service}: p.service was undefined for all 17 rows, so React
           // saw seventeen children with the same undefined key.
           <div key={p.ai_service} style={{ marginBottom: 16 }}>
-            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>{p.product || p.ai_service}</div>
+            <div style={{ fontWeight: 600, fontSize:13.7, marginBottom: 6 }}>{p.product || p.ai_service}</div>
             <DataTable
               columns={[
                 // breakdown rows carry label / user / hostname — `identity` is not
                 // one of them. Prefer the human label the server already resolved.
-                { label: "User", render: r => <span style={{ fontSize: 12 }}>{r.label || r.user || r.hostname || "Unknown"}</span> },
+                { label: "User", render: r => <span style={{ fontSize:13.2 }}>{r.label || r.user || r.hostname || "Unknown"}</span> },
                 { label: "Prompts", key: "prompts", right: true },
                 { label: "Est. Tokens", render: r => fmtTokens(r.est_total_tokens), right: true },
                 { label: "Est. Cost", render: r => fmtUsd(r.est_cost_usd), right: true },
@@ -4792,7 +4793,7 @@ function AIUsageView() {
         ))}
       </>)}
 
-      <p className="aihub_text_muted" style={{ fontSize: 11, marginTop: 8 }}>
+      <p className="aihub_text_muted" style={{ fontSize:12.7, marginTop: 8 }}>
         Token and cost estimates are based on captured prompt lengths. Actual billed usage may differ.
       </p>
     </div>
@@ -4928,7 +4929,7 @@ function IntegrationsView() {
         {id:"log",label:"Delivery Log"},
         {id:"connections",label:"Connections ("+configuredCount+"/"+((connections||[]).length)+")"},
       ].map(t=>
-        <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"10px 20px",fontSize:13,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0052e0":"2px solid transparent",background:"none",color:tab===t.id?"#0052e0":"#8b919e",cursor:"pointer",marginBottom:-2,fontFamily:"inherit",transition:"all 0.15s"}}>{t.label}</button>
+        <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"10px 20px",fontSize:13.7,fontWeight:tab===t.id?700:500,border:"none",borderBottom:tab===t.id?"2px solid #0052e0":"2px solid transparent",background:"none",color:tab===t.id?"#0052e0":"#6b7280",cursor:"pointer",marginBottom:-2,fontFamily:"inherit",transition:"all 0.15s"}}>{t.label}</button>
       )}
     </div>
 
@@ -4939,19 +4940,19 @@ function IntegrationsView() {
           {(connections||[]).map(c=>(
             <div key={c.type} style={{border:"1px solid "+(c.status==='configured'?"#22c55e30":"#e2e5ea"),borderRadius:12,padding:18,background:c.status==='configured'?"#f0fdf4":"#fff"}}>
               <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
-                <span style={{fontSize:30}}>{c.icon}</span>
+                <span style={{fontSize:30.2}}>{c.icon}</span>
                 <div>
-                  <div style={{fontWeight:700,fontSize:15}}>{c.name}</div>
-                  <div style={{fontSize:12,color:"#9ca3af"}}>{c.description}</div>
+                  <div style={{fontWeight:700,fontSize:15.2}}>{c.name}</div>
+                  <div style={{fontSize:13.2,color:"#9ca3af"}}>{c.description}</div>
                 </div>
               </div>
               {c.status==='configured'?(
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 12px",background:"#22c55e0a",borderRadius:8,border:"1px solid #22c55e20"}}>
-                  <span style={{fontSize:12,fontWeight:700,color:"#22c55e"}}>✓ Connected</span>
-                  <button onClick={()=>disconnect(c.type)} style={{fontSize:11,color:"#ef4444",background:"none",border:"none",cursor:"pointer"}}>Disconnect</button>
+                  <span style={{fontSize:13.2,fontWeight:700,color:"#22c55e"}}>✓ Connected</span>
+                  <button onClick={()=>disconnect(c.type)} style={{fontSize:12.7,color:"#ef4444",background:"none",border:"none",cursor:"pointer"}}>Disconnect</button>
                 </div>
               ):(
-                <button onClick={()=>setConfigType(c.type)} style={{width:"100%",padding:"8px 0",borderRadius:8,border:"1px solid #0044cc30",background:"#0044cc08",color:"#0052e0",fontSize:13,fontWeight:600,cursor:"pointer"}}>Configure</button>
+                <button onClick={()=>setConfigType(c.type)} style={{width:"100%",padding:"8px 0",borderRadius:8,border:"1px solid #0044cc30",background:"#0044cc08",color:"#0052e0",fontSize:13.7,fontWeight:600,cursor:"pointer"}}>Configure</button>
               )}
             </div>
           ))}
@@ -4961,19 +4962,19 @@ function IntegrationsView() {
         {configType==='slack'&&(
           <div className="aihub_card" style={{background:"#f5f6f8"}}>
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-              <h4 style={{margin:0,fontSize:14,fontWeight:700}}>Connect Slack</h4>
+              <h4 style={{margin:0,fontSize:14.2,fontWeight:700}}>Connect Slack</h4>
               <div style={{position:"relative"}}>
-                <button onClick={()=>setShowHelp('slack')} style={{background:"none",border:"1px solid #0044cc30",borderRadius:"50%",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:"#0052e0",fontWeight:700,fontSize:14}}>?</button>
-                {!cfgSlackToken&&<div style={{position:"absolute",right:36,top:4,whiteSpace:"nowrap",fontSize:11,color:"#0052e0",fontWeight:600,animation:"cfai-fade-in .3s"}}>Need help? Click here →</div>}
+                <button onClick={()=>setShowHelp('slack')} style={{background:"none",border:"1px solid #0044cc30",borderRadius:"50%",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:"#0052e0",fontWeight:700,fontSize:14.2}}>?</button>
+                {!cfgSlackToken&&<div style={{position:"absolute",right:36,top:4,whiteSpace:"nowrap",fontSize:12.7,color:"#0052e0",fontWeight:600,animation:"cfai-fade-in .3s"}}>Need help? Click here →</div>}
               </div>
             </div>
             <div style={{marginBottom:12}}>
-              <label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Bot Token</label>
-              <input value={cfgSlackToken} onChange={e=>setCfgSlackToken(e.target.value)} placeholder="xoxb-..." style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/>
+              <label style={{fontSize:13.2,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Bot Token</label>
+              <input value={cfgSlackToken} onChange={e=>setCfgSlackToken(e.target.value)} placeholder="xoxb-..." style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,boxSizing:"border-box"}}/>
             </div>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
-              <button onClick={()=>setConfigType(null)} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>Cancel</button>
-              <button onClick={()=>saveConnection('slack')} disabled={!cfgSlackToken||cfgSaving} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:!cfgSlackToken||cfgSaving?0.5:1}}>{cfgSaving?"Verifying...":"Connect"}</button>
+              <button onClick={()=>setConfigType(null)} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13.7}}>Cancel</button>
+              <button onClick={()=>saveConnection('slack')} disabled={!cfgSlackToken||cfgSaving} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13.7,fontWeight:600,opacity:!cfgSlackToken||cfgSaving?0.5:1}}>{cfgSaving?"Verifying...":"Connect"}</button>
             </div>
           </div>
         )}
@@ -4982,30 +4983,30 @@ function IntegrationsView() {
         {configType==='teams'&&(
           <div className="aihub_card" style={{background:"#f5f6f8"}}>
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-              <h4 style={{margin:0,fontSize:14,fontWeight:700}}>Connect Microsoft Teams</h4>
+              <h4 style={{margin:0,fontSize:14.2,fontWeight:700}}>Connect Microsoft Teams</h4>
               <div style={{position:"relative"}}>
-                <button onClick={()=>setShowHelp('teams')} style={{background:"none",border:"1px solid #0044cc30",borderRadius:"50%",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:"#0052e0",fontWeight:700,fontSize:14}}>?</button>
-                {!cfgTeamsClientId&&<div style={{position:"absolute",right:36,top:4,whiteSpace:"nowrap",fontSize:11,color:"#0052e0",fontWeight:600,animation:"cfai-fade-in .3s"}}>Need help? Click here →</div>}
+                <button onClick={()=>setShowHelp('teams')} style={{background:"none",border:"1px solid #0044cc30",borderRadius:"50%",width:28,height:28,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:"#0052e0",fontWeight:700,fontSize:14.2}}>?</button>
+                {!cfgTeamsClientId&&<div style={{position:"absolute",right:36,top:4,whiteSpace:"nowrap",fontSize:12.7,color:"#0052e0",fontWeight:600,animation:"cfai-fade-in .3s"}}>Need help? Click here →</div>}
               </div>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
               <div>
-                <label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Client ID</label>
-                <input value={cfgTeamsClientId} onChange={e=>setCfgTeamsClientId(e.target.value)} placeholder="Azure App Client ID" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/>
+                <label style={{fontSize:13.2,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Client ID</label>
+                <input value={cfgTeamsClientId} onChange={e=>setCfgTeamsClientId(e.target.value)} placeholder="Azure App Client ID" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,boxSizing:"border-box"}}/>
               </div>
               <div>
-                <label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Tenant ID</label>
-                <input value={cfgTeamsTenant} onChange={e=>setCfgTeamsTenant(e.target.value)} placeholder="Azure Tenant ID" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/>
+                <label style={{fontSize:13.2,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Tenant ID</label>
+                <input value={cfgTeamsTenant} onChange={e=>setCfgTeamsTenant(e.target.value)} placeholder="Azure Tenant ID" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,boxSizing:"border-box"}}/>
               </div>
             </div>
             <div style={{marginBottom:12}}>
-              <label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Client Secret</label>
-              <input type="password" value={cfgTeamsSecret} onChange={e=>setCfgTeamsSecret(e.target.value)} placeholder="Azure App Client Secret" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/>
+              <label style={{fontSize:13.2,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Client Secret</label>
+              <input type="password" value={cfgTeamsSecret} onChange={e=>setCfgTeamsSecret(e.target.value)} placeholder="Azure App Client Secret" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,boxSizing:"border-box"}}/>
             </div>
             {teamsManualUpload&&(
               <div style={{marginBottom:12,padding:14,background:"#fff7ed",border:"1px solid #fed7aa",borderRadius:10}}>
-                <div style={{fontWeight:700,fontSize:13,color:"#92400e",marginBottom:6}}>⚠ Connected — but bot app needs manual upload</div>
-                <div style={{fontSize:12,color:"#78350f",lineHeight:1.6,marginBottom:10}}>
+                <div style={{fontWeight:700,fontSize:13.7,color:"#92400e",marginBottom:6}}>⚠ Connected — but bot app needs manual upload</div>
+                <div style={{fontSize:13.2,color:"#78350f",lineHeight:1.6,marginBottom:10}}>
                   Your org policy blocks automated app uploads. The credentials are saved and working. To complete setup:<br/>
                   1. Download the bot manifest below<br/>
                   2. Go to <strong>Teams Admin Center</strong> → Teams apps → Manage apps → Upload new app<br/>
@@ -5013,14 +5014,14 @@ function IntegrationsView() {
                   After upload, webhooks will auto-install the bot in any team you select.
                 </div>
                 <a href={CONNECTIONS_API+"/teams/manifest"} download="CloudFuze-Alerts-Bot.zip"
-                  style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",fontSize:13,fontWeight:600,textDecoration:"none",cursor:"pointer"}}>
+                  style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",fontSize:13.7,fontWeight:600,textDecoration:"none",cursor:"pointer"}}>
                   ⬇ Download Manifest ZIP
                 </a>
               </div>
             )}
             <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
-              <button onClick={()=>{setConfigType(null);setTeamsManualUpload(false);}} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>{teamsManualUpload?"Done":"Cancel"}</button>
-              {!teamsManualUpload&&<button onClick={()=>saveConnection('teams')} disabled={!cfgTeamsClientId||!cfgTeamsSecret||!cfgTeamsTenant||cfgSaving} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:(!cfgTeamsClientId||!cfgTeamsSecret||!cfgTeamsTenant||cfgSaving)?0.5:1}}>{cfgSaving?"Verifying...":"Connect"}</button>}
+              <button onClick={()=>{setConfigType(null);setTeamsManualUpload(false);}} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13.7}}>{teamsManualUpload?"Done":"Cancel"}</button>
+              {!teamsManualUpload&&<button onClick={()=>saveConnection('teams')} disabled={!cfgTeamsClientId||!cfgTeamsSecret||!cfgTeamsTenant||cfgSaving} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13.7,fontWeight:600,opacity:(!cfgTeamsClientId||!cfgTeamsSecret||!cfgTeamsTenant||cfgSaving)?0.5:1}}>{cfgSaving?"Verifying...":"Connect"}</button>}
             </div>
           </div>
         )}
@@ -5032,91 +5033,91 @@ function IntegrationsView() {
       <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={()=>setShowHelp(null)}>
         <div style={{background:"#fff",borderRadius:14,padding:28,width:640,maxHeight:"85vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.2)"}} onClick={e=>e.stopPropagation()}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
-            <h3 style={{margin:0,fontSize:18,fontWeight:700}}>{showHelp==='slack'?'How to Connect Slack':'How to Connect Microsoft Teams'}</h3>
-            <button onClick={()=>setShowHelp(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:20,color:"#6b7280"}}>✕</button>
+            <h3 style={{margin:0,fontSize:17.7,fontWeight:700}}>{showHelp==='slack'?'How to Connect Slack':'How to Connect Microsoft Teams'}</h3>
+            <button onClick={()=>setShowHelp(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:19.7,color:"#6b7280"}}>✕</button>
           </div>
 
-          {showHelp==='slack'&&(<div style={{fontSize:13,color:"#374151",lineHeight:1.8}}>
-            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 1 — Create a Slack App</div>
+          {showHelp==='slack'&&(<div style={{fontSize:13.7,color:"#374151",lineHeight:1.8}}>
+            <div style={{fontWeight:700,fontSize:14.2,color:"#0052e0",marginBottom:8}}>Step 1 — Create a Slack App</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Go to <strong>api.slack.com/apps</strong></li>
               <li>Click <strong>Create New App</strong> → <strong>Blank app</strong></li>
               <li>App name: <code style={{background:"#f1f5f9",padding:"1px 6px",borderRadius:3}}>CloudFuze Alerts</code></li>
               <li>Pick your workspace → <strong>Create App</strong></li>
             </ol>
-            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 2 — Add Bot Permissions</div>
+            <div style={{fontWeight:700,fontSize:14.2,color:"#0052e0",marginBottom:8}}>Step 2 — Add Bot Permissions</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Left sidebar → <strong>OAuth & Permissions</strong></li>
               <li>Scroll to <strong>Bot Token Scopes</strong></li>
               <li>Click <strong>Add an OAuth Scope</strong> and add these:
                 <div style={{display:"flex",gap:6,marginTop:6,flexWrap:"wrap"}}>
-                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>chat:write</code>
-                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>channels:read</code>
-                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>channels:join</code>
-                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>groups:read</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:13.2}}>chat:write</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:13.2}}>channels:read</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:13.2}}>channels:join</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:13.2}}>groups:read</code>
                 </div>
               </li>
             </ol>
-            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 3 — Install & Copy Token</div>
+            <div style={{fontWeight:700,fontSize:14.2,color:"#0052e0",marginBottom:8}}>Step 3 — Install & Copy Token</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Scroll up → <strong>Install to Workspace</strong> → <strong>Allow</strong></li>
               <li>Copy the <strong>Bot User OAuth Token</strong> (starts with <code>xoxb-</code>)</li>
               <li>Paste it in the field below and click <strong>Connect</strong></li>
             </ol>
-            <div style={{background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:8,padding:12,fontSize:12,color:"#166534"}}>
+            <div style={{background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:8,padding:12,fontSize:13.2,color:"#166534"}}>
               <strong>That's it!</strong> CloudFuze will automatically join any channel you select when creating webhooks. No manual bot invites needed.
             </div>
           </div>)}
 
-          {showHelp==='teams'&&(<div style={{fontSize:13,color:"#374151",lineHeight:1.8}}>
-            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 1 — Create Azure Bot Resource</div>
+          {showHelp==='teams'&&(<div style={{fontSize:13.7,color:"#374151",lineHeight:1.8}}>
+            <div style={{fontWeight:700,fontSize:14.2,color:"#0052e0",marginBottom:8}}>Step 1 — Create Azure Bot Resource</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Go to <strong>portal.azure.com</strong></li>
               <li>Search <strong>"Azure Bot"</strong> in the top search bar → click under Marketplace → <strong>Create</strong></li>
               <li>Fill in: Bot handle: <code style={{background:"#f1f5f9",padding:"1px 6px",borderRadius:3}}>CloudFuze-Alerts-Bot</code>, Type: <strong>Multi Tenant</strong></li>
               <li>Click <strong>Review + Create</strong> → <strong>Create</strong></li>
             </ol>
-            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 2 — Get App ID & Secret</div>
+            <div style={{fontWeight:700,fontSize:14.2,color:"#0052e0",marginBottom:8}}>Step 2 — Get App ID & Secret</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Go to <strong>Azure Portal</strong> → <strong>App registrations</strong> → find your bot</li>
               <li>Copy the <strong>Application (client) ID</strong> and <strong>Directory (tenant) ID</strong></li>
               <li>Go to <strong>Certificates & secrets</strong> → <strong>New client secret</strong> → copy the <strong>Value</strong></li>
             </ol>
-            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 3 — Enable Teams Channel</div>
+            <div style={{fontWeight:700,fontSize:14.2,color:"#0052e0",marginBottom:8}}>Step 3 — Enable Teams Channel</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Go to the <strong>Azure Bot</strong> resource (not App registration)</li>
               <li>Left sidebar → <strong>Channels</strong> → select <strong>Microsoft Teams</strong> → <strong>Apply</strong></li>
             </ol>
-            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 4 — Add API Permissions</div>
+            <div style={{fontWeight:700,fontSize:14.2,color:"#0052e0",marginBottom:8}}>Step 4 — Add API Permissions</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Go to <strong>App registrations</strong> → your bot → <strong>API permissions</strong></li>
               <li>Click <strong>Add a permission</strong> → <strong>Microsoft Graph</strong> → <strong>Application permissions</strong></li>
               <li>Add these permissions:
                 <div style={{display:"flex",gap:6,marginTop:6,flexWrap:"wrap"}}>
-                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>Group.Read.All</code>
-                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>Team.ReadBasic.All</code>
-                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>Channel.ReadBasic.All</code>
-                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>AppCatalog.Read.All</code>
-                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>AppCatalog.ReadWrite.All</code>
-                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:12}}>TeamsAppInstallation.ReadWriteForTeam.All</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:13.2}}>Group.Read.All</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:13.2}}>Team.ReadBasic.All</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:13.2}}>Channel.ReadBasic.All</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:13.2}}>AppCatalog.Read.All</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:13.2}}>AppCatalog.ReadWrite.All</code>
+                  <code style={{background:"#dbeafe",padding:"2px 8px",borderRadius:4,fontSize:13.2}}>TeamsAppInstallation.ReadWriteForTeam.All</code>
                 </div>
               </li>
               <li>Click <strong>Grant admin consent for [your org]</strong></li>
             </ol>
-            <div style={{fontWeight:700,fontSize:14,color:"#0052e0",marginBottom:8}}>Step 5 — Connect in CloudFuze</div>
+            <div style={{fontWeight:700,fontSize:14.2,color:"#0052e0",marginBottom:8}}>Step 5 — Connect in CloudFuze</div>
             <ol style={{paddingLeft:20,marginBottom:16}}>
               <li>Paste <strong>Client ID</strong>, <strong>Tenant ID</strong>, and <strong>Client Secret</strong> below</li>
               <li>Click <strong>Connect</strong></li>
               <li>CloudFuze will auto-publish the bot to your org's app catalog</li>
               <li>If auto-publish fails, download the manifest and upload manually via <strong>Teams Admin Center</strong></li>
             </ol>
-            <div style={{background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:8,padding:12,fontSize:12,color:"#166534"}}>
+            <div style={{background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:8,padding:12,fontSize:13.2,color:"#166534"}}>
               <strong>Once connected,</strong> CloudFuze will automatically install the bot in any team you select when creating webhooks. No manual app installs needed.
             </div>
           </div>)}
 
           <div style={{display:"flex",justifyContent:"flex-end",marginTop:16}}>
-            <button onClick={()=>setShowHelp(null)} style={{padding:"8px 24px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>Got it</button>
+            <button onClick={()=>setShowHelp(null)} style={{padding:"8px 24px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13.7,fontWeight:600}}>Got it</button>
           </div>
         </div>
       </div>
@@ -5130,13 +5131,13 @@ function IntegrationsView() {
           setFTemplate(defaultType);
           setShowForm(true);
           if(defaultType==='slack'||defaultType==='teams') loadChannels(defaultType);
-        }} style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}><Plus size={14}/> Add Webhook</button>
+        }} style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13.7,fontWeight:600}}><Plus size={14}/> Add Webhook</button>
       </div>
       {showForm&&(<div className="aihub_card" style={{marginBottom:16,background:"#f5f6f8"}}>
-        <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700}}>{editId?"Edit Webhook":"New Webhook"}</h4>
+        <h4 style={{margin:"0 0 12px",fontSize:14.2,fontWeight:700}}>{editId?"Edit Webhook":"New Webhook"}</h4>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
-          <div><label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Name</label><input value={fName} onChange={e=>setFName(e.target.value)} placeholder="e.g. Security Alerts Slack" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}/></div>
-          <div><label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Send To</label><select value={fTemplate} onChange={e=>{setFTemplate(e.target.value);setFChannelId("");setChannelData(null);setChannelSearch("");if(e.target.value==='slack'||e.target.value==='teams')loadChannels(e.target.value);}} style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,marginTop:4,boxSizing:"border-box"}}>
+          <div><label style={{fontSize:13.2,fontWeight:600,color:"#374151"}}>Name</label><input value={fName} onChange={e=>setFName(e.target.value)} placeholder="e.g. Security Alerts Slack" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,marginTop:4,boxSizing:"border-box"}}/></div>
+          <div><label style={{fontSize:13.2,fontWeight:600,color:"#374151"}}>Send To</label><select value={fTemplate} onChange={e=>{setFTemplate(e.target.value);setFChannelId("");setChannelData(null);setChannelSearch("");if(e.target.value==='slack'||e.target.value==='teams')loadChannels(e.target.value);}} style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,marginTop:4,boxSizing:"border-box"}}>
             {configuredConnections.map(c=><option key={c.type} value={c.type}>{c.icon+" "+c.name}</option>)}
             <option value="custom">⚡ Custom Webhook URL</option>
           </select></div>
@@ -5146,11 +5147,11 @@ function IntegrationsView() {
         {(fTemplate==='slack'||fTemplate==='teams')&&(
           <div style={{marginBottom:12}}>
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}}>
-              <label style={{fontSize:12,fontWeight:600,color:"#374151"}}>Channel {fChannelId&&<span style={{fontWeight:400,color:"#22c55e"}}> ✓ selected</span>}</label>
-              <button type="button" onClick={()=>loadChannels(fTemplate)} disabled={loadingChannels} style={{fontSize:11,color:"#0052e0",background:"none",border:"none",cursor:"pointer",fontWeight:600}}>{loadingChannels?"Loading...":"↻ Refresh"}</button>
+              <label style={{fontSize:13.2,fontWeight:600,color:"#374151"}}>Channel {fChannelId&&<span style={{fontWeight:400,color:"#22c55e"}}> ✓ selected</span>}</label>
+              <button type="button" onClick={()=>loadChannels(fTemplate)} disabled={loadingChannels} style={{fontSize:12.7,color:"#0052e0",background:"none",border:"none",cursor:"pointer",fontWeight:600}}>{loadingChannels?"Loading...":"↻ Refresh"}</button>
             </div>
             {loadingChannels?(
-              <div style={{padding:"16px",background:"#f5f6f8",borderRadius:8,fontSize:12,color:"#6b7280",textAlign:"center"}}>Loading from {fTemplate==='slack'?'Slack':'Microsoft Teams'}...</div>
+              <div style={{padding:"16px",background:"#f5f6f8",borderRadius:8,fontSize:13.2,color:"#6b7280",textAlign:"center"}}>Loading from {fTemplate==='slack'?'Slack':'Microsoft Teams'}...</div>
             ):channelData?(()=>{
               const q=channelSearch.toLowerCase();
 
@@ -5171,21 +5172,21 @@ function IntegrationsView() {
                 };
                 return (<div style={{border:"1px solid #e5e7eb",borderRadius:8,overflow:"hidden"}}>
                   <div style={{padding:"8px 10px",borderBottom:"1px solid #e5e7eb",background:"#f5f6f8"}}>
-                    <input value={channelSearch} onChange={e=>setChannelSearch(e.target.value)} placeholder={"Search "+filteredTeams.length+" teams..."} style={{width:"100%",border:"none",background:"transparent",outline:"none",fontSize:12,boxSizing:"border-box"}}/>
+                    <input value={channelSearch} onChange={e=>setChannelSearch(e.target.value)} placeholder={"Search "+filteredTeams.length+" teams..."} style={{width:"100%",border:"none",background:"transparent",outline:"none",fontSize:13.2,boxSizing:"border-box"}}/>
                   </div>
                   <div style={{maxHeight:300,overflowY:"auto"}}>
-                    {filteredTeams.length===0&&<div style={{padding:12,textAlign:"center",fontSize:12,color:"#9ca3af"}}>No teams match "{channelSearch}"</div>}
+                    {filteredTeams.length===0&&<div style={{padding:12,textAlign:"center",fontSize:13.2,color:"#9ca3af"}}>No teams match "{channelSearch}"</div>}
                     {filteredTeams.map(t=>(
                       <div key={t.team_id}>
-                        <div onClick={()=>expandTeam(t.team_id)} style={{padding:"8px 12px",fontSize:12,fontWeight:600,color:"#374151",background:expandedTeam===t.team_id?"#eef2ff":"#f9fafb",borderBottom:"1px solid #f3f4f6",cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
-                          <span style={{fontSize:10,color:"#6b7280"}}>{expandedTeam===t.team_id?"▼":"▶"}</span> 🏢 {t.team_name}
+                        <div onClick={()=>expandTeam(t.team_id)} style={{padding:"8px 12px",fontSize:13.2,fontWeight:600,color:"#374151",background:expandedTeam===t.team_id?"#eef2ff":"#f9fafb",borderBottom:"1px solid #f3f4f6",cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
+                          <span style={{fontSize:11.7,color:"#6b7280"}}>{expandedTeam===t.team_id?"▼":"▶"}</span> 🏢 {t.team_name}
                         </div>
                         {expandedTeam===t.team_id&&(
                           loadingTeamCh===t.team_id?
-                            <div style={{padding:"8px 32px",fontSize:11,color:"#9ca3af"}}>Loading channels...</div>
+                            <div style={{padding:"8px 32px",fontSize:12.7,color:"#9ca3af"}}>Loading channels...</div>
                           :(teamChannels[t.team_id]||[]).map(ch=>(
                             <div key={ch.id} onClick={()=>setFChannelId(ch.id)}
-                              style={{padding:"7px 12px 7px 36px",fontSize:12,cursor:"pointer",borderBottom:"1px solid #f9fafb",
+                              style={{padding:"7px 12px 7px 36px",fontSize:13.2,cursor:"pointer",borderBottom:"1px solid #f9fafb",
                                 background:fChannelId===ch.id?"#0044cc10":"#fff",color:fChannelId===ch.id?"#0052e0":"#374151",fontWeight:fChannelId===ch.id?600:400}}>
                               # {ch.name}
                             </div>
@@ -5201,41 +5202,41 @@ function IntegrationsView() {
                 const chs=(channelData.channels||[]).filter(ch=>!q||ch.name.toLowerCase().includes(q));
                 return (<div style={{border:"1px solid #e5e7eb",borderRadius:8,overflow:"hidden"}}>
                   <div style={{padding:"8px 10px",borderBottom:"1px solid #e5e7eb",background:"#f5f6f8"}}>
-                    <input value={channelSearch} onChange={e=>setChannelSearch(e.target.value)} placeholder={"Search "+chs.length+" channels..."} style={{width:"100%",border:"none",background:"transparent",outline:"none",fontSize:12,boxSizing:"border-box"}}/>
+                    <input value={channelSearch} onChange={e=>setChannelSearch(e.target.value)} placeholder={"Search "+chs.length+" channels..."} style={{width:"100%",border:"none",background:"transparent",outline:"none",fontSize:13.2,boxSizing:"border-box"}}/>
                   </div>
                   <div style={{maxHeight:300,overflowY:"auto"}}>
-                    {chs.length===0&&<div style={{padding:12,textAlign:"center",fontSize:12,color:"#9ca3af"}}>No channels match "{channelSearch}"</div>}
+                    {chs.length===0&&<div style={{padding:12,textAlign:"center",fontSize:13.2,color:"#9ca3af"}}>No channels match "{channelSearch}"</div>}
                     {chs.map(ch=>(
                       <div key={ch.id} onClick={()=>setFChannelId(ch.id)}
-                        style={{padding:"7px 12px",fontSize:12,cursor:"pointer",borderBottom:"1px solid #f9fafb",
+                        style={{padding:"7px 12px",fontSize:13.2,cursor:"pointer",borderBottom:"1px solid #f9fafb",
                           background:fChannelId===ch.id?"#0044cc10":"#fff",color:fChannelId===ch.id?"#0052e0":"#374151",fontWeight:fChannelId===ch.id?600:400}}>
-                        {ch.name} {ch.is_private&&<span style={{fontSize:10,color:"#9ca3af"}}>🔒</span>}
+                        {ch.name} {ch.is_private&&<span style={{fontSize:11.7,color:"#9ca3af"}}>🔒</span>}
                       </div>
                     ))}
                   </div>
                 </div>);
               }
             })():(
-              <div style={{padding:"10px 12px",background:"#fff7ed",borderRadius:8,fontSize:12,color:"#92400e",border:"1px solid #fed7aa"}}>Click "↻ Refresh" to load from {fTemplate==='slack'?'Slack':'Microsoft Teams'}</div>
+              <div style={{padding:"10px 12px",background:"#fff7ed",borderRadius:8,fontSize:13.2,color:"#92400e",border:"1px solid #fed7aa"}}>Click "↻ Refresh" to load from {fTemplate==='slack'?'Slack':'Microsoft Teams'}</div>
             )}
           </div>
         )}
 
         {/* URL + Auth for custom webhooks only */}
         {fTemplate==='custom'&&(<>
-          <div style={{marginBottom:12}}><label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Webhook URL</label><input value={fUrl} onChange={e=>setFUrl(e.target.value)} placeholder="https://..." style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/></div>
-          <div style={{marginBottom:12}}><label style={{fontSize:12,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Auth Header <span style={{fontWeight:400,color:"#9ca3af"}}>(optional)</span></label><input value={fAuth} onChange={e=>setFAuth(e.target.value)} placeholder="Authorization: Bearer your-token" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13,boxSizing:"border-box"}}/></div>
+          <div style={{marginBottom:12}}><label style={{fontSize:13.2,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Webhook URL</label><input value={fUrl} onChange={e=>setFUrl(e.target.value)} placeholder="https://..." style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,boxSizing:"border-box"}}/></div>
+          <div style={{marginBottom:12}}><label style={{fontSize:13.2,fontWeight:600,color:"#374151",display:"block",marginBottom:4}}>Auth Header <span style={{fontWeight:400,color:"#9ca3af"}}>(optional)</span></label><input value={fAuth} onChange={e=>setFAuth(e.target.value)} placeholder="Authorization: Bearer your-token" style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,boxSizing:"border-box"}}/></div>
         </>)}
 
-        <div style={{marginBottom:12}}><label style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:6,display:"block"}}>Triggers</label><div style={{display:"flex",flexWrap:"wrap",gap:6}}>{triggersList.map(t=>{const sel=fTriggers.includes(t);return <button key={t} type="button" onClick={()=>setFTriggers(sel?fTriggers.filter(x=>x!==t):[...fTriggers,t])} style={{padding:"4px 12px",borderRadius:6,fontSize:11,fontWeight:600,border:"1px solid",cursor:"pointer",background:sel?"#0044cc14":"#fff",color:sel?"#0052e0":"#6b7280",borderColor:sel?"#0044cc30":"#e2e5ea"}}>{TL[t]||t}</button>;})}</div></div>
-        <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}><button onClick={closeForm} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13}}>Cancel</button><button onClick={save} disabled={!fName} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,opacity:!fName?0.5:1}}>{editId?"Update":"Save"}</button></div>
+        <div style={{marginBottom:12}}><label style={{fontSize:13.2,fontWeight:600,color:"#374151",marginBottom:6,display:"block"}}>Triggers</label><div style={{display:"flex",flexWrap:"wrap",gap:6}}>{triggersList.map(t=>{const sel=fTriggers.includes(t);return <button key={t} type="button" onClick={()=>setFTriggers(sel?fTriggers.filter(x=>x!==t):[...fTriggers,t])} style={{padding:"4px 12px",borderRadius:6,fontSize:12.7,fontWeight:600,border:"1px solid",cursor:"pointer",background:sel?"#0044cc14":"#fff",color:sel?"#0052e0":"#6b7280",borderColor:sel?"#0044cc30":"#e2e5ea"}}>{TL[t]||t}</button>;})}</div></div>
+        <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}><button onClick={closeForm} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:13.7}}>Cancel</button><button onClick={save} disabled={!fName} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13.7,fontWeight:600,opacity:!fName?0.5:1}}>{editId?"Update":"Save"}</button></div>
       </div>)}
       <div className="aihub_card"><DataTable columns={[
-        {label:"Webhook",render:r=><div><div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:16}}>{TI[r.template]||"⚡"}</span><div className="aihub_text_primary">{r.name}</div></div><div className="aihub_text_muted" style={{fontSize:11}}>{r.url?.slice(0,50)}{r.url?.length>50?"...":""}</div></div>},
+        {label:"Webhook",render:r=><div><div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:16.2}}>{TI[r.template]||"⚡"}</span><div className="aihub_text_primary">{r.name}</div></div><div className="aihub_text_muted" style={{fontSize:12.7}}>{r.url?.slice(0,50)}{r.url?.length>50?"...":""}</div></div>},
         {label:"Template",render:r=><Tag text={templates?.[r.template]?.name||r.template}/>},
         {label:"Triggers",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:3}}>{(r.triggers||[]).map(t=><Tag key={t} text={TL[t]||t} color="#6366f1"/>)}</div>},
         {label:"Status",render:r=><Badge text={r.enabled?"Active":"Disabled"} color={r.enabled?"#22c55e":"#9ca3af"}/>},
-        {label:"Actions",render:r=><div style={{display:"flex",gap:6,whiteSpace:"nowrap"}}><button onClick={()=>startEdit(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#0052e0",fontSize:12,fontWeight:600}}>Edit</button><button onClick={()=>test(r.id)} disabled={testing===r.id} style={{background:"none",border:"none",cursor:"pointer",color:"#6366f1",fontSize:12,fontWeight:600}}>{testing===r.id?"Testing...":"Test"}</button><button onClick={()=>toggle(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#f59e0b",fontSize:12,fontWeight:600}}>{r.enabled?"Disable":"Enable"}</button><button onClick={()=>remove(r.id)} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",fontSize:12,fontWeight:600}}>Delete</button></div>},
+        {label:"Actions",render:r=><div style={{display:"flex",gap:6,whiteSpace:"nowrap"}}><button onClick={()=>startEdit(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#0052e0",fontSize:13.2,fontWeight:600}}>Edit</button><button onClick={()=>test(r.id)} disabled={testing===r.id} style={{background:"none",border:"none",cursor:"pointer",color:"#6366f1",fontSize:13.2,fontWeight:600}}>{testing===r.id?"Testing...":"Test"}</button><button onClick={()=>toggle(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#f59e0b",fontSize:13.2,fontWeight:600}}>{r.enabled?"Disable":"Enable"}</button><button onClick={()=>remove(r.id)} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",fontSize:13.2,fontWeight:600}}>Delete</button></div>},
       ]} rows={hooks} empty="No webhooks configured. Click 'Add Webhook' to connect to Slack, Teams, Jira, or any tool."/></div>
     </div>)}
 
@@ -5245,7 +5246,7 @@ function IntegrationsView() {
       {label:"Trigger",render:r=><Tag text={TL[r.trigger]||r.trigger}/>},
       {label:"Status",render:r=><Badge text={r.status} color={r.status==='delivered'?"#22c55e":r.status==='failed'?"#f59e0b":"#ef4444"}/>},
       {label:"HTTP",render:r=>r.http_status||"—"},
-      {label:"Error",render:r=><div className="aihub_text_muted" style={{fontSize:11,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis"}}>{r.error||"—"}</div>},
+      {label:"Error",render:r=><div className="aihub_text_muted" style={{fontSize:12.7,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis"}}>{r.error||"—"}</div>},
     ]} rows={deliveryLog||[]} empty="No webhook deliveries yet."/></div>)}
   </div>);
 }
@@ -5333,8 +5334,8 @@ function PolicyPacksView() {
         {label:"Monitored",render:p=><span style={{color:ENFORCE_META.dlp.color,fontWeight:600}}>{p.monitored}</span>,right:true},
         {label:"Attestations",render:p=><span style={{color:ENFORCE_META.attestation.color,fontWeight:600}}>{p.attestations}</span>,right:true},
         {label:"Status",render:p=>p.deployed
-          ? <span style={{color:"#16a34a",fontWeight:600,fontSize:11}}>deployed v{p.deployed_version}{p.update_available&&" · update available"}</span>
-          : <span className="aihub_text_muted" style={{fontSize:11}}>not deployed</span>},
+          ? <span style={{color:"#16a34a",fontWeight:600,fontSize:12.7}}>deployed v{p.deployed_version}{p.update_available&&" · update available"}</span>
+          : <span className="aihub_text_muted" style={{fontSize:12.7}}>not deployed</span>},
         {label:"Actions",render:p=><div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
           <button className="aihub_filter_btn" disabled={busy} onClick={()=>openPack(p.id)}>Review</button>
           <button className="aihub_filter_btn" disabled={busy||p.monitored===0}
@@ -5365,18 +5366,18 @@ function PolicyPacksView() {
         <div style={{background:"#fff",borderRadius:14,padding:28,width:900,maxHeight:"85vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.2)"}} onClick={e=>e.stopPropagation()}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
             <div>
-              <h3 style={{margin:"0 0 4px",fontSize:18,fontWeight:700}}>{detail.framework} — {detail.ruleCount} rules</h3>
+              <h3 style={{margin:"0 0 4px",fontSize:17.7,fontWeight:700}}>{detail.framework} — {detail.ruleCount} rules</h3>
               <div className="aihub_text_muted">{detail.description}</div>
             </div>
             <div style={{display:"flex",gap:6}}>
               {detail.monitored>0 && <button className="aihub_filter_btn" onClick={()=>setSimId(simId===detail.id?null:detail.id)}>
                 {simId===detail.id?"Hide simulation":"Run simulation"}
               </button>}
-              <button onClick={()=>{setOpenId(null);setDetail(null);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:20,color:"#6b7280"}}>✕</button>
+              <button onClick={()=>{setOpenId(null);setDetail(null);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:19.7,color:"#6b7280"}}>✕</button>
             </div>
           </div>
 
-          <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:12,fontSize:11}}>
+          <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:12,fontSize:12.7}}>
             {Object.entries(ENFORCE_META).map(([k,m])=>(
               <span key={k} style={{color:m.color}}>
                 <strong>{m.label}</strong> — {m.hint}
@@ -5389,24 +5390,24 @@ function PolicyPacksView() {
               <div className="aihub_text_primary">{r.title}</div>
               <div className="aihub_text_muted">{r.citation}</div>
             </>},
-            {label:"Type",render:r=><span style={{color:ENFORCE_META[r.enforcement].color,fontWeight:600,fontSize:11}}>{ENFORCE_META[r.enforcement].label}</span>},
+            {label:"Type",render:r=><span style={{color:ENFORCE_META[r.enforcement].color,fontWeight:600,fontSize:12.7}}>{ENFORCE_META[r.enforcement].label}</span>},
             {label:"Severity",render:r=><Badge text={r.severity} color={{critical:"#dc2626",high:"#ea580c",medium:"#d97706",low:"#65a30d"}[r.severity]||"#9ca3af"}/>},
             {label:"State",render:r=>{
-              if(r.enforcement==="agent") return <span style={{fontSize:11,color:r.enabled?"#16a34a":"#9ca3af"}}>{r.enabled?"active":"disabled"}</span>;
+              if(r.enforcement==="agent") return <span style={{fontSize:12.7,color:r.enabled?"#16a34a":"#9ca3af"}}>{r.enabled?"active":"disabled"}</span>;
               if(r.enforcement==="dlp") return r.coverage_verified
-                ? <span style={{fontSize:11,color:"#16a34a"}}>patterns seen</span>
-                : <span style={{fontSize:11,color:"#b45309"}}>no events yet</span>;
+                ? <span style={{fontSize:12.7,color:"#16a34a"}}>patterns seen</span>
+                : <span style={{fontSize:12.7,color:"#b45309"}}>no events yet</span>;
               return r.attestation
-                ? <span style={{fontSize:11,color:"#16a34a"}}>attested — {r.attestation.owner}</span>
-                : <span style={{fontSize:11,color:"#b45309"}}>outstanding</span>;
+                ? <span style={{fontSize:12.7,color:"#16a34a"}}>attested — {r.attestation.owner}</span>
+                : <span style={{fontSize:12.7,color:"#b45309"}}>outstanding</span>;
             }},
             {label:"",render:r=>{
-              if(!detail.deployed) return <span className="aihub_text_muted" style={{fontSize:11}}>deploy first</span>;
+              if(!detail.deployed) return <span className="aihub_text_muted" style={{fontSize:12.7}}>deploy first</span>;
               if(r.enforcement==="agent") return <div style={{display:"flex",gap:6,alignItems:"center"}}>
                 <button className="aihub_filter_btn" disabled={busy} onClick={()=>toggle(detail.id,r.key,!r.enabled)}>{r.enabled?"Disable":"Enable"}</button>
                 {r.tunable && <input type="number" defaultValue={r.tuned_value ?? r.conditions?.[0]?.value}
                   min={r.tunable.min} max={r.tunable.max} title={r.tunable.label} disabled={busy}
-                  style={{width:70,padding:"3px 6px",fontSize:12,border:"1px solid #e5e7eb",borderRadius:4}}
+                  style={{width:70,padding:"3px 6px",fontSize:13.2,border:"1px solid #e5e7eb",borderRadius:4}}
                   onBlur={e=>{const v=e.target.value; if(v!=="") tune(detail.id,r.key,v);}}/>}
               </div>;
               if(r.enforcement==="attestation") return r.attestation
@@ -5415,11 +5416,11 @@ function PolicyPacksView() {
                     const owner=window.prompt(`Who is accountable for this control?\n\n${r.evidence||""}`);
                     if(owner) attest(detail.id,r.key,owner);
                   }}>Attest</button>;
-              return <span className="aihub_text_muted" style={{fontSize:11}}>{(r.patterns||[]).length} patterns</span>;
+              return <span className="aihub_text_muted" style={{fontSize:12.7}}>{(r.patterns||[]).length} patterns</span>;
             }},
           ]} rows={detail.rules||[]} empty="No rules in this pack."/>
 
-          <p className="aihub_text_muted" style={{fontSize:11,marginTop:8}}>
+          <p className="aihub_text_muted" style={{fontSize:12.7,marginTop:8}}>
             Deploying creates {detail.enforceable} policies that the engine evaluates on every agent scan. The
             {" "}{detail.monitored} monitored rules rely on prompt detection already running on enrolled endpoints —
             their coverage is confirmed from observed events. The {detail.attestations} attestations require a named
@@ -5486,28 +5487,28 @@ function PackSimulation({ pack, onClose }) {
     {err && <div className="aihub_error" style={{marginBottom:12}}><AlertTriangle size={14}/> {err}</div>}
 
     {pack.monitored===0
-      ? <p className="aihub_text_muted" style={{fontSize:12,margin:0}}>
+      ? <p className="aihub_text_muted" style={{fontSize:13.2,margin:0}}>
           This pack has no prompt-detection rules, so there is nothing to simulate. Its controls are agent
           policies and attestations, which are evaluated against the agent registry rather than prompt history.
         </p>
       : <>
         <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:10,flexWrap:"wrap"}}>
-          <span style={{fontSize:12,fontWeight:600}}>Window</span>
+          <span style={{fontSize:13.2,fontWeight:600}}>Window</span>
           {[7,30,90].map(d=>(
             <button key={d} className={`aihub_filter_btn ${days===d?"active":""}`} disabled={busy} onClick={()=>setDays(d)}>{d} days</button>
           ))}
-          {opts && <span className="aihub_text_muted" style={{fontSize:11}}>{opts.events_available} prompt events captured in this window</span>}
+          {opts && <span className="aihub_text_muted" style={{fontSize:12.7}}>{opts.events_available} prompt events captured in this window</span>}
         </div>
 
         {!!opts?.services?.length && <div style={{marginBottom:12}}>
-          <div style={{fontSize:12,fontWeight:600,marginBottom:5}}>Allow these tools (exclude from blocking)</div>
+          <div style={{fontSize:13.2,fontWeight:600,marginBottom:5}}>Allow these tools (exclude from blocking)</div>
           <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
             {opts.services.slice(0,10).map(s=>(
               <button key={s.value} className={`aihub_filter_btn ${excl.includes(s.value)?"active":""}`}
                       disabled={busy} onClick={()=>toggleExcl(s.value)}>{s.value} · {s.events}</button>
             ))}
           </div>
-          <div className="aihub_text_muted" style={{fontSize:11,marginTop:4}}>
+          <div className="aihub_text_muted" style={{fontSize:12.7,marginTop:4}}>
             Use this to keep an approved internal tool working while blocking the same data elsewhere.
           </div>
         </div>}
@@ -5516,7 +5517,7 @@ function PackSimulation({ pack, onClose }) {
           <button className="aihub_action_btn" disabled={busy||!opts} onClick={run}>
             {busy?"Simulating…":"Re-run simulation"}
           </button>
-          <label style={{fontSize:12,display:"flex",alignItems:"center",gap:5}}>
+          <label style={{fontSize:13.2,display:"flex",alignItems:"center",gap:5}}>
             <input type="checkbox" checked={samples} disabled={busy} onChange={e=>setSamples(e.target.checked)}/>
             Include example prompts (masked)
           </label>
@@ -5525,7 +5526,7 @@ function PackSimulation({ pack, onClose }) {
 
     {result && <>
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,padding:"7px 12px",borderRadius:6,
-                   background:"#f0fdf4",border:"1px solid #bbf7d0",fontSize:12,color:"#166534"}}>
+                   background:"#f0fdf4",border:"1px solid #bbf7d0",fontSize:13.2,color:"#166534"}}>
         <Shield size={13}/>
         <span><strong>Simulation only — nothing was enabled.</strong> {result.rule_label}, {result.window_days} days.</span>
       </div>
@@ -5565,13 +5566,13 @@ function PackSimulation({ pack, onClose }) {
           {label:"When",render:r=>relTime(r.occurred_at)},
           {label:"Tool",key:"ai_service"},
           {label:"Detected",render:r=>(r.patterns||[]).join(", ")},
-          {label:"Excerpt",render:r=>r.excerpt_available?<span style={{fontSize:11}}>{r.excerpt}</span>:<span className="aihub_text_muted">no text retained</span>},
+          {label:"Excerpt",render:r=>r.excerpt_available?<span style={{fontSize:12.7}}>{r.excerpt}</span>:<span className="aihub_text_muted">no text retained</span>},
         ]} rows={result.samples} empty="No excerpts available."/>
       </div>}
 
       <div style={SIM_PANEL}>
         <SectionHeader title={pack.deployed?"Worth knowing":"Before you deploy"}/>
-        <ul style={{margin:0,paddingLeft:18,fontSize:12,color:"#4b5563"}}>
+        <ul style={{margin:0,paddingLeft:18,fontSize:13.2,color:"#4b5563"}}>
           {result.caveats.map((c,i)=><li key={i} style={{marginBottom:3}}>{c}</li>)}
         </ul>
       </div>
@@ -5658,7 +5659,7 @@ function EuAiActView() {
       <button className="aihub_action_btn" onClick={()=>{setMode("wizard");setAnswers({});setLive(null);}}><Plus size={13}/> Classify a system</button>
       <a className="aihub_filter_btn" href={reportUrl} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}>Open compliance report</a>
       <input placeholder="Your name (compliance officer)" value={officer} onChange={e=>setOfficer(e.target.value)}
-             style={{padding:"5px 10px",fontSize:12,border:"1px solid #e5e7eb",borderRadius:6,minWidth:210}}/>
+             style={{padding:"5px 10px",fontSize:13.2,border:"1px solid #e5e7eb",borderRadius:6,minWidth:210}}/>
     </div>
 
     {mode==="portfolio" && <div className="aihub_card">
@@ -5667,11 +5668,11 @@ function EuAiActView() {
         {label:"System",render:r=><><div className="aihub_text_primary">{r.system_name}</div><div className="aihub_text_muted">{r.assessed_by}</div></>},
         {label:"Risk tier",render:r=><Badge text={r.final_tier} color={TIER_COLOR[r.final_tier]||"#6b7280"}/>},
         {label:"Basis",render:r=>r.overridden
-          ? <span style={{fontSize:11,color:"#b45309"}}>overridden from {r.proposed_tier}</span>
-          : <span style={{fontSize:11}}>{(r.proposed_reasons||[]).map(x=>x.citation).join(", ")||"no triggers"}</span>},
+          ? <span style={{fontSize:12.7,color:"#b45309"}}>overridden from {r.proposed_tier}</span>
+          : <span style={{fontSize:12.7}}>{(r.proposed_reasons||[]).map(x=>x.citation).join(", ")||"no triggers"}</span>},
         {label:"FRIA",render:r=>!r.fria_required
-          ? <span className="aihub_text_muted" style={{fontSize:11}}>not required</span>
-          : <span style={{fontSize:11,color:r.fria_completeness?.complete?"#16a34a":"#b45309"}}>
+          ? <span className="aihub_text_muted" style={{fontSize:12.7}}>not required</span>
+          : <span style={{fontSize:12.7,color:r.fria_completeness?.complete?"#16a34a":"#b45309"}}>
               {r.fria_completeness?.answered||0}/{r.fria_completeness?.total||10} sections</span>},
         {label:"Actions",render:r=><div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
           {r.fria_required && <button className="aihub_action_btn warn" onClick={()=>{setFriaFor(r);setFriaAns(r.fria_answers||{});setMode("fria");}}>FRIA</button>}
@@ -5686,18 +5687,18 @@ function EuAiActView() {
         action={<button className="aihub_filter_btn" onClick={()=>setMode("portfolio")}><X size={13}/> Cancel</button>}/>
 
       <input placeholder="AI system name (e.g. HR CV Screener)" value={sysName} onChange={e=>setSysName(e.target.value)}
-             style={{padding:"7px 11px",fontSize:13,border:"1px solid #e5e7eb",borderRadius:6,width:"100%",maxWidth:460,marginBottom:14}}/>
+             style={{padding:"7px 11px",fontSize:13.7,border:"1px solid #e5e7eb",borderRadius:6,width:"100%",maxWidth:460,marginBottom:14}}/>
 
       {["prohibited","high_risk","transparency","context"].map(sec=>{
         const qs=meta.tier_questions.filter(q=>q.section===sec);
         const title={prohibited:"1. Prohibited practices (Article 5)",high_risk:"2. High-risk use cases (Annex III)",
                      transparency:"3. Transparency obligations (Article 50)",context:"4. Your role and context"}[sec];
         return (<div key={sec} style={{marginBottom:16}}>
-          <div style={{fontSize:12,fontWeight:700,color:"#0052e0",marginBottom:6}}>{title}</div>
+          <div style={{fontSize:13.2,fontWeight:700,color:"#0052e0",marginBottom:6}}>{title}</div>
           {qs.map(q=>(
             <div key={q.id} style={{padding:"8px 0",borderBottom:"1px solid #f1f5f9"}}>
-              <div style={{fontSize:12.5,marginBottom:3}}>{q.question}</div>
-              <div className="aihub_text_muted" style={{fontSize:11,marginBottom:5}}>{q.help} · <Mono>{q.citation}</Mono></div>
+              <div style={{fontSize:13.2,marginBottom:3}}>{q.question}</div>
+              <div className="aihub_text_muted" style={{fontSize:12.7,marginBottom:5}}>{q.help} · <Mono>{q.citation}</Mono></div>
               <div style={{display:"flex",gap:6}}>
                 <button className={`aihub_filter_btn ${answers[q.id]===true?"active":""}`} onClick={()=>setAns(q.id,true)}>Yes</button>
                 <button className={`aihub_filter_btn ${answers[q.id]===false?"active":""}`} onClick={()=>setAns(q.id,false)}>No</button>
@@ -5709,30 +5710,30 @@ function EuAiActView() {
 
       {live && <div style={{padding:"12px 14px",borderRadius:6,marginBottom:12,
                             background:"#f8fafc",border:`2px solid ${TIER_COLOR[live.tier]}`}}>
-        <div style={{fontSize:13,fontWeight:700,color:TIER_COLOR[live.tier]}}>Proposed: {live.tier_meta.label}</div>
-        <div style={{fontSize:12,margin:"4px 0 6px"}}>{live.tier_meta.summary}</div>
-        {!!live.reasons.length && <div style={{fontSize:11,color:"#4b5563"}}>Because: {live.reasons.map(r=>r.citation).join(", ")}</div>}
-        {live.fria_required && <div style={{fontSize:11,color:"#b45309",marginTop:4}}><strong>A FRIA is required</strong> (Article 27) — you indicated a public body or essential-service operator.</div>}
-        <div style={{fontSize:11,marginTop:8}}><strong>Obligations if confirmed:</strong></div>
-        <ul style={{margin:"3px 0 0 16px",fontSize:11,color:"#4b5563"}}>
+        <div style={{fontSize:13.7,fontWeight:700,color:TIER_COLOR[live.tier]}}>Proposed: {live.tier_meta.label}</div>
+        <div style={{fontSize:13.2,margin:"4px 0 6px"}}>{live.tier_meta.summary}</div>
+        {!!live.reasons.length && <div style={{fontSize:12.7,color:"#4b5563"}}>Because: {live.reasons.map(r=>r.citation).join(", ")}</div>}
+        {live.fria_required && <div style={{fontSize:12.7,color:"#b45309",marginTop:4}}><strong>A FRIA is required</strong> (Article 27) — you indicated a public body or essential-service operator.</div>}
+        <div style={{fontSize:12.7,marginTop:8}}><strong>Obligations if confirmed:</strong></div>
+        <ul style={{margin:"3px 0 0 16px",fontSize:12.7,color:"#4b5563"}}>
           {live.tier_meta.obligations.map((o,i)=><li key={i}>{o}</li>)}
         </ul>
       </div>}
 
       <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
-        <span style={{fontSize:12,fontWeight:600}}>Override tier (optional)</span>
+        <span style={{fontSize:13.2,fontWeight:600}}>Override tier (optional)</span>
         {["","unacceptable","high","limited","minimal"].map(t=>(
           <button key={t||"none"} className={`aihub_filter_btn ${ovTier===t?"active":""}`} onClick={()=>setOvTier(t)}>{t||"no override"}</button>
         ))}
       </div>
       {ovTier && <input placeholder="Why are you overriding the proposed tier? (required, recorded in the report)"
               value={ovWhy} onChange={e=>setOvWhy(e.target.value)}
-              style={{padding:"7px 11px",fontSize:12,border:"1px solid #e5e7eb",borderRadius:6,width:"100%",marginBottom:10}}/>}
+              style={{padding:"7px 11px",fontSize:13.2,border:"1px solid #e5e7eb",borderRadius:6,width:"100%",marginBottom:10}}/>}
 
       <button className="aihub_action_btn" disabled={busy||!sysName||!officer||(!!ovTier&&!ovWhy)} onClick={save}>
         {busy?"Saving…":"Save classification"}
       </button>
-      {(!sysName||!officer) && <div className="aihub_text_muted" style={{fontSize:11,marginTop:5}}>
+      {(!sysName||!officer) && <div className="aihub_text_muted" style={{fontSize:12.7,marginTop:5}}>
         A system name and your name are required — an assessment needs an accountable person.
       </div>}
     </div>}
@@ -5743,16 +5744,16 @@ function EuAiActView() {
         action={<button className="aihub_filter_btn" onClick={()=>setMode("portfolio")}><X size={13}/> Cancel</button>}/>
       {meta.fria_questions.map(q=>(
         <div key={q.id} style={{marginBottom:12}}>
-          <div style={{fontSize:12.5,fontWeight:600}}>{q.prompt}</div>
-          <div className="aihub_text_muted" style={{fontSize:11,marginBottom:4}}>{q.help} · <Mono>{q.citation}</Mono></div>
+          <div style={{fontSize:13.2,fontWeight:600}}>{q.prompt}</div>
+          <div className="aihub_text_muted" style={{fontSize:12.7,marginBottom:4}}>{q.help} · <Mono>{q.citation}</Mono></div>
           <textarea rows={q.kind==="list"?2:3} value={friaAns[q.id]||""}
                     onChange={e=>setFriaAns(a=>({...a,[q.id]:e.target.value}))}
-                    style={{width:"100%",padding:"7px 10px",fontSize:12,border:"1px solid #e5e7eb",
+                    style={{width:"100%",padding:"7px 10px",fontSize:13.2,border:"1px solid #e5e7eb",
                             borderRadius:6,fontFamily:"inherit",resize:"vertical"}}/>
         </div>
       ))}
       <button className="aihub_action_btn" disabled={busy} onClick={saveFria}>{busy?"Saving…":"Save FRIA"}</button>
-      <div className="aihub_text_muted" style={{fontSize:11,marginTop:5}}>
+      <div className="aihub_text_muted" style={{fontSize:12.7,marginTop:5}}>
         Saved progress is kept. Sections shorter than ten characters count as outstanding, and the report lists them.
       </div>
     </div>}
@@ -5882,7 +5883,7 @@ function ServerMonitorView() {
       <div style={{ display: "flex", gap: 2, marginBottom: 16, borderBottom: "1px solid #e5e7eb", paddingBottom: 0 }}>
         {smTabs.map(t => (
           <button key={t.id} onClick={() => { setTab(t.id); setSelectedTrace(null); }}
-            style={{ display: "flex", alignItems: "center", gap: 5, padding: "8px 16px", border: "none", background: "none", cursor: "pointer", fontSize: 13, fontWeight: tab === t.id ? 600 : 400, color: tab === t.id ? "#2563eb" : "#6b7280", borderBottom: tab === t.id ? "2px solid #2563eb" : "2px solid transparent", marginBottom: -1 }}>
+            style={{ display: "flex", alignItems: "center", gap: 5, padding: "8px 16px", border: "none", background: "none", cursor: "pointer", fontSize:13.7, fontWeight: tab === t.id ? 600 : 400, color: tab === t.id ? "#2563eb" : "#6b7280", borderBottom: tab === t.id ? "2px solid #2563eb" : "2px solid transparent", marginBottom: -1 }}>
             {t.icon} {t.label}
           </button>
         ))}
@@ -5906,8 +5907,8 @@ function ServerMonitorView() {
                       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                         <div style={{ width: 8, height: 8, borderRadius: "50%", background: srv.status === "active" ? "#22c55e" : srv.status === "uninstalled" ? "#ef4444" : "#9ca3af" }} />
                         <div>
-                          <div style={{ fontWeight: 600, fontSize: 15 }}>{srv.display_name || srv.hostname || srv.machine_id?.slice(0, 12)}</div>
-                          <div className="aihub_text_muted" style={{ fontSize: 12 }}>{srvGoverned.length} agent{srvGoverned.length !== 1 ? "s" : ""} governed | {srv.total_calls || 0} traces | {fmtUsd(srv.total_cost_usd)} | avg {srv.avg_latency_ms ? (srv.avg_latency_ms / 1000).toFixed(1) + "s" : "--"}</div>
+                          <div style={{ fontWeight: 600, fontSize:15.2 }}>{srv.display_name || srv.hostname || srv.machine_id?.slice(0, 12)}</div>
+                          <div className="aihub_text_muted" style={{ fontSize:13.2 }}>{srvGoverned.length} agent{srvGoverned.length !== 1 ? "s" : ""} governed | {srv.total_calls || 0} traces | {fmtUsd(srv.total_cost_usd)} | avg {srv.avg_latency_ms ? (srv.avg_latency_ms / 1000).toFixed(1) + "s" : "--"}</div>
                         </div>
                       </div>
                       <ChevronRight size={16} style={{ color: "#9ca3af" }} />
@@ -5922,7 +5923,7 @@ function ServerMonitorView() {
 
       {tab === "traces" && selectedServer && !selectedAgent && (
         <div>
-          <button onClick={() => setSelectedServer(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+          <button onClick={() => setSelectedServer(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize:13.7, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
             <ChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Back to servers
           </button>
           <SectionHeader title={selectedServer.display_name || selectedServer.hostname} hint="Governed agents on this server. Click an agent to see its traces." />
@@ -5944,8 +5945,8 @@ function ServerMonitorView() {
                           <Shield size={16} style={{ color: "#3b82f6" }} />
                         </div>
                         <div>
-                          <div style={{ fontWeight: 600, fontSize: 14 }}>{agent.container_name}</div>
-                          <div className="aihub_text_muted" style={{ fontSize: 12 }}>
+                          <div style={{ fontWeight: 600, fontSize:14.2 }}>{agent.container_name}</div>
+                          <div className="aihub_text_muted" style={{ fontSize:13.2 }}>
                             IP: {agent.container_ip || "?"} | {agent.total_calls || 0} traces | {fmtUsd(agent.total_cost_usd)} | avg {agent.avg_latency_ms ? (agent.avg_latency_ms / 1000).toFixed(1) + "s" : "--"}
                           </div>
                         </div>
@@ -5962,23 +5963,23 @@ function ServerMonitorView() {
 
       {tab === "traces" && selectedServer && selectedAgent && !selectedTrace && (
         <div>
-          <button onClick={() => setSelectedAgent(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+          <button onClick={() => setSelectedAgent(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize:13.7, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
             <ChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Back to {selectedServer.display_name}
           </button>
           <SectionHeader title={selectedAgent.container_name} hint={`Individual AI API calls from this agent (${agentCalls.length} total)`} />
           <div style={{ display: "flex", gap: 12, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
-            <label style={{ fontSize: 12, color: "#6b7280" }}>From:</label>
-            <input type="date" value={dateFrom} onChange={e => { setDateFrom(e.target.value); }} style={{ padding: "4px 8px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 12 }} />
-            <label style={{ fontSize: 12, color: "#6b7280" }}>To:</label>
-            <input type="date" value={dateTo} onChange={e => { setDateTo(e.target.value); }} style={{ padding: "4px 8px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 12 }} />
-            <button onClick={fetchAgentCalls} style={{ padding: "4px 12px", borderRadius: 6, border: "1px solid #d1d5db", background: "#fff", fontSize: 12, cursor: "pointer" }}>Filter</button>
-            {(dateFrom || dateTo) && <button onClick={() => { setDateFrom(""); setDateTo(""); }} style={{ padding: "4px 12px", borderRadius: 6, border: "none", background: "#f3f4f6", fontSize: 12, cursor: "pointer", color: "#6b7280" }}>Clear</button>}
+            <label style={{ fontSize:13.2, color: "#6b7280" }}>From:</label>
+            <input type="date" value={dateFrom} onChange={e => { setDateFrom(e.target.value); }} style={{ padding: "4px 8px", border: "1px solid #d1d5db", borderRadius: 6, fontSize:13.2 }} />
+            <label style={{ fontSize:13.2, color: "#6b7280" }}>To:</label>
+            <input type="date" value={dateTo} onChange={e => { setDateTo(e.target.value); }} style={{ padding: "4px 8px", border: "1px solid #d1d5db", borderRadius: 6, fontSize:13.2 }} />
+            <button onClick={fetchAgentCalls} style={{ padding: "4px 12px", borderRadius: 6, border: "1px solid #d1d5db", background: "#fff", fontSize:13.2, cursor: "pointer" }}>Filter</button>
+            {(dateFrom || dateTo) && <button onClick={() => { setDateFrom(""); setDateTo(""); }} style={{ padding: "4px 12px", borderRadius: 6, border: "none", background: "#f3f4f6", fontSize:13.2, cursor: "pointer", color: "#6b7280" }}>Clear</button>}
           </div>
           <div style={{ maxHeight: 600, overflowY: "auto" }}>
           <DataTable columns={[
-            { label: "Time", render: r => <span style={{ fontSize: 12 }}>{relTime(r.occurred_at)}</span> },
+            { label: "Time", render: r => <span style={{ fontSize:13.2 }}>{relTime(r.occurred_at)}</span> },
             { label: "Provider", render: r => <Tag text={r.provider || "?"} color={r.provider === "openai" ? "#10a37f" : r.provider === "anthropic" ? "#d97706" : "#6366f1"} /> },
-            { label: "Model", render: r => <span style={{ fontSize: 12, fontWeight: 500 }}>{(r.model || "?").replace(/-\d{4}-\d{2}-\d{2}$/, "")}</span> },
+            { label: "Model", render: r => <span style={{ fontSize:13.2, fontWeight: 500 }}>{(r.model || "?").replace(/-\d{4}-\d{2}-\d{2}$/, "")}</span> },
             { label: "Tokens", render: r => fmtTokens((r.prompt_tokens || 0) + (r.completion_tokens || 0)), right: true },
             { label: "Cost", render: r => fmtUsd(traceCost(r)), right: true },
             { label: "Duration", render: r => <span>{r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "\u2014"}</span>, right: true },
@@ -5989,7 +5990,7 @@ function ServerMonitorView() {
 
       {tab === "traces" && selectedTrace && traceDetail && (
         <div>
-          <button onClick={() => setSelectedTrace(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 13, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
+          <button onClick={() => setSelectedTrace(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize:13.7, marginBottom: 12, padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
             <ChevronRight size={14} style={{ transform: "rotate(180deg)" }} /> Back to {selectedAgent?.container_name || "traces"}
           </button>
           <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 24 }}>
@@ -5998,32 +5999,32 @@ function ServerMonitorView() {
               <div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                   <Tag text={traceDetail.provider || "?"} color={traceDetail.provider === "openai" ? "#10a37f" : traceDetail.provider === "anthropic" ? "#d97706" : "#6366f1"} />
-                  <h3 style={{ margin: 0, fontSize: 16 }}>{(traceDetail.model || "?").replace(/-\d{4}-\d{2}-\d{2}$/, "")}</h3>
+                  <h3 style={{ margin: 0, fontSize:16.2 }}>{(traceDetail.model || "?").replace(/-\d{4}-\d{2}-\d{2}$/, "")}</h3>
                 </div>
-                <div className="aihub_text_muted" style={{ fontSize: 12 }}>
+                <div className="aihub_text_muted" style={{ fontSize:13.2 }}>
                   {traceDetail.host}{traceDetail.path || ""} | {new Date(traceDetail.occurred_at || traceDetail.started_at).toLocaleString()}
                 </div>
               </div>
               <div style={{ display: "flex", gap: 16, textAlign: "right" }}>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtTokens((traceDetail.prompt_tokens||0)+(traceDetail.completion_tokens||0))}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>tokens</div></div>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{traceDetail.duration_ms ? (traceDetail.duration_ms/1000).toFixed(1)+"s" : "--"}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>duration</div></div>
-                <div><div style={{ fontSize: 18, fontWeight: 700 }}>{fmtUsd(traceCost(traceDetail))}</div><div className="aihub_text_muted" style={{ fontSize: 11 }}>cost</div></div>
+                <div><div style={{ fontSize:17.7, fontWeight: 700 }}>{fmtTokens((traceDetail.prompt_tokens||0)+(traceDetail.completion_tokens||0))}</div><div className="aihub_text_muted" style={{ fontSize:12.7 }}>tokens</div></div>
+                <div><div style={{ fontSize:17.7, fontWeight: 700 }}>{traceDetail.duration_ms ? (traceDetail.duration_ms/1000).toFixed(1)+"s" : "--"}</div><div className="aihub_text_muted" style={{ fontSize:12.7 }}>duration</div></div>
+                <div><div style={{ fontSize:17.7, fontWeight: 700 }}>{fmtUsd(traceCost(traceDetail))}</div><div className="aihub_text_muted" style={{ fontSize:12.7 }}>cost</div></div>
               </div>
             </div>
 
             {/* Token breakdown */}
             <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
               <div style={{ flex: 1, background: "#f0fdf4", borderRadius: 8, padding: 12 }}>
-                <div style={{ fontSize: 11, color: "#166534", fontWeight: 600, marginBottom: 2 }}>PROMPT TOKENS</div>
-                <div style={{ fontSize: 20, fontWeight: 700, color: "#166534" }}>{fmtTokens(traceDetail.prompt_tokens)}</div>
+                <div style={{ fontSize:12.7, color: "#166534", fontWeight: 600, marginBottom: 2 }}>PROMPT TOKENS</div>
+                <div style={{ fontSize:19.7, fontWeight: 700, color: "#166534" }}>{fmtTokens(traceDetail.prompt_tokens)}</div>
               </div>
               <div style={{ flex: 1, background: "#eff6ff", borderRadius: 8, padding: 12 }}>
-                <div style={{ fontSize: 11, color: "#1e40af", fontWeight: 600, marginBottom: 2 }}>COMPLETION TOKENS</div>
-                <div style={{ fontSize: 20, fontWeight: 700, color: "#1e40af" }}>{fmtTokens(traceDetail.completion_tokens)}</div>
+                <div style={{ fontSize:12.7, color: "#1e40af", fontWeight: 600, marginBottom: 2 }}>COMPLETION TOKENS</div>
+                <div style={{ fontSize:19.7, fontWeight: 700, color: "#1e40af" }}>{fmtTokens(traceDetail.completion_tokens)}</div>
               </div>
               <div style={{ flex: 1, background: "#fefce8", borderRadius: 8, padding: 12 }}>
-                <div style={{ fontSize: 11, color: "#854d0e", fontWeight: 600, marginBottom: 2 }}>RESPONSE STATUS</div>
-                <div style={{ fontSize: 20, fontWeight: 700, color: traceDetail.response_status >= 400 ? "#dc2626" : "#166534" }}>{traceDetail.response_status || 200}</div>
+                <div style={{ fontSize:12.7, color: "#854d0e", fontWeight: 600, marginBottom: 2 }}>RESPONSE STATUS</div>
+                <div style={{ fontSize:19.7, fontWeight: 700, color: traceDetail.response_status >= 400 ? "#dc2626" : "#166534" }}>{traceDetail.response_status || 200}</div>
               </div>
             </div>
 
@@ -6127,14 +6128,14 @@ function ServerMonitorView() {
                 <>
                   {/* User Input */}
                   <div style={{ marginBottom: 16 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: "#166534", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                    <div style={{ fontSize:13.2, fontWeight: 600, color: "#166534", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
                       <div style={{ width: 8, height: 8, borderRadius: 2, background: "#22c55e" }} /> USER INPUT
                     </div>
                     <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 14 }}>
                       {userInput ? (
-                        <div style={{ fontSize: 14, lineHeight: 1.6, color: "#1f2937" }}>{userInput}</div>
+                        <div style={{ fontSize:14.2, lineHeight: 1.6, color: "#1f2937" }}>{userInput}</div>
                       ) : (
-                        <span className="aihub_text_muted" style={{ fontSize: 12 }}>User input not available.</span>
+                        <span className="aihub_text_muted" style={{ fontSize:13.2 }}>User input not available.</span>
                       )}
                     </div>
                   </div>
@@ -6142,14 +6143,14 @@ function ServerMonitorView() {
                   {/* Tool Calls (if any) */}
                   {toolCalls.length > 0 && (
                     <div style={{ marginBottom: 16 }}>
-                      <div style={{ fontSize: 12, fontWeight: 600, color: "#7c3aed", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                      <div style={{ fontSize:13.2, fontWeight: 600, color: "#7c3aed", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
                         <div style={{ width: 8, height: 8, borderRadius: 2, background: "#8b5cf6" }} /> TOOL CALLS ({toolCalls.length})
                       </div>
                       <div style={{ display: "grid", gap: 8 }}>
                         {toolCalls.slice(-5).map((tc, i) => (
                           <div key={i} style={{ background: "#f5f3ff", border: "1px solid #ddd6fe", borderRadius: 8, padding: 12 }}>
-                            <div style={{ fontSize: 13, fontWeight: 600, color: "#5b21b6", marginBottom: 4 }}>{tc.name || "unknown"}</div>
-                            <pre style={{ margin: 0, fontSize: 11, color: "#6b7280", whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 100, overflowY: "auto" }}>
+                            <div style={{ fontSize:13.7, fontWeight: 600, color: "#5b21b6", marginBottom: 4 }}>{tc.name || "unknown"}</div>
+                            <pre style={{ margin: 0, fontSize:12.7, color: "#6b7280", whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 100, overflowY: "auto" }}>
                               {(() => { try { return JSON.stringify(JSON.parse(tc.args || '{}'), null, 2); } catch { return tc.args || ''; } })()}
                             </pre>
                           </div>
@@ -6160,14 +6161,14 @@ function ServerMonitorView() {
 
                   {/* Assistant Output */}
                   <div style={{ marginBottom: 16 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: "#1e40af", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                    <div style={{ fontSize:13.2, fontWeight: 600, color: "#1e40af", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
                       <div style={{ width: 8, height: 8, borderRadius: 2, background: "#3b82f6" }} /> ASSISTANT OUTPUT
                     </div>
                     <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 8, padding: 14 }}>
                       {assistantOutput ? (
-                        <div style={{ fontSize: 14, lineHeight: 1.6, color: "#1f2937", whiteSpace: "pre-wrap" }}>{assistantOutput}</div>
+                        <div style={{ fontSize:14.2, lineHeight: 1.6, color: "#1f2937", whiteSpace: "pre-wrap" }}>{assistantOutput}</div>
                       ) : (
-                        <span className="aihub_text_muted" style={{ fontSize: 12 }}>Assistant output not available.</span>
+                        <span className="aihub_text_muted" style={{ fontSize:13.2 }}>Assistant output not available.</span>
                       )}
                     </div>
                   </div>
@@ -6175,11 +6176,11 @@ function ServerMonitorView() {
                   {/* System Prompt (collapsed) */}
                   {systemPrompt && (
                     <details style={{ marginBottom: 16 }}>
-                      <summary style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", cursor: "pointer", marginBottom: 6 }}>
+                      <summary style={{ fontSize:13.2, fontWeight: 600, color: "#6b7280", cursor: "pointer", marginBottom: 6 }}>
                         System Prompt ({systemPrompt.length} chars)
                       </summary>
                       <div style={{ background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, padding: 14, maxHeight: 200, overflowY: "auto" }}>
-                        <pre style={{ margin: 0, fontSize: 11, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "#6b7280" }}>
+                        <pre style={{ margin: 0, fontSize:12.7, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "#6b7280" }}>
                           {systemPrompt}
                         </pre>
                       </div>
@@ -6214,26 +6215,26 @@ function ServerMonitorView() {
 
             {/* Step 1: Configure */}
             <div style={{ display: "flex", gap: 12, marginBottom: 24 }}>
-              <div style={{ width: 32, height: 32, minWidth: 32, borderRadius: "50%", background: "#dbeafe", color: "#2563eb", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>1</div>
+              <div style={{ width: 32, height: 32, minWidth: 32, borderRadius: "50%", background: "#dbeafe", color: "#2563eb", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize:14.2 }}>1</div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>Configure your server</div>
-                <div className="aihub_text_muted" style={{ fontSize: 12, marginBottom: 14 }}>Enter the proxy port the monitor will listen on. This port intercepts all outbound AI API traffic from every process on the server.</div>
+                <div style={{ fontWeight: 600, fontSize:14.2, marginBottom: 4 }}>Configure your server</div>
+                <div className="aihub_text_muted" style={{ fontSize:13.2, marginBottom: 14 }}>Enter the proxy port the monitor will listen on. This port intercepts all outbound AI API traffic from every process on the server.</div>
 
                 <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
                   <div>
-                    <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 4 }}>Proxy Port</label>
+                    <label style={{ display: "block", fontSize:13.2, fontWeight: 600, color: "#374151", marginBottom: 4 }}>Proxy Port</label>
                     <input type="number" value={proxyPort} onChange={e => { setProxyPort(e.target.value); setInstallCmd(""); }}
-                      style={{ width: 120, padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 14, fontFamily: "ui-monospace, monospace" }}
+                      style={{ width: 120, padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 6, fontSize:14.2, fontFamily: "ui-monospace, monospace" }}
                       placeholder="8443" min="1024" max="65535" />
                   </div>
                   <div>
-                    <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 4 }}>Server IP / Hostname <span style={{ fontWeight: 400, color: "#9ca3af" }}>(optional)</span></label>
+                    <label style={{ display: "block", fontSize:13.2, fontWeight: 600, color: "#374151", marginBottom: 4 }}>Server IP / Hostname <span style={{ fontWeight: 400, color: "#9ca3af" }}>(optional)</span></label>
                     <input type="text" value={serverIp} onChange={e => { setServerIp(e.target.value); setInstallCmd(""); }}
-                      style={{ width: 220, padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 14 }}
+                      style={{ width: 220, padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 6, fontSize:14.2 }}
                       placeholder="auto-detect" />
                   </div>
                   <button onClick={generateInstallCmd} disabled={generating || !proxyPort}
-                    style={{ padding: "8px 20px", borderRadius: 6, border: "none", background: "#2563eb", color: "#fff", fontSize: 13, fontWeight: 600, cursor: generating ? "wait" : "pointer", opacity: generating ? 0.6 : 1, height: 38 }}>
+                    style={{ padding: "8px 20px", borderRadius: 6, border: "none", background: "#2563eb", color: "#fff", fontSize:13.7, fontWeight: 600, cursor: generating ? "wait" : "pointer", opacity: generating ? 0.6 : 1, height: 38 }}>
                     {generating ? "Generating..." : "Generate Install Command"}
                   </button>
                 </div>
@@ -6242,12 +6243,12 @@ function ServerMonitorView() {
 
             {/* Step 2: Install command */}
             <div style={{ display: "flex", gap: 12, marginBottom: 24 }}>
-              <div style={{ width: 32, height: 32, minWidth: 32, borderRadius: "50%", background: installCmd ? "#dcfce7" : "#f3f4f6", color: installCmd ? "#16a34a" : "#9ca3af", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>2</div>
+              <div style={{ width: 32, height: 32, minWidth: 32, borderRadius: "50%", background: installCmd ? "#dcfce7" : "#f3f4f6", color: installCmd ? "#16a34a" : "#9ca3af", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize:14.2 }}>2</div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>Run this command on your server</div>
-                <div className="aihub_text_muted" style={{ fontSize: 12, marginBottom: 10 }}>SSH into your server and paste this command. Requires sudo access.</div>
+                <div style={{ fontWeight: 600, fontSize:14.2, marginBottom: 4 }}>Run this command on your server</div>
+                <div className="aihub_text_muted" style={{ fontSize:13.2, marginBottom: 10 }}>SSH into your server and paste this command. Requires sudo access.</div>
                 {installCmd ? (
-                  <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 16, fontFamily: "ui-monospace, monospace", fontSize: 12, overflowX: "auto", position: "relative", lineHeight: 1.6, wordBreak: "break-all" }}>
+                  <div style={{ background: "#1e293b", color: "#e2e8f0", borderRadius: 8, padding: 16, fontFamily: "ui-monospace, monospace", fontSize:13.2, overflowX: "auto", position: "relative", lineHeight: 1.6, wordBreak: "break-all" }}>
                     <code>{installCmd}</code>
                     <button onClick={copyCmd} title={copied ? "Copied!" : "Copy to clipboard"}
                       style={{ position: "absolute", top: 10, right: 10, background: "none", border: "none", color: copied ? "#4ade80" : "#94a3b8", cursor: "pointer", padding: 2, transition: "color 0.2s", display: "flex", alignItems: "center" }}>
@@ -6255,7 +6256,7 @@ function ServerMonitorView() {
                     </button>
                   </div>
                 ) : (
-                  <div style={{ background: "#f9fafb", border: "1px dashed #d1d5db", borderRadius: 8, padding: 16, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
+                  <div style={{ background: "#f9fafb", border: "1px dashed #d1d5db", borderRadius: 8, padding: 16, textAlign: "center", color: "#9ca3af", fontSize:13.7 }}>
                     Configure port above and click "Generate Install Command"
                   </div>
                 )}
@@ -6264,17 +6265,17 @@ function ServerMonitorView() {
 
             {/* Step 3: Done */}
             <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
-              <div style={{ width: 32, height: 32, minWidth: 32, borderRadius: "50%", background: "#f3f4f6", color: "#9ca3af", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>3</div>
+              <div style={{ width: 32, height: 32, minWidth: 32, borderRadius: "50%", background: "#f3f4f6", color: "#9ca3af", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize:14.2 }}>3</div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>ALL agents are instantly governed</div>
-                <div className="aihub_text_muted" style={{ fontSize: 12 }}>The installer sets up an <code style={{ background: "#f1f5f9", padding: "1px 4px", borderRadius: 3 }}>iptables</code> transparent redirect that captures ALL outbound port-443 traffic at the kernel level. Every process &mdash; already running or new &mdash; is governed instantly. No code changes, no env vars, no agent restarts needed. Works with Node.js, Python, Go, curl, anything.</div>
+                <div style={{ fontWeight: 600, fontSize:14.2, marginBottom: 4 }}>ALL agents are instantly governed</div>
+                <div className="aihub_text_muted" style={{ fontSize:13.2 }}>The installer sets up an <code style={{ background: "#f1f5f9", padding: "1px 4px", borderRadius: 3 }}>iptables</code> transparent redirect that captures ALL outbound port-443 traffic at the kernel level. Every process &mdash; already running or new &mdash; is governed instantly. No code changes, no env vars, no agent restarts needed. Works with Node.js, Python, Go, curl, anything.</div>
               </div>
             </div>
 
             {/* What gets captured */}
             <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 14, marginTop: 8 }}>
-              <div style={{ fontWeight: 600, fontSize: 13, color: "#166534", marginBottom: 6 }}>What gets captured from every AI agent on the server:</div>
-              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: "#166534", lineHeight: 1.8 }}>
+              <div style={{ fontWeight: 600, fontSize:13.7, color: "#166534", marginBottom: 6 }}>What gets captured from every AI agent on the server:</div>
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize:13.2, color: "#166534", lineHeight: 1.8 }}>
                 <li>Every LLM API call &mdash; provider, model, tokens, cost, full prompt and response</li>
                 <li>Who made the call &mdash; user, process ID, command line, working directory</li>
                 <li>How it was triggered &mdash; SSH session, cron job, CI pipeline, systemd service, Docker container</li>
@@ -6285,30 +6286,30 @@ function ServerMonitorView() {
 
             {/* How it works */}
             <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 8, padding: 14, marginTop: 12 }}>
-              <div style={{ fontWeight: 600, fontSize: 13, color: "#1e40af", marginBottom: 6 }}>How it works:</div>
-              <div style={{ fontSize: 12, color: "#1e40af", lineHeight: 1.7 }}>
+              <div style={{ fontWeight: 600, fontSize:13.7, color: "#1e40af", marginBottom: 6 }}>How it works:</div>
+              <div style={{ fontSize:13.2, color: "#1e40af", lineHeight: 1.7 }}>
                 The monitor uses <strong>iptables transparent redirect</strong> to capture ALL outbound HTTPS traffic at the kernel level. Every connection to port 443 is redirected through the monitor's proxy, which reads the SNI hostname from the TLS handshake. AI provider traffic (OpenAI, Anthropic, Google, AWS, local models) is intercepted and logged with full prompt/response, cost, and process attribution. Non-AI traffic is bridged transparently with zero overhead. Works on already-running processes &mdash; no restart needed.
               </div>
             </div>
 
             {/* Docker governance */}
             <div style={{ background: "#f5f3ff", border: "1px solid #c4b5fd", borderRadius: 8, padding: 14, marginTop: 12 }}>
-              <div style={{ fontWeight: 600, fontSize: 13, color: "#5b21b6", marginBottom: 6 }}>Docker Container Governance:</div>
-              <div style={{ fontSize: 12, color: "#5b21b6", lineHeight: 1.7, marginBottom: 8 }}>
+              <div style={{ fontWeight: 600, fontSize:13.7, color: "#5b21b6", marginBottom: 6 }}>Docker Container Governance:</div>
+              <div style={{ fontSize:13.2, color: "#5b21b6", lineHeight: 1.7, marginBottom: 8 }}>
                 After installing, host processes are <strong>fully governed</strong> (prompt, response, tokens, cost &mdash; everything captured).
                 Docker containers are tracked at the network level (which AI provider, when, duration). To enable <strong>full governance inside a container</strong>
                 (prompt/response content, token counts, cost), run:
               </div>
-              <div style={{ fontSize: 12, color: "#5b21b6", lineHeight: 1.7 }}>
+              <div style={{ fontSize:13.2, color: "#5b21b6", lineHeight: 1.7 }}>
                 <code style={{ background: "#ede9fe", padding: "2px 6px", borderRadius: 3 }}>sudo cloudfuze-monitor govern</code>
-                <div style={{ marginTop: 4, fontSize: 11, color: "#7c3aed" }}>Interactive &mdash; lists containers, you pick which ones to govern, one at a time. Each container gets the CA cert injected and restarts automatically.</div>
+                <div style={{ marginTop: 4, fontSize:12.7, color: "#7c3aed" }}>Interactive &mdash; lists containers, you pick which ones to govern, one at a time. Each container gets the CA cert injected and restarts automatically.</div>
               </div>
             </div>
 
             {/* Commands reference */}
             <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, padding: 14, marginTop: 12 }}>
-              <div style={{ fontWeight: 600, fontSize: 13, color: "#111", marginBottom: 8 }}>Available Commands:</div>
-              <div style={{ fontSize: 12, color: "#374151", fontFamily: "ui-monospace, monospace", lineHeight: 2.0 }}>
+              <div style={{ fontWeight: 600, fontSize:13.7, color: "#111", marginBottom: 8 }}>Available Commands:</div>
+              <div style={{ fontSize:13.2, color: "#374151", fontFamily: "ui-monospace, monospace", lineHeight: 2.0 }}>
                 <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: "2px 16px" }}>
                   <span>cloudfuze-monitor status</span><span style={{ color: "#6b7280" }}>Show service status</span>
                   <span>cloudfuze-monitor logs</span><span style={{ color: "#6b7280" }}>Stream live logs</span>
@@ -6319,23 +6320,23 @@ function ServerMonitorView() {
                   <span>cloudfuze-monitor help</span><span style={{ color: "#6b7280" }}>Show all commands</span>
                 </div>
               </div>
-              <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 8 }}>
+              <div className="aihub_text_muted" style={{ fontSize:12.7, marginTop: 8 }}>
                 Run these commands on the server where the monitor is installed. Most require <code>sudo</code>.
               </div>
             </div>
 
             {/* Coverage & Limitations */}
             <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, padding: 14, marginTop: 12 }}>
-              <div style={{ fontWeight: 600, fontSize: 13, color: "#111", marginBottom: 8 }}>Coverage:</div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "4px 16px", fontSize: 12, lineHeight: 1.8 }}>
+              <div style={{ fontWeight: 600, fontSize:13.7, color: "#111", marginBottom: 8 }}>Coverage:</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "4px 16px", fontSize:13.2, lineHeight: 1.8 }}>
                 <span>Host processes (direct on server)</span><span style={{ color: "#16a34a", fontWeight: 600 }}>Full governance</span>
                 <span>Docker containers (bridge network)</span><span style={{ color: "#16a34a", fontWeight: 600 }}>Full governance *</span>
                 <span>Docker containers (custom bridge)</span><span style={{ color: "#16a34a", fontWeight: 600 }}>Full governance *</span>
                 <span>Docker containers (host network)</span><span style={{ color: "#16a34a", fontWeight: 600 }}>Full governance</span>
               </div>
-              <div style={{ fontSize: 11, color: "#6b7280", marginTop: 6 }}>* Requires <code>docker-enable</code> + container restart for prompt/response content.</div>
-              <div style={{ fontWeight: 600, fontSize: 13, color: "#111", marginTop: 12, marginBottom: 8 }}>Not supported:</div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "4px 16px", fontSize: 12, lineHeight: 1.8, color: "#6b7280" }}>
+              <div style={{ fontSize:12.7, color: "#6b7280", marginTop: 6 }}>* Requires <code>docker-enable</code> + container restart for prompt/response content.</div>
+              <div style={{ fontWeight: 600, fontSize:13.7, color: "#111", marginTop: 12, marginBottom: 8 }}>Not supported:</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "4px 16px", fontSize:13.2, lineHeight: 1.8, color: "#6b7280" }}>
                 <span>Docker Macvlan/IPvlan networks</span><span>Rare — traffic bypasses bridge</span>
                 <span>Kubernetes pods</span><span>Requires sidecar approach</span>
                 <span>Podman rootless containers</span><span>Runs in user namespace</span>
@@ -6345,9 +6346,9 @@ function ServerMonitorView() {
 
             {/* Uninstall */}
             <div style={{ background: "#fefce8", border: "1px solid #fde68a", borderRadius: 8, padding: 14, marginTop: 12 }}>
-              <div style={{ fontWeight: 600, fontSize: 13, color: "#854d0e", marginBottom: 6 }}>To uninstall:</div>
-              <code style={{ fontSize: 12, color: "#854d0e" }}>sudo cloudfuze-monitor uninstall</code>
-              <div className="aihub_text_muted" style={{ fontSize: 11, marginTop: 4 }}>Stops the service, removes iptables rules, CA, proxy config, and all files.</div>
+              <div style={{ fontWeight: 600, fontSize:13.7, color: "#854d0e", marginBottom: 6 }}>To uninstall:</div>
+              <code style={{ fontSize:13.2, color: "#854d0e" }}>sudo cloudfuze-monitor uninstall</code>
+              <div className="aihub_text_muted" style={{ fontSize:12.7, marginTop: 4 }}>Stops the service, removes iptables rules, CA, proxy config, and all files.</div>
             </div>
           </div>
         </div>
@@ -6423,99 +6424,39 @@ function InstallationsView() {
       {/* Desktop Agent */}
       <div className="aihub_card">
         <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
-          <div style={{width:44,height:44,borderRadius:10,background:"#eff6ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22}}>💻</div>
+          <div style={{width:44,height:44,borderRadius:10,background:"#eff6ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22.2}}>💻</div>
           <div>
-            <h4 style={{margin:0,fontSize:15,fontWeight:700}}>Desktop Agent</h4>
-            <div style={{fontSize:11,color:"#9ca3af"}}>Windows · macOS · Linux</div>
+            <h4 style={{margin:0,fontSize:15.2,fontWeight:700}}>Desktop Agent</h4>
+            <div style={{fontSize:12.7,color:"#9ca3af"}}>Windows · macOS · Linux</div>
           </div>
-          <div style={{marginLeft:"auto",fontSize:10,color:"#0052e0",background:"#eff6ff",padding:"3px 8px",borderRadius:6,fontWeight:600}}>Step 1</div>
+          <div style={{marginLeft:"auto",fontSize:11.7,color:"#0052e0",background:"#eff6ff",padding:"3px 8px",borderRadius:6,fontWeight:600}}>Step 1</div>
         </div>
 
-        <div style={{fontSize:12,color:"#6b7280",marginBottom:14,lineHeight:1.5}}>
+        <div style={{fontSize:13.2,color:"#6b7280",marginBottom:14,lineHeight:1.5}}>
           Scans the machine for AI tools, monitors clipboard & prompts, and runs the identity beacon so the browser extension knows who this employee is.
         </div>
 
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
-          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=windows','CloudFuze-Desktop-Agent-windows.zip','windows')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='windows'?"#6b7280":"#0052e0",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='windows'?0.5:1}}>{downloading==='windows'?'⏳ Preparing...':'⬇ Windows'}</button>
-          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=macos','CloudFuze-Desktop-Agent-macos.zip','macos')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='macos'?"#6b7280":"#1e293b",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='macos'?0.5:1}}>{downloading==='macos'?'⏳ Preparing...':'⬇ macOS'}</button>
-          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=linux','CloudFuze-Desktop-Agent-linux.zip','linux')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='linux'?"#6b7280":"#1e293b",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='linux'?0.5:1}}>{downloading==='linux'?'⏳ Preparing...':'⬇ Linux'}</button>
+          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=windows','CloudFuze-Desktop-Agent-windows.zip','windows')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='windows'?"#6b7280":"#0052e0",color:"#fff",fontSize:13.2,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='windows'?0.5:1}}>{downloading==='windows'?'⏳ Preparing...':'⬇ Windows'}</button>
+          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=macos','CloudFuze-Desktop-Agent-macos.zip','macos')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='macos'?"#6b7280":"#1e293b",color:"#fff",fontSize:13.2,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='macos'?0.5:1}}>{downloading==='macos'?'⏳ Preparing...':'⬇ macOS'}</button>
+          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=linux','CloudFuze-Desktop-Agent-linux.zip','linux')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='linux'?"#6b7280":"#1e293b",color:"#fff",fontSize:13.2,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='linux'?0.5:1}}>{downloading==='linux'?'⏳ Preparing...':'⬇ Linux'}</button>
         </div>
 
-        <details style={{fontSize:12,color:"#374151",marginBottom:10}}>
-          <summary style={{cursor:"pointer",fontWeight:600,fontSize:13,marginBottom:6}}>Installation steps</summary>
+        <details style={{fontSize:13.2,color:"#374151",marginBottom:10}}>
+          <summary style={{cursor:"pointer",fontWeight:600,fontSize:13.7,marginBottom:6}}>Installation steps</summary>
           <ol style={{lineHeight:2,paddingLeft:18,margin:0}}>
             <li>Download the installer for your OS</li>
-            <li><strong>Windows:</strong> Extract zip → double-click <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:11}}>install.bat</code></li>
-            <li><strong>macOS/Linux:</strong> Extract zip → run <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:11}}>bash install.sh</code></li>
+            <li><strong>Windows:</strong> Extract zip → double-click <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:12.7}}>install.bat</code></li>
+            <li><strong>macOS/Linux:</strong> Extract zip → run <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:12.7}}>bash install.sh</code></li>
             <li>Agent auto-enrolls, installs dependencies, and starts scanning</li>
           </ol>
         </details>
 
-        <details style={{fontSize:12,color:"#6b7280"}}>
-          <summary style={{cursor:"pointer",fontWeight:600,fontSize:12,color:"#374151"}}>IT mass deployment</summary>
+        <details style={{fontSize:13.2,color:"#6b7280"}}>
+          <summary style={{cursor:"pointer",fontWeight:600,fontSize:13.2,color:"#374151"}}>IT mass deployment</summary>
           <div style={{marginTop:6,lineHeight:1.6}}>
-            Silent: <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:11}}>CloudFuze-Agent.exe /S</code><br/>
+            Silent: <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:12.7}}>CloudFuze-Agent.exe /S</code><br/>
             Intune (Win) · Jamf (Mac) · Ansible (Linux)
-          </div>
-        </details>
-      </div>
-
-      {/* Claude Usage Tracker — a separate deliverable from the Desktop Agent above.
-          Kept as its own card, not a variant of it: the agent monitors every AI tool
-          on the machine, this watches Claude only (claude_tracker/config.js pins
-          DESKTOP_PROCESSES to ['Claude']). Deploying it asks colleagues for much
-          narrower consent, so the two must not share a button. */}
-      <div className="aihub_card">
-        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
-          <div style={{fontSize:26}}>🧠</div>
-          <div>
-            <h4 style={{margin:0,fontSize:15,fontWeight:700}}>Claude Usage Tracker</h4>
-            <div style={{fontSize:11,color:"#6b7280"}}>Desktop: Windows · Extension: Chrome · Edge · Brave</div>
-          </div>
-          <div style={{marginLeft:"auto",fontSize:10,fontWeight:700,color:"#8b5cf6",background:"#8b5cf614",border:"1px solid #8b5cf630",borderRadius:999,padding:"3px 9px"}}>Claude only</div>
-        </div>
-
-        <div style={{fontSize:12,color:"#4b5563",marginBottom:14,lineHeight:1.5}}>
-          Tracks Claude usage per person — Claude Desktop, Claude in the browser and Claude Code CLI.
-          It does not scan for other AI tools and does not monitor other sites. Also switches on Claude Code
-          telemetry so token counts come from the CLI instead of being estimated.
-        </div>
-
-        {/* Two downloads, deliberately separate. The .exe covers Claude Desktop and
-            Claude Code CLI; the extension covers Claude in the browser. An admin may
-            want either or both, and neither can see anything but Claude. */}
-        <div style={{display:"grid",gridTemplateColumns:"repeat(2,minmax(0,1fr))",gap:8}}>
-          <button disabled={!!downloading}
-                  onClick={()=>download('/api/v1/installations/claude-tracker','CloudFuze-Claude-Usage-Tracker.zip','claude')}
-                  style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='claude'?"#6b7280":"#8b5cf6",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='claude'?0.5:1}}>
-            {downloading==='claude'?'⏳ Preparing...':'⬇ Desktop (.exe)'}
-          </button>
-          <button disabled={!!downloading}
-                  onClick={()=>download('/api/v1/installations/extension-package?flavour=claude','CloudFuze-Claude-Extension.zip','claude-ext')}
-                  style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='claude-ext'?"#6b7280":"#7c3aed",color:"#fff",fontSize:12,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='claude-ext'?0.5:1}}>
-            {downloading==='claude-ext'?'⏳ Preparing...':'⬇ Extension'}
-          </button>
-        </div>
-
-        <details style={{marginTop:12}}>
-          <summary style={{fontSize:11,color:"#6b7280",cursor:"pointer"}}>Installation steps</summary>
-          <div style={{fontSize:11,fontWeight:700,color:"#374151",marginTop:8}}>Desktop (.exe) — Claude Desktop + Claude Code CLI</div>
-          <ol style={{fontSize:11,color:"#4b5563",margin:"4px 0 0",paddingLeft:18,lineHeight:1.7}}>
-            <li>Unzip anywhere — keep the <code>.exe</code> and <code>prompt-watcher.ps1</code> together</li>
-            <li>Double-click <strong>CloudFuzeClaudeTracker.exe</strong></li>
-            <li>It enrols itself and starts reporting — leave it running</li>
-            <li>Restart any open Claude Code session so CLI telemetry takes effect</li>
-          </ol>
-          <div style={{fontSize:11,fontWeight:700,color:"#374151",marginTop:10}}>Extension — Claude in the browser</div>
-          <ol style={{fontSize:11,color:"#4b5563",margin:"4px 0 0",paddingLeft:18,lineHeight:1.7}}>
-            <li>Unzip the folder and keep it somewhere permanent</li>
-            <li><code>chrome://extensions</code> → enable <strong>Developer mode</strong></li>
-            <li><strong>Load unpacked</strong> → select the unzipped folder</li>
-            <li>It enrols on first load — no configuration needed</li>
-          </ol>
-          <div style={{fontSize:10.5,color:"#92400e",background:"#fffbeb",border:"1px solid #fde68a",borderRadius:6,padding:"6px 9px",marginTop:8}}>
-            The two files must stay in the same folder — the tracker looks for
-            prompt-watcher.ps1 beside the executable and exits if it is missing.
           </div>
         </details>
       </div>
@@ -6523,160 +6464,141 @@ function InstallationsView() {
       {/* Browser Extension */}
       <div className="aihub_card">
         <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
-          <div style={{width:44,height:44,borderRadius:10,background:"#f0fdf4",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22}}>🌐</div>
+          <div style={{width:44,height:44,borderRadius:10,background:"#f0fdf4",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22.2}}>🌐</div>
           <div>
-            <h4 style={{margin:0,fontSize:15,fontWeight:700}}>Browser Extension</h4>
-            <div style={{fontSize:11,color:"#9ca3af"}}>Chrome · Edge · Brave</div>
+            <h4 style={{margin:0,fontSize:15.2,fontWeight:700}}>Browser Extension</h4>
+            <div style={{fontSize:12.7,color:"#9ca3af"}}>Chrome · Edge · Brave</div>
           </div>
-          <div style={{marginLeft:"auto",fontSize:10,color:"#166534",background:"#f0fdf4",padding:"3px 8px",borderRadius:6,fontWeight:600}}>Step 2</div>
+          <div style={{marginLeft:"auto",fontSize:11.7,color:"#166534",background:"#f0fdf4",padding:"3px 8px",borderRadius:6,fontWeight:600}}>Step 2</div>
         </div>
 
-        <div style={{fontSize:12,color:"#6b7280",marginBottom:14,lineHeight:1.5}}>
+        <div style={{fontSize:13.2,color:"#6b7280",marginBottom:14,lineHeight:1.5}}>
           Monitors AI tool usage in the browser — DLP scanning, model routing, access requests. Auto-detects the desktop agent for employee linking.
         </div>
 
-        <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/extension-package','CloudFuze-Browser-Extension.zip','extension')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:downloading==='extension'?"#6b7280":"#0052e0",color:"#fff",fontSize:13,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",width:"100%",marginBottom:14,opacity:downloading&&downloading!=='extension'?0.5:1}}>{downloading==='extension'?'⏳ Preparing package...':'⬇ Download Extension'}</button>
+        <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/extension-package','CloudFuze-Browser-Extension.zip','extension')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:downloading==='extension'?"#6b7280":"#0052e0",color:"#fff",fontSize:13.7,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",width:"100%",marginBottom:14,opacity:downloading&&downloading!=='extension'?0.5:1}}>{downloading==='extension'?'⏳ Preparing package...':'⬇ Download Extension'}</button>
 
-        <details style={{fontSize:12,color:"#374151",marginBottom:10}}>
-          <summary style={{cursor:"pointer",fontWeight:600,fontSize:13,marginBottom:6}}>Installation steps</summary>
+        <details style={{fontSize:13.2,color:"#374151",marginBottom:10}}>
+          <summary style={{cursor:"pointer",fontWeight:600,fontSize:13.7,marginBottom:6}}>Installation steps</summary>
           <ol style={{lineHeight:2,paddingLeft:18,margin:0}}>
             <li>Download and extract the ZIP</li>
-            <li>Chrome → <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:11}}>chrome://extensions</code></li>
+            <li>Chrome → <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:12.7}}>chrome://extensions</code></li>
             <li>Enable <strong>Developer mode</strong></li>
             <li><strong>Load unpacked</strong> → select folder</li>
             <li>Auto-enrolls — no setup needed</li>
           </ol>
         </details>
 
-        <details style={{fontSize:12,color:"#6b7280"}}>
-          <summary style={{cursor:"pointer",fontWeight:600,fontSize:12,color:"#374151"}}>IT mass deployment</summary>
+        <details style={{fontSize:13.2,color:"#6b7280"}}>
+          <summary style={{cursor:"pointer",fontWeight:600,fontSize:13.2,color:"#374151"}}>IT mass deployment</summary>
           <div style={{marginTop:6,lineHeight:1.6}}>
             Chrome Enterprise policy:<br/>
-            <code style={{background:"#f1f5f9",padding:"2px 6px",borderRadius:3,fontSize:10}}>ExtensionInstallForcelist</code>
+            <code style={{background:"#f1f5f9",padding:"2px 6px",borderRadius:3,fontSize:11.7}}>ExtensionInstallForcelist</code>
           </div>
         </details>
       </div>
     </div>
 
-    <div style={{textAlign:"center",marginTop:14,fontSize:11,color:"#9ca3af"}}>
+    <div style={{textAlign:"center",marginTop:14,fontSize:12.7,color:"#9ca3af"}}>
       Both components are pre-configured with your server URL — zero employee setup required.
     </div>
   </div>);
 }
 
-const TAB_GROUPS = {
+// Tab definitions with feature keys. Tabs where feat is disabled are filtered
+// out at render time. If all tabs in a group are disabled, the group won't
+// appear in the nav (handled by SideNav's own filter).
+const TAB_GROUPS_RAW = {
   Inventory: {
     title: "Inventory",
-    // No group hint: both tabs under it already carry their own description
-    // ("AI & Agent Registry" and "Agents & MCP"), so this restated the same thing
-    // one line above whichever tab was open.
     tabs: [
-      { slug: "systems", label: "AI Systems",   component: AIRegistryView },
-      { slug: "agents",  label: "Agents & MCP", component: AgentsView },
-      // Platforms folded into AI Systems: the known-services catalog is merged in
-      // there and deduped, so one table now answers "what AI exists here?" instead
-      // of two that had to be read together. Adding a platform, the block/allow
-      // decision and the risk analysis for a service now all sit in one place —
-      // previously they were spread across two tabs.
-      // PlatformsView is still defined (its session-replay panel has no equivalent
-      // in the merged table) but is no longer mounted anywhere.
-      // { slug: "platforms", label: "Platform detail", component: PlatformsView },
+      { slug: "systems", label: "AI Systems",   component: AIRegistryView, feat: "ai_systems" },
+      { slug: "agents",  label: "Agents & MCP", component: AgentsView,     feat: "agents_mcp" },
     ],
   },
   Activity: {
     title: "Activity",
-    // No group hint: each tab under it already carries its own description, and this
-    // one had also gone stale — it still advertised "full session replays" after the
-    // Sessions tab was hidden.
     tabs: [
-      { slug: "prompts",  label: "Prompts & DLP", component: DLPView },
+      { slug: "prompts",  label: "Prompts & DLP", component: DLPView, feat: "dlp" },
       // Sessions hidden from the tab strip again after review: the capture holds
       // conversation groupings but zero rrweb recordings, so the replay half of the
       // view has nothing to play. SessionReplayView and every endpoint behind it are
       // untouched, so uncommenting this line brings it back. /AIHub/SessionReplay
       // still redirects here and resolveTab falls back to the first tab, so the old
       // URL lands on Prompts & DLP rather than breaking.
-      // { slug: "sessions", label: "Sessions",      component: SessionReplayView },
-      { slug: "claude",   label: "Claude Usage",  component: ClaudeUsageView },
+      // { slug: "sessions", label: "Sessions",       component: SessionReplayView, feat: "session_replay" },
+      { slug: "claude",   label: "Claude Usage",  component: ClaudeUsageView, feat: "claude_usage" },
       // Model Routing is back in the tab strip: it is being actively tested
       // against the browser extension, and the routed events it shows are the
       // only view of whether a rule actually switched the model in the page.
-      { slug: "routing",  label: "Model Routing", component: ModelRoutingView },
+      { slug: "routing",  label: "Model Routing",  component: ModelRoutingView, feat: "model_routing" },
     ],
   },
   PoliciesRisk: {
-    // Named "Policies & Risk" rather than "Governance": sitting next to the
-    // existing "Agent Governance" entry, two things called governance would be a
-    // coin toss for the user. Renaming their established screen is the riskier fix.
     title: "Policies & Risk",
     hint: "The policies you are enforcing, the framework packs you can draw from, and who is risky.",
     tabs: [
-      // Governance policies lead: these are the rules actually running against the
-      // agent fleet, so they are what someone opening this screen came to see.
-      // Policy Packs sits behind them as the library you deploy FROM — deploying a
-      // pack materialises its rules into this same list.
-      //
-      // Wrapped in AgentGovernanceProvider because PoliciesTab reads the shared
-      // discovery context. The provider is also mounted by the Agent Governance
-      // screen, but the two are never on screen together, so there is no duplicate
-      // in-flight state — just one fetch per screen visit.
-      { slug: "policies", label: "Policies", component: function PoliciesPage() {
+      { slug: "policies", label: "Policies", feat: "policies", component: function PoliciesPage() {
         return <AgentGovernanceProvider><PoliciesTab/></AgentGovernanceProvider>;
       } },
-      // Policy Packs merged into the Policies tab — the "Policy Packs" button
-      // inside PoliciesTab opens an inline drawer with deploy/undeploy.
-      // PolicyPacksView is still defined and reachable by direct URL.
-      { slug: "risk",  label: "Risk Scores",  component: RiskScoreView },
-      // EU AI Act belongs here as a 3rd tab once its intake is seeded from the
-      // discovered agent registry. EuAiActView above is intact and unmounted.
-      // { slug: "eu-ai-act", label: "EU AI Act", component: EuAiActView },
+      { slug: "risk", label: "Risk Scores", component: function RiskScorePage() {
+        return <><FeatureDepWarning featureKey="risk_scores"/><RiskScoreView/></>;
+      }, feat: "risk_scores" },
     ],
   },
   SDK: {
     title: "SDK",
     hint: "Credentials for apps that report their AI activity here, and what they've reported.",
     tabs: [
-      { slug: "projects", label: "Projects", component: SdkProjectsView },
-      { slug: "traces",   label: "Traces",   component: SdkTracesView },
+      { slug: "projects", label: "Projects", component: SdkProjectsView, feat: "sdk" },
+      { slug: "traces",   label: "Traces",   component: SdkTracesView,   feat: "sdk" },
     ],
   },
   Setup: {
     title: "Setup",
     hint: "Wiring and one-off assessments. Configure once, then rarely visit.",
     tabs: [
-      { slug: "installations", label: "Installations",     component: InstallationsView },
-      { slug: "integrations", label: "Integrations",      component: IntegrationsView },
-      // The old hidden "Developer SDK" tab is gone: its DeveloperSDKView could not
-      // work (api_key fields the server never returns, no Authorization header at
-      // admin-gated routes, snippets posting to a removed endpoint via a
-      // globalThis.fetch monkey-patch). It is replaced by the SDK group above, not
-      // duplicated — /AIHub/DeveloperSDK now redirects there.
-      { slug: "server-monitor", label: "Server Monitor",  component: ServerMonitorView },
-      // { slug: "copilot",      label: "Copilot Readiness", component: CopilotReadinessView },  // hidden — not working reliably
-      // Machines is commented out because Policies & Risk → Risk Scores already
-      // lists every enrolled machine: all of its rows carry a hostname, sourced
-      // from the agent and the extension. /AIHub/Machines redirects there.
-      // MachinesView below is intact and unmounted.
-      // { slug: "machines", label: "Machines", component: MachinesView },
+      { slug: "installations",  label: "Installations",  component: InstallationsView,  feat: "installations" },
+      { slug: "integrations",   label: "Integrations",   component: IntegrationsView,   feat: "integrations" },
+      { slug: "server-monitor", label: "Server Monitor", component: ServerMonitorView,  feat: "server_monitor" },
     ],
   },
 };
+
+// Built dynamically so it picks up server-driven feature flags after async load.
+function buildTabGroups() {
+  const out = {};
+  for (const [key, group] of Object.entries(TAB_GROUPS_RAW)) {
+    const tabs = group.tabs.map(t => t.feat && !isFeatureEnabled(t.feat) ? { ...t, locked: true } : t);
+    out[key] = { ...group, tabs };
+  }
+  return out;
+}
 
 // Single-view screens. The trailing entries are not in the sidebar — they were
 // already hidden before this regrouping and stay reachable by URL only, so no
 // bookmark breaks and nothing new appears in the nav.
 const PAGES = {
-  Overview:        { title: "AI Overview",      component: OverviewView },
-  // Top-level rather than a Policies & Risk tab: this is an inbox, not reference
-  // material. Pending requests are somebody waiting on a decision, and a queue
-  // buried one click behind a tab is a queue that gets answered late.
-  AccessRequests:  { title: "Access Requests",  component: AccessRequestsView },
-  AgentGovernance: { title: "Agent Governance", component: AgentGovernance },
-
-  AIUsage:      { title: "AI Usage",      component: AIUsageView },
-  Tools:        { title: "Tools Catalog", component: ToolsView },
-  ServerAgents: { title: "Server Agents", component: ServerAgentsView },
+  Overview:        { title: "AI Overview",      component: OverviewView,       feat: "overview" },
+  AccessRequests:  { title: "Access Requests",  component: AccessRequestsView, feat: "access_requests" },
+  AgentGovernance: { title: "Agent Governance", component: AgentGovernance,    feat: "agent_governance" },
+  AIUsage:         { title: "AI Usage",         component: AIUsageView },
+  Tools:           { title: "Tools Catalog",    component: ToolsView },
+  ServerAgents:    { title: "Server Agents",    component: ServerAgentsView },
 };
+
+/** Shown when a user navigates to a feature that's disabled. */
+function FeatureDisabled({ page }) {
+  return (
+    <div style={{textAlign:"center",padding:"80px 20px"}}>
+      <ShieldAlert size={40} style={{color:"#d1d5db",marginBottom:16}}/>
+      <h3 style={{margin:"0 0 8px",fontSize:17.7,fontWeight:700,color:"#111"}}>Feature not available</h3>
+      <p style={{fontSize:13.7,color:"#6b7280",maxWidth:400,margin:"0 auto",lineHeight:1.6}}>
+        The <strong>{page}</strong> feature is not enabled for this deployment. Contact your administrator to enable it.
+      </p>
+    </div>
+  );
+}
 
 /** Resolve ?tab= against a group, falling back to its first tab. */
 function resolveTab(group, slug) {
@@ -6691,15 +6613,30 @@ function resolveTab(group, slug) {
  * the separate screens never did that, and this keeps the network cost of opening
  * a group identical to opening the old single screen.
  */
+function LockedTabContent({ label }) {
+  return (
+    <div style={{textAlign:"center",padding:"60px 20px"}}>
+      <div style={{width:56,height:56,borderRadius:14,background:"#fee2e2",display:"inline-flex",alignItems:"center",justifyContent:"center",marginBottom:16}}>
+        <ShieldAlert size={24} color="#ef4444"/>
+      </div>
+      <h3 style={{margin:"0 0 8px",fontSize:17,fontWeight:700,color:"#111"}}>Feature Not Available</h3>
+      <p style={{fontSize:13.5,color:"#6b7280",maxWidth:400,margin:"0 auto",lineHeight:1.6}}>
+        <strong>{label}</strong> is not enabled for this deployment. Contact your administrator to enable it.
+      </p>
+    </div>
+  );
+}
+
 function TabGroup({ group }) {
   const [params, setParams] = useSearchParams();
-  const active = resolveTab(group, params.get("tab"));
+  // Don't auto-resolve to a locked tab — prefer the first unlocked one
+  const requestedSlug = params.get("tab");
+  const requested = group.tabs.find(t => t.slug === requestedSlug);
+  const active = requested || group.tabs.find(t => !t.locked) || group.tabs[0];
   const Body = active.component;
 
   const select = (t) => {
     if (t.slug === active.slug) return;
-    // replace:true — flipping tabs should not stack history entries, or Back has
-    // to be pressed once per tab the user glanced at before leaving the screen.
     setParams({ tab: t.slug }, { replace: true });
   };
 
@@ -6708,14 +6645,15 @@ function TabGroup({ group }) {
       {group.tabs.map((t) => (
         <button key={t.slug}
                 className={`aihub_group_tab ${t.slug === active.slug ? "active" : ""}`}
-                style={t.hidden ? {color: t.slug === active.slug ? undefined : "transparent"} : undefined}
+                style={t.locked ? {opacity:0.55,display:"flex",alignItems:"center",gap:5} : undefined}
                 onClick={() => select(t)}>
           {t.label}
+          {t.locked && <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>}
         </button>
       ))}
     </div>
     {group.hint && <p className="aihub_group_hint">{group.hint}</p>}
-    <Body/>
+    {active.locked ? <LockedTabContent label={active.label}/> : <Body/>}
   </div>);
 }
 
@@ -6729,10 +6667,23 @@ const BUILD_SHA = String(import.meta.env.VITE_BUILD_SHA || "").slice(0, 7);
 
 export default function AIHubPage({ page }) {
   const [params] = useSearchParams();
+  // Re-check features on every render so async flag load takes effect
+  const [, forceUpdate] = useState(0);
+  useEffect(() => {
+    // When features finish loading from server, re-render to apply flags
+    import("../../../featureFlags").then(m => {
+      if (m.loadFeatures) m.loadFeatures().then(() => forceUpdate(n => n + 1));
+    });
+  }, []);
+
+  const TAB_GROUPS = buildTabGroups();
   const group = TAB_GROUPS[page];
   const config = PAGES[page];
 
-  // Tab name in the header too, so the breadcrumb still says where you are.
+  const pageLocked = !group && config?.feat && !isFeatureEnabled(config.feat);
+  const pageDisabled = false;
+  const groupDisabled = !group && !config && TAB_GROUPS_RAW[page];
+
   const heading = group
     ? `${group.title} — ${resolveTab(group, params.get("tab")).label}`
     : (config || PAGES.Overview).title;
@@ -6744,8 +6695,7 @@ export default function AIHubPage({ page }) {
       <div className="cf_main_content_place">
         <TopNav pageName={heading}/>
         <div className="cf_main_content_place_main" style={{flexDirection:"column",padding:"20px 24px",overflowY:"auto",background:"#f8f9fb"}}>
-          {group ? <TabGroup group={group}/> : <Single/>}
-          <p className="aihub_build_stamp">build {BUILD_SHA || "dev"}</p>
+          {pageLocked ? <LockedTabContent label={config?.title || page}/> : (pageDisabled || groupDisabled) ? <FeatureDisabled page={page}/> : group ? <TabGroup group={group}/> : <Single/>}
         </div>
       </div>
     </div>

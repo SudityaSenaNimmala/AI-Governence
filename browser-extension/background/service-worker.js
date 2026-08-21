@@ -1085,9 +1085,43 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     getStored(STORAGE.DLP_POLICY)
       .then((policy) => sendResponse({ policy: policy || null }))
       .catch(() => sendResponse({ policy: null }));
-    return true; // async response
+    return true;
+  }
+  if (msg && msg.type === 'cfai-get-features') {
+    getStored('cfai.features')
+      .then((f) => sendResponse({ features: f || null }))
+      .catch(() => sendResponse({ features: null }));
+    return true;
   }
 });
+
+// ── Feature flags — fetched from server, cached in storage ──────────────────
+async function refreshFeatureFlags() {
+  try {
+    const config = await getConfig();
+    // Try enrolled server first, then local fallbacks
+    const urls = [];
+    if (config.serverUrl) urls.push(config.serverUrl.replace(/\/$/, ''));
+    if (!urls.includes('http://127.0.0.1:8787')) urls.push('http://127.0.0.1:8787');
+    if (!urls.includes('http://localhost:8787')) urls.push('http://localhost:8787');
+    for (const base of urls) {
+      try {
+        const res = await fetch(`${base}/api/v1/features`, { signal: AbortSignal.timeout(3000) });
+        if (!res.ok) continue;
+        const data = await res.json();
+        if (data?.features) {
+          await setStored('cfai.features', data);
+          chrome.storage.local.set({ 'cfai.features': data });
+          return;
+        }
+      } catch {}
+    }
+  } catch {}
+}
+// Refresh on startup, again after 3s (in case server was slow), then every 2 minutes
+refreshFeatureFlags();
+setTimeout(refreshFeatureFlags, 3000);
+setInterval(refreshFeatureFlags, 2 * 60 * 1000);
 
 // ── Session Replay — the worker half of the rrweb recorder ──────────────────
 // WHAT USED TO BE HERE, AND WHY IT IS GONE

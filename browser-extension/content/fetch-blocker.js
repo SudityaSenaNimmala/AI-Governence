@@ -41,7 +41,20 @@
     { name: 'toxicity-self-harm',            regex: /\b(how\s+(to|can\s+I|do\s+I|could\s+I)\s+(commit\s+suicide|hurt\s+myself|self[\s-]?harm|end\s+my\s+life|kill\s+myself|harm\s+myself)|best\s+way\s+to\s+(die|kill\s+myself|end\s+it|commit\s+suicide))\b/i },
   ];
 
+  // Check feature flag — reads from DOM attribute set by content script before this loaded
+  function isDlpEnabled() {
+    try {
+      const raw = document.documentElement.getAttribute('data-cfai-features');
+      if (raw) {
+        const f = JSON.parse(raw);
+        if (f.dlp && f.dlp.status === 'disabled') return false;
+      }
+    } catch {}
+    return true;
+  }
+
   function scanText(text) {
+    if (!isDlpEnabled()) return []; // DLP feature disabled
     if (!text || text.length < 5) return [];
     const found = [];
     for (const p of SENSITIVE_PATTERNS) {
@@ -711,6 +724,8 @@
   let _pendingRoute = null;
 
   document.addEventListener('cfai-route-model', (e) => {
+    // Skip if model routing feature is disabled
+    try { const raw=document.documentElement.getAttribute('data-cfai-features'); if(raw){const f=JSON.parse(raw); if(f.model_routing&&f.model_routing.status==='disabled') return;} } catch{}
     if (e.detail && e.detail.model) {
       _pendingRoute = { model: e.detail.model, rule_name: e.detail.rule_name || '', ts: Date.now() };
       console.info('[cfai] routing queued:', _pendingRoute.model, '(' + _pendingRoute.rule_name + ')');

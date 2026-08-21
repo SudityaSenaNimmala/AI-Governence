@@ -3,6 +3,16 @@
    CloudFuze AI Governance Dashboard
    ═══════════════════════════════════════════════════════════════════════════════ */
 
+/* ── Global base weight ───────────────────────────────────────────────────────
+   A single rule that nudges all AI Hub text from the browser default 400 to
+   450 — just enough to feel slightly bolder without looking bold. Headings,
+   badges, and stat values already set their own weight so they're unaffected. */
+.cf_main_content_place_main {
+  font-weight: 500;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
 /* ── Design tokens ────────────────────────────────────────────────────────────── */
 :root {
   --ah-accent: #0052e0;
@@ -15,9 +25,9 @@
   --ah-surface-raised: #fafbfc;
   --ah-surface-sunken: #f5f6f8;
   --ah-text: #111827;
-  --ah-text-secondary: #4b5563;
-  --ah-text-muted: #8b919e;
-  --ah-text-faint: #b0b6c0;
+  --ah-text-secondary: #374151;
+  --ah-text-muted: #6b7280;
+  --ah-text-faint: #9ca3af;
   --ah-shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
   --ah-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
   --ah-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
@@ -37,18 +47,18 @@
 .aihub_stat_grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 16px;
-  margin-bottom: 24px;
+  gap: 12px;
+  margin-bottom: 16px;
 }
 
 .aihub_stat_card {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   background: var(--ah-surface);
   border: 1px solid var(--ah-border);
   border-radius: var(--ah-radius-lg);
-  padding: 20px 22px;
+  padding: 14px 16px;
   transition: all var(--ah-transition-medium);
   box-shadow: var(--ah-shadow-xs);
   position: relative;
@@ -111,25 +121,26 @@
 }
 
 .aihub_stat_value {
-  font-size: 24px;
+  font-size: 24.2px;
   font-weight: 800;
   color: var(--ah-text);
-  line-height: 1.1;
+  line-height: 1.2;
   text-align: left;
   letter-spacing: -0.025em;
 }
 
 .aihub_stat_label {
-  font-size: 12px;
+  font-size: 13.2px;
   color: var(--ah-text-secondary);
   font-weight: 500;
   text-align: left;
   letter-spacing: 0.01em;
-  margin-top: 2px;
+  margin-top: 3px;
+  line-height: 1.35;
 }
 
 .aihub_stat_sub {
-  font-size: 10.5px;
+  font-size: 12.2px;
   color: var(--ah-text-muted);
   margin-top: 3px;
   text-align: left;
@@ -140,13 +151,13 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 6px;
 }
 
 .aihub_section_title {
-  font-size: 17px;
+  font-size: 16.7px;
   font-weight: 700;
   color: var(--ah-text);
   margin: 0;
@@ -154,7 +165,7 @@
 }
 
 .aihub_section_subtitle {
-  font-size: 12.5px;
+  font-size: 13.2px;
   color: var(--ah-text-muted);
   margin: 3px 0 0;
 }
@@ -164,8 +175,8 @@
   background: var(--ah-surface);
   border: 1px solid var(--ah-border);
   border-radius: var(--ah-radius-lg);
-  padding: 22px;
-  margin-bottom: 18px;
+  padding: 16px;
+  margin-bottom: 14px;
   box-shadow: var(--ah-shadow-xs);
   transition: box-shadow var(--ah-transition-medium);
 }
@@ -190,7 +201,7 @@
   align-items: center;
   padding: 3px 10px;
   border-radius: var(--ah-radius-pill);
-  font-size: 11px;
+  font-size: 12.7px;
   font-weight: 600;
   border: 1px solid;
   white-space: nowrap;
@@ -209,7 +220,7 @@
 .aihub_table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 13.7px;
 }
 
 .aihub_table thead tr {
@@ -219,17 +230,17 @@
 
 .aihub_table th {
   text-align: left;
-  padding: 11px 16px;
+  padding: 10px 14px;
   color: var(--ah-text-secondary);
   font-weight: 600;
-  font-size: 11px;
+  font-size: 12.7px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   white-space: nowrap;
 }
 
 .aihub_table td {
-  padding: 12px 16px;
+  padding: 10px 14px;
   color: var(--ah-text-secondary);
   border-bottom: 1px solid var(--ah-border-light);
 }
@@ -260,13 +271,13 @@
 }
 
 .aihub_text_muted {
-  font-size: 12px;
+  font-size: 13.2px;
   color: var(--ah-text-muted);
 }
 
 .aihub_text_mono {
   font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
+  font-size: 13.2px;
   color: var(--ah-text-secondary);
   background: var(--ah-surface-sunken);
   padding: 1px 5px;
@@ -294,7 +305,7 @@
 .aihub_search_box input {
   border: none;
   outline: none;
-  font-size: 13px;
+  font-size: 13.7px;
   color: var(--ah-text);
   background: transparent;
   width: 200px;
@@ -318,7 +329,7 @@
 }
 
 .aihub_bar_label {
-  font-size: 12px;
+  font-size: 13.2px;
   color: var(--ah-text-secondary);
   width: 120px;
   flex-shrink: 0;
@@ -343,7 +354,7 @@
 }
 
 .aihub_bar_value {
-  font-size: 12px;
+  font-size: 13.2px;
   font-weight: 700;
   color: var(--ah-text);
   min-width: 40px;
@@ -359,7 +370,7 @@
   gap: 10px;
   padding: 80px;
   color: var(--ah-text-muted);
-  font-size: 14px;
+  font-size: 14.2px;
   font-weight: 500;
 }
 
@@ -383,7 +394,7 @@
   border: 1px solid #fecaca;
   border-radius: var(--ah-radius-md);
   color: #dc2626;
-  font-size: 13px;
+  font-size: 13.7px;
   font-weight: 500;
   box-shadow: 0 2px 8px rgba(220, 38, 38, 0.06);
 }
@@ -395,7 +406,7 @@
   border: 1px solid var(--ah-border);
   background: var(--ah-surface);
   color: var(--ah-text-secondary);
-  font-size: 12px;
+  font-size: 13.2px;
   font-weight: 500;
   cursor: pointer;
   font-family: inherit;
@@ -426,7 +437,7 @@
   border-radius: var(--ah-radius-sm);
   background: var(--ah-accent-soft);
   color: var(--ah-accent);
-  font-size: 12px;
+  font-size: 13.2px;
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
@@ -479,8 +490,8 @@
   border-bottom: 1px solid var(--ah-border);
   background: var(--ah-surface-raised);
 }
-.aihub_drawer_title { font-size: 15px; font-weight: 700; color: var(--ah-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.aihub_drawer_sub { font-size: 12px; color: var(--ah-text-muted); margin-top: 3px; }
+.aihub_drawer_title { font-size: 15.2px; font-weight: 700; color: var(--ah-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aihub_drawer_sub { font-size: 13.2px; color: var(--ah-text-muted); margin-top: 3px; }
 .aihub_drawer_close {
   flex-shrink: 0;
   width: 34px;
@@ -498,7 +509,7 @@
 .aihub_drawer_close:hover { background: var(--ah-surface-sunken); color: var(--ah-text); border-color: #d0d5dd; }
 .aihub_drawer_body { flex: 1; overflow: auto; }
 .aihub_content_pre {
-  font-size: 12.5px;
+  font-size: 13.2px;
   line-height: 1.7;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: var(--ah-text);
@@ -528,7 +539,7 @@
   border-radius: var(--ah-radius-sm);
   background: var(--ah-accent);
   color: #fff;
-  font-size: 13px;
+  font-size: 13.7px;
   font-weight: 600;
   text-decoration: none;
   transition: all var(--ah-transition-fast);
@@ -542,13 +553,13 @@
   color: var(--ah-text-muted);
 }
 .aihub_empty h4 {
-  font-size: 17px;
+  font-size: 16.7px;
   font-weight: 700;
   color: var(--ah-text-secondary);
   margin: 14px 0 8px;
 }
 .aihub_empty p {
-  font-size: 13px;
+  font-size: 13.7px;
   max-width: 420px;
   margin: 0 auto;
   line-height: 1.65;
@@ -570,7 +581,7 @@
   gap: 6px;
 }
 .aihub_filter_label {
-  font-size: 11px;
+  font-size: 12.7px;
   font-weight: 600;
   color: var(--ah-text-secondary);
   text-transform: uppercase;
@@ -584,7 +595,7 @@
   border-radius: var(--ah-radius-sm);
   background: var(--ah-surface);
   color: var(--ah-text);
-  font-size: 12px;
+  font-size: 13.2px;
   font-family: inherit;
   cursor: pointer;
   box-shadow: var(--ah-shadow-xs);
@@ -607,7 +618,7 @@
   border-radius: var(--ah-radius-sm);
   background: var(--ah-surface);
   color: var(--ah-text-secondary);
-  font-size: 12px;
+  font-size: 13.2px;
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
@@ -623,7 +634,7 @@
   gap: 14px 20px;
 }
 .aihub_replay_meta_label {
-  font-size: 11px;
+  font-size: 12.7px;
   font-weight: 600;
   color: var(--ah-text-muted);
   text-transform: uppercase;
@@ -634,7 +645,7 @@
   margin-top: 14px;
   padding-top: 12px;
   border-top: 1px solid var(--ah-border-light);
-  font-size: 11px;
+  font-size: 12.7px;
   word-break: break-all;
 }
 
@@ -673,12 +684,12 @@
   color: var(--ah-text-muted);
 }
 .aihub_msg_who {
-  font-size: 12px;
+  font-size: 13.2px;
   font-weight: 700;
   color: var(--ah-text);
 }
 .aihub_msg_time {
-  font-size: 11px;
+  font-size: 12.7px;
   color: var(--ah-text-faint);
   margin-left: auto;
   white-space: nowrap;
@@ -696,7 +707,7 @@
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 8px;
-  font-size: 11px;
+  font-size: 12.7px;
 }
 .aihub_msg_content {
   margin-top: 10px;
@@ -713,7 +724,7 @@
   padding: 8px 12px;
   border: 1px solid var(--ah-border);
   border-radius: var(--ah-radius-sm);
-  font-size: 12px;
+  font-size: 13.2px;
   margin: 0 auto;
   width: 100%;
   max-width: 92%;
@@ -756,7 +767,7 @@
   border-radius: var(--ah-radius-sm);
   background: var(--ah-surface);
   color: var(--ah-text-secondary);
-  font-size: 12px;
+  font-size: 13.2px;
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
@@ -800,7 +811,7 @@
   align-items: center;
   gap: 6px;
   margin-top: 12px;
-  font-size: 11px;
+  font-size: 12.7px;
   color: var(--ah-text-muted);
 }
 .aihub_rec_gone {
@@ -815,8 +826,8 @@
   background: var(--ah-surface-raised);
   color: var(--ah-text-muted);
 }
-.aihub_rec_gone_title { font-size: 14px; font-weight: 700; color: var(--ah-text-secondary); }
-.aihub_rec_gone p { margin: 0; font-size: 12px; max-width: 340px; }
+.aihub_rec_gone_title { font-size: 14.2px; font-weight: 700; color: var(--ah-text-secondary); }
+.aihub_rec_gone p { margin: 0; font-size: 13.2px; max-width: 340px; }
 
 .aihub_rec_dl { color: var(--ah-accent); font-weight: 600; text-decoration: none; transition: color var(--ah-transition-fast); }
 .aihub_rec_dl:hover { text-decoration: underline; color: var(--ah-accent-hover); }
@@ -826,7 +837,7 @@
   align-items: center;
   gap: 6px;
   margin-bottom: 12px;
-  font-size: 11px;
+  font-size: 12.7px;
   color: var(--ah-text-muted);
 }
 
@@ -841,7 +852,7 @@
   border-radius: 6px;
   background: var(--ah-accent-soft);
   color: var(--ah-accent);
-  font-size: 11px;
+  font-size: 12.7px;
   font-weight: 600;
   font-family: inherit;
   font-variant-numeric: tabular-nums;
@@ -864,7 +875,7 @@
   border: 1px solid var(--ah-accent);
   background: var(--ah-accent);
   color: #fff;
-  font-size: 12px;
+  font-size: 13.2px;
   font-weight: 600;
   cursor: pointer;
   font-family: inherit;
@@ -916,13 +927,13 @@
   position: relative;
 }
 .aihub_group_tab {
-  padding: 10px 20px;
+  padding: 9px 18px;
   border: none;
   background: none;
   border-bottom: 2px solid transparent;
   margin-bottom: -2px;
   color: var(--ah-text-muted);
-  font-size: 13px;
+  font-size: 13.7px;
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
@@ -944,7 +955,7 @@
 
 .aihub_group_hint {
   margin: 0 0 18px;
-  font-size: 13px;
+  font-size: 13.7px;
   color: var(--ah-text-muted);
   max-width: 760px;
   line-height: 1.5;
@@ -966,7 +977,7 @@
   background: linear-gradient(135deg, #fffbeb 0%, #fefce8 100%);
   border: 1px solid #fde68a;
   color: #92400e;
-  font-size: 13px;
+  font-size: 13.7px;
   font-weight: 500;
 }
 
@@ -974,12 +985,12 @@
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   grid-auto-rows: 1fr;
-  gap: 18px;
+  gap: 12px;
   align-items: stretch;
 }
 .aihub_ov_grid > * {
   min-width: 0;
-  min-height: 300px;
+  min-height: 240px;
 }
 .aihub_ov_main, .aihub_ov_side { min-width: 0; }
 @media (max-width: 1100px) {
@@ -1047,14 +1058,14 @@
 .aihub_gov_stat:hover .aihub_gov_txt { color: var(--ah-accent); }
 .aihub_gov_stat:focus-visible { outline: 2px solid var(--ah-accent); outline-offset: -2px; }
 .aihub_gov_num {
-  font-size: 22px;
+  font-size: 22.2px;
   font-weight: 800;
   color: var(--ah-text);
   line-height: 1;
   letter-spacing: -0.02em;
 }
 .aihub_gov_txt {
-  font-size: 13px;
+  font-size: 13.7px;
   color: var(--ah-text-secondary);
   font-weight: 500;
 }
@@ -1067,7 +1078,7 @@
 
 /* Donut cards */
 .aihub_chart_total {
-  font-size: 28px;
+  font-size: 28.2px;
   font-weight: 800;
   background: var(--ah-gradient-accent);
   -webkit-background-clip: text;
@@ -1077,7 +1088,7 @@
   letter-spacing: -0.03em;
 }
 .aihub_chart_total_label {
-  font-size: 11px;
+  font-size: 12.7px;
   color: var(--ah-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -1102,14 +1113,14 @@
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 9px;
   min-width: 0;
 }
 .aihub_legend li {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 12.5px;
+  font-size: 13.2px;
   color: var(--ah-text-secondary);
   font-weight: 500;
 }
@@ -1144,7 +1155,7 @@
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 12px;
+  font-size: 13.2px;
   color: var(--ah-text-secondary);
 }
 .aihub_seg_legend strong { color: var(--ah-text); font-weight: 800; }
@@ -1168,13 +1179,13 @@
 }
 .aihub_sev_num {
   display: block;
-  font-size: 22px;
+  font-size: 22.2px;
   font-weight: 800;
   line-height: 1.2;
   letter-spacing: -0.02em;
 }
 .aihub_sev_label {
-  font-size: 11px;
+  font-size: 12.7px;
   color: var(--ah-text-secondary);
   text-transform: capitalize;
   font-weight: 500;
@@ -1189,14 +1200,14 @@
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
 }
 .aihub_attn_item {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
+  gap: 10px;
+  padding: 8px 10px;
   border: 1px solid var(--ah-border-light);
   border-radius: var(--ah-radius-md);
   background: var(--ah-surface);
@@ -1218,12 +1229,12 @@
 }
 .aihub_attn_text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .aihub_attn_label {
-  font-size: 12.5px;
+  font-size: 13.2px;
   font-weight: 600;
   color: var(--ah-text);
   text-transform: capitalize;
 }
-.aihub_attn_sub { font-size: 11px; color: var(--ah-text-muted); }
+.aihub_attn_sub { font-size: 12.7px; color: var(--ah-text-muted); }
 .aihub_attn_chev { margin-left: auto; color: var(--ah-text-faint); flex-shrink: 0; transition: transform var(--ah-transition-fast); }
 .aihub_attn_item:hover .aihub_attn_chev { transform: translateX(3px); color: var(--ah-accent); }
 
@@ -1231,18 +1242,18 @@
 .aihub_quick_links {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
 }
 .aihub_quick_link {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 7px 14px;
+  gap: 5px;
+  padding: 6px 12px;
   border: 1px solid var(--ah-border);
   border-radius: var(--ah-radius-pill);
   background: var(--ah-surface);
   color: var(--ah-text-secondary);
-  font-size: 12px;
+  font-size: 13.2px;
   font-weight: 500;
   font-family: inherit;
   text-decoration: none;
@@ -1267,7 +1278,7 @@
 .aihub_build_stamp {
   margin: 20px 0 2px;
   text-align: right;
-  font-size: 11px;
+  font-size: 12.7px;
   color: var(--ah-text-muted);
   font-variant-numeric: tabular-nums;
   user-select: all;

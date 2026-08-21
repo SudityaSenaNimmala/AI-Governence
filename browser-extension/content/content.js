@@ -40,14 +40,48 @@
 
   // Inject fetch blocker IMMEDIATELY (synchronous) so it patches fetch()
   // before any page JS fires. The blocked list arrives shortly after via
-  // postMessage from the cached storage read.
+  // Inject feature flags into the page world via a DOM data attribute.
+  // Both fetch-blocker.js and content.js read from this.
+  // The attribute is set BEFORE fetch-blocker loads so it reads flags synchronously.
+  function pushFeaturesToPage(feats) {
+    try {
+      document.documentElement.setAttribute('data-cfai-features', JSON.stringify(feats));
+    } catch {}
+  }
+
+  // Load features then inject fetch-blocker
+  function injectFetchBlocker() {
+    try {
+      const script = document.createElement('script');
+      script.src = chrome.runtime.getURL('content/fetch-blocker.js');
+      (document.head || document.documentElement).appendChild(script);
+      script.onload = () => script.remove();
+    } catch (e) {
+      console.warn('[cfai] could not inject fetch blocker:', e);
+    }
+  }
+
+  // Try to get features from service worker first, then inject
+  let _fetchBlockerInjected = false;
+  function injectOnce() {
+    if (_fetchBlockerInjected) return;
+    _fetchBlockerInjected = true;
+    injectFetchBlocker();
+  }
+
   try {
-    const script = document.createElement('script');
-    script.src = chrome.runtime.getURL('content/fetch-blocker.js');
-    (document.head || document.documentElement).appendChild(script);
-    script.onload = () => script.remove();
+    // Ask service worker for features — it has them from startup fetch
+    chrome.runtime.sendMessage({ type: 'cfai-get-features' }, (resp) => {
+      if (chrome.runtime.lastError) { injectOnce(); return; }
+      if (resp?.features?.features) {
+        pushFeaturesToPage(resp.features.features);
+      }
+      injectOnce();
+    });
+    // Safety: if service worker doesn't respond in 1s, inject anyway
+    setTimeout(injectOnce, 1000);
   } catch (e) {
-    console.warn('[cfai] could not inject fetch blocker:', e);
+    injectOnce();
   }
 
   // Load blocked list from cache and send to fetch-blocker immediately
@@ -148,6 +182,7 @@
     return null;
   }
   async function applyPlatformPolicy(platforms) {
+    if (!isFeatureOn('ai_systems')) return; // platform blocking is part of AI Systems
     const hit = platformBlockMatch(platforms);
     if (hit) {
       // Check if this machine has a temporary access exception.
@@ -225,9 +260,44 @@
   } catch (e) {}
 
   const SERVICE = inferService(location.hostname);
-  const scan = window.__cfaiPatterns?.scan ?? (() => []);
+  const _rawScan = window.__cfaiPatterns?.scan ?? (() => []);
+  // Gate ALL scanning through the DLP feature flag
+  const scan = (text) => isFeatureOn('dlp') ? _rawScan(text) : [];
   const classifyFile = window.__cfaiPatterns?.classifyFile ?? ((n) => ({ class: 'other', severity: 'low', reason: '' }));
   const sizeBucket = window.__cfaiPatterns?.sizeBucket ?? (() => '?');
+
+  // ── Server-driven feature flags ────────────────────────────────────────────
+  // Cached from the service worker. When a feature is disabled on the server,
+  // the extension skips its enforcement — e.g. DLP scanning, platform blocking.
+  let _cfaiFeatures = {};
+  // Bootstrap from DOM attribute (set by us above before fetch-blocker loaded)
+  try { const raw = document.documentElement.getAttribute('data-cfai-features'); if (raw) _cfaiFeatures = JSON.parse(raw); } catch {}
+
+  function isFeatureOn(key) {
+    // Re-read from DOM attribute each time — picks up live updates
+    try {
+      const raw = document.documentElement.getAttribute('data-cfai-features');
+      if (raw) { const f = JSON.parse(raw); if (f[key]) return f[key].status === 'enabled'; }
+    } catch {}
+    const f = _cfaiFeatures[key];
+    if (!f) return true;
+    return f.status === 'enabled';
+  }
+
+  function applyFeatures(feats) {
+    if (!feats || typeof feats !== 'object' || !Object.keys(feats).length) return;
+    _cfaiFeatures = feats;
+    pushFeaturesToPage(feats);
+  }
+
+  try {
+    // Live updates when service worker refreshes flags
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes['cfai.features']?.newValue?.features) {
+        applyFeatures(changes['cfai.features'].newValue.features);
+      }
+    });
+  } catch {}
 
   // Bucket the content length so we don't leak exact prompt sizes.
   function lengthBucket(n) {
@@ -2110,7 +2180,12 @@
     if (btn.type === 'submit') return true;
     // ChatGPT uses an SVG arrow button near the composer — catch any button
     // inside the composer form/container that has an SVG child (icon button)
-    if (btn.querySelector('svg') && btn.closest('form, [class*="composer" i], [class*="input-area" i], [class*="prompt" i], [class*="chat-input" i]')) return true;
+    if (btn.querySelector('svg') && btn.closest('form, [class*="composer" i], [class*="input-area" i], [class*="prompt" i], [class*="chat-input" i]')) {
+      // Skip if it looks like a mic/media button (check svg content for mic-like paths)
+      const svgHtml = (btn.querySelector('svg')?.innerHTML || '').toLowerCase();
+      if (/microphone|mic-|record|m12.*v6.*a6/i.test(svgHtml)) return false;
+      return true;
+    }
     // Also match by proximity — any button right next to a textarea/contenteditable
     const sibling = btn.previousElementSibling || btn.parentElement;
     if (sibling && (sibling.querySelector?.('textarea, [contenteditable="true"], [role="textbox"]'))) return true;
@@ -2119,7 +2194,7 @@
 
   function scanForBlockers(text) {
     if (!text || text.length < 4) return null;
-    const matches = scan(text).filter((m) => BLOCK_SEVERITIES.has(m.severity));
+    let matches = scan(text).filter((m) => BLOCK_SEVERITIES.has(m.severity));
     return matches.length > 0 ? matches : null;
   }
 
@@ -2923,14 +2998,13 @@
   // (c) leave the masked text in place and tell the user to press Enter. We
   // never clear or lose the masked prompt.
   function triggerSendFor(el, maskedText, labels) {
-    const btn = findSendButtonForInput(el);
-    if (btn) {
-      console.info('[cfai] tokenize: clicking the site send button —', describeElement(btn));
-      try { btn.click(); } catch (e) { simulateSend(el); }
-    } else {
-      console.info('[cfai] tokenize: no send button found — dispatching Enter');
+    // Claude.ai and similar sites: clicking the send button is unreliable because
+    // the mic/voice button sits right next to send and gets picked before React
+    // enables the real send button. Enter keydown is the universal send trigger
+    // that works on every site — use it directly instead of hunting for a button.
+    setTimeout(() => {
       simulateSend(el);
-    }
+    }, 300);
 
     setTimeout(() => {
       // Still holding the masked text ⇒ the site never consumed the send. The
@@ -2951,7 +3025,7 @@
   // (attach, mic, stop, …) are never clicked.
   function findSendButtonForInput(el) {
     if (!el || typeof el.closest !== 'function') return null;
-    const DECOY = /attach|upload|file|image|photo|camera|mic|voice|dictate|speech|audio|stop|cancel|close|menu|model|setting|emoji|search|new chat|history|sidebar/;
+    const DECOY = /attach|upload|file|image|photo|camera|mic|voice|dictate|speech|audio|record|stop|cancel|close|menu|model|setting|emoji|search|new chat|history|sidebar|microphone/;
     // "Send feedback" / "Share" style buttons say "send" but are not the composer.
     const NOT_SEND = /feedback|report|invite|share|email|newsletter|subscribe|survey/;
 
