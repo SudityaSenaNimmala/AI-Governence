@@ -731,11 +731,14 @@
     return null;
   }
 
-  const FALLBACK_ROUTES = {
-    anthropic: { premium: 'claude-sonnet-4-20250514', standard: 'claude-haiku-4-5-20251001' },
-    openai:    { premium: 'gpt-4o', standard: 'gpt-4o-mini' },
-    google:    { premium: 'gemini-2.0-flash', standard: 'gemini-2.0-flash' },
-  };
+  // FALLBACK_ROUTES was removed here. It was declared and never read — the fetch
+  // wrapper below applies `_pendingRoute` and nothing else — while holding stale
+  // model ids AND a tier mapping that was off by one (it called Sonnet "premium"
+  // and Haiku "standard", and gave Google the same economy model for both tiers).
+  // Dead code with wrong values is worse than no code: the next person to need a
+  // fallback would have wired it up and shipped a silent mis-route. If a fallback
+  // is wanted, derive it from the routing rules the server already sends rather
+  // than a second hardcoded table.
 
   // Patch the fetch wrapper to apply routing BEFORE sending
   const _routedFetch = window.fetch;

@@ -411,3 +411,51 @@ test('contract: every verdict is a key smartRoute\'s ROUTE_TABLE actually indexe
 test('VERSION is pinned so a lexicon change is a visible change', () => {
   assert.match(String(VERSION), /^\d+\.\d+\.\d+$/);
 });
+
+// ── Pure arithmetic ─────────────────────────────────────────────────────────
+//
+// "what is 2+2" used to classify as 'moderate' — and NOT because anything judged
+// it middling. The lexicon carries no arithmetic signal, so the prompt matched
+// nothing at all, scored 0, and landed on the deliberate no-opinion fallback.
+// Every trivial sum was therefore routed to the standard tier instead of the
+// cheapest one, which is the exact cost saving the router exists to capture.
+//
+// The fix is a SHAPE test — is there any word left once the interrogative
+// wrapper comes off — not a length test. That distinction is the whole premise
+// of content/complexity.js, so the guards below matter as much as the wins.
+
+test('a bare sum is simple, however it is phrased', () => {
+  for (const p of [
+    '2+2', 'what is 2+2', "what's 2 + 2?", 'what is 2 + 2 = ?',
+    '12 * 7', '12 x 7', '8÷2', 'calculate 3^4',
+    'how much is 100 / 4', 'what is 15% of 240',
+  ]) {
+    assert.equal(classify(p), 'simple', `${JSON.stringify(p)} should be simple`);
+  }
+});
+
+test('arithmetic inside a real question is still judged on the question', () => {
+  // Words survive the wrapper strip, so these fall through to normal scoring.
+  // This is what stops the rule degenerating into "contains digits -> cheap".
+  for (const p of [
+    'explain why 2+2=4 in Peano arithmetic',
+    'design a sharding strategy for 2 regions and 4 replicas',
+    'what is the architecture of service 2',
+    'refactor the N+1 query in module 3',
+  ]) {
+    assert.notEqual(classify(p), 'simple', `${JSON.stringify(p)} must not be simple`);
+  }
+});
+
+test('a bare number is not a sum', () => {
+  // No operator: an id or an answer, not a question. Must not be swept up.
+  for (const p of ['42', '2026', '3.14']) {
+    assert.notEqual(classify(p), 'simple', `${JSON.stringify(p)} must not be simple`);
+  }
+});
+
+test('an unmatched prompt still falls back to moderate, never simple', () => {
+  // The fallback this whole fix works around must stay intact: scoring zero
+  // means "no opinion", and no opinion must not silently downgrade the model.
+  assert.equal(classify('zxqv wobble frimble'), 'moderate');
+});

@@ -721,9 +721,103 @@
   }
 
   // ── Model tier detection (Smart Model Router) ────────────────────────────
+
+  /**
+   * The model tiers each PLATFORM offers, keyed by host. Tier numbers match
+   * TIER_NUM: 3 = premium, 2 = standard, 1 = economy. The string is the label to
+   * look for in that platform's own model picker.
+   *
+   * WHY KEYED BY HOST AND NOT BY VENDOR. Tier detection used to be one ordered
+   * keyword chain over the whole button text with no idea which site it was on,
+   * and that cannot be extended past three vendors without cross-talk:
+   *
+   *   - 'mini' meant openai/economy, so Grok 3 mini read as OpenAI and the router
+   *     would then hunt for "GPT-4o mini" in xAI's picker.
+   *   - 'pro' meant google/premium, so Perplexity's "Sonar Pro" read as Google
+   *     and it would hunt for Gemini's labels.
+   *   - Perplexity and Poe PROXY other vendors ("Claude Sonnet", "GPT-4o"), so
+   *     keyword matching attributes them to the wrong picker entirely.
+   *
+   * The host decides the vendor, so a label can never leak across platforms.
+   * A host that is not listed keeps the old keyword-only behaviour, so nothing
+   * that works today changes.
+   */
+  const PLATFORM_TIERS = {
+    'claude.ai':            { vendor: 'anthropic',  3: 'Opus',     2: 'Sonnet',    1: 'Haiku' },
+    'chatgpt.com':          { vendor: 'openai',     3: 'GPT-4',    2: 'GPT-4o',    1: 'GPT-4o mini' },
+    'chat.openai.com':      { vendor: 'openai',     3: 'GPT-4',    2: 'GPT-4o',    1: 'GPT-4o mini' },
+    'gemini.google.com':    { vendor: 'google',     3: 'Pro',      2: 'Thinking',  1: 'Flash' },
+    'aistudio.google.com':  { vendor: 'google',     3: 'Pro',      2: 'Thinking',  1: 'Flash' },
+    // Le Chat. 'chat.mistral.ai' is listed before the bare domain and matched by
+    // longest key, so the app host wins over the marketing site.
+    'chat.mistral.ai':      { vendor: 'mistral',    3: 'Large',    2: 'Medium',    1: 'Small' },
+    'mistral.ai':           { vendor: 'mistral',    3: 'Large',    2: 'Medium',    1: 'Small' },
+    'perplexity.ai':        { vendor: 'perplexity', 3: 'Research', 2: 'Sonar Pro', 1: 'Sonar' },
+  };
+
+  /** The PLATFORM_TIERS entry for a host — longest matching key wins. */
+  function platformTiers(host) {
+    const h = String(host || '').toLowerCase();
+    if (!h) return null;
+    let best = null, bestLen = 0;
+    for (const key of Object.keys(PLATFORM_TIERS)) {
+      if ((h === key || h.endsWith('.' + key) || h.includes(key)) && key.length > bestLen) {
+        best = PLATFORM_TIERS[key];
+        bestLen = key.length;
+      }
+    }
+    return best;
+  }
+
+  // Local copy so this region stays evaluable ON ITS OWN — the tests slice it
+  // out of the file and run it with no surrounding scope, which is the whole
+  // reason nothing in here may reference a declaration further down the file.
+  // Same values as TIER_NAME.
+  const TIER_NAME_LOCAL = { 3: 'premium', 2: 'standard', 1: 'economy' };
+
+  /**
+   * Which of a platform's own tier labels the button text is showing.
+   * LONGEST LABEL FIRST: Perplexity offers both "Sonar" and "Sonar Pro", and
+   * matching the short one first would read Pro as economy.
+   */
+  function tierFromPlatformLabels(text, entry) {
+    const t = String(text || '').toLowerCase();
+    if (!t) return null;
+    const byLen = [3, 2, 1]
+      .filter((n) => entry[n])
+      .sort((a, b) => String(entry[b]).length - String(entry[a]).length);
+    for (const n of byLen) {
+      if (t.includes(String(entry[n]).toLowerCase())) return TIER_NAME_LOCAL[n];
+    }
+    return null;
+  }
+
+  /**
+   * Detect provider + tier from the model button text.
+   *
+   * `host` is OPTIONAL and additive: with it, the platform's own labels are
+   * consulted first and the vendor comes from the host, which is what stops
+   * label cross-talk. Without it the behaviour is exactly the historic
+   * keyword chain — which is what keeps every existing caller and test valid.
+   */
+  function detectModelInfo(text, host) {
+    const entry = host ? platformTiers(host) : null;
+    if (entry) {
+      const tier = tierFromPlatformLabels(text, entry);
+      if (tier) return { provider: entry.vendor, tier };
+      // A proxied model ("Claude Sonnet" inside Perplexity): take the TIER from
+      // the keyword chain but keep the vendor from the host, so the label we
+      // later click still comes from this platform's picker.
+      const legacy = detectModelInfoByKeyword(text);
+      if (legacy) return { provider: entry.vendor, tier: legacy.tier };
+      return null;
+    }
+    return detectModelInfoByKeyword(text);
+  }
+
   // Detect model tier from button text or model ID.
   // Handles current + future model names dynamically by keyword matching.
-  function detectModelInfo(text) {
+  function detectModelInfoByKeyword(text) {
     const t = (text || '').toLowerCase();
 
     // Anthropic — Fable and Opus are premium, Sonnet is standard, Haiku is economy
@@ -836,6 +930,70 @@
     downgrade: { 2: 'Standard prompt → balanced model', 1: 'Simple prompt → fastest & cheapest' },
   };
 
+  /**
+   * The label to click for a target tier on this host. The host-scoped table
+   * wins; TIER_UI_NAME is the vendor-level fallback for a host that is not
+   * listed, so unlisted platforms behave exactly as they did before.
+   *
+   * Lives OUTSIDE the model-tier-detection region on purpose: it reads
+   * TIER_UI_NAME, which is declared here, and that region is sliced out and
+   * executed standalone by tests/load-model-router.mjs — anything in there that
+   * referenced a later declaration would break the loader.
+   */
+  function tierLabelFor(host, provider, tierNum) {
+    const entry = platformTiers(host);
+    if (entry && entry[tierNum]) return entry[tierNum];
+    return (TIER_UI_NAME[provider] || {})[tierNum] || null;
+  }
+
+  // ── Admin routing rules (synced from the server) ─────────────────────────
+  // The service worker has always written /api/v1/routing/rules into
+  // chrome.storage under 'cfai.routing_rules' — and NOTHING read it. Every
+  // rule an admin configured was dead on arrival, which is why routing
+  // analytics attributed 1 of 252 routes to a rule_id. This is the reader.
+  //
+  // A rule only ever OVERRIDES the built-in choice, so an empty, unsynced or
+  // unreachable rule set leaves the built-in behaviour intact rather than
+  // disabling routing.
+  let _serverRules = [];
+
+  function applyServerRules(list) {
+    _serverRules = Array.isArray(list)
+      ? list.filter(r => r && r.enabled !== false)
+            .sort((a, b) => (a.priority || 50) - (b.priority || 50))
+      : [];
+    if (_serverRules.length) console.info('[cfai] routing rules loaded:', _serverRules.length);
+  }
+
+  try {
+    chrome.storage.local.get(['cfai.routing_rules'], (r) => applyServerRules(r['cfai.routing_rules']));
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes['cfai.routing_rules']) {
+        applyServerRules(changes['cfai.routing_rules'].newValue);
+      }
+    });
+  } catch (e) {
+    // Extension context gone; built-in routing still works.
+  }
+
+  /**
+   * First rule matching this provider + complexity (+ optional host), by
+   * priority. An absent or empty condition array means "any", matching how the
+   * server's own /routing/decide treats them.
+   */
+  function serverRuleFor(provider, complexity, host) {
+    const anyOf = (arr, v) => !Array.isArray(arr) || arr.length === 0 || arr.includes(v);
+    for (const r of _serverRules) {
+      const c = r.conditions || {};
+      if (!anyOf(c.provider, provider)) continue;
+      if (!anyOf(c.complexity, complexity)) continue;
+      if (Array.isArray(c.host) && c.host.length
+          && !c.host.some(h => String(host || '').includes(h))) continue;
+      return r;
+    }
+    return null;
+  }
+
   // Load persisted ceiling from chrome.storage (survives extension refresh)
   try {
     chrome.storage.local.get('cfai.user_ceiling', (data) => {
@@ -871,7 +1029,10 @@
   setTimeout(updateUserCeiling, 1000);
 
   function smartRoute(currentModelText, promptText) {
-    const current = detectModelInfo(currentModelText);
+    // Host is passed so the platform's own tier labels are used and the vendor
+    // comes from the site, not from a keyword that might belong to someone else.
+    const host = (typeof window !== 'undefined' && window.location) ? window.location.hostname : '';
+    const current = detectModelInfo(currentModelText, host);
     if (!current) return null;
 
     // Set ceiling on first detection if not set
@@ -910,17 +1071,28 @@
     if (targetNum === currentNum) return null;
 
     const targetTierName = TIER_NAME[targetNum];
-    const uiName = TIER_UI_NAME[current.provider]?.[targetNum];
+
+    // An admin rule wins over the built-in label, so a platform that renames a
+    // tier can be corrected from the dashboard instead of by shipping a new
+    // extension. `action.ui_name` is what gets clicked; `action.model` is the API
+    // id used by the fetch-blocker path (see dispatchRouteModel), and the two are
+    // deliberately separate — a model id is not a picker label.
+    const rule = serverRuleFor(current.provider, complexity, host);
+    const uiName = (rule && rule.action && rule.action.ui_name)
+      || tierLabelFor(host, current.provider, targetNum);
     if (!uiName) return null;
 
     const direction = targetNum < currentNum ? 'downgrade' : 'upgrade';
-    const reason = direction === 'downgrade'
-      ? (TIER_REASON.downgrade[targetNum] || 'Optimized for this prompt')
-      : (TIER_REASON.upgrade[targetNum] || 'Upgraded for quality');
+    const reason = (rule && rule.name)
+      || (direction === 'downgrade'
+        ? (TIER_REASON.downgrade[targetNum] || 'Optimized for this prompt')
+        : (TIER_REASON.upgrade[targetNum] || 'Upgraded for quality'));
 
     return {
       model: uiName,
       uiName,
+      apiModel: (rule && rule.action && rule.action.model) || null,
+      rule_id: (rule && rule.id) || null,
       rule_name: reason,
       complexity,
       currentTier: current.tier,
@@ -1002,24 +1174,105 @@
     return findModelButton();
   }
 
-  // Search the ENTIRE document for a clickable element containing specific text.
-  // Returns the most specific (deepest) match — avoids clicking a parent container.
-  function findClickableByText(text) {
+  // ── Model-menu option lookup ─────────────────────────────────────────────
+  // Containers a model dropdown actually renders into. `.mat-mdc-menu-panel` is
+  // Angular Material, which is what Gemini is built on; the rest are the
+  // standard roles every other platform uses.
+  const MENU_CONTAINER_SELECTOR =
+    '[role="menu"], [role="listbox"], [role="dialog"], [popover], .mat-mdc-menu-panel';
+
+  // Rendered and hittable. Deliberately fail-OPEN: a node is only rejected when
+  // the DOM actively says it is hidden, so an unusual host page (or a minimal
+  // test double) is never wrongly skipped.
+  function isVisibleEl(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (typeof el.getAttribute === 'function') {
+      if (el.getAttribute('aria-hidden') === 'true') return false;
+      if (el.getAttribute('hidden') !== null) return false;
+    }
+    if (typeof el.hasAttribute === 'function' && el.hasAttribute('inert')) return false;
+    if (typeof el.getClientRects === 'function') {
+      const rects = el.getClientRects();
+      if (rects && rects.length === 0) return false;
+    }
+    if (typeof el.getBoundingClientRect === 'function') {
+      const r = el.getBoundingClientRect();
+      if (r && (r.width === 0 || r.height === 0)) return false;
+    }
+    return true;
+  }
+
+  // Shortest text containing `text` inside one scope = the most specific element.
+  function pickShortestMatch(scope, text, exclude) {
     let best = null;
     let bestLen = Infinity;
-    for (const el of document.querySelectorAll('*')) {
+    for (const el of scope.querySelectorAll('*')) {
+      if (el === exclude) continue;                 // never re-click the trigger
       if (el.children.length > 10) continue;
       const t = (el.textContent || '').trim();
       if (t.length > 100 || t.length < 2) continue;
       if (!t.includes(text)) continue;
-      // Prefer the shortest text that contains our target (= most specific element)
-      if (t.length < bestLen) {
-        best = el;
-        bestLen = t.length;
-      }
+      if (!isVisibleEl(el)) continue;
+      if (t.length < bestLen) { best = el; bestLen = t.length; }
     }
     return best;
   }
+
+  /**
+   * Find the clickable element for a model option.
+   *
+   * OPEN MENUS ARE SEARCHED FIRST, and this is the whole point rather than an
+   * optimisation. The old version scanned the entire document and took the
+   * shortest text match anywhere on the page — which is wrong precisely on
+   * Gemini, whose target tier is literally named "Thinking" and which ALSO
+   * renders "Thinking" as a generation status while a reply streams. The status
+   * label is shorter than the menu row, so it won the shortest-match contest,
+   * got clicked, and nothing changed: 9 of 10 Gemini routings reported
+   * ui_changed:false while Claude managed 34 of 34.
+   *
+   * Invisible nodes are skipped for the same reason — a collapsed menu still has
+   * its rows in the DOM.
+   *
+   * The whole-document pass is kept as a fallback so platforms that render their
+   * picker without any of the standard roles still work.
+   */
+  function findClickableByText(text, opts) {
+    const exclude = (opts && opts.exclude) || null;
+    for (const menu of document.querySelectorAll(MENU_CONTAINER_SELECTOR)) {
+      if (!isVisibleEl(menu)) continue;
+      const hit = pickShortestMatch(menu, text, exclude);
+      if (hit) return hit;
+    }
+    return pickShortestMatch(document, text, exclude);
+  }
+
+  // Poll instead of sleeping a fixed 400ms. A menu that renders in 50ms no longer
+  // costs 400, and one that takes 900 no longer reports failure.
+  async function waitForEl(get, timeoutMs, stepMs) {
+    const deadline = Date.now() + (timeoutMs || 1500);
+    for (;;) {
+      const v = get();
+      if (v) return v;
+      if (Date.now() >= deadline) return null;
+      await new Promise(r => setTimeout(r, stepMs || 100));
+    }
+  }
+
+  // What the open menu is actually offering, for the failure log. Without this a
+  // failed switch says only "not found" and the next debugging step is guesswork.
+  function visibleMenuOptions() {
+    const out = [];
+    for (const menu of document.querySelectorAll(MENU_CONTAINER_SELECTOR)) {
+      if (!isVisibleEl(menu)) continue;
+      for (const el of menu.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], button, li')) {
+        if (!isVisibleEl(el)) continue;
+        const t = (el.textContent || '').trim();
+        if (t && t.length < 80 && !out.includes(t)) out.push(t);
+      }
+    }
+    return out;
+  }
+  // ── end model-menu option lookup ─
 
   async function changeModelInUI(targetModelId) {
     const btn = getModelButton();
@@ -1034,31 +1287,31 @@
     // Step 1: Click model button to open dropdown
     console.info('[cfai] step 1: clicking model button');
     btn.click();
-    await new Promise(r => setTimeout(r, 400));
 
-    // Step 2: Search for target model — try multiple strategies
-    let targetEl = findClickableByText(targetText);
+    // Step 2: Search for target model — try multiple strategies.
+    // `exclude: btn` on every lookup: the trigger button's own label contains a
+    // model name, so it is itself a tempting shortest-match and clicking it just
+    // closes the menu again.
+    let targetEl = await waitForEl(() => findClickableByText(targetText, { exclude: btn }));
 
     if (!targetEl) {
       // Strategy A: look for "More models" sub-menu (Claude pattern)
-      const moreEl = findClickableByText('More models');
+      const moreEl = findClickableByText('More models', { exclude: btn });
       if (moreEl) {
         console.info('[cfai] step 2a: clicking "More models"');
         moreEl.click();
-        await new Promise(r => setTimeout(r, 400));
-        targetEl = findClickableByText(targetText);
+        targetEl = await waitForEl(() => findClickableByText(targetText, { exclude: btn }));
       }
     }
 
     if (!targetEl) {
       // Strategy B: look for "See all models" or "Show all" (ChatGPT/other patterns)
       for (const altText of ['See all', 'Show all', 'All models', 'More', 'View all']) {
-        const altEl = findClickableByText(altText);
+        const altEl = findClickableByText(altText, { exclude: btn });
         if (altEl) {
           console.info('[cfai] step 2b: clicking "' + altText + '"');
           altEl.click();
-          await new Promise(r => setTimeout(r, 400));
-          targetEl = findClickableByText(targetText);
+          targetEl = await waitForEl(() => findClickableByText(targetText, { exclude: btn }));
           if (targetEl) break;
         }
       }
@@ -1080,7 +1333,14 @@
       console.info('[cfai] clicking target:', (targetEl.textContent || '').trim().slice(0, 40));
       targetEl.click();
     } else {
-      console.warn('[cfai] target "' + targetText + '" not found in any dropdown');
+      // Name what the menu DID offer. "not found" alone cannot distinguish a
+      // stale selector, a renamed tier, or a menu that never opened — and those
+      // need three different fixes.
+      const offered = visibleMenuOptions();
+      console.warn('[cfai] target "' + targetText + '" not found in any dropdown; '
+        + (offered.length
+          ? 'open menu offered: ' + offered.join(' | ')
+          : 'no open menu found — the model button click did not open a picker'));
       // Close any open menus
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await new Promise(r => setTimeout(r, 100));
@@ -1110,10 +1370,31 @@
     d.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;background:#0044cc;color:#fff;padding:12px 18px;border-radius:10px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,0.2);max-width:350px;animation:cfai-fade-in .2s ease-out;';
     const f = (fromModel || '').replace(/claude-/i,'').replace(/-\d{8}$/,'');
     const t = (toModel || '').replace(/claude-/i,'').replace(/-\d{8}$/,'');
-    d.innerHTML = '<div style="font-weight:700;margin-bottom:4px">⚡ Model Routed</div>' +
-      '<div>' + f + ' → <strong>' + t + '</strong></div>' +
-      '<div style="font-size:11px;opacity:0.8;margin-top:4px">Rule: ' + (ruleName||'') + '</div>' +
-      '<div style="font-size:10px;opacity:0.6;margin-top:2px">CloudFuze AI Governance</div>';
+
+    // BUILT WITH DOM NODES, NOT innerHTML. `fromModel` is read straight off the
+    // AI site's own model-picker button, so it is page-controlled text: an
+    // innerHTML concatenation let any of these sites inject markup into our own
+    // governance toast. `ruleName` comes from the server, but an admin types it,
+    // so it is not trusted markup either. textContent everywhere.
+    const line = (text, css) => {
+      const el = document.createElement('div');
+      if (css) el.style.cssText = css;
+      el.textContent = text;
+      return el;
+    };
+
+    d.appendChild(line('⚡ Model Routed', 'font-weight:700;margin-bottom:4px'));
+
+    const swap = document.createElement('div');
+    swap.appendChild(document.createTextNode(f + ' → '));
+    const strong = document.createElement('strong');
+    strong.textContent = t;
+    swap.appendChild(strong);
+    d.appendChild(swap);
+
+    d.appendChild(line('Rule: ' + (ruleName || ''), 'font-size:11px;opacity:0.8;margin-top:4px'));
+    d.appendChild(line('CloudFuze AI Governance', 'font-size:10px;opacity:0.6;margin-top:2px'));
+
     document.documentElement.appendChild(d);
     setTimeout(() => { try { d.remove(); } catch {} }, 5000);
   }

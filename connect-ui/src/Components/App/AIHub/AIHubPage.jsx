@@ -6590,11 +6590,10 @@ const TAB_GROUPS = {
       // URL lands on Prompts & DLP rather than breaking.
       // { slug: "sessions", label: "Sessions",      component: SessionReplayView },
       { slug: "claude",   label: "Claude Usage",  component: ClaudeUsageView },
-      // Model Routing hidden from the tab strip, to be restored — same treatment as
-      // Sessions above. ModelRoutingView and its /api/v1/routing/* endpoints are
-      // untouched; /AIHub/ModelRouting still redirects here and lands on the first
-      // tab. Uncommenting this line is the whole of putting it back.
-      // { slug: "routing",  label: "Model Routing", component: ModelRoutingView },
+      // Model Routing is back in the tab strip: it is being actively tested
+      // against the browser extension, and the routed events it shows are the
+      // only view of whether a rule actually switched the model in the page.
+      { slug: "routing",  label: "Model Routing", component: ModelRoutingView },
     ],
   },
   PoliciesRisk: {

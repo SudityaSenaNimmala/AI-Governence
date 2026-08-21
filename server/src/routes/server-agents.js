@@ -15,13 +15,56 @@ const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 
 // ── Client-authoritative pricing (USD per 1M tokens) ─────────────────────
 // Cost is always recalculated from model + tokens, never from stored values.
+// SECOND COPY OF A PRICE TABLE. The fuller one is
+// agent/src/server-monitor/pricing.js, which carries provenance URLs, every
+// provider, and the retired-model rows. These two are kept in step by
+// agent/tests/complexity-parity.test.mjs, which fails if they disagree on any
+// model the routing rules target. Collapsing them into one shared module is
+// worth doing; until then, edit both.
 const PRICING = [
+  // The tiers the built-in routing rules target. Missing rows here priced them
+  // at zero, so routed traffic looked free in cost reporting.
+  { m: /^claude-opus-5/,           input: 5.00,  output: 25.00, cached: 0.50 },
+  { m: /^claude-sonnet-5/,         input: 3.00,  output: 15.00, cached: 0.30 },
+  { m: /^claude-opus-4-8/,         input: 5.00,  output: 25.00, cached: 0.50 },
+  { m: /^claude-opus-4-7/,         input: 5.00,  output: 25.00, cached: 0.50 },
+  { m: /^claude-opus-4-6/,         input: 5.00,  output: 25.00, cached: 0.50 },
   { m: /^claude-opus-4/,           input: 15.00, output: 75.00, cached: 1.50 },
   { m: /^claude-sonnet-4/,         input: 3.00,  output: 15.00, cached: 0.30 },
   { m: /^claude-haiku-4/,          input: 1.00,  output: 5.00,  cached: 0.10 },
   { m: /^claude-3-5-sonnet/,       input: 3.00,  output: 15.00, cached: 0.30 },
   { m: /^claude-3-5-haiku/,        input: 0.80,  output: 4.00,  cached: 0.08 },
   { m: /^claude-3-opus/,           input: 15.00, output: 75.00, cached: 1.50 },
+  // Google, Mistral and Perplexity were absent entirely — every one of those
+  // routed models costed zero here.
+  { m: /^gemini-3\.7-flash/,       input: 0.75,  output: 3.75,  cached: 0.075 },
+  { m: /^gemini-2\.5-pro/,         input: 1.25,  output: 10.00, cached: 0.125 },
+  { m: /^gemini-2\.5-flash-lite/,  input: 0.10,  output: 0.40,  cached: 0.01 },
+  { m: /^gemini-2\.5-flash/,       input: 0.30,  output: 2.50,  cached: 0.03 },
+  { m: /^gemini-2\.0-flash/,       input: 0.10,  output: 0.40,  cached: 0.025 },
+  { m: /^mistral-large/,           input: 0.50,  output: 1.50,  cached: null },
+  { m: /^mistral-medium/,          input: 1.50,  output: 7.50,  cached: null },
+  { m: /^mistral-small/,           input: 0.15,  output: 0.60,  cached: null },
+  { m: /^sonar-deep-research/,     input: 2.00,  output: 8.00,  cached: null },
+  { m: /^sonar-pro/,               input: 3.00,  output: 15.00, cached: null },
+  { m: /^sonar/,                   input: 1.00,  output: 1.00,  cached: null },
+  { m: /^gpt-5\.6-sol/,            input: 5.00,  output: 30.00, cached: 0.50 },
+  { m: /^gpt-5\.6-terra/,          input: 2.00,  output: 12.00, cached: 0.20 },
+  { m: /^gpt-5\.6-luna/,           input: 0.20,  output: 1.20,  cached: 0.02 },
+  { m: /^gpt-5\.5-pro/,            input: 30.00, output: 180.00, cached: null },
+  { m: /^gpt-5\.5/,                input: 5.00,  output: 30.00, cached: 0.50 },
+  { m: /^gpt-5\.4-pro/,            input: 30.00, output: 180.00, cached: null },
+  { m: /^gpt-5\.4-mini/,           input: 0.75,  output: 4.50,  cached: 0.075 },
+  { m: /^gpt-5\.4-nano/,           input: 0.20,  output: 1.25,  cached: 0.02 },
+  { m: /^gpt-5\.4/,                input: 2.50,  output: 15.00, cached: 0.25 },
+  { m: /^gpt-5\.3-codex/,          input: 1.75,  output: 14.00, cached: 0.175 },
+  { m: /^gpt-5\.2-pro/,            input: 21.00, output: 168.00, cached: null },
+  { m: /^gpt-5\.2/,                input: 1.75,  output: 14.00, cached: 0.175 },
+  { m: /^gpt-5\.1/,                input: 1.25,  output: 10.00, cached: 0.125 },
+  { m: /^gpt-5-pro/,               input: 15.00, output: 120.00, cached: null },
+  { m: /^gpt-5-mini/,              input: 0.25,  output: 2.00,  cached: 0.025 },
+  { m: /^gpt-5-nano/,              input: 0.05,  output: 0.40,  cached: 0.005 },
+  { m: /^gpt-5/,                   input: 1.25,  output: 10.00, cached: 0.125 },
   { m: /^gpt-4\.1-nano/,           input: 0.10,  output: 0.40,  cached: 0.025 },
   { m: /^gpt-4\.1-mini/,           input: 0.40,  output: 1.60,  cached: 0.10 },
   { m: /^gpt-4\.1/,                input: 2.00,  output: 8.00,  cached: 0.50 },
@@ -30,12 +73,16 @@ const PRICING = [
   { m: /^gpt-4-turbo/,             input: 10.00, output: 30.00, cached: 10.00 },
   { m: /^gpt-4(?![\.\do]|-turbo)/, input: 30.00, output: 60.00, cached: 30.00 },
   { m: /^gpt-3\.5-turbo/,          input: 0.50,  output: 1.50,  cached: 0.50 },
+  { m: /^o4-mini/,                 input: 1.10,  output: 4.40,  cached: 0.275 },
+  { m: /^o3-pro/,                  input: 20.00, output: 80.00, cached: null },
   { m: /^o3-mini/,                 input: 1.10,  output: 4.40,  cached: 0.55 },
-  { m: /^o3/,                      input: 10.00, output: 40.00, cached: 2.50 },
+  // o3 was price-cut to $2/$8; the old row overstated it 5x.
+  { m: /^o3/,                      input: 2.00,  output: 8.00,  cached: 0.50 },
+  { m: /^o1-pro/,                  input: 150.00, output: 600.00, cached: null },
   { m: /^o1-mini/,                 input: 3.00,  output: 12.00, cached: 1.50 },
   { m: /^o1/,                      input: 15.00, output: 60.00, cached: 7.50 },
-  { m: /^gemini-2\.5-pro/,         input: 1.25,  output: 10.00, cached: 0.31 },
-  { m: /^gemini-2\.5-flash/,       input: 0.30,  output: 2.50,  cached: 0.075 },
+  // The gemini-2.5 rows live in the Google block above; duplicating them here
+  // with different cached rates left dead rows that only the first match won.
   { m: /^gemini-1\.5-pro/,         input: 1.25,  output: 5.00,  cached: 0.31 },
   { m: /^gemini-1\.5-flash/,       input: 0.075, output: 0.30,  cached: 0.019 },
 ];

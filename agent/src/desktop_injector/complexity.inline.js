@@ -1,3 +1,13 @@
+// GENERATED FILE — DO NOT EDIT BY HAND.
+//
+// Source of truth:  browser-extension/content/complexity.js  (copied verbatim)
+// Regenerate with:  node scripts/gen-proxy-complexity.mjs
+// Pinned by:        agent/tests/complexity-parity.test.mjs
+//
+// Embedded as text by hook-template.js and evaluated in every Claude Desktop
+// renderer before hook-renderer.js runs, so the desktop routing path classifies
+// prompts identically to the browser extension and the HTTPS proxy.
+
 // Prompt-complexity classifier for the Smart Model Router.
 //
 // Replaces the old two-regex + character-length heuristic in content.js, which

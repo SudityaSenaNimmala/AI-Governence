@@ -25,7 +25,8 @@
 // The stub returns a real verdict so the rest of the system keeps working;
 // it just produces lower-confidence answers.
 
-const DEFAULT_MODEL    = 'claude-haiku-4-5-20251001';
+// Anthropic model ids carry no date suffix; the dated form is a legacy shape.
+const DEFAULT_MODEL    = 'claude-haiku-4-5';
 const REQUEST_TIMEOUT  = 8_000;
 const MAX_OUTPUT_TOKENS = 400;
 

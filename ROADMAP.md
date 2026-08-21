@@ -247,6 +247,20 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   in the extension. Needs a settings screen so an admin can tune routing behavior
   per tenant without a code change.
 
+- [ ] **Stamp a correlation id on OS-monitor enforcement events**
+  Today the enforcer and the keystroke prompt capture never learn each other's event
+  ids, so the Activity table pairs a prompt with the block it triggered by a
+  time/machine/pattern heuristic — 43 of 85 blocks pair, the rest stay on their own
+  rows. An agent-side id would make the join exact, as it already is for the browser
+  extension.
+
+- [ ] **Broaden the complexity classifier's negative signals (factual lookups)**
+  Today an unmatched prompt scores 0 and falls to `moderate` by design (never silently
+  downgrade the user's chosen model), so cost savings only trigger on the ~30 negative
+  terms or the arithmetic rule: `capital of France`, `what time is it in Tokyo` and
+  `who wrote Hamlet` all bill at the standard tier. Needs terms that cannot misfire —
+  "who is responsible for our GDPR compliance" must not become simple.
+
 ---
 
 ## P3 — coverage expansion
@@ -284,6 +298,12 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   like `TypeError:`/`ValueError:` (only bare `Error:` matches), Node's `at async fn (...)`
   stack frames, and bare Java frames pasted without the `Exception in thread` header.
   Common cases already work; this improves accuracy on the less common ones.
+
+- [ ] **Batch `risk_score_high` webhooks into one digest per compute run**
+  `POST /risk-scores/compute` fires one notification per high/critical profile per
+  enabled hook. Harmless at current scale (2 high-risk people × 2 hooks = 4 messages),
+  but it grows linearly with headcount — a 500-person org at 15% high/critical would
+  send ~150 per click, and a flooded channel is a channel someone disables.
 
 ---
 

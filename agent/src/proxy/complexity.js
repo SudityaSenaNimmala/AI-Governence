@@ -1,3 +1,18 @@
+// GENERATED FILE — DO NOT EDIT BY HAND.
+//
+// Source of truth:  browser-extension/content/complexity.js
+// Regenerate with:  node scripts/gen-proxy-complexity.mjs
+// Pinned by:        agent/tests/complexity-parity.test.mjs
+//
+// This is the SAME classifier the browser extension runs, mechanically
+// translated from its content-script IIFE into an ES module so the HTTPS proxy
+// can import it. One definition of simple / moderate / complex now governs both
+// routing paths; see the generator's header for why the proxy's own regex-plus-
+// length classifier was removed.
+//
+// Edit content/complexity.js and re-run the generator. Editing this file
+// directly will be overwritten and the parity test will fail.
+
 // Prompt-complexity classifier for the Smart Model Router.
 //
 // Replaces the old two-regex + character-length heuristic in content.js, which
@@ -23,12 +38,11 @@
 // This file is plain (non-module) JS so manifest content_scripts can load it,
 // same as content/patterns.js. It publishes window.__cfaiComplexity.
 
-(function () {
+
   // Injected twice on hosts present in BOTH manifest.json's content_scripts and
   // the service worker's injectDlpStack(). Everything here is pure, so a second
   // evaluation is harmless — but it re-compiles ~200 regexes for nothing.
-  if (window.__cfaiComplexityLoaded) return;
-  window.__cfaiComplexityLoaded = true;
+  // (browser double-injection guard removed — ES modules evaluate once.)
 
   // 1.2.0 — added the pure-arithmetic shape test (step 3b). Bumped because this
   // changes verdicts: a bare sum was 'moderate' via the no-opinion fallback.
@@ -605,7 +619,7 @@
     return 'moderate';
   }
 
-  window.__cfaiComplexity = {
+  export const __cfaiComplexity = {
     VERSION,
     /** classify(text) -> 'simple' | 'moderate' | 'complex'. Total function. */
     classify(text) {
@@ -618,4 +632,4 @@
       }
     },
   };
-})();
+
