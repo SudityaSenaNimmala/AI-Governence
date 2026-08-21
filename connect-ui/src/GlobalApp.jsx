@@ -12,6 +12,7 @@ import GlobalContextReducer from "./GlobalContext/GlobalContextReducer";
 import { RESET_APP_CONTEXT } from "./GlobalContext/action.types";
 import ReactDOM from "react-dom";
 import ErrorCatcher from "./Components/Resuables/ErrorCatcher/ErrorCatcher";
+import { identifyHotjarUser } from "./analytics/hotjar";
 
 const GlobalApp = () => {
   // const navigation = useNavigate();
@@ -65,6 +66,16 @@ const GlobalApp = () => {
   useEffect(() => {
     localStorage.setItem("globalState", JSON.stringify(globalContext));
   }, [globalContext]);
+
+  // Tag the Hotjar recording once sign-in resolves, so a session can be traced back to the tenant
+  // it belongs to. No-ops when Hotjar is disabled, which is the default. Sends no email address --
+  // see identifyHotjarUser in src/analytics/hotjar.js for why.
+  useEffect(() => {
+    if (globalContext?.userId) identifyHotjarUser(globalContext.user);
+    // userId only: SET_CF_USER also fires on profile edits (Settings, UserManagement), and
+    // re-identifying on each of those is noise.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [globalContext?.userId]);
 
   useEffect(() => {
     if (!(localStorage.time && window.location.pathname === "/CloudFuze")) {

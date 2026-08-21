@@ -146,6 +146,11 @@ jobs:
         env:
           VITE_ADMIN_TOKEN: ''
           VITE_BUILD_SHA: ${{ github.sha }}
+          # Hotjar Site ID. A repo *variable*, not a secret: it ships inside client-side JS
+          # that every visitor can read, so hiding it buys nothing. Unset -> empty -> Hotjar
+          # is fully off in the built bundle (no script requested, no session recorded).
+          # Set it under Settings -> Secrets and variables -> Actions -> Variables.
+          VITE_HOTJAR_SITE_ID: ${{ vars.HOTJAR_SITE_ID }}
         run: npm run build
 
       - name: Check the bundle carries no admin token
