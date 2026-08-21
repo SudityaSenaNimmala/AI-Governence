@@ -10,7 +10,7 @@ import {
   Monitor, Scan, AlertTriangle, Wrench, Server, Shield, Clock, ChevronRight,
   Search, RefreshCw, Activity, FileText, MessageSquare, Eye, Trash2, Plus, X,
   History, ArrowLeft, Bot, User, ShieldAlert, Film, PlayCircle, MonitorPlay,
-  Maximize2, Minimize2, Copy, Check, DollarSign, ExternalLink, Download, Boxes,
+  Maximize2, Minimize2, Copy, Check, DollarSign, ExternalLink, Boxes,
 } from "lucide-react";
 import { sanitizeReplayEvents } from "./replaySanitize";
 import { createReplayHost, applyReplayIframeCsp } from "./rrwebHost";
@@ -335,9 +335,12 @@ function Donut({ segments, label, size=132, thickness=30 }) {
             const len=c*(s.value/total);
             const pct=Math.round((s.value/total)*100);
             // <title> is a native SVG hover tooltip — no JS state, no positioning
-            // logic, and it doubles as the segment's accessible name.
+            // logic, and it doubles as the segment's accessible name. Each arc
+            // deep-links to just that slice's rows — not the whole card to one
+            // generic destination.
             const arc=(<circle key={s.key} cx={size/2} cy={size/2} r={r} fill="none" stroke={s.color}
-                              strokeWidth={thickness} strokeDasharray={`${len} ${c-len}`} strokeDashoffset={-off}>
+                              strokeWidth={thickness} strokeDasharray={`${len} ${c-len}`} strokeDashoffset={-off}
+                              onClick={s.onClick} style={s.onClick?{cursor:"pointer"}:undefined}>
               <title>{`${s.label}: ${s.value.toLocaleString()} (${pct}%)`}</title>
             </circle>);
             off+=len; return arc;
@@ -349,20 +352,26 @@ function Donut({ segments, label, size=132, thickness=30 }) {
 // Headline total on top, donut below, swatch+label legend beside it. The legend
 // deliberately carries no per-slice counts — the breakdown lives on the page this
 // card opens. Counts are still in the chart's aria-label for screen readers.
-function DonutCard({ title, hint, segments, onClick, unavailable }) {
+// No whole-card onClick any more — the two donuts on Overview used to both send
+// any click to the exact same unfiltered list, which made clicking a specific
+// slice pointless (you always landed in the same place no matter what you
+// clicked). Now each slice/legend row carries its own destination, and there is
+// no card-level fallback that would swallow that distinction.
+function DonutCard({ title, hint, segments, unavailable }) {
   const total=segments.reduce((s,x)=>s+x.value,0);
-  return (<ClickCard title={title} hint={hint} onClick={onClick}>
+  return (<div className="aihub_card">
+    <SectionHeader title={title} hint={hint}/>
     {unavailable ? <p className="aihub_text_muted">Not available right now — open the full list.</p> : <>
       <div className="aihub_chart_total">{total.toLocaleString()}</div>
       <div className="aihub_chart_total_label">total</div>
       <div className="aihub_donut_wrap">
         <Donut segments={segments} label={`${title} — ${segments.map(s=>`${s.label}: ${s.value}`).join(", ")}`}/>
         <ul className="aihub_legend">
-          {segments.map(s=><li key={s.key}><span className="aihub_legend_dot" style={{background:s.color}}/>{s.label}</li>)}
+          {segments.map(s=><li key={s.key} onClick={s.onClick} style={s.onClick?{cursor:"pointer"}:undefined}><span className="aihub_legend_dot" style={{background:s.color}}/>{s.label}</li>)}
         </ul>
       </div>
     </>}
-  </ClickCard>);
+  </div>);
 }
 
 // One stacked bar: proportional widths for apps / MCP servers / coding agents /
@@ -459,18 +468,43 @@ function OverviewView() {
   const ev=Array.isArray(hiEv)?hiEv[0]:null;
   const noAutonomy=mcp===false&&proj===false;   // both endpoints failed — 0 would be a lie
 
+  // Each slice deep-links to Inventory pre-filtered to that exact value — the
+  // two donuts used to both just open the same unfiltered list regardless of
+  // where you clicked, which made clicking a specific slice pointless. Restricted
+  // has no filter of its own on the Inventory screen (it's grouped under
+  // "Unreviewed" there along with unknown), so it deep-links to the same
+  // status=unknown filter as Unknown does — that is genuinely where those rows
+  // surface, not a placeholder.
   const sanctionSegs=[
-    {key:"approved",label:"Approved",value:byStatus.approved||0,color:SANCTION_TONE.approved},
-    {key:"restricted",label:"Restricted",value:byStatus.restricted||0,color:SANCTION_TONE.restricted},
-    {key:"blocked",label:"Blocked",value:byStatus.blocked||0,color:SANCTION_TONE.blocked},
-    {key:"unknown",label:"Unknown",value:byStatus.unknown||0,color:SANCTION_TONE.unknown},
+    {key:"approved",label:"Approved",value:byStatus.approved||0,color:SANCTION_TONE.approved,onClick:()=>nav(`${OV_ROUTE.tools}&status=approved`)},
+    {key:"restricted",label:"Restricted",value:byStatus.restricted||0,color:SANCTION_TONE.restricted,onClick:()=>nav(`${OV_ROUTE.tools}&status=unknown`)},
+    {key:"blocked",label:"Blocked",value:byStatus.blocked||0,color:SANCTION_TONE.blocked,onClick:()=>nav(`${OV_ROUTE.tools}&status=blocked`)},
+    {key:"unknown",label:"Unknown",value:byStatus.unknown||0,color:SANCTION_TONE.unknown,onClick:()=>nav(`${OV_ROUTE.tools}&status=unknown`)},
   ];
-  const riskSegs=[
-    {key:"critical",label:"Critical",value:byRisk.critical||0,color:RISK_TONE.critical},
-    {key:"high",label:"High",value:byRisk.high||0,color:RISK_TONE.high},
-    {key:"medium",label:"Medium",value:byRisk.medium||0,color:RISK_TONE.medium},
-    {key:"low",label:"Low",value:byRisk.low||0,color:RISK_TONE.low},
-    {key:"not_assessed",label:"Not assessed",value:byRisk.not_assessed||0,color:RISK_TONE.not_assessed},
+  // A second "tools sliced a different way" donut still describes the exact same
+  // 260-system inventory as the sanction one — same total, same population, just
+  // grouped by a different column. This one is deliberately a different KIND of
+  // information: real activity (from DLP events, already fetched above for the
+  // severity chips), not another static inventory count. Top 5 services by event
+  // volume, the long tail folded into "Other" rather than a 20-slice donut.
+  const dlpServices=(dlp&&Array.isArray(dlp.byService))?[...dlp.byService].sort((a,b)=>(b.events||0)-(a.events||0)):[];
+  const SERVICE_TOP_N=5;
+  const topServices=dlpServices.slice(0,SERVICE_TOP_N);
+  const otherServiceEvents=dlpServices.slice(SERVICE_TOP_N).reduce((s,d)=>s+(d.events||0),0);
+  // Reuses this file's existing provider-brand hexes (ServerAgentsView's
+  // providerTone, CostTab's VENDOR_META) for the services that match a known
+  // vendor, rather than inventing new ones; "Other" reuses the same neutral gray
+  // the sanction/risk donuts already use for their own catch-all buckets.
+  const SERVICE_COLOR={chatgpt:"#10a37f",openai:"#10a37f",claude:"#D4622A",anthropic:"#D4622A",gemini:"#4285F4",google:"#4285F4",copilot:"#0078D4",microsoft:"#0078D4",perplexity:"#8b5cf6",cursor:"#6366f1"};
+  const FALLBACK_SERVICE_COLORS=["#10a37f","#D4622A","#4285F4","#8b5cf6","#6366f1"];
+  const colorForService=(name,i)=>{
+    const lower=(name||"").toLowerCase();
+    const hit=Object.keys(SERVICE_COLOR).find(k=>lower.includes(k));
+    return hit?SERVICE_COLOR[hit]:FALLBACK_SERVICE_COLORS[i%FALLBACK_SERVICE_COLORS.length];
+  };
+  const serviceSegs=[
+    ...topServices.map((s,i)=>({key:s.ai_service||`svc${i}`,label:s.ai_service||"Unknown",value:s.events||0,color:colorForService(s.ai_service,i),onClick:()=>nav(OV_ROUTE.dlp)})),
+    ...(otherServiceEvents>0?[{key:"other",label:"Other",value:otherServiceEvents,color:"#9ca3af",onClick:()=>nav(OV_ROUTE.dlp)}]:[]),
   ];
   const autonomySegs=[
     {key:"ai_app",label:"AI-using apps",value:cats.ai_app,color:AUTONOMY_TONE.ai_app},
@@ -536,14 +570,14 @@ function OverviewView() {
       </button>
     </div>
 
-    {/* One flat grid of six equal cards.
-        Previously a 2fr/1fr split: four cards in a wide main column and two in a
-        narrow side column, so no two cards on screen were the same width and the
-        rows did not line up either. A single 3-column grid with grid-auto-rows:1fr
-        makes all six identical in both dimensions. */}
+    {/* One flat grid of six equal cards — see AIHub.css for why (grid-auto-rows
+        makes every row as tall as its tallest card). The second donut is
+        "Activity by AI service", not another static inventory cut of the same
+        260 tools — two donuts describing the same population made clicking
+        a specific slice pointless, since both always opened the same list. */}
     <div className="aihub_ov_grid">
-      <DonutCard title="Tools by sanction" hint="Allow/block decision per AI system." segments={sanctionSegs} unavailable={reg===false} onClick={()=>nav(OV_ROUTE.tools)}/>
-      <DonutCard title="Tools by risk level" hint="Assessed risk per AI system." segments={riskSegs} unavailable={reg===false} onClick={()=>nav(OV_ROUTE.tools)}/>
+      <DonutCard title="Tools by sanction" hint="Allow/block decision per AI system. Click a slice to see just those tools." segments={sanctionSegs} unavailable={reg===false}/>
+      <DonutCard title="Activity by AI service" hint="Real usage this month, not another tool count. Click a slice to see the activity log." segments={serviceSegs} unavailable={dlp===false}/>
       <div className="aihub_card">
         <SectionHeader title="Needs attention" hint="Open items — each one opens where it is handled."/>
         {attn.length===0
@@ -552,16 +586,16 @@ function OverviewView() {
       </div>
       <AutonomyCard segments={autonomySegs} unavailable={noAutonomy} onClick={()=>nav(OV_ROUTE.agents)}/>
       <ClickCard title="Activity by severity" hint="Prompt and upload detections." onClick={()=>nav(OV_ROUTE.dlp)}>
-            {dlp===false
-              ? <p className="aihub_text_muted">Severity counts unavailable.</p>
-              : <div className="aihub_sev_chips">
-                  {["critical","high","medium","low"].map(k=>(
-                    <div key={k} className="aihub_sev_chip" style={{background:SEV_TONE[k]+"14",borderColor:SEV_TONE[k]+"30"}}>
-                      <span className="aihub_sev_num" style={{color:SEV_TONE[k]}}>{(sev[k]||0).toLocaleString()}</span>
-                      <span className="aihub_sev_label">{k}</span>
-                    </div>
-                  ))}
-                </div>}
+        {dlp===false
+          ? <p className="aihub_text_muted">Severity counts unavailable.</p>
+          : <div className="aihub_sev_chips">
+              {["critical","high","medium","low"].map(k=>(
+                <div key={k} className="aihub_sev_chip" style={{background:SEV_TONE[k]+"14",borderColor:SEV_TONE[k]+"30"}}>
+                  <span className="aihub_sev_num" style={{color:SEV_TONE[k]}}>{(sev[k]||0).toLocaleString()}</span>
+                  <span className="aihub_sev_label">{k}</span>
+                </div>
+              ))}
+            </div>}
       </ClickCard>
       <div className="aihub_card">
         <SectionHeader title="Quick links" hint="Frameworks and policy references."/>
@@ -851,7 +885,8 @@ function DLPView() {
         {label:"When",render:r=>relTime(r.occurred_at)},
         {label:"Service",render:r=><ServiceCell row={r}/>},
         {label:"Source",render:r=><Badge text={(r.source||"").replace(/_/g," ")} color={sourceTone[r.source]||"#9ca3af"}/>},
-        {label:"Kind",render:r=><Tag text={r.event_kind}/>},
+        {label:"Kind",render:r=><Tag text={eventKindLabel(r)}/>},
+        {label:"Filename",render:r=>r.metadata?.filename?<Mono>{r.metadata.filename}</Mono>:"—"},
         {label:"Pattern",render:r=><Mono>{r.pattern_matched||"—"}</Mono>},
         {label:"Severity",render:r=><SeverityBadge sev={r.secret_class||r.highest_severity}/>},
         {label:"",render:r=><ViewBtn has={r.has_content} onClick={()=>setPreview(r)}/>,right:true},
@@ -980,6 +1015,12 @@ function systemNote(m) {
 // Field resolvers. The session/message payloads are still settling on the server
 // side, so read the top-level column first and fall back to metadata — that way
 // the transcript keeps rendering whichever shape the API actually returns.
+// enforcement_block covers several distinct blocked_for reasons (a typed
+// prompt, a paste, an attached file) that all share the same event_kind —
+// distinguish them here rather than showing the raw internal kind string in
+// the Prompts & DLP table.
+const BLOCKED_FOR_LABELS={file_upload:"File upload blocked",prompt_submit:"Prompt blocked",prompt_paste:"Paste blocked",platform:"Platform blocked"};
+function eventKindLabel(r) { return r.event_kind==="enforcement_block" ? (BLOCKED_FOR_LABELS[r.metadata?.blocked_for]||"Blocked") : r.event_kind; }
 function msgMatches(m) { const x=m.matches??m.metadata?.matches; return Array.isArray(x)?x:[]; }
 function msgSeverity(m) { return m.secret_class||m.highest_severity||m.metadata?.highest_severity||m.severity||null; }
 function sessionSeverity(s) { return s.highest_severity||s.severity||s.secret_class||null; }
@@ -2942,22 +2983,43 @@ function RegistryToggle({ status, onChange, pending }) {
 // an inline expansion cannot.
 // ═══════════════════════════════════════════════════════════════════════════════
 function AIRegistryView() {
+  // ?status= / ?risk= let a link (e.g. Overview's sanction/risk donut slices)
+  // deep-link straight into a specific filtered view, instead of every link
+  // landing on the same unfiltered list regardless of what was clicked.
+  const [params]=useSearchParams();
   const [allItems,setAllItems]=useState(null);
   const [summary,setSummary]=useState(null);
   const [err,setErr]=useState(null);
   const [search,setSearch]=useState("");
-  const [filterStatus,setFilterStatus]=useState("");
+  const [filterStatus,setFilterStatus]=useState(()=>params.get("status")||"");
   const [filterType,setFilterType]=useState("");
   const [filterCategory,setFilterCategory]=useState("");
-  const [filterRisk,setFilterRisk]=useState("");
+  const [filterRisk,setFilterRisk]=useState(()=>params.get("risk")||"");
   // Ids currently mid-flight on an allow/block decision. The toggle's own
   // `status` prop doesn't change until loadAll() finishes re-fetching, so
   // without this a slow save looks identical to a click that did nothing —
   // and the natural response is to click again.
   const [pendingIds,setPendingIds]=useState(()=>new Set());
-  const [hideInactive,setHideInactive]=useState(true);
+  // A status/risk deep-link means someone wants to see exactly those rows right
+  // now — silently hiding the "unused" ones would defeat the click that brought
+  // them here (this was a real gap: a previous version left "hide unused" on
+  // even when arriving via an Unreviewed filter, and 2 of 3 unreviewed tools
+  // were invisible until it was unchecked by hand).
+  const [hideInactive,setHideInactive]=useState(()=>!(params.get("status")||params.get("risk")));
   const [selected,setSelected]=useState(null);
   const [showAdd,setShowAdd]=useState(false);
+
+  // The mount-time check above only covers arriving via a fresh link (e.g. an
+  // Overview donut slice). It missed the equally common case of picking a
+  // status/risk value from the dropdowns on THIS page after already being here
+  // — confirmed live: filtering to a specific risk level with "hide unused"
+  // still checked silently dropped a real, correctly-scoped row (a platform
+  // with zero captured activity), so the list read as "3 results" for a filter
+  // Overview correctly reported as 4. Re-running this on every change, not just
+  // once at mount, closes it for both paths.
+  useEffect(()=>{
+    if(filterStatus||filterRisk) setHideInactive(false);
+  },[filterStatus,filterRisk]);
 
   // Fetch ALL data once on mount — filter client-side for instant response.
   // Returns the promise chain (previously fire-and-forget) so a caller that
@@ -3091,7 +3153,14 @@ function AIRegistryView() {
     }
     if(filterType && systemTypeOf(r.category)!==filterType) return false;
     if(filterCategory && r.category!==filterCategory) return false;
-    if(filterRisk && r.risk_level!==filterRisk) return false;
+    if(filterRisk) {
+      // Rows with no assessed risk carry risk_level: null/undefined, never the
+      // literal string "not_assessed" — that string only exists as a display
+      // label. An exact-match filter would silently match zero rows for this
+      // option (which the Overview "Not assessed" donut slice deep-links to).
+      if(filterRisk==='not_assessed') { if(r.risk_level) return false; }
+      else if(r.risk_level!==filterRisk) return false;
+    }
     if(q && !(r.name||'').toLowerCase().includes(q) && !(r.vendor||'').toLowerCase().includes(q) && !(r.owner||'').toLowerCase().includes(q) && !(r.platform||'').toLowerCase().includes(q) && !(r.category||'').toLowerCase().includes(q)) return false;
     return true;
   }).sort((a,b)=>(b.activity?.total||0)-(a.activity?.total||0));
@@ -3148,6 +3217,7 @@ function AIRegistryView() {
         <option value="medium">Medium</option>
         <option value="high">High</option>
         <option value="critical">Critical</option>
+        <option value="not_assessed">Not assessed</option>
       </select>
       {/* "Show unused" checkbox and the results count both removed. The AI Systems
           stat card above still toggles hideInactive and shows the row count, so this
@@ -3739,18 +3809,7 @@ function SdkProjectsView() {
   const pk=reveal?.public_key||lastPk||"<their public_key>";
   const sk=reveal?.secret_key||"<their secret_key — shown once at creation>";
   const envBlock=`CF_AIGOV_URL=${origin}\nCF_AIGOV_PUBLIC_KEY=${pk}\nCF_AIGOV_SECRET_KEY=${sk}`;
-  // Where the unzipped folder is expected to sit, so the import path in step 4
-  // resolves. Kept as one string so the tree and the import can't drift apart.
-  const tree=`your-project/
-├─ ai-gov-sdk/          ← the folder you just downloaded
-│  ├─ src/index.js
-│  └─ examples/demo.mjs
-├─ your-app-code.js
-└─ package.json`;
-  // Relative import, not '@cloudfuze/ai-gov-sdk' — the package is not published,
-  // so the developer hand-places the folder from step 2 and imports it by path.
-  const snippet=`import { CloudFuzeTracer } from './ai-gov-sdk/src/index.js';
-// ^ adjust the number of ../ if your code file isn't in your project's root
+  const snippet=`import { CloudFuzeTracer } from '@cloudfuze/ai-gov-sdk';
 
 const tracer = new CloudFuzeTracer({
   baseUrl: process.env.CF_AIGOV_URL,
@@ -3875,37 +3934,25 @@ await tracer.flush();`;
 
     {/* ── How a developer connects ──────────────────────────────────────────
         A followable checklist, not a description: every step is something the
-        developer does, in order, and steps 3–4 fill themselves in with the real
+        developer does, in order, and steps 2–3 fill themselves in with the real
         keys the moment a project exists (placeholders before that). */}
     <div className="aihub_card">
-      <SectionHeader title="How a developer connects" hint="Six steps, in order — hand them to whoever owns the app. Steps 3 and 4 fill in with the real keys as soon as you create a project."/>
+      <SectionHeader title="How a developer connects" hint="Five steps, in order — hand them to whoever owns the app. Steps 2 and 3 fill in with the real keys as soon as you create a project."/>
 
       <ol role="list" style={{listStyle:"none",margin:"4px 0 0",padding:0,display:"flex",flexDirection:"column",gap:20}}>
 
-        {sdkStep(1,"Download the SDK",<>
-          {/* Root-relative on purpose: /api is proxied to the API server by the
-              Vite dev server and by nginx in the deploy. Prefixing the app's
-              /CloudFuze base path here would 404. No auth on this route, so a
-              plain anchor is enough — same shape as the Teams manifest link. */}
-          <a href={`${API}/sdk/download`} download="ai-gov-sdk.zip" className="aihub_dl_btn" style={{marginTop:0}}>
-            <Download size={14}/>Download SDK (.zip)
-          </a>
+        {sdkStep(1,"Download the SDK from npm",<>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>{copyBtn("install","npm install @cloudfuze/ai-gov-sdk")}</div>
+          <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>npm install @cloudfuze/ai-gov-sdk</pre>
           <p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,margin:"8px 0 0"}}>
-            Not published to npm yet — that&apos;s why you&apos;re downloading a folder directly
-            instead of running <Mono>npm install</Mono>.
+            Run this inside your project. npm fetches the SDK folder from{" "}
+            <a href="https://www.npmjs.com/package/@cloudfuze/ai-gov-sdk" target="_blank" rel="noreferrer">the published package</a>{" "}
+            and places it in <Mono>node_modules/@cloudfuze/ai-gov-sdk</Mono> — that is the download step,
+            there is nothing to unzip or move by hand.
           </p>
         </>)}
 
-        {sdkStep(2,"Put the folder in your project",<>
-          <p className="aihub_text_muted" style={{fontSize:12,lineHeight:1.65,margin:"0 0 8px"}}>
-            Unzip the download. You&apos;ll get a folder called <Mono>ai-gov-sdk</Mono>. Move that whole
-            folder into the root of your own project — the same folder that has your project&apos;s
-            <Mono> package.json</Mono> (or main file) in it. For example:
-          </p>
-          <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>{tree}</pre>
-        </>)}
-
-        {sdkStep(3,"Set these three values",<>
+        {sdkStep(2,"Set these three values",<>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>{copyBtn("env",envBlock)}</div>
           <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>{envBlock}</pre>
           {!reveal&&<p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,margin:"8px 0 0"}}>
@@ -3914,24 +3961,22 @@ await tracer.flush();`;
           </p>}
         </>)}
 
-        {sdkStep(4,"Add the tracer to your code",<>
+        {sdkStep(3,"Add the tracer to your code",<>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>{copyBtn("code",snippet)}</div>
           <pre className="aihub_content_pre" style={{fontSize:12,padding:12,margin:0}}>{snippet}</pre>
           <p className="aihub_text_muted" style={{fontSize:11.5,lineHeight:1.6,margin:"8px 0 0"}}>
-            The import path matches the folder location in step 2. Nothing is intercepted and nothing is
-            captured that the app does not pass in. Raw prompt and completion text is stored only for
-            projects created with content capture on; otherwise the server keeps masked previews only.
+            Nothing is intercepted and nothing is captured that the app does not pass in. Raw prompt and
+            completion text is stored only for projects created with content capture on; otherwise the
+            server keeps masked previews only.
           </p>
         </>)}
 
-        {sdkStep(5,"Run it",
+        {sdkStep(4,"Run it",
           <p className="aihub_text_muted" style={{fontSize:12,lineHeight:1.65,margin:0}}>
-            Run your app the way you normally do. If you just want to test with our sample app instead of
-            your own code, run the file at <Mono>ai-gov-sdk/examples/demo.mjs</Mono> the same way
-            (<Mono>node ai-gov-sdk/examples/demo.mjs</Mono>) with the same 3 values set.
+            Run your app the way you normally do, with the same 3 values set as environment variables.
           </p>)}
 
-        {sdkStep(6,"Confirm it worked",
+        {sdkStep(5,"Confirm it worked",
           <p className="aihub_text_muted" style={{fontSize:12,lineHeight:1.65,margin:0}}>
             Come back here, click the <strong>Traces</strong> tab, and select this project — you should see
             a new trace appear within a few seconds.

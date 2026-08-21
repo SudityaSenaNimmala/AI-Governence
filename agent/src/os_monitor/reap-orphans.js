@@ -1,9 +1,13 @@
-// Reaper for orphan poller/toast-helper PowerShell processes.
+// Reaper for orphan helper PowerShell processes.
 //
 // Called once at monitor startup (after we acquire the singleton lock and
 // before we spawn our own helpers). Kills any powershell.exe instances
 // running our scripts — they can only be orphans at this point, since the
 // lock guarantees no other --monitor agent is alive to own them.
+//
+// enforcer-win.ps1 is the one that MUST be reaped: it holds a system-wide
+// WH_KEYBOARD_LL hook that swallows keystrokes, so an orphan of it degrades
+// the whole machine's keyboard, not just our own monitoring.
 //
 // On non-Windows this is a no-op.
 
@@ -11,6 +15,22 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileP = promisify(execFile);
+
+// Helper scripts we own. Kept as a list (and exported) so it's testable and so
+// adding a helper is a one-line change that can't drift from the reaper.
+export const HELPER_SCRIPTS = [
+  'win-poller.ps1',
+  'toast-helper.ps1',
+  'file-dialog-watcher.ps1',
+  'attachment-watcher.ps1',
+  'enforcer-win.ps1',
+];
+
+// PowerShell -match pattern (a .NET regex source) matching any helper's
+// command line. Dots escaped so 'win-pollerXps1' can't match.
+export const HELPER_SCRIPT_PATTERN = HELPER_SCRIPTS
+  .map((s) => s.replace(/\./g, '\\.'))
+  .join('|');
 
 export async function reapOrphans({ log }) {
   if (process.platform !== 'win32') return;
@@ -22,7 +42,7 @@ export async function reapOrphans({ log }) {
     // PID per line on stdout for easy parsing.
     const psCommand = `
       Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
-        Where-Object { $_.CommandLine -match 'win-poller\\.ps1|toast-helper\\.ps1|file-dialog-watcher\\.ps1|attachment-watcher\\.ps1' } |
+        Where-Object { $_.CommandLine -match '${HELPER_SCRIPT_PATTERN}' } |
         ForEach-Object { $_.ProcessId }
     `;
     const { stdout } = await execFileP(

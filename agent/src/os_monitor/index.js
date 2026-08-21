@@ -13,13 +13,14 @@
 import { createPoller } from './poller-factory.js';
 import { createNotifier } from './notify-factory.js';
 import { AI_PROCESSES, identifyAiProcess, isAttachmentWatcherEligible } from './ai-processes.js';
-import { scan, lengthBucket, BLOCK_PATTERNS, getBlockPatterns } from './classifier.js';
+import { scan, lengthBucket, BLOCK_PATTERNS, getBlockPatterns, isTextReadable, isBinaryParseable, isImage, isArchive } from './classifier.js';
 import { PolicySync } from './policy-sync.js';
 import { buildFileUploadEvent } from './file-handler.js';
 import { FileDialogWatcher } from './file-dialog-watcher.js';
 import { AttachmentWatcher } from './attachment-watcher.js';
 import { PromptWatcher } from './prompt-watcher.js';
 import { Enforcer } from './enforcer.js';
+import { spawnEnforcerWatchdog } from './enforcer-watchdog.js';
 import { Reporter } from './reporter.js';
 
 // How long after firing a toast for a (clipboardSeq, processName) pair we
@@ -35,8 +36,13 @@ const FIRE_DEDUP_TTL_MS = 10_000;
 // owned by the browser extension (web apps) and the proxy (API/CLI traffic).
 
 export class OsMonitor {
-  constructor({ serverUrl, token, log }) {
+  // `enforcerEnabled` is the desktop app's "Keystroke enforcer" setting,
+  // plumbed through from Electron. False turns OFF only the active
+  // keystroke-blocking piece — every passive DLP watcher (clipboard, file
+  // dialogs, attachments, typed prompts) keeps running.
+  constructor({ serverUrl, token, log, enforcerEnabled = true }) {
     this.log = log;
+    this.enforcerEnabled = enforcerEnabled !== false;
     this.poller = createPoller({ log });
     this.reporter = new Reporter({ serverUrl, token, log });
     this.toast = createNotifier({ log });
@@ -49,7 +55,15 @@ export class OsMonitor {
     this.promptWatcher = new PromptWatcher({ log, aiProcessNames: aiProcNames });
     // Keystroke send-blocker — actually prevents the send (swallows Enter /
     // Ctrl+V) when the focused AI prompt or clipboard holds a blocked pattern.
-    this.enforcer = new Enforcer({ log, aiProcessNames: aiProcNames, blockPatterns: getBlockPatterns() });
+    this.enforcer = new Enforcer({
+      log,
+      aiProcessNames: aiProcNames,
+      blockPatterns: getBlockPatterns(),
+      enabled: this.enforcerEnabled,
+    });
+    // Detached sibling that releases the keyboard hook if THIS process is
+    // hard-killed. Handle kept so shutdown can reap it.
+    this.enforcerWatchdog = null;
     // Keeps desktop detection aligned with deployed compliance policy packs. When
     // the policy changes we must push the new rule set to the keystroke blocker
     // too — otherwise a pattern could be reported as critical while the blocker
@@ -57,13 +71,35 @@ export class OsMonitor {
     this.policySync = new PolicySync({
       serverUrl,
       log,
-      onChange: ({ blockPatterns }) => this.enforcer.updateBlockPatterns(blockPatterns),
+      onChange: ({ blockPatterns }) => {
+        // updateBlockPatterns restarts the helper; skip entirely when the
+        // enforcer is off so a policy poll can't start a hook the user
+        // disabled. (Enforcer.start() also refuses — this is the outer gate.)
+        if (!this.enforcerEnabled) return;
+        this.enforcer.updateBlockPatterns(blockPatterns);
+      },
     });
     this.currentFocus = null;  // { pid, process, title, aiInfo? }
     // Map<"seq|process", lastFiredAtMs> — used to suppress duplicate fires
     // when the user pastes the same clipboard contents repeatedly into the
     // same AI surface. Pruned periodically to bound memory.
     this.firedAt = new Map();
+    // Filename currently held (Enter/send-click swallowed) by the
+    // attachment-hold mechanism, or null. Single-slot by design for v1 — see
+    // the attachment_appeared handler's comments for the provisional/
+    // confirmed two-stage story; "more than one flagged attachment at once"
+    // is a known simplification, not yet handled per-file.
+    this.attachHoldFilename = null;
+    // Keeps a CONFIRMED attach hold alive past its own TTL for as long as the
+    // flagged file stays attached. attachment_appeared only fires once, on
+    // first appearance — it does NOT keep firing while a chip just sits
+    // there unchanged, so without an active refresh the hold silently
+    // expires (60s) even though the sensitive file never left the composer,
+    // and a send that should still be blocked goes through with no warning
+    // at all. Confirmed live: exactly this happened when enough real time
+    // passed between attaching a file and testing it (talking, reviewing a
+    // separate change) with the file never removed and re-attached.
+    this.attachHoldRefreshTimer = null;
     setInterval(() => this.#pruneFired(), 60_000).unref();
   }
 
@@ -71,6 +107,26 @@ export class OsMonitor {
     const cutoff = Date.now() - 2 * FIRE_DEDUP_TTL_MS;
     for (const [key, ts] of this.firedAt) {
       if (ts < cutoff) this.firedAt.delete(key);
+    }
+  }
+
+  // Re-sends attach_hold('on', ...) on an interval well inside the C# side's
+  // TTL, so a still-attached flagged file's hold never lapses on its own.
+  // One timer at a time (single-slot hold, matching attachHoldFilename) —
+  // starting a new one always clears whatever was running before.
+  #startAttachHoldRefresh(filename, patterns, ttlMs) {
+    this.#stopAttachHoldRefresh();
+    this.attachHoldRefreshTimer = setInterval(() => {
+      if (this.attachHoldFilename !== filename) { this.#stopAttachHoldRefresh(); return; }
+      this.enforcer.attachHold('on', { filename, patterns, ttlMs });
+    }, Math.max(5000, ttlMs / 3));
+    this.attachHoldRefreshTimer.unref?.();
+  }
+
+  #stopAttachHoldRefresh() {
+    if (this.attachHoldRefreshTimer) {
+      clearInterval(this.attachHoldRefreshTimer);
+      this.attachHoldRefreshTimer = null;
     }
   }
 
@@ -304,10 +360,28 @@ export class OsMonitor {
       if (!ev.path) {
         // Filename was visible but we couldn't resolve it to a file on disk.
         // Could be a remote URL, a recent-history label, or a path outside
-        // our search dirs. Skip — nothing to scan.
+        // our search dirs. Skip — nothing to scan, and arming a hold on a
+        // file we can't scan would be an unexplained permanent block, worse
+        // than the miss.
         this.log?.info(`attachment-watcher: filename "${ev.filename}" appeared in ${ai.product} but not found on disk`);
         return;
       }
+
+      // PROVISIONAL hold — armed BEFORE the scan below even starts, for any
+      // extension the classifier can actually scan. This is what wins the
+      // race against a fast Enter: the keystroke hook checks the hold flag
+      // at keypress time, so arming it now (µs) beats a slow PDF/OCR
+      // extraction (up to several seconds) that hasn't returned yet. A
+      // 3s TTL on the helper side means a crash here never leaves Enter
+      // permanently dead — see enforcer-win.ps1's CheckAttachHoldExpiry.
+      // Not armed for unscannable extensions (media, unknown types) — same
+      // "don't block what we can't explain" reasoning as the !ev.path case.
+      const scannable = isTextReadable(ev.filename) || isBinaryParseable(ev.filename) || isImage(ev.filename) || isArchive(ev.filename);
+      if (scannable) {
+        this.attachHoldFilename = ev.filename;
+        this.enforcer.attachHold('on', { filename: ev.filename, patterns: '', ttlMs: 3000 });
+      }
+
       try {
         const fileEvent = await buildFileUploadEvent({
           path: ev.path,
@@ -318,7 +392,38 @@ export class OsMonitor {
           windowTitle: '',
           log: this.log,
         });
-        if (!fileEvent) return;
+        if (!fileEvent) {
+          if (scannable && this.attachHoldFilename === ev.filename) {
+            this.attachHoldFilename = null;
+            this.#stopAttachHoldRefresh();
+            this.enforcer.attachHold('off', { filename: ev.filename });
+          }
+          return;
+        }
+
+        // CONFIRMED hold — only high/critical, matching the browser
+        // extension's existing file-upload block threshold. A longer TTL
+        // than the provisional one, and — unlike the provisional hold —
+        // actively kept alive by #startAttachHoldRefresh for as long as the
+        // attachment stays present, since this is a real finding that must
+        // survive until the file actually disappears, not expire on its own.
+        const cs = fileEvent.content_scan;
+        const severity = fileEvent.severity;
+        const shouldHold = severity === 'high' || severity === 'critical';
+        if (shouldHold) {
+          const patternNames = (cs?.matches || []).map((m) => m.pattern).join(',') || fileEvent.file_class;
+          this.attachHoldFilename = ev.filename;
+          const ttlMs = 60_000;
+          this.enforcer.attachHold('on', { filename: ev.filename, patterns: patternNames, ttlMs });
+          this.#startAttachHoldRefresh(ev.filename, patternNames, ttlMs);
+        } else if (this.attachHoldFilename === ev.filename) {
+          // Scan came back clean (or below the hold threshold) — release the
+          // provisional hold armed above rather than letting it ride out its
+          // TTL with the send needlessly stuck for up to 3 more seconds.
+          this.attachHoldFilename = null;
+          this.#stopAttachHoldRefresh();
+          this.enforcer.attachHold('off', { filename: ev.filename });
+        }
         const dedupKey = `file|${ev.path}|${ev.process}`;
         const lastFired = this.firedAt.get(dedupKey) ?? 0;
         if (Date.now() - lastFired < FIRE_DEDUP_TTL_MS) {
@@ -327,7 +432,6 @@ export class OsMonitor {
         }
         this.firedAt.set(dedupKey, Date.now());
         this.reporter.enqueue(fileEvent);
-        const cs = fileEvent.content_scan;
         const matchCount = cs?.matchCount || 0;
         this.log?.info(
           `os_monitor: attachment chip → ${ai.product} — ${fileEvent.filename} ` +
@@ -348,6 +452,21 @@ export class OsMonitor {
       } catch (err) {
         this.log?.warn(`os_monitor: attachment event build failed: ${err?.message || err}`);
       }
+    });
+
+    // Release a hold when the flagged chip itself disappears (removed by the
+    // user, or — a known limitation, see attachment-watcher.ps1's own
+    // comment — scrolled out of the UIA tree in a long chat). Best-effort:
+    // if this fires wrongly for a still-present file, the next
+    // attachment_appeared poll tick will just re-observe it and re-arm.
+    // Guarded on filename match so an unrelated file's disappearance can't
+    // release a hold armed for a DIFFERENT, still-present flagged file.
+    this.attachmentWatcher.on('attachment_disappeared', (ev) => {
+      if (this.attachHoldFilename !== ev.filename) return;
+      this.attachHoldFilename = null;
+      this.#stopAttachHoldRefresh();
+      this.enforcer.attachHold('off', { filename: ev.filename });
+      this.log?.info(`os_monitor: attachment "${ev.filename}" removed — send hold released`);
     });
 
     // UIA typed-prompt watcher — reads what the user TYPES into an AI app's
@@ -428,13 +547,16 @@ export class OsMonitor {
       const ai = identifyAiProcess(ev.process) || { product: ev.process, vendor: null };
       const patterns = (ev.patterns || '').split(',').filter(Boolean);
       const matches = patterns.map((p) => ({ pattern: p, severity: 'high', count: 1 }));
-      // reason: 'send' (Enter) | 'paste' (Ctrl+V) | 'click' (send button).
-      const reason = ev.reason === 'paste' ? 'prompt_paste' : 'prompt_submit';
-      const how = ev.reason === 'paste' ? 'paste' : ev.reason === 'click' ? 'send-button click' : 'send';
+      const isAttachment = ev.reason === 'attachment';
+      // reason: 'send' (Enter) | 'paste' (Ctrl+V) | 'click' (send button) | 'attachment' (sensitive file attached).
+      const reason = isAttachment ? 'file_upload' : ev.reason === 'paste' ? 'prompt_paste' : 'prompt_submit';
+      const how = isAttachment ? `attachment "${ev.filename}"` : ev.reason === 'paste' ? 'paste' : ev.reason === 'click' ? 'send-button click' : 'send';
       this.reporter.enqueue({
         kind: 'enforcement_block',
         blocked_for: reason,
-        mechanism: 'keystroke_block',
+        mechanism: isAttachment ? 'attachment_hold' : 'keystroke_block',
+        blocked_by: isAttachment ? 'attachment_hold' : undefined,
+        filename: isAttachment ? ev.filename : undefined,
         source: 'os_monitor_enforcer',
         service: ai.product,
         vendor: ai.vendor,
@@ -443,11 +565,76 @@ export class OsMonitor {
         highest_severity: 'high',
       });
       this.log?.info(`os_monitor: BLOCKED ${how} into ${ai.product} — [${ev.patterns}]`);
-      if (this.#shouldFire(`enf|${ev.process}|${ev.patterns}`)) {
-        this.toast.show({
+      if (this.#shouldFire(`enf|${ev.process}|${ev.patterns}|${ev.filename || ''}`)) {
+        // Honest framing per the design decision: this stops the MESSAGE,
+        // not necessarily the upload — several chat apps upload an attached
+        // file to the vendor's backend the instant it's attached, well
+        // before Send. Never imply the bytes never left the machine.
+        this.toast.show(isAttachment ? {
+          title: `${ai.product} - attachment blocked`,
+          message: `Send blocked: "${ev.filename}" contains ${ev.patterns}\n` +
+            `Remove the attachment to send. If the app already uploaded it on attach, this only stops it from being used in the conversation.`,
+        } : {
           title: `${ai.product} - BLOCKED`,
           message: `Send blocked: prompt contains ${ev.patterns}\n` +
             `Remove the sensitive data to send. Override (logged): Ctrl+Alt+Enter.`,
+        });
+      }
+      // Structured relay for the Electron dialog — separate from the plain-text
+      // log line above, which main.js's regex-scraper cannot parse reliably.
+      // block_id/rewritable/preview travel ONLY on this line, never through
+      // log.* (see notify.js/enforcer-win.ps1's "never log content" discipline).
+      console.log('@@CFAI-BLOCK ' + JSON.stringify({
+        app: ai.product, patterns: ev.patterns, block_id: ev.block_id || '',
+        rewritable: !!ev.rewritable, preview: ev.preview || '', why_not: ev.why_not || '',
+        reason: ev.reason || '', filename: ev.filename || '',
+      }));
+    });
+
+    // Tier B mask-and-rewrite result. 'ok' means the composer was verified to
+    // hold exactly the masked text before Enter was synthesized — report it
+    // the same way the browser extension's Tokenize & Send reports
+    // enforcement_redact, masked content only, original never sent here.
+    this.enforcer.on('rewrite', (ev) => {
+      console.log('@@CFAI-REWRITE ' + JSON.stringify(ev));
+      if (ev.result !== 'ok') return;
+      this.reporter.enqueue({
+        kind: 'enforcement_redact',
+        mechanism: 'keystroke_rewrite',
+        source: 'os_monitor_enforcer',
+        decision_for: ev.block_id,
+        sent: true,
+      });
+      this.log?.info(`os_monitor: TOKENIZED + sent — block_id=${ev.block_id}`);
+    });
+
+    // Smart Model Router (desktop). Reported for every attempt, not just
+    // successful ones — a route that silently stopped working (e.g. after a
+    // target app's UI redesign) is the main operational risk, mirrored on
+    // ui_changed so the dashboard can distinguish an actual switch from an
+    // observed-but-not-applied decision. No prompt content ever travels on
+    // this event: only an enum result, tier names, a public model label, and
+    // a length — see enforcer-win.ps1's UpdateModelRouting/RunRoute.
+    this.enforcer.on('route', (ev) => {
+      console.log('@@CFAI-ROUTE ' + JSON.stringify(ev));
+      const ai = identifyAiProcess(ev.process) || { product: ev.process, vendor: null };
+      this.reporter.enqueue({
+        kind: 'model_routed',
+        mechanism: 'keystroke_route',
+        source: 'os_monitor_enforcer',
+        service: ai.product,
+        vendor: ai.vendor,
+        routed_ui_name: ev.to_label || null,
+        complexity: ev.complexity || null,
+        current_tier: ev.from_tier || null,
+        provider: ev.provider || null,
+        ui_changed: ev.result === 'ok',
+      });
+      this.log?.info(`os_monitor: model route ${ev.result} — ${ai.product} ${ev.from_tier}->${ev.to_tier} (${ev.complexity})`);
+      if (ev.result === 'ok' && this.#shouldFire(`route|${ev.process}`)) {
+        this.toast.show({
+          title: `${ai.product} - model routed`,
+          message: `Switched to ${ev.to_label} for this message (${ev.complexity} prompt).`,
         });
       }
     });
@@ -472,10 +659,22 @@ export class OsMonitor {
     this.dialogWatcher.start();
     this.attachmentWatcher.start();
     this.promptWatcher.start();
-    this.enforcer.start();
+
+    if (this.enforcerEnabled) {
+      this.enforcer.start();
+      // Spawn the watchdog alongside the enforcer — and only alongside it.
+      // Nothing else in the monitor installs a keyboard hook, so there is
+      // nothing for it to reap when the enforcer is off.
+      this.enforcerWatchdog = spawnEnforcerWatchdog({ parentPid: process.pid, log: this.log });
+    } else {
+      this.log?.info('os_monitor: keystroke enforcer disabled by settings — passive DLP watchers still active');
+    }
 
     if (process.platform === 'win32') {
-      this.log?.info('os_monitor: started (clipboard text + files + dialogs + drag-drop chips + typed prompts + keystroke send-blocker)');
+      this.log?.info(
+        'os_monitor: started (clipboard text + files + dialogs + drag-drop chips + typed prompts' +
+        (this.enforcerEnabled ? ' + keystroke send-blocker)' : '; keystroke send-blocker OFF)')
+      );
     } else {
       this.log?.info(
         `os_monitor: started on ${process.platform} ` +
@@ -484,12 +683,25 @@ export class OsMonitor {
     }
   }
 
+  /** Relay a Tokenize click from the Electron dialog down to the enforcer. */
+  tokenize(blockId) {
+    return this.enforcer.tokenize(blockId);
+  }
+
   stop() {
+    this.#stopAttachHoldRefresh();
     this.poller.stop();
     this.dialogWatcher.stop();
     this.attachmentWatcher.stop();
     this.promptWatcher.stop();
+    // Order matters: stop the enforcer (kills the helper, clears the pid +
+    // heartbeat files) BEFORE reaping the watchdog, so the watchdog has
+    // nothing left to act on and exits without killing anything.
     this.enforcer.stop();
+    if (this.enforcerWatchdog) {
+      try { this.enforcerWatchdog.kill(); } catch {}
+      this.enforcerWatchdog = null;
+    }
     this.policySync.stop();
     this.reporter.stop();
     this.toast.stop();

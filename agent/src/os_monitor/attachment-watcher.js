@@ -78,6 +78,9 @@ export class AttachmentWatcher extends EventEmitter {
       case 'attachment_appeared':
         this.emit('attachment_appeared', ev);
         break;
+      case 'attachment_disappeared':
+        this.emit('attachment_disappeared', ev);
+        break;
       case 'heartbeat':
         break;
       case 'error':

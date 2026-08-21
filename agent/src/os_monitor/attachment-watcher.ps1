@@ -17,6 +17,7 @@
 # Output schema (NDJSON on stdout):
 #   {"kind":"ready","ai_processes":[...]}
 #   {"kind":"attachment_appeared","process":"ChatGPT","filename":"foo.csv","path":"C:\\...\\foo.csv"}
+#   {"kind":"attachment_disappeared","process":"ChatGPT","filename":"foo.csv"}
 #   {"kind":"heartbeat"}
 #   {"kind":"error","message":"..."}
 
@@ -163,6 +164,23 @@ while ($true) {
                             filename = $name
                             path     = $null
                         }
+                    }
+                }
+            }
+            # A filename that was present last tick and is gone this tick —
+            # the user removed the attachment (or it scrolled out of the UIA
+            # tree, a known false-disappear risk in a long chat; the Node
+            # side's attachment-hold consumer treats this as best-effort
+            # release, not proof the file is truly gone, since a stale hold
+            # auto-expires via its own TTL regardless).
+            foreach ($name in $prev) {
+                if (-not $current.Contains($name)) {
+                    Emit-Json @{
+                        t        = (Get-Date).ToUniversalTime().ToString('o')
+                        kind     = 'attachment_disappeared'
+                        process  = $fg.Process
+                        pid      = $fg.Pid
+                        filename = $name
                     }
                 }
             }

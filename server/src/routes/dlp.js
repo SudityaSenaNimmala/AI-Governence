@@ -152,6 +152,17 @@ export function mountDlp(app, db) {
             length_bucket: e.length_bucket,
             highest_severity: e.highest_severity,
             tab_host: e.tabHost,
+            // blocked_for/filename/blocked_by: enforcement_block/override
+            // events for a file attachment (browser extension's existing
+            // content-based file block, and the desktop attachment-hold
+            // feature) — both were being silently dropped here, since this
+            // catch-all branch only had prompt-shaped fields. undefined
+            // values are omitted by JSON.stringify, so this is a no-op for
+            // every other kind that lands in this branch (prompt_submit,
+            // enforcement_disarmed, etc.).
+            blocked_for: e.blocked_for,
+            filename: e.filename,
+            blocked_by: e.blocked_by,
           },
         ),
         received_at: new Date(),

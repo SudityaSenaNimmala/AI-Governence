@@ -151,6 +151,15 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   AI-site page could inject markup into our own model-routing toast. Fix: build the
   page-derived model name with `textContent`, not string-concatenated `innerHTML`.
 
+- [ ] **Fix substring false-positives in detectModelInfo's tier keyword matching**
+  `detectModelInfo` (browser-extension/content/content.js) matches provider/tier keywords
+  via plain substring `.includes()`, so "Gemini" contains "mini" (misdetected as OpenAI
+  economy tier, checked before the Google rules ever run) and "prompt"/"professional"/etc.
+  contain "pro" (misdetected as Google premium tier). Found while porting this logic to the
+  desktop model router (agent/src/os_monitor/enforcer-win.ps1), which faithfully replicates
+  the same bug for parity — fixing it here should be mirrored there too. Needs word-boundary
+  matching or a stricter token check instead of raw substring search.
+
 ---
 
 ## P2 — enterprise distribution
@@ -227,6 +236,18 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   (what counts as a "simple" vs "complex" prompt for Smart Model Router) are hardcoded
   in the extension. Needs a settings screen so an admin can tune routing behavior
   per tenant without a code change.
+
+- [ ] **Tokenize & Send support for IDE apps (Cursor/VSCode/Copilot)**
+  The desktop enforcer's mask-and-auto-send flow (`enforcer-win.ps1`) excludes
+  `_ideApps` from UIA-based masking entirely, since UIA in an IDE reads code/
+  terminal content, not a single composer field. IDE users blocked for a
+  sensitive paste currently have no Tokenize & Send option at all.
+
+- [ ] **Tokenize & Send support for multi-line prompts**
+  `ComputeMaskCandidate` in `enforcer-win.ps1` rejects any composer text
+  containing `\n`/`\r` as unmaskable ("multiline"), so a blocked multi-line
+  prompt always falls back to "remove it yourself and resend" with no
+  Tokenize & Send option.
 
 ---
 

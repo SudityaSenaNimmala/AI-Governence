@@ -49,7 +49,7 @@
     { name: 'us-ssn',             class: 'pii',       regex: /\b\d{3}-\d{2}-\d{4}\b/g,                                 severity: 'critical' },
     { name: 'credit-card',        class: 'pii',       regex: /\b(?:\d[ -]*?){13,16}\b/g,                               severity: 'high', validate: luhnCheck },
     { name: 'iban',               class: 'pii',       regex: /\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b/g,                      severity: 'high'     },
-    { name: 'us-phone',           class: 'pii',       regex: /\b(?:\+?1[ -]?)?\(?[2-9]\d{2}\)?[ -]?\d{3}[ -]?\d{4}\b/g, severity: 'low'      },
+    { name: 'us-phone',           class: 'pii',       regex: /\b(?:\+?1[ -]?)?\(?[2-9]\d{2}\)?[ -]?\d{3}[ -]?\d{4}\b/g, severity: 'high'     },
 
     // ----- internal hints (customize per organization) -----
     { name: 'cloudfuze-customer-id', class: 'internal', regex: /\bCF-CUST-[A-Z0-9]{6,}\b/g,                            severity: 'high'     },

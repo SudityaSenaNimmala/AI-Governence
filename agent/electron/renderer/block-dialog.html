@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Sensitive prompt blocked</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    /* This page IS the dialog — no overlay/backdrop needed, the whole
+       (frameless, non-activating) window is sized to fit it exactly. */
+    html, body { margin: 0; padding: 0; background: transparent; }
+    .block-dialog { width: 100%; box-sizing: border-box; box-shadow: none; }
+  </style>
+</head>
+<body>
+  <div class="block-dialog" id="dialog-root"></div>
+  <script src="block-dialog.js"></script>
+</body>
+</html>

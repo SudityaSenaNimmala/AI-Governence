@@ -11,6 +11,7 @@ import { createLogger } from '../src/util/logger.js';
 import { OsMonitor } from '../src/os_monitor/index.js';
 import { acquireMonitorLock, releaseMonitorLock } from '../src/os_monitor/lock.js';
 import { reapOrphans } from '../src/os_monitor/reap-orphans.js';
+import { enforcerEnabledFromEnv } from '../src/os_monitor/settings-env.js';
 
 const CRED_PATH = join(homedir(), '.cloudfuze-aigov', 'credentials.json');
 
@@ -39,13 +40,43 @@ log.info(`Acquired singleton lock (pid=${process.pid})`);
 
 await reapOrphans({ log: log.child('reap-orphans') });
 
+// Electron passes the "Keystroke enforcer" checkbox down as CFAI_ENFORCER_ENABLED.
+// Unset (agent launched from the CLI) means enabled, as before.
+const enforcerEnabled = enforcerEnabledFromEnv(process.env);
+if (!enforcerEnabled) {
+  log.info('Keystroke enforcer disabled in settings — passive DLP watchers only.');
+}
+
 const monitor = new OsMonitor({
   serverUrl: creds.serverUrl,
   token: creds.token,
   log: log.child('os_monitor'),
+  enforcerEnabled,
 });
 monitor.start();
 log.info('Monitor running. Ctrl+C to stop.');
+
+// Control channel from Electron main (ultimately the block dialog's Tokenize
+// button). The only accepted message is {cmd:"tokenize", block_id} — relayed
+// straight through to the enforcer, which independently validates the id
+// against its own pinned state. No text ever flows down this path.
+let stdinBuf = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  stdinBuf += chunk;
+  let idx;
+  while ((idx = stdinBuf.indexOf('\n')) >= 0) {
+    const line = stdinBuf.slice(0, idx).trim();
+    stdinBuf = stdinBuf.slice(idx + 1);
+    if (!line) continue;
+    try {
+      const msg = JSON.parse(line);
+      if (msg.cmd === 'tokenize' && msg.block_id) {
+        monitor.tokenize(msg.block_id);
+      }
+    } catch { /* ignore malformed input */ }
+  }
+});
 
 // ── Blocked agents poller ──────────────────────────────────────────────────
 // Polls the server's blocked-agents list and writes it to a local JSON file.

@@ -18,9 +18,16 @@
 //           false avoids spurious "attachment_appeared" events for files
 //           the user is just editing.
 //
-// Apps with successful asar injection (Claude Desktop, Cursor) are also
-// usually false, because the in-app hook handles file uploads via DOM
-// events and the OS-level watcher would just double-fire.
+// NOTE: do not set this false on the assumption that "the asar-injected
+// hook handles it instead" — confirmed live (2026-08) that ASAR integrity
+// enforcement on current desktop builds of Claude blocks that injection
+// entirely, so the hook never runs. Only Cursor (genuine continuous file
+// exposure via its IDE UI) and GitHub Copilot (runs as a VS Code plugin, not
+// a standalone window this catalog can even key on) have a real reason to
+// stay false; each needs its own investigation before flipping, not a blind
+// flip — an IDE's tab-strip/file-tree filenames are NOT "genuinely attached
+// to an AI prompt," and firing attachment_appeared for every file a user
+// opens while coding would be a false positive, not a coverage improvement.
 // `unhookableSandbox`: should the OS monitor scrub the clipboard for this
 // app when a high/critical pattern is detected?
 //
@@ -37,11 +44,28 @@
 export const AI_PROCESSES = [
   // ChatGPT Desktop (Microsoft Store) — sandboxed, no asar injection possible,
   // and pins TLS certs (confirmed 2026-05-20 via ERR_SSL_SSLV3_ALERT_CERTIFICATE_UNKNOWN).
-  // Clipboard scrub is the only enforcement mechanism that works.
-  { match: /^chatgpt$/i,         product: 'ChatGPT',           vendor: 'OpenAI',     useAttachmentWatcher: true,  unhookableSandbox: true  },
+  // unhookableSandbox only gates the (now-removed) clipboard-scrub path — the
+  // keyboard-hook enforcer still applies to this app, since it intercepts input
+  // at the OS level regardless of app-level sandboxing.
+  { match: /^chatgpt$/i,          product: 'ChatGPT',           vendor: 'OpenAI',     useAttachmentWatcher: true,  unhookableSandbox: true  },
+  // Some installs of the same app run under the process name "ChatGPT Classic"
+  // instead of "ChatGPT" (confirmed 2026-08-13 via tasklist) — index.js turns
+  // each `match` regex into one literal process name for an exact-match
+  // HashSet downstream (enforcer-win.ps1), so name variants need their own
+  // entry rather than a regex alternation.
+  { match: /^chatgpt classic$/i,  product: 'ChatGPT',           vendor: 'OpenAI',     useAttachmentWatcher: true,  unhookableSandbox: true  },
 
-  // Claude Desktop — asar-hooked, scrub would just duplicate the modal block.
-  { match: /^claude$/i,          product: 'Claude',            vendor: 'Anthropic',  useAttachmentWatcher: false, unhookableSandbox: false },
+  // Claude Desktop — a pure chat app (no continuously-visible file list the
+  // way an IDE has), so it fits the `useAttachmentWatcher: true` case same as
+  // ChatGPT/Comet/Gemini below. Previously false on the assumption that the
+  // asar-injected desktop hook covers file uploads via DOM events instead —
+  // confirmed live (2026-08) that ASAR integrity enforcement on current
+  // Claude Desktop builds blocks that injection entirely, so the hook never
+  // actually runs. Leaving this false meant Claude Desktop file uploads got
+  // NO content scanning at all — neither path was active. No scrub (below):
+  // scrub is for apps with no other way to block a paste; the keystroke
+  // enforcer already covers Claude at the OS level regardless of this flag.
+  { match: /^claude$/i,          product: 'Claude',            vendor: 'Anthropic',  useAttachmentWatcher: true,  unhookableSandbox: false },
 
   // Cursor IDE — asar-targeted (different bundling but coverable via proxy
   // for API calls). No scrub.
