@@ -17,7 +17,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { loadSurfaceScope, el, doc } from './load-surface-scope.mjs';
+import { loadSurfaceScope, el, doc, contentSource } from './load-surface-scope.mjs';
 
 // A Gmail-shaped page: an ordinary mail composer, and optionally the Gemini panel.
 function gmailPage({ geminiOpen = false, geminiVisible = true } = {}) {
@@ -195,4 +195,20 @@ test('a malformed selector is skipped rather than throwing', () => {
   page.querySelectorAll = (sel) => { if (sel.includes('[[[')) throw new Error('bad selector'); return []; };
   const s = loadSurfaceScope('example.com', page, synced);
   assert.equal(s.captureAllowed(box), false);   // fails closed, does not crash
+});
+
+// ── Routing must never run on an embedded-AI host ───────────────────────────
+//
+// Reported live: with the Gemini panel open in Gmail, pressing any button showed a
+// "Model Routed" toast and the button did nothing. Routing pauses the event with
+// preventDefault() and then clicks around hunting for a model label — on a host
+// app that means hijacking that app's own buttons. These panels have no model
+// picker to switch, so there is nothing to gain and a working app to break.
+//
+// Asserted against the shipped source, because the guard sits in the send path
+// rather than in the sliced region.
+test('the send path refuses to route on an embedded-AI host', () => {
+  const src = contentSource();
+  assert.match(src, /if \(!_skipRouting && !IS_EMBEDDED_AI\)/,
+    'the routing block is no longer guarded by IS_EMBEDDED_AI — Gmail buttons will break again');
 });

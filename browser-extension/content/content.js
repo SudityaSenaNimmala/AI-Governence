@@ -1058,7 +1058,14 @@
     if (t.includes('haiku'))  return { provider: 'anthropic', tier: 'economy' };
 
     // OpenAI — order matters: "mini" before "4o", "o1/o3/o4" are premium
-    if (t.includes('mini') || t.includes('3.5') || t.includes('nano'))  return { provider: 'openai', tier: 'economy' };
+    // WORD-BOUNDED, and this is not a nicety. A bare substring test for "mini"
+    // matches "geMINI" — so every Gemini surface was read as OpenAI economy, and
+    // routing then hunted for OpenAI's labels on a Google page. Live symptom: on
+    // Gmail with the Gemini panel open, an element reading "AskGeminiViewAnswer"
+    // was taken for the model button, classified openai/economy, and "upgraded"
+    // to GPT-4o. \b still matches the spellings that matter — "GPT-4o mini",
+    // "gpt-4o-mini", "o4-mini" — because a hyphen and a space are both boundaries.
+    if (/\bmini\b/.test(t) || t.includes('3.5') || /\bnano\b/.test(t)) return { provider: 'openai', tier: 'economy' };
     if (t.includes('4o') || t.includes('4.1'))                          return { provider: 'openai', tier: 'standard' };
     if (t.includes('gpt-4') || t.includes('gpt4'))                      return { provider: 'openai', tier: 'premium' };
     if (/\bo[1-9]/.test(t))                                             return { provider: 'openai', tier: 'premium' };
@@ -3450,7 +3457,17 @@
       // 1. Try to change the model in the UI (visible to user)
       // 2. Always set fetch-blocker backup (guarantees the API call uses the right model)
       // 3. Pause the send → change model → re-send
-      if (!_skipRouting) {
+      // NEVER ROUTE ON AN EMBEDDED-AI HOST. Routing pauses the event with
+      // preventDefault(), then clicks around the page hunting for a model label —
+      // which on a host app means hijacking that app's own buttons. Live symptom:
+      // with the Gemini panel open in Gmail, pressing any button showed a "Model
+      // Routed" toast and the button did nothing, because the send was paused and
+      // the router was clicking Gmail's UI looking for "GPT-4o".
+      //
+      // These panels have no model picker to switch anyway: the tier tables in
+      // PLATFORM_TIERS cover dedicated AI products, not an assistant embedded in a
+      // mail client. So there is nothing to gain here and a working app to break.
+      if (!_skipRouting && !IS_EMBEDDED_AI) {
         const currentModelText = (getModelButton()?.textContent || '').trim();
         const routing = smartRoute(currentModelText, text);
         if (routing) {
