@@ -209,7 +209,13 @@ test('a malformed selector is skipped rather than throwing', () => {
 // rather than in the sliced region.
 test('the send path refuses to route on an embedded-AI host', () => {
   const src = contentSource();
-  assert.match(src, /if \(!_skipRouting && !IS_EMBEDDED_AI\)/,
+  // Asserts the PROPERTY, not the exact expression. The first version pinned
+  // `if (!_skipRouting && !IS_EMBEDDED_AI)` verbatim and broke the moment a
+  // feature-flag condition was legitimately appended to the same line — a test
+  // failing on a correct change is worse than no test.
+  const guard = src.split(/\r?\n/).find((l) => l.includes('!_skipRouting'));
+  assert.ok(guard, 'the routing guard line is gone entirely');
+  assert.ok(guard.includes('!IS_EMBEDDED_AI'),
     'the routing block is no longer guarded by IS_EMBEDDED_AI — Gmail buttons will break again');
 });
 
