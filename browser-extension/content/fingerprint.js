@@ -307,7 +307,7 @@
           return;
         }
         const v = resp.verdict;
-        if (v?.should_govern) showGovernanceBanner(v);
+        if (v?.should_govern) announceGovernance(v);
       },
     );
   }
@@ -347,10 +347,77 @@
           // discovery + classification layer only. Annotate the page so the
           // user knows it's being governed (small banner — invisible if the
           // existing content script already handles this site).
-          showGovernanceBanner(v);
+          announceGovernance(v);
         }
       },
     );
+  }
+
+  // ── When to tell the user they are governed ───────────────────────────────
+  //
+  // The banner used to appear the moment the HOST verdict said govern. On a
+  // dedicated AI site that is right. On a SaaS app where AI is one panel it was
+  // wrong and alarming: opening your Gmail inbox popped "governed by CloudFuze"
+  // while you read ordinary mail, implying the mail itself was being watched.
+  //
+  // The notice now follows exactly the rule capture follows (lib/ai-surfaces.js):
+  // on an embedded-AI host it appears only when an AI panel is actually open. It
+  // has to be REACTIVE, because a side panel is opened minutes after page load —
+  // announcing at load time and never again would mean the notice was either
+  // premature or absent.
+  //
+  // The two must agree in both directions. A notice with no capture is a false
+  // alarm; capture with no notice is worse. Both read the same selectors, served
+  // from the same module.
+  const EMBEDDED = 'embedded_ai';
+
+  function panelsVisible(selectors) {
+    for (const sel of selectors) {
+      let found;
+      try { found = document.querySelectorAll(sel); } catch (e) { continue; }
+      for (const el of found) {
+        // A collapsed side panel is still in the DOM; it is not open.
+        if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) continue;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function announceGovernance(v) {
+    const selectors = Array.isArray(v.panel_selectors) ? v.panel_selectors : [];
+
+    // Whole-site AI product: unchanged, announce immediately.
+    if (v.surface_scope !== EMBEDDED) { showGovernanceBanner(v); return; }
+
+    // Scoped host, but we do not know what its AI panel looks like. Stay silent:
+    // capture is gated by the same unknown, so there is nothing to announce.
+    if (selectors.length === 0) return;
+
+    if (panelsVisible(selectors)) { showGovernanceBanner(v); return; }
+
+    // Wait for the panel to open. Debounced, because a mail app mutates its DOM
+    // constantly and this observer would otherwise run a selector sweep on every
+    // keystroke. Disconnects as soon as it fires — the banner is once per page.
+    let timer = null;
+    let done = false;
+    const obs = new MutationObserver(() => {
+      if (done || timer) return;
+      timer = setTimeout(() => {
+        timer = null;
+        if (done) return;
+        if (panelsVisible(selectors)) {
+          done = true;
+          obs.disconnect();
+          showGovernanceBanner(v);
+        }
+      }, 400);
+    });
+    try {
+      obs.observe(document.documentElement, { childList: true, subtree: true });
+    } catch (e) {
+      // Nothing to observe (detached document) — no notice, and no capture either.
+    }
   }
 
   function showGovernanceBanner(v) {
@@ -363,10 +430,18 @@
       'background:#0f172a;color:#e2e8f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;' +
       'padding:8px 12px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.25);' +
       'border:1px solid #1e293b;max-width:320px;';
-    const vendor = v.vendor ? `<strong>${escapeHtml(v.vendor)}</strong>` : 'AI tool';
+    // NAME THE AI, NOT THE HOST. On an embedded-AI host the vendor is the host's
+    // vendor — "Google" on Gmail — so the old label read as though Google Mail
+    // itself were governed. surface_product names the actual feature ("Gemini in
+    // Gmail"), which is both accurate and far less alarming.
+    const label = v.surface_product || v.vendor || 'AI tool';
+    const subject = `<strong>${escapeHtml(label)}</strong>`;
+    // Scope is the sentence that stops this reading as blanket surveillance.
+    const scopeNote = v.surface_scope === EMBEDDED
+      ? '<div style="opacity:.7;margin-top:4px;font-size:11px">Only your AI prompts here are governed — the rest of this app is not.</div>'
+      : '';
     const note = v.governance_note ? `<div style="opacity:.7;margin-top:4px;font-size:11px">${escapeHtml(v.governance_note)}</div>` : '';
-    div.innerHTML =
-      `<div>🛡 ${vendor} — governed by CloudFuze (${(v.confidence * 100).toFixed(0)}% conf)</div>${note}`;
+    div.innerHTML = `<div>🛡 ${subject} — governed by CloudFuze</div>${scopeNote}${note}`;
     document.documentElement.appendChild(div);
     setTimeout(() => { try { div.remove(); } catch {} }, 6000);
   }

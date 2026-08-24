@@ -595,9 +595,136 @@
     if (conv) emitSessionBind(conv);      // "New chat" (conv → null) binds nothing
   }
 
+  // ── AI surface scope ──────────────────────────────────────────────────────
+  //
+  // Governance used to be decided per HOST and enforced across the whole PAGE.
+  // The registry governs mail.google.com for "Gemini in Gmail", hubspot.com for
+  // HubSpot AI, github.com for Copilot — and once a host was governed, every
+  // textarea, contenteditable and file input on it was captured as an AI prompt.
+  // Production collected 186 events from app.hubspot.com, 32 from github.com and
+  // 6 from a SharePoint tenant, all from ordinary compose fields, all with stored
+  // content. That is employee correspondence captured under an AI policy.
+  //
+  // So a host is now one of two scopes:
+  //   whole_site  — the site IS the AI product. Capture anywhere (unchanged).
+  //   embedded_ai — AI is a panel inside a larger app. Capture ONLY inside a
+  //                 recognised AI panel, and nothing at all if none is present.
+  //
+  // THE LIST IS BUILT IN, not only fetched. The server serves the authoritative
+  // map at /api/v1/ai-surfaces so a stale selector is a config fix rather than an
+  // extension release — but a privacy guarantee must not depend on a network call
+  // succeeding, so this floor applies even with no server reachable. The synced
+  // map can add hosts and replace selectors; it cannot remove the floor.
+  const EMBEDDED_AI_FLOOR = {
+    'mail.google.com': ['[aria-label*="Gemini" i]', '[data-gemini]', 'dialog[aria-label*="Gemini" i]'],
+    'docs.google.com': ['[aria-label*="Gemini" i]', '[aria-label*="Help me write" i]'],
+    'hubspot.com':     ['[data-test-id*="copilot" i]', '[class*="copilot" i]', '[aria-label*="Breeze" i]'],
+    'github.com':      ['[data-testid*="copilot" i]', '#copilot-chat', '[aria-label*="Copilot" i]', 'copilot-chat'],
+    'sharepoint.com':  ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'zendesk.com':     ['[data-test-id*="copilot" i]', '[data-test-id*="generative" i]', '[class*="ai-agent" i]'],
+    'salesforce.com':  ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'force.com':       ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'intercom.com':    ['[class*="fin-" i]', '[class*="intercom-ai" i]'],
+  };
+  // NOTE ON SELECTORS: they key on the AI product's own name — Gemini, Copilot,
+  // Breeze, Einstein — never a bare "ai" token. An attribute substring match on
+  // "ai" also matches the word "mail", which on Gmail would re-select the entire
+  // mail UI and reproduce exactly the bug this code removes.
+
+  let _syncedSurfaces = null;   // { host: {selectors:[]} } from the server
+  try {
+    chrome.storage.local.get(['cfai.ai_surfaces'], (r) => {
+      const v = r['cfai.ai_surfaces'];
+      if (v && typeof v === 'object') _syncedSurfaces = v.embedded || v;
+    });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes['cfai.ai_surfaces']) {
+        const v = changes['cfai.ai_surfaces'].newValue;
+        _syncedSurfaces = v && (v.embedded || v);
+      }
+    });
+  } catch (e) { /* extension context gone; the floor still applies */ }
+
+  /** Longest matching host key across the synced map and the built-in floor. */
+  function surfaceSelectorsForHost(host) {
+    const h = String(host || '').toLowerCase();
+    let best = null, bestLen = 0;
+    const consider = (key, sels) => {
+      if (!sels || !sels.length) return;
+      if ((h === key || h.endsWith('.' + key)) && key.length > bestLen) {
+        best = sels; bestLen = key.length;
+      }
+    };
+    for (const [k, v] of Object.entries(EMBEDDED_AI_FLOOR)) consider(k, v);
+    if (_syncedSurfaces) {
+      for (const [k, v] of Object.entries(_syncedSurfaces)) {
+        consider(k, Array.isArray(v) ? v : (v && v.selectors));
+      }
+    }
+    return best;   // null => whole_site
+  }
+
+  const _panelSelectors = surfaceSelectorsForHost(
+    (typeof window !== 'undefined' && window.location) ? window.location.hostname : '',
+  );
+  const IS_EMBEDDED_AI = !!_panelSelectors;
+  if (IS_EMBEDDED_AI) {
+    console.info('[cfai] embedded-AI host: capture restricted to the AI panel only');
+  }
+
+  /** Visible AI panels on the page right now. */
+  function aiPanels() {
+    if (!_panelSelectors) return [];
+    const out = [];
+    for (const sel of _panelSelectors) {
+      let found;
+      try { found = document.querySelectorAll(sel); } catch (e) { continue; }
+      for (const el of found) {
+        // A hidden panel is not an open panel: a collapsed side panel still
+        // exists in the DOM, and treating it as open would re-govern the page.
+        if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) continue;
+        out.push(el);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * May this element's content be captured?
+   *
+   * whole_site  → always. embedded_ai → only inside a visible AI panel.
+   * Crosses shadow boundaries via getRootNode(), because these panels are
+   * routinely rendered in one.
+   */
+  function captureAllowed(el) {
+    if (!IS_EMBEDDED_AI) return true;
+    const panels = aiPanels();
+    if (panels.length === 0) return false;   // fail closed
+    if (!el) return true;                    // page-level event, a panel is open
+    let node = el;
+    while (node) {
+      for (const p of panels) {
+        if (p === node || (p.contains && p.contains(node))) return true;
+      }
+      const root = node.getRootNode ? node.getRootNode() : null;
+      node = (root && root.host) ? root.host : null;   // hop out of a shadow root
+    }
+    return false;
+  }
+  // ── end AI surface scope ─
+
   function emit(event) {
     try {
       const kind = event && event.kind;
+      // SCOPE GATE. On an embedded-AI host, nothing is reported unless an AI
+      // panel is actually open. Events carrying an element are additionally
+      // checked for containment at their own call sites, where the element is
+      // known; this catches the page-level kinds (ai_response, model_routed)
+      // that have no element at all.
+      if (IS_EMBEDDED_AI && !captureAllowed(null)) {
+        console.info('[cfai] suppressed', kind, '— no AI panel open on this embedded-AI host');
+        return;
+      }
       // THE ONLY PLACE _activeConvId MOVES. A real user action re-reads the URL;
       // everything else (an AI reply arriving, an enforcement record, a routing
       // decision, a bare SPA navigation) leaves it exactly where it was.
@@ -1528,6 +1655,10 @@
   }
 
   function handlePaste(el, event) {
+    // Pasting into an ordinary compose box on an embedded-AI host is not an AI
+    // action. Checked here rather than only in emit() because the element is
+    // known at this point, so containment can be enforced precisely.
+    if (!captureAllowed(el)) return;
     // Two kinds of paste: text + files attached to the clipboard.
     const cd = event.clipboardData;
     if (!cd) return;
@@ -1957,6 +2088,9 @@
     if (!t || t.tagName !== 'INPUT' || t.type !== 'file') return;
     const files = t.files;
     if (!files || files.length === 0) return;
+    // Attaching a file to an email or a ticket is not an AI upload. Without this
+    // gate, every attachment on a governed SaaS host was scanned and recorded.
+    if (!captureAllowed(t)) return;
 
     const blocked = [...files].filter((f) => filenameRisky(f));
     if (blocked.length > 0) {
@@ -1991,6 +2125,10 @@
   // Drag-and-drop — page-wide, capture phase
   document.addEventListener('drop', (e) => {
     if (!e.dataTransfer?.files || e.dataTransfer.files.length === 0) return;
+    // Same rule as the file picker: a file dropped onto the mail composer is not
+    // an AI upload. e.target is the drop target, which is what must be inside the
+    // AI panel for this to count.
+    if (!captureAllowed(e.target)) return;
 
     const blocked = [...e.dataTransfer.files].filter((f) => filenameRisky(f));
     if (blocked.length > 0) {
@@ -3217,6 +3355,10 @@
   // text and no focus on the textarea). In that case the prompt scan is skipped
   // and only the attachment check decides whether to block.
   function tryBlock(el, e, label) {
+    // Sending an ordinary email, ticket reply or CRM note on an embedded-AI host
+    // is not a prompt. Returning false leaves the site's own send path completely
+    // untouched — the user must not be blocked from doing their job.
+    if (!captureAllowed(el)) return false;
     // Always reset dedup so repeated sends of the same sensitive text get blocked every time.
     _lastLogKey = null;
 
