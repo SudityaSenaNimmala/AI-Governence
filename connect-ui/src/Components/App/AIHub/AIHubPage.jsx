@@ -19,6 +19,20 @@ import { createReplayHost, applyReplayIframeCsp } from "./rrwebHost";
 import "./AIHub.css";
 
 const API = "/api/v1";
+
+// Which build of this UI you are actually looking at.
+//
+// WHY THIS EXISTS. There is no way to tell from the dashboard whether a push has
+// reached the host. A deploy that sits queued behind an offline self-hosted runner
+// looks identical to a healthy one: /api/v1/health returns 200, the site loads,
+// and the previous version keeps serving. Diagnosing that has meant comparing
+// content-hashed bundle filenames by hand.
+//
+// BUMP THIS IN THE SAME COMMIT AS ANY CHANGE YOU NEED TO CONFIRM IS LIVE. It is a
+// hand-maintained string on purpose — wiring it to the commit SHA needs a
+// VITE_ variable set by the CI frontend job, and this file must not depend on a
+// workflow that is being rewritten. Replace it with that when the pipeline settles.
+const UI_BUILD = "2026-08-24 · 0038097+1";
 async function apiFetch(path) {
   const r = await fetch(`${API}${path}`);
   if (!r.ok) throw new Error(`${r.status}`);
@@ -6699,6 +6713,15 @@ export default function AIHubPage({ page }) {
       <div className="cf_main_content_place">
         <TopNav pageName={heading}/>
         <div className="cf_main_content_place_main" style={{flexDirection:"column",padding:"20px 24px",overflowY:"auto",background:"#f8f9fb"}}>
+          {/* Build marker — see UI_BUILD. Sits on every AI Hub page so "is this
+              the version I just shipped?" is answerable at a glance instead of by
+              diffing bundle hashes. */}
+          <div style={{alignSelf:"flex-end",marginBottom:10,fontFamily:"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",
+            fontSize:11,fontWeight:600,letterSpacing:"0.04em",color:"#0052e0",background:"#0052e014",
+            border:"1px solid #0052e033",borderRadius:999,padding:"3px 10px",whiteSpace:"nowrap"}}
+            title="Build of the dashboard currently served. Bumped with each deploy.">
+            UI BUILD {UI_BUILD}
+          </div>
           {pageLocked ? <LockedTabContent label={config?.title || page}/> : (pageDisabled || groupDisabled) ? <FeatureDisabled page={page}/> : group ? <TabGroup group={group}/> : <Single/>}
         </div>
       </div>
