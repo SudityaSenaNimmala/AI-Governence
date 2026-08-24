@@ -1147,7 +1147,11 @@ function DLPView() {
   return (<div>
     {/* The severity scope moves into the hint now that it is fixed — with no
         dropdown on screen, an unstated filter is an invisible one. */}
-    <SectionHeader title="AI Activity (DLP)" hint="Clipboard, typed prompts, and file upload events captured by the OS monitor and browser extension. High and critical severity only."
+    {/* The scope sentence matters as much as the severity one now: on a SaaS app
+        where AI is one panel (Gmail, HubSpot, Zendesk, GitHub) only the AI panel
+        is governed, so an admin should not expect ordinary mail or tickets here.
+        Without saying so, an empty table reads as a broken agent. */}
+    <SectionHeader title="AI Activity (DLP)" hint="Prompts and file uploads captured by the OS monitor and browser extension. High and critical severity only. On apps where AI is one panel, only the AI panel is governed."
       action={section?<button className="aihub_filter_btn" onClick={()=>setSection("")}>Clear selection</button>:null}/>
 
     <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(4,1fr)"}}>
@@ -3848,7 +3852,7 @@ function AccessRequestsView() {
               </div>
             ):(
               <div style={{display:"flex",gap:8,marginTop:8}}>
-                <button onClick={()=>setApproving(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13.2,fontWeight:600,borderRadius:8}}>Review</button>
+                <button onClick={()=>setApproving(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:13.2,fontWeight:600}}>Review</button>
                 <button onClick={()=>reject(r.id)} style={{padding:"6px 16px",borderRadius:8,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:"pointer",fontSize:13.2,fontWeight:600}}>Reject</button>
               </div>
             )}
