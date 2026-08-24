@@ -77,7 +77,11 @@
       "webDomains": [
         "copilot.microsoft.com",
         "m365.cloud.microsoft",
-        "www.microsoft365.com"
+        "www.microsoft365.com",
+        "teams.microsoft.com",
+        "outlook.office.com",
+        "outlook.office365.com",
+        "copilotstudio.microsoft.com"
       ],
       "processes": []
     },

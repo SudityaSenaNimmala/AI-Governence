@@ -212,3 +212,72 @@ test('the send path refuses to route on an embedded-AI host', () => {
   assert.match(src, /if \(!_skipRouting && !IS_EMBEDDED_AI\)/,
     'the routing block is no longer guarded by IS_EMBEDDED_AI — Gmail buttons will break again');
 });
+
+// ── Microsoft publish surfaces ──────────────────────────────────────────────
+//
+// A Copilot Studio agent is one Dataverse object published to many places: M365
+// Copilot, Teams (including the desktop app), SharePoint, Outlook, Power Apps,
+// Dynamics, Direct Line. The admin does not know which. Since enforcement here is
+// browser-only, the extension has to be PRESENT on every browser surface — a
+// blocklist cannot act on a page it was never injected into.
+//
+// The danger in doing that: Teams is a chat client and Outlook is mail. Injecting
+// the DLP stack there without scoping capture to the Copilot panel would recreate
+// the over-collection defect at a far worse scale than HubSpot did — every Teams
+// message, every email. So each surface added for BLOCKING must also be in the
+// embedded-AI floor. Agent blocking itself runs on its own interval and is not
+// gated by the capture scope, which is what makes the pairing safe.
+
+const MS_SURFACES = [
+  ['teams.microsoft.com',          'Teams'],
+  ['m365.cloud.microsoft',         'M365 Copilot'],
+  ['contoso.sharepoint.com',       'SharePoint'],
+  ['outlook.office.com',           'Outlook'],
+  ['outlook.office365.com',        'Outlook (legacy host)'],
+  ['org32322095.crm.dynamics.com', 'Dynamics / Dataverse'],
+  ['copilotstudio.microsoft.com',  'Copilot Studio authoring'],
+  ['make.powerapps.com',           'Power Apps'],
+];
+
+test('every Microsoft publish surface is scoped to the Copilot panel', () => {
+  for (const [host, label] of MS_SURFACES) {
+    const s = loadSurfaceScope(host, doc([]));
+    assert.equal(s.IS_EMBEDDED_AI, true,
+      `${label} (${host}) is unscoped — injecting there would capture the whole app`);
+  }
+});
+
+test('a Teams message and an Outlook mail body are not captured', () => {
+  // The precise failure being prevented: these are the app's own composers, not
+  // an AI prompt, and there is no Copilot panel open.
+  for (const [host, label] of [['teams.microsoft.com', 'Teams'], ['outlook.office.com', 'Outlook']]) {
+    const composer = el({ tag: 'div', attrs: { 'aria-label': 'Message', contenteditable: 'true' } });
+    const s = loadSurfaceScope(host, doc([composer]));
+    assert.equal(s.captureAllowed(composer), false, `${label}: the app's own composer was captured`);
+    assert.equal(s.captureAllowed(null), false, `${label}: a page-level event was captured`);
+  }
+});
+
+test('a Copilot panel on a Microsoft surface IS captured', () => {
+  const panelBox = el({ tag: 'textarea', attrs: { 'aria-label': 'Ask Copilot' } });
+  const panel = el({ tag: 'div', attrs: { 'aria-label': 'Copilot' }, children: [panelBox] });
+  const teamsBox = el({ tag: 'div', attrs: { 'aria-label': 'Message', contenteditable: 'true' } });
+  const s = loadSurfaceScope('teams.microsoft.com', doc([panel, teamsBox]));
+
+  assert.equal(s.captureAllowed(panelBox), true, 'the Copilot composer was not governed');
+  assert.equal(s.captureAllowed(teamsBox), false, 'the Teams message composer was governed');
+});
+
+// Agent blocking must work on every surface regardless of capture scope — it is
+// enforcement, not collection. If it were gated, adding these hosts as
+// embedded_ai would silently disable the very blocking they were added for.
+test('agent blocking is not gated by the capture scope', () => {
+  const src = contentSource();
+  const start = src.indexOf('function enforceBlockedAgent');
+  assert.ok(start > 0, 'enforceBlockedAgent not found');
+  const body = src.slice(start, src.indexOf('\n  }', start));
+  assert.ok(!body.includes('captureAllowed'),
+    'enforceBlockedAgent now consults captureAllowed — blocking would stop working outside AI panels');
+  assert.ok(!body.includes('IS_EMBEDDED_AI'),
+    'enforceBlockedAgent now consults IS_EMBEDDED_AI — blocking would stop working on Teams/Outlook');
+});

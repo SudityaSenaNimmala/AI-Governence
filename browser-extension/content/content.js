@@ -625,6 +625,24 @@
     'salesforce.com':  ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
     'force.com':       ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
     'intercom.com':    ['[class*="fin-" i]', '[class*="intercom-ai" i]'],
+    // Microsoft surfaces a Copilot Studio agent can be published to. These are
+    // apps first and AI second — Teams is a chat client, Outlook is mail — so
+    // capture stays inside the Copilot panel. Adding them for AGENT BLOCKING
+    // without this would recreate the over-collection defect at a far worse
+    // scale: every Teams message and every email.
+    //
+    // 'cloud.microsoft' is deliberately broad. Microsoft has been moving M365
+    // web apps onto it, so it now spans Word and Outlook as well as Copilot
+    // chat — which means m365.cloud.microsoft is scoped too, and on that one
+    // surface we may under-capture. That is the correct side to err on: a
+    // reportable gap, not a compliance incident.
+    'teams.microsoft.com':        ['[aria-label*="Copilot" i]', '[data-tid*="copilot" i]'],
+    'cloud.microsoft':            ['[aria-label*="Copilot" i]', '[class*="copilot" i]', '[data-tid*="copilot" i]'],
+    'outlook.office.com':         ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'outlook.office365.com':      ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'crm.dynamics.com':           ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'copilotstudio.microsoft.com':['[aria-label*="Copilot" i]', '[class*="copilot" i]', '[aria-label*="Test your agent" i]'],
+    'powerapps.com':              ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
   };
   // NOTE ON SELECTORS: they key on the AI product's own name — Gemini, Copilot,
   // Breeze, Einstein — never a bare "ai" token. An attribute substring match on
