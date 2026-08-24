@@ -39,7 +39,9 @@ export function isFeatureLocked(key) {
 }
 
 export function isFeatureVisible(key) {
-  return true; // all features visible, disabled ones show "not available"
+  const s = feat(key).status;
+  if (s === 'hidden') return false;
+  return true;
 }
 
 export function getMissingDeps(key) {

@@ -3341,11 +3341,11 @@
       matches: [],
       hint:  'Need access? Click below to submit a request to your administrator.',
       hardBlock: true,
-      requestAccess: {
+      requestAccess: isFeatureOn('access_requests') ? {
         tool_host: host,
         tool_name: name,
         tool_vendor: platformInfo.vendor || null,
-      },
+      } : null,
     });
   }
 
@@ -3485,7 +3485,7 @@
       // These panels have no model picker to switch anyway: the tier tables in
       // PLATFORM_TIERS cover dedicated AI products, not an assistant embedded in a
       // mail client. So there is nothing to gain here and a working app to break.
-      if (!_skipRouting && !IS_EMBEDDED_AI) {
+      if (!_skipRouting && !IS_EMBEDDED_AI && isFeatureOn('model_routing')) {
         const currentModelText = (getModelButton()?.textContent || '').trim();
         const routing = smartRoute(currentModelText, text);
         if (routing) {

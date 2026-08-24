@@ -202,10 +202,10 @@ const policyPacks = {
 // ACCESS REQUESTS — 6 requests covering all statuses + 2 active exceptions
 // ═══════════════════════════════════════════════════════════════════════════════
 const accessRequests = [
-  { id:"ar8", tool_name:"Claude",      tool_host:"claude.ai",        tool_vendor:"Anthropic",  employee_name:"Suditya Nimmala", machine_id:"m1",  status:"pending",  reason:"Hi can you allow me please",                                                    submitted_at:ago(0.5) },
+  { id:"ar8", tool_name:"Claude",      tool_host:"claude.ai",        tool_vendor:"Anthropic",  employee_name:"Steve",           machine_id:"m1",  status:"pending",  reason:"Need claude for market research",                                                    submitted_at:ago(1/60) },
   { id:"ar1", tool_name:"ChatGPT",     tool_host:"chat.openai.com",  tool_vendor:"OpenAI",     employee_name:"James Wilson",    machine_id:"m2",  status:"pending",  reason:"Need ChatGPT for marketing copy generation and A/B test ideas.",                submitted_at:ago(2) },
   { id:"ar2", tool_name:"Midjourney",   tool_host:"midjourney.com",   tool_vendor:"Midjourney", employee_name:"Alex Johnson",    machine_id:"m4",  status:"pending",  reason:"Creating product mockups and visual assets for Q4 launch.",                     submitted_at:ago(8) },
-  { id:"ar3", tool_name:"DeepSeek",     tool_host:"chat.deepseek.com",tool_vendor:"DeepSeek",   employee_name:"Raj Gupta",       machine_id:"m8",  status:"pending",  reason:"Comparing model performance for our benchmark study.",                           submitted_at:ago(1) },
+  { id:"ar3", tool_name:"DeepSeek",     tool_host:"chat.deepseek.com",tool_vendor:"DeepSeek",   employee_name:"Raj Gupta",       machine_id:"m8",  status:"rejected", reason:"Comparing model performance for our benchmark study.",                           submitted_at:ago(24), reviewed_at:ago(22) },
   { id:"ar4", tool_name:"ChatGPT",     tool_host:"chat.openai.com",  tool_vendor:"OpenAI",     employee_name:"Sarah Chen",      machine_id:"m1",  status:"approved", reason:"Research and code review assistance.",                                          submitted_at:ago(96), reviewed_at:ago(94), expires_at:new Date(Date.now()+72*3600000).toISOString() },
   { id:"ar5", tool_name:"Jasper AI",   tool_host:"jasper.ai",        tool_vendor:"Jasper",     employee_name:"Maya Patel",      machine_id:"m5",  status:"rejected", reason:"Content drafting for blog posts.",                                              submitted_at:ago(120),reviewed_at:ago(118) },
   { id:"ar6", tool_name:"ChatGPT",     tool_host:"chat.openai.com",  tool_vendor:"OpenAI",     employee_name:"Tom Baker",       machine_id:"m12", status:"approved", reason:"Customer demo preparation.",                                                    submitted_at:ago(200),reviewed_at:ago(198),expires_at:new Date(Date.now()-24*3600000).toISOString() },
@@ -422,6 +422,27 @@ app.get("/api/v1/installations/info", (_,r) => r.json({server_url:"https://demo.
 app.get("/api/v1/installations/agent-installer", (_,r) => r.status(200).send("demo-installer"));
 app.get("/api/v1/installations/extension-package", (_,r) => r.status(200).send("demo-extension"));
 app.get("/api/v1/installations/claude-tracker", (_,r) => r.status(200).send("demo-tracker"));
+
+// Feature flags — agent_governance locked, SDK disabled, rest enabled
+app.get("/api/v1/features", (_,r) => r.json({ features: {
+  overview:         { label:"Overview",         status:"enabled" },
+  ai_systems:       { label:"AI Systems",       status:"enabled" },
+  agents_mcp:       { label:"Agents & MCP",     status:"enabled" },
+  dlp:              { label:"Prompts & DLP",    status:"enabled" },
+  claude_usage:     { label:"Claude Usage",     status:"enabled" },
+  policies:         { label:"Policies",         status:"enabled" },
+  risk_scores:      { label:"Risk Scores",      status:"enabled" },
+  access_requests:  { label:"Access Requests",  status:"enabled" },
+  agent_governance: { label:"Agent Governance", status:"disabled" },
+  installations:    { label:"Installations",    status:"enabled" },
+  integrations:     { label:"Integrations",     status:"enabled" },
+  server_monitor:   { label:"Server Monitor",   status:"enabled" },
+  sdk:              { label:"Developer SDK",    status:"hidden" },
+  session_replay:   { label:"Session Replay",   status:"enabled" },
+  model_routing:    { label:"Model Routing",    status:"enabled" },
+  endpoint_scan:    { label:"Endpoint Scan",    status:"enabled" },
+  clipboard_monitor:{ label:"Clipboard Monitor",status:"enabled" },
+}}));
 
 // Catch-all
 app.all("/api/*", (q,r) => { console.log(`[demo] unhandled: ${q.method} ${q.path}`); r.json({ok:true}); });

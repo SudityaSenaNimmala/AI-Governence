@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import { useContext, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { isFeatureEnabled } from "../../../featureFlags";
+import { isFeatureEnabled, isFeatureVisible } from "../../../featureFlags";
 import CF_LOGO from "../../../assets/images/CF_LOGO_WHITE.png";
 import { GlobalContext } from "../../../GlobalContext/GlobalContext";
 import { SET_SIDEBAR_COLLAPSED } from "../../../GlobalContext/action.types";
@@ -139,8 +139,13 @@ const SideNav = (props) => {
         { icon: agentGovernanceIcon, title: "Agent Governance", link: "/AIHub/AgentGovernance", feat: "agent_governance" },
         { icon: <Boxes size={16} />, title: "SDK", link: "/AIHub/SDK", feat: "sdk" },
         { icon: <Unplug size={16} />, title: "Setup", link: "/AIHub/Setup", feat: ["installations", "integrations", "server_monitor"] },
-      ].map(item => {
-        // All items show. Disabled ones get a locked flag.
+      ].filter(item => {
+        // Hide items where ALL sub-features are hidden
+        if (!item.feat) return true;
+        const feats = Array.isArray(item.feat) ? item.feat : [item.feat];
+        return feats.some(f => isFeatureVisible(f));
+      }).map(item => {
+        // Disabled (not hidden) ones get a locked flag
         if (!item.feat) return item;
         const feats = Array.isArray(item.feat) ? item.feat : [item.feat];
         const anyEnabled = feats.some(f => isFeatureEnabled(f));
