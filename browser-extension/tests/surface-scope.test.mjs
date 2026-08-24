@@ -287,3 +287,52 @@ test('agent blocking is not gated by the capture scope', () => {
   assert.ok(!body.includes('IS_EMBEDDED_AI'),
     'enforceBlockedAgent now consults IS_EMBEDDED_AI — blocking would stop working on Teams/Outlook');
 });
+
+// ── A platform block must not disable the host app ──────────────────────────
+//
+// Reported live: blocking "Gemini in Gmail" made the whole of Gmail unusable —
+// "I am not able to click any button". The send blocking was already correctly
+// scoped (tryBlock returns early unless captureAllowed puts the element inside the
+// AI panel, so mail still sends). The damage was the NOTICE: a full-width bar at
+// position:fixed top:0 with the maximum z-index and no pointer-events:none, which
+// sat over Gmail's own toolbar and swallowed every click in that strip.
+//
+// Blocking one panel inside a mail client must not look like, or behave like,
+// disabling the mail client.
+
+function platformBannerBody() {
+  const src = contentSource();
+  const start = src.indexOf('function showPlatformBanner()');
+  assert.ok(start > 0, 'showPlatformBanner is gone');
+  return src.slice(start, src.indexOf('\n  }', start));
+}
+
+test('the page-wide block banner is suppressed on an embedded-AI host', () => {
+  const body = platformBannerBody();
+  assert.ok(body.includes('IS_EMBEDDED_AI'),
+    'showPlatformBanner no longer checks IS_EMBEDDED_AI — it will cover the host app again');
+  // The guard has to be an early return, not merely a mention.
+  const guardIdx = body.indexOf('IS_EMBEDDED_AI');
+  const createIdx = body.indexOf('createElement');
+  assert.ok(createIdx === -1 || guardIdx < createIdx,
+    'the IS_EMBEDDED_AI check comes after the banner is built — it would still render');
+});
+
+test('the block banner cannot intercept clicks anywhere', () => {
+  // It is a notice, not a control. On a dedicated AI site it still spans the top
+  // of the page, so swallowing clicks there is wrong too.
+  assert.ok(platformBannerBody().includes('pointer-events:none'),
+    'the banner can swallow clicks meant for the page underneath it');
+});
+
+test('a platform block still refuses a prompt inside the AI panel', () => {
+  // The block must survive being scoped — losing enforcement would be a worse bug
+  // than the obstruction it replaced.
+  const geminiBox = el({ tag: 'textarea', attrs: { 'aria-label': 'Enter a prompt' } });
+  const panel = el({ tag: 'div', attrs: { 'aria-label': 'Gemini' }, children: [geminiBox] });
+  const mailBox = el({ tag: 'div', attrs: { 'aria-label': 'Message Body', contenteditable: 'true' } });
+  const s = loadSurfaceScope('mail.google.com', doc([panel, mailBox]));
+
+  assert.equal(s.captureAllowed(geminiBox), true, 'the panel is no longer governed at all');
+  assert.equal(s.captureAllowed(mailBox), false, 'the mail composer became governed');
+});

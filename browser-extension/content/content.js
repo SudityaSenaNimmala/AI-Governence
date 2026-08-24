@@ -3351,11 +3351,27 @@
 
   // Persistent banner pinned to the top of a blocked platform.
   function showPlatformBanner() {
+    // NEVER ON AN EMBEDDED-AI HOST. Blocking "Gemini in Gmail" blocks one panel
+    // inside a mail client, not the mail client — but this bar is full-width,
+    // position:fixed at top:0, and at the maximum z-index, so it covered Gmail's
+    // own toolbar and swallowed every click in that strip. Reported live as "the
+    // whole Gmail is blocked, I can't click any button".
+    //
+    // The block itself is already correctly scoped: tryBlock() returns early
+    // unless captureAllowed(el) puts the element inside the AI panel, so mail can
+    // still be sent and only a prompt typed into the panel is refused — with
+    // showPlatformBlockPopup() explaining why at the moment it is attempted,
+    // exactly as a DLP block does. A page-wide bar adds nothing here except
+    // obstruction and the false impression that the whole app is disabled.
+    if (IS_EMBEDDED_AI) return;
+
     if (document.getElementById('cfai-platform-banner')) return;
     const name = (BLOCKED_PLATFORM && (BLOCKED_PLATFORM.product || BLOCKED_PLATFORM.vendor || BLOCKED_PLATFORM.host)) || 'This AI platform';
     const bar = document.createElement('div');
     bar.id = 'cfai-platform-banner';
-    bar.setAttribute('style', 'position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#b91c1c;color:#fff;font:600 13px/1.4 system-ui,-apple-system,sans-serif;padding:10px 16px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.25);');
+    // pointer-events:none — it is a notice, not a control. Even on a dedicated AI
+    // site it must not intercept clicks meant for the page underneath it.
+    bar.setAttribute('style', 'position:fixed;top:0;left:0;right:0;z-index:2147483647;pointer-events:none;background:#b91c1c;color:#fff;font:600 13px/1.4 system-ui,-apple-system,sans-serif;padding:10px 16px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.25);');
     bar.textContent = `\u{1F512} ${name} is blocked by CloudFuze AI Governance — prompts cannot be sent here.`;
     (document.documentElement || document.body).appendChild(bar);
   }
