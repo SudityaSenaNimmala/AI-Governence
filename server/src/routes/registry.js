@@ -220,7 +220,25 @@ export function mountRegistry(app, db) {
     for (const agent of govAgents) {
       const key = agent.botId || agent.appId || agent.id || agent.name;
       if (!key) continue;
-      const sanction = sanctionMap.get(key);
+      // THE SANCTION IS LOOKED UP UNDER EVERY IDENTIFIER THIS ROW COULD HAVE BEEN
+      // SAVED UNDER, and that is a bug fix rather than defensiveness.
+      //
+      // The read used `key` — botId first — while PUT /registry/:id/status writes
+      // `sanctions.tool_key` using the id the UI sent, which is this row's exposed
+      // `id` (agent.id || key). For a Copilot Studio agent whose botId differs
+      // from its id, the write landed under one key and the read looked under
+      // another, so the decision was invisible: the toggle showed Blocked from
+      // optimistic local state and silently reverted to "approved" on reload.
+      // Observed live — a PUT returning {"ok":true} followed by a read still
+      // saying approved.
+      //
+      // Reading tolerantly fixes rows already written under either key, so no
+      // migration is needed. First match wins, in the same precedence the write
+      // path would have used.
+      const sanction = [agent.id, key, agent.botId, agent.appId, agent.name]
+        .filter(Boolean)
+        .map((k) => sanctionMap.get(k))
+        .find(Boolean);
       const risk = normalizeStoredRisk(agent.risk);
       const govResolved = resolveProductHosts(agent.name, agent.vendor);
       registry.set('gov:' + key, {
@@ -532,6 +550,16 @@ export function mountRegistry(app, db) {
     const id = req.params.id;
     const isBlocked = status === 'blocked';
 
+    // INVALIDATE THE REGISTRY CACHE FIRST. buildRegistry() results are cached for
+    // LIVE_CACHE_TTL_MS (30s), and the status write did not clear it — so a reload
+    // within 30 seconds of blocking something served the pre-block registry and the
+    // row appeared to revert to its old status. Combined with the UI updating
+    // optimistically and deliberately not re-reading, an admin's decision looked
+    // like it had silently failed. Observed live: a PUT returning {"ok":true}
+    // followed immediately by a read still reporting "approved".
+    _liveCache = null;
+    _liveCacheAt = 0;
+
     // Update sanctions collection (status tracking)
     await db.collection('sanctions').updateOne(
       { tool_key: id },
@@ -616,7 +644,9 @@ export function mountRegistry(app, db) {
       || req.body.category === 'autonomous-agent'
       || req.body.source === 'governance';
 
+    let agentEnforced = false;
     if (looksLikeAgent) {
+      agentEnforced = true;
       const agentName = req.body.product_name || id;
       if (isBlocked) {
         await db.collection('blocked_agents').updateOne(
@@ -652,7 +682,21 @@ export function mountRegistry(app, db) {
       trigger: isBlocked ? 'tool_blocked' : 'tool_approved',
     });
 
-    res.json({ ok: true, enforced: matched.matchedCount > 0 || matched.modifiedCount > 0 });
+    // `enforced` must account for BOTH enforcement paths. It previously reported
+    // only whether ai_platforms hosts matched, so blocking a Copilot Studio agent
+    // — which has no host of its own and is enforced by name through
+    // blocked_agents — returned {"ok":true,"enforced":false}. That reads as "the
+    // block did nothing", which is what sent this investigation down the wrong
+    // path in the first place.
+    const platformEnforced = matched.matchedCount > 0 || matched.modifiedCount > 0;
+    res.json({
+      ok: true,
+      enforced: platformEnforced || agentEnforced,
+      enforced_via: [
+        ...(platformEnforced ? ['platform_hosts'] : []),
+        ...(agentEnforced ? ['agent_blocklist'] : []),
+      ],
+    });
   }));
 }
 

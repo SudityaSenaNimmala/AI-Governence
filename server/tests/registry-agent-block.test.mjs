@@ -165,3 +165,114 @@ test('the agent lifecycle is still suspended alongside the mirror', async () => 
     assert.equal(db._rows('discovered_agents')[0].lifecycleStatus, 'active');
   });
 });
+
+// ── The key mismatch that made the toggle silently revert ───────────────────
+//
+// Observed live: PUT /registry/:id/status returned {"ok":true} and a re-read of
+// the registry still said status "approved". The UI showed Blocked from optimistic
+// local state and reverted on reload, so an admin's decision quietly vanished.
+//
+// Cause: the write stores sanctions.tool_key using the id the UI sent — the row's
+// exposed `id`, which is `agent.id || key` — while the read looked the sanction up
+// under `agent.botId || agent.appId || agent.id || agent.name`. For a Copilot
+// Studio agent whose botId differs from its id, the write landed under one key and
+// the read looked under another.
+
+const readStatus = async (base, name) => {
+  const res = await fetch(`${base}/api/v1/registry`);
+  const body = await res.json();
+  const rows = Array.isArray(body) ? body : (body.rows || body.items || []);
+  return rows.find((r) => r.name === name);
+};
+
+async function withRegistry(seed, fn) {
+  const db = createFakeDb();
+  await seed(db);
+  const app = express();
+  app.use(express.json());
+  mountRegistry(app, db);
+  app.use((err, req, res, next) => res.status(500).json({ error: err.message, stack: err.stack }));
+  const server = app.listen(0);
+  await new Promise((r) => server.once('listening', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try { return await fn({ db, base }); }
+  finally { await new Promise((r) => server.close(r)); }
+}
+
+// botId deliberately differs from id — the exact shape that broke.
+const AGENT_WITH_BOTID = {
+  id: '124794af-3b8f-f111-b8da-0022480b1f83',
+  botId: 'bot-9999-different-from-id',
+  name: 'Enterprise Agent',
+  platform: 'copilot_studio',
+  lifecycleStatus: 'active',
+};
+
+test('a block persists when botId differs from the row id', async () => {
+  await withRegistry(async (db) => {
+    await db.collection('discovered_agents').insertOne({ ...AGENT_WITH_BOTID });
+  }, async ({ base }) => {
+    const before = await readStatus(base, 'Enterprise Agent');
+    assert.ok(before, 'the agent is not in the registry at all');
+
+    const res = await fetch(`${base}/api/v1/registry/${encodeURIComponent(before.id)}/status`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status: 'blocked', product_name: 'Enterprise Agent', category: 'autonomous-agent' }),
+    });
+    assert.equal(res.status, 200);
+
+    const after = await readStatus(base, 'Enterprise Agent');
+    assert.equal(after.status, 'blocked',
+      'the block was written under one key and read under another — it silently reverted');
+  });
+});
+
+test('the decision round-trips back to approved', async () => {
+  await withRegistry(async (db) => {
+    await db.collection('discovered_agents').insertOne({ ...AGENT_WITH_BOTID });
+  }, async ({ base }) => {
+    const row = await readStatus(base, 'Enterprise Agent');
+    const put = (status) => fetch(`${base}/api/v1/registry/${encodeURIComponent(row.id)}/status`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status, product_name: 'Enterprise Agent', category: 'autonomous-agent' }),
+    });
+
+    await put('blocked');
+    assert.equal((await readStatus(base, 'Enterprise Agent')).status, 'blocked');
+    await put('approved');
+    assert.equal((await readStatus(base, 'Enterprise Agent')).status, 'approved',
+      'un-blocking did not read back');
+  });
+});
+
+// `enforced:false` on a successful agent block is what sent this investigation
+// down the wrong path — it reads as "the block did nothing".
+test('enforced reports the agent blocklist, not just platform hosts', async () => {
+  await withRegistry(async (db) => {
+    await db.collection('discovered_agents').insertOne({ ...AGENT_WITH_BOTID });
+  }, async ({ base }) => {
+    const row = await readStatus(base, 'Enterprise Agent');
+    const res = await fetch(`${base}/api/v1/registry/${encodeURIComponent(row.id)}/status`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status: 'blocked', product_name: 'Enterprise Agent', category: 'autonomous-agent' }),
+    });
+    const body = await res.json();
+    assert.equal(body.enforced, true, 'a successful agent block still reported enforced:false');
+    assert.ok(body.enforced_via.includes('agent_blocklist'), 'enforced_via does not name the agent blocklist');
+  });
+});
+
+test('a sanction already stored under the legacy key is still honoured', async () => {
+  // No migration: rows written before the fix used whichever key the write path
+  // produced, and both must read back.
+  await withRegistry(async (db) => {
+    await db.collection('discovered_agents').insertOne({ ...AGENT_WITH_BOTID });
+    await db.collection('sanctions').insertOne({ tool_key: AGENT_WITH_BOTID.botId, status: 'blocked' });
+  }, async ({ base }) => {
+    const row = await readStatus(base, 'Enterprise Agent');
+    assert.equal(row.status, 'blocked', 'a sanction stored under botId no longer reads back');
+  });
+});
