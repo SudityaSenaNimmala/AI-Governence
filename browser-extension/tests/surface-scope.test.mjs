@@ -336,3 +336,53 @@ test('a platform block still refuses a prompt inside the AI panel', () => {
   assert.equal(s.captureAllowed(geminiBox), true, 'the panel is no longer governed at all');
   assert.equal(s.captureAllowed(mailBox), false, 'the mail composer became governed');
 });
+
+// ── The click origin must be in the panel, not just the resolved input ──────
+//
+// Reported live: with Gemini blocked in Gmail, clicking ANY button showed the
+// blocked popup and the button did nothing.
+//
+// The button handler resolves its element with
+// `findPromptInputFor(btn) || findActivePromptInput()`, and looksLikeSendButton()
+// matches ordinary Gmail toolbar buttons. So a click on Archive resolved to the
+// Gemini panel's composer — which IS inside the panel — the gate passed on that
+// element, and the click was cancelled. Checking the resolved input alone cannot
+// distinguish "the user sent a prompt" from "the user clicked something else
+// while a panel happened to be open".
+
+test('a Gmail toolbar click is not treated as a prompt send while Gemini is open', () => {
+  const geminiBox = el({ tag: 'textarea', attrs: { 'aria-label': 'Enter a prompt' } });
+  const panel = el({ tag: 'div', attrs: { 'aria-label': 'Gemini' }, children: [geminiBox] });
+  const archiveBtn = el({ tag: 'button', attrs: { 'aria-label': 'Archive' } });
+  const s = loadSurfaceScope('mail.google.com', doc([panel, archiveBtn]));
+
+  // The resolved input is the panel's composer and passes on its own …
+  assert.equal(s.captureAllowed(geminiBox), true);
+  // … but the thing actually clicked does not, which is what must decide it.
+  assert.equal(s.captureAllowed(archiveBtn), false,
+    'a Gmail toolbar button was treated as inside the AI panel');
+});
+
+test('the send path checks the event origin, not only the resolved input', () => {
+  const src = contentSource();
+  const start = src.indexOf('function tryBlock(el, e, label)');
+  assert.ok(start > 0, 'tryBlock is gone');
+  const head = src.slice(start, start + 2000);
+  assert.ok(head.includes('e.target'),
+    'tryBlock no longer checks the event origin — any button click will read as a prompt send again');
+  const originIdx = head.indexOf('captureAllowed(origin)');
+  assert.ok(originIdx > 0, 'the origin is not passed through captureAllowed');
+  // It has to be an early return, before any enforcement branch runs.
+  const platformIdx = head.indexOf('PLATFORM_BLOCKED');
+  assert.ok(platformIdx === -1 || originIdx < platformIdx,
+    'the origin check comes after the platform-block branch — the click would still be cancelled');
+});
+
+test('a real send from inside the panel is still blocked', () => {
+  // The origin check must not cost the enforcement: pressing Enter in the panel
+  // has the composer as its own event target, so it still qualifies.
+  const geminiBox = el({ tag: 'textarea', attrs: { 'aria-label': 'Enter a prompt' } });
+  const panel = el({ tag: 'div', attrs: { 'aria-label': 'Gemini' }, children: [geminiBox] });
+  const s = loadSurfaceScope('mail.google.com', doc([panel]));
+  assert.equal(s.captureAllowed(geminiBox), true, 'a genuine prompt send stopped being governed');
+});

@@ -3433,7 +3433,22 @@
     // Sending an ordinary email, ticket reply or CRM note on an embedded-AI host
     // is not a prompt. Returning false leaves the site's own send path completely
     // untouched — the user must not be blocked from doing their job.
+    //
+    // BOTH THE RESOLVED INPUT *AND* WHAT THE USER ACTUALLY INTERACTED WITH have
+    // to be inside the AI panel, and checking only the input was a real bug.
+    // The button handler resolves its element with
+    // `findPromptInputFor(btn) || findActivePromptInput()`, and on Gmail
+    // looksLikeSendButton() matches ordinary toolbar buttons — so a click on
+    // Archive resolved to the Gemini panel's composer, which IS in the panel, the
+    // gate passed, and the click was cancelled with a "blocked" popup. Reported
+    // live: "when I click any button it is showing blocked".
+    //
+    // e.target is the element the event originated on: the clicked button, the
+    // composer for keydown, the form for submit. Requiring it to be in the panel
+    // too is what makes "this send came from the AI" true rather than assumed.
     if (!captureAllowed(el)) return false;
+    const origin = e && e.target;
+    if (origin && !captureAllowed(origin)) return false;
     // Always reset dedup so repeated sends of the same sensitive text get blocked every time.
     _lastLogKey = null;
 
