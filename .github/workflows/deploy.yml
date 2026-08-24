@@ -57,6 +57,16 @@ jobs:
   test:
     name: test (${{ matrix.project }})
     runs-on: ubuntu-latest
+    # A HANGING TEST USED TO BLOCK EVERY DEPLOY. tests/worker-load.test.mjs imports
+    # the service worker for real, and a top-level setInterval there kept the Node
+    # process alive, so `node --test` never returned. With no timeout this job ran
+    # to GitHub's 6-hour ceiling while `concurrency: deploy-server` held the lock —
+    # and since only the most recent queued run survives, every push behind it was
+    # cancelled. Six commits sat undeployed on one leaked timer.
+    #
+    # The suites take well under a minute each; 10 turns a future hang into a fast,
+    # obvious failure instead of a silent six-hour deploy freeze.
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:

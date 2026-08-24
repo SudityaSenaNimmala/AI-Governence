@@ -6667,7 +6667,14 @@ function TabGroup({ group }) {
 // rather than by guessing whether the push landed. Empty in a local dev
 // server, where nothing injects it — hence the "dev" fallback rather than an
 // empty stamp.
-const BUILD_SHA = String(import.meta.env.VITE_BUILD_SHA || "").slice(0, 7);
+// NO BUILD STAMP IN THE UI. A commit hash on a customer-facing dashboard looks
+// like debug output, so it is out — and the constant goes with it rather than
+// being left declared-but-unrendered, which is the state that made the last stamp
+// silently lie about which build was live.
+//
+// deploy.yml's frontend job still passes VITE_BUILD_SHA; it is simply unused. If a
+// deployed-version indicator is wanted again, put it somewhere it belongs — the
+// Setup page, or /api/v1/health next to `version` — not on every page.
 
 export default function AIHubPage({ page }) {
   const [params] = useSearchParams();
@@ -6700,14 +6707,6 @@ export default function AIHubPage({ page }) {
         <TopNav pageName={heading}/>
         <div className="cf_main_content_place_main" style={{flexDirection:"column",padding:"20px 24px",overflowY:"auto",background:"#f8f9fb"}}>
           {pageLocked ? <LockedTabContent label={config?.title || page}/> : (pageDisabled || groupDisabled) ? <FeatureDisabled page={page}/> : group ? <TabGroup group={group}/> : <Single/>}
-          {/* RESTORED. This stamp is the only reliable way to tell which build the
-              host is actually serving, and it was deleted as collateral damage in
-              8995915's refactor — leaving BUILD_SHA declared but never rendered, so
-              production kept showing the last build that still had the render.
-              Confirming a deploy then meant diffing content-hashed bundle names by
-              hand. Automatic and always accurate: deploy.yml's frontend job passes
-              github.sha as VITE_BUILD_SHA, which Vite inlines. */}
-          <p className="aihub_build_stamp">build {BUILD_SHA || "dev"}</p>
         </div>
       </div>
     </div>
