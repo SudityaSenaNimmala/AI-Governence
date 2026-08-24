@@ -426,7 +426,7 @@ REM -- Find Node.js --
 set "NODE="
 set "NPM="
 if exist "%~dp0node\\node.exe" set "NODE=%~dp0node\\node.exe" & set "NPM=%~dp0node\\npm.cmd" & echo  [OK] Using bundled Node.js & goto FOUND_NODE
-where node >nul 2>&1 && set "NODE=node" & set "NPM=npm" & echo  [OK] Using system Node.js & goto FOUND_NODE
+for /f "tokens=*" %%i in ('where node 2^>nul') do set "NODE=%%i" & set "NPM=npm" & echo  [OK] Using system Node.js & goto FOUND_NODE
 echo  [..] Node.js not found - downloading (~30 MB)...
 powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://nodejs.org/dist/v22.15.0/node-v22.15.0-win-x64.zip' -OutFile '%~dp0node.zip'"
 if not exist "%~dp0node.zip" echo  [ERROR] Download failed. Install Node.js from nodejs.org & goto DONE
