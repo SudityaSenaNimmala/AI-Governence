@@ -70,10 +70,11 @@ function harness({ panelPresent = false, panelVisible = true } = {}) {
     appended, observers, timers,
     openPanel() { present = true; },
     flush() { for (const o of observers) if (o.live) o.cb(); const t = timers.splice(0); for (const fn of t) fn(); },
-    load() {
-      const body = region()
+    load(host = 'mail.google.com') {
+      const body = 'const window = { location: { hostname: ' + JSON.stringify(host) + ' } };\n'
+        + region()
         + '\n  function escapeHtml(s){return String(s);}'
-        + '\n  return { announceGovernance, panelsVisible };';
+        + '\n  return { announceGovernance, panelsVisible, EMBEDDED_AI_FLOOR, floorSelectorsForHost };';
       // showGovernanceBanner lives outside the sliced region, so a recording stub
       // stands in for it — this test is about WHEN it is called, not its markup.
       const shown = [];
@@ -105,7 +106,7 @@ const CLAUDE_VERDICT = {
 
 test('a dedicated AI site announces immediately — unchanged', () => {
   const h = harness();
-  const { announceGovernance, shown } = h.load();
+  const { announceGovernance, shown } = h.load('claude.ai');
   announceGovernance(CLAUDE_VERDICT);
   assert.equal(shown.length, 1);
 });
@@ -166,10 +167,24 @@ test('the observer disconnects after firing', () => {
 
 test('a scoped host with no known panel selectors stays silent', () => {
   // Capture is gated by the same unknown, so there is nothing to announce.
+  //
+  // The host must be one the FLOOR does not cover, otherwise the floor supplies
+  // selectors and the notice correctly proceeds — which is what makes an empty
+  // panel_selectors list on a Gmail verdict harmless rather than silencing.
   const h = harness({ panelPresent: true });
-  const { announceGovernance, shown } = h.load();
-  announceGovernance({ ...GMAIL_VERDICT, panel_selectors: [] });
+  const { announceGovernance, shown } = h.load('some-scoped-saas.example');
+  announceGovernance({ ...GMAIL_VERDICT, panel_selectors: [], surface_product: null });
   assert.equal(shown.length, 0);
+});
+
+test('an empty selector list from the server falls back to the floor', () => {
+  // The inverse of the case above, and the reason the fallback exists: a verdict
+  // that carries the scope but no selectors must not silence a host the extension
+  // already knows how to scope.
+  const h = harness({ panelPresent: true });
+  const { announceGovernance, shown } = h.load('mail.google.com');
+  announceGovernance({ ...GMAIL_VERDICT, panel_selectors: [] });
+  assert.equal(shown.length, 1, 'the floor selectors were not used as a fallback');
 });
 
 // The banner copy is outside the sliced region, so assert on the source: these
@@ -179,4 +194,83 @@ test('the banner names the AI feature and states the scope', () => {
     'the banner still leads with the host vendor rather than the AI feature');
   assert.match(src, /Only your AI prompts here are governed/,
     'the banner no longer tells the user the rest of the app is not governed');
+});
+
+// ── The regression that shipped: fail-open against an old server ────────────
+//
+// The first version of this gate read surface_scope from the SERVER VERDICT only.
+// Against a server that predates the field — or one unreachable, or a verdict
+// cached from before the upgrade — surface_scope is undefined, the embedded test
+// is false, and the notice announced on Gmail the moment the inbox opened. That
+// is fail-OPEN on precisely the case the gate exists for, and it is what a live
+// test caught: the fix was deployed to the extension before the server, so every
+// verdict arrived without the field.
+
+const LEGACY_VERDICT = {
+  should_govern: true,
+  vendor: 'Google',
+  confidence: 0.98,
+  // no surface_scope, no panel_selectors — an old or unreachable server
+};
+
+test('an old server verdict does NOT re-enable the load-time banner on Gmail', () => {
+  const h = harness({ panelPresent: false });
+  const { announceGovernance, shown } = h.load('mail.google.com');
+  announceGovernance({ ...LEGACY_VERDICT });
+  assert.equal(shown.length, 0,
+    'the banner fired on the Gmail inbox because the server sent no surface_scope');
+});
+
+test('with an old server verdict the notice still appears when Gemini opens', () => {
+  const h = harness({ panelPresent: false });
+  const { announceGovernance, shown } = h.load('mail.google.com');
+  announceGovernance({ ...LEGACY_VERDICT });
+  h.openPanel();
+  h.flush();
+  assert.equal(shown.length, 1, 'the floor gated the notice but never let it through');
+});
+
+test('an old server verdict still announces immediately on a dedicated AI site', () => {
+  const h = harness();
+  const { announceGovernance, shown } = h.load('claude.ai');
+  announceGovernance({ ...LEGACY_VERDICT, vendor: 'Anthropic' });
+  assert.equal(shown.length, 1, 'a whole-site AI product went silent');
+});
+
+test('the floor marks the verdict scoped so the banner copy states the scope', () => {
+  const h = harness({ panelPresent: true });
+  const v = { ...LEGACY_VERDICT };
+  const { announceGovernance, shown } = h.load('mail.google.com');
+  announceGovernance(v);
+  assert.equal(shown.length, 1);
+  assert.equal(shown[0].surface_scope, 'embedded_ai',
+    'the banner would not print the "rest of this app is not governed" line');
+});
+
+test('the floor resolves tenant subdomains and does not catch Gemini', () => {
+  const { floorSelectorsForHost } = harness().load();
+  assert.ok(floorSelectorsForHost('app.hubspot.com'), 'hubspot tenant not matched');
+  assert.ok(floorSelectorsForHost('acme.zendesk.com'), 'zendesk tenant not matched');
+  assert.equal(floorSelectorsForHost('gemini.google.com'), null, 'Gemini was scoped by the Gmail entry');
+  assert.equal(floorSelectorsForHost('claude.ai'), null);
+});
+
+// The two content scripts are injected independently, so neither can depend on the
+// other's load order and each carries its own copy of the floor. That is only safe
+// while the copies are identical.
+test('the notice floor and the capture floor are the same list', () => {
+  const contentSrc = readFileSync(path.join(here, '..', 'content', 'content.js'), 'utf8');
+  const grab = (src, label) => {
+    const i = src.indexOf('const EMBEDDED_AI_FLOOR = {');
+    assert.ok(i > 0, `${label}: EMBEDDED_AI_FLOOR not found`);
+    const end = src.indexOf('};', i);
+    assert.ok(end > i, `${label}: EMBEDDED_AI_FLOOR never closes`);
+    // Normalise whitespace so alignment padding is not a difference.
+    return src.slice(i, end).replace(/\s+/g, ' ').trim();
+  };
+  assert.equal(
+    grab(src, 'fingerprint.js'),
+    grab(contentSrc, 'content.js'),
+    'the notice gate and the capture gate disagree about which hosts are embedded-AI',
+  );
 });

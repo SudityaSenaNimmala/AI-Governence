@@ -371,6 +371,43 @@
   // from the same module.
   const EMBEDDED = 'embedded_ai';
 
+  // THE SAME BUILT-IN FLOOR content.js CARRIES, and for the same reason: the
+  // guarantee must not depend on a network call succeeding.
+  //
+  // The first version of this gate read surface_scope from the SERVER VERDICT
+  // only. Against a server that predates the field — or one that is unreachable,
+  // or a cached verdict from before the upgrade — `surface_scope` is undefined,
+  // the embedded test is false, and the notice announced on Gmail immediately.
+  // That is fail-OPEN on the exact case the gate exists for.
+  //
+  // Kept in step with content.js's EMBEDDED_AI_FLOOR by
+  // tests/governance-notice.test.mjs, which compares the two lists and fails if
+  // they drift. Duplication across two independently-injected content scripts is
+  // the price of neither of them depending on the other's load order.
+  const EMBEDDED_AI_FLOOR = {
+    'mail.google.com': ['[aria-label*="Gemini" i]', '[data-gemini]', 'dialog[aria-label*="Gemini" i]'],
+    'docs.google.com': ['[aria-label*="Gemini" i]', '[aria-label*="Help me write" i]'],
+    'hubspot.com':     ['[data-test-id*="copilot" i]', '[class*="copilot" i]', '[aria-label*="Breeze" i]'],
+    'github.com':      ['[data-testid*="copilot" i]', '#copilot-chat', '[aria-label*="Copilot" i]', 'copilot-chat'],
+    'sharepoint.com':  ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'zendesk.com':     ['[data-test-id*="copilot" i]', '[data-test-id*="generative" i]', '[class*="ai-agent" i]'],
+    'salesforce.com':  ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'force.com':       ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'intercom.com':    ['[class*="fin-" i]', '[class*="intercom-ai" i]'],
+  };
+
+  /** Floor selectors for a host — exact or dot-suffix, longest key wins. */
+  function floorSelectorsForHost(host) {
+    const h = String(host || '').toLowerCase();
+    let best = null, bestLen = 0;
+    for (const [key, sels] of Object.entries(EMBEDDED_AI_FLOOR)) {
+      if ((h === key || h.endsWith('.' + key)) && key.length > bestLen) {
+        best = sels; bestLen = key.length;
+      }
+    }
+    return best;
+  }
+
   function panelsVisible(selectors) {
     for (const sel of selectors) {
       let found;
@@ -385,14 +422,29 @@
   }
 
   function announceGovernance(v) {
-    const selectors = Array.isArray(v.panel_selectors) ? v.panel_selectors : [];
+    const host = (typeof window !== 'undefined' && window.location) ? window.location.hostname : '';
+    const floor = floorSelectorsForHost(host);
+
+    // EMBEDDED IF EITHER SOURCE SAYS SO. The verdict is authoritative when it
+    // carries the field; the floor decides when it does not, which is what keeps
+    // an old, cached or unreachable server from re-enabling the load-time banner.
+    const isEmbedded = v.surface_scope === EMBEDDED || !!floor;
 
     // Whole-site AI product: unchanged, announce immediately.
-    if (v.surface_scope !== EMBEDDED) { showGovernanceBanner(v); return; }
+    if (!isEmbedded) { showGovernanceBanner(v); return; }
+
+    // Server selectors preferred — they can be corrected without a release — with
+    // the floor behind them.
+    const selectors = (Array.isArray(v.panel_selectors) && v.panel_selectors.length)
+      ? v.panel_selectors
+      : (floor || []);
 
     // Scoped host, but we do not know what its AI panel looks like. Stay silent:
     // capture is gated by the same unknown, so there is nothing to announce.
     if (selectors.length === 0) return;
+
+    // The banner copy needs to know it is scoped even when the server did not say so.
+    if (!v.surface_scope) v.surface_scope = EMBEDDED;
 
     if (panelsVisible(selectors)) { showGovernanceBanner(v); return; }
 
