@@ -384,34 +384,69 @@
   // tests/governance-notice.test.mjs, which compares the two lists and fails if
   // they drift. Duplication across two independently-injected content scripts is
   // the price of neither of them depending on the other's load order.
+  // Generic AI-panel selectors, used for every app whose embedded assistant we
+  // have not named specifically. Keyed on words vendors actually put on an AI
+  // surface — never a bare "ai" token, which also matches "mail".
+  //
+  // These are conservative on purpose. The gate fails closed: if none of them
+  // match, that host captures nothing and shows no notice, which is a reportable
+  // gap rather than a silent over-collection. Correct one from the dashboard
+  // (/api/v1/ai-surfaces) rather than shipping a new extension.
+  const GENERIC_AI_PANEL = [
+    '[aria-label*="Copilot" i]', '[aria-label*="Assistant" i]', '[aria-label*="Ask AI" i]',
+    '[class*="copilot" i]', '[class*="assistant" i]', '[data-testid*="assistant" i]',
+  ];
+
   const EMBEDDED_AI_FLOOR = {
+    // ── Google ──
     'mail.google.com': ['[aria-label*="Gemini" i]', '[data-gemini]', 'dialog[aria-label*="Gemini" i]'],
     'docs.google.com': ['[aria-label*="Gemini" i]', '[aria-label*="Help me write" i]'],
-    'hubspot.com':     ['[data-test-id*="copilot" i]', '[class*="copilot" i]', '[aria-label*="Breeze" i]'],
-    'github.com':      ['[data-testid*="copilot" i]', '#copilot-chat', '[aria-label*="Copilot" i]', 'copilot-chat'],
-    'sharepoint.com':  ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
-    'zendesk.com':     ['[data-test-id*="copilot" i]', '[data-test-id*="generative" i]', '[class*="ai-agent" i]'],
-    'salesforce.com':  ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
-    'force.com':       ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
-    'intercom.com':    ['[class*="fin-" i]', '[class*="intercom-ai" i]'],
-    // Microsoft surfaces a Copilot Studio agent can be published to. These are
-    // apps first and AI second — Teams is a chat client, Outlook is mail — so
-    // capture stays inside the Copilot panel. Adding them for AGENT BLOCKING
-    // without this would recreate the over-collection defect at a far worse
-    // scale: every Teams message and every email.
-    //
-    // 'cloud.microsoft' is deliberately broad. Microsoft has been moving M365
-    // web apps onto it, so it now spans Word and Outlook as well as Copilot
-    // chat — which means m365.cloud.microsoft is scoped too, and on that one
-    // surface we may under-capture. That is the correct side to err on: a
-    // reportable gap, not a compliance incident.
+    'meet.google.com': ['[aria-label*="Gemini" i]', '[aria-label*="take notes" i]'],
+    // ── Microsoft. A Copilot Studio agent is published across all of these. ──
     'teams.microsoft.com':        ['[aria-label*="Copilot" i]', '[data-tid*="copilot" i]'],
     'cloud.microsoft':            ['[aria-label*="Copilot" i]', '[class*="copilot" i]', '[data-tid*="copilot" i]'],
+    'sharepoint.com':             ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
     'outlook.office.com':         ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
     'outlook.office365.com':      ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'outlook.live.com':           ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'office.com':                 GENERIC_AI_PANEL,
+    'office365.com':              GENERIC_AI_PANEL,
     'crm.dynamics.com':           ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
     'copilotstudio.microsoft.com':['[aria-label*="Copilot" i]', '[class*="copilot" i]', '[aria-label*="Test your agent" i]'],
     'powerapps.com':              ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    // ── Code hosting ──
+    'github.com': ['[data-testid*="copilot" i]', '#copilot-chat', '[aria-label*="Copilot" i]', 'copilot-chat'],
+    'gitlab.com': ['[aria-label*="Duo" i]', '[class*="duo-chat" i]', '[data-testid*="duo" i]'],
+    // ── CRM / support desks ──
+    'hubspot.com':      ['[data-test-id*="copilot" i]', '[class*="copilot" i]', '[aria-label*="Breeze" i]'],
+    'hs-scripts.com':   ['[data-test-id*="copilot" i]', '[class*="copilot" i]', '[aria-label*="Breeze" i]'],
+    'salesforce.com':   ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'force.com':        ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'salesforceliveagent.com':   ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'salesforce-experience.com': ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'salesforce-sites.com':      ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'zendesk.com':      ['[data-test-id*="copilot" i]', '[data-test-id*="generative" i]', '[class*="ai-agent" i]'],
+    'zopim.com':        ['[data-test-id*="copilot" i]', '[data-test-id*="generative" i]', '[class*="ai-agent" i]'],
+    'intercom.com':     ['[class*="fin-" i]', '[class*="intercom-ai" i]'],
+    'intercom.io':      ['[class*="fin-" i]', '[class*="intercom-ai" i]'],
+    'drift.com':        GENERIC_AI_PANEL,
+    'driftt.com':       GENERIC_AI_PANEL,
+    'livechatinc.com':  GENERIC_AI_PANEL,
+    'crisp.chat':       ['[class*="magic" i]', ...GENERIC_AI_PANEL],
+    'tawk.to':          GENERIC_AI_PANEL,
+    // ── Productivity / collaboration with an AI panel ──
+    'slack.com':     ['[aria-label*="Slack AI" i]', '[data-qa*="ai_" i]', ...GENERIC_AI_PANEL],
+    'notion.so':     ['[class*="notion-ai" i]', '[aria-label*="Notion AI" i]', ...GENERIC_AI_PANEL],
+    'notion.site':   ['[class*="notion-ai" i]', '[aria-label*="Notion AI" i]', ...GENERIC_AI_PANEL],
+    'linear.app':    GENERIC_AI_PANEL,
+    'atlassian.net': ['[data-testid*="ai-" i]', '[aria-label*="Atlassian Intelligence" i]', ...GENERIC_AI_PANEL],
+    'atlassian.com': ['[data-testid*="ai-" i]', '[aria-label*="Atlassian Intelligence" i]', ...GENERIC_AI_PANEL],
+    'asana.com':     GENERIC_AI_PANEL,
+    'monday.com':    GENERIC_AI_PANEL,
+    'clickup.com':   ['[aria-label*="Brain" i]', ...GENERIC_AI_PANEL],
+    'canva.com':     ['[aria-label*="Magic" i]', ...GENERIC_AI_PANEL],
+    'figma.com':     GENERIC_AI_PANEL,
+    'miro.com':      GENERIC_AI_PANEL,
   };
 
   /** Floor selectors for a host — exact or dot-suffix, longest key wins. */
