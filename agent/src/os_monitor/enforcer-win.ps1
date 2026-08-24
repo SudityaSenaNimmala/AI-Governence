@@ -81,6 +81,7 @@ $patNames   = New-Object System.Collections.ArrayList
 $patSources = New-Object System.Collections.ArrayList
 $patSevs    = New-Object System.Collections.ArrayList
 $patLabels  = New-Object System.Collections.ArrayList
+$patIgnoreCase = New-Object System.Collections.ArrayList
 if ($env:CFAI_BLOCK_PATTERNS) {
     try {
         $parsed = $env:CFAI_BLOCK_PATTERNS | ConvertFrom-Json
@@ -89,6 +90,7 @@ if ($env:CFAI_BLOCK_PATTERNS) {
             [void]$patSources.Add([string]$p.source)
             [void]$patSevs.Add([string]$p.severity)
             [void]$patLabels.Add([string]$p.label)
+            [void]$patIgnoreCase.Add([bool]$p.ignoreCase)
         }
     } catch {}
 }
@@ -251,6 +253,14 @@ public static class CfaiEnforcer
     // Updated every 30s by reading ~/.cloudfuze-aigov/blocked-agents.json.
     static volatile bool _fgIsBlocked = false;
     static string _blockedReason = "";
+    // Which blocked row matched, so the "Request Access" dialog can name the
+    // platform an exception would have to be granted for. Fields come straight
+    // from blocked-agents.json (platform / agent_name / agent_id — the shape
+    // monitor-runner.mjs writes and UpdateBlockedAgents parses); nothing here is
+    // synthesised, so an admin's row and the request the user files agree.
+    static string _blockedPlatform = "";
+    static string _blockedAgentName = "";
+    static string _blockedAgentId = "";
     static string _blockedAgentFile = "";
     static long _lastBlockedCheck = 0;
     static readonly long BLOCKED_CHECK_INTERVAL = TimeSpan.FromSeconds(10).Ticks;
@@ -412,7 +422,7 @@ public static class CfaiEnforcer
     static volatile bool _rewriteInProgress = false;
     static volatile bool _rewriteAbort = false;
 
-    public static void Start(string[] aiProcs, string[] patNames, string[] patSources, string[] patSevs, string[] patLabels, string heartbeatFile, bool modelRouterEnabled, string modelRouterConfigJson)
+    public static void Start(string[] aiProcs, string[] patNames, string[] patSources, string[] patSevs, string[] patLabels, bool[] patIgnoreCase, string heartbeatFile, bool modelRouterEnabled, string modelRouterConfigJson)
     {
         try { SetProcessDPIAware(); } catch { }   // align UIA rect with hook screen coords
         _startTicks = DateTime.UtcNow.Ticks;
@@ -429,7 +439,15 @@ public static class CfaiEnforcer
             // concerned: always construct with the match timeout.
             try
             {
-                var rx = new Regex(patSources[i], RegexOptions.CultureInvariant, REGEX_TIMEOUT);
+                // ignoreCase travels per-pattern from classifier.js's p.regex.ignoreCase:
+                // .source alone drops the JS /i flag, so guardrail patterns (authored
+                // case-insensitive) need it restored here or a naturally-capitalized
+                // sentence ("Ignore all previous instructions") silently fails to match.
+                // Key/secret patterns (AWS, API keys) never set /i and must stay
+                // case-sensitive — their format is fixed-case by definition.
+                bool ic = (patIgnoreCase != null && i < patIgnoreCase.Length) && patIgnoreCase[i];
+                var opts = RegexOptions.CultureInvariant | (ic ? RegexOptions.IgnoreCase : RegexOptions.None);
+                var rx = new Regex(patSources[i], opts, REGEX_TIMEOUT);
                 string sev = (patSevs != null && i < patSevs.Length) ? patSevs[i] : "";
                 string label = (patLabels != null && i < patLabels.Length) ? patLabels[i] : "";
                 int sevRank = string.Equals(sev, "critical", StringComparison.OrdinalIgnoreCase) ? 4 : 3;
@@ -1517,6 +1535,12 @@ public static class CfaiEnforcer
     // Is the typed-buffer block still fresh? Expires after 60s of no new
     // matching keystrokes so stale buffers from editor typing don't
     // permanently block sends in a different panel.
+    // "An AI app is the foreground window RIGHT NOW" — as opposed to _fgIsAi,
+    // which stays true for FG_STICKY_TTL after focus leaves one. Used only to
+    // gate keystroke CAPTURE, never a block decision: see the call site in
+    // HookCallback for why those two want different answers.
+    static bool FgIsAiNow() { return _fgIsAi && _fgLeftAiTicks == 0; }
+
     static bool TypedBlockFresh()
     {
         return _blockTyped && (DateTime.UtcNow.Ticks - _typedBlockTicks) < TYPED_BLOCK_TTL;
@@ -1541,7 +1565,10 @@ public static class CfaiEnforcer
         return _fgIsBlocked || _attachHoldActive || TypedBlockFresh() || _blockUia || (recentPaste && _blockPaste) || cooldown;
     }
 
-    static string ActivePatterns() { return _attachHoldActive ? _attachHoldPatterns : _blockTyped ? _typedPatterns : _blockUia ? _uiaPatterns : ""; }
+    // Precedence matches the Enter path's `pats` chain, platform block first —
+    // otherwise a send-button click on a fully blocked app emitted a block with
+    // an empty patterns field and no way for the Node side to tell what it was.
+    static string ActivePatterns() { return _fgIsBlocked ? _blockedReason : _attachHoldActive ? _attachHoldPatterns : _blockTyped ? _typedPatterns : _blockUia ? _uiaPatterns : ""; }
 
     // Mouse hook — swallows a click on the send button while a block is active.
     // Only acts on left-button down/up that land inside the cached send-button
@@ -1729,7 +1756,19 @@ public static class CfaiEnforcer
                                 // ordinary block keeps the composer's Enter dead
                                 // either way, same outcome, simpler than adding a
                                 // second override meaning.
-                                if (ctrl && alt && !attachHold) { Emit("override", _app, pats, ""); }  // allow, logged
+                                //
+                                // Nor for a FULL PLATFORM BLOCK (_fgIsBlocked).
+                                // The override exists so a user with a false
+                                // positive on ONE message is not stuck; a
+                                // platform block is not a false positive about a
+                                // message, it is the org disallowing the whole
+                                // app, and there is now a sanctioned way to ask
+                                // for it back (Request Access → a time-boxed,
+                                // admin-approved exception). Leaving a hotkey
+                                // that silently walks through it would make that
+                                // approval optional. The panic hotkey is
+                                // untouched and still disarms everything.
+                                if (ctrl && alt && !attachHold && !_fgIsBlocked) { Emit("override", _app, pats, ""); }  // allow, logged
                                 else { EmitBlock(_app, pats, attachHold ? "attachment" : "send"); return (IntPtr)1; }  // swallow
                             }
                             else
@@ -1765,18 +1804,38 @@ public static class CfaiEnforcer
                         }
                         else if (vk == VK_BACK)
                         {
-                            TypedBackspace();
-                            _typedDirty = true;   // poll thread rescans; no regex here
+                            if (FgIsAiNow()) { TypedBackspace(); _typedDirty = true; }   // poll thread rescans; no regex here
                         }
                         else if (!ctrl && !alt)
                         {
                             // Accumulate printable characters (ignore Ctrl/Alt combos
                             // like Ctrl+A/Ctrl+C so they don't pollute the buffer).
-                            char c = MapKey(vk, shift, caps);
-                            if (c != '\0')
+                            //
+                            // FgIsAiNow(), not _fgIsAi: capture requires an AI app to
+                            // REALLY be in the foreground, not merely to have been
+                            // there within the 3s sticky window. Every block DECISION
+                            // above deliberately still uses the sticky flag — that is
+                            // what closes the dismiss-toast-then-quick-send bypass —
+                            // but a keystroke landing in some OTHER window is by
+                            // definition not part of an AI prompt, and reconstructing
+                            // it into the scan buffer captured text from whatever the
+                            // user alt-tabbed to.
+                            //
+                            // Concretely: the Request Access dialog opens the instant
+                            // an app is platform-blocked, i.e. squarely inside that
+                            // 3s window, so the reason the user types into it was
+                            // being appended here and regex-scanned (and its LENGTH
+                            // reported as a prompt into the AI app, on Enter). Nothing
+                            // is lost by the gate: you cannot type into an AI app
+                            // while a different window has focus.
+                            if (FgIsAiNow())
                             {
-                                TypedAppend(c);
-                                _typedDirty = true;   // poll thread rescans; no regex here
+                                char c = MapKey(vk, shift, caps);
+                                if (c != '\0')
+                                {
+                                    TypedAppend(c);
+                                    _typedDirty = true;   // poll thread rescans; no regex here
+                                }
                             }
                         }
                     }
@@ -1937,7 +1996,7 @@ public static class CfaiEnforcer
         }
         _lastBlockedCheck = now;
         try {
-            if (!System.IO.File.Exists(_blockedAgentFile)) { _blockedList.Clear(); _fgIsBlocked = false; return; }
+            if (!System.IO.File.Exists(_blockedAgentFile)) { _blockedList.Clear(); ClearFgBlocked(); return; }
             string json = System.IO.File.ReadAllText(_blockedAgentFile);
             // Minimal JSON parse — extract platform and agent_name fields
             var list = new List<Dictionary<string, string>>();
@@ -1949,7 +2008,15 @@ public static class CfaiEnforcer
                     var d = new Dictionary<string, string>();
                     d["platform"] = ExtractJsonString(item, "platform");
                     d["agent_name"] = ExtractJsonString(item, "agent_name");
+                    d["agent_id"] = ExtractJsonString(item, "agent_id");
                     d["reason"] = ExtractJsonString(item, "reason");
+                    // Host-keyed platform blocks (admin Inventory "blocked"
+                    // toggle) name their process directly instead of going
+                    // through PLATFORM_PROCS — see CheckFgBlocked. Empty on
+                    // ordinary per-agent rows, which is why the non-empty
+                    // platform guard below is left exactly as it was: the
+                    // synthesised rows carry the "ai_platform" sentinel there.
+                    d["process_name"] = ExtractJsonString(item, "process_name");
                     if (!string.IsNullOrEmpty(d["platform"])) list.Add(d);
                 }
             }
@@ -1960,18 +2027,46 @@ public static class CfaiEnforcer
 
     static void CheckFgBlocked()
     {
-        if (!_fgIsAi || _blockedList.Count == 0) { _fgIsBlocked = false; return; }
+        if (!_fgIsAi || _blockedList.Count == 0) { ClearFgBlocked(); return; }
         foreach (var agent in _blockedList) {
             HashSet<string> procs;
             if (PLATFORM_PROCS.TryGetValue(agent["platform"], out procs)) {
                 if (procs.Contains(_app)) {
                     _fgIsBlocked = true;
-                    _blockedReason = "Blocked agent: " + (agent["agent_name"] ?? agent["platform"]);
+                    _blockedPlatform = agent["platform"] ?? "";
+                    _blockedAgentName = string.IsNullOrEmpty(agent["agent_name"]) ? (agent["platform"] ?? "") : agent["agent_name"];
+                    _blockedAgentId = agent["agent_id"] ?? "";
+                    _blockedReason = "Blocked agent: " + _blockedAgentName;
+                    return;
+                }
+            }
+            // Host-keyed platform block: the row names its process outright, so
+            // no PLATFORM_PROCS entry is needed (and the "ai_platform" sentinel
+            // deliberately has none). Checked in the SAME iteration as the
+            // lookup above so first-match-wins ordering across the file is
+            // unchanged — a per-agent row earlier in the array still wins.
+            if (!string.IsNullOrEmpty(agent["process_name"])) {
+                if (string.Equals(agent["process_name"], _app, StringComparison.OrdinalIgnoreCase)) {
+                    _fgIsBlocked = true;
+                    _blockedPlatform = "ai_platform";
+                    _blockedAgentName = string.IsNullOrEmpty(agent["agent_name"]) ? "ai_platform" : agent["agent_name"];
+                    _blockedAgentId = agent["agent_id"] ?? "";
+                    _blockedReason = "Blocked platform: " + _blockedAgentName;
                     return;
                 }
             }
         }
+        ClearFgBlocked();
+    }
+
+    // Cleared together with the flag: a stale platform/agent name outliving the
+    // block it described would let EmitBlock attribute an unrelated block to it.
+    static void ClearFgBlocked()
+    {
         _fgIsBlocked = false;
+        _blockedPlatform = "";
+        _blockedAgentName = "";
+        _blockedAgentId = "";
     }
 
     static string ExtractJsonString(string json, string key)
@@ -2502,6 +2597,17 @@ public static class CfaiEnforcer
         // Send" for text while the actual thing holding the send is the
         // attached file — masking the text would do nothing to unblock it.
         if (reason == "attachment") { rewritable = false; blockId = ""; }
+        // A FULL PLATFORM BLOCK is never rewritable either, for a mechanical
+        // reason rather than a UX one: RunRewrite finishes by synthesizing an
+        // Enter, and the Enter-decision code swallows every Enter while
+        // _fgIsBlocked is set — including an injected one, since it does not
+        // exempt injected keys. So "Tokenize & Send" on a platform-blocked app
+        // wiped the composer, retyped the masked text and then silently failed
+        // with not_submitted. The user's actual remediation here is Request
+        // Access (the fields below), not masking: the org disallowed the whole
+        // app, not this one sentence.
+        bool platformBlock = _fgIsBlocked && reason != "attachment";
+        if (platformBlock) { rewritable = false; blockId = ""; }
         string json = "{\"kind\":\"block\""
             + ",\"reason\":\"" + Esc(reason) + "\""
             + (app.Length > 0 ? ",\"process\":\"" + Esc(app) + "\"" : "")
@@ -2510,6 +2616,13 @@ public static class CfaiEnforcer
             + ",\"rewritable\":" + (rewritable ? "true" : "false")
             + (rewritable ? ",\"preview\":\"" + Esc(preview) + "\"" : (whyNot.Length > 0 ? ",\"why_not\":\"" + Esc(whyNot) + "\"" : ""))
             + (reason == "attachment" ? ",\"filename\":\"" + Esc(_attachHoldFilename) + "\"" : "")
+            // Identity of the block, for the Request Access dialog. No prompt
+            // content — a platform id, a display name and an agent id, all of
+            // them values an admin typed into the blocklist.
+            + (platformBlock ? ",\"platform_block\":true"
+                 + ",\"blocked_platform\":\"" + Esc(_blockedPlatform) + "\""
+                 + ",\"blocked_agent\":\"" + Esc(_blockedAgentName) + "\""
+                 + ",\"blocked_agent_id\":\"" + Esc(_blockedAgentId) + "\"" : "")
             + "}";
         lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }
@@ -2798,7 +2911,7 @@ Add-Type -TypeDefinition $source -ReferencedAssemblies @(
     'System.Web.Extensions'
 ) -ErrorAction Stop
 
-[CfaiEnforcer]::Start(($aiProcs -split ','), $patNames.ToArray(), $patSources.ToArray(), $patSevs.ToArray(), $patLabels.ToArray(), $hbPath, $modelRouterEnabled, $mrConfigJson)
+[CfaiEnforcer]::Start(($aiProcs -split ','), $patNames.ToArray(), $patSources.ToArray(), $patSevs.ToArray(), $patLabels.ToArray(), [bool[]]($patIgnoreCase.ToArray()), $hbPath, $modelRouterEnabled, $mrConfigJson)
 
 # Keep the process alive — the C# background threads (poll + message pump) do
 # the work and write events to stdout. Node reads them.

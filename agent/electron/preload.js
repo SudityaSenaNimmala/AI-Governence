@@ -24,6 +24,12 @@ contextBridge.exposeInMainWorld('api', {
   // Tokenize & Send dialog
   tokenizeBlock: (blockId) => ipcRenderer.invoke('tokenize-block', blockId),
 
+  // Request Access dialog (shown when an AI app is blocked outright).
+  // The reason text goes straight into the POST body in the main process — it is
+  // never scanned, logged or persisted locally except in the offline queue file.
+  submitAccessRequest: (payload) => ipcRenderer.invoke('access-request', payload),
+  getAccessRequestStatus: (toolHost) => ipcRenderer.invoke('access-request-status', toolHost),
+
   // Auto-launch
   getAutoLaunch: () => ipcRenderer.invoke('get-auto-launch'),
   setAutoLaunch: (enable) => ipcRenderer.invoke('set-auto-launch', enable),
@@ -73,5 +79,10 @@ contextBridge.exposeInMainWorld('api', {
     const handler = (_event, data) => callback(data);
     ipcRenderer.on('rewrite-result', handler);
     return () => ipcRenderer.removeListener('rewrite-result', handler);
+  },
+  onAccessRequestDialog: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('access-request-dialog', handler);
+    return () => ipcRenderer.removeListener('access-request-dialog', handler);
   },
 });

@@ -92,6 +92,15 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   arg as a directory target (its path regex matches the `/`), polluting data-flow
   targets with a false directory. Skip the package/spec arg before extracting dirs.
 
+- [ ] **Real admin session/login for connect-ui, replacing the build-time VITE_ADMIN_TOKEN**
+  Admin-only routes (Access Requests approve/reject, SDK projects, tracing observations,
+  session-replay media) are gated server-side by `requireAdminAuth`, but connect-ui's
+  `adminFetch` only ever sends a bearer sourced from `import.meta.env.VITE_ADMIN_TOKEN` at
+  build time — there is no login flow and no server-set session cookie. A production build
+  without that env var baked in has every admin-gated view (including the new desktop
+  Request Access queue) permanently non-functional, with no in-product way to fix it short
+  of a rebuild.
+
 - [ ] **Endpoint enforcement for MCP servers (quarantine blocked MCP servers from config)**
   Today MCP handling is discovery-only — a server can be sanctioned `blocked` in the
   catalog but nothing acts on it; the proxy/hook/OS-monitor only cover prompt/file
@@ -267,6 +276,26 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   containing `\n`/`\r` as unmaskable ("multiline"), so a blocked multi-line
   prompt always falls back to "remove it yourself and resend" with no
   Tokenize & Send option.
+
+- [ ] **Populate `ai_platforms.surface` from the admin UI**
+  The field is schema'd and validated server-side (`browser`/`desktop`/`cli`/`all`)
+  but no admin UI ever sets it — every row defaults to `browser`. The desktop
+  agent's Inventory-block bridge (`monitor-runner.mjs`'s `synthesizePlatformBlocks`)
+  has to route around this by filtering on the process catalog instead of
+  `surface`. A settings control to set this properly would let desktop enforcement
+  filter on the intended field directly.
+
+- [ ] **Desktop host-block enforcement for IDE surfaces (Cursor, GitHub Copilot)**
+  The Inventory-block bridge deliberately excludes any host resolving to a
+  process with `useAttachmentWatcher:false` (currently Cursor + GitHub Copilot),
+  since blocking Enter in an IDE has a much larger blast radius than a chat app.
+  Blocking `cursor.com`/`github.com` from Inventory today has zero desktop effect.
+  Needs its own design for how much of the IDE to actually block.
+
+- [ ] **Require authentication on `GET /api/v1/ai-platforms`**
+  Currently public/unauthenticated. The desktop agent already sends a bearer
+  token on this route that the server ignores; the browser extension's own use
+  of this endpoint would need checking before tightening it.
 
 ---
 

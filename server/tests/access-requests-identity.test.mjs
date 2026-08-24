@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import express from 'express';
 
 import { mountAccessRequests } from '../src/routes/access-requests.js';
+import { ADMIN_TOKEN } from '../src/auth.js';
 import { createFakeDb } from './helpers/fake-db.mjs';
 
 async function withServer(seed, fn) {
@@ -34,7 +35,14 @@ async function withServer(seed, fn) {
     return await fn({
       db,
       async get(p) {
-        const res = await fetch(`${base}${p}`);
+        // Both fleet-wide lists are behind requireAdminAuth — they return named
+        // employees, hostnames and (for requests) the reason text — so every
+        // read here carries the admin credential. The 401 paths themselves are
+        // pinned in access-requests-desktop.test.mjs; this file is about the
+        // name precedence once you are through the door.
+        const res = await fetch(`${base}${p}`, {
+          headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+        });
         assert.equal(res.status, 200, `GET ${p} → ${res.status}`);
         return res.json();
       },

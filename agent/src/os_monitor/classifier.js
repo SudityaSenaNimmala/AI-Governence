@@ -161,6 +161,11 @@ export function getBlockPatterns() {
     .map((p) => ({
       name: p.name,
       source: p.regex.source,
+      // .source never carries the /i flag — without this, the enforcer's C#
+      // Regex compiles case-sensitive and a naturally-capitalized sentence
+      // ("Ignore all previous instructions") silently fails to match a
+      // pattern authored assuming case-insensitive matching.
+      ignoreCase: p.regex.ignoreCase,
       severity: effectiveSeverity(p),
       label: REDACT_LABELS[p.name] || null,
     }));

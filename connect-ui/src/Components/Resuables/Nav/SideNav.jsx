@@ -28,10 +28,27 @@ import { SET_SIDEBAR_COLLAPSED } from "../../../GlobalContext/action.types";
 import "./css/Nav.css";
 
 // Pending access request count — polled so the badge updates without a refresh.
+//
+// GET /api/v1/access-requests is behind requireAdminAuth, so the poll has to
+// send a credential or the badge sits at 0 no matter how many requests are
+// waiting. This is the same optional-bearer seam AIHubPage's adminFetch uses:
+// VITE_ADMIN_TOKEN is read from the environment with no default, so nothing is
+// embedded in the repo and no header is sent when it is unset. It is inlined
+// rather than shared because these are the only two call sites in the app and
+// there is no existing /api/v1 client module to put it in (helpers/apiRequest.js
+// is the unrelated cfcommon axios wrapper).
+//
+// With no token the route 401s, r.ok is false, and the badge falls back to 0 —
+// the pre-existing silent degradation, deliberately kept: a nav badge is not
+// the place to raise a configuration error.
 function usePendingRequestCount() {
   const [count, setCount] = useState(0);
   useEffect(() => {
-    const load = () => fetch("/api/v1/access-requests")
+    const adminToken = import.meta.env.VITE_ADMIN_TOKEN;
+    const load = () => fetch("/api/v1/access-requests", {
+      credentials: "same-origin",
+      headers: adminToken ? { Authorization: `Bearer ${adminToken}` } : {},
+    })
       .then(r => r.ok ? r.json() : [])
       .then(list => setCount((list || []).filter(r => r.status === "pending").length))
       .catch(() => {});

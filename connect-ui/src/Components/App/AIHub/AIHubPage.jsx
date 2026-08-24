@@ -733,7 +733,12 @@ function OverviewView() {
     soft(apiFetch("/dlp/summary"),"prompt & DLP activity",setDlp,false);
     soft(apiFetch("/findings?type=mcp_server&latestOnly=true&limit=500"),"MCP servers",setMcp,false);
     soft(apiFetch("/findings?type=agent_project&latestOnly=true&limit=500"),"agent projects",setProj,false);
-    soft(apiFetch("/access-requests"),"access requests",setReqs,false);
+    // adminJson, not apiFetch: /access-requests is behind requireAdminAuth, so
+    // apiFetch's credential-less GET now 401s and this tile would read "0
+    // pending" forever. soft() still handles the no-token build — the count
+    // falls back and the warning strip names "access requests" — but with a
+    // token the number is real again.
+    soft(adminJson("/access-requests"),"access requests",setReqs,false);
     soft(apiFetch("/dlp?severity=critical,high&limit=1"),"recent detections",setHiEv,false);
     // Exact same count DLPView shows: fetch actual events + files, count high/critical
     Promise.all([apiFetch("/dlp?limit=5000").catch(()=>[]),apiFetch("/dlp/files?limit=5000").catch(()=>[])]).then(([ev,f])=>{
@@ -1401,6 +1406,17 @@ async function adminFetch(path, init) {
       ...(init?.headers||{}),
     },
   });
+}
+
+// apiFetch's throw-on-!ok contract, with the admin credential attached. For
+// admin-gated routes whose caller only wants the JSON and treats any failure
+// the same way — e.g. OverviewView's soft() tiles, which already degrade to a
+// named warning. Views that must tell "no credential" apart from "server
+// broke" should call adminFetch directly and check res.status themselves.
+async function adminJson(path) {
+  const r = await adminFetch(path);
+  if (!r.ok) throw new Error(`${r.status}`);
+  return r.json();
 }
 
 function classifyRecErr(status) {
@@ -3720,13 +3736,56 @@ function RegistryRowDetail({ row, onStatus, pending }) {
 
 // ── Access Requests View ──────────────────────────────────────────────────
 
-const ACCESS_API = "/api/v1/access-requests";
-const EXCEPTION_API = "/api/v1/access-exceptions";
+// API-RELATIVE on purpose (no "/api/v1" prefix): every route below sits behind
+// requireAdminAuth on the server — listing requests, approve, reject, and
+// revoking an exception — so they all go through adminFetch, which prepends API
+// itself. Bare fetch() here would send no credential and 401 on every call.
+const ACCESS_API = "/access-requests";
+const EXCEPTION_API = "/access-exceptions";
+
+// WHERE a request came from. Both surfaces post to the same endpoint, so without
+// this an admin cannot tell a desktop app block from a browser one — and the
+// remedy differs (uninstall/allow-list an app vs. an extension rule).
+// `surface` is optional: only the desktop agent stamps it, so every row that
+// predates the desktop flow — and every browser row — arrives without it. Missing
+// therefore means "browser", which is why the lookup below falls back to browser
+// rather than rendering an "unknown" state that would only ever mean "old row".
+const SURFACE_META = {
+  desktop: { label:"Desktop", color:"#7c3aed", hint:"Requested from a desktop AI app, via the endpoint agent." },
+  browser: { label:"Browser", color:"#0052e0", hint:"Requested from a web AI tool, via the browser extension." },
+};
+// Node's process.platform, spelled the way an admin reads it. Same raw values the
+// Machines view tones by, so the two stay in step.
+const SURFACE_PLATFORM_LABELS = { win32:"Windows", darwin:"macOS", linux:"Linux" };
+
+// Render helpers rather than components on purpose: this file has no prop-types
+// plumbing, and a `{ row }` component signature trips react/prop-types on every
+// field it reads. Called as surfaceBadge(r), so nothing new goes red.
+function surfaceBadge(row) {
+  const meta = SURFACE_META[row?.surface] || SURFACE_META.browser;
+  return <span title={meta.hint}><Badge text={meta.label} color={meta.color}/></span>;
+}
+// The desktop-only detail that makes the badge actionable: which app process asked,
+// on which OS. Both fields are optional even on a desktop row, so this renders
+// nothing rather than a half-empty line, and nothing at all for browser rows —
+// they have no process to name.
+function surfaceDetail(row) {
+  if (row?.surface !== "desktop") return null;
+  const parts = [row.process_name, SURFACE_PLATFORM_LABELS[row.platform] || row.platform].filter(Boolean);
+  if (!parts.length) return null;
+  return <div className="aihub_text_muted">{parts.join(" · ")}</div>;
+}
+
+// A denied write, phrased for the person who clicked the button. Same cause as
+// the sdkAuthNotice panel below, but that panel only explains an empty list —
+// an alert is what an admin needs when Approve does nothing.
+const ACCESS_DENIED_MSG="Not authorised — approving, rejecting, and revoking need an admin credential (VITE_ADMIN_TOKEN in connect-ui/.env.local). Nothing was changed.";
 
 function AccessRequestsView() {
   const [requests,setRequests]=useState(null);
   const [exceptions,setExceptions]=useState(null);
   const [err,setErr]=useState(null);
+  const [authFail,setAuthFail]=useState(false); // 401/403 — a config gap, not an error
   const [tab,setTab]=useState("pending");
   const [approving,setApproving]=useState(null); // request id being approved
   const [expiryMode,setExpiryMode]=useState("hours"); // "hours" or "date"
@@ -3734,11 +3793,22 @@ function AccessRequestsView() {
   const [expiryDate,setExpiryDate]=useState("");
   const [reviewNote,setReviewNote]=useState("");
 
+  // Same shape SdkProjectsView.load uses: 401/403 is its own state (setup
+  // guidance), any other bad status is a real error. Rows are set to [] on an
+  // auth failure so the view renders the notice instead of spinning forever.
   const loadAll=()=>{
-    Promise.all([
-      fetch(ACCESS_API).then(r=>r.json()),
-      fetch(EXCEPTION_API).then(r=>r.json()),
-    ]).then(([r,e])=>{setRequests(r);setExceptions(e);}).catch(x=>setErr(x.message));
+    setErr(null);
+    Promise.all([adminFetch(ACCESS_API),adminFetch(EXCEPTION_API)])
+      .then(async([rr,er])=>{
+        const denied=s=>s===401||s===403;
+        if(denied(rr.status)||denied(er.status)){ setAuthFail(true); setRequests([]); setExceptions([]); return; }
+        if(!rr.ok) throw new Error(`HTTP ${rr.status}`);
+        if(!er.ok) throw new Error(`HTTP ${er.status}`);
+        const [r,e]=[await rr.json(),await er.json()];
+        setAuthFail(false);
+        setRequests(Array.isArray(r)?r:[]); setExceptions(Array.isArray(e)?e:[]);
+      })
+      .catch(x=>{setErr(x.message); setRequests([]); setExceptions([]);});
   };
   useEffect(()=>{ loadAll(); },[]);
 
@@ -3746,19 +3816,24 @@ function AccessRequestsView() {
     const body={note:reviewNote};
     if(expiryMode==="hours") body.expires_in_hours=Number(expiryHours);
     else body.expires_at=expiryDate;
-    const res=await fetch(`${ACCESS_API}/${id}/approve`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const res=await adminFetch(`${ACCESS_API}/${id}/approve`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(res.status===401||res.status===403){setAuthFail(true);alert(ACCESS_DENIED_MSG);return;}
     if(!res.ok){const e=await res.json().catch(()=>({}));alert(e.error||"Failed");return;}
     setApproving(null);setReviewNote("");loadAll();
   };
 
   const reject=async(id)=>{
-    await fetch(`${ACCESS_API}/${id}/reject`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({note:reviewNote})});
+    const res=await adminFetch(`${ACCESS_API}/${id}/reject`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({note:reviewNote})});
+    if(res.status===401||res.status===403){setAuthFail(true);alert(ACCESS_DENIED_MSG);return;}
+    if(!res.ok){const e=await res.json().catch(()=>({}));alert(e.error||"Failed");return;}
     setApproving(null);setReviewNote("");loadAll();
   };
 
   const revoke=async(id)=>{
     if(!confirm("Revoke this access? The tool will be blocked again for this employee.")) return;
-    await fetch(`${EXCEPTION_API}/${id}`,{method:"DELETE"});
+    const res=await adminFetch(`${EXCEPTION_API}/${id}`,{method:"DELETE"});
+    if(res.status===401||res.status===403){setAuthFail(true);alert(ACCESS_DENIED_MSG);return;}
+    if(!res.ok){alert(`Revoke failed (HTTP ${res.status}).`);return;}
     loadAll();
   };
 
@@ -3776,6 +3851,11 @@ function AccessRequestsView() {
 
   return (<div>
     <SectionHeader title="Tool Access Requests" hint="Employees request temporary access to blocked AI tools. Approve with a mandatory expiry date."/>
+
+    {/* Without a credential every count below is a truthful zero for a route
+        that answered 401 — say so, rather than letting "0 pending" read as
+        "nobody is waiting on you". Same panel the SDK views use. */}
+    {authFail&&sdkAuthNotice("Reviewing tool access requests and active exceptions")}
 
     {/* Summary */}
     <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(3, 1fr)"}}>
@@ -3804,10 +3884,12 @@ function AccessRequestsView() {
           {pending.map(r=>(<div key={r.id} style={{padding:"16px 0",borderBottom:"1px solid #f3f4f6"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
               <div>
-                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}>
                   <span style={{fontSize:16,fontWeight:700}}>{r.tool_name||r.tool_host}</span>
                   {r.tool_vendor&&<Tag text={r.tool_vendor}/>}
+                  {surfaceBadge(r)}
                 </div>
+                {surfaceDetail(r)}
                 {/* Name the device too, but only when it adds something: on a
                     machine with no detected user employee_name IS the hostname,
                     and repeating it reads like two different facts. */}
@@ -3878,7 +3960,8 @@ function AccessRequestsView() {
     {/* History Tab */}
     {tab==="history"&&(<div className="aihub_card">
       <DataTable columns={[
-        {label:"Tool",render:r=><div className="aihub_text_primary">{r.tool_name||r.tool_host}</div>},
+        {label:"Tool",render:r=><><div className="aihub_text_primary">{r.tool_name||r.tool_host}</div>
+          <div style={{marginTop:3,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>{surfaceBadge(r)}{surfaceDetail(r)}</div></>},
         {label:"Employee",render:r=><UserCell row={r}/>},
         {label:"Reason",render:r=><div style={{fontSize:12,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.reason||"—"}</div>},
         {label:"Status",render:r=><Badge text={r.status} color={r.status==="approved"?"#22c55e":r.status==="rejected"?"#ef4444":r.status==="revoked"?"#f59e0b":"#9ca3af"}/>},

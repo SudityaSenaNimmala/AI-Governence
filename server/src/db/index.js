@@ -166,6 +166,11 @@ export async function applyInitialSchema(db) {
   await db.collection('access_requests').createIndex({ id: 1 }, { unique: true });
   await db.collection('access_requests').createIndex({ machine_id: 1, tool_host: 1 });
   await db.collection('access_requests').createIndex({ status: 1 });
+  // The 24h post-rejection cooldown's second lookup: an extension reinstall
+  // mints a new machine_id, so for a body-trust caller the hostname is the only
+  // continuity there is (routes/access-requests.js). Without this the check is a
+  // collection scan on every extension submit that is NOT in cooldown.
+  await db.collection('access_requests').createIndex({ hostname: 1, tool_host: 1 });
 
   // access_exceptions
   await db.collection('access_exceptions').createIndex({ machine_id: 1, tool_host: 1 });

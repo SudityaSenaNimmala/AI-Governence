@@ -20,6 +20,13 @@ const BROWSER_EXT_DIR = isDev
 const CRED_DIR = path.join(os.homedir(), '.cloudfuze-aigov');
 const CRED_PATH = path.join(CRED_DIR, 'credentials.json');
 const SETTINGS_PATH = path.join(CRED_DIR, 'electron-settings.json');
+// Single-slot offline queue for a Request Access submission. Written here when
+// the POST cannot reach the server; monitor-runner.mjs retries and deletes it on
+// its 30s tick. See flushPendingAccessRequest() there.
+const PENDING_ACCESS_REQUEST_PATH = path.join(CRED_DIR, 'pending-access-request.json');
+// Mirrors REASON_MAX in server/src/routes/access-requests.js. The server caps
+// independently — this is the client being well-behaved, not the enforcement.
+const REASON_MAX = 500;
 
 // ── Icons ──────────────────────────────────────────────────────────────────────
 const ICON_PATH = path.join(__dirname, 'assets', 'icon.png');
@@ -53,6 +60,7 @@ function copyDirSync(src, dest) {
 let tray = null;
 let mainWindow = null;
 let dialogWindow = null;  // the non-activating Tokenize & Send popup — see showBlockDialogWindow()
+let accessWindow = null;  // the FOCUSABLE Request Access dialog — see showAccessRequestWindow()
 let monitorProcess = null;  // child_process running the OsMonitor
 let isMonitoring = false;
 let recentAlerts = [];      // last 100 DLP events for the dashboard
@@ -223,6 +231,64 @@ function showBlockDialogWindow(data) {
   dialogWindow.showInactive();
 }
 
+// The Request Access dialog, shown when the org has blocked this AI app
+// OUTRIGHT (not because of anything in the message).
+//
+// Unlike showBlockDialogWindow above, this window IS focusable, and must be: the
+// user has to type a reason into it. That is safe here for the exact reason the
+// other one isn't — there is no pending rewrite to protect. A platform block
+// offers no Tokenize & Send (see EmitBlock's platformBlock override in
+// enforcer-win.ps1), so no block_id is being held, and nothing expires if focus
+// leaves the AI app. Do NOT "unify" the two windows: making the Tokenize popup
+// focusable is the bug that left it stuck on "Masking…".
+//
+// PII: this is an ordinary Electron window and the Electron app is not in
+// AI_PROCESSES, so the enforcer's typed-buffer capture (gated on _fgIsAi) and
+// the clipboard watcher both ignore it. The reason text is never scanned,
+// reported or logged — it travels only in the POST body below.
+let accessWindowHost = null;   // which tool the open dialog is about
+
+function showAccessRequestWindow(data) {
+  const send = () => { if (accessWindow && !accessWindow.isDestroyed()) accessWindow.webContents.send('access-request-dialog', data); };
+  // A blocked app keeps emitting blocks — every swallowed Enter and every
+  // swallowed send-button click is another @@CFAI-BLOCK line. Re-sending the
+  // payload would re-render the dialog and DISCARD whatever reason the user has
+  // typed so far, so an already-open dialog for the same tool is just raised.
+  if (accessWindow && !accessWindow.isDestroyed() && accessWindowHost === (data?.tool_host || null)) {
+    accessWindow.show();
+    accessWindow.focus();
+    return;
+  }
+  accessWindowHost = data?.tool_host || null;
+  if (!accessWindow || accessWindow.isDestroyed()) {
+    const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+    const w = 460, h = 520;
+    accessWindow = new BrowserWindow({
+      width: w,
+      height: h,
+      x: Math.round((sw - w) / 2),
+      y: Math.round((sh - h) / 2),
+      frame: false,
+      resizable: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      show: false,
+      backgroundColor: '#1c1f2e',
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+      },
+    });
+    accessWindow.loadFile(path.join(__dirname, 'renderer', 'access-request.html'));
+    accessWindow.webContents.once('did-finish-load', send);
+    accessWindow.on('closed', () => { accessWindow = null; accessWindowHost = null; });
+  } else {
+    send();
+  }
+  accessWindow.show();
+  accessWindow.focus();
+}
+
 function parseMonitorLine(line) {
   // Structured lines (block dialog / rewrite result) are a distinct, always-
   // JSON channel — checked first so they never fall into the plain-text
@@ -230,15 +296,25 @@ function parseMonitorLine(line) {
   if (line.startsWith('@@CFAI-BLOCK ')) {
     try {
       const parsed = JSON.parse(line.slice('@@CFAI-BLOCK '.length));
-      // An attachment block has nothing actionable to offer in the center
-      // dialog — no Tokenize option (that masks text, not files) and no
-      // retraction button (out of scope, see the design doc) — it's just a
-      // "Got it." The toast index.js already fires for the same event says
-      // the same thing without stealing focus over the conversation, so
-      // skip the dialog here rather than showing both. Confirmed live: a
-      // user reported seeing both fire for the same attachment block, and
-      // the dialog added nothing the toast hadn't already said.
-      if (parsed.reason !== 'attachment') showBlockDialogWindow(parsed);
+      // Only show the center dialog when it has something ACTIONABLE to
+      // offer — the "Tokenize & Send" button, which requires rewritable:true.
+      // A non-rewritable block's dialog is just "Got it" restating what the
+      // toast (fired independently by index.js for the same event) already
+      // said, and confirmed live twice now — once for an attachment block,
+      // once for an ordinary non-maskable guardrail/prompt-injection block —
+      // that showing both reads as a redundant double pop-up, not two
+      // pieces of information. rewritable is always false for an attachment
+      // block already (Tokenize & Send masks text, not files — see
+      // EmitBlock's own override), so this single condition covers that
+      // case too without needing a reason-specific check.
+      //
+      // A FULL PLATFORM BLOCK is the one non-rewritable case that DOES have
+      // something actionable, and it is not Tokenize & Send: the whole app is
+      // disallowed, so the only move is to ask for a temporary exception. It
+      // gets its own focusable dialog. (Before this, such a block showed a
+      // toast and nothing else — there was no way to act on it at all.)
+      if (parsed.platform_block) { showAccessRequestWindow(parsed); return; }
+      if (parsed.rewritable) showBlockDialogWindow(parsed);
     }
     catch { /* malformed — drop, nothing else can be done with it */ }
     return;
@@ -593,6 +669,100 @@ function setupIPC() {
       return { sent: true };
     } catch (err) {
       return { sent: false, error: err.message };
+    }
+  });
+
+  // ── Request Access (desktop platform block) ────────────────────────────────
+  // Submits to the SAME /api/v1/access-requests the browser extension uses, so
+  // one admin queue and one approval cover both surfaces. The difference is the
+  // bearer token: this device is enrolled, so the server derives machine_id and
+  // hostname from the verified claims and ignores whatever the body says.
+  //
+  // Only the block's identity and the reason the user typed are sent. No prompt
+  // text, no clipboard, no window title.
+  ipcMain.handle('access-request', async (_event, payload) => {
+    const creds = loadCredentials();
+    if (!creds?.token || !creds?.serverUrl) {
+      return { ok: false, code: 'not_enrolled', error: 'This device is not enrolled. Open CloudFuze AI Governance → Settings and enroll.' };
+    }
+    const p = payload || {};
+    if (!p.tool_host) {
+      return { ok: false, code: 'no_tool_host', error: 'Could not identify which AI app to request access for.' };
+    }
+
+    const body = {
+      machine_id: creds.machineId || null,   // ignored by the server when the token verifies; kept for the offline queue
+      tool_host: String(p.tool_host),
+      tool_name: p.tool_name ? String(p.tool_name) : undefined,
+      tool_vendor: p.tool_vendor ? String(p.tool_vendor) : undefined,
+      reason: String(p.reason || '').slice(0, REASON_MAX),
+      surface: 'desktop',
+      platform: p.platform ? String(p.platform) : undefined,
+      process_name: p.process_name ? String(p.process_name) : undefined,
+      agent_id: p.agent_id ? String(p.agent_id) : undefined,
+    };
+
+    try {
+      const res = await fetch(`${creds.serverUrl.replace(/\/$/, '')}/api/v1/access-requests`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${creds.token}` },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const out = await res.json().catch(() => ({}));
+        return { ok: true, id: out.id || null };
+      }
+      const err = await res.json().catch(() => ({}));
+      // 401 is NOT a network problem and must not be reported as one — the
+      // machine token is expired or was minted against a different JWT_SECRET,
+      // and the fix is re-enrolling this device, not retrying later.
+      if (res.status === 401) {
+        return { ok: false, code: 'reenroll', error: 'This device needs to re-enroll before it can request access. Open CloudFuze AI Governance → Settings and enroll again.' };
+      }
+      return { ok: false, code: err.code || `http_${res.status}`, error: err.error || `Server returned ${res.status}.` };
+    } catch (netErr) {
+      // Offline: park it in the single slot and let monitor-runner.mjs submit it
+      // on its next successful tick. A second Submit while still offline
+      // overwrites this file rather than adding to it.
+      try {
+        fs.mkdirSync(CRED_DIR, { recursive: true });
+        fs.writeFileSync(
+          PENDING_ACCESS_REQUEST_PATH,
+          JSON.stringify({ ...body, queued_at: new Date().toISOString() }, null, 2),
+          'utf8',
+        );
+        return { ok: true, queued: true };
+      } catch (writeErr) {
+        return { ok: false, code: 'offline', error: `Could not reach the server (${netErr.message}) and could not save the request (${writeErr.message}).` };
+      }
+    }
+  });
+
+  // What this device has already asked for, so the dialog can render an
+  // "already pending" state instead of submitting into a 409.
+  ipcMain.handle('access-request-status', async (_event, toolHost) => {
+    const creds = loadCredentials();
+    if (!creds?.token || !creds?.serverUrl) return { ok: false, code: 'not_enrolled' };
+    try {
+      const res = await fetch(`${creds.serverUrl.replace(/\/$/, '')}/api/v1/access-requests/mine`, {
+        headers: { authorization: `Bearer ${creds.token}` },
+      });
+      if (res.status === 401) return { ok: false, code: 'reenroll' };
+      if (!res.ok) return { ok: false, code: `http_${res.status}` };
+      const rows = await res.json();
+      const host = String(toolHost || '').toLowerCase();
+      const mine = Array.isArray(rows) ? rows.filter((r) => String(r.tool_host || '').toLowerCase() === host) : [];
+      return {
+        ok: true,
+        pending: mine.find((r) => r.status === 'pending') || null,
+        latest: mine[0] || null,
+        // A locally queued submission has not reached the server yet, so it
+        // cannot come back on /mine — surface it so the dialog does not invite
+        // the user to submit the same thing twice.
+        queued: fs.existsSync(PENDING_ACCESS_REQUEST_PATH),
+      };
+    } catch (err) {
+      return { ok: false, code: 'offline', error: err.message, queued: fs.existsSync(PENDING_ACCESS_REQUEST_PATH) };
     }
   });
 

@@ -12,7 +12,7 @@
 
 import { createPoller } from './poller-factory.js';
 import { createNotifier } from './notify-factory.js';
-import { AI_PROCESSES, identifyAiProcess, isAttachmentWatcherEligible } from './ai-processes.js';
+import { AI_PROCESSES, identifyAiProcess, isAttachmentWatcherEligible, hostForProcess, hostsForPlatform } from './ai-processes.js';
 import { scan, lengthBucket, BLOCK_PATTERNS, getBlockPatterns, isTextReadable, isBinaryParseable, isImage, isArchive } from './classifier.js';
 import { PolicySync } from './policy-sync.js';
 import { buildFileUploadEvent } from './file-handler.js';
@@ -546,23 +546,44 @@ export class OsMonitor {
     this.enforcer.on('block', (ev) => {
       const ai = identifyAiProcess(ev.process) || { product: ev.process, vendor: null };
       const patterns = (ev.patterns || '').split(',').filter(Boolean);
-      const matches = patterns.map((p) => ({ pattern: p, severity: 'high', count: 1 }));
       const isAttachment = ev.reason === 'attachment';
+      // A FULL PLATFORM BLOCK — the org disallowed this app outright, so
+      // nothing about the message was scanned or is at fault. `patterns` on
+      // this event is the enforcer's human-readable "Blocked agent: X" string,
+      // NOT a pattern list, so it must not be reported as one; the browser
+      // extension's equivalent (blocked_for:'platform') reports matches:[] too.
+      const isPlatform = !!ev.platform_block;
+      const matches = isPlatform ? [] : patterns.map((p) => ({ pattern: p, severity: 'high', count: 1 }));
+      const agentName = ev.blocked_agent || ai.product;
+      // The access-exception key. The process name is preferred over the
+      // platform id because it names the app actually in the foreground; the
+      // platform mapping is the fallback for a process the catalog does not
+      // carry a host for.
+      const toolHost = isPlatform
+        ? (hostForProcess(ev.process) || hostsForPlatform(ev.blocked_platform)[0] || '')
+        : '';
       // reason: 'send' (Enter) | 'paste' (Ctrl+V) | 'click' (send button) | 'attachment' (sensitive file attached).
-      const reason = isAttachment ? 'file_upload' : ev.reason === 'paste' ? 'prompt_paste' : 'prompt_submit';
-      const how = isAttachment ? `attachment "${ev.filename}"` : ev.reason === 'paste' ? 'paste' : ev.reason === 'click' ? 'send-button click' : 'send';
+      const reason = isPlatform ? 'platform' : isAttachment ? 'file_upload' : ev.reason === 'paste' ? 'prompt_paste' : 'prompt_submit';
+      const how = isPlatform ? 'blocked platform' : isAttachment ? `attachment "${ev.filename}"` : ev.reason === 'paste' ? 'paste' : ev.reason === 'click' ? 'send-button click' : 'send';
       this.reporter.enqueue({
         kind: 'enforcement_block',
         blocked_for: reason,
-        mechanism: isAttachment ? 'attachment_hold' : 'keystroke_block',
+        mechanism: isPlatform ? 'platform_block' : isAttachment ? 'attachment_hold' : 'keystroke_block',
         blocked_by: isAttachment ? 'attachment_hold' : undefined,
         filename: isAttachment ? ev.filename : undefined,
         source: 'os_monitor_enforcer',
         service: ai.product,
         vendor: ai.vendor,
         process_name: ev.process,
+        // NOTE: the blocked platform id / agent id / tool_host are deliberately
+        // NOT sent here. POST /api/v1/dlp maps enforcement metadata from an
+        // explicit allowlist (see its metadata block), so extra keys would be
+        // silently dropped — which reads as "we recorded it" when nothing was
+        // recorded. They travel on the @@CFAI-BLOCK line below, which is where
+        // they are actually consumed, and reach the server on the access request
+        // itself. blocked_for/mechanism already carry "this was a platform block".
         matches,
-        highest_severity: 'high',
+        highest_severity: isPlatform ? 'critical' : 'high',
       });
       this.log?.info(`os_monitor: BLOCKED ${how} into ${ai.product} — [${ev.patterns}]`);
       if (this.#shouldFire(`enf|${ev.process}|${ev.patterns}|${ev.filename || ''}`)) {
@@ -570,7 +591,16 @@ export class OsMonitor {
         // not necessarily the upload — several chat apps upload an attached
         // file to the vendor's backend the instant it's attached, well
         // before Send. Never imply the bytes never left the machine.
-        this.toast.show(isAttachment ? {
+        this.toast.show(isPlatform ? {
+          // The old copy here read "Send blocked: prompt contains Blocked
+          // agent: Claude … Override (logged): Ctrl+Alt+Enter" — wrong on all
+          // three counts: the prompt contains nothing, "Blocked agent" is not
+          // a pattern name, and that override no longer applies to a platform
+          // block. Say what is actually true and where the remedy is.
+          title: `${ai.product} is blocked`,
+          message: `Your organization has blocked ${agentName} on this device — nothing can be sent here.\n` +
+            `Need it? Ask for temporary access in the CloudFuze window that just opened.`,
+        } : isAttachment ? {
           title: `${ai.product} - attachment blocked`,
           message: `Send blocked: "${ev.filename}" contains ${ev.patterns}\n` +
             `Remove the attachment to send. If the app already uploaded it on attach, this only stops it from being used in the conversation.`,
@@ -584,10 +614,22 @@ export class OsMonitor {
       // log line above, which main.js's regex-scraper cannot parse reliably.
       // block_id/rewritable/preview travel ONLY on this line, never through
       // log.* (see notify.js/enforcer-win.ps1's "never log content" discipline).
+      // platform_block routes main.js to the Request Access dialog instead of
+      // the Tokenize one; tool_host/tool_name/tool_vendor are pre-resolved here
+      // so the Electron layer never needs the process→host catalog itself, and
+      // are named to match the /api/v1/access-requests body exactly.
       console.log('@@CFAI-BLOCK ' + JSON.stringify({
         app: ai.product, patterns: ev.patterns, block_id: ev.block_id || '',
         rewritable: !!ev.rewritable, preview: ev.preview || '', why_not: ev.why_not || '',
         reason: ev.reason || '', filename: ev.filename || '',
+        platform_block: isPlatform,
+        blocked_platform: ev.blocked_platform || '',
+        blocked_agent: isPlatform ? agentName : '',
+        agent_id: ev.blocked_agent_id || '',
+        tool_host: toolHost,
+        tool_name: isPlatform ? ai.product : '',
+        tool_vendor: isPlatform ? (ai.vendor || '') : '',
+        process_name: ev.process || '',
       }));
     });
 

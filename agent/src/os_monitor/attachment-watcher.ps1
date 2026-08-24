@@ -138,8 +138,21 @@ while ($true) {
         $fg = Get-ForegroundAiWindow
         if ($fg) {
             $current = Collect-FilenameLikeNames $fg.Element
+            # First time we ever see this hwnd (fresh watcher start, or a
+            # window we haven't polled before): seed the baseline silently
+            # instead of diffing against empty. Otherwise every restart
+            # treats whatever filename-shaped chip already sits in chat
+            # history (or a stuck composer attachment from a prior session)
+            # as a brand-new attachment and fires a false attachment_appeared.
+            if (-not $Seen.ContainsKey($fg.Hwnd)) {
+                $Seen[$fg.Hwnd] = $current
+                if ($tick % 50 -eq 0) {
+                    Emit-Json @{ t = (Get-Date).ToUniversalTime().ToString('o'); kind = 'heartbeat'; tick = $tick; tracked = $Seen.Count }
+                }
+                Start-Sleep -Milliseconds 800
+                continue
+            }
             $prev = $Seen[$fg.Hwnd]
-            if (-not $prev) { $prev = New-Object System.Collections.Generic.HashSet[string] }
             foreach ($name in $current) {
                 if (-not $prev.Contains($name)) {
                     $resolved = Resolve-Path-ByBasename $name
