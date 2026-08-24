@@ -10,6 +10,12 @@
 //   const decision = router.decide({ host, model, text, sensitivity });
 //   // decision: { routed: true, model, host, rule_name, rule_id } or { routed: false }
 
+// The prompt-complexity classifier, generated from the canonical
+// browser-extension/content/complexity.js so the proxy, the browser extension,
+// and the desktop injector all agree on what 'simple' means. Regenerate with
+// `node scripts/gen-proxy-complexity.mjs` after editing the canonical file.
+import { __cfaiComplexity } from './complexity.js';
+
 const REFRESH_INTERVAL_MS = 60_000;
 
 // Known model families per provider — used to validate same-provider swaps.
@@ -19,6 +25,11 @@ const PROVIDER_MODELS = {
     'gpt-3.5-turbo', 'o1', 'o1-mini', 'o1-pro', 'o3', 'o3-mini', 'o4-mini',
   ],
   anthropic: [
+    // Current families first. Anthropic model ids carry no date suffix.
+    'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5',
+    'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6',
+    // Older families kept so a customer still pinned to one is recognised as
+    // same-provider rather than treated as an unknown model.
     'claude-opus-4', 'claude-sonnet-4', 'claude-haiku-4',
     'claude-3-5-sonnet', 'claude-3-5-haiku', 'claude-3-opus', 'claude-3-sonnet', 'claude-3-haiku',
   ],
@@ -61,7 +72,7 @@ export class ModelRouter {
     if (!this._ready || this._rules.length === 0) return { routed: false };
 
     const promptTokens = estimateTokens(text);
-    const complexity = classifyComplexity(text, promptTokens);
+    const complexity = classifyComplexity(text);
     const ctx = { host, model, sensitivity, complexity, prompt_tokens: promptTokens };
 
     for (const rule of this._rules) {
@@ -117,26 +128,46 @@ export class ModelRouter {
 }
 
 // ── Complexity Classification ─────────────────────────────────────────
+//
+// ONE DEFINITION OF simple / moderate / complex, SHARED WITH THE BROWSER
+// EXTENSION AND THE DESKTOP INJECTOR.
+//
+// This function used to be a pair of flat regexes behind a length test:
+//
+//     if (tokenEstimate < 100) return 'simple';     // ~400 characters
+//     if (tokenEstimate > 3000) return 'complex';
+//
+// Those rules read LENGTH as difficulty, which the extension's classifier was
+// rewritten to stop doing. Because both engines evaluate the same routing rules
+// from /api/v1/routing/rules, one admin rule saying `complexity: simple` was
+// matching two incompatible definitions of the word:
+//
+//     "what's our architecture for the billing service?"   (48 chars)
+//        browser extension -> complex -> Opus
+//        this proxy        -> simple  -> Haiku      <-- 12 tokens, short-
+//                                                       circuited before the
+//                                                       regex ever ran
+//
+// Same prompt, opposite tier, and the customer sees it on the invoice. The
+// classifier is now imported from ./complexity.js, generated from the canonical
+// browser-extension/content/complexity.js — see scripts/gen-proxy-complexity.mjs
+// and agent/tests/complexity-parity.test.mjs.
 
-const COMPLEX_SIGNALS = /\b(architect|design|implement|refactor|optimize|compare|evaluate|explain in detail|step.by.step|comprehensive|thorough|deep.dive|trade.?offs?|pros?.and?.cons|debug|investigate|root.cause|security.review|performance|scale|migration)\b/i;
-const SIMPLE_SIGNALS  = /\b(commit.message|changelog|fix.typo|rename|format|lint|summarize|translate|convert|hello|hi|hey|thanks|thank.you|yes|no|ok|okay)\b/i;
+const { classify: classifyText, VERSION: COMPLEXITY_VERSION } = __cfaiComplexity;
 
-function classifyComplexity(text, tokenEstimate) {
+/**
+ * 'simple' | 'moderate' | 'complex' — or 'unknown' when there is no text.
+ *
+ * The 'unknown' case is a deliberate difference from the extension, which
+ * returns 'moderate' for an empty prompt. In the browser an empty prompt means
+ * the user typed nothing and sent an attachment; here it means we could not
+ * extract prompt text from the request body at all, which is not the same
+ * claim. No complexity condition matches 'unknown', so an unreadable body is
+ * forwarded untouched instead of being routed on a guess.
+ */
+function classifyComplexity(text) {
   if (!text) return 'unknown';
-  if (tokenEstimate < 100) return 'simple';
-  if (tokenEstimate > 3000) return 'complex';
-
-  // Check content signals (sample first 2000 chars for speed)
-  const sample = text.length > 2000 ? text.slice(0, 2000) : text;
-  if (COMPLEX_SIGNALS.test(sample)) return 'complex';
-  if (SIMPLE_SIGNALS.test(sample)) return 'simple';
-
-  // Code-heavy prompts are usually moderate+
-  const codeBlockCount = (sample.match(/```/g) || []).length / 2;
-  if (codeBlockCount >= 2) return 'complex';
-  if (codeBlockCount >= 1) return 'moderate';
-
-  return 'moderate';
+  return classifyText(text);
 }
 
 function estimateTokens(text) {
@@ -200,4 +231,4 @@ function resolveAction(action, endpoints, originalModel) {
   return null;
 }
 
-export { classifyComplexity, estimateTokens, providerFromHost, PROVIDER_MODELS };
+export { classifyComplexity, estimateTokens, providerFromHost, PROVIDER_MODELS, COMPLEXITY_VERSION };

@@ -41,7 +41,20 @@
     { name: 'toxicity-self-harm',            regex: /\b(how\s+(to|can\s+I|do\s+I|could\s+I)\s+(commit\s+suicide|hurt\s+myself|self[\s-]?harm|end\s+my\s+life|kill\s+myself|harm\s+myself)|best\s+way\s+to\s+(die|kill\s+myself|end\s+it|commit\s+suicide))\b/i },
   ];
 
+  // Check feature flag — reads from DOM attribute set by content script before this loaded
+  function isDlpEnabled() {
+    try {
+      const raw = document.documentElement.getAttribute('data-cfai-features');
+      if (raw) {
+        const f = JSON.parse(raw);
+        if (f.dlp && f.dlp.status === 'disabled') return false;
+      }
+    } catch {}
+    return true;
+  }
+
   function scanText(text) {
+    if (!isDlpEnabled()) return []; // DLP feature disabled
     if (!text || text.length < 5) return [];
     const found = [];
     for (const p of SENSITIVE_PATTERNS) {
@@ -711,6 +724,8 @@
   let _pendingRoute = null;
 
   document.addEventListener('cfai-route-model', (e) => {
+    // Skip if model routing feature is disabled
+    try { const raw=document.documentElement.getAttribute('data-cfai-features'); if(raw){const f=JSON.parse(raw); if(f.model_routing&&f.model_routing.status==='disabled') return;} } catch{}
     if (e.detail && e.detail.model) {
       _pendingRoute = { model: e.detail.model, rule_name: e.detail.rule_name || '', ts: Date.now() };
       console.info('[cfai] routing queued:', _pendingRoute.model, '(' + _pendingRoute.rule_name + ')');
@@ -731,11 +746,14 @@
     return null;
   }
 
-  const FALLBACK_ROUTES = {
-    anthropic: { premium: 'claude-sonnet-4-20250514', standard: 'claude-haiku-4-5-20251001' },
-    openai:    { premium: 'gpt-4o', standard: 'gpt-4o-mini' },
-    google:    { premium: 'gemini-2.0-flash', standard: 'gemini-2.0-flash' },
-  };
+  // FALLBACK_ROUTES was removed here. It was declared and never read — the fetch
+  // wrapper below applies `_pendingRoute` and nothing else — while holding stale
+  // model ids AND a tier mapping that was off by one (it called Sonnet "premium"
+  // and Haiku "standard", and gave Google the same economy model for both tiers).
+  // Dead code with wrong values is worse than no code: the next person to need a
+  // fallback would have wired it up and shipped a silent mis-route. If a fallback
+  // is wanted, derive it from the routing rules the server already sends rather
+  // than a second hardcoded table.
 
   // Patch the fetch wrapper to apply routing BEFORE sending
   const _routedFetch = window.fetch;

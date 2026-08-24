@@ -12,6 +12,15 @@ const MAX_CONTENT_BYTES = 25 * 1024 * 1024;   // 25 MB
 
 export function mountDlp(app, db) {
   // Ingest — auth required, body { events: [...] }
+  // Feature gate — reject DLP event ingestion when disabled
+  app.use('/api/v1/dlp', (req, res, next) => {
+    if (req.method === 'POST') {
+      const v = process.env.FEAT_DLP;
+      if (v === 'false' || v === '0') return res.status(403).json({ error: 'DLP is disabled' });
+    }
+    next();
+  });
+
   app.post('/api/v1/dlp', requireMachineAuth, a(async (req, res) => {
     const events = req.body?.events;
     if (!Array.isArray(events)) return res.status(400).json({ error: 'events array required' });

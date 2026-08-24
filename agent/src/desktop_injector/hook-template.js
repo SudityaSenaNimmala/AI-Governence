@@ -21,6 +21,15 @@ import { dirname, join } from 'node:path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const RENDERER_SCANNER_SRC = readFileSync(join(__dirname, 'hook-renderer.js'), 'utf8');
 
+// The shared prompt-complexity classifier, embedded the same way as the scanner.
+// Generated from browser-extension/content/complexity.js by
+// scripts/gen-proxy-complexity.mjs, so the desktop routing path uses the same
+// definition of simple / moderate / complex as the browser extension and the
+// HTTPS proxy. It is a self-invoking IIFE that publishes window.__cfaiComplexity
+// and carries its own double-injection guard, so evaluating it once per
+// did-finish-load is safe.
+const COMPLEXITY_SRC = readFileSync(join(__dirname, 'complexity.inline.js'), 'utf8');
+
 export const HOOK_SOURCE = `
 "use strict";
 
@@ -70,6 +79,10 @@ function showNativeWarning(title, body) {
 //   - Ctrl+Alt+Enter = logged override
 const RENDERER_SCANNER = ${JSON.stringify(RENDERER_SCANNER_SRC)};
 
+// The shared complexity classifier, evaluated in each renderer BEFORE the
+// scanner so window.__cfaiComplexity exists by the time routing runs.
+const COMPLEXITY_CLASSIFIER = ${JSON.stringify(COMPLEXITY_SRC)};
+
 // ===== Main-process side =====
 
 const eventQueue = [];
@@ -96,7 +109,14 @@ setInterval(flushQueue, 60_000);
 // process polls every 2s via executeJavaScript to drain the queue.
 function installInWindow(win) {
   win.webContents.on('did-finish-load', () => {
-    win.webContents.executeJavaScript('(' + RENDERER_SCANNER + ')();').catch(() => {});
+    // Classifier first — the scanner's routing path reads window.__cfaiComplexity.
+    // Chained rather than fired in parallel so the ordering is guaranteed; if the
+    // classifier fails to evaluate, the scanner still installs and routing simply
+    // reports 'unknown' (no complexity rule matches, nothing gets downgraded).
+    win.webContents.executeJavaScript(COMPLEXITY_CLASSIFIER)
+      .catch(() => {})
+      .then(() => win.webContents.executeJavaScript('(' + RENDERER_SCANNER + ')();'))
+      .catch(() => {});
     pollRendererQueue(win);
   });
 }

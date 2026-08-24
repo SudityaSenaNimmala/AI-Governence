@@ -307,7 +307,7 @@
           return;
         }
         const v = resp.verdict;
-        if (v?.should_govern) showGovernanceBanner(v);
+        if (v?.should_govern) announceGovernance(v);
       },
     );
   }
@@ -347,10 +347,168 @@
           // discovery + classification layer only. Annotate the page so the
           // user knows it's being governed (small banner — invisible if the
           // existing content script already handles this site).
-          showGovernanceBanner(v);
+          announceGovernance(v);
         }
       },
     );
+  }
+
+  // ── When to tell the user they are governed ───────────────────────────────
+  //
+  // The banner used to appear the moment the HOST verdict said govern. On a
+  // dedicated AI site that is right. On a SaaS app where AI is one panel it was
+  // wrong and alarming: opening your Gmail inbox popped "governed by CloudFuze"
+  // while you read ordinary mail, implying the mail itself was being watched.
+  //
+  // The notice now follows exactly the rule capture follows (lib/ai-surfaces.js):
+  // on an embedded-AI host it appears only when an AI panel is actually open. It
+  // has to be REACTIVE, because a side panel is opened minutes after page load —
+  // announcing at load time and never again would mean the notice was either
+  // premature or absent.
+  //
+  // The two must agree in both directions. A notice with no capture is a false
+  // alarm; capture with no notice is worse. Both read the same selectors, served
+  // from the same module.
+  const EMBEDDED = 'embedded_ai';
+
+  // THE SAME BUILT-IN FLOOR content.js CARRIES, and for the same reason: the
+  // guarantee must not depend on a network call succeeding.
+  //
+  // The first version of this gate read surface_scope from the SERVER VERDICT
+  // only. Against a server that predates the field — or one that is unreachable,
+  // or a cached verdict from before the upgrade — `surface_scope` is undefined,
+  // the embedded test is false, and the notice announced on Gmail immediately.
+  // That is fail-OPEN on the exact case the gate exists for.
+  //
+  // Kept in step with content.js's EMBEDDED_AI_FLOOR by
+  // tests/governance-notice.test.mjs, which compares the two lists and fails if
+  // they drift. Duplication across two independently-injected content scripts is
+  // the price of neither of them depending on the other's load order.
+  const EMBEDDED_AI_FLOOR = {
+    'mail.google.com': ['[aria-label*="Gemini" i]', '[data-gemini]', 'dialog[aria-label*="Gemini" i]'],
+    'docs.google.com': ['[aria-label*="Gemini" i]', '[aria-label*="Help me write" i]'],
+    'hubspot.com':     ['[data-test-id*="copilot" i]', '[class*="copilot" i]', '[aria-label*="Breeze" i]'],
+    'github.com':      ['[data-testid*="copilot" i]', '#copilot-chat', '[aria-label*="Copilot" i]', 'copilot-chat'],
+    'sharepoint.com':  ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'zendesk.com':     ['[data-test-id*="copilot" i]', '[data-test-id*="generative" i]', '[class*="ai-agent" i]'],
+    'salesforce.com':  ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'force.com':       ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'intercom.com':    ['[class*="fin-" i]', '[class*="intercom-ai" i]'],
+    // Microsoft surfaces a Copilot Studio agent can be published to. These are
+    // apps first and AI second — Teams is a chat client, Outlook is mail — so
+    // capture stays inside the Copilot panel. Adding them for AGENT BLOCKING
+    // without this would recreate the over-collection defect at a far worse
+    // scale: every Teams message and every email.
+    //
+    // 'cloud.microsoft' is deliberately broad. Microsoft has been moving M365
+    // web apps onto it, so it now spans Word and Outlook as well as Copilot
+    // chat — which means m365.cloud.microsoft is scoped too, and on that one
+    // surface we may under-capture. That is the correct side to err on: a
+    // reportable gap, not a compliance incident.
+    'teams.microsoft.com':        ['[aria-label*="Copilot" i]', '[data-tid*="copilot" i]'],
+    'cloud.microsoft':            ['[aria-label*="Copilot" i]', '[class*="copilot" i]', '[data-tid*="copilot" i]'],
+    'outlook.office.com':         ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'outlook.office365.com':      ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'crm.dynamics.com':           ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'copilotstudio.microsoft.com':['[aria-label*="Copilot" i]', '[class*="copilot" i]', '[aria-label*="Test your agent" i]'],
+    'powerapps.com':              ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+  };
+
+  /** Floor selectors for a host — exact or dot-suffix, longest key wins. */
+  function floorSelectorsForHost(host) {
+    const h = String(host || '').toLowerCase();
+    let best = null, bestLen = 0;
+    for (const [key, sels] of Object.entries(EMBEDDED_AI_FLOOR)) {
+      if ((h === key || h.endsWith('.' + key)) && key.length > bestLen) {
+        best = sels; bestLen = key.length;
+      }
+    }
+    return best;
+  }
+
+  // What a prompt is typed into — and the test for "is this the AI PANEL, or just
+  // the button that opens it". Gmail keeps a Gemini launcher in its toolbar
+  // permanently, and that button's aria-label contains "Gemini", so a name-only
+  // match fired on the bare inbox and the banner appeared with no panel open.
+  // Requiring a composer is not a size heuristic: it is the thing being governed.
+  const COMPOSER_SEL = 'textarea, [contenteditable]:not([contenteditable="false"]), [role="textbox"]';
+
+  // The launcher itself — Gmail's toolbar Gemini button, an "Ask Copilot" link, a
+  // menu trigger. Rejected first: it carries the AI's name but nothing can be
+  // typed into it.
+  const LAUNCHER_SEL = 'button, [role="button"], a, [aria-haspopup]';
+
+  function hasComposer(el) {
+    try {
+      if (el.matches && el.matches(LAUNCHER_SEL)) return false;
+      if (el.matches && el.matches(COMPOSER_SEL)) return true;
+      return !!(el.querySelector && el.querySelector(COMPOSER_SEL));
+    } catch (e) { return false; }
+  }
+
+  function panelsVisible(selectors) {
+    for (const sel of selectors) {
+      let found;
+      try { found = document.querySelectorAll(sel); } catch (e) { continue; }
+      for (const el of found) {
+        // A collapsed side panel is still in the DOM; it is not open.
+        if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) continue;
+        if (!hasComposer(el)) continue;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function announceGovernance(v) {
+    const host = (typeof window !== 'undefined' && window.location) ? window.location.hostname : '';
+    const floor = floorSelectorsForHost(host);
+
+    // EMBEDDED IF EITHER SOURCE SAYS SO. The verdict is authoritative when it
+    // carries the field; the floor decides when it does not, which is what keeps
+    // an old, cached or unreachable server from re-enabling the load-time banner.
+    const isEmbedded = v.surface_scope === EMBEDDED || !!floor;
+
+    // Whole-site AI product: unchanged, announce immediately.
+    if (!isEmbedded) { showGovernanceBanner(v); return; }
+
+    // Server selectors preferred — they can be corrected without a release — with
+    // the floor behind them.
+    const selectors = (Array.isArray(v.panel_selectors) && v.panel_selectors.length)
+      ? v.panel_selectors
+      : (floor || []);
+
+    // Scoped host, but we do not know what its AI panel looks like. Stay silent:
+    // capture is gated by the same unknown, so there is nothing to announce.
+    if (selectors.length === 0) return;
+
+    // The banner copy needs to know it is scoped even when the server did not say so.
+    if (!v.surface_scope) v.surface_scope = EMBEDDED;
+
+    if (panelsVisible(selectors)) { showGovernanceBanner(v); return; }
+
+    // Wait for the panel to open. Debounced, because a mail app mutates its DOM
+    // constantly and this observer would otherwise run a selector sweep on every
+    // keystroke. Disconnects as soon as it fires — the banner is once per page.
+    let timer = null;
+    let done = false;
+    const obs = new MutationObserver(() => {
+      if (done || timer) return;
+      timer = setTimeout(() => {
+        timer = null;
+        if (done) return;
+        if (panelsVisible(selectors)) {
+          done = true;
+          obs.disconnect();
+          showGovernanceBanner(v);
+        }
+      }, 400);
+    });
+    try {
+      obs.observe(document.documentElement, { childList: true, subtree: true });
+    } catch (e) {
+      // Nothing to observe (detached document) — no notice, and no capture either.
+    }
   }
 
   function showGovernanceBanner(v) {
@@ -363,10 +521,18 @@
       'background:#0f172a;color:#e2e8f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;' +
       'padding:8px 12px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.25);' +
       'border:1px solid #1e293b;max-width:320px;';
-    const vendor = v.vendor ? `<strong>${escapeHtml(v.vendor)}</strong>` : 'AI tool';
+    // NAME THE AI, NOT THE HOST. On an embedded-AI host the vendor is the host's
+    // vendor — "Google" on Gmail — so the old label read as though Google Mail
+    // itself were governed. surface_product names the actual feature ("Gemini in
+    // Gmail"), which is both accurate and far less alarming.
+    const label = v.surface_product || v.vendor || 'AI tool';
+    const subject = `<strong>${escapeHtml(label)}</strong>`;
+    // Scope is the sentence that stops this reading as blanket surveillance.
+    const scopeNote = v.surface_scope === EMBEDDED
+      ? '<div style="opacity:.7;margin-top:4px;font-size:11px">Only your AI prompts here are governed — the rest of this app is not.</div>'
+      : '';
     const note = v.governance_note ? `<div style="opacity:.7;margin-top:4px;font-size:11px">${escapeHtml(v.governance_note)}</div>` : '';
-    div.innerHTML =
-      `<div>🛡 ${vendor} — governed by CloudFuze (${(v.confidence * 100).toFixed(0)}% conf)</div>${note}`;
+    div.innerHTML = `<div>🛡 ${subject} — governed by CloudFuze</div>${scopeNote}${note}`;
     document.documentElement.appendChild(div);
     setTimeout(() => { try { div.remove(); } catch {} }, 6000);
   }

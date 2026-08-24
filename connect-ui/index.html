@@ -38,24 +38,15 @@
     })(window, document, "script", "dataLayer", "GTM-KM2B43ZH");
   </script>
   <!-- End Google Tag Manager -->
-  <!-- HotJar -->
-  <!-- Hotjar Tracking Code for CloudFuze Connect -->
-  <!-- <script>
-    (function (h, o, t, j, a, r) {
-      h.hj =
-        h.hj ||
-        function () {
-          (h.hj.q = h.hj.q || []).push(arguments);
-        };
-      h._hjSettings = { hjid: 5311868, hjsv: 6 };
-      a = o.getElementsByTagName("head")[0];
-      r = o.createElement("script");
-      r.async = 1;
-      r.src = t + h._hjSettings.hjid + j + h._hjSettings.hjsv;
-      a.appendChild(r);
-    })(window, document, "https://static.hotjar.com/c/hotjar-", ".js?sv=");
-  </script> -->
-  <!-- End HotJar -->
+  <!-- Runtime config. Must load BEFORE the bundle so window.__APP_CONFIG__ exists by the time
+       src/config/runtimeConfig.js is evaluated. Copied verbatim out of public/, which is what
+       keeps it editable on the deploy host without a rebuild. -->
+  <script src="/runtime-config.js"></script>
+
+  <!-- Hotjar is injected by src/analytics/hotjar.js (called from src/main.jsx) rather than
+       hardcoded here, so the site ID comes from CI or runtime-config.js instead of being frozen
+       into this file. Recording is off unless a site ID is set. Do not add an inline snippet
+       back alongside it: two snippets in one document open two recordings for one page view. -->
   <!-- Clarity -->
   <!-- <script
     type="text/javascript">     (function (c, l, a, r, i, t, y) { c[a] = c[a] || function () { (c[a].q = c[a].q || []).push(arguments) }; t = l.createElement(r); t.async = 1; t.src = "https://www.clarity.ms/tag/" + i; y = l.getElementsByTagName(r)[0]; y.parentNode.insertBefore(t, y); })(window, document, "clarity", "script", "u5e50vh2gq"); </script> -->
@@ -63,9 +54,21 @@
 </head>
 
 <body>
-  <div id="root"></div>
-  <div id="popup-root"></div>
-  <div id="toast-root" style="z-index: 99999999999999999;"></div>
+  <!-- data-hj-suppress: Hotjar masks the text of a tagged element AND all of its descendants, so
+       these three attributes suppress every string the app renders. Deliberately broad.
+       This app displays customer mailboxes, tenant domains, file and channel names, collaborator
+       lists and migration mappings across ~230 render sites in ~86 components -- a per-field
+       allowlist would leak the moment anyone adds a table column. Governing where customer data
+       goes is what this product is for, so it does not export that data to a session recorder.
+       Recordings and heatmaps still capture layout, clicks, rage clicks, scroll depth and
+       navigation; only the text is masked.
+       All three roots need it: popup-root and toast-root are React portals that render OUTSIDE
+       #root, so suppressing #root alone would still ship popup and toast text.
+       To relax this, move the attribute off these roots and onto the specific PII-bearing
+       containers instead -- and re-check the leaks before you do. -->
+  <div id="root" data-hj-suppress></div>
+  <div id="popup-root" data-hj-suppress></div>
+  <div id="toast-root" style="z-index: 99999999999999999;" data-hj-suppress></div>
   <script type="module" src="/src/main.jsx"></script>
   <!-- Google Tag Manager (noscript) -->
   <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-KM2B43ZH" height="0" width="0"

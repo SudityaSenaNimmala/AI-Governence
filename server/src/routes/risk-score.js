@@ -51,49 +51,71 @@ export function mountRiskScore(app, db) {
 
   // ── Compute scores for all employees ──
 
+  // WHY THIS IS BATCHED AND NOT A LOOP OF QUERIES.
+  //
+  // This endpoint used to issue SIX sequential Mongo queries per profile and then
+  // TWO sequential writes, inside a sequential for-loop. At 48 profiles that is
+  // 384 serialized round trips against Atlas over a 90-day window. Measured at
+  // 46ms per round trip it takes ~18s from a developer machine; on the deploy host
+  // it exceeded nginx's 120s proxy_read_timeout (connect-ui/nginx.conf) and the
+  // caller got a 504 — while the run monopolised the box long enough that
+  // concurrent requests (/identity/resolve, /access-exceptions) failed too.
+  //
+  // The cost is now independent of the profile count: two aggregations to collect
+  // every per-machine metric, then pure in-memory scoring, then two bulk writes.
+  // Same numbers out — the per-machine counts are summed per profile exactly as
+  // the per-profile $in queries counted them.
   app.post('/api/v1/risk-scores/compute', a(async (req, res) => {
     const allProfiles = await profiles().find({}).project({ _id: 0 }).toArray();
     const allSanctions = await sanctions().find({}).project({ _id: 0 }).toArray();
     const sanctionedKeys = new Set(allSanctions.filter(s => s.status === 'approved').map(s => s.tool_key));
 
-    const results = [];
-    for (const profile of allProfiles) {
-      const score = await computeScore(db, profile, sanctionedKeys);
-      results.push(score);
+    const machineIds = [...new Set(allProfiles.flatMap(p => p.machine_ids || []).filter(Boolean))];
+    const metrics = await machineMetrics(db, machineIds);
 
-      // Store historical score
-      await scores().insertOne({
-        id: crypto.randomUUID(),
-        profile_id: profile.id,
-        display_name: profile.display_name,
-        score: score.score,
-        level: score.level,
-        factors: score.factors,
-        computed_at: new Date(),
-      });
+    const results = allProfiles.map(profile => computeScore(profile, metrics, sanctionedKeys));
 
-      // Update profile with latest score
-      await profiles().updateOne({ id: profile.id }, {
-        $set: {
-          risk_score: score.score,
-          risk_level: score.level,
-          risk_factors: score.factors,
-          risk_computed_at: new Date(),
+    const computedAt = new Date();
+    // Historical rows for trending — one insert for the whole run.
+    const history = allProfiles.map((profile, i) => ({
+      id: crypto.randomUUID(),
+      profile_id: profile.id,
+      display_name: profile.display_name,
+      score: results[i].score,
+      level: results[i].level,
+      factors: results[i].factors,
+      computed_at: computedAt,
+    }));
+    if (history.length) await scores().insertMany(history);
+
+    if (allProfiles.length) {
+      await profiles().bulkWrite(allProfiles.map((profile, i) => ({
+        updateOne: {
+          filter: { id: profile.id },
+          update: { $set: {
+            risk_score: results[i].score,
+            risk_level: results[i].level,
+            risk_factors: results[i].factors,
+            risk_computed_at: computedAt,
+          } },
         },
-      });
-
-      // Fire webhook if score is high or critical
-      if (score.level === 'high' || score.level === 'critical') {
-        fireWebhooks(db, 'risk_score_high', {
-          title: 'Risk Score Alert: ' + (profile.display_name || 'Employee') + ' → ' + score.level.toUpperCase(),
-          body: (profile.display_name || 'An employee') + ' has a risk score of ' + score.score + ' (' + score.level + '). Top factors: DLP violations (' + (score.factors?.dlp_violations?.raw || 0) + '), overrides (' + (score.factors?.enforcement_overrides?.raw || 0) + '), shadow tools (' + (score.factors?.shadow_tools?.raw || 0) + ').',
-          severity: score.level,
-          employee: profile.display_name || profile.email || 'Unknown',
-          tool: 'Risk Score Engine',
-          trigger: 'risk_score_high',
-        });
-      }
+      })));
     }
+
+    // Webhooks last, and still not awaited — same fire-and-forget as before, but
+    // now after the writes so a slow endpoint cannot delay the response.
+    allProfiles.forEach((profile, i) => {
+      const score = results[i];
+      if (score.level !== 'high' && score.level !== 'critical') return;
+      fireWebhooks(db, 'risk_score_high', {
+        title: 'Risk Score Alert: ' + (profile.display_name || 'Employee') + ' → ' + score.level.toUpperCase(),
+        body: (profile.display_name || 'An employee') + ' has a risk score of ' + score.score + ' (' + score.level + '). Top factors: DLP violations (' + (score.factors?.dlp_violations?.raw || 0) + '), overrides (' + (score.factors?.enforcement_overrides?.raw || 0) + '), shadow tools (' + (score.factors?.shadow_tools?.raw || 0) + ').',
+        severity: score.level,
+        employee: profile.display_name || profile.email || 'Unknown',
+        tool: 'Risk Score Engine',
+        trigger: 'risk_score_high',
+      });
+    });
 
     res.json({ computed: results.length, scores: results });
   }));
@@ -199,7 +221,63 @@ function windowStart() {
 // already the ones the dashboard's printed legend documents.
 const scoreLevel = scoreToLevel;
 
-async function computeScore(db, profile, sanctionedKeys) {
+/**
+ * Every per-machine metric the score needs, in two aggregations.
+ *
+ * Replaces six countDocuments/find calls PER PROFILE. The window bounds are
+ * folded into $cond accumulators rather than issued as separate queries, which
+ * is what makes the round-trip count independent of how many people exist.
+ *
+ * `occurred_at` / `detected_at` are compared as STRINGS, exactly as the
+ * per-profile queries did — DLP events store them as ISO strings, not Dates
+ * (see windowStart), and switching to Date here would silently match nothing
+ * because Mongo brackets by BSON type.
+ *
+ * @returns {Map<string, {blocks,overrides,hiCrit,recent7d,prevPeriod,toolKeys:Set<string>}>}
+ */
+async function machineMetrics(db, machineIds) {
+  const empty = () => ({ blocks: 0, overrides: 0, hiCrit: 0, recent7d: 0, prevPeriod: 0, toolKeys: new Set() });
+  const out = new Map();
+  if (!machineIds || machineIds.length === 0) return out;
+  for (const id of machineIds) out.set(id, empty());
+
+  const since = windowStart();
+  const recent7dStart = new Date(Date.now() - 7 * 86400000).toISOString();
+
+  const [events, tools] = await Promise.all([
+    db.collection('dlp_events').aggregate([
+      { $match: { machine_id: { $in: machineIds }, occurred_at: { $gte: since } } },
+      { $group: {
+        _id: '$machine_id',
+        blocks:     { $sum: { $cond: [{ $eq: ['$event_kind', 'enforcement_block'] }, 1, 0] } },
+        overrides:  { $sum: { $cond: [{ $eq: ['$event_kind', 'enforcement_override'] }, 1, 0] } },
+        hiCrit:     { $sum: { $cond: [{ $in: ['$secret_class', ['critical', 'high']] }, 1, 0] } },
+        // The original recent7d query carried no lower bound, but recent7dStart is
+        // inside the window, so the $match above does not change the answer.
+        recent7d:   { $sum: { $cond: [{ $gte: ['$occurred_at', recent7dStart] }, 1, 0] } },
+        prevPeriod: { $sum: { $cond: [{ $lt:  ['$occurred_at', recent7dStart] }, 1, 0] } },
+      } },
+    ]).toArray(),
+    db.collection('findings').aggregate([
+      { $match: { machine_id: { $in: machineIds }, detected_at: { $gte: since } } },
+      { $group: { _id: '$machine_id', toolKeys: { $addToSet: '$tool_key' } } },
+    ]).toArray(),
+  ]);
+
+  for (const r of events) {
+    const m = out.get(r._id); if (!m) continue;
+    m.blocks = r.blocks; m.overrides = r.overrides; m.hiCrit = r.hiCrit;
+    m.recent7d = r.recent7d; m.prevPeriod = r.prevPeriod;
+  }
+  for (const r of tools) {
+    const m = out.get(r._id); if (!m) continue;
+    for (const k of r.toolKeys || []) if (k) m.toolKeys.add(k);
+  }
+  return out;
+}
+
+/** Pure — no I/O. Sums the pre-collected per-machine metrics for one profile. */
+function computeScore(profile, metrics, sanctionedKeys) {
   const machineIds = profile.machine_ids || [];
   if (machineIds.length === 0) {
     // NOT score 0 / level 'low'.
@@ -223,32 +301,28 @@ async function computeScore(db, profile, sanctionedKeys) {
     };
   }
 
-  const since = windowStart();
-  const dlpCol = db.collection('dlp_events');
-  const findingsCol = db.collection('findings');
+  // Sum this profile's machines. A machine listed on two profiles contributes to
+  // both, which is what the old `machine_id: { $in: machineIds }` queries did.
+  let dlpViolations = 0, overrides = 0, criticalEvents = 0, recent7d = 0, prevPeriod = 0;
+  const uniqueTools = new Set();
+  for (const id of machineIds) {
+    const m = metrics.get(id);
+    if (!m) continue;
+    dlpViolations  += m.blocks;
+    overrides      += m.overrides;
+    criticalEvents += m.hiCrit;
+    recent7d       += m.recent7d;
+    prevPeriod     += m.prevPeriod;
+    for (const k of m.toolKeys) uniqueTools.add(k);
+  }
 
-  // Factor 1: DLP violations (high/critical severity events)
-  const dlpViolations = await dlpCol.countDocuments({
-    machine_id: { $in: machineIds },
-    occurred_at: { $gte: since },
-    event_kind: 'enforcement_block',
-  });
+  // Factor 1: DLP violations (high/critical blocked events)
   const dlpScore = Math.min(dlpViolations * 8, 100);  // each block = 8 points, max 100
 
   // Factor 2: Enforcement overrides (user bypassed the block)
-  const overrides = await dlpCol.countDocuments({
-    machine_id: { $in: machineIds },
-    occurred_at: { $gte: since },
-    event_kind: 'enforcement_override',
-  });
   const overrideScore = Math.min(overrides * 20, 100);  // each override = 20 points (very risky)
 
   // Factor 3: Shadow tool usage (tools not in sanctioned list)
-  const toolUsage = await findingsCol.find({
-    machine_id: { $in: machineIds },
-    detected_at: { $gte: since },
-  }).project({ tool_key: 1 }).toArray();
-  const uniqueTools = new Set(toolUsage.map(f => f.tool_key).filter(Boolean));
   let shadowCount = 0;
   for (const tk of uniqueTools) {
     if (!sanctionedKeys.has(tk)) shadowCount++;
@@ -256,23 +330,9 @@ async function computeScore(db, profile, sanctionedKeys) {
   const shadowScore = Math.min(shadowCount * 15, 100);  // each shadow tool = 15 points
 
   // Factor 4: Data sensitivity (severity of patterns found in prompts)
-  const criticalEvents = await dlpCol.countDocuments({
-    machine_id: { $in: machineIds },
-    occurred_at: { $gte: since },
-    secret_class: { $in: ['critical', 'high'] },
-  });
   const sensitivityScore = Math.min(criticalEvents * 10, 100);  // each critical/high event = 10
 
   // Factor 5: Volume anomaly — compare last 7 days to previous period average
-  const recent7dStart = new Date(Date.now() - 7 * 86400000).toISOString();
-  const recent7d = await dlpCol.countDocuments({
-    machine_id: { $in: machineIds },
-    occurred_at: { $gte: recent7dStart },
-  });
-  const prevPeriod = await dlpCol.countDocuments({
-    machine_id: { $in: machineIds },
-    occurred_at: { $gte: since, $lt: recent7dStart },
-  });
   const prevDays = WINDOW_DAYS - 7;
   const dailyAvgPrev = prevPeriod / prevDays;
   const dailyAvgRecent = recent7d / 7;

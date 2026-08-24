@@ -47,6 +47,7 @@ const STORAGE = {
   // Nothing reads it any more.
   ROUTING_RULES: 'cfai.routing_rules',     // model routing rules from server
   ROUTING_RULES_AT: 'cfai.routing_rules_at',
+  AI_SURFACES:  'cfai.ai_surfaces',   // mirror of GET /api/v1/ai-surfaces
   DLP_POLICY:   'cfai.dlp_policy',    // mirror of GET /api/policy-packs/extension-config
   DLP_POLICY_AT:'cfai.dlp_policy_at',
 };
@@ -799,7 +800,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === PLATFORMS_ALARM)  refreshPlatforms();
   if (alarm.name === BLOCKED_ALARM)    refreshBlockedAgents();
   if (alarm.name === ENGAGEMENT_SWEEP_ALARM) engagementSweep().catch(() => {});
-  if (alarm.name === ROUTING_ALARM)    refreshRoutingRules();
+  if (alarm.name === ROUTING_ALARM)    { refreshRoutingRules(); refreshAiSurfaces(); }
   if (alarm.name === DLP_POLICY_ALARM) refreshDlpPolicy();
 });
 
@@ -812,6 +813,7 @@ refreshDlpPolicy();
 refreshPlatforms().catch(() => {});
 refreshBlockedAgents().catch(() => {});
 refreshRoutingRules().catch(() => {});
+refreshAiSurfaces().catch(() => {});
 
 // Auto-link: detect desktop agent beacon → re-enroll with real hostname if needed.
 // Runs every startup so a freshly installed extension links automatically.
@@ -1027,6 +1029,33 @@ async function refreshRoutingRules() {
 // write a default. patterns.js treats "no policy" as "run everything", so an
 // empty write would look like a successful sync that silently disabled nothing —
 // or worse, a truncated response could disable real detection.
+// Where on a governed page capture is allowed. Mirrored into chrome.storage for
+// the content scripts, exactly like the routing rules and the DLP policy.
+//
+// content.js also carries a BUILT-IN copy of this list. That is deliberate: the
+// list is what stops an embedded-AI host (Gmail, HubSpot, Zendesk) having its
+// whole page captured, and a privacy guarantee must not depend on a network call
+// succeeding. This sync exists so a selector that goes stale when a vendor
+// reshuffles its DOM is a config fix rather than an extension release — it can
+// add hosts and replace selectors, never remove the built-in floor.
+//
+// Unauthenticated GET, like the platforms registry: scope policy must sync even
+// when the token is stale or the extension has not enrolled yet.
+async function refreshAiSurfaces() {
+  try {
+    const config = await getConfig();
+    if (!config.serverUrl) return;
+    const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/ai-surfaces`);
+    if (!res.ok) return;
+    const map = await res.json();
+    if (!map || typeof map !== 'object' || !map.embedded) return;
+    await setStored(STORAGE.AI_SURFACES, map);
+  } catch (e) {
+    // Leave the previous mirror in place; the built-in floor still applies.
+    console.warn('[cfai] ai-surfaces refresh failed:', e?.message || e);
+  }
+}
+
 async function refreshDlpPolicy() {
   try {
     const config = await getConfig();
@@ -1085,9 +1114,43 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     getStored(STORAGE.DLP_POLICY)
       .then((policy) => sendResponse({ policy: policy || null }))
       .catch(() => sendResponse({ policy: null }));
-    return true; // async response
+    return true;
+  }
+  if (msg && msg.type === 'cfai-get-features') {
+    getStored('cfai.features')
+      .then((f) => sendResponse({ features: f || null }))
+      .catch(() => sendResponse({ features: null }));
+    return true;
   }
 });
+
+// ── Feature flags — fetched from server, cached in storage ──────────────────
+async function refreshFeatureFlags() {
+  try {
+    const config = await getConfig();
+    // Try enrolled server first, then local fallbacks
+    const urls = [];
+    if (config.serverUrl) urls.push(config.serverUrl.replace(/\/$/, ''));
+    if (!urls.includes('http://127.0.0.1:8787')) urls.push('http://127.0.0.1:8787');
+    if (!urls.includes('http://localhost:8787')) urls.push('http://localhost:8787');
+    for (const base of urls) {
+      try {
+        const res = await fetch(`${base}/api/v1/features`, { signal: AbortSignal.timeout(3000) });
+        if (!res.ok) continue;
+        const data = await res.json();
+        if (data?.features) {
+          await setStored('cfai.features', data);
+          chrome.storage.local.set({ 'cfai.features': data });
+          return;
+        }
+      } catch {}
+    }
+  } catch {}
+}
+// Refresh on startup, again after 3s (in case server was slow), then every 2 minutes
+refreshFeatureFlags();
+setTimeout(refreshFeatureFlags, 3000);
+setInterval(refreshFeatureFlags, 2 * 60 * 1000);
 
 // ── Session Replay — the worker half of the rrweb recorder ──────────────────
 // WHAT USED TO BE HERE, AND WHY IT IS GONE

@@ -407,22 +407,30 @@
   }, true);
 
   // ── Model Routing ─────────────────────────────────────────────────
-  // Complexity classifier — determines if a prompt is simple/moderate/complex.
-  const COMPLEX_RE = /\b(architect|design|implement|refactor|optimize|compare|evaluate|explain in detail|step.by.step|comprehensive|thorough|deep.dive|trade.?offs?|debug|investigate|root.cause|security.review|performance|scale|migration)\b/i;
-  const SIMPLE_RE  = /\b(commit.message|changelog|fix.typo|rename|format|lint|summarize|translate|convert|hello|hi|hey|thanks|thank.you|yes|no|ok|okay)\b/i;
-
+  //
+  // Complexity classification is NOT defined here any more. This file used to
+  // carry its own copy — a pair of flat regexes behind `tokens < 100 -> simple`
+  // — which made the desktop path a third, disagreeing definition of the same
+  // word the routing rules are written against. A 48-character architecture
+  // question came out 'simple' here and 'complex' in the browser extension,
+  // from the same rule set.
+  //
+  // hook-template.js now evaluates complexity.inline.js (generated from
+  // browser-extension/content/complexity.js) in this renderer before this
+  // scanner runs, so window.__cfaiComplexity is the one shared classifier.
   function classifyComplexity(text) {
     if (!text) return 'unknown';
-    const tokens = Math.ceil(text.length / 4);
-    if (tokens < 100) return 'simple';
-    if (tokens > 3000) return 'complex';
-    const sample = text.length > 2000 ? text.slice(0, 2000) : text;
-    if (COMPLEX_RE.test(sample)) return 'complex';
-    if (SIMPLE_RE.test(sample)) return 'simple';
-    const codeBlocks = (sample.match(/```/g) || []).length / 2;
-    if (codeBlocks >= 2) return 'complex';
-    if (codeBlocks >= 1) return 'moderate';
-    return 'moderate';
+    const c = window.__cfaiComplexity;
+    // No classifier means we have no opinion — NOT that the prompt is simple.
+    // Returning 'unknown' matches no complexity condition, so the prompt is
+    // left on whatever model the user already chose instead of being
+    // downgraded because an injection failed.
+    if (!c || typeof c.classify !== 'function') return 'unknown';
+    try {
+      return c.classify(text);
+    } catch {
+      return 'unknown';
+    }
   }
 
   function providerFromHost() {
@@ -466,13 +474,48 @@
   }
 
   // Model display name mapping — maps API model IDs to text shown in Claude Desktop's UI
+  // API model id -> the labels Claude Desktop actually shows in its picker.
+  //
+  // MISSING ENTRY = SILENT NO-OP. changeModel() falls back to
+  // `[targetModelId]` and then asks whether the picker's text contains it, and
+  // no picker anywhere renders "claude-opus-5". So a model id absent from this
+  // map means the desktop UI switch quietly does nothing — which is exactly what
+  // happened when the seeded rules moved to current ids and this map did not.
+  // Keep the generic label last in each list ('Opus'), so a picker that shows
+  // only the family name still matches.
   const MODEL_DISPLAY = {
+    // Current families — what the seeded routing rules point at.
+    'claude-opus-5':              ['Opus 5', 'Claude Opus 5', 'Opus'],
+    'claude-sonnet-5':            ['Sonnet 5', 'Claude Sonnet 5', 'Sonnet'],
+    'claude-haiku-4-5':           ['Haiku 4.5', 'Claude Haiku 4.5', 'Haiku'],
+    'claude-opus-4-8':            ['Opus 4.8', 'Claude Opus 4.8', 'Opus'],
+    'claude-opus-4-7':            ['Opus 4.7', 'Claude Opus 4.7', 'Opus'],
+    'claude-opus-4-6':            ['Opus 4.6', 'Claude Opus 4.6', 'Opus'],
+    'claude-sonnet-4-6':          ['Sonnet 4.6', 'Claude Sonnet 4.6', 'Sonnet'],
+    // Older ids, kept so an admin still pinned to one keeps a working UI switch.
     'claude-opus-4-20250514':     ['Opus 4', 'Claude Opus 4', 'Opus'],
     'claude-sonnet-4-20250514':   ['Sonnet 4', 'Claude Sonnet 4', 'Sonnet'],
     'claude-haiku-4-5-20251001':  ['Haiku 4.5', 'Claude Haiku 4.5', 'Haiku'],
     'claude-3-5-sonnet-20241022': ['Sonnet 3.5', 'Claude 3.5 Sonnet'],
     'claude-3-5-haiku-20241022':  ['Haiku 3.5', 'Claude 3.5 Haiku'],
     'claude-3-opus-20240229':     ['Opus 3', 'Claude 3 Opus'],
+
+    // Non-Anthropic desktop apps. providerFromHost() above already recognises
+    // OpenAI and Google, so a routing rule can target them in the ChatGPT or
+    // Gemini desktop apps — and without these entries that switch was the same
+    // silent no-op.
+    'gpt-5.6-sol':                ['GPT-5.6 Sol', 'Sol', 'GPT-5.6'],
+    'gpt-5.6-terra':              ['GPT-5.6 Terra', 'Terra', 'GPT-5.6'],
+    'gpt-5.6-luna':               ['GPT-5.6 Luna', 'Luna', 'GPT-5.6'],
+    'gpt-5':                      ['GPT-5', 'GPT 5'],
+    'gpt-5-mini':                 ['GPT-5 mini', 'GPT-5 Mini', 'mini'],
+    'gpt-4o':                     ['GPT-4o', 'GPT 4o', '4o'],
+    'gpt-4o-mini':                ['GPT-4o mini', 'GPT-4o Mini'],
+    'gpt-4':                      ['GPT-4'],
+    'gemini-3.7-flash':           ['Flash', 'Gemini 3.7 Flash', 'Thinking'],
+    'gemini-2.5-pro':             ['Pro', 'Gemini 2.5 Pro'],
+    'gemini-2.5-flash-lite':      ['Flash-Lite', 'Flash Lite', 'Flash'],
+    'gemini-2.5-flash':           ['Flash', 'Gemini 2.5 Flash'],
   };
 
   // Find the model selector button in Claude Desktop's UI.

@@ -73,3 +73,41 @@ test('TIER_UI_NAME.google is the current three-tier lineup, not the retired one'
     'Gemini\'s tier ladder changed (Flash/Pro/Ultra -> Flash/Thinking/Pro) — '
     + 'if this fails because the lineup changed AGAIN, update the map and this pin together');
 });
+
+// ── "mini" must not match inside "Gemini" ────────────────────────────────────
+//
+// Reported live: on Gmail with the Gemini panel open, pressing any button popped a
+// "Model Routed — AskGeminiViewAnswer → GPT-4o" toast and the button stopped
+// working. A bare substring test for "mini" matches "geMINI", so every Gemini
+// surface was classified openai/economy; routing then "upgraded" it to GPT-4o,
+// paused the event with preventDefault(), and clicked around Gmail hunting for an
+// OpenAI label that was never there.
+//
+// The boundary has to hold in both directions: Gemini is not OpenAI, and the
+// spellings OpenAI actually ships must still resolve.
+
+test('regression: "Gemini" is never read as OpenAI', () => {
+  for (const text of ['Gemini', 'gemini', 'AskGeminiViewAnswer', 'Gemini Alpha', '2.5 Gemini']) {
+    const info = detectModelInfo(text);
+    if (info) {
+      assert.notEqual(info.provider, 'openai',
+        `${JSON.stringify(text)} was classified as OpenAI because it contains "mini"`);
+    }
+  }
+});
+
+test('the OpenAI economy spellings that ship still resolve', () => {
+  for (const text of ['GPT-4o mini', 'gpt-4o-mini', 'o4-mini', 'GPT-3.5', 'GPT-4.1 nano']) {
+    const info = detectModelInfo(text);
+    assert.ok(info, `${JSON.stringify(text)} no longer detected at all`);
+    assert.equal(info.provider, 'openai', `${JSON.stringify(text)} -> ${info.provider}`);
+    assert.equal(info.tier, 'economy', `${JSON.stringify(text)} -> ${info.tier}`);
+  }
+});
+
+test('a Gemini tier label still resolves to google', () => {
+  // The words that carry the tier are Flash / Thinking / Pro, and those are what
+  // the picker shows — so nothing about the fix costs Gemini its detection.
+  assert.deepEqual(detectModelInfo('2.5 Flash'), { provider: 'google', tier: 'economy' });
+  assert.deepEqual(detectModelInfo('Gemini 2.5 Pro'), { provider: 'google', tier: 'premium' });
+});

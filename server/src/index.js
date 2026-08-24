@@ -18,6 +18,7 @@ import { mountServerAgents } from './routes/server-agents.js';
 import { mountDiscovered } from './routes/discovered.js';
 import { mountClassifications } from './routes/classifications.js';
 import { mountAiPlatforms } from './routes/ai-platforms.js';
+import { mountAiSurfaces } from './routes/ai-surfaces.js';
 import { mountRouting } from './routes/routing.js';
 import { mountIdentity, resolveProfiles } from './routes/identity.js';
 import { mountRiskScore } from './routes/risk-score.js';
@@ -45,9 +46,11 @@ import governanceRouter from './governance/app.js';
 
 const PORT = Number(process.env.PORT) || 8787;
 const db = await openDb();
-await applyInitialSchema(db);
-await seedAiPlatforms(db);
-await seedDefaultRoutingRules(db);
+// Writes (schema/seed) may fail if the DB is over quota — catch and continue
+// so the server still starts and serves read-only + feature flags.
+try { await applyInitialSchema(db); } catch (e) { console.warn('[db] schema init failed (DB may be full):', e.message); }
+try { await seedAiPlatforms(db); } catch (e) { console.warn('[db] platform seed failed:', e.message); }
+try { await seedDefaultRoutingRules(db); } catch (e) { console.warn('[db] routing seed failed:', e.message); }
 
 const app = express();
 app.use(cors());
@@ -63,6 +66,43 @@ app.use(express.json({ limit: '50mb' }));
 app.get('/api/v1/health', (req, res) => {
   res.json({ ok: true, service: 'ai-governance-server', version: '0.1.0', dbKind: 'mongodb' });
 });
+
+// ── Feature flags (server-driven) ────────────────────────────────────────────
+// All features default to true. Set FEAT_<NAME>=false in server/.env to disable.
+// Dashboard, browser extension, and desktop agent all read this endpoint.
+(() => {
+  // One toggle per feature — controls dashboard tab + extension + agent together.
+  const FEATURES = {
+    overview:           { label: 'Overview' },
+    ai_systems:         { label: 'AI Systems — registry + platform blocking (extension)' },
+    agents_mcp:         { label: 'Agents & MCP — dashboard + MCP/agent discovery (agent)' },
+    dlp:                { label: 'DLP — dashboard + scanning + guardrails (extension)' },
+    claude_usage:       { label: 'Claude Usage' },
+    policies:           { label: 'Policies' },
+    risk_scores:        { label: 'Risk Scores' },
+    access_requests:    { label: 'Access Requests — dashboard + access gate (extension)' },
+    agent_governance:   { label: 'Agent Governance' },
+    installations:      { label: 'Installations' },
+    integrations:       { label: 'Integrations' },
+    server_monitor:     { label: 'Server Monitor' },
+    sdk:                { label: 'Developer SDK' },
+    session_replay:     { label: 'Session Replay — dashboard + recording (extension)' },
+    model_routing:      { label: 'Model Routing — dashboard + enforcement (extension)' },
+    endpoint_scan:      { label: 'Endpoint Scan — AI tool discovery (agent)' },
+    clipboard_monitor:  { label: 'Clipboard Monitor — prompt monitoring (agent)' },
+  };
+
+  app.get('/api/v1/features', (req, res) => {
+    const result = {};
+    for (const [key, def] of Object.entries(FEATURES)) {
+      const envKey = 'FEAT_' + key.toUpperCase();
+      const envVal = process.env[envKey];
+      const enabled = envVal !== 'false' && envVal !== '0';
+      result[key] = { label: def.label, status: enabled ? 'enabled' : 'disabled' };
+    }
+    res.json({ features: result });
+  });
+})();
 
 mountEnroll(app, db);
 mountReports(app, db);
@@ -80,6 +120,7 @@ mountServerAgents(app, db);
 mountDiscovered(app, db);
 mountClassifications(app, db);
 mountAiPlatforms(app, db);
+mountAiSurfaces(app);
 mountRouting(app, db);
 mountIdentity(app, db);
 mountRiskScore(app, db);

@@ -173,6 +173,29 @@ server
   }))
   .route('POST /api/v1/replays', jsonResponse(201, { replay_id: 'r-1' }));
 
+// THE WORKER SCHEDULES PERIODIC REFRESHES AT TOP LEVEL, AND THIS FILE IMPORTS IT
+// FOR REAL. A service worker is meant to run forever, so `setInterval` there is
+// correct — but in Node the returned timer is a live handle that keeps the process
+// alive, so `node --test` waited on this file indefinitely.
+//
+// That is not a cosmetic problem. deploy.yml's `test` job runs this suite with no
+// timeout-minutes, so the hang ran to GitHub's 6-hour ceiling while
+// `concurrency: deploy-server` held the lock — and because only the most recent
+// queued run survives, every push behind it was cancelled. Six commits sat
+// undeployed because of this one handle.
+//
+// unref() is the whole fix: the timer still exists and still fires, it just stops
+// counting as a reason to keep the process alive. Deliberately NOT applied to
+// setTimeout — the settle helpers below rely on real timeouts holding the loop.
+const _scheduledIntervals = [];
+const _realSetInterval = globalThis.setInterval;
+globalThis.setInterval = (fn, ms, ...rest) => {
+  const t = _realSetInterval(fn, ms, ...rest);
+  if (t && typeof t.unref === 'function') t.unref();
+  _scheduledIntervals.push(ms);
+  return t;
+};
+
 await import(WORKER);
 await new Promise((r) => setTimeout(r, 25));   // let the top-level best-effort calls settle
 
@@ -782,4 +805,15 @@ test('with no managed policy present, managed auto-config is a no-op on install'
   await settle();
   assert.equal(server.of('/api/v1/enroll').length, 0,
     'no managed serverUrl/secret → managed path does not enroll');
+});
+
+// Turns the exit fix above into coverage rather than silence: assert the worker
+// really does schedule its periodic refreshes, so unref'ing them cannot mask a
+// regression where they stop being scheduled at all.
+test('the worker schedules its periodic refreshes at load', () => {
+  assert.ok(_scheduledIntervals.length > 0,
+    'the worker scheduled no intervals — its periodic refreshes are gone');
+  for (const ms of _scheduledIntervals) {
+    assert.ok(Number.isFinite(ms) && ms > 0, `interval scheduled with a bad period: ${ms}`);
+  }
 });

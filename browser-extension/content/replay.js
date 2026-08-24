@@ -888,6 +888,11 @@
     // ── rrweb attach / detach ───────────────────────────────────────────────
 
     function attachRecorder() {
+      // Check server feature flag — skip recording if session_replay is disabled
+      try {
+        const raw = document.documentElement.getAttribute('data-cfai-features');
+        if (raw) { const feats = JSON.parse(raw); if (feats.session_replay && feats.session_replay.status === 'disabled') return false; }
+      } catch {}
       const record = d.rrweb && d.rrweb.record;
       if (typeof record !== 'function') {
         if (!noRecorderWarned) {

@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { useContext, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
+import { isFeatureEnabled, isFeatureVisible } from "../../../featureFlags";
 import CF_LOGO from "../../../assets/images/CF_LOGO_WHITE.png";
 import { GlobalContext } from "../../../GlobalContext/GlobalContext";
 import { SET_SIDEBAR_COLLAPSED } from "../../../GlobalContext/action.types";
@@ -147,36 +148,26 @@ const SideNav = (props) => {
       // from inside Policy Packs; EU AI Act returns as a Policies & Risk tab once
       // its intake is seeded from the discovered agent registry.
       children: [
-        { icon: <LayoutDashboard size={16} />, title: "Overview", link: "/AIHub/Overview" },
-        // Systems · Agents & MCP · Platforms
-        { icon: <Database size={16} />, title: "Inventory", link: "/AIHub/Inventory" },
-        // Prompts & DLP · Sessions · Claude Usage · Model Routing
-        { icon: <Sparkles size={16} />, title: "Activity", link: "/AIHub/Activity" },
-        // Policy Packs · Risk Scores
-        { icon: <ShieldCheck size={16} />, title: "Policies & Risk", link: "/AIHub/PoliciesRisk" },
-        // Top level, not a tab: an approval queue is somebody waiting on you.
-        { icon: <Inbox size={16} />, title: "Access Requests", link: "/AIHub/AccessRequests" },
-        // Left intact: its own tab bar already covers Discovery, User Activity,
-        // Stale Agents, Cost and Budget. "AI Budget" was this component's BudgetTab
-        // surfaced twice, so it is gone from the nav rather than duplicated.
-        { icon: agentGovernanceIcon, title: "Agent Governance", link: "/AIHub/AgentGovernance" },
-        // Projects (issue/revoke SDK credentials) · Traces (what those apps reported).
-        // This is the active-reporting path: an app that calls the SDK on purpose,
-        // as opposed to everything above, which is discovered passively.
-        //
-        // Hidden from the nav, to be restored. Only this entry is commented out —
-        // the /AIHub/SDK route, the TAB_GROUPS.SDK definition, both views and every
-        // /api/v1/sdk/* endpoint are untouched, so the screen still answers on its
-        // URL and uncommenting this line is the whole of putting it back.
-        // { icon: <Boxes size={16} />, title: "SDK", link: "/AIHub/SDK" },
-        // Integrations · Copilot Readiness
-        // The flat entries this replaced (Server Monitor, AI Budget, Copilot
-        // Readiness, Model Routing, Risk Scores, AI Registry, Integrations) are all
-        // still reachable — as tabs within the groups above, or via the redirects in
-        // App.jsx. The old "Developer SDK" tab is the one thing genuinely removed;
-        // /AIHub/DeveloperSDK now redirects to the SDK group.
-        { icon: <Unplug size={16} />, title: "Setup", link: "/AIHub/Setup" },
-      ],
+        { icon: <LayoutDashboard size={16} />, title: "Overview", link: "/AIHub/Overview", feat: "overview" },
+        { icon: <Database size={16} />, title: "Inventory", link: "/AIHub/Inventory", feat: ["ai_systems", "agents_mcp"] },
+        { icon: <Sparkles size={16} />, title: "Activity", link: "/AIHub/Activity", feat: ["dlp", "claude_usage"] },
+        { icon: <ShieldCheck size={16} />, title: "Policies & Risk", link: "/AIHub/PoliciesRisk", feat: ["policies", "risk_scores"] },
+        { icon: <Inbox size={16} />, title: "Access Requests", link: "/AIHub/AccessRequests", feat: "access_requests" },
+        { icon: agentGovernanceIcon, title: "Agent Governance", link: "/AIHub/AgentGovernance", feat: "agent_governance" },
+        { icon: <Boxes size={16} />, title: "SDK", link: "/AIHub/SDK", feat: "sdk" },
+        { icon: <Unplug size={16} />, title: "Setup", link: "/AIHub/Setup", feat: ["installations", "integrations", "server_monitor"] },
+      ].filter(item => {
+        // Hide items where ALL sub-features are hidden
+        if (!item.feat) return true;
+        const feats = Array.isArray(item.feat) ? item.feat : [item.feat];
+        return feats.some(f => isFeatureVisible(f));
+      }).map(item => {
+        // Disabled (not hidden) ones get a locked flag
+        if (!item.feat) return item;
+        const feats = Array.isArray(item.feat) ? item.feat : [item.feat];
+        const anyEnabled = feats.some(f => isFeatureEnabled(f));
+        return anyEnabled ? item : { ...item, locked: true };
+      }),
     },
     ...(hasContentSprawl
       ? [
@@ -345,6 +336,30 @@ const SideNav = (props) => {
                       <ul className="cf_sideNav_submenu">
                         {item.children.map((child) => (
                           <li key={child.title} className="cf_sideNav_subitem">
+                            {child.locked ? (
+                              <button
+                                className="cf_sideNav_sublink"
+                                style={{background:"none",border:"none",width:"100%",textAlign:"left",cursor:"pointer",opacity:0.6,padding:"8px 12px 8px 18px",fontFamily:"inherit"}}
+                                title="Upgrade to Business plan to unlock"
+                                onClick={(e)=>{e.preventDefault();e.stopPropagation();
+                                  const el=e.currentTarget;
+                                  // Show inline toast
+                                  if(el.querySelector('.plan_toast')) return;
+                                  const t=document.createElement('div');t.className='plan_toast';
+                                  t.style.cssText='position:fixed;top:80px;left:50%;transform:translateX(-50%);z-index:9999;background:#1e293b;color:#fff;padding:10px 20px;border-radius:10px;font-size:13px;font-weight:600;box-shadow:0 8px 30px rgba(0,0,0,0.2);display:flex;align-items:center;gap:8px;animation:polFadeIn 0.15s ease-out';
+                                  t.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> <b>'+child.title+'</b> is not enabled. Contact your admin.';
+                                  document.body.appendChild(t);setTimeout(()=>t.remove(),2500);
+                                }}
+                              >
+                                {child.icon && (
+                                  <span className="cf_sideNav_icon" style={{opacity:0.5}}>{child.icon}</span>
+                                )}
+                                <span className="cf_sideNav_sublabel" style={{display:"flex",alignItems:"center"}}>
+                                  {child.title}
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{marginLeft:"auto",opacity:0.5}}><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                                </span>
+                              </button>
+                            ) : (
                             <Link
                               to={child.link}
                               className={`cf_sideNav_sublink ${isChildActive(child)
@@ -359,10 +374,11 @@ const SideNav = (props) => {
                               <span className="cf_sideNav_sublabel">
                                 {child.title}
                                 {child.title === "Access Requests" && pendingRequestCount > 0 && (
-                                  <span style={{marginLeft:6,background:"#ef4444",color:"#fff",fontSize:10,fontWeight:700,borderRadius:10,padding:"1px 6px",minWidth:16,textAlign:"center",display:"inline-block",lineHeight:"16px"}}>{pendingRequestCount}</span>
+                                  <span style={{marginLeft:10,background:"#ef4444",color:"#fff",fontSize:10,fontWeight:700,borderRadius:10,padding:"1px 6px",minWidth:16,textAlign:"center",display:"inline-block",lineHeight:"16px"}}>{pendingRequestCount}</span>
                                 )}
                               </span>
                             </Link>
+                            )}
                           </li>
                         ))}
                       </ul>

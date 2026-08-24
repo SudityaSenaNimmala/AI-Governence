@@ -8,6 +8,7 @@
 
 import { a } from '../util.js';
 import { requireMachineAuth } from '../auth.js';
+import { surfaceFor } from '../lib/ai-surfaces.js';
 import { classifyHost } from '../lib/ai-classifier.js';
 
 // TTL — sites add AI features over time, so re-classify every ~30 days.
@@ -32,10 +33,17 @@ export function mountClassifications(app, db, log) {
         confidence: 0.98,
         override_is_ai: null,
       });
+      // WHERE capture is allowed on this host, not just whether. A governed
+      // host whose AI is one panel inside a larger app must not have its whole
+      // page captured — see lib/ai-surfaces.js.
+      const surface = surfaceFor(host);
       return res.json({
         host,
         is_ai:          true,
         should_govern:  !!platform.governed,
+        surface_scope:  surface.scope,
+        panel_selectors: surface.selectors,
+        surface_product: surface.product || null,
         confidence:     0.98,
         classifier:     'registry:ai_platforms',
         reasoning:      `matched ${platform.host} in ai_platforms registry (governed=${platform.governed})`,
@@ -402,8 +410,15 @@ function normalizeHost(h) {
 function rowToVerdict(row, { fromCache, threshold }) {
   const overridden = row.override_is_ai != null;
   const effective_is_ai = overridden ? !!row.override_is_ai : !!row.is_ai;
+  // Scope travels with EVERY verdict, cached ones included. It is derived from the
+  // host rather than stored on the row, so a newly-listed embedded-AI host takes
+  // effect immediately instead of waiting for the classification cache to expire.
+  const surface = surfaceFor(row.host);
   return {
     host:            row.host,
+    surface_scope:   surface.scope,
+    panel_selectors: surface.selectors,
+    surface_product: surface.product || null,
     is_ai:           effective_is_ai,
     confidence:      row.confidence ?? 0,
     vendor:          row.vendor,

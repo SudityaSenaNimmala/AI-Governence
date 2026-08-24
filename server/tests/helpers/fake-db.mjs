@@ -1,8 +1,9 @@
 // Minimal in-memory stand-in for the Mongo `Db` handle the routes receive.
-// Implements only the operations the DLP ingest and Session Replay read paths
-// use: insertOne, findOne, updateOne (with $set / $setOnInsert / $inc / $min /
-// $max / $addToSet + upsert), a find() chain, countDocuments, distinct,
-// deleteMany, and a small aggregate() pipeline interpreter.
+// Implements only the operations this codebase's read and write paths use:
+// insertOne, insertMany, findOne, updateOne (with $set / $setOnInsert / $inc /
+// $min / $max / $addToSet + upsert), updateMany, bulkWrite (updateOne ops only),
+// a find() chain, countDocuments, distinct, deleteOne, deleteMany, and a small aggregate()
+// pipeline interpreter.
 //
 // It deliberately enforces one real MongoDB constraint that is easy to violate
 // by accident: a field may not appear in two update operators at once. Mongo
@@ -64,6 +65,28 @@ function cmp(a, b) {
 
 function matches(doc, filter = {}) {
   for (const [k, v] of Object.entries(filter)) {
+    // Top-level logical operators. $or was previously unhandled and fell through
+    // to a FIELD comparison against a document key literally named "$or", which is
+    // always false — so a query like
+    //   { $or: [{ id }, { botId }, { appId }] }
+    // silently matched nothing and the caller looked like it had no data. That is
+    // exactly the "quietly disagrees with the real server" failure this file
+    // promises not to have; the default branch below now throws instead.
+    if (k === '$or' || k === '$and' || k === '$nor') {
+      if (!Array.isArray(v)) throw new Error(`fake-db: ${k} expects an array`);
+      const results = v.map((sub) => matches(doc, sub));
+      if (k === '$or'  && !results.some(Boolean)) return false;
+      if (k === '$and' && !results.every(Boolean)) return false;
+      if (k === '$nor' && results.some(Boolean)) return false;
+      continue;
+    }
+    if (k === '$not') {
+      if (matches(doc, v)) return false;
+      continue;
+    }
+    if (k.startsWith('$')) {
+      throw new Error(`fake-db: unsupported top-level query operator ${k}`);
+    }
     if (!matchesValue(doc[k], v)) return false;
   }
   return true;
@@ -158,6 +181,35 @@ function applyExprOperator(op, arg, doc) {
       }
       if (arg.to === 'string') return String(v);
       throw new Error(`fake-db: unsupported $convert target '${arg.to}'`);
+    }
+    // Branching + comparison. Needed by a $group that counts a SUBSET of the
+    // matched documents ($sum with $cond) — the shape that lets one aggregation
+    // replace several countDocuments calls, so a route can stop issuing one query
+    // per row. Ordering comes from the same cmp() the query side uses.
+    case '$cond': {
+      // Both spellings: [if, then, else] and { if, then, else }.
+      const [ifExpr, thenExpr, elseExpr] = Array.isArray(arg)
+        ? arg
+        : [arg.if, arg.then, arg.else];
+      return resolve(ifExpr, doc) ? resolve(thenExpr, doc) : resolve(elseExpr, doc);
+    }
+    case '$eq':  return eq(resolve(arg[0], doc), resolve(arg[1], doc));
+    case '$ne':  return !eq(resolve(arg[0], doc), resolve(arg[1], doc));
+    case '$gt':  return cmp(resolve(arg[0], doc), resolve(arg[1], doc)) > 0;
+    case '$gte': return cmp(resolve(arg[0], doc), resolve(arg[1], doc)) >= 0;
+    case '$lt':  return cmp(resolve(arg[0], doc), resolve(arg[1], doc)) < 0;
+    case '$lte': return cmp(resolve(arg[0], doc), resolve(arg[1], doc)) <= 0;
+    // $in as an EXPRESSION: is operand 0 a member of the array in operand 1.
+    // Deliberately NOT the query operator of the same name — that one asks the
+    // mirror-image question about an array FIELD and lives in matchesValue().
+    // Conflating the two is exactly the silent-wrong-answer this file refuses.
+    case '$in': {
+      const needle = resolve(arg[0], doc);
+      const haystack = resolve(arg[1], doc);
+      if (!Array.isArray(haystack)) {
+        throw new Error('fake-db: the $in expression needs an array as its second operand');
+      }
+      return haystack.some((v) => eq(needle, v));
     }
     default:
       throw new Error(`fake-db: unsupported aggregation operator ${op}`);
@@ -307,6 +359,45 @@ class FakeCollection {
     return { acknowledged: true, insertedId: doc.id ?? this.docs.length };
   }
 
+  // Real insertMany rejects an empty list rather than no-op'ing, and so does this
+  // one: a caller that has to guard the empty case should fail its test if the
+  // guard is ever dropped, not pass quietly.
+  async insertMany(docs) {
+    if (!Array.isArray(docs) || docs.length === 0) {
+      throw new Error('fake-db: insertMany needs a non-empty document list');
+    }
+    for (const doc of docs) {
+      this.assertUnique(doc);
+      this.docs.push({ ...doc });
+    }
+    return { acknowledged: true, insertedCount: docs.length };
+  }
+
+  // Only the updateOne form, which is the one this codebase writes. Anything else
+  // throws rather than being quietly skipped — a bulkWrite that silently ignored
+  // half its operations would look like a successful write.
+  async bulkWrite(ops) {
+    if (!Array.isArray(ops) || ops.length === 0) {
+      throw new Error('fake-db: bulkWrite needs a non-empty operation list');
+    }
+    let matchedCount = 0, modifiedCount = 0, upsertedCount = 0;
+    for (const op of ops) {
+      const kinds = Object.keys(op);
+      if (kinds.length !== 1) {
+        throw new Error(`fake-db: each bulkWrite op needs exactly one verb, got ${kinds.join(', ') || 'none'}`);
+      }
+      if (kinds[0] !== 'updateOne') {
+        throw new Error(`fake-db: bulkWrite supports updateOne only, got ${kinds[0]}`);
+      }
+      const { filter, update, upsert } = op.updateOne;
+      const r = await this.updateOne(filter, update, { upsert: !!upsert });
+      matchedCount += r.matchedCount;
+      modifiedCount += r.modifiedCount;
+      upsertedCount += r.upsertedCount;
+    }
+    return { matchedCount, modifiedCount, upsertedCount };
+  }
+
   async findOne(filter = {}) {
     return this.docs.find((d) => matches(d, filter)) ?? null;
   }
@@ -398,6 +489,16 @@ class FakeCollection {
     for (const d of hits) Object.assign(d, set);
     for (const d of hits) this.assertUnique(d, d);
     return { matchedCount: hits.length, modifiedCount: hits.length, upsertedCount: 0 };
+  }
+
+  // First match only, like the driver. Its absence was a real gap: the routing
+  // routes and the routing seeder both delete by id, so any test touching them
+  // failed with "deleteOne is not a function" rather than exercising the code.
+  async deleteOne(filter = {}) {
+    const i = this.docs.findIndex((d) => matches(d, filter));
+    if (i < 0) return { acknowledged: true, deletedCount: 0 };
+    this.docs.splice(i, 1);
+    return { acknowledged: true, deletedCount: 1 };
   }
 
   async deleteMany(filter = {}) {

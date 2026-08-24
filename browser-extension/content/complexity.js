@@ -30,7 +30,9 @@
   if (window.__cfaiComplexityLoaded) return;
   window.__cfaiComplexityLoaded = true;
 
-  const VERSION = '1.1.0';
+  // 1.2.0 — added the pure-arithmetic shape test (step 3b). Bumped because this
+  // changes verdicts: a bare sum was 'moderate' via the no-opinion fallback.
+  const VERSION = '1.2.0';
 
   // Tier thresholds. Tuned against the acceptance table in tests/complexity.test.mjs.
   const COMPLEX_AT = 6;
@@ -275,6 +277,44 @@
     { key: '#go-panic', weight: 4, re: /panic:/ },
     { key: '#error-label', weight: 4, re: /\bError:/ },
   ];
+
+  // ── Pure arithmetic ────────────────────────────────────────────────────────
+  //
+  // "what is 2+2" used to come out 'moderate', and not because anything judged
+  // it: the lexicon has no arithmetic signal, so it matched NOTHING, scored 0,
+  // and landed on the no-opinion fallback. Every trivial sum was therefore sent
+  // to the standard tier. (`zxqv wobble frimble` scores 0 the same way — that is
+  // what the fallback is for, and why it must stay 'moderate' in general.)
+  //
+  // This is a STRUCTURAL signal, not a length rule: it asks whether, once the
+  // interrogative wrapper is removed, there is any WORD left. Nothing about how
+  // short the prompt is matters, which keeps faith with this file's premise that
+  // length is not difficulty.
+  //
+  // "explain why 2+2=4 in Peano arithmetic" is deliberately NOT caught: 'explain
+  // why in peano arithmetic' survives the strip, so real words remain and the
+  // prompt goes on to be scored normally.
+
+  // The interrogative scaffolding around a sum, and the words for operators.
+  const ARITH_WRAPPER_RE = new RegExp(
+    '\\b(?:what(?:\\s+is|\\s*\'s|s)?|how\\s+much\\s+is|calculate|compute|'
+    + 'plus|minus|times|multiplied\\s+by|divided\\s+by|equals?|percent|of|is|the|answer|to)\\b',
+    'gi',
+  );
+  // Digits and the symbols of arithmetic. `x` and `X` are included because
+  // people write "12 x 7"; a bare letter is not otherwise allowed through.
+  const ARITH_RESIDUE_RE = /^[\s\d+\-*/^%().,=:?xX×÷]*$/;
+  // At least one digit AND one operator, so a bare number ("42") — which is an
+  // answer or an id, not a question — is not swept up.
+  const ARITH_HAS_OP_RE = /[+\-*/^%×÷]|\bx\b/i;
+
+  function isPureArithmetic(sample) {
+    const s = String(sample || '');
+    if (!/\d/.test(s)) return false;
+    if (!ARITH_HAS_OP_RE.test(s)) return false;
+    const residue = s.replace(ARITH_WRAPPER_RE, ' ');
+    return ARITH_RESIDUE_RE.test(residue);
+  }
 
   // ── Compilation ────────────────────────────────────────────────────────────
   // One alternation regex per category rather than one regex per term: eleven
@@ -542,6 +582,11 @@
 
     // 3. Trivial fast path, dominance-gated (see isAllTrivialTokens).
     if (isAllTrivialTokens(sample)) return 'simple';
+
+    // 3b. A bare sum is simple. Sits here, before scoring, because the lexicon
+    //     has nothing to say about arithmetic and a score of 0 means 'moderate' —
+    //     see isPureArithmetic for why this is a shape test, not a length test.
+    if (isPureArithmetic(sample)) return 'simple';
 
     // 4. Weighted, per-category-capped score across all eleven categories.
     const { score, simplicityRequestHit, strongHit } = scoreAll(sample);

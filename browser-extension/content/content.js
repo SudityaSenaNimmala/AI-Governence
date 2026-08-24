@@ -40,14 +40,48 @@
 
   // Inject fetch blocker IMMEDIATELY (synchronous) so it patches fetch()
   // before any page JS fires. The blocked list arrives shortly after via
-  // postMessage from the cached storage read.
+  // Inject feature flags into the page world via a DOM data attribute.
+  // Both fetch-blocker.js and content.js read from this.
+  // The attribute is set BEFORE fetch-blocker loads so it reads flags synchronously.
+  function pushFeaturesToPage(feats) {
+    try {
+      document.documentElement.setAttribute('data-cfai-features', JSON.stringify(feats));
+    } catch {}
+  }
+
+  // Load features then inject fetch-blocker
+  function injectFetchBlocker() {
+    try {
+      const script = document.createElement('script');
+      script.src = chrome.runtime.getURL('content/fetch-blocker.js');
+      (document.head || document.documentElement).appendChild(script);
+      script.onload = () => script.remove();
+    } catch (e) {
+      console.warn('[cfai] could not inject fetch blocker:', e);
+    }
+  }
+
+  // Try to get features from service worker first, then inject
+  let _fetchBlockerInjected = false;
+  function injectOnce() {
+    if (_fetchBlockerInjected) return;
+    _fetchBlockerInjected = true;
+    injectFetchBlocker();
+  }
+
   try {
-    const script = document.createElement('script');
-    script.src = chrome.runtime.getURL('content/fetch-blocker.js');
-    (document.head || document.documentElement).appendChild(script);
-    script.onload = () => script.remove();
+    // Ask service worker for features — it has them from startup fetch
+    chrome.runtime.sendMessage({ type: 'cfai-get-features' }, (resp) => {
+      if (chrome.runtime.lastError) { injectOnce(); return; }
+      if (resp?.features?.features) {
+        pushFeaturesToPage(resp.features.features);
+      }
+      injectOnce();
+    });
+    // Safety: if service worker doesn't respond in 1s, inject anyway
+    setTimeout(injectOnce, 1000);
   } catch (e) {
-    console.warn('[cfai] could not inject fetch blocker:', e);
+    injectOnce();
   }
 
   // Load blocked list from cache and send to fetch-blocker immediately
@@ -148,6 +182,7 @@
     return null;
   }
   async function applyPlatformPolicy(platforms) {
+    if (!isFeatureOn('ai_systems')) return; // platform blocking is part of AI Systems
     const hit = platformBlockMatch(platforms);
     if (hit) {
       // Check if this machine has a temporary access exception.
@@ -225,9 +260,44 @@
   } catch (e) {}
 
   const SERVICE = inferService(location.hostname);
-  const scan = window.__cfaiPatterns?.scan ?? (() => []);
+  const _rawScan = window.__cfaiPatterns?.scan ?? (() => []);
+  // Gate ALL scanning through the DLP feature flag
+  const scan = (text) => isFeatureOn('dlp') ? _rawScan(text) : [];
   const classifyFile = window.__cfaiPatterns?.classifyFile ?? ((n) => ({ class: 'other', severity: 'low', reason: '' }));
   const sizeBucket = window.__cfaiPatterns?.sizeBucket ?? (() => '?');
+
+  // ── Server-driven feature flags ────────────────────────────────────────────
+  // Cached from the service worker. When a feature is disabled on the server,
+  // the extension skips its enforcement — e.g. DLP scanning, platform blocking.
+  let _cfaiFeatures = {};
+  // Bootstrap from DOM attribute (set by us above before fetch-blocker loaded)
+  try { const raw = document.documentElement.getAttribute('data-cfai-features'); if (raw) _cfaiFeatures = JSON.parse(raw); } catch {}
+
+  function isFeatureOn(key) {
+    // Re-read from DOM attribute each time — picks up live updates
+    try {
+      const raw = document.documentElement.getAttribute('data-cfai-features');
+      if (raw) { const f = JSON.parse(raw); if (f[key]) return f[key].status === 'enabled'; }
+    } catch {}
+    const f = _cfaiFeatures[key];
+    if (!f) return true;
+    return f.status === 'enabled';
+  }
+
+  function applyFeatures(feats) {
+    if (!feats || typeof feats !== 'object' || !Object.keys(feats).length) return;
+    _cfaiFeatures = feats;
+    pushFeaturesToPage(feats);
+  }
+
+  try {
+    // Live updates when service worker refreshes flags
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes['cfai.features']?.newValue?.features) {
+        applyFeatures(changes['cfai.features'].newValue.features);
+      }
+    });
+  } catch {}
 
   // Bucket the content length so we don't leak exact prompt sizes.
   function lengthBucket(n) {
@@ -525,9 +595,188 @@
     if (conv) emitSessionBind(conv);      // "New chat" (conv → null) binds nothing
   }
 
+  // ── AI surface scope ──────────────────────────────────────────────────────
+  //
+  // Governance used to be decided per HOST and enforced across the whole PAGE.
+  // The registry governs mail.google.com for "Gemini in Gmail", hubspot.com for
+  // HubSpot AI, github.com for Copilot — and once a host was governed, every
+  // textarea, contenteditable and file input on it was captured as an AI prompt.
+  // Production collected 186 events from app.hubspot.com, 32 from github.com and
+  // 6 from a SharePoint tenant, all from ordinary compose fields, all with stored
+  // content. That is employee correspondence captured under an AI policy.
+  //
+  // So a host is now one of two scopes:
+  //   whole_site  — the site IS the AI product. Capture anywhere (unchanged).
+  //   embedded_ai — AI is a panel inside a larger app. Capture ONLY inside a
+  //                 recognised AI panel, and nothing at all if none is present.
+  //
+  // THE LIST IS BUILT IN, not only fetched. The server serves the authoritative
+  // map at /api/v1/ai-surfaces so a stale selector is a config fix rather than an
+  // extension release — but a privacy guarantee must not depend on a network call
+  // succeeding, so this floor applies even with no server reachable. The synced
+  // map can add hosts and replace selectors; it cannot remove the floor.
+  const EMBEDDED_AI_FLOOR = {
+    'mail.google.com': ['[aria-label*="Gemini" i]', '[data-gemini]', 'dialog[aria-label*="Gemini" i]'],
+    'docs.google.com': ['[aria-label*="Gemini" i]', '[aria-label*="Help me write" i]'],
+    'hubspot.com':     ['[data-test-id*="copilot" i]', '[class*="copilot" i]', '[aria-label*="Breeze" i]'],
+    'github.com':      ['[data-testid*="copilot" i]', '#copilot-chat', '[aria-label*="Copilot" i]', 'copilot-chat'],
+    'sharepoint.com':  ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'zendesk.com':     ['[data-test-id*="copilot" i]', '[data-test-id*="generative" i]', '[class*="ai-agent" i]'],
+    'salesforce.com':  ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'force.com':       ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'intercom.com':    ['[class*="fin-" i]', '[class*="intercom-ai" i]'],
+    // Microsoft surfaces a Copilot Studio agent can be published to. These are
+    // apps first and AI second — Teams is a chat client, Outlook is mail — so
+    // capture stays inside the Copilot panel. Adding them for AGENT BLOCKING
+    // without this would recreate the over-collection defect at a far worse
+    // scale: every Teams message and every email.
+    //
+    // 'cloud.microsoft' is deliberately broad. Microsoft has been moving M365
+    // web apps onto it, so it now spans Word and Outlook as well as Copilot
+    // chat — which means m365.cloud.microsoft is scoped too, and on that one
+    // surface we may under-capture. That is the correct side to err on: a
+    // reportable gap, not a compliance incident.
+    'teams.microsoft.com':        ['[aria-label*="Copilot" i]', '[data-tid*="copilot" i]'],
+    'cloud.microsoft':            ['[aria-label*="Copilot" i]', '[class*="copilot" i]', '[data-tid*="copilot" i]'],
+    'outlook.office.com':         ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'outlook.office365.com':      ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'crm.dynamics.com':           ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'copilotstudio.microsoft.com':['[aria-label*="Copilot" i]', '[class*="copilot" i]', '[aria-label*="Test your agent" i]'],
+    'powerapps.com':              ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+  };
+  // NOTE ON SELECTORS: they key on the AI product's own name — Gemini, Copilot,
+  // Breeze, Einstein — never a bare "ai" token. An attribute substring match on
+  // "ai" also matches the word "mail", which on Gmail would re-select the entire
+  // mail UI and reproduce exactly the bug this code removes.
+
+  let _syncedSurfaces = null;   // { host: {selectors:[]} } from the server
+  try {
+    chrome.storage.local.get(['cfai.ai_surfaces'], (r) => {
+      const v = r['cfai.ai_surfaces'];
+      if (v && typeof v === 'object') _syncedSurfaces = v.embedded || v;
+    });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes['cfai.ai_surfaces']) {
+        const v = changes['cfai.ai_surfaces'].newValue;
+        _syncedSurfaces = v && (v.embedded || v);
+      }
+    });
+  } catch (e) { /* extension context gone; the floor still applies */ }
+
+  /** Longest matching host key across the synced map and the built-in floor. */
+  function surfaceSelectorsForHost(host) {
+    const h = String(host || '').toLowerCase();
+    let best = null, bestLen = 0;
+    const consider = (key, sels) => {
+      if (!sels || !sels.length) return;
+      if ((h === key || h.endsWith('.' + key)) && key.length > bestLen) {
+        best = sels; bestLen = key.length;
+      }
+    };
+    for (const [k, v] of Object.entries(EMBEDDED_AI_FLOOR)) consider(k, v);
+    if (_syncedSurfaces) {
+      for (const [k, v] of Object.entries(_syncedSurfaces)) {
+        consider(k, Array.isArray(v) ? v : (v && v.selectors));
+      }
+    }
+    return best;   // null => whole_site
+  }
+
+  const _panelSelectors = surfaceSelectorsForHost(
+    (typeof window !== 'undefined' && window.location) ? window.location.hostname : '',
+  );
+  const IS_EMBEDDED_AI = !!_panelSelectors;
+  if (IS_EMBEDDED_AI) {
+    console.info('[cfai] embedded-AI host: capture restricted to the AI panel only');
+  }
+
+  // What a prompt is typed into. Also the test for "is this an AI PANEL, or just
+  // the button that opens one".
+  const COMPOSER_SEL = 'textarea, [contenteditable]:not([contenteditable="false"]), [role="textbox"]';
+
+  /**
+   * A matched node only counts as an open AI panel if a prompt can actually be
+   * typed in it.
+   *
+   * WHY. Gmail keeps a Gemini launcher button in its toolbar at all times, and
+   * that button's aria-label contains "Gemini" — so a name-only selector matched
+   * it on the bare inbox, `aiPanels()` came back non-empty, and the page was
+   * treated as having an open AI panel when it did not. Reported from a live test:
+   * the banner appeared on the inbox.
+   *
+   * Requiring a composer is not a heuristic about size or position, it is the
+   * thing we actually care about: a surface where prompts can be entered. A
+   * launcher icon contains no composer. If a panel renders its composer inside a
+   * shadow root this returns false and the host captures nothing — the same
+   * fail-closed direction as everything else here.
+   */
+  // The launcher itself: Gmail's toolbar Gemini button, a "Ask Copilot" link, a
+  // menu trigger. Rejected before anything else — it carries the AI's name but is
+  // not a surface anything can be typed into.
+  const LAUNCHER_SEL = 'button, [role="button"], a, [aria-haspopup]';
+
+  function isPanelWithComposer(el) {
+    try {
+      if (el.matches && el.matches(LAUNCHER_SEL)) return false;
+      if (el.matches && el.matches(COMPOSER_SEL)) return true;
+      return !!(el.querySelector && el.querySelector(COMPOSER_SEL));
+    } catch (e) { return false; }
+  }
+
+  /** Visible AI panels on the page right now. */
+  function aiPanels() {
+    if (!_panelSelectors) return [];
+    const out = [];
+    for (const sel of _panelSelectors) {
+      let found;
+      try { found = document.querySelectorAll(sel); } catch (e) { continue; }
+      for (const el of found) {
+        // A hidden panel is not an open panel: a collapsed side panel still
+        // exists in the DOM, and treating it as open would re-govern the page.
+        if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) continue;
+        if (!isPanelWithComposer(el)) continue;
+        out.push(el);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * May this element's content be captured?
+   *
+   * whole_site  → always. embedded_ai → only inside a visible AI panel.
+   * Crosses shadow boundaries via getRootNode(), because these panels are
+   * routinely rendered in one.
+   */
+  function captureAllowed(el) {
+    if (!IS_EMBEDDED_AI) return true;
+    const panels = aiPanels();
+    if (panels.length === 0) return false;   // fail closed
+    if (!el) return true;                    // page-level event, a panel is open
+    let node = el;
+    while (node) {
+      for (const p of panels) {
+        if (p === node || (p.contains && p.contains(node))) return true;
+      }
+      const root = node.getRootNode ? node.getRootNode() : null;
+      node = (root && root.host) ? root.host : null;   // hop out of a shadow root
+    }
+    return false;
+  }
+  // ── end AI surface scope ─
+
   function emit(event) {
     try {
       const kind = event && event.kind;
+      // SCOPE GATE. On an embedded-AI host, nothing is reported unless an AI
+      // panel is actually open. Events carrying an element are additionally
+      // checked for containment at their own call sites, where the element is
+      // known; this catches the page-level kinds (ai_response, model_routed)
+      // that have no element at all.
+      if (IS_EMBEDDED_AI && !captureAllowed(null)) {
+        console.info('[cfai] suppressed', kind, '— no AI panel open on this embedded-AI host');
+        return;
+      }
       // THE ONLY PLACE _activeConvId MOVES. A real user action re-reads the URL;
       // everything else (an AI reply arriving, an enforcement record, a routing
       // decision, a bare SPA navigation) leaves it exactly where it was.
@@ -721,9 +970,103 @@
   }
 
   // ── Model tier detection (Smart Model Router) ────────────────────────────
+
+  /**
+   * The model tiers each PLATFORM offers, keyed by host. Tier numbers match
+   * TIER_NUM: 3 = premium, 2 = standard, 1 = economy. The string is the label to
+   * look for in that platform's own model picker.
+   *
+   * WHY KEYED BY HOST AND NOT BY VENDOR. Tier detection used to be one ordered
+   * keyword chain over the whole button text with no idea which site it was on,
+   * and that cannot be extended past three vendors without cross-talk:
+   *
+   *   - 'mini' meant openai/economy, so Grok 3 mini read as OpenAI and the router
+   *     would then hunt for "GPT-4o mini" in xAI's picker.
+   *   - 'pro' meant google/premium, so Perplexity's "Sonar Pro" read as Google
+   *     and it would hunt for Gemini's labels.
+   *   - Perplexity and Poe PROXY other vendors ("Claude Sonnet", "GPT-4o"), so
+   *     keyword matching attributes them to the wrong picker entirely.
+   *
+   * The host decides the vendor, so a label can never leak across platforms.
+   * A host that is not listed keeps the old keyword-only behaviour, so nothing
+   * that works today changes.
+   */
+  const PLATFORM_TIERS = {
+    'claude.ai':            { vendor: 'anthropic',  3: 'Opus',     2: 'Sonnet',    1: 'Haiku' },
+    'chatgpt.com':          { vendor: 'openai',     3: 'GPT-4',    2: 'GPT-4o',    1: 'GPT-4o mini' },
+    'chat.openai.com':      { vendor: 'openai',     3: 'GPT-4',    2: 'GPT-4o',    1: 'GPT-4o mini' },
+    'gemini.google.com':    { vendor: 'google',     3: 'Pro',      2: 'Thinking',  1: 'Flash' },
+    'aistudio.google.com':  { vendor: 'google',     3: 'Pro',      2: 'Thinking',  1: 'Flash' },
+    // Le Chat. 'chat.mistral.ai' is listed before the bare domain and matched by
+    // longest key, so the app host wins over the marketing site.
+    'chat.mistral.ai':      { vendor: 'mistral',    3: 'Large',    2: 'Medium',    1: 'Small' },
+    'mistral.ai':           { vendor: 'mistral',    3: 'Large',    2: 'Medium',    1: 'Small' },
+    'perplexity.ai':        { vendor: 'perplexity', 3: 'Research', 2: 'Sonar Pro', 1: 'Sonar' },
+  };
+
+  /** The PLATFORM_TIERS entry for a host — longest matching key wins. */
+  function platformTiers(host) {
+    const h = String(host || '').toLowerCase();
+    if (!h) return null;
+    let best = null, bestLen = 0;
+    for (const key of Object.keys(PLATFORM_TIERS)) {
+      if ((h === key || h.endsWith('.' + key) || h.includes(key)) && key.length > bestLen) {
+        best = PLATFORM_TIERS[key];
+        bestLen = key.length;
+      }
+    }
+    return best;
+  }
+
+  // Local copy so this region stays evaluable ON ITS OWN — the tests slice it
+  // out of the file and run it with no surrounding scope, which is the whole
+  // reason nothing in here may reference a declaration further down the file.
+  // Same values as TIER_NAME.
+  const TIER_NAME_LOCAL = { 3: 'premium', 2: 'standard', 1: 'economy' };
+
+  /**
+   * Which of a platform's own tier labels the button text is showing.
+   * LONGEST LABEL FIRST: Perplexity offers both "Sonar" and "Sonar Pro", and
+   * matching the short one first would read Pro as economy.
+   */
+  function tierFromPlatformLabels(text, entry) {
+    const t = String(text || '').toLowerCase();
+    if (!t) return null;
+    const byLen = [3, 2, 1]
+      .filter((n) => entry[n])
+      .sort((a, b) => String(entry[b]).length - String(entry[a]).length);
+    for (const n of byLen) {
+      if (t.includes(String(entry[n]).toLowerCase())) return TIER_NAME_LOCAL[n];
+    }
+    return null;
+  }
+
+  /**
+   * Detect provider + tier from the model button text.
+   *
+   * `host` is OPTIONAL and additive: with it, the platform's own labels are
+   * consulted first and the vendor comes from the host, which is what stops
+   * label cross-talk. Without it the behaviour is exactly the historic
+   * keyword chain — which is what keeps every existing caller and test valid.
+   */
+  function detectModelInfo(text, host) {
+    const entry = host ? platformTiers(host) : null;
+    if (entry) {
+      const tier = tierFromPlatformLabels(text, entry);
+      if (tier) return { provider: entry.vendor, tier };
+      // A proxied model ("Claude Sonnet" inside Perplexity): take the TIER from
+      // the keyword chain but keep the vendor from the host, so the label we
+      // later click still comes from this platform's picker.
+      const legacy = detectModelInfoByKeyword(text);
+      if (legacy) return { provider: entry.vendor, tier: legacy.tier };
+      return null;
+    }
+    return detectModelInfoByKeyword(text);
+  }
+
   // Detect model tier from button text or model ID.
   // Handles current + future model names dynamically by keyword matching.
-  function detectModelInfo(text) {
+  function detectModelInfoByKeyword(text) {
     const t = (text || '').toLowerCase();
 
     // Anthropic — Fable and Opus are premium, Sonnet is standard, Haiku is economy
@@ -733,7 +1076,14 @@
     if (t.includes('haiku'))  return { provider: 'anthropic', tier: 'economy' };
 
     // OpenAI — order matters: "mini" before "4o", "o1/o3/o4" are premium
-    if (t.includes('mini') || t.includes('3.5') || t.includes('nano'))  return { provider: 'openai', tier: 'economy' };
+    // WORD-BOUNDED, and this is not a nicety. A bare substring test for "mini"
+    // matches "geMINI" — so every Gemini surface was read as OpenAI economy, and
+    // routing then hunted for OpenAI's labels on a Google page. Live symptom: on
+    // Gmail with the Gemini panel open, an element reading "AskGeminiViewAnswer"
+    // was taken for the model button, classified openai/economy, and "upgraded"
+    // to GPT-4o. \b still matches the spellings that matter — "GPT-4o mini",
+    // "gpt-4o-mini", "o4-mini" — because a hyphen and a space are both boundaries.
+    if (/\bmini\b/.test(t) || t.includes('3.5') || /\bnano\b/.test(t)) return { provider: 'openai', tier: 'economy' };
     if (t.includes('4o') || t.includes('4.1'))                          return { provider: 'openai', tier: 'standard' };
     if (t.includes('gpt-4') || t.includes('gpt4'))                      return { provider: 'openai', tier: 'premium' };
     if (/\bo[1-9]/.test(t))                                             return { provider: 'openai', tier: 'premium' };
@@ -836,6 +1186,70 @@
     downgrade: { 2: 'Standard prompt → balanced model', 1: 'Simple prompt → fastest & cheapest' },
   };
 
+  /**
+   * The label to click for a target tier on this host. The host-scoped table
+   * wins; TIER_UI_NAME is the vendor-level fallback for a host that is not
+   * listed, so unlisted platforms behave exactly as they did before.
+   *
+   * Lives OUTSIDE the model-tier-detection region on purpose: it reads
+   * TIER_UI_NAME, which is declared here, and that region is sliced out and
+   * executed standalone by tests/load-model-router.mjs — anything in there that
+   * referenced a later declaration would break the loader.
+   */
+  function tierLabelFor(host, provider, tierNum) {
+    const entry = platformTiers(host);
+    if (entry && entry[tierNum]) return entry[tierNum];
+    return (TIER_UI_NAME[provider] || {})[tierNum] || null;
+  }
+
+  // ── Admin routing rules (synced from the server) ─────────────────────────
+  // The service worker has always written /api/v1/routing/rules into
+  // chrome.storage under 'cfai.routing_rules' — and NOTHING read it. Every
+  // rule an admin configured was dead on arrival, which is why routing
+  // analytics attributed 1 of 252 routes to a rule_id. This is the reader.
+  //
+  // A rule only ever OVERRIDES the built-in choice, so an empty, unsynced or
+  // unreachable rule set leaves the built-in behaviour intact rather than
+  // disabling routing.
+  let _serverRules = [];
+
+  function applyServerRules(list) {
+    _serverRules = Array.isArray(list)
+      ? list.filter(r => r && r.enabled !== false)
+            .sort((a, b) => (a.priority || 50) - (b.priority || 50))
+      : [];
+    if (_serverRules.length) console.info('[cfai] routing rules loaded:', _serverRules.length);
+  }
+
+  try {
+    chrome.storage.local.get(['cfai.routing_rules'], (r) => applyServerRules(r['cfai.routing_rules']));
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes['cfai.routing_rules']) {
+        applyServerRules(changes['cfai.routing_rules'].newValue);
+      }
+    });
+  } catch (e) {
+    // Extension context gone; built-in routing still works.
+  }
+
+  /**
+   * First rule matching this provider + complexity (+ optional host), by
+   * priority. An absent or empty condition array means "any", matching how the
+   * server's own /routing/decide treats them.
+   */
+  function serverRuleFor(provider, complexity, host) {
+    const anyOf = (arr, v) => !Array.isArray(arr) || arr.length === 0 || arr.includes(v);
+    for (const r of _serverRules) {
+      const c = r.conditions || {};
+      if (!anyOf(c.provider, provider)) continue;
+      if (!anyOf(c.complexity, complexity)) continue;
+      if (Array.isArray(c.host) && c.host.length
+          && !c.host.some(h => String(host || '').includes(h))) continue;
+      return r;
+    }
+    return null;
+  }
+
   // Load persisted ceiling from chrome.storage (survives extension refresh)
   try {
     chrome.storage.local.get('cfai.user_ceiling', (data) => {
@@ -871,7 +1285,10 @@
   setTimeout(updateUserCeiling, 1000);
 
   function smartRoute(currentModelText, promptText) {
-    const current = detectModelInfo(currentModelText);
+    // Host is passed so the platform's own tier labels are used and the vendor
+    // comes from the site, not from a keyword that might belong to someone else.
+    const host = (typeof window !== 'undefined' && window.location) ? window.location.hostname : '';
+    const current = detectModelInfo(currentModelText, host);
     if (!current) return null;
 
     // Set ceiling on first detection if not set
@@ -910,17 +1327,28 @@
     if (targetNum === currentNum) return null;
 
     const targetTierName = TIER_NAME[targetNum];
-    const uiName = TIER_UI_NAME[current.provider]?.[targetNum];
+
+    // An admin rule wins over the built-in label, so a platform that renames a
+    // tier can be corrected from the dashboard instead of by shipping a new
+    // extension. `action.ui_name` is what gets clicked; `action.model` is the API
+    // id used by the fetch-blocker path (see dispatchRouteModel), and the two are
+    // deliberately separate — a model id is not a picker label.
+    const rule = serverRuleFor(current.provider, complexity, host);
+    const uiName = (rule && rule.action && rule.action.ui_name)
+      || tierLabelFor(host, current.provider, targetNum);
     if (!uiName) return null;
 
     const direction = targetNum < currentNum ? 'downgrade' : 'upgrade';
-    const reason = direction === 'downgrade'
-      ? (TIER_REASON.downgrade[targetNum] || 'Optimized for this prompt')
-      : (TIER_REASON.upgrade[targetNum] || 'Upgraded for quality');
+    const reason = (rule && rule.name)
+      || (direction === 'downgrade'
+        ? (TIER_REASON.downgrade[targetNum] || 'Optimized for this prompt')
+        : (TIER_REASON.upgrade[targetNum] || 'Upgraded for quality'));
 
     return {
       model: uiName,
       uiName,
+      apiModel: (rule && rule.action && rule.action.model) || null,
+      rule_id: (rule && rule.id) || null,
       rule_name: reason,
       complexity,
       currentTier: current.tier,
@@ -1002,24 +1430,105 @@
     return findModelButton();
   }
 
-  // Search the ENTIRE document for a clickable element containing specific text.
-  // Returns the most specific (deepest) match — avoids clicking a parent container.
-  function findClickableByText(text) {
+  // ── Model-menu option lookup ─────────────────────────────────────────────
+  // Containers a model dropdown actually renders into. `.mat-mdc-menu-panel` is
+  // Angular Material, which is what Gemini is built on; the rest are the
+  // standard roles every other platform uses.
+  const MENU_CONTAINER_SELECTOR =
+    '[role="menu"], [role="listbox"], [role="dialog"], [popover], .mat-mdc-menu-panel';
+
+  // Rendered and hittable. Deliberately fail-OPEN: a node is only rejected when
+  // the DOM actively says it is hidden, so an unusual host page (or a minimal
+  // test double) is never wrongly skipped.
+  function isVisibleEl(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (typeof el.getAttribute === 'function') {
+      if (el.getAttribute('aria-hidden') === 'true') return false;
+      if (el.getAttribute('hidden') !== null) return false;
+    }
+    if (typeof el.hasAttribute === 'function' && el.hasAttribute('inert')) return false;
+    if (typeof el.getClientRects === 'function') {
+      const rects = el.getClientRects();
+      if (rects && rects.length === 0) return false;
+    }
+    if (typeof el.getBoundingClientRect === 'function') {
+      const r = el.getBoundingClientRect();
+      if (r && (r.width === 0 || r.height === 0)) return false;
+    }
+    return true;
+  }
+
+  // Shortest text containing `text` inside one scope = the most specific element.
+  function pickShortestMatch(scope, text, exclude) {
     let best = null;
     let bestLen = Infinity;
-    for (const el of document.querySelectorAll('*')) {
+    for (const el of scope.querySelectorAll('*')) {
+      if (el === exclude) continue;                 // never re-click the trigger
       if (el.children.length > 10) continue;
       const t = (el.textContent || '').trim();
       if (t.length > 100 || t.length < 2) continue;
       if (!t.includes(text)) continue;
-      // Prefer the shortest text that contains our target (= most specific element)
-      if (t.length < bestLen) {
-        best = el;
-        bestLen = t.length;
-      }
+      if (!isVisibleEl(el)) continue;
+      if (t.length < bestLen) { best = el; bestLen = t.length; }
     }
     return best;
   }
+
+  /**
+   * Find the clickable element for a model option.
+   *
+   * OPEN MENUS ARE SEARCHED FIRST, and this is the whole point rather than an
+   * optimisation. The old version scanned the entire document and took the
+   * shortest text match anywhere on the page — which is wrong precisely on
+   * Gemini, whose target tier is literally named "Thinking" and which ALSO
+   * renders "Thinking" as a generation status while a reply streams. The status
+   * label is shorter than the menu row, so it won the shortest-match contest,
+   * got clicked, and nothing changed: 9 of 10 Gemini routings reported
+   * ui_changed:false while Claude managed 34 of 34.
+   *
+   * Invisible nodes are skipped for the same reason — a collapsed menu still has
+   * its rows in the DOM.
+   *
+   * The whole-document pass is kept as a fallback so platforms that render their
+   * picker without any of the standard roles still work.
+   */
+  function findClickableByText(text, opts) {
+    const exclude = (opts && opts.exclude) || null;
+    for (const menu of document.querySelectorAll(MENU_CONTAINER_SELECTOR)) {
+      if (!isVisibleEl(menu)) continue;
+      const hit = pickShortestMatch(menu, text, exclude);
+      if (hit) return hit;
+    }
+    return pickShortestMatch(document, text, exclude);
+  }
+
+  // Poll instead of sleeping a fixed 400ms. A menu that renders in 50ms no longer
+  // costs 400, and one that takes 900 no longer reports failure.
+  async function waitForEl(get, timeoutMs, stepMs) {
+    const deadline = Date.now() + (timeoutMs || 1500);
+    for (;;) {
+      const v = get();
+      if (v) return v;
+      if (Date.now() >= deadline) return null;
+      await new Promise(r => setTimeout(r, stepMs || 100));
+    }
+  }
+
+  // What the open menu is actually offering, for the failure log. Without this a
+  // failed switch says only "not found" and the next debugging step is guesswork.
+  function visibleMenuOptions() {
+    const out = [];
+    for (const menu of document.querySelectorAll(MENU_CONTAINER_SELECTOR)) {
+      if (!isVisibleEl(menu)) continue;
+      for (const el of menu.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], button, li')) {
+        if (!isVisibleEl(el)) continue;
+        const t = (el.textContent || '').trim();
+        if (t && t.length < 80 && !out.includes(t)) out.push(t);
+      }
+    }
+    return out;
+  }
+  // ── end model-menu option lookup ─
 
   async function changeModelInUI(targetModelId) {
     const btn = getModelButton();
@@ -1034,31 +1543,31 @@
     // Step 1: Click model button to open dropdown
     console.info('[cfai] step 1: clicking model button');
     btn.click();
-    await new Promise(r => setTimeout(r, 400));
 
-    // Step 2: Search for target model — try multiple strategies
-    let targetEl = findClickableByText(targetText);
+    // Step 2: Search for target model — try multiple strategies.
+    // `exclude: btn` on every lookup: the trigger button's own label contains a
+    // model name, so it is itself a tempting shortest-match and clicking it just
+    // closes the menu again.
+    let targetEl = await waitForEl(() => findClickableByText(targetText, { exclude: btn }));
 
     if (!targetEl) {
       // Strategy A: look for "More models" sub-menu (Claude pattern)
-      const moreEl = findClickableByText('More models');
+      const moreEl = findClickableByText('More models', { exclude: btn });
       if (moreEl) {
         console.info('[cfai] step 2a: clicking "More models"');
         moreEl.click();
-        await new Promise(r => setTimeout(r, 400));
-        targetEl = findClickableByText(targetText);
+        targetEl = await waitForEl(() => findClickableByText(targetText, { exclude: btn }));
       }
     }
 
     if (!targetEl) {
       // Strategy B: look for "See all models" or "Show all" (ChatGPT/other patterns)
       for (const altText of ['See all', 'Show all', 'All models', 'More', 'View all']) {
-        const altEl = findClickableByText(altText);
+        const altEl = findClickableByText(altText, { exclude: btn });
         if (altEl) {
           console.info('[cfai] step 2b: clicking "' + altText + '"');
           altEl.click();
-          await new Promise(r => setTimeout(r, 400));
-          targetEl = findClickableByText(targetText);
+          targetEl = await waitForEl(() => findClickableByText(targetText, { exclude: btn }));
           if (targetEl) break;
         }
       }
@@ -1080,7 +1589,14 @@
       console.info('[cfai] clicking target:', (targetEl.textContent || '').trim().slice(0, 40));
       targetEl.click();
     } else {
-      console.warn('[cfai] target "' + targetText + '" not found in any dropdown');
+      // Name what the menu DID offer. "not found" alone cannot distinguish a
+      // stale selector, a renamed tier, or a menu that never opened — and those
+      // need three different fixes.
+      const offered = visibleMenuOptions();
+      console.warn('[cfai] target "' + targetText + '" not found in any dropdown; '
+        + (offered.length
+          ? 'open menu offered: ' + offered.join(' | ')
+          : 'no open menu found — the model button click did not open a picker'));
       // Close any open menus
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await new Promise(r => setTimeout(r, 100));
@@ -1110,10 +1626,31 @@
     d.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;background:#0044cc;color:#fff;padding:12px 18px;border-radius:10px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,0.2);max-width:350px;animation:cfai-fade-in .2s ease-out;';
     const f = (fromModel || '').replace(/claude-/i,'').replace(/-\d{8}$/,'');
     const t = (toModel || '').replace(/claude-/i,'').replace(/-\d{8}$/,'');
-    d.innerHTML = '<div style="font-weight:700;margin-bottom:4px">⚡ Model Routed</div>' +
-      '<div>' + f + ' → <strong>' + t + '</strong></div>' +
-      '<div style="font-size:11px;opacity:0.8;margin-top:4px">Rule: ' + (ruleName||'') + '</div>' +
-      '<div style="font-size:10px;opacity:0.6;margin-top:2px">CloudFuze AI Governance</div>';
+
+    // BUILT WITH DOM NODES, NOT innerHTML. `fromModel` is read straight off the
+    // AI site's own model-picker button, so it is page-controlled text: an
+    // innerHTML concatenation let any of these sites inject markup into our own
+    // governance toast. `ruleName` comes from the server, but an admin types it,
+    // so it is not trusted markup either. textContent everywhere.
+    const line = (text, css) => {
+      const el = document.createElement('div');
+      if (css) el.style.cssText = css;
+      el.textContent = text;
+      return el;
+    };
+
+    d.appendChild(line('⚡ Model Routed', 'font-weight:700;margin-bottom:4px'));
+
+    const swap = document.createElement('div');
+    swap.appendChild(document.createTextNode(f + ' → '));
+    const strong = document.createElement('strong');
+    strong.textContent = t;
+    swap.appendChild(strong);
+    d.appendChild(swap);
+
+    d.appendChild(line('Rule: ' + (ruleName || ''), 'font-size:11px;opacity:0.8;margin-top:4px'));
+    d.appendChild(line('CloudFuze AI Governance', 'font-size:10px;opacity:0.6;margin-top:2px'));
+
     document.documentElement.appendChild(d);
     setTimeout(() => { try { d.remove(); } catch {} }, 5000);
   }
@@ -1177,6 +1714,10 @@
   }
 
   function handlePaste(el, event) {
+    // Pasting into an ordinary compose box on an embedded-AI host is not an AI
+    // action. Checked here rather than only in emit() because the element is
+    // known at this point, so containment can be enforced precisely.
+    if (!captureAllowed(el)) return;
     // Two kinds of paste: text + files attached to the clipboard.
     const cd = event.clipboardData;
     if (!cd) return;
@@ -1606,6 +2147,9 @@
     if (!t || t.tagName !== 'INPUT' || t.type !== 'file') return;
     const files = t.files;
     if (!files || files.length === 0) return;
+    // Attaching a file to an email or a ticket is not an AI upload. Without this
+    // gate, every attachment on a governed SaaS host was scanned and recorded.
+    if (!captureAllowed(t)) return;
 
     const blocked = [...files].filter((f) => filenameRisky(f));
     if (blocked.length > 0) {
@@ -1640,6 +2184,10 @@
   // Drag-and-drop — page-wide, capture phase
   document.addEventListener('drop', (e) => {
     if (!e.dataTransfer?.files || e.dataTransfer.files.length === 0) return;
+    // Same rule as the file picker: a file dropped onto the mail composer is not
+    // an AI upload. e.target is the drop target, which is what must be inside the
+    // AI panel for this to count.
+    if (!captureAllowed(e.target)) return;
 
     const blocked = [...e.dataTransfer.files].filter((f) => filenameRisky(f));
     if (blocked.length > 0) {
@@ -1829,7 +2377,12 @@
     if (btn.type === 'submit') return true;
     // ChatGPT uses an SVG arrow button near the composer — catch any button
     // inside the composer form/container that has an SVG child (icon button)
-    if (btn.querySelector('svg') && btn.closest('form, [class*="composer" i], [class*="input-area" i], [class*="prompt" i], [class*="chat-input" i]')) return true;
+    if (btn.querySelector('svg') && btn.closest('form, [class*="composer" i], [class*="input-area" i], [class*="prompt" i], [class*="chat-input" i]')) {
+      // Skip if it looks like a mic/media button (check svg content for mic-like paths)
+      const svgHtml = (btn.querySelector('svg')?.innerHTML || '').toLowerCase();
+      if (/microphone|mic-|record|m12.*v6.*a6/i.test(svgHtml)) return false;
+      return true;
+    }
     // Also match by proximity — any button right next to a textarea/contenteditable
     const sibling = btn.previousElementSibling || btn.parentElement;
     if (sibling && (sibling.querySelector?.('textarea, [contenteditable="true"], [role="textbox"]'))) return true;
@@ -1838,7 +2391,7 @@
 
   function scanForBlockers(text) {
     if (!text || text.length < 4) return null;
-    const matches = scan(text).filter((m) => BLOCK_SEVERITIES.has(m.severity));
+    let matches = scan(text).filter((m) => BLOCK_SEVERITIES.has(m.severity));
     return matches.length > 0 ? matches : null;
   }
 
@@ -2642,14 +3195,13 @@
   // (c) leave the masked text in place and tell the user to press Enter. We
   // never clear or lose the masked prompt.
   function triggerSendFor(el, maskedText, labels) {
-    const btn = findSendButtonForInput(el);
-    if (btn) {
-      console.info('[cfai] tokenize: clicking the site send button —', describeElement(btn));
-      try { btn.click(); } catch (e) { simulateSend(el); }
-    } else {
-      console.info('[cfai] tokenize: no send button found — dispatching Enter');
+    // Claude.ai and similar sites: clicking the send button is unreliable because
+    // the mic/voice button sits right next to send and gets picked before React
+    // enables the real send button. Enter keydown is the universal send trigger
+    // that works on every site — use it directly instead of hunting for a button.
+    setTimeout(() => {
       simulateSend(el);
-    }
+    }, 300);
 
     setTimeout(() => {
       // Still holding the masked text ⇒ the site never consumed the send. The
@@ -2670,7 +3222,7 @@
   // (attach, mic, stop, …) are never clicked.
   function findSendButtonForInput(el) {
     if (!el || typeof el.closest !== 'function') return null;
-    const DECOY = /attach|upload|file|image|photo|camera|mic|voice|dictate|speech|audio|stop|cancel|close|menu|model|setting|emoji|search|new chat|history|sidebar/;
+    const DECOY = /attach|upload|file|image|photo|camera|mic|voice|dictate|speech|audio|record|stop|cancel|close|menu|model|setting|emoji|search|new chat|history|sidebar|microphone/;
     // "Send feedback" / "Share" style buttons say "send" but are not the composer.
     const NOT_SEND = /feedback|report|invite|share|email|newsletter|subscribe|survey/;
 
@@ -2789,21 +3341,37 @@
       matches: [],
       hint:  'Need access? Click below to submit a request to your administrator.',
       hardBlock: true,
-      requestAccess: {
+      requestAccess: isFeatureOn('access_requests') ? {
         tool_host: host,
         tool_name: name,
         tool_vendor: platformInfo.vendor || null,
-      },
+      } : null,
     });
   }
 
   // Persistent banner pinned to the top of a blocked platform.
   function showPlatformBanner() {
+    // NEVER ON AN EMBEDDED-AI HOST. Blocking "Gemini in Gmail" blocks one panel
+    // inside a mail client, not the mail client — but this bar is full-width,
+    // position:fixed at top:0, and at the maximum z-index, so it covered Gmail's
+    // own toolbar and swallowed every click in that strip. Reported live as "the
+    // whole Gmail is blocked, I can't click any button".
+    //
+    // The block itself is already correctly scoped: tryBlock() returns early
+    // unless captureAllowed(el) puts the element inside the AI panel, so mail can
+    // still be sent and only a prompt typed into the panel is refused — with
+    // showPlatformBlockPopup() explaining why at the moment it is attempted,
+    // exactly as a DLP block does. A page-wide bar adds nothing here except
+    // obstruction and the false impression that the whole app is disabled.
+    if (IS_EMBEDDED_AI) return;
+
     if (document.getElementById('cfai-platform-banner')) return;
     const name = (BLOCKED_PLATFORM && (BLOCKED_PLATFORM.product || BLOCKED_PLATFORM.vendor || BLOCKED_PLATFORM.host)) || 'This AI platform';
     const bar = document.createElement('div');
     bar.id = 'cfai-platform-banner';
-    bar.setAttribute('style', 'position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#b91c1c;color:#fff;font:600 13px/1.4 system-ui,-apple-system,sans-serif;padding:10px 16px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.25);');
+    // pointer-events:none — it is a notice, not a control. Even on a dedicated AI
+    // site it must not intercept clicks meant for the page underneath it.
+    bar.setAttribute('style', 'position:fixed;top:0;left:0;right:0;z-index:2147483647;pointer-events:none;background:#b91c1c;color:#fff;font:600 13px/1.4 system-ui,-apple-system,sans-serif;padding:10px 16px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.25);');
     bar.textContent = `\u{1F512} ${name} is blocked by CloudFuze AI Governance — prompts cannot be sent here.`;
     (document.documentElement || document.body).appendChild(bar);
   }
@@ -2862,6 +3430,25 @@
   // text and no focus on the textarea). In that case the prompt scan is skipped
   // and only the attachment check decides whether to block.
   function tryBlock(el, e, label) {
+    // Sending an ordinary email, ticket reply or CRM note on an embedded-AI host
+    // is not a prompt. Returning false leaves the site's own send path completely
+    // untouched — the user must not be blocked from doing their job.
+    //
+    // BOTH THE RESOLVED INPUT *AND* WHAT THE USER ACTUALLY INTERACTED WITH have
+    // to be inside the AI panel, and checking only the input was a real bug.
+    // The button handler resolves its element with
+    // `findPromptInputFor(btn) || findActivePromptInput()`, and on Gmail
+    // looksLikeSendButton() matches ordinary toolbar buttons — so a click on
+    // Archive resolved to the Gemini panel's composer, which IS in the panel, the
+    // gate passed, and the click was cancelled with a "blocked" popup. Reported
+    // live: "when I click any button it is showing blocked".
+    //
+    // e.target is the element the event originated on: the clicked button, the
+    // composer for keydown, the form for submit. Requiring it to be in the panel
+    // too is what makes "this send came from the AI" true rather than assumed.
+    if (!captureAllowed(el)) return false;
+    const origin = e && e.target;
+    if (origin && !captureAllowed(origin)) return false;
     // Always reset dedup so repeated sends of the same sensitive text get blocked every time.
     _lastLogKey = null;
 
@@ -2919,7 +3506,17 @@
       // 1. Try to change the model in the UI (visible to user)
       // 2. Always set fetch-blocker backup (guarantees the API call uses the right model)
       // 3. Pause the send → change model → re-send
-      if (!_skipRouting) {
+      // NEVER ROUTE ON AN EMBEDDED-AI HOST. Routing pauses the event with
+      // preventDefault(), then clicks around the page hunting for a model label —
+      // which on a host app means hijacking that app's own buttons. Live symptom:
+      // with the Gemini panel open in Gmail, pressing any button showed a "Model
+      // Routed" toast and the button did nothing, because the send was paused and
+      // the router was clicking Gmail's UI looking for "GPT-4o".
+      //
+      // These panels have no model picker to switch anyway: the tier tables in
+      // PLATFORM_TIERS cover dedicated AI products, not an assistant embedded in a
+      // mail client. So there is nothing to gain here and a working app to break.
+      if (!_skipRouting && !IS_EMBEDDED_AI && isFeatureOn('model_routing')) {
         const currentModelText = (getModelButton()?.textContent || '').trim();
         const routing = smartRoute(currentModelText, text);
         if (routing) {

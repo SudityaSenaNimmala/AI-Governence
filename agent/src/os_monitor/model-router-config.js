@@ -129,7 +129,12 @@ const TIER_KEYWORD_RULES = [
   { provider: 'anthropic', tier: 'premium', any: ['opus'] },
   { provider: 'anthropic', tier: 'standard', any: ['sonnet'] },
   { provider: 'anthropic', tier: 'economy', any: ['haiku'] },
-  { provider: 'openai', tier: 'economy', any: ['mini', '3.5', 'nano'] },
+  // "mini" and "nano" are WORD-BOUNDED, matching content.js. A bare substring
+  // test for "mini" matches "geMINI", so "Gemini Flash" resolved to
+  // openai/economy here — and in the extension it caused routing to hunt for
+  // OpenAI's labels on a Google page. The parity test below is what caught the
+  // drift when only content.js was fixed.
+  { provider: 'openai', tier: 'economy', any: ['3.5'], anyRegex: ['\\bmini\\b', '\\bnano\\b'] },
   { provider: 'openai', tier: 'standard', any: ['4o', '4.1'] },
   { provider: 'openai', tier: 'premium', any: ['gpt-4', 'gpt4'] },
   { provider: 'openai', tier: 'premium', anyRegex: ['\\bo[1-9]'] },

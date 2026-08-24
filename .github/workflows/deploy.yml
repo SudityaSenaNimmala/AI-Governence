@@ -57,6 +57,16 @@ jobs:
   test:
     name: test (${{ matrix.project }})
     runs-on: ubuntu-latest
+    # A HANGING TEST USED TO BLOCK EVERY DEPLOY. tests/worker-load.test.mjs imports
+    # the service worker for real, and a top-level setInterval there kept the Node
+    # process alive, so `node --test` never returned. With no timeout this job ran
+    # to GitHub's 6-hour ceiling while `concurrency: deploy-server` held the lock —
+    # and since only the most recent queued run survives, every push behind it was
+    # cancelled. Six commits sat undeployed on one leaked timer.
+    #
+    # The suites take well under a minute each; 10 turns a future hang into a fast,
+    # obvious failure instead of a silent six-hour deploy freeze.
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -146,6 +156,11 @@ jobs:
         env:
           VITE_ADMIN_TOKEN: ''
           VITE_BUILD_SHA: ${{ github.sha }}
+          # Hotjar Site ID. A repo *variable*, not a secret: it ships inside client-side JS
+          # that every visitor can read, so hiding it buys nothing. Unset -> empty -> Hotjar
+          # is fully off in the built bundle (no script requested, no session recorded).
+          # Set it under Settings -> Secrets and variables -> Actions -> Variables.
+          VITE_HOTJAR_SITE_ID: ${{ vars.HOTJAR_SITE_ID }}
         run: npm run build
 
       - name: Check the bundle carries no admin token

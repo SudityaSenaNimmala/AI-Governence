@@ -75,7 +75,7 @@ const ACTION_TYPES = [
 function PolicySimResult({ res, onClose }) {
   if (res.error) {
     return (
-      <div style={{ marginTop: 10, padding: "8px 12px", borderRadius: 6, background: "#fef2f2", border: "1px solid #fecaca", fontSize: 12, color: "#b91c1c" }}>
+      <div style={{ marginTop: 10, padding: "8px 12px", borderRadius: 6, background: "#fef2f2", border: "1px solid #fecaca", fontSize:13.2, color: "#b91c1c" }}>
         <AlertTriangle size={12} /> {res.error}
         <button onClick={onClose} style={{ float: "right", border: "none", background: "none", cursor: "pointer", color: "#b91c1c" }}>×</button>
       </div>
@@ -85,32 +85,32 @@ function PolicySimResult({ res, onClose }) {
   const tone = n === 0 ? "#16a34a" : res.severity === "critical" ? "#b91c1c" : "#b45309";
   return (
     <div style={{ marginTop: 10, border: "1px solid #e5e7eb", borderRadius: 8, background: "#fff", overflow: "hidden" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", background: "#f0fdf4", borderBottom: "1px solid #bbf7d0", fontSize: 11.5, color: "#166534" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", background: "#f0fdf4", borderBottom: "1px solid #bbf7d0", fontSize:12.7, color: "#166534" }}>
         <ShieldCheck size={12} />
         <span><strong>Simulation only — nothing was changed.</strong> No violations recorded, no actions run.</span>
-        <button onClick={onClose} style={{ marginLeft: "auto", border: "none", background: "none", cursor: "pointer", color: "#166534", fontSize: 15, lineHeight: 1 }}>×</button>
+        <button onClick={onClose} style={{ marginLeft: "auto", border: "none", background: "none", cursor: "pointer", color: "#166534", fontSize:15.2, lineHeight: 1 }}>×</button>
       </div>
 
       <div style={{ padding: "10px 12px" }}>
-        <div style={{ fontSize: 13, marginBottom: n ? 8 : 0 }}>
-          Would flag <strong style={{ color: tone, fontSize: 16 }}>{n}</strong> of {res.agents_evaluated} agents
+        <div style={{ fontSize:13.7, marginBottom: n ? 8 : 0 }}>
+          Would flag <strong style={{ color: tone, fontSize:16.2 }}>{n}</strong> of {res.agents_evaluated} agents
           {n > 0 && <> — action: <strong>{(res.actions || []).join(", ") || "flag"}</strong></>}
           {res.already_open > 0 && <span style={{ color: "#6b7280" }}> · {res.newly_flagged} new, {res.already_open} already flagged</span>}
         </div>
 
-        {n === 0 && <div style={{ fontSize: 11.5, color: "#6b7280" }}>No agent currently meets this policy&apos;s conditions.</div>}
+        {n === 0 && <div style={{ fontSize:12.7, color: "#6b7280" }}>No agent currently meets this policy&apos;s conditions.</div>}
 
         {n > 0 && (
           <div style={{ maxHeight: 170, overflowY: "auto", border: "1px solid #f3f4f6", borderRadius: 6 }}>
             {res.matches.map((m, i) => (
-              <div key={i} style={{ display: "flex", gap: 8, padding: "5px 10px", fontSize: 11.5, borderBottom: i < res.matches.length - 1 ? "1px solid #f9fafb" : "none" }}>
+              <div key={i} style={{ display: "flex", gap: 8, padding: "5px 10px", fontSize:12.7, borderBottom: i < res.matches.length - 1 ? "1px solid #f9fafb" : "none" }}>
                 <span style={{ fontWeight: 600, minWidth: 190, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.agent_name}</span>
                 <span style={{ color: "#6b7280", flex: 1 }}>{m.condition_triggered}</span>
-                {m.already_open && <span style={{ color: "#9ca3af", fontSize: 10 }}>already open</span>}
+                {m.already_open && <span style={{ color: "#9ca3af", fontSize:11.7 }}>already open</span>}
               </div>
             ))}
             {n > res.matches.length && (
-              <div style={{ padding: "5px 10px", fontSize: 11, color: "#9ca3af" }}>
+              <div style={{ padding: "5px 10px", fontSize:12.7, color: "#9ca3af" }}>
                 …and {n - res.matches.length} more not listed
               </div>
             )}
@@ -148,10 +148,10 @@ function PackRow({ pk, busyId, onDeploy, onUndeploy }) {
       <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 16px" }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontWeight: 700, fontSize: 14, color: "#111" }}>{pk.framework}</span>
-            {pk.deployed && <span style={{ fontSize: 9.5, padding: "2px 7px", background: "#22c55e18", color: "#16a34a", borderRadius: 4, fontWeight: 600 }}>deployed</span>}
+            <span style={{ fontWeight: 700, fontSize:14.2, color: "#111" }}>{pk.framework}</span>
+            {pk.deployed && <span style={{ fontSize:11.2, padding: "2px 7px", background: "#22c55e18", color: "#16a34a", borderRadius: 4, fontWeight: 600 }}>deployed</span>}
           </div>
-          <div style={{ fontSize: 11.5, color: "#6b7280", marginTop: 3 }}>
+          <div style={{ fontSize:12.7, color: "#6b7280", marginTop: 3 }}>
             {pk.ruleCount} rules · {pk.enforceable} enforced · {pk.monitored || 0} monitored · {pk.attestations || 0} attestations
           </div>
         </div>
@@ -175,8 +175,8 @@ function PackRow({ pk, busyId, onDeploy, onUndeploy }) {
       </div>
       {expanded && (
         <div style={{ padding: "0 16px 14px", borderTop: "1px solid #f3f4f6", marginTop: 0 }}>
-          <p style={{ margin: "12px 0 0", fontSize: 12.5, color: "#4b5563", lineHeight: 1.65 }}>{desc}</p>
-          <div style={{ display: "flex", gap: 10, marginTop: 10, fontSize: 11, color: "#8b919e" }}>
+          <p style={{ margin: "12px 0 0", fontSize:13.2, color: "#4b5563", lineHeight: 1.65 }}>{desc}</p>
+          <div style={{ display: "flex", gap: 10, marginTop: 10, fontSize:12.7, color: "#6b7280" }}>
             <span><strong style={{ color: "#16a34a" }}>{pk.enforceable}</strong> auto-enforced on agents</span>
             <span>·</span>
             <span><strong style={{ color: "#0052e0" }}>{pk.monitored || 0}</strong> monitored via endpoint DLP</span>
@@ -221,7 +221,7 @@ const CARD_ANIMS = `
   100% { width: 95%; }
 }
 .pol_sim_track {
-  height: 28px; border-radius: 8px; overflow: hidden;
+  height: 35px; border-radius: 8px; overflow: hidden;
   background: #f3f4f6; border: 1px solid #e2e5ea;
   position: relative; flex: 1;
 }
@@ -233,16 +233,17 @@ const CARD_ANIMS = `
 .pol_sim_track .pol_sim_label {
   position: absolute; inset: 0; display: flex; align-items: center;
   justify-content: center; font-size: 10.5px; font-weight: 700;
-  color: #fff; mix-blend-mode: difference; pointer-events: none;
+  pointer-events: none; color: transparent;
 }
 .pol_sim_result {
   display: flex; align-items: center; gap: 6px; flex: 1;
-  padding: 5px 10px; border-radius: 8px; font-size: 11px; font-weight: 600;
+  height: 35px; box-sizing: border-box;
+  padding: 0 10px; border-radius: 8px; font-size: 11px; font-weight: 600;
   cursor: pointer; border: 1px solid; transition: opacity 0.15s;
 }
 .pol_sim_result:hover { opacity: 0.85; }
 .pol_card_hint {
-  position: absolute; bottom: 52px; left: 0; right: 0;
+  position: absolute; bottom: 56px; left: 0; right: 0;
   text-align: center; font-size: 10.5px; font-weight: 600;
   color: #8b919e; letter-spacing: 0.02em;
   opacity: 0; transition: opacity 0.2s;
@@ -258,17 +259,36 @@ function ensureAnims() {
   document.head.appendChild(s);
 }
 
+/** Measures its own width and passes it to children as a render prop. */
+function SimTrack({ children }) {
+  const ref = useRef(null);
+  const [w, setW] = useState(0);
+  useEffect(() => {
+    if (ref.current) setW(ref.current.offsetWidth);
+  }, []);
+  return <div className="pol_sim_track" ref={ref}>{children(w)}</div>;
+}
+
 /** Three-state simulate button: idle → animated progress bar → compact result chip.
  *  Clicking the result chip opens a detail modal; × dismisses it. */
 function SimButton({ simulating, result, onRun, onClear }) {
   const [showDetail, setShowDetail] = useState(false);
 
   if (simulating) {
+    const lbl = {position:"absolute",top:0,bottom:0,left:0,display:"flex",alignItems:"center",justifyContent:"center",
+      fontSize:10.2,fontWeight:700,pointerEvents:"none",whiteSpace:"nowrap"};
     return (
-      <div className="pol_sim_track">
-        <div className="pol_sim_fill" />
-        <div className="pol_sim_label">Simulating...</div>
-      </div>
+      <SimTrack>
+        {(trackW) => <>
+          <div className="pol_sim_fill" />
+          <div style={{...lbl, right:0, color:"#374151", zIndex:1}}>Simulating...</div>
+          {/* Clip div animates width same as the fill. White text inside is pinned to full track width so it stays centered. */}
+          <div style={{position:"absolute",top:0,left:0,bottom:0,zIndex:2,overflow:"hidden",
+            animation:"polProgress 2s ease-out forwards"}}>
+            <div style={{...lbl, width:trackW+"px", color:"#fff"}}>Simulating...</div>
+          </div>
+        </>}
+      </SimTrack>
     );
   }
   if (result) {
@@ -277,7 +297,7 @@ function SimButton({ simulating, result, onRun, onClear }) {
         <div className="pol_sim_result" onClick={onClear}
           style={{ background: "#fef2f210", color: "#b91c1c", borderColor: "#fecaca" }}>
           <AlertTriangle size={12} /> Failed
-          <span style={{ marginLeft: "auto", fontSize: 10, opacity: 0.6 }}>dismiss</span>
+          <span style={{ marginLeft: "auto", fontSize:11.7, opacity: 0.6 }}>dismiss</span>
         </div>
       );
     }
@@ -288,7 +308,7 @@ function SimButton({ simulating, result, onRun, onClear }) {
         style={{ background: ok ? "#f0fdf410" : "#fffbeb10", color: ok ? "#16a34a" : "#b45309", borderColor: ok ? "#bbf7d0" : "#fde68a" }}>
         {ok ? <CheckCircle size={12} /> : <AlertTriangle size={12} />}
         {ok ? "All clear" : `${n} flagged`}
-        <span onClick={e => { e.stopPropagation(); onClear(); }} style={{ marginLeft: "auto", fontSize: 13, opacity: 0.5, lineHeight: 1, padding: "0 2px", cursor: "pointer" }}>×</span>
+        <span onClick={e => { e.stopPropagation(); onClear(); }} style={{ marginLeft: "auto", fontSize:13.7, opacity: 0.5, lineHeight: 1, padding: "0 2px", cursor: "pointer" }}>×</span>
       </div>
       {showDetail && createPortal(<SimDetailModal result={result} onClose={() => setShowDetail(false)} onClear={onClear} />, document.body)}
     </>);
@@ -330,8 +350,8 @@ function SimDetailModal({ result, onClose, onClear }) {
         <div style={{ padding: "20px 28px 0" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16 }}>
             <div>
-              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "#111", letterSpacing: "-0.02em" }}>Simulation Result</h3>
-              <p style={{ margin: "4px 0 0", fontSize: 13, color: "#8b919e" }}>Dry run only — no violations recorded, no actions executed.</p>
+              <h3 style={{ margin: 0, fontSize:17.7, fontWeight: 800, color: "#111", letterSpacing: "-0.02em" }}>Simulation Result</h3>
+              <p style={{ margin: "4px 0 0", fontSize:13.7, color: "#6b7280" }}>Dry run only — no violations recorded, no actions executed.</p>
             </div>
             <button onClick={onClose} style={{ width: 32, height: 32, border: "1px solid #e2e5ea", borderRadius: 8, background: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "#6b7280", flexShrink: 0 }}><X size={16} /></button>
           </div>
@@ -341,23 +361,23 @@ function SimDetailModal({ result, onClose, onClear }) {
           {/* Stat cards row */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 20 }}>
             <div style={{ background: ok ? "#f0fdf4" : "#fffbeb", border: "1px solid " + (ok ? "#bbf7d0" : "#fde68a"), borderRadius: 12, padding: "16px 18px" }}>
-              <div style={{ fontSize: 32, fontWeight: 800, color: tone, lineHeight: 1 }}>{n}</div>
-              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>would be flagged</div>
+              <div style={{ fontSize:32.2, fontWeight: 800, color: tone, lineHeight: 1 }}>{n}</div>
+              <div style={{ fontSize:13.2, color: "#6b7280", marginTop: 4 }}>would be flagged</div>
             </div>
             <div style={{ background: "#f5f6f8", border: "1px solid #e2e5ea", borderRadius: 12, padding: "16px 18px" }}>
-              <div style={{ fontSize: 32, fontWeight: 800, color: "#111", lineHeight: 1 }}>{result.agents_evaluated || 0}</div>
-              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>agents evaluated</div>
+              <div style={{ fontSize:32.2, fontWeight: 800, color: "#111", lineHeight: 1 }}>{result.agents_evaluated || 0}</div>
+              <div style={{ fontSize:13.2, color: "#6b7280", marginTop: 4 }}>agents evaluated</div>
             </div>
             <div style={{ background: "#f5f6f8", border: "1px solid #e2e5ea", borderRadius: 12, padding: "16px 18px" }}>
-              <div style={{ fontSize: 32, fontWeight: 800, color: "#111", lineHeight: 1 }}>{(result.actions || []).length}</div>
-              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>actions configured</div>
+              <div style={{ fontSize:32.2, fontWeight: 800, color: "#111", lineHeight: 1 }}>{(result.actions || []).length}</div>
+              <div style={{ fontSize:13.2, color: "#6b7280", marginTop: 4 }}>actions configured</div>
             </div>
           </div>
 
           {(result.actions || []).length > 0 && (
-            <div style={{ background: "#f5f6f8", borderRadius: 10, padding: "12px 16px", marginBottom: 16, fontSize: 13, color: "#4b5563" }}>
+            <div style={{ background: "#f5f6f8", borderRadius: 10, padding: "12px 16px", marginBottom: 16, fontSize:13.7, color: "#4b5563" }}>
               <span style={{ fontWeight: 700, color: "#111" }}>Actions: </span>{result.actions.join(", ")}
-              {result.already_open > 0 && <span style={{ color: "#8b919e" }}> · {result.newly_flagged || 0} new, {result.already_open} already open</span>}
+              {result.already_open > 0 && <span style={{ color: "#6b7280" }}> · {result.newly_flagged || 0} new, {result.already_open} already open</span>}
             </div>
           )}
 
@@ -365,29 +385,29 @@ function SimDetailModal({ result, onClose, onClear }) {
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "20px", borderRadius: 12, background: "#f0fdf4", border: "1px solid #bbf7d0" }}>
               <CheckCircle size={22} color="#16a34a" />
               <div>
-                <div style={{ fontWeight: 700, fontSize: 14, color: "#16a34a" }}>All clear</div>
-                <div style={{ fontSize: 12, color: "#6b7280", marginTop: 1 }}>No agent currently meets this policy's conditions.</div>
+                <div style={{ fontWeight: 700, fontSize:14.2, color: "#16a34a" }}>All clear</div>
+                <div style={{ fontSize:13.2, color: "#6b7280", marginTop: 1 }}>No agent currently meets this policy's conditions.</div>
               </div>
             </div>
           )}
 
           {n > 0 && matches.length > 0 && (<>
-            <div style={{ fontSize: 11, fontWeight: 700, color: "#8b919e", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>Agents that would be flagged ({matches.length}{n > matches.length ? ` of ${n}` : ""})</div>
+            <div style={{ fontSize:12.7, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>Agents that would be flagged ({matches.length}{n > matches.length ? ` of ${n}` : ""})</div>
             <div style={{ border: "1px solid #e2e5ea", borderRadius: 12, overflow: "hidden" }}>
               <div style={{ maxHeight: 340, overflowY: "auto" }}>
                 {matches.map((m, i) => (
                   <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 18px", borderBottom: i < matches.length - 1 ? "1px solid #f3f4f6" : "none" }}>
                     <div style={{ width: 8, height: 8, borderRadius: "50%", background: tone, flexShrink: 0 }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "#111" }}>{m.agent_name}</div>
-                      <div style={{ fontSize: 11.5, color: "#8b919e", marginTop: 1 }}>{m.condition_triggered}</div>
+                      <div style={{ fontSize:13.7, fontWeight: 600, color: "#111" }}>{m.agent_name}</div>
+                      <div style={{ fontSize:12.7, color: "#6b7280", marginTop: 1 }}>{m.condition_triggered}</div>
                     </div>
-                    {m.already_open && <span style={{ fontSize: 10, padding: "2px 8px", background: "#f5f6f8", borderRadius: 4, color: "#8b919e" }}>already flagged</span>}
+                    {m.already_open && <span style={{ fontSize:11.7, padding: "2px 8px", background: "#f5f6f8", borderRadius: 4, color: "#6b7280" }}>already flagged</span>}
                   </div>
                 ))}
               </div>
               {n > matches.length && (
-                <div style={{ padding: "10px 18px", fontSize: 12, color: "#8b919e", background: "#fafbfc", borderTop: "1px solid #f3f4f6" }}>...and {n - matches.length} more not listed</div>
+                <div style={{ padding: "10px 18px", fontSize:13.2, color: "#6b7280", background: "#fafbfc", borderTop: "1px solid #f3f4f6" }}>...and {n - matches.length} more not listed</div>
               )}
             </div>
           </>)}
@@ -463,15 +483,15 @@ function PolicyCard({ policy: p, simulatingId, simResult, onSimulate, onDelete, 
 
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
             <div style={{ width: 8, height: 8, borderRadius: "50%", background: isActive ? "#22c55e" : "#d1d5db", flexShrink: 0 }} />
-            <span style={{ fontWeight: 700, fontSize: 13.5, color: "var(--ag-text, #111)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{p.name}</span>
+            <span style={{ fontWeight: 700, fontSize:13.7, color: "var(--ag-text, #111)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{p.name}</span>
           </div>
 
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
             <Badge text={p.severity} color={sColor} />
             <Badge text={p.type} color="#6366f1" />
             {p.pack_id
-              ? <span style={{ fontSize: 9.5, padding: "2px 7px", background: "#8b5cf614", color: "#8b5cf6", borderRadius: 4, fontWeight: 600 }}>pack</span>
-              : <span style={{ fontSize: 9.5, padding: "2px 7px", background: "#0052e012", color: "#0052e0", borderRadius: 4, fontWeight: 600 }}>custom</span>}
+              ? <span style={{ fontSize:11.2, padding: "2px 7px", background: "#8b5cf614", color: "#8b5cf6", borderRadius: 4, fontWeight: 600 }}>pack</span>
+              : <span style={{ fontSize:11.2, padding: "2px 7px", background: "#0052e012", color: "#0052e0", borderRadius: 4, fontWeight: 600 }}>custom</span>}
           </div>
 
           <div className="pol_card_hint">click for more info</div>
@@ -501,8 +521,8 @@ function PolicyCard({ policy: p, simulatingId, simResult, onSimulate, onDelete, 
             <Trash2 size={20} color="#ef4444" />
           </div>
           <div>
-            <div style={{ fontWeight: 700, fontSize: 14, color: "#111", marginBottom: 4 }}>Delete this policy?</div>
-            <div style={{ fontSize: 12, color: "#6b7280", lineHeight: 1.5, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+            <div style={{ fontWeight: 700, fontSize:14.2, color: "#111", marginBottom: 4 }}>Delete this policy?</div>
+            <div style={{ fontSize:13.2, color: "#6b7280", lineHeight: 1.5, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={() => setFlipped(false)}
@@ -575,7 +595,7 @@ function PackGroupCard({ group: g, spawning, smashing, collapsing, onUndeploy, o
 
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
             <Boxes size={14} color="#8b5cf6" style={{ flexShrink: 0 }} />
-            <span style={{ fontWeight: 700, fontSize: 13.5, color: "#111", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+            <span style={{ fontWeight: 700, fontSize:13.7, color: "#111", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
               {g.packId.replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase())}
             </span>
           </div>
@@ -583,7 +603,7 @@ function PackGroupCard({ group: g, spawning, smashing, collapsing, onUndeploy, o
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
             <Badge text={`${ruleCount} rules`} color="#8b5cf6" />
             <Badge text={`${activeCount} active`} color="#22c55e" />
-            <span style={{ fontSize: 9.5, padding: "2px 7px", background: "#8b5cf614", color: "#8b5cf6", borderRadius: 4, fontWeight: 600 }}>pack</span>
+            <span style={{ fontSize:11.2, padding: "2px 7px", background: "#8b5cf614", color: "#8b5cf6", borderRadius: 4, fontWeight: 600 }}>pack</span>
           </div>
 
           <div className="pol_card_hint">click for more info</div>
@@ -611,8 +631,8 @@ function PackGroupCard({ group: g, spawning, smashing, collapsing, onUndeploy, o
             <Trash2 size={20} color="#ef4444" />
           </div>
           <div>
-            <div style={{ fontWeight: 700, fontSize: 14, color: "#111", marginBottom: 4 }}>Undeploy this pack?</div>
-            <div style={{ fontSize: 12, color: "#6b7280" }}>Removes all {ruleCount} rules</div>
+            <div style={{ fontWeight: 700, fontSize:14.2, color: "#111", marginBottom: 4 }}>Undeploy this pack?</div>
+            <div style={{ fontSize:13.2, color: "#6b7280" }}>Removes all {ruleCount} rules</div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={() => setFlipped(false)}
@@ -643,10 +663,10 @@ function PackGroupCard({ group: g, spawning, smashing, collapsing, onUndeploy, o
           <div style={{ padding: "20px 24px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
               <div>
-                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "#111" }}>
+                <h3 style={{ margin: 0, fontSize:17.7, fontWeight: 800, color: "#111" }}>
                   {g.packId.replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase())}
                 </h3>
-                <div style={{ fontSize: 12, color: "#8b919e", marginTop: 3 }}>{ruleCount} rules · {activeCount} active</div>
+                <div style={{ fontSize:13.2, color: "#6b7280", marginTop: 3 }}>{ruleCount} rules · {activeCount} active</div>
               </div>
               <button onClick={() => setOpen(false)} style={{ width: 32, height: 32, border: "1px solid #e2e5ea", borderRadius: 8, background: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "#6b7280" }}><X size={16} /></button>
             </div>
@@ -655,8 +675,8 @@ function PackGroupCard({ group: g, spawning, smashing, collapsing, onUndeploy, o
                 <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", border: "1px solid #e2e5ea", borderRadius: 10, background: "#fafbfc" }}>
                   <div style={{ width: 6, height: 6, borderRadius: "50%", background: p.status === "active" ? "#22c55e" : "#d1d5db", flexShrink: 0 }} />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: "#111", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
-                    {p.description && <div style={{ fontSize: 11, color: "#8b919e", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.description}</div>}
+                    <div style={{ fontSize:13.7, fontWeight: 600, color: "#111", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                    {p.description && <div style={{ fontSize:12.7, color: "#6b7280", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.description}</div>}
                   </div>
                   <Badge text={p.severity} color={severityColor[p.severity] || "#9ca3af"} />
                 </div>
@@ -700,11 +720,11 @@ function PolicyDetail({ policy: p, sColor, simulatingId, simResult, onSimulate, 
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                 <div style={{ width: 10, height: 10, borderRadius: "50%", background: isActive ? "#22c55e" : "#d1d5db", boxShadow: isActive ? "0 0 6px rgba(34,197,94,0.4)" : "none" }} />
-                <span style={{ fontSize: 11, fontWeight: 600, color: isActive ? "#16a34a" : "#9ca3af", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                <span style={{ fontSize:12.7, fontWeight: 600, color: isActive ? "#16a34a" : "#9ca3af", textTransform: "uppercase", letterSpacing: "0.06em" }}>
                   {p.status}
                 </span>
               </div>
-              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "#111", letterSpacing: "-0.02em" }}>{p.name}</h3>
+              <h3 style={{ margin: 0, fontSize:17.7, fontWeight: 800, color: "#111", letterSpacing: "-0.02em" }}>{p.name}</h3>
             </div>
             <button onClick={onClose} style={{
               width: 32, height: 32, border: "1px solid #e2e5ea", borderRadius: 8, background: "#fff", cursor: "pointer",
@@ -717,8 +737,8 @@ function PolicyDetail({ policy: p, sColor, simulatingId, simResult, onSimulate, 
             <Badge text={p.severity} color={sColor} />
             <Badge text={p.type} color="#6366f1" />
             {p.pack_id
-              ? <span style={{ fontSize: 10, padding: "2px 8px", background: "#8b5cf612", color: "#8b5cf6", borderRadius: 6, fontWeight: 600 }}>pack · {p.pack_id}</span>
-              : <span style={{ fontSize: 10, padding: "2px 8px", background: "#0052e012", color: "#0052e0", borderRadius: 6, fontWeight: 600 }}>custom</span>}
+              ? <span style={{ fontSize:11.7, padding: "2px 8px", background: "#8b5cf612", color: "#8b5cf6", borderRadius: 6, fontWeight: 600 }}>pack · {p.pack_id}</span>
+              : <span style={{ fontSize:11.7, padding: "2px 8px", background: "#0052e012", color: "#0052e0", borderRadius: 6, fontWeight: 600 }}>custom</span>}
           </div>
         </div>
 
@@ -726,14 +746,14 @@ function PolicyDetail({ policy: p, sColor, simulatingId, simResult, onSimulate, 
         <div style={{ padding: "16px 24px 24px" }}>
           {/* Description */}
           {p.description && (
-            <div style={{ fontSize: 13, color: "#4b5563", lineHeight: 1.65, marginBottom: 16 }}>{p.description}</div>
+            <div style={{ fontSize:13.7, color: "#4b5563", lineHeight: 1.65, marginBottom: 16 }}>{p.description}</div>
           )}
 
           {/* Condition logic */}
           {p.conditions && p.conditions.length > 0 && (
             <div style={{ background: "#f5f6f8", borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: "#8b919e", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Rule Logic</div>
-              <div style={{ fontSize: 12, fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#6366f1", lineHeight: 1.6 }}>
+              <div style={{ fontSize:11.7, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Rule Logic</div>
+              <div style={{ fontSize:13.2, fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#6366f1", lineHeight: 1.6 }}>
                 IF {p.conditions.map((c) => `${c.field} ${c.operator} ${c.value}`).join(" AND ")} &rarr; {p.actions?.map((a) => a.type).join(", ") || "flag"}
               </div>
             </div>
@@ -742,12 +762,12 @@ function PolicyDetail({ policy: p, sColor, simulatingId, simResult, onSimulate, 
           {/* Detail fields */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
             <div style={{ background: "#f5f6f8", borderRadius: 8, padding: "10px 12px" }}>
-              <div style={{ fontSize: 10, fontWeight: 600, color: "#8b919e", textTransform: "uppercase", letterSpacing: "0.04em" }}>Actions</div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: "#111", marginTop: 3 }}>{p.actions?.map(a => a.type).join(", ") || "flag"}</div>
+              <div style={{ fontSize:11.7, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.04em" }}>Actions</div>
+              <div style={{ fontSize:13.7, fontWeight: 600, color: "#111", marginTop: 3 }}>{p.actions?.map(a => a.type).join(", ") || "flag"}</div>
             </div>
             <div style={{ background: "#f5f6f8", borderRadius: 8, padding: "10px 12px" }}>
-              <div style={{ fontSize: 10, fontWeight: 600, color: "#8b919e", textTransform: "uppercase", letterSpacing: "0.04em" }}>Scope</div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: "#111", marginTop: 3 }}>{p.scope?.type || "all agents"}</div>
+              <div style={{ fontSize:11.7, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.04em" }}>Scope</div>
+              <div style={{ fontSize:13.7, fontWeight: 600, color: "#111", marginTop: 3 }}>{p.scope?.type || "all agents"}</div>
             </div>
           </div>
 
@@ -1102,8 +1122,8 @@ export function PoliciesTab() {
         ) : cardCount === 0 ? (
           <div style={{ textAlign: "center", padding: 40 }}>
             <ShieldCheck size={40} style={{ color: "#999", marginBottom: 12, opacity: 0.3 }} />
-            <div style={{ fontSize: 14, fontWeight: 600, color: "#333", marginBottom: 8 }}>No policies configured</div>
-            <div style={{ fontSize: 12, color: "#999", marginBottom: 16 }}>Click <strong>"Custom Policy"</strong> or deploy a <strong>Policy Pack</strong>.</div>
+            <div style={{ fontSize:14.2, fontWeight: 600, color: "#333", marginBottom: 8 }}>No policies configured</div>
+            <div style={{ fontSize:13.2, color: "#999", marginBottom: 16 }}>Click <strong>"Custom Policy"</strong> or deploy a <strong>Policy Pack</strong>.</div>
           </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
@@ -1150,18 +1170,18 @@ export function PoliciesTab() {
           }}>
             <div style={{ padding: "20px 24px", borderBottom: "1px solid #e2e5ea", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
-                <h3 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: "#111" }}>Policy Packs</h3>
-                <div style={{ fontSize: 12, color: "#8b919e", marginTop: 3 }}>Deploy a compliance framework to add its rules as policies</div>
+                <h3 style={{ margin: 0, fontSize:16.7, fontWeight: 800, color: "#111" }}>Policy Packs</h3>
+                <div style={{ fontSize:13.2, color: "#6b7280", marginTop: 3 }}>Deploy a compliance framework to add its rules as policies</div>
               </div>
               <button onClick={() => setShowPacks(false)} style={{ width: 32, height: 32, border: "1px solid #e2e5ea", borderRadius: 8, background: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "#6b7280" }}><X size={16} /></button>
             </div>
             <div style={{ padding: "16px 24px 24px" }}>
-              {!packs ? <div style={{ textAlign: "center", padding: 30, color: "#999", fontSize: 13 }}>Loading packs...</div> : (
+              {!packs ? <div style={{ textAlign: "center", padding: 30, color: "#999", fontSize:13.7 }}>Loading packs...</div> : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                   {(packs.packs || []).map(pk => (
                     <PackRow key={pk.id} pk={pk} busyId={packsBusyId} onDeploy={deployPack} onUndeploy={undeployPack} />
                   ))}
-                  {(packs.packs || []).length === 0 && <div style={{ textAlign: "center", padding: 20, color: "#999", fontSize: 13 }}>No policy packs available.</div>}
+                  {(packs.packs || []).length === 0 && <div style={{ textAlign: "center", padding: 20, color: "#999", fontSize:13.7 }}>No policy packs available.</div>}
                 </div>
               )}
             </div>
@@ -1173,12 +1193,12 @@ export function PoliciesTab() {
   );
 }
 
-const btnPrimary = { display: "flex", alignItems: "center", justifyContent: "center", gap: 6, background: "#6366f1", color: "#fff", padding: "9px 16px", borderRadius: 8, fontSize: 12, fontWeight: 600, border: "none", cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" };
-const btnSecondary = { display: "flex", alignItems: "center", justifyContent: "center", gap: 6, background: "transparent", border: "1px solid var(--ag-border)", color: "#666", padding: "9px 16px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" };
-const btnSmall = { display: "flex", alignItems: "center", gap: 3, background: "transparent", border: "none", padding: "4px 8px", borderRadius: 4, fontSize: 11, fontWeight: 500, cursor: "pointer", fontFamily: "inherit" };
-const cardBtn = { display: "flex", alignItems: "center", gap: 5, padding: "7px 12px", borderRadius: 8, fontSize: 11.5, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" };
-const countPill = { display: "inline-flex", alignItems: "center", gap: 5, padding: "6px 14px", borderRadius: 20, fontSize: 12, fontWeight: 700, border: "1px solid", cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s", letterSpacing: "-0.01em" };
-const fieldLabel = { display: "block", fontSize: 11, fontWeight: 500, color: "#666", marginBottom: 4 };
-const fieldInput = { width: "100%", background: "#fff", border: "1px solid var(--ag-border)", borderRadius: 6, padding: "8px 10px", fontSize: 12, color: "#333", outline: "none", fontFamily: "inherit" };
-const thStyle = { textAlign: "left", padding: "8px 12px", color: "#666", fontWeight: 600, fontSize: 11 };
+const btnPrimary = { display: "flex", alignItems: "center", justifyContent: "center", gap: 6, background: "#6366f1", color: "#fff", padding: "9px 16px", borderRadius: 8, fontSize:13.2, fontWeight: 600, border: "none", cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" };
+const btnSecondary = { display: "flex", alignItems: "center", justifyContent: "center", gap: 6, background: "transparent", border: "1px solid var(--ag-border)", color: "#666", padding: "9px 16px", borderRadius: 8, fontSize:13.2, fontWeight: 500, cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" };
+const btnSmall = { display: "flex", alignItems: "center", gap: 3, background: "transparent", border: "none", padding: "4px 8px", borderRadius: 4, fontSize:12.7, fontWeight: 500, cursor: "pointer", fontFamily: "inherit" };
+const cardBtn = { display: "flex", alignItems: "center", gap: 5, height: 35, boxSizing: "border-box", padding: "0 12px", borderRadius: 8, fontSize:12.7, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" };
+const countPill = { display: "inline-flex", alignItems: "center", gap: 5, padding: "6px 14px", borderRadius: 20, fontSize:13.2, fontWeight: 700, border: "1px solid", cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s", letterSpacing: "-0.01em" };
+const fieldLabel = { display: "block", fontSize:12.7, fontWeight: 500, color: "#666", marginBottom: 4 };
+const fieldInput = { width: "100%", background: "#fff", border: "1px solid var(--ag-border)", borderRadius: 6, padding: "8px 10px", fontSize:13.2, color: "#333", outline: "none", fontFamily: "inherit" };
+const thStyle = { textAlign: "left", padding: "8px 12px", color: "#666", fontWeight: 600, fontSize:12.7 };
 const tdStyle = { padding: "8px 12px" };
