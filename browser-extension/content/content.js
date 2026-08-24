@@ -2400,16 +2400,92 @@
     return container.querySelector('textarea, [contenteditable="true"], [role="textbox"]') || null;
   }
 
+  // ── Send-button identification ─
+  //
+  // NOT EVERY BUTTON IN A COMPOSER IS THE SEND BUTTON. Two of the rules below
+  // are shape-based rather than name-based — "icon button inside the composer"
+  // and "button adjacent to the textbox" — because sites ship an unlabelled SVG
+  // arrow and we have to catch it. But a modern composer is a whole toolbar of
+  // unlabelled SVG icon buttons sitting next to the textbox: attach, mic, model
+  // picker, tools, canvas, emoji. Every one of them matched.
+  //
+  // That misfire is not cosmetic, because the caller acts on a positive by
+  // calling preventDefault(). Live symptom on gemini.google.com: clicking "+"
+  // to attach a document was read as a send, the click was cancelled so the
+  // file dialog never opened, and the router then went looking for a model
+  // label — leaving the model dropdown open and a "Flash → Thinking" toast on
+  // screen. Attaching a document was impossible.
+  //
+  // So the shape rules stay, but a deny list runs FIRST and wins. It is checked
+  // against name-ish attributes AND against menu semantics: a control that owns
+  // a popup (aria-haspopup) or toggles expansion (aria-expanded) is a menu
+  // trigger, and a send button never is.
+  //
+  // ASYMMETRIC ON PURPOSE. A false positive cancels a real UI action the user
+  // asked for — a broken app. A false negative means one composer's send is
+  // not intercepted, which the keydown:Enter and submit hooks usually catch
+  // anyway. When a control is ambiguous, treat it as not-send.
+  // Each entry is matched with a leading word boundary, so short tokens cannot
+  // hide inside unrelated words. Without that, 'mic' matched "Dynamics", 'back'
+  // matched "feedback" and 'more' matched "Learn more" — each one silently
+  // demoting a real send button. Entries ending in $ must be a whole word; the
+  // rest match as a prefix, so 'dictat' covers dictate and dictation.
+  const NON_SEND_LABEL = new RegExp(String.raw`\b(?:` + [
+    // attach / upload
+    // 'photo'/'image'/'file' are bare rather than "add photo" etc. because the
+    // verb varies per site ("Add photo", "Take a photo", "Upload image") and
+    // the noun is the reliable half. An explicit send label still wins, so
+    // "Send image" is unaffected.
+    'attach', 'upload', 'photo', 'image', 'file$', 'files$', 'insert$', 'browse',
+    'choose', 'from drive', 'from computer', 'paperclip', 'gallery', 'document$',
+    // capture / media
+    'mic$', 'microphone', 'voice', 'dictat', 'speech', 'record', 'audio$', 'camera',
+    'screenshot', 'screen share', 'gif$', 'sticker', 'emoji',
+    // pickers / tools / navigation
+    'model', 'tools$', 'canvas', 'deep research', 'settings', 'options', 'more$',
+    'menu$', 'close$', 'cancel', 'clear$', 'delete', 'remove', 'stop$', 'copy$',
+    'expand', 'collapse', 'dismiss', 'back$', 'new chat', 'history',
+  ].map((t) => (t.endsWith('$') ? t.slice(0, -1) + String.raw`\b` : t)).join('|') + ')', 'i');
+
+  function isNonSendControl(btn) {
+    // Menu semantics beat every other signal: a send button does not own a
+    // popup and does not toggle open/closed.
+    if (btn.hasAttribute?.('aria-haspopup')) return true;
+    if (btn.hasAttribute?.('aria-expanded')) return true;
+    // A control wrapping a file input is an attach button by construction —
+    // this is the shape Gemini's "+" and ChatGPT's paperclip both use.
+    if (btn.querySelector?.('input[type="file"]')) return true;
+    if (btn.closest?.('label')?.querySelector?.('input[type="file"]')) return true;
+
+    const names = [
+      btn.getAttribute('aria-label'), btn.getAttribute('title'),
+      btn.getAttribute('data-testid'), btn.getAttribute('name'),
+      // innerText only — className carries framework noise ("MuiIconButton")
+      // that trips the deny list on words the author never chose.
+      (btn.innerText || '').trim(),
+    ].filter(Boolean).join(' ');
+    // "send" wins over the deny list when both appear: "Send message" inside a
+    // container labelled "more" must stay a send button.
+    if (/\bsend\b|\bsubmit\b/i.test(names)) return false;
+    return NON_SEND_LABEL.test(names);
+  }
+
   function looksLikeSendButton(btn) {
     if (!btn) return false;
     const label = (btn.getAttribute('aria-label') || '').toLowerCase();
     const text  = (btn.innerText || '').toLowerCase().trim();
     const tid   = (btn.getAttribute('data-testid') || '').toLowerCase();
-    const cls   = (btn.className || '').toLowerCase();
+    // Explicit self-identification is trusted even against the deny list —
+    // an author who labelled it "send" means it.
     if (label.includes('send') || label.includes('submit')) return true;
     if (text === 'send' || text === 'submit') return true;
     if (tid.includes('send-button') || tid.includes('send_button') || tid.includes('send')) return true;
     if (btn.type === 'submit') return true;
+
+    // Past here we are guessing from shape, so anything that names itself as a
+    // different control is out.
+    if (isNonSendControl(btn)) return false;
+
     // ChatGPT uses an SVG arrow button near the composer — catch any button
     // inside the composer form/container that has an SVG child (icon button)
     if (btn.querySelector('svg') && btn.closest('form, [class*="composer" i], [class*="input-area" i], [class*="prompt" i], [class*="chat-input" i]')) {
@@ -2423,6 +2499,7 @@
     if (sibling && (sibling.querySelector?.('textarea, [contenteditable="true"], [role="textbox"]'))) return true;
     return false;
   }
+  // ── end send-button identification ─
 
   function scanForBlockers(text) {
     if (!text || text.length < 4) return null;
@@ -3537,6 +3614,32 @@
         showBlockPopup(_recentSensitivePaste.matches, el, cid);
         return true;
       }
+      // AN EMPTY COMPOSER IS NOT A SEND. Nothing was typed and nothing is
+      // attached, so whatever the click was, it was not submitting a prompt —
+      // and both things this function does next are wrong for it. Routing would
+      // pause the click with preventDefault() and go hunting for a model label,
+      // and logPromptEvent would file a zero-length prompt as governed usage.
+      //
+      // Live symptom on gemini.google.com: the composer read "Ask Gemini", the
+      // user clicked "+" to attach a document, and a "Standard prompt → Gemini
+      // Thinking" toast appeared with the model dropdown left open. The button
+      // misidentification is fixed above; this is the second half, and it holds
+      // even for a real send button clicked with an empty box.
+      //
+      // Reaching here already means no flagged attachment is on the composer
+      // (that is this branch's condition), so empty text is the whole test.
+      //
+      // A send carrying one CLEAN file and no text therefore also returns here.
+      // That is the right outcome rather than a gap to close later: routing
+      // picks a model from prompt complexity, and an empty prompt carries no
+      // complexity signal, so routing it was always noise — it is exactly what
+      // produced the "Standard prompt → Gemini Thinking" toast. The BLOCK path
+      // is untouched: a flagged attachment fails this branch's condition and
+      // never gets here.
+      if (!text.trim()) {
+        return false;
+      }
+
       // ── Model Routing ──
       // 1. Try to change the model in the UI (visible to user)
       // 2. Always set fetch-blocker backup (guarantees the API call uses the right model)
