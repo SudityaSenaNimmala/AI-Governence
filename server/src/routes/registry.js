@@ -585,10 +585,62 @@ export function mountRegistry(app, db) {
     }
 
     // Strategy 3: for governance agents — update lifecycle
-    await db.collection('discovered_agents').updateMany(
+    const agentLifecycle = await db.collection('discovered_agents').updateMany(
       { $or: [{ id: id }, { botId: id }, { appId: id }, { name: id }] },
       { $set: { lifecycleStatus: isBlocked ? 'suspended' : 'active' } },
     );
+
+    // Strategy 4: MIRROR AN AGENT BLOCK INTO `blocked_agents`.
+    //
+    // THE GAP THIS CLOSES. Two different things were both called "blocked" and
+    // neither knew about the other:
+    //
+    //   * this route writes sanctions + ai_platforms, which is HOST-keyed, and is
+    //     what enforces "this platform is blocked" in the extension;
+    //   * content.js's enforceBlockedAgent() polls
+    //     GET /api/lifecycle/blocked-agents, which reads `blocked_agents` and
+    //     matches on the agent NAME shown in the page header. Only
+    //     POST /api/lifecycle/block ever wrote to it.
+    //
+    // So blocking a Copilot Studio agent from Inventory → AI Systems marked the
+    // row Blocked, suspended its lifecycle, and did nothing at runtime: the agent
+    // stayed fully usable in m365.cloud.microsoft. Worse, a host-keyed block could
+    // never have stopped it — an agent inside Copilot Studio has no host of its
+    // own, only a name inside someone else's app.
+    //
+    // Written to match POST /api/lifecycle/block exactly, field for field, so the
+    // two paths produce indistinguishable rows and /unblock still works on either.
+    // Unblocking sets blocked:false rather than deleting, mirroring /unblock and
+    // keeping the audit trail.
+    const looksLikeAgent = agentLifecycle.matchedCount > 0
+      || req.body.category === 'autonomous-agent'
+      || req.body.source === 'governance';
+
+    if (looksLikeAgent) {
+      const agentName = req.body.product_name || id;
+      if (isBlocked) {
+        await db.collection('blocked_agents').updateOne(
+          { agent_id: id },
+          { $set: {
+            agent_id: id,
+            agent_name: agentName,
+            platform: req.body.platform || null,
+            reason: 'Blocked by admin from AI Systems',
+            oauth_key_id: null,
+            blocked: true,
+            blocked_at: new Date(),
+            unblocked_at: null,
+          } },
+          { upsert: true },
+        );
+      } else {
+        // Only ever relaxes an existing block; never creates a row.
+        await db.collection('blocked_agents').updateOne(
+          { agent_id: id },
+          { $set: { blocked: false, unblocked_at: new Date() } },
+        );
+      }
+    }
 
     // Fire webhook
     const productName = req.body.product_name || id;

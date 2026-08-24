@@ -65,6 +65,28 @@ function cmp(a, b) {
 
 function matches(doc, filter = {}) {
   for (const [k, v] of Object.entries(filter)) {
+    // Top-level logical operators. $or was previously unhandled and fell through
+    // to a FIELD comparison against a document key literally named "$or", which is
+    // always false — so a query like
+    //   { $or: [{ id }, { botId }, { appId }] }
+    // silently matched nothing and the caller looked like it had no data. That is
+    // exactly the "quietly disagrees with the real server" failure this file
+    // promises not to have; the default branch below now throws instead.
+    if (k === '$or' || k === '$and' || k === '$nor') {
+      if (!Array.isArray(v)) throw new Error(`fake-db: ${k} expects an array`);
+      const results = v.map((sub) => matches(doc, sub));
+      if (k === '$or'  && !results.some(Boolean)) return false;
+      if (k === '$and' && !results.every(Boolean)) return false;
+      if (k === '$nor' && results.some(Boolean)) return false;
+      continue;
+    }
+    if (k === '$not') {
+      if (matches(doc, v)) return false;
+      continue;
+    }
+    if (k.startsWith('$')) {
+      throw new Error(`fake-db: unsupported top-level query operator ${k}`);
+    }
     if (!matchesValue(doc[k], v)) return false;
   }
   return true;

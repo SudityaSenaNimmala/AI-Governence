@@ -2,17 +2,17 @@
   "$comment": "Single source of truth for AI apps the governance stack recognizes. Drives whitelist, cost-parser dispatch, process attribution, browser-extension overlays, and dashboard grouping. Onboarding a new app = one block here. Unknown apps fall through to the shape-based detector in cost-parser.js and surface in the dashboard's Discovery tray.",
   "version": 1,
   "schema": {
-    "id":            "stable kebab-case identifier (do not change once shipped)",
-    "name":          "display name shown in dashboard",
-    "vendor":        "company name",
-    "category":      "api-platform | cli-agent | ide-assistant | autonomous-agent | chat-frontend | local-runtime",
-    "sandbox":       "local | remote | mixed  -- where the agent's ACTIONS run (matters for action governance)",
-    "wireFormat":    "anthropic | openai | openai-compatible | google | passthrough  -- which parser handles the body",
-    "apiDomains":    "[] domains that serve API traffic; always MITM-intercepted",
-    "webDomains":    "[] domains that serve a web UI; intercepted only when the source process is a known AI desktop app, otherwise bridged so browsers do not break",
-    "processes":     "[] process basenames (lowercased, no extension) used for attribution",
-    "pinned":        "true if the vendor pins TLS certs and rejects our CA; forces socket bridge (no body capture from network)",
-    "governanceNote":"free text shown in dashboard; especially used to flag remote-sandbox visibility gaps"
+    "id": "stable kebab-case identifier (do not change once shipped)",
+    "name": "display name shown in dashboard",
+    "vendor": "company name",
+    "category": "api-platform | cli-agent | ide-assistant | autonomous-agent | chat-frontend | local-runtime",
+    "sandbox": "local | remote | mixed  -- where the agent's ACTIONS run (matters for action governance)",
+    "wireFormat": "anthropic | openai | openai-compatible | google | passthrough  -- which parser handles the body",
+    "apiDomains": "[] domains that serve API traffic; always MITM-intercepted",
+    "webDomains": "[] domains that serve a web UI; intercepted only when the source process is a known AI desktop app, otherwise bridged so browsers do not break",
+    "processes": "[] process basenames (lowercased, no extension) used for attribution",
+    "pinned": "true if the vendor pins TLS certs and rejects our CA; forces socket bridge (no body capture from network)",
+    "governanceNote": "free text shown in dashboard; especially used to flag remote-sandbox visibility gaps"
   },
   "apps": [
     {
@@ -22,8 +22,12 @@
       "category": "api-platform",
       "sandbox": "local",
       "wireFormat": "anthropic",
-      "apiDomains": ["api.anthropic.com"],
-      "webDomains": ["claude.ai"],
+      "apiDomains": [
+        "api.anthropic.com"
+      ],
+      "webDomains": [
+        "claude.ai"
+      ],
       "processes": []
     },
     {
@@ -33,8 +37,13 @@
       "category": "api-platform",
       "sandbox": "local",
       "wireFormat": "openai",
-      "apiDomains": ["api.openai.com"],
-      "webDomains": ["chatgpt.com", "chat.openai.com"],
+      "apiDomains": [
+        "api.openai.com"
+      ],
+      "webDomains": [
+        "chatgpt.com",
+        "chat.openai.com"
+      ],
       "processes": [],
       "pinned": true,
       "governanceNote": "ChatGPT Desktop pins TLS certs; web/desktop body capture relies on browser extension + asar hook, not the proxy."
@@ -46,8 +55,13 @@
       "category": "api-platform",
       "sandbox": "local",
       "wireFormat": "google",
-      "apiDomains": ["generativelanguage.googleapis.com"],
-      "webDomains": ["gemini.google.com", "aistudio.google.com"],
+      "apiDomains": [
+        "generativelanguage.googleapis.com"
+      ],
+      "webDomains": [
+        "gemini.google.com",
+        "aistudio.google.com"
+      ],
       "processes": []
     },
     {
@@ -57,8 +71,14 @@
       "category": "api-platform",
       "sandbox": "local",
       "wireFormat": "openai-compatible",
-      "apiDomains": ["api.copilot.microsoft.com"],
-      "webDomains": ["copilot.microsoft.com"],
+      "apiDomains": [
+        "api.copilot.microsoft.com"
+      ],
+      "webDomains": [
+        "copilot.microsoft.com",
+        "m365.cloud.microsoft",
+        "www.microsoft365.com"
+      ],
       "processes": []
     },
     {
@@ -68,8 +88,13 @@
       "category": "chat-frontend",
       "sandbox": "remote",
       "wireFormat": "openai-compatible",
-      "apiDomains": ["api.perplexity.ai"],
-      "webDomains": ["www.perplexity.ai", "perplexity.ai"],
+      "apiDomains": [
+        "api.perplexity.ai"
+      ],
+      "webDomains": [
+        "www.perplexity.ai",
+        "perplexity.ai"
+      ],
       "processes": []
     },
     {
@@ -79,8 +104,12 @@
       "category": "api-platform",
       "sandbox": "remote",
       "wireFormat": "openai-compatible",
-      "apiDomains": ["api-inference.huggingface.co"],
-      "webDomains": ["huggingface.co"],
+      "apiDomains": [
+        "api-inference.huggingface.co"
+      ],
+      "webDomains": [
+        "huggingface.co"
+      ],
       "processes": []
     },
     {
@@ -91,7 +120,9 @@
       "sandbox": "remote",
       "wireFormat": "passthrough",
       "apiDomains": [],
-      "webDomains": ["poe.com"],
+      "webDomains": [
+        "poe.com"
+      ],
       "processes": []
     },
     {
@@ -101,7 +132,9 @@
       "category": "api-platform",
       "sandbox": "local",
       "wireFormat": "openai-compatible",
-      "apiDomains": ["bedrock-runtime"],
+      "apiDomains": [
+        "bedrock-runtime"
+      ],
       "webDomains": [],
       "processes": []
     },
@@ -112,11 +145,12 @@
       "category": "api-platform",
       "sandbox": "local",
       "wireFormat": "openai",
-      "apiDomains": ["openai.azure.com"],
+      "apiDomains": [
+        "openai.azure.com"
+      ],
       "webDomains": [],
       "processes": []
     },
-
     {
       "id": "claude-code",
       "name": "Claude Code",
@@ -124,9 +158,14 @@
       "category": "cli-agent",
       "sandbox": "local",
       "wireFormat": "anthropic",
-      "apiDomains": ["api.anthropic.com"],
+      "apiDomains": [
+        "api.anthropic.com"
+      ],
       "webDomains": [],
-      "processes": ["claude", "claude-code"],
+      "processes": [
+        "claude",
+        "claude-code"
+      ],
       "governanceNote": "CLI agent; cmdline captured as intent signal. Action-capable (shell + file edits) — combine with auditd/ETW for action governance."
     },
     {
@@ -136,9 +175,17 @@
       "category": "ide-assistant",
       "sandbox": "local",
       "wireFormat": "openai-compatible",
-      "apiDomains": ["api.augmentcode.com", "d3.augmentcode.com"],
-      "webDomains": ["app.augmentcode.com"],
-      "processes": ["augment", "augment-code"]
+      "apiDomains": [
+        "api.augmentcode.com",
+        "d3.augmentcode.com"
+      ],
+      "webDomains": [
+        "app.augmentcode.com"
+      ],
+      "processes": [
+        "augment",
+        "augment-code"
+      ]
     },
     {
       "id": "factory-ai",
@@ -147,9 +194,16 @@
       "category": "autonomous-agent",
       "sandbox": "mixed",
       "wireFormat": "openai-compatible",
-      "apiDomains": ["api.factory.ai"],
-      "webDomains": ["app.factory.ai"],
-      "processes": ["droid", "factory"],
+      "apiDomains": [
+        "api.factory.ai"
+      ],
+      "webDomains": [
+        "app.factory.ai"
+      ],
+      "processes": [
+        "droid",
+        "factory"
+      ],
       "governanceNote": "CLI runs locally; Droids run in Factory's cloud sandbox. Sandbox actions invisible from the endpoint."
     },
     {
@@ -159,8 +213,13 @@
       "category": "autonomous-agent",
       "sandbox": "remote",
       "wireFormat": "passthrough",
-      "apiDomains": ["api.devin.ai"],
-      "webDomains": ["app.devin.ai", "preview.devin.ai"],
+      "apiDomains": [
+        "api.devin.ai"
+      ],
+      "webDomains": [
+        "app.devin.ai",
+        "preview.devin.ai"
+      ],
       "processes": [],
       "governanceNote": "Agent runs entirely in Cognition's cloud sandbox. We capture inbound prompts and outbound results only; agent's in-sandbox actions (git, shell, network egress) are NOT visible. Procure vendor audit API for full coverage."
     },
@@ -173,7 +232,9 @@
       "wireFormat": "passthrough",
       "apiDomains": [],
       "webDomains": [],
-      "processes": ["openclaw"],
+      "processes": [
+        "openclaw"
+      ],
       "governanceNote": "Model-agnostic CLI agent; wireFormat is whichever provider's SDK it's using (Anthropic/OpenAI/local). Detection by process + dispatch by destination host."
     },
     {
@@ -183,9 +244,17 @@
       "category": "ide-assistant",
       "sandbox": "local",
       "wireFormat": "openai-compatible",
-      "apiDomains": ["api2.cursor.sh", "api.cursor.sh"],
-      "webDomains": ["cursor.com", "cursor.sh"],
-      "processes": ["cursor"]
+      "apiDomains": [
+        "api2.cursor.sh",
+        "api.cursor.sh"
+      ],
+      "webDomains": [
+        "cursor.com",
+        "cursor.sh"
+      ],
+      "processes": [
+        "cursor"
+      ]
     },
     {
       "id": "windsurf",
@@ -194,9 +263,18 @@
       "category": "ide-assistant",
       "sandbox": "local",
       "wireFormat": "openai-compatible",
-      "apiDomains": ["server.codeium.com", "inference.codeium.com"],
-      "webDomains": ["codeium.com", "windsurf.com"],
-      "processes": ["windsurf", "codeium"]
+      "apiDomains": [
+        "server.codeium.com",
+        "inference.codeium.com"
+      ],
+      "webDomains": [
+        "codeium.com",
+        "windsurf.com"
+      ],
+      "processes": [
+        "windsurf",
+        "codeium"
+      ]
     },
     {
       "id": "cline",
@@ -207,7 +285,9 @@
       "wireFormat": "passthrough",
       "apiDomains": [],
       "webDomains": [],
-      "processes": ["cline"],
+      "processes": [
+        "cline"
+      ],
       "governanceNote": "VS Code extension; uses whichever provider user configures. Detection via destination host (Anthropic/OpenAI/etc.)."
     },
     {
@@ -218,7 +298,9 @@
       "sandbox": "remote",
       "wireFormat": "passthrough",
       "apiDomains": [],
-      "webDomains": ["replit.com"],
+      "webDomains": [
+        "replit.com"
+      ],
       "processes": [],
       "governanceNote": "Cloud-hosted agent; same boundary-only visibility caveat as Devin."
     },
@@ -231,7 +313,9 @@
       "wireFormat": "openai-compatible",
       "apiDomains": [],
       "webDomains": [],
-      "processes": ["ollama"],
+      "processes": [
+        "ollama"
+      ],
       "governanceNote": "Local model runtime on 127.0.0.1:11434. Captured via Tier 2 localhost intercept."
     },
     {
@@ -243,7 +327,9 @@
       "wireFormat": "openai-compatible",
       "apiDomains": [],
       "webDomains": [],
-      "processes": ["vllm"],
+      "processes": [
+        "vllm"
+      ],
       "governanceNote": "Local OpenAI-compatible inference server; captured via localhost intercept."
     },
     {
@@ -255,7 +341,10 @@
       "wireFormat": "openai-compatible",
       "apiDomains": [],
       "webDomains": [],
-      "processes": ["llama-server", "llama-cpp"],
+      "processes": [
+        "llama-server",
+        "llama-cpp"
+      ],
       "governanceNote": "Local inference server; captured via localhost intercept. Standalone CLI binary covered by Tier 3 audit-watch (file open) + GPU watch."
     }
   ]

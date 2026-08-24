@@ -3390,7 +3390,14 @@ function AIRegistryView() {
       } else {
         await fetch(`${REGISTRY_API}/${encodeURIComponent(row.id)}/status`,{
           method:"PUT",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({status,product_name:row.name,matched_hosts:row.matched_hosts||[]}),
+          // category/source travel with the decision so the server can tell an
+          // AGENT from a platform. A host-keyed block cannot stop a Copilot Studio
+          // agent — it has no host of its own — so an agent row must also be
+          // mirrored into the agent blocklist the extension enforces. The server
+          // can infer this from discovered_agents, but sending it makes the intent
+          // explicit rather than dependent on that lookup succeeding.
+          body:JSON.stringify({status,product_name:row.name,matched_hosts:row.matched_hosts||[],
+            category:row.category||null,source:row.source||null}),
         });
       }
       // Update local state immediately — don't reload from registry (it's slow
