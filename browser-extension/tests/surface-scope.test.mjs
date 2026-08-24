@@ -87,9 +87,11 @@ test('Gemini is not caught by the Gmail entry', () => {
 
 test('the gate reaches through a shadow root', () => {
   // These panels are routinely rendered in a shadow root, so an element inside
-  // one must still resolve to its host panel.
+  // one must still resolve to its host panel. The panel carries its own composer
+  // in the light DOM, which is what qualifies it as a panel at all.
+  const panelComposer = el({ tag: 'textarea' });
+  const panel = el({ tag: 'div', attrs: { 'aria-label': 'Copilot chat' }, children: [panelComposer] });
   const inner = el({ tag: 'textarea' });
-  const panel = el({ tag: 'div', attrs: { 'aria-label': 'Copilot chat' } });
   inner.shadowHost = panel;
   const page = doc([panel]);
   const s = loadSurfaceScope('github.com', page);
@@ -97,6 +99,51 @@ test('the gate reaches through a shadow root', () => {
   assert.equal(s.captureAllowed(inner), true, 'a shadow-DOM element inside the panel was rejected');
   const outside = el({ tag: 'textarea' });
   assert.equal(s.captureAllowed(outside), false, 'an element outside the panel was accepted');
+});
+
+// ── The live regression: Gmail's permanent Gemini launcher ──────────────────
+//
+// Reported from a real test — the banner appeared on the bare Gmail inbox. Gmail
+// keeps a Gemini button in its toolbar at all times, and that button's aria-label
+// contains "Gemini", so a name-only selector matched it, the page looked like it
+// had an open AI panel, and both the notice and capture were enabled on ordinary
+// mail. A panel now has to be something a prompt can be typed into.
+
+function gmailWithLauncherOnly() {
+  const launcher = el({ tag: 'button', attrs: { 'aria-label': 'Ask Gemini' } });
+  const mailBox = el({ tag: 'div', attrs: { 'aria-label': 'Message Body', contenteditable: 'true' } });
+  return { page: doc([launcher, mailBox]), launcher, mailBox };
+}
+
+test('the toolbar Gemini launcher is not an open panel', () => {
+  const { page, mailBox } = gmailWithLauncherOnly();
+  const s = loadSurfaceScope('mail.google.com', page);
+
+  assert.deepEqual(s.aiPanels(), [], 'the launcher button counted as an open AI panel');
+  assert.equal(s.captureAllowed(mailBox), false, 'the mail composer was captured on the bare inbox');
+  assert.equal(s.captureAllowed(null), false);
+});
+
+test('a launcher plus a real open panel still governs the panel', () => {
+  const launcher = el({ tag: 'button', attrs: { 'aria-label': 'Ask Gemini' } });
+  const geminiBox = el({ tag: 'textarea', attrs: { 'aria-label': 'Enter a prompt' } });
+  const panel = el({ tag: 'div', attrs: { 'aria-label': 'Gemini' }, children: [geminiBox] });
+  const mailBox = el({ tag: 'div', attrs: { 'aria-label': 'Message Body', contenteditable: 'true' } });
+  const s = loadSurfaceScope('mail.google.com', doc([launcher, panel, mailBox]));
+
+  assert.equal(s.aiPanels().length, 1, 'expected exactly the panel, not the launcher too');
+  assert.equal(s.captureAllowed(geminiBox), true, 'the Gemini composer was not governed');
+  assert.equal(s.captureAllowed(mailBox), false, 'the mail composer was governed');
+});
+
+test('a named container with no composer is not a panel', () => {
+  // A heading, a tooltip, a menu item — anything that carries the AI's name but
+  // cannot be typed into.
+  const label = el({ tag: 'span', attrs: { 'aria-label': 'Gemini' } });
+  const mailBox = el({ tag: 'div', attrs: { 'aria-label': 'Message Body', contenteditable: 'true' } });
+  const s = loadSurfaceScope('mail.google.com', doc([label, mailBox]));
+  assert.deepEqual(s.aiPanels(), []);
+  assert.equal(s.captureAllowed(mailBox), false);
 });
 
 test('every over-collecting host from production is now scoped', () => {

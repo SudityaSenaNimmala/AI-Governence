@@ -408,6 +408,26 @@
     return best;
   }
 
+  // What a prompt is typed into — and the test for "is this the AI PANEL, or just
+  // the button that opens it". Gmail keeps a Gemini launcher in its toolbar
+  // permanently, and that button's aria-label contains "Gemini", so a name-only
+  // match fired on the bare inbox and the banner appeared with no panel open.
+  // Requiring a composer is not a size heuristic: it is the thing being governed.
+  const COMPOSER_SEL = 'textarea, [contenteditable]:not([contenteditable="false"]), [role="textbox"]';
+
+  // The launcher itself — Gmail's toolbar Gemini button, an "Ask Copilot" link, a
+  // menu trigger. Rejected first: it carries the AI's name but nothing can be
+  // typed into it.
+  const LAUNCHER_SEL = 'button, [role="button"], a, [aria-haspopup]';
+
+  function hasComposer(el) {
+    try {
+      if (el.matches && el.matches(LAUNCHER_SEL)) return false;
+      if (el.matches && el.matches(COMPOSER_SEL)) return true;
+      return !!(el.querySelector && el.querySelector(COMPOSER_SEL));
+    } catch (e) { return false; }
+  }
+
   function panelsVisible(selectors) {
     for (const sel of selectors) {
       let found;
@@ -415,6 +435,7 @@
       for (const el of found) {
         // A collapsed side panel is still in the DOM; it is not open.
         if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) continue;
+        if (!hasComposer(el)) continue;
         return true;
       }
     }

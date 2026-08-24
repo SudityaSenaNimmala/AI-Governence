@@ -672,6 +672,39 @@
     console.info('[cfai] embedded-AI host: capture restricted to the AI panel only');
   }
 
+  // What a prompt is typed into. Also the test for "is this an AI PANEL, or just
+  // the button that opens one".
+  const COMPOSER_SEL = 'textarea, [contenteditable]:not([contenteditable="false"]), [role="textbox"]';
+
+  /**
+   * A matched node only counts as an open AI panel if a prompt can actually be
+   * typed in it.
+   *
+   * WHY. Gmail keeps a Gemini launcher button in its toolbar at all times, and
+   * that button's aria-label contains "Gemini" — so a name-only selector matched
+   * it on the bare inbox, `aiPanels()` came back non-empty, and the page was
+   * treated as having an open AI panel when it did not. Reported from a live test:
+   * the banner appeared on the inbox.
+   *
+   * Requiring a composer is not a heuristic about size or position, it is the
+   * thing we actually care about: a surface where prompts can be entered. A
+   * launcher icon contains no composer. If a panel renders its composer inside a
+   * shadow root this returns false and the host captures nothing — the same
+   * fail-closed direction as everything else here.
+   */
+  // The launcher itself: Gmail's toolbar Gemini button, a "Ask Copilot" link, a
+  // menu trigger. Rejected before anything else — it carries the AI's name but is
+  // not a surface anything can be typed into.
+  const LAUNCHER_SEL = 'button, [role="button"], a, [aria-haspopup]';
+
+  function isPanelWithComposer(el) {
+    try {
+      if (el.matches && el.matches(LAUNCHER_SEL)) return false;
+      if (el.matches && el.matches(COMPOSER_SEL)) return true;
+      return !!(el.querySelector && el.querySelector(COMPOSER_SEL));
+    } catch (e) { return false; }
+  }
+
   /** Visible AI panels on the page right now. */
   function aiPanels() {
     if (!_panelSelectors) return [];
@@ -683,6 +716,7 @@
         // A hidden panel is not an open panel: a collapsed side panel still
         // exists in the DOM, and treating it as open would re-govern the page.
         if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) continue;
+        if (!isPanelWithComposer(el)) continue;
         out.push(el);
       }
     }

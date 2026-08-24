@@ -68,6 +68,11 @@ export function loadSurfaceScope(host, fakeDocument, synced) {
 // actually uses — attribute-contains, id, and tag. Deliberately not a selector
 // engine, so a test cannot pass because the fake was clever.
 
+function walk(node, out = []) {
+  for (const c of node.children) { out.push(c); walk(c, out); }
+  return out;
+}
+
 export function el(spec = {}) {
   const node = {
     nodeType: 1,
@@ -110,15 +115,25 @@ export function el(spec = {}) {
     if (m) return m[1] in node.attrs;
     if (s.startsWith('#')) return node.id === s.slice(1);
     if (s.startsWith('.')) return String(node.className).split(/\s+/).includes(s.slice(1));
+    // `[contenteditable]:not([contenteditable="false"])` — the composer selector
+    // uses it, so the fake has to understand the negation rather than silently
+    // never matching, which would make every composer test pass for free.
+    m = /^\[contenteditable\]:not\(\[contenteditable="false"\]\)$/.exec(s);
+    if (m) return 'contenteditable' in node.attrs && node.attrs.contenteditable !== 'false';
+    m = /^\[([a-zA-Z-]+)="([^"]+)"\]$/.exec(s);
+    if (m) return node.attrs[m[1]] === m[2];
     return node.tag === s;
   };
+  // The composer test asks whether a panel CONTAINS an input, so an element needs
+  // to be able to search its own subtree, not just the document.
+  node.querySelectorAll = (selector) => {
+    const parts = selector.split(',').map((x) => x.trim()).filter(Boolean);
+    return walk(node).filter((d) => selector === '*' || parts.some((x) => d.matches(x)));
+  };
+  node.querySelector = (selector) => node.querySelectorAll(selector)[0] || null;
   return node;
 }
 
-function walk(node, out = []) {
-  for (const c of node.children) { out.push(c); walk(c, out); }
-  return out;
-}
 
 export function doc(children = []) {
   const root = el({ tag: '#document', children });

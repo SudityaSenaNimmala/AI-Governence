@@ -47,14 +47,28 @@ function harness({ panelPresent = false, panelVisible = true } = {}) {
   let present = panelPresent;
   const observers = [];
 
+  // A panel is something a prompt can be typed into. The launcher button that
+  // opens it is NOT — Gmail keeps one in its toolbar permanently, and matching it
+  // is what made the banner appear on the bare inbox.
+  const composer = { matches: (sel) => /textarea/.test(sel) };
   const panelNode = {
     getClientRects: () => (panelVisible ? [{ width: 10, height: 10 }] : []),
+    matches: () => false,                       // a container, not a control
+    querySelector: (sel) => (/textarea/.test(sel) ? composer : null),
+  };
+  const launcherNode = {
+    getClientRects: () => [{ width: 24, height: 24 }],
+    matches: (sel) => /button/.test(sel),       // it IS a control
+    querySelector: () => null,                  // nothing to type into
   };
 
   const document = {
     documentElement: { appendChild: (el) => appended.push(el) },
     querySelector: () => null,          // no pre-existing banner
-    querySelectorAll: (sel) => (present && /Gemini|Copilot|Breeze|Einstein/i.test(sel) ? [panelNode] : []),
+    // The launcher is ALWAYS present, exactly as in Gmail; the panel only when opened.
+    querySelectorAll: (sel) => (/Gemini|Copilot|Breeze|Einstein/i.test(sel)
+      ? (present ? [launcherNode, panelNode] : [launcherNode])
+      : []),
   };
 
   class FakeMutationObserver {
@@ -273,4 +287,15 @@ test('the notice floor and the capture floor are the same list', () => {
     grab(contentSrc, 'content.js'),
     'the notice gate and the capture gate disagree about which hosts are embedded-AI',
   );
+});
+
+// The live regression, on the notice side. Gmail's toolbar Gemini button is
+// present on the bare inbox; it must not be mistaken for an open panel.
+test('the permanent Gemini launcher does not trigger the notice', () => {
+  const h = harness({ panelPresent: false });   // launcher only
+  const { announceGovernance, shown, panelsVisible } = h.load('mail.google.com');
+  assert.equal(panelsVisible(['[aria-label*="Gemini" i]']), false,
+    'the launcher button was treated as an open panel');
+  announceGovernance({ ...GMAIL_VERDICT });
+  assert.equal(shown.length, 0, 'the banner fired on the bare Gmail inbox');
 });
