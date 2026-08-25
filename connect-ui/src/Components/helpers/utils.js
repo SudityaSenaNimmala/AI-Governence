@@ -79,6 +79,18 @@ export const notifyToast = (action, message, position) => {
   }
 };
 
+// True when this build runs as the standalone AI-Governance deployment, with no
+// CloudFuze platform behind it. That deployment serves no /cfcommon/api backend,
+// so every call through helpers/apiRequest.js (the cfcommon axios wrapper) 404s.
+// Callers use this to skip requests that cannot succeed rather than firing them
+// and swallowing the rejection — a 404 is logged by the browser itself, so not
+// making the request is the only way to keep the console clean.
+//
+// Defaults to standalone, matching isSessionValid()'s hardcoded bypass below.
+// Set VITE_STANDALONE=false for a build that IS served behind the platform.
+export const isStandaloneDeployment = () =>
+  import.meta.env.VITE_STANDALONE !== "false";
+
 export const isSessionValid = () => {
   // ─── STANDALONE DEMO MODE (temporary) ────────────────────────────────────
   // Bypasses the CloudFuze platform login/session gate so the AI Hub / Agent

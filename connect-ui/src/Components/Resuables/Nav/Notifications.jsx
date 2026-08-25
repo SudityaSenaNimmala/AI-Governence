@@ -10,6 +10,7 @@ import {
 import {
   getDateFormatted,
   getMomentAgo,
+  isStandaloneDeployment,
   makeFirstLetterCapital,
 } from "../../helpers/utils";
 import { getCFTextLoader } from "../Loaders/Loaders";
@@ -85,6 +86,16 @@ const Notifications = () => {
   };
 
   const fetchNotifications = async (pageNo = 1, pageSize = 10) => {
+    // The standalone deployment has no /cfcommon/api backend, so this request
+    // can only ever 404 — and the browser logs that itself, regardless of how
+    // we handle the rejection. Bail before the request rather than after.
+    // Guarded here, at the single choke point, so the mount effect, the
+    // RERUN_NOTIFICATIONS effect, mark-as-done, and pagination are all covered.
+    if (isStandaloneDeployment()) {
+      setNotificationList([]);
+      setIsLoading(false);
+      return;
+    }
     setIsLoading(true);
     let res = await getNotificationsList(pageNo, pageSize);
     if (res?.status === "OK") {
