@@ -24,13 +24,20 @@
 # assign DIFFERENT IDs to the same extension, so set both after publishing.
 #   Chrome: chrome://extensions (Developer mode) or the Web Store item URL.
 #   Edge:   edge://extensions or the Edge Add-ons item URL.
-$ChromeExtensionId = 'REPLACE_WITH_CHROME_STORE_ID'         # 32 chars a-p
-$EdgeExtensionId   = 'REPLACE_WITH_EDGE_STORE_ID'           # 32 chars a-p
+# SELF-HOSTED, NOT STORE-PUBLISHED. We sign the package ourselves, so the ID is
+# derived from our signing key and is the SAME in both browsers — a store would
+# have assigned two different ones. Produce the package and this ID with:
+#   node scripts/pack-crx.mjs --url https://agentgovernence.cftools.live
+$ExtensionId       = 'REPLACE_WITH_ID_FROM_pack-crx'        # 32 chars a-p
+$ChromeExtensionId = $ExtensionId
+$EdgeExtensionId   = $ExtensionId
 $ServerUrl    = 'https://agentgovernence.cftools.live'      # governance server
 $EnrollSecret = 'REPLACE_WITH_ENROLL_SECRET'               # shared secret from IT
-# Store update URLs (force-install fetches the package from here):
-$EdgeUpdateUrl   = 'https://edge.microsoft.com/extensionwebstorebase/v1/crx'
-$ChromeUpdateUrl = 'https://clients2.google.com/service/update2/crx'
+# Where the browsers fetch the package and poll for updates. This is OUR server,
+# not a store. Must be HTTPS and reachable from every managed machine.
+$UpdateUrl       = "$ServerUrl/downloads/update.xml"
+$EdgeUpdateUrl   = $UpdateUrl
+$ChromeUpdateUrl = $UpdateUrl
 
 # Corporate email domain. Any signed-in BROWSER profile outside this domain is
 # refused as an identity (recorded as profile_domain_mismatch) instead of being
@@ -100,6 +107,14 @@ foreach ($b in $browsers) {
   # 1) Force-install: <root>\ExtensionInstallForcelist\1 = "<id>;<update_url>"
   $forceKey = Join-Path $b.Root 'ExtensionInstallForcelist'
   Set-RegValue -Path $forceKey -Name '1' -Value ("{0};{1}" -f $b.Id, $b.Update)
+
+  # 1b) A self-hosted package is an "external" install, and both browsers refuse
+  #     those by default. Without these two the force-install entry above is
+  #     accepted and then silently ignored: nothing installs, nothing is logged,
+  #     and the admin console shows no error. It is the most common way this
+  #     rollout appears to have "not applied".
+  Set-RegValue -Path (Join-Path $b.Root 'ExtensionInstallAllowlist') -Name '1' -Value $b.Id
+  Set-RegValue -Path (Join-Path $b.Root 'ExtensionInstallSources')   -Name '1' -Value ("{0}/*" -f $ServerUrl)
 
   # 2) Managed config: <root>\3rdparty\extensions\<id>\policy\{serverUrl,enrollSecret}
   $policyKey = Join-Path $b.Root ("3rdparty\extensions\{0}\policy" -f $b.Id)

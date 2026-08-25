@@ -65,15 +65,119 @@ in their session, and its identity beacon comes up automatically for the extensi
 link to. (The old double-click path — per-user `HKCU` + a console window — still exists
 for manual one-off installs, but is **not** used for Intune.)
 
+---
+
+## Part B0 — Force-install WITHOUT publishing to a store
+
+Publishing to the Chrome Web Store / Edge Add-ons means a review queue measured in
+days. Skip it: both browsers force-install a self-hosted, self-signed package on a
+**managed** device. Three commands and two files.
+
+### 1. Build the package
+
+```bash
+node scripts/pack-crx.mjs --url https://agentgovernence.cftools.live
+```
+
+Writes to `dist/extension/`:
+
+| File | Purpose |
+|---|---|
+| `cloudfuze-ai-governance.crx` | the signed package (~23 MB) |
+| `update.xml` | the manifest browsers poll |
+| `manifest-info.json` | id + version, read by the server |
+| `crx-signing-key.pem` | **first run only — move this somewhere safe** |
+
+It prints the extension ID and the exact policy values.
+
+### 2. Keep the signing key
+
+The extension ID is derived from the key, and the force-install policy on every
+machine names that ID. **Lose the key and you cannot ship an update** — only a
+different extension with a new ID, plus a re-push of policy to every machine.
+Store it with your production secrets. `.gitignore` covers `dist/` and `*.pem`, but
+that protects the repo, not a laptop.
+
+The *public* half is written into `browser-extension/manifest.json` as `key` and
+should be committed. It is what makes an unpacked developer load report the same ID
+as the packed build — without it, testing and production disagree about which
+extension this is, and the symptom looks like "the policy did not apply".
+
+### 3. Host the two files
+
+The server serves them once `dist/extension/` is deployed alongside it (or
+`EXTENSION_DIST_DIR` points at it):
+
+```
+GET /downloads/update.xml
+GET /downloads/cloudfuze-ai-governance.crx
+GET /downloads/extension-info     ← id, version, and the policy values to paste
+```
+
+Unauthenticated by design: the browser's updater sends no credentials, and what is
+exposed is the extension code we are installing everywhere anyway. The enroll
+secret is **not** in the package — it arrives via Intune policy.
+
+If the package is missing, these return **503 with the build command**, not 404 —
+a 404 sends an admin hunting through policy when the real answer is that nobody ran
+the packer.
+
+### 4. Push the policy
+
+Set `$ExtensionId` in `scripts/intune-provision-extension.ps1` to the printed ID and
+run it from Intune in **device/SYSTEM context**. It writes, per browser:
+
+| Registry value | Why |
+|---|---|
+| `ExtensionInstallForcelist\1` = `<id>;<update.xml url>` | installs it, un-removable |
+| `ExtensionInstallAllowlist\1` = `<id>` | off-store installs are blocked without it |
+| `ExtensionInstallSources\1` = `<server>/*` | permits fetching from our host |
+| `3rdparty\extensions\<id>\policy\*` | serverUrl, enrollSecret, identity |
+
+**The allowlist and sources entries are not optional.** Without them the
+force-install entry is accepted and then silently ignored — nothing installs,
+nothing is logged, no error appears in the admin console. It is the most common way
+this rollout looks like it "didn't apply".
+
+### 5. Every update
+
+Bump `manifest.json`'s version, re-run the packer, redeploy `dist/extension/`.
+Browsers poll `update.xml` and only fetch when the version **increases**. A stale
+version is the usual reason a self-hosted fleet stays on an old build.
+
+### The one hard requirement
+
+| Browser | Off-store force-install |
+|---|---|
+| **Edge** | Works on any Intune-managed device |
+| **Chrome** | Requires the machine to be **domain-joined or enrolled in Chrome Browser Cloud Management** |
+
+On an unmanaged Chrome the policy is ignored and nothing installs, with no error.
+If your Chrome estate is not CBCM-enrolled, deploy on Edge, or enroll Chrome — this
+is the one prerequisite that cannot be worked around in code.
+
+### Verifying before the fleet
+
+```bash
+curl https://agentgovernence.cftools.live/downloads/extension-info
+```
+
+Then on one pilot machine, after the policy lands and the browser restarts:
+`edge://extensions` / `chrome://extensions` should show it as **Installed by your
+organization** and non-removable.
+
 ## Part B — Browser extension (Edge **and** Chrome)
 
 Chosen route: **store-published + managed config** (no signing key).
 
-### Step 1 — Publish (one-time)
+### Step 1 — Publish (one-time) — OPTIONAL, see Part B0
 
-Upload the extension to the **Chrome Web Store** and **Edge Add-ons** (both support
-**unlisted / private** visibility for internal-only distribution). Record the ID each store
-assigns — they differ per browser.
+Store publication is no longer required: Part B0 above force-installs a package we
+sign and host ourselves, with no review queue. Use a store only if you want its
+update infrastructure and are willing to wait for review. If you do, upload to the
+**Chrome Web Store** and **Edge Add-ons** (both support unlisted/private
+visibility) and record the ID each store assigns — they differ per browser, whereas
+a self-signed package has one ID for both.
 
 ### Step 2 — Push two policies per browser
 
