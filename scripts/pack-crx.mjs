@@ -120,11 +120,20 @@ writeFileSync(join(outDir, 'manifest-info.json'), JSON.stringify({
 const provisionDir = join(root, 'dist', 'provision');
 mkdirSync(provisionDir, { recursive: true });
 const enrollSecret = args.get('secret') || process.env.ENROLL_SECRET || '';
+// Chrome ignores an off-store force-install unless the machine is AD-domain-joined
+// or CBCM-enrolled; Entra join does not count. Passing the token here injects it
+// into both provisioning artifacts so nobody edits a generated script by hand and
+// forgets on the next repack.
+const cbcmToken = args.get('cbcm-token') || process.env.CBCM_TOKEN || '';
 
 for (const name of ['intune-provision-extension.ps1', 'macos-provision-extension.sh']) {
   let src = readFileSync(join(root, 'scripts', name), 'utf8');
   src = src.replace(/REPLACE_WITH_ID_FROM_pack-crx/g, extensionId);
   if (enrollSecret) src = src.replace(/REPLACE_WITH_ENROLL_SECRET/g, enrollSecret);
+  if (cbcmToken) {
+    src = src.replace("$ChromeCbcmToken = ''", `$ChromeCbcmToken = '${cbcmToken}'`)
+             .replace('CBCM_TOKEN=""', `CBCM_TOKEN="${cbcmToken}"`);
+  }
   writeFileSync(join(provisionDir, name), src);
 }
 

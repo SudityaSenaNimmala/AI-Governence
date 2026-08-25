@@ -149,6 +149,25 @@ for (const [file, label] of [[PS1, 'Windows'], [SH, 'macOS']]) {
   }
 }
 
+// ── 3b. Is the CBCM token in the artifacts? ─────────────────────────────────
+// Chrome ignores an off-store force-install unless the machine is AD-domain-joined
+// or CBCM-enrolled. A WARN rather than a BLOCK: an Edge-only estate genuinely does
+// not need this, and an AD-joined one already satisfies Chrome. But shipping
+// without it on an Entra-only estate with Chrome installed means Chrome is
+// ungoverned and nothing says so, so it must not pass quietly.
+{
+  const winSrc = read(PS1);
+  const hasToken = /\$ChromeCbcmToken\s*=\s*'[^']+'/.test(winSrc);
+  if (hasToken) {
+    pass('all browsers', 'Chrome CBCM token present', 'Chrome will accept the off-store install');
+  } else {
+    warn('all browsers', 'Chrome CBCM token missing',
+      'Chrome installs nothing unless the machine is AD-domain-joined. Get a token '
+      + 'from admin.google.com -> Devices -> Chrome -> Managed browsers, then repack '
+      + 'with --cbcm-token. Skip only if the estate is Edge-only or AD-joined.');
+  }
+}
+
 // ── 4. All browsers, both platforms ─────────────────────────────────────────
 
 const WIN_ROOTS = ['Microsoft\\\\Edge', 'Google\\\\Chrome', 'BraveSoftware\\\\Brave', 'Vivaldi', 'Opera Software\\\\Opera', 'Chromium'];

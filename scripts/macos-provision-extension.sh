@@ -36,6 +36,12 @@ SERVER_URL="https://agentgovernence.cftools.live"
 ENROLL_SECRET="REPLACE_WITH_ENROLL_SECRET"
 IDENTITY_DOMAIN="cloudfuze.com"                # empty string disables the guard
 BROWSER_ONLY=1                                 # 1 when no desktop agent is deployed
+# Chrome only honours an off-store force-install on a MANAGED machine. An
+# MDM-enrolled Mac usually satisfies that, so this is often unnecessary here —
+# but setting it removes the doubt, and it is the same token as Windows.
+# admin.google.com -> Devices -> Chrome -> Managed browsers -> Enrollment token.
+CBCM_TOKEN=""
+
 REPORT_COVERAGE=1                              # report installed browsers + whether
                                                # each can actually be governed
 PER_USER_IDENTITY=0                            # 1 on SHARED Macs: skips writing a
@@ -195,6 +201,11 @@ for b in "${BROWSERS[@]}"; do
     write_pref "$ext_domain" userEmail "$RESOLVED_UPN"
   fi
 
+  # Chrome only: the token that makes this machine cloud-managed.
+  if [[ "$b" == "com.google.Chrome" && -n "$CBCM_TOKEN" ]]; then
+    write_pref "$b" CloudManagementEnrollmentToken "$CBCM_TOKEN"
+  fi
+
   echo "Provisioned ${b}"
 done
 
@@ -230,7 +241,7 @@ if [[ "$REPORT_COVERAGE" == "1" ]]; then
  "extension_id":"$EXTENSION_ID","browsers":$list,
  "chrome_installed":$([[ " ${browsers[*]} " == *" chrome "* ]] && echo true || echo false),
  "chrome_governable":$mdm_enrolled,"domain_joined":false,"entra_joined":$mdm_enrolled,
- "cbcm_token":false,"private_browsing_blocked":false,"enrollSecret":"$ENROLL_SECRET"}
+ "cbcm_token":$([[ -n "$CBCM_TOKEN" ]] && echo true || echo false),"private_browsing_blocked":false,"enrollSecret":"$ENROLL_SECRET"}
 JSON
 )
   if curl -fsS -X POST "$SERVER_URL/api/v1/browser-coverage"        -H 'Content-Type: application/json' -d "$payload" >/dev/null 2>&1; then
