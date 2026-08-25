@@ -9,8 +9,12 @@
        3rdparty extension policy, which the extension reads via chrome.storage.managed
        and auto-enrolls from — no options page, no user click.
 
-  The desktop agent's identity beacon (127.0.0.1:19532) then links the extension to
-  the same machine/user automatically, so browser usage attributes to the real person.
+  Identity comes from the DEVICE, not the browser: the script reads the Intune
+  enrollment UPN and the machine name and pushes them as managed policy, which the
+  extension trusts ahead of any signed-in browser profile. That matters because a
+  tester or developer signed into a throwaway Google profile would otherwise be
+  reported as the user. Where the desktop agent IS deployed, its identity beacon
+  (127.0.0.1:19532) supersedes both.
 
   Edit the CONFIG block, then let Intune run it. Idempotent — safe to re-run.
 #>
@@ -27,6 +31,54 @@ $EnrollSecret = 'REPLACE_WITH_ENROLL_SECRET'               # shared secret from 
 # Store update URLs (force-install fetches the package from here):
 $EdgeUpdateUrl   = 'https://edge.microsoft.com/extensionwebstorebase/v1/crx'
 $ChromeUpdateUrl = 'https://clients2.google.com/service/update2/crx'
+
+# Corporate email domain. Any signed-in BROWSER profile outside this domain is
+# refused as an identity (recorded as profile_domain_mismatch) instead of being
+# attributed. Leave blank only if you accept that a tester signed into a personal
+# or QA browser profile will be reported as the user.
+$IdentityDomain = 'cloudfuze.com'
+
+# $true when the desktop agent is NOT deployed. Skips the extension's five-minute
+# wait for an agent identity beacon that will never arrive.
+$BrowserOnly = $true
+# -----------------------------------------------------------------------------
+
+# ---- Device-sourced identity -------------------------------------------------
+# WHY NOT THE BROWSER PROFILE. chrome.identity reports whichever account the
+# browser is signed into, and on a developer's or tester's machine that is
+# routinely a throwaway Google account. Attributing enterprise AI usage to a
+# fictional persona is worse than attributing it to nobody, because a wrong name
+# gets acted on.
+#
+# Intune already knows the answer. The MDM enrollment records the UPN of the user
+# the device is enrolled for, and this script runs on the device, so we can read
+# ground truth and push it as managed policy — which the extension trusts ahead of
+# any browser profile. A test profile in Chrome then changes nothing.
+#
+# Both lookups are best-effort: an unenrolled or shared device simply gets no
+# userEmail, and the extension falls back (guarded by $IdentityDomain).
+function Get-EnrolledUpn {
+  # Intune writes one key per enrollment; pick the one that actually carries a UPN.
+  $roots = @('HKLM:\SOFTWARE\Microsoft\Enrollments')
+  foreach ($root in $roots) {
+    if (-not (Test-Path $root)) { continue }
+    foreach ($k in Get-ChildItem $root -ErrorAction SilentlyContinue) {
+      $upn = (Get-ItemProperty -Path $k.PSPath -Name 'UPN' -ErrorAction SilentlyContinue).UPN
+      # EnrollmentType 6 = MDM; but older agents vary, so accept any key with a UPN
+      # that looks like an address rather than filtering on the type.
+      if ($upn -and $upn -like '*@*') { return $upn }
+    }
+  }
+  return $null
+}
+
+$EnrolledUpn  = Get-EnrolledUpn
+$ComputerName = $env:COMPUTERNAME
+if ($EnrolledUpn) {
+  Write-Output ("Device identity: {0} on {1}" -f $EnrolledUpn, $ComputerName)
+} else {
+  Write-Output ("No Intune enrollment UPN found on {0} - extension will fall back to the browser profile (domain-guarded)." -f $ComputerName)
+}
 # -----------------------------------------------------------------------------
 
 function Set-RegValue([string]$Path, [string]$Name, [string]$Value) {
@@ -53,8 +105,13 @@ foreach ($b in $browsers) {
   $policyKey = Join-Path $b.Root ("3rdparty\extensions\{0}\policy" -f $b.Id)
   Set-RegValue -Path $policyKey -Name 'serverUrl'    -Value $ServerUrl
   Set-RegValue -Path $policyKey -Name 'enrollSecret' -Value $EnrollSecret
-  # Optional: pin identity explicitly instead of relying on the desktop-agent beacon.
-  # Set-RegValue -Path $policyKey -Name 'userEmail'  -Value 'user@cloudfuze.com'
+
+  # Identity, in order of trust. userEmail is what makes attribution independent
+  # of which profile the browser happens to be signed into.
+  if ($EnrolledUpn)   { Set-RegValue -Path $policyKey -Name 'userEmail'      -Value $EnrolledUpn }
+  if ($ComputerName)  { Set-RegValue -Path $policyKey -Name 'computerName'   -Value $ComputerName }
+  if ($IdentityDomain){ Set-RegValue -Path $policyKey -Name 'identityDomain' -Value $IdentityDomain }
+  if ($BrowserOnly)   { Set-RegValue -Path $policyKey -Name 'browserOnly'    -Value '1' }
 
   Write-Output ("Provisioned {0}: force-install + managed config for {1}" -f $b.Name, $b.Id)
 }

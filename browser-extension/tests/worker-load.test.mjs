@@ -927,3 +927,76 @@ test('the desktop agent, when present, still outranks the browser profile', asyn
   assert.equal(enroll.body.identitySource, 'agent_beacon');
   assert.equal(enroll.body.user, 'alice');
 });
+
+// --- A wrong name is worse than no name ----------------------------------------
+//
+// chrome.identity reports whichever account the BROWSER is signed into. On a
+// developer's or tester's machine that is routinely a throwaway or QA Google
+// account, and the API cannot tell that from a corporate identity — so taken at
+// face value it attributes enterprise AI usage to a fictional person, or to the
+// wrong real one. An anonymous row is understood to be anonymous; a confidently
+// wrong one gets acted on.
+
+test('a browser profile outside the corporate domain is refused, not attributed', async () => {
+  resetIdentityFleet({ managed: { browserOnly: true, identityDomain: 'cloudfuze.com' } });
+  globalThis.chrome.identity = {
+    getProfileUserInfo: (_opts, cb) => cb({ email: 'qa.tester42@gmail.com', id: '1' }),
+  };
+  await fireManagedChange();
+
+  const enroll = server.of('/api/v1/enroll').at(-1);
+  assert.equal(enroll.body.user, null, 'a personal test profile must not become the user');
+  assert.equal(enroll.body.identitySource, 'profile_domain_mismatch',
+    'and the reason is recorded, so this is not confused with "sign-in not enforced"');
+});
+
+test('a corporate profile still passes the domain guard', async () => {
+  resetIdentityFleet({ managed: { browserOnly: true, identityDomain: 'cloudfuze.com' } });
+  globalThis.chrome.identity = {
+    getProfileUserInfo: (_opts, cb) => cb({ email: 'Satya.Pinniti@CloudFuze.com', id: '1' }),
+  };
+  await fireManagedChange();
+
+  const enroll = server.of('/api/v1/enroll').at(-1);
+  // Case must not matter — the policy value and the profile email are typed by
+  // different people in different systems.
+  assert.equal(enroll.body.user, 'Satya.Pinniti@CloudFuze.com');
+  assert.equal(enroll.body.identitySource, 'browser_profile');
+});
+
+test('the domain guard cannot be fooled by a lookalike suffix', async () => {
+  resetIdentityFleet({ managed: { browserOnly: true, identityDomain: 'cloudfuze.com' } });
+  for (const email of ['attacker@notcloudfuze.com', 'x@cloudfuze.com.evil.io', 'cloudfuze.com@gmail.com']) {
+    globalThis.chrome.identity = { getProfileUserInfo: (_opts, cb) => cb({ email, id: '1' }) };
+    await fireManagedChange();
+    const enroll = server.of('/api/v1/enroll').at(-1);
+    assert.equal(enroll.body.user, null, `${email} must not be accepted`);
+  }
+});
+
+test('device-provisioned identity beats the browser profile entirely', async () => {
+  // What the Intune script pushes: the enrollment UPN as userEmail. Once that is
+  // present, whichever profile the browser is signed into is irrelevant — which
+  // is the entire point of sourcing identity from the device.
+  resetIdentityFleet({
+    managed: { browserOnly: true, identityDomain: 'cloudfuze.com', userEmail: 'satya.pinniti@cloudfuze.com' },
+  });
+  globalThis.chrome.identity = {
+    getProfileUserInfo: (_opts, cb) => cb({ email: 'qa.tester42@gmail.com', id: '1' }),
+  };
+  await fireManagedChange();
+
+  const enroll = server.of('/api/v1/enroll').at(-1);
+  assert.equal(enroll.body.user, 'satya.pinniti@cloudfuze.com');
+  assert.equal(enroll.body.identitySource, 'managed_policy');
+});
+
+test('enrollment reports which browser it is', async () => {
+  // Edge and Chrome have different identity guarantees, so the two fleets must be
+  // separable in the dashboard without cross-referencing anything.
+  resetIdentityFleet({ managed: { browserOnly: true } });
+  await fireManagedChange();
+  const enroll = server.of('/api/v1/enroll').at(-1);
+  assert.ok(['edge', 'chrome', 'other'].includes(enroll.body.browser),
+    `unexpected browser value: ${enroll.body.browser}`);
+});

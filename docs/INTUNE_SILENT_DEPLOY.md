@@ -177,6 +177,80 @@ GET /api/v1/machines        # find this machine by its id
 policy did not apply — that is the whole point of recording it. Check this on one
 machine before rolling out to everyone; it decides whether you need the agent.
 
+---
+
+## Part B3 — Identity from the DEVICE, not the browser (recommended)
+
+Everything above still lets a browser profile decide who someone is, and on a real
+estate that is not safe. Testers and developers routinely sign a work machine's
+Chrome into a throwaway or QA Google account. `chrome.identity` cannot tell that
+from a corporate identity, so it would report enterprise AI usage under a
+fictional persona — **a wrong name, which is worse than no name, because a wrong
+name gets acted on.**
+
+Intune already knows the truth, and the provisioning script runs on the device, so
+read it there and push it as policy.
+
+`scripts/intune-provision-extension.ps1` now reads:
+
+| Value | Source | Pushed as |
+|---|---|---|
+| Enrolled user's UPN | `HKLM\SOFTWARE\Microsoft\Enrollments\*\UPN` (written by Intune MDM enrollment) | `userEmail` |
+| Machine name | `$env:COMPUTERNAME` | `computerName` |
+| Corporate domain | `$IdentityDomain` in the CONFIG block | `identityDomain` |
+
+Verified on an Entra-joined CloudFuze machine: the enrollment key holds a real
+`user@cloudfuze.com` UPN with `EnrollmentType=6` (MDM). Confirm on any device
+before rollout:
+
+```powershell
+Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Enrollments' |
+  ForEach-Object { (Get-ItemProperty $_.PSPath -EA SilentlyContinue).UPN } |
+  Where-Object { $_ -like '*@*' }
+```
+
+Because the extension trusts managed policy **above** the browser profile, a test
+profile in Chrome then changes nothing — `identity_source` reads `managed_policy`
+and the name is the enrolled user's.
+
+`identityDomain` is the backstop for machines the script did not reach: a signed-in
+profile is accepted only if its email ends with `@<domain>`, and anything else is
+recorded as `profile_domain_mismatch` rather than attributed. Suffix matching is
+exact, so `notcloudfuze.com` and `cloudfuze.com.evil.io` are both refused.
+
+This also removes the Edge-vs-Chrome constraint from Part B2: with device-sourced
+identity, Chrome is fine on an M365-only estate. Enrollment reports which browser
+each install is (`browser`: `edge` / `chrome` / `other`) so the two fleets stay
+separable.
+
+### Caveats worth knowing before you rely on it
+
+- **Shared / kiosk machines** enrol under one UPN, so all usage on them attributes
+  to that user. Leave `userEmail` unset for those and let the domain-guarded
+  browser profile answer instead.
+- **Device-context script, user-specific value.** The UPN is read from the device's
+  MDM enrollment, which is the user the device was enrolled for — correct for
+  1:1 assigned laptops, not for multi-user desktops.
+- The script is idempotent; re-running it after a device is re-assigned updates the
+  pushed `userEmail` on the next run.
+
+### Which machines actually have the extension?
+
+Four ways, most accurate first:
+
+1. **This product.** Every enrolled machine in `GET /api/v1/machines` *is* an
+   extension install — the extension self-reports on install, with `browser` and
+   `identity_source`. Cross-reference against the Intune device list to find
+   machines that should have it and do not.
+2. **Microsoft Defender for Endpoint** — Advanced Hunting `DeviceTvmBrowserExtensions`
+   gives device ↔ extension ↔ browser directly. Needs Defender P2.
+3. **Edge for Business** (M365 admin center) — extension inventory per device, Edge only.
+4. **Chrome Browser Cloud Management** — per-device extension list in Google Admin;
+   requires enrolling the browsers into CBCM.
+
+Intune's own **Discovered apps** does *not* list browser extensions, so do not
+expect to find it there.
+
 ## Part C — Claude Code CLI (OTel)
 
 Push these as **device environment variables** (Intune Settings Catalog → *Environment

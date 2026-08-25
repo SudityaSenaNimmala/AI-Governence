@@ -101,7 +101,7 @@ async function setStored(key, value) {
 // browserOnly is a BOOLEAN and the only non-string key: it declares that this
 // fleet has no desktop agent, so the extension should not wait for a beacon
 // that will never arrive (see ENROLL_BEACON_GRACE_MS).
-const MANAGED_KEYS = ['serverUrl', 'enrollSecret', 'userEmail', 'employeeEmail', 'computerName', 'browserOnly'];
+const MANAGED_KEYS = ['serverUrl', 'enrollSecret', 'userEmail', 'employeeEmail', 'computerName', 'browserOnly', 'identityDomain'];
 async function getManagedConfig() {
   try {
     if (typeof chrome === 'undefined' || !chrome.storage?.managed) return {};
@@ -181,7 +181,28 @@ async function resolveIdentity(config) {
         try { chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, resolve); }
         catch { resolve(null); }
       });
-      if (info?.email) return { user: info.email, source: 'browser_profile' };
+      if (info?.email) {
+        // A BROWSER PROFILE IS NOT PROOF OF WHO THIS IS. Testers and developers
+        // routinely sign a work machine's Chrome into a throwaway or QA Google
+        // account, and this API cannot tell that from a corporate identity — so
+        // taken at face value it attributes enterprise AI usage to a fictional
+        // person, or to the wrong real one.
+        //
+        // A WRONG NAME IS WORSE THAN NO NAME. An anonymous row is understood to
+        // be anonymous; a confidently wrong one gets acted on. So when the admin
+        // declares the corporate domain, anything outside it is refused and
+        // recorded as such — the usage is still captured and still enforced, it
+        // just does not borrow someone else's identity.
+        const domain = String(config.identityDomain || '').trim().toLowerCase();
+        if (domain) {
+          const email = String(info.email).toLowerCase();
+          const suffix = domain.startsWith('@') ? domain : '@' + domain;
+          if (!email.endsWith(suffix)) {
+            return { user: null, source: 'profile_domain_mismatch' };
+          }
+        }
+        return { user: info.email, source: 'browser_profile' };
+      }
     }
   } catch { /* unsupported / not permitted — fall through */ }
   return { user: null, source: 'none' };
@@ -250,9 +271,16 @@ async function ensureToken() {
     ? computerName + '-browser-extension'
     : navigator.userAgent.split(/[\s/(]/)[0] + '-browser-extension';
   const { user, source: identitySource } = await resolveIdentity(config);
+  // Edge and Chrome have different identity guarantees (Entra work account vs
+  // Google account), so an admin auditing attribution needs to tell the two
+  // fleets apart without cross-referencing anything.
+  const ua = String(navigator.userAgent || '');
+  // Edge must be tested FIRST: its user agent contains "Chrome/" too, so the
+  // order here is what keeps an Edge install from reporting itself as Chrome.
+  const browser = /\bEdg\//.test(ua) ? 'edge' : (/\bChrome\//.test(ua) ? 'chrome' : 'other');
 
   try {
-    const enrollBody = { machineId, hostname, user, identitySource, enrollSecret: config.enrollSecret };
+    const enrollBody = { machineId, hostname, user, identitySource, browser, enrollSecret: config.enrollSecret };
     if (config.employeeEmail) enrollBody.employeeEmail = config.employeeEmail;
     const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/enroll`, {
       method: 'POST',

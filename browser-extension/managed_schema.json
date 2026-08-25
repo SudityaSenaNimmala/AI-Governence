@@ -30,6 +30,11 @@
       "title": "Browser-only fleet (no desktop agent)",
       "description": "Set true when the desktop agent is not deployed. Skips the five-minute wait for an agent identity beacon so the extension enrolls immediately on install.",
       "type": "boolean"
+    },
+    "identityDomain": {
+      "title": "Corporate email domain for identity",
+      "description": "When set, a signed-in browser profile is only accepted as the user identity if its email ends with this domain. Prevents a tester or developer signed into a personal/QA browser profile from being attributed as the user. Example: cloudfuze.com",
+      "type": "string"
     }
   }
 }
