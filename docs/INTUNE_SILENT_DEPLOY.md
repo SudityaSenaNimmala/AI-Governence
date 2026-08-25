@@ -285,6 +285,19 @@ The only enterprise answer is to remove the window. Set
 `$DisablePrivateBrowsing = $true` in the script and it writes
 `IncognitoModeAvailability = 1` for every browser above.
 
+#### Decision: accepted, not overlooked (CloudFuze, 2026-08-25)
+
+`$DisablePrivateBrowsing` stays `$false`. AI used in an Incognito / InPrivate
+window is **knowingly ungoverned** — no capture, no blocking, no notice, no record
+that it happened. The trade was made deliberately: removing private browsing for
+the whole company was judged more disruptive than the gap.
+
+Written down because the alternative reading — that nobody noticed — is the one an
+auditor will assume, and because the flag's default alone cannot distinguish the
+two. Revisit if AI usage in private windows ever needs to be provably zero; the
+only mechanism is `IncognitoModeAvailability = 1`, which the script already knows
+how to write.
+
 It is **off by default**, because it changes how everyone in the company browses
 and that is your call, not a default worth assuming. Leaving it off means
 accepting that anyone who opens a private window bypasses AI governance entirely.
