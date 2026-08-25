@@ -128,7 +128,7 @@ mountIdentity(app, db);
 mountRiskScore(app, db);
 mountRegistry(app, db);
 mountAccessRequests(app, db);
-mountExtensionHosting(app);
+mountExtensionHosting(app, db);
 mountBrowserCoverage(app, db);
 mountWebhooks(app, db);
 mountConnections(app, db);

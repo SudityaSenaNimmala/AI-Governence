@@ -24,10 +24,12 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { a } from '../util.js';
+import { ENROLL_SECRET, ADMIN_TOKEN } from '../auth.js';
 import { createZip } from '../lib/zip.js';
 import {
-  extensionIdFromDer, extensionIdFromKey, manifestKeyFromPem, packCrx, updateManifestXml,
+  extensionIdFromDer, manifestKeyFromPem, packCrx, updateManifestXml,
 } from '../lib/crx.js';
+import { getOrCreateSigningKey } from '../lib/crx-key.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -65,23 +67,13 @@ function baseUrl(req) {
 const SKIP = new Set(['node_modules', 'tests', '.git', 'package-lock.json', 'package.json']);
 const EXT_SRC = join(__dirname, '..', '..', '..', 'browser-extension');
 
-const SIGNING_KEY = (() => {
-  const raw = process.env.CRX_SIGNING_KEY || '';
-  if (!raw.trim()) return null;
-  // Accept the PEM directly or base64-wrapped, since env plumbing mangles
-  // newlines and a silently-truncated key would produce a package that installs
-  // nowhere.
-  const pem = raw.includes('BEGIN')
-    ? raw.replace(new RegExp(String.raw`\\n`, 'g'), String.fromCharCode(10))
-    : Buffer.from(raw, 'base64').toString('utf8');
-  return pem.includes('BEGIN') ? pem : null;
-})();
-
 let _built = null;   // { crx, id, version }
 
-function buildPackage() {
+async function buildPackage(db) {
   if (_built) return _built;
-  if (!SIGNING_KEY) return null;
+  const key = await getOrCreateSigningKey(db);
+  if (!key) return null;
+  const SIGNING_KEY = key.pem;
 
   const manifestPath = join(EXT_SRC, 'manifest.json');
   if (!existsSync(manifestPath)) return null;
@@ -108,8 +100,23 @@ function buildPackage() {
 
   const { crx, id } = packCrx(createZip(files, { compress: true }), SIGNING_KEY);
   _built = { crx, id, version: manifest.version };
-  console.log(`[extension] packed ${id} v${manifest.version} (${(crx.length / 1048576).toFixed(1)} MB) from source`);
+  console.log(`[extension] packed ${id} v${manifest.version} (${(crx.length / 1048576).toFixed(1)} MB) from source, key from ${key.source}`);
   return _built;
+}
+
+// The package endpoints are public by necessity; the provisioning script is not,
+// because it carries the enroll secret. Checked inline rather than via middleware
+// so the public and admin routes can share one mount.
+function requireAdmin(req, res) {
+  const header = String(req.headers.authorization || '');
+  const token = header.startsWith('Bearer ') ? header.slice(7) : String(req.query.adminToken || '');
+  if (token && token === ADMIN_TOKEN) return true;
+  res.status(401).json({
+    error: 'admin token required',
+    detail: 'This script contains the enroll secret. Pass it as '
+      + 'Authorization: Bearer <ADMIN_TOKEN> or ?adminToken=',
+  });
+  return false;
 }
 
 const NOT_BUILT = {
@@ -120,7 +127,7 @@ const NOT_BUILT = {
     + 'EXTENSION_DIST_DIR at it).',
 };
 
-export function mountExtensionHosting(app) {
+export function mountExtensionHosting(app, db = null) {
   const crxPath = join(DIST_DIR, CRX_NAME);
 
   // MOUNTED UNDER /api/v1 BECAUSE THAT IS WHAT THE PROXY FORWARDS. The deployed
@@ -136,14 +143,14 @@ export function mountExtensionHosting(app) {
 
   // dist/ wins when present (a locally packed package or a mounted volume);
   // otherwise pack from source. Either way the callers below see one shape.
-  const resolve = () => {
+  const resolve = async () => {
     if (existsSync(crxPath)) {
       const infoPath = join(DIST_DIR, 'manifest-info.json');
       let info = null;
       try { info = JSON.parse(readFileSync(infoPath, 'utf8')); } catch { /* handled */ }
       return { crx: readFileSync(crxPath), id: info?.id ?? null, version: info?.version ?? null, from: 'dist' };
     }
-    const built = buildPackage();
+    const built = await buildPackage(db);
     return built ? { ...built, from: 'source' } : null;
   };
 
@@ -152,7 +159,7 @@ export function mountExtensionHosting(app) {
   // A manifest baked at pack time carries whatever URL the packer was told, and if
   // that is wrong every machine installs once and then never updates.
   routes('/update.xml', a(async (req, res) => {
-    const info = resolve();
+    const info = await resolve();
     if (!info) return res.status(503).json(NOT_BUILT);
     if (!info.id || !info.version) {
       return res.status(503).json({
@@ -172,7 +179,7 @@ export function mountExtensionHosting(app) {
   }));
 
   routes(`/${CRX_NAME}`, a(async (_req, res) => {
-    const pkg = resolve();
+    const pkg = await resolve();
     if (!pkg) return res.status(503).json(NOT_BUILT);
     // The CRX content type is what tells the browser this is an extension package
     // rather than something to download; serving it as octet-stream makes Chrome
@@ -182,10 +189,69 @@ export function mountExtensionHosting(app) {
     res.send(pkg.crx);
   }));
 
+  // ── The provisioning script, generated per deployment ─────────────────────
+  //
+  // WHAT THIS REPLACES. Rolling out at CloudFuze meant editing a script in the
+  // repo: paste the extension ID, the enroll secret, the server URL, the identity
+  // domain. That is fine once for ourselves and unacceptable as a product — every
+  // customer would be hand-editing PowerShell, and every value they got wrong
+  // would fail silently in the way this whole flow keeps demonstrating.
+  //
+  // So the server emits the script already filled in from what it knows about
+  // itself: its own URL, its own enroll secret, the ID of the package it is
+  // serving. The admin supplies only what the server cannot know — their Chrome
+  // CBCM token and their corporate email domain — as query parameters.
+  //
+  // ADMIN-AUTHENTICATED, unlike the package endpoints. The .crx is public because
+  // a browser updater cannot present credentials, but this script contains the
+  // enroll secret, which is the credential for joining the fleet.
+  routes('/provisioning-script', a(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+
+    const platform = String(req.query.platform || 'windows').toLowerCase();
+    if (!['windows', 'macos'].includes(platform)) {
+      return res.status(400).json({ error: 'platform must be windows or macos' });
+    }
+    const pkg = await resolve();
+    if (!pkg?.id) return res.status(503).json(NOT_BUILT);
+
+    const file = platform === 'windows'
+      ? 'intune-provision-extension.ps1'
+      : 'macos-provision-extension.sh';
+    const templatePath = join(__dirname, '..', '..', '..', 'scripts', file);
+    if (!existsSync(templatePath)) {
+      return res.status(500).json({ error: `provisioning template missing: ${file}` });
+    }
+    let src = readFileSync(templatePath, 'utf8');
+
+    // Everything the server knows about itself. A value left as a placeholder is
+    // a value the admin has to discover, so none are.
+    const cbcm = String(req.query.cbcmToken || '').trim();
+    const domain = String(req.query.identityDomain || '').trim();
+    const base = baseUrl(req);
+
+    src = src.replace(/REPLACE_WITH_ID_FROM_pack-crx/g, pkg.id)
+      .replace(/REPLACE_WITH_ENROLL_SECRET/g, ENROLL_SECRET);
+
+    if (platform === 'windows') {
+      src = src.replace(/\$ServerUrl {4}= '[^']*'/, `$ServerUrl    = '${base}'`);
+      if (domain) src = src.replace(/\$IdentityDomain = '[^']*'/, `$IdentityDomain = '${domain}'`);
+      if (cbcm) src = src.replace("$ChromeCbcmToken = ''", `$ChromeCbcmToken = '${cbcm}'`);
+    } else {
+      src = src.replace(/SERVER_URL="[^"]*"/, `SERVER_URL="${base}"`);
+      if (domain) src = src.replace(/IDENTITY_DOMAIN="[^"]*"/, `IDENTITY_DOMAIN="${domain}"`);
+      if (cbcm) src = src.replace('CBCM_TOKEN=""', `CBCM_TOKEN="${cbcm}"`);
+    }
+
+    res.type('text/plain');
+    res.setHeader('Content-Disposition', `attachment; filename="${file}"`);
+    res.send(src);
+  }));
+
   // Small helper for the rollout itself: confirms what is being served and the ID
   // the policy must name. Saves an admin from decoding a binary to check.
   routes('/extension-info', a(async (req, res) => {
-    const info = resolve();
+    const info = await resolve();
     if (!info) return res.status(503).json(NOT_BUILT);
     res.json({
       extension_id: info.id,
