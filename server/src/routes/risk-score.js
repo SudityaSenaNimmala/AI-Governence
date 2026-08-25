@@ -369,13 +369,49 @@ function computeScore(profile, metrics, sanctionedKeys) {
   const volumeRatio = dailyAvgPrev > 0 ? dailyAvgRecent / dailyAvgPrev : (recent7d > 10 ? 3 : 0);
   const volumeScore = volumeRatio > 5 ? 100 : volumeRatio > 3 ? 70 : volumeRatio > 2 ? 40 : 0;
 
-  // Weighted composite score
-  const rawScore =
-    (dlpScore * WEIGHTS.dlp_violations +
-     overrideScore * WEIGHTS.enforcement_overrides +
-     shadowScore * WEIGHTS.shadow_tools +
-     sensitivityScore * WEIGHTS.data_sensitivity +
-     volumeScore * WEIGHTS.volume_anomaly) / 100;
+  // WEIGHTED COMPOSITE, NORMALISED OVER THE FACTORS THAT CAN ACTUALLY BE MEASURED.
+  //
+  // An unmeasurable factor used to contribute a zero — that is, it was scored as
+  // "clean". This file's own header rejects exactly that reasoning for a profile
+  // with no machine: no data is not the same as no risk, and treating it as safe
+  // is "precisely backwards for a governance tool". The same mistake applied one
+  // level down, per factor.
+  //
+  // Concretely: enforcement_overrides counts a user bypassing a block, and the
+  // browser extension offers no bypass — the block modal only lets you edit the
+  // prompt or send a MASKED version, which is compliance rather than override. So
+  // on a browser-only rollout that factor could never be anything but zero, and it
+  // carries 25 of the 100 weight. The reachable ceiling was therefore 75, against
+  // bands where "critical" starts at 81 — meaning no browser-only employee could
+  // EVER be labelled critical, however badly they behaved, and any alert filtering
+  // on critical returned nothing for ever.
+  //
+  // So the denominator is the weight in play rather than a constant 100. A factor
+  // is in play when this profile has a data source that could produce it; a factor
+  // that IS measurable and came back clean still contributes its zero, because
+  // that is a real observation.
+  // CONSERVATIVE: only drop the weight when we positively know this profile has no
+  // agent. A missing `sources` means unknown provenance — legacy rows predate the
+  // field — and guessing "extension-only" there would inflate scores on data we
+  // cannot vouch for. Unknown therefore keeps the full denominator, so the only
+  // profiles that change are the ones explicitly recorded as extension-only.
+  const overridesMeasurable = !Array.isArray(profile.sources)
+    || profile.sources.includes('agent');
+
+  const applicable = [
+    { score: dlpScore,         weight: WEIGHTS.dlp_violations },
+    { score: shadowScore,      weight: WEIGHTS.shadow_tools },
+    { score: sensitivityScore, weight: WEIGHTS.data_sensitivity },
+    { score: volumeScore,      weight: WEIGHTS.volume_anomaly },
+  ];
+  if (overridesMeasurable) {
+    applicable.push({ score: overrideScore, weight: WEIGHTS.enforcement_overrides });
+  }
+
+  const totalWeight = applicable.reduce((sum, f) => sum + f.weight, 0);
+  const rawScore = totalWeight === 0
+    ? 0
+    : applicable.reduce((sum, f) => sum + f.score * f.weight, 0) / totalWeight;
 
   const finalScore = Math.min(Math.round(rawScore), 100);
 
@@ -385,6 +421,10 @@ function computeScore(profile, metrics, sanctionedKeys) {
     email: profile.email,
     score: finalScore,
     level: scoreLevel(finalScore),
+    // Which factors counted, so a reader can tell a clean measurement from an
+    // impossible one — the distinction that made the ceiling wrong.
+    scored_over_weight: totalWeight,
+    excluded_factors: overridesMeasurable ? [] : ['enforcement_overrides'],
     factors: {
       dlp_violations:       { raw: dlpViolations, score: dlpScore, weight: WEIGHTS.dlp_violations },
       enforcement_overrides:{ raw: overrides, score: overrideScore, weight: WEIGHTS.enforcement_overrides },

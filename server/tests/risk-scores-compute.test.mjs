@@ -273,3 +273,82 @@ test('tool usage older than the window is excluded', async () => {
     assert.equal(shadowRaw(await compute()), 1, 'only the in-window tool counts');
   });
 });
+
+// ── The reachable ceiling ──────────────────────────────────────────────────
+//
+// THE DEFECT THIS PINS DOWN. enforcement_overrides counts a user bypassing a
+// block, and the browser extension offers no bypass — its block modal lets you
+// edit the prompt or send a MASKED version, which is compliance, not override. So
+// on a browser-only rollout that factor could never be anything but zero, while
+// carrying 25 of the 100 weight. The reachable ceiling was 75 against bands where
+// critical starts at 81, so no browser-only employee could EVER be labelled
+// critical however badly they behaved, and any alert filtering on critical
+// returned nothing for ever.
+//
+// Scoring an unmeasurable factor as zero is scoring it as CLEAN. This file's
+// header already rejects that reasoning one level up, for profiles with no
+// machine: no data is not no risk.
+
+const maxedOut = (sources) => async (db) => {
+  await db.collection('employee_profiles').insertOne({
+    id: 'p1', display_name: 'Worst Case', machine_ids: ['m1'], sources,
+  });
+  const now = new Date().toISOString();
+  // Enough of everything to peg every measurable factor at 100.
+  for (let i = 0; i < 20; i += 1) {
+    await db.collection('dlp_events').insertOne({
+      machine_id: 'm1', event_kind: 'enforcement_block',
+      secret_class: 'critical', occurred_at: now,
+    });
+  }
+  // volume_anomaly measures a SPIKE, not raw volume: it compares the last 7 days
+  // against the daily average of the period before it. One older in-window event
+  // gives that comparison a baseline to be a spike against — without it the ratio
+  // lands in the middle band and the factor never pegs, which is what made this
+  // test's first expectation wrong rather than the code.
+  await db.collection('dlp_events').insertOne({
+    machine_id: 'm1', event_kind: 'enforcement_block', secret_class: 'critical',
+    occurred_at: new Date(Date.now() - 20 * 86400000).toISOString(),
+  });
+  for (let i = 0; i < 10; i += 1) {
+    await db.collection('tool_usage').insertOne({
+      machine_id: 'm1', tool_key: `shadow${i}.ai`, last_used_at: new Date(),
+    });
+  }
+};
+
+test('a browser-only employee can reach critical', async () => {
+  await withServer(maxedOut(['extension']), async ({ compute }) => {
+    const s = (await compute()).scores[0];
+    assert.equal(s.score, 100,
+      'every measurable factor pegged must reach 100, not the old ceiling of 75');
+    assert.equal(s.level, 'critical',
+      'critical was mathematically unreachable on a browser-only rollout');
+    assert.deepEqual(s.excluded_factors, ['enforcement_overrides'],
+      'and the report says which factor could not be measured');
+    assert.equal(s.scored_over_weight, 75);
+  });
+});
+
+test('an agent profile still scores over the full weight', async () => {
+  // The fix must not quietly inflate profiles where the factor IS measurable: a
+  // measured-and-clean zero is a real observation and keeps its weight.
+  await withServer(maxedOut(['agent', 'extension']), async ({ compute }) => {
+    const s = (await compute()).scores[0];
+    assert.equal(s.scored_over_weight, 100, 'the override weight stays in play');
+    assert.deepEqual(s.excluded_factors, []);
+    // 75 of 100 weight pegged, overrides genuinely clean.
+    assert.equal(s.score, 75);
+    assert.equal(s.level, 'high');
+  });
+});
+
+test('a measurable-but-clean override still counts against the denominator', async () => {
+  // Otherwise an agent machine with no overrides would be scored as if the factor
+  // did not exist, and would rank identically to one where it cannot be seen.
+  await withServer(maxedOut(['agent']), async ({ compute }) => {
+    const s = (await compute()).scores[0];
+    assert.equal(s.scored_over_weight, 100);
+    assert.ok(s.score < 100, 'a clean factor is not the same as an absent one');
+  });
+});
