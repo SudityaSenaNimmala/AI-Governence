@@ -4097,16 +4097,19 @@ function AdminAuthNotice({ what }) {
     </div>);
   }
 
-  // Deployed: one line, no input, no token, no internals.
-  return (<div className="aihub_card" style={{borderLeft:"3px solid #f59e0b"}}>
-    <div style={{display:"flex",gap:10,alignItems:"center"}}>
-      <Shield size={17} color="#f59e0b" style={{flexShrink:0}}/>
-      <p className="aihub_text_muted" style={{fontSize:13.2,lineHeight:1.6,margin:0}}>
-        {what} is restricted to administrators, and this dashboard has not been granted
-        administrator access. Ask whoever runs your governance server to enable it.
-      </p>
-    </div>
-  </div>);
+  // DEPLOYED: RENDER NOTHING. Asked for explicitly — no banner, no field, no
+  // mention of credentials anywhere in the product UI.
+  //
+  // THE TRADE-OFF, so it is not rediscovered as a bug. With the notice gone, a 401
+  // is indistinguishable from an empty result: the page shows "0 Pending" and "No
+  // pending requests" whether there are genuinely none or the dashboard simply
+  // could not read them. The count is asserted without being verified.
+  //
+  // That is survivable only because the intended state is ADMIN_AUTH_OPEN=true on
+  // the server, where no 401 occurs and the zeros are real. If those panels ever
+  // read zero unexpectedly, check /api/v1/health for admin_auth:"required" — the UI
+  // will not say it.
+  return null;
 }
 
 // Kept as a function call so the existing call sites are unchanged.
