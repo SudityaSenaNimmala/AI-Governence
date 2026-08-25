@@ -223,6 +223,57 @@ A local (non-Entra) Windows account has no work UPN. The user run leaves identit
 unset in that case rather than substituting the machine's enrollment UPN, which
 would name a different person.
 
+### macOS
+
+The PowerShell script does nothing on a Mac, so those machines had no extension at
+all. `scripts/macos-provision-extension.sh` covers them. Deploy as an Intune
+**shell script** with *Run script as signed-in user* = **No** (root), one run only.
+
+Same six browsers, same signed package, same extension ID. There is no registry:
+
+| What | Where |
+|---|---|
+| Force-install list | `/Library/Managed Preferences/<bundle-id>.plist` |
+| Managed config the extension reads | `/Library/Managed Preferences/<bundle-id>.extensions.<ext-id>.plist` |
+
+Bundle ids: `com.google.Chrome`, `com.microsoft.Edge`, `com.brave.Browser`,
+`com.vivaldi.Vivaldi`, `com.operasoftware.Opera`, `org.chromium.Chromium`.
+
+#### Identity on macOS is weaker than on Windows — deliberately stated
+
+Windows hands us the enrolled user's UPN in the registry; that is ground truth.
+macOS has no guaranteed equivalent, so the script tries several sources in order
+and **prints which one answered**:
+
+| Source | Reported as |
+|---|---|
+| Company Portal's registered account | `company_portal` |
+| Company Portal, older key name | `company_portal_alt` |
+| The account's `EMailAddress` in the local directory | `dscl_email` |
+| The MDM enrollment profile | `mdm_enrollment` |
+| Nothing found | falls back to the browser profile |
+
+All four are best-effort. Run it on one pilot Mac and read the printed source
+rather than assuming — that line is the whole point of it printing.
+
+Two things that would otherwise have failed silently, both handled:
+
+- **The lookups run as the console user, not root.** `defaults read` is per-user,
+  and as root it reads `/var/root`, where Company Portal has never written
+  anything. Every user-scoped lookup is executed as the person actually logged in
+  (`stat -f%Su /dev/console`), and treats "root" as nobody-logged-in.
+- **There is no per-user equivalent of the Windows HKCU trick.**
+  `chrome.storage.managed` is populated *only* from `/Library/Managed Preferences`,
+  which is root-owned. A plist written into a user's own domain is ignored — the
+  write succeeds and `defaults read` shows the value, but the extension never sees
+  it. So on shared Macs, set `IDENTITY_DOMAIN` and let the extension use the
+  signed-in browser profile: that is per-person by construction, and the domain
+  guard means it cannot attribute a personal account.
+
+Net effect: **on Macs, expect `identity_source` to be `managed_policy` where a
+lookup succeeded and `browser_profile` otherwise** — both are correct names, and
+neither can be a wrong one.
+
 ### The private-browsing hole
 
 **A force-installed extension is disabled in Incognito / InPrivate, and no policy
