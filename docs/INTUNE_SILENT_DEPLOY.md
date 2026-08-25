@@ -274,6 +274,51 @@ Net effect: **on Macs, expect `identity_source` to be `managed_policy` where a
 lookup succeeded and `browser_profile` otherwise** — both are correct names, and
 neither can be a wrong one.
 
+### The CBCM enrollment token — it must be YOUR domain's
+
+Chrome only honours an off-store force-install on a machine it considers managed:
+joined to an Active Directory domain, or enrolled in Chrome Browser Cloud
+Management. Entra/Azure-AD join and Intune MDM do **not** satisfy it. On an
+Entra-only estate, that makes the CBCM token effectively required for Chrome.
+
+Get it from a Google Admin console **CloudFuze owns**:
+admin.google.com → Devices → Chrome → Managed browsers → Enrollment token.
+
+#### Any token would technically work, which is exactly the problem
+
+The token is an enrollment credential, not a licence check. It does not verify that
+the browser belongs to the same domain as the token. So a token from someone else's
+Google organisation *would* make Chrome accept the install — and would also enrol
+every CloudFuze browser into **that organisation's** management.
+
+Whoever administers the console the token came from can then push Chrome policy to
+those browsers, and see them in their Managed browsers inventory. That includes
+force-installing extensions of their own. Using a token from a domain you do not
+control hands browser-level control of the fleet to a third party, so it is worse
+than having no token and leaving Chrome ungoverned.
+
+#### What counts as a usable console
+
+- **Google Workspace on cloudfuze.com** — if it exists, use it. Check by opening
+  admin.google.com signed in as a cloudfuze.com account.
+- **Cloud Identity Free** — no Workspace subscription needed, free for a small
+  number of admin seats, gives the same Chrome management. Requires proving you own
+  the domain (a DNS record).
+- **A personal @gmail.com account cannot do this.** Enrollment tokens require a
+  managed domain; a consumer account has no admin console.
+
+Another domain CloudFuze owns would also be safe, since the requirement is control
+rather than a name match — but the browsers then appear under that organisation's
+inventory, which is confusing for whoever inherits this. Prefer cloudfuze.com.
+
+#### What enrolling actually grants
+
+CBCM gives the console Chrome policy authority over those browsers plus an
+inventory of browser version, installed extensions and applied policies. It does
+not give it browsing history. Worth knowing before enrolling, because it is a real
+transfer of authority — the argument for doing it anyway is that the alternative is
+an ungoverned Chrome on every machine.
+
 ### The private-browsing hole
 
 **A force-installed extension is disabled in Incognito / InPrivate, and no policy
