@@ -107,6 +107,18 @@ async function buildPackage(db) {
 // The package endpoints are public by necessity; the provisioning script is not,
 // because it carries the enroll secret. Checked inline rather than via middleware
 // so the public and admin routes can share one mount.
+// DELIBERATELY NOT AFFECTED BY ADMIN_AUTH_OPEN, and that asymmetry is the point.
+//
+// That flag exists so dashboard PANELS work before admin OAuth ships — the cost
+// there is that someone could read or approve access requests. This endpoint
+// returns the provisioning script, which contains the ENROLL SECRET: the
+// credential every extension and tracker presents to join the fleet. Handing that
+// to anyone who can reach the API would let an outsider enrol machines and post
+// fabricated events, which is a different order of problem from an open review
+// queue.
+//
+// It also costs nothing to keep gated: an admin fetches this once during rollout
+// and can pass ?adminToken= then, whereas a dashboard panel is opened daily.
 function requireAdmin(req, res) {
   const header = String(req.headers.authorization || '');
   const token = header.startsWith('Bearer ') ? header.slice(7) : String(req.query.adminToken || '');

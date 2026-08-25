@@ -43,7 +43,7 @@ import { mountApprovals } from './routes/approvals.js';
 import { mountSiem } from './routes/siem.js';
 import { seedAiPlatforms } from './seed-platforms.js';
 import { seedDefaultRoutingRules } from './seed-routing.js';
-import { JWT_SECRET, ENROLL_SECRET, ADMIN_TOKEN } from './auth.js';
+import { JWT_SECRET, ENROLL_SECRET, ADMIN_TOKEN, adminAuthIsOpen } from './auth.js';
 import governanceRouter from './governance/app.js';
 
 const PORT = Number(process.env.PORT) || 8787;
@@ -66,7 +66,13 @@ mountTracingIngestBodyLimit(app);
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/api/v1/health', (req, res) => {
-  res.json({ ok: true, service: 'ai-governance-server', version: '0.1.0', dbKind: 'mongodb' });
+  res.json({
+    ok: true, service: 'ai-governance-server', version: '0.1.0', dbKind: 'mongodb',
+    // Reported so an open admin surface is discoverable without reading the host's
+    // .env. A temporary hole that nothing mentions is a hole nobody remembers to
+    // close, and health is the one place ops already looks.
+    admin_auth: adminAuthIsOpen() ? 'open' : 'required',
+  });
 });
 
 // ── Feature flags (server-driven) ────────────────────────────────────────────
