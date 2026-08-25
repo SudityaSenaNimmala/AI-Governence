@@ -6635,9 +6635,7 @@ const TAB_GROUPS_RAW = {
       { slug: "policies", label: "Policies", feat: "policies", component: function PoliciesPage() {
         return <AgentGovernanceProvider><PoliciesTab/></AgentGovernanceProvider>;
       } },
-      { slug: "risk", label: "Risk Scores", component: function RiskScorePage() {
-        return <><FeatureDepWarning featureKey="risk_scores"/><RiskScoreView/></>;
-      }, feat: "risk_scores" },
+      { slug: "risk", label: "Risk Scores", component: RiskScoreView, feat: "risk_scores" },
     ],
   },
   SDK: {
