@@ -96,7 +96,8 @@ files[mi] = { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest, 
 
 const { crx } = packCrx(createZip(files, { compress: true }), keyPem);
 const crxName = 'cloudfuze-ai-governance.crx';
-const codebase = `${baseUrl}/downloads/${crxName}`;
+// /api/v1 is what the deployed host's proxy forwards; /downloads 404s there.
+const codebase = `${baseUrl}/api/v1/extension/${crxName}`;
 
 writeFileSync(join(outDir, crxName), crx);
 writeFileSync(join(outDir, 'update.xml'), updateManifestXml({
@@ -109,8 +110,26 @@ writeFileSync(join(outDir, 'manifest-info.json'), JSON.stringify({
   id: extensionId, version: manifest.version,
 }, null, 2) + '\n');
 
+// ── Deployment-ready provisioning scripts ───────────────────────────────────
+//
+// The templates in scripts/ keep their placeholders on purpose: an extension ID is
+// harmless, but the enroll secret must never be committed. So filled-in copies are
+// generated into dist/provision/ (gitignored) and those are what gets uploaded to
+// Intune. Pass --secret, or set ENROLL_SECRET, to fill it in; without it the copy
+// still carries the placeholder and the pre-flight will refuse the rollout.
+const provisionDir = join(root, 'dist', 'provision');
+mkdirSync(provisionDir, { recursive: true });
+const enrollSecret = args.get('secret') || process.env.ENROLL_SECRET || '';
+
+for (const name of ['intune-provision-extension.ps1', 'macos-provision-extension.sh']) {
+  let src = readFileSync(join(root, 'scripts', name), 'utf8');
+  src = src.replace(/REPLACE_WITH_ID_FROM_pack-crx/g, extensionId);
+  if (enrollSecret) src = src.replace(/REPLACE_WITH_ENROLL_SECRET/g, enrollSecret);
+  writeFileSync(join(provisionDir, name), src);
+}
+
 // ── What to do with it ──────────────────────────────────────────────────────
-const updateUrl = `${baseUrl}/downloads/update.xml`;
+const updateUrl = `${baseUrl}/api/v1/extension/update.xml`;
 console.log(`
 Packed ${files.length} files — ${(crx.length / 1024).toFixed(0)} KB
 
@@ -118,14 +137,13 @@ Packed ${files.length} files — ${(crx.length / 1024).toFixed(0)} KB
   Version      : ${manifest.version}
   Output       : dist/extension/
 
-Host these two files at ${baseUrl}/downloads/ :
+Served by the governance server at ${baseUrl}/api/v1/extension/ :
   ${crxName}
   update.xml
 
-Then set in scripts/intune-provision-extension.ps1:
-  $ChromeExtensionId = '${extensionId}'
-  $EdgeExtensionId   = '${extensionId}'
-  $UpdateUrl         = '${updateUrl}'
+Upload these to Intune (already filled in, ${enrollSecret ? 'including the enroll secret' : 'BUT the enroll secret is still a placeholder — re-run with --secret'}):
+  dist/provision/intune-provision-extension.ps1   (Windows, device/SYSTEM context)
+  dist/provision/macos-provision-extension.sh     (macOS, root)
 
 Self-hosted force-install works on MANAGED machines only. Edge allows it on any
 Intune-managed device. Chrome requires the machine to be domain-joined or enrolled

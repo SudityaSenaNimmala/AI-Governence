@@ -44,7 +44,7 @@ PER_USER_IDENTITY=0                            # 1 on SHARED Macs: skips writing
 # -----------------------------------------------------------------------------
 
 MANAGED_DIR="/Library/Managed Preferences"
-UPDATE_URL="${SERVER_URL}/downloads/update.xml"
+UPDATE_URL="${SERVER_URL}/api/v1/extension/update.xml"
 
 if [[ "$EXTENSION_ID" == REPLACE_* ]]; then
   echo "EXTENSION_ID is not set. Run: node scripts/pack-crx.mjs --url $SERVER_URL" >&2

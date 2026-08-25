@@ -2,7 +2,7 @@
   CloudFuze AI-Governance — silent browser-extension provisioning for Intune / GPO.
 
   Deploy this as an Intune Win32 app or a Platform (device) PowerShell script in
-  SYSTEM context. It does two things, for BOTH Microsoft Edge and Google Chrome:
+  SYSTEM context. It does two things, for EVERY Chromium-family browser:
 
     1. Force-installs the extension by its stable ID (user cannot remove it).
     2. Pushes the managed config (serverUrl + enrollSecret) into the browser's
@@ -20,10 +20,6 @@
 #>
 
 # ---- CONFIG (edit these) -----------------------------------------------------
-# The extension ID is ASSIGNED BY THE STORE when you first publish. Chrome and Edge
-# assign DIFFERENT IDs to the same extension, so set both after publishing.
-#   Chrome: chrome://extensions (Developer mode) or the Web Store item URL.
-#   Edge:   edge://extensions or the Edge Add-ons item URL.
 # SELF-HOSTED, NOT STORE-PUBLISHED. We sign the package ourselves, so the ID is
 # derived from our signing key and is the SAME in both browsers — a store would
 # have assigned two different ones. Produce the package and this ID with:
@@ -35,7 +31,7 @@ $ServerUrl    = 'https://agentgovernence.cftools.live'      # governance server
 $EnrollSecret = 'REPLACE_WITH_ENROLL_SECRET'               # shared secret from IT
 # Where the browsers fetch the package and poll for updates. This is OUR server,
 # not a store. Must be HTTPS and reachable from every managed machine.
-$UpdateUrl       = "$ServerUrl/downloads/update.xml"
+$UpdateUrl       = "$ServerUrl/api/v1/extension/update.xml"
 $EdgeUpdateUrl   = $UpdateUrl
 $ChromeUpdateUrl = $UpdateUrl
 
