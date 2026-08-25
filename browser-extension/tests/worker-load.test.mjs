@@ -53,6 +53,10 @@ function makeFetch() {
     calls,
     /** route('POST /api/v1/replays', Response | (req) => Response) */
     route(key, value) { routes.set(key, value); return this; },
+    /** Remove a route. reset() only clears the call log, so without this a
+     *  route registered by an earlier test keeps answering later ones — which
+     *  silently turned a "no desktop agent" fixture into "agent present". */
+    unroute(key) { routes.delete(key); return this; },
     of(path) { return calls.filter((c) => c.path === path); },
     /** Lifetime call count for a path, unaffected by reset(). */
     total(path) { return totals.get(path) || 0; },
@@ -816,4 +820,110 @@ test('the worker schedules its periodic refreshes at load', () => {
   for (const ms of _scheduledIntervals) {
     assert.ok(Number.isFinite(ms) && ms > 0, `interval scheduled with a bad period: ${ms}`);
   }
+});
+
+// --- Identity on a browser-only fleet ------------------------------------------
+//
+// WHY THIS MATTERS MORE THAN IT LOOKS. A rollout that force-installs the extension
+// and does NOT deploy the desktop agent has no identity beacon, so attribution
+// rests entirely on the browser profile being signed in — an admin policy the
+// extension cannot verify. When it is missing, nothing breaks visibly: the
+// extension enrolls, enforces, captures, and every row reads "Browser User (…)".
+// An intentionally anonymous deployment and a misconfigured one look identical,
+// and the misconfiguration is silent on exactly the machines nobody inspects.
+//
+// So enrollment carries WHERE the identity came from, including 'none'.
+
+function resetIdentityFleet({ managed = {}, beacon = null } = {}) {
+  for (const k of ['serverUrl', 'enrollSecret', 'userEmail', 'employeeEmail', 'computerName', 'browserOnly']) {
+    delete chrome._managed[k];
+  }
+  Object.assign(chrome._managed, { serverUrl: 'https://gov.example.test', enrollSecret: 'managed-secret' }, managed);
+  delete chrome._store['cfai.firstEnrollAt'];
+  delete chrome._store['cfai.config'];
+  delete globalThis.chrome.identity;
+  server.reset();
+  server.unroute('/cfai/identity');          // no agent unless this fixture says so
+  if (beacon) server.route('/cfai/identity', jsonResponse(200, beacon));
+}
+
+const fireManagedChange = async () => {
+  for (const fn of chrome._listeners.storageChanged) fn({ enrollSecret: { newValue: 'managed-secret' } }, 'managed');
+  await settle();
+};
+
+test('browserOnly policy enrolls immediately instead of waiting five minutes for an agent', async () => {
+  // Without this the worker defers for ENROLL_BEACON_GRACE_MS waiting for a
+  // beacon that will never arrive, so every newly provisioned machine is
+  // invisible to governance for five minutes after the extension installs.
+  resetIdentityFleet({ managed: { browserOnly: true } });
+  await fireManagedChange();
+
+  const enrolls = server.of('/api/v1/enroll');
+  assert.equal(enrolls.length, 1, 'a declared browser-only fleet does not wait for an agent');
+  assert.equal(enrolls[0].body.identitySource, 'none',
+    'and it says plainly that it could not attribute this browser');
+});
+
+test('browserOnly survives a policy transport that sends it as a string', async () => {
+  // Registry REG_DWORD and some ADMX tooling deliver booleans as "true"/"1".
+  // Dropping those would silently reinstate the five-minute wait on a fleet the
+  // admin believes they configured.
+  for (const raw of ['true', '1']) {
+    resetIdentityFleet({ managed: { browserOnly: raw } });
+    await fireManagedChange();
+    assert.equal(server.of('/api/v1/enroll').length, 1, `browserOnly="${raw}" must be honoured`);
+  }
+});
+
+test('a signed-in browser profile is used, and reported as such', async () => {
+  // The zero-touch path: Entra work account in Edge, Google account in Chrome.
+  resetIdentityFleet({ managed: { browserOnly: true } });
+  globalThis.chrome.identity = {
+    getProfileUserInfo: (_opts, cb) => cb({ email: 'satya@cloudfuze.com', id: '1' }),
+  };
+  await fireManagedChange();
+
+  const enroll = server.of('/api/v1/enroll').at(-1);
+  assert.equal(enroll.body.user, 'satya@cloudfuze.com');
+  assert.equal(enroll.body.identitySource, 'browser_profile');
+});
+
+test('an unsigned-in profile reports none rather than inventing an identity', async () => {
+  resetIdentityFleet({ managed: { browserOnly: true } });
+  // Signed out: Chrome returns an object with an EMPTY email, not null.
+  globalThis.chrome.identity = { getProfileUserInfo: (_opts, cb) => cb({ email: '', id: '' }) };
+  await fireManagedChange();
+
+  const enroll = server.of('/api/v1/enroll').at(-1);
+  assert.equal(enroll.body.user, null, 'no email means no user');
+  assert.equal(enroll.body.identitySource, 'none',
+    'this is the signal that browser sign-in is not enforced on this fleet');
+});
+
+test('managed userEmail outranks the browser profile', async () => {
+  resetIdentityFleet({ managed: { browserOnly: true, userEmail: 'policy@cloudfuze.com' } });
+  globalThis.chrome.identity = {
+    getProfileUserInfo: (_opts, cb) => cb({ email: 'personal@gmail.com', id: '1' }),
+  };
+  await fireManagedChange();
+
+  const enroll = server.of('/api/v1/enroll').at(-1);
+  assert.equal(enroll.body.user, 'policy@cloudfuze.com');
+  assert.equal(enroll.body.identitySource, 'managed_policy');
+});
+
+test('the desktop agent, when present, still outranks the browser profile', async () => {
+  // A browser profile can be a personal account signed into a work machine; the
+  // beacon names the OS user. Deploying the agent must not weaken attribution.
+  resetIdentityFleet({ beacon: { hostname: 'TESTPC', user: 'alice', machineId: 'm-1' } });
+  globalThis.chrome.identity = {
+    getProfileUserInfo: (_opts, cb) => cb({ email: 'personal@gmail.com', id: '1' }),
+  };
+  await fireManagedChange();
+
+  const enroll = server.of('/api/v1/enroll').at(-1);
+  assert.equal(enroll.body.hostname, 'TESTPC-browser-extension');
+  assert.equal(enroll.body.identitySource, 'agent_beacon');
+  assert.equal(enroll.body.user, 'alice');
 });

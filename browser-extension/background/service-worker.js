@@ -98,14 +98,25 @@ async function setStored(key, value) {
 // browser's ExtensionSettings/3rdparty policy, keyed to this extension's ID. It is
 // only present when such a policy exists; otherwise .get() rejects or returns {}.
 // These are the only keys an admin may push (see managed_schema.json).
-const MANAGED_KEYS = ['serverUrl', 'enrollSecret', 'userEmail', 'employeeEmail', 'computerName'];
+// browserOnly is a BOOLEAN and the only non-string key: it declares that this
+// fleet has no desktop agent, so the extension should not wait for a beacon
+// that will never arrive (see ENROLL_BEACON_GRACE_MS).
+const MANAGED_KEYS = ['serverUrl', 'enrollSecret', 'userEmail', 'employeeEmail', 'computerName', 'browserOnly'];
 async function getManagedConfig() {
   try {
     if (typeof chrome === 'undefined' || !chrome.storage?.managed) return {};
     const all = await chrome.storage.managed.get(MANAGED_KEYS);
     const out = {};
     for (const k of MANAGED_KEYS) {
-      if (typeof all?.[k] === 'string' && all[k].trim() !== '') out[k] = all[k].trim();
+      const v = all?.[k];
+      // Some policy transports (registry REG_DWORD, older ADMX tooling) deliver a
+      // boolean as the string "true"/"1", so accept both rather than silently
+      // ignoring a policy the admin did set.
+      if (k === 'browserOnly') {
+        if (v === true || v === 'true' || v === '1' || v === 1) out[k] = true;
+        continue;
+      }
+      if (typeof v === 'string' && v.trim() !== '') out[k] = v.trim();
     }
     return out;
   } catch {
@@ -129,17 +140,51 @@ async function getConfig() {
 // 2) Chrome signed-in profile email (best-effort — needs the "identity"/"identity.email"
 //    permission; if absent it just returns null and we fall through).
 async function resolveUserIdentity(config) {
-  if (config.userEmail) return config.userEmail;
+  return (await resolveIdentity(config)).user;
+}
+
+/**
+ * The same lookup, but it also reports WHERE the identity came from — or why
+ * there wasn't one.
+ *
+ * WHY PROVENANCE IS WORTH CARRYING. On a browser-only rollout (force-installed
+ * extension, no desktop agent) identity rests entirely on the browser profile
+ * being signed in, which is an admin policy the extension cannot verify. When
+ * that policy is missing the extension still works perfectly — it enrolls, it
+ * enforces, it captures — and every row simply says "Browser User (…)". An
+ * admin looking at that cannot tell an intentionally anonymous deployment from
+ * a misconfigured one, and the failure is silent on exactly the machines nobody
+ * is looking at.
+ *
+ * Reporting the source turns that into an answerable question: `none` on a fleet
+ * that was supposed to be attributed means browser sign-in is not enforced.
+ *
+ * Sources, in the order they are tried:
+ *   managed_policy   admin pushed userEmail — deterministic, any browser
+ *   agent_beacon     the desktop agent told us who is logged in
+ *   browser_profile  the signed-in browser profile (Entra work account in Edge,
+ *                    Google account in Chrome) — needs sign-in to be enforced
+ *   none             nothing to attribute to; usage lands under a stable
+ *                    anonymous per-browser id
+ */
+async function resolveIdentity(config) {
+  if (config.userEmail) return { user: config.userEmail, source: 'managed_policy' };
+  // The beacon's answer is already persisted here by fetchBeacon/auto-link, and
+  // it outranks the browser profile: it names the OS user, whereas a browser
+  // profile can be a personal account signed into a work machine.
+  if (config.detectedUser) return { user: config.detectedUser, source: 'agent_beacon' };
   try {
     if (typeof chrome !== 'undefined' && chrome.identity?.getProfileUserInfo) {
       const info = await new Promise((resolve) => {
+        // accountStatus:'ANY' matters — without it this returns nothing unless
+        // the user has turned on sync, which enterprises routinely disable.
         try { chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, resolve); }
         catch { resolve(null); }
       });
-      if (info?.email) return info.email;
+      if (info?.email) return { user: info.email, source: 'browser_profile' };
     }
   } catch { /* unsupported / not permitted — fall through */ }
-  return null;
+  return { user: null, source: 'none' };
 }
 function safeHost(url) {
   try { return new URL(url).hostname; } catch (e) { return null; }
@@ -190,7 +235,11 @@ async function ensureToken() {
     const now = Date.now();
     let firstAt = await getStored(STORAGE.FIRST_ENROLL_AT);
     if (!firstAt) { firstAt = now; await setStored(STORAGE.FIRST_ENROLL_AT, firstAt); }
-    if (now - firstAt < ENROLL_BEACON_GRACE_MS) {
+    // The grace exists so a slow-starting agent does not cost us attribution.
+    // On a declared browser-only fleet there is no agent to wait for, and the
+    // wait is pure cost: every newly provisioned machine would be invisible to
+    // governance for five minutes after the extension force-installs.
+    if (!config.browserOnly && now - firstAt < ENROLL_BEACON_GRACE_MS) {
       console.info('[cfai] desktop agent beacon not found yet — deferring enroll to stay attributable');
       return null;
     }
@@ -200,10 +249,10 @@ async function ensureToken() {
   const hostname = computerName
     ? computerName + '-browser-extension'
     : navigator.userAgent.split(/[\s/(]/)[0] + '-browser-extension';
-  const user = await resolveUserIdentity(config);
+  const { user, source: identitySource } = await resolveIdentity(config);
 
   try {
-    const enrollBody = { machineId, hostname, user, enrollSecret: config.enrollSecret };
+    const enrollBody = { machineId, hostname, user, identitySource, enrollSecret: config.enrollSecret };
     if (config.employeeEmail) enrollBody.employeeEmail = config.employeeEmail;
     const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/enroll`, {
       method: 'POST',
@@ -927,7 +976,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           body: JSON.stringify({
             machine_id: machineId,
             hostname: config.computerName || null,
-            user: config.detectedUser || null,
+            // detectedUser is written ONLY by the desktop-agent beacon, so on a
+            // browser-only install this field was always null even when the
+            // extension knew the user's email from policy or the browser
+            // profile. Attribution survived because the server resolves it from
+            // the enrolled machine record via machine_id — but the payload said
+            // "unknown" about someone we could name, which is one refactor away
+            // from becoming true.
+            user: await resolveUserIdentity(config),
             tool_host: msg.tool_host,
             tool_name: msg.tool_name,
             tool_vendor: msg.tool_vendor,

@@ -103,6 +103,80 @@ Ingest the **Edge** and **Google Chrome** ADMX, then set:
 > The extension reads managed config on install/startup and on policy change, so once the
 > policy lands the user just needs to (re)start the browser — no options page, ever.
 
+---
+
+## Part B2 — Browser-only rollout (extension force-installed, **no** desktop agent)
+
+Valid deployment, but identity works differently and the difference is silent, so
+read this before choosing it.
+
+### What you get with zero user action
+
+Everything enforcement-related works with no identity at all: blocking AI apps and
+Copilot agents, sensitive-prompt and file blocking, Tokenize & Send, model routing,
+access requests, and tool discovery. `content.js` never consults a user identity —
+policy is per host and org-wide, and access approvals are keyed on `machine_id`.
+
+What you lose without identity is only the answer to *"which employee did this"*.
+Rows read `Browser User (…)`. That id is a UUID persisted in the browser profile, so
+it is stable per browser and still usable for "this browser has 40 blocked prompts".
+
+### Getting the username **deterministically**
+
+Without the agent there is no identity beacon, so the extension falls back to the
+signed-in browser profile (`chrome.identity.getProfileUserInfo`, `accountStatus:
+'ANY'` so it does not require sync). That is only reliable if profile sign-in is
+**enforced by policy** — which is another admin policy, not user action, pushed the
+same way as the force-install:
+
+| Browser | Policy | Value |
+|---|---|---|
+| Edge | `HKLM\SOFTWARE\Policies\Microsoft\Edge\BrowserSignin` | `2` (force sign-in) |
+| Chrome | `HKLM\SOFTWARE\Policies\Google\Chrome\BrowserSignin` | `2` (force sign-in) |
+| both | `RestrictSigninToPattern` | e.g. `.*@yourcompany\.com` — stops a personal account being the identity |
+
+**The browser you pick decides whether this works.** Edge signs in with the
+Entra/AAD work account, which on an Entra-joined Windows machine is automatic and
+is the corporate email — so on an M365 estate, Edge gives a guaranteed username with
+nobody doing anything. Chrome signs in with a **Google** account, so forcing Chrome
+sign-in only produces a corporate email if the company has Google Workspace. An
+M365-only shop that force-installs on Chrome will get `Browser User (…)` no matter
+what policy is set.
+
+Also set, alongside `serverUrl` and `enrollSecret`:
+
+- `…\3rdparty\extensions\<store-id>\policy\browserOnly = 1`
+
+Without it the extension waits five minutes on every machine for an agent beacon
+that will never arrive (`ENROLL_BEACON_GRACE_MS`), leaving newly provisioned
+machines ungoverned for that window. With it, enrollment happens on install.
+
+Do **not** try to push `computerName` per machine: one policy value is the same
+string for every device it targets, so it cannot carry a real hostname.
+
+### Confirming it worked — the one test that matters
+
+Enrollment now records **where** the identity came from, so this is a fact on the
+record rather than something to infer from a blank column. On one pilot machine,
+after the policy lands and the browser restarts:
+
+```
+GET /api/v1/machines        # find this machine by its id
+```
+
+`identity_source` will be one of:
+
+| Value | Meaning |
+|---|---|
+| `agent_beacon` | desktop agent named the OS user (best) |
+| `managed_policy` | admin pushed `userEmail` |
+| `browser_profile` | signed-in browser profile — **the browser-only success case** |
+| `none` | nothing to attribute to; sign-in is **not** enforced, or the user is signed out |
+
+`none` across a fleet that was supposed to be attributed means the `BrowserSignin`
+policy did not apply — that is the whole point of recording it. Check this on one
+machine before rolling out to everyone; it decides whether you need the agent.
+
 ## Part C — Claude Code CLI (OTel)
 
 Push these as **device environment variables** (Intune Settings Catalog → *Environment

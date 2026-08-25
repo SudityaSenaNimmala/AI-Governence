@@ -25,6 +25,11 @@
       "title": "Computer name (optional)",
       "description": "Override machine name. Normally left empty so the desktop agent's identity beacon supplies it automatically.",
       "type": "string"
+    },
+    "browserOnly": {
+      "title": "Browser-only fleet (no desktop agent)",
+      "description": "Set true when the desktop agent is not deployed. Skips the five-minute wait for an agent identity beacon so the extension enrolls immediately on install.",
+      "type": "boolean"
     }
   }
 }
