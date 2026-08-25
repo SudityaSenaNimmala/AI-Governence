@@ -244,7 +244,14 @@ async function machineMetrics(db, machineIds) {
   const since = windowStart();
   const recent7dStart = new Date(Date.now() - 7 * 86400000).toISOString();
 
-  const [events, tools] = await Promise.all([
+  // tool_usage stores real Date objects while dlp_events store ISO strings, and
+  // Mongo comparisons are TYPE-BRACKETED: a Date field never matches a string
+  // bound. Using windowStart() for both would silently return nothing for
+  // tool_usage, which is indistinguishable from "this person used no AI tools" —
+  // the exact failure this factor already had.
+  const sinceDate = new Date(Date.now() - WINDOW_DAYS * 86400000);
+
+  const [events, tools, webTools] = await Promise.all([
     db.collection('dlp_events').aggregate([
       { $match: { machine_id: { $in: machineIds }, occurred_at: { $gte: since } } },
       { $group: {
@@ -262,6 +269,26 @@ async function machineMetrics(db, machineIds) {
       { $match: { machine_id: { $in: machineIds }, detected_at: { $gte: since } } },
       { $group: { _id: '$machine_id', toolKeys: { $addToSet: '$tool_key' } } },
     ]).toArray(),
+    // BROWSER-DISCOVERED TOOLS. `findings` is written only by the desktop agent's
+    // scan report (/api/v1/reports), so on a browser-only rollout — extension
+    // force-installed, no agent — this factor was structurally zero for everyone.
+    // Verified in production: all 39 extension-only profiles scored shadow_tools 0,
+    // capping every one of them at 80 of 100 and losing the "which unsanctioned AI
+    // is this person using" signal entirely, which is the headline question the
+    // factor exists to answer.
+    //
+    // The data was already being collected and correctly shaped —
+    // classifications.js upserts { machine_id, tool_key: host } into tool_usage on
+    // every hit against an AI-classified host. Nothing read it.
+    //
+    // tool_key is the HOST for browser tools and vendor:product for agent
+    // findings. Both are compared against the same sanctions list, which stores
+    // whichever key the registry exposed for that tool, so the two shapes coexist
+    // rather than needing translation.
+    db.collection('tool_usage').aggregate([
+      { $match: { machine_id: { $in: machineIds }, last_used_at: { $gte: sinceDate } } },
+      { $group: { _id: '$machine_id', toolKeys: { $addToSet: '$tool_key' } } },
+    ]).toArray(),
   ]);
 
   for (const r of events) {
@@ -269,7 +296,9 @@ async function machineMetrics(db, machineIds) {
     m.blocks = r.blocks; m.overrides = r.overrides; m.hiCrit = r.hiCrit;
     m.recent7d = r.recent7d; m.prevPeriod = r.prevPeriod;
   }
-  for (const r of tools) {
+  // Unioned into one set, so a tool seen by both the agent and the browser counts
+  // once rather than twice.
+  for (const r of [...tools, ...webTools]) {
     const m = out.get(r._id); if (!m) continue;
     for (const k of r.toolKeys || []) if (k) m.toolKeys.add(k);
   }

@@ -203,3 +203,73 @@ test('DB operation count does not grow with the number of profiles', async () =>
   assert.equal(large.insertMany, 1);
   assert.equal(large.bulkWrite, 1);
 });
+
+// ── Shadow tools on a browser-only rollout ─────────────────────────────────
+//
+// THE DEFECT THIS PINS DOWN. shadow_tools is 20 of the 100 score weight, and it
+// read only `findings` — written exclusively by the desktop agent's scan report.
+// On a browser-only rollout (extension force-installed, no agent) it was therefore
+// structurally zero for everybody. Verified in production before the fix: all 39
+// extension-only profiles scored shadow_tools 0, capping each at 80 of 100 and
+// losing the "which unsanctioned AI is this person using" signal — the headline
+// question the factor exists to answer.
+//
+// The data was already collected and correctly shaped: classifications.js upserts
+// { machine_id, tool_key: host } into tool_usage on every hit against an
+// AI-classified host. Nothing read it.
+
+const profileOnly = (extra = {}) => async (db) => {
+  await db.collection('employee_profiles').insertOne({
+    id: 'p1', display_name: 'Browser Only', machine_ids: ['m1'],
+  });
+  for (const [coll, docs] of Object.entries(extra)) {
+    for (const doc of docs) await db.collection(coll).insertOne(doc);
+  }
+};
+
+const shadowRaw = (body) => body.scores[0].factors.shadow_tools.raw;
+
+test('browser-discovered tools count toward shadow tools', async () => {
+  await withServer(profileOnly({
+    tool_usage: [
+      { machine_id: 'm1', tool_key: 'chatgpt.com', last_used_at: new Date() },
+      { machine_id: 'm1', tool_key: 'perplexity.ai', last_used_at: new Date() },
+    ],
+  }), async ({ compute }) => {
+    assert.equal(shadowRaw(await compute()), 2,
+      'both browser-discovered tools must count — this was 0 before the fix');
+  });
+});
+
+test('a sanctioned browser tool is not shadow', async () => {
+  await withServer(profileOnly({
+    sanctions: [{ tool_key: 'chatgpt.com', status: 'approved' }],
+    tool_usage: [{ machine_id: 'm1', tool_key: 'chatgpt.com', last_used_at: new Date() }],
+  }), async ({ compute }) => {
+    assert.equal(shadowRaw(await compute()), 0,
+      'approving a tool must remove it from the risk score');
+  });
+});
+
+test('a tool seen by BOTH the agent and the browser counts once', async () => {
+  await withServer(profileOnly({
+    findings: [{ machine_id: 'm1', tool_key: 'openai:chatgpt', detected_at: new Date() }],
+    tool_usage: [{ machine_id: 'm1', tool_key: 'openai:chatgpt', last_used_at: new Date() }],
+  }), async ({ compute }) => {
+    assert.equal(shadowRaw(await compute()), 1, 'the two sources are unioned, not summed');
+  });
+});
+
+test('tool usage older than the window is excluded', async () => {
+  // The window bound must actually apply. tool_usage stores Date objects while
+  // dlp_events store ISO strings, and Mongo comparisons are type-bracketed — using
+  // the string bound here would match nothing and look exactly like "no tools".
+  await withServer(profileOnly({
+    tool_usage: [
+      { machine_id: 'm1', tool_key: 'ancient.ai', last_used_at: new Date(Date.now() - 400 * 86400000) },
+      { machine_id: 'm1', tool_key: 'current.ai', last_used_at: new Date() },
+    ],
+  }), async ({ compute }) => {
+    assert.equal(shadowRaw(await compute()), 1, 'only the in-window tool counts');
+  });
+});
