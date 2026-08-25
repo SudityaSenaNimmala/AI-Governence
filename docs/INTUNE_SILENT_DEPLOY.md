@@ -189,6 +189,40 @@ separate build plus an AMO submission, not another registry key. If Firefox is i
 your estate, the honest short-term answer is to block it by policy or accept it as
 ungoverned.
 
+### "All profiles" means two different things
+
+They need opposite handling, and conflating them is how a rollout ends up with
+confidently wrong names.
+
+**Browser profiles inside one Windows account** — Chrome "Profile 1", a test
+profile, a second work profile — are the **same human**. All of them must report
+that person, which is exactly what a policy-provided `userEmail` does. This is also
+why a developer's throwaway Chrome profile stops mattering: the browser profile is
+never consulted.
+
+**Windows user accounts on one PC** are **different humans**. The Intune enrollment
+UPN names only the person the *device* was enrolled for, so on a shared machine
+every account would report that one name — a wrong name, not a missing one.
+
+Set `$PerUserIdentity = $true` when any machine is shared. Then:
+
+| Run | Context | Writes |
+|---|---|---|
+| 1 | device / SYSTEM | force-install, allowlist, sources, `serverUrl`, `enrollSecret`, `computerName`, `identityDomain`, `browserOnly` — **but not `userEmail`** |
+| 2 | user | `userEmail` only, from `whoami /upn`, under `HKCU` |
+
+Assign the same script twice in Intune, once per context. It detects which it is
+running in and does the right half.
+
+**Why the SYSTEM run must stop writing `userEmail`, not merely also write it:**
+Chromium gives `HKLM` precedence over `HKCU`. A machine-wide value would override
+every per-user one, silently, and everybody's activity would carry the enrollment
+user's name.
+
+A local (non-Entra) Windows account has no work UPN. The user run leaves identity
+unset in that case rather than substituting the machine's enrollment UPN, which
+would name a different person.
+
 ### The private-browsing hole
 
 **A force-installed extension is disabled in Incognito / InPrivate, and no policy

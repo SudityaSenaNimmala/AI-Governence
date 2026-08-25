@@ -54,6 +54,31 @@ $BrowserOnly = $true
 # $true to remove private windows instead, in every Chromium browser below.
 # Off by default because it changes how everyone browses — decide deliberately.
 $DisablePrivateBrowsing = $false
+
+# TWO DIFFERENT THINGS ARE CALLED "PROFILES", and they need opposite handling.
+#
+#   Browser profiles inside one Windows account (Chrome "Profile 1", a test
+#   profile, a second work profile) are the SAME HUMAN. They must all report that
+#   person, which is exactly what a machine- or user-level policy already does —
+#   and it is why a developer's throwaway Chrome profile stops mattering.
+#
+#   Windows user accounts on one PC are DIFFERENT HUMANS. The Intune enrollment
+#   UPN names only the person the DEVICE was enrolled for, so on a shared machine
+#   every account would report that one name. That is a wrong name, not a missing
+#   one.
+#
+# $PerUserIdentity = $true fixes the second case: the device-context run stops
+# writing userEmail machine-wide, and a second, USER-context run writes each
+# logged-on user's own UPN under HKCU.
+#
+# THE ORDER MATTERS AND IS NOT NEGOTIABLE. Chromium gives HKLM precedence over
+# HKCU, so a userEmail left in HKLM would win and the per-user value would be
+# silently ignored. Hence "stops writing" above rather than "also writes".
+#
+# Leave $false for 1:1 assigned laptops — simpler, one Intune assignment.
+# Set $true if ANY machine is shared, and assign this script twice in Intune:
+# once in device/SYSTEM context, once in user context.
+$PerUserIdentity = $false
 # -----------------------------------------------------------------------------
 
 # ---- Device-sourced identity -------------------------------------------------
@@ -84,6 +109,22 @@ function Get-EnrolledUpn {
   }
   return $null
 }
+
+# The UPN of the person actually signed in — used only by the user-context run.
+# whoami /upn is the reliable source on an Entra-joined machine; it fails on a
+# local account, in which case there is no work identity to report and we say so
+# rather than substituting the machine's enrollment UPN (which would be a
+# different person).
+function Get-CurrentUserUpn {
+  try {
+    $upn = (& whoami /upn) 2>$null
+    if ($LASTEXITCODE -eq 0 -and $upn -and $upn -like '*@*') { return $upn.Trim() }
+  } catch { }
+  return $null
+}
+
+# SYSTEM does the machine-wide work; a user context does only its own identity.
+$RunningAsSystem = ([Security.Principal.WindowsIdentity]::GetCurrent()).IsSystem
 
 $EnrolledUpn  = Get-EnrolledUpn
 $ComputerName = $env:COMPUTERNAME
@@ -131,6 +172,31 @@ $browsers = @(
   [pscustomobject]$_
 }
 
+# ---- User-context run: this account's identity, and nothing else -------------
+# Assigned in Intune as a USER-context script when $PerUserIdentity is set. It
+# deliberately does NOT force-install or write serverUrl/enrollSecret — those are
+# machine-wide and already done by the SYSTEM run. Writing them again per user
+# would put the enroll secret in every user's own hive for no benefit.
+if (-not $RunningAsSystem) {
+  if (-not $PerUserIdentity) {
+    Write-Output 'Running as a user but $PerUserIdentity is $false - nothing to do (the device-context run owns identity).'
+    return
+  }
+  $upn = Get-CurrentUserUpn
+  if (-not $upn) {
+    Write-Output "No work UPN for $env:USERNAME (local account?) - leaving identity unset so the extension falls back rather than borrowing another user's name."
+    return
+  }
+  foreach ($b in $browsers) {
+    if ([string]::IsNullOrWhiteSpace($b.Id) -or $b.Id -like 'REPLACE_*') { continue }
+    $userPolicyKey = ('HKCU:\SOFTWARE\Policies\{0}\3rdparty\extensions\{1}\policy' -f
+      ($b.Root -replace '^HKLM:\\SOFTWARE\\Policies\\', ''), $b.Id)
+    Set-RegValue -Path $userPolicyKey -Name 'userEmail' -Value $upn
+  }
+  Write-Output ("Per-user identity set for {0}: {1}" -f $env:USERNAME, $upn)
+  return
+}
+
 foreach ($b in $browsers) {
   if ([string]::IsNullOrWhiteSpace($b.Id) -or $b.Id -like 'REPLACE_*') {
     Write-Output ("Skipping {0}: extension ID not set yet." -f $b.Name); continue
@@ -154,8 +220,14 @@ foreach ($b in $browsers) {
   Set-RegValue -Path $policyKey -Name 'enrollSecret' -Value $EnrollSecret
 
   # Identity, in order of trust. userEmail is what makes attribution independent
-  # of which profile the browser happens to be signed into.
-  if ($EnrolledUpn)   { Set-RegValue -Path $policyKey -Name 'userEmail'      -Value $EnrolledUpn }
+  # of which browser profile happens to be signed in.
+  #
+  # Skipped when $PerUserIdentity: HKLM beats HKCU in Chromium, so leaving a
+  # machine-wide value here would override every per-user one and put the
+  # enrollment user's name on everybody's activity.
+  if ($EnrolledUpn -and -not $PerUserIdentity) {
+    Set-RegValue -Path $policyKey -Name 'userEmail' -Value $EnrolledUpn
+  }
   if ($ComputerName)  { Set-RegValue -Path $policyKey -Name 'computerName'   -Value $ComputerName }
   if ($IdentityDomain){ Set-RegValue -Path $policyKey -Name 'identityDomain' -Value $IdentityDomain }
   if ($BrowserOnly)   { Set-RegValue -Path $policyKey -Name 'browserOnly'    -Value '1' }
