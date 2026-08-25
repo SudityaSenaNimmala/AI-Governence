@@ -29,14 +29,43 @@
   //
   // It must stay FIRST: nothing above it may have a side effect, or the second
   // injection would still fire it before returning.
+  // ── page console ─
+  //
+  // WE ARE A GUEST IN SOMEONE ELSE'S CONSOLE. This file runs on the customer's
+  // own applications, and it was writing ~50 informational lines per page there:
+  // which host is governed, which panel selectors matched, that a send was
+  // blocked and why. Three problems with that, in order of seriousness.
+  //
+  // It tells the MONITORED USER how the controls work. "[cfai] BLOCKED via
+  // keydown:Enter" and the surface selectors are a map for anyone who wants to
+  // avoid enforcement, printed in the tab they are being enforced in.
+  //
+  // It buries the customer's own logs, and their engineers reasonably read
+  // unfamiliar noise in their console as our bug.
+  //
+  // So informational logging is off by default and support can turn it on for
+  // one browser without a rebuild:
+  //
+  //   localStorage.cfai_debug = '1'   (then reload)
+  //
+  // warn/error are deliberately NOT gated — those report something actually
+  // wrong, and a silent extension is harder to support than a noisy one.
+  // Reading localStorage can THROW outright in a sandboxed iframe or with
+  // third-party site data blocked, which is why this is wrapped: an exception
+  // here would abort the whole content script before enforcement installs.
+  let CFAI_DEBUG = false;
+  try { CFAI_DEBUG = window.localStorage?.getItem('cfai_debug') === '1'; } catch { /* blocked */ }
+  function clog(...args) { if (CFAI_DEBUG) console.info(...args); }
+  // ── end page console ─
+
   if (window.__cfaiContentBootstrapped) {
-    console.info('[cfai] content script already bootstrapped on', location.hostname,
-                 '— ignoring this injection (manifest + scripting both cover this host)');
+    clog('[cfai] content script already bootstrapped on', location.hostname,
+         '— ignoring this injection (manifest + scripting both cover this host)');
     return;
   }
   window.__cfaiContentBootstrapped = true;
 
-  console.info('[cfai] content script v2 loaded on', location.hostname);
+  clog('[cfai] content script v2 loaded on', location.hostname);
 
   // Inject fetch blocker IMMEDIATELY (synchronous) so it patches fetch()
   // before any page JS fires. The blocked list arrives shortly after via
@@ -96,7 +125,7 @@
   window.addEventListener('cfai-fetch-blocked', (e) => {
     if (PLATFORM_BLOCKED) return;
     const { matches } = e.detail || {};
-    console.info('[cfai] fetch was blocked, showing popup. Matches:', matches);
+    clog('[cfai] fetch was blocked, showing popup. Matches:', matches);
     const matchObjs = (matches || []).map(name => ({ pattern: name, severity: 'critical', count: 1 }));
     showWarning(matchObjs, 'Sensitive data blocked from being sent');
   });
@@ -159,7 +188,7 @@
         capture_truncated: truncated ? 1 : 0,
         duration_ms: typeof d.duration_ms === 'number' ? d.duration_ms : null,
       });
-      console.info('[cfai] captured AI response —', text.length, 'chars,', d.format, 'format');
+      clog('[cfai] captured AI response —', text.length, 'chars,', d.format, 'format');
     } catch (err) {
       // Capture is best-effort and must never disturb the page.
     }
@@ -202,7 +231,7 @@
           PLATFORM_BLOCKED = false;
           BLOCKED_PLATFORM = null;
           removePlatformBanner();
-          console.info('[cfai] access exception active for', location.hostname, '— expires:', resp.expires_at);
+          clog('[cfai] access exception active for', location.hostname, '— expires:', resp.expires_at);
           return;
         }
       } catch {} // Service worker unavailable — enforce the block
@@ -722,7 +751,7 @@
   );
   const IS_EMBEDDED_AI = !!_panelSelectors;
   if (IS_EMBEDDED_AI) {
-    console.info('[cfai] embedded-AI host: capture restricted to the AI panel only');
+    clog('[cfai] embedded-AI host: capture restricted to the AI panel only');
   }
 
   // What a prompt is typed into. Also the test for "is this an AI PANEL, or just
@@ -809,7 +838,7 @@
       // known; this catches the page-level kinds (ai_response, model_routed)
       // that have no element at all.
       if (IS_EMBEDDED_AI && !captureAllowed(null)) {
-        console.info('[cfai] suppressed', kind, '— no AI panel open on this embedded-AI host');
+        clog('[cfai] suppressed', kind, '— no AI panel open on this embedded-AI host');
         return;
       }
       // THE ONLY PLACE _activeConvId MOVES. A real user action re-reads the URL;
@@ -1253,7 +1282,7 @@
       ? list.filter(r => r && r.enabled !== false)
             .sort((a, b) => (a.priority || 50) - (b.priority || 50))
       : [];
-    if (_serverRules.length) console.info('[cfai] routing rules loaded:', _serverRules.length);
+    if (_serverRules.length) clog('[cfai] routing rules loaded:', _serverRules.length);
   }
 
   try {
@@ -1290,7 +1319,7 @@
     chrome.storage.local.get('cfai.user_ceiling', (data) => {
       if (data['cfai.user_ceiling']) {
         _userCeiling = data['cfai.user_ceiling'];
-        console.info('[cfai] ceiling restored:', _userCeiling.modelText, '→', _userCeiling.tier);
+        clog('[cfai] ceiling restored:', _userCeiling.modelText, '→', _userCeiling.tier);
       }
     });
   } catch {}
@@ -1309,7 +1338,7 @@
     // This prevents our own downgrades from lowering the ceiling.
     if (newTierNum > oldTierNum || !_userCeiling || _userCeiling.provider !== info.provider) {
       _userCeiling = { ...info, modelText: text };
-      console.info('[cfai] user ceiling updated:', text, '→', info.tier);
+      clog('[cfai] user ceiling updated:', text, '→', info.tier);
       try { chrome.storage.local.set({ 'cfai.user_ceiling': _userCeiling }); } catch {}
     }
   }
@@ -1401,7 +1430,7 @@
   }
 
   document.addEventListener('cfai-route-applied', (e) => {
-    console.info('[cfai] fetch-level route applied:', e.detail?.from, '→', e.detail?.to);
+    clog('[cfai] fetch-level route applied:', e.detail?.from, '→', e.detail?.to);
   });
 
   // ── Adaptive Model Selector — learns the DOM once, reuses, re-learns if stale ──
@@ -1438,7 +1467,7 @@
         const el = document.querySelector(selector);
         if (el) {
           _modelBtnCache = el;
-          console.info('[cfai] model button found via platform selector:', (el.textContent || '').trim().slice(0, 40));
+          clog('[cfai] model button found via platform selector:', (el.textContent || '').trim().slice(0, 40));
           return el;
         }
       }
@@ -1450,7 +1479,7 @@
       if (t.length > 100 || t.length < 2) continue;
       if (MODEL_KEYWORDS.some(k => t.includes(k))) {
         _modelBtnCache = el;
-        console.info('[cfai] model button discovered:', t);
+        clog('[cfai] model button discovered:', t);
         return el;
       }
     }
@@ -1576,7 +1605,7 @@
     if (btnText.includes(targetText)) return true;
 
     // Step 1: Click model button to open dropdown
-    console.info('[cfai] step 1: clicking model button');
+    clog('[cfai] step 1: clicking model button');
     btn.click();
 
     // Step 2: Search for target model — try multiple strategies.
@@ -1589,7 +1618,7 @@
       // Strategy A: look for "More models" sub-menu (Claude pattern)
       const moreEl = findClickableByText('More models', { exclude: btn });
       if (moreEl) {
-        console.info('[cfai] step 2a: clicking "More models"');
+        clog('[cfai] step 2a: clicking "More models"');
         moreEl.click();
         targetEl = await waitForEl(() => findClickableByText(targetText, { exclude: btn }));
       }
@@ -1600,7 +1629,7 @@
       for (const altText of ['See all', 'Show all', 'All models', 'More', 'View all']) {
         const altEl = findClickableByText(altText, { exclude: btn });
         if (altEl) {
-          console.info('[cfai] step 2b: clicking "' + altText + '"');
+          clog('[cfai] step 2b: clicking "' + altText + '"');
           altEl.click();
           targetEl = await waitForEl(() => findClickableByText(targetText, { exclude: btn }));
           if (targetEl) break;
@@ -1614,14 +1643,14 @@
         const t = (el.textContent || '').trim();
         if (t.includes(targetText) && t.length < 80) {
           targetEl = el;
-          console.info('[cfai] step 2c: found via role selector');
+          clog('[cfai] step 2c: found via role selector');
           break;
         }
       }
     }
 
     if (targetEl) {
-      console.info('[cfai] clicking target:', (targetEl.textContent || '').trim().slice(0, 40));
+      clog('[cfai] clicking target:', (targetEl.textContent || '').trim().slice(0, 40));
       targetEl.click();
     } else {
       // Name what the menu DID offer. "not found" alone cannot distinguish a
@@ -1645,11 +1674,11 @@
     const newBtn = findModelButton();
     const newText = newBtn ? (newBtn.textContent || '').trim() : '';
     if (newText.includes(targetText)) {
-      console.info('[cfai] ✓ model changed:', btnText, '→', newText);
+      clog('[cfai] ✓ model changed:', btnText, '→', newText);
       return true;
     }
 
-    console.info('[cfai] click done, button now shows:', newText);
+    clog('[cfai] click done, button now shows:', newText);
     return newText !== btnText;
   }
 
@@ -1907,7 +1936,7 @@
       const langPath = chrome.runtime.getURL('vendor/tesseract/');
       const workerPath = chrome.runtime.getURL('vendor/tesseract/worker.min.js');
       const corePath = chrome.runtime.getURL('vendor/tesseract/');
-      console.log('[cfai] initializing Tesseract worker', { langPath, workerPath, corePath });
+      clog('[cfai] initializing Tesseract worker', { langPath, workerPath, corePath });
       try {
         const worker = await window.Tesseract.createWorker('eng', 1, {
           langPath,
@@ -1918,9 +1947,9 @@
           // it in a blob URL (page origin), which IS allowed.
           workerBlobURL: true,
           cacheMethod: 'none',
-          logger: (m) => { if (m.status) console.log('[cfai] tesseract:', m.status, m.progress); },
+          logger: (m) => { if (m.status) clog('[cfai] tesseract:', m.status, m.progress); },
         });
-        console.log('[cfai] Tesseract worker ready');
+        clog('[cfai] Tesseract worker ready');
         return worker;
       } catch (e) {
         console.error('[cfai] Tesseract worker init failed:', e);
@@ -2090,7 +2119,7 @@
       severity = contentScan.contentSeverity;
     }
 
-    console.log('[cfai] emit file_upload', {
+    clog('[cfai] emit file_upload', {
       filename: file.name, size: file.size, class: r.class, severity, via,
       scanned: contentScan?.scanned, matches: contentScan?.matchCount ?? 0,
     });
@@ -2145,7 +2174,7 @@
         ? `${file.name} → ${SERVICE}  (${contentScan.matchCount} sensitive matches found)`
         : `${file.name} → ${SERVICE}  (${r.reason})`;
       if (hasContentMatches) {
-        console.info('[cfai] file content-scan flagged', file.name, '— matches:',
+        clog('[cfai] file content-scan flagged', file.name, '— matches:',
           patterns.map((p) => p.pattern).join(', '));
       }
       showWarning(patterns, note);
@@ -2193,7 +2222,7 @@
       try { t.value = ''; } catch {}
       for (const f of blocked) {
         const r = classifyFile(f.name, f.size);
-        console.info('[cfai] BLOCKED upload (filename) via change:', f.name);
+        clog('[cfai] BLOCKED upload (filename) via change:', f.name);
         showWarning(
           [{ pattern: r.class, class: r.class, severity: r.severity, count: 1 }],
           `File upload blocked: ${f.name}`,
@@ -2212,7 +2241,7 @@
       return;
     }
 
-    console.log('[cfai] file_picker change captured:', files.length, 'file(s)');
+    clog('[cfai] file_picker change captured:', files.length, 'file(s)');
     for (const f of files) emitFileUpload(f, 'file_picker');
   }, true);
 
@@ -2231,7 +2260,7 @@
       if (typeof e.stopPropagation === 'function') e.stopPropagation();
       for (const f of blocked) {
         const r = classifyFile(f.name, f.size);
-        console.info('[cfai] BLOCKED upload (filename) via drop:', f.name);
+        clog('[cfai] BLOCKED upload (filename) via drop:', f.name);
         showWarning(
           [{ pattern: r.class, class: r.class, severity: r.severity, count: 1 }],
           `File drop blocked: ${f.name}`,
@@ -2250,7 +2279,7 @@
       return;
     }
 
-    console.log('[cfai] drop captured:', e.dataTransfer.files.length, 'file(s)');
+    clog('[cfai] drop captured:', e.dataTransfer.files.length, 'file(s)');
     for (const f of e.dataTransfer.files) emitFileUpload(f, 'drop');
   }, true);
 
@@ -2347,7 +2376,7 @@
       const chip = findChipElementByFilename(filename);
       if (chip) {
         entry.chipEl = chip;
-        console.info('[cfai] tracked chip for', filename);
+        clog('[cfai] tracked chip for', filename);
         return;
       }
       if (attempts < 8) setTimeout(tick, 200);   // up to ~1.6s of retries
@@ -2396,7 +2425,16 @@
   // composer container, then searching down for a prompt input.
   function findPromptInputFor(btn) {
     let container = btn.closest('form, [class*="composer" i], [class*="input" i], [data-testid*="composer" i]');
-    if (!container) container = btn.parentElement?.parentElement?.parentElement || document.body;
+    // NO document.body FALLBACK. When the walk finds no composer container this
+    // used to search the entire page and return its first text field, so a
+    // button with no composer near it was paired with an unrelated input —
+    // whose contents then decided whether to cancel the click. Three ancestors
+    // is already generous; past that we genuinely do not know which input the
+    // button belongs to, and the caller's own fallback
+    // (findPromptInputFor(btn) || findActivePromptInput()) is the better guess
+    // because it at least follows focus.
+    if (!container) container = btn.parentElement?.parentElement?.parentElement || null;
+    if (!container) return null;
     return container.querySelector('textarea, [contenteditable="true"], [role="textbox"]') || null;
   }
 
@@ -2555,7 +2593,7 @@
           typeof CSSStyleSheet.prototype.replaceSync !== 'function' ||
           typeof ShadowRoot === 'undefined' ||
           !('adoptedStyleSheets' in ShadowRoot.prototype)) {
-        console.info('[cfai] constructable stylesheets unavailable — modal will use light DOM');
+        clog('[cfai] constructable stylesheets unavailable — modal will use light DOM');
         return;
       }
       const sheet = new CSSStyleSheet();
@@ -2766,7 +2804,7 @@
           e.preventDefault();
           e.stopImmediatePropagation();
           if (Date.now() - openedAt < TOKENIZE_KEY_ARM_MS) {
-            console.info('[cfai] ignoring keyboard activation of Tokenize & Send — not armed yet');
+            clog('[cfai] ignoring keyboard activation of Tokenize & Send — not armed yet');
             return;
           }
           run(e);
@@ -3063,7 +3101,7 @@
     try { returned = document.execCommand('insertText', false, text); }
     catch (e) { console.warn('[cfai] write: execCommand threw —', e?.message || e); }
     document.removeEventListener('beforeinput', onBeforeInput, false);
-    console.info('[cfai] write: execCommand returned=' + returned +
+    clog('[cfai] write: execCommand returned=' + returned +
                  ' | beforeinput seen=' + seen + ' cancelled-by-editor=' + prevented);
     return { returned, beforeInputSeen: seen, beforeInputPrevented: prevented };
   }
@@ -3098,8 +3136,8 @@
     const isField = el.tagName === 'TEXTAREA' || el.tagName === 'INPUT';
     const out = { ok: false, strategy: 'none', framework, checks: [] };
 
-    console.info('[cfai] write: BEGIN on', location.hostname, '| target =', describeElement(el));
-    console.info('[cfai] write: editor model =', framework || 'none (plain field/contenteditable)',
+    clog('[cfai] write: BEGIN on', location.hostname, '| target =', describeElement(el));
+    clog('[cfai] write: editor model =', framework || 'none (plain field/contenteditable)',
                  '| plain field =', isField,
                  '| masked chars =', text.length,
                  '| labels =', labels.join(' ') || '(none)');
@@ -3107,7 +3145,7 @@
     const check = (strategy, acknowledged) => {
       const v = verifyMaskedWrite(el, text, labels);
       out.checks.push({ strategy, acknowledged, ...v });
-      console.info('[cfai] write: strategy=' + strategy +
+      clog('[cfai] write: strategy=' + strategy +
         ' | editor-acknowledged=' + acknowledged +
         ' | readback=' + (v.ok ? 'MATCHES masked text' : 'DOES NOT MATCH') +
         ' (exact=' + v.exact + ', labels-present=' + v.labelsPresent +
@@ -3118,7 +3156,7 @@
     const succeed = (strategy) => {
       out.ok = true;
       out.strategy = strategy;
-      console.info('[cfai] write: SUCCESS via "' + strategy + '" — safe to send');
+      clog('[cfai] write: SUCCESS via "' + strategy + '" — safe to send');
       return out;
     };
     const fail = (why) => {
@@ -3162,7 +3200,7 @@
         console.warn('[cfai] write: paste simulation unavailable —', paste.reason);
         break;
       }
-      console.info('[cfai] write: paste attempt ' + attempt + ' | editor called preventDefault =', paste.handled);
+      clog('[cfai] write: paste attempt ' + attempt + ' | editor called preventDefault =', paste.handled);
       if (!paste.handled) {
         // A synthetic paste has no default action, so nothing was written and a
         // retry is harmless. The editor's selection may just not be synced yet.
@@ -3244,7 +3282,7 @@
       pattern: r.pattern, class: r.class, severity: r.severity, label: r.label, count: r.count,
     }));
     const labels = Array.from(new Set(replacements.map((r) => r.label)));
-    console.info('[cfai] tokenize & send —', replacements.map((r) => r.pattern + '×' + r.count).join(', '));
+    clog('[cfai] tokenize & send —', replacements.map((r) => r.pattern + '×' + r.count).join(', '));
 
     // Mark before we write: the write itself dispatches input/paste events that
     // other intercept layers observe.
@@ -3263,7 +3301,7 @@
     // one condition that must hold.
     const verify = verifyMaskedWrite(el, result.redacted, labels);
     const safeToSend = !!write.ok && verify.ok;
-    console.info('[cfai] tokenize: pre-send gate | write.ok=' + write.ok +
+    clog('[cfai] tokenize: pre-send gate | write.ok=' + write.ok +
                  ' strategy=' + write.strategy +
                  ' | final readback ok=' + verify.ok +
                  (verify.leftovers.length ? ' | STILL SENSITIVE: ' + verify.leftovers.join(',') : '') +
@@ -3320,10 +3358,10 @@
       // masked prompt stays exactly where it is; the user only has to hit Enter.
       const still = verifyMaskedWrite(el, maskedText, labels || []);
       if (still.ok) {
-        console.info('[cfai] tokenize: send did not go through — masked text left in place for the user');
+        clog('[cfai] tokenize: send did not go through — masked text left in place for the user');
         showWarning([], 'Tokenized — press Enter to send.');
       } else {
-        console.info('[cfai] tokenize: composer no longer holds the masked text — send went through');
+        clog('[cfai] tokenize: composer no longer holds the masked text — send went through');
       }
     }, 1200);
   }
@@ -3579,7 +3617,7 @@
         e.stopImmediatePropagation();
         if (typeof e.stopPropagation === 'function') e.stopPropagation();
       }
-      console.info('[cfai] BLOCKED (platform disallowed) via', label);
+      clog('[cfai] BLOCKED (platform disallowed) via', label);
       emit({ kind: 'enforcement_block', blocked_for: 'platform', reason: 'platform_blocked', highest_severity: 'critical', matches: [] });
       showPlatformBlockPopup();
       return true;
@@ -3607,7 +3645,7 @@
       // multiple rapid send attempts are all caught.
       if (_recentSensitivePaste && (Date.now() - _recentSensitivePaste.at) < 2000) {
         if (e) { e.preventDefault(); e.stopImmediatePropagation(); if (typeof e.stopPropagation === 'function') e.stopPropagation(); }
-        console.info('[cfai] BLOCKED via', label, '(recent paste, input not yet updated)');
+        clog('[cfai] BLOCKED via', label, '(recent paste, input not yet updated)');
         // Emit the block so the modal's follow-up decision event has something
         // to reference via decision_for (this path previously logged nothing).
         const cid = emitEnforcement('block', el, _recentSensitivePaste.matches, 'prompt_submit');
@@ -3660,7 +3698,7 @@
         if (routing) {
           // PAUSE the send
           if (e) { e.preventDefault(); e.stopImmediatePropagation(); if (typeof e.stopPropagation === 'function') e.stopPropagation(); }
-          console.info('[cfai] SMART ROUTE:', currentModelText, '→', routing.uiName, '(' + routing.rule_name + ')');
+          clog('[cfai] SMART ROUTE:', currentModelText, '→', routing.uiName, '(' + routing.rule_name + ')');
 
           // Set fetch-blocker backup (always works even if DOM change fails)
           dispatchRouteModel(routing.model, routing.rule_name);
@@ -3716,7 +3754,7 @@
     if (flaggedAttachments.length > 0) {
       const filenames = flaggedAttachments.map((a) => a.filename).join(', ');
       const allMatches = mergeMatches(flaggedAttachments.flatMap((a) => a.matches));
-      console.info('[cfai] BLOCKED via', label, '(attachment)', filenames);
+      clog('[cfai] BLOCKED via', label, '(attachment)', filenames);
       emit({
         kind: 'enforcement_block',
         blocked_for: 'file_upload',
@@ -3728,7 +3766,7 @@
       return true;
     }
 
-    console.info('[cfai] BLOCKED via', label, promptMatches.map((m) => m.pattern).join(', '));
+    clog('[cfai] BLOCKED via', label, promptMatches.map((m) => m.pattern).join(', '));
     const cid = emitEnforcement('block', el, promptMatches, 'prompt_submit');
     showBlockPopup(promptMatches, el, cid);
     return true;
@@ -3824,6 +3862,50 @@
     });
   }
 
+  // ── Event origin ─
+  //
+  // Did this event actually come from `el`?
+  //
+  // Every send hook resolves an element to act on and then cancels the event.
+  // When the two are unrelated the cancel lands on innocent UI: the resolvers
+  // below fall back to "the composer" whenever the real target is not a prompt
+  // input, so an Enter pressed in a search box, a rename dialog, or any other
+  // field on the page was cancelled and attributed to the composer's contents.
+  //
+  // composedPath() first, because a composer rendered in a shadow root
+  // retargets e.target to the host and contains() then reports false for its
+  // own input. Falls back to contains() when the event has no path (synthetic
+  // events in tests, older synthetic dispatch in some frameworks).
+  function eventCameFrom(el, e) {
+    if (!el || !e) return false;
+    const target = e.target;
+    if (target === el) return true;
+    if (typeof e.composedPath === 'function') {
+      const path = e.composedPath();
+      if (path && path.length) return path.includes(el);
+    }
+    return !!(el.contains && target && el.contains(target));
+  }
+  // The prompt input the enforcement hooks should act on.
+  //
+  // "Focused input, else the first one on the page" is wrong on an embedded-AI
+  // host, and wrong in BOTH directions. The first prompt input on Gmail is the
+  // message body, so pairing it with a scope gate would silently disarm the
+  // blocker — sensitive text typed into the Gemini panel itself would sail
+  // through — while the focused-element branch would hand back the mail body and
+  // arm the blocker over the whole app.
+  //
+  // Both stop being possible if the search itself is scope-aware: prefer the
+  // focused input when it is inside a governed surface, otherwise take the first
+  // input that is. On a whole_site host captureAllowed is always true, so this
+  // is exactly the old behaviour.
+  function governedPromptInput() {
+    const active = findActivePromptInput();
+    if (active && captureAllowed(active)) return active;
+    return findPromptInputs().find((n) => captureAllowed(n)) || null;
+  }
+  // ── end event origin ─
+
   function findActivePromptInput() {
     // Walk through shadow roots — inside a shadow tree, document.activeElement
     // returns the shadow host, not the actually-focused element inside.
@@ -3840,7 +3922,7 @@
   function installEnforcementHooks() {
     if (window.__cfaiEnforceInstalled) return;
     window.__cfaiEnforceInstalled = true;
-    console.info('[cfai] enforcement v2 installed (intercept-on-send, no DOM mutation)');
+    clog('[cfai] enforcement v2 installed (intercept-on-send, no DOM mutation)');
 
     // 0) Document-level paste fallback. Per-element paste listeners cover the
     //    happy path, but shadow-rooted inputs (Salesforce Lightning chat etc.)
@@ -3861,6 +3943,12 @@
       if (e.key !== 'Enter' || e.shiftKey) return;
       const el = isPromptInput(e.target) ? e.target : findActivePromptInput();
       if (!el) return;
+      // The fallback above resolves to "the composer" for ANY Enter on the page,
+      // including one pressed in a search field or a dialog. tryBlock cancels
+      // the event, so acting on an unrelated keystroke breaks that control. Only
+      // proceed when the Enter genuinely came from the composer — directly, or
+      // from a node inside it (contenteditables target their inner nodes).
+      if (!eventCameFrom(el, e)) return;
       tryBlock(el, e, 'keydown:Enter');
     }, true);
 
@@ -3912,8 +4000,31 @@
         if (!btn || !looksLikeSendButton(btn)) return;
       }
 
-      const el = findActivePromptInput() || findPromptInputs()[0];
+      const el = governedPromptInput();
       if (!el) return;
+
+      // SCOPE APPLIES HERE TOO. This listener is attached at window level in the
+      // capture phase for keydown/pointerdown/mousedown/click/submit and cancels
+      // the event outright, so an over-broad match does not under-report — it
+      // breaks the host application.
+      //
+      // It was the one enforcement path with no scope check at all. On an
+      // embedded-AI host every contenteditable is a "prompt input", so typing an
+      // SSN into a Gmail message body armed the blocker, and from then on Enter
+      // anywhere in Gmail was cancelled and showed a block modal. Capture was
+      // already gated, which made it worse rather than better: the app broke
+      // with nothing recorded that would explain why.
+      //
+      // `el` is now scope-checked by governedPromptInput() above. What remains
+      // is the gesture: the flagged text being inside a panel does not make a
+      // click on the host app's own toolbar ours to cancel.
+      if (!captureAllowed(e.target)) return;
+
+      // And Enter must come from the flagged input itself. Otherwise pressing
+      // Enter in a search box, a rename dialog or any unrelated field on the
+      // page was cancelled and blamed on the composer's contents.
+      if (e.type === 'keydown' && !eventCameFrom(el, e)) return;
+
       const text = readInputText(el);
       const matches = scanForBlockers(text);
       if (!matches) {
@@ -3924,7 +4035,7 @@
       e.preventDefault();
       e.stopImmediatePropagation();
       e.stopPropagation();
-      console.info('[cfai] GLOBAL BLOCKER stopped', e.type);
+      clog('[cfai] GLOBAL BLOCKER stopped', e.type);
       _lastLogKey = null;
       const cid = emitEnforcement('block', el, matches, 'prompt_submit');
       showBlockPopup(matches, el, cid);
@@ -3937,7 +4048,7 @@
       for (const evt of ['keydown', 'pointerdown', 'mousedown', 'click', 'submit']) {
         window.addEventListener(evt, globalBlocker, true);
       }
-      console.info('[cfai] global blocker ACTIVATED');
+      clog('[cfai] global blocker ACTIVATED');
     }
 
     function deactivateBlocker() {
@@ -3946,7 +4057,7 @@
       for (const evt of ['keydown', 'pointerdown', 'mousedown', 'click', 'submit']) {
         window.removeEventListener(evt, globalBlocker, true);
       }
-      console.info('[cfai] global blocker deactivated');
+      clog('[cfai] global blocker deactivated');
     }
 
     // Poll the prompt input every 500ms. If sensitive content is detected,
@@ -3958,7 +4069,11 @@
     // same scan.
     setInterval(() => {
       if (!ENFORCE) return;
-      const el = findActivePromptInput() || findPromptInputs()[0];
+      const el = governedPromptInput();
+      // Disarm as well as decline to arm: a panel can close (or its selector go
+      // stale) while the blocker is already active, and leaving window-level
+      // capture listeners attached would keep cancelling the host app's events
+      // with no AI surface on screen to justify it.
       if (!el) { if (_blockActive) deactivateBlocker(); return; }
       const text = readInputText(el);
       const matches = scanForBlockers(text);
@@ -4042,7 +4157,7 @@
     // which resumes a surviving engagement and never mints on a bare ask.
     refreshSessionId(true);
     const tag = el.tagName + (el.getAttribute('role') ? ('[role=' + el.getAttribute('role') + ']') : '');
-    console.info('[cfai] attached to prompt input:', tag,
+    clog('[cfai] attached to prompt input:', tag,
       el.getAttribute('aria-label') || el.getAttribute('placeholder') || '');
 
     el.addEventListener('paste', (e) => handlePaste(el, e), true);
@@ -4061,7 +4176,7 @@
             e.preventDefault();
             e.stopImmediatePropagation();
             e.stopPropagation();
-            console.info('[cfai] ELEMENT-LEVEL BLOCK on Enter');
+            clog('[cfai] ELEMENT-LEVEL BLOCK on Enter');
             _lastLogKey = null;
             const cid = emitEnforcement('block', el, matches, 'prompt_submit');
             showBlockPopup(matches, el, cid);
@@ -4085,7 +4200,7 @@
         e.preventDefault();
         e.stopImmediatePropagation();
         e.stopPropagation();
-        console.info('[cfai] BUTTON-LEVEL BLOCK on', e.type);
+        clog('[cfai] BUTTON-LEVEL BLOCK on', e.type);
         _lastLogKey = null;
         const cid = emitEnforcement('block', el, matches, 'prompt_submit');
         showBlockPopup(matches, el, cid);
@@ -4433,7 +4548,7 @@
     chrome.storage.local.get(['cfai.blocked'], (result) => {
       const cached = result['cfai.blocked'] || [];
       if (cached.length > 0) {
-        console.info('[cfai] blocked agents from cache:', cached.map(a => a.agent_name).join(', '));
+        clog('[cfai] blocked agents from cache:', cached.map(a => a.agent_name).join(', '));
         applyBlockedList(cached);
       }
     });

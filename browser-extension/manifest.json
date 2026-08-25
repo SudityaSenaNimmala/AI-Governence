@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CloudFuze AI Governance",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Detects sensitive data flowing into AI services. Reports to CloudFuze governance, never to third parties.",
   "permissions": [
     "storage",

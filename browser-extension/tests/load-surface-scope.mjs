@@ -58,8 +58,11 @@ export function loadSurfaceScope(host, fakeDocument, synced) {
   const body = region()
     + '\n  return { captureAllowed, aiPanels, IS_EMBEDDED_AI, surfaceSelectorsForHost, EMBEDDED_AI_FLOOR };';
   // eslint-disable-next-line no-new-func
-  const run = new Function('document', 'chrome', 'window', 'console', body);
-  return run(fakeDocument, chrome, win, quiet);
+  // content.js routes informational logging through clog(), which is defined
+  // above this slice and gated on localStorage. Bind it to the quiet console so
+  // the region under test behaves as it does with debug logging enabled.
+  const run = new Function('document', 'chrome', 'window', 'console', 'clog', body);
+  return run(fakeDocument, chrome, win, quiet, (...a) => quiet.info(...a));
 }
 
 // ── A DOM small enough to reason about ──────────────────────────────────────
