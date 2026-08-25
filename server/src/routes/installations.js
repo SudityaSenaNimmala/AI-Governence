@@ -634,6 +634,15 @@ pause >nul
     }
     walk(agentDir, '');
 
+    // Bundle browser-extension files the agent reads at runtime.
+    // These live outside agent/ in the repo but are needed by the installed agent.
+    const browserExtDir = join(agentDir, '..', 'browser-extension', 'content');
+    const bundledExtFiles = ['complexity.js', 'content.js'];
+    for (const f of bundledExtFiles) {
+      const p = join(browserExtDir, f);
+      if (existsSync(p)) files.push({ name: `browser-extension/content/${f}`, data: readFileSync(p) });
+    }
+
     const ext = { windows: 'zip', macos: 'zip', linux: 'zip' };
     const zipBuffer = createZip(files);
     res.setHeader('Content-Type', 'application/zip');
