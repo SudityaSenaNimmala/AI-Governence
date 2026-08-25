@@ -1401,20 +1401,15 @@ const REPLAY_CONTROLS_H=88;
 //     "needs an admin credential" panel. There is therefore no credential
 //     embedded in this repository, and none in a build unless the person doing
 //     the build supplies one.
-// Where the admin credential comes from at RUNTIME.
+// BUILD-time only, and only useful in a developer checkout.
 //
-// VITE_ADMIN_TOKEN is a BUILD-time value: Vite inlines it into the client bundle,
-// so anything put there is readable by every visitor who opens devtools. That is
-// acceptable for a developer's local build and wrong for a deployed dashboard on a
-// public host — which is exactly what this deployment is. So the deployed path is
-// a token the admin supplies in their own browser, held in sessionStorage: it
-// never enters the bundle, never reaches another user, and is gone when the tab
-// closes. Reading it can throw where site data is blocked, hence the try.
-export const ADMIN_TOKEN_KEY="cfai_admin_token";
-export function adminToken(){
-  try{ const t=window.sessionStorage?.getItem(ADMIN_TOKEN_KEY); if(t) return t; }catch{ /* blocked */ }
-  return import.meta.env.VITE_ADMIN_TOKEN||"";
-}
+// Vite inlines this into the client bundle, so anything put here is readable by
+// every visitor who opens devtools — fine locally, wrong for a deployed dashboard
+// on a public host. There is deliberately no runtime entry point either: a shared
+// admin token pasted into a web page spreads by screenshot and outlives whoever
+// pasted it. A deployment makes these panels usable with ADMIN_AUTH_OPEN=true on
+// the server instead, and admin OAuth replaces both.
+export function adminToken(){ return import.meta.env.VITE_ADMIN_TOKEN||""; }
 
 async function adminFetch(path, init) {
   const token=adminToken();
@@ -4066,81 +4061,50 @@ function copyText(text) {
   }catch{ fallback(); }
 }
 
-// Not an error state: a dashboard with no admin credential is a normal starting
-// point, so this reads as what to do rather than what went wrong.
+// Shown only when an admin-gated panel gets a 401.
 //
-// IT MUST SAY DIFFERENT THINGS IN THE TWO PLACES IT APPEARS. The original copy was
-// written for a developer checkout and shown everywhere, so the DEPLOYED dashboard
-// on a public host was telling customers to edit connect-ui/.env.local, restart a
-// dev server they do not have, and printing both an internal source path and the
-// string dev-admin-token. None of that is actionable there, and a customer-facing
-// page should not be narrating our file layout.
+// NO CREDENTIAL ENTRY, DELIBERATELY. An earlier version of this offered a token
+// field, and asking each admin to paste a shared secret into a web page is a
+// habit worth not teaching — the token is the same for everyone who has it, so it
+// spreads by screenshot and lives in whatever notes app it was copied from. Admin
+// OAuth is the intended answer.
 //
-// In a deployed build the honest instruction is: paste this deployment's own
-// ADMIN_TOKEN. It is held in sessionStorage rather than baked into the bundle,
-// because Vite inlines build-time env vars into client JS where any visitor can
-// read them — which on a public host would hand admin API access to the internet.
+// Until then the server-side flag ADMIN_AUTH_OPEN=true removes the 401 entirely
+// and this panel never renders, which is why the copy points at the operator
+// rather than the reader: there is nothing the person looking at the screen can do
+// here, and pretending otherwise wastes their time.
+//
+// The dev branch keeps its .env.local instructions because there it IS actionable.
+// Vite dead-code-eliminates the branch that does not apply, so a production bundle
+// carries none of the developer text.
 function AdminAuthNotice({ what }) {
-  const [token, setToken] = useState("");
-  const [saved, setSaved] = useState(false);
-  const isDev = import.meta.env.DEV;
-
-  const apply = () => {
-    const t = token.trim();
-    if (!t) return;
-    try { window.sessionStorage?.setItem(ADMIN_TOKEN_KEY, t); } catch { /* blocked */ }
-    setSaved(true);
-    // A reload is the simplest correct refresh: every admin-gated panel on the
-    // page re-fetches with the credential, rather than each one needing to learn
-    // that a token arrived.
-    window.location.reload();
-  };
-
-  return (<div className="aihub_card" style={{borderLeft:"3px solid #f59e0b"}}>
-    <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
-      <Shield size={18} color="#f59e0b" style={{flexShrink:0,marginTop:2}}/>
-      <div style={{flex:1}}>
-        <div style={{fontWeight:700,fontSize:14.2,marginBottom:4}}>Admin credential required</div>
-
-        {isDev ? (<>
+  if (import.meta.env.DEV) {
+    return (<div className="aihub_card" style={{borderLeft:"3px solid #f59e0b"}}>
+      <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+        <Shield size={18} color="#f59e0b" style={{flexShrink:0,marginTop:2}}/>
+        <div>
+          <div style={{fontWeight:700,fontSize:14.2,marginBottom:4}}>Admin credential required</div>
           <p className="aihub_text_muted" style={{fontSize:13.2,lineHeight:1.65,margin:0}}>
             {what} is admin-only and this build sent no admin token, so the server answered 401.
             Add a line to <Mono>connect-ui/.env.local</Mono> and restart the dev server:
           </p>
           <pre className="aihub_content_pre" style={{marginTop:10,fontSize:13.2}}>VITE_ADMIN_TOKEN=dev-admin-token</pre>
           <p className="aihub_text_muted" style={{fontSize:12.7,lineHeight:1.6,marginTop:8,marginBottom:0}}>
-            <Mono>dev-admin-token</Mono> is the local default in <Mono>server/src/auth.js</Mono>.
-            Nothing is hardcoded in the app — with no token set, no <Mono>Authorization</Mono> header is sent.
+            Or set <Mono>ADMIN_AUTH_OPEN=true</Mono> on the server to skip admin auth entirely.
           </p>
-        </>) : (<>
-          <p className="aihub_text_muted" style={{fontSize:13.2,lineHeight:1.65,margin:0}}>
-            {what} is restricted to administrators. Enter this deployment&apos;s admin
-            token to continue. It is kept in this browser tab only — never stored on
-            disk, never shared with other users, and cleared when the tab closes.
-          </p>
-          <div style={{display:"flex",gap:8,marginTop:10,flexWrap:"wrap"}}>
-            <input
-              type="password"
-              value={token}
-              onChange={(e)=>setToken(e.target.value)}
-              onKeyDown={(e)=>{ if(e.key==="Enter") apply(); }}
-              placeholder="Admin token"
-              aria-label="Admin token"
-              autoComplete="off"
-              style={{flex:"1 1 240px",minWidth:0,padding:"8px 10px",fontSize:13.4,
-                border:"1px solid var(--aihub-border, #d8dee9)",borderRadius:6}}
-            />
-            <button type="button" className="aihub_btn" onClick={apply} disabled={!token.trim()}>
-              {saved ? "Applying…" : "Continue"}
-            </button>
-          </div>
-          <p className="aihub_text_muted" style={{fontSize:12.7,lineHeight:1.6,marginTop:8,marginBottom:0}}>
-            Your administrator set this value as <Mono>ADMIN_TOKEN</Mono> on the governance
-            server. If you do not have it, ask them rather than guessing — failed
-            attempts are rejected by the server, not by this page.
-          </p>
-        </>)}
+        </div>
       </div>
+    </div>);
+  }
+
+  // Deployed: one line, no input, no token, no internals.
+  return (<div className="aihub_card" style={{borderLeft:"3px solid #f59e0b"}}>
+    <div style={{display:"flex",gap:10,alignItems:"center"}}>
+      <Shield size={17} color="#f59e0b" style={{flexShrink:0}}/>
+      <p className="aihub_text_muted" style={{fontSize:13.2,lineHeight:1.6,margin:0}}>
+        {what} is restricted to administrators, and this dashboard has not been granted
+        administrator access. Ask whoever runs your governance server to enable it.
+      </p>
     </div>
   </div>);
 }
