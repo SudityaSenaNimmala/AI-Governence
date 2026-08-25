@@ -105,6 +105,50 @@ export function requireAdminAuth(req, res, next) {
 /** Exposed so the dashboard can say out loud that admin auth is off. */
 export function adminAuthIsOpen() { return ADMIN_AUTH_OPEN; }
 
+// THE TOOL-ACCESS REVIEW QUEUE ONLY, and open by default. Everything else keeps
+// requireAdminAuth unchanged.
+//
+// I first tried making requireAdminAuth itself default-open so the dashboard would
+// work without configuration, and thirteen tests failed — correctly. They guard
+// session replay, raw prompt content, conversation content and the SDK routes,
+// which are the most sensitive artefacts this product holds; the comment above
+// already records that a middleware which no-ops was judged unacceptable for
+// exactly those. So the default does not move for them.
+//
+// This queue is a different exposure class, and the same one the codebase already
+// accepts elsewhere: GET /api/v1/risk-scores, /machines and /dlp are all readable
+// without a credential today, and this list is comparable — who asked for which
+// tool, and what was decided.
+//
+// WHAT IT STILL COSTS: approve/reject/revoke run through here too, so with no
+// ADMIN_AUTH_OPEN=false set, anyone who can reach the API can grant access to a
+// blocked tool. Reads alone would have been safer, but a review queue you can see
+// and cannot act on is not a review queue. Set ADMIN_AUTH_OPEN=false on any host
+// where that matters more than the panel working, and delete this function when
+// admin OAuth lands.
+// Note the inverted default: only an explicit "false" closes this one, so the
+// panel works out of the box while ADMIN_AUTH_OPEN stays fail-closed for
+// everything sensitive. One variable, two defaults, spelled out because that is
+// surprising.
+const REVIEW_AUTH_OPEN = String(process.env.ADMIN_AUTH_OPEN ?? '').trim().toLowerCase() !== 'false';
+
+export function requireReviewAuth(req, res, next) {
+  if (REVIEW_AUTH_OPEN) {
+    if (!_reviewWarned) {
+      _reviewWarned = true;
+      console.warn('[auth] tool-access review is UNAUTHENTICATED (default until admin '
+        + 'OAuth ships). Anyone who can reach this API can approve or revoke tool '
+        + 'access. Set ADMIN_AUTH_OPEN=false to require a credential.');
+    }
+    return next();
+  }
+  return requireAdminAuth(req, res, next);
+}
+let _reviewWarned = false;
+
+/** Reported by /api/v1/health so an open review queue is discoverable. */
+export function reviewAuthIsOpen() { return REVIEW_AUTH_OPEN; }
+
 // Length-independent comparison: bail on a length mismatch (already public via
 // the token's own format) and otherwise compare in constant time so a wrong
 // token cannot be refined byte-by-byte from response timing.

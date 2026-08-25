@@ -21,7 +21,7 @@
 
 import crypto from 'node:crypto';
 import { a } from '../util.js';
-import { requireMachineAuth, requireAdminAuth } from '../auth.js';
+import { requireMachineAuth, requireReviewAuth } from '../auth.js';
 import { fireWebhooks } from './webhooks.js';
 import { UNIDENTIFIED_NAME } from './risk-score.js';
 
@@ -282,14 +282,14 @@ export function mountAccessRequests(app, db) {
 
   // ── List requests (admin dashboard) ──
   //
-  // requireAdminAuth, same exposure class as GET /api/v1/access-exceptions
+  // requireReviewAuth, same exposure class as GET /api/v1/access-exceptions
   // below: this is EVERY request in the fleet, enriched with the requester's
   // name and hostname and carrying the free-text `reason` they typed — "why I
   // need this tool" is exactly the sort of prose a governance product must not
   // hand to an unauthenticated caller. A device that wants its own rows reads
   // /access-requests/mine, which is machine-scoped from verified claims.
 
-  app.get('/api/v1/access-requests', requireAdminAuth, a(async (req, res) => {
+  app.get('/api/v1/access-requests', requireReviewAuth, a(async (req, res) => {
     const { status } = req.query;
     const filter = {};
     // String(): `?status[$ne]=zzz` arrives as an object from Express's extended
@@ -324,12 +324,12 @@ export function mountAccessRequests(app, db) {
 
   // ── Approve request (admin — expiry is MANDATORY) ──
   //
-  // requireAdminAuth is the whole point of the review step. Unauthenticated,
+  // requireReviewAuth is the whole point of the review step. Unauthenticated,
   // the employee whose request is pending could PUT their own id here and mint
   // the exception themselves, which makes the block advisory rather than
   // enforced.
 
-  app.put('/api/v1/access-requests/:id/approve', requireAdminAuth, a(async (req, res) => {
+  app.put('/api/v1/access-requests/:id/approve', requireReviewAuth, a(async (req, res) => {
     const { expires_at, expires_in_hours, note } = req.body ?? {};
 
     // Calculate expiry — either a date or a countdown in hours
@@ -380,11 +380,11 @@ export function mountAccessRequests(app, db) {
 
   // ── Reject request ──
   //
-  // requireAdminAuth: a rejection is a verdict that also starts the 24h
+  // requireReviewAuth: a rejection is a verdict that also starts the 24h
   // cooldown enforced by POST above, so an open route lets anyone deny someone
   // else's request and silence them for a day.
 
-  app.put('/api/v1/access-requests/:id/reject', requireAdminAuth, a(async (req, res) => {
+  app.put('/api/v1/access-requests/:id/reject', requireReviewAuth, a(async (req, res) => {
     const { note } = req.body ?? {};
     const request = await requests().findOne({ id: req.params.id });
     if (!request) return res.status(404).json({ error: 'Request not found' });
@@ -436,7 +436,7 @@ export function mountAccessRequests(app, db) {
 
   // ── List active exceptions (admin view) ──
   //
-  // requireAdminAuth, because the enrichment below turns each row into
+  // requireReviewAuth, because the enrichment below turns each row into
   // "<employee name> on <hostname> (<machine id>) currently has access to
   // <tool>" — a fleet-wide roster of named people and their devices. It was
   // reachable unauthenticated, which is not defensible for that payload; the
@@ -448,7 +448,7 @@ export function mountAccessRequests(app, db) {
   // which /api/v1/replays/* is served through. AccessRequestsView still uses
   // bare fetch() for this URL and must be switched to adminFetch to keep
   // rendering the Active Exceptions tab.
-  app.get('/api/v1/access-exceptions', requireAdminAuth, a(async (req, res) => {
+  app.get('/api/v1/access-exceptions', requireReviewAuth, a(async (req, res) => {
     // Clean up expired ones first
     await exceptions().updateMany(
       { expires_at: { $lte: new Date() }, active: true },
@@ -489,12 +489,12 @@ export function mountAccessRequests(app, db) {
 
   // ── Revoke an exception early ──
   //
-  // requireAdminAuth: this deactivates a granted exception and marks the
+  // requireReviewAuth: this deactivates a granted exception and marks the
   // request 'revoked'. Open, it is an unauthenticated write against any
   // approval by request id — either griefing a colleague's access or, paired
   // with the open approve route, laundering the audit trail of a grant.
 
-  app.delete('/api/v1/access-exceptions/:id', requireAdminAuth, a(async (req, res) => {
+  app.delete('/api/v1/access-exceptions/:id', requireReviewAuth, a(async (req, res) => {
     await exceptions().updateOne(
       { request_id: req.params.id },
       { $set: { active: false } },

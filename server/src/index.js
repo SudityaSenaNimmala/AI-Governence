@@ -43,7 +43,7 @@ import { mountApprovals } from './routes/approvals.js';
 import { mountSiem } from './routes/siem.js';
 import { seedAiPlatforms } from './seed-platforms.js';
 import { seedDefaultRoutingRules } from './seed-routing.js';
-import { JWT_SECRET, ENROLL_SECRET, ADMIN_TOKEN, adminAuthIsOpen } from './auth.js';
+import { JWT_SECRET, ENROLL_SECRET, ADMIN_TOKEN, adminAuthIsOpen, reviewAuthIsOpen } from './auth.js';
 import governanceRouter from './governance/app.js';
 
 const PORT = Number(process.env.PORT) || 8787;
@@ -72,6 +72,10 @@ app.get('/api/v1/health', (req, res) => {
     // .env. A temporary hole that nothing mentions is a hole nobody remembers to
     // close, and health is the one place ops already looks.
     admin_auth: adminAuthIsOpen() ? 'open' : 'required',
+    // Reported separately because the two differ: the sensitive routes stay
+    // fail-closed while the tool-access review queue is open by default, so the
+    // dashboard works without configuration. ADMIN_AUTH_OPEN=false closes both.
+    review_auth: reviewAuthIsOpen() ? 'open' : 'required',
   });
 });
 
