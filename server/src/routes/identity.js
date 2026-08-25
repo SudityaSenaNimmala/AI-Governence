@@ -175,7 +175,21 @@ export async function resolveProfiles(db, allMachines) {
   //           (2) employee email → fuzzy match to OS username
   //           (3) no match → standalone profile
   for (const ext of extensions) {
-    const email = (ext.employee_email || '').toLowerCase().trim();
+    // AN EXTENSION'S IDENTITY USUALLY ARRIVES IN `user`, NOT `employee_email`.
+    // employee_email is only ever set by the `employeeEmail` managed key, while
+    // every other identity path — the Intune-provisioned userEmail, the signed-in
+    // browser profile, the desktop-agent beacon — writes to `user` at enrollment.
+    // Reading only employee_email meant a browser-only machine that had reported a
+    // perfectly good corporate address still fell through to the standalone branch
+    // and was displayed as "Browser User (…)": the name was known and thrown away.
+    //
+    // `user` is an email on the extension paths but an OS username ("alice") on the
+    // beacon path, so only treat it as an email when it looks like one; the
+    // non-email case is handled as a display name further down.
+    const extUser = String(ext.user || '').trim();
+    const userIsEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(extUser);
+    const email = (ext.employee_email || '').toLowerCase().trim()
+      || (userIsEmail ? extUser.toLowerCase() : '');
     const extHost = (ext.hostname || '').toLowerCase().replace(/-?browser-?extension$/i, '').trim();
 
     const allProfiles = await profiles.find({}).project({ _id: 0 }).toArray();
@@ -225,9 +239,13 @@ export async function resolveProfiles(db, allMachines) {
     if (existing) {
       skipped++;
     } else {
+      // Order: a real address, then a non-email username the beacon supplied, and
+      // only then the anonymous placeholder. The placeholder is a last resort, not
+      // a default — it should appear only when nothing at all was reported.
       const displayName = email
         ? email.split('@')[0].replace(/[._-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-        : 'Browser User (' + ext.id.slice(0, 8) + ')';
+        : (extUser ? humanizeName(extUser)
+          : 'Browser User (' + ext.id.slice(0, 8) + ')');
       await profiles.insertOne({
         id: crypto.randomUUID(),
         resolve_key: resolveKey,
