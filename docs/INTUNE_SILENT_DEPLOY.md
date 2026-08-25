@@ -156,6 +156,54 @@ On an unmanaged Chrome the policy is ignored and nothing installs, with no error
 If your Chrome estate is not CBCM-enrolled, deploy on Edge, or enroll Chrome — this
 is the one prerequisite that cannot be worked around in code.
 
+### Coverage: which browsers, which profiles
+
+**All Chromium-family browsers, one package.** They all read the same Chromium
+policy names and accept the same signed CRX, so a single extension ID covers every
+one — which is only true because we sign it ourselves. Two stores would have issued
+two different IDs, and Brave/Vivaldi/Opera would have had no route at all.
+
+| Browser | Policy root under `HKLM:\SOFTWARE\Policies` | Status |
+|---|---|---|
+| Edge | `Microsoft\Edge` | supported |
+| Chrome | `Google\Chrome` | supported (managed device required) |
+| Brave | `BraveSoftware\Brave` | supported |
+| Vivaldi | `Vivaldi` | supported |
+| Chromium | `Chromium` | supported |
+| Opera | `Opera Software\Opera` | best-effort — its Chromium policy support has historically lagged; verify on a real machine |
+
+Policy is written for all six whether or not the browser is installed. An absent
+browser's policy is inert, and the alternative — detect, then write — leaves a
+browser someone installs next week silently ungoverned until the script runs again.
+
+**All profiles, automatically.** These are machine-level (`HKLM`) policies, so they
+apply to every user and every profile on the device, including profiles created
+after the policy landed. There is nothing per-profile to enumerate or maintain.
+
+**Firefox is not covered, and it is not a packaging problem.** Three separate
+blockers: Firefox does not support MV3 `background.service_worker` (it needs an
+event page), the extension uses `chrome.scripting` and `chrome.identity` APIs with
+no Firefox equivalent, and Firefox refuses to install any extension not signed by
+Mozilla — self-hosted signing is not an option there. Supporting it means a
+separate build plus an AMO submission, not another registry key. If Firefox is in
+your estate, the honest short-term answer is to block it by policy or accept it as
+ungoverned.
+
+### The private-browsing hole
+
+**A force-installed extension is disabled in Incognito / InPrivate, and no policy
+can force it on.** AI used in a private window is therefore completely ungoverned:
+no capture, no blocking, no notice. This is a browser design decision, not
+something fixable in the extension.
+
+The only enterprise answer is to remove the window. Set
+`$DisablePrivateBrowsing = $true` in the script and it writes
+`IncognitoModeAvailability = 1` for every browser above.
+
+It is **off by default**, because it changes how everyone in the company browses
+and that is your call, not a default worth assuming. Leaving it off means
+accepting that anyone who opens a private window bypasses AI governance entirely.
+
 ### Verifying before the fleet
 
 ```bash
