@@ -175,8 +175,16 @@ $browsers = @(
 # would put the enroll secret in every user's own hive for no benefit.
 if (-not $RunningAsSystem) {
   if (-not $PerUserIdentity) {
-    Write-Output 'Running as a user but $PerUserIdentity is $false - nothing to do (the device-context run owns identity).'
-    return
+    # EXIT NON-ZERO, because doing nothing quietly is the dangerous outcome here.
+    # Intune reports a zero exit as success, so an assignment created in the wrong
+    # context would show a green tick on every machine while provisioning nothing
+    # and installing no extension. Failing loudly makes the misconfiguration
+    # visible in the Intune console, which is the only place anyone would look.
+    Write-Error ('This script must run in DEVICE (SYSTEM) context, but it is running as ' +
+      $env:USERNAME + '. $PerUserIdentity is $false, so there is nothing for a user-context ' +
+      'run to do. Re-create the Intune assignment with "Run this script using the logged on ' +
+      'credentials" = No.')
+    exit 1
   }
   $upn = Get-CurrentUserUpn
   if (-not $upn) {
