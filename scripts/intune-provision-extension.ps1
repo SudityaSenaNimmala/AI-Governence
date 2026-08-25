@@ -75,6 +75,27 @@ $DisablePrivateBrowsing = $false
 # Set $true if ANY machine is shared, and assign this script twice in Intune:
 # once in device/SYSTEM context, once in user context.
 $PerUserIdentity = $false
+
+# CHROME REFUSES AN OFF-STORE FORCE-INSTALL UNLESS THE MACHINE IS "MANAGED", and
+# its definition of managed is narrow: joined to an Active Directory domain, or
+# enrolled in Chrome Browser Cloud Management. Entra/Azure-AD join and Intune MDM
+# are NOT on that list. This estate is Entra-joined with no on-prem AD, so without
+# a CBCM token Chrome silently ignores the policy: no extension, no error, nothing
+# in the Intune console. Edge is unaffected — it has no such requirement.
+#
+# The token makes every Chrome on the machine cloud-managed and unblocks the
+# install. Get it free from admin.google.com -> Devices -> Chrome -> Managed
+# browsers -> Enrollment token. Chrome Browser Cloud Management costs nothing and
+# does not require Workspace.
+#
+# Left empty, this script still provisions everything and REPORTS Chrome as an
+# ungoverned gap rather than pretending it worked.
+$ChromeCbcmToken = ''
+
+# Report which browsers exist on this machine and whether Chrome can actually be
+# governed, so coverage is a fact on the server rather than an assumption. Costs
+# one HTTPS POST per run.
+$ReportCoverage = $true
 # -----------------------------------------------------------------------------
 
 # ---- Device-sourced identity -------------------------------------------------
@@ -252,7 +273,75 @@ foreach ($b in $browsers) {
       -Value 1 -PropertyType DWord -Force | Out-Null
   }
 
+  # Chrome only: the token that makes this machine cloud-managed, without which
+  # Chrome ignores the force-install above. Harmless on the other browsers, so it
+  # is written only where it means something.
+  if ($b.Name -eq 'Chrome' -and $ChromeCbcmToken) {
+    Set-RegValue -Path $b.Root -Name 'CloudManagementEnrollmentToken' -Value $ChromeCbcmToken
+  }
+
   Write-Output ("Provisioned {0}: force-install + managed config for {1}" -f $b.Name, $b.Id)
 }
 
 Write-Output 'Done. Users must restart the browser to pick up the policy.'
+
+# ---- Coverage report ---------------------------------------------------------
+# WHY REPORT THIS AT ALL. Chrome's off-store rule means a machine can be fully
+# provisioned by this script and still have an ungoverned Chrome, with nothing
+# anywhere saying so — the policy is written, Intune reports success, and the
+# extension simply never appears. The only way that becomes visible is if the
+# machine itself says what it found.
+#
+# So each run reports which browsers exist and whether Chrome is actually
+# governable here. A machine with Chrome installed, no AD domain join and no CBCM
+# token is a hole, and the server can then list those rather than an admin
+# discovering one at a time.
+if ($ReportCoverage) {
+  $chromeInstalled = @(
+    "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+    "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
+  ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+  $domainJoined = (Get-CimInstance Win32_ComputerSystem -EA SilentlyContinue).PartOfDomain -eq $true
+  # Chrome accepts AD domain join OR a CBCM token. Entra join is NOT sufficient,
+  # which is exactly why it is recorded separately instead of being counted.
+  $entraJoined = ((& dsregcmd /status 2>$null) | Select-String 'AzureAdJoined\s*:\s*YES').Count -gt 0
+  $chromeGovernable = $domainJoined -or [bool]$ChromeCbcmToken
+
+  $browsers = @()
+  foreach ($probe in @(
+    @{ n = 'chrome';   p = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe" },
+    @{ n = 'edge';     p = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" },
+    @{ n = 'brave';    p = "$env:ProgramFiles\BraveSoftware\Brave-Browser\Applicationrave.exe" },
+    @{ n = 'vivaldi';  p = "$env:LOCALAPPDATA\Vivaldi\Applicationivaldi.exe" },
+    @{ n = 'opera';    p = "$env:LOCALAPPDATA\Programs\Opera\opera.exe" },
+    @{ n = 'firefox';  p = "$env:ProgramFiles\Mozilla Firefoxirefox.exe" }
+  )) { if (Test-Path $probe.p) { $browsers += $probe.n } }
+
+  $body = @{
+    hostname          = $env:COMPUTERNAME
+    os                = 'windows'
+    user              = $EnrolledUpn
+    extension_id      = $ExtensionId
+    browsers          = $browsers
+    chrome_installed  = [bool]$chromeInstalled
+    chrome_governable = $chromeGovernable
+    domain_joined     = $domainJoined
+    entra_joined      = $entraJoined
+    cbcm_token        = [bool]$ChromeCbcmToken
+    private_browsing_blocked = [bool]$DisablePrivateBrowsing
+    enrollSecret      = $EnrollSecret
+  } | ConvertTo-Json -Compress
+
+  try {
+    Invoke-RestMethod -Method Post -Uri "$ServerUrl/api/v1/browser-coverage" `
+      -ContentType 'application/json' -Body $body -TimeoutSec 20 | Out-Null
+    if ($chromeInstalled -and -not $chromeGovernable) {
+      Write-Output 'WARNING: Chrome is installed but NOT governable on this machine (no AD domain join, no CBCM token). Chrome will ignore the force-install. Reported to the server.'
+    } else {
+      Write-Output ("Coverage reported: {0}" -f ($browsers -join ', '))
+    }
+  } catch {
+    Write-Output ("Coverage report failed (provisioning still applied): {0}" -f $_.Exception.Message)
+  }
+}

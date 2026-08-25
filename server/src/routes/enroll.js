@@ -1,5 +1,4 @@
-import crypto from 'node:crypto';
-import { ENROLL_SECRET, signMachineToken } from '../auth.js';
+import { ENROLL_SECRET, signMachineToken, constantTimeEqual } from '../auth.js';
 import { a } from '../util.js';
 import { resolveProfiles } from './identity.js';
 
@@ -52,12 +51,4 @@ export function mountEnroll(app, db) {
     const token = signMachineToken({ machineId, hostname });
     res.json({ token, machineId });
   }));
-}
-
-function constantTimeEqual(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string') return false;
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ab.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ab, bb);
 }

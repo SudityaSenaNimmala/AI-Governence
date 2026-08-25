@@ -70,7 +70,10 @@ export function requireAdminAuth(req, res, next) {
 // Length-independent comparison: bail on a length mismatch (already public via
 // the token's own format) and otherwise compare in constant time so a wrong
 // token cannot be refined byte-by-byte from response timing.
-function constantTimeEqual(a, b) {
+// Exported so callers that authenticate with the enroll secret (enroll.js,
+// browser-coverage.js) share one implementation. Comparing secrets with === leaks
+// their length and prefix through timing, which is worth exactly one function.
+export function constantTimeEqual(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   const ab = Buffer.from(a);
   const bb = Buffer.from(b);

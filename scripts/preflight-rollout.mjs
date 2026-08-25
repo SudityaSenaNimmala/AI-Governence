@@ -264,6 +264,32 @@ for (const r of await probe()) {
   }
 }
 
+// ── 9. Chrome manageability, which is the likeliest silent failure ──────────
+// Chrome ignores an off-store force-install unless the machine is AD-domain-joined
+// or CBCM-enrolled. Entra join and Intune MDM do not count. It cannot be checked
+// from here for the whole estate — only reported per machine — so this reports what
+// the fleet has already said.
+try {
+  const res = await fetch(`${baseUrl}/api/v1/browser-coverage`);
+  if (res.ok) {
+    const cov = await res.json();
+    if (cov.machines_reporting === 0) {
+      warn('all machines', 'Chrome manageability', 'no machine has reported yet — run the provisioning script on the pilot first');
+    } else if (cov.ungoverned_chrome > 0) {
+      block('all machines', 'Chrome manageability',
+        `${cov.ungoverned_chrome} of ${cov.machines_reporting} reporting machines have Chrome `
+        + 'installed but ungovernable — set $ChromeCbcmToken and re-run provisioning');
+    } else {
+      pass('all machines', 'Chrome manageability',
+        `${cov.machines_reporting} machines reporting, no ungoverned Chrome`);
+    }
+    if (cov.ungoverned_firefox > 0) {
+      warn('all machines', 'Firefox present',
+        `${cov.ungoverned_firefox} machines have Firefox, which cannot be governed at all`);
+    }
+  }
+} catch { /* server unreachable is already reported above */ }
+
 // ── Report ──────────────────────────────────────────────────────────────────
 
 const ICON = { PASS: 'PASS ', BLOCK: 'BLOCK', WARN: 'WARN ' };

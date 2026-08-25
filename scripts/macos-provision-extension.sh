@@ -36,6 +36,8 @@ SERVER_URL="https://agentgovernence.cftools.live"
 ENROLL_SECRET="REPLACE_WITH_ENROLL_SECRET"
 IDENTITY_DOMAIN="cloudfuze.com"                # empty string disables the guard
 BROWSER_ONLY=1                                 # 1 when no desktop agent is deployed
+REPORT_COVERAGE=1                              # report installed browsers + whether
+                                               # each can actually be governed
 PER_USER_IDENTITY=0                            # 1 on SHARED Macs: skips writing a
                                                # machine-wide userEmail, so the
                                                # per-person browser profile answers
@@ -200,4 +202,42 @@ done
 # them. A restart of the browser is enough for the extension config; the
 # force-install list is picked up on the next policy refresh.
 killall cfprefsd 2>/dev/null || true
+
+# ---- Coverage report ---------------------------------------------------------
+# Same reason as the Windows script: a provisioned machine can still have an
+# ungoverned browser, and nothing observable distinguishes that from a machine
+# that does not have the browser at all. Chrome on macOS is generally satisfied by
+# the Mac being MDM-enrolled, which Intune provides — but that is exactly the sort
+# of "generally" worth measuring rather than assuming.
+if [[ "$REPORT_COVERAGE" == "1" ]]; then
+  browsers=()
+  [[ -d "/Applications/Google Chrome.app" ]] && browsers+=("chrome")
+  [[ -d "/Applications/Microsoft Edge.app" ]] && browsers+=("edge")
+  [[ -d "/Applications/Brave Browser.app" ]] && browsers+=("brave")
+  [[ -d "/Applications/Vivaldi.app" ]] && browsers+=("vivaldi")
+  [[ -d "/Applications/Opera.app" ]] && browsers+=("opera")
+  [[ -d "/Applications/Firefox.app" ]] && browsers+=("firefox")
+
+  # MDM enrollment is what makes Chrome treat the Mac as managed.
+  mdm_enrolled=false
+  if profiles status -type enrollment 2>/dev/null | grep -qi 'MDM enrollment: Yes'; then
+    mdm_enrolled=true
+  fi
+
+  list=$(printf '"%s",' "${browsers[@]}"); list="[${list%,}]"
+  payload=$(cat <<JSON
+{"hostname":"$COMPUTER_NAME","os":"macos","user":"$RESOLVED_UPN",
+ "extension_id":"$EXTENSION_ID","browsers":$list,
+ "chrome_installed":$([[ " ${browsers[*]} " == *" chrome "* ]] && echo true || echo false),
+ "chrome_governable":$mdm_enrolled,"domain_joined":false,"entra_joined":$mdm_enrolled,
+ "cbcm_token":false,"private_browsing_blocked":false,"enrollSecret":"$ENROLL_SECRET"}
+JSON
+)
+  if curl -fsS -X POST "$SERVER_URL/api/v1/browser-coverage"        -H 'Content-Type: application/json' -d "$payload" >/dev/null 2>&1; then
+    echo "Coverage reported: ${browsers[*]}"
+  else
+    echo "Coverage report failed (provisioning still applied)."
+  fi
+fi
+
 echo "Done. Restart the browsers to pick this up."
