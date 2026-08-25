@@ -216,6 +216,24 @@ if (!existsSync(join(root, 'dist/extension/crx-signing-key.pem'))) {
     'move it to your secret store — the extension ID depends on it forever');
 }
 
+// ── 7b. Is the signing key actually reaching the container? ─────────────────
+// Compose forwards ONLY the variables it lists. Putting CRX_SIGNING_KEY in the
+// host's .env without the passthrough line leaves the container blind to it, and
+// /api/v1/extension/* answers 503 forever while every machine's policy points at
+// it. That is exactly how ENROLL_SECRET went wrong before, so it is checked here
+// rather than rediscovered.
+try {
+  const compose = read('docker-compose.yml');
+  if (/CRX_SIGNING_KEY:\s*\$\{CRX_SIGNING_KEY/.test(compose)) {
+    pass('all machines', 'compose forwards CRX_SIGNING_KEY', 'the container can see the host .env value');
+  } else {
+    block('all machines', 'compose forwards CRX_SIGNING_KEY',
+      'docker-compose.yml does not pass it through — the container will never see it');
+  }
+} catch {
+  warn('all machines', 'compose forwards CRX_SIGNING_KEY', 'docker-compose.yml not readable here');
+}
+
 // ── 8. Is the server actually serving the package? ──────────────────────────
 
 async function probe() {
@@ -238,7 +256,8 @@ for (const r of await probe()) {
     pass('all machines', `server serves ${r.path}`, r.type);
   } else if (r.status === 503) {
     block('all machines', `server serves ${r.path}`,
-      '503 — the package is not deployed to the server yet (deploy dist/extension/ or set EXTENSION_DIST_DIR)');
+      '503 — the route is live but has no package: set CRX_SIGNING_KEY in the '
+      + "HOST's .env (base64, one line) and redeploy so the server can build it");
   } else {
     block('all machines', `server serves ${r.path}`,
       r.err ? `unreachable: ${r.err}` : `HTTP ${r.status}, content-type ${r.type || '(none)'}`);
