@@ -21,6 +21,7 @@ import {
   clearEnforcerState,
 } from './enforcer-watchdog.js';
 import { buildModelRouterConfig } from './model-router-config.js';
+import { buildIdeProcessConfig, buildAiPanelConfig } from './ai-processes.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ENFORCER_SCRIPT = join(__dirname, 'enforcer-win.ps1');
@@ -85,6 +86,15 @@ export class Enforcer extends EventEmitter {
           // the C# side treats it as an independent gate internally.
           CFAI_MODEL_ROUTER_ENABLED: 'true',
           CFAI_MODEL_ROUTER_CONFIG: JSON.stringify(buildModelRouterConfig()),
+          // IDE-hosted AI panels (Claude Code / Copilot Chat in VS Code,
+          // Cursor's own composer). Two payloads, same JSON-over-env-var
+          // mechanism as CFAI_MODEL_ROUTER_CONFIG above: the helper owns the
+          // comparison code, ai-processes.js owns the data, so a signature is
+          // written down exactly once. Deliberately NOT folded into
+          // CFAI_AI_PROCESSES — an IDE process name in that list would turn on
+          // clipboard/attachment/file-dialog watching across the whole editor.
+          CFAI_IDE_PROCESSES: JSON.stringify(buildIdeProcessConfig()),
+          CFAI_AI_PANELS: JSON.stringify(buildAiPanelConfig()),
         },
       }
     );
@@ -254,6 +264,17 @@ export class Enforcer extends EventEmitter {
         break;
       case 'route':
         this.emit('route', ev);
+        break;
+      case 'blockstate':
+        // Standing "this whole app is blocked" bar state, for the desktop
+        // overlay. Presentation only, and deliberately NOT logged: the block it
+        // reflects is already recorded by the 'block' path, and a log line per
+        // focus change would be pure noise. The case itself is not optional
+        // either — without it every transition would fall into the default
+        // "unknown kind" warn, which lands in Electron's plain-text line
+        // scraper and pollutes recentAlerts. (Same class of bug this file
+        // already hit once for 'route'.)
+        this.emit('blockstate', ev);
         break;
       case 'enforcement_disarmed':
         // Panic hotkey (Ctrl+Alt+Shift+F12) — all blocking off for ev.seconds,

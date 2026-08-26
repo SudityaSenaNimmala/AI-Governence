@@ -434,8 +434,14 @@ test('enforcer-win.ps1: panic hotkey disarms every block decision for 10 minutes
   assert.match(src, /vk == VK_F12 && ctrl && alt && shift/);
   assert.match(src, /DISARM_SECONDS = 600/);
   assert.match(src, /Emit\("enforcement_disarmed"/);
-  // Guard present on the Enter path and on both BlockActive helpers.
-  assert.match(src, /bool block = !Disarmed\(\) &&/);
+  // Guard present on the Enter path and on both BlockActive helpers. The Enter
+  // path's predicate now lives in EnterBlockActive (factored out so the
+  // behavioural harness in enforcer-panel-block.test.mjs can assert the real
+  // decision without installing a hook); Disarmed() is its first line.
+  assert.match(src, /bool block = EnterBlockActive\(attachHold, uiaBlock, clipBlock, cooldown\);/);
+  const enterPred = src.slice(src.indexOf('static bool EnterBlockActive('), src.indexOf('static string ActivePatterns()'));
+  assert.ok(enterPred.length > 0, 'expected an EnterBlockActive body');
+  assert.match(enterPred, /if \(Disarmed\(\)\) return false;/);
   const forMouse = src.slice(src.indexOf('static bool BlockActiveForMouse()'));
   assert.match(forMouse.slice(0, 400), /if \(Disarmed\(\)\) return false;/);
 });
@@ -469,12 +475,18 @@ test('enforcer-win.ps1: attach_hold ORs into both the Enter and mouse-click bloc
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
   // Declared state.
   assert.match(src, /static volatile bool _attachHoldActive = false;/);
-  // Mouse-click gate (BlockActiveForMouse).
-  const mouseGate = src.slice(src.indexOf('static bool BlockActiveForMouse()'));
-  assert.match(mouseGate.slice(0, 400), /_fgIsBlocked \|\| _attachHoldActive \|\|/);
+  // Mouse-click gate (BlockActiveForMouse). The platform block is checked on its
+  // own line ahead of the content signals (see _blockedByPanel), so the hold is
+  // asserted on the content OR-chain it actually belongs to.
+  const mouseGate = src.slice(src.indexOf('static bool BlockActiveForMouse()'), src.indexOf('// Precedence matches the Enter path'));
+  assert.ok(mouseGate.length > 0, 'expected a BlockActiveForMouse body');
+  assert.match(mouseGate, /return _attachHoldActive \|\| TypedBlockFresh\(\) \|\| _blockUia \|\| \(recentPaste && _blockPaste\) \|\| cooldown;/);
+  assert.match(mouseGate, /if \(_fgIsBlocked && \(_blockedByPanel \|\| PanelEnforceOk\(\)\)\) return true;/);
   // Enter-decision gate.
   assert.match(src, /bool attachHold = _attachHoldActive;/);
-  assert.match(src, /\(_fgIsBlocked \|\| attachHold \|\| TypedBlockFresh\(\)/);
+  const enterPred = src.slice(src.indexOf('static bool EnterBlockActive('), src.indexOf('static string ActivePatterns()'));
+  assert.match(enterPred, /return attachHold \|\| TypedBlockFresh\(\) \|\| uiaBlock \|\| clipBlock \|\| cooldown;/);
+  assert.match(enterPred, /if \(_fgIsBlocked && \(_blockedByPanel \|\| PanelEnforceOk\(\)\)\) return true;/);
 });
 
 test('enforcer-win.ps1: attach_hold has an auto-expiring TTL so a crashed parent cannot leave Enter dead', async () => {
@@ -721,12 +733,18 @@ test('enforcer-win.ps1: keystrokes are only captured while an AI app is REALLY f
   // The split that must hold: CAPTURE uses FgIsAiNow(), every block DECISION
   // still uses the sticky _fgIsAi.
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
-  assert.match(src, /static bool FgIsAiNow\(\) \{ return _fgIsAi && _fgLeftAiTicks == 0; \}/);
+  // PanelEnforceOk() joined this gate when IDE panels landed: a detection-only
+  // panel must not accumulate keystrokes either. The sticky/now split it exists
+  // for is unchanged.
+  assert.match(src, /static bool FgIsAiNow\(\) \{ return _fgIsAi && _fgLeftAiTicks == 0 && PanelEnforceOk\(\); \}/);
   assert.match(src, /if \(FgIsAiNow\(\)\)\s*\r?\n\s*\{\s*\r?\n\s*char c = MapKey\(vk, shift, caps\);/);
   assert.match(src, /if \(FgIsAiNow\(\)\) \{ TypedBackspace\(\);/);
   // The Enter decision must NOT have been narrowed to FgIsAiNow — that would
-  // reopen the bypass the sticky flag exists to close.
-  assert.match(src, /bool block = !Disarmed\(\) &&\s*\r?\n\s*\(_fgIsBlocked \|\| attachHold/);
+  // reopen the bypass the sticky flag exists to close. Neither the call site nor
+  // the predicate it now delegates to may mention it.
+  const enterPred = src.slice(src.indexOf('static bool EnterBlockActive('), src.indexOf('static string ActivePatterns()'));
+  assert.ok(enterPred.length > 0, 'expected an EnterBlockActive body');
+  assert.equal(/FgIsAiNow/.test(enterPred), false, 'block decisions stay on the sticky flag');
   const enterBranch = src.slice(src.indexOf('if (vk == VK_RETURN && !shift)'), src.indexOf('else if (vk == VK_ESCAPE)'));
   assert.equal(/FgIsAiNow/.test(enterBranch), false, 'block decisions stay on the sticky flag');
 });
@@ -865,10 +883,11 @@ test('enforcer-win.ps1: a host-keyed platform block matches on process_name, kee
   assert.match(check, /if \(!string\.IsNullOrEmpty\(agent\["process_name"\]\)\)/);
   assert.match(check, /_blockedPlatform = "ai_platform";/);
   assert.match(check, /_blockedReason = "Blocked platform: " \+ _blockedAgentName;/);
-  // Both branches must feed the same fields EmitBlock already reports, or the
-  // Request Access dialog cannot name what to ask for.
-  assert.equal((check.match(/_fgIsBlocked = true;/g) || []).length, 2);
-  assert.equal((check.match(/_blockedAgentId = agent\["agent_id"\] \?\? "";/g) || []).length, 2);
+  // All three branches (PLATFORM_PROCS, process_name, panel) must feed the same
+  // fields EmitBlock already reports, or the Request Access dialog cannot name
+  // what to ask for.
+  assert.equal((check.match(/_fgIsBlocked = true;/g) || []).length, 3);
+  assert.equal((check.match(/_blockedAgentId = agent\["agent_id"\] \?\? "";/g) || []).length, 3);
   // The whole point of the sentinel: PLATFORM_PROCS stays untouched.
   assert.equal(/"ai_platform",\s*new HashSet/.test(src), false, 'ai_platform must NOT be added to PLATFORM_PROCS');
 });
@@ -886,6 +905,645 @@ test('the ai_platform sentinel cannot collide with a real platform id', async ()
   assert.equal(keys.includes(PLATFORM_BLOCK_SENTINEL), false);
 });
 
+// ── IDE-hosted AI panels (Claude Code / Copilot Chat in VS Code, Cursor) ─────
+// Static source assertions, same reason as every other .ps1 check in this file:
+// exercising these paths for real means installing a system-wide keyboard hook.
+// The pure-function half of this feature is covered in ai-panels.test.mjs.
+
+test('enforcer-win.ps1: the typed-buffer owner key includes panel identity, not just the pid', async () => {
+  // The bug this pins: an IDE hosts the AI composer, the code editor and a
+  // terminal in ONE process, so a pid-only owner key never changed when focus
+  // moved between them. Keystrokes typed in the editor between two panel visits
+  // stayed in the scan buffer and were treated as part of the next AI prompt —
+  // a real privacy/correctness defect, not a style nit.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  assert.match(src, /if \(_fgOwnerKey != _typedOwnerKey\)/);
+  assert.match(src, /TypedClear\(\); _typedOwnerKey = _fgOwnerKey;/);
+  // The key is composed on the POLL thread and carries pid + panel + element.
+  assert.match(src, /_fgOwnerKey = pid\.ToString\(\) \+ "\|" \+ \(isPanel \? panelId : "none"\) \+ "\|" \+ panelRid;/);
+  // The old pid-only comparison must be gone entirely.
+  assert.equal(/_typedOwnerPid/.test(src), false, 'the pid-only owner key regressed');
+  assert.equal(/_fgPid != _typedOwnerKey|_fgPid != _typedOwnerPid/.test(src), false);
+  // Composing it must NOT happen on the hook thread — the hook only compares.
+  const hook = src.slice(src.indexOf('static IntPtr HookCallback('), src.indexOf('// Scans the typed buffer'));
+  assert.equal(/ReadFocusedPanel|MatchPanelSignature/.test(hook), false, 'panel matching must stay on the poll thread');
+  assert.equal(/_fgOwnerKey = /.test(hook), false, 'the hook must not compose the owner key');
+});
+
+test('enforcer-win.ps1: _ideApps is gone, replaced by the data-driven _ideProcs', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  assert.equal(/_ideApps/.test(src), false, '_ideApps must not survive anywhere in the file');
+  // The old hardcoded set is not restated either. "Copilot" in it was a
+  // pre-existing bug (standalone Microsoft Copilot is a chat app, not an IDE)
+  // and "VSCode" was never a real process name.
+  assert.equal(/"Cursor", "Code", "VSCode", "Copilot"/.test(src), false);
+  assert.match(src, /static HashSet<string> _ideProcs = new HashSet<string>\(StringComparer\.OrdinalIgnoreCase\);/);
+  assert.match(src, /static HashSet<string> _ideFallbackProcs/);
+});
+
+test('enforcer-win.ps1: PanelUiaOk gates the Enter decision and Tokenize & Send, replacing the blanket IDE exclusion', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  assert.match(src, /static bool PanelUiaOk\(\)/);
+  // Trusted only while a panel is focused RIGHT NOW — not merely within the 3s
+  // sticky window, during which the caret may already be back in the editor and
+  // a UIA read would return source code or terminal output.
+  const fn = src.slice(src.indexOf('static bool PanelUiaOk()'), src.indexOf('// ── Model routing'));
+  assert.match(fn, /if \(!_ideProcs\.Contains\(_app\)\) return true;/);
+  assert.match(fn, /return _fgIsPanel && _fgPanelEnforce && _fgLeftAiTicks == 0;/);
+  // Enter decision: the old `!isIde && _blockUia` is replaced.
+  assert.match(src, /bool uiaBlock = PanelUiaOk\(\) && _blockUia;/);
+  // The old blanket `bool isIde = _ideProcs.Contains(...)` local inside the
+  // Enter branch must stay gone. UpdateForeground has an `isIde` of its own now
+  // (it feeds ApplyForegroundTick), so scope the check to the hook.
+  const hookBody = src.slice(src.indexOf('static IntPtr HookCallback('), src.indexOf('// Scans the typed buffer'));
+  assert.equal(/bool isIde = /.test(hookBody), false, 'the old isIde local must be gone from the hook');
+  // Tokenize & Send: same replacement, so it is now available in a focused,
+  // enforcing panel and still refused in the editor.
+  assert.match(src, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| Disarmed\(\)\)/);
+  // …and the UIA read itself is gated, so the PII patterns never run over the
+  // user's source code on the poll loop in the first place.
+  assert.match(src, /if \(!_fgIsAi \|\| !PanelUiaOk\(\)\) \{ _blockUia = false; _uiaPatterns = ""; return; \}/);
+});
+
+test('enforcer-win.ps1: model routing still excludes IDE processes ENTIRELY (not panel-scoped)', async () => {
+  // Explicitly out of scope for IDE panels: there is no probed model-picker
+  // signature for any of them. This must not have been "helpfully" widened.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  const routing = src.slice(src.indexOf('static void UpdateModelRouting()'), src.indexOf('static void ClearPendingRoute()'));
+  assert.ok(routing.length > 0, 'expected an UpdateModelRouting body');
+  assert.match(routing, /if \(!_fgIsAi \|\| _ideProcs\.Contains\(_app\) \|\| Disarmed\(\)\) \{ ClearPendingRoute\(\); return; \}/);
+  // Not PanelUiaOk / _fgIsPanel — that would make routing panel-aware.
+  assert.equal(/PanelUiaOk|_fgIsPanel/.test(routing), false, 'model routing must not become panel-aware');
+});
+
+test('enforcer-win.ps1: send-rect detection skips IDE processes instead of walking their UIA tree', async () => {
+  // Attempt 1 there is FindAll(TreeScope.Descendants) over the whole foreground
+  // window — a real performance hazard against a VS Code tree, on the same poll
+  // thread that guards the DLP scan. Attempt 2's bottom-right heuristic is
+  // meaningless in an IDE (status bar / terminal, not a send button).
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  const fn = src.slice(src.indexOf('static void UpdateSendRect()'), src.indexOf('static void UpdateUia()'));
+  assert.ok(fn.length > 0, 'expected an UpdateSendRect body');
+  const skip = fn.indexOf('if (_ideProcs.Contains(_app)) { _hasRect = false; return; }');
+  const search = fn.indexOf('win.FindAll(TreeScope.Descendants');
+  assert.ok(skip >= 0, 'expected an IDE skip in UpdateSendRect');
+  assert.ok(search >= 0, 'expected the UIA descendant search to still exist for chat apps');
+  assert.ok(skip < search, 'the skip must come BEFORE the expensive search');
+});
+
+test('enforcer-win.ps1: a panel-keyed platform block matches the focused panel and honours enforce', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  // Parsed off each row alongside process_name.
+  assert.match(src, /d\["panel"\] = ExtractJsonString\(item, "panel"\);/);
+  const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static void ClearFgBlocked()'));
+  // Third branch, same loop iteration → first-match-wins ordering preserved.
+  assert.match(check, /if \(_fgIsPanel && !string\.IsNullOrEmpty\(agent\["panel"\]\)\)/);
+  assert.match(check, /string\.Equals\(agent\["panel"\], _fgPanelId, StringComparison\.OrdinalIgnoreCase\)/);
+  // The enforce gate: a detection-only panel never blocks, even with a matching
+  // row present.
+  assert.match(check, /if \(_fgPanelEnforce\) \{/);
+});
+
+// ── The IDE-panel platform-block race ───────────────────────────────────────
+// Reproduced live: a platform block on claude.ai swallowed Enter in the Claude
+// Code composer twice and then let the third message through. VS Code stayed in
+// the foreground the whole time — what flickered was the FOCUSED ELEMENT read
+// that _fgIsPanel/_fgIsAi are derived from for a panel. Once the miss outlasted
+// FG_STICKY_TTL, UpdateForeground tore down _fgIsAi/_fgIsPanel, CheckFgBlocked's
+// `if (!_fgIsAi) ClearFgBlocked()` dropped the block, and HookCallback's
+// `if (_fgIsAi)` gate meant the Enter decision was never even evaluated.
+//
+// A chat app cannot hit this: there _fgIsAi comes from "is this PROCESS the
+// foreground window", which does not flicker.
+
+test('enforcer-win.ps1: a platform block established in an IDE panel is latched, not dropped on one bad UIA read', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  assert.match(src, /static volatile bool _panelBlockLatch = false;/);
+  assert.match(src, /static volatile uint _panelBlockPid = 0;/);
+  assert.match(src, /static readonly long PANEL_BLOCK_LATCH_TTL = TimeSpan\.FromSeconds\(\d+\)\.Ticks;/);
+
+  // Armed ONLY by the panel branch of CheckFgBlocked — the two process-keyed
+  // branches must not arm it, because a foreground PROCESS cannot flicker and
+  // latching one would keep a whole chat app blocked after the user left it.
+  const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static void ClearFgBlocked()'));
+  assert.ok(check.length > 0, 'expected a CheckFgBlocked body');
+  assert.equal((check.match(/ArmPanelBlockLatch\(\);/g) || []).length, 1, 'exactly one arming site');
+  const armIdx = check.indexOf('ArmPanelBlockLatch();');
+  const panelBranchIdx = check.indexOf('if (_fgIsPanel && !string.IsNullOrEmpty(agent["panel"]))');
+  assert.ok(panelBranchIdx >= 0 && panelBranchIdx < armIdx, 'the latch must be armed inside the panel branch');
+  // …and only on a tick whose panel read really succeeded, reusing the existing
+  // sticky signal rather than inventing a second counter. Arming inside the
+  // sticky window would stack the two grace periods.
+  assert.match(check, /if \(_fgLeftAiTicks == 0\) ArmPanelBlockLatch\(\);/);
+
+  // The block decision consults the latch instead of being torn down.
+  assert.match(src, /if \(_fgIsAi \|\| PanelBlockLatchHeld\(\)\)/);
+  assert.match(check, /if \(PanelBlockLatchHeld\(\)\) return;/);
+});
+
+test('enforcer-win.ps1: the original race pattern — an immediate, unconditional ClearFgBlocked — is gone', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  // The exact pre-fix line. It cleared the platform block the instant _fgIsAi
+  // read false for one tick, with no grace-period check of any kind.
+  assert.equal(
+    /if \(!_fgIsAi \|\| _blockedList\.Count == 0\) \{ ClearFgBlocked\(\); return; \}/.test(src),
+    false,
+    'the unconditional early-exit clear regressed',
+  );
+  // …and the pre-fix hook gate, which skipped the Enter decision outright.
+  assert.equal(
+    /\n\s*if \(_fgIsAi\)\r?\n\s*\{\r?\n\s*\/\/ Reset the typed buffer/.test(src),
+    false,
+    'the hook gate regressed to the bare sticky flag',
+  );
+  // Every clear inside CheckFgBlocked is now behind a latch check.
+  const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static void ClearFgBlocked()'));
+  const clears = (check.match(/ClearFgBlocked\(\);/g) || []).length;
+  assert.equal(clears, 3, 'expected exactly three clear sites: empty list, !_fgIsAi, no-row-matched');
+  for (const seg of check.split('ClearFgBlocked();').slice(0, clears)) {
+    assert.match(
+      seg,
+      /PanelBlockLatchHeld\(\)|_blockedList\.Count == 0/,
+      `a ClearFgBlocked() site has no grace-period guard: ...${seg.slice(-160)}`,
+    );
+  }
+});
+
+test('enforcer-win.ps1: the platform-block latch is bounded, pid-scoped, and yields to an authoritative non-panel read', async () => {
+  // Fail-closed must not become fail-stuck: this is the file that installs a
+  // system-wide keyboard hook, and a latch with no way out would leave Enter
+  // dead in the user's code editor.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  const held = src.slice(src.indexOf('static bool PanelBlockLatchHeld()'), src.indexOf('static void CheckFgBlocked()'));
+  assert.ok(held.length > 0, 'expected a PanelBlockLatchHeld body');
+  assert.match(held, /if \(\(DateTime\.UtcNow\.Ticks - armed\) > PANEL_BLOCK_LATCH_TTL\) return false;/);
+  assert.match(held, /if \(_fgPid != _panelBlockPid\) return false;/);
+  // The hook thread calls this, so it must not write poll-thread state.
+  assert.equal(/ClearPanelBlockLatch\(\)|_panelBlockLatch = |_panelBlockLatchTicks = /.test(held), false,
+    'PanelBlockLatchHeld must stay side-effect free — the hook thread calls it');
+
+  // An admin un-blocking drops it at once rather than letting it outlive its row.
+  const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static void ClearFgBlocked()'));
+  assert.match(check, /if \(_blockedList\.Count == 0\) \{ ClearPanelBlockLatch\(\); ClearFgBlocked\(\); return; \}/);
+
+  // A read that SUCCEEDED and did not match is authoritative — the caret really
+  // is in the editor — so UpdateForeground retires the latch there, keeping
+  // "genuinely left the panel" behaving exactly as it did before the fix. It is
+  // authoritative only when the user could actually have moved the caret, which
+  // is the cursor_composer fix; see the FocusCouldHaveMoved test below.
+  const fg = src.slice(src.indexOf('static void UpdateForeground()'), src.indexOf('static void UpdateSendRect()'));
+  assert.ok(fg.length > 0, 'expected an UpdateForeground body');
+  assert.match(fg, /hit = ReadFocusedPanel\(proc, pid, out panelRid, out panelReadable\);/);
+  assert.match(fg, /else if \(panelReadable\)\r?\n\s*\{[\s\S]{0,2600}?if \(FocusCouldHaveMoved\(\)\) ClearPanelBlockLatch\(\);/);
+  // …and a real app switch drops it on the very next poll tick.
+  assert.match(fg, /if \(_panelBlockLatch && pid != _panelBlockPid\) ClearPanelBlockLatch\(\);/);
+
+  // "readable" mirrors MatchPanelSignature's own preconditions, so a read that
+  // could not have matched anything is never mistaken for a fact.
+  const read = src.slice(src.indexOf('static PanelSig ReadFocusedPanel('), src.indexOf('static bool PanelEnforceOk()'));
+  assert.match(read, /readable = ctName\.Trim\(\)\.Length > 0 && \(name\.Trim\(\)\.Length > 0 \|\| cls\.Trim\(\)\.Length > 0\);/);
+  assert.match(read, /readable = false;/);
+});
+
+test('enforcer-win.ps1: a focused element from another process is a read FAILURE, not evidence', async () => {
+  // AutomationElement.FocusedElement is a GLOBAL read and is NOT scoped to the
+  // foreground window. Measured 2026-08-25 with a read-only UIA probe: with a
+  // plain console window in the foreground it returned a terminal element
+  // belonging to a background VS Code window in a different process, while
+  // three elements in three different windows all reported HasKeyboardFocus.
+  //
+  // Both directions of trusting that are bugs: a MATCH on a background window's
+  // composer reports a panel as focused while the user types in the foreground
+  // window's code editor, and a readable NON-match on a background window's
+  // terminal is what retires the platform-block latch. Neither is evidence about
+  // the foreground, so an unattributable element must land in the "no evidence"
+  // state (readable stays false, no panel).
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  const read = src.slice(src.indexOf('static PanelSig ReadFocusedPanel('), src.indexOf('static bool PanelEnforceOk()'));
+  assert.match(read, /static PanelSig ReadFocusedPanel\(string proc, uint fgPid, out string runtimeIdKey, out bool readable\)/);
+  assert.match(read, /try \{ if \(el\.Current\.ProcessId != \(int\)fgPid\) return null; \}\r?\n\s*catch \{ return null; \}/);
+  // The ownership check must come BEFORE any property is trusted, or a
+  // background window's element could still set `readable`.
+  const ownIdx = read.indexOf('el.Current.ProcessId != (int)fgPid');
+  const readableIdx = read.indexOf('readable = ctName.Trim().Length > 0');
+  assert.ok(ownIdx >= 0 && ownIdx < readableIdx, 'the ownership check must precede the readable computation');
+});
+
+test('enforcer-win.ps1: a neighbouring panel in the same window cannot tear down another panel\'s platform block', async () => {
+  // The live bug: one VS Code window hosts several AI composers at once (two
+  // Claude Code composers AND a Copilot Chat input, measured), and a single
+  // poll tick's global focused-element read can land on any of them. When it
+  // landed on the detection-only `vscode_chat` composer, the old code cleared
+  // _fgIsBlocked and the latch on that one tick with NO grace period at all —
+  // a different panel is still an AI surface, so it RESET the sticky timer to
+  // 0, which the fall-through then read as "authoritative". Behavioural
+  // reproduction and proof: tests/enforcer-panel-block.test.mjs.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static void ClearFgBlocked()'));
+  assert.ok(check.length > 0, 'expected a CheckFgBlocked body');
+  assert.match(check, /bool sameSurface = !_fgIsPanel\r?\n\s*\|\| string\.Equals\(_fgPanelId \?\? "", _panelBlockPanelId \?\? "", StringComparison\.OrdinalIgnoreCase\);/);
+  assert.match(check, /if \(!sameSurface && PanelBlockLatchHeld\(\)\) return;/);
+  // The latch records WHICH panel it was armed for, and gives it up on release.
+  assert.match(src, /static volatile string _panelBlockPanelId = "";/);
+  const arm = src.slice(src.indexOf('static void ArmPanelBlockLatch()'), src.indexOf('static bool PanelBlockLatchHeld()'));
+  assert.match(arm, /_panelBlockPanelId = _fgPanelId \?\? "";/);
+  assert.match(arm, /_panelBlockPanelId = "";/, 'ClearPanelBlockLatch must drop the panel id too');
+  // A same-surface miss stays authoritative, so an admin un-blocking is still
+  // immediate rather than waiting out the 10s latch TTL.
+  const sameIdx = check.indexOf('bool sameSurface');
+  const clearIdx = check.indexOf('ClearPanelBlockLatch();\n        ClearFgBlocked();'.replace('\n', '\r\n'));
+  assert.ok(sameIdx >= 0);
+  assert.ok(clearIdx < 0 || sameIdx < clearIdx);
+});
+
+test('enforcer-win.ps1: a "you left the panel" read with no user input behind it is a bad read, not a fact', async () => {
+  // The cursor_composer leak. The neighbouring-PANEL fix above scopes the
+  // fall-through by panel id, which only helps when the read that stole the tick
+  // MATCHED a panel. Cursor's window has no second AI panel at all — the element
+  // beside `aislash-editor-input` is Cursor's own Monaco input
+  // ("inputarea monaco-mouse-cursor-text"), which matches nothing — so a stolen
+  // tick arrived as a readable NON-match and retired the latch outright in
+  // ApplyForegroundTick, before CheckFgBlocked ever ran. 3s later the sticky
+  // window lapsed and the blocked Enter went through, mid-way through a 4.5s
+  // wait in which the user touched nothing.
+  //
+  // Behavioural reproduction and proof: tests/enforcer-panel-block.test.mjs.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  assert.match(src, /static long _lastFocusMoveInputTicks = 0;/);
+  assert.match(src, /static readonly long PANEL_LEAVE_INPUT_WINDOW = TimeSpan\.FromMilliseconds\(\d+\)\.Ticks;/);
+
+  // Pure, and bounded by a recency window — a click from a minute ago is not
+  // evidence about this tick's read.
+  const moved = src.slice(src.indexOf('static bool FocusCouldHaveMoved()'), src.indexOf('static bool PanelBlockLatchHeld()'));
+  assert.ok(moved.length > 0, 'expected a FocusCouldHaveMoved body');
+  assert.match(moved, /if \(t == 0\) return false;/);
+  assert.match(moved, /return \(DateTime\.UtcNow\.Ticks - t\) < PANEL_LEAVE_INPUT_WINDOW;/);
+  assert.equal(/_lastFocusMoveInputTicks = /.test(moved), false, 'FocusCouldHaveMoved must not write the field it reads');
+
+  // Consulted in exactly ONE place: whether to retire an armed panel platform
+  // block. It must never widen capture or a content block.
+  const codeOnly = src.split(/\r?\n/).filter((l) => !l.trim().startsWith('//')).join('\n');
+  assert.equal((codeOnly.match(/FocusCouldHaveMoved\(\)/g) || []).length, 2, 'one definition, one call site');
+  for (const [name, from, to] of [
+    ['FgIsAiNow', 'static bool FgIsAiNow()', 'static bool TypedBlockFresh()'],
+    ['EnterBlockActive', 'static bool EnterBlockActive(', 'static string ActivePatterns()'],
+    ['BlockActiveForMouse', 'static bool BlockActiveForMouse()', '// The Enter-decision predicate'],
+    ['PanelUiaOk', 'static bool PanelUiaOk()', '// ── Model routing'],
+    ['CheckFgBlocked', 'static void CheckFgBlocked()', 'static void ClearFgBlocked()'],
+  ]) {
+    const fn = src.slice(src.indexOf(from), src.indexOf(to));
+    assert.ok(fn.length > 0, `expected a ${name} body`);
+    assert.equal(/FocusCouldHaveMoved|_lastFocusMoveInputTicks/.test(fn), false, `${name} must not consult focus-move input`);
+  }
+
+  // The hooks record a TIMESTAMP only — never which key, which button, or where
+  // — and never treat our own synthetic input (Tier B's Ctrl+A) as the user
+  // navigating away.
+  const hook = src.slice(src.indexOf('static IntPtr HookCallback('), src.indexOf('// Scans the typed buffer'));
+  assert.match(hook, /if \(ctrl \|\| alt \|\| vk == VK_TAB \|\| vk == VK_ESCAPE \|\| \(vk >= VK_F1 && vk <= VK_F24\)\)/);
+  assert.match(hook, /if \(\(fmFlags & LLKHF_INJECTED\) == 0\) _lastFocusMoveInputTicks = DateTime\.UtcNow\.Ticks;/);
+  const mouse = src.slice(src.indexOf('static IntPtr MouseCallback('), src.indexOf('static IntPtr HookCallback('));
+  assert.match(mouse, /if \(\(fmFlags & LLMHF_INJECTED\) == 0\) _lastFocusMoveInputTicks = DateTime\.UtcNow\.Ticks;/);
+  // A plain character key cannot move focus out of a text box, and must not be
+  // recorded — that would make ordinary typing in the composer look like leaving it.
+  assert.equal(/vk == VK_A \|\| .*_lastFocusMoveInputTicks/.test(hook), false);
+});
+
+test('enforcer-win.ps1: a className rule matches a class TOKEN, so a second class cannot hide a composer', async () => {
+  // cursor_composer is the one signature with a single signal: an EXACT
+  // ClassName, an empty Name, no prefix rule. A web-hosted element's UIA
+  // ClassName is the DOM class ATTRIBUTE — Cursor's own Monaco input reports
+  // "inputarea monaco-mouse-cursor-text", two classes in one string — so a
+  // whole-string compare stopped matching a genuinely focused composer the
+  // moment Cursor put a second class on it, and a readable NON-match is what
+  // tears an IDE-panel platform block down.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  const rule = src.slice(src.indexOf('static bool ClassRuleMatches('), src.indexOf('// Port of ai-processes.js'));
+  assert.ok(rule.length > 0, 'expected a ClassRuleMatches body');
+  // Still plain string comparison on the poll thread — no Regex, which would
+  // need REGEX_TIMEOUT for a reason that must not be reintroduced here.
+  assert.equal(/Regex|IsMatch/.test(rule), false, 'panel matching must stay Regex-free');
+  // Not a substring test: "xx-messageInput_abc" must not satisfy "messageInput_".
+  assert.match(rule, /StartsWith\(want, StringComparison\.OrdinalIgnoreCase\)/);
+  assert.equal(/IndexOf\(want/.test(rule), false, 'a substring test would match unrelated controls');
+
+  const match = src.slice(src.indexOf('static PanelSig MatchPanelSignature('), src.indexOf('// ONE property read'));
+  assert.match(match, /ClassRuleMatches\(cls, p\.ClassEquals, false\)/);
+  assert.match(match, /ClassRuleMatches\(cls, p\.ClassPrefix, true\)/);
+  // The Name rules stay whole-string: a Name is prose, not a token list.
+  assert.match(match, /string\.Equals\(nm, p\.NameEquals, StringComparison\.OrdinalIgnoreCase\)/);
+  assert.match(match, /nm\.StartsWith\(p\.NamePrefix, StringComparison\.OrdinalIgnoreCase\)/);
+
+  // And the JS side, which is the single source of truth for the signatures,
+  // must implement the same rule — matchPanelSignature and this C# port are
+  // asserted to agree case by case in ai-panels.test.mjs.
+  const js = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'ai-processes.js'), 'utf8');
+  assert.match(js, /function classRuleMatches\(cls, want, prefix\)/);
+  assert.match(js, /classRuleMatches\(cls, panel\.classEquals\.toLowerCase\(\), false\)/);
+  assert.match(js, /classRuleMatches\(cls, panel\.classPrefix\.toLowerCase\(\), true\)/);
+});
+
+test('enforcer-win.ps1: a detection-only panel can never CANCEL another panel\'s platform block', async () => {
+  // PanelEnforceOk() answers a question about the element THIS tick's read
+  // landed on. ANDing it over the whole Enter decision meant one read landing
+  // on the detection-only Copilot Chat composer in the same window let the
+  // blocked Enter through. "Detection-only" must mean "never causes a block",
+  // not "cancels other panels' blocks".
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  assert.match(src, /static volatile bool _blockedByPanel = false;/);
+  const enterPred = src.slice(src.indexOf('static bool EnterBlockActive('), src.indexOf('static string ActivePatterns()'));
+  assert.match(enterPred, /if \(_fgIsBlocked && \(_blockedByPanel \|\| PanelEnforceOk\(\)\)\) return true;/);
+  // …but every CONTENT signal is still gated on the current surface.
+  assert.match(enterPred, /if \(!PanelEnforceOk\(\)\) return false;\r?\n\s*return attachHold \|\| TypedBlockFresh\(\)/);
+
+  // Only the panel branch may set _blockedByPanel, and it still sits behind
+  // _fgPanelEnforce — so a detection-only panel cannot arm a block either way.
+  const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static void ClearFgBlocked()'));
+  const panelBranchIdx = check.indexOf('if (_fgPanelEnforce) {');
+  const armIdx = check.indexOf('_blockedByPanel = true;');
+  assert.ok(panelBranchIdx >= 0 && armIdx > panelBranchIdx, '_blockedByPanel must be set inside the _fgPanelEnforce branch');
+  assert.equal((check.match(/_blockedByPanel = true;/g) || []).length, 1, 'exactly one place may set it');
+  assert.equal((check.match(/_blockedByPanel = false;/g) || []).length, 2, 'both process-keyed branches must clear it');
+  // Cleared with the block itself, so it can never outlive it.
+  const clear = src.slice(src.indexOf('static void ClearFgBlocked()'), src.indexOf('static string ExtractJsonString('));
+  assert.match(clear, /_blockedByPanel = false;/);
+
+  // Attribution: a platform block reports the panel it was ARMED for, so
+  // Request Access asks for an exception on the right host.
+  assert.match(src, /static string PlatformBlockPanelField\(\)/);
+  assert.match(src, /\(platformBlock \? PlatformBlockPanelField\(\) : PanelField\(\)\)/);
+  const attr = src.slice(src.indexOf('static string PlatformBlockPanelField()'), src.indexOf('static void Emit(string kind'));
+  assert.match(attr, /if \(_blockedByPanel && !string\.IsNullOrEmpty\(_panelBlockPanelId\)\)/);
+});
+
+test('enforcer-win.ps1: the platform-block latch does NOT widen capture or content blocks', async () => {
+  // The invariant that must not regress while fixing the block side: keystroke
+  // capture and every UIA/clipboard-derived block still fail OPEN on the FIRST
+  // bad read. Only the already-established platform block is latched.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  // Unchanged, character for character — same assertion as the capture test above.
+  assert.match(src, /static bool FgIsAiNow\(\) \{ return _fgIsAi && _fgLeftAiTicks == 0 && PanelEnforceOk\(\); \}/);
+  assert.match(src, /return _fgIsPanel && _fgPanelEnforce && _fgLeftAiTicks == 0;/);
+  for (const [name, from, to] of [
+    ['FgIsAiNow', 'static bool FgIsAiNow()', 'static bool TypedBlockFresh()'],
+    ['PanelEnforceOk', 'static bool PanelEnforceOk()', 'static bool PanelUiaOk()'],
+    ['PanelUiaOk', 'static bool PanelUiaOk()', '// ── Model routing'],
+  ]) {
+    const fn = src.slice(src.indexOf(from), src.indexOf(to));
+    assert.ok(fn.length > 0, `expected a ${name} body`);
+    assert.equal(/PanelBlockLatch/.test(fn), false, `${name} must not consult the latch`);
+  }
+  // PanelEnforceOk's `!_fgIsPanel → true` branch is PERMISSIVE — it lets a block
+  // proceed — so it was never a bypass and must not be "hardened" into
+  // returning false, which would silently remove blocking for pure chat apps
+  // and for the IDE whole-app fallback.
+  const enforce = src.slice(src.indexOf('static bool PanelEnforceOk()'), src.indexOf('static bool PanelUiaOk()'));
+  assert.match(enforce, /if \(!_fgIsPanel\) return true;/);
+  // Capture and clipboard/UIA gates keep asking _fgIsAi / FgIsAiNow, not the latch.
+  assert.match(src, /if \(!_fgIsAi \|\| !PanelUiaOk\(\)\) \{ _blockUia = false; _uiaPatterns = ""; return; \}/);
+  assert.match(src, /if \(!_fgIsAi\) \{ _blockPaste = false; return; \}/);
+  const hook = src.slice(src.indexOf('static IntPtr HookCallback('), src.indexOf('// Scans the typed buffer'));
+  // Comment lines stripped — the count is about real call sites, and the gate
+  // carries a long explanatory comment that names the function.
+  const hookCode = hook.split(/\r?\n/).filter((l) => !l.trim().startsWith('//')).join('\n');
+  assert.equal((hookCode.match(/PanelBlockLatchHeld\(\)/g) || []).length, 1, 'the hook may consult the latch in exactly one place');
+  assert.match(hookCode, /if \(_fgIsAi \|\| PanelBlockLatchHeld\(\)\)/);
+});
+
+test('enforcer-win.ps1: the enforce gate is applied on BOTH the capture and the blocking side', async () => {
+  // A detection-only panel must have genuinely zero live effect — not "no
+  // effect in one of the two places".
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  assert.match(src, /static bool PanelEnforceOk\(\)/);
+  const fn = src.slice(src.indexOf('static bool PanelEnforceOk()'), src.indexOf('static bool PanelUiaOk()'));
+  assert.match(fn, /if \(!_fgIsPanel\) return true;/);
+  assert.match(fn, /return _fgPanelEnforce;/);
+  // Capture side (via FgIsAiNow), Enter side, mouse side, UIA side. On both
+  // block-decision sides the gate now covers every CONTENT signal, with a
+  // platform block armed by an enforcing panel checked ahead of it — see
+  // _blockedByPanel and the "can never CANCEL" test below.
+  assert.match(src, /static bool FgIsAiNow\(\) \{ return _fgIsAi && _fgLeftAiTicks == 0 && PanelEnforceOk\(\); \}/);
+  const enterPred = src.slice(src.indexOf('static bool EnterBlockActive('), src.indexOf('static string ActivePatterns()'));
+  assert.match(enterPred, /if \(!PanelEnforceOk\(\)\) return false;/);
+  const forMouse = src.slice(src.indexOf('static bool BlockActiveForMouse()'), src.indexOf('// The Enter-decision predicate'));
+  assert.match(forMouse, /if \(!PanelEnforceOk\(\)\) return false;/);
+  assert.match(src, /return _fgIsPanel && _fgPanelEnforce && _fgLeftAiTicks == 0;/);
+});
+
+test('enforcer-win.ps1: panel detection is a single focused-element read, never a tree walk', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  const fn = src.slice(src.indexOf('static PanelSig ReadFocusedPanel('), src.indexOf('static bool PanelEnforceOk()'));
+  assert.ok(fn.length > 0, 'expected a ReadFocusedPanel body');
+  assert.match(fn, /AutomationElement\.FocusedElement/);
+  // No FindAll / TreeWalker / descendant enumeration on this path.
+  assert.equal(/FindAll|TreeWalker|GetFirstChild/.test(fn), false, 'panel detection must not walk the tree');
+  // Every property read is individually try/caught — reading another process's
+  // accessibility tree throws routinely.
+  assert.match(fn, /try \{ name = el\.Current\.Name \?\? ""; \} catch \{ \}/);
+  assert.match(fn, /try \{ cls = el\.Current\.ClassName \?\? ""; \} catch \{ \}/);
+  // ProgrammaticName, not LocalizedControlType — culture-independent.
+  assert.match(fn, /ProgrammaticName/);
+});
+
+test('enforcer-win.ps1: panel matching adds no Regex, and every Regex still carries the timeout', async () => {
+  // Signatures are fixed literals, so the C# port is plain string comparison.
+  // (The blanket "every Regex has REGEX_TIMEOUT" check lives above; this pins
+  // that the panel code did not introduce one at all.)
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  const panelSection = src.slice(src.indexOf('static string StripExe('), src.indexOf('// ── Model routing'));
+  assert.ok(panelSection.length > 0);
+  assert.equal(/new Regex\(|Regex\.(IsMatch|Match|Replace)/.test(panelSection), false, 'no regex in the panel path');
+  // …and the global invariant still holds, panel code included.
+  for (const c of src.match(/new Regex\([^)]*\)/g) || []) {
+    assert.match(c, /REGEX_TIMEOUT/, `Regex built without a timeout: ${c}`);
+  }
+});
+
+test('enforcer-win.ps1: no window title or element text is ever emitted for a panel', async () => {
+  // VS Code's window title carries the open file path and the workspace name;
+  // an element Name/ClassName in an IDE can too. Panel detection reads them and
+  // must never let them out.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  // The only panel value that reaches stdout is the catalog id.
+  assert.match(src, /static string PanelField\(\)/);
+  const emitField = src.slice(src.indexOf('static string PanelField()'), src.indexOf('static void Emit(string kind'));
+  assert.match(emitField, /",\\"panel\\":\\"" \+ Esc\(_fgPanelId\) \+ "\\""/);
+  // Nothing anywhere in the file reads a window title in the first place.
+  assert.equal(/GetWindowText|WindowTitle|MainWindowTitle/.test(src), false, 'no window title may be read at all');
+  // …and the read-only locals of ReadFocusedPanel never reach an emitter.
+  const fn = src.slice(src.indexOf('static PanelSig ReadFocusedPanel('), src.indexOf('static bool PanelEnforceOk()'));
+  assert.equal(/Emit\(|EmitBlock\(|Console\.Out/.test(fn), false, 'panel detection must emit nothing');
+});
+
+test('enforcer.js passes the IDE process and panel payloads, built from the catalog', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer.js'), 'utf8');
+  assert.match(src, /CFAI_IDE_PROCESSES:\s*JSON\.stringify\(buildIdeProcessConfig\(\)\)/);
+  assert.match(src, /CFAI_AI_PANELS:\s*JSON\.stringify\(buildAiPanelConfig\(\)\)/);
+  assert.match(src, /import \{ buildIdeProcessConfig, buildAiPanelConfig \} from '\.\/ai-processes\.js';/);
+  // The IDE names must NOT have been folded into CFAI_AI_PROCESSES, which is
+  // what the clipboard/attachment/file-dialog watchers key on.
+  assert.match(src, /CFAI_AI_PROCESSES: this\.aiProcessNames\.join\(','\)/);
+});
+
+test('IDE_PROCESSES never reaches aiProcNames or any passive watcher', async () => {
+  // The core privacy-scoping guarantee of keeping the two catalogs separate: an
+  // IDE process name in aiProcNames would silently turn on clipboard scanning
+  // and attachment-chip watching across the whole editor, reporting every file
+  // opened while coding as an AI file upload.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  assert.equal(/IDE_PROCESSES/.test(src), false, 'index.js must not import the IDE catalog at all');
+  assert.match(src, /const aiProcNames = AI_PROCESSES\.map\(/);
+  // aiProcNames is derived from AI_PROCESSES only, and nothing is concatenated.
+  const build = src.slice(src.indexOf('const aiProcNames ='), src.indexOf('this.dialogWatcher ='));
+  assert.equal(/IDE|PANEL|concat/.test(build), false, `aiProcNames construction grew a second source: ${build}`);
+  for (const watcher of ['FileDialogWatcher', 'AttachmentWatcher', 'PromptWatcher']) {
+    const line = src.match(new RegExp(`new ${watcher}\\(\\{[^}]*\\}\\)`));
+    assert.ok(line, `expected a ${watcher} construction`);
+    assert.match(line[0], /aiProcessNames: aiProcNames/, `${watcher} must only get the AI catalog`);
+  }
+  // The chip/dialog watchers only ever forward CFAI_AI_PROCESSES.
+  for (const file of ['file-dialog-watcher.js', 'attachment-watcher.js']) {
+    const w = await readFile(join(AGENT_DIR, 'src', 'os_monitor', file), 'utf8');
+    assert.equal(/CFAI_IDE_PROCESSES|CFAI_AI_PANELS|IDE_PROCESSES/.test(w), false, `${file} must know nothing about IDE panels`);
+  }
+  // prompt-watcher.js is the ONE exception, and only in the restricting
+  // direction: it forwards the panel payloads so its .ps1 can refuse to read a
+  // code editor. What it still must not do is widen the watched process set —
+  // the IDE names may never reach CFAI_AI_PROCESSES.
+  const pw = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'prompt-watcher.js'), 'utf8');
+  assert.match(pw, /CFAI_AI_PROCESSES: this\.aiProcessNames\.join\(','\)/);
+  assert.equal(
+    /aiProcessNames.*(IDE|buildIdeProcessConfig)|(IDE|buildIdeProcessConfig).*aiProcessNames/.test(pw),
+    false,
+    'the IDE catalog must never be mixed into prompt-watcher.js aiProcessNames',
+  );
+});
+
+// ── prompt-watcher.ps1 panel scoping ─────────────────────────────────────────
+//
+// Same static-source convention this file already uses for enforcer-win.ps1:
+// the script needs a live desktop, a focused UIA element and an AI app running,
+// so the invariants are pinned against the source instead.
+
+test('prompt-watcher.js hands the panel payloads to its .ps1, built from the catalog', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'prompt-watcher.js'), 'utf8');
+  assert.match(src, /import \{ buildIdeProcessConfig, buildAiPanelConfig \} from '\.\/ai-processes\.js';/);
+  assert.match(src, /CFAI_IDE_PROCESSES:\s*JSON\.stringify\(buildIdeProcessConfig\(\)\)/);
+  assert.match(src, /CFAI_AI_PANELS:\s*JSON\.stringify\(buildAiPanelConfig\(\)\)/);
+  // Passed unconditionally — not behind trackerMode or any other flag, or the
+  // full agent (the case that actually has Cursor in its process list) would
+  // keep reading code editors.
+  const envBlock = src.slice(src.indexOf('env: {'), src.indexOf('this.child.stdout.setEncoding'));
+  assert.equal(/trackerMode \? \{ CFAI_IDE_PROCESSES/.test(envBlock), false);
+});
+
+test('prompt-watcher.ps1 will not read an IDE element that is not a known AI panel', async () => {
+  // The bug this closes: Cursor is legitimately in AI_PROCESSES (host
+  // cursor.com), so every ~1.2s this watcher read the FULL TEXT of whatever
+  // element had focus in Cursor — a source file or a terminal included — and
+  // emitted it as a typed prompt.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'prompt-watcher.ps1'), 'utf8');
+  assert.match(src, /\$env:CFAI_IDE_PROCESSES/);
+  assert.match(src, /\$env:CFAI_AI_PANELS/);
+  assert.match(src, /function Match-PanelSignature\(/);
+  assert.match(src, /function Get-CaptureGate\(/);
+  assert.match(src, /function Is-IdeProcess\(/);
+  // The gate is what a non-matching element hits: no panel id => not allowed.
+  const gate = src.slice(src.indexOf('function Get-CaptureGate('), src.indexOf('# ── Claude-tracker mode'));
+  assert.match(gate, /if \(-not \(Is-IdeProcess \$proc\)\) \{\s*\r?\n\s*return \[pscustomobject\]@\{ allowed = \$true; panel = '' \}/);
+  assert.match(gate, /return \[pscustomobject\]@\{ allowed = \$false; panel = '' \}/);
+  // No whole-app fallback here, unlike the keystroke enforcer: falling back
+  // would mean reading and transmitting arbitrary IDE content.
+  assert.equal(/panelFallback|IdeFallback/.test(gate), false, 'a read path must never have a whole-app fallback');
+  // Both read sites gate BEFORE Read-FocusedText — reading one character of a
+  // source file is already the leak.
+  const loop = src.slice(src.indexOf('while ($true)'));
+  const gateCalls = loop.match(/\$gate = Get-CaptureGate \$focused \$fg\.process/g) || [];
+  assert.equal(gateCalls.length, 2, 'both the tracker and the normal branch must gate');
+  for (const branch of loop.split('$gate = Get-CaptureGate').slice(1)) {
+    const readIdx = branch.indexOf('Read-FocusedText $focused');
+    const checkIdx = branch.indexOf('$gate.allowed');
+    assert.ok(checkIdx >= 0 && readIdx >= 0, 'expected a gate check and a text read in each branch');
+    assert.ok(checkIdx < readIdx, 'the gate must be checked BEFORE any text is read');
+  }
+  // The signature values stay data, exactly as for enforcer-win.ps1.
+  for (const literal of ['Message input', 'aislash-editor-input', 'messageInput_', 'Chat Input']) {
+    assert.equal(src.includes(literal), false, `${literal} is hardcoded in prompt-watcher.ps1 — it must arrive as data`);
+  }
+});
+
+test('prompt-watcher.ps1 leaves non-IDE AI apps exactly as they were', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'prompt-watcher.ps1'), 'utf8');
+  // Claude Desktop / ChatGPT are not IDE processes, so Get-CaptureGate returns
+  // allowed:true before it ever looks at a signature — no new way for the
+  // watcher to go silent on the apps it was built for.
+  const { IDE_PROCESSES } = await import('../src/os_monitor/ai-processes.js');
+  for (const name of ['Claude', 'ChatGPT', 'Comet', 'Gemini', 'Poe']) {
+    assert.equal(IDE_PROCESSES.some((e) => e.match.test(name)), false, `${name} must not be an IDE process`);
+  }
+  // The gating is keyed on the IDE list only — never on Is-AiProcess, which is
+  // still what decides whether a window is looked at at all.
+  assert.match(src, /if \(\$fg -and \(Is-AiProcess \$fg\.process\)\)/);
+  // The hardcoded fallback list (used only when the env payload is missing or
+  // unparseable) must stay in step with the catalog, and it must be non-empty:
+  // an empty list would restore the old read-everything behaviour.
+  const fallback = src.match(/if \(@\(\$IdeProcesses\)\.Count -eq 0\) \{ \$IdeProcesses = @\(([^)]*)\) \}/);
+  assert.ok(fallback, 'expected a hardcoded IDE fallback list');
+  const names = fallback[1].split(',').map((s) => s.trim().replace(/^'|'$/g, '').toLowerCase());
+  assert.deepEqual(
+    names,
+    IDE_PROCESSES.map((e) => e.match.source.replace(/^\^/, '').replace(/\$$/, '').replace(/[\\/]i?$/, '').toLowerCase()),
+    'the .ps1 fallback IDE list has drifted from IDE_PROCESSES',
+  );
+});
+
+test('prompt-watcher.ps1 emits the matched panel id, and index.js attributes on it', async () => {
+  const ps1 = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'prompt-watcher.ps1'), 'utf8');
+  const emit = ps1.slice(ps1.indexOf("kind    = 'prompt_text'"), ps1.indexOf("kind    = 'prompt_text'") + 700);
+  assert.match(emit, /panel\s*=\s*\$gate\.panel/);
+  // Never the raw UIA reads the gate performed — a ClassName or an element name
+  // in an IDE can carry a file path or a workspace name.
+  assert.equal(/ClassName|ProgrammaticName|\$cls/.test(emit), false, 'panel detection reads must not be emitted');
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  const handler = src.slice(src.indexOf("this.promptWatcher.on('prompt_text'"));
+  assert.match(handler.slice(0, 600), /const ai = identifyEventAi\(ev\);/);
+  const { identifyAiPanel } = await import('../src/os_monitor/ai-processes.js');
+  assert.deepEqual(identifyAiPanel('cursor_composer'), { product: 'Cursor', vendor: 'Anysphere' });
+});
+
+test('index.js resolves a panel event panel-first, so a process:"Code" prompt is not dropped', async () => {
+  // "Code" is in no AI catalog and never will be, so identifyAiProcess returns
+  // null for it and the `if (!ai) return` guard would silently discard every
+  // prompt sent from a VS Code AI panel.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  assert.match(src, /function identifyEventAi\(ev\) \{\s*\r?\n\s*return \(ev\?\.panel \? identifyAiPanel\(ev\.panel\) : null\) \|\| identifyAiProcess\(ev\?\.process\);/);
+  for (const handler of ['prompt', 'block', 'override']) {
+    const h = src.slice(src.indexOf(`this.enforcer.on('${handler}'`));
+    assert.match(h.slice(0, 400), /identifyEventAi\(ev\)/, `the '${handler}' handler must resolve panel-first`);
+  }
+  // tool_host: panel host first, then the process host, then the platform map.
+  assert.match(src, /hostForPanel\(ev\.panel\) \|\| hostForProcess\(ev\.process\) \|\| hostsForPlatform\(ev\.blocked_platform\)\[0\] \|\| ''/);
+  // Model routing is excluded from IDE panels, so its handler stays
+  // process-based on purpose.
+  const route = src.slice(src.indexOf("this.enforcer.on('route'"));
+  assert.match(route.slice(0, 300), /identifyAiProcess\(ev\.process\)/);
+
+  // …and the resolution really does work for a real panel event shape.
+  const { identifyAiPanel, hostForPanel, identifyAiProcess } = await import('../src/os_monitor/ai-processes.js');
+  assert.equal(identifyAiProcess('Code'), null, '"Code" must stay out of the AI process catalog');
+  assert.deepEqual(identifyAiPanel('claude_code'), { product: 'Claude Code', vendor: 'Anthropic' });
+  assert.equal(hostForPanel('claude_code'), 'claude.ai');
+});
+
+test('index.js relays the panel id to the Request Access dialog', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  const relayStart = src.indexOf("console.log('@@CFAI-BLOCK '");
+  const relay = src.slice(relayStart, relayStart + 900);
+  assert.match(relay, /panel: ev\.panel \|\| ''/);
+  // A catalog id only — nothing read out of the app.
+  assert.equal(/window_title|title:|className/.test(relay), false);
+});
+
 test('index.js resolves the Request Access tool_host from the PROCESS, so the sentinel still works', async () => {
   // The downstream assumption the whole bridge rests on: hostsForPlatform
   // ('ai_platform') is legitimately [], so if tool_host resolution depended on
@@ -895,4 +1553,401 @@ test('index.js resolves the Request Access tool_host from the PROCESS, so the se
   const { hostsForPlatform, hostForProcess, PLATFORM_BLOCK_SENTINEL } = await import('../src/os_monitor/ai-processes.js');
   assert.deepEqual(hostsForPlatform(PLATFORM_BLOCK_SENTINEL), []);
   assert.equal(hostForProcess('Claude'), 'claude.ai');   // …and the primary path answers
+});
+
+// ── The standing blocked-platform bar (desktop) ───────────────────────────────
+// The desktop counterpart of the browser extension's showPlatformBanner(). These
+// cases guard the CONTRACT (scope discrimination, payload contents, when the bar
+// is allowed to be up) — the overlay window itself is Electron and cannot be
+// exercised here, so everything that can be asserted statically is.
+
+async function enforcerSrc() {
+  return readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+}
+
+// Comments in this repo deliberately NAME the thing the code must not do ("must
+// not wait out FG_STICKY_TTL", "must never write _fgIsBlocked"). Strip them
+// before any "this identifier does not appear" assertion, or the explanation
+// trips the very test it explains. Line comments only — both the C# inside
+// enforcer-win.ps1 and the JS use //.
+function codeOnly(src) {
+  return src.split(/\r?\n/).filter((l) => !l.trim().startsWith('//')).join('\n');
+}
+
+// Assignment, not comparison: `_fgLeftAiTicks == 0` contains `_fgLeftAiTicks =`
+// as a substring, and reading a field is exactly what the bar is supposed to do.
+function assignsTo(src, field) {
+  return new RegExp(`${field}\\s*=(?!=)`).test(src);
+}
+
+function bannerStateFn(src) {
+  const start = src.indexOf('static void UpdateBannerState()');
+  const end = src.indexOf('static void EmitBlockState(');
+  assert.ok(start >= 0 && end > start, 'expected an UpdateBannerState body followed by EmitBlockState');
+  return src.slice(start, end);
+}
+
+test('enforcer-win.ps1: a platform block declares its SCOPE, taken from _blockedByPanel and not from the panel field', async () => {
+  // Scope must not be inferred from `panel`. That field is ATTRIBUTION —
+  // PlatformBlockPanelField falls back to PanelField, so the day any
+  // IDE_PROCESSES entry sets panelFallback:true an APP-scoped block can legally
+  // carry a panel id, and anything keyed on `!panel` silently flips.
+  const src = await enforcerSrc();
+  assert.ok(
+    src.includes('",\\"block_scope\\":\\"" + (_blockedByPanel ? "panel" : "app") + "\\""'),
+    'EmitBlock must emit block_scope straight from _blockedByPanel',
+  );
+  // …emitted inside the platform-block group, alongside the other identity
+  // fields, so it can never appear on a content block.
+  const emitBlock = codeOnly(src.slice(src.indexOf('static void EmitBlock('), src.indexOf('static void EmitRewrite(')));
+  const scopeIdx = emitBlock.indexOf('block_scope');
+  const groupIdx = emitBlock.indexOf('platform_block\\":true');
+  assert.ok(groupIdx >= 0, 'expected the platform_block group in EmitBlock');
+  assert.ok(scopeIdx > groupIdx, 'block_scope belongs in the platform_block group');
+
+  // All THREE arm sites in CheckFgBlocked, in file order: two process-keyed
+  // (whole app) then the panel-keyed one. If a fourth arm site is ever added
+  // this fails until its scope is decided deliberately.
+  const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static void UpdateBannerState()'));
+  const arms = [...check.matchAll(/_fgIsBlocked = true;\s*\r?\n\s*_blockedByPanel = (true|false);/g)].map((m) => m[1]);
+  assert.deepEqual(arms, ['false', 'false', 'true'], 'the three CheckFgBlocked arm sites must keep their scopes');
+});
+
+test('index.js relays block_scope to Electron without inventing it', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  const relayStart = src.indexOf("console.log('@@CFAI-BLOCK '");
+  const relay = src.slice(relayStart, relayStart + 1400);
+  assert.match(relay, /block_scope: ev\.block_scope \|\| ''/);
+});
+
+test('the blocked-platform bar payload carries NO prompt content — a bool, a scope, admin-typed names, a pid and a rect', async () => {
+  // The strictest PII rule in this feature, because a BrowserWindow renders
+  // this. There must be no route at all from the bar to anything the user
+  // typed: no window title, no UIA element Name, no pattern list, no preview.
+  const src = await enforcerSrc();
+  const emit = src.slice(src.indexOf('static void EmitBlockState('), src.indexOf('static void ClearFgBlocked()'));
+  assert.ok(emit.length > 0, 'expected an EmitBlockState body');
+
+  const keys = [...emit.matchAll(/\\"([a-z_]+)\\":/g)].map((m) => m[1]).sort();
+  assert.deepEqual(keys, [
+    'active', 'agent', 'agent_id', 'kind', 'pid', 'platform', 'process',
+    'scope', 'win_h', 'win_w', 'win_x', 'win_y',
+  ], 'the bar payload gained or lost a field — every addition must be re-reviewed for PII');
+
+  for (const forbidden of [
+    'patterns', '_blockedReason', '_pendingPreview', 'preview', 'block_id',
+    'GetWindowText', '.Current.Name', '_typed', 'ActivePatterns',
+  ]) {
+    assert.equal(emit.includes(forbidden), false, `${forbidden} must never reach the bar payload`);
+  }
+  // The rect is read with the SAME Win32 pair UpdateSendRect already uses — no
+  // new interop was added for this, and it is read once per transition rather
+  // than tracked.
+  assert.match(emit, /GetForegroundWindow\(\)/);
+  assert.match(emit, /GetWindowRect\(fg, out wr\)/);
+});
+
+test('enforcer-win.ps1: the bar is off whenever the panic hotkey has disarmed enforcement', async () => {
+  // Disarmed() is checked inside the block DECISION functions and NOT inside
+  // CheckFgBlocked, so _fgIsBlocked stays true across a disarm. Without this
+  // term the bar would keep asserting that prompts are being stopped while
+  // every Enter is in fact going through — the worst kind of wrong for a
+  // governance indicator.
+  const src = await enforcerSrc();
+  const fn = bannerStateFn(src);
+  assert.match(fn, /!Disarmed\(\)/, 'the bar-active condition must include !Disarmed()');
+  assert.match(fn, /bool want = _fgIsBlocked && !_blockedByPanel && !Disarmed\(\)/);
+  // …and Disarmed() really is absent from CheckFgBlocked, which is the whole
+  // reason the term is needed here. If that ever changes, this term becomes
+  // redundant rather than wrong — but the assumption should be re-checked.
+  const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static void UpdateBannerState()'));
+  assert.equal(check.includes('Disarmed()'), false, 'CheckFgBlocked gained a Disarmed() gate — re-read UpdateBannerState');
+});
+
+test('enforcer-win.ps1: the bar is whole-app only — an IDE-panel block never raises it', async () => {
+  // Mirrors showPlatformBanner()'s IS_EMBEDDED_AI early-return in the browser
+  // extension, and for the same reason: blocking one AI panel inside VS Code is
+  // not blocking VS Code, and a display-wide red bar would say that it was.
+  const src = await enforcerSrc();
+  assert.match(bannerStateFn(src), /!_blockedByPanel/);
+});
+
+test('enforcer-win.ps1: the bar clears immediately and never borrows the 3s enforcement sticky window', async () => {
+  // The bug this prevents: alt-tab from a blocked app to Outlook. _fgIsBlocked
+  // stays true for FG_STICKY_TTL by design, so a bar keyed on it would sit red
+  // over Outlook for 3 seconds. The bar therefore keeps its OWN pid and clears
+  // on the first tick the foreground pid changes.
+  const src = await enforcerSrc();
+  const fn = bannerStateFn(src);
+  const code = codeOnly(fn);
+  assert.match(code, /pid != _bannerPid/, 'expected a pid-keyed fast clear of its own');
+  // Its own state, not the enforcement latch's.
+  assert.equal(code.includes('_panelBlockPid'), false, 'the bar must not reuse the enforcement latch pid');
+  // No grace period of any kind may appear in here.
+  for (const ttl of ['FG_STICKY_TTL', 'PANEL_BLOCK_LATCH_TTL', 'PANEL_LEAVE_INPUT_WINDOW']) {
+    assert.equal(code.includes(ttl), false, `the bar must not wait out ${ttl}`);
+  }
+  // And it may only ARM on a first-hand tick — otherwise the fast clear above
+  // is undone one tick later, with the bar re-armed over whatever the user
+  // switched to. Measured: this exact regression.
+  assert.match(fn, /bool firstHand = _fgLeftAiTicks == 0;/);
+  assert.match(fn, /&& firstHand/);
+});
+
+test('enforcer-win.ps1: the bar OBSERVES enforcement state and never writes it', async () => {
+  // _fgIsBlocked / _blockedByPanel / the panel latch release deliberately
+  // slowly, for correctness reasons the bar does not share (see the
+  // platform-block-latch fix). A presentation feature must not be able to
+  // shorten or extend any of them.
+  const code = codeOnly(bannerStateFn(await enforcerSrc()));
+  for (const field of [
+    '_fgIsBlocked', '_blockedByPanel', '_blockedPlatform', '_blockedAgentName',
+    '_blockedAgentId', '_fgLeftAiTicks', '_fgPid', '_panelBlockLatch',
+  ]) {
+    assert.equal(assignsTo(code, field), false, `UpdateBannerState must not write ${field}`);
+  }
+  for (const call of ['ClearFgBlocked(', 'ArmPanelBlockLatch(', 'ClearPanelBlockLatch(']) {
+    assert.equal(code.includes(call), false, `UpdateBannerState must not call ${call})`);
+  }
+  // …while the bar's OWN state is of course written here, and only here.
+  for (const own of ['_bannerActive', '_bannerPid', '_bannerAgent']) {
+    assert.equal(assignsTo(code, own), true, `expected UpdateBannerState to own ${own}`);
+  }
+  const src = await enforcerSrc();
+  // It runs on the poll thread, straight after the block decision it reads.
+  assert.match(src, /UpdateForeground\(\); UpdateBlockedAgents\(\); UpdateBannerState\(\);/);
+});
+
+test('enforcer.js dispatches blockstate instead of warning about an unknown kind', async () => {
+  // A missing case would not merely drop the event: the default branch logs
+  // "unknown kind", that warning reaches Electron's plain-text line scraper,
+  // and every focus change onto a blocked app would add a bogus row to
+  // recentAlerts. Same class of bug this file already hit for 'route'.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer.js'), 'utf8');
+  assert.match(src, /case 'blockstate':[\s\S]{0,700}?this\.emit\('blockstate', ev\);/);
+  const dispatch = src.slice(src.indexOf('#dispatch(ev)'));
+  const caseIdx = dispatch.indexOf("case 'blockstate':");
+  const body = dispatch.slice(caseIdx, dispatch.indexOf('break;', caseIdx));
+  assert.equal(/this\.log/.test(body), false, 'a log line per focus change is noise, and this event is presentation-only');
+  // Source-level, in the same style (and for the same reason) as the 'route'
+  // dispatch case above: #dispatch/#onStdout are private and unreachable
+  // without spawning a real child, which this file's header forbids. What CAN
+  // be checked live is that constructing the Enforcer still installs no hook.
+  const enforcer = new Enforcer({ aiProcessNames: [], blockPatterns: [], enabled: false });
+  enforcer.start();
+  assert.equal(enforcer.child, null, 'a disabled enforcer must never spawn the helper');
+});
+
+test('index.js relays @@CFAI-BLOCKSTATE and NEVER reports the bar to the server', async () => {
+  // An enforcement_block record means "a send was actually refused". A blocked
+  // window merely GAINING FOCUS is not that, and enqueueing one would inflate
+  // every block count with attempts the user never made.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  const start = src.indexOf("this.enforcer.on('blockstate'");
+  assert.ok(start >= 0, "expected an enforcer.on('blockstate') handler");
+  const handler = codeOnly(src.slice(start, src.indexOf("this.enforcer.on('disarmed'")));
+  assert.match(handler, /console\.log\('@@CFAI-BLOCKSTATE '/);
+  assert.equal(handler.includes('reporter.enqueue'), false, 'the bar must never become a server record');
+  assert.equal(handler.includes('this.log'), false, 'and must never be logged');
+  assert.equal(handler.includes('toast.show'), false, 'the bar IS the notification');
+  // No content field can be relayed, whatever the helper sends.
+  assert.equal(/patterns|preview|block_id|filename|title/.test(handler), false);
+
+  // The panic hotkey takes the bar down on the same presentation-only channel.
+  // Bounded at the NEXT handler, not by a character count — the handler after it
+  // does enqueue, legitimately.
+  const dStart = src.indexOf("this.enforcer.on('disarmed'");
+  const dEnd = src.indexOf('this.enforcer.on(', dStart + 20);
+  const disarmed = codeOnly(src.slice(dStart, dEnd > dStart ? dEnd : undefined));
+  assert.match(disarmed, /@@CFAI-BLOCKSTATE ' \+ JSON\.stringify\(\{ active: false \}\)/);
+  assert.equal(disarmed.includes('reporter.enqueue'), false);
+});
+
+async function electronMain() {
+  return readFile(join(AGENT_DIR, 'electron', 'main.js'), 'utf8');
+}
+
+function bannerSection(src) {
+  const start = src.indexOf('const BANNER_HEIGHT');
+  const end = src.indexOf('function showBlockDialogWindow(');
+  assert.ok(start >= 0 && end > start, 'expected the banner section to sit above showBlockDialogWindow');
+  return src.slice(start, end);
+}
+
+test('main.js handles @@CFAI-BLOCKSTATE before the pinned @@CFAI-BLOCK guard, and never crashes the line pump', async () => {
+  const src = await electronMain();
+  const stateIdx = src.indexOf("line.startsWith('@@CFAI-BLOCKSTATE '");
+  const blockIdx = src.indexOf("line.startsWith('@@CFAI-BLOCK '");
+  assert.ok(stateIdx >= 0, 'expected an @@CFAI-BLOCKSTATE guard');
+  assert.ok(stateIdx < blockIdx, 'the BLOCKSTATE guard must come first');
+  const guard = src.slice(stateIdx, blockIdx);
+  // Malformed JSON is dropped, exactly like every other structured channel here.
+  assert.match(guard, /catch \{ \/\* malformed/);
+  // Scope is asserted, not assumed: a panel-scoped state must never draw a bar.
+  assert.match(guard, /parsed\.active && parsed\.scope === 'app'/);
+  assert.match(guard, /else hideBlockBanner\(\);/);
+  // Presentation only — nothing on this path may report, log or alert.
+  const code = codeOnly(guard);
+  for (const forbidden of ['recentAlerts', 'sendToRenderer', 'fetch(']) {
+    assert.equal(code.includes(forbidden), false, `${forbidden} must not appear on the bar path`);
+  }
+
+  // …and the real thing does not throw on the shapes it will actually see.
+  const parse = (line) => {
+    if (!line.startsWith('@@CFAI-BLOCKSTATE ')) return 'not-ours';
+    try {
+      const parsed = JSON.parse(line.slice('@@CFAI-BLOCKSTATE '.length));
+      return (parsed.active && parsed.scope === 'app') ? 'show' : 'hide';
+    } catch { return 'dropped'; }
+  };
+  assert.equal(parse('@@CFAI-BLOCKSTATE {"active":true,"scope":"app","name":"Claude"}'), 'show');
+  assert.equal(parse('@@CFAI-BLOCKSTATE {"active":true,"scope":"panel","name":"Claude Code"}'), 'hide');
+  assert.equal(parse('@@CFAI-BLOCKSTATE {"active":false}'), 'hide');
+  assert.equal(parse('@@CFAI-BLOCKSTATE {"active":true,'), 'dropped');
+  assert.equal(parse('@@CFAI-BLOCKSTATE '), 'dropped');
+  // The shorter prefix must not swallow the longer one — the trailing space in
+  // '@@CFAI-BLOCK ' is what keeps them apart.
+  assert.equal('@@CFAI-BLOCKSTATE {"active":false}'.startsWith('@@CFAI-BLOCK '), false);
+});
+
+test('the banner window is non-focusable, click-through and never docked to the blocked window', async () => {
+  // focusable:true here would be worse than it was for the Tokenize popup:
+  // stealing focus from the AI app makes the enforcer see the user leave it, so
+  // the bar would tear down the very block it is announcing.
+  const section = bannerSection(await electronMain());
+  assert.match(section, /focusable: false/);
+  assert.match(section, /showInactive\(\)/);
+  assert.match(section, /setIgnoreMouseEvents\(true\)/);
+  assert.match(section, /setAlwaysOnTop\(true, 'screen-saver'\)/);
+  assert.match(section, /skipTaskbar: true/);
+  assert.match(section, /frame: false/);
+  assert.match(section, /renderer', 'block-banner\.html'/);
+  // Anchored to the display's workArea so a top-docked taskbar is not covered by
+  // something the user can neither move nor click through.
+  assert.match(section, /screen\.getDisplayNearestPoint/);
+  assert.match(section, /display\.workArea/);
+  assert.equal(/display\.bounds/.test(codeOnly(section)), false, 'workArea, not bounds');
+  // Explicitly NOT a window follower: no polling of the blocked window.
+  const code = codeOnly(section);
+  for (const forbidden of ['setInterval', 'GetWindowRect', 'win_w', 'win_h']) {
+    assert.equal(code.includes(forbidden), false, `${forbidden} would make this a window-follower`);
+  }
+  // A show-debounce so alt-tabbing THROUGH a blocked app does not flash it.
+  assert.match(section, /BANNER_SHOW_DEBOUNCE_MS/);
+  assert.match(section, /setTimeout\(/);
+  // A transparent, non-resizable window cannot be resized on Windows, and the
+  // bar's WIDTH has to follow the display's workArea. So a size change recreates
+  // the window; only a move goes through setBounds. Getting this wrong leaves a
+  // bar of the old monitor's width stretched across, or short of, the new one.
+  assert.match(section, /cur\.width !== bounds\.width \|\| cur\.height !== bounds\.height/);
+  assert.match(section, /transparent: true/);
+});
+
+test('the banner is destroyed on every path that ends the monitor', async () => {
+  // The worst failure mode of this whole feature: an always-on-top,
+  // click-through bar with no enforcer behind it, claiming a block that is not
+  // happening and offering the user no way to dismiss it.
+  const src = await electronMain();
+  assert.match(src, /function destroyBlockBanner\(\)/);
+  const destroy = src.slice(src.indexOf('function destroyBlockBanner()'), src.indexOf('function repositionBlockBanner()'));
+  assert.match(destroy, /bannerWindow\.destroy\(\)/);
+  assert.match(destroy, /bannerWindow = null;/);
+
+  // Child exit, spawn error, Stop Monitoring, and quit.
+  const exitHandler = src.slice(src.indexOf("monitorProcess.on('exit'"), src.indexOf('function stopMonitor()'));
+  assert.match(exitHandler, /destroyBlockBanner\(\);/);
+  const errHandler = exitHandler.slice(exitHandler.indexOf("monitorProcess.on('error'"));
+  assert.match(errHandler, /destroyBlockBanner\(\);/);
+  const stop = src.slice(src.indexOf('function stopMonitor()'), src.indexOf('// ── The standing'));
+  assert.match(stop, /destroyBlockBanner\(\);/);
+  const beforeQuit = src.slice(src.indexOf("app.on('before-quit'"));
+  assert.match(beforeQuit.slice(0, 500), /destroyBlockBanner\(\);/);
+
+  // A display disappearing must not leave it drawn at coordinates that are gone.
+  assert.match(src, /screen\.on\('display-removed', repositionBlockBanner\)/);
+  assert.match(src, /screen\.on\('display-metrics-changed', repositionBlockBanner\)/);
+});
+
+test('the banner is admin-controlled — it is NOT a user-toggleable setting', async () => {
+  // A user who could switch off the indicator for a block they cannot switch off
+  // would only be hiding the explanation. Deliberate product decision.
+  const src = await electronMain();
+  const defaults = src.slice(src.indexOf('const DEFAULT_SETTINGS = {'), src.indexOf('function loadSettings()'));
+  assert.equal(/banner|Banner/.test(defaults), false, 'the bar must not become a setting');
+});
+
+test('block-banner.js renders one admin-supplied name as TEXT, and has no route to prompt content', async () => {
+  const src = await readFile(join(AGENT_DIR, 'electron', 'renderer', 'block-banner.js'), 'utf8');
+  // textContent, never innerHTML — no markup path at all for a value that is
+  // admin-typed but untrusted by the time it reaches a BrowserWindow.
+  assert.match(src, /\$bar\.textContent =/);
+  assert.equal(/innerHTML/.test(codeOnly(src)), false);
+  // The exact approved copy, including the remediation pointer.
+  assert.match(src, /is blocked by CloudFuze AI Governance/);
+  assert.match(src, /prompts cannot be sent here/);
+  assert.match(src, /Request access from the CloudFuze tray icon/);
+  assert.match(src, /\\u\{1F512\}/, 'the lock glyph is escaped, as in the extension banner');
+  // One field in, nothing out.
+  const code = codeOnly(src);
+  for (const forbidden of ['preview', 'patterns', 'block_id', 'tokenize', 'invoke', 'submitAccessRequest']) {
+    assert.equal(code.includes(forbidden), false, `${forbidden} must not appear in the bar renderer`);
+  }
+  // Same palette/copy structure as the extension's own bar, so the two surfaces
+  // read as one control.
+  const html = await readFile(join(AGENT_DIR, 'electron', 'renderer', 'block-banner.html'), 'utf8');
+  assert.match(html, /#b91c1c/);
+  assert.match(html, /600 13px\/1\.4 system-ui/);
+  assert.match(html, /pointer-events: none/);
+  const ext = await readFile(join(AGENT_DIR, '..', 'browser-extension', 'content', 'content.js'), 'utf8');
+  assert.ok(ext.includes('background:#b91c1c'), 'the extension banner colour moved — the desktop bar has drifted from it');
+});
+
+test('the preload bridge exposes the banner as receive-only, with no matching invoke', async () => {
+  const src = await readFile(join(AGENT_DIR, 'electron', 'preload.js'), 'utf8');
+  assert.match(src, /onBlockBanner: \(callback\) => \{/);
+  assert.match(src, /ipcRenderer\.on\('block-banner', handler\)/);
+  assert.equal(/invoke\('block-banner/.test(src), false, 'the bar has nothing to send back');
+});
+
+// ── §5d: the bar changes what the Request Access modal is for ─────────────────
+
+test('the Request Access modal is shown ONCE per host while the bar is up, and the pinned guard line is untouched', async () => {
+  // DELIBERATE UPDATE to the coverage around the platform_block guard. Before
+  // the bar existed, every swallowed Enter and every swallowed send-button click
+  // re-raised (and re-focused) this dialog — the behaviour that made a blocked
+  // app feel broken rather than governed. Now the bar is the standing
+  // explanation and the modal explains it once.
+  //
+  // The guard line itself is unchanged and still asserted byte-for-byte below:
+  // the suppression is separate logic INSIDE showAccessRequestWindow, not a
+  // rewrite of the call site.
+  const src = await electronMain();
+  const blockHandler = src.slice(src.indexOf("line.startsWith('@@CFAI-BLOCK '"), src.indexOf("line.startsWith('@@CFAI-REWRITE '"));
+  assert.match(blockHandler, /if \(parsed\.platform_block\) \{ showAccessRequestWindow\(parsed\); return; \}/);
+
+  const fn = src.slice(src.indexOf('function showAccessRequestWindow('), src.indexOf('function parseMonitorLine('));
+  assert.match(fn, /platformModalShownForHost === host/);
+  // Conditional on the bar being up. With no bar (a panel-scoped block raises
+  // none) the modal is the only signal there is, so every-attempt behaviour must
+  // survive — this is the term that guarantees it.
+  assert.match(fn, /bannerVisible\s*\r?\n?\s*&& platformModalShownForHost === host/);
+  // An OPEN dialog is still raised by the existing guard rather than suppressed.
+  assert.match(fn, /\(!accessWindow \|\| accessWindow\.isDestroyed\(\)\)/);
+  const suppressIdx = fn.indexOf('platformModalShownForHost === host');
+  const raiseIdx = fn.indexOf('accessWindowHost === (data?.tool_host || null)');
+  assert.ok(suppressIdx >= 0 && raiseIdx > suppressIdx, 'the suppression check comes first, then the raise-only guard');
+
+  // Reset when the bar clears — otherwise the next real block would go
+  // unexplained.
+  const hide = src.slice(src.indexOf('function hideBlockBanner()'), src.indexOf('function destroyBlockBanner()'));
+  assert.match(hide, /platformModalShownForHost = null;/);
+
+  // The behaviour itself, on a copy of exactly those conditions.
+  const decide = (bannerUp, shownFor, host, dialogOpen) =>
+    (bannerUp && shownFor === host && !dialogOpen) ? 'suppressed' : 'shown';
+  assert.equal(decide(true, null, 'claude.ai', false), 'shown');          // first block: always explained
+  assert.equal(decide(true, 'claude.ai', 'claude.ai', false), 'suppressed'); // repeat while the bar is up
+  assert.equal(decide(true, 'claude.ai', 'chat.openai.com', false), 'shown'); // different tool
+  assert.equal(decide(false, 'claude.ai', 'claude.ai', false), 'shown');  // no bar → the modal is the only signal
+  assert.equal(decide(true, 'claude.ai', 'claude.ai', true), 'shown');    // open dialog is still raised
 });

@@ -106,6 +106,201 @@ export const AI_PROCESSES = [
   { match: /^github copilot$/i,  product: 'GitHub Copilot',    vendor: 'GitHub',     host: 'github.com',                useAttachmentWatcher: false, unhookableSandbox: false },
 ];
 
+// ── IDE-hosted AI panels ────────────────────────────────────────────────────
+//
+// An IDE is not an AI app, but it HOSTS them: Claude Code and GitHub Copilot
+// Chat as VS Code extensions, and Cursor's own AI composer. Enforcement has to
+// follow the focused ELEMENT here, not the process — swallowing Enter for every
+// keystroke in a code editor or a terminal would be a catastrophic false
+// positive, and (until now) VS Code's process name was simply absent from every
+// catalog, so nothing in an IDE was scanned at all.
+//
+// This is a SEPARATE catalog from AI_PROCESSES on purpose. Do NOT add "Code"
+// (or a second "Cursor") to AI_PROCESSES to get IDE coverage: that array also
+// drives index.js's aiProcNames, which is handed to the clipboard poller and to
+// the attachment-chip / file-dialog / prompt-text UIA watchers. Adding an IDE
+// there would silently turn on clipboard scanning and attachment-chip watching
+// across the WHOLE editor — reporting every file you open while coding as an AI
+// file upload. That is a far bigger privacy expansion than the keystroke
+// scoping this feature is about. agent/tests/ai-processes.test.mjs asserts the
+// separation.
+//
+// `panelFallback`: when the foreground is this IDE process but NO panel
+// signature matches the focused element, should the process still be treated as
+// a whole-app AI surface?
+//
+// Both false: explicit user decision (2026-08-25) to scope Cursor down to its
+// AI composer only, matching Claude Code's precision, even though Cursor was
+// already in AI_PROCESSES and had whole-app keystroke coverage before this
+// change. Typing in Cursor's editor or terminal is no longer scanned at all —
+// only `aislash-editor-input` is. If a future Cursor build renames that class
+// and the fallback is ever wanted back as a safety net, set this back to true;
+// UpdateForeground's `_ideFallbackProcs.Contains(proc) && _aiProcs.Contains(proc)`
+// branch already exists to support it, and Cursor's continued AI_PROCESSES
+// membership below is what that branch would use.
+export const IDE_PROCESSES = [
+  { match: /^code$/i,   product: 'Visual Studio Code', vendor: 'Microsoft', panelFallback: false },
+  { match: /^cursor$/i, product: 'Cursor',             vendor: 'Anysphere', panelFallback: false },
+];
+
+// Signatures for the AI composer inside each IDE, matched against the focused
+// UIA element's { ControlType, Name, ClassName }.
+//
+// Every signature below except vscode_chat was verified by live UIA probing
+// against a real installation (2026-08). Notes on the fields, because the
+// wrong choice here is either a miss or a false block:
+//
+//   claude_code      — Name "Message input" is ARIA-label driven and stable.
+//                      ClassName is a CSS-module build hash ("messageInput_cKsPxg"),
+//                      so only its PREFIX may be matched: the suffix changes on
+//                      every extension build.
+//   cursor_composer  — Name is EMPTY (no ARIA label), so ClassName is the only
+//                      signal: exact "aislash-editor-input". Cursor also has a
+//                      near-identically-shaped Edit with ClassName
+//                      "agent-sidebar-search-input" / Name "Search Agents…" —
+//                      that is the agent-history SEARCH box, and filtering past
+//                      sessions is not sending a prompt. Matching on ClassName
+//                      exactly is what keeps them apart. "Exactly" means exactly
+//                      one CLASS, not the whole class attribute — see
+//                      classRuleMatches: a web-hosted element's UIA ClassName is
+//                      the DOM class attribute and can hold several, and this is
+//                      the only entry with no second signal to fall back on.
+//   vscode_chat      — NOT verified live (Copilot Chat was not installed during
+//                      probing); inferred from VS Code's generic Chat UI. Its
+//                      observed ClassName was "native-edit-context", which is a
+//                      GENERIC VS Code internal class shared with the Find
+//                      widget, quick-open, search and rename inputs — matching
+//                      it would blanket-block ordinary editor UI, so it is
+//                      deliberately absent here. Name prefix only.
+//
+// `enforce: false` means DETECTION-ONLY: the signature is matched (so the panel
+// is identified for telemetry and the whole bridge is exercised), but no
+// guardrail/PII block and no platform block may ever fire from it. This is the
+// deliberate safety gate for vscode_chat, whose signature is unverified.
+// Flipping it to true requires a live verification pass against a real GitHub
+// Copilot Chat installation — confirm the real ControlType/Name of its composer
+// and confirm no non-chat VS Code input shares that Name prefix. Matching and
+// enforcing are separate concerns: matchPanelSignature() must keep matching a
+// detection-only panel, the ENFORCEMENT paths are what consult `enforce`.
+export const AI_PANELS = [
+  {
+    id: 'claude_code', product: 'Claude Code', vendor: 'Anthropic', host: 'claude.ai',
+    procs: ['Code', 'Cursor'], controlType: 'Edit',
+    nameEquals: 'Message input', classPrefix: 'messageInput_',
+    enforce: true, verified: true,
+  },
+  {
+    id: 'vscode_chat', product: 'GitHub Copilot Chat', vendor: 'GitHub', host: 'github.com',
+    procs: ['Code', 'Cursor'], controlType: 'Edit',
+    namePrefix: 'Chat Input',
+    enforce: false, verified: false,
+  },
+  {
+    id: 'cursor_composer', product: 'Cursor', vendor: 'Anysphere', host: 'cursor.com',
+    procs: ['Cursor'], controlType: 'Edit',
+    classEquals: 'aislash-editor-input',
+    enforce: true, verified: true,
+  },
+];
+
+// The single source of truth for "is this focused element an AI panel".
+//
+// Pure and side-effect free so it can be unit tested without a live UI, and
+// serialized (see buildAiPanelConfig) rather than re-implemented for the C#
+// side — the same JSON-over-env-var mechanism CFAI_MODEL_ROUTER_CONFIG uses.
+// The C# port in enforcer-win.ps1 (MatchPanelSignature) must stay in lockstep
+// with the comparison order below.
+//
+// Returns the matching AI_PANELS entry, or null. Never throws: the inputs come
+// from another process's accessibility tree and can be null, empty, or garbage.
+// A className rule is matched against the whole string AND against each
+// whitespace-separated TOKEN of it, the way a CSS selector would.
+//
+// For a web-hosted element the UIA ClassName IS the DOM class ATTRIBUTE, which
+// routinely holds more than one class: Cursor's own Monaco editor input reports
+// "inputarea monaco-mouse-cursor-text", measured. `cursor_composer` is the one
+// signature here with nothing to fall back on — empty Name, no namePrefix, no
+// classPrefix, just the exact ClassName — so a whole-string compare stops
+// matching a genuinely focused, genuinely stable composer the moment Cursor
+// carries a second class on it, and a readable NON-match is what tears an
+// IDE-panel platform block down in enforcer-win.ps1. claude_code never showed
+// this because its ARIA-driven Name matches independently of any class.
+//
+// Deliberately NOT a substring test: "xx-messageInput_abc" must not satisfy the
+// "messageInput_" prefix. Ported to C# as ClassRuleMatches in enforcer-win.ps1;
+// the two must stay in lockstep.
+function classRuleMatches(cls, want, prefix) {
+  if (!want || !cls) return false;
+  if (prefix ? cls.startsWith(want) : cls === want) return true;
+  if (!/\s/.test(cls)) return false;
+  return cls.split(/\s+/).some((tok) => tok.length > 0 && (prefix ? tok.startsWith(want) : tok === want));
+}
+
+export function matchPanelSignature(focused) {
+  // Destructuring in the signature is not enough: a default only applies to
+  // `undefined`, so an explicit null (a perfectly ordinary "nothing is focused"
+  // answer) would throw. This function is on the poll path and must never do
+  // that.
+  const { process: processName, controlType, name, className } = focused || {};
+  const proc = String(processName ?? '').replace(/\.exe$/i, '').trim().toLowerCase();
+  if (!proc) return null;
+  const ct = String(controlType ?? '').trim().toLowerCase();
+  if (!ct) return null;
+  const nm = String(name ?? '').trim().toLowerCase();
+  const cls = String(className ?? '').trim().toLowerCase();
+  for (const panel of AI_PANELS) {
+    if (String(panel.controlType).toLowerCase() !== ct) continue;
+    if (!panel.procs.some((p) => String(p).toLowerCase() === proc)) continue;
+    // Any ONE of the fields the entry defines is enough — that is what lets
+    // claude_code survive a CSS-module hash change via its Name alone. An
+    // absent field never matches, and an empty read never satisfies a
+    // non-empty rule (so a blank Name cannot prefix-match "Chat Input").
+    const nameEq = !!panel.nameEquals && nm.length > 0 && nm === panel.nameEquals.toLowerCase();
+    const namePre = !!panel.namePrefix && nm.length > 0 && nm.startsWith(panel.namePrefix.toLowerCase());
+    const classEq = !!panel.classEquals && cls.length > 0 && classRuleMatches(cls, panel.classEquals.toLowerCase(), false);
+    const classPre = !!panel.classPrefix && cls.length > 0 && classRuleMatches(cls, panel.classPrefix.toLowerCase(), true);
+    if (nameEq || namePre || classEq || classPre) return panel;
+  }
+  return null;
+}
+
+// Mirrors identifyAiProcess, for a panel id reported on an enforcer event.
+export function identifyAiPanel(panelId) {
+  const id = String(panelId || '').trim();
+  if (!id) return null;
+  for (const panel of AI_PANELS) {
+    if (panel.id === id) return { product: panel.product, vendor: panel.vendor };
+  }
+  return null;
+}
+
+// Mirrors hostForProcess: the access-exception key for a panel block.
+export function hostForPanel(panelId) {
+  const id = String(panelId || '').trim();
+  if (!id) return null;
+  for (const panel of AI_PANELS) {
+    if (panel.id === id) return panel.host || null;
+  }
+  return null;
+}
+
+// Reverse of hostForPanel — the platform-block bridge's lookup, mirroring
+// processForHost. Exact + case-insensitive for the same reason that one is:
+// ai_platforms.host is already normalized server-side, and guessing at
+// subdomains could block a panel off an unrelated row.
+//
+// Unlike processForHost this does NOT exclude the IDE surfaces: excluding them
+// there is about never swallowing input process-wide in a code editor, and a
+// panel match is by construction scoped to the AI composer element only.
+export function panelForHost(host) {
+  const target = String(host || '').trim().toLowerCase();
+  if (!target) return null;
+  for (const panel of AI_PANELS) {
+    if (String(panel.host || '').trim().toLowerCase() === target) return panel.id;
+  }
+  return null;
+}
+
 // Returns true if clipboard scrub is the ONLY block mechanism available
 // for the given process — the OS monitor uses this to decide whether to
 // overwrite the clipboard contents when a high/critical pattern is detected.
@@ -227,6 +422,75 @@ export function processForHost(host) {
   return null;
 }
 
+// Like processForHost, but returns EVERY process name that reaches this host,
+// not just the first. Some vendors ship more than one process name for the
+// same app — ChatGPT Desktop runs as "ChatGPT" on most installs but as
+// "ChatGPT Classic" on others (confirmed 2026-08-13 via tasklist), and both
+// entries carry host:'chatgpt.com'. processForHost's single-value contract
+// (relied on elsewhere, e.g. the access-exception host key) stops at the
+// first match, which is correct for that use but silently dropped every
+// variant past the first when reused for host-keyed platform blocking — an
+// admin blocking chatgpt.com only ever produced a row for "chatgpt", so a
+// "ChatGPT Classic" install was never actually enforced. This is the
+// multi-entry-aware version synthesizePlatformBlocks needs.
+export function processesForHost(host) {
+  const target = String(host || '').trim().toLowerCase();
+  if (!target) return [];
+  const names = [];
+  for (const entry of AI_PROCESSES) {
+    if (String(entry.host || '').trim().toLowerCase() !== target) continue;
+    if (entry.useAttachmentWatcher === false) continue;
+    const name = processNameForEntry(entry);
+    if (name && !names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+// ── Helper env payloads (CFAI_IDE_PROCESSES / CFAI_AI_PANELS) ───────────────
+//
+// Serialized as JSON and deserialized on the C# side with JavaScriptSerializer,
+// mirroring CFAI_MODEL_ROUTER_CONFIG exactly, rather than being restated as
+// literals inside enforcer-win.ps1. The point is that AI_PANELS above is the
+// only place a signature is ever written down: the .ps1 owns the comparison
+// code (MatchPanelSignature), never the data.
+//
+// TWO consumers, for opposite reasons:
+//   enforcer.js         → enforcer-win.ps1 scopes keystroke scanning/blocking to
+//                         a focused panel instead of the whole IDE process.
+//   prompt-watcher.js   → prompt-watcher.ps1 refuses to READ the focused
+//                         element's text at all unless it matches a panel.
+//                         Without it, Cursor's AI_PROCESSES membership (needed
+//                         for host/exception resolution) meant that watcher read
+//                         and reported source code as a typed prompt.
+// Neither payload ever widens which PROCESSES are watched — that stays
+// AI_PROCESSES' job, via CFAI_AI_PROCESSES.
+
+// The IDE process-name list, with each entry's whole-app fallback flag.
+export function buildIdeProcessConfig() {
+  return IDE_PROCESSES.map((entry) => ({
+    name: processNameForEntry(entry),
+    panelFallback: entry.panelFallback === true,
+  })).filter((e) => e.name);
+}
+
+// The panel signature table. `enforce` travels with each entry so the C# side
+// knows which panels are live and which are detection-only; `product`/`vendor`
+// do not (nothing on that side displays them — index.js resolves those from the
+// panel id via identifyAiPanel), and `host` does not either (blocked-agents.json
+// rows already carry their own host).
+export function buildAiPanelConfig() {
+  return AI_PANELS.map((panel) => ({
+    id: panel.id,
+    procs: panel.procs.slice(),
+    controlType: panel.controlType,
+    nameEquals: panel.nameEquals || '',
+    namePrefix: panel.namePrefix || '',
+    classEquals: panel.classEquals || '',
+    classPrefix: panel.classPrefix || '',
+    enforce: panel.enforce === true,
+  }));
+}
+
 // enforcer-win.ps1 parses blocked-agents.json with a hand-rolled extractor:
 // ExtractJsonString stops at the first `"` after the value starts, and
 // SplitJsonArray splits rows on brace depth. Both are fooled by a quote, a
@@ -246,7 +510,25 @@ function sanitizeForPs1(value) {
 // Fetched UNFILTERED by the caller: `surface` is not consulted at all, because
 // no admin UI has ever set it (every row defaults to 'browser'), so filtering on
 // it would return nothing. The real desktop-relevance test is whether the host
-// resolves to a process this catalog carries.
+// resolves to a process — or, now, an IDE-hosted PANEL — this catalog carries.
+//
+// A host can resolve to BOTH, and then both rows are emitted:
+//   claude.ai  → the Claude Desktop process AND the Claude Code panel in VS Code
+//   github.com → (no standalone process; GitHub Copilot is excluded there) AND
+//                the Copilot Chat panel — this is the linkage that makes ONE
+//                Inventory toggle cover the website and the in-IDE panel
+//   cursor.com → the Cursor composer panel only; the Cursor PROCESS is
+//                deliberately excluded by processForHost, because blocking a
+//                whole code editor off a browser-inventory toggle would be a
+//                catastrophic false positive. The panel row is safe precisely
+//                because it is scoped to the composer element.
+//
+// A panel row carries `panel` and NOT `process_name`: process_name matching in
+// enforcer-win.ps1 is process-WIDE, so keying the Claude Code panel on
+// process_name:"Code" would also block the Copilot Chat panel and plain editing.
+// A detection-only panel (enforce:false) still gets its row — the enforce gate
+// lives in the .ps1, so the wiring is real and flipping the flag is all that is
+// needed later.
 //
 // Only the `blocked` boolean is read. capture_mode (observe/block_critical/hold)
 // is deliberately NOT wired up here — that is separate, tracked work.
@@ -256,22 +538,39 @@ export function synthesizePlatformBlocks(platformRows) {
   const seen = new Set();
   for (const row of platformRows) {
     if (row?.blocked !== true) continue;
-    const proc = processForHost(row.host);
-    if (!proc) continue;
-    // Two hosts can legitimately resolve to one app (e.g. a second Perplexity
-    // domain also reaching Comet). The enforcer stops at the first match, so a
-    // duplicate row would only ever be dead weight in the file.
-    const key = proc.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    rows.push({
-      platform: PLATFORM_BLOCK_SENTINEL,
-      process_name: sanitizeForPs1(proc),
-      agent_name: sanitizeForPs1(row.product || row.vendor || row.host),
-      agent_id: '',
-      host: sanitizeForPs1(row.host),
-      reason: 'Blocked by organization policy',
-    });
+    const agentName = sanitizeForPs1(row.product || row.vendor || row.host);
+    const host = sanitizeForPs1(row.host);
+    // ALL process names for this host, not just the first — a vendor can ship
+    // more than one process name for the same app (ChatGPT Desktop runs as
+    // "ChatGPT" on most installs, "ChatGPT Classic" on others). Using only
+    // processForHost's first match here left every later variant unblocked
+    // even though the admin's toggle said otherwise. Two hosts can still
+    // legitimately resolve to one app (e.g. a second Perplexity domain also
+    // reaching Comet); the `seen` set is what dedupes THAT case, not this one.
+    for (const proc of processesForHost(row.host)) {
+      if (seen.has(`proc:${proc.toLowerCase()}`)) continue;
+      seen.add(`proc:${proc.toLowerCase()}`);
+      rows.push({
+        platform: PLATFORM_BLOCK_SENTINEL,
+        process_name: sanitizeForPs1(proc),
+        agent_name: agentName,
+        agent_id: '',
+        host,
+        reason: 'Blocked by organization policy',
+      });
+    }
+    const panel = panelForHost(row.host);
+    if (panel && !seen.has(`panel:${panel}`)) {
+      seen.add(`panel:${panel}`);
+      rows.push({
+        platform: PLATFORM_BLOCK_SENTINEL,
+        panel,
+        agent_name: agentName,
+        agent_id: '',
+        host,
+        reason: 'Blocked by organization policy',
+      });
+    }
   }
   return rows;
 }

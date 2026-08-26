@@ -188,6 +188,13 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   the same bug for parity — fixing it here should be mirrored there too. Needs word-boundary
   matching or a stricter token check instead of raw substring search.
 
+- [ ] **Desktop enforcement doesn't detect/block terminal-based CLI AI tools (e.g. Claude Code CLI)**
+  The OS-monitor's `AI_PROCESSES`/`IDE_PROCESSES`/`AI_PANELS` catalogs only recognize
+  GUI-hosted surfaces (standalone chat apps, IDE extension composer panels) — a terminal
+  emulator running a CLI-based agent (e.g. the Claude Code CLI) is never in the foreground-
+  process catalog at all, so it gets zero platform-block enforcement. Anyone blocked from an
+  AI platform on desktop can bypass it entirely by using that platform's CLI in a terminal.
+
 ---
 
 ## P2 — enterprise distribution

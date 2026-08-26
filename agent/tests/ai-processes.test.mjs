@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path';
 
 import {
   AI_PROCESSES,
+  IDE_PROCESSES,
   PLATFORM_PROCS,
   isAttachmentWatcherEligible,
   shouldScrubClipboardFor,
@@ -202,22 +203,54 @@ test('processForHost excludes the IDE surfaces — Cursor and GitHub Copilot', (
   assert.deepEqual(excluded, ['Cursor', 'GitHub Copilot']);
 });
 
-test('synthesizePlatformBlocks only emits rows that are blocked AND resolve to a desktop app', () => {
+test('synthesizePlatformBlocks only emits rows that are blocked AND resolve to a desktop app or panel', () => {
   const rows = synthesizePlatformBlocks([
     { host: 'claude.ai',   product: 'Claude',    vendor: 'Anthropic',  blocked: true  },
     { host: 'chatgpt.com', product: 'ChatGPT',   vendor: 'OpenAI',     blocked: false },  // not blocked
-    { host: 'lovable.dev', product: 'Lovable',   vendor: 'Lovable',    blocked: true  },  // no desktop app
-    { host: 'cursor.com',  product: 'Cursor',    vendor: 'Anysphere',  blocked: true  },  // excluded IDE
-    { host: 'github.com',  product: 'Copilot',   vendor: 'GitHub',     blocked: true  },  // excluded IDE plugin
+    { host: 'lovable.dev', product: 'Lovable',   vendor: 'Lovable',    blocked: true  },  // no desktop app, no panel
+    { host: 'cursor.com',  product: 'Cursor',    vendor: 'Anysphere',  blocked: true  },  // IDE process excluded; PANEL covered
+    { host: 'github.com',  product: 'Copilot',   vendor: 'GitHub',     blocked: true  },  // IDE plugin excluded; PANEL covered
   ]);
-  assert.deepEqual(rows, [{
-    platform: PLATFORM_BLOCK_SENTINEL,
-    process_name: 'claude',
-    agent_name: 'Claude',
-    agent_id: '',
-    host: 'claude.ai',
-    reason: 'Blocked by organization policy',
-  }]);
+  // The IDE PROCESS exclusion is unchanged — no row ever names Cursor or
+  // GitHub Copilot as a process_name, because process_name matching in the .ps1
+  // is process-wide and would swallow input in a code editor. What is new is
+  // that the AI PANEL inside those IDEs is covered, scoped to the composer
+  // element. See ai-panels.test.mjs for the panel rows in detail.
+  assert.deepEqual(rows, [
+    {
+      platform: PLATFORM_BLOCK_SENTINEL,
+      process_name: 'claude',
+      agent_name: 'Claude',
+      agent_id: '',
+      host: 'claude.ai',
+      reason: 'Blocked by organization policy',
+    },
+    {
+      platform: PLATFORM_BLOCK_SENTINEL,
+      panel: 'claude_code',
+      agent_name: 'Claude',
+      agent_id: '',
+      host: 'claude.ai',
+      reason: 'Blocked by organization policy',
+    },
+    {
+      platform: PLATFORM_BLOCK_SENTINEL,
+      panel: 'cursor_composer',
+      agent_name: 'Cursor',
+      agent_id: '',
+      host: 'cursor.com',
+      reason: 'Blocked by organization policy',
+    },
+    {
+      platform: PLATFORM_BLOCK_SENTINEL,
+      panel: 'vscode_chat',
+      agent_name: 'Copilot',
+      agent_id: '',
+      host: 'github.com',
+      reason: 'Blocked by organization policy',
+    },
+  ]);
+  assert.equal(rows.some((r) => /cursor|github copilot/i.test(r.process_name || '')), false);
 });
 
 test('synthesizePlatformBlocks only reads the blocked boolean — never capture_mode', () => {
@@ -232,12 +265,52 @@ test('synthesizePlatformBlocks only reads the blocked boolean — never capture_
 });
 
 test('synthesizePlatformBlocks falls back vendor → host for the display name', () => {
-  const [a, b] = synthesizePlatformBlocks([
+  // Keyed by row rather than by index: claude.ai now yields TWO rows (the
+  // desktop process AND the Claude Code panel), and both take the same name.
+  const rows = synthesizePlatformBlocks([
     { host: 'claude.ai',  vendor: 'Anthropic', product: null, blocked: true },
     { host: 'chatgpt.com', vendor: null,       product: null, blocked: true },
   ]);
-  assert.equal(a.agent_name, 'Anthropic');
-  assert.equal(b.agent_name, 'chatgpt.com');
+  for (const row of rows.filter((r) => r.host === 'claude.ai')) {
+    assert.equal(row.agent_name, 'Anthropic', 'vendor is the first fallback');
+  }
+  assert.equal(rows.find((r) => r.host === 'chatgpt.com').agent_name, 'chatgpt.com', 'host is the last fallback');
+});
+
+test('the AI and IDE catalogs stay separate, and Cursor dual membership is deliberate', () => {
+  // The privacy-scoping guarantee: AI_PROCESSES drives aiProcNames, which is
+  // handed to the clipboard poller and the attachment-chip / file-dialog /
+  // prompt-text watchers. An IDE name in there turns those on across the whole
+  // editor. The keystroke enforcer gets IDE names via its OWN env var instead.
+  const aiNames = AI_PROCESSES.map((e) =>
+    e.match.source.replace(/^\^/, '').replace(/\$$/, '').replace(/[\\/]i?$/, '').toLowerCase(),
+  );
+  const ideNames = IDE_PROCESSES.map((e) =>
+    e.match.source.replace(/^\^/, '').replace(/\$$/, '').replace(/[\\/]i?$/, '').toLowerCase(),
+  );
+  assert.deepEqual(ideNames, ['code', 'cursor']);
+  // VS Code must NOT be in the AI catalog — that is what keeps the passive
+  // watchers out of the editor entirely.
+  assert.equal(aiNames.includes('code'), false, '"Code" in AI_PROCESSES would turn on clipboard/attachment watching across VS Code');
+  assert.equal(identifyAiProcess('Code'), null);
+  assert.equal(hostForProcess('Code'), null);
+  // Cursor IS in both, deliberately — but as of the 2026-08-25 decision its IDE
+  // entry carries panelFallback:false, so that dual membership is now LATENT
+  // rather than an active path: UpdateForeground checks the IDE catalog first,
+  // and its whole-app branch (`_ideFallbackProcs.Contains(proc) &&
+  // _aiProcs.Contains(proc)`) can never be satisfied for a process whose
+  // panelFallback is false, because such a process is never added to
+  // _ideFallbackProcs at all. Cursor is therefore scoped to its AI composer only,
+  // exactly like Claude Code — typing in its editor or terminal is not scanned.
+  // The AI_PROCESSES entry stays because (a) it is what `host: 'cursor.com'`
+  // resolution, the access-exception chain and the passive-watcher flags below
+  // are keyed on, and (b) it is the coverage the fallback branch would use if
+  // panelFallback were ever flipped back to true.
+  assert.equal(aiNames.includes('cursor'), true);
+  assert.equal(IDE_PROCESSES.find((e) => e.match.test('cursor')).panelFallback, false);
+  // And Cursor's existing AI_PROCESSES flags are untouched by this feature.
+  assert.equal(isAttachmentWatcherEligible('Cursor'), false);
+  assert.equal(processForHost('cursor.com'), null);
 });
 
 test('synthesizePlatformBlocks dedupes hosts that resolve to the same desktop app', () => {
@@ -250,7 +323,12 @@ test('synthesizePlatformBlocks dedupes hosts that resolve to the same desktop ap
     { host: 'copilot.microsoft.com', product: 'Copilot',  blocked: true },
     { host: 'm365.cloud.microsoft',  product: 'M365',     blocked: true },
   ]);
-  assert.deepEqual(rows.map((r) => r.process_name), ['claude', 'copilot', 'm365copilot']);
+  // claude.ai also contributes its panel row; the two Copilot hosts have no
+  // panel. Process and panel keys are namespaced, so they can never collide.
+  assert.deepEqual(
+    rows.map((r) => r.process_name || 'panel:' + r.panel),
+    ['claude', 'panel:claude_code', 'copilot', 'm365copilot'],
+  );
   assert.equal(rows[0].agent_name, 'Claude', 'the FIRST row wins a dedup');
 });
 
@@ -295,12 +373,18 @@ test('filterBlockedAgents lifts a synthesised platform block via the row own hos
     ]),
     { agent_id: 'a1', agent_name: 'Team GPT', platform: 'openai_assistant' },
   ];
+  // One approval for claude.ai lifts EVERY claude.ai row — the desktop process
+  // row and the Claude Code panel row alike, which is the point of keying
+  // exceptions on the host rather than on the process or panel. chatgpt.com
+  // appears TWICE here — see processesForHost: ChatGPT Desktop ships under two
+  // different process names ("ChatGPT" and "ChatGPT Classic"), so one host
+  // now correctly synthesises one row per process name, not just the first.
   const kept = filterBlockedAgents(list, [{ tool_host: 'CLAUDE.AI' }]);
-  assert.deepEqual(kept.map((r) => r.host || r.agent_id), ['chatgpt.com', 'a1']);
+  assert.deepEqual(kept.map((r) => r.host || r.agent_id), ['chatgpt.com', 'chatgpt.com', 'a1']);
   // An exception for the agent-block row's platform host still lifts only that
   // row — the host-keyed chatgpt.com platform row is a separate decision.
   assert.deepEqual(
-    filterBlockedAgents(list, [{ tool_host: 'chatgpt.com' }]).map((r) => r.host || r.agent_id),
-    ['claude.ai'],
+    filterBlockedAgents(list, [{ tool_host: 'chatgpt.com' }]).map((r) => (r.host || r.agent_id) + (r.panel ? '/' + r.panel : '')),
+    ['claude.ai', 'claude.ai/claude_code'],
   );
 });

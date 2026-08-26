@@ -85,4 +85,13 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('access-request-dialog', handler);
     return () => ipcRenderer.removeListener('access-request-dialog', handler);
   },
+  // The standing blocked-platform bar. Receive-only, and the payload is a single
+  // display name — there is no companion invoke() for it and there must not be
+  // one: the bar has nothing to send back, and the window rendering it is
+  // non-focusable and click-through, so it has no way to be interacted with.
+  onBlockBanner: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('block-banner', handler);
+    return () => ipcRenderer.removeListener('block-banner', handler);
+  },
 });

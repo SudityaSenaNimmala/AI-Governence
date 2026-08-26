@@ -12,7 +12,15 @@
 
 import { createPoller } from './poller-factory.js';
 import { createNotifier } from './notify-factory.js';
-import { AI_PROCESSES, identifyAiProcess, isAttachmentWatcherEligible, hostForProcess, hostsForPlatform } from './ai-processes.js';
+import {
+  AI_PROCESSES,
+  identifyAiProcess,
+  isAttachmentWatcherEligible,
+  hostForProcess,
+  hostsForPlatform,
+  identifyAiPanel,
+  hostForPanel,
+} from './ai-processes.js';
 import { scan, lengthBucket, BLOCK_PATTERNS, getBlockPatterns, isTextReadable, isBinaryParseable, isImage, isArchive } from './classifier.js';
 import { PolicySync } from './policy-sync.js';
 import { buildFileUploadEvent } from './file-handler.js';
@@ -27,6 +35,23 @@ import { Reporter } from './reporter.js';
 // suppress re-firing for the same pair. 10s prevents rapid-fire spam while
 // still re-warning on repeated paste attempts.
 const FIRE_DEDUP_TTL_MS = 10_000;
+
+// Product identity for an enforcer event, panel FIRST.
+//
+// An event from an IDE-hosted AI panel carries process:"Code" (or "Cursor")
+// plus panel:"claude_code". The process alone identifies nothing — "Code" is in
+// no AI catalog and never will be (see the IDE-catalog comment in
+// ai-processes.js for why adding it there would be a privacy regression),
+// so before panels existed such an event could not even be produced, and
+// resolving one by process would drop it at the `if (!ai) return` guard. The
+// panel id is what names the product ("Claude Code" by Anthropic).
+//
+// Falls back to the existing process-based resolution when there is no panel:
+// every pure chat app, and an IDE in its whole-app fallback mode (Cursor with no
+// panel focused), where process:"Cursor" is the correct identity.
+function identifyEventAi(ev) {
+  return (ev?.panel ? identifyAiPanel(ev.panel) : null) || identifyAiProcess(ev?.process);
+}
 
 // Clipboard scrubbing was removed on 2026-06-15: the clipboard path now fires
 // on the actual paste gesture, so the content is already in the app and
@@ -296,6 +321,12 @@ export class OsMonitor {
     this.dialogWatcher.on('file_dialog_pick', async (ev) => {
       const ai = identifyAiProcess(ev.process);
       if (!ai) return;
+      // Same eligibility gate the attachment-chip watcher already applies
+      // below: an IDE's File > Open dialog is not an AI upload. Without this,
+      // opening any file in Cursor got reported as if it had been uploaded to
+      // an AI — the dialog fires for every "Open" the OS shows this process,
+      // not just an AI app's own attach-file picker.
+      if (!isAttachmentWatcherEligible(ev.process)) return;
       try {
         const fileEvent = await buildFileUploadEvent({
           path: ev.path,
@@ -475,7 +506,11 @@ export class OsMonitor {
     // they pin TLS (proxy blind) and enforce ASAR integrity (no DOM hook).
     // Detect + notify + report only — UIA can't block another app's send.
     this.promptWatcher.on('prompt_text', (ev) => {
-      const ai = identifyAiProcess(ev.process);
+      // Panel-first, same as the enforcer handlers: the watcher now only reads an
+      // IDE's focused element when it matched an AI panel signature, and it says
+      // which one — so a prompt typed into Claude Code inside Cursor is
+      // attributed to Claude Code, not to the host editor.
+      const ai = identifyEventAi(ev);
       if (!ai) return;
 
       const { matches, highestSeverity } = scan(ev.text);
@@ -523,7 +558,10 @@ export class OsMonitor {
     // the DOM hook / proxy are both blocked. Sensitive sends never reach here —
     // they go through the 'block' path below — so there's no double counting.
     this.enforcer.on('prompt', (ev) => {
-      const ai = identifyAiProcess(ev.process);
+      // Panel-first: a prompt sent from the Claude Code panel arrives as
+      // process:"Code" + panel:"claude_code", and "Code" resolves to nothing on
+      // its own — this guard would have silently dropped it.
+      const ai = identifyEventAi(ev);
       if (!ai) return;
       const len = Number(ev.len) || 0;
       if (len < 1) return;
@@ -544,7 +582,7 @@ export class OsMonitor {
     // Distinct dedup namespace ('enf|…') so the block notice always shows at
     // the moment of the block, independent of the detection toast.
     this.enforcer.on('block', (ev) => {
-      const ai = identifyAiProcess(ev.process) || { product: ev.process, vendor: null };
+      const ai = identifyEventAi(ev) || { product: ev.process, vendor: null };
       const patterns = (ev.patterns || '').split(',').filter(Boolean);
       const isAttachment = ev.reason === 'attachment';
       // A FULL PLATFORM BLOCK — the org disallowed this app outright, so
@@ -555,12 +593,13 @@ export class OsMonitor {
       const isPlatform = !!ev.platform_block;
       const matches = isPlatform ? [] : patterns.map((p) => ({ pattern: p, severity: 'high', count: 1 }));
       const agentName = ev.blocked_agent || ai.product;
-      // The access-exception key. The process name is preferred over the
-      // platform id because it names the app actually in the foreground; the
-      // platform mapping is the fallback for a process the catalog does not
+      // The access-exception key. Most specific first: the PANEL names the exact
+      // AI surface inside an IDE (and "Code" has no host of its own), then the
+      // process name because it names the app actually in the foreground, then
+      // the platform mapping as the fallback for a process the catalog does not
       // carry a host for.
       const toolHost = isPlatform
-        ? (hostForProcess(ev.process) || hostsForPlatform(ev.blocked_platform)[0] || '')
+        ? (hostForPanel(ev.panel) || hostForProcess(ev.process) || hostsForPlatform(ev.blocked_platform)[0] || '')
         : '';
       // reason: 'send' (Enter) | 'paste' (Ctrl+V) | 'click' (send button) | 'attachment' (sensitive file attached).
       const reason = isPlatform ? 'platform' : isAttachment ? 'file_upload' : ev.reason === 'paste' ? 'prompt_paste' : 'prompt_submit';
@@ -630,7 +669,58 @@ export class OsMonitor {
         tool_name: isPlatform ? ai.product : '',
         tool_vendor: isPlatform ? (ai.vendor || '') : '',
         process_name: ev.process || '',
+        // Which AI panel inside the IDE, when the block came from one. A catalog
+        // id only — never a file path, workspace name or window title.
+        panel: ev.panel || '',
+        // SCOPE of the block: 'app' = the whole process is disallowed, 'panel' =
+        // one AI surface inside an IDE is. Straight from the enforcer's
+        // _blockedByPanel. Not the same question as `panel` above, which is
+        // attribution and can carry a panel id for an app-scoped block.
+        block_scope: ev.block_scope || '',
       }));
+    });
+
+    // Standing blocked-platform bar (desktop) — the counterpart of the browser
+    // extension's showPlatformBanner(). STATE, not an event: it says the org has
+    // disallowed the app that currently has focus.
+    //
+    // Deliberately NOT reported to the server. An enforcement_block record means
+    // "a send was actually refused", which the 'block' handler above already
+    // writes; enqueueing a record every time a blocked window gains focus would
+    // inflate the block count with things the user never attempted. Nothing here
+    // is logged either — see enforcer.js's dispatch case.
+    //
+    // PII: the helper only ever puts a bool, a scope enum, admin-typed names, a
+    // process name, a pid and a window rect on this event, and this relay
+    // narrows rather than widens that. No prompt text can reach the renderer
+    // that consumes it.
+    this.enforcer.on('blockstate', (ev) => {
+      const active = !!ev.active;
+      const ai = active ? (identifyEventAi(ev) || { product: ev.process, vendor: null }) : null;
+      console.log('@@CFAI-BLOCKSTATE ' + JSON.stringify({
+        active,
+        scope: ev.scope || '',
+        // Display name for the bar. The admin-typed agent name first (the same
+        // value the Request Access modal titles itself with), then the catalog
+        // product name for the process, so the copy never reads "ai_platform".
+        name: active ? (ev.agent || ai?.product || '') : '',
+        agent_id: active ? (ev.agent_id || '') : '',
+        process_name: active ? (ev.process || '') : '',
+        pid: Number(ev.pid) || 0,
+        // Used ONLY to pick which monitor the bar belongs on — see main.js.
+        win_x: Number(ev.win_x) || 0,
+        win_y: Number(ev.win_y) || 0,
+        win_w: Number(ev.win_w) || 0,
+        win_h: Number(ev.win_h) || 0,
+      }));
+    });
+
+    // Panic hotkey. The helper's own bar state already includes !Disarmed(), so
+    // its next tick clears the bar by itself — this is belt and braces for the
+    // case where that tick never arrives (helper wedged, stdout stalled), on the
+    // same presentation-only channel and with the same no-reporting rule.
+    this.enforcer.on('disarmed', () => {
+      console.log('@@CFAI-BLOCKSTATE ' + JSON.stringify({ active: false }));
     });
 
     // Tier B mask-and-rewrite result. 'ok' means the composer was verified to
@@ -657,6 +747,10 @@ export class OsMonitor {
     // observed-but-not-applied decision. No prompt content ever travels on
     // this event: only an enum result, tier names, a public model label, and
     // a length — see enforcer-win.ps1's UpdateModelRouting/RunRoute.
+    // Process-based resolution only, deliberately: model routing is excluded
+    // from every IDE panel (see UpdateModelRouting in enforcer-win.ps1), so a
+    // route event can never carry a panel id. Using the panel-first resolver
+    // here would imply support that does not exist.
     this.enforcer.on('route', (ev) => {
       console.log('@@CFAI-ROUTE ' + JSON.stringify(ev));
       const ai = identifyAiProcess(ev.process) || { product: ev.process, vendor: null };
@@ -682,7 +776,7 @@ export class OsMonitor {
     });
 
     this.enforcer.on('override', (ev) => {
-      const ai = identifyAiProcess(ev.process) || { product: ev.process, vendor: null };
+      const ai = identifyEventAi(ev) || { product: ev.process, vendor: null };
       this.reporter.enqueue({
         kind: 'enforcement_override',
         blocked_for: 'prompt_submit',

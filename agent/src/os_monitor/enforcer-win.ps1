@@ -62,12 +62,21 @@
 #   {"kind":"enforcement_disarmed","reason":"panic_hotkey","seconds":600}
 #   {"kind":"error","message":"..."}
 #
+# IDE-hosted panels (Claude Code / GitHub Copilot Chat in VS Code, Cursor's own
+# composer): enforcement follows the focused ELEMENT, not the process. See the
+# "IDE-hosted AI panels" section below — a UIA signature match on
+# AutomationElement.FocusedElement is what makes an IDE count as an AI surface at
+# all, so code editing and terminal use are untouched. Model routing is excluded
+# from every IDE panel, and mouse/send-button detection is skipped there.
+#
 # Limitations (told to the user): blocks Enter-to-send and Ctrl+V; clicking the
 # send button with the mouse is not swallowed. The typed buffer is a best-effort
 # reconstruction (mouse-editing mid-string can desync) but errs toward catching
 # the secret. Charset covers the secret patterns (A-Za-z0-9 _ - . /). Tier B
-# rewrite only offers itself for single-line, non-IDE, maskable text under 2000
-# chars — anything else stays block-only with no Ctrl+Alt+T offer at all.
+# rewrite only offers itself for single-line, maskable text under 2000 chars in a
+# surface where UIA can be trusted (a chat app, or an IDE panel that actually has
+# focus — see PanelUiaOk) — anything else stays block-only with no Ctrl+Alt+T
+# offer at all.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
@@ -110,6 +119,18 @@ $hbPath = if ($env:CFAI_ENFORCER_HEARTBEAT) { $env:CFAI_ENFORCER_HEARTBEAT } els
 # the parsing problem rather than solve it.
 $modelRouterEnabled = ($env:CFAI_MODEL_ROUTER_ENABLED -eq 'true')
 $mrConfigJson = if ($modelRouterEnabled -and $env:CFAI_MODEL_ROUTER_CONFIG) { $env:CFAI_MODEL_ROUTER_CONFIG } else { '' }
+
+# IDE-hosted AI panels. Same treatment as CFAI_MODEL_ROUTER_CONFIG directly
+# above (passed through UNPARSED, deserialized on the C# side with
+# JavaScriptSerializer) rather than the parallel-array flattening
+# CFAI_BLOCK_PATTERNS gets: each panel entry carries a nested `procs` array, and
+# re-flattening that by hand here would just move the parsing problem.
+#
+# Empty (env unset) means no IDE panel support at all — which is the right
+# default for a by-hand debugging run of this script, and leaves every
+# pre-existing chat-app code path untouched.
+$ideProcsJson = if ($env:CFAI_IDE_PROCESSES) { $env:CFAI_IDE_PROCESSES } else { '' }
+$aiPanelsJson = if ($env:CFAI_AI_PANELS)     { $env:CFAI_AI_PANELS }     else { '' }
 
 $source = @'
 using System;
@@ -188,7 +209,14 @@ public static class CfaiEnforcer
     const int WM_MOUSEMOVE = 0x0200;
     const int WM_LBUTTONDOWN = 0x0201;
     const int WM_LBUTTONUP = 0x0202;
+    // Non-left button DOWNs. Never swallowed and never inspected for content —
+    // they exist only as "the user clicked something, so keyboard focus could
+    // have moved". See _lastFocusMoveInputTicks.
+    const int WM_RBUTTONDOWN = 0x0204;
+    const int WM_MBUTTONDOWN = 0x0207;
+    const int WM_XBUTTONDOWN = 0x020B;
     const int VK_BACK = 0x08;
+    const int VK_TAB = 0x09;
     const int VK_RETURN = 0x0D;
     const int VK_SHIFT = 0x10;
     const int VK_CONTROL = 0x11;
@@ -199,7 +227,9 @@ public static class CfaiEnforcer
     const int VK_A = 0x41;
     const int VK_T = 0x54;
     const int VK_V = 0x56;
+    const int VK_F1 = 0x70;
     const int VK_F12 = 0x7B;
+    const int VK_F24 = 0x87;
 
     // KBDLLHOOKSTRUCT.flags is at byte offset 8 ({vkCode,scanCode,flags,...}),
     // MSLLHOOKSTRUCT.flags is at offset 12 ({pt(8),mouseData,flags,...}).
@@ -243,6 +273,29 @@ public static class CfaiEnforcer
     static volatile bool _fgIsAi = false;
     static volatile uint _fgPid = 0;
     static string _app = "";
+
+    // ── IDE-hosted AI panel state (written only by the poll thread) ─────────
+    // True when the foreground process is an IDE (VS Code / Cursor) AND the
+    // focused element matched an AI_PANELS signature — i.e. the caret is in an
+    // AI composer, not in the code editor or a terminal. _fgIsAi is set for
+    // these too, so every existing block path applies unchanged; these fields
+    // are what scope it to the panel.
+    static volatile bool _fgIsPanel = false;
+    static volatile string _fgPanelId = "";
+    // The matched panel's `enforce` flag. FALSE means detection-only: the panel
+    // is identified (so events can be attributed to it) but NOTHING may ever be
+    // blocked or captured because of it — see PanelEnforceOk/PanelUiaOk and the
+    // panel branch of CheckFgBlocked, which all consult this.
+    static volatile bool _fgPanelEnforce = false;
+    // Composite identity of "whose keystrokes are in the typed buffer":
+    // pid + panel id (or "none") + the focused element's RuntimeId. Moving
+    // between two panels, or between a panel and the editor, INSIDE one process
+    // leaves the pid unchanged — so a pid-only key let editor/terminal
+    // keystrokes stay buffered across a panel visit and be scanned as part of
+    // an AI prompt. Built here on the poll thread (never in the hook, which
+    // only ever compares two strings). Contains no text — ints and our own
+    // catalog ids only.
+    static volatile string _fgOwnerKey = "";
     // Sticky timer: when focus leaves an AI app, keep _fgIsAi true for 3s
     // so toast-dismiss-then-quick-send can't bypass the block.
     static long _fgLeftAiTicks = 0;
@@ -252,6 +305,26 @@ public static class CfaiEnforcer
     // send button swallowed) when it matches a platform in the blocklist.
     // Updated every 30s by reading ~/.cloudfuze-aigov/blocked-agents.json.
     static volatile bool _fgIsBlocked = false;
+    // Which BRANCH of CheckFgBlocked armed _fgIsBlocked: the panel branch (true)
+    // or one of the two process-keyed branches (false).
+    //
+    // The distinction exists because PanelEnforceOk() answers a question about
+    // the CURRENT poll tick's focused element ("is the surface focused right now
+    // allowed to enforce?"), and using that to re-gate a block that a DIFFERENT,
+    // enforcing panel already established is wrong in a way that silently
+    // un-blocks a blocked app: the moment one tick's focused-element read lands
+    // on the detection-only Copilot Chat composer that shares the same VS Code
+    // window, PanelEnforceOk() goes false and the Enter the org disallowed is
+    // let through. "Detection-only" has to mean "this panel never CAUSES a
+    // block" — it cannot also mean "this panel CANCELS other panels' blocks".
+    //
+    // Set only by the panel branch, which already requires _fgPanelEnforce, so a
+    // detection-only panel can still never arm a block through it. The
+    // process-keyed branches leave it false and stay fully subject to
+    // PanelEnforceOk(), because those are process-WIDE and an IDE with no
+    // enforcing panel focused is exactly the code-editor false positive the
+    // panel feature exists to avoid.
+    static volatile bool _blockedByPanel = false;
     static string _blockedReason = "";
     // Which blocked row matched, so the "Request Access" dialog can name the
     // platform an exception would have to be granted for. Fields come straight
@@ -264,6 +337,113 @@ public static class CfaiEnforcer
     static string _blockedAgentFile = "";
     static long _lastBlockedCheck = 0;
     static readonly long BLOCKED_CHECK_INTERVAL = TimeSpan.FromSeconds(10).Ticks;
+
+    // ── Standing "this app is blocked" bar (presentation state only) ──────────
+    // Feeds the desktop overlay bar — the counterpart of the browser
+    // extension's showPlatformBanner(). PURELY DERIVED, and READ-ONLY with
+    // respect to every enforcement field above: nothing in UpdateBannerState /
+    // EmitBlockState may write _fgIsBlocked, _blockedByPanel, the panel latch,
+    // or call ClearFgBlocked(). Those release deliberately SLOWLY (FG_STICKY_TTL,
+    // PANEL_BLOCK_LATCH_TTL) for correctness reasons the bar does not share.
+    //
+    // _bannerPid is its own copy of "which process the bar is up for", kept
+    // separate from _panelBlockPid for exactly that reason: the bar must clear
+    // the instant the foreground pid changes, with NO grace period at all. If it
+    // borrowed the enforcement sticky window, alt-tabbing from a blocked app to
+    // Outlook would leave a red "blocked" bar sitting over Outlook for 3s —
+    // reproducing, on the desktop, the "the whole Gmail is blocked" bug the
+    // extension's own IS_EMBEDDED_AI exclusion exists to prevent.
+    static volatile bool _bannerActive = false;
+    static volatile uint _bannerPid = 0;
+    static string _bannerAgent = "";
+
+    // ── Platform-block latch for IDE-hosted panels ───────────────────────────
+    // Fixes a real, reproduced race (2 of 3 Enters blocked, the third sent).
+    //
+    // For a PURE CHAT APP _fgIsAi comes from "is this PROCESS the foreground
+    // window" — a signal that cannot flicker. For an IDE PANEL it comes from
+    // "does the FOCUSED UIA ELEMENT match a panel signature right now", and on
+    // an Electron host that read is routinely unresolvable — most of all during
+    // the panel's own send transition, which is exactly when it matters. Live
+    // testing showed VS Code still in the foreground (the process never
+    // changed) while the panel read came back empty for longer than
+    // FG_STICKY_TTL; UpdateForeground then tore down _fgIsAi/_fgIsPanel,
+    // CheckFgBlocked cleared _fgIsBlocked, and the next Enter in a panel an
+    // admin had BLOCKED went through unswallowed.
+    //
+    // Same principle the sticky window already encodes, applied one level
+    // deeper: CAPTURE may fail open on the first bad read — and still does,
+    // FgIsAiNow/PanelUiaOk go false immediately and nothing below changes that
+    // — but a platform BLOCK DECISION that was already correctly established
+    // must not be torn down by a bad read. So that decision is latched, and the
+    // latch is deliberately narrow:
+    //   * platform blocks only, never a typed/UIA/clipboard content block;
+    //   * armed only by the panel branch of CheckFgBlocked, and only on a tick
+    //     whose panel read actually succeeded (_fgLeftAiTicks == 0);
+    //   * dropped the instant a SUCCESSFUL panel read says "not a panel" — so
+    //     genuinely clicking into the code editor behaves exactly as it does
+    //     today (the 3s sticky, then clear), with no added collateral;
+    //   * dropped the instant the foreground pid changes — a real app switch;
+    //   * bounded by PANEL_BLOCK_LATCH_TTL, so a host whose UIA never recovers
+    //     cannot leave Enter dead in the editor indefinitely;
+    //   * still under Disarmed(), so the panic hotkey releases it like
+    //     everything else.
+    static volatile bool _panelBlockLatch = false;
+    static volatile uint _panelBlockPid = 0;
+    // WHICH panel the latch was armed for. Needed because a single IDE window
+    // hosts several AI composers at once — a real VS Code window was measured
+    // with two live Claude Code composers AND a GitHub Copilot Chat input, all
+    // three matching the signature table, all three reporting keyboard focus
+    // within their own webview — and AutomationElement.FocusedElement is a
+    // GLOBAL read that is not scoped to the surface the user is typing into
+    // (measured returning an element from a different window, and a different
+    // process, than the foreground one). So "this tick matched some panel that
+    // no blocklist row covers" is NOT evidence that the latched panel lost
+    // focus, and must not tear its block down. See CheckFgBlocked's fall-through.
+    static volatile string _panelBlockPanelId = "";
+    static long _panelBlockLatchTicks = 0;
+    static readonly long PANEL_BLOCK_LATCH_TTL = TimeSpan.FromSeconds(10).Ticks;
+
+    // ── Could keyboard focus actually have MOVED? ────────────────────────────
+    // The second half of the same story, and what the Cursor composer needed.
+    //
+    // The neighbour-panel fix above scopes the "no row matched" fall-through by
+    // PANEL id — which only helps when the read that stole the tick MATCHED some
+    // panel. Cursor's window has no second AI panel in it at all: the element
+    // sitting next to `aislash-editor-input` is Cursor's own Monaco editor input
+    // ("inputarea monaco-mouse-cursor-text"), which matches nothing. A global
+    // FocusedElement read landing on THAT is a readable NON-match, and a readable
+    // non-match was treated as the authoritative "the user left the panel"
+    // answer, unconditionally and with no grace period — ApplyForegroundTick
+    // retired the latch on that single tick, before CheckFgBlocked's panel-id
+    // scoping ever ran. 3s later the sticky window lapsed and the Enter an admin
+    // had blocked went through.
+    //
+    // The fact that separates the two cases is not in the accessibility tree at
+    // all: KEYBOARD FOCUS DOES NOT MOVE ON ITS OWN. A click, or a chorded /
+    // navigation key (Ctrl or Alt held, Tab, Escape, an F-key) can move it; a
+    // plain character key typed into a text box cannot. So a readable "you are
+    // not in the panel any more" arriving when no such input has happened is not
+    // a fact about the user — it is a bad read, and belongs in the same
+    // "no evidence" bucket as an unreadable one.
+    //
+    // Deliberately narrow, same as the latch itself:
+    //   * consulted ONLY when deciding whether to retire an armed panel platform
+    //     block. Capture still fails open on the first bad read (FgIsAiNow /
+    //     PanelUiaOk go false immediately and nothing here changes that), and no
+    //     content block can be manufactured from it.
+    //   * still bounded by PANEL_BLOCK_LATCH_TTL, so focus moved by something
+    //     this list does not model (an extension stealing it with no input)
+    //     costs at most that, not forever — and the panic hotkey still releases
+    //     it like everything else.
+    // Written by the hook/mouse threads: a TIMESTAMP only. Which key, which
+    // button and where are never recorded.
+    static long _lastFocusMoveInputTicks = 0;
+    // One poll tick is 150ms, and UpdateForeground runs first in it, so the read
+    // that observes a genuine click into the editor always lands well inside
+    // this. Wide enough to absorb a slow tick; far too narrow to be satisfied by
+    // the quiet moment before an Enter.
+    static readonly long PANEL_LEAVE_INPUT_WINDOW = TimeSpan.FromMilliseconds(1500).Ticks;
 
     // Attachment hold — armed over stdin ("attach_hold") when a file attached
     // to the composer is being (or has been found) sensitive. ORed into the
@@ -305,7 +485,9 @@ public static class CfaiEnforcer
     static volatile bool _blockTyped = false;
     static string _typedPatterns = "";
     static readonly StringBuilder _typed = new StringBuilder();
-    static uint _typedOwnerPid = 0;
+    // Owner of the buffer's current contents — compared against _fgOwnerKey.
+    // See _fgOwnerKey for why this is a composite key and not just a pid.
+    static string _typedOwnerKey = "";
     // Buffer caps. TYPED_MAX is what we retain; SCAN_TAIL is what we actually
     // scan each pass. A prompt about to be sent ends at the tail, so scanning
     // the last 512 chars finds the same secrets as scanning all 4096 at an
@@ -376,12 +558,43 @@ public static class CfaiEnforcer
     static readonly long HEARTBEAT_MAX_STALE = TimeSpan.FromSeconds(30).Ticks;
 
     static HashSet<string> _aiProcs;
-    // IDE-type apps where UIA reads code/terminal/output, not just the AI
-    // prompt.  For these, UIA is excluded from the Enter-block decision to
-    // avoid false positives.  Pure chat apps (Claude, ChatGPT, Gemini) keep
-    // UIA in the Enter check because the focused element IS the composer.
-    static readonly HashSet<string> _ideApps = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        { "Cursor", "Code", "VSCode", "Copilot" };
+
+    // ── IDE processes + panel signatures (CFAI_IDE_PROCESSES / CFAI_AI_PANELS) ─
+    // Replaces the old hardcoded IDE-app name set (Cursor, Code, VSCode and
+    // Copilot, as C# literals), which was both too wide and too narrow:
+    //   - "Copilot" is Microsoft Copilot STANDALONE, a pure chat app, not an IDE.
+    //     Including it denied Tokenize & Send and model routing to that app for
+    //     no reason — a pre-existing bug, fixed as a side effect by not carrying
+    //     it here.
+    //   - "VSCode" is not a real shipping process name (VS Code's is "Code"), so
+    //     it never matched anything; dropped rather than kept as an alias.
+    //   - And the set only ever excluded UIA-based checks. It did NOT scope the
+    //     keystroke-buffer scan, which is the actual detection mechanism — so
+    //     Cursor was scanned everywhere (editor, terminal, AI panel alike) while
+    //     VS Code, absent from every catalog, was not scanned at all.
+    // Both payloads are data from ai-processes.js; the comparison code lives
+    // here and only here (see MatchPanelSignature).
+    static HashSet<string> _ideProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    // IDE processes that fall back to whole-app treatment when no panel matches
+    // — see ai-processes.js's panelFallback. Empty today: an explicit decision
+    // (2026-08-25) scoped Cursor down to its composer only, same as Claude
+    // Code, giving up the whole-app coverage it used to have from being in
+    // _aiProcs. The mechanism stays here — a future entry can set
+    // panelFallback:true again if a whole-app safety net is ever wanted.
+    static HashSet<string> _ideFallbackProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    class PanelSig
+    {
+        public string Id;
+        public HashSet<string> Procs;
+        public string ControlType;
+        public string NameEquals;
+        public string NamePrefix;
+        public string ClassEquals;
+        public string ClassPrefix;
+        public bool Enforce;
+    }
+    static List<PanelSig> _panels = new List<PanelSig>();
 
     // One entry per active block pattern. Label is empty for guardrail
     // patterns (prompt-injection, jailbreak, ...) — there is no value to
@@ -422,7 +635,7 @@ public static class CfaiEnforcer
     static volatile bool _rewriteInProgress = false;
     static volatile bool _rewriteAbort = false;
 
-    public static void Start(string[] aiProcs, string[] patNames, string[] patSources, string[] patSevs, string[] patLabels, bool[] patIgnoreCase, string heartbeatFile, bool modelRouterEnabled, string modelRouterConfigJson)
+    public static void Start(string[] aiProcs, string[] patNames, string[] patSources, string[] patSevs, string[] patLabels, bool[] patIgnoreCase, string heartbeatFile, bool modelRouterEnabled, string modelRouterConfigJson, string ideProcsJson, string aiPanelsJson)
     {
         try { SetProcessDPIAware(); } catch { }   // align UIA rect with hook screen coords
         _startTicks = DateTime.UtcNow.Ticks;
@@ -464,6 +677,21 @@ public static class CfaiEnforcer
             try { LoadModelRouterConfig(modelRouterConfigJson); _modelRouterEnabled = true; }
             catch (Exception ex) { Emit("error", "", "", "model_router_config_load_failed", -1, -1, ex.GetType().Name); }
         }
+        // IDE panels — same "a bad payload must never take the helper down"
+        // rule. A load failure leaves _panels empty, which means no IDE process
+        // ever detects a panel: VS Code goes back to being unmonitored, and
+        // Cursor falls back to the whole-app behavior it has today. Fail OPEN on
+        // capture, never a false block.
+        if (!string.IsNullOrEmpty(ideProcsJson))
+        {
+            try { LoadIdeProcesses(ideProcsJson); }
+            catch (Exception ex) { Emit("error", "", "", "ide_processes_load_failed", -1, -1, ex.GetType().Name); }
+        }
+        if (!string.IsNullOrEmpty(aiPanelsJson))
+        {
+            try { LoadAiPanels(aiPanelsJson); }
+            catch (Exception ex) { Emit("error", "", "", "ai_panels_load_failed", -1, -1, ex.GetType().Name); }
+        }
         // The poll thread MUST be STA: UI Automation's FocusedElement read
         // returns null from an MTA thread for Chromium/Electron apps (Claude,
         // ChatGPT), which is why an earlier MTA version detected nothing in the
@@ -472,6 +700,282 @@ public static class CfaiEnforcer
         poll.SetApartmentState(ApartmentState.STA); poll.Start();
         var pump = new Thread(PumpLoop); pump.IsBackground = true; pump.Start();
         var stdin = new Thread(StdinLoop); stdin.IsBackground = true; stdin.Start();
+    }
+
+    // ── IDE-hosted AI panels ────────────────────────────────────────────────
+    // Detection for AI composers that live INSIDE an IDE (Claude Code and
+    // GitHub Copilot Chat as VS Code extensions, Cursor's own composer).
+    //
+    // The problem this solves: every block decision below gates on _fgIsAi,
+    // which was true only when the foreground PROCESS NAME was in the AI
+    // catalog. VS Code's ("Code") was in no catalog, so nothing in it was ever
+    // scanned; Cursor's was, so EVERY keystroke anywhere in Cursor was scanned.
+    // Neither is what we want: enforcement has to follow the focused ELEMENT.
+    //
+    // Detection is a single property read of AutomationElement.FocusedElement
+    // on the poll thread — the exact pattern UpdateUia/UpdatePendingRewrite
+    // already use — never a tree walk. SetFocus() on these elements was
+    // confirmed live to update the system's global FocusedElement, so the
+    // existing poll-based read sees them with no new machinery.
+
+    static string StripExe(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        return s.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? s.Substring(0, s.Length - 4) : s;
+    }
+
+    static string JsStr(Dictionary<string, object> d, string key)
+    {
+        object v;
+        if (d != null && d.TryGetValue(key, out v) && v != null) return Convert.ToString(v);
+        return "";
+    }
+
+    static bool JsBool(Dictionary<string, object> d, string key)
+    {
+        object v;
+        if (d != null && d.TryGetValue(key, out v) && v is bool) return (bool)v;
+        return false;
+    }
+
+    static void LoadIdeProcesses(string json)
+    {
+        var serializer = new JavaScriptSerializer();
+        var raw = (object[])serializer.DeserializeObject(json);
+        var procs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var fallback = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in raw)
+        {
+            var d = (Dictionary<string, object>)item;
+            string name = StripExe(JsStr(d, "name")).Trim();
+            if (name.Length == 0) continue;
+            procs.Add(name);
+            if (JsBool(d, "panelFallback")) fallback.Add(name);
+        }
+        _ideProcs = procs;
+        _ideFallbackProcs = fallback;
+    }
+
+    static void LoadAiPanels(string json)
+    {
+        var serializer = new JavaScriptSerializer();
+        var raw = (object[])serializer.DeserializeObject(json);
+        var panels = new List<PanelSig>();
+        foreach (var item in raw)
+        {
+            var d = (Dictionary<string, object>)item;
+            string id = JsStr(d, "id");
+            string ct = JsStr(d, "controlType");
+            if (id.Length == 0 || ct.Length == 0) continue;
+            var procs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            object rawProcs;
+            if (d.TryGetValue("procs", out rawProcs) && rawProcs != null)
+            {
+                foreach (var p in (IEnumerable)rawProcs)
+                {
+                    string name = Convert.ToString(p);
+                    if (!string.IsNullOrEmpty(name)) procs.Add(StripExe(name).Trim());
+                }
+            }
+            if (procs.Count == 0) continue;   // a signature with no host process can never match
+            panels.Add(new PanelSig
+            {
+                Id = id,
+                Procs = procs,
+                ControlType = ct,
+                NameEquals = JsStr(d, "nameEquals"),
+                NamePrefix = JsStr(d, "namePrefix"),
+                ClassEquals = JsStr(d, "classEquals"),
+                ClassPrefix = JsStr(d, "classPrefix"),
+                Enforce = JsBool(d, "enforce"),
+            });
+        }
+        _panels = panels;
+    }
+
+    static readonly char[] CLASS_TOKEN_SEP = new char[] { ' ', '\t', '\r', '\n', '\f' };
+
+    // A className rule matched against the whole string AND against each
+    // whitespace-separated TOKEN of it, the way a CSS selector would.
+    //
+    // Not cosmetic. For a web-hosted element the UIA ClassName IS the DOM class
+    // ATTRIBUTE, which routinely holds more than one class — Cursor's own Monaco
+    // editor input reports "inputarea monaco-mouse-cursor-text", two classes in
+    // one string, measured. `cursor_composer` is the one signature in the catalog
+    // with NOTHING to fall back on: an empty Name, no namePrefix, no classPrefix,
+    // just its one exact ClassName. So the moment Cursor's
+    // composer carries a second class (a state class while it holds text, during
+    // its send transition, in a different composer mode) an exact whole-string
+    // compare stops matching a composer that is genuinely focused and genuinely
+    // stable — and a readable NON-match is what tears a platform block down.
+    // claude_code never showed this because its ARIA-driven Name matches
+    // independently of any class at all.
+    //
+    // Still plain string comparison, still no Regex, and still not a substring
+    // test: a class that merely CONTAINS a rule must not satisfy it, and neither
+    // Cursor's agent-history search input nor a wrapper class around the
+    // composer may ever match the composer's own rule. The catalog side of that
+    // is asserted case by case in agent/tests/ai-panels.test.mjs.
+    static bool ClassRuleMatches(string cls, string want, bool prefix)
+    {
+        if (string.IsNullOrEmpty(want) || string.IsNullOrEmpty(cls)) return false;
+        if (prefix ? cls.StartsWith(want, StringComparison.OrdinalIgnoreCase)
+                   : string.Equals(cls, want, StringComparison.OrdinalIgnoreCase)) return true;
+        if (cls.IndexOfAny(CLASS_TOKEN_SEP) < 0) return false;
+        foreach (string tok in cls.Split(CLASS_TOKEN_SEP))
+        {
+            if (tok.Length == 0) continue;
+            if (prefix ? tok.StartsWith(want, StringComparison.OrdinalIgnoreCase)
+                       : string.Equals(tok, want, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    // Port of ai-processes.js's matchPanelSignature(). Plain string comparison
+    // only — no Regex, deliberately: these are fixed literals, and every regex
+    // in this file has to carry REGEX_TIMEOUT for a reason that does not need to
+    // apply here. Keep the comparison ORDER identical to the JS side, which is
+    // unit-tested in agent/tests/ai-panels.test.mjs.
+    //
+    // Matching is independent of Enforce on purpose: a detection-only panel must
+    // still be identified (that is the point of shipping it detection-first);
+    // the ENFORCEMENT gates are what consult it.
+    static PanelSig MatchPanelSignature(string proc, string controlType, string name, string className)
+    {
+        if (_panels == null || _panels.Count == 0) return null;
+        if (proc == null) return null;
+        // Trailing ".exe" only, case-insensitively — matching the JS side's
+        // /\.exe$/i exactly. GetForegroundWindow's ProcName() never carries the
+        // suffix on Windows, so this is parity insurance rather than a live
+        // need; agent/tests verifies the two implementations agree case by case,
+        // and it caught this being missing.
+        proc = StripExe(proc).Trim();
+        if (proc.Length == 0) return null;
+        string ct = (controlType ?? "").Trim();
+        if (ct.Length == 0) return null;
+        string nm = (name ?? "").Trim();
+        string cls = (className ?? "").Trim();
+        foreach (var p in _panels)
+        {
+            if (!string.Equals(ct, p.ControlType, StringComparison.OrdinalIgnoreCase)) continue;
+            if (p.Procs == null || !p.Procs.Contains(proc)) continue;
+            bool hit = false;
+            if (p.NameEquals.Length > 0 && nm.Length > 0 && string.Equals(nm, p.NameEquals, StringComparison.OrdinalIgnoreCase)) hit = true;
+            if (!hit && p.NamePrefix.Length > 0 && nm.Length > 0 && nm.StartsWith(p.NamePrefix, StringComparison.OrdinalIgnoreCase)) hit = true;
+            if (!hit && p.ClassEquals.Length > 0 && cls.Length > 0 && ClassRuleMatches(cls, p.ClassEquals, false)) hit = true;
+            if (!hit && p.ClassPrefix.Length > 0 && cls.Length > 0 && ClassRuleMatches(cls, p.ClassPrefix, true)) hit = true;
+            if (hit) return p;
+        }
+        return null;
+    }
+
+    // ONE property read of the currently-focused element, matched against the
+    // signature table. Returns the matched panel (or null) and, on a match, a
+    // stable string form of the element's RuntimeId for the typed-buffer owner
+    // key. Runs on the poll thread only — same STA requirement as every other
+    // UIA read here.
+    //
+    // NOTHING read here is ever emitted, logged or persisted: an element Name
+    // or ClassName in an IDE can carry a file path or a workspace name.
+    //
+    // `readable` reports whether this read produced enough evidence to call a
+    // non-match AUTHORITATIVE. It is false when FocusedElement threw or was
+    // null, and when the properties MatchPanelSignature needs came back empty —
+    // an element with no ControlType, or with neither a Name nor a ClassName,
+    // could not have matched even if it WERE the composer, so treating it as
+    // "the user left the panel" is a read failure dressed up as a fact. That
+    // distinction is what the platform-block latch keys on: see
+    // PanelBlockLatchHeld and the IDE branch of UpdateForeground.
+    static PanelSig ReadFocusedPanel(string proc, uint fgPid, out string runtimeIdKey, out bool readable)
+    {
+        runtimeIdKey = "";
+        readable = false;
+        if (_panels == null || _panels.Count == 0) return null;
+        AutomationElement el;
+        try { el = AutomationElement.FocusedElement; } catch { return null; }
+        if (el == null) return null;
+
+        // AutomationElement.FocusedElement is a GLOBAL read, and it is NOT
+        // reliably scoped to the foreground window. Measured live: with a plain
+        // console window in the foreground it returned a terminal element
+        // belonging to a background VS Code window, in a different process —
+        // while three separate elements in three different windows all
+        // simultaneously reported HasKeyboardFocus.
+        //
+        // Nothing that read says is evidence about the foreground surface unless
+        // the element actually belongs to it, and both directions of getting
+        // this wrong are real bugs:
+        //   * a MATCH on a background window's composer would report a panel as
+        //     focused while the user is typing in the foreground window's code
+        //     editor — the exact false positive panel scoping exists to prevent;
+        //   * a readable NON-match on a background window's terminal was being
+        //     taken as the authoritative "the user left the panel" answer, and
+        //     that is what retires the platform-block latch.
+        // So an element we cannot attribute to the foreground process is treated
+        // as a read FAILURE (readable stays false, no panel), which is the
+        // "no evidence" state the latch already survives.
+        try { if (el.Current.ProcessId != (int)fgPid) return null; }
+        catch { return null; }
+
+        string ctName = "", name = "", cls = "";
+        try
+        {
+            // ProgrammaticName is "ControlType.Edit" — stable and culture
+            // independent, unlike LocalizedControlType. Take the last segment so
+            // the catalog can say plain "Edit".
+            string pn = el.Current.ControlType.ProgrammaticName ?? "";
+            int dot = pn.LastIndexOf('.');
+            ctName = (dot >= 0) ? pn.Substring(dot + 1) : pn;
+        }
+        catch { }
+        try { name = el.Current.Name ?? ""; } catch { }
+        try { cls = el.Current.ClassName ?? ""; } catch { }
+
+        // Mirrors MatchPanelSignature's own preconditions exactly — it bails on
+        // an empty control type, and can only ever hit on a non-empty Name or
+        // ClassName. No property value is stored or emitted here, only whether
+        // there was one.
+        readable = ctName.Trim().Length > 0 && (name.Trim().Length > 0 || cls.Trim().Length > 0);
+
+        PanelSig hit = MatchPanelSignature(proc, ctName, name, cls);
+        if (hit == null) return null;
+        try
+        {
+            int[] rid = el.GetRuntimeId();
+            if (rid != null) runtimeIdKey = string.Join(".", Array.ConvertAll(rid, delegate(int i) { return i.ToString(); }));
+        }
+        catch { }
+        return hit;
+    }
+
+    // Is the CURRENT foreground surface allowed to enforce at all?
+    //
+    // Only ever false for a detection-only panel (AI_PANELS enforce:false —
+    // today just GitHub Copilot Chat, whose signature is unverified). Gating
+    // both capture (FgIsAiNow) and blocking (CheckFgBlocked's panel branch,
+    // PanelUiaOk) on this is what makes "detection-only" mean genuinely zero
+    // live effect rather than "no effect in one of the two places".
+    static bool PanelEnforceOk()
+    {
+        if (!_fgIsPanel) return true;   // pure chat app, or an IDE whole-app fallback
+        return _fgPanelEnforce;
+    }
+
+    // May the UIA-derived signals (_blockUia, the pending-rewrite candidate) be
+    // trusted for the current foreground?
+    //
+    // For a pure chat app: yes whenever _fgIsAi, exactly as before — the focused
+    // element IS the composer.
+    //
+    // For an IDE: only while a panel is focused RIGHT NOW. Not "was focused
+    // within the sticky window" — during those 3s the caret may already be back
+    // in the code editor, and a UIA read then reflects source code or terminal
+    // output (routinely full of real keys and tokens), which is precisely the
+    // false-positive the old blanket IDE-name exclusion existed to avoid.
+    static bool PanelUiaOk()
+    {
+        if (!_ideProcs.Contains(_app)) return true;
+        return _fgIsPanel && _fgPanelEnforce && _fgLeftAiTicks == 0;
     }
 
     // ── Model routing (Smart Model Router, desktop) ──────────────────────────
@@ -958,7 +1462,15 @@ public static class CfaiEnforcer
     static void UpdateModelRouting()
     {
         if (!_modelRouterEnabled) return;
-        if (!_fgIsAi || _ideApps.Contains(_app) || Disarmed()) { ClearPendingRoute(); return; }
+        // IDE processes are excluded ENTIRELY — not panel-scoped like the DLP
+        // paths below. Model routing is deliberately out of scope for every IDE
+        // panel (Claude Code, Copilot Chat, Cursor's composer alike): there is
+        // no probed picker signature for any of them, and switching a model in
+        // an IDE panel would mean driving UI this feature has never been tested
+        // against. _ideProcs replaces the old hardcoded name set here with no
+        // behavior change for Cursor/Code; standalone Microsoft Copilot, which
+        // that set wrongly contained, now gets routing like the chat app it is.
+        if (!_fgIsAi || _ideProcs.Contains(_app) || Disarmed()) { ClearPendingRoute(); return; }
         // Block always wins, and a live Tokenize & Send offer must never be
         // disturbed — same precedence RunRewrite's callers already respect.
         if (_fgIsBlocked || _blockUia || _blockTyped) { ClearPendingRoute(); return; }
@@ -1539,7 +2051,11 @@ public static class CfaiEnforcer
     // which stays true for FG_STICKY_TTL after focus leaves one. Used only to
     // gate keystroke CAPTURE, never a block decision: see the call site in
     // HookCallback for why those two want different answers.
-    static bool FgIsAiNow() { return _fgIsAi && _fgLeftAiTicks == 0; }
+    // PanelEnforceOk() is part of the CAPTURE gate, not just the block gate: a
+    // detection-only panel must not even accumulate keystrokes into the scan
+    // buffer, or "no enforcement" would still mean "scanned, and blocked via
+    // TypedBlockFresh a moment later".
+    static bool FgIsAiNow() { return _fgIsAi && _fgLeftAiTicks == 0 && PanelEnforceOk(); }
 
     static bool TypedBlockFresh()
     {
@@ -1560,9 +2076,37 @@ public static class CfaiEnforcer
     static bool BlockActiveForMouse()
     {
         if (Disarmed()) return false;
+        // Same split the Enter decision makes, for the same reason: a platform
+        // block armed by an enforcing panel survives a tick whose focused-element
+        // read landed on a detection-only panel sharing the window, while every
+        // CONTENT signal stays gated on the current surface. See _blockedByPanel.
+        if (_fgIsBlocked && (_blockedByPanel || PanelEnforceOk())) return true;
+        if (!PanelEnforceOk()) return false;   // detection-only panel — zero live effect
         bool recentPaste = (DateTime.UtcNow.Ticks - _lastPasteTicks) < PASTE_WINDOW;
         bool cooldown = (DateTime.UtcNow.Ticks - _lastBlockFiredTicks) < BLOCK_COOLDOWN;
-        return _fgIsBlocked || _attachHoldActive || TypedBlockFresh() || _blockUia || (recentPaste && _blockPaste) || cooldown;
+        return _attachHoldActive || TypedBlockFresh() || _blockUia || (recentPaste && _blockPaste) || cooldown;
+    }
+
+    // The Enter-decision predicate, factored out of HookCallback so the offline
+    // harness in agent/tests can assert the REAL decision instead of a copy of
+    // it (that harness must never install a hook). Pure: reads state, writes
+    // none. The caller passes the four signals it already computed for `pats`.
+    //
+    // A platform block armed BY AN ENFORCING PANEL is the one signal NOT
+    // re-gated on the current tick's PanelEnforceOk(). That flag describes
+    // whatever element this tick's global focused-element read happened to land
+    // on, and a single read landing on the detection-only Copilot Chat composer
+    // that shares the same VS Code window used to let the blocked Enter
+    // straight through. CheckFgBlocked's panel branch already refuses to ARM a
+    // block for a detection-only panel, so nothing here widens what such a
+    // panel can cause — it only stops one from CANCELLING another panel's
+    // block. See _blockedByPanel.
+    static bool EnterBlockActive(bool attachHold, bool uiaBlock, bool clipBlock, bool cooldown)
+    {
+        if (Disarmed()) return false;
+        if (_fgIsBlocked && (_blockedByPanel || PanelEnforceOk())) return true;
+        if (!PanelEnforceOk()) return false;
+        return attachHold || TypedBlockFresh() || uiaBlock || clipBlock || cooldown;
     }
 
     // Precedence matches the Enter path's `pats` chain, platform block first —
@@ -1598,6 +2142,20 @@ public static class CfaiEnforcer
                         if (_rewriteInProgress) _rewriteAbort = true;
                         if (_routeInProgress) _routeAbort = true;
                     }
+                }
+                // Focus-move evidence — see _lastFocusMoveInputTicks. A button
+                // DOWN anywhere is the one thing that most obviously moves
+                // keyboard focus, so it is recorded before any of the send-button
+                // logic below (which is scoped to one cached rectangle and to AI
+                // apps, and would therefore miss the click that took the user into
+                // their code editor — precisely the click that matters here).
+                // Movement and wheel are not focus changes and are ignored. Our
+                // own synthetic input is excluded. A timestamp only — never the
+                // coordinates.
+                if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN || msg == WM_XBUTTONDOWN)
+                {
+                    uint fmFlags = (uint)Marshal.ReadInt32(lParam, 12);   // MSLLHOOKSTRUCT.flags
+                    if ((fmFlags & LLMHF_INJECTED) == 0) _lastFocusMoveInputTicks = DateTime.UtcNow.Ticks;
                 }
                 if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP)
                 {
@@ -1656,6 +2214,20 @@ public static class CfaiEnforcer
                         }
                     }
 
+                    // Focus-move evidence — see _lastFocusMoveInputTicks. A plain
+                    // character key cannot move keyboard focus out of a text box;
+                    // a chord (Ctrl/Alt held), Tab, Escape or an F-key can.
+                    // Recorded for every foreground app, AI or not, because the
+                    // only question it answers is "could focus have left the
+                    // panel at all". Our OWN synthetic input is excluded: Tier B's
+                    // rewrite types Ctrl+A, and that must never read as the user
+                    // navigating away. A timestamp only — never the key.
+                    if (ctrl || alt || vk == VK_TAB || vk == VK_ESCAPE || (vk >= VK_F1 && vk <= VK_F24))
+                    {
+                        uint fmFlags = (uint)Marshal.ReadInt32(lParam, 8);   // KBDLLHOOKSTRUCT.flags
+                        if ((fmFlags & LLKHF_INJECTED) == 0) _lastFocusMoveInputTicks = DateTime.UtcNow.Ticks;
+                    }
+
                     // Confirm hotkey — Ctrl+Alt+T. Masks the pinned block's
                     // composer text and rewrites it in place; NEVER sends —
                     // the user still presses Enter themselves.
@@ -1697,13 +2269,32 @@ public static class CfaiEnforcer
                         return CallNextHookEx(_hook, nCode, wParam, lParam);
                     }
 
-                    if (_fgIsAi)
+                    // PanelBlockLatchHeld() is ORed in, not folded into _fgIsAi,
+                    // so this is the ONLY thing it widens: the block-decision
+                    // branch below. Everything inside that still needs a live AI
+                    // surface asks separately and gets the old answer — capture
+                    // goes through FgIsAiNow() (false during the latch, so no
+                    // editor keystroke is ever buffered), the UIA and clipboard
+                    // signals through PanelUiaOk()/_fgIsAi (both false, so no
+                    // content block can be manufactured out of source code).
+                    // What survives is _fgIsBlocked: a platform block already
+                    // established in an enforcing panel. See _panelBlockLatch.
+                    if (_fgIsAi || PanelBlockLatchHeld())
                     {
-                        // Reset the typed buffer when focus moves to a different
-                        // process.
-                        if (_fgPid != _typedOwnerPid)
+                        // Reset the typed buffer when the OWNER of its contents
+                        // changes. The owner key is a composite (pid + panel id +
+                        // focused-element RuntimeId), not just the pid, because
+                        // an IDE hosts several surfaces in ONE process: moving
+                        // Claude Code panel → code editor → back to the panel
+                        // never changes the pid, so a pid-only comparison left
+                        // whatever was typed in between sitting in the scan
+                        // buffer, to be treated as part of the next AI prompt (or
+                        // to keep a stale block armed against it). Composed on
+                        // the poll thread — this is a string compare, nothing
+                        // more, on the hook thread.
+                        if (_fgOwnerKey != _typedOwnerKey)
                         {
-                            TypedClear(); _typedOwnerPid = _fgPid;
+                            TypedClear(); _typedOwnerKey = _fgOwnerKey;
                             _blockTyped = false; _typedPatterns = "";
                         }
 
@@ -1716,16 +2307,17 @@ public static class CfaiEnforcer
 
                         // Enter-to-send decision.
                         //   1. Typed buffer — user typed a secret (fresh 60s).
-                        //   2. UIA focused element — for pure chat apps only
-                        //      (Claude Desktop, ChatGPT, Gemini). Excluded for
-                        //      IDEs (Cursor) where UIA reads code/terminal.
+                        //   2. UIA focused element — for pure chat apps always
+                        //      (Claude Desktop, ChatGPT, Gemini), and for an IDE
+                        //      only while an enforcing AI panel is the focused
+                        //      element right now. See PanelUiaOk: in an IDE, UIA
+                        //      otherwise reads code/terminal/output.
                         //   3. Clipboard — ONLY within 5s of a Ctrl+V press.
                         //      Prevents stale clipboard from false-blocking
                         //      while still catching paste-then-Enter.
                         if (vk == VK_RETURN && !shift)
                         {
-                            bool isIde = _ideApps.Contains(_app);
-                            bool uiaBlock = !isIde && _blockUia;
+                            bool uiaBlock = PanelUiaOk() && _blockUia;
                             bool recentPaste = (DateTime.UtcNow.Ticks - _lastPasteTicks) < PASTE_WINDOW;
                             bool clipBlock = recentPaste && _blockPaste;
                             // A sensitive-file attachment holds the send exactly
@@ -1735,9 +2327,13 @@ public static class CfaiEnforcer
                             // Cooldown: if a block fired recently, keep blocking
                             bool cooldown = (DateTime.UtcNow.Ticks - _lastBlockFiredTicks) < BLOCK_COOLDOWN;
                             // Panic hotkey wins over every other signal: while
-                            // disarmed nothing is ever swallowed.
-                            bool block = !Disarmed() &&
-                                (_fgIsBlocked || attachHold || TypedBlockFresh() || uiaBlock || clipBlock || cooldown);
+                            // disarmed nothing is ever swallowed. PanelEnforceOk
+                            // sits at the same level for the same reason: a
+                            // detection-only panel must never swallow an Enter
+                            // through ANY of the signals below — including the
+                            // 30s cooldown or an attachment hold armed while a
+                            // different, enforcing surface had focus.
+                            bool block = EnterBlockActive(attachHold, uiaBlock, clipBlock, cooldown);
                             string pats = _fgIsBlocked ? _blockedReason
                                         : attachHold ? _attachHoldPatterns
                                         : TypedBlockFresh() ? _typedPatterns
@@ -1902,7 +2498,11 @@ public static class CfaiEnforcer
             // feature is off (the default) — zero added latency for every
             // user who hasn't enabled it. See its own comment for why the
             // expensive part of what it does runs on a separate thread.
-            try { UpdateForeground(); UpdateBlockedAgents(); UpdatePaste(); UpdateUia(); UpdateSendRect(); UpdatePendingRewrite(); CheckHeartbeat(); CheckAttachHoldExpiry(); UpdateModelRouting(); }
+            // UpdateBannerState runs immediately after UpdateBlockedAgents (the
+            // only caller of CheckFgBlocked) so the bar's state is derived from
+            // this tick's block decision, not the previous one's. It emits at
+            // most one line per real transition and nothing at all while idle.
+            try { UpdateForeground(); UpdateBlockedAgents(); UpdateBannerState(); UpdatePaste(); UpdateUia(); UpdateSendRect(); UpdatePendingRewrite(); CheckHeartbeat(); CheckAttachHoldExpiry(); UpdateModelRouting(); }
             catch { }
             // The 150ms cadence above is unchanged; inside it we look at the
             // typed-buffer dirty flag every 30ms so the verdict trails the last
@@ -2017,6 +2617,11 @@ public static class CfaiEnforcer
                     // platform guard below is left exactly as it was: the
                     // synthesised rows carry the "ai_platform" sentinel there.
                     d["process_name"] = ExtractJsonString(item, "process_name");
+                    // Panel-keyed platform blocks (an Inventory host that maps
+                    // to an IDE-hosted AI panel rather than, or as well as, a
+                    // standalone process) — see the panel branch in
+                    // CheckFgBlocked. Empty on every other row shape.
+                    d["panel"] = ExtractJsonString(item, "panel");
                     if (!string.IsNullOrEmpty(d["platform"])) list.Add(d);
                 }
             }
@@ -2025,14 +2630,84 @@ public static class CfaiEnforcer
         CheckFgBlocked();
     }
 
+    // Arm the platform-block latch — called only from CheckFgBlocked's panel
+    // branch, and only on a tick whose panel read really succeeded, so the TTL
+    // below is measured from "the last time an enforcing blocked panel was
+    // genuinely observed to have focus", not from the end of the sticky window.
+    static void ArmPanelBlockLatch()
+    {
+        _panelBlockPid = _fgPid;
+        _panelBlockPanelId = _fgPanelId ?? "";
+        _panelBlockLatchTicks = DateTime.UtcNow.Ticks;
+        _panelBlockLatch = true;
+    }
+
+    static void ClearPanelBlockLatch()
+    {
+        _panelBlockLatch = false;
+        _panelBlockPid = 0;
+        _panelBlockPanelId = "";
+        _panelBlockLatchTicks = 0;
+    }
+
+    // Is a previously-established IDE-panel platform block still in force?
+    //
+    // Pure and side-effect free on purpose: the keyboard hook thread calls this
+    // (see the HookCallback gate), and the hook must never write poll-thread
+    // state. Expiry is therefore observed here and actually reset by the poll
+    // thread in CheckFgBlocked.
+    // Has the user done something that could actually have moved keyboard focus,
+    // recently enough to explain a focused-element read that says they left the
+    // panel? See _lastFocusMoveInputTicks. Pure and side-effect free — the poll
+    // thread calls it, but it reads a field the hook threads write.
+    static bool FocusCouldHaveMoved()
+    {
+        long t = _lastFocusMoveInputTicks;
+        if (t == 0) return false;
+        return (DateTime.UtcNow.Ticks - t) < PANEL_LEAVE_INPUT_WINDOW;
+    }
+
+    static bool PanelBlockLatchHeld()
+    {
+        if (!_panelBlockLatch) return false;
+        long armed = _panelBlockLatchTicks;
+        if (armed == 0) return false;
+        // Bounded: a host whose focused-element reads never recover must not be
+        // able to leave Enter swallowed forever.
+        if ((DateTime.UtcNow.Ticks - armed) > PANEL_BLOCK_LATCH_TTL) return false;
+        // Same host process still in the foreground. _fgPid is refreshed on
+        // every poll tick regardless of AI state (unlike _app, which is sticky
+        // by design), so a genuine app switch drops the latch on the next tick.
+        if (_fgPid != _panelBlockPid) return false;
+        return true;
+    }
+
     static void CheckFgBlocked()
     {
-        if (!_fgIsAi || _blockedList.Count == 0) { ClearFgBlocked(); return; }
+        // An admin un-blocking must take effect at once, so an empty/absent
+        // blocklist drops the latch rather than letting it outlive its own row.
+        if (_blockedList.Count == 0) { ClearPanelBlockLatch(); ClearFgBlocked(); return; }
+        if (!_fgIsAi) {
+            // NOT necessarily "the user left the AI surface". For an IDE panel
+            // this is routinely an unresolvable focused-element read while the
+            // same host window is still in the foreground — the race the latch
+            // exists for. Capture has already failed open by this point
+            // (FgIsAiNow/PanelUiaOk went false on the first bad read and stay
+            // false); the platform block decision is what must not be torn down
+            // by it. UpdateForeground drops the latch as soon as a SUCCESSFUL
+            // read says the focused element is not a panel, so a real
+            // navigation away still clears here on the very next tick.
+            if (PanelBlockLatchHeld()) return;
+            ClearPanelBlockLatch();
+            ClearFgBlocked();
+            return;
+        }
         foreach (var agent in _blockedList) {
             HashSet<string> procs;
             if (PLATFORM_PROCS.TryGetValue(agent["platform"], out procs)) {
                 if (procs.Contains(_app)) {
                     _fgIsBlocked = true;
+                    _blockedByPanel = false;   // process-keyed — see _blockedByPanel
                     _blockedPlatform = agent["platform"] ?? "";
                     _blockedAgentName = string.IsNullOrEmpty(agent["agent_name"]) ? (agent["platform"] ?? "") : agent["agent_name"];
                     _blockedAgentId = agent["agent_id"] ?? "";
@@ -2048,6 +2723,7 @@ public static class CfaiEnforcer
             if (!string.IsNullOrEmpty(agent["process_name"])) {
                 if (string.Equals(agent["process_name"], _app, StringComparison.OrdinalIgnoreCase)) {
                     _fgIsBlocked = true;
+                    _blockedByPanel = false;   // process-keyed — see _blockedByPanel
                     _blockedPlatform = "ai_platform";
                     _blockedAgentName = string.IsNullOrEmpty(agent["agent_name"]) ? "ai_platform" : agent["agent_name"];
                     _blockedAgentId = agent["agent_id"] ?? "";
@@ -2055,8 +2731,178 @@ public static class CfaiEnforcer
                     return;
                 }
             }
+            // Panel-keyed platform block: matched against the AI PANEL that has
+            // focus, not the process. Keyed this way precisely because
+            // process_name matching above is process-WIDE — a row saying
+            // process_name:"Code" would block plain code editing and every other
+            // panel in the same window, which is the false positive this whole
+            // feature exists to avoid. Checked in the SAME iteration as the two
+            // branches above so first-match-wins ordering across the file is
+            // unchanged.
+            if (_fgIsPanel && !string.IsNullOrEmpty(agent["panel"])) {
+                if (string.Equals(agent["panel"], _fgPanelId, StringComparison.OrdinalIgnoreCase)) {
+                    // A detection-only panel (AI_PANELS enforce:false) never
+                    // blocks, even with a matching row present. This is the same
+                    // gate FgIsAiNow/PanelUiaOk apply on the capture side; both
+                    // are needed, or "detection-only" would still swallow Enter
+                    // for a platform block. Not a `continue`: falling through to
+                    // the next row is exactly right, since another row may still
+                    // match this foreground some other way.
+                    if (_fgPanelEnforce) {
+                        _fgIsBlocked = true;
+                        _blockedByPanel = true;   // see _blockedByPanel
+                        _blockedPlatform = "ai_platform";
+                        _blockedAgentName = string.IsNullOrEmpty(agent["agent_name"]) ? "ai_platform" : agent["agent_name"];
+                        _blockedAgentId = agent["agent_id"] ?? "";
+                        _blockedReason = "Blocked platform: " + _blockedAgentName;
+                        // Only this branch arms the latch: the two above are
+                        // process-keyed, and a foreground PROCESS cannot
+                        // flicker the way a focused ELEMENT does. _fgLeftAiTicks
+                        // == 0 is the existing "this tick's read succeeded"
+                        // signal — arming inside the sticky window instead would
+                        // stack the two grace periods.
+                        if (_fgLeftAiTicks == 0) ArmPanelBlockLatch();
+                        return;
+                    }
+                }
+            }
         }
+        // No row matched. "A tick whose panel read succeeded is authoritative"
+        // used to be the whole test here, and it collapsed two situations that
+        // are not remotely the same:
+        //
+        //   a) The read is about the SAME panel the latch was armed for, and no
+        //      row covers it any more — an admin lifted the block. Genuinely
+        //      authoritative: clear at once, so un-blocking stays immediate.
+        //
+        //   b) The read is about a DIFFERENT panel in the same host process.
+        //      This is the case that let a blocked panel's Enter through, and it
+        //      had NO grace period whatsoever: a different panel is still an AI
+        //      surface, so UpdateForeground sets isAi and RESETS _fgLeftAiTicks
+        //      to 0 — the sticky window never even starts, and this line then
+        //      read that reset as proof the block should die. One single 150ms
+        //      tick was enough to clear both _fgIsBlocked and the latch.
+        //      It is not proof of anything: one VS Code window was measured
+        //      hosting two Claude Code composers AND a Copilot Chat input, all
+        //      matching the signature table, while FocusedElement — a GLOBAL
+        //      read — was measured returning elements from other windows and
+        //      other processes entirely. A read about another surface says
+        //      nothing about the latched one.
+        bool sameSurface = !_fgIsPanel
+            || string.Equals(_fgPanelId ?? "", _panelBlockPanelId ?? "", StringComparison.OrdinalIgnoreCase);
+        if (!sameSurface && PanelBlockLatchHeld()) return;
+        // Inside the sticky window the state is second-hand, and the latch keeps
+        // its say — unchanged.
+        if (_fgLeftAiTicks != 0 && PanelBlockLatchHeld()) return;
+        ClearPanelBlockLatch();
         ClearFgBlocked();
+    }
+
+    // Recompute the standing bar's state and emit ONE line per real transition.
+    // Called from the poll tick straight after UpdateBlockedAgents (the only
+    // caller of CheckFgBlocked), so it always reads a freshly-decided block.
+    //
+    // Deliberately observes, never decides: no field CheckFgBlocked owns is
+    // written here. See the _bannerActive/_bannerPid comments above.
+    static void UpdateBannerState()
+    {
+        // WHOLE-APP blocks only — !_blockedByPanel. A panel-scoped block (a
+        // Claude Code / Cursor composer inside an IDE) gets no bar: the block
+        // covers one surface inside an editor, not the editor, and a bar
+        // spanning the whole display would state something false. Same
+        // exclusion, same reason, as showPlatformBanner()'s IS_EMBEDDED_AI
+        // early-return in the browser extension.
+        //
+        // !Disarmed() is REQUIRED here and is not redundant with anything.
+        // Disarmed() (the panic hotkey) is checked inside the block DECISION
+        // functions — EnterBlockActive / BlockActiveForMouse — and never inside
+        // CheckFgBlocked, so _fgIsBlocked stays true across a disarm. Without
+        // this term the bar would keep asserting that prompts are being stopped
+        // while every Enter is in fact going through.
+        // _fgLeftAiTicks == 0 is the existing "this tick's read is FIRST-HAND"
+        // signal (ApplyForegroundTick resets it whenever the foreground really is
+        // an AI surface, and stamps it the moment focus leaves one) — the same
+        // signal ArmPanelBlockLatch gates on. It is what actually keeps the bar
+        // off the 3s sticky window, and it is load-bearing in BOTH directions:
+        //
+        //   * as a clear term, it drops the bar the instant focus leaves a
+        //     blocked app for something that is not an AI surface at all, while
+        //     _fgIsBlocked is still (correctly, stickily) true;
+        //   * as an ARM term, it stops the bar from immediately coming back. A
+        //     pid check alone cleared the bar and then re-armed it on the very
+        //     next tick — over Outlook, with Outlook's pid — because the sticky
+        //     _fgIsBlocked still said "blocked". Measured in the offline
+        //     transition harness; exactly the bug the fast clear exists to
+        //     prevent, one tick later.
+        bool firstHand = _fgLeftAiTicks == 0;
+        bool want = _fgIsBlocked && !_blockedByPanel && !Disarmed() && firstHand;
+        uint pid = _fgPid;
+        if (_bannerActive)
+        {
+            // FAST CLEAR. _fgPid is refreshed on every poll tick unconditionally
+            // (unlike _app, which is sticky by design), so a genuine app switch
+            // drops the bar on the very next tick — no new read, and no share of
+            // FG_STICKY_TTL. Deliberate: see the field comments.
+            if (!want
+                || pid != _bannerPid
+                || !string.Equals(_bannerAgent, _blockedAgentName, StringComparison.Ordinal))
+            {
+                _bannerActive = false;
+                _bannerPid = 0;
+                _bannerAgent = "";
+                EmitBlockState(false, "", "", "", "", 0);
+            }
+            return;
+        }
+        if (!want) return;
+        _bannerActive = true;
+        _bannerPid = pid;
+        _bannerAgent = _blockedAgentName;
+        EmitBlockState(true, _blockedPlatform, _blockedAgentName, _blockedAgentId, _app, pid);
+    }
+
+    // The bar's whole payload. PII discipline, tighter than any other emit in
+    // this file because a BrowserWindow consumes it: a bool, the fixed scope
+    // enum, the admin-typed platform/agent name + id, a process name, a pid, and
+    // a window rect. NEVER a window title, NEVER a UIA element Name, NEVER
+    // `patterns`, NEVER a prompt preview — there is no route from this event to
+    // anything the user typed, and there must never be one.
+    static void EmitBlockState(bool active, string platform, string agent, string agentId, string process, uint pid)
+    {
+        int wx = 0, wy = 0, ww = 0, wh = 0;
+        if (active)
+        {
+            // The SAME Win32 pair UpdateSendRect already uses — no new interop.
+            // Read ONCE, at the transition, and used by Electron only to decide
+            // which MONITOR the bar belongs on. Nothing tracks this window
+            // afterwards; the bar is display-anchored, not window-docked.
+            try
+            {
+                IntPtr fg = GetForegroundWindow();
+                RECT wr;
+                if (fg != IntPtr.Zero && GetWindowRect(fg, out wr))
+                {
+                    wx = wr.Left; wy = wr.Top;
+                    ww = wr.Right - wr.Left; wh = wr.Bottom - wr.Top;
+                }
+            }
+            catch { }
+        }
+        // scope is always "app": UpdateBannerState refuses to arm for a
+        // panel-scoped block at all, so a "panel" bar cannot exist. The field is
+        // still emitted so the consumer can assert on it rather than assume.
+        string json = "{\"kind\":\"blockstate\""
+            + ",\"active\":" + (active ? "true" : "false")
+            + ",\"scope\":\"app\""
+            + ",\"platform\":\"" + Esc(platform ?? "") + "\""
+            + ",\"agent\":\"" + Esc(agent ?? "") + "\""
+            + ",\"agent_id\":\"" + Esc(agentId ?? "") + "\""
+            + ",\"process\":\"" + Esc(process ?? "") + "\""
+            + ",\"pid\":" + pid
+            + ",\"win_x\":" + wx + ",\"win_y\":" + wy
+            + ",\"win_w\":" + ww + ",\"win_h\":" + wh
+            + "}";
+        lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }
 
     // Cleared together with the flag: a stale platform/agent name outliving the
@@ -2064,6 +2910,7 @@ public static class CfaiEnforcer
     static void ClearFgBlocked()
     {
         _fgIsBlocked = false;
+        _blockedByPanel = false;
         _blockedPlatform = "";
         _blockedAgentName = "";
         _blockedAgentId = "";
@@ -2121,12 +2968,118 @@ public static class CfaiEnforcer
         if (fg == IntPtr.Zero) return; // don't change state on null window
         uint pid; GetWindowThreadProcessId(fg, out pid);
         string proc = ProcName(pid);
+
+        bool isIde = (proc != null && _ideProcs.Contains(proc));
+        string panelRid = "";
+        bool panelReadable = false;
+        PanelSig hit = null;
+        // The ONE UIA call. Everything that interprets its result lives in
+        // ApplyForegroundTick, so the offline harness can drive the real state
+        // machine with a substituted read instead of re-implementing it.
+        if (isIde) hit = ReadFocusedPanel(proc, pid, out panelRid, out panelReadable);
+        ApplyForegroundTick(pid, proc, isIde, hit, panelRid, panelReadable);
+    }
+
+    // Everything UpdateForeground does once the focused-element read is in.
+    //
+    // Split out for testability, and for a specific reason: the transitions
+    // below are where every panel-scoping bug so far has lived, and a test that
+    // re-implements them in PowerShell or JS is testing its own copy. The
+    // harness in agent/tests drives THIS method with reads built from real,
+    // measured UIA property values (fed through the real MatchPanelSignature),
+    // so the only thing it substitutes is the AutomationElement lookup itself.
+    static void ApplyForegroundTick(uint pid, string proc, bool isIde, PanelSig hit, string panelRid, bool panelReadable)
+    {
         _fgPid = pid;
-        if (proc != null && _aiProcs.Contains(proc))
+
+        bool isAi = false, isPanel = false, panelEnforce = false;
+        string panelId = "";
+        if (panelRid == null) panelRid = "";
+
+        // A real app switch retires the IDE-panel platform-block latch straight
+        // away — the pid check in PanelBlockLatchHeld already fails at this
+        // point, this just resets the flag on the thread that owns it.
+        if (_panelBlockLatch && pid != _panelBlockPid) ClearPanelBlockLatch();
+
+        if (isIde)
+        {
+            // An IDE. Whether this counts as an AI surface depends on the
+            // focused ELEMENT, not the process — checked BEFORE the _aiProcs
+            // branch below so an IDE that is ALSO in AI_PROCESSES (Cursor is,
+            // for its host/exception-chain entry) gets panel scoping instead
+            // of falling through to whole-app treatment.
+            if (hit != null)
+            {
+                isAi = true; isPanel = true; panelId = hit.Id; panelEnforce = hit.Enforce;
+            }
+            else if (panelReadable)
+            {
+                // A read that SUCCEEDED and did not match looks like the
+                // authoritative "the caret is in the editor / a terminal / some
+                // other panel" answer — and when the user really did move it, it
+                // is: the latch is retired here and this tick falls through to
+                // the ordinary sticky-expiry path below, so behaviour for
+                // genuinely leaving a panel is unchanged.
+                //
+                // But only when they COULD have moved it. Focus does not move on
+                // its own, so a readable non-match with no click and no
+                // chorded/navigation key behind it is a bad READ, not a fact —
+                // the same "no evidence" state an UNREADABLE read (element gone,
+                // no control type, no name and no class) already lands in, and
+                // the state the latch deliberately survives.
+                //
+                // This is the cursor_composer leak. Its window holds no second AI
+                // panel for the panel-id scoping in CheckFgBlocked to catch — the
+                // element next to the composer is Cursor's own Monaco editor
+                // input, which matches nothing — so a stolen tick arrived here as
+                // a readable non-match and killed the block outright, mid-way
+                // through a 4.5s wait in which the user had touched nothing at
+                // all. See _lastFocusMoveInputTicks and _panelBlockLatch.
+                if (FocusCouldHaveMoved()) ClearPanelBlockLatch();
+            }
+            if (hit == null && proc != null && _ideFallbackProcs != null && _ideFallbackProcs.Contains(proc)
+                && _aiProcs != null && _aiProcs.Contains(proc))
+            {
+                // Whole-app fallback — nothing uses this today (_ideFallbackProcs
+                // is empty; see its own comment above), reachable again only if a
+                // future entry sets panelFallback:true. Both conditions are
+                // required even then: a panelFallback flag on a process this
+                // catalog has no AI entry for would silently mean "no coverage",
+                // so the AI_PROCESSES membership that actually provides the
+                // coverage is checked too.
+                isAi = true;
+            }
+            // Otherwise: not an AI surface. A failed/absent panel match — the
+            // caret is in the editor or a terminal, or the UIA read threw — is
+            // treated exactly like switching away from a chat app, i.e. it falls
+            // into the sticky-expiry branch below. That is deliberately fail-OPEN
+            // for capture (FgIsAiNow goes false immediately, so no keystroke in
+            // the editor is ever buffered) while block DECISIONS still hold for
+            // the existing 3s, which is the same separation the sticky window
+            // already draws for every other app.
+            //
+            // The one thing this branch no longer collapses: "the read said the
+            // caret is elsewhere" and "the read said nothing at all". A platform
+            // block established in an enforcing panel outlives the second for up
+            // to PANEL_BLOCK_LATCH_TTL, because 3s of unreadable reads while the
+            // SAME host window stays in the foreground used to tear the block
+            // down and let the next Enter through. See _panelBlockLatch.
+        }
+        else if (proc != null && _aiProcs != null && _aiProcs.Contains(proc))
+        {
+            isAi = true;
+        }
+
+        if (isAi)
         {
             _fgIsAi = true;
             _app = proc;
             _fgLeftAiTicks = 0; // reset sticky timer
+            _fgIsPanel = isPanel;
+            _fgPanelId = isPanel ? panelId : "";
+            _fgPanelEnforce = isPanel ? panelEnforce : true;   // non-panel surfaces enforce as before
+            // Composite owner key for the typed buffer — see _fgOwnerKey.
+            _fgOwnerKey = pid.ToString() + "|" + (isPanel ? panelId : "none") + "|" + panelRid;
         }
         else
         {
@@ -2142,6 +3095,13 @@ public static class CfaiEnforcer
             {
                 _fgIsAi = false;
                 _fgLeftAiTicks = 0;
+                // Panel identity outlives _fgIsAi through the sticky window on
+                // purpose (a block armed in a panel stays attributed to it), but
+                // must not outlive the block itself — a stale panel id would let
+                // CheckFgBlocked's panel branch match a surface nobody is in.
+                _fgIsPanel = false;
+                _fgPanelId = "";
+                _fgPanelEnforce = false;
             }
             // During the sticky window, _fgIsAi stays true
         }
@@ -2160,6 +3120,22 @@ public static class CfaiEnforcer
         // OR when there's a pending typed prompt (to capture a benign click-send).
         // Cleared otherwise so normal clicks are never swallowed or captured.
         if (!_fgIsAi || (!BlockActiveForMouse() && TypedLength() < 1)) { _hasRect = false; return; }
+        // IDE processes are skipped outright — panel or not. Two independent
+        // reasons, either one sufficient:
+        //   1. Cost. Attempt 1 below is a descendant-wide UIA search over the
+        //      whole foreground window. Against a VS Code / Cursor accessibility
+        //      tree that is orders of magnitude larger than a chat window's, and
+        //      it would run on the 150ms poll thread that also guards the DLP
+        //      scan path.
+        //   2. Meaning. Attempt 2's heuristic — "the bottom-right corner of the
+        //      window is the send button" — is true of every chat app and false
+        //      of every IDE, where that rectangle is the status bar or the
+        //      terminal. Caching a rect there would swallow ordinary clicks.
+        // Consequence, accepted for this pass: no mouse-click blocking for an
+        // IDE panel's Send button, and no click-to-send prompt capture there.
+        // Enter-to-send is fully blocked via the keystroke hook, which is the
+        // separate and primary path.
+        if (_ideProcs.Contains(_app)) { _hasRect = false; return; }
         try
         {
             IntPtr fg = GetForegroundWindow();
@@ -2227,7 +3203,15 @@ public static class CfaiEnforcer
 
     static void UpdateUia()
     {
-        if (!_fgIsAi) { _blockUia = false; return; }
+        // PanelUiaOk, not just _fgIsAi: in an IDE with no panel focused, the
+        // focused element IS the code editor or the terminal, and reading it
+        // here would run every PII/secret pattern over the user's source code
+        // on a 150ms loop. That is both the false-positive source the old
+        // blanket IDE exclusion existed to avoid and a scan of content nobody is
+        // sending anywhere. Gating at the read means _blockUia is never even
+        // computed from it, rather than being computed and then filtered out at
+        // each consumer — one of which (BlockActiveForMouse) does not filter.
+        if (!_fgIsAi || !PanelUiaOk()) { _blockUia = false; _uiaPatterns = ""; return; }
         string text = null;
         try
         {
@@ -2247,7 +3231,14 @@ public static class CfaiEnforcer
     // every other UIA/regex path; the hook thread only ever reads the result.
     static void UpdatePendingRewrite()
     {
-        if (!_fgIsAi || _ideApps.Contains(_app) || Disarmed())
+        // PanelUiaOk replaces the old blanket IDE-name exclusion. Tokenize &
+        // Send was NEVER offered in an IDE before; it is now offered while an
+        // enforcing AI panel actually has focus, and still refused in the editor
+        // or the terminal (where the "composer text" this reads would be source
+        // code). Note IDE prompts are frequently multi-line and
+        // ComputeMaskCandidate still rejects multi-line text outright — that
+        // pre-existing limitation is untouched here and tracked separately.
+        if (!_fgIsAi || !PanelUiaOk() || Disarmed())
         {
             lock (_pendingLock) { _pendingRewritable = false; _pendingBlockId = ""; }
             return;
@@ -2561,11 +3552,38 @@ public static class CfaiEnforcer
         Emit("error", "", "", "regex_timeout", -1, -1, "regex match timeout — rule skipped: " + rule);
     }
 
+    // `panel` names WHICH AI surface inside an IDE this event came from, when
+    // the foreground was an IDE panel. It is a catalog id ("claude_code"), never
+    // anything read out of the app: an element Name or a window title in VS Code
+    // can carry a file path or a workspace name, and neither is ever emitted
+    // from anywhere in this file. index.js prefers it over `process` when
+    // resolving service/vendor/tool_host, because the process ("Code") does not
+    // identify a product on its own.
+    static string PanelField()
+    {
+        return (_fgIsPanel && !string.IsNullOrEmpty(_fgPanelId)) ? ",\"panel\":\"" + Esc(_fgPanelId) + "\"" : "";
+    }
+
+    // Same field, but for a PLATFORM BLOCK: attribute it to the panel the block
+    // was actually established for, not to whatever surface this tick's global
+    // focused-element read happened to land on. index.js resolves tool_host from
+    // `panel`, and tool_host is what the Request Access dialog asks for an
+    // exception against — so reporting a neighbouring panel here (Copilot Chat
+    // in the same VS Code window → github.com) made the user file a request that
+    // could never lift the claude.ai block they were actually hitting.
+    static string PlatformBlockPanelField()
+    {
+        if (_blockedByPanel && !string.IsNullOrEmpty(_panelBlockPanelId))
+            return ",\"panel\":\"" + Esc(_panelBlockPanelId) + "\"";
+        return PanelField();
+    }
+
     static void Emit(string kind, string app, string patterns, string reason, int len = -1, int seconds = -1, string message = null)
     {
         string json = "{\"kind\":\"" + kind + "\""
             + (reason.Length > 0 ? ",\"reason\":\"" + Esc(reason) + "\"" : "")
             + (app.Length > 0 ? ",\"process\":\"" + Esc(app) + "\"" : "")
+            + (app.Length > 0 ? PanelField() : "")
             + (patterns.Length > 0 ? ",\"patterns\":\"" + Esc(patterns) + "\"" : "")
             + (len >= 0 ? ",\"len\":" + len : "")
             + (seconds >= 0 ? ",\"seconds\":" + seconds : "")
@@ -2611,6 +3629,7 @@ public static class CfaiEnforcer
         string json = "{\"kind\":\"block\""
             + ",\"reason\":\"" + Esc(reason) + "\""
             + (app.Length > 0 ? ",\"process\":\"" + Esc(app) + "\"" : "")
+            + (platformBlock ? PlatformBlockPanelField() : PanelField())
             + (patterns.Length > 0 ? ",\"patterns\":\"" + Esc(patterns) + "\"" : "")
             + ",\"block_id\":\"" + Esc(blockId) + "\""
             + ",\"rewritable\":" + (rewritable ? "true" : "false")
@@ -2619,7 +3638,16 @@ public static class CfaiEnforcer
             // Identity of the block, for the Request Access dialog. No prompt
             // content — a platform id, a display name and an agent id, all of
             // them values an admin typed into the blocklist.
+            // block_scope is the AUTHORITATIVE scope of the block: "app" = the
+            // whole process is disallowed, "panel" = one AI surface inside an
+            // IDE is. It comes straight from _blockedByPanel, i.e. from which
+            // branch of CheckFgBlocked armed the block. Consumers must NOT infer
+            // scope from the `panel` field above — that field is ATTRIBUTION
+            // (PlatformBlockPanelField falls back to PanelField, so any
+            // panelFallback:true IDE entry can put a panel id on an app-scoped
+            // block) and answers a different question entirely.
             + (platformBlock ? ",\"platform_block\":true"
+                 + ",\"block_scope\":\"" + (_blockedByPanel ? "panel" : "app") + "\""
                  + ",\"blocked_platform\":\"" + Esc(_blockedPlatform) + "\""
                  + ",\"blocked_agent\":\"" + Esc(_blockedAgentName) + "\""
                  + ",\"blocked_agent_id\":\"" + Esc(_blockedAgentId) + "\"" : "")
@@ -2911,7 +3939,7 @@ Add-Type -TypeDefinition $source -ReferencedAssemblies @(
     'System.Web.Extensions'
 ) -ErrorAction Stop
 
-[CfaiEnforcer]::Start(($aiProcs -split ','), $patNames.ToArray(), $patSources.ToArray(), $patSevs.ToArray(), $patLabels.ToArray(), [bool[]]($patIgnoreCase.ToArray()), $hbPath, $modelRouterEnabled, $mrConfigJson)
+[CfaiEnforcer]::Start(($aiProcs -split ','), $patNames.ToArray(), $patSources.ToArray(), $patSevs.ToArray(), $patLabels.ToArray(), [bool[]]($patIgnoreCase.ToArray()), $hbPath, $modelRouterEnabled, $mrConfigJson, $ideProcsJson, $aiPanelsJson)
 
 # Keep the process alive — the C# background threads (poll + message pump) do
 # the work and write events to stdout. Node reads them.

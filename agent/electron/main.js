@@ -61,6 +61,7 @@ let tray = null;
 let mainWindow = null;
 let dialogWindow = null;  // the non-activating Tokenize & Send popup — see showBlockDialogWindow()
 let accessWindow = null;  // the FOCUSABLE Request Access dialog — see showAccessRequestWindow()
+let bannerWindow = null;  // the click-through "this app is blocked" bar — see showBlockBanner()
 let monitorProcess = null;  // child_process running the OsMonitor
 let isMonitoring = false;
 let recentAlerts = [];      // last 100 DLP events for the dashboard
@@ -168,6 +169,9 @@ function startMonitor() {
   monitorProcess.on('exit', (code) => {
     monitorProcess = null;
     isMonitoring = false;
+    // Nothing is enforcing any more, so nothing may still be claiming to. See
+    // destroyBlockBanner().
+    destroyBlockBanner();
     sendToRenderer('monitor-status', { running: false, exitCode: code });
     updateTrayMenu();
   });
@@ -175,12 +179,16 @@ function startMonitor() {
   monitorProcess.on('error', (err) => {
     monitorProcess = null;
     isMonitoring = false;
+    destroyBlockBanner();
     sendToRenderer('monitor-error', err.message);
     updateTrayMenu();
   });
 }
 
 function stopMonitor() {
+  // Before the kill, not after: the bar must be gone the moment the user asks
+  // for monitoring to stop, whether or not the child exits cleanly.
+  destroyBlockBanner();
   if (!monitorProcess) return;
   monitorProcess.kill('SIGTERM');
   // Force kill after 3s if it hasn't exited
@@ -190,6 +198,167 @@ function stopMonitor() {
     }
   }, 3000);
   monitorProcess.on('exit', () => clearTimeout(killTimer));
+}
+
+// ── The standing "this app is blocked" bar ────────────────────────────────────
+// Desktop counterpart of the browser extension's showPlatformBanner()
+// (browser-extension/content/content.js). The modal that already exists is
+// REACTIVE — it appears after a send is refused. This is STATE: while a
+// whole-app-blocked window has focus, the bar is up, so the org's decision is
+// visible before the first keystroke instead of only after it.
+//
+// Admin-controlled only. There is deliberately no entry for it in
+// DEFAULT_SETTINGS: a user who could switch off the indicator for a block they
+// cannot switch off would only be hiding the explanation.
+//
+// Scope: whole-app blocks ONLY (block_scope 'app'). An IDE-panel block (Claude
+// Code / Cursor composer) gets nothing beyond the existing per-attempt modal —
+// the enforcer never even emits a bar state for one. Same exclusion as the
+// extension's IS_EMBEDDED_AI early-return, and for the same reason: blocking one
+// AI panel inside an editor is not blocking the editor.
+const BANNER_HEIGHT = 36;              // DIP; workArea-anchored, so DPI-scaled by Electron
+// Alt-tabbing THROUGH a blocked app (or a single flapping focus read) must not
+// flash a red bar across the display.
+const BANNER_SHOW_DEBOUNCE_MS = 200;
+
+let bannerState = null;        // { name, origin:{x,y} } while a block is in force
+let bannerVisible = false;
+let bannerShowTimer = null;
+// Which tool_host the Request Access modal has already explained during the
+// current bar session. See the guard in showAccessRequestWindow().
+let platformModalShownForHost = null;
+
+// DISPLAY-anchored, not window-docked. The rect on the event is used for one
+// thing only: choosing which monitor the bar belongs to. Nothing tracks the
+// blocked window afterwards — no polling, no coordinate-space conversion, no
+// window-follow. Drag a blocked app to another monitor and the bar stays where
+// it was until the next state transition. Accepted and documented, not a bug:
+// a follower would have to reconcile Win32 physical pixels with Electron DIPs on
+// every tick, which is precisely the fragility this avoids.
+function bannerBoundsFor(origin) {
+  try {
+    const display = origin
+      ? screen.getDisplayNearestPoint({ x: Math.round(origin.x), y: Math.round(origin.y) })
+      : screen.getPrimaryDisplay();
+    if (!display) return null;
+    // workArea, NOT bounds — a top-docked taskbar must not be covered by a bar
+    // the user cannot move or click through to.
+    const wa = display.workArea;
+    return { x: wa.x, y: wa.y, width: wa.width, height: BANNER_HEIGHT };
+  } catch {
+    // The stored origin no longer resolves to a display (monitor unplugged,
+    // session change). Better no bar than a bar at coordinates that don't exist.
+    return null;
+  }
+}
+
+function renderBlockBanner() {
+  if (!bannerState) return;
+  const bounds = bannerBoundsFor(bannerState.origin);
+  if (!bounds) { hideBlockBanner(); return; }
+  // A transparent, non-resizable window cannot be RESIZED reliably on Windows —
+  // resizable:false makes setBounds ignore size changes, and Electron documents
+  // setResizable(true) on a transparent window as liable to break it outright.
+  // MOVING one is fine. So a display change that alters the WIDTH (a monitor
+  // added, removed or rescaled) is handled by recreating the window rather than
+  // by resizing it; ordinary re-anchoring on the same display just moves it.
+  if (bannerWindow && !bannerWindow.isDestroyed()) {
+    const cur = bannerWindow.getBounds();
+    if (cur.width !== bounds.width || cur.height !== bounds.height) {
+      bannerWindow.destroy();
+      bannerWindow = null;
+    }
+  }
+  const send = () => {
+    if (bannerWindow && !bannerWindow.isDestroyed() && bannerState) {
+      bannerWindow.webContents.send('block-banner', { name: bannerState.name });
+    }
+  };
+  if (!bannerWindow || bannerWindow.isDestroyed()) {
+    bannerWindow = new BrowserWindow({
+      ...bounds,
+      frame: false,
+      resizable: false,
+      movable: false,
+      minimizable: false,
+      maximizable: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      // focusable:false + showInactive() is NOT a style choice here — it is the
+      // same hard requirement documented on showBlockDialogWindow below. Taking
+      // focus off the AI app makes the enforcer's own foreground tracking see
+      // the user leave it, which is how the Tokenize popup once ended up
+      // permanently stuck on "Masking…". A bar that stole focus would do worse:
+      // it would tear down the very block it is announcing.
+      focusable: false,
+      show: false,
+      transparent: true,
+      hasShadow: false,
+      backgroundColor: '#00000000',
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+      },
+    });
+    bannerWindow.loadFile(path.join(__dirname, 'renderer', 'block-banner.html'));
+    bannerWindow.webContents.once('did-finish-load', send);
+    bannerWindow.on('closed', () => { bannerWindow = null; bannerVisible = false; });
+    // The native equivalent of the extension bar's pointer-events:none. It is a
+    // notice, not a control, and must never swallow a click meant for the app
+    // underneath — the "the whole Gmail is blocked, I can't click any button"
+    // report that exclusion came from.
+    bannerWindow.setIgnoreMouseEvents(true);
+    // Above full-screen AI apps too, not just ordinary windows.
+    bannerWindow.setAlwaysOnTop(true, 'screen-saver');
+  } else {
+    // Same size, possibly a different position — a move, which is allowed.
+    bannerWindow.setBounds(bounds);
+    send();
+  }
+  bannerWindow.showInactive();
+  bannerVisible = true;
+}
+
+function showBlockBanner(data) {
+  const name = String(data?.name || '').trim() || 'This AI platform';
+  bannerState = {
+    name,
+    origin: { x: Number(data?.win_x) || 0, y: Number(data?.win_y) || 0 },
+  };
+  if (bannerVisible) { renderBlockBanner(); return; }   // already up — refresh copy/monitor
+  if (bannerShowTimer) return;                          // a show is pending; the newest state above wins
+  bannerShowTimer = setTimeout(() => {
+    bannerShowTimer = null;
+    if (bannerState) renderBlockBanner();
+  }, BANNER_SHOW_DEBOUNCE_MS);
+}
+
+function hideBlockBanner() {
+  if (bannerShowTimer) { clearTimeout(bannerShowTimer); bannerShowTimer = null; }
+  bannerState = null;
+  bannerVisible = false;
+  // The bar is what makes the modal a one-shot explanation. With the bar gone
+  // (focus left the blocked app) the next block is a new situation and has to
+  // explain itself again — see showAccessRequestWindow().
+  platformModalShownForHost = null;
+  if (bannerWindow && !bannerWindow.isDestroyed()) bannerWindow.hide();
+}
+
+// An always-on-top, click-through, un-closeable bar with no process behind it is
+// by far the worst failure mode this feature has: nothing would be blocking, and
+// the user would have no way to dismiss the claim that something is. So it is
+// destroyed unconditionally on EVERY path that ends the monitor — helper exit,
+// spawn error, Stop Monitoring, and quit.
+function destroyBlockBanner() {
+  hideBlockBanner();
+  if (bannerWindow && !bannerWindow.isDestroyed()) bannerWindow.destroy();
+  bannerWindow = null;
+}
+
+// A monitor going away (undock, RDP resize, resolution change) must not leave
+// the bar drawn across coordinates that no longer exist.
+function repositionBlockBanner() {
+  if (bannerVisible && bannerState) renderBlockBanner();
 }
 
 // The Tokenize & Send popup. This must NEVER take keyboard focus — confirmed
@@ -249,6 +418,27 @@ function showBlockDialogWindow(data) {
 let accessWindowHost = null;   // which tool the open dialog is about
 
 function showAccessRequestWindow(data) {
+  // ONCE per (host, bar session) — suppression, not de-duplication. The
+  // raise-only guard further down stops an OPEN dialog being re-rendered, but a
+  // dialog the user had already read and CLOSED came straight back on the next
+  // swallowed keystroke, and a blocked app emits one of those per Enter and per
+  // send-button click. That is what made a governed app feel broken.
+  //
+  // Deliberately conditional on the bar actually being up for this host: the bar
+  // is the standing explanation, so the modal only needs to say it once. With no
+  // bar (bar hidden, or a panel-scoped block, which never raises one) the modal
+  // is the ONLY signal there is, and the old every-attempt behaviour is kept
+  // exactly as it was.
+  //
+  // Reset when the bar clears (focus left the blocked app) or when tool_host
+  // changes — see hideBlockBanner().
+  const host = data?.tool_host || null;
+  if (bannerVisible
+      && platformModalShownForHost === host
+      && (!accessWindow || accessWindow.isDestroyed())) {
+    return;
+  }
+  platformModalShownForHost = host;
   const send = () => { if (accessWindow && !accessWindow.isDestroyed()) accessWindow.webContents.send('access-request-dialog', data); };
   // A blocked app keeps emitting blocks — every swallowed Enter and every
   // swallowed send-button click is another @@CFAI-BLOCK line. Re-sending the
@@ -290,6 +480,26 @@ function showAccessRequestWindow(data) {
 }
 
 function parseMonitorLine(line) {
+  // Standing blocked-platform bar. Checked BEFORE the '@@CFAI-BLOCK ' guard so
+  // that guard is left byte-for-byte as it was (a test pins its exact text), and
+  // so the two prefixes are visibly distinguished at the top of the function
+  // rather than relying on the trailing space in the shorter one.
+  //
+  // Presentation only: no reporting, no logging, no recentAlerts row. A blocked
+  // window gaining focus is not an event, and index.js does not report it either.
+  if (line.startsWith('@@CFAI-BLOCKSTATE ')) {
+    try {
+      const parsed = JSON.parse(line.slice('@@CFAI-BLOCKSTATE '.length));
+      // scope is asserted rather than assumed. The enforcer only ever raises the
+      // bar for a whole-app block, but if a panel-scoped state ever reaches here
+      // it must be ignored, not rendered — an editor-wide red bar for one
+      // blocked panel is the exact false claim this feature must not make.
+      if (parsed.active && parsed.scope === 'app') showBlockBanner(parsed);
+      else hideBlockBanner();
+    }
+    catch { /* malformed — drop; the line pump must never crash */ }
+    return;
+  }
   // Structured lines (block dialog / rewrite result) are a distinct, always-
   // JSON channel — checked first so they never fall into the plain-text
   // regex heuristics below, which cannot parse them reliably.
@@ -838,6 +1048,14 @@ if (!gotLock) {
     setupIPC();
     createTray();
 
+    // The bar is anchored to a display, and displays come and go (undock, RDP
+    // resize, resolution change). Recompute against the stored origin point;
+    // bannerBoundsFor() hides the bar rather than guess if it no longer
+    // resolves. Registered here because the screen module needs the app ready.
+    screen.on('display-removed', repositionBlockBanner);
+    screen.on('display-added', repositionBlockBanner);
+    screen.on('display-metrics-changed', repositionBlockBanner);
+
     const startHidden = process.argv.includes('--hidden');
     if (!startHidden) {
       createMainWindow();
@@ -861,6 +1079,10 @@ if (!gotLock) {
   app.on('before-quit', () => {
     app.isQuitting = true;
     stopMonitor();
+    // stopMonitor() already does this; repeated deliberately, because an
+    // orphaned always-on-top click-through bar surviving the app is the one
+    // outcome here that the user cannot recover from without Task Manager.
+    destroyBlockBanner();
   });
 
   app.on('activate', () => {

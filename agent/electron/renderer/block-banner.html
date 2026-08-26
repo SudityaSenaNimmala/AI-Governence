@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Blocked by CloudFuze AI Governance</title>
+  <!-- Deliberately NOT linking styles.css: this window is a single bar, the
+       palette below is copied from the browser extension's own banner so the two
+       surfaces are visibly the same control, and pulling in the app stylesheet
+       would let an unrelated change there alter it. -->
+  <style>
+    /* The window is transparent; the bar is a full-bleed div so its shadow and
+       edges render cleanly instead of being clipped by window chrome. */
+    /* height:100% is required here, not decorative — #bar's own height:100%
+       has no ancestor with an explicit height to resolve against otherwise,
+       which collapsed the whole bar to zero height (confirmed live: a
+       fully-transparent zero-height window is indistinguishable on screen
+       from no window at all — this is what silently broke the first ship). */
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+    #bar {
+      box-sizing: border-box;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      /* Same values as showPlatformBanner() in
+         browser-extension/content/content.js. */
+      background: #b91c1c;
+      color: #fff;
+      font: 600 13px/1.4 system-ui, -apple-system, sans-serif;
+      padding: 10px 16px;
+      text-align: center;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, .25);
+      /* Belt and braces with the main process's setIgnoreMouseEvents(true) — it
+         is a notice, not a control. */
+      pointer-events: none;
+      user-select: none;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  </style>
+</head>
+<body>
+  <div id="bar"></div>
+  <script src="block-banner.js"></script>
+</body>
+</html>
