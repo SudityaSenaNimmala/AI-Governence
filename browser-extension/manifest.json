@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CloudFuze AI Governance",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Detects sensitive data flowing into AI services. Reports to CloudFuze governance, never to third parties.",
   "permissions": [
     "storage",
@@ -58,7 +58,27 @@
     "https://*.hs-scripts.com/*",
     "https://*.livechatinc.com/*",
     "https://*.crisp.chat/*",
-    "https://*.tawk.to/*"
+    "https://*.tawk.to/*",
+    "https://meet.google.com/*",
+    "https://mail.google.com/*",
+    "https://docs.google.com/*",
+    "https://outlook.live.com/*",
+    "https://*.office.com/*",
+    "https://*.office365.com/*",
+    "https://gitlab.com/*",
+    "https://app.slack.com/*",
+    "https://*.slack.com/*",
+    "https://*.notion.so/*",
+    "https://*.notion.site/*",
+    "https://linear.app/*",
+    "https://*.atlassian.net/*",
+    "https://*.atlassian.com/*",
+    "https://app.asana.com/*",
+    "https://*.monday.com/*",
+    "https://app.clickup.com/*",
+    "https://*.canva.com/*",
+    "https://*.figma.com/*",
+    "https://miro.com/*"
   ],
   "content_scripts": [
     {
@@ -106,7 +126,27 @@
         "https://*.hs-scripts.com/*",
         "https://*.livechatinc.com/*",
         "https://*.crisp.chat/*",
-        "https://*.tawk.to/*"
+        "https://*.tawk.to/*",
+        "https://meet.google.com/*",
+        "https://mail.google.com/*",
+        "https://docs.google.com/*",
+        "https://outlook.live.com/*",
+        "https://*.office.com/*",
+        "https://*.office365.com/*",
+        "https://gitlab.com/*",
+        "https://app.slack.com/*",
+        "https://*.slack.com/*",
+        "https://*.notion.so/*",
+        "https://*.notion.site/*",
+        "https://linear.app/*",
+        "https://*.atlassian.net/*",
+        "https://*.atlassian.com/*",
+        "https://app.asana.com/*",
+        "https://*.monday.com/*",
+        "https://app.clickup.com/*",
+        "https://*.canva.com/*",
+        "https://*.figma.com/*",
+        "https://miro.com/*"
       ],
       "js": [
         "vendor/pdf.js",
@@ -175,5 +215,6 @@
     "16": "icons/icon-16.png",
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
-  }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnRB+d7KA2qgyxgAJCsQu3glqdgTkcy2CJwn/nsus8+gmZ6zVYGLFPDKPgAxx6kpr2X/I9gxU8SbImMKEubrI100cpBVtEhOzcWFiaDcy2G/+1mWviNTEwOnd2MG32d+r5nAwjfPwioucIX5S4TLDSG6CEP/xi1RfJLqFgDCaZkGRH0jI7r1FVvlRtVQsL45t6DZt7gaDf3sXYDXCCYK16Ol7xDoY5eWLa+9DYWcPA3sAz3LKKubMMm6y2HsU54ViRXYrua3vJQHSXF2S3N8ixiqLowAOJNESjubRlZvGWUgwmg7iFDkAIXO+k1BpFlUzEAIqrsmLHFAdzpmP4PRTuwIDAQAB"
 }

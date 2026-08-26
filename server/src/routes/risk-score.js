@@ -244,7 +244,14 @@ async function machineMetrics(db, machineIds) {
   const since = windowStart();
   const recent7dStart = new Date(Date.now() - 7 * 86400000).toISOString();
 
-  const [events, tools] = await Promise.all([
+  // tool_usage stores real Date objects while dlp_events store ISO strings, and
+  // Mongo comparisons are TYPE-BRACKETED: a Date field never matches a string
+  // bound. Using windowStart() for both would silently return nothing for
+  // tool_usage, which is indistinguishable from "this person used no AI tools" —
+  // the exact failure this factor already had.
+  const sinceDate = new Date(Date.now() - WINDOW_DAYS * 86400000);
+
+  const [events, tools, webTools] = await Promise.all([
     db.collection('dlp_events').aggregate([
       { $match: { machine_id: { $in: machineIds }, occurred_at: { $gte: since } } },
       { $group: {
@@ -262,6 +269,26 @@ async function machineMetrics(db, machineIds) {
       { $match: { machine_id: { $in: machineIds }, detected_at: { $gte: since } } },
       { $group: { _id: '$machine_id', toolKeys: { $addToSet: '$tool_key' } } },
     ]).toArray(),
+    // BROWSER-DISCOVERED TOOLS. `findings` is written only by the desktop agent's
+    // scan report (/api/v1/reports), so on a browser-only rollout — extension
+    // force-installed, no agent — this factor was structurally zero for everyone.
+    // Verified in production: all 39 extension-only profiles scored shadow_tools 0,
+    // capping every one of them at 80 of 100 and losing the "which unsanctioned AI
+    // is this person using" signal entirely, which is the headline question the
+    // factor exists to answer.
+    //
+    // The data was already being collected and correctly shaped —
+    // classifications.js upserts { machine_id, tool_key: host } into tool_usage on
+    // every hit against an AI-classified host. Nothing read it.
+    //
+    // tool_key is the HOST for browser tools and vendor:product for agent
+    // findings. Both are compared against the same sanctions list, which stores
+    // whichever key the registry exposed for that tool, so the two shapes coexist
+    // rather than needing translation.
+    db.collection('tool_usage').aggregate([
+      { $match: { machine_id: { $in: machineIds }, last_used_at: { $gte: sinceDate } } },
+      { $group: { _id: '$machine_id', toolKeys: { $addToSet: '$tool_key' } } },
+    ]).toArray(),
   ]);
 
   for (const r of events) {
@@ -269,7 +296,9 @@ async function machineMetrics(db, machineIds) {
     m.blocks = r.blocks; m.overrides = r.overrides; m.hiCrit = r.hiCrit;
     m.recent7d = r.recent7d; m.prevPeriod = r.prevPeriod;
   }
-  for (const r of tools) {
+  // Unioned into one set, so a tool seen by both the agent and the browser counts
+  // once rather than twice.
+  for (const r of [...tools, ...webTools]) {
     const m = out.get(r._id); if (!m) continue;
     for (const k of r.toolKeys || []) if (k) m.toolKeys.add(k);
   }
@@ -340,13 +369,49 @@ function computeScore(profile, metrics, sanctionedKeys) {
   const volumeRatio = dailyAvgPrev > 0 ? dailyAvgRecent / dailyAvgPrev : (recent7d > 10 ? 3 : 0);
   const volumeScore = volumeRatio > 5 ? 100 : volumeRatio > 3 ? 70 : volumeRatio > 2 ? 40 : 0;
 
-  // Weighted composite score
-  const rawScore =
-    (dlpScore * WEIGHTS.dlp_violations +
-     overrideScore * WEIGHTS.enforcement_overrides +
-     shadowScore * WEIGHTS.shadow_tools +
-     sensitivityScore * WEIGHTS.data_sensitivity +
-     volumeScore * WEIGHTS.volume_anomaly) / 100;
+  // WEIGHTED COMPOSITE, NORMALISED OVER THE FACTORS THAT CAN ACTUALLY BE MEASURED.
+  //
+  // An unmeasurable factor used to contribute a zero — that is, it was scored as
+  // "clean". This file's own header rejects exactly that reasoning for a profile
+  // with no machine: no data is not the same as no risk, and treating it as safe
+  // is "precisely backwards for a governance tool". The same mistake applied one
+  // level down, per factor.
+  //
+  // Concretely: enforcement_overrides counts a user bypassing a block, and the
+  // browser extension offers no bypass — the block modal only lets you edit the
+  // prompt or send a MASKED version, which is compliance rather than override. So
+  // on a browser-only rollout that factor could never be anything but zero, and it
+  // carries 25 of the 100 weight. The reachable ceiling was therefore 75, against
+  // bands where "critical" starts at 81 — meaning no browser-only employee could
+  // EVER be labelled critical, however badly they behaved, and any alert filtering
+  // on critical returned nothing for ever.
+  //
+  // So the denominator is the weight in play rather than a constant 100. A factor
+  // is in play when this profile has a data source that could produce it; a factor
+  // that IS measurable and came back clean still contributes its zero, because
+  // that is a real observation.
+  // CONSERVATIVE: only drop the weight when we positively know this profile has no
+  // agent. A missing `sources` means unknown provenance — legacy rows predate the
+  // field — and guessing "extension-only" there would inflate scores on data we
+  // cannot vouch for. Unknown therefore keeps the full denominator, so the only
+  // profiles that change are the ones explicitly recorded as extension-only.
+  const overridesMeasurable = !Array.isArray(profile.sources)
+    || profile.sources.includes('agent');
+
+  const applicable = [
+    { score: dlpScore,         weight: WEIGHTS.dlp_violations },
+    { score: shadowScore,      weight: WEIGHTS.shadow_tools },
+    { score: sensitivityScore, weight: WEIGHTS.data_sensitivity },
+    { score: volumeScore,      weight: WEIGHTS.volume_anomaly },
+  ];
+  if (overridesMeasurable) {
+    applicable.push({ score: overrideScore, weight: WEIGHTS.enforcement_overrides });
+  }
+
+  const totalWeight = applicable.reduce((sum, f) => sum + f.weight, 0);
+  const rawScore = totalWeight === 0
+    ? 0
+    : applicable.reduce((sum, f) => sum + f.score * f.weight, 0) / totalWeight;
 
   const finalScore = Math.min(Math.round(rawScore), 100);
 
@@ -356,6 +421,10 @@ function computeScore(profile, metrics, sanctionedKeys) {
     email: profile.email,
     score: finalScore,
     level: scoreLevel(finalScore),
+    // Which factors counted, so a reader can tell a clean measurement from an
+    // impossible one — the distinction that made the ceiling wrong.
+    scored_over_weight: totalWeight,
+    excluded_factors: overridesMeasurable ? [] : ['enforcement_overrides'],
     factors: {
       dlp_violations:       { raw: dlpViolations, score: dlpScore, weight: WEIGHTS.dlp_violations },
       enforcement_overrides:{ raw: overrides, score: overrideScore, weight: WEIGHTS.enforcement_overrides },

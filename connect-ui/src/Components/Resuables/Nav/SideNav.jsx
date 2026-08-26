@@ -46,15 +46,34 @@ function usePendingRequestCount() {
   const [count, setCount] = useState(0);
   useEffect(() => {
     const adminToken = import.meta.env.VITE_ADMIN_TOKEN;
+    let id;
+    // Whether this build has a credential the route accepts is decided before
+    // the first request — VITE_ADMIN_TOKEN is inlined at build time, and a
+    // session cookie would already be on the document. So a 401/403 here will
+    // still be a 401/403 in 30 seconds. Stop the poll on the first one instead
+    // of reprinting the same console error twice a minute for as long as the
+    // tab is open. The first attempt is still made, so the day the server
+    // starts setting a session cookie this picks it up with no change.
+    let stopped = false;
     const load = () => fetch("/api/v1/access-requests", {
       credentials: "same-origin",
       headers: adminToken ? { Authorization: `Bearer ${adminToken}` } : {},
     })
-      .then(r => r.ok ? r.json() : [])
+      .then(r => {
+        if (r.status === 401 || r.status === 403) {
+          stopped = true;
+          clearInterval(id);
+          return [];
+        }
+        return r.ok ? r.json() : [];
+      })
       .then(list => setCount((list || []).filter(r => r.status === "pending").length))
       .catch(() => {});
     load();
-    const id = setInterval(load, 30000);
+    id = setInterval(() => {
+      if (stopped) { clearInterval(id); return; }
+      load();
+    }, 30000);
     return () => clearInterval(id);
   }, []);
   return count;

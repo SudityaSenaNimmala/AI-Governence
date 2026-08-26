@@ -16,6 +16,7 @@
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, createWriteStream, readdirSync, statSync, copyFileSync, cpSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
@@ -134,7 +135,7 @@ async function applyUpdate({ serverUrl, token, serverVersion, log }) {
 
   // Copy new agent source files over the current installation (silent, in-place).
   // The extracted zip has agent/src/, agent/package.json. Copy them over ours.
-  const agentRoot = join(dirname(dirname(import.meta.url.replace('file:///', '').replace('file://', ''))));
+  const agentRoot = dirname(dirname(fileURLToPath(import.meta.url)));
   const extractedAgent = join(extractDir, 'agent');
   const sourceDir = existsSync(extractedAgent) ? extractedAgent : extractDir;
 
@@ -155,7 +156,7 @@ async function applyUpdate({ serverUrl, token, serverVersion, log }) {
   try {
     const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
     const npmResult = spawn(npm, ['install', '--production', '--no-audit', '--no-fund'], {
-      cwd: agentRoot, stdio: 'pipe',
+      cwd: agentRoot, stdio: 'pipe', shell: process.platform === 'win32',
     });
     await new Promise((resolve) => npmResult.on('exit', resolve));
     log?.info?.('auto-updater: dependencies updated');

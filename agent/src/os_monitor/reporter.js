@@ -7,6 +7,7 @@
 // events within a couple seconds for live alerting), plus a longer safety-net
 // interval (in case the debounce timer is somehow lost or stalled).
 import os from 'node:os';
+import { createHash } from 'node:crypto';
 
 const DEBOUNCE_MS         = 2_000;   // flush this long after the latest event
 const SAFETY_INTERVAL_MS  = 30_000;  // also flush at least this often
@@ -40,11 +41,21 @@ export class Reporter {
   }
 
   enqueue(event) {
+    const occurredAt = event.occurredAt || new Date().toISOString();
+    // Stable dedupe key: hash of the event's immutable identity fields.
+    // The server upserts on this key, so replays after a restart or retry
+    // update the existing row instead of inserting a duplicate.
+    const clientEventId = createHash('sha256')
+      .update([event.kind ?? '', event.service ?? '', occurredAt, event.user || OS_USER || '', event.hostname || ''].join('|'))
+      .digest('hex')
+      .slice(0, 32);
+
     this.queue.push({
       ...event,
       source: 'os_monitor',
       user: event.user || OS_USER,
-      occurredAt: event.occurredAt || new Date().toISOString(),
+      occurredAt,
+      clientEventId,
     });
 
     // Eager-flush if batch fills (high-volume case).

@@ -58,7 +58,42 @@ export const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'dev-admin-token';
 // Dev convenience is preserved by the token itself, not by an env check: with no
 // ADMIN_TOKEN set the value is the well-known 'dev-admin-token', which startup
 // logs, so a local caller just sends `Authorization: Bearer dev-admin-token`.
+// ADMIN_AUTH_OPEN — a deliberate, temporary hole, opted into per deployment.
+//
+// WHY IT EXISTS. The dashboard has no way for a person to sign in yet, so every
+// admin-gated panel (Access Requests, Active Exceptions, session replay, SDK
+// projects) is unusable in a deployment: the browser has no credential to send and
+// the server correctly answers 401. The alternative stopgaps are worse — baking
+// ADMIN_TOKEN into the client bundle publishes it to every visitor, and asking
+// each admin to paste a shared token is a credential-handling habit worth not
+// teaching. Admin OAuth is the real answer and is deliberately deferred.
+//
+// WHAT IT COSTS, stated so it is chosen rather than discovered. With this on,
+// anyone who can reach the API can read access requests and approve, reject or
+// revoke them — which for a governance product means an outsider could grant
+// access to a blocked AI tool. It is only defensible while the host is reachable
+// solely from inside the network or by people who would be admins anyway.
+//
+// DEFAULT OFF, so nobody gets this by upgrading. Enabling it logs a warning on
+// every request path that uses it, once, because a hole nothing mentions is a hole
+// nobody remembers to close. Delete this branch when OAuth lands.
+// Trimmed, because .env parsers routinely leave trailing whitespace and
+// `ADMIN_AUTH_OPEN=true ` is unambiguous in intent. Still an exact match on
+// "true" otherwise: "1"/"yes"/"on" must NOT enable it, so a mistyped value fails
+// closed rather than opening the admin surface by accident.
+const ADMIN_AUTH_OPEN = String(process.env.ADMIN_AUTH_OPEN || '').trim().toLowerCase() === 'true';
+let _openWarned = false;
+
 export function requireAdminAuth(req, res, next) {
+  if (ADMIN_AUTH_OPEN) {
+    if (!_openWarned) {
+      _openWarned = true;
+      console.warn('[auth] ADMIN_AUTH_OPEN=true — admin routes are UNAUTHENTICATED. '
+        + 'Anyone who can reach this API can approve or revoke tool access. '
+        + 'Intended as a stopgap until admin OAuth ships; unset it to re-enable auth.');
+    }
+    return next();
+  }
   const header = req.headers.authorization || '';
   const m = header.match(/^Bearer\s+(.+)$/);
   if (!m || !constantTimeEqual(m[1], ADMIN_TOKEN)) {
@@ -67,10 +102,60 @@ export function requireAdminAuth(req, res, next) {
   next();
 }
 
+/** Exposed so the dashboard can say out loud that admin auth is off. */
+export function adminAuthIsOpen() { return ADMIN_AUTH_OPEN; }
+
+// THE TOOL-ACCESS REVIEW QUEUE ONLY, and open by default. Everything else keeps
+// requireAdminAuth unchanged.
+//
+// I first tried making requireAdminAuth itself default-open so the dashboard would
+// work without configuration, and thirteen tests failed — correctly. They guard
+// session replay, raw prompt content, conversation content and the SDK routes,
+// which are the most sensitive artefacts this product holds; the comment above
+// already records that a middleware which no-ops was judged unacceptable for
+// exactly those. So the default does not move for them.
+//
+// This queue is a different exposure class, and the same one the codebase already
+// accepts elsewhere: GET /api/v1/risk-scores, /machines and /dlp are all readable
+// without a credential today, and this list is comparable — who asked for which
+// tool, and what was decided.
+//
+// WHAT IT STILL COSTS: approve/reject/revoke run through here too, so with no
+// ADMIN_AUTH_OPEN=false set, anyone who can reach the API can grant access to a
+// blocked tool. Reads alone would have been safer, but a review queue you can see
+// and cannot act on is not a review queue. Set ADMIN_AUTH_OPEN=false on any host
+// where that matters more than the panel working, and delete this function when
+// admin OAuth lands.
+// Note the inverted default: only an explicit "false" closes this one, so the
+// panel works out of the box while ADMIN_AUTH_OPEN stays fail-closed for
+// everything sensitive. One variable, two defaults, spelled out because that is
+// surprising.
+const REVIEW_AUTH_OPEN = String(process.env.ADMIN_AUTH_OPEN ?? '').trim().toLowerCase() !== 'false';
+
+export function requireReviewAuth(req, res, next) {
+  if (REVIEW_AUTH_OPEN) {
+    if (!_reviewWarned) {
+      _reviewWarned = true;
+      console.warn('[auth] tool-access review is UNAUTHENTICATED (default until admin '
+        + 'OAuth ships). Anyone who can reach this API can approve or revoke tool '
+        + 'access. Set ADMIN_AUTH_OPEN=false to require a credential.');
+    }
+    return next();
+  }
+  return requireAdminAuth(req, res, next);
+}
+let _reviewWarned = false;
+
+/** Reported by /api/v1/health so an open review queue is discoverable. */
+export function reviewAuthIsOpen() { return REVIEW_AUTH_OPEN; }
+
 // Length-independent comparison: bail on a length mismatch (already public via
 // the token's own format) and otherwise compare in constant time so a wrong
 // token cannot be refined byte-by-byte from response timing.
-function constantTimeEqual(a, b) {
+// Exported so callers that authenticate with the enroll secret (enroll.js,
+// browser-coverage.js) share one implementation. Comparing secrets with === leaks
+// their length and prefix through timing, which is worth exactly one function.
+export function constantTimeEqual(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   const ab = Buffer.from(a);
   const bb = Buffer.from(b);

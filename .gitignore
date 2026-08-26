@@ -30,3 +30,8 @@ agent/prebuilt/
 
 # Baked pilot config (contains enroll secret) — never commit
 browser-extension/cfai-config.json
+
+# CRX signing key. The extension ID is derived from it, so committing it would let
+# anyone sign a package that every managed machine accepts as ours.
+*.pem
+crx-signing-key*

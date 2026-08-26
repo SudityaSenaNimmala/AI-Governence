@@ -1401,8 +1401,18 @@ const REPLAY_CONTROLS_H=88;
 //     "needs an admin credential" panel. There is therefore no credential
 //     embedded in this repository, and none in a build unless the person doing
 //     the build supplies one.
+// BUILD-time only, and only useful in a developer checkout.
+//
+// Vite inlines this into the client bundle, so anything put here is readable by
+// every visitor who opens devtools — fine locally, wrong for a deployed dashboard
+// on a public host. There is deliberately no runtime entry point either: a shared
+// admin token pasted into a web page spreads by screenshot and outlives whoever
+// pasted it. A deployment makes these panels usable with ADMIN_AUTH_OPEN=true on
+// the server instead, and admin OAuth replaces both.
+export function adminToken(){ return import.meta.env.VITE_ADMIN_TOKEN||""; }
+
 async function adminFetch(path, init) {
-  const token=import.meta.env.VITE_ADMIN_TOKEN;
+  const token=adminToken();
   return fetch(`${API}${path}`, {
     ...init,
     credentials:"same-origin",
@@ -1824,7 +1834,7 @@ function ReplayPlayer({ replays, activeIdx, onSelect, man, apiRef, tickRef, onRe
           <Shield size={26} strokeWidth={1.5}/>
           <div className="aihub_rec_gone_title">Replay needs an admin credential</div>
           <p className="aihub_text_muted">
-            The replay routes require admin auth and this dashboard sent none the server accepted. For local review, put <Mono>VITE_ADMIN_TOKEN</Mono> in <Mono>connect-ui/.env.local</Mono> matching the server&apos;s <Mono>ADMIN_TOKEN</Mono> and restart the dev server. The metadata below comes from the open sessions route and is accurate.
+            Session replay playback is restricted to administrators, and this dashboard has no admin credential. The metadata below comes from the open sessions route and is accurate.
           </p>
         </div>
       ) : (man.status==="missing"||ev.status==="missing") ? (
@@ -3791,7 +3801,10 @@ function surfaceDetail(row) {
 // A denied write, phrased for the person who clicked the button. Same cause as
 // the sdkAuthNotice panel below, but that panel only explains an empty list —
 // an alert is what an admin needs when Approve does nothing.
-const ACCESS_DENIED_MSG="Not authorised — approving, rejecting, and revoking need an admin credential (VITE_ADMIN_TOKEN in connect-ui/.env.local). Nothing was changed.";
+// Names no build variable and no source path: this string reaches a customer's
+// screen on a deployed dashboard, where neither is actionable and both are just
+// our internals on someone else's monitor.
+const ACCESS_DENIED_MSG="Not authorised — approving, rejecting and revoking require an admin credential. Nothing was changed.";
 
 function AccessRequestsView() {
   const [requests,setRequests]=useState(null);
@@ -4048,27 +4061,60 @@ function copyText(text) {
   }catch{ fallback(); }
 }
 
-// Not an error state: a checkout with no VITE_ADMIN_TOKEN is the normal starting
-// point, so this reads as setup instructions.
-function sdkAuthNotice(what) {
-  return (<div className="aihub_card" style={{borderLeft:"3px solid #f59e0b"}}>
-    <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
-      <Shield size={18} color="#f59e0b" style={{flexShrink:0,marginTop:2}}/>
-      <div>
-        <div style={{fontWeight:700,fontSize:14.2,marginBottom:4}}>Admin credential required</div>
-        <p className="aihub_text_muted" style={{fontSize:13.2,lineHeight:1.65,margin:0}}>
-          {what} is admin-only, and this build is not sending an admin token, so the server answered 401.
-          Add a line to <Mono>connect-ui/.env.local</Mono> and restart the dev server:
-        </p>
-        <pre className="aihub_content_pre" style={{marginTop:10,fontSize:13.2}}>VITE_ADMIN_TOKEN=dev-admin-token</pre>
-        <p className="aihub_text_muted" style={{fontSize:12.7,lineHeight:1.6,marginTop:8,marginBottom:0}}>
-          <Mono>dev-admin-token</Mono> is the documented local default in <Mono>server/src/auth.js</Mono>.
-          A deployed server sets its own <Mono>ADMIN_TOKEN</Mono>, and that value goes here instead.
-          Nothing is hardcoded in the app — with no token set, no <Mono>Authorization</Mono> header is sent at all.
-        </p>
+// Shown only when an admin-gated panel gets a 401.
+//
+// NO CREDENTIAL ENTRY, DELIBERATELY. An earlier version of this offered a token
+// field, and asking each admin to paste a shared secret into a web page is a
+// habit worth not teaching — the token is the same for everyone who has it, so it
+// spreads by screenshot and lives in whatever notes app it was copied from. Admin
+// OAuth is the intended answer.
+//
+// Until then the server-side flag ADMIN_AUTH_OPEN=true removes the 401 entirely
+// and this panel never renders, which is why the copy points at the operator
+// rather than the reader: there is nothing the person looking at the screen can do
+// here, and pretending otherwise wastes their time.
+//
+// The dev branch keeps its .env.local instructions because there it IS actionable.
+// Vite dead-code-eliminates the branch that does not apply, so a production bundle
+// carries none of the developer text.
+function AdminAuthNotice({ what }) {
+  if (import.meta.env.DEV) {
+    return (<div className="aihub_card" style={{borderLeft:"3px solid #f59e0b"}}>
+      <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+        <Shield size={18} color="#f59e0b" style={{flexShrink:0,marginTop:2}}/>
+        <div>
+          <div style={{fontWeight:700,fontSize:14.2,marginBottom:4}}>Admin credential required</div>
+          <p className="aihub_text_muted" style={{fontSize:13.2,lineHeight:1.65,margin:0}}>
+            {what} is admin-only and this build sent no admin token, so the server answered 401.
+            Add a line to <Mono>connect-ui/.env.local</Mono> and restart the dev server:
+          </p>
+          <pre className="aihub_content_pre" style={{marginTop:10,fontSize:13.2}}>VITE_ADMIN_TOKEN=dev-admin-token</pre>
+          <p className="aihub_text_muted" style={{fontSize:12.7,lineHeight:1.6,marginTop:8,marginBottom:0}}>
+            Or set <Mono>ADMIN_AUTH_OPEN=true</Mono> on the server to skip admin auth entirely.
+          </p>
+        </div>
       </div>
-    </div>
-  </div>);
+    </div>);
+  }
+
+  // DEPLOYED: RENDER NOTHING. Asked for explicitly — no banner, no field, no
+  // mention of credentials anywhere in the product UI.
+  //
+  // THE TRADE-OFF, so it is not rediscovered as a bug. With the notice gone, a 401
+  // is indistinguishable from an empty result: the page shows "0 Pending" and "No
+  // pending requests" whether there are genuinely none or the dashboard simply
+  // could not read them. The count is asserted without being verified.
+  //
+  // That is survivable only because the intended state is ADMIN_AUTH_OPEN=true on
+  // the server, where no 401 occurs and the zeros are real. If those panels ever
+  // read zero unexpectedly, check /api/v1/health for admin_auth:"required" — the UI
+  // will not say it.
+  return null;
+}
+
+// Kept as a function call so the existing call sites are unchanged.
+function sdkAuthNotice(what) {
+  return <AdminAuthNotice what={what} />;
 }
 
 // One numbered step of the "How a developer connects" checklist. There is no
@@ -4444,7 +4490,7 @@ function SdkTracesView() {
     setIo({status:"loading"});
     try{
       const res=await adminFetch(`/tracing/observations/${encodeURIComponent(o.id)}/io?project_id=${encodeURIComponent(projectId)}`);
-      if(res.status===401||res.status===403){ setIo({status:"error",message:"Admin credential required — set VITE_ADMIN_TOKEN in connect-ui/.env.local (local value: dev-admin-token) and restart the dev server."}); return; }
+      if(res.status===401||res.status===403){ setIo({status:"error",message:"Admin credential required to view raw content."}); return; }
       if(res.status===404){ setIo({status:"error",message:"Content unavailable — this project doesn't store raw content, so only the masked previews above exist."}); return; }
       if(!res.ok){ setIo({status:"error",message:`Content unavailable (HTTP ${res.status}).`}); return; }
       const d=await res.json();
@@ -4469,8 +4515,8 @@ function SdkTracesView() {
             style={{padding:"7px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",fontSize:13.2,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>Load traces</button>
         </div>
         <p className="aihub_text_muted" style={{fontSize:12.7,lineHeight:1.6,margin:"8px 0 0"}}>
-          The project drop-down needs an admin credential (<Mono>VITE_ADMIN_TOKEN</Mono> in <Mono>connect-ui/.env.local</Mono>,
-          local value <Mono>dev-admin-token</Mono>). Reading traces does not — paste a project id and this view works on its own.
+          The project drop-down needs an admin credential. Reading traces does not — paste a
+          project id and this view works on its own.
         </p>
       </div>):projects.length===0?(
         <Empty icon={<Server size={28} strokeWidth={1.5}/>} title="No SDK projects yet"
@@ -6635,9 +6681,7 @@ const TAB_GROUPS_RAW = {
       { slug: "policies", label: "Policies", feat: "policies", component: function PoliciesPage() {
         return <AgentGovernanceProvider><PoliciesTab/></AgentGovernanceProvider>;
       } },
-      { slug: "risk", label: "Risk Scores", component: function RiskScorePage() {
-        return <><FeatureDepWarning featureKey="risk_scores"/><RiskScoreView/></>;
-      }, feat: "risk_scores" },
+      { slug: "risk", label: "Risk Scores", component: RiskScoreView, feat: "risk_scores" },
     ],
   },
   SDK: {

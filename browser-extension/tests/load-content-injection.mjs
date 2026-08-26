@@ -27,7 +27,7 @@ import path from 'node:path';
 const GUARD_START = '// ── one bootstrap per document ─';
 // The load banner is the first thing after the guard, and it is also the line the
 // live test saw twice — so the slice ends with it and the test can count it.
-const GUARD_END = "console.info('[cfai] content script v2 loaded on', location.hostname);";
+const GUARD_END = "clog('[cfai] content script v2 loaded on', location.hostname);";
 
 const BOOT_START = '// ── session replay bootstrap ─';
 const BOOT_END = '// ── end session replay bootstrap ─';
@@ -59,6 +59,7 @@ export function guardIsFirstStatement() {
  *
  * options:
  *   topFrame   the recorder is top-frame only (content.js is injected all_frames)
+ *   debug      value of the localStorage cfai_debug gate (default on)
  *   sessionId  what currentSessionIdCached() returns
  *
  * Returns:
@@ -72,7 +73,7 @@ export function guardIsFirstStatement() {
  *   logs                console.info / console.warn lines, across injections
  *   loadedLines         just the "content script v2 loaded" lines
  */
-export function makeDocumentWorld({ topFrame = true, sessionId = 'sess-1' } = {}) {
+export function makeDocumentWorld({ topFrame = true, sessionId = 'sess-1', debug = true } = {}) {
   const created = [];
   const controllers = [];
   const banners = [];
@@ -81,6 +82,10 @@ export function makeDocumentWorld({ topFrame = true, sessionId = 'sess-1' } = {}
   const logs = { info: [], warn: [] };
 
   const window = {};
+  // `debug` drives content.js's real localStorage gate. Defaults to on here so
+  // the bootstrap lines these tests count are emitted; pass false to assert the
+  // shipping default, which is silence on the customer's page.
+  window.localStorage = { getItem: (k) => ((debug && k === 'cfai_debug') ? '1' : null) };
   window.self = window;
   window.top = topFrame ? window : { notThisFrame: true };
   window.rrweb = { record: () => () => {} };

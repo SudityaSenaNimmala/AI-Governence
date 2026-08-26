@@ -203,3 +203,152 @@ test('DB operation count does not grow with the number of profiles', async () =>
   assert.equal(large.insertMany, 1);
   assert.equal(large.bulkWrite, 1);
 });
+
+// ── Shadow tools on a browser-only rollout ─────────────────────────────────
+//
+// THE DEFECT THIS PINS DOWN. shadow_tools is 20 of the 100 score weight, and it
+// read only `findings` — written exclusively by the desktop agent's scan report.
+// On a browser-only rollout (extension force-installed, no agent) it was therefore
+// structurally zero for everybody. Verified in production before the fix: all 39
+// extension-only profiles scored shadow_tools 0, capping each at 80 of 100 and
+// losing the "which unsanctioned AI is this person using" signal — the headline
+// question the factor exists to answer.
+//
+// The data was already collected and correctly shaped: classifications.js upserts
+// { machine_id, tool_key: host } into tool_usage on every hit against an
+// AI-classified host. Nothing read it.
+
+const profileOnly = (extra = {}) => async (db) => {
+  await db.collection('employee_profiles').insertOne({
+    id: 'p1', display_name: 'Browser Only', machine_ids: ['m1'],
+  });
+  for (const [coll, docs] of Object.entries(extra)) {
+    for (const doc of docs) await db.collection(coll).insertOne(doc);
+  }
+};
+
+const shadowRaw = (body) => body.scores[0].factors.shadow_tools.raw;
+
+test('browser-discovered tools count toward shadow tools', async () => {
+  await withServer(profileOnly({
+    tool_usage: [
+      { machine_id: 'm1', tool_key: 'chatgpt.com', last_used_at: new Date() },
+      { machine_id: 'm1', tool_key: 'perplexity.ai', last_used_at: new Date() },
+    ],
+  }), async ({ compute }) => {
+    assert.equal(shadowRaw(await compute()), 2,
+      'both browser-discovered tools must count — this was 0 before the fix');
+  });
+});
+
+test('a sanctioned browser tool is not shadow', async () => {
+  await withServer(profileOnly({
+    sanctions: [{ tool_key: 'chatgpt.com', status: 'approved' }],
+    tool_usage: [{ machine_id: 'm1', tool_key: 'chatgpt.com', last_used_at: new Date() }],
+  }), async ({ compute }) => {
+    assert.equal(shadowRaw(await compute()), 0,
+      'approving a tool must remove it from the risk score');
+  });
+});
+
+test('a tool seen by BOTH the agent and the browser counts once', async () => {
+  await withServer(profileOnly({
+    findings: [{ machine_id: 'm1', tool_key: 'openai:chatgpt', detected_at: new Date() }],
+    tool_usage: [{ machine_id: 'm1', tool_key: 'openai:chatgpt', last_used_at: new Date() }],
+  }), async ({ compute }) => {
+    assert.equal(shadowRaw(await compute()), 1, 'the two sources are unioned, not summed');
+  });
+});
+
+test('tool usage older than the window is excluded', async () => {
+  // The window bound must actually apply. tool_usage stores Date objects while
+  // dlp_events store ISO strings, and Mongo comparisons are type-bracketed — using
+  // the string bound here would match nothing and look exactly like "no tools".
+  await withServer(profileOnly({
+    tool_usage: [
+      { machine_id: 'm1', tool_key: 'ancient.ai', last_used_at: new Date(Date.now() - 400 * 86400000) },
+      { machine_id: 'm1', tool_key: 'current.ai', last_used_at: new Date() },
+    ],
+  }), async ({ compute }) => {
+    assert.equal(shadowRaw(await compute()), 1, 'only the in-window tool counts');
+  });
+});
+
+// ── The reachable ceiling ──────────────────────────────────────────────────
+//
+// THE DEFECT THIS PINS DOWN. enforcement_overrides counts a user bypassing a
+// block, and the browser extension offers no bypass — its block modal lets you
+// edit the prompt or send a MASKED version, which is compliance, not override. So
+// on a browser-only rollout that factor could never be anything but zero, while
+// carrying 25 of the 100 weight. The reachable ceiling was 75 against bands where
+// critical starts at 81, so no browser-only employee could EVER be labelled
+// critical however badly they behaved, and any alert filtering on critical
+// returned nothing for ever.
+//
+// Scoring an unmeasurable factor as zero is scoring it as CLEAN. This file's
+// header already rejects that reasoning one level up, for profiles with no
+// machine: no data is not no risk.
+
+const maxedOut = (sources) => async (db) => {
+  await db.collection('employee_profiles').insertOne({
+    id: 'p1', display_name: 'Worst Case', machine_ids: ['m1'], sources,
+  });
+  const now = new Date().toISOString();
+  // Enough of everything to peg every measurable factor at 100.
+  for (let i = 0; i < 20; i += 1) {
+    await db.collection('dlp_events').insertOne({
+      machine_id: 'm1', event_kind: 'enforcement_block',
+      secret_class: 'critical', occurred_at: now,
+    });
+  }
+  // volume_anomaly measures a SPIKE, not raw volume: it compares the last 7 days
+  // against the daily average of the period before it. One older in-window event
+  // gives that comparison a baseline to be a spike against — without it the ratio
+  // lands in the middle band and the factor never pegs, which is what made this
+  // test's first expectation wrong rather than the code.
+  await db.collection('dlp_events').insertOne({
+    machine_id: 'm1', event_kind: 'enforcement_block', secret_class: 'critical',
+    occurred_at: new Date(Date.now() - 20 * 86400000).toISOString(),
+  });
+  for (let i = 0; i < 10; i += 1) {
+    await db.collection('tool_usage').insertOne({
+      machine_id: 'm1', tool_key: `shadow${i}.ai`, last_used_at: new Date(),
+    });
+  }
+};
+
+test('a browser-only employee can reach critical', async () => {
+  await withServer(maxedOut(['extension']), async ({ compute }) => {
+    const s = (await compute()).scores[0];
+    assert.equal(s.score, 100,
+      'every measurable factor pegged must reach 100, not the old ceiling of 75');
+    assert.equal(s.level, 'critical',
+      'critical was mathematically unreachable on a browser-only rollout');
+    assert.deepEqual(s.excluded_factors, ['enforcement_overrides'],
+      'and the report says which factor could not be measured');
+    assert.equal(s.scored_over_weight, 75);
+  });
+});
+
+test('an agent profile still scores over the full weight', async () => {
+  // The fix must not quietly inflate profiles where the factor IS measurable: a
+  // measured-and-clean zero is a real observation and keeps its weight.
+  await withServer(maxedOut(['agent', 'extension']), async ({ compute }) => {
+    const s = (await compute()).scores[0];
+    assert.equal(s.scored_over_weight, 100, 'the override weight stays in play');
+    assert.deepEqual(s.excluded_factors, []);
+    // 75 of 100 weight pegged, overrides genuinely clean.
+    assert.equal(s.score, 75);
+    assert.equal(s.level, 'high');
+  });
+});
+
+test('a measurable-but-clean override still counts against the denominator', async () => {
+  // Otherwise an agent machine with no overrides would be scored as if the factor
+  // did not exist, and would rank identically to one where it cannot be seen.
+  await withServer(maxedOut(['agent']), async ({ compute }) => {
+    const s = (await compute()).scores[0];
+    assert.equal(s.scored_over_weight, 100);
+    assert.ok(s.score < 100, 'a clean factor is not the same as an absent one');
+  });
+});

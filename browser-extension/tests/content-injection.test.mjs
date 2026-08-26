@@ -112,3 +112,42 @@ test('patterns.js is idempotent too — it does not re-arm its GC timer or swap 
   assert.equal(win.__cfaiTokenVault, vault, 'the SAME vault, so live tokens stay resolvable');
   assert.equal(win.__cfaiPatterns.restoreTokens(token.tokenized), 'my ssn is 123-45-6789');
 });
+
+// ── The page console ────────────────────────────────────────────────────────
+//
+// content.js runs inside the customer's own applications, where it was writing
+// ~50 informational lines per page: which host is governed, which panel
+// selectors matched, that a send was blocked and why. That last group is the
+// serious one — it tells the MONITORED USER how the controls work, printed in
+// the tab they are being enforced in. Informational logging is therefore gated
+// on localStorage.cfai_debug so support can enable it per browser, while
+// warn/error stay loud because a silent extension is harder to support.
+
+test('the page console is silent by default', () => {
+  const world = makeDocumentWorld({ debug: false });
+  world.inject();
+
+  assert.equal(world.logs.info.length, 0,
+    'no informational logging on a customer page unless cfai_debug is set');
+  // The work still happened — this is a logging gate, not a feature flag.
+  assert.equal(world.created.length, 1, 'the replay controller is still set up');
+});
+
+test('support can turn the page console on for one browser', () => {
+  const world = makeDocumentWorld({ debug: true });
+  world.inject();
+  assert.equal(world.loadedLines.length, 1, 'cfai_debug=1 restores the diagnostics');
+});
+
+test('no raw console.info or console.log survives in content.js', () => {
+  // A lint the deny list cannot express: a new call added later would ship
+  // straight to the customer's console. clog() is the only way in.
+  const offenders = contentSrc
+    .split(/\r?\n/)
+    .map((line, i) => [i + 1, line])
+    .filter(([, line]) => /\bconsole\.(info|log)\(/.test(line))
+    .filter(([, line]) => !line.includes('function clog'));
+
+  assert.deepEqual(offenders, [],
+    'use clog() so page logging stays behind the cfai_debug gate');
+});

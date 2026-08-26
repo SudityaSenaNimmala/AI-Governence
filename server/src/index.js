@@ -24,6 +24,8 @@ import { mountIdentity, resolveProfiles } from './routes/identity.js';
 import { mountRiskScore } from './routes/risk-score.js';
 import { mountRegistry } from './routes/registry.js';
 import { mountAccessRequests } from './routes/access-requests.js';
+import { mountExtensionHosting } from './routes/extension-hosting.js';
+import { mountBrowserCoverage } from './routes/browser-coverage.js';
 import { mountWebhooks } from './routes/webhooks.js';
 import { mountConnections } from './routes/connections.js';
 import { mountInstallations } from './routes/installations.js';
@@ -41,7 +43,7 @@ import { mountApprovals } from './routes/approvals.js';
 import { mountSiem } from './routes/siem.js';
 import { seedAiPlatforms } from './seed-platforms.js';
 import { seedDefaultRoutingRules } from './seed-routing.js';
-import { JWT_SECRET, ENROLL_SECRET, ADMIN_TOKEN } from './auth.js';
+import { JWT_SECRET, ENROLL_SECRET, ADMIN_TOKEN, adminAuthIsOpen, reviewAuthIsOpen } from './auth.js';
 import governanceRouter from './governance/app.js';
 
 const PORT = Number(process.env.PORT) || 8787;
@@ -64,7 +66,17 @@ mountTracingIngestBodyLimit(app);
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/api/v1/health', (req, res) => {
-  res.json({ ok: true, service: 'ai-governance-server', version: '0.1.0', dbKind: 'mongodb' });
+  res.json({
+    ok: true, service: 'ai-governance-server', version: '0.1.0', dbKind: 'mongodb',
+    // Reported so an open admin surface is discoverable without reading the host's
+    // .env. A temporary hole that nothing mentions is a hole nobody remembers to
+    // close, and health is the one place ops already looks.
+    admin_auth: adminAuthIsOpen() ? 'open' : 'required',
+    // Reported separately because the two differ: the sensitive routes stay
+    // fail-closed while the tool-access review queue is open by default, so the
+    // dashboard works without configuration. ADMIN_AUTH_OPEN=false closes both.
+    review_auth: reviewAuthIsOpen() ? 'open' : 'required',
+  });
 });
 
 // ── Feature flags (server-driven) ────────────────────────────────────────────
@@ -126,6 +138,8 @@ mountIdentity(app, db);
 mountRiskScore(app, db);
 mountRegistry(app, db);
 mountAccessRequests(app, db);
+mountExtensionHosting(app, db);
+mountBrowserCoverage(app, db);
 mountWebhooks(app, db);
 mountConnections(app, db);
 mountInstallations(app, db);

@@ -386,3 +386,97 @@ test('a real send from inside the panel is still blocked', () => {
   const s = loadSurfaceScope('mail.google.com', doc([panel]));
   assert.equal(s.captureAllowed(geminiBox), true, 'a genuine prompt send stopped being governed');
 });
+
+// ── Consistency across every app, enforced ─────────────────────────────────
+//
+// The gate is generic, but its COVERAGE was hand-maintained — which is how apps
+// drifted out of it. Gmail was scoped while Google Meet was not injected at all,
+// and thirteen injected hosts (Intercom, Drift, LiveChat, Crisp, Tawk, Zopim,
+// hs-scripts, four Salesforce domains) had no scope decision, so the DLP stack
+// would have captured those whole apps.
+//
+// This test is the guarantee: every host the extension injects into must be
+// EITHER a dedicated AI product (whole_site is correct — the site IS the AI) or in
+// the embedded floor. Adding a host without deciding which is now a build failure
+// rather than a silent over-collection.
+
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const manifest = JSON.parse(readFileSync(path.join(here, '..', 'manifest.json'), 'utf8'));
+
+// Sites that ARE the AI. Capture anywhere on these is correct.
+const DEDICATED_AI =
+  /^(chatgpt\.com|chat\.openai\.com|claude\.ai|gemini\.google\.com|aistudio\.google\.com|(www\.)?perplexity\.ai|copilot\.microsoft\.com|poe\.com|you\.com|huggingface\.co|mistral\.ai|chat\.mistral\.ai|groq\.com)$/;
+
+function injectedHosts() {
+  return (manifest.content_scripts[0].matches || [])
+    .filter((m) => m !== '<all_urls>')
+    .map((m) => m.replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/^\*\./, ''));
+}
+
+test('every injected host is either a dedicated AI site or scoped to its AI panel', () => {
+  const s = loadSurfaceScope('example.invalid', doc([]));
+  const unscoped = injectedHosts().filter((h) => !DEDICATED_AI.test(h) && !s.surfaceSelectorsForHost(h));
+
+  assert.deepEqual(unscoped, [],
+    'these hosts are injected with no scope decision, so the DLP stack would capture the whole app:\n  '
+    + unscoped.join('\n  '));
+});
+
+test('every scoped host has at least one panel selector', () => {
+  // A host in the floor with an empty selector list is worse than absent: it
+  // reads as "scoped" while matching nothing, so it captures nothing and nobody
+  // notices the entry is dead.
+  const s = loadSurfaceScope('example.invalid', doc([]));
+  for (const [host, sels] of Object.entries(s.EMBEDDED_AI_FLOOR)) {
+    assert.ok(Array.isArray(sels) && sels.length > 0, `${host} has no panel selectors`);
+    for (const sel of sels) {
+      assert.doesNotMatch(sel, /\*=\s*"ai"/i,
+        `${host}: ${sel} matches the bare substring "ai", which also matches "mail"`);
+    }
+  }
+});
+
+test('the apps named in the report are all scoped the same way', () => {
+  // Gmail, Meet, HubSpot — plus the support desks and productivity apps that
+  // were injected but unscoped.
+  for (const host of [
+    'mail.google.com', 'meet.google.com', 'docs.google.com',
+    'app.hubspot.com', 'js.hs-scripts.com',
+    'acme.zendesk.com', 'acme.zopim.com',
+    'widget.intercom.io', 'js.driftt.com', 'cdn.livechatinc.com',
+    'client.crisp.chat', 'embed.tawk.to',
+    'acme.my.salesforce.com', 'acme.salesforce-sites.com',
+    'app.slack.com', 'www.notion.so', 'acme.atlassian.net',
+    'app.asana.com', 'acme.monday.com', 'app.clickup.com',
+    'www.canva.com', 'www.figma.com', 'miro.com', 'gitlab.com',
+  ]) {
+    const s = loadSurfaceScope(host, doc([]));
+    assert.equal(s.IS_EMBEDDED_AI, true, `${host} is not scoped — it would capture the whole app`);
+    // And with nothing open, it captures nothing at all.
+    assert.equal(s.captureAllowed(el({ tag: 'textarea' })), false, `${host} captured with no AI panel open`);
+  }
+});
+
+test('the same panel rule applies on every app, not just Gmail', () => {
+  // One shape, checked across a spread of apps: the app's own composer is never
+  // captured, and the AI panel's composer always is.
+  for (const [host, aiLabel] of [
+    ['meet.google.com', 'Gemini'],
+    ['app.hubspot.com', 'Breeze'],
+    ['app.slack.com', 'Assistant'],
+    ['acme.atlassian.net', 'Assistant'],
+    ['gitlab.com', 'Duo'],
+  ]) {
+    const aiBox = el({ tag: 'textarea', attrs: { 'aria-label': 'Ask' } });
+    const panel = el({ tag: 'div', attrs: { 'aria-label': aiLabel }, children: [aiBox] });
+    const appBox = el({ tag: 'div', attrs: { 'aria-label': 'Message', contenteditable: 'true' } });
+    const s = loadSurfaceScope(host, doc([panel, appBox]));
+
+    assert.equal(s.captureAllowed(aiBox), true, `${host}: the AI panel composer was not governed`);
+    assert.equal(s.captureAllowed(appBox), false, `${host}: the app's own composer was governed`);
+  }
+});

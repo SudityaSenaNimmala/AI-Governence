@@ -42,62 +42,189 @@ export const SURFACE_SCOPE = {
  * capture fails closed, an inaccurate selector under-collects — which is why it
  * is safe to ship them unverified and correct them from observed behaviour.
  */
+// Generic AI-panel selectors for apps whose embedded assistant we have not named
+// specifically. Mirrors GENERIC_AI_PANEL in browser-extension/content/content.js.
+const GENERIC_AI_PANEL = [
+  '[aria-label*="Copilot" i]', '[aria-label*="Assistant" i]', '[aria-label*="Ask AI" i]',
+  '[class*="copilot" i]', '[class*="assistant" i]', '[data-testid*="assistant" i]',
+];
+
 export const EMBEDDED_AI_SURFACES = {
   'mail.google.com': {
     product: 'Gemini in Gmail',
-    selectors: [
-      '[aria-label*="Gemini" i]',
-      '[data-gemini]',
-      'dialog[aria-label*="Gemini" i]',
-      '[jsname][aria-label*="Ask Gemini" i]',
-    ],
+    selectors: ['[aria-label*="Gemini" i]', '[data-gemini]', 'dialog[aria-label*="Gemini" i]'],
   },
   'docs.google.com': {
     product: 'Gemini in Docs',
     selectors: ['[aria-label*="Gemini" i]', '[aria-label*="Help me write" i]'],
   },
-  'hubspot.com': {
-    product: 'HubSpot Breeze',
-    selectors: [
-      '[data-test-id*="copilot" i]',
-      '[class*="copilot" i]',
-      '[aria-label*="Breeze" i]',
-      '[data-test-id*="breeze" i]',
-    ],
+  'meet.google.com': {
+    product: 'Gemini in Meet',
+    selectors: ['[aria-label*="Gemini" i]', '[aria-label*="take notes" i]'],
   },
-  'github.com': {
-    product: 'GitHub Copilot',
-    selectors: [
-      '[data-testid*="copilot" i]',
-      '#copilot-chat',
-      '[aria-label*="Copilot" i]',
-      'copilot-chat',
-    ],
+  'teams.microsoft.com': {
+    product: 'Teams Copilot',
+    selectors: ['[aria-label*="Copilot" i]', '[data-tid*="copilot" i]'],
+  },
+  'cloud.microsoft': {
+    product: 'Microsoft 365 Copilot',
+    selectors: ['[aria-label*="Copilot" i]', '[class*="copilot" i]', '[data-tid*="copilot" i]'],
   },
   'sharepoint.com': {
     product: 'SharePoint Copilot',
     selectors: ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
   },
-  'zendesk.com': {
-    product: 'Zendesk AI',
-    selectors: [
-      '[data-test-id*="copilot" i]',
-      '[data-test-id*="generative" i]',
-      '[aria-label*="Zendesk AI" i]',
-      '[class*="ai-agent" i]',
-    ],
+  'outlook.office.com': {
+    product: 'Outlook Copilot',
+    selectors: ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+  },
+  'outlook.office365.com': {
+    product: 'Outlook Copilot',
+    selectors: ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+  },
+  'outlook.live.com': {
+    product: 'Outlook Copilot',
+    selectors: ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+  },
+  'office.com': {
+    product: 'Microsoft 365 Copilot',
+    selectors: GENERIC_AI_PANEL,
+  },
+  'office365.com': {
+    product: 'Microsoft 365 Copilot',
+    selectors: GENERIC_AI_PANEL,
+  },
+  'crm.dynamics.com': {
+    product: 'Dynamics Copilot',
+    selectors: ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+  },
+  'copilotstudio.microsoft.com': {
+    product: 'Copilot Studio',
+    selectors: ['[aria-label*="Copilot" i]', '[class*="copilot" i]', '[aria-label*="Test your agent" i]'],
+  },
+  'powerapps.com': {
+    product: 'Power Apps Copilot',
+    selectors: ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+  },
+  'github.com': {
+    product: 'GitHub Copilot',
+    selectors: ['[data-testid*="copilot" i]', '#copilot-chat', '[aria-label*="Copilot" i]', 'copilot-chat'],
+  },
+  'gitlab.com': {
+    product: 'GitLab Duo',
+    selectors: ['[aria-label*="Duo" i]', '[class*="duo-chat" i]', '[data-testid*="duo" i]'],
+  },
+  'hubspot.com': {
+    product: 'HubSpot Breeze',
+    selectors: ['[data-test-id*="copilot" i]', '[class*="copilot" i]', '[aria-label*="Breeze" i]'],
+  },
+  'hs-scripts.com': {
+    product: 'HubSpot Breeze',
+    selectors: ['[data-test-id*="copilot" i]', '[class*="copilot" i]', '[aria-label*="Breeze" i]'],
   },
   'salesforce.com': {
     product: 'Salesforce Agentforce',
-    selectors: ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]', '[class*="einstein" i]'],
+    selectors: ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
   },
   'force.com': {
     product: 'Salesforce Agentforce',
-    selectors: ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]', '[class*="einstein" i]'],
+    selectors: ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+  },
+  'salesforceliveagent.com': {
+    product: 'Salesforce Agentforce',
+    selectors: ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+  },
+  'salesforce-experience.com': {
+    product: 'Salesforce Agentforce',
+    selectors: ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+  },
+  'salesforce-sites.com': {
+    product: 'Salesforce Agentforce',
+    selectors: ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+  },
+  'zendesk.com': {
+    product: 'Zendesk AI',
+    selectors: ['[data-test-id*="copilot" i]', '[data-test-id*="generative" i]', '[class*="ai-agent" i]'],
+  },
+  'zopim.com': {
+    product: 'Zendesk AI',
+    selectors: ['[data-test-id*="copilot" i]', '[data-test-id*="generative" i]', '[class*="ai-agent" i]'],
   },
   'intercom.com': {
     product: 'Intercom Fin',
-    selectors: ['[class*="fin-" i]', '[aria-label*="Fin" i]', '[class*="intercom-ai" i]'],
+    selectors: ['[class*="fin-" i]', '[class*="intercom-ai" i]'],
+  },
+  'intercom.io': {
+    product: 'Intercom Fin',
+    selectors: ['[class*="fin-" i]', '[class*="intercom-ai" i]'],
+  },
+  'drift.com': {
+    product: 'Drift AI',
+    selectors: GENERIC_AI_PANEL,
+  },
+  'driftt.com': {
+    product: 'Drift AI',
+    selectors: GENERIC_AI_PANEL,
+  },
+  'livechatinc.com': {
+    product: 'LiveChat AI',
+    selectors: GENERIC_AI_PANEL,
+  },
+  'crisp.chat': {
+    product: 'Crisp MagicReply',
+    selectors: ['[class*="magic" i]', ...GENERIC_AI_PANEL],
+  },
+  'tawk.to': {
+    product: 'Tawk AI',
+    selectors: GENERIC_AI_PANEL,
+  },
+  'slack.com': {
+    product: 'Slack AI',
+    selectors: ['[aria-label*="Slack AI" i]', '[data-qa*="ai_" i]', ...GENERIC_AI_PANEL],
+  },
+  'notion.so': {
+    product: 'Notion AI',
+    selectors: ['[class*="notion-ai" i]', '[aria-label*="Notion AI" i]', ...GENERIC_AI_PANEL],
+  },
+  'notion.site': {
+    product: 'Notion AI',
+    selectors: ['[class*="notion-ai" i]', '[aria-label*="Notion AI" i]', ...GENERIC_AI_PANEL],
+  },
+  'linear.app': {
+    product: 'Linear AI',
+    selectors: GENERIC_AI_PANEL,
+  },
+  'atlassian.net': {
+    product: 'Atlassian Intelligence',
+    selectors: ['[data-testid*="ai-" i]', '[aria-label*="Atlassian Intelligence" i]', ...GENERIC_AI_PANEL],
+  },
+  'atlassian.com': {
+    product: 'Atlassian Intelligence',
+    selectors: ['[data-testid*="ai-" i]', '[aria-label*="Atlassian Intelligence" i]', ...GENERIC_AI_PANEL],
+  },
+  'asana.com': {
+    product: 'Asana AI',
+    selectors: GENERIC_AI_PANEL,
+  },
+  'monday.com': {
+    product: 'monday AI',
+    selectors: GENERIC_AI_PANEL,
+  },
+  'clickup.com': {
+    product: 'ClickUp Brain',
+    selectors: ['[aria-label*="Brain" i]', ...GENERIC_AI_PANEL],
+  },
+  'canva.com': {
+    product: 'Canva Magic Studio',
+    selectors: ['[aria-label*="Magic" i]', ...GENERIC_AI_PANEL],
+  },
+  'figma.com': {
+    product: 'Figma AI',
+    selectors: GENERIC_AI_PANEL,
+  },
+  'miro.com': {
+    product: 'Miro AI',
+    selectors: GENERIC_AI_PANEL,
   },
 };
 
