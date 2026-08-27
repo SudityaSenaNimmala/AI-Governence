@@ -4,6 +4,7 @@ import { getDataverseToken, getValidToken } from "../services/tokenManager.js";
 import { DataverseClient } from "../services/dataverseClient.js";
 import { getDb } from "../db.js";
 import { decrypt } from "../crypto.js";
+import { normalizeAgentScope } from "../agent-scope.js";
 import type { GoogleServiceAccountKey } from "../services/googleWorkspaceClient.js";
 
 const router = Router();
@@ -432,9 +433,18 @@ router.delete("/clear-token-cache", async (_req, res) => {
 
 router.post("/block", async (req, res) => {
   try {
-    const { agent_id, agent_name, platform, reason, oauth_key_id } = req.body;
+    const { agent_id, agent_name, platform, reason, oauth_key_id, agent_scope } = req.body;
     if (!agent_id) {
       res.status(400).json({ error: "agent_id is required" });
+      return;
+    }
+    // How wide the block is — see ../agent-scope.ts. Optional and defaulting to
+    // null (platform-wide, i.e. exactly today's behaviour), but an UNRECOGNISED
+    // value is refused rather than coerced: silently defaulting a typo either way
+    // would misrepresent the admin's decision.
+    const scope = normalizeAgentScope(agent_scope);
+    if (scope === undefined) {
+      res.status(400).json({ error: "agent_scope must be 'agent', 'platform', or omitted" });
       return;
     }
     const db = getDb();
@@ -450,6 +460,7 @@ router.post("/block", async (req, res) => {
           // from. Rows written before this have none, which is why the read path
           // falls back to checking whether the agent still appears in any scan.
           oauth_key_id: oauth_key_id || null,
+          agent_scope: scope,
           blocked: true,
           blocked_at: new Date(),
           unblocked_at: null,
@@ -487,7 +498,11 @@ router.get("/blocked-agents", async (_req, res) => {
     const db = getDb();
     const list = await db.collection("blocked_agents")
       .find({ blocked: true })
-      .project({ _id: 0, agent_id: 1, agent_name: 1, platform: 1, reason: 1, blocked_at: 1, oauth_key_id: 1 })
+      // agent_scope is part of the projection because it is ENFORCEMENT input,
+      // not metadata: the desktop agent's blocked-agents.json is built from this
+      // payload, and a row whose scope never reaches the enforcer is a row that
+      // silently blocks the whole app.
+      .project({ _id: 0, agent_id: 1, agent_name: 1, platform: 1, reason: 1, blocked_at: 1, oauth_key_id: 1, agent_scope: 1 })
       .toArray();
 
     // Flag blocks whose agent no longer appears in any scan, WITHOUT removing them.

@@ -657,6 +657,16 @@ export function mountRegistry(app, db) {
             platform: req.body.platform || null,
             reason: 'Blocked by admin from AI Systems',
             oauth_key_id: null,
+            // Unconditionally 'agent' on THIS path, and only on this path. By
+            // construction of the looksLikeAgent guard above, everything reaching
+            // here IS an individual agent — a named agent inside someone else's
+            // app, with no host of its own — so "block the whole app it lives in"
+            // was never what the admin asked for. Whether the narrowing can
+            // actually be applied is the enforcer's call (it falls back to the
+            // whole-app block when it cannot tell which agent is open); the row's
+            // job is to state the intent. Plain platform blocks are handled
+            // entirely by the ai_platforms path above and never get here.
+            agent_scope: 'agent',
             blocked: true,
             blocked_at: new Date(),
             unblocked_at: null,
