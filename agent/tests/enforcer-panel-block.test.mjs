@@ -104,7 +104,7 @@ test('baseline: a stable, matching composer read blocks Enter on every tick', { 
   for (const r of rows) {
     assert.equal(r.matched, 'claude_code');
     assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
-    assert.equal(r.blockedByPanel, true, `tick ${r.tick}`);
+    assert.equal(r.blockedByElement, true, `tick ${r.tick}`);
     assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
   }
 });
@@ -125,7 +125,7 @@ test('REGRESSION: a neighbouring detection-only panel stealing the odd read must
   // panel it was armed for — not the neighbour the read landed on.
   for (const r of stolen) {
     assert.equal(r.latchHeld, true, `tick ${r.tick}: the latch must survive a neighbouring-panel read`);
-    assert.equal(r.latchPanel, 'claude_code', `tick ${r.tick}`);
+    assert.equal(r.latchKey, 'panel:claude_code', `tick ${r.tick}`);
   }
 });
 
@@ -251,7 +251,7 @@ test('baseline: a stable Cursor composer read blocks Enter on every tick', { ski
   for (const r of rows) {
     assert.equal(r.matched, 'cursor_composer');
     assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
-    assert.equal(r.blockedByPanel, true, `tick ${r.tick}`);
+    assert.equal(r.blockedByElement, true, `tick ${r.tick}`);
     assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
   }
 });
@@ -267,7 +267,7 @@ test("REGRESSION: Cursor's own code editor stealing the odd read must not unbloc
     assert.equal(r.readable, true, `tick ${r.tick}: this must be a READABLE non-match, not an unreadable read`);
     assert.equal(r.focusMoved, false, `tick ${r.tick}: nobody touched anything`);
     assert.equal(r.latchHeld, true, `tick ${r.tick}: the latch must survive a read about another element`);
-    assert.equal(r.latchPanel, 'cursor_composer', `tick ${r.tick}`);
+    assert.equal(r.latchKey, 'panel:cursor_composer', `tick ${r.tick}`);
   }
   for (const r of rows) {
     assert.equal(r.enterBlocked, true, `tick ${r.tick} (matched '${r.matched}') let Enter through`);
@@ -289,7 +289,7 @@ test('REGRESSION: the code editor winning EVERY read for 4.5s must not unblock E
   const late = rows[rows.length - 1];
   assert.equal(late.fgIsAi, false, 'the sticky window must really have expired');
   assert.equal(late.latchHeld, true, 'only the latch can still be holding the block here');
-  assert.equal(late.blockedByPanel, true);
+  assert.equal(late.blockedByElement, true);
 });
 
 test('REGRESSION: a second CSS class on the Cursor composer must not stop it matching', { skip: !win }, async () => {
@@ -342,4 +342,300 @@ test('the panic hotkey still releases a latched panel platform block', { skip: !
   // The block state itself is untouched — only the decision is suppressed, so
   // enforcement resumes on its own when the disarm window lapses.
   assert.equal(rows[1].fgIsBlocked, true);
+});
+
+// ── Agent-scoped blocks (agent_scope:'agent') ───────────────────────────────
+//
+// A blocked_agents row names ONE agent ({ agent_name: "AI Learning Advisor",
+// platform: "personal_agent" }), but the enforcer matched it against the whole
+// PROCESS set the platform maps to and used agent_name only as display text. So
+// blocking one agent disabled the entire Microsoft 365 Copilot app — generic
+// Copilot chat and every other agent in it included.
+//
+// The signal, measured live: the composer Edit's UIA Name is "Message Copilot"
+// with no specific agent open and "Message AI Learning Advisor" with that agent
+// open. The WINDOW TITLE is useless (always the static "Microsoft 365 Copilot")
+// and is used by nothing here.
+//
+// m365_copilot passed its live verification pass on 2026-08-27 against a real
+// Microsoft 365 Copilot install with a real added agent ("AI Learning Advisor"):
+// blocking that agent blocked only that agent — Enter swallowed with the composer
+// text preserved, the Request Access modal naming the agent rather than the whole
+// app — while generic Copilot chat and a different agent kept sending, including
+// immediately after switching away. So the narrowing scenarios below run the
+// SHIPPED catalog and are the shipping behaviour.
+//
+// The two-flag safety GATE is still under test, using a second, hypothetical
+// surface for the STANDALONE Copilot app that has NOT had a live pass — because
+// the gate is a rule about every future entry, not about m365_copilot.
+
+test('SAFETY GATE: an UNVERIFIED surface never narrows — the row still blocks the whole app', { skip: !win }, async () => {
+  // The rule every future AGENT_SURFACES entry ships under, asserted rather than
+  // asserted-by-absence. The harness loads the verified m365_copilot entry AND a
+  // hypothetical copilot_standalone entry with both flags false, then drives the
+  // unverified one: an agent_scope:'agent' row there must behave EXACTLY as it did
+  // before this feature existed — the whole process blocked, scope "app", no
+  // element attribution — regardless of which agent the composer says is open,
+  // and regardless of whether the read succeeded at all.
+  const rows = await scenario('agent_unverified_surface_whole_app');
+  assert.equal(rows.length, 4);
+  // The reads really did land on all three interesting outcomes, so this is not
+  // passing because nothing was read.
+  assert.deepEqual(rows.map((r) => r.agentOutcome), ['Named', 'Generic', 'Unreadable', 'Named']);
+  for (const r of rows) {
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}: the whole-app block must still fire`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'app', `tick ${r.tick}: nothing may be narrowed by an unverified surface`);
+    assert.equal(r.blockedByElement, false, `tick ${r.tick}`);
+    assert.equal(r.latchKey, '', `tick ${r.tick}: no element latch may be armed`);
+  }
+  // Including on tick 0, where the composer named the very agent the row names —
+  // a verified surface would have narrowed to it. And on tick 3, where a
+  // DIFFERENT agent was open: narrowing would have let that one through.
+  assert.equal(rows[0].enterBlocked, true);
+  assert.equal(rows[3].enterBlocked, true);
+});
+
+test('PRIVACY GATE: a platform-scoped row performs no focused-element read at all', { skip: !win }, async () => {
+  // Reading another app's accessibility tree to learn which agent someone has
+  // open is only justified by a policy that needs the answer. With no
+  // agent-scoped row covering the process, no read happens — the outcome stays
+  // Unreadable even though the composer would have read cleanly.
+  const rows = await scenario('agent_no_policy_no_read');
+  for (const r of rows) {
+    assert.equal(r.agentOutcome, 'Unreadable', `tick ${r.tick}: no read may be performed`);
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}: and the platform block is unchanged`);
+    assert.equal(r.blockScope, 'app', `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+  }
+});
+
+test('FAIL CLOSED: an agent-scoped row on a process with no surface still blocks the whole app', { skip: !win }, async () => {
+  // Nothing can tell which agent is open inside ChatGPT — there is no
+  // AGENT_SURFACES entry for it — and "cannot tell" must never mean "block
+  // nothing". Same rule that keeps the feature inert while the flags are false.
+  const rows = await scenario('agent_no_surface_whole_app');
+  for (const r of rows) {
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'app', `tick ${r.tick}`);
+    assert.equal(r.blockedByElement, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+  }
+});
+
+test('the blocked agent being open blocks Enter on every tick, agent-scoped', { skip: !win }, async () => {
+  const rows = await scenario('agent_stable_named');
+  assert.equal(rows.length, 30);
+  for (const r of rows) {
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}: a matched agent block is never app-scoped`);
+    assert.equal(r.blockedByElement, true, `tick ${r.tick}`);
+    assert.equal(r.latchKey, 'agent:m365_copilot', `tick ${r.tick}`);
+    // Attribution: an agent block carries no `panel`. index.js resolves a
+    // tool_host from that field, and an agent-surface id is not a panel id.
+    assert.equal(r.panelField, '', `tick ${r.tick}`);
+  }
+});
+
+test('unreadable reads keep an agent-scoped block alive, and the latch stays bounded', { skip: !win }, async () => {
+  // Unreadable is NO EVIDENCE — the element was gone, or belonged to another
+  // process. Treating it as "no blocked agent is open" would tear the block down
+  // on the first bad read while the user sits in the very agent an admin blocked.
+  const intermittent = await scenario('agent_intermittent_unreadable');
+  assert.ok(intermittent.filter((r) => r.agentOutcome === 'Unreadable').length >= 9);
+  for (const r of intermittent) {
+    assert.equal(r.enterBlocked, true, `tick ${r.tick} (outcome ${r.agentOutcome}) let Enter through`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}`);
+  }
+
+  const all = await scenario('agent_all_unreadable');
+  for (const r of all.slice(1)) {
+    assert.equal(r.agentOutcome, 'Unreadable', `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick} let Enter through after ${r.tick * 150}ms`);
+    assert.equal(r.latchHeld, true, `tick ${r.tick}: only the latch can be holding this`);
+  }
+
+  // …but bounded. A host whose reads never recover must not leave Enter dead.
+  const [expired] = await scenario('agent_latch_expires');
+  assert.equal(expired.latchHeld, false);
+  assert.equal(expired.fgIsBlocked, false);
+  assert.equal(expired.enterBlocked, false);
+});
+
+test('a NotComposer read holds the block exactly as an unreadable one does', { skip: !win }, async () => {
+  // Focus on the transcript above the composer: readable, correctly attributed
+  // to the foreground process, and says nothing about which agent is open.
+  const rows = await scenario('agent_not_composer');
+  for (const r of rows.slice(1)) {
+    assert.equal(r.agentOutcome, 'NotComposer', `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.latchHeld, true, `tick ${r.tick}`);
+    assert.equal(r.latchKey, 'agent:m365_copilot', `tick ${r.tick}`);
+  }
+});
+
+test('switching to generic Copilot chat clears the block in ONE tick', { skip: !win }, async () => {
+  // The other half of the bug: generic chat was blocked too. A Generic read comes
+  // from the composer itself, correctly pid-attributed, so it is AUTHORITATIVE
+  // and gets no grace period — unlike the Cursor case, where the read that stole
+  // the tick came from an unrelated element.
+  const rows = await scenario('agent_switch_to_generic');
+  assert.equal(rows[0].enterBlocked, true, 'blocked while the agent is open');
+  assert.equal(rows[1].agentOutcome, 'Generic');
+  assert.equal(rows[1].latchHeld, false, 'an authoritative Generic read retires the latch at once');
+  assert.equal(rows[1].fgIsBlocked, false, 'and clears the block on the same tick');
+  assert.equal(rows[1].enterBlocked, false, 'generic Copilot chat must be usable');
+  assert.equal(rows[2].enterBlocked, false);
+});
+
+test('switching to a DIFFERENT blocked agent re-arms under that agent', { skip: !win }, async () => {
+  const rows = await scenario('agent_switch_to_other_blocked');
+  assert.equal(rows[0].blockedAgent, 'AI Learning Advisor');
+  for (const r of rows.slice(1)) {
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}`);
+    // Re-attributed, so Request Access names the agent actually being hit.
+    assert.equal(r.blockedAgent, 'Finance Analyst', `tick ${r.tick}`);
+    assert.equal(r.latchHeld, true, `tick ${r.tick}`);
+  }
+});
+
+test('switching to an agent nobody blocked clears the block in one tick', { skip: !win }, async () => {
+  const rows = await scenario('agent_switch_to_unblocked');
+  assert.equal(rows[0].enterBlocked, true);
+  for (const r of rows.slice(1)) {
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}: a Named read for an unblocked agent is authoritative`);
+    assert.equal(r.latchHeld, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+  }
+});
+
+test('an admin lifting an agent-scoped block takes effect immediately', { skip: !win }, async () => {
+  const rows = await scenario('agent_admin_unblocks');
+  assert.equal(rows[0].enterBlocked, true);
+  assert.equal(rows[1].fgIsBlocked, false, 'the block must drop on the next tick, not after the latch TTL');
+  assert.equal(rows[1].latchHeld, false);
+  assert.equal(rows[1].enterBlocked, false);
+});
+
+test('the panic hotkey still overrides an agent-scoped block', { skip: !win }, async () => {
+  const rows = await scenario('agent_panic_hotkey');
+  assert.equal(rows[0].enterBlocked, true);
+  assert.equal(rows[1].enterBlocked, false, 'Disarmed() must win over every other signal');
+  assert.equal(rows[1].fgIsBlocked, true, 'the state is untouched — only the decision is suppressed');
+});
+
+test('a real app switch retires the agent latch at once', { skip: !win }, async () => {
+  const rows = await scenario('agent_app_switch');
+  assert.equal(rows[0].latchHeld, true);
+  assert.equal(rows[1].latchHeld, false, 'a pid change must retire the latch');
+  assert.equal(rows[1].fgIsBlocked, false);
+  assert.equal(rows[1].enterBlocked, false);
+});
+
+test('generic Copilot chat is never blocked at all when only an agent is blocked', { skip: !win }, async () => {
+  // Confirmed live: with "AI Learning Advisor" blocked, generic Copilot chat sent
+  // normally. The switch-away case is covered above; this is the cold start, where
+  // there is no latch to retire and so nothing but the block decision itself can
+  // be keeping Enter alive.
+  const rows = await scenario('agent_generic_never_blocks');
+  assert.equal(rows.length, 5);
+  for (const r of rows) {
+    assert.equal(r.agentOutcome, 'Generic', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}: generic chat must be usable`);
+    assert.equal(r.blockedByElement, false, `tick ${r.tick}`);
+    // blockScope is only meaningful while a block is up; what matters here is
+    // that no element latch was ever armed to hold one.
+    assert.equal(r.latchKey, '', `tick ${r.tick}`);
+  }
+});
+
+test('a DIFFERENT named agent is never blocked at all when only one agent is blocked', { skip: !win }, async () => {
+  // The other half of the same live observation: a different chat/agent kept
+  // sending. A Named read for an agent no row names is authoritative, so nothing
+  // arms — this is the whole point of narrowing.
+  const rows = await scenario('agent_other_named_never_blocks');
+  assert.equal(rows.length, 5);
+  for (const r of rows) {
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.blockedByElement, false, `tick ${r.tick}`);
+  }
+});
+
+test('LIVE ROUND replayed: blocked throughout, then unblocked immediately on switching away', { skip: !win }, async () => {
+  // The 2026-08-27 verification round at the real 150ms cadence: ~3s in the
+  // blocked agent's composer (the live read was clean 17/17; two transient
+  // misreads are injected anyway, since the latch has to survive them), then a
+  // switch to generic chat and to a different agent — both of which must send at
+  // once, with no lingering block.
+  const rows = await scenario('agent_live_round');
+  assert.equal(rows.length, 23);
+  const blocked = rows.slice(0, 20);
+  // The transient misreads really happened, so the pass is not vacuous.
+  assert.equal(blocked[7].agentOutcome, 'Unreadable');
+  assert.equal(blocked[13].agentOutcome, 'NotComposer');
+  for (const r of blocked) {
+    assert.equal(r.enterBlocked, true, `tick ${r.tick} (outcome ${r.agentOutcome}) let Enter through`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}: never the whole app`);
+    assert.equal(r.blockedAgent, 'AI Learning Advisor', `tick ${r.tick}`);
+    assert.equal(r.latchKey, 'agent:m365_copilot', `tick ${r.tick}`);
+    // No panel attribution: index.js resolves a tool_host from that field, and an
+    // agent-surface id is not a panel id.
+    assert.equal(r.panelField, '', `tick ${r.tick}`);
+  }
+  // Generic chat, on the very next tick — no grace period, because the read came
+  // from the composer itself and is authoritative.
+  for (const r of rows.slice(20)) {
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.latchHeld, false, `tick ${r.tick}: no lingering block`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+  }
+  assert.equal(rows[22].agentOutcome, 'Named', 'the last ticks are a different, unblocked agent');
+});
+
+test('WEBVIEW2 REGRESSION: an element in a DIRECT CHILD process still reads as the open agent', { skip: !win }, async () => {
+  // THE bug the live pass found. M365Copilot.exe hosts its UI in WebView2, so the
+  // focused composer element is UIA-owned by a child msedgewebview2.exe process,
+  // not by the foreground window's own process. ReadFocusedAgentName required an
+  // exact pid match, so every tick came back Unreadable and the narrowing could
+  // never arm at all — an agent-scoped block silently enforced nothing.
+  //
+  // Driven with REAL processes: the harness spawns genuine children of itself and
+  // asks the REAL ElementPidBelongsToForeground about the pid relationships, so
+  // the parent-pid lookup (CreateToolhelp32Snapshot) actually runs.
+  const rows = await scenario('agent_webview_child_pid');
+  assert.equal(rows.length, 3);
+  for (const r of rows) {
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}: a child process's element must be readable`);
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}`);
+    assert.equal(r.blockedByElement, true, `tick ${r.tick}`);
+    assert.equal(r.latchKey, 'agent:m365_copilot', `tick ${r.tick}`);
+  }
+});
+
+test('…and the check it preserves still rejects a genuinely unrelated process', { skip: !win }, async () => {
+  // The safety half of the same fix. FocusedElement is a GLOBAL read that was
+  // measured returning an element from another window in another process, so
+  // accepting one generation must not have become "accept anything". Two shapes,
+  // both a real live process and neither a child of the foreground pid: a SIBLING
+  // process, and the foreground process's own PARENT (the rule is one-directional).
+  // Both must land on Unreadable and arm nothing, even though the element's
+  // properties would have read as the blocked agent.
+  const rows = await scenario('agent_unrelated_pid_rejected');
+  assert.equal(rows.length, 2);
+  for (const r of rows) {
+    assert.equal(r.agentOutcome, 'Unreadable', `tick ${r.tick}: an unrelated process is no evidence`);
+    assert.equal(r.blockedByElement, false, `tick ${r.tick}`);
+    assert.equal(r.latchKey, '', `tick ${r.tick}: nothing may be armed off a rejected read`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+  }
 });

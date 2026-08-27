@@ -203,6 +203,163 @@ export const AI_PANELS = [
   },
 ];
 
+// ── Agent surfaces: one named agent INSIDE one AI app ───────────────────────
+//
+// A THIRD catalog, separate from AI_PANELS (fixed element signatures) and
+// PLATFORM_PROCS (platform id → process names), because it answers a third
+// question: not "which app is this" and not "which composer is focused", but
+// "WHICH AGENT is currently open inside this app".
+//
+// The problem it exists for. A `blocked_agents` row written by the governance
+// lifecycle route names ONE agent — { agent_name: "AI Learning Advisor",
+// platform: "personal_agent" } — but the desktop enforcer matches that row
+// against the whole PROCESS set from PLATFORM_PROCS and uses agent_name only as
+// display text. Blocking one agent therefore disabled the entire M365Copilot
+// app: generic Copilot chat and every other agent in it included.
+//
+// The read signal, confirmed live (2026-08) by a read-only UIA probe:
+//   * M365Copilot with no specific agent open → composer Edit's Name is
+//     "Message Copilot"
+//   * with "AI Learning Advisor" open        → "Message AI Learning Advisor"
+// The WINDOW TITLE is useless — it is the static "Microsoft 365 Copilot" in both
+// cases — so it is deliberately not used anywhere here.
+//
+// So: strip a known composer prefix off the focused element's Name; if what is
+// left is a `genericNames` entry, no specific agent is open; otherwise the
+// remainder IS the agent's exact display name.
+//
+// `composerNamePrefixes` is DATA, not code, precisely because "Message " is
+// English-UI-only. A non-English UI simply never matches a prefix, every read
+// lands in the NotComposer outcome, and an agent-scoped row enforces nothing on
+// the desktop (the browser extension still covers the web surface). That is an
+// accepted, deliberate fail-open; adding a locale is adding an array element.
+//
+// `enforce` / `verified` are the same two-flag safety gate AI_PANELS uses.
+//
+// The M365Copilot entry is LIVE-VERIFIED and ENFORCING (both flags true). The
+// verification pass ran 2026-08-27 against a real Microsoft 365 Copilot install
+// with a real added agent ("AI Learning Advisor"): blocking that agent blocked
+// only that agent — Enter swallowed with the composer text preserved, the
+// Request Access modal naming the agent rather than the whole app — while
+// generic Copilot chat and a different agent kept sending normally, including
+// immediately after switching away from the blocked one. The composer-name read
+// was stable across a 5s idle window (17/17 ticks). One accepted gap: the
+// mouse-click send path was not separately verified (its send-button element
+// could not be located live); it rides the same `_blockedByElement` flag Enter
+// uses, which the IDE-panel work already proved.
+//
+// The gate still applies to every FUTURE entry added here. A new surface ships
+// with BOTH FALSE — matched and unit-tested, so the whole bridge is exercised,
+// but arming nothing — until a human runs its own live pass and flips them.
+// While they are false an agent-scoped row behaves exactly as it did before this
+// feature existed: a whole-app block. enforcer-win.ps1's EnforcingAgentSurface()
+// is the single place that reads both flags, and
+// tests/enforcer-panel-block.test.mjs asserts the mechanism behaviourally
+// against a still-unverified surface.
+export const AGENT_SURFACES = [
+  {
+    id: 'm365_copilot',
+    procs: ['M365Copilot'],
+    controlType: 'Edit',
+    composerNamePrefixes: ['Message '],
+    genericNames: ['Copilot'],
+    enforce: true,
+    verified: true,
+  },
+];
+
+// Sentinels returned by extractAgentName() for the two non-Named outcomes.
+//
+// They are wrapped in BRACES, which sanitizeForPs1 strips from every value that
+// can ever reach blocked-agents.json — so no admin-typed agent_name can ever
+// collide with one, and agentNameMatches() rejects them by identity anyway
+// rather than by hoping a real name never looks like a sentinel.
+export const AGENT_NAME_GENERIC = '{generic}';
+export const AGENT_NAME_NOT_COMPOSER = '{not_composer}';
+
+// Trim + collapse internal whitespace. Applied to BOTH sides of every agent-name
+// comparison: a UIA Name can arrive with a non-breaking space or a doubled space
+// that the admin's typed name does not have, and that is not a different agent.
+// Case is preserved here — the case-insensitive part is the comparison itself.
+function normalizeAgentName(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+// Which AGENT_SURFACES entry hosts this process name, or null.
+export function agentSurfaceForProcess(processName) {
+  const proc = String(processName ?? '').replace(/\.exe$/i, '').trim().toLowerCase();
+  if (!proc) return null;
+  for (const surface of AGENT_SURFACES) {
+    if (surface.procs.some((p) => String(p).toLowerCase() === proc)) return surface;
+  }
+  return null;
+}
+
+// The name of the agent currently open in this app, extracted from the focused
+// element. PURE and side-effect free, same as matchPanelSignature and for the
+// same reason: it is unit-testable without a live UI, and the C# port in
+// enforcer-win.ps1 (ExtractAgentName) can be held in lockstep with it.
+//
+// Takes { process, controlType, name } and returns one of:
+//   AGENT_NAME_NOT_COMPOSER — this element is not a composer we can read an
+//                             agent name off (wrong process, wrong control type,
+//                             no recognised prefix, nothing after the prefix).
+//                             NO EVIDENCE either way.
+//   AGENT_NAME_GENERIC      — a composer, and what follows the prefix is a
+//                             generic app name ("Copilot"). AUTHORITATIVE: no
+//                             specific agent is open.
+//   any other string        — AUTHORITATIVE: that named agent is open.
+//
+// The "Unreadable" outcome of the live read (FocusedElement threw/was null, or
+// the element belongs to another process) is NOT this function's business — it
+// is decided at the read site, which is the only place that knows.
+//
+// Never throws: every input comes from another process's accessibility tree and
+// can be null, empty or garbage.
+export function extractAgentName(focused) {
+  const { process: processName, controlType, name } = focused || {};
+  const surface = agentSurfaceForProcess(processName);
+  if (!surface) return AGENT_NAME_NOT_COMPOSER;
+  const ct = String(controlType ?? '').trim().toLowerCase();
+  if (!ct || ct !== String(surface.controlType).toLowerCase()) return AGENT_NAME_NOT_COMPOSER;
+  const nm = String(name ?? '').trim();
+  if (!nm) return AGENT_NAME_NOT_COMPOSER;
+  for (const prefix of surface.composerNamePrefixes || []) {
+    const pre = String(prefix ?? '');
+    if (!pre) continue;
+    if (nm.length <= pre.length) continue;
+    if (nm.slice(0, pre.length).toLowerCase() !== pre.toLowerCase()) continue;
+    const remainder = normalizeAgentName(nm.slice(pre.length));
+    if (!remainder) return AGENT_NAME_NOT_COMPOSER;
+    // The Generic filter runs BEFORE any matching, so an agent literally named
+    // "Copilot" can never be matched by this mechanism. Deliberate: "block all
+    // of Copilot" is what a platform-scoped row is for.
+    for (const generic of surface.genericNames || []) {
+      if (normalizeAgentName(generic).toLowerCase() === remainder.toLowerCase()) return AGENT_NAME_GENERIC;
+    }
+    return remainder;
+  }
+  return AGENT_NAME_NOT_COMPOSER;
+}
+
+// Does the extracted agent name identify the agent a blocklist row names?
+//
+// WHOLE-STRING equality after normalisation, NOT the substring test the browser
+// extension's enforceBlockedAgent() uses. That looseness is right for the
+// extension's much messier signal (an agent name found somewhere in a page
+// header); here the signal is clean — an exact composer label — so a substring
+// test would only add false positives, e.g. a row for "Advisor" silently
+// blocking "AI Learning Advisor".
+//
+// A sentinel outcome never matches anything.
+export function agentNameMatches(extracted, blockedName) {
+  if (extracted === AGENT_NAME_GENERIC || extracted === AGENT_NAME_NOT_COMPOSER) return false;
+  const a = normalizeAgentName(extracted);
+  const b = normalizeAgentName(blockedName);
+  if (!a || !b) return false;
+  return a.toLowerCase() === b.toLowerCase();
+}
+
 // The single source of truth for "is this focused element an AI panel".
 //
 // Pure and side-effect free so it can be unit tested without a live UI, and
@@ -491,6 +648,24 @@ export function buildAiPanelConfig() {
   }));
 }
 
+// The agent-surface catalog, for the CFAI_AGENT_SURFACES env-var handoff.
+//
+// BOTH flags travel: the C# side narrows a block only when a surface is
+// `verified` AND `enforce`, so dropping either here would silently change which
+// side of that gate the surface lands on. `product`/`vendor`/`host` do not — the
+// .ps1 displays nothing and a blocked row carries its own identity fields.
+export function buildAgentSurfaceConfig() {
+  return AGENT_SURFACES.map((surface) => ({
+    id: surface.id,
+    procs: surface.procs.slice(),
+    controlType: surface.controlType,
+    composerNamePrefixes: (surface.composerNamePrefixes || []).slice(),
+    genericNames: (surface.genericNames || []).slice(),
+    enforce: surface.enforce === true,
+    verified: surface.verified === true,
+  }));
+}
+
 // enforcer-win.ps1 parses blocked-agents.json with a hand-rolled extractor:
 // ExtractJsonString stops at the first `"` after the value starts, and
 // SplitJsonArray splits rows on brace depth. Both are fooled by a quote, a
@@ -503,6 +678,63 @@ const PS1_FIELD_MAX = 200;
 
 function sanitizeForPs1(value) {
   return String(value ?? '').replace(PS1_UNSAFE_CHARS, '').trim().slice(0, PS1_FIELD_MAX);
+}
+
+// The `agent_scope` values the enforcer understands. Anything else — including
+// an absent field — means today's whole-process behaviour.
+const AGENT_SCOPES = ['agent', 'platform'];
+
+// Sanitise the SERVER's per-agent blocked_agents rows before they are written to
+// blocked-agents.json.
+//
+// synthesizePlatformBlocks() has always run its admin-typed fields through
+// sanitizeForPs1, for the reason documented above it: the .ps1's hand-rolled
+// parser derails on the whole FILE for one stray quote/backslash/brace in one
+// value, silently dropping every other block too. The server's per-agent rows
+// were sent RAW. Until now that only risked corrupting a display string; with
+// agent_scope:'agent' the agent_name becomes the MATCHING KEY, and Agent Store
+// display names are free text nobody necessarily typed carefully.
+//
+// Two things happen per row:
+//   1. every STRING value is sanitised. Non-strings (bool/number/null) are left
+//      alone — they cannot carry a character the parser chokes on, and coercing
+//      them would change the file's shape for no benefit. Anything structured
+//      (an object/array, which WOULD serialise braces into the file) is
+//      flattened through sanitizeForPs1 as a last line of defence.
+//   2. an 'agent'-scoped row whose agent_name did not survive the transport
+//      intact is DOWNGRADED to platform scope. A name the enforcer can never
+//      match would mean an agent-scoped block that silently enforces nothing;
+//      falling back to today's whole-app block is the fail-closed answer. The
+//      comparison normalises whitespace on both sides so an ordinary doubled
+//      space is not mistaken for character loss, and a sanitised name under 2
+//      characters is treated as lost regardless.
+export function normalizeAgentRows(agentRows, logger) {
+  if (!Array.isArray(agentRows)) return [];
+  const out = [];
+  for (const row of agentRows) {
+    if (!row || typeof row !== 'object') continue;
+    const clean = {};
+    for (const [key, value] of Object.entries(row)) {
+      if (typeof value === 'string') clean[key] = sanitizeForPs1(value);
+      else if (value === null || value === undefined || typeof value === 'boolean' || typeof value === 'number') clean[key] = value;
+      else clean[key] = sanitizeForPs1(value);
+    }
+    const scope = String(row.agent_scope ?? '').trim().toLowerCase();
+    clean.agent_scope = AGENT_SCOPES.includes(scope) ? scope : null;
+    if (clean.agent_scope === 'agent') {
+      const rawName = normalizeAgentName(row.agent_name);
+      const cleanName = normalizeAgentName(clean.agent_name);
+      if (cleanName.length < 2 || cleanName !== rawName) {
+        logger?.warn(
+          `blocked-agents: agent-scoped row ${row.agent_id || '(no id)'} downgraded to platform scope — `
+          + 'its agent name cannot survive the enforcer transport intact',
+        );
+        clean.agent_scope = null;
+      }
+    }
+    out.push(clean);
+  }
+  return out;
 }
 
 // GET /api/v1/ai-platforms rows → extra blocked-agents.json rows.

@@ -97,7 +97,7 @@ process.stdin.on('data', (chunk) => {
 // platform maps to (or, for a synthesised platform row, for its own host) —
 // see filterBlockedAgents() in ai-processes.js.
 import { writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
-import { filterBlockedAgents, synthesizePlatformBlocks } from '../src/os_monitor/ai-processes.js';
+import { filterBlockedAgents, synthesizePlatformBlocks, normalizeAgentRows } from '../src/os_monitor/ai-processes.js';
 
 const BLOCKED_PATH = join(homedir(), '.cloudfuze-aigov', 'blocked-agents.json');
 const PENDING_REQUEST_PATH = join(homedir(), '.cloudfuze-aigov', 'pending-access-request.json');
@@ -174,7 +174,15 @@ async function refreshBlockedAgents() {
     // ever name the same process: CheckFgBlocked() returns on its first match,
     // so array order IS the precedence. (Both branches set the same fields, so
     // the only visible difference is which name the block is attributed to.)
-    const list = (Array.isArray(agentRows) ? agentRows : []).concat(synthesizePlatformBlocks(platforms));
+    // normalizeAgentRows() is what synthesizePlatformBlocks() has always done to
+    // its own fields, applied to the server's per-agent rows too: the .ps1's
+    // hand-rolled JSON parser derails on the WHOLE file for one stray quote,
+    // backslash or brace in one value. It also downgrades an agent-scoped row
+    // whose agent_name cannot survive that transport back to platform scope, so
+    // a name the enforcer could never match falls back to a whole-app block
+    // rather than silently enforcing nothing. See ai-processes.js.
+    const list = normalizeAgentRows(Array.isArray(agentRows) ? agentRows : [], log)
+      .concat(synthesizePlatformBlocks(platforms));
     // Fail CLOSED on an exception fetch failure — keep blocking. The user can
     // still ask again; silently unblocking a disallowed app because the server
     // was briefly unreachable is the one outcome that is not recoverable.

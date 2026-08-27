@@ -131,6 +131,7 @@ $mrConfigJson = if ($modelRouterEnabled -and $env:CFAI_MODEL_ROUTER_CONFIG) { $e
 # pre-existing chat-app code path untouched.
 $ideProcsJson = if ($env:CFAI_IDE_PROCESSES) { $env:CFAI_IDE_PROCESSES } else { '' }
 $aiPanelsJson = if ($env:CFAI_AI_PANELS)     { $env:CFAI_AI_PANELS }     else { '' }
+$agentSurfacesJson = if ($env:CFAI_AGENT_SURFACES) { $env:CFAI_AGENT_SURFACES } else { '' }
 
 $source = @'
 using System;
@@ -174,6 +175,82 @@ public static class CfaiEnforcer
     static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
     [StructLayout(LayoutKind.Sequential)]
     struct RECT { public int Left, Top, Right, Bottom; }
+
+    // For ReadFocusedAgentName's parent-process check: a WebView2-hosted app
+    // (M365Copilot.exe, confirmed live) puts its actual UI content — and
+    // therefore the focused UIA element — in a CHILD msedgewebview2.exe
+    // process, not the process GetWindowThreadProcessId returns for the
+    // window itself. An exact pid match against the foreground window's
+    // process is correct for a single-process app but wrongly reads
+    // "Unreadable" on every tick for a multi-process host. Walking to find one
+    // specific pid's parent is the minimal fix — no full tree, no repeated
+    // snapshot each tick beyond the single lookup this needs.
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESSENTRY32
+    {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+    [DllImport("kernel32.dll")]
+    static extern bool Process32First(IntPtr hSnapshot, ref PROCESSENTRY32 lppe);
+    [DllImport("kernel32.dll")]
+    static extern bool Process32Next(IntPtr hSnapshot, ref PROCESSENTRY32 lppe);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr hObject);
+    const uint TH32CS_SNAPPROCESS = 0x00000002;
+
+    // Does a focused element owned by `elPid` belong to the FOREGROUND surface
+    // whose window process is `fgPid`?
+    //
+    // Its own method (rather than an inline condition in ReadFocusedAgentName)
+    // because it is the one part of that read the panel-block harness can drive
+    // for real: the FocusedElement lookup has to be substituted in a test, this
+    // rule does not.
+    //
+    // Accepts the process itself, or a DIRECT CHILD of it — nothing else. One
+    // generation only, deliberately: a WebView2/Chromium host puts its UI content
+    // exactly one process down, and walking further would start accepting
+    // whatever an unrelated app happened to launch. The direction matters too —
+    // the PARENT of the foreground process is NOT the foreground surface.
+    static bool ElementPidBelongsToForeground(int elPid, uint fgPid)
+    {
+        if (elPid == (int)fgPid) return true;
+        return GetParentProcessId(elPid) == (int)fgPid;
+    }
+
+    // Returns the parent pid of `pid`, or -1 if not found/on any error. Never
+    // throws — a failure here must fall back to the exact-match behavior, not
+    // take the poll thread down.
+    static int GetParentProcessId(int pid)
+    {
+        IntPtr snap = IntPtr.Zero;
+        try
+        {
+            snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if (snap == IntPtr.Zero) return -1;
+            PROCESSENTRY32 pe = new PROCESSENTRY32();
+            pe.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+            if (!Process32First(snap, ref pe)) return -1;
+            do
+            {
+                if ((int)pe.th32ProcessID == pid) return (int)pe.th32ParentProcessID;
+            } while (Process32Next(snap, ref pe));
+            return -1;
+        }
+        catch { return -1; }
+        finally { if (snap != IntPtr.Zero) CloseHandle(snap); }
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam; public IntPtr lParam; public uint time; public int x; public int y; }
@@ -305,8 +382,15 @@ public static class CfaiEnforcer
     // send button swallowed) when it matches a platform in the blocklist.
     // Updated every 30s by reading ~/.cloudfuze-aigov/blocked-agents.json.
     static volatile bool _fgIsBlocked = false;
-    // Which BRANCH of CheckFgBlocked armed _fgIsBlocked: the panel branch (true)
-    // or one of the two process-keyed branches (false).
+    // Was _fgIsBlocked armed from a FOCUSED-ELEMENT read (true) or from a
+    // process-name match (false)?
+    //
+    // True for both element-scoped block kinds now: an IDE-hosted AI PANEL
+    // (claude_code / cursor_composer) and a named AGENT inside a chat app
+    // (agent_scope:'agent'). Both are established by reading which element/agent
+    // has focus, so both must be exempt from re-gating on THIS tick's read —
+    // which is what the flag is for. _blockScope below is the field that says
+    // WHICH of the two (or neither) it was; this one only says "not process-wide".
     //
     // The distinction exists because PanelEnforceOk() answers a question about
     // the CURRENT poll tick's focused element ("is the surface focused right now
@@ -318,13 +402,25 @@ public static class CfaiEnforcer
     // let through. "Detection-only" has to mean "this panel never CAUSES a
     // block" — it cannot also mean "this panel CANCELS other panels' blocks".
     //
-    // Set only by the panel branch, which already requires _fgPanelEnforce, so a
-    // detection-only panel can still never arm a block through it. The
-    // process-keyed branches leave it false and stay fully subject to
-    // PanelEnforceOk(), because those are process-WIDE and an IDE with no
-    // enforcing panel focused is exactly the code-editor false positive the
-    // panel feature exists to avoid.
-    static volatile bool _blockedByPanel = false;
+    // Set only by the panel branch (which already requires _fgPanelEnforce) and
+    // the agent-scoped branch (which already requires a verified AND enforcing
+    // AGENT_SURFACES entry), so a detection-only surface of either kind can still
+    // never arm a block through it. The process-keyed branches leave it false and
+    // stay fully subject to PanelEnforceOk(), because those are process-WIDE and
+    // an IDE with no enforcing panel focused is exactly the code-editor false
+    // positive the panel feature exists to avoid.
+    static volatile bool _blockedByElement = false;
+    // The AUTHORITATIVE scope of the current block, and the single source of
+    // truth for both reporting (block_scope / the bar's scope field) and the
+    // banner gate:
+    //   "app"    — the whole foreground process is disallowed.
+    //   "panel"  — one AI composer inside an IDE is.
+    //   "agent"  — one named agent inside a chat app is.
+    //   ""       — nothing is blocked.
+    // Scope must NEVER be inferred from the `panel` attribution field: that field
+    // falls back to PanelField(), so an app-scoped block can legitimately carry a
+    // panel id, and anything keyed on its presence silently flips.
+    static volatile string _blockScope = "";
     static string _blockedReason = "";
     // Which blocked row matched, so the "Request Access" dialog can name the
     // platform an exception would have to be granted for. Fields come straight
@@ -342,7 +438,7 @@ public static class CfaiEnforcer
     // Feeds the desktop overlay bar — the counterpart of the browser
     // extension's showPlatformBanner(). PURELY DERIVED, and READ-ONLY with
     // respect to every enforcement field above: nothing in UpdateBannerState /
-    // EmitBlockState may write _fgIsBlocked, _blockedByPanel, the panel latch,
+    // EmitBlockState may write _fgIsBlocked, _blockedByElement, the panel latch,
     // or call ClearFgBlocked(). Those release deliberately SLOWLY (FG_STICKY_TTL,
     // PANEL_BLOCK_LATCH_TTL) for correctness reasons the bar does not share.
     //
@@ -400,7 +496,21 @@ public static class CfaiEnforcer
     // process, than the foreground one). So "this tick matched some panel that
     // no blocklist row covers" is NOT evidence that the latched panel lost
     // focus, and must not tear its block down. See CheckFgBlocked's fall-through.
-    static volatile string _panelBlockPanelId = "";
+    //
+    // GENERALISED, not duplicated. The same state machine now latches two kinds
+    // of element-scoped block, so the field holds an opaque NAMESPACED key rather
+    // than a bare panel id:
+    //   "panel:claude_code"    — an IDE-hosted AI composer
+    //   "agent:m365_copilot"   — a named agent inside a chat app
+    // The namespace matters: a panel id and an agent-surface id come from
+    // different catalogs and could in principle collide, and the two are
+    // retired by different evidence. Everything else about the latch — the pid
+    // check, the TTL, the arm-only-on-a-first-hand-tick rule, Disarmed()
+    // releasing it — is unchanged and shared. The surrounding
+    // _panelBlockLatch/_panelBlockPid/PanelBlockLatchHeld names are kept as they
+    // were to hold the diff of this change down; read "panel" in them as
+    // "focused element".
+    static volatile string _elementBlockKey = "";
     static long _panelBlockLatchTicks = 0;
     static readonly long PANEL_BLOCK_LATCH_TTL = TimeSpan.FromSeconds(10).Ticks;
 
@@ -596,6 +706,60 @@ public static class CfaiEnforcer
     }
     static List<PanelSig> _panels = new List<PanelSig>();
 
+    // ── Agent surfaces (CFAI_AGENT_SURFACES) ────────────────────────────────
+    // "WHICH named agent is open inside this app", for agent_scope:'agent'
+    // blocked rows. Data from ai-processes.js's AGENT_SURFACES; the comparison
+    // code lives here and only here (ExtractAgentName / AgentNameMatches).
+    //
+    // FAIL CLOSED on an empty or malformed payload, which is the OPPOSITE
+    // direction from _panels — and correctly so. An empty PANEL catalog means
+    // "do not scan an editor", which is safe. An empty AGENT-SURFACE catalog
+    // means "do not NARROW a block", which is also safe: an agent-scoped row
+    // falls back to today's whole-app block rather than enforcing nothing.
+    class AgentSurface
+    {
+        public string Id;
+        public HashSet<string> Procs;
+        public string ControlType;
+        public List<string> NamePrefixes;
+        public HashSet<string> GenericNames;
+        public bool Enforce;
+        public bool Verified;
+    }
+    static List<AgentSurface> _agentSurfaces = new List<AgentSurface>();
+
+    // What one ReadFocusedAgentName() call established. Getting this taxonomy
+    // right IS the reliability of the feature:
+    //   Unreadable   — FocusedElement threw/was null, or belonged to another
+    //                  process, or carried no usable properties. NO EVIDENCE.
+    //   NotComposer  — readable, but not a composer this catalog can read an
+    //                  agent name off (wrong control type, no known prefix).
+    //                  NO EVIDENCE either.
+    //   Generic      — a composer, and what follows the prefix is a generic app
+    //                  name. AUTHORITATIVE: no specific agent is open.
+    //   Named        — AUTHORITATIVE: that named agent is open.
+    // The two NO EVIDENCE outcomes are what the latch survives; the two
+    // AUTHORITATIVE ones retire it on the tick they arrive.
+    enum AgentReadOutcome { Unreadable = 0, NotComposer = 1, Generic = 2, Named = 3 }
+
+    // THIS TICK's agent read. Always mirrors the read UpdateForeground actually
+    // performed — Unreadable whenever it performed none — so a stale Named can
+    // never leak into a later tick's block decision.
+    //
+    // _fgAgentName holds a display string read out of ANOTHER APP's accessibility
+    // tree. It is compared against the blocklist and nothing else: it is never
+    // emitted, logged, persisted or put in a block event. Every name that reaches
+    // stdout comes from the blocked ROW (admin-typed), never from here.
+    static volatile AgentReadOutcome _fgAgentOutcome = AgentReadOutcome.Unreadable;
+    static volatile string _fgAgentName = "";
+    // PRIVACY GATE. The process names for which the CURRENT blocklist holds an
+    // agent-scoped row — recomputed by UpdateBlockedAgents. Without a policy that
+    // actually needs to know which agent is open, we never read another app's
+    // accessibility tree to find out. Keyed by PROCESS (not by the sticky _app)
+    // so a tick can decide about the process it is actually looking at, with no
+    // one-tick lag that would read the wrong app.
+    static HashSet<string> _agentScopedProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
     // One entry per active block pattern. Label is empty for guardrail
     // patterns (prompt-injection, jailbreak, ...) — there is no value to
     // substitute for those, only PII/secret patterns are ever maskable.
@@ -635,7 +799,7 @@ public static class CfaiEnforcer
     static volatile bool _rewriteInProgress = false;
     static volatile bool _rewriteAbort = false;
 
-    public static void Start(string[] aiProcs, string[] patNames, string[] patSources, string[] patSevs, string[] patLabels, bool[] patIgnoreCase, string heartbeatFile, bool modelRouterEnabled, string modelRouterConfigJson, string ideProcsJson, string aiPanelsJson)
+    public static void Start(string[] aiProcs, string[] patNames, string[] patSources, string[] patSevs, string[] patLabels, bool[] patIgnoreCase, string heartbeatFile, bool modelRouterEnabled, string modelRouterConfigJson, string ideProcsJson, string aiPanelsJson, string agentSurfacesJson)
     {
         try { SetProcessDPIAware(); } catch { }   // align UIA rect with hook screen coords
         _startTicks = DateTime.UtcNow.Ticks;
@@ -691,6 +855,15 @@ public static class CfaiEnforcer
         {
             try { LoadAiPanels(aiPanelsJson); }
             catch (Exception ex) { Emit("error", "", "", "ai_panels_load_failed", -1, -1, ex.GetType().Name); }
+        }
+        // Agent surfaces — same "a bad payload must never take the helper down"
+        // rule, opposite fail direction: a load failure leaves _agentSurfaces
+        // empty, which means no agent-scoped row can ever narrow a block, so
+        // every such row falls back to the whole-app block it produces today.
+        if (!string.IsNullOrEmpty(agentSurfacesJson))
+        {
+            try { LoadAgentSurfaces(agentSurfacesJson); }
+            catch (Exception ex) { Emit("error", "", "", "agent_surfaces_load_failed", -1, -1, ex.GetType().Name); }
         }
         // The poll thread MUST be STA: UI Automation's FocusedElement read
         // returns null from an MTA thread for Chromium/Electron apps (Claude,
@@ -791,6 +964,214 @@ public static class CfaiEnforcer
             });
         }
         _panels = panels;
+    }
+
+    // CFAI_AGENT_SURFACES → _agentSurfaces. Same try/catch shape as LoadAiPanels
+    // (the caller catches, so a malformed payload cannot take the helper down),
+    // and the same "assign only at the end" discipline — which here means a
+    // failure leaves the list EMPTY, i.e. no block is ever narrowed. Fail closed.
+    static void LoadAgentSurfaces(string json)
+    {
+        var serializer = new JavaScriptSerializer();
+        var raw = (object[])serializer.DeserializeObject(json);
+        var surfaces = new List<AgentSurface>();
+        foreach (var item in raw)
+        {
+            var d = (Dictionary<string, object>)item;
+            string id = JsStr(d, "id");
+            string ct = JsStr(d, "controlType");
+            if (id.Length == 0 || ct.Length == 0) continue;
+            var procs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            object rawProcs;
+            if (d.TryGetValue("procs", out rawProcs) && rawProcs != null)
+            {
+                foreach (var p in (IEnumerable)rawProcs)
+                {
+                    string name = Convert.ToString(p);
+                    if (!string.IsNullOrEmpty(name)) procs.Add(StripExe(name).Trim());
+                }
+            }
+            if (procs.Count == 0) continue;   // a surface with no host process can never match
+            var prefixes = new List<string>();
+            object rawPrefixes;
+            if (d.TryGetValue("composerNamePrefixes", out rawPrefixes) && rawPrefixes != null)
+            {
+                foreach (var x in (IEnumerable)rawPrefixes)
+                {
+                    string pre = Convert.ToString(x);
+                    if (!string.IsNullOrEmpty(pre)) prefixes.Add(pre);
+                }
+            }
+            if (prefixes.Count == 0) continue;   // nothing to strip → nothing readable
+            var generics = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            object rawGenerics;
+            if (d.TryGetValue("genericNames", out rawGenerics) && rawGenerics != null)
+            {
+                foreach (var x in (IEnumerable)rawGenerics)
+                {
+                    string g = NormalizeAgentName(Convert.ToString(x));
+                    if (g.Length > 0) generics.Add(g);
+                }
+            }
+            surfaces.Add(new AgentSurface
+            {
+                Id = id,
+                Procs = procs,
+                ControlType = ct,
+                NamePrefixes = prefixes,
+                GenericNames = generics,
+                Enforce = JsBool(d, "enforce"),
+                Verified = JsBool(d, "verified"),
+            });
+        }
+        _agentSurfaces = surfaces;
+    }
+
+    // Which AGENT_SURFACES entry hosts this process name, or null.
+    static AgentSurface MatchAgentSurface(string proc)
+    {
+        if (_agentSurfaces == null || _agentSurfaces.Count == 0) return null;
+        if (proc == null) return null;
+        string name = StripExe(proc).Trim();
+        if (name.Length == 0) return null;
+        foreach (var s in _agentSurfaces)
+        {
+            if (s.Procs != null && s.Procs.Contains(name)) return s;
+        }
+        return null;
+    }
+
+    // May a block be NARROWED to one named agent inside this process right now?
+    //
+    // Requires a surface that is BOTH Verified and Enforce. m365_copilot passed
+    // its live verification pass (2026-08-27) and ships with both flags true, so
+    // this returns the surface and an agent-scoped row really does narrow to one
+    // named agent. Any FUTURE entry ships both false until its own live pass:
+    // this then returns null and that row keeps producing the whole-app block it
+    // produced before the feature existed. Nothing else in this file has to
+    // change either way — this is the only place both flags are read.
+    static AgentSurface EnforcingAgentSurface(string proc)
+    {
+        AgentSurface s = MatchAgentSurface(proc);
+        if (s == null) return null;
+        return (s.Verified && s.Enforce) ? s : null;
+    }
+
+    // Trim + collapse internal whitespace. C# port of ai-processes.js's
+    // normalizeAgentName(), applied to BOTH sides of every comparison: a UIA Name
+    // can carry a non-breaking space or a doubled space the admin's typed name
+    // does not have, and that is not a different agent.
+    //
+    // char.IsWhiteSpace rather than a hand-written character list, so the Unicode
+    // spaces a JS whitespace class also covers (U+00A0 above all - routine in a
+    // web-hosted UI's ARIA label) are covered on both sides without the two
+    // implementations drifting over a missing entry. No Regex, same reason the
+    // panel matcher has none.
+    static string NormalizeAgentName(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        var sb = new StringBuilder(s.Length);
+        bool pendingSpace = false;
+        foreach (char c in s)
+        {
+            if (char.IsWhiteSpace(c)) { if (sb.Length > 0) pendingSpace = true; continue; }
+            if (pendingSpace) { sb.Append(' '); pendingSpace = false; }
+            sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
+    // C# port of extractAgentName() in ai-processes.js. PURE: given the surface and
+    // the focused element's Name, decide NotComposer / Generic / Named(X).
+    // "Unreadable" is not decided here — only the read site knows that.
+    //
+    // Keep in lockstep with the JS side, which is the single source of truth for
+    // the catalog and is unit-tested in agent/tests/ai-processes.test.mjs.
+    static AgentReadOutcome ExtractAgentName(AgentSurface surface, string controlType, string name, out string agentName)
+    {
+        agentName = "";
+        if (surface == null) return AgentReadOutcome.NotComposer;
+        string ct = (controlType ?? "").Trim();
+        if (ct.Length == 0) return AgentReadOutcome.NotComposer;
+        if (!string.Equals(ct, surface.ControlType, StringComparison.OrdinalIgnoreCase)) return AgentReadOutcome.NotComposer;
+        string nm = (name ?? "").Trim();
+        if (nm.Length == 0) return AgentReadOutcome.NotComposer;
+        if (surface.NamePrefixes == null) return AgentReadOutcome.NotComposer;
+        foreach (string pre in surface.NamePrefixes)
+        {
+            if (string.IsNullOrEmpty(pre)) continue;
+            if (nm.Length <= pre.Length) continue;
+            if (!nm.StartsWith(pre, StringComparison.OrdinalIgnoreCase)) continue;
+            string remainder = NormalizeAgentName(nm.Substring(pre.Length));
+            if (remainder.Length == 0) return AgentReadOutcome.NotComposer;
+            // The Generic filter runs BEFORE any matching, so an agent literally
+            // named "Copilot" can never be matched through this mechanism. That is
+            // intentional: a platform-scoped row is the right tool for "block all
+            // of Copilot".
+            if (surface.GenericNames != null && surface.GenericNames.Contains(remainder)) return AgentReadOutcome.Generic;
+            agentName = remainder;
+            return AgentReadOutcome.Named;
+        }
+        return AgentReadOutcome.NotComposer;
+    }
+
+    // C# port of agentNameMatches() in ai-processes.js. WHOLE-STRING equality after
+    // normalisation, deliberately NOT the substring test the browser extension
+    // uses: its signal (a name found somewhere in a page header) is much messier
+    // than this one (an exact composer label), and a substring test here would
+    // only add false positives — a row for "Advisor" blocking "AI Learning
+    // Advisor".
+    static bool AgentNameMatches(string extracted, string blockedName)
+    {
+        string a = NormalizeAgentName(extracted);
+        string b = NormalizeAgentName(blockedName);
+        if (a.Length == 0 || b.Length == 0) return false;
+        return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // A SINGLE property read of the currently-focused element, turned into which
+    // named agent is open. Same single-read discipline as ReadFocusedPanel — no
+    // tree walk, ever — and the same non-negotiable pid check, for the same
+    // measured reason: FocusedElement is a GLOBAL read that routinely returns an
+    // element from another window in another process, and nothing it says is
+    // evidence about the foreground surface unless the element belongs to it.
+    //
+    // NOTHING read here is ever emitted, logged or persisted.
+    static AgentReadOutcome ReadFocusedAgentName(AgentSurface surface, uint fgPid, out string agentName)
+    {
+        agentName = "";
+        if (surface == null) return AgentReadOutcome.Unreadable;
+        AutomationElement el;
+        try { el = AutomationElement.FocusedElement; } catch { return AgentReadOutcome.Unreadable; }
+        if (el == null) return AgentReadOutcome.Unreadable;
+        try
+        {
+            // The foreground window's own process, or a DIRECT CHILD of it — a
+            // WebView2/Chromium-hosted app (confirmed live: M365Copilot.exe's
+            // composer is UIA-owned by a child msedgewebview2.exe, not
+            // M365Copilot.exe itself) puts real UI content one process down.
+            // Anything else is still rejected, so a genuinely unrelated app's
+            // focused element — the entire reason this check exists — is still
+            // caught.
+            if (!ElementPidBelongsToForeground(el.Current.ProcessId, fgPid)) return AgentReadOutcome.Unreadable;
+        }
+        catch { return AgentReadOutcome.Unreadable; }
+
+        string ctName = "", name = "";
+        try
+        {
+            string pn = el.Current.ControlType.ProgrammaticName ?? "";
+            int dot = pn.LastIndexOf('.');
+            ctName = (dot >= 0) ? pn.Substring(dot + 1) : pn;
+        }
+        catch { }
+        try { name = el.Current.Name ?? ""; } catch { }
+        // No control type or no Name at all is a READ FAILURE, not a fact about
+        // which agent is open: this catalog can only ever conclude anything from
+        // those two properties, so their absence is the "no evidence" state the
+        // latch deliberately survives — never the authoritative "no agent open".
+        if (ctName.Trim().Length == 0 || name.Trim().Length == 0) return AgentReadOutcome.Unreadable;
+        return ExtractAgentName(surface, ctName, name, out agentName);
     }
 
     static readonly char[] CLASS_TOKEN_SEP = new char[] { ' ', '\t', '\r', '\n', '\f' };
@@ -2079,8 +2460,8 @@ public static class CfaiEnforcer
         // Same split the Enter decision makes, for the same reason: a platform
         // block armed by an enforcing panel survives a tick whose focused-element
         // read landed on a detection-only panel sharing the window, while every
-        // CONTENT signal stays gated on the current surface. See _blockedByPanel.
-        if (_fgIsBlocked && (_blockedByPanel || PanelEnforceOk())) return true;
+        // CONTENT signal stays gated on the current surface. See _blockedByElement.
+        if (_fgIsBlocked && (_blockedByElement || PanelEnforceOk())) return true;
         if (!PanelEnforceOk()) return false;   // detection-only panel — zero live effect
         bool recentPaste = (DateTime.UtcNow.Ticks - _lastPasteTicks) < PASTE_WINDOW;
         bool cooldown = (DateTime.UtcNow.Ticks - _lastBlockFiredTicks) < BLOCK_COOLDOWN;
@@ -2100,11 +2481,11 @@ public static class CfaiEnforcer
     // straight through. CheckFgBlocked's panel branch already refuses to ARM a
     // block for a detection-only panel, so nothing here widens what such a
     // panel can cause — it only stops one from CANCELLING another panel's
-    // block. See _blockedByPanel.
+    // block. See _blockedByElement.
     static bool EnterBlockActive(bool attachHold, bool uiaBlock, bool clipBlock, bool cooldown)
     {
         if (Disarmed()) return false;
-        if (_fgIsBlocked && (_blockedByPanel || PanelEnforceOk())) return true;
+        if (_fgIsBlocked && (_blockedByElement || PanelEnforceOk())) return true;
         if (!PanelEnforceOk()) return false;
         return attachHold || TypedBlockFresh() || uiaBlock || clipBlock || cooldown;
     }
@@ -2596,7 +2977,7 @@ public static class CfaiEnforcer
         }
         _lastBlockedCheck = now;
         try {
-            if (!System.IO.File.Exists(_blockedAgentFile)) { _blockedList.Clear(); ClearFgBlocked(); return; }
+            if (!System.IO.File.Exists(_blockedAgentFile)) { _blockedList.Clear(); RebuildAgentScopedProcs(); ClearFgBlocked(); return; }
             string json = System.IO.File.ReadAllText(_blockedAgentFile);
             // Minimal JSON parse — extract platform and agent_name fields
             var list = new List<Dictionary<string, string>>();
@@ -2622,31 +3003,85 @@ public static class CfaiEnforcer
                     // standalone process) — see the panel branch in
                     // CheckFgBlocked. Empty on every other row shape.
                     d["panel"] = ExtractJsonString(item, "panel");
+                    // 'agent' narrows this row to the ONE named agent in
+                    // agent_name, instead of the whole process set its platform
+                    // maps to. Absent / 'platform' / anything else means today's
+                    // whole-process behaviour, unchanged — see CheckFgBlocked.
+                    d["agent_scope"] = ExtractJsonString(item, "agent_scope");
                     if (!string.IsNullOrEmpty(d["platform"])) list.Add(d);
                 }
             }
             _blockedList = list;
+            RebuildAgentScopedProcs();
         } catch { }
         CheckFgBlocked();
     }
 
-    // Arm the platform-block latch — called only from CheckFgBlocked's panel
-    // branch, and only on a tick whose panel read really succeeded, so the TTL
-    // below is measured from "the last time an enforcing blocked panel was
-    // genuinely observed to have focus", not from the end of the sticky window.
-    static void ArmPanelBlockLatch()
+    // The PRIVACY GATE's data: which foreground processes the current blocklist
+    // actually holds an agent-scoped row for. Recomputed with the list, and only
+    // there, so the poll path is a HashSet lookup.
+    //
+    // Without a policy that needs to know which agent is open, we never read
+    // another app's accessibility tree to find out. Deliberately NOT keyed on the
+    // sticky _app: a row's coverage is a property of the PROCESS, so a tick can
+    // ask about the process it is actually looking at rather than the one the
+    // previous tick decided about.
+    static void RebuildAgentScopedProcs()
+    {
+        var procs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var agent in _blockedList)
+        {
+            if (!string.Equals(agent["agent_scope"], "agent", StringComparison.OrdinalIgnoreCase)) continue;
+            HashSet<string> mapped;
+            if (PLATFORM_PROCS.TryGetValue(agent["platform"], out mapped))
+            {
+                foreach (string p in mapped) procs.Add(p);
+            }
+            if (!string.IsNullOrEmpty(agent["process_name"])) procs.Add(agent["process_name"]);
+        }
+        _agentScopedProcs = procs;
+    }
+
+    // Arm the platform-block latch — called only from the two ELEMENT-scoped
+    // branches of CheckFgBlocked, and only on a tick whose focused-element read
+    // really succeeded, so the TTL below is measured from "the last time an
+    // enforcing blocked surface was genuinely observed to have focus", not from
+    // the end of the sticky window.
+    //
+    // `key` is the namespaced surface key ("panel:<id>" / "agent:<id>") — see
+    // _elementBlockKey. Passed in rather than derived here because the two
+    // branches know different things: the panel branch has _fgPanelId, the agent
+    // branch has an AGENT_SURFACES id that is not foreground-panel state at all.
+    static void ArmPanelBlockLatch(string key)
     {
         _panelBlockPid = _fgPid;
-        _panelBlockPanelId = _fgPanelId ?? "";
+        _elementBlockKey = key ?? "";
         _panelBlockLatchTicks = DateTime.UtcNow.Ticks;
         _panelBlockLatch = true;
+    }
+
+    // The latched PANEL id, or "" when the latch is not a panel latch. Keeps
+    // every panel-specific consumer (attribution, the same-surface fall-through)
+    // from ever reading an agent key as a panel id.
+    static string LatchedPanelId()
+    {
+        string k = _elementBlockKey ?? "";
+        return k.StartsWith("panel:", StringComparison.Ordinal) ? k.Substring(6) : "";
+    }
+
+    // Is the latch holding an AGENT-scoped block? Its retirement rules differ
+    // from a panel's: see the agent-evidence guard in CheckFgBlocked.
+    static bool AgentBlockLatched()
+    {
+        string k = _elementBlockKey ?? "";
+        return k.StartsWith("agent:", StringComparison.Ordinal);
     }
 
     static void ClearPanelBlockLatch()
     {
         _panelBlockLatch = false;
         _panelBlockPid = 0;
-        _panelBlockPanelId = "";
+        _elementBlockKey = "";
         _panelBlockLatchTicks = 0;
     }
 
@@ -2706,13 +3141,63 @@ public static class CfaiEnforcer
             HashSet<string> procs;
             if (PLATFORM_PROCS.TryGetValue(agent["platform"], out procs)) {
                 if (procs.Contains(_app)) {
-                    _fgIsBlocked = true;
-                    _blockedByPanel = false;   // process-keyed — see _blockedByPanel
-                    _blockedPlatform = agent["platform"] ?? "";
-                    _blockedAgentName = string.IsNullOrEmpty(agent["agent_name"]) ? (agent["platform"] ?? "") : agent["agent_name"];
-                    _blockedAgentId = agent["agent_id"] ?? "";
-                    _blockedReason = "Blocked agent: " + _blockedAgentName;
-                    return;
+                    // AGENT-SCOPED NARROWING. A MODIFIER on this branch, not a
+                    // fourth independent branch: the row still has to name a
+                    // platform whose process set covers the foreground app. All
+                    // agent_scope:'agent' changes is WHICH agent inside that app
+                    // is blocked.
+                    //
+                    // It applies only when the foreground process has an
+                    // AGENT_SURFACES entry that is both verified and enforcing —
+                    // m365_copilot since its 2026-08-27 live pass. For an
+                    // unverified future entry (and for any process this catalog
+                    // knows nothing about) EnforcingAgentSurface() returns null,
+                    // `narrowed` stays false, and the coarse whole-app arm below
+                    // runs exactly as it did before this feature existed. That is
+                    // the fail-closed direction: no way to tell which agent is
+                    // open must never mean "block nothing".
+                    bool narrowed = false;
+                    if (string.Equals(agent["agent_scope"], "agent", StringComparison.OrdinalIgnoreCase)) {
+                        AgentSurface surface = EnforcingAgentSurface(_app);
+                        if (surface != null) {
+                            narrowed = true;
+                            // Only a Named read can arm: Generic ("no specific
+                            // agent open") and the two no-evidence outcomes must
+                            // never manufacture a block for a named agent.
+                            if (_fgAgentOutcome == AgentReadOutcome.Named
+                                && AgentNameMatches(_fgAgentName, agent["agent_name"])) {
+                                _fgIsBlocked = true;
+                                _blockedByElement = true;   // see _blockedByElement
+                                _blockScope = "agent";
+                                _blockedPlatform = agent["platform"] ?? "";
+                                _blockedAgentName = string.IsNullOrEmpty(agent["agent_name"]) ? (agent["platform"] ?? "") : agent["agent_name"];
+                                _blockedAgentId = agent["agent_id"] ?? "";
+                                _blockedReason = "Blocked agent: " + _blockedAgentName;
+                                // Same latch, same rule as the panel branch: arm
+                                // only on a tick whose read was first-hand, so the
+                                // TTL is not stacked on top of the sticky window.
+                                if (_fgLeftAiTicks == 0) ArmPanelBlockLatch("agent:" + surface.Id);
+                                return;
+                            }
+                        }
+                    }
+                    // When narrowing DOES apply and this row's agent is not the
+                    // one open, today's coarse whole-app arm must NOT fire for
+                    // this row — that is the entire point. Not a `continue`
+                    // either: fall through to this row's other branches (and then
+                    // the next row), because another row may still cover this
+                    // foreground some other way. Same reasoning as the
+                    // detection-only panel fall-through below.
+                    if (!narrowed) {
+                        _fgIsBlocked = true;
+                        _blockedByElement = false;   // process-keyed — see _blockedByElement
+                        _blockScope = "app";
+                        _blockedPlatform = agent["platform"] ?? "";
+                        _blockedAgentName = string.IsNullOrEmpty(agent["agent_name"]) ? (agent["platform"] ?? "") : agent["agent_name"];
+                        _blockedAgentId = agent["agent_id"] ?? "";
+                        _blockedReason = "Blocked agent: " + _blockedAgentName;
+                        return;
+                    }
                 }
             }
             // Host-keyed platform block: the row names its process outright, so
@@ -2723,7 +3208,8 @@ public static class CfaiEnforcer
             if (!string.IsNullOrEmpty(agent["process_name"])) {
                 if (string.Equals(agent["process_name"], _app, StringComparison.OrdinalIgnoreCase)) {
                     _fgIsBlocked = true;
-                    _blockedByPanel = false;   // process-keyed — see _blockedByPanel
+                    _blockedByElement = false;   // process-keyed — see _blockedByElement
+                    _blockScope = "app";
                     _blockedPlatform = "ai_platform";
                     _blockedAgentName = string.IsNullOrEmpty(agent["agent_name"]) ? "ai_platform" : agent["agent_name"];
                     _blockedAgentId = agent["agent_id"] ?? "";
@@ -2750,18 +3236,20 @@ public static class CfaiEnforcer
                     // match this foreground some other way.
                     if (_fgPanelEnforce) {
                         _fgIsBlocked = true;
-                        _blockedByPanel = true;   // see _blockedByPanel
+                        _blockedByElement = true;   // see _blockedByElement
+                        _blockScope = "panel";
                         _blockedPlatform = "ai_platform";
                         _blockedAgentName = string.IsNullOrEmpty(agent["agent_name"]) ? "ai_platform" : agent["agent_name"];
                         _blockedAgentId = agent["agent_id"] ?? "";
                         _blockedReason = "Blocked platform: " + _blockedAgentName;
-                        // Only this branch arms the latch: the two above are
-                        // process-keyed, and a foreground PROCESS cannot
-                        // flicker the way a focused ELEMENT does. _fgLeftAiTicks
-                        // == 0 is the existing "this tick's read succeeded"
-                        // signal — arming inside the sticky window instead would
-                        // stack the two grace periods.
-                        if (_fgLeftAiTicks == 0) ArmPanelBlockLatch();
+                        // Only the two ELEMENT-scoped branches arm the latch (this
+                        // one and the agent-scoped modifier above): the
+                        // process-keyed ones do not need it, because a foreground
+                        // PROCESS cannot flicker the way a focused ELEMENT does.
+                        // _fgLeftAiTicks == 0 is the existing "this tick's read
+                        // succeeded" signal — arming inside the sticky window
+                        // instead would stack the two grace periods.
+                        if (_fgLeftAiTicks == 0) ArmPanelBlockLatch("panel:" + _fgPanelId);
                         return;
                     }
                 }
@@ -2789,13 +3277,43 @@ public static class CfaiEnforcer
         //      other processes entirely. A read about another surface says
         //      nothing about the latched one.
         bool sameSurface = !_fgIsPanel
-            || string.Equals(_fgPanelId ?? "", _panelBlockPanelId ?? "", StringComparison.OrdinalIgnoreCase);
+            || string.Equals(_fgPanelId ?? "", LatchedPanelId(), StringComparison.OrdinalIgnoreCase);
         if (!sameSurface && PanelBlockLatchHeld()) return;
+        // The same principle for an AGENT-scoped latch, keyed on the OUTCOME of
+        // this tick's agent read rather than on a surface id.
+        //
+        //   Generic / Named(some other agent) come from the composer itself,
+        //   correctly pid-attributed, and are AUTHORITATIVE: the latch was
+        //   already retired for them, in ApplyForegroundTick, on the tick they
+        //   arrived — so control reaches here with nothing held and the block
+        //   clears immediately. (That is also why this path needs no
+        //   could-focus-have-moved gate: unlike the Cursor case, a read saying "a
+        //   different agent is open" is positive evidence about the composer
+        //   itself, not a stolen read about an unrelated element.)
+        //
+        //   Unreadable / NotComposer are NO EVIDENCE — the element was gone, or
+        //   belonged to another process, or was a transcript rather than the
+        //   composer. Treating those as "no blocked agent is open" is a read
+        //   failure dressed up as a fact, and it would tear the block down on the
+        //   first bad read while the user sits in the very agent an admin blocked.
+        bool noAgentEvidence = _fgAgentOutcome == AgentReadOutcome.Unreadable
+                            || _fgAgentOutcome == AgentReadOutcome.NotComposer;
+        if (noAgentEvidence && AgentBlockLatched() && PanelBlockLatchHeld()) return;
         // Inside the sticky window the state is second-hand, and the latch keeps
         // its say — unchanged.
         if (_fgLeftAiTicks != 0 && PanelBlockLatchHeld()) return;
         ClearPanelBlockLatch();
         ClearFgBlocked();
+    }
+
+    // The AUTHORITATIVE scope of the current block, for reporting and for the
+    // banner gate. "app" when nothing has set a scope, which is both the
+    // pre-existing default and the safe one: every arm site sets it explicitly,
+    // so this fallback can only ever be reached with no block in force.
+    static string BlockScope()
+    {
+        string s = _blockScope;
+        return (s != null && s.Length > 0) ? s : "app";
     }
 
     // Recompute the standing bar's state and emit ONE line per real transition.
@@ -2806,12 +3324,17 @@ public static class CfaiEnforcer
     // written here. See the _bannerActive/_bannerPid comments above.
     static void UpdateBannerState()
     {
-        // WHOLE-APP blocks only — !_blockedByPanel. A panel-scoped block (a
+        // WHOLE-APP blocks only — BlockScope() == "app". A panel-scoped block (a
         // Claude Code / Cursor composer inside an IDE) gets no bar: the block
         // covers one surface inside an editor, not the editor, and a bar
         // spanning the whole display would state something false. Same
         // exclusion, same reason, as showPlatformBanner()'s IS_EMBEDDED_AI
-        // early-return in the browser extension.
+        // early-return in the browser extension. An AGENT-scoped block is
+        // excluded by exactly the same rule and for exactly the same reason:
+        // blocking one agent inside Microsoft 365 Copilot is not blocking
+        // Microsoft 365 Copilot. Tested against the positive scope rather than
+        // against !_blockedByElement so that a future third element-scoped kind
+        // has to state its intent here instead of inheriting "no bar" silently.
         //
         // !Disarmed() is REQUIRED here and is not redundant with anything.
         // Disarmed() (the panic hotkey) is checked inside the block DECISION
@@ -2835,7 +3358,7 @@ public static class CfaiEnforcer
         //     transition harness; exactly the bug the fast clear exists to
         //     prevent, one tick later.
         bool firstHand = _fgLeftAiTicks == 0;
-        bool want = _fgIsBlocked && !_blockedByPanel && !Disarmed() && firstHand;
+        bool want = _fgIsBlocked && BlockScope() == "app" && !Disarmed() && firstHand;
         uint pid = _fgPid;
         if (_bannerActive)
         {
@@ -2888,12 +3411,16 @@ public static class CfaiEnforcer
             }
             catch { }
         }
-        // scope is always "app": UpdateBannerState refuses to arm for a
-        // panel-scoped block at all, so a "panel" bar cannot exist. The field is
-        // still emitted so the consumer can assert on it rather than assume.
+        // The REAL scope, never a hardcoded "app". UpdateBannerState refuses to
+        // arm for anything but an app-scoped block, so in practice an active
+        // event always carries "app" — but emitting the truth is what makes
+        // main.js's `parsed.scope === 'app'` guard a genuine second line of
+        // defence rather than a check against a constant. If a scope ever leaks
+        // through, the consumer drops it instead of rendering a display-wide red
+        // bar for one blocked agent.
         string json = "{\"kind\":\"blockstate\""
             + ",\"active\":" + (active ? "true" : "false")
-            + ",\"scope\":\"app\""
+            + ",\"scope\":\"" + Esc(BlockScope()) + "\""
             + ",\"platform\":\"" + Esc(platform ?? "") + "\""
             + ",\"agent\":\"" + Esc(agent ?? "") + "\""
             + ",\"agent_id\":\"" + Esc(agentId ?? "") + "\""
@@ -2910,7 +3437,8 @@ public static class CfaiEnforcer
     static void ClearFgBlocked()
     {
         _fgIsBlocked = false;
-        _blockedByPanel = false;
+        _blockedByElement = false;
+        _blockScope = "";
         _blockedPlatform = "";
         _blockedAgentName = "";
         _blockedAgentId = "";
@@ -2977,7 +3505,28 @@ public static class CfaiEnforcer
         // ApplyForegroundTick, so the offline harness can drive the real state
         // machine with a substituted read instead of re-implementing it.
         if (isIde) hit = ReadFocusedPanel(proc, pid, out panelRid, out panelReadable);
-        ApplyForegroundTick(pid, proc, isIde, hit, panelRid, panelReadable);
+
+        // The SECOND (and only other) UIA call, for "which named agent is open".
+        //
+        // PRIVACY GATE, and it is the whole reason this is not read
+        // unconditionally: reading another app's accessibility tree to learn
+        // which agent someone has open is only justified by a policy that needs
+        // the answer. Three conditions, all required:
+        //   * the process is an AI app (not an IDE — an agent surface is a chat
+        //     app, and the IDE branch above owns that case);
+        //   * this catalog knows how to read an agent name out of it at all;
+        //   * the CURRENT blocklist holds an agent-scoped row covering it.
+        // Any one missing and no read happens, the outcome stays Unreadable, and
+        // an agent-scoped row behaves exactly as it does today.
+        AgentReadOutcome agentOutcome = AgentReadOutcome.Unreadable;
+        string agentName = "";
+        if (!isIde && proc != null && _aiProcs != null && _aiProcs.Contains(proc)
+            && _agentScopedProcs.Contains(proc))
+        {
+            AgentSurface surface = MatchAgentSurface(proc);
+            if (surface != null) agentOutcome = ReadFocusedAgentName(surface, pid, out agentName);
+        }
+        ApplyForegroundTick(pid, proc, isIde, hit, panelRid, panelReadable, agentOutcome, agentName);
     }
 
     // Everything UpdateForeground does once the focused-element read is in.
@@ -2988,13 +3537,18 @@ public static class CfaiEnforcer
     // harness in agent/tests drives THIS method with reads built from real,
     // measured UIA property values (fed through the real MatchPanelSignature),
     // so the only thing it substitutes is the AutomationElement lookup itself.
-    static void ApplyForegroundTick(uint pid, string proc, bool isIde, PanelSig hit, string panelRid, bool panelReadable)
+    static void ApplyForegroundTick(uint pid, string proc, bool isIde, PanelSig hit, string panelRid, bool panelReadable, AgentReadOutcome agentOutcome, string agentName)
     {
         _fgPid = pid;
 
         bool isAi = false, isPanel = false, panelEnforce = false;
         string panelId = "";
         if (panelRid == null) panelRid = "";
+        // Always mirrors THIS tick's read — Unreadable whenever UpdateForeground
+        // performed none — so a stale Named outcome can never leak forward into a
+        // later tick's block decision. Never emitted; see the field comments.
+        _fgAgentOutcome = agentOutcome;
+        _fgAgentName = agentName ?? "";
 
         // A real app switch retires the IDE-panel platform-block latch straight
         // away — the pid check in PanelBlockLatchHeld already fails at this
@@ -3068,6 +3622,35 @@ public static class CfaiEnforcer
         else if (proc != null && _aiProcs != null && _aiProcs.Contains(proc))
         {
             isAi = true;
+            // A chat app that MAY also be an agent surface. isAi stays true and
+            // isPanel stays FALSE — an agent surface is not an IDE panel, and
+            // making it one would change PanelUiaOk()/PanelEnforceOk() for
+            // M365Copilot and so silently alter its existing UIA content scanning
+            // and typed-buffer capture. Nothing about capture changes here; the
+            // agent read only ever narrows a platform BLOCK.
+            //
+            // What does happen: an AUTHORITATIVE outcome retires an agent-scoped
+            // latch on this very tick.
+            //   Generic     — no specific agent is open, so no agent-scoped block
+            //                 can be in force.
+            //   Named       — including Named(the same agent): CheckFgBlocked
+            //                 re-arms it in the same tick if a row still covers
+            //                 it, which also refreshes the TTL from genuinely
+            //                 current evidence. If no row covers the agent now
+            //                 (a different agent, or an admin lifted the block)
+            //                 the block correctly ends here.
+            // Unreadable / NotComposer are NO EVIDENCE and deliberately do
+            // nothing — that is the state the latch exists to survive.
+            //
+            // No FocusCouldHaveMoved() gate, unlike the IDE branch: there, a
+            // readable non-match came from an unrelated element and said nothing
+            // about the composer. Here Generic/Named come FROM the composer,
+            // correctly pid-attributed, and are positive evidence.
+            if (AgentBlockLatched()
+                && (agentOutcome == AgentReadOutcome.Generic || agentOutcome == AgentReadOutcome.Named))
+            {
+                ClearPanelBlockLatch();
+            }
         }
 
         if (isAi)
@@ -3571,10 +4154,18 @@ public static class CfaiEnforcer
     // exception against — so reporting a neighbouring panel here (Copilot Chat
     // in the same VS Code window → github.com) made the user file a request that
     // could never lift the claude.ai block they were actually hitting.
+    // An AGENT-scoped block deliberately falls through to PanelField() (which is
+    // empty for a chat app): there is no `panel` to attribute it to, and putting
+    // an agent-surface id in a field index.js resolves a tool_host from would
+    // send the user's Request Access at the wrong key. LatchedPanelId() is what
+    // keeps the two namespaces apart.
     static string PlatformBlockPanelField()
     {
-        if (_blockedByPanel && !string.IsNullOrEmpty(_panelBlockPanelId))
-            return ",\"panel\":\"" + Esc(_panelBlockPanelId) + "\"";
+        if (_blockedByElement)
+        {
+            string panelId = LatchedPanelId();
+            if (panelId.Length > 0) return ",\"panel\":\"" + Esc(panelId) + "\"";
+        }
         return PanelField();
     }
 
@@ -3639,15 +4230,17 @@ public static class CfaiEnforcer
             // content — a platform id, a display name and an agent id, all of
             // them values an admin typed into the blocklist.
             // block_scope is the AUTHORITATIVE scope of the block: "app" = the
-            // whole process is disallowed, "panel" = one AI surface inside an
-            // IDE is. It comes straight from _blockedByPanel, i.e. from which
-            // branch of CheckFgBlocked armed the block. Consumers must NOT infer
-            // scope from the `panel` field above — that field is ATTRIBUTION
+            // whole process is disallowed, "panel" = one AI composer inside an
+            // IDE is, "agent" = one named agent inside a chat app is. It comes
+            // straight from _blockScope, i.e. from the branch of CheckFgBlocked
+            // that armed the block. Consumers must NOT infer scope from the
+            // `panel` field above — that field is ATTRIBUTION
             // (PlatformBlockPanelField falls back to PanelField, so any
             // panelFallback:true IDE entry can put a panel id on an app-scoped
-            // block) and answers a different question entirely.
+            // block, and an agent-scoped block carries no panel at all) and
+            // answers a different question entirely.
             + (platformBlock ? ",\"platform_block\":true"
-                 + ",\"block_scope\":\"" + (_blockedByPanel ? "panel" : "app") + "\""
+                 + ",\"block_scope\":\"" + Esc(BlockScope()) + "\""
                  + ",\"blocked_platform\":\"" + Esc(_blockedPlatform) + "\""
                  + ",\"blocked_agent\":\"" + Esc(_blockedAgentName) + "\""
                  + ",\"blocked_agent_id\":\"" + Esc(_blockedAgentId) + "\"" : "")
@@ -3939,7 +4532,7 @@ Add-Type -TypeDefinition $source -ReferencedAssemblies @(
     'System.Web.Extensions'
 ) -ErrorAction Stop
 
-[CfaiEnforcer]::Start(($aiProcs -split ','), $patNames.ToArray(), $patSources.ToArray(), $patSevs.ToArray(), $patLabels.ToArray(), [bool[]]($patIgnoreCase.ToArray()), $hbPath, $modelRouterEnabled, $mrConfigJson, $ideProcsJson, $aiPanelsJson)
+[CfaiEnforcer]::Start(($aiProcs -split ','), $patNames.ToArray(), $patSources.ToArray(), $patSevs.ToArray(), $patLabels.ToArray(), [bool[]]($patIgnoreCase.ToArray()), $hbPath, $modelRouterEnabled, $mrConfigJson, $ideProcsJson, $aiPanelsJson, $agentSurfacesJson)
 
 # Keep the process alive — the C# background threads (poll + message pump) do
 # the work and write events to stdout. Node reads them.

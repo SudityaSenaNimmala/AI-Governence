@@ -21,7 +21,7 @@ import {
   clearEnforcerState,
 } from './enforcer-watchdog.js';
 import { buildModelRouterConfig } from './model-router-config.js';
-import { buildIdeProcessConfig, buildAiPanelConfig } from './ai-processes.js';
+import { buildIdeProcessConfig, buildAiPanelConfig, buildAgentSurfaceConfig } from './ai-processes.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ENFORCER_SCRIPT = join(__dirname, 'enforcer-win.ps1');
@@ -95,6 +95,15 @@ export class Enforcer extends EventEmitter {
           // clipboard/attachment/file-dialog watching across the whole editor.
           CFAI_IDE_PROCESSES: JSON.stringify(buildIdeProcessConfig()),
           CFAI_AI_PANELS: JSON.stringify(buildAiPanelConfig()),
+          // Agent surfaces — "which named agent is open inside this app", for
+          // agent_scope:'agent' blocked rows. Third payload, same mechanism, and
+          // deliberately a THIRD catalog: it neither widens which processes are
+          // watched (that stays CFAI_AI_PROCESSES) nor which elements are
+          // scanned (that stays CFAI_AI_PANELS). Each entry carries its own
+          // enforce/verified pair: m365_copilot is live-verified and arming,
+          // every FUTURE surface ships both false until a human runs its own
+          // live pass and flips them. See AGENT_SURFACES in ai-processes.js.
+          CFAI_AGENT_SURFACES: JSON.stringify(buildAgentSurfaceConfig()),
         },
       }
     );

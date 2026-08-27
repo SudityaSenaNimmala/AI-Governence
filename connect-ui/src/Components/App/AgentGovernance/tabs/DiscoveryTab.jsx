@@ -1339,6 +1339,7 @@ function AgentTableView() {
           agent_name: agent.name,
           platform: agent.platform,
           reason: "Blocked by admin from governance dashboard",
+          agent_scope: "agent",
         });
         setBlockedAgents(prev => new Set([...prev, agent.id]));
         showFeedback(agent.id, true, "Agent blocked — enforced via extension & monitor");

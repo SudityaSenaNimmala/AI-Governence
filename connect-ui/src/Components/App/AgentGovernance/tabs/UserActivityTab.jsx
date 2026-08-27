@@ -1378,6 +1378,7 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
           agent_name: agent.botName || agent.name,
           platform: agent.platform || application,
           reason: "Blocked by admin from Risk Management",
+          agent_scope: "agent",
         });
         setBlockedAgents(prev => new Set([...prev, agentId]));
         setBlockFeedback(prev => ({ ...prev, [agentId]: { ok: true, msg: "Blocked" } }));

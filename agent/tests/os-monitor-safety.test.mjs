@@ -476,17 +476,17 @@ test('enforcer-win.ps1: attach_hold ORs into both the Enter and mouse-click bloc
   // Declared state.
   assert.match(src, /static volatile bool _attachHoldActive = false;/);
   // Mouse-click gate (BlockActiveForMouse). The platform block is checked on its
-  // own line ahead of the content signals (see _blockedByPanel), so the hold is
+  // own line ahead of the content signals (see _blockedByElement), so the hold is
   // asserted on the content OR-chain it actually belongs to.
   const mouseGate = src.slice(src.indexOf('static bool BlockActiveForMouse()'), src.indexOf('// Precedence matches the Enter path'));
   assert.ok(mouseGate.length > 0, 'expected a BlockActiveForMouse body');
   assert.match(mouseGate, /return _attachHoldActive \|\| TypedBlockFresh\(\) \|\| _blockUia \|\| \(recentPaste && _blockPaste\) \|\| cooldown;/);
-  assert.match(mouseGate, /if \(_fgIsBlocked && \(_blockedByPanel \|\| PanelEnforceOk\(\)\)\) return true;/);
+  assert.match(mouseGate, /if \(_fgIsBlocked && \(_blockedByElement \|\| PanelEnforceOk\(\)\)\) return true;/);
   // Enter-decision gate.
   assert.match(src, /bool attachHold = _attachHoldActive;/);
   const enterPred = src.slice(src.indexOf('static bool EnterBlockActive('), src.indexOf('static string ActivePatterns()'));
   assert.match(enterPred, /return attachHold \|\| TypedBlockFresh\(\) \|\| uiaBlock \|\| clipBlock \|\| cooldown;/);
-  assert.match(enterPred, /if \(_fgIsBlocked && \(_blockedByPanel \|\| PanelEnforceOk\(\)\)\) return true;/);
+  assert.match(enterPred, /if \(_fgIsBlocked && \(_blockedByElement \|\| PanelEnforceOk\(\)\)\) return true;/);
 });
 
 test('enforcer-win.ps1: attach_hold has an auto-expiring TTL so a crashed parent cannot leave Enter dead', async () => {
@@ -883,11 +883,12 @@ test('enforcer-win.ps1: a host-keyed platform block matches on process_name, kee
   assert.match(check, /if \(!string\.IsNullOrEmpty\(agent\["process_name"\]\)\)/);
   assert.match(check, /_blockedPlatform = "ai_platform";/);
   assert.match(check, /_blockedReason = "Blocked platform: " \+ _blockedAgentName;/);
-  // All three branches (PLATFORM_PROCS, process_name, panel) must feed the same
-  // fields EmitBlock already reports, or the Request Access dialog cannot name
-  // what to ask for.
-  assert.equal((check.match(/_fgIsBlocked = true;/g) || []).length, 3);
-  assert.equal((check.match(/_blockedAgentId = agent\["agent_id"\] \?\? "";/g) || []).length, 3);
+  // All FOUR arm sites (the agent-scoped narrowing of the PLATFORM_PROCS branch,
+  // PLATFORM_PROCS whole-app, process_name, panel) must feed the same fields
+  // EmitBlock already reports, or the Request Access dialog cannot name what to
+  // ask for. Was three before agent_scope:'agent' added the narrowing modifier.
+  assert.equal((check.match(/_fgIsBlocked = true;/g) || []).length, 4);
+  assert.equal((check.match(/_blockedAgentId = agent\["agent_id"\] \?\? "";/g) || []).length, 4);
   // The whole point of the sentinel: PLATFORM_PROCS stays untouched.
   assert.equal(/"ai_platform",\s*new HashSet/.test(src), false, 'ai_platform must NOT be added to PLATFORM_PROCS');
 });
@@ -1027,14 +1028,27 @@ test('enforcer-win.ps1: a platform block established in an IDE panel is latched,
   // latching one would keep a whole chat app blocked after the user left it.
   const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static void ClearFgBlocked()'));
   assert.ok(check.length > 0, 'expected a CheckFgBlocked body');
-  assert.equal((check.match(/ArmPanelBlockLatch\(\);/g) || []).length, 1, 'exactly one arming site');
-  const armIdx = check.indexOf('ArmPanelBlockLatch();');
+  // TWO arming sites now, both ELEMENT-scoped: the panel branch and the
+  // agent-scoped narrowing of the PLATFORM_PROCS branch. Each passes a
+  // NAMESPACED key ("panel:<id>" / "agent:<id>"), which is what keeps a panel id
+  // and an agent-surface id from ever being confused for one another.
+  const armKinds = (check.match(/ArmPanelBlockLatch\("(panel|agent):/g) || [])
+    .map((m) => m.slice('ArmPanelBlockLatch("'.length, -1));
+  assert.deepEqual(armKinds, ['agent', 'panel'], 'exactly two arming sites, one per element-scoped branch');
+  assert.equal((check.match(/ArmPanelBlockLatch\(/g) || []).length, 2, 'no unkeyed arming site may exist');
   const panelBranchIdx = check.indexOf('if (_fgIsPanel && !string.IsNullOrEmpty(agent["panel"]))');
-  assert.ok(panelBranchIdx >= 0 && panelBranchIdx < armIdx, 'the latch must be armed inside the panel branch');
-  // …and only on a tick whose panel read really succeeded, reusing the existing
-  // sticky signal rather than inventing a second counter. Arming inside the
-  // sticky window would stack the two grace periods.
-  assert.match(check, /if \(_fgLeftAiTicks == 0\) ArmPanelBlockLatch\(\);/);
+  const panelArmIdx = check.indexOf('ArmPanelBlockLatch("panel:');
+  assert.ok(panelBranchIdx >= 0 && panelBranchIdx < panelArmIdx, 'the latch must be armed inside the panel branch');
+  // The agent arm sits behind BOTH the verified+enforcing surface check and a
+  // Named read, so no unverified surface and no failed read can arm it.
+  const agentArmIdx = check.indexOf('ArmPanelBlockLatch("agent:');
+  const surfaceIdx = check.indexOf('AgentSurface surface = EnforcingAgentSurface(_app);');
+  assert.ok(surfaceIdx >= 0 && surfaceIdx < agentArmIdx, 'the agent arm must sit behind EnforcingAgentSurface');
+  assert.match(check, /if \(_fgAgentOutcome == AgentReadOutcome\.Named\r?\n\s*&& AgentNameMatches\(_fgAgentName, agent\["agent_name"\]\)\)/);
+  // …and both arm only on a tick whose focused-element read really succeeded,
+  // reusing the existing sticky signal rather than inventing a second counter.
+  // Arming inside the sticky window would stack the two grace periods.
+  assert.equal((check.match(/if \(_fgLeftAiTicks == 0\) ArmPanelBlockLatch\(/g) || []).length, 2);
 
   // The block decision consults the latch instead of being torn down.
   assert.match(src, /if \(_fgIsAi \|\| PanelBlockLatchHeld\(\)\)/);
@@ -1141,13 +1155,21 @@ test('enforcer-win.ps1: a neighbouring panel in the same window cannot tear down
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
   const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static void ClearFgBlocked()'));
   assert.ok(check.length > 0, 'expected a CheckFgBlocked body');
-  assert.match(check, /bool sameSurface = !_fgIsPanel\r?\n\s*\|\| string\.Equals\(_fgPanelId \?\? "", _panelBlockPanelId \?\? "", StringComparison\.OrdinalIgnoreCase\);/);
+  // Compared against LatchedPanelId(), not the raw key: the key is namespaced
+  // now, so a bare compare would never match and the fall-through would silently
+  // stop being scoped by panel.
+  assert.match(check, /bool sameSurface = !_fgIsPanel\r?\n\s*\|\| string\.Equals\(_fgPanelId \?\? "", LatchedPanelId\(\), StringComparison\.OrdinalIgnoreCase\);/);
   assert.match(check, /if \(!sameSurface && PanelBlockLatchHeld\(\)\) return;/);
   // The latch records WHICH panel it was armed for, and gives it up on release.
-  assert.match(src, /static volatile string _panelBlockPanelId = "";/);
-  const arm = src.slice(src.indexOf('static void ArmPanelBlockLatch()'), src.indexOf('static bool PanelBlockLatchHeld()'));
-  assert.match(arm, /_panelBlockPanelId = _fgPanelId \?\? "";/);
-  assert.match(arm, /_panelBlockPanelId = "";/, 'ClearPanelBlockLatch must drop the panel id too');
+  assert.match(src, /static volatile string _elementBlockKey = "";/);
+  const arm = src.slice(src.indexOf('static void ArmPanelBlockLatch(string key)'), src.indexOf('static bool PanelBlockLatchHeld()'));
+  assert.ok(arm.length > 0, 'expected an ArmPanelBlockLatch body');
+  assert.match(arm, /_elementBlockKey = key \?\? "";/);
+  assert.match(arm, /_elementBlockKey = "";/, 'ClearPanelBlockLatch must drop the latch key too');
+  // The two namespaces are read back through their own accessors, so neither can
+  // be mistaken for the other.
+  assert.match(arm, /k\.StartsWith\("panel:", StringComparison\.Ordinal\) \? k\.Substring\(6\) : ""/);
+  assert.match(arm, /return k\.StartsWith\("agent:", StringComparison\.Ordinal\);/);
   // A same-surface miss stays authoritative, so an admin un-blocking is still
   // immediate rather than waiting out the 10s latch TTL.
   const sameIdx = check.indexOf('bool sameSurface');
@@ -1250,30 +1272,39 @@ test('enforcer-win.ps1: a detection-only panel can never CANCEL another panel\'s
   // blocked Enter through. "Detection-only" must mean "never causes a block",
   // not "cancels other panels' blocks".
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
-  assert.match(src, /static volatile bool _blockedByPanel = false;/);
+  assert.match(src, /static volatile bool _blockedByElement = false;/);
   const enterPred = src.slice(src.indexOf('static bool EnterBlockActive('), src.indexOf('static string ActivePatterns()'));
-  assert.match(enterPred, /if \(_fgIsBlocked && \(_blockedByPanel \|\| PanelEnforceOk\(\)\)\) return true;/);
+  assert.match(enterPred, /if \(_fgIsBlocked && \(_blockedByElement \|\| PanelEnforceOk\(\)\)\) return true;/);
   // …but every CONTENT signal is still gated on the current surface.
   assert.match(enterPred, /if \(!PanelEnforceOk\(\)\) return false;\r?\n\s*return attachHold \|\| TypedBlockFresh\(\)/);
 
-  // Only the panel branch may set _blockedByPanel, and it still sits behind
+  // Only the panel branch may set _blockedByElement, and it still sits behind
   // _fgPanelEnforce — so a detection-only panel cannot arm a block either way.
   const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static void ClearFgBlocked()'));
   const panelBranchIdx = check.indexOf('if (_fgPanelEnforce) {');
-  const armIdx = check.indexOf('_blockedByPanel = true;');
-  assert.ok(panelBranchIdx >= 0 && armIdx > panelBranchIdx, '_blockedByPanel must be set inside the _fgPanelEnforce branch');
-  assert.equal((check.match(/_blockedByPanel = true;/g) || []).length, 1, 'exactly one place may set it');
-  assert.equal((check.match(/_blockedByPanel = false;/g) || []).length, 2, 'both process-keyed branches must clear it');
+  const panelArmIdx = check.lastIndexOf('_blockedByElement = true;');
+  assert.ok(panelBranchIdx >= 0 && panelArmIdx > panelBranchIdx, '_blockedByElement must be set inside the _fgPanelEnforce branch');
+  // TWO places set it now, one per element-scoped branch — the panel branch
+  // (gated on _fgPanelEnforce) and the agent-scoped narrowing (gated on a
+  // verified AND enforcing AGENT_SURFACES entry). Both gates encode the same
+  // rule: an unverified surface can never arm a block.
+  assert.equal((check.match(/_blockedByElement = true;/g) || []).length, 2, 'exactly one arm per element-scoped branch');
+  assert.equal((check.match(/_blockedByElement = false;/g) || []).length, 2, 'both process-keyed branches must clear it');
   // Cleared with the block itself, so it can never outlive it.
   const clear = src.slice(src.indexOf('static void ClearFgBlocked()'), src.indexOf('static string ExtractJsonString('));
-  assert.match(clear, /_blockedByPanel = false;/);
+  assert.match(clear, /_blockedByElement = false;/);
 
   // Attribution: a platform block reports the panel it was ARMED for, so
   // Request Access asks for an exception on the right host.
   assert.match(src, /static string PlatformBlockPanelField\(\)/);
   assert.match(src, /\(platformBlock \? PlatformBlockPanelField\(\) : PanelField\(\)\)/);
   const attr = src.slice(src.indexOf('static string PlatformBlockPanelField()'), src.indexOf('static void Emit(string kind'));
-  assert.match(attr, /if \(_blockedByPanel && !string\.IsNullOrEmpty\(_panelBlockPanelId\)\)/);
+  // Via LatchedPanelId(), so an AGENT-scoped block carries no panel field at
+  // all: index.js resolves a tool_host from it, and an agent-surface id is not a
+  // panel id.
+  assert.match(attr, /if \(_blockedByElement\)/);
+  assert.match(attr, /string panelId = LatchedPanelId\(\);/);
+  assert.equal(/Esc\(_elementBlockKey\)/.test(attr), false, 'the raw namespaced key must never be emitted');
 });
 
 test('enforcer-win.ps1: the platform-block latch does NOT widen capture or content blocks', async () => {
@@ -1321,7 +1352,7 @@ test('enforcer-win.ps1: the enforce gate is applied on BOTH the capture and the 
   // Capture side (via FgIsAiNow), Enter side, mouse side, UIA side. On both
   // block-decision sides the gate now covers every CONTENT signal, with a
   // platform block armed by an enforcing panel checked ahead of it — see
-  // _blockedByPanel and the "can never CANCEL" test below.
+  // _blockedByElement and the "can never CANCEL" test below.
   assert.match(src, /static bool FgIsAiNow\(\) \{ return _fgIsAi && _fgLeftAiTicks == 0 && PanelEnforceOk\(\); \}/);
   const enterPred = src.slice(src.indexOf('static bool EnterBlockActive('), src.indexOf('static string ActivePatterns()'));
   assert.match(enterPred, /if \(!PanelEnforceOk\(\)\) return false;/);
@@ -1379,7 +1410,9 @@ test('enforcer.js passes the IDE process and panel payloads, built from the cata
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer.js'), 'utf8');
   assert.match(src, /CFAI_IDE_PROCESSES:\s*JSON\.stringify\(buildIdeProcessConfig\(\)\)/);
   assert.match(src, /CFAI_AI_PANELS:\s*JSON\.stringify\(buildAiPanelConfig\(\)\)/);
-  assert.match(src, /import \{ buildIdeProcessConfig, buildAiPanelConfig \} from '\.\/ai-processes\.js';/);
+  // Third payload: the agent-surface catalog, for agent_scope:'agent' rows.
+  assert.match(src, /CFAI_AGENT_SURFACES:\s*JSON\.stringify\(buildAgentSurfaceConfig\(\)\)/);
+  assert.match(src, /import \{ buildIdeProcessConfig, buildAiPanelConfig, buildAgentSurfaceConfig \} from '\.\/ai-processes\.js';/);
   // The IDE names must NOT have been folded into CFAI_AI_PROCESSES, which is
   // what the clipboard/attachment/file-dialog watchers key on.
   assert.match(src, /CFAI_AI_PROCESSES: this\.aiProcessNames\.join\(','\)/);
@@ -1587,16 +1620,30 @@ function bannerStateFn(src) {
   return src.slice(start, end);
 }
 
-test('enforcer-win.ps1: a platform block declares its SCOPE, taken from _blockedByPanel and not from the panel field', async () => {
+test('enforcer-win.ps1: a platform block declares its SCOPE, taken from _blockedByElement and not from the panel field', async () => {
   // Scope must not be inferred from `panel`. That field is ATTRIBUTION —
   // PlatformBlockPanelField falls back to PanelField, so the day any
   // IDE_PROCESSES entry sets panelFallback:true an APP-scoped block can legally
   // carry a panel id, and anything keyed on `!panel` silently flips.
   const src = await enforcerSrc();
+  // Straight from _blockScope, via the one accessor — NOT from _blockedByElement
+  // (which cannot tell "panel" from "agent") and NOT from the panel field.
   assert.ok(
-    src.includes('",\\"block_scope\\":\\"" + (_blockedByPanel ? "panel" : "app") + "\\""'),
-    'EmitBlock must emit block_scope straight from _blockedByPanel',
+    src.includes('",\\"block_scope\\":\\"" + Esc(BlockScope()) + "\\""'),
+    'EmitBlock must emit block_scope straight from _blockScope via BlockScope()',
   );
+  const scopeFn = src.slice(src.indexOf('static string BlockScope()'), src.indexOf('static void UpdateBannerState()'));
+  assert.ok(scopeFn.length > 0, 'expected a BlockScope body');
+  assert.match(scopeFn, /string s = _blockScope;/);
+  assert.match(scopeFn, /return \(s != null && s\.Length > 0\) \? s : "app";/);
+  // The bar's own payload must emit the REAL scope too, never a hardcoded "app" —
+  // main.js only renders for scope === 'app', and that guard is a real second
+  // line of defence only if what it checks can actually differ.
+  const barEmit = src.slice(src.indexOf('static void EmitBlockState('), src.indexOf('static void ClearFgBlocked()'));
+  assert.match(barEmit, /",\\"scope\\":\\"" \+ Esc\(BlockScope\(\)\) \+ "\\""/);
+  assert.equal(/\\"scope\\":\\"app\\"/.test(barEmit), false, 'the bar must not hardcode its scope');
+  // Cleared with the block itself, so a stale scope can never outlive it.
+  assert.match(src.slice(src.indexOf('static void ClearFgBlocked()'), src.indexOf('static string ExtractJsonString(')), /_blockScope = "";/);
   // …emitted inside the platform-block group, alongside the other identity
   // fields, so it can never appear on a content block.
   const emitBlock = codeOnly(src.slice(src.indexOf('static void EmitBlock('), src.indexOf('static void EmitRewrite(')));
@@ -1605,12 +1652,15 @@ test('enforcer-win.ps1: a platform block declares its SCOPE, taken from _blocked
   assert.ok(groupIdx >= 0, 'expected the platform_block group in EmitBlock');
   assert.ok(scopeIdx > groupIdx, 'block_scope belongs in the platform_block group');
 
-  // All THREE arm sites in CheckFgBlocked, in file order: two process-keyed
-  // (whole app) then the panel-keyed one. If a fourth arm site is ever added
-  // this fails until its scope is decided deliberately.
-  const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static void UpdateBannerState()'));
-  const arms = [...check.matchAll(/_fgIsBlocked = true;\s*\r?\n\s*_blockedByPanel = (true|false);/g)].map((m) => m[1]);
-  assert.deepEqual(arms, ['false', 'false', 'true'], 'the three CheckFgBlocked arm sites must keep their scopes');
+  // All FOUR arm sites in CheckFgBlocked, in file order: the agent-scoped
+  // narrowing, the two process-keyed whole-app ones, then the panel-keyed one.
+  // Every site must declare BOTH flags together, so a fifth arm site fails this
+  // until its scope is decided deliberately.
+  const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static string BlockScope()'));
+  const arms = [...check.matchAll(/_fgIsBlocked = true;\s*\r?\n\s*_blockedByElement = (true|false);[^\r\n]*\r?\n\s*_blockScope = "(app|panel|agent)";/g)]
+    .map((m) => [m[1], m[2]]);
+  assert.deepEqual(arms, [['true', 'agent'], ['false', 'app'], ['false', 'app'], ['true', 'panel']],
+    'the four CheckFgBlocked arm sites must keep their scopes');
 });
 
 test('index.js relays block_scope to Electron without inventing it', async () => {
@@ -1656,7 +1706,7 @@ test('enforcer-win.ps1: the bar is off whenever the panic hotkey has disarmed en
   const src = await enforcerSrc();
   const fn = bannerStateFn(src);
   assert.match(fn, /!Disarmed\(\)/, 'the bar-active condition must include !Disarmed()');
-  assert.match(fn, /bool want = _fgIsBlocked && !_blockedByPanel && !Disarmed\(\)/);
+  assert.match(fn, /bool want = _fgIsBlocked && BlockScope\(\) == "app" && !Disarmed\(\)/);
   // …and Disarmed() really is absent from CheckFgBlocked, which is the whole
   // reason the term is needed here. If that ever changes, this term becomes
   // redundant rather than wrong — but the assumption should be re-checked.
@@ -1669,7 +1719,10 @@ test('enforcer-win.ps1: the bar is whole-app only — an IDE-panel block never r
   // extension, and for the same reason: blocking one AI panel inside VS Code is
   // not blocking VS Code, and a display-wide red bar would say that it was.
   const src = await enforcerSrc();
-  assert.match(bannerStateFn(src), /!_blockedByPanel/);
+  // Tested against the POSITIVE scope rather than !_blockedByElement: agent- and
+  // panel-scoped blocks are both excluded, and a future third element-scoped kind
+  // has to state its intent here instead of inheriting "no bar" silently.
+  assert.match(bannerStateFn(src), /BlockScope\(\) == "app"/);
 });
 
 test('enforcer-win.ps1: the bar clears immediately and never borrows the 3s enforcement sticky window', async () => {
@@ -1695,14 +1748,14 @@ test('enforcer-win.ps1: the bar clears immediately and never borrows the 3s enfo
 });
 
 test('enforcer-win.ps1: the bar OBSERVES enforcement state and never writes it', async () => {
-  // _fgIsBlocked / _blockedByPanel / the panel latch release deliberately
+  // _fgIsBlocked / _blockedByElement / the panel latch release deliberately
   // slowly, for correctness reasons the bar does not share (see the
   // platform-block-latch fix). A presentation feature must not be able to
   // shorten or extend any of them.
   const code = codeOnly(bannerStateFn(await enforcerSrc()));
   for (const field of [
-    '_fgIsBlocked', '_blockedByPanel', '_blockedPlatform', '_blockedAgentName',
-    '_blockedAgentId', '_fgLeftAiTicks', '_fgPid', '_panelBlockLatch',
+    '_fgIsBlocked', '_blockedByElement', '_blockedPlatform', '_blockedAgentName',
+    '_blockedAgentId', '_fgLeftAiTicks', '_fgPid', '_panelBlockLatch', '_blockScope',
   ]) {
     assert.equal(assignsTo(code, field), false, `UpdateBannerState must not write ${field}`);
   }
@@ -1950,4 +2003,298 @@ test('the Request Access modal is shown ONCE per host while the bar is up, and t
   assert.equal(decide(true, 'claude.ai', 'chat.openai.com', false), 'shown'); // different tool
   assert.equal(decide(false, 'claude.ai', 'claude.ai', false), 'shown');  // no bar → the modal is the only signal
   assert.equal(decide(true, 'claude.ai', 'claude.ai', true), 'shown');    // open dialog is still raised
+});
+
+// ── §6: agent-scoped desktop blocks (agent_scope:'agent') ────────────────────
+//
+// A blocked_agents row names ONE agent, but the enforcer matched it against the
+// whole PROCESS set its platform maps to and used agent_name only as display
+// text — so blocking "AI Learning Advisor" disabled the entire Microsoft 365
+// Copilot app. The behavioural half of this feature is driven for real in
+// tests/enforcer-panel-block.test.mjs; these are the source invariants, same
+// convention as every other .ps1 check in this file.
+
+test('AGENT_SURFACES: an entry may only enforce once a live pass verified it', async () => {
+  // THE safety gate of this feature, in its general form. A new surface ships
+  // enforce:false AND verified:false — matched and unit-tested, so the whole
+  // bridge is exercised, but arming nothing — until a human runs a live
+  // verification pass against a real installation and flips BOTH. While they are
+  // false an agent-scoped row behaves exactly as it did before the feature
+  // existed (a whole-app block), asserted behaviourally against the hypothetical
+  // unverified surface in tests/enforcer-panel-block.test.mjs.
+  //
+  // m365_copilot is the one entry PAST that gate: verified live 2026-08-27
+  // against a real Microsoft 365 Copilot install with a real added agent, and now
+  // enforcing. If you are here because this test failed after you flipped a flag
+  // on a NEW entry: that is the point. Confirm the live verification actually
+  // happened and record it, rather than loosening this.
+  const { AGENT_SURFACES, buildAgentSurfaceConfig } = await import('../src/os_monitor/ai-processes.js');
+  assert.ok(AGENT_SURFACES.length > 0, 'expected at least one agent surface');
+  for (const surface of AGENT_SURFACES) {
+    assert.equal(typeof surface.enforce, 'boolean', `${surface.id} must state enforce explicitly`);
+    assert.equal(typeof surface.verified, 'boolean', `${surface.id} must state verified explicitly`);
+    if (surface.enforce) {
+      assert.equal(surface.verified, true, `${surface.id} enforces without a recorded live verification`);
+    }
+  }
+  const m365 = AGENT_SURFACES.find((s2) => s2.id === 'm365_copilot');
+  assert.ok(m365, 'the m365_copilot surface is missing');
+  assert.equal(m365.enforce, true, 'm365_copilot was live-verified 2026-08-27 and must stay enforcing');
+  assert.equal(m365.verified, true);
+  // …and both flags must survive the env-var handoff, because the C# side
+  // narrows only when a surface is verified AND enforcing. Dropping either from
+  // the payload would silently move the surface to the wrong side of that gate.
+  for (const entry of buildAgentSurfaceConfig()) {
+    const src = AGENT_SURFACES.find((s2) => s2.id === entry.id);
+    assert.ok(src, `${entry.id} is not in the catalog`);
+    assert.equal(entry.enforce, src.enforce === true, `${entry.id} enforce must survive the handoff`);
+    assert.equal(entry.verified, src.verified === true, `${entry.id} verified must survive the handoff`);
+    assert.ok(Array.isArray(entry.composerNamePrefixes) && entry.composerNamePrefixes.length > 0);
+    assert.ok(Array.isArray(entry.genericNames));
+  }
+});
+
+test('the agent catalog is separate from AI_PANELS and adds no process to any watcher', async () => {
+  // Same separation AI_PANELS/IDE_PROCESSES already keep, for the same reason: a
+  // process name landing in the wrong catalog silently turns on clipboard and
+  // attachment watching for a whole app. AGENT_SURFACES narrows an existing
+  // block; it must never widen what is watched or scanned.
+  const { AGENT_SURFACES, AI_PANELS } = await import('../src/os_monitor/ai-processes.js');
+  const panelIds = new Set(AI_PANELS.map((p2) => p2.id));
+  for (const surface of AGENT_SURFACES) {
+    assert.equal(panelIds.has(surface.id), false, `${surface.id} collides with a panel id`);
+  }
+  const index = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  assert.equal(/AGENT_SURFACES|buildAgentSurfaceConfig/.test(index), false,
+    'index.js (which builds aiProcNames for every passive watcher) must not know about agent surfaces');
+  for (const file of ['file-dialog-watcher.js', 'attachment-watcher.js', 'prompt-watcher.js']) {
+    const w = await readFile(join(AGENT_DIR, 'src', 'os_monitor', file), 'utf8');
+    assert.equal(/CFAI_AGENT_SURFACES|AGENT_SURFACES/.test(w), false,
+      `${file} must know nothing about agent surfaces`);
+  }
+});
+
+test('enforcer-win.ps1: the agent-surface catalog FAILS CLOSED on a bad payload', async () => {
+  // The opposite direction from LoadAiPanels, and deliberately so. An empty PANEL
+  // catalog means "do not scan an editor", which is safe. An empty AGENT-SURFACE
+  // catalog means "do not NARROW a block" — also safe, because an agent-scoped
+  // row then falls back to the whole-app block it produces today.
+  const src = await enforcerSrc();
+  assert.match(src, /static List<AgentSurface> _agentSurfaces = new List<AgentSurface>\(\);/);
+  const load = src.slice(src.indexOf('static void LoadAgentSurfaces(string json)'), src.indexOf('static AgentSurface MatchAgentSurface(string proc)'));
+  assert.ok(load.length > 0, 'expected a LoadAgentSurfaces body');
+  // Assigned only at the very end, so a throw leaves the list empty rather than
+  // half-populated.
+  assert.match(load, /_agentSurfaces = surfaces;\s*\r?\n\s*\}/);
+  assert.equal((load.match(/_agentSurfaces = /g) || []).length, 1, 'exactly one assignment, at the end');
+  // A surface with nothing to match on can never match, so it is dropped rather
+  // than kept as a half-entry.
+  assert.match(load, /if \(procs\.Count == 0\) continue;/);
+  assert.match(load, /if \(prefixes\.Count == 0\) continue;/);
+  // The caller catches, so a malformed payload cannot take the helper down.
+  assert.match(src, /try \{ LoadAgentSurfaces\(agentSurfacesJson\); \}\r?\n\s*catch \(Exception ex\) \{ Emit\("error", "", "", "agent_surfaces_load_failed"/);
+  // Narrowing requires BOTH flags, in one place, so no call site can forget one.
+  const enforcing = src.slice(src.indexOf('static AgentSurface EnforcingAgentSurface(string proc)'), src.indexOf('// Trim + collapse internal whitespace'));
+  assert.match(enforcing, /return \(s\.Verified && s\.Enforce\) \? s : null;/);
+});
+
+test('enforcer-win.ps1: the agent read is ONE property read, pid-checked, and never a tree walk', async () => {
+  const src = await enforcerSrc();
+  const read = src.slice(src.indexOf('static AgentReadOutcome ReadFocusedAgentName('), src.indexOf('static readonly char[] CLASS_TOKEN_SEP'));
+  assert.ok(read.length > 0, 'expected a ReadFocusedAgentName body');
+  assert.match(read, /AutomationElement\.FocusedElement/);
+  assert.equal((read.match(/AutomationElement\.FocusedElement/g) || []).length, 1, 'exactly one read');
+  assert.equal(/FindAll|TreeWalker|GetFirstChild/.test(read), false, 'agent detection must not walk the tree');
+  // The pid check is non-negotiable: FocusedElement is a GLOBAL read that was
+  // measured returning an element from another window in another process, and
+  // nothing it says is evidence about the foreground surface unless the element
+  // belongs to it. It is delegated to ElementPidBelongsToForeground — one place,
+  // so the panel path's own exact-match check cannot drift into it by accident —
+  // and a rejection is Unreadable (no evidence), never "no agent open".
+  assert.match(read, /if \(!ElementPidBelongsToForeground\(el\.Current\.ProcessId, fgPid\)\) return AgentReadOutcome\.Unreadable;/);
+  assert.match(read, /catch \{ return AgentReadOutcome\.Unreadable; \}/);
+  const ownIdx = read.indexOf('ElementPidBelongsToForeground(');
+  assert.ok(ownIdx >= 0 && ownIdx < read.indexOf('el.Current.Name'), 'the ownership check must precede any property read');
+  // Every property read is individually try/caught — reading another process's
+  // accessibility tree throws routinely.
+  assert.match(read, /try \{ name = el\.Current\.Name \?\? ""; \} catch \{ \}/);
+  // A missing control type or Name is a READ FAILURE, never the authoritative
+  // "no agent is open" — that distinction is what the latch keys on.
+  assert.match(read, /if \(ctName\.Trim\(\)\.Length == 0 \|\| name\.Trim\(\)\.Length == 0\) return AgentReadOutcome\.Unreadable;/);
+  // Nothing read here may ever reach an emitter.
+  assert.equal(/Emit\(|EmitBlock\(|Console\.Out/.test(read), false, 'agent detection must emit nothing');
+});
+
+test('enforcer-win.ps1: the WebView2 pid rule accepts a DIRECT child and nothing further', async () => {
+  // The bug the 2026-08-27 live pass found. M365Copilot.exe hosts its UI in
+  // WebView2, so the composer element is UIA-owned by a CHILD msedgewebview2.exe
+  // process; an exact pid match against the foreground window's process therefore
+  // read Unreadable on every single tick and the narrowing could never arm.
+  //
+  // The fix must not become "accept any ancestor": one generation is what a
+  // Chromium host needs, and walking further would start accepting whatever an
+  // unrelated app happened to launch. Driven behaviourally with real child
+  // processes in tests/enforcer-panel-block.test.mjs.
+  const src = await enforcerSrc();
+  const own = src.slice(
+    src.indexOf('static bool ElementPidBelongsToForeground(int elPid, uint fgPid)'),
+    src.indexOf('// Returns the parent pid of `pid`'),
+  );
+  assert.ok(own.length > 0, 'expected an ElementPidBelongsToForeground body');
+  assert.match(own, /if \(elPid == \(int\)fgPid\) return true;/);
+  assert.match(own, /return GetParentProcessId\(elPid\) == \(int\)fgPid;/);
+  // ONE generation: no ancestor walk, no recursion.
+  assert.equal(/while|for \(|ElementPidBelongsToForeground\(/.test(own.slice(own.indexOf('{'))), false,
+    'the ownership rule must not walk further than one generation');
+
+  // The parent lookup itself: snapshot-based, handle always released, and it can
+  // only ever fail CLOSED (-1 matches no pid, so the element is rejected).
+  const parent = src.slice(
+    src.indexOf('static int GetParentProcessId(int pid)'),
+    src.indexOf('struct MSG {'),
+  );
+  assert.ok(parent.length > 0, 'expected a GetParentProcessId body');
+  assert.match(parent, /if \(snap == IntPtr\.Zero\) return -1;/);
+  assert.match(parent, /catch \{ return -1; \}/);
+  assert.match(parent, /finally \{ if \(snap != IntPtr\.Zero\) CloseHandle\(snap\); \}/);
+  // Enumeration only — nothing opens, reads or touches another process.
+  assert.equal(/OpenProcess|ReadProcessMemory|TerminateProcess/.test(parent), false,
+    'the parent lookup must only enumerate, never open another process');
+  // And the snapshot is taken in exactly one place, on the poll thread's path.
+  const code = codeOnly(src);
+  assert.equal((code.match(/CreateToolhelp32Snapshot\(TH32CS_SNAPPROCESS/g) || []).length, 1,
+    'exactly one snapshot site');
+  assert.equal((code.match(/ElementPidBelongsToForeground\(/g) || []).length, 2,
+    'the rule is declared once and called once — from the agent read only');
+  // The PANEL read keeps its own exact-pid check: VS Code/Cursor were verified
+  // live with it, and widening that path is a separate decision with its own
+  // false-positive surface (a code editor).
+  const panelRead = src.slice(src.indexOf('static PanelSig ReadFocusedPanel('), src.indexOf('static bool PanelEnforceOk()'));
+  assert.ok(panelRead.length > 0, 'expected a ReadFocusedPanel body');
+  assert.equal(/ElementPidBelongsToForeground|GetParentProcessId/.test(panelRead), false,
+    'the panel read must keep its exact-pid check until its own live pass');
+});
+
+test('enforcer-win.ps1: the agent name read out of another app is never emitted or logged', async () => {
+  // The strictest rule in this feature. _fgAgentName holds a display string read
+  // from ANOTHER APP's accessibility tree. It is compared against the blocklist
+  // and nothing else. Every name that reaches stdout comes from the blocked ROW
+  // (admin-typed) — _blockedAgentName — never from the read.
+  const src = await enforcerSrc();
+  const code = codeOnly(src);
+  const uses = (code.match(/_fgAgentName/g) || []).length;
+  assert.ok(uses > 0, 'expected _fgAgentName to exist');
+  // Exactly three code references: the declaration, the per-tick assignment in
+  // ApplyForegroundTick, and the one comparison in CheckFgBlocked.
+  assert.equal(uses, 3, `_fgAgentName gained a reference (${uses}) — every use must be re-reviewed for PII`);
+  assert.match(code, /static volatile string _fgAgentName = "";/);
+  assert.match(code, /_fgAgentName = agentName \?\? "";/);
+  assert.match(code, /AgentNameMatches\(_fgAgentName, agent\["agent_name"\]\)/);
+  // And it appears in no emitter at all.
+  for (const [name, from, to] of [
+    ['Emit', 'static void Emit(string kind', 'static string Esc(string s)'],
+    ['EmitBlock', 'static void EmitBlock(', 'static void EmitRewrite('],
+    ['EmitBlockState', 'static void EmitBlockState(', 'static void ClearFgBlocked()'],
+  ]) {
+    const fn = src.slice(src.indexOf(from), src.indexOf(to));
+    assert.ok(fn.length > 0, `expected a ${name} body`);
+    assert.equal(/_fgAgentName|_fgAgentOutcome/.test(fn), false, `${name} must not carry the read agent name`);
+  }
+});
+
+test('enforcer-win.ps1: the extra accessibility read happens ONLY when an agent-scoped policy needs it', async () => {
+  // PRIVACY GATE. Reading another app's accessibility tree to learn which agent
+  // someone has open is justified only by a policy that needs the answer. Three
+  // conditions, all required, and keyed on the CURRENT process rather than the
+  // sticky _app so a tick can never read the wrong app.
+  const src = await enforcerSrc();
+  const fg = src.slice(src.indexOf('static void UpdateForeground()'), src.indexOf('// Everything UpdateForeground does once the focused-element read is in.'));
+  assert.ok(fg.length > 0, 'expected an UpdateForeground body');
+  assert.match(fg, /if \(!isIde && proc != null && _aiProcs != null && _aiProcs\.Contains\(proc\)\r?\n\s*&& _agentScopedProcs\.Contains\(proc\)\)/);
+  assert.match(fg, /if \(surface != null\) agentOutcome = ReadFocusedAgentName\(surface, pid, out agentName\);/);
+  // The gate's data is rebuilt with the blocklist, and only there.
+  const rebuild = src.slice(src.indexOf('static void RebuildAgentScopedProcs()'), src.indexOf('// Arm the platform-block latch'));
+  assert.ok(rebuild.length > 0, 'expected a RebuildAgentScopedProcs body');
+  assert.match(rebuild, /if \(!string\.Equals\(agent\["agent_scope"\], "agent", StringComparison\.OrdinalIgnoreCase\)\) continue;/);
+  assert.match(rebuild, /_agentScopedProcs = procs;/);
+  const codeSrc = codeOnly(src);
+  assert.ok(codeSrc.includes('static HashSet<string> _agentScopedProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);'));
+  assert.equal((codeSrc.match(/_agentScopedProcs = procs;/g) || []).length, 1, 'exactly one place may write the gate set');
+  // Dropping the file must drop the gate with it, or a removed policy would keep
+  // licensing the read.
+  assert.match(src, /_blockedList\.Clear\(\); RebuildAgentScopedProcs\(\); ClearFgBlocked\(\); return;/);
+  // …and the scope really is parsed off each row.
+  assert.match(src, /d\["agent_scope"\] = ExtractJsonString\(item, "agent_scope"\);/);
+});
+
+test('enforcer-win.ps1: an agent surface is NOT a panel, so M365Copilot capture is untouched', async () => {
+  // PanelUiaOk/PanelEnforceOk decide whether this app's UIA content scanning and
+  // typed-buffer capture may run. Making an agent surface set _fgIsPanel would
+  // change both for Microsoft 365 Copilot — a capture regression dressed up as a
+  // blocking feature. The chat-app branch must leave isPanel alone.
+  const src = await enforcerSrc();
+  const tick = src.slice(src.indexOf('static void ApplyForegroundTick('), src.indexOf('// When a block is active, locate the send button'));
+  assert.ok(tick.length > 0, 'expected an ApplyForegroundTick body');
+  const chatBranch = tick.slice(tick.indexOf('else if (proc != null && _aiProcs != null && _aiProcs.Contains(proc))'));
+  assert.ok(chatBranch.length > 0, 'expected the chat-app branch');
+  const chatCode = codeOnly(chatBranch.slice(0, chatBranch.indexOf('if (isAi)')));
+  assert.equal(/isPanel = |panelEnforce = |panelId = /.test(chatCode), false,
+    'the chat-app branch must not touch panel state');
+  assert.match(chatCode, /isAi = true;/);
+  // Only an AUTHORITATIVE outcome retires an agent latch, and only an agent one.
+  assert.match(chatCode, /if \(AgentBlockLatched\(\)\r?\n\s*&& \(agentOutcome == AgentReadOutcome\.Generic \|\| agentOutcome == AgentReadOutcome\.Named\)\)/);
+  assert.match(chatCode, /ClearPanelBlockLatch\(\);/);
+  // The two NO-EVIDENCE outcomes must not appear as latch-retiring conditions.
+  assert.equal(/Unreadable\)\s*\|\|/.test(chatCode), false, 'an unreadable read must not retire the latch');
+  assert.equal(/NotComposer/.test(chatCode), false, 'a NotComposer read must not retire the latch');
+  // And the two no-evidence outcomes are what the tail guard protects.
+  const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static string BlockScope()'));
+  assert.match(check, /bool noAgentEvidence = _fgAgentOutcome == AgentReadOutcome\.Unreadable\r?\n\s*\|\| _fgAgentOutcome == AgentReadOutcome\.NotComposer;/);
+  assert.match(check, /if \(noAgentEvidence && AgentBlockLatched\(\) && PanelBlockLatchHeld\(\)\) return;/);
+});
+
+test('enforcer-win.ps1: agent-name matching is whole-string, normalised, and Regex-free', async () => {
+  // WHOLE-STRING equality, not the substring test the browser extension uses: its
+  // signal is a name found somewhere in a page header, this one is an exact
+  // composer label, and a substring test here would let a row for "Advisor"
+  // block "AI Learning Advisor".
+  const src = await enforcerSrc();
+  const match = src.slice(src.indexOf('static bool AgentNameMatches(string extracted, string blockedName)'), src.indexOf('// A SINGLE property read of the currently-focused element'));
+  assert.ok(match.length > 0, 'expected an AgentNameMatches body');
+  assert.match(match, /return string\.Equals\(a, b, StringComparison\.OrdinalIgnoreCase\);/);
+  assert.equal(/IndexOf|Contains|StartsWith/.test(match), false, 'matching must not become a substring test');
+  assert.match(match, /if \(a\.Length == 0 \|\| b\.Length == 0\) return false;/);
+  // The Generic filter runs BEFORE matching, so an agent literally named
+  // "Copilot" can never be matched through this mechanism.
+  const extract = src.slice(src.indexOf('static AgentReadOutcome ExtractAgentName('), src.indexOf('static bool AgentNameMatches('));
+  const genericIdx = extract.indexOf('return AgentReadOutcome.Generic;');
+  const namedIdx = extract.indexOf('return AgentReadOutcome.Named;');
+  assert.ok(genericIdx >= 0 && namedIdx > genericIdx, 'the Generic filter must precede the Named result');
+  // Fixed literals, so no Regex — same rule the panel matcher holds to, and every
+  // Regex in this file has to carry REGEX_TIMEOUT for a reason that must not be
+  // reintroduced here.
+  const section = src.slice(src.indexOf('static void LoadAgentSurfaces(string json)'), src.indexOf('static readonly char[] CLASS_TOKEN_SEP'));
+  assert.equal(/new Regex\(|Regex\.(IsMatch|Match|Replace)/.test(section), false, 'no regex in the agent path');
+  // The prefix list is DATA from the catalog, never a literal in here — the
+  // English-only "Message " prefix is a locale limitation to be fixed by adding
+  // an array element, not by editing C#.
+  assert.equal(section.includes('"Message "'), false, 'the composer prefix must come from the catalog, not the .ps1');
+});
+
+test("monitor-runner.mjs sanitises the server's per-agent rows before they reach the enforcer", async () => {
+  // The latent bug this feature makes load-bearing. The .ps1 parses
+  // blocked-agents.json with a hand-rolled extractor that derails on the WHOLE
+  // FILE for one stray quote/backslash/brace in one value — silently dropping
+  // every other block too. synthesizePlatformBlocks has always sanitised its
+  // fields; the server's per-agent rows were sent RAW. That only risked a
+  // corrupted display string before; now agent_name is the MATCHING KEY.
+  const src = await readFile(join(AGENT_DIR, 'electron', 'monitor-runner.mjs'), 'utf8');
+  assert.match(src, /import \{ filterBlockedAgents, synthesizePlatformBlocks, normalizeAgentRows \} from '\.\.\/src\/os_monitor\/ai-processes\.js';/);
+  assert.match(src, /const list = normalizeAgentRows\(Array\.isArray\(agentRows\) \? agentRows : \[\], log\)\r?\n\s*\.concat\(synthesizePlatformBlocks\(platforms\)\);/);
+  // Agent rows still come FIRST, so a more specific per-agent block still wins:
+  // CheckFgBlocked returns on its first match, so array order IS the precedence.
+  const fn = src.slice(src.indexOf('async function refreshBlockedAgents()'), src.indexOf('// ── Offline access-request queue'));
+  assert.ok(fn.indexOf('normalizeAgentRows(') < fn.indexOf('synthesizePlatformBlocks('), 'agent rows must stay first');
+  // And the exception filter still runs on the combined list, after this.
+  assert.ok(fn.indexOf('const list =') < fn.indexOf('filterBlockedAgents(list'));
 });

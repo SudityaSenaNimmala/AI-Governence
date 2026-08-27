@@ -26,6 +26,14 @@ import {
   processForHost,
   synthesizePlatformBlocks,
   PLATFORM_BLOCK_SENTINEL,
+  AGENT_SURFACES,
+  AGENT_NAME_GENERIC,
+  AGENT_NAME_NOT_COMPOSER,
+  agentSurfaceForProcess,
+  extractAgentName,
+  agentNameMatches,
+  normalizeAgentRows,
+  buildAgentSurfaceConfig,
 } from '../src/os_monitor/ai-processes.js';
 
 const AGENT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -387,4 +395,275 @@ test('filterBlockedAgents lifts a synthesised platform block via the row own hos
     filterBlockedAgents(list, [{ tool_host: 'chatgpt.com' }]).map((r) => (r.host || r.agent_id) + (r.panel ? '/' + r.panel : '')),
     ['claude.ai', 'claude.ai/claude_code'],
   );
+});
+
+// ── Agent surfaces: which named agent is open inside one AI app ─────────────
+//
+// A blocked_agents row names ONE agent ({ agent_name: "AI Learning Advisor",
+// platform: "personal_agent" }), but the desktop enforcer matched it against the
+// whole PROCESS set the platform maps to and used agent_name only as display
+// text. Blocking one agent therefore disabled the entire Microsoft 365 Copilot
+// app — generic Copilot chat and every other agent in it included.
+//
+// The pure half of the fix lives here; the C# port in enforcer-win.ps1
+// (ExtractAgentName / AgentNameMatches) must stay in lockstep with it, and
+// os-monitor-safety.test.mjs pins the .ps1 side.
+
+// The MEASURED live values (2026-08, read-only UIA probe of a real Microsoft 365
+// Copilot window). The WINDOW TITLE is useless — always the static "Microsoft
+// 365 Copilot" — and is used by nothing.
+const M365_GENERIC = { process: 'M365Copilot', controlType: 'Edit', name: 'Message Copilot' };
+const M365_ADVISOR = { process: 'M365Copilot', controlType: 'Edit', name: 'Message AI Learning Advisor' };
+
+test('the M365Copilot surface is live-verified and enforcing — enforce:true AND verified:true', () => {
+  // Verified live on 2026-08-27 against a real Microsoft 365 Copilot install with
+  // a real added agent ("AI Learning Advisor"): only that agent was blocked, the
+  // Request Access modal named it rather than the whole app, and generic Copilot
+  // chat plus a different agent kept sending. Duplicated deliberately in
+  // os-monitor-safety.test.mjs, which is the file a reviewer reads for safety
+  // invariants.
+  const m365 = AGENT_SURFACES.find((s2) => s2.id === 'm365_copilot');
+  assert.ok(m365, 'the m365_copilot surface is missing');
+  assert.equal(m365.enforce, true);
+  assert.equal(m365.verified, true);
+  // The locale limitation is modelled as DATA, so adding a language is adding an
+  // array element rather than editing the C#.
+  assert.deepEqual(m365.composerNamePrefixes, ['Message ']);
+  assert.deepEqual(m365.genericNames, ['Copilot']);
+});
+
+test('the safety gate holds for every entry: nothing may enforce without being verified', () => {
+  // The general rule, stated over the whole catalog rather than over one entry, so
+  // it keeps covering FUTURE surfaces after m365_copilot stopped being the
+  // unverified example. A new entry ships enforce:false/verified:false — matched
+  // and unit-tested, arming nothing — until a human runs its own live pass.
+  // enforcer-win.ps1's EnforcingAgentSurface() requires BOTH flags, so an
+  // enforce:true/verified:false entry would be a catalog author claiming a live
+  // pass that never happened.
+  for (const surface of AGENT_SURFACES) {
+    assert.equal(typeof surface.enforce, 'boolean', `${surface.id} must state enforce explicitly`);
+    assert.equal(typeof surface.verified, 'boolean', `${surface.id} must state verified explicitly`);
+    if (surface.enforce) {
+      assert.equal(surface.verified, true, `${surface.id} enforces without a recorded live verification`);
+    }
+    // Every entry needs something to match on, verified or not — a surface with
+    // no prefix can never read a name and would silently narrow nothing.
+    assert.ok(Array.isArray(surface.composerNamePrefixes) && surface.composerNamePrefixes.length > 0, surface.id);
+    assert.ok(Array.isArray(surface.genericNames), surface.id);
+  }
+});
+
+test('agentSurfaceForProcess matches on the process name, case- and .exe-insensitively', () => {
+  for (const proc of ['M365Copilot', 'm365copilot', 'M365Copilot.exe', ' M365Copilot ']) {
+    assert.equal(agentSurfaceForProcess(proc)?.id, 'm365_copilot', proc);
+  }
+  // Copilot STANDALONE is a different process and has no surface: PLATFORM_PROCS
+  // maps personal_agent to both, so a row covering it must still fall back to a
+  // whole-app block there rather than silently narrowing.
+  assert.equal(agentSurfaceForProcess('Copilot'), null);
+  for (const proc of ['ChatGPT', 'Claude', 'Code', 'notepad', '', null, undefined]) {
+    assert.equal(agentSurfaceForProcess(proc), null, String(proc));
+  }
+});
+
+test('extractAgentName reads the agent name off the composer, with Generic first', () => {
+  // The whole read signal, on the measured values.
+  assert.equal(extractAgentName(M365_ADVISOR), 'AI Learning Advisor');
+  assert.equal(extractAgentName(M365_GENERIC), AGENT_NAME_GENERIC);
+  // Generic is matched case-insensitively and after whitespace normalisation, so
+  // a UI that pads or re-cases the label still resolves to "no agent open".
+  assert.equal(extractAgentName({ ...M365_GENERIC, name: 'Message   copilot' }), AGENT_NAME_GENERIC);
+  // Whitespace in a real name is normalised, not lost.
+  assert.equal(extractAgentName({ ...M365_ADVISOR, name: 'Message  AI  Learning   Advisor  ' }), 'AI Learning Advisor');
+  // A non-breaking space is what a web-hosted ARIA label routinely carries.
+  assert.equal(extractAgentName({ ...M365_ADVISOR, name: 'Message AI\u00a0Learning Advisor' }), 'AI Learning Advisor');
+});
+
+test('extractAgentName treats anything it cannot read as NO EVIDENCE, never as "no agent"', () => {
+  // Every one of these must be NotComposer, not Generic: reporting "no specific
+  // agent is open" off a read that established nothing would tear a live block
+  // down on the first bad tick.
+  const notComposer = [
+    // Wrong control type — the transcript, a button, a list.
+    { ...M365_ADVISOR, controlType: 'Document' },
+    { ...M365_ADVISOR, controlType: '' },
+    { ...M365_ADVISOR, controlType: null },
+    // No recognised prefix: a different composer, a search box, a non-English UI.
+    { ...M365_ADVISOR, name: 'Search agents' },
+    { ...M365_ADVISOR, name: 'Nachricht an AI Learning Advisor' },
+    // The prefix and nothing after it.
+    { ...M365_ADVISOR, name: 'Message ' },
+    { ...M365_ADVISOR, name: 'Message' },
+    { ...M365_ADVISOR, name: 'Message    ' },
+    { ...M365_ADVISOR, name: '' },
+    { ...M365_ADVISOR, name: null },
+    // A process with no surface at all.
+    { process: 'ChatGPT', controlType: 'Edit', name: 'Message ChatGPT' },
+    { process: '', controlType: 'Edit', name: 'Message Copilot' },
+  ];
+  for (const focused of notComposer) {
+    assert.equal(extractAgentName(focused), AGENT_NAME_NOT_COMPOSER, JSON.stringify(focused));
+  }
+  // Never throws: every input comes from another process's accessibility tree.
+  assert.equal(extractAgentName(null), AGENT_NAME_NOT_COMPOSER);
+  assert.equal(extractAgentName(undefined), AGENT_NAME_NOT_COMPOSER);
+  assert.equal(extractAgentName({}), AGENT_NAME_NOT_COMPOSER);
+});
+
+test('agentNameMatches is WHOLE-STRING, not the substring test the extension uses', () => {
+  assert.equal(agentNameMatches('AI Learning Advisor', 'AI Learning Advisor'), true);
+  // Normalised on BOTH sides.
+  assert.equal(agentNameMatches('ai learning advisor', 'AI Learning Advisor'), true);
+  assert.equal(agentNameMatches('AI  Learning Advisor', ' AI Learning Advisor '), true);
+  // The looseness this deliberately does NOT have. The browser extension's
+  // enforceBlockedAgent() substring-matches because its signal (a name found
+  // somewhere in a page header) is much messier; here the signal is an exact
+  // composer label, so a row for "Advisor" must not block "AI Learning Advisor".
+  assert.equal(agentNameMatches('AI Learning Advisor', 'Advisor'), false);
+  assert.equal(agentNameMatches('Advisor', 'AI Learning Advisor'), false);
+  assert.equal(agentNameMatches('AI Learning Advisor 2', 'AI Learning Advisor'), false);
+  // A sentinel outcome can never match anything, including a row that happens to
+  // be named like one.
+  assert.equal(agentNameMatches(AGENT_NAME_GENERIC, 'Copilot'), false);
+  assert.equal(agentNameMatches(AGENT_NAME_GENERIC, AGENT_NAME_GENERIC), false);
+  assert.equal(agentNameMatches(AGENT_NAME_NOT_COMPOSER, AGENT_NAME_NOT_COMPOSER), false);
+  // Empty on either side is never a match — the fail-closed direction here is to
+  // NOT narrow, which leaves the whole-app block in place.
+  for (const [a, b] of [['', 'x'], ['x', ''], [null, 'x'], ['x', null], ['  ', 'x'], [undefined, undefined]]) {
+    assert.equal(agentNameMatches(a, b), false, `${a} / ${b}`);
+  }
+});
+
+test('an agent literally named "Copilot" can never be matched through this mechanism', () => {
+  // Intentional: the Generic filter runs BEFORE matching, and a platform-scoped
+  // row is the right tool for "block all of Copilot".
+  assert.equal(agentNameMatches(extractAgentName(M365_GENERIC), 'Copilot'), false);
+});
+
+test('buildAgentSurfaceConfig serialises the catalog without aliasing it', () => {
+  const [entry] = buildAgentSurfaceConfig();
+  assert.deepEqual(entry, {
+    id: 'm365_copilot',
+    procs: ['M365Copilot'],
+    controlType: 'Edit',
+    composerNamePrefixes: ['Message '],
+    genericNames: ['Copilot'],
+    enforce: true,
+    verified: true,
+  });
+  // Copies, so a consumer mutating the payload cannot reach back into the catalog.
+  entry.procs.push('Notepad');
+  entry.composerNamePrefixes.push('x');
+  assert.deepEqual(AGENT_SURFACES[0].procs, ['M365Copilot']);
+  assert.deepEqual(AGENT_SURFACES[0].composerNamePrefixes, ['Message ']);
+});
+
+// ── normalizeAgentRows: the transport the matching key has to survive ───────
+//
+// enforcer-win.ps1 parses blocked-agents.json with a hand-rolled extractor that
+// derails on the WHOLE FILE for one stray quote/backslash/brace in one value,
+// silently dropping every other block too. synthesizePlatformBlocks has always
+// sanitised its admin-typed fields; the server's per-agent rows were sent RAW.
+// That only risked a corrupted display string before — now agent_name is the
+// MATCHING KEY, and Agent Store display names are free text.
+
+test('normalizeAgentRows strips the characters that derail the .ps1 parser', () => {
+  const [row] = normalizeAgentRows([{
+    agent_id: 'a1',
+    agent_name: 'Say "hello"\\ {now}',
+    platform: 'personal_agent',
+    reason: 'Blocked "by" admin',
+  }]);
+  assert.equal(row.agent_name, 'Say hello now');
+  assert.equal(row.reason, 'Blocked by admin');
+  assert.equal(row.platform, 'personal_agent');
+});
+
+test('normalizeAgentRows DOWNGRADES an agent-scoped row whose name cannot survive', () => {
+  // A name the enforcer could never match would mean an agent-scoped block that
+  // silently enforces nothing. Falling back to platform scope restores the
+  // whole-app block, which is the fail-closed answer.
+  const warnings = [];
+  const logger = { warn: (m) => warnings.push(m) };
+  const [row] = normalizeAgentRows([{
+    agent_id: 'a1', agent_name: 'Advisor "Prime"', platform: 'personal_agent', agent_scope: 'agent',
+  }], logger);
+  assert.equal(row.agent_scope, null, 'a sanitised-away name must not stay agent-scoped');
+  assert.equal(row.agent_name, 'Advisor Prime');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /downgraded to platform scope/);
+
+  // A name that survives intact keeps its scope, including one whose only change
+  // is whitespace the matcher normalises on both sides anyway.
+  const kept = normalizeAgentRows([
+    { agent_id: 'a2', agent_name: 'AI Learning Advisor', platform: 'personal_agent', agent_scope: 'agent' },
+    { agent_id: 'a3', agent_name: '  AI  Learning Advisor  ', platform: 'personal_agent', agent_scope: 'agent' },
+  ]);
+  assert.deepEqual(kept.map((r) => r.agent_scope), ['agent', 'agent']);
+
+  // Too short to be a name at all after sanitising — same downgrade.
+  const [tiny] = normalizeAgentRows([{ agent_id: 'a4', agent_name: '"{}"', platform: 'personal_agent', agent_scope: 'agent' }]);
+  assert.equal(tiny.agent_scope, null);
+  // A PLATFORM-scoped row is never downgraded (there is nothing to downgrade to)
+  // and its name is still sanitised.
+  const [plat] = normalizeAgentRows([{ agent_id: 'a5', agent_name: 'Bad "name"', platform: 'personal_agent', agent_scope: 'platform' }]);
+  assert.equal(plat.agent_scope, 'platform');
+  assert.equal(plat.agent_name, 'Bad name');
+});
+
+test('normalizeAgentRows normalises agent_scope to the enum, or to null', () => {
+  const rows = normalizeAgentRows([
+    { agent_id: '1', agent_name: 'A One', agent_scope: 'agent' },
+    { agent_id: '2', agent_name: 'A Two', agent_scope: 'AGENT' },
+    { agent_id: '3', agent_name: 'A Three', agent_scope: ' platform ' },
+    { agent_id: '4', agent_name: 'A Four' },
+    { agent_id: '5', agent_name: 'A Five', agent_scope: null },
+    { agent_id: '6', agent_name: 'A Six', agent_scope: '' },
+    // Anything unrecognised must land on the WIDE side, never silently narrow.
+    { agent_id: '7', agent_name: 'A Seven', agent_scope: 'Agent ' },
+    { agent_id: '8', agent_name: 'A Eight', agent_scope: 'everything' },
+  ]);
+  assert.deepEqual(rows.map((r) => r.agent_scope),
+    ['agent', 'agent', 'platform', null, null, null, 'agent', null]);
+  // The field is always PRESENT, so the .ps1 never has to distinguish absent from
+  // null — it extracts "" for both anyway.
+  for (const r of rows) assert.ok('agent_scope' in r);
+});
+
+test('normalizeAgentRows leaves non-string fields alone and never throws', () => {
+  // Booleans/numbers/dates cannot carry a character the parser chokes on, and
+  // coercing them would change the file's shape for no benefit.
+  const [row] = normalizeAgentRows([{
+    agent_id: 'a1', agent_name: 'A One', blocked: true, orphaned: false, count: 3, oauth_key_id: null,
+  }]);
+  assert.equal(row.blocked, true);
+  assert.equal(row.orphaned, false);
+  assert.equal(row.count, 3);
+  assert.equal(row.oauth_key_id, null);
+  // Junk in, no throw: this runs on the blocked-agents poll path.
+  assert.deepEqual(normalizeAgentRows(null), []);
+  assert.deepEqual(normalizeAgentRows(undefined), []);
+  assert.deepEqual(normalizeAgentRows('nope'), []);
+  assert.deepEqual(normalizeAgentRows([null, undefined, 'x', 7]), []);
+  // Input rows are not mutated — the caller still holds the server's payload.
+  const input = [{ agent_id: 'a1', agent_name: 'Bad "name"', agent_scope: 'agent' }];
+  normalizeAgentRows(input);
+  assert.equal(input[0].agent_name, 'Bad "name"');
+  assert.equal(input[0].agent_scope, 'agent');
+});
+
+test('a normalised row can never break out of the .ps1 string extractor', () => {
+  // The actual invariant, stated as a property rather than a case list: no value
+  // written to blocked-agents.json may contain a quote, a backslash, a brace or a
+  // control character, because any one of them derails the parse of the whole
+  // file. Long values are truncated for the same reason.
+  const nasty = 'x"y\\z{a}b\u0000c\u001fd' + 'p'.repeat(400);
+  const [row] = normalizeAgentRows([{
+    agent_id: nasty, agent_name: nasty, platform: nasty, reason: nasty, host: nasty, agent_scope: 'agent',
+  }]);
+  for (const [key, value] of Object.entries(row)) {
+    if (typeof value !== 'string') continue;
+    assert.equal(/["\\{}\u0000-\u001f\u007f]/.test(value), false, `${key} kept a parser-breaking character`);
+    assert.ok(value.length <= 200, `${key} was not truncated`);
+  }
 });
