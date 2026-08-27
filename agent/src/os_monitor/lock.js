@@ -13,6 +13,11 @@ import os from 'node:os';
 const LOCK_DIR  = join(os.homedir(), '.cloudfuze-aigov');
 const LOCK_PATH = join(LOCK_DIR, 'monitor.lock');
 
+/** System uptime in seconds — used to detect reboots. */
+function bootTimestamp() {
+  return Date.now() - os.uptime() * 1000;
+}
+
 function isProcessAlive(pid) {
   if (!pid || pid <= 0) return false;
   try {
@@ -27,6 +32,10 @@ function isProcessAlive(pid) {
 /**
  * Try to acquire the lock. Returns { acquired: true } on success or
  * { acquired: false, heldByPid } if another live process owns it.
+ *
+ * Lock file format: "PID\nBOOT_TS" where BOOT_TS is the approximate system
+ * boot epoch ms. After a reboot Windows may reuse the old PID for an unrelated
+ * process — comparing boot timestamps lets us detect this and steal the lock.
  */
 export async function acquireMonitorLock() {
   await mkdir(LOCK_DIR, { recursive: true });
@@ -34,16 +43,27 @@ export async function acquireMonitorLock() {
   // Check for existing lock
   try {
     const content = await readFile(LOCK_PATH, 'utf8');
-    const heldByPid = parseInt(content.trim(), 10);
-    if (Number.isFinite(heldByPid) && heldByPid !== process.pid && isProcessAlive(heldByPid)) {
-      return { acquired: false, heldByPid };
+    const lines = content.trim().split('\n');
+    const heldByPid = parseInt(lines[0], 10);
+    const lockBootTs = parseInt(lines[1], 10);
+
+    if (Number.isFinite(heldByPid) && heldByPid !== process.pid) {
+      // If the lock was written during a previous boot, the PID is definitely
+      // stale even if Windows reused it for a different process.
+      const currentBootTs = bootTimestamp();
+      const sameBootSession = Number.isFinite(lockBootTs) &&
+        Math.abs(currentBootTs - lockBootTs) < 120_000; // 2 min tolerance
+
+      if (sameBootSession && isProcessAlive(heldByPid)) {
+        return { acquired: false, heldByPid };
+      }
     }
-    // PID is stale — fall through and steal it.
+    // PID is stale (dead, or from a previous boot) — fall through and steal it.
   } catch (err) {
     if (err.code !== 'ENOENT') throw err;
   }
 
-  await writeFile(LOCK_PATH, String(process.pid), 'utf8');
+  await writeFile(LOCK_PATH, `${process.pid}\n${bootTimestamp()}`, 'utf8');
   return { acquired: true };
 }
 

@@ -119,6 +119,105 @@ async function main() {
     skip: values.skip?.split(',').map((s) => s.trim()).filter(Boolean),
   });
 
+  // --monitor: start beacon + monitor IMMEDIATELY, then run scan in background.
+  // This avoids a 20+ second blocking scan (with visible console windows) at boot.
+  if (values.monitor) {
+    if (!values.server) {
+      log.error('--monitor requires --server (the OS monitor reports events to /api/v1/dlp)');
+      process.exit(2);
+    }
+
+    const creds = await loadCredentials();
+    if (!creds?.token) {
+      log.warn('No enrolled token yet — beacon will start but event reporting disabled until server is reachable.');
+    }
+
+    // Singleton check — only one --monitor instance per machine.
+    const lockResult = await acquireMonitorLock();
+    if (!lockResult.acquired) {
+      log.error(`Another --monitor instance is already running (pid=${lockResult.heldByPid}). Stop it first, or remove ~/.cloudfuze-aigov/monitor.lock if you're sure it's stale.`);
+      process.exit(3);
+    }
+    log.info(`Acquired singleton lock (pid=${process.pid})`);
+
+    await reapOrphans({ log: log.child('reap-orphans') });
+
+    // Start identity beacon so the browser extension can auto-discover this machine
+    const { startIdentityBeacon } = await import('./identity-beacon.js');
+    startIdentityBeacon({ machineId: config.machineId, log: log.child('beacon') });
+
+    const monitor = new OsMonitor({
+      serverUrl: creds?.serverUrl || values.server,
+      token: creds?.token,
+      log: log.child('os_monitor'),
+    });
+    monitor.start();
+    log.info('Monitor running. Ctrl+C to stop.');
+
+    // Auto-updater — checks for updates every hour, applies silently
+    const { startAutoUpdater } = await import('./auto-updater.js');
+    const updater = startAutoUpdater({
+      serverUrl: creds?.serverUrl || values.server,
+      token: creds?.token,
+      log: log.child('updater'),
+    });
+
+    const shutdown = async (sig) => {
+      log.info(`Received ${sig} — flushing pending events and exiting…`);
+      monitor.stop();
+      try { updater?.stop(); } catch {}
+      await releaseMonitorLock();
+      setTimeout(() => process.exit(0), 500);
+    };
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    const lockPath = join(homedir(), '.cloudfuze-aigov', 'monitor.lock');
+    process.on('exit', () => {
+      try {
+        const content = readFileSync(lockPath, 'utf8');
+        if (parseInt(content.trim(), 10) === process.pid) unlinkSync(lockPath);
+      } catch {}
+    });
+
+    // Deferred background scan — runs after monitor is already live.
+    setTimeout(async () => {
+      try {
+        // On Windows, force ALL child processes spawned during the scan to be
+        // hidden — monkey-patch spawn/spawnSync so no console window ever appears.
+        if (process.platform === 'win32') {
+          const cp = await import('node:child_process');
+          const origSpawn = cp.spawn;
+          const origSpawnSync = cp.spawnSync;
+          cp.spawn = function(cmd, args, opts = {}) {
+            return origSpawn.call(this, cmd, args, { ...opts, windowsHide: true });
+          };
+          cp.spawnSync = function(cmd, args, opts = {}) {
+            return origSpawnSync.call(this, cmd, args, { ...opts, windowsHide: true });
+          };
+        }
+        log.info('Background scan starting…');
+        const report = await runScan({ config, log });
+        log.info(`Background scan complete: ${report.findings.length} findings in ${report.summary.durationMs}ms`);
+        const freshCreds = await loadCredentials();
+        if (freshCreds?.token) {
+          const json = JSON.stringify(report);
+          const res = await fetch(`${freshCreds.serverUrl}/api/v1/reports`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'authorization': `Bearer ${freshCreds.token}` },
+            body: json,
+          });
+          if (res.ok) log.info('Background scan report uploaded');
+          else log.warn(`Background scan upload failed: ${res.status}`);
+        }
+      } catch (err) {
+        log.warn(`Background scan failed: ${err.message}`);
+      }
+    }, 30_000);
+
+    return; // do not fall through to process.exit
+  }
+
+  // Non-monitor path: scan → upload → exit (original flow)
   log.info(`Starting scan — agent v${config.agentVersion} on ${config.platform}`);
   const report = await runScan({ config, log });
   log.info(
@@ -171,17 +270,6 @@ async function main() {
     log.info(`Report uploaded to ${creds.serverUrl}`);
 
     // Desktop hook injector — OPT-IN ONLY (--inject-desktop).
-    //
-    // Modifying an Electron app's app.asar bricks any app that enforces ASAR
-    // integrity validation (current Claude Desktop builds do): the modified
-    // archive fails the embedded hash check and the app refuses to launch.
-    // We learned this the hard way, so injection no longer runs on a normal
-    // --server scan. Desktop coverage is provided by the OS monitor (detect +
-    // notify) and the HTTPS proxy (network-level block) — neither of which
-    // touches the app bundle. Use --inject-desktop only for Electron apps
-    // known NOT to enforce integrity (e.g. Cursor, older builds).
-    //
-    // Runs AFTER report upload so we have a valid enrolled token to embed.
     if (values['inject-desktop']) {
       try {
         const injectorFindings = await runInjector({
@@ -201,10 +289,7 @@ async function main() {
     process.stdout.write(json + '\n');
   }
 
-  // --protect-mcp: route every MCP server we just discovered through
-  // cfai-mcp-guard so sensitive tool-call data is blocked without disabling the
-  // server. Idempotent (already-guarded entries are skipped) and works with or
-  // without --server (the guard only reports blocks when creds are present).
+  // --protect-mcp: route every MCP server we just discovered through cfai-mcp-guard
   if (values['protect-mcp']) {
     const { apply } = await import('./mcp_guard/apply.js');
     const creds = await loadCredentials();
@@ -230,76 +315,6 @@ async function main() {
       }
       log.info(`protect-mcp: ${guarded} newly-guarded MCP server(s) across ${configPaths.length} config file(s)`);
     }
-  }
-
-  // --monitor: stay alive and run the OS-level AI monitor. Captures sensitive
-  // pastes into any AI desktop app regardless of how it was installed.
-  // Requires server + a valid token (enrolled above).
-  if (values.monitor) {
-    if (!values.server) {
-      log.error('--monitor requires --server (the OS monitor reports events to /api/v1/dlp)');
-      process.exit(2);
-    }
-    const creds = await loadCredentials();
-    if (!creds?.token) {
-      log.error('--monitor requires an enrolled token. Run with --enroll-secret first.');
-      process.exit(2);
-    }
-
-    // Singleton check — only one --monitor instance per machine. Without this,
-    // background restarts can leave orphan pollers alive that fire duplicate
-    // toasts and double-write events to the server.
-    const lockResult = await acquireMonitorLock();
-    if (!lockResult.acquired) {
-      log.error(`Another --monitor instance is already running (pid=${lockResult.heldByPid}). Stop it first, or remove ~/.cloudfuze-aigov/monitor.lock if you're sure it's stale.`);
-      process.exit(3);
-    }
-    log.info(`Acquired singleton lock (pid=${process.pid})`);
-
-    // Reap any orphan poller/toast-helper processes left by prior crashes.
-    // Safe to do this now because the lock guarantees no other monitor is alive.
-    await reapOrphans({ log: log.child('reap-orphans') });
-
-    // Start identity beacon so the browser extension can auto-discover this machine
-    const { startIdentityBeacon } = await import('./identity-beacon.js');
-    startIdentityBeacon({ machineId: config.machineId, log: log.child('beacon') });
-
-    const monitor = new OsMonitor({
-      serverUrl: creds.serverUrl || values.server,
-      token: creds.token,
-      log: log.child('os_monitor'),
-    });
-    monitor.start();
-    log.info('Monitor running. Ctrl+C to stop.');
-
-    // Auto-updater — checks for updates every hour, applies silently
-    const { startAutoUpdater } = await import('./auto-updater.js');
-    const updater = startAutoUpdater({
-      serverUrl: creds.serverUrl || values.server,
-      token: creds.token,
-      log: log.child('updater'),
-    });
-
-    const shutdown = async (sig) => {
-      log.info(`Received ${sig} — flushing pending events and exiting…`);
-      monitor.stop();
-      try { updater?.stop(); } catch {}
-      await releaseMonitorLock();
-      // Give the reporter a moment to drain the final flush.
-      setTimeout(() => process.exit(0), 500);
-    };
-    process.on('SIGINT', () => shutdown('SIGINT'));
-    process.on('SIGTERM', () => shutdown('SIGTERM'));
-    // Best-effort release on hard exit (uncaught exception etc.).
-    // 'exit' handlers must be synchronous, so we use sync fs calls.
-    const lockPath = join(homedir(), '.cloudfuze-aigov', 'monitor.lock');
-    process.on('exit', () => {
-      try {
-        const content = readFileSync(lockPath, 'utf8');
-        if (parseInt(content.trim(), 10) === process.pid) unlinkSync(lockPath);
-      } catch {}
-    });
-    return; // do not fall through to process.exit
   }
 }
 
