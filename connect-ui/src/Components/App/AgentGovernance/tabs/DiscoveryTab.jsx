@@ -1360,7 +1360,7 @@ function AgentTableView() {
   let agents = [...getScopedAgents(result, state.selectedScope)].filter(a => !deletedAgents.has(a.id));
   if (state.searchQuery) {
     const q = state.searchQuery.toLowerCase();
-    agents = agents.filter((a) => a.name.toLowerCase().includes(q) || a.vendor?.toLowerCase().includes(q) || a.appId?.toLowerCase().includes(q) || a.platform?.toLowerCase().includes(q));
+    agents = agents.filter((a) => a.name?.toLowerCase().includes(q) || a.vendor?.toLowerCase().includes(q) || a.appId?.toLowerCase().includes(q) || a.platform?.toLowerCase().includes(q));
   }
   if (state.riskFilter !== "all") agents = agents.filter((a) => a.risk.level === state.riskFilter);
   if (state.statusFilter !== "all") agents = agents.filter((a) => a.lifecycleStatus === state.statusFilter);
