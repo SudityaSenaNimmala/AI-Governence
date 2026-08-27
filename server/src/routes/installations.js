@@ -73,7 +73,7 @@ export function mountInstallations(app, db) {
 
     // Hash all agent source files to create a version fingerprint
     const hash = crypto.createHash('sha256');
-    const SKIP = new Set(['node_modules', 'tests', '.git', 'package-lock.json', 'build', 'electron', 'browser-extension']);
+    const SKIP = new Set(['node_modules', 'tests', '.git', 'package-lock.json', 'build', 'electron', 'browser-extension', 'launcher.cjs', 'start-agent.vbs', 'start-agent.cmd', 'start-agent.ps1']);
     function walkHash(dir) {
       for (const entry of readdirSync(dir).sort()) {
         if (SKIP.has(entry)) continue;
@@ -446,8 +446,14 @@ REM -- Check source --
 if not exist "%~dp0agent\\src\\index.js" echo  [ERROR] Agent source not found! & goto DONE
 
 REM -- Stop old agent --
-taskkill /IM node.exe /FI "WINDOWTITLE eq CloudFuze*" /F >nul 2>&1
-if exist "%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock" del "%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock" >nul 2>&1
+REM   Kill the node process from the lock file, then any wscript/powershell launchers
+if exist "%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock" (
+  set /p OLDPID=<"%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock"
+  taskkill /PID %OLDPID% /F >nul 2>&1
+  del "%USERPROFILE%\\.cloudfuze-aigov\\monitor.lock" >nul 2>&1
+)
+taskkill /IM wscript.exe /FI "WINDOWTITLE eq CloudFuze*" /F >nul 2>&1
+if exist "%USERPROFILE%\\.cloudfuze-aigov\\credentials.json" del "%USERPROFILE%\\.cloudfuze-aigov\\credentials.json" >nul 2>&1
 
 REM -- Install dependencies --
 echo  [..] Installing dependencies (may take a minute)...
@@ -465,8 +471,11 @@ echo  [..] Enrolling with server...
 echo  [OK] Enrolled
 
 REM -- Create hidden launcher --
+REM   conhost.exe --headless creates an invisible console that Windows Terminal
+REM   cannot intercept. The -- separates conhost args from the child command.
+REM   No launcher.cjs needed — VBS calls conhost directly.
 > "%~dp0agent\\start-agent.vbs" echo Set ws = CreateObject("WScript.Shell")
->> "%~dp0agent\\start-agent.vbs" echo ws.Run """%NODE%"" ""%~dp0agent\\src\\index.js"" --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor", 0, False
+>> "%~dp0agent\\start-agent.vbs" echo ws.Run "C:\\Windows\\System32\\conhost.exe --headless -- ""%NODE%"" ""%~dp0agent\\src\\index.js"" --server ${serverUrl} --enroll-secret ${ENROLL_SECRET} --monitor", 0, False
 
 REM -- Auto-start on boot --
 reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v CloudFuzeAgent /d "wscript.exe \\"%~dp0agent\\start-agent.vbs\\"" /f >nul 2>&1
@@ -619,7 +628,7 @@ pause >nul
     files.push({ name: 'cloudfuze-config.json', data: Buffer.from(agentConfig, 'utf8') });
 
     // Add agent source (skip heavy/unnecessary dirs)
-    const SKIP = new Set(['node_modules', 'tests', '.git', 'package-lock.json', 'build', 'electron', 'browser-extension']);
+    const SKIP = new Set(['node_modules', 'tests', '.git', 'package-lock.json', 'build', 'electron', 'browser-extension', 'launcher.cjs', 'start-agent.vbs', 'start-agent.cmd', 'start-agent.ps1']);
     function walk(dir, prefix) {
       for (const entry of readdirSync(dir)) {
         if (SKIP.has(entry)) continue;

@@ -117,7 +117,7 @@ async function applyUpdate({ serverUrl, token, serverVersion, log }) {
     const ps = spawn('powershell', [
       '-NoProfile', '-Command',
       `Expand-Archive -Path '${zipPath}' -DestinationPath '${extractDir}' -Force`,
-    ], { stdio: 'pipe' });
+    ], { stdio: 'pipe', windowsHide: true });
     await new Promise((resolve, reject) => {
       ps.on('exit', code => code === 0 ? resolve() : reject(new Error(`Extract failed: exit ${code}`)));
       ps.on('error', reject);
@@ -164,11 +164,32 @@ async function applyUpdate({ serverUrl, token, serverVersion, log }) {
     log?.warn?.('auto-updater: npm install failed (non-fatal):', e?.message);
   }
 
+  // Regenerate VBS with conhost --headless before saving version.
+  // This runs in the OLD code's context (before restart loads new code),
+  // so VBS regeneration must happen HERE, not in the new code.
+  if (process.platform === 'win32') {
+    const node = process.execPath;
+    const indexJs = join(agentRoot, 'src', 'index.js');
+    const configPath = join(homedir(), '.cloudfuze-aigov', 'auto-config.json');
+    let monitorArgs = ['--monitor'];
+    if (existsSync(configPath)) {
+      try {
+        const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
+        if (cfg.serverUrl) monitorArgs.push('--server', cfg.serverUrl);
+        if (cfg.enrollSecret) monitorArgs.push('--enroll-secret', cfg.enrollSecret);
+      } catch {}
+    }
+    const vbsPath = join(agentRoot, 'start-agent.vbs');
+    const quotedArgs = monitorArgs.map(a => `""${a}""`).join(' ');
+    const vbs = `Set ws = CreateObject("WScript.Shell")\r\nws.Run "C:\\Windows\\System32\\conhost.exe --headless -- ""${node}"" ""${indexJs}"" ${quotedArgs}", 0, False`;
+    writeFileSync(vbsPath, vbs);
+    log?.info?.('auto-updater: regenerated start-agent.vbs with conhost --headless');
+  }
+
   // Save new version
   saveCurrentVersion(serverVersion);
 
-  // Restart: launch a new agent process, then exit this one.
-  // No visible window — the new process inherits our hidden state.
+  // Restart via the (newly regenerated) VBS
   const node = process.execPath;
   const indexJs = join(agentRoot, 'src', 'index.js');
   const configPath = join(homedir(), '.cloudfuze-aigov', 'auto-config.json');
@@ -182,6 +203,11 @@ async function applyUpdate({ serverUrl, token, serverVersion, log }) {
   }
 
   log?.info?.('auto-updater: restarting agent silently');
-  spawn(node, args, { cwd: agentRoot, detached: true, stdio: 'ignore' }).unref();
+  if (process.platform === 'win32') {
+    const vbsPath = join(agentRoot, 'start-agent.vbs');
+    spawn('wscript.exe', [vbsPath], { detached: true, stdio: 'ignore' }).unref();
+  } else {
+    spawn(node, args, { cwd: agentRoot, detached: true, stdio: 'ignore' }).unref();
+  }
   setTimeout(() => process.exit(0), 2000);
 }
