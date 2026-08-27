@@ -567,83 +567,97 @@ export function mountRegistry(app, db) {
       { upsert: true },
     );
 
-    // ENFORCE via ai_platforms — the same collection the browser extension
-    // and proxy already read. The UI sends matched_hosts (resolved during
-    // buildRegistry) so we update the exact hosts — no fuzzy matching needed.
-    const patch = { blocked: isBlocked ? 1 : 0, updated_at: new Date() };
-    if (status === 'approved') patch.governed = 1;
-
-    let matched = { matchedCount: 0, modifiedCount: 0 };
-    const hosts = req.body.matched_hosts;
-
-    if (Array.isArray(hosts) && hosts.length > 0) {
-      // Direct: UI told us exactly which hosts to update
-      matched = await db.collection('ai_platforms').updateMany(
-        { host: { $in: hosts } },
-        { $set: patch },
-      );
-    } else {
-      // Fallback: try id as host, then product/vendor/host-substring matching
-      matched = await db.collection('ai_platforms').updateOne({ host: id }, { $set: patch });
-      if (matched.matchedCount === 0) {
-        const productName = req.body.product_name || id;
-        const allPlatforms = await db.collection('ai_platforms').find({}).project({ _id: 0, host: 1, product: 1, vendor: 1 }).toArray();
-        const lower = productName.toLowerCase();
-        // 1. Exact product match
-        let matchHosts = allPlatforms.filter(p => p.product?.toLowerCase() === lower).map(p => p.host);
-        // 2. Partial product match (e.g. "Gemini" → "Google Gemini")
-        if (!matchHosts.length) matchHosts = allPlatforms.filter(p => {
-          const pl = (p.product || '').toLowerCase();
-          return (pl.includes(lower) || lower.includes(pl)) && !pl.includes(' in ');
-        }).map(p => p.host);
-        // 3. Vendor match (e.g. "Claude" → vendor "Anthropic" → claude.ai)
-        if (!matchHosts.length) matchHosts = allPlatforms.filter(p =>
-          p.vendor?.toLowerCase() === lower
-        ).map(p => p.host);
-        // 4. Host substring (e.g. "Claude" → host contains "claude")
-        if (!matchHosts.length) matchHosts = allPlatforms.filter(p =>
-          p.host?.toLowerCase().includes(lower)
-        ).map(p => p.host);
-        if (matchHosts.length) {
-          matched = await db.collection('ai_platforms').updateMany(
-            { host: { $in: matchHosts } }, { $set: patch },
-          );
-        }
-      }
-    }
-
-    // Strategy 3: for governance agents — update lifecycle
+    // Strategy 3: for governance agents — update lifecycle. Moved AHEAD of the
+    // ai_platforms host-block below (was Strategy 2 first, in request order) so
+    // `looksLikeAgent` is known BEFORE deciding whether to touch ai_platforms at
+    // all — see the comment on that gate for why order matters here.
     const agentLifecycle = await db.collection('discovered_agents').updateMany(
       { $or: [{ id: id }, { botId: id }, { appId: id }, { name: id }] },
       { $set: { lifecycleStatus: isBlocked ? 'suspended' : 'active' } },
     );
 
-    // Strategy 4: MIRROR AN AGENT BLOCK INTO `blocked_agents`.
-    //
-    // THE GAP THIS CLOSES. Two different things were both called "blocked" and
-    // neither knew about the other:
+    // THE GAP THIS WHOLE ROUTE EXISTS TO CLOSE. Two different things were both
+    // called "blocked" and neither knew about the other:
     //
     //   * this route writes sanctions + ai_platforms, which is HOST-keyed, and is
     //     what enforces "this platform is blocked" in the extension;
-    //   * content.js's enforceBlockedAgent() polls
-    //     GET /api/lifecycle/blocked-agents, which reads `blocked_agents` and
-    //     matches on the agent NAME shown in the page header. Only
-    //     POST /api/lifecycle/block ever wrote to it.
+    //   * content.js's enforceBlockedAgent() (browser) and the desktop enforcer's
+    //     agent-scoped narrowing both poll GET /api/lifecycle/blocked-agents,
+    //     which reads `blocked_agents` and matches on the agent's NAME — an
+    //     individual Copilot Studio / M365 agent has no host of its own, only a
+    //     name inside someone else's app, so a host-keyed block could never have
+    //     stopped it at all.
     //
-    // So blocking a Copilot Studio agent from Inventory → AI Systems marked the
-    // row Blocked, suspended its lifecycle, and did nothing at runtime: the agent
-    // stayed fully usable in m365.cloud.microsoft. Worse, a host-keyed block could
-    // never have stopped it — an agent inside Copilot Studio has no host of its
-    // own, only a name inside someone else's app.
-    //
-    // Written to match POST /api/lifecycle/block exactly, field for field, so the
-    // two paths produce indistinguishable rows and /unblock still works on either.
-    // Unblocking sets blocked:false rather than deleting, mirroring /unblock and
-    // keeping the audit trail.
+    // `looksLikeAgent` decides which of those two mechanisms this request is
+    // actually asking for, and it now GATES ai_platforms too, not just adds
+    // blocked_agents alongside it. Blocking one agent from Inventory used to
+    // ALSO set every host in matched_hosts to blocked:true — for a Copilot
+    // Studio agent, that list is broad Microsoft-suite hosts (teams.microsoft.com,
+    // sharepoint.com, outlook.office.com, m365.cloud.microsoft, ...), so clicking
+    // Block on one named agent blocked Teams, SharePoint, and Outlook for
+    // everyone. Observed live. An agent-scoped decision must never fall back to
+    // "block the whole app it lives in" — that's a materially bigger, unrequested
+    // action, and the enforcer's own agent-scope narrowing already has its own
+    // fail-closed fallback (whole-app block, but only for the process the agent
+    // actually runs IN, e.g. M365Copilot.exe — never for its host list) for when
+    // it can't tell which agent is open. That fallback belongs to the enforcer,
+    // not to a second, broader one fired here at block-time.
     const looksLikeAgent = agentLifecycle.matchedCount > 0
       || req.body.category === 'autonomous-agent'
       || req.body.source === 'governance';
 
+    // ENFORCE via ai_platforms — the same collection the browser extension and
+    // proxy already read — but ONLY for a genuine host-keyed row (a platform or
+    // an endpoint-scanned tool, never an individual agent; see the gate above).
+    let matched = { matchedCount: 0, modifiedCount: 0 };
+    if (!looksLikeAgent) {
+      const patch = { blocked: isBlocked ? 1 : 0, updated_at: new Date() };
+      if (status === 'approved') patch.governed = 1;
+
+      const hosts = req.body.matched_hosts;
+
+      if (Array.isArray(hosts) && hosts.length > 0) {
+        // Direct: UI told us exactly which hosts to update
+        matched = await db.collection('ai_platforms').updateMany(
+          { host: { $in: hosts } },
+          { $set: patch },
+        );
+      } else {
+        // Fallback: try id as host, then product/vendor/host-substring matching
+        matched = await db.collection('ai_platforms').updateOne({ host: id }, { $set: patch });
+        if (matched.matchedCount === 0) {
+          const productName = req.body.product_name || id;
+          const allPlatforms = await db.collection('ai_platforms').find({}).project({ _id: 0, host: 1, product: 1, vendor: 1 }).toArray();
+          const lower = productName.toLowerCase();
+          // 1. Exact product match
+          let matchHosts = allPlatforms.filter(p => p.product?.toLowerCase() === lower).map(p => p.host);
+          // 2. Partial product match (e.g. "Gemini" → "Google Gemini")
+          if (!matchHosts.length) matchHosts = allPlatforms.filter(p => {
+            const pl = (p.product || '').toLowerCase();
+            return (pl.includes(lower) || lower.includes(pl)) && !pl.includes(' in ');
+          }).map(p => p.host);
+          // 3. Vendor match (e.g. "Claude" → vendor "Anthropic" → claude.ai)
+          if (!matchHosts.length) matchHosts = allPlatforms.filter(p =>
+            p.vendor?.toLowerCase() === lower
+          ).map(p => p.host);
+          // 4. Host substring (e.g. "Claude" → host contains "claude")
+          if (!matchHosts.length) matchHosts = allPlatforms.filter(p =>
+            p.host?.toLowerCase().includes(lower)
+          ).map(p => p.host);
+          if (matchHosts.length) {
+            matched = await db.collection('ai_platforms').updateMany(
+              { host: { $in: matchHosts } }, { $set: patch },
+            );
+          }
+        }
+      }
+    }
+
+    // Strategy 4: MIRROR AN AGENT BLOCK INTO `blocked_agents`. Written to match
+    // POST /api/lifecycle/block exactly, field for field, so the two paths
+    // produce indistinguishable rows and /unblock still works on either.
+    // Unblocking sets blocked:false rather than deleting, mirroring /unblock and
+    // keeping the audit trail.
     let agentEnforced = false;
     if (looksLikeAgent) {
       agentEnforced = true;

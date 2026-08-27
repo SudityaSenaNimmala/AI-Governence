@@ -265,6 +265,75 @@ test('enforced reports the agent blocklist, not just platform hosts', async () =
   });
 });
 
+// ── The over-blocking bug: blocking one agent blocked Teams/SharePoint/Outlook ──
+//
+// Reported live: clicking Block on "Enterprise Agent" from Inventory also set
+// blocked:true on every host in matched_hosts — for a Copilot Studio agent that
+// list is broad Microsoft-suite hosts (teams.microsoft.com, sharepoint.com,
+// outlook.office.com, m365.cloud.microsoft, ...), so one agent decision blocked
+// Teams, SharePoint and Outlook for the whole org. Confirmed live via a direct
+// PUT replicating the dashboard's exact request body.
+const MS_SUITE_HOSTS = [
+  'teams.microsoft.com', 'sharepoint.com', 'outlook.office.com',
+  'office.com', 'm365.cloud.microsoft', 'copilot.microsoft.com',
+];
+
+test('blocking an agent does NOT touch ai_platforms, even when matched_hosts is sent', async () => {
+  await withServer(async (db) => {
+    await seedAgent(db);
+    for (const host of MS_SUITE_HOSTS) {
+      await db.collection('ai_platforms').insertOne({ host, blocked: 0 });
+    }
+  }, async ({ db, setStatus }) => {
+    await setStatus(AGENT_ID, {
+      status: 'blocked', product_name: 'Enterprise Agent', category: 'autonomous-agent',
+      // This is the exact shape the dashboard sends for an agent row — a broad
+      // matched_hosts list travels along unconditionally, so the fix has to be
+      // "ignore it for an agent", not "the UI happens not to send one".
+      matched_hosts: MS_SUITE_HOSTS,
+    });
+
+    for (const row of db._rows('ai_platforms')) {
+      assert.equal(row.blocked, 0, `${row.host} was blocked by an individual agent decision`);
+    }
+    // The agent itself is still correctly blocked via the narrow mechanism.
+    assert.equal(blockedRows(db).length, 1);
+  });
+});
+
+test('enforced_via names only agent_blocklist when matched_hosts was ignored', async () => {
+  await withServer(async (db) => {
+    await seedAgent(db);
+    await db.collection('ai_platforms').insertOne({ host: 'teams.microsoft.com', blocked: 0 });
+  }, async ({ setStatus }) => {
+    const body = await setStatus(AGENT_ID, {
+      status: 'blocked', product_name: 'Enterprise Agent', category: 'autonomous-agent',
+      matched_hosts: ['teams.microsoft.com'],
+    });
+    assert.deepEqual(body.enforced_via, ['agent_blocklist'],
+      'reporting platform_hosts here would mean ai_platforms was touched after all');
+  });
+});
+
+// ── The platform field: without it, the mirrored row is unmatchable ──────────
+//
+// Reported live: the dashboard's PUT never sent `platform`, so the mirrored
+// blocked_agents row carried platform:null. Both the browser extension's
+// isBlockedAgentActive() and the desktop enforcer's PLATFORM_PROCS lookup key
+// on this field — a null value makes the row look blocked in the UI while
+// enforcing nothing on either surface.
+test('the mirrored row carries the real platform, not null', async () => {
+  await withServer(seedAgent, async ({ db, setStatus }) => {
+    await setStatus(AGENT_ID, {
+      status: 'blocked', product_name: 'Enterprise Agent',
+      category: 'autonomous-agent', platform: 'copilot_studio',
+    });
+    const row = blockedRows(db)[0];
+    assert.equal(row.platform, 'copilot_studio',
+      'platform came through as null — this row cannot be matched by PLATFORM_PROCS on either enforcement surface');
+  });
+});
+
 test('a sanction already stored under the legacy key is still honoured', async () => {
   // No migration: rows written before the fix used whichever key the write path
   // produced, and both must read back.

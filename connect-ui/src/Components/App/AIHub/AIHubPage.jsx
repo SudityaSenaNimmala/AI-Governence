@@ -3422,8 +3422,15 @@ function AIRegistryView() {
           // mirrored into the agent blocklist the extension enforces. The server
           // can infer this from discovered_agents, but sending it makes the intent
           // explicit rather than dependent on that lookup succeeding.
+          // platform travels too — without it, the server's agent-blocklist
+          // mirror writes platform:null, which the browser extension's
+          // isBlockedAgentActive() and the desktop enforcer's PLATFORM_PROCS
+          // lookup both key on. A null platform makes that row unmatchable by
+          // either enforcement surface — it looks blocked in the UI but does
+          // nothing at runtime. Observed live: blocking "Enterprise Agent"
+          // this way produced a blocked_agents row with platform:null.
           body:JSON.stringify({status,product_name:row.name,matched_hosts:row.matched_hosts||[],
-            category:row.category||null,source:row.source||null}),
+            category:row.category||null,source:row.source||null,platform:row.platform||null}),
         });
       }
       // Update local state immediately — don't reload from registry (it's slow
