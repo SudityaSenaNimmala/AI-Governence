@@ -96,6 +96,31 @@ services:
       LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-https://us.cloud.langfuse.com}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      # Interactive OAuth sign-in for Microsoft and Google (server/src/governance/
+      # routes/{msOAuth,googleOAuth}.ts). CloudFuze registers ONE multi-tenant Entra
+      # app and ONE Google OAuth client; each customer's admin clicks Connect and
+      # consents. They never see a client id or secret.
+      #
+      # Without these lines the container never sees what is in the host's .env, so
+      # msOAuthConfigured()/googleOAuthConfigured() return false, /api/auth/*/status
+      # answers {"configured":false} and the UI hides the sign-in buttons and falls
+      # back to the old form — the credentials look correct on the host and the
+      # feature is invisible anyway. Same class as ENROLL_SECRET and CRX_SIGNING_KEY
+      # above; it is how this shipped dark on the live host.
+      #
+      # Not `${VAR:?...}` fail-fast: these gate discovery onboarding, not the whole
+      # server, and /start already answers 503 with a remedy string while they are
+      # being obtained out of band.
+      MS_CLIENT_ID: ${MS_CLIENT_ID:-}
+      MS_CLIENT_SECRET: ${MS_CLIENT_SECRET:-}
+      MS_REDIRECT_URI: ${MS_REDIRECT_URI:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-}
+      # Where the browser lands after consent. The code default is localhost:3000,
+      # which on a deployed host sends the admin to their own machine and looks like
+      # the flow failed at the last step. Must be the public dashboard URL.
+      UI_RETURN_URL: ${UI_RETURN_URL:-}
     depends_on:
       - mongo
     ports:
