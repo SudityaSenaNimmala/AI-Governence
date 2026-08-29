@@ -550,11 +550,6 @@ export function mountRegistry(app, db) {
     const id = req.params.id;
     const isBlocked = status === 'blocked';
 
-    // TEMPORARY — diagnosing the over-block bug recurring on real UI clicks
-    // despite the looksLikeAgent fix. Remove once the real request body is
-    // captured and the mismatch is understood.
-    console.log('[registry:status:debug] id=%s body=%j', id, req.body);
-
     // INVALIDATE THE REGISTRY CACHE FIRST. buildRegistry() results are cached for
     // LIVE_CACHE_TTL_MS (30s), and the status write did not clear it — so a reload
     // within 30 seconds of blocking something served the pre-block registry and the
@@ -610,9 +605,6 @@ export function mountRegistry(app, db) {
     const looksLikeAgent = agentLifecycle.matchedCount > 0
       || req.body.category === 'autonomous-agent'
       || req.body.source === 'governance';
-
-    // TEMPORARY — see debug log above.
-    console.log('[registry:status:debug] looksLikeAgent=%s matchedCount=%d category=%j source=%j', looksLikeAgent, agentLifecycle.matchedCount, req.body.category, req.body.source);
 
     // ENFORCE via ai_platforms — the same collection the browser extension and
     // proxy already read — but ONLY for a genuine host-keyed row (a platform or
