@@ -1,0 +1,57 @@
+name: Read server logs (ad-hoc diagnostic)
+
+# TEMPORARY DIAGNOSTIC WORKFLOW — delete once the over-block bug is closed.
+#
+# WHY THIS EXISTS
+#   sshd on the deploy host is not reachable from the internet (see the long
+#   note at the top of deploy.yml and docs/AUTO_DEPLOY.md), so there is no way
+#   to run `docker compose logs` on production from a laptop. The self-hosted
+#   runner installed ON that host dials out to GitHub, so a job with the same
+#   labels deploy.yml uses is the only channel we have into the box.
+#
+#   This reads. It does not build, ship, restart or write anything — the whole
+#   job is one `docker compose logs | grep`, and the output is written to the
+#   step summary so it can be read straight from the Actions UI/API without
+#   downloading a raw log archive.
+#
+# workflow_dispatch ONLY. Deliberately no `push:` trigger — this must never run
+# on its own; it is something a human asks for when diagnosing a live issue.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  # Same philosophy as deploy.yml: read-only. This workflow needs no git write
+  # access and holds no secrets.
+  contents: read
+
+jobs:
+  logs:
+    runs-on: [self-hosted, linux, ai-gov]
+    timeout-minutes: 5
+    env:
+      DEPLOY_DIR: ${{ vars.DEPLOY_DIR || '/opt/ai-gov' }}
+    steps:
+      - name: Grep the server container log for registry:status:debug
+        run: |
+          set -uo pipefail
+          cd "$DEPLOY_DIR"
+          # `|| true` on the pipeline: grep exits 1 when it matches nothing, and
+          # "no matching lines" is a real, informative result here — not a job
+          # failure. The empty-output case is reported explicitly below.
+          OUT="$(docker compose logs server --since 60m 2>&1 | grep 'registry:status:debug' | tail -100 || true)"
+          {
+            echo "### \`[registry:status:debug]\` — last 60m of the server container"
+            echo
+            if [ -z "$OUT" ]; then
+              echo "**No matching lines.** Either no request reached"
+              echo "\`PUT /api/v1/registry/:id/status\` in the last 60 minutes, or the"
+              echo "temporary logging is not present in the running image."
+            else
+              echo '```'
+              echo "$OUT"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Also echo to the job log, so the text is retrievable either way.
+          echo "$OUT"
