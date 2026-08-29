@@ -4374,7 +4374,13 @@
   // a full-page overlay that prevents all interaction.
 
   const PLATFORM_TO_HOSTS = {
-    copilot_studio:     [/copilot\.microsoft/, /m365\.cloud\.microsoft/, /powerva\.ms/, /copilotstudio/],
+    // A Copilot Studio agent can be published into Teams, Outlook, or
+    // SharePoint, not just the standalone Copilot chat surfaces — the
+    // agent's own registry entry already lists these hosts in
+    // matched_hosts (that's where it was discovered), but this list used
+    // to stop at copilot.microsoft/m365.cloud.microsoft/powerva.ms, so a
+    // blocked agent published into Teams or Outlook went unenforced there.
+    copilot_studio:     [/copilot\.microsoft/, /m365\.cloud\.microsoft/, /powerva\.ms/, /copilotstudio/, /teams\.microsoft/, /outlook\.office/, /outlook\.live/, /sharepoint\.com/, /(^|\.)office\.com/, /office365\.com/, /microsoft365\.com/],
     personal_agent:     [/copilot\.microsoft/, /m365\.cloud\.microsoft/],
     teams_chat_agent:   [/teams\.microsoft/],
     openai_assistant:   [/chatgpt\.com/, /chat\.openai\.com/],
