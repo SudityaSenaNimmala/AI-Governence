@@ -639,3 +639,336 @@ test('…and the check it preserves still rejects a genuinely unrelated process'
     assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
   }
 });
+
+// ── HOST APPS: agent-scoped enforcement inside Microsoft Teams ───────────────
+//
+// Teams is NOT an AI app. It is a general-purpose communications client that
+// happens to host one Copilot Studio agent among a company's DMs, channels and
+// meetings, and the composer's UIA Name is the literal "Type a message" in every
+// one of them — so the composer-name mechanism the M365Copilot surface uses
+// cannot work here at all. The WINDOW TITLE is what names the conversation.
+//
+// Two properties are under test, and the second matters more than the first:
+//   1. when it CAN prove a blocked agent's conversation is open, enforcement is
+//      confined to exactly that conversation;
+//   2. when it CANNOT prove it, there is NO BLOCK AT ALL. Never a whole-app
+//      fallback. A whole-app block here means the user cannot message a
+//      colleague, post in a channel or reply in a meeting — because one agent
+//      inside the app is blocked. That is the inversion this feature exists for,
+//      and `teams_unverified_never_whole_app` below is its proof.
+
+test('SHIPPING STATE: the Teams surface is completely inert — no block, and no read at all', { skip: !win }, async () => {
+  // Stages 1-2 ship the mechanism, not the enforcement: teams_desktop and
+  // teams_composer both carry enforce:false/verified:false, pinned in
+  // ai-processes.test.mjs. With a real agent-scoped row present, the blocked
+  // agent's conversation open and its composer focused, nothing whatsoever may
+  // happen.
+  const rows = await scenario('teams_shipped_is_inert');
+  assert.equal(rows.length, 5);
+  for (const r of rows) {
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.fgIsAi, false, `tick ${r.tick}: Teams must not become an AI surface`);
+    assert.equal(r.fgIsPanel, false, `tick ${r.tick}`);
+    // Unreadable proves NO READ HAPPENED — not that a read failed. An
+    // unverified host-app surface must not even look at the window title.
+    assert.equal(r.agentOutcome, 'Unreadable', `tick ${r.tick}: no read may occur at all`);
+    assert.equal(r.matched, '', `tick ${r.tick}: no accessibility read either`);
+  }
+});
+
+test('THE INVERSION: an unverified HOST-APP surface produces NO BLOCK, never a whole-app one', { skip: !win }, async () => {
+  // THE most important test in this feature.
+  //
+  // Compare with `agent_unverified_surface_whole_app` above, which is the same
+  // question asked of a CHAT app: there, "cannot narrow to one agent" correctly
+  // falls back to blocking the whole application, because the whole application
+  // is an AI product and the user only loses an AI tool.
+  //
+  // Here the same fallback would disable Microsoft Teams. So it must not exist:
+  // the row's agent is genuinely open, the surface genuinely cannot narrow, and
+  // the answer is no block — no app scope, no panel scope, no agent scope.
+  const rows = await scenario('teams_unverified_never_whole_app');
+  assert.equal(rows.length, 4);
+  for (const r of rows) {
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}: a host app must NEVER be blocked whole`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'app', `tick ${r.tick}: 'app' is only the no-block default here`);
+    assert.equal(r.blockedAgent, '', `tick ${r.tick}: nothing may be attributed`);
+    assert.equal(r.latchKey, '', `tick ${r.tick}`);
+  }
+});
+
+test('a PLATFORM-scoped row against Teams blocks nothing, armed catalog or not', { skip: !win }, async () => {
+  // An absent agent_scope is the pre-existing row shape and means "block the
+  // whole platform". Against a host app that is precisely the outcome this
+  // feature prevents, so the coarse arm is guarded on the PROCESS being a host
+  // app — not on the surface being verified.
+  for (const name of ['teams_platform_row_never_blocks', 'teams_platform_row_no_read']) {
+    const rows = await scenario(name);
+    assert.equal(rows.length, 3, name);
+    for (const r of rows) {
+      assert.equal(r.fgIsBlocked, false, `${name} tick ${r.tick}`);
+      assert.equal(r.enterBlocked, false, `${name} tick ${r.tick}`);
+      // …and it does not license the accessibility/title read either: only
+      // agent_scope:'agent' puts a process into _agentScopedProcs.
+      assert.equal(r.agentOutcome, 'Unreadable', `${name} tick ${r.tick}: no read may occur`);
+      assert.equal(r.matched, '', `${name} tick ${r.tick}`);
+    }
+  }
+});
+
+test('a host-keyed process_name or panel row against Teams is refused outright', { skip: !win }, async () => {
+  // Neither row can be synthesised: processesForHost() excludes a host app, and
+  // teams_composer carries host:null so panelForHost() cannot resolve it
+  // (both asserted in ai-processes.test.mjs / ai-panels.test.mjs). These prove
+  // the .ps1 refuses such a row even if a bug in the other file produced one —
+  // the two guards are independent, which is the point.
+  for (const name of ['teams_process_row_never_blocks', 'teams_panel_row_never_blocks']) {
+    const rows = await scenario(name);
+    assert.equal(rows.length, 3, name);
+    for (const r of rows) {
+      assert.equal(r.fgIsBlocked, false, `${name} tick ${r.tick}: a host app takes no coarse block`);
+      assert.equal(r.enterBlocked, false, `${name} tick ${r.tick}`);
+    }
+  }
+});
+
+test('PRIVACY GATE: with no agent-scoped policy for Teams, nothing about Teams is read', { skip: !win }, async () => {
+  // Reading a company's chat window titles to learn what is open is justified
+  // only by a policy that needs the answer. The catalog here is fully ARMED and
+  // the blocked agent's own composer is focused — the only thing missing is a
+  // row whose platform covers ms-teams, and that alone must stop every read.
+  const rows = await scenario('teams_no_policy_no_read');
+  assert.equal(rows.length, 3);
+  for (const r of rows) {
+    assert.equal(r.agentOutcome, 'Unreadable', `tick ${r.tick}: no window title may be read`);
+    assert.equal(r.matched, '', `tick ${r.tick}: no accessibility read either`);
+    assert.equal(r.fgIsAi, false, `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+  }
+});
+
+test('ARMED: the blocked agent conversation is blocked, at AGENT scope, via the composer', { skip: !win }, async () => {
+  // The mechanism Stage 3 will turn on, driven with the TEST-ONLY armed flags.
+  // Both the title read (the conversation) and the element read (the composer)
+  // have to agree before anything is governed.
+  const rows = await scenario('teams_agent_blocked');
+  assert.equal(rows.length, 20);
+  for (const r of rows) {
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    assert.equal(r.matched, 'teams_composer', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    // AGENT scope, never app: this is what keeps the standing "this app is
+    // blocked" bar off the screen and the Request Access modal naming the agent.
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}`);
+    assert.equal(r.blockedByElement, true, `tick ${r.tick}`);
+    assert.equal(r.latchKey, 'agent:teams_desktop', `tick ${r.tick}`);
+    // The name that reaches a block event is the ADMIN-TYPED one from the row,
+    // never the string parsed out of the window title.
+    assert.equal(r.blockedAgent, 'IT Help Desk Agent', `tick ${r.tick}`);
+  }
+});
+
+test('ARMED: the same agent reached through copilot_studio is covered too', { skip: !win }, async () => {
+  // A Copilot Studio agent added to Teams keeps its own platform id.
+  // PLATFORM_PROCS maps copilot_studio to both Copilot builds AND to ms-teams,
+  // which is why the row reaches the Teams process at all.
+  const rows = await scenario('teams_agent_via_copilot_studio');
+  assert.equal(rows.length, 5);
+  for (const r of rows) {
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+  }
+});
+
+test('ARMED: a 1:1 DM, a default-named group chat, a channel and the Activity tab are untouched', { skip: !win }, async () => {
+  // The collateral this feature must never cause, on the four measured title
+  // shapes. Every one of them has the blocked agent's row live and the composer
+  // focused — the ONLY difference is which conversation the title names.
+
+  // A DM's title has NO leading kind segment: segment 0 is the colleague's
+  // display name. Without the kind check this would read as an agent named
+  // after a person, so it must land in NO EVIDENCE.
+  const dm = await scenario('teams_dm_never_blocks');
+  assert.equal(dm.length, 5);
+  for (const r of dm) {
+    assert.equal(r.agentOutcome, 'NotComposer', `dm tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `dm tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `dm tick ${r.tick}`);
+    assert.equal(r.fgIsAi, false, `dm tick ${r.tick}: no capture in a colleague DM`);
+  }
+
+  // A human group chat's title has the IDENTICAL 5-segment shape as the agent's
+  // — kind alone cannot separate them. Teams' own participant naming is what
+  // does, and it is AUTHORITATIVE "no agent open" rather than no evidence.
+  const group = await scenario('teams_group_chat_never_blocks');
+  assert.equal(group.length, 5);
+  for (const r of group) {
+    assert.equal(r.agentOutcome, 'Generic', `group tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `group tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `group tick ${r.tick}`);
+    assert.equal(r.fgIsAi, false, `group tick ${r.tick}`);
+  }
+
+  // A channel post view, the Activity tab, and Teams' generic Copilot panel.
+  const other = await scenario('teams_other_surfaces_never_block');
+  assert.equal(other.length, 3);
+  for (const r of other) {
+    assert.equal(r.agentOutcome, 'NotComposer', `other tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `other tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `other tick ${r.tick}`);
+    assert.equal(r.fgIsAi, false, `other tick ${r.tick}`);
+  }
+});
+
+test('ARMED: leaving the blocked conversation releases the block within ONE tick', { skip: !win }, async () => {
+  // The FAIL-OPEN direction, and the reason a host app's latch rule is wider
+  // than a chat app's. For M365Copilot a NotComposer read is no evidence (the
+  // global focused-element read landed on the transcript) and the latch survives
+  // it. In window-title mode NotComposer comes from a title that WAS read and
+  // simply is not a nameable Chat — positive evidence the blocked conversation
+  // is not open. Holding the block past it would leave Enter dead in a channel.
+  for (const name of ['teams_release_to_channel', 'teams_release_to_activity', 'teams_release_to_dm']) {
+    const rows = await scenario(name);
+    assert.equal(rows.length, 3, name);
+    assert.equal(rows[0].fgIsBlocked, true, `${name}: the block must be established first`);
+    assert.equal(rows[0].enterBlocked, true, name);
+    for (const r of rows.slice(1)) {
+      assert.equal(r.fgIsBlocked, false, `${name} tick ${r.tick}: must release on the very next tick`);
+      assert.equal(r.enterBlocked, false, `${name} tick ${r.tick}`);
+      assert.equal(r.latchHeld, false, `${name} tick ${r.tick}: no lingering latch`);
+      assert.equal(r.latchKey, '', `${name} tick ${r.tick}`);
+    }
+  }
+});
+
+test('ARMED: switching to a different, unblocked agent clears in one tick', { skip: !win }, async () => {
+  const rows = await scenario('teams_other_agent_clears');
+  assert.equal(rows.length, 3);
+  assert.equal(rows[0].fgIsBlocked, true);
+  for (const r of rows.slice(1)) {
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}: a different agent is still authoritative`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+  }
+});
+
+test('ARMED: the composer losing focus stops CAPTURE at once and the block soon after', { skip: !win }, async () => {
+  // The user scrolls the blocked agent's transcript. The title still says the
+  // agent conversation is open, so the block is correct to stand through the
+  // pre-existing 3s sticky window — but _fgIsPanel goes false immediately, and
+  // PanelUiaOk/PanelEnforceOk deny every content read from that instant.
+  //
+  // Tick 2 ages the sticky window out and shows the block does NOT stand
+  // indefinitely on an unfocused composer. That is the fail-open direction
+  // again: a host app gives the block up rather than holding it on weak evidence.
+  const rows = await scenario('teams_composer_not_focused');
+  assert.equal(rows.length, 3);
+  assert.equal(rows[0].matched, 'teams_composer');
+  assert.equal(rows[0].fgIsBlocked, true);
+  assert.equal(rows[0].fgIsPanel, true);
+  // Focus moved to the message list: no signature match, so no capture surface.
+  assert.equal(rows[1].matched, '', 'the message list is not the composer');
+  assert.equal(rows[1].latchHeld, false, 'an authoritative read retires the latch');
+  assert.equal(rows[1].fgIsBlocked, true, 'the sticky window still holds the block');
+  // …and once it lapses, the block is gone rather than stuck.
+  assert.equal(rows[2].fgIsBlocked, false);
+  assert.equal(rows[2].enterBlocked, false);
+  assert.equal(rows[2].fgIsAi, false);
+});
+
+test('ARMED: an unreadable TITLE is no evidence — the latch survives it, and is bounded', { skip: !win }, async () => {
+  // The one outcome in window-title mode that is a genuine read failure rather
+  // than a fact about the open conversation: no window handle, or GetWindowText
+  // returned nothing. That, and only that, holds the block.
+  const rows = await scenario('teams_unreadable_title');
+  assert.equal(rows.length, 6);
+  assert.equal(rows[0].agentOutcome, 'Named');
+  for (const r of rows.slice(1)) {
+    assert.equal(r.agentOutcome, 'Unreadable', `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}: a failed read must not unblock`);
+    assert.equal(r.latchHeld, true, `tick ${r.tick}`);
+    assert.equal(r.latchKey, 'agent:teams_desktop', `tick ${r.tick}`);
+  }
+  // Fail-closed must not become fail-stuck: a Teams whose title reads never
+  // recover cannot leave Enter dead in a chat client forever.
+  const [expired] = await scenario('teams_latch_expires');
+  assert.equal(expired.latchHeld, false);
+  assert.equal(expired.fgIsBlocked, false);
+  assert.equal(expired.enterBlocked, false);
+});
+
+test('ARMED: an admin lifting the block takes effect at once, and stops the reads too', { skip: !win }, async () => {
+  const rows = await scenario('teams_admin_unblocks');
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].fgIsBlocked, true);
+  assert.equal(rows[1].fgIsBlocked, false, 'un-blocking must be immediate');
+  assert.equal(rows[1].enterBlocked, false);
+  // Dropping the row also drops the PRIVACY GATE with it — no policy, no read.
+  assert.equal(rows[1].agentOutcome, 'Unreadable', 'a lifted policy must stop licensing the read');
+  assert.equal(rows[1].matched, '');
+});
+
+test('ARMED: the panic hotkey still releases a Teams block', { skip: !win }, async () => {
+  const rows = await scenario('teams_panic_hotkey');
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].enterBlocked, true);
+  assert.equal(rows[1].enterBlocked, false, 'Ctrl+Alt+Shift+F12 must release everything');
+});
+
+test('ARMED: the Teams WebView2 child-process composer matches, unrelated processes do not', { skip: !win }, async () => {
+  // ms-teams.exe hosts its real UI in a child msedgewebview2.exe — confirmed
+  // live via Win32_Process ParentProcessId, exactly as M365Copilot does. With
+  // ReadFocusedPanel's default exact-pid rule the composer could never be
+  // matched at all, so the whole feature would be unreachable. Driven with REAL
+  // child processes, so the parent-pid lookup actually runs.
+  const child = await scenario('teams_webview_child_pid');
+  assert.equal(child.length, 3);
+  for (const r of child) {
+    assert.equal(r.matched, 'teams_composer', `tick ${r.tick}: a child process element must match`);
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+  }
+  // …and widening to one generation must not have become "accept anything".
+  // A sibling process and the foreground process's own parent are both rejected,
+  // so a global FocusedElement read landing in another app can never govern a
+  // Teams tick. Note the TITLE still reads Named — it is a property of the
+  // foreground WINDOW, not of the stolen element — which is exactly why the
+  // element match is required as a separate condition.
+  const rejected = await scenario('teams_unrelated_pid_rejected');
+  assert.equal(rejected.length, 2);
+  for (const r of rejected) {
+    assert.equal(r.matched, '', `tick ${r.tick}: an unrelated process element is not evidence`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}: and cannot govern the tick`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.fgIsAi, false, `tick ${r.tick}`);
+  }
+});
+
+test('REGRESSION: M365Copilot behaves exactly as before, with host apps in the catalog', { skip: !win }, async () => {
+  // Run last in the harness, with the SHIPPED catalog reloaded, so a
+  // fixture-only payload cannot be what makes it pass. Every outcome here is
+  // identical to the pre-host-app behaviour: the composer-name read, the
+  // one-tick clear on Generic, and the latch surviving both no-evidence
+  // outcomes (NotComposer and Unreadable).
+  const rows = await scenario('m365_unaffected_by_host_apps');
+  assert.equal(rows.length, 5);
+  assert.deepEqual(rows.map((r) => r.agentOutcome),
+    ['Named', 'Generic', 'Named', 'NotComposer', 'Unreadable']);
+  assert.deepEqual(rows.map((r) => r.fgIsBlocked), [true, false, true, true, true]);
+  assert.deepEqual(rows.map((r) => r.enterBlocked), [true, false, true, true, true]);
+  for (const r of rows) {
+    // An agent surface is NOT a panel — making one would change PanelUiaOk /
+    // PanelEnforceOk for M365Copilot and silently alter its content scanning.
+    assert.equal(r.fgIsPanel, false, `tick ${r.tick}: the chat-app branch must not touch panel state`);
+    assert.equal(r.panelField, '', `tick ${r.tick}`);
+  }
+  // NotComposer and Unreadable are still NO EVIDENCE for a composer-name
+  // surface — the wider host-app latch rule must not have leaked into it.
+  assert.equal(rows[3].latchKey, 'agent:m365_copilot');
+  assert.equal(rows[4].latchKey, 'agent:m365_copilot');
+});

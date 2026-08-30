@@ -13,7 +13,7 @@
 import { createPoller } from './poller-factory.js';
 import { createNotifier } from './notify-factory.js';
 import {
-  AI_PROCESSES,
+  watcherProcessNames,
   identifyAiProcess,
   isAttachmentWatcherEligible,
   hostForProcess,
@@ -71,10 +71,19 @@ export class OsMonitor {
     this.poller = createPoller({ log });
     this.reporter = new Reporter({ serverUrl, token, log });
     this.toast = createNotifier({ log });
-    // Extract bare process names (without regex) for the UIA watcher.
-    const aiProcNames = AI_PROCESSES.map((e) =>
-      e.match.source.replace(/^\^/, '').replace(/\$$/, '').replace(/[\\\/]i?$/, '')
-    );
+    // Bare process names (without regex) for the UIA watchers, the clipboard
+    // poller and the keystroke enforcer.
+    //
+    // Built by watcherProcessNames() rather than inline off AI_PROCESSES,
+    // because the derivation now carries a rule: `hostApp: true` entries
+    // (Microsoft Teams) are EXCLUDED. Teams is in the catalog only for host /
+    // exception resolution; letting its process name reach this list would turn
+    // on clipboard scanning, attachment-chip watching and prompt-text reading
+    // across a company's whole communications client — every DM and channel —
+    // which is exactly what the narrow agent-conversation scoping exists to
+    // avoid. Same separation, and the same reason, that keeps the IDE catalog
+    // out of this file entirely.
+    const aiProcNames = watcherProcessNames();
     this.dialogWatcher = new FileDialogWatcher({ log, aiProcessNames: aiProcNames });
     this.attachmentWatcher = new AttachmentWatcher({ log, aiProcessNames: aiProcNames });
     this.promptWatcher = new PromptWatcher({ log, aiProcessNames: aiProcNames });

@@ -24,6 +24,8 @@ import {
   hostsForPlatform,
   filterBlockedAgents,
   processForHost,
+  processesForHost,
+  watcherProcessNames,
   synthesizePlatformBlocks,
   PLATFORM_BLOCK_SENTINEL,
   AGENT_SURFACES,
@@ -31,6 +33,8 @@ import {
   AGENT_NAME_NOT_COMPOSER,
   agentSurfaceForProcess,
   extractAgentName,
+  extractAgentNameFromTitle,
+  looksLikeParticipantList,
   agentNameMatches,
   normalizeAgentRows,
   buildAgentSurfaceConfig,
@@ -112,15 +116,69 @@ test('hostsForPlatform maps every blockable platform to at least one host', () =
   assert.deepEqual(hostsForPlatform('openai_assistant'), ['chatgpt.com']);
   assert.deepEqual(hostsForPlatform('custom_gpt'), ['chatgpt.com']);
   assert.deepEqual(hostsForPlatform('gemini'), ['gemini.google.com']);
-  // copilot_studio is reachable through two different Copilot builds.
-  assert.deepEqual(hostsForPlatform('copilot_studio'), ['copilot.microsoft.com', 'm365.cloud.microsoft']);
+  // copilot_studio is reachable through two Copilot builds AND inside Microsoft
+  // Teams — a Copilot Studio agent is added to Teams as a chat participant, so
+  // teams.microsoft.com is a real desktop reach for it. Same for personal_agent.
+  assert.deepEqual(hostsForPlatform('copilot_studio'),
+    ['copilot.microsoft.com', 'm365.cloud.microsoft', 'teams.microsoft.com']);
+  assert.deepEqual(hostsForPlatform('personal_agent'),
+    ['copilot.microsoft.com', 'm365.cloud.microsoft', 'teams.microsoft.com']);
+  // teams_chat_agent is Teams-only. This is what lets an admin's approved
+  // teams.microsoft.com exception actually lift a Teams agent block on the
+  // desktop, via filterBlockedAgents.
+  assert.deepEqual(hostsForPlatform('teams_chat_agent'), ['teams.microsoft.com']);
   for (const platform of Object.keys(PLATFORM_PROCS)) {
     assert.ok(hostsForPlatform(platform).length > 0, `${platform} maps to no host`);
   }
   // An unknown platform yields nothing, which callers must read as "no
   // exception can apply" — never as "unblock it".
-  assert.deepEqual(hostsForPlatform('teams_chat_agent'), []);
+  assert.deepEqual(hostsForPlatform('not_a_platform'), []);
   assert.deepEqual(hostsForPlatform(undefined), []);
+});
+
+test('a host app resolves to a host but never to a blockable process', () => {
+  // The whole asymmetry of `hostApp`, stated in one place.
+  //
+  // hostForProcess MUST resolve — that is what puts teams.microsoft.com on the
+  // access-exception chain, and it is the only reason ms-teams is in
+  // AI_PROCESSES at all.
+  assert.equal(hostForProcess('ms-teams'), 'teams.microsoft.com');
+  assert.equal(hostForProcess('ms-teams.exe'), 'teams.microsoft.com');
+  assert.equal(hostForProcess('MS-Teams'), 'teams.microsoft.com');
+  // The REVERSE must not. A process_name:'ms-teams' row in blocked-agents.json
+  // is matched process-WIDE by enforcer-win.ps1: it would swallow Enter in every
+  // DM, channel and meeting chat because an admin toggled a host in Inventory.
+  assert.equal(processForHost('teams.microsoft.com'), null);
+  assert.deepEqual(processesForHost('teams.microsoft.com'), []);
+  // …so an Inventory block on the host synthesizes no desktop row at all.
+  assert.deepEqual(
+    synthesizePlatformBlocks([{ host: 'teams.microsoft.com', product: 'Microsoft Teams', vendor: 'Microsoft', blocked: true }]),
+    [],
+  );
+  // And the flag is declared exactly where the docs say it is.
+  const teams = AI_PROCESSES.find((e) => e.product === 'Microsoft Teams');
+  assert.ok(teams, 'the Microsoft Teams entry is missing');
+  assert.equal(teams.hostApp, true);
+  assert.deepEqual(AI_PROCESSES.filter((e) => e.hostApp === true).map((e) => e.product), ['Microsoft Teams']);
+});
+
+test('a host app never reaches the passive watchers', () => {
+  // THE privacy property of the host-app feature. Microsoft Teams in the watcher
+  // list would turn on clipboard scanning, attachment-chip watching and
+  // prompt-text reading across a company's whole communications client — every
+  // DM and every channel — which is exactly what the narrow agent-conversation
+  // scoping exists to avoid. Same separation, same reason, as IDE_PROCESSES.
+  const names = watcherProcessNames();
+  assert.ok(names.length > 0);
+  for (const name of names) {
+    assert.equal(name.toLowerCase() === 'ms-teams', false, 'ms-teams must never reach a passive watcher');
+  }
+  // It is exactly the catalog minus the host apps — no other entry was dropped.
+  const expected = AI_PROCESSES
+    .filter((e) => e.hostApp !== true)
+    .map((e) => e.match.source.replace(/^\^/, '').replace(/\$$/, '').replace(/[\\/]i?$/, ''));
+  assert.deepEqual(names, expected);
+  assert.equal(names.length, AI_PROCESSES.length - 1);
 });
 
 test('PLATFORM_PROCS agrees with the copy inside enforcer-win.ps1', async () => {
@@ -206,9 +264,12 @@ test('processForHost excludes the IDE surfaces — Cursor and GitHub Copilot', (
   // exclusion tracks the catalog.
   assert.equal(processForHost('cursor.com'), null);
   assert.equal(processForHost('github.com'), null);
-  // …and the flag really is what draws that line today.
+  // …and the flag really is what draws that line today. Microsoft Teams is
+  // excluded twice over — by this flag AND by its own `hostApp` guard, which is
+  // deliberate belt-and-braces: flipping useAttachmentWatcher on a host app
+  // later must not quietly re-enable whole-app blocking for it.
   const excluded = AI_PROCESSES.filter((e) => e.useAttachmentWatcher === false).map((e) => e.product);
-  assert.deepEqual(excluded, ['Cursor', 'GitHub Copilot']);
+  assert.deepEqual(excluded, ['Cursor', 'GitHub Copilot', 'Microsoft Teams']);
 });
 
 test('synthesizePlatformBlocks only emits rows that are blocked AND resolve to a desktop app or panel', () => {
@@ -447,10 +508,47 @@ test('the safety gate holds for every entry: nothing may enforce without being v
       assert.equal(surface.verified, true, `${surface.id} enforces without a recorded live verification`);
     }
     // Every entry needs something to match on, verified or not — a surface with
-    // no prefix can never read a name and would silently narrow nothing.
-    assert.ok(Array.isArray(surface.composerNamePrefixes) && surface.composerNamePrefixes.length > 0, surface.id);
+    // nothing to read a name FROM can never narrow anything, and would ship as a
+    // silent no-op. Which fields those are depends on the read mode, and the
+    // absence of `read` must keep meaning the original composer-name mode.
+    assert.ok(surface.read === undefined || surface.read === 'window_title',
+      `${surface.id}: unknown read mode '${surface.read}'`);
+    if (surface.read === 'window_title') {
+      assert.ok(surface.titleSeparator, `${surface.id} has no titleSeparator`);
+      assert.ok(surface.titleSuffix, `${surface.id} has no titleSuffix`);
+      assert.ok(Array.isArray(surface.titleKinds) && surface.titleKinds.length > 0, `${surface.id} has no titleKinds`);
+    } else {
+      assert.ok(Array.isArray(surface.composerNamePrefixes) && surface.composerNamePrefixes.length > 0, surface.id);
+    }
     assert.ok(Array.isArray(surface.genericNames), surface.id);
   }
+});
+
+test('teams_desktop ships INERT, reads the title, and never falls back to a whole-app block', () => {
+  const teams = AGENT_SURFACES.find((s) => s.id === 'teams_desktop');
+  assert.ok(teams, 'the teams_desktop surface is missing');
+  // Stage 1-2 ship the mechanism, not the enforcement. Both flags false means
+  // enforcer-win.ps1 does nothing at all for Teams: no title read, no
+  // accessibility read, no block.
+  assert.equal(teams.enforce, false);
+  assert.equal(teams.verified, false);
+  // The discriminator, and the measured title grammar behind it.
+  assert.equal(teams.read, 'window_title');
+  assert.equal(teams.titleSeparator, ' | ');
+  assert.equal(teams.titleSuffix, 'Microsoft Teams');
+  assert.deepEqual(teams.titleKinds, ['Chat']);
+  // THE inversion. For an AI-only app "cannot tell which agent is open" safely
+  // means "block the whole app". For a general-purpose communications client it
+  // would mean the user cannot message a colleague, so it must mean "block
+  // nothing" instead.
+  assert.equal(teams.hostApp, true);
+  // …and it is the ONLY host-app surface, so this stays a deliberate opt-in.
+  assert.deepEqual(AGENT_SURFACES.filter((s) => s.hostApp === true).map((s) => s.id), ['teams_desktop']);
+  // m365_copilot is completely untouched by the new fields existing.
+  const m365 = AGENT_SURFACES.find((s) => s.id === 'm365_copilot');
+  assert.equal(m365.read, undefined, 'm365_copilot must not gain a read mode');
+  assert.equal(m365.hostApp, undefined, 'm365_copilot must not become a host app');
+  assert.equal(m365.titleSeparator, undefined);
 });
 
 test('agentSurfaceForProcess matches on the process name, case- and .exe-insensitively', () => {
@@ -541,21 +639,225 @@ test('an agent literally named "Copilot" can never be matched through this mecha
 });
 
 test('buildAgentSurfaceConfig serialises the catalog without aliasing it', () => {
-  const [entry] = buildAgentSurfaceConfig();
+  const [entry, teams] = buildAgentSurfaceConfig();
+  // The title fields travel on EVERY entry, empty for a composer-name surface.
+  // Stating 'composer_name' explicitly (rather than shipping "") is what keeps
+  // the JS default and the C# default the same word in the same place.
   assert.deepEqual(entry, {
     id: 'm365_copilot',
     procs: ['M365Copilot'],
     controlType: 'Edit',
     composerNamePrefixes: ['Message '],
     genericNames: ['Copilot'],
+    read: 'composer_name',
+    titleSeparator: '',
+    titleSuffix: '',
+    titleKinds: [],
+    hostApp: false,
     enforce: true,
     verified: true,
+  });
+  assert.deepEqual(teams, {
+    id: 'teams_desktop',
+    procs: ['ms-teams'],
+    controlType: 'Edit',
+    composerNamePrefixes: [],
+    genericNames: ['Copilot', 'Chat', 'Microsoft Teams', 'Meeting chat'],
+    read: 'window_title',
+    titleSeparator: ' | ',
+    titleSuffix: 'Microsoft Teams',
+    titleKinds: ['Chat'],
+    hostApp: true,
+    enforce: false,
+    verified: false,
   });
   // Copies, so a consumer mutating the payload cannot reach back into the catalog.
   entry.procs.push('Notepad');
   entry.composerNamePrefixes.push('x');
+  teams.titleKinds.push('Channel');
+  teams.genericNames.push('x');
   assert.deepEqual(AGENT_SURFACES[0].procs, ['M365Copilot']);
   assert.deepEqual(AGENT_SURFACES[0].composerNamePrefixes, ['Message ']);
+  assert.deepEqual(AGENT_SURFACES[1].titleKinds, ['Chat']);
+  assert.deepEqual(AGENT_SURFACES[1].genericNames, ['Copilot', 'Chat', 'Microsoft Teams', 'Meeting chat']);
+});
+
+// ── Window-title agent reads (Microsoft Teams) ───────────────────────────────
+//
+// Teams' composer Name is the literal "Type a message" in EVERY conversation, so
+// the composer-name mechanism above cannot work here at all. The window title is
+// the only signal that says which conversation is open. Every title below is a
+// VERBATIM live capture (2026-08) from a real Teams install with a real Copilot
+// Studio agent ("IT Help Desk Agent") added.
+
+const TEAMS_SURFACE = AGENT_SURFACES.find((s) => s.id === 'teams_desktop');
+
+// Measured, verbatim.
+const T_AGENT   = 'Chat | IT Help Desk Agent | filefuze | erik@filefuze.co | Microsoft Teams';
+const T_GROUP   = 'Chat | alex, max | filefuze | erik@filefuze.co | Microsoft Teams';
+const T_DM      = 'Sruthi Chimata | CloudFuze, Inc | Pravallika.Punumalli@cloudfuze.com | Microsoft Teams';
+const T_COPILOT = 'Copilot | filefuze | erik@filefuze.co | Microsoft Teams';
+const T_CHANNEL = 'Teams and Channels | CFQMSG END-END Sanity testing for public channel-ivy2 | General | filefuze | erik@filefuze.co | Microsoft Teams';
+const T_ACTIVITY = 'Activity | Workflows | filefuze | erik@filefuze.co | Microsoft Teams';
+
+test('extractAgentNameFromTitle names the agent conversation and nothing else', () => {
+  // THE positive case: the real agent conversation, on the real title.
+  assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, T_AGENT), 'IT Help Desk Agent');
+
+  // A human GROUP CHAT has the IDENTICAL 5-segment shape — kind alone cannot
+  // tell the two apart. Teams' own participant naming is what does, and it is
+  // AUTHORITATIVE "no agent open", not "no evidence".
+  assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, T_GROUP), AGENT_NAME_GENERIC);
+
+  // A plain 1:1 DM has NO leading kind segment at all — the person's display
+  // name is segment 0. Without the kind check this would read as an agent named
+  // after a colleague, so it must land in NO EVIDENCE.
+  assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, T_DM), AGENT_NAME_NOT_COMPOSER);
+
+  // The Teams-generic Copilot panel: kind is "Copilot" and there is no separate
+  // name segment at all. The kind check rejects it before anything is extracted,
+  // so it is NO EVIDENCE — not Generic. (Both are non-blocking; the distinction
+  // matters because only an AUTHORITATIVE outcome retires a live block's latch.)
+  assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, T_COPILOT), AGENT_NAME_NOT_COMPOSER);
+
+  // A channel post view and the Activity tab: different kinds, same rejection.
+  assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, T_CHANNEL), AGENT_NAME_NOT_COMPOSER);
+  assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, T_ACTIVITY), AGENT_NAME_NOT_COMPOSER);
+});
+
+test('extractAgentNameFromTitle refuses any title that is not this app\'s', () => {
+  // The suffix check is what stops another app's window from ever being parsed
+  // as a Teams title.
+  for (const title of [
+    'Chat | IT Help Desk Agent | filefuze | erik@filefuze.co | Slack',
+    'Chat | IT Help Desk Agent | filefuze | erik@filefuze.co',
+    'Chat | IT Help Desk Agent | Microsoft Teams Classic',
+    'Microsoft Teams',
+    'Chat | Microsoft Teams',              // only 2 segments — nothing to name
+    'index.js - my-project - Visual Studio Code',
+  ]) {
+    assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, title), AGENT_NAME_NOT_COMPOSER, title);
+  }
+  // Generic labels in the name slot are AUTHORITATIVE "no agent open".
+  for (const name of ['Copilot', 'Chat', 'Microsoft Teams', 'Meeting chat', 'meeting CHAT']) {
+    assert.equal(
+      extractAgentNameFromTitle(TEAMS_SURFACE, `Chat | ${name} | filefuze | erik@filefuze.co | Microsoft Teams`),
+      AGENT_NAME_GENERIC, name,
+    );
+  }
+  // Never throws — every input comes from another process's window.
+  for (const bad of [null, undefined, '', '   ', 0, {}]) {
+    assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, bad), AGENT_NAME_NOT_COMPOSER, JSON.stringify(bad));
+  }
+  assert.equal(extractAgentNameFromTitle(null, T_AGENT), AGENT_NAME_NOT_COMPOSER);
+  assert.equal(extractAgentNameFromTitle({}, T_AGENT), AGENT_NAME_NOT_COMPOSER);
+});
+
+test('extractAgentNameFromTitle strips an unread-count prefix and bounds its input', () => {
+  // HYPOTHESISED, not live-measured: implemented defensively because a missed
+  // strip would silently disable the whole read the moment a message arrives.
+  assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, `(3) ${T_AGENT}`), 'IT Help Desk Agent');
+  assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, `(12)${T_AGENT}`), 'IT Help Desk Agent');
+  assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, `(3) ${T_GROUP}`), AGENT_NAME_GENERIC);
+  // Not a count — left alone, and then rejected on its own merits.
+  assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, `() ${T_AGENT}`), AGENT_NAME_NOT_COMPOSER);
+  assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, `(x) ${T_AGENT}`), AGENT_NAME_NOT_COMPOSER);
+  // Capped at 512 chars, so a pathological title cannot make this expensive —
+  // and truncation loses the suffix, which fails closed to NO EVIDENCE.
+  const long = `Chat | ${'a'.repeat(600)} | filefuze | erik@filefuze.co | Microsoft Teams`;
+  assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, long), AGENT_NAME_NOT_COMPOSER);
+  // Whitespace is normalised, not treated as a mismatch — same rule the
+  // composer-name read follows on both sides of every comparison.
+  assert.equal(
+    extractAgentNameFromTitle(TEAMS_SURFACE, '  Chat |  IT  Help Desk Agent | filefuze | e@f.co | Microsoft Teams  '),
+    'IT Help Desk Agent',
+  );
+});
+
+test('extractAgentName dispatches to the title reader for a window_title surface', () => {
+  // The dispatcher: the same entry point the composer path uses, so the C# port
+  // has one method to mirror. `title` is preferred, `name` is the fallback,
+  // because the C# side puts the title in its single string parameter.
+  assert.equal(extractAgentName({ process: 'ms-teams', title: T_AGENT }), 'IT Help Desk Agent');
+  assert.equal(extractAgentName({ process: 'ms-teams.exe', title: T_AGENT }), 'IT Help Desk Agent');
+  assert.equal(extractAgentName({ process: 'ms-teams', name: T_AGENT }), 'IT Help Desk Agent');
+  assert.equal(extractAgentName({ process: 'ms-teams', title: T_GROUP }), AGENT_NAME_GENERIC);
+  assert.equal(extractAgentName({ process: 'ms-teams', title: T_DM }), AGENT_NAME_NOT_COMPOSER);
+  // The composer's own Name is NOT a signal for this surface — it is the same
+  // literal in every conversation, which is the whole reason for title mode.
+  assert.equal(extractAgentName({ process: 'ms-teams', controlType: 'Edit', name: 'Type a message' }), AGENT_NAME_NOT_COMPOSER);
+  // …and m365_copilot's composer path is completely unaffected by the dispatch.
+  assert.equal(extractAgentName(M365_ADVISOR), 'AI Learning Advisor');
+  assert.equal(extractAgentName(M365_GENERIC), AGENT_NAME_GENERIC);
+  // A title-shaped string in an M365Copilot composer read is not a title read.
+  assert.equal(extractAgentName({ process: 'M365Copilot', controlType: 'Edit', title: T_AGENT, name: 'Message Copilot' }), AGENT_NAME_GENERIC);
+});
+
+test('looksLikeParticipantList recognises Teams\' own group-chat naming', () => {
+  // Accepted: Teams' default comma+space join of participant display names.
+  for (const value of [
+    'alex, max',
+    'Alex Morgan, Max Chen',
+    'Alex Morgan, Max Chen, Sam Ng',
+    "Siobhán O'Brien, Max Chen",
+    'Renée Dubois-Martin, Max Chen',
+    'J. R. Ewing, Max Chen',
+  ]) {
+    assert.equal(looksLikeParticipantList(value), true, value);
+  }
+  // Rejected: a single name, an agent name, and anything with a digit or a
+  // symbol a display name does not carry.
+  for (const value of [
+    'IT Help Desk Agent',
+    'alex',
+    '',
+    '   ',
+    'alex,max',                       // no space after the comma — not the join
+    'Deal Desk Bot, Agent #2',        // a digit and a symbol
+    'Team Alpha, Squad 7',            // a digit
+    'A Very Long Single Segment Name Beyond Forty Chars, Max',
+    'One Two Three Four, Max Chen',   // four words is not a display name
+    'alex, ',                         // one real segment
+    'alex@corp.com, max@corp.com',    // '@' is not a name character
+  ]) {
+    assert.equal(looksLikeParticipantList(value), false, JSON.stringify(value));
+  }
+  // Never throws.
+  for (const bad of [null, undefined, 0, {}]) {
+    assert.equal(looksLikeParticipantList(bad), false, JSON.stringify(bad));
+  }
+});
+
+test('looksLikeParticipantList is defence in depth, NOT a complete fix', () => {
+  // Stated as a test so the accepted residual risk is impossible to lose.
+  //
+  // 1. A DELIBERATELY renamed group chat with no comma is indistinguishable from
+  //    an agent conversation, by construction. If someone renames a chat to
+  //    exactly a blocked agent's name, it is blocked. Accepted, not solved.
+  assert.equal(looksLikeParticipantList('IT Help Desk Agent'), false);
+  assert.equal(
+    extractAgentNameFromTitle(TEAMS_SURFACE, 'Chat | IT Help Desk Agent | filefuze | e@f.co | Microsoft Teams'),
+    'IT Help Desk Agent',
+    'a chat renamed to a blocked agent name is not distinguishable — accepted',
+  );
+  // 2. The converse: a comma+space AGENT name is read as a participant list and
+  //    therefore never blocked through this path. Fail-OPEN, which is the
+  //    correct direction for a general-purpose communications client — a missed
+  //    block is recoverable, a company that cannot chat is not.
+  assert.equal(looksLikeParticipantList('Contracts, Legal'), true);
+  assert.equal(
+    extractAgentNameFromTitle(TEAMS_SURFACE, 'Chat | Contracts, Legal | filefuze | e@f.co | Microsoft Teams'),
+    AGENT_NAME_GENERIC,
+    'an agent whose name contains ", " cannot be blocked via the title — accepted, fail-open',
+  );
+});
+
+test('agentSurfaceForProcess resolves the Teams host app', () => {
+  for (const proc of ['ms-teams', 'MS-Teams', 'ms-teams.exe', ' ms-teams ']) {
+    assert.equal(agentSurfaceForProcess(proc)?.id, 'teams_desktop', proc);
+  }
+  // The old Teams process name is a different app and is not covered.
+  assert.equal(agentSurfaceForProcess('Teams'), null);
 });
 
 // ── normalizeAgentRows: the transport the matching key has to survive ───────

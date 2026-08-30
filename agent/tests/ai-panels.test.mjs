@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path';
 
 import {
   AI_PANELS,
+  AGENT_SURFACES,
   IDE_PROCESSES,
   AI_PROCESSES,
   matchPanelSignature,
@@ -50,6 +51,18 @@ const COPILOT_CHAT = {
   controlType: 'Edit',
   name: 'Chat Input (Agent), edit files in your workspace. Press Enter to send out the request. Use Alt+F1 for Chat Accessibility Help.',
   className: 'native-edit-context',
+};
+// Microsoft Teams' message composer, exactly as probed live 2026-08 in a real
+// new-Teams (MSIX) window. Note the Name is the literal "Type a message" and is
+// IDENTICAL in a DM, a group chat, an agent conversation and the Copilot panel —
+// it is deliberately not used as a signal. The ClassName is the real, verbatim
+// token list: stable CKEditor semantic classes mixed with Fluent-UI build
+// hashes, and only the semantic `ck-editor__editable` token is matched.
+const TEAMS_COMPOSER = {
+  process: 'ms-teams',
+  controlType: 'Edit',
+  name: 'Type a message',
+  className: 'ck ck-content ck-editor__editable ck-rounded-corners ck-editor__editable_inline ck-blurred ___1czdayc f1poobt0 f1cktdmf f13htf1t f1ubnyt4 f1couhl3 f1ahpp82 f11qra4b f6dzj5z f1p9o1ba fokg9q4',
 };
 // NOT a composer: Cursor's agent-session history search box. Same ControlType,
 // same process, similar shape — filtering past sessions is not sending a prompt.
@@ -181,8 +194,13 @@ test('Copilot Chat ships enforce:false and the matcher does not treat that as "d
   // Detection must still fire, or the whole point of shipping it detection-first
   // (exercising the plumbing, gathering telemetry) is lost.
   assert.equal(matchPanelSignature(COPILOT_CHAT)?.id, 'vscode_chat');
-  // …and it is the only non-enforcing panel today.
-  assert.deepEqual(AI_PANELS.filter((p) => !p.enforce).map((p) => p.id), ['vscode_chat']);
+  // …and the non-enforcing panels are exactly the two unverified ones. Both
+  // ship detection-only until a human runs their own live pass:
+  //   vscode_chat    — signature inferred, never probed against a real install
+  //   teams_composer — probed live, but the FEATURE it gates (agent-scoped
+  //                    enforcement inside a general-purpose chat client) has not
+  //                    had its end-to-end pass yet, so it ships inert
+  assert.deepEqual(AI_PANELS.filter((p) => !p.enforce).map((p) => p.id), ['vscode_chat', 'teams_composer']);
 });
 
 // ── Negative cases ───────────────────────────────────────────────────────────
@@ -239,9 +257,38 @@ test('identifyAiPanel / hostForPanel / panelForHost round-trip for all three pan
   assert.equal(hostForPanel('cursor_composer'), 'cursor.com');
 
   for (const panel of AI_PANELS) {
+    // A host-less panel is deliberately unreachable from a host — see below.
+    if (!panel.host) continue;
     assert.equal(panelForHost(panel.host), panel.id, `${panel.host} → ${panel.id}`);
     assert.equal(hostForPanel(panelForHost(panel.host)), panel.host);
   }
+});
+
+test('teams_composer carries NO host, so an Inventory toggle can never block all of Teams', () => {
+  // THE load-bearing property of this entry. If teams_composer had
+  // host:'teams.microsoft.com', an admin toggling that host in Inventory would
+  // make synthesizePlatformBlocks emit a panel-keyed row against it — and that
+  // row would disable the composer in EVERY Teams conversation: DMs, channels,
+  // meeting chat, everyone. That is "disable all of Teams", which is exactly
+  // what the whole agent-scoped Teams feature exists to avoid.
+  const teams = AI_PANELS.find((p) => p.id === 'teams_composer');
+  assert.ok(teams, 'the teams_composer panel is missing');
+  assert.equal(teams.host, null, 'teams_composer must carry no host');
+  assert.equal(hostForPanel('teams_composer'), null);
+  // The reverse lookup must not resolve the Teams host to this panel — not by
+  // the entry's own (absent) host, and not by the AI_PROCESSES host either.
+  assert.equal(panelForHost('teams.microsoft.com'), null);
+  assert.equal(panelForHost('TEAMS.MICROSOFT.COM'), null);
+  // …and no synthesised row is produced for it at all: not a panel row (no
+  // host), and not a process row (processesForHost excludes a host app).
+  assert.deepEqual(
+    synthesizePlatformBlocks([{ host: 'teams.microsoft.com', product: 'Microsoft Teams', vendor: 'Microsoft', blocked: true }]),
+    [],
+    'an Inventory block on teams.microsoft.com must synthesize NOTHING for the desktop',
+  );
+  // It is still MATCHED, though — detection and enforcement stay separate, so
+  // the agent-scoped path in enforcer-win.ps1 can use it.
+  assert.equal(matchPanelSignature(TEAMS_COMPOSER)?.id, 'teams_composer');
 });
 
 test('the identity lookups reject junk instead of guessing', () => {
@@ -263,7 +310,12 @@ test('the identity lookups reject junk instead of guessing', () => {
 test('every panel carries a bare canonical host and a distinct id', () => {
   const ids = new Set();
   for (const panel of AI_PANELS) {
-    assert.match(panel.host, /^[a-z0-9.-]+\.[a-z]{2,}$/, `${panel.id}: '${panel.host}' is not a bare hostname`);
+    // `host: null` is a deliberate, documented choice for a HOST-APP panel
+    // (teams_composer) — it is what makes the panel unreachable from an
+    // Inventory host toggle. Anything else must still be a bare hostname.
+    if (panel.host !== null) {
+      assert.match(panel.host, /^[a-z0-9.-]+\.[a-z]{2,}$/, `${panel.id}: '${panel.host}' is not a bare hostname`);
+    }
     assert.match(panel.id, /^[a-z0-9_]+$/, `${panel.id} must be a plain id (it is used as a JSON key and a C# literal)`);
     assert.equal(ids.has(panel.id), false, `duplicate panel id ${panel.id}`);
     ids.add(panel.id);
@@ -273,11 +325,22 @@ test('every panel carries a bare canonical host and a distinct id', () => {
   }
 });
 
-test('every panel names only processes the IDE catalog carries', () => {
+test('every panel names only processes the IDE catalog — or a declared HOST APP — carries', () => {
+  // A panel used to be an IDE-only concept. It is now also how a HOST APP's one
+  // governed composer is identified, so the rule is "an IDE process or a process
+  // an AGENT_SURFACES entry declares hostApp:true" — never an arbitrary process.
+  // Both sides stay closed: a panel naming a process in neither catalog would be
+  // element scoping over an app nothing else in the system knows about.
   const ideNames = new Set(buildIdeProcessConfig().map((e) => e.name.toLowerCase()));
+  const hostAppNames = new Set(
+    AGENT_SURFACES.filter((s) => s.hostApp === true).flatMap((s) => s.procs.map((p) => p.toLowerCase())),
+  );
+  assert.ok(hostAppNames.has('ms-teams'), 'expected ms-teams to be a declared host app');
   for (const panel of AI_PANELS) {
     for (const proc of panel.procs) {
-      assert.ok(ideNames.has(proc.toLowerCase()), `${panel.id} names ${proc}, which is not an IDE process`);
+      const name = proc.toLowerCase();
+      assert.ok(ideNames.has(name) || hostAppNames.has(name),
+        `${panel.id} names ${proc}, which is neither an IDE process nor a declared host app`);
     }
   }
 });

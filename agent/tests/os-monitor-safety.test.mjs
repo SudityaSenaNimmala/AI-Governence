@@ -949,8 +949,17 @@ test('enforcer-win.ps1: PanelUiaOk gates the Enter decision and Tokenize & Send,
   // sticky window, during which the caret may already be back in the editor and
   // a UIA read would return source code or terminal output.
   const fn = src.slice(src.indexOf('static bool PanelUiaOk()'), src.indexOf('// ── Model routing'));
-  assert.match(fn, /if \(!_ideProcs\.Contains\(_app\)\) return true;/);
+  // A HOST APP (Microsoft Teams) gets the same element scoping an IDE gets, for
+  // the same reason: the process being in the foreground says nothing about
+  // whether the one governed composer is what has focus, and between them sit
+  // every DM and every channel whose content must never be read.
+  assert.match(fn, /if \(!_ideProcs\.Contains\(_app\) && !_hostAppProcs\.Contains\(_app\)\) return true;/);
   assert.match(fn, /return _fgIsPanel && _fgPanelEnforce && _fgLeftAiTicks == 0;/);
+  // PanelEnforceOk states the host-app case POSITIVELY rather than inheriting
+  // the "not a panel → fine" default, so a future change has to opt out of it
+  // deliberately instead of falling out of it by accident.
+  const enforceOk = src.slice(src.indexOf('static bool PanelEnforceOk()'), src.indexOf('static bool PanelUiaOk()'));
+  assert.match(enforceOk, /if \(_hostAppProcs\.Contains\(_app\)\) return _fgIsPanel && _fgPanelEnforce;/);
   // Enter decision: the old `!isIde && _blockUia` is replaced.
   assert.match(src, /bool uiaBlock = PanelUiaOk\(\) && _blockUia;/);
   // The old blanket `bool isIde = _ideProcs.Contains(...)` local inside the
@@ -960,19 +969,26 @@ test('enforcer-win.ps1: PanelUiaOk gates the Enter decision and Tokenize & Send,
   assert.equal(/bool isIde = /.test(hookBody), false, 'the old isIde local must be gone from the hook');
   // Tokenize & Send: same replacement, so it is now available in a focused,
   // enforcing panel and still refused in the editor.
-  assert.match(src, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| Disarmed\(\)\)/);
+  // A HOST APP is excluded from it ENTIRELY, not merely panel-scoped: Tokenize
+  // & Send is the only path in the file that WRITES into another app's
+  // composer, and the "composer" inside a general-purpose chat client could be
+  // a message to a colleague.
+  assert.match(src, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| _hostAppProcs\.Contains\(_app\) \|\| Disarmed\(\)\)/);
   // …and the UIA read itself is gated, so the PII patterns never run over the
   // user's source code on the poll loop in the first place.
   assert.match(src, /if \(!_fgIsAi \|\| !PanelUiaOk\(\)\) \{ _blockUia = false; _uiaPatterns = ""; return; \}/);
 });
 
-test('enforcer-win.ps1: model routing still excludes IDE processes ENTIRELY (not panel-scoped)', async () => {
+test('enforcer-win.ps1: model routing still excludes IDE and HOST-APP processes ENTIRELY (not panel-scoped)', async () => {
   // Explicitly out of scope for IDE panels: there is no probed model-picker
   // signature for any of them. This must not have been "helpfully" widened.
+  // A host app (Microsoft Teams) is excluded on the same terms and for a
+  // stronger reason — there is no picker there to detect or drive at all, and
+  // the picker search is a descendant-wide UIA walk on the poll thread.
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
   const routing = src.slice(src.indexOf('static void UpdateModelRouting()'), src.indexOf('static void ClearPendingRoute()'));
   assert.ok(routing.length > 0, 'expected an UpdateModelRouting body');
-  assert.match(routing, /if \(!_fgIsAi \|\| _ideProcs\.Contains\(_app\) \|\| Disarmed\(\)\) \{ ClearPendingRoute\(\); return; \}/);
+  assert.match(routing, /if \(!_fgIsAi \|\| _ideProcs\.Contains\(_app\) \|\| _hostAppProcs\.Contains\(_app\) \|\| Disarmed\(\)\) \{ ClearPendingRoute\(\); return; \}/);
   // Not PanelUiaOk / _fgIsPanel — that would make routing panel-aware.
   assert.equal(/PanelUiaOk|_fgIsPanel/.test(routing), false, 'model routing must not become panel-aware');
 });
@@ -985,9 +1001,13 @@ test('enforcer-win.ps1: send-rect detection skips IDE processes instead of walki
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
   const fn = src.slice(src.indexOf('static void UpdateSendRect()'), src.indexOf('static void UpdateUia()'));
   assert.ok(fn.length > 0, 'expected an UpdateSendRect body');
-  const skip = fn.indexOf('if (_ideProcs.Contains(_app)) { _hasRect = false; return; }');
+  // A HOST APP is skipped too: attempt 2's "the bottom-right corner is the send
+  // button" heuristic is just as wrong in Teams, where which composer that
+  // corner belongs to depends on which conversation is open — so a cached rect
+  // would swallow an ordinary click in an ordinary chat.
+  const skip = fn.indexOf('if (_ideProcs.Contains(_app) || _hostAppProcs.Contains(_app)) { _hasRect = false; return; }');
   const search = fn.indexOf('win.FindAll(TreeScope.Descendants');
-  assert.ok(skip >= 0, 'expected an IDE skip in UpdateSendRect');
+  assert.ok(skip >= 0, 'expected an IDE + host-app skip in UpdateSendRect');
   assert.ok(search >= 0, 'expected the UIA descendant search to still exist for chat apps');
   assert.ok(skip < search, 'the skip must come BEFORE the expensive search');
 });
@@ -1107,7 +1127,10 @@ test('enforcer-win.ps1: the platform-block latch is bounded, pid-scoped, and yie
   // is the cursor_composer fix; see the FocusCouldHaveMoved test below.
   const fg = src.slice(src.indexOf('static void UpdateForeground()'), src.indexOf('static void UpdateSendRect()'));
   assert.ok(fg.length > 0, 'expected an UpdateForeground body');
-  assert.match(fg, /hit = ReadFocusedPanel\(proc, pid, out panelRid, out panelReadable\);/);
+  // The IDE read keeps `allowChildProcess: false` — VS Code and Cursor were
+  // verified live with the exact-pid rule, and widening a code editor's read is
+  // a separate decision with its own false-positive surface.
+  assert.match(fg, /if \(isIde\) hit = ReadFocusedPanel\(proc, pid, out panelRid, out panelReadable, false\);/);
   assert.match(fg, /else if \(panelReadable\)\r?\n\s*\{[\s\S]{0,2600}?if \(FocusCouldHaveMoved\(\)\) ClearPanelBlockLatch\(\);/);
   // …and a real app switch drops it on the very next poll tick.
   assert.match(fg, /if \(_panelBlockLatch && pid != _panelBlockPid\) ClearPanelBlockLatch\(\);/);
@@ -1134,11 +1157,20 @@ test('enforcer-win.ps1: a focused element from another process is a read FAILURE
   // state (readable stays false, no panel).
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
   const read = src.slice(src.indexOf('static PanelSig ReadFocusedPanel('), src.indexOf('static bool PanelEnforceOk()'));
-  assert.match(read, /static PanelSig ReadFocusedPanel\(string proc, uint fgPid, out string runtimeIdKey, out bool readable\)/);
-  assert.match(read, /try \{ if \(el\.Current\.ProcessId != \(int\)fgPid\) return null; \}\r?\n\s*catch \{ return null; \}/);
+  assert.match(read, /static PanelSig ReadFocusedPanel\(string proc, uint fgPid, out string runtimeIdKey, out bool readable, bool allowChildProcess\)/);
+  // The DEFAULT stays exact-pid. `allowChildProcess` widens it to one
+  // generation, and it is passed `true` from exactly one place — the host-app
+  // read, whose composer really does live in a child WebView2 process (measured
+  // via Win32_Process ParentProcessId on ms-teams.exe). Every IDE call site
+  // passes `false`.
+  assert.match(read, /if \(allowChildProcess\) \{ if \(!ElementPidBelongsToForeground\(el\.Current\.ProcessId, fgPid\)\) return null; \}/);
+  assert.match(read, /else if \(el\.Current\.ProcessId != \(int\)fgPid\) return null;/);
+  const code = codeOnly(src);
+  assert.equal((code.match(/ReadFocusedPanel\(proc, pid, out panelRid, out panelReadable, true\)/g) || []).length, 1,
+    'exactly one call site may widen the panel read to a child process');
   // The ownership check must come BEFORE any property is trusted, or a
   // background window's element could still set `readable`.
-  const ownIdx = read.indexOf('el.Current.ProcessId != (int)fgPid');
+  const ownIdx = read.indexOf('el.Current.ProcessId');
   const readableIdx = read.indexOf('readable = ctName.Trim().Length > 0');
   assert.ok(ownIdx >= 0 && ownIdx < readableIdx, 'the ownership check must precede the readable computation');
 });
@@ -1399,11 +1431,82 @@ test('enforcer-win.ps1: no window title or element text is ever emitted for a pa
   assert.match(src, /static string PanelField\(\)/);
   const emitField = src.slice(src.indexOf('static string PanelField()'), src.indexOf('static void Emit(string kind'));
   assert.match(emitField, /",\\"panel\\":\\"" \+ Esc\(_fgPanelId\) \+ "\\""/);
-  // Nothing anywhere in the file reads a window title in the first place.
-  assert.equal(/GetWindowText|WindowTitle|MainWindowTitle/.test(src), false, 'no window title may be read at all');
   // …and the read-only locals of ReadFocusedPanel never reach an emitter.
   const fn = src.slice(src.indexOf('static PanelSig ReadFocusedPanel('), src.indexOf('static bool PanelEnforceOk()'));
   assert.equal(/Emit\(|EmitBlock\(|Console\.Out/.test(fn), false, 'panel detection must emit nothing');
+});
+
+test('enforcer-win.ps1: the ONLY window-title read is the gated agent read, and the title never leaves it', async () => {
+  // NARROWED, deliberately. This used to assert that NO window title could be
+  // read anywhere in the file at all. Microsoft Teams broke that premise: its
+  // composer's UIA Name is the literal "Type a message" in every conversation,
+  // so the title is the only thing that can say WHICH conversation is open, and
+  // without it agent-scoped enforcement in Teams is impossible.
+  //
+  // A Teams title carries a colleague's display name, the tenant and the
+  // signed-in user's email address. So the rule is no longer "never read one" —
+  // it is "read one in exactly one gated place, compare it against the
+  // blocklist, and never let it out". That is what this asserts, and it is a
+  // stronger statement than the old blanket ban would have been if it had simply
+  // been deleted.
+  const src = await enforcerSrc();
+  const code = codeOnly(src);
+
+  // 1. EXACTLY ONE read site, and it is inside ReadFocusedAgentName.
+  const read = src.slice(src.indexOf('static AgentReadOutcome ReadFocusedAgentName('), src.indexOf('static readonly char[] CLASS_TOKEN_SEP'));
+  assert.ok(read.length > 0, 'expected a ReadFocusedAgentName body');
+  assert.equal((code.match(/GetWindowText\(/g) || []).length, 2, 'exactly one GetWindowText call site (plus its DllImport)');
+  assert.equal((code.match(/GetWindowTextLength\(/g) || []).length, 2, 'exactly one GetWindowTextLength call site (plus its DllImport)');
+  assert.ok(read.includes('GetWindowText(fgHwnd, sb, cap)'), 'the only title read must be the agent read');
+  assert.ok(read.includes('GetWindowTextLength(fgHwnd)'));
+  // Nothing reads a title through the OTHER routes either — Process.MainWindowTitle
+  // would bypass every gate here.
+  assert.equal(/MainWindowTitle|WindowTitle\b/.test(code), false, 'no other window-title route may exist');
+
+  // 2. It is behind the read-mode branch, so a composer-name surface (every
+  //    pre-Teams entry, m365_copilot included) never reaches it at all.
+  const titleIdx = read.indexOf('if (string.Equals(surface.ReadFrom, "window_title", StringComparison.OrdinalIgnoreCase))');
+  assert.ok(titleIdx >= 0 && titleIdx < read.indexOf('GetWindowTextLength(fgHwnd)'),
+    'the title read must sit inside the window_title branch');
+  // …and it reuses the foreground HWND the tick already has: no second
+  // GetForegroundWindow(), so it can never read a different window than the one
+  // every other decision on this tick was made about.
+  assert.match(read, /static AgentReadOutcome ReadFocusedAgentName\(AgentSurface surface, uint fgPid, IntPtr fgHwnd, out string agentName\)/);
+  assert.equal(/GetForegroundWindow\(\)/.test(read), false, 'the title read must reuse the tick\'s HWND');
+
+  // 3. THE PII RULE: the title never reaches an emitter. Not the raw title, not
+  //    the parsed conversation name. Every name that reaches stdout comes from
+  //    the blocked ROW (admin-typed), never from a read.
+  assert.equal(/Emit\(|EmitBlock\(|EmitBlockState\(|Console\.Out/.test(read), false,
+    'the title read must emit nothing');
+  // The parsed name leaves the reader only through `out agentName`, which flows
+  // into _fgAgentName — already pinned at exactly three code references, none of
+  // them an emitter, by its own test below.
+  for (const [name, from, to] of [
+    ['Emit', 'static void Emit(string kind', 'static string Esc(string s)'],
+    ['EmitBlock', 'static void EmitBlock(', 'static void EmitRewrite('],
+    ['EmitBlockState', 'static void EmitBlockState(', 'static void ClearFgBlocked()'],
+    ['EmitRoute', 'static void EmitRoute(', 'static readonly object _routeLock'],
+  ]) {
+    const body = src.slice(src.indexOf(from), src.indexOf(to));
+    assert.ok(body.length > 0, `expected a ${name} body`);
+    for (const forbidden of ['GetWindowText', 'title', 'Title']) {
+      assert.equal(body.includes(forbidden), false, `${name} must not carry a window title (${forbidden})`);
+    }
+  }
+  // 4. The parse itself is bounded and allocates a bounded buffer, so another
+  //    process's window title can never make this expensive.
+  assert.match(src, /const int WINDOW_TITLE_MAX = 1024;/);
+  assert.match(src, /const int TITLE_PARSE_MAX = 512;/);
+  assert.match(read, /if \(cap > WINDOW_TITLE_MAX\) cap = WINDOW_TITLE_MAX;/);
+  // 5. An empty or failed read is Unreadable — NO EVIDENCE — never the
+  //    authoritative "no agent is open". Same distinction the composer read
+  //    draws, and the one the latch keys on.
+  const titleBlock = read.slice(titleIdx, read.indexOf('AutomationElement el;'));
+  assert.equal((titleBlock.match(/return AgentReadOutcome\.Unreadable;/g) || []).length, 5,
+    'every failure path in the title read must be Unreadable');
+  assert.equal(/AgentReadOutcome\.(Generic|NotComposer|Named)/.test(titleBlock), false,
+    'the read site must not decide an outcome the pure parser owns');
 });
 
 test('enforcer.js passes the IDE process and panel payloads, built from the catalog', async () => {
@@ -1425,7 +1528,20 @@ test('IDE_PROCESSES never reaches aiProcNames or any passive watcher', async () 
   // opened while coding as an AI file upload.
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
   assert.equal(/IDE_PROCESSES/.test(src), false, 'index.js must not import the IDE catalog at all');
-  assert.match(src, /const aiProcNames = AI_PROCESSES\.map\(/);
+  // The derivation moved into ai-processes.js as watcherProcessNames(), because
+  // it now carries a RULE (exclude `hostApp: true` entries — Microsoft Teams)
+  // that must not be re-implemented, or forgotten, at a call site. index.js must
+  // not go back to mapping the raw catalog.
+  assert.match(src, /const aiProcNames = watcherProcessNames\(\);/);
+  assert.equal(/AI_PROCESSES\s*\.?\s*map\(/.test(src), false,
+    'index.js must not derive the watcher list from the raw catalog — a host app would leak in');
+  const { watcherProcessNames, AI_PROCESSES } = await import('../src/os_monitor/ai-processes.js');
+  const names = watcherProcessNames().map((n) => n.toLowerCase());
+  for (const entry of AI_PROCESSES) {
+    if (entry.hostApp !== true) continue;
+    const literal = entry.match.source.replace(/^\^/, '').replace(/\$$/, '').replace(/[\\/]i?$/, '').toLowerCase();
+    assert.equal(names.includes(literal), false, `${literal} is a host app and must never reach a passive watcher`);
+  }
   // aiProcNames is derived from AI_PROCESSES only, and nothing is concatenated.
   const build = src.slice(src.indexOf('const aiProcNames ='), src.indexOf('this.dialogWatcher ='));
   assert.equal(/IDE|PANEL|concat/.test(build), false, `aiProcNames construction grew a second source: ${build}`);
@@ -2049,9 +2165,69 @@ test('AGENT_SURFACES: an entry may only enforce once a live pass verified it', a
     assert.ok(src, `${entry.id} is not in the catalog`);
     assert.equal(entry.enforce, src.enforce === true, `${entry.id} enforce must survive the handoff`);
     assert.equal(entry.verified, src.verified === true, `${entry.id} verified must survive the handoff`);
-    assert.ok(Array.isArray(entry.composerNamePrefixes) && entry.composerNamePrefixes.length > 0);
     assert.ok(Array.isArray(entry.genericNames));
+    // The read mode and its data must survive too — the C# side branches on
+    // `read`, so losing it would silently move a title surface onto the
+    // composer-name path and make it read nothing at all.
+    assert.equal(entry.read, src.read === 'window_title' ? 'window_title' : 'composer_name', entry.id);
+    assert.equal(entry.hostApp, src.hostApp === true, `${entry.id} hostApp must survive the handoff`);
+    if (entry.read === 'window_title') {
+      assert.equal(entry.titleSeparator, src.titleSeparator);
+      assert.equal(entry.titleSuffix, src.titleSuffix);
+      assert.ok(Array.isArray(entry.titleKinds) && entry.titleKinds.length > 0, entry.id);
+    } else {
+      assert.ok(Array.isArray(entry.composerNamePrefixes) && entry.composerNamePrefixes.length > 0);
+    }
   }
+  // teams_desktop ships INERT — Stage 1-2 ship the mechanism, not the
+  // enforcement. It is a HOST APP, so unlike an unverified chat-app surface it
+  // does not even fall back to a whole-app block: it does nothing at all.
+  const teams = AGENT_SURFACES.find((s2) => s2.id === 'teams_desktop');
+  assert.ok(teams, 'the teams_desktop surface is missing');
+  assert.equal(teams.enforce, false, 'teams_desktop has not had its live pass — it must not enforce');
+  assert.equal(teams.verified, false);
+  assert.equal(teams.hostApp, true);
+});
+
+test('a HOST-APP surface can never fall back to a whole-app block', async () => {
+  // THE inversion this feature turns on, stated as a source invariant. For an
+  // AI-only app, "cannot tell which agent is open → block the whole app" is a
+  // safe fail-CLOSED default; the user loses an AI tool. For Microsoft Teams the
+  // same default means the user cannot message a colleague, post in a channel or
+  // reply in a meeting — because ONE agent inside the app is blocked. The
+  // correct direction there is fail-OPEN: no block at all.
+  //
+  // Driven behaviourally in tests/enforcer-panel-block.test.mjs; these are the
+  // source invariants, same convention as every other .ps1 check in this file.
+  const src = await enforcerSrc();
+  const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static void ClearFgBlocked()'));
+  assert.ok(check.length > 0, 'expected a CheckFgBlocked body');
+  // Computed once per call, from the PROCESS — deliberately not from the surface
+  // being verified, because an UNVERIFIED host-app surface must produce no block
+  // either. That is the opposite of what an unverified chat-app surface does.
+  assert.match(check, /bool hostApp = _hostAppProcs\.Contains\(_app\);/);
+  // All THREE coarse arms are guarded. Each one is a route to a whole-app block.
+  assert.match(check, /if \(!narrowed && !hostApp\) \{/);
+  assert.match(check, /if \(!hostApp && string\.Equals\(agent\["process_name"\], _app, StringComparison\.OrdinalIgnoreCase\)\)/);
+  assert.match(check, /if \(!hostApp && string\.Equals\(agent\["panel"\], _fgPanelId, StringComparison\.OrdinalIgnoreCase\)\)/);
+  // …and the guard really does cover every arm site: each `_fgIsBlocked = true;`
+  // other than the agent-scoped narrowing sits behind a `!hostApp` term.
+  const armSegments = check.split('_fgIsBlocked = true;').slice(0, -1);
+  assert.equal(armSegments.length, 4, 'expected four arm sites');
+  for (const [i, seg] of armSegments.entries()) {
+    if (i === 0) continue;   // the agent-scoped narrowing — element-scoped by construction
+    assert.match(seg.slice(-800), /!hostApp/, `arm site ${i} has no host-app guard`);
+  }
+  // The set itself is derived from the catalog, in one place, and empty by
+  // default — so a malformed payload means "no process is a host app", i.e.
+  // exactly the behaviour this file had before host apps existed.
+  assert.match(src, /static HashSet<string> _hostAppProcs = new HashSet<string>\(StringComparer\.OrdinalIgnoreCase\);/);
+  const code = codeOnly(src);
+  assert.equal((code.match(/_hostAppProcs = hostApps;/g) || []).length, 1, 'exactly one place may write the host-app set');
+  assert.equal((code.match(/^\s*_hostAppProcs = /gm) || []).length, 1, 'no second assignment site may exist');
+  const load = src.slice(src.indexOf('static void LoadAgentSurfaces(string json)'), src.indexOf('static AgentSurface MatchAgentSurface(string proc)'));
+  assert.match(load, /if \(hostApp\) \{ foreach \(string p in procs\) hostApps\.Add\(p\); \}/);
+  assert.match(load, /_hostAppProcs = hostApps;\s*\r?\n\s*_agentSurfaces = surfaces;\s*\r?\n\s*\}/);
 });
 
 test('the agent catalog is separate from AI_PANELS and adds no process to any watcher', async () => {
@@ -2164,15 +2340,24 @@ test('enforcer-win.ps1: the WebView2 pid rule accepts a DIRECT child and nothing
   const code = codeOnly(src);
   assert.equal((code.match(/CreateToolhelp32Snapshot\(TH32CS_SNAPPROCESS/g) || []).length, 1,
     'exactly one snapshot site');
-  assert.equal((code.match(/ElementPidBelongsToForeground\(/g) || []).length, 2,
-    'the rule is declared once and called once — from the agent read only');
-  // The PANEL read keeps its own exact-pid check: VS Code/Cursor were verified
-  // live with it, and widening that path is a separate decision with its own
-  // false-positive surface (a code editor).
+  assert.equal((code.match(/ElementPidBelongsToForeground\(/g) || []).length, 3,
+    'the rule is declared once and called twice — the agent read and the host-app panel read');
+  // The PANEL read's DEFAULT stays exact-pid: VS Code and Cursor were verified
+  // live with it, and widening a code editor's read is a separate decision with
+  // its own false-positive surface. The one-generation rule is reachable there
+  // only via `allowChildProcess`, which only the HOST-APP call site passes —
+  // ms-teams.exe hosts its composer in a child msedgewebview2.exe, confirmed
+  // live via Win32_Process ParentProcessId, exactly as M365Copilot does.
   const panelRead = src.slice(src.indexOf('static PanelSig ReadFocusedPanel('), src.indexOf('static bool PanelEnforceOk()'));
   assert.ok(panelRead.length > 0, 'expected a ReadFocusedPanel body');
-  assert.equal(/ElementPidBelongsToForeground|GetParentProcessId/.test(panelRead), false,
-    'the panel read must keep its exact-pid check until its own live pass');
+  assert.match(panelRead, /if \(allowChildProcess\) \{ if \(!ElementPidBelongsToForeground\(el\.Current\.ProcessId, fgPid\)\) return null; \}/);
+  assert.match(panelRead, /else if \(el\.Current\.ProcessId != \(int\)fgPid\) return null;/);
+  assert.equal(/GetParentProcessId/.test(panelRead), false,
+    'the panel read must go through the shared rule, never its own parent lookup');
+  // Every IDE call site still passes false.
+  const fg = src.slice(src.indexOf('static void UpdateForeground()'), src.indexOf('static void ApplyForegroundTick('));
+  assert.match(fg, /if \(isIde\) hit = ReadFocusedPanel\(proc, pid, out panelRid, out panelReadable, false\);/);
+  assert.match(fg, /else if \(hostAppArmed\) hit = ReadFocusedPanel\(proc, pid, out panelRid, out panelReadable, true\);/);
 });
 
 test('enforcer-win.ps1: the agent name read out of another app is never emitted or logged', async () => {
@@ -2210,8 +2395,18 @@ test('enforcer-win.ps1: the extra accessibility read happens ONLY when an agent-
   const src = await enforcerSrc();
   const fg = src.slice(src.indexOf('static void UpdateForeground()'), src.indexOf('// Everything UpdateForeground does once the focused-element read is in.'));
   assert.ok(fg.length > 0, 'expected an UpdateForeground body');
-  assert.match(fg, /if \(!isIde && proc != null && _aiProcs != null && _aiProcs\.Contains\(proc\)\r?\n\s*&& _agentScopedProcs\.Contains\(proc\)\)/);
-  assert.match(fg, /if \(surface != null\) agentOutcome = ReadFocusedAgentName\(surface, pid, out agentName\);/);
+  assert.match(fg, /if \(\(!isIde && proc != null && _aiProcs != null && _aiProcs\.Contains\(proc\)\r?\n\s*&& _agentScopedProcs\.Contains\(proc\)\) \|\| hostAppArmed\)/);
+  assert.match(fg, /if \(surface != null\) agentOutcome = ReadFocusedAgentName\(surface, pid, fg, out agentName\);/);
+  // A HOST APP reaches the read through hostAppArmed instead of _aiProcs — it is
+  // deliberately absent from that set — and hostAppArmed is the STRICTER of the
+  // two gates: it additionally requires the surface to have passed its live
+  // pass. That is what makes an unverified host-app surface completely inert
+  // (no title read, no accessibility read, no state at all) rather than merely
+  // non-blocking, which is what an unverified CHAT-app surface is.
+  assert.match(fg, /bool hostAppArmed = !isIde && proc != null && _hostAppProcs\.Contains\(proc\)\r?\n\s*&& _agentScopedProcs\.Contains\(proc\) && EnforcingAgentSurface\(proc\) != null;/);
+  const armedIdx = fg.indexOf('bool hostAppArmed =');
+  assert.ok(armedIdx >= 0 && armedIdx < fg.indexOf('ReadFocusedPanel('),
+    'the host-app gate must be decided before any read happens');
   // The gate's data is rebuilt with the blocklist, and only there.
   const rebuild = src.slice(src.indexOf('static void RebuildAgentScopedProcs()'), src.indexOf('// Arm the platform-block latch'));
   assert.ok(rebuild.length > 0, 'expected a RebuildAgentScopedProcs body');

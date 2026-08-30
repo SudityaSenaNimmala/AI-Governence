@@ -176,6 +176,25 @@ public static class CfaiEnforcer
     [StructLayout(LayoutKind.Sequential)]
     struct RECT { public int Left, Top, Right, Bottom; }
 
+    // The foreground window's TITLE, for a `read:"window_title"` agent surface
+    // (Microsoft Teams — its composer's UIA Name is the same literal "Type a
+    // message" in every conversation, so the title is the only signal that says
+    // WHICH conversation is open). Same signature pair win-poller.ps1 already
+    // uses; a bigger buffer, because a Teams title is "<kind> | <name> | <org> |
+    // <email> | Microsoft Teams" and a long group-chat name plus a long tenant
+    // and address can run past that file's 512 before reaching the suffix this
+    // parse requires.
+    //
+    // NOTHING read through here is ever emitted, logged or persisted. The string
+    // is parsed by ExtractAgentName, compared against the blocklist, and dropped
+    // — the same rule the composer-Name read already follows, asserted in
+    // agent/tests/os-monitor-safety.test.mjs.
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    static extern int GetWindowTextLength(IntPtr hWnd);
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+    const int WINDOW_TITLE_MAX = 1024;
+
     // For ReadFocusedAgentName's parent-process check: a WebView2-hosted app
     // (M365Copilot.exe, confirmed live) puts its actual UI content — and
     // therefore the focused UIA element — in a CHILD msedgewebview2.exe
@@ -579,9 +598,16 @@ public static class CfaiEnforcer
     static string _attachHoldPatterns = "";
     static long _attachHoldExpiresAt = 0;
     // Platform → process name mapping for desktop enforcement.
+    // MIRRORS ai-processes.js's PLATFORM_PROCS byte for byte; the two are held
+    // in lockstep by agent/tests/ai-processes.test.mjs, which parses this block.
+    // "ms-teams" is a HOST APP (see _hostAppProcs): its membership here is what
+    // lets an agent-scoped row cover the Teams process at all, and it can never
+    // produce a whole-app block — CheckFgBlocked excludes a host app from all
+    // three coarse arms.
     static readonly Dictionary<string, HashSet<string>> PLATFORM_PROCS = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase) {
-        { "copilot_studio",    new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Copilot", "M365Copilot" } },
-        { "personal_agent",    new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Copilot", "M365Copilot" } },
+        { "copilot_studio",    new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Copilot", "M365Copilot", "ms-teams" } },
+        { "personal_agent",    new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Copilot", "M365Copilot", "ms-teams" } },
+        { "teams_chat_agent",  new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ms-teams" } },
         { "openai_assistant",  new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ChatGPT" } },
         { "custom_gpt",        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ChatGPT" } },
         { "claude_ai_project", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Claude" } },
@@ -723,10 +749,40 @@ public static class CfaiEnforcer
         public string ControlType;
         public List<string> NamePrefixes;
         public HashSet<string> GenericNames;
+        // WHICH signal names the open agent. "" / "composer_name" is the
+        // original behaviour (strip a known prefix off the focused composer's
+        // UIA Name) and is what m365_copilot and every pre-Teams entry get.
+        // "window_title" parses the foreground window's title instead — see
+        // ExtractAgentNameFromTitle and the teams_desktop entry in
+        // ai-processes.js for why Teams cannot use the composer name.
+        public string ReadFrom;
+        public string TitleSeparator;
+        public string TitleSuffix;
+        public HashSet<string> TitleKinds;
+        // A HOST APP: a general-purpose application (Microsoft Teams) that is
+        // AI-relevant only inside one specific, separately-gated conversation.
+        // It NEVER falls back to a whole-app block — see CheckFgBlocked. For an
+        // AI-only app "cannot tell which agent is open" safely means "block the
+        // app"; for a company's communications client it must mean "block
+        // nothing".
+        public bool HostApp;
         public bool Enforce;
         public bool Verified;
     }
     static List<AgentSurface> _agentSurfaces = new List<AgentSurface>();
+
+    // The process names covered by a HostApp surface. Mirrors _agentScopedProcs'
+    // shape and rebuild discipline: recomputed only where the surfaces are
+    // loaded, so every consumer is a HashSet lookup on the poll path.
+    //
+    // Read in five places, all of them EXCLUSIONS that keep a general-purpose
+    // app from being treated as a chat app: CheckFgBlocked (no whole-app block),
+    // PanelEnforceOk / PanelUiaOk (element-scoped, like an IDE), UpdateSendRect
+    // (no send-button hunt), UpdatePendingRewrite and UpdateModelRouting (no
+    // Tokenize & Send offer, no model routing). ApplyForegroundTick's own
+    // host-app branch is the single place it can be treated as an AI surface at
+    // all, and only for the exact tick a blocked agent is provably open.
+    static HashSet<string> _hostAppProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
     // What one ReadFocusedAgentName() call established. Getting this taxonomy
     // right IS the reliability of the feature:
@@ -975,12 +1031,18 @@ public static class CfaiEnforcer
         var serializer = new JavaScriptSerializer();
         var raw = (object[])serializer.DeserializeObject(json);
         var surfaces = new List<AgentSurface>();
+        var hostApps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var item in raw)
         {
             var d = (Dictionary<string, object>)item;
             string id = JsStr(d, "id");
             string ct = JsStr(d, "controlType");
-            if (id.Length == 0 || ct.Length == 0) continue;
+            // Only the id is required of EVERY entry now. The control type is
+            // required of a composer-name surface (it identifies the composer
+            // element) and meaningless to a window-title one, so it moved down
+            // into that mode's own validation rather than staying a blanket
+            // guard here.
+            if (id.Length == 0) continue;
             var procs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             object rawProcs;
             if (d.TryGetValue("procs", out rawProcs) && rawProcs != null)
@@ -992,6 +1054,11 @@ public static class CfaiEnforcer
                 }
             }
             if (procs.Count == 0) continue;   // a surface with no host process can never match
+            // Absent / anything unrecognised means the ORIGINAL composer-name
+            // mode, so m365_copilot's payload is completely unaffected by this
+            // field existing. Only the one literal opts into the title parse.
+            string readFrom = JsStr(d, "read");
+            bool titleMode = string.Equals(readFrom, "window_title", StringComparison.OrdinalIgnoreCase);
             var prefixes = new List<string>();
             object rawPrefixes;
             if (d.TryGetValue("composerNamePrefixes", out rawPrefixes) && rawPrefixes != null)
@@ -1002,7 +1069,31 @@ public static class CfaiEnforcer
                     if (!string.IsNullOrEmpty(pre)) prefixes.Add(pre);
                 }
             }
-            if (prefixes.Count == 0) continue;   // nothing to strip → nothing readable
+            string titleSep = JsStr(d, "titleSeparator");
+            string titleSuffix = NormalizeAgentName(JsStr(d, "titleSuffix"));
+            var titleKinds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            object rawKinds;
+            if (d.TryGetValue("titleKinds", out rawKinds) && rawKinds != null)
+            {
+                foreach (var x in (IEnumerable)rawKinds)
+                {
+                    string k = NormalizeAgentName(Convert.ToString(x));
+                    if (k.Length > 0) titleKinds.Add(k);
+                }
+            }
+            // Each mode validates on the fields IT can read a name with. A
+            // half-configured entry is dropped rather than kept, in both modes:
+            // a surface that can never read a name would silently narrow
+            // nothing (composer mode) or gate nothing (title mode).
+            if (titleMode)
+            {
+                if (titleSep.Length == 0 || titleSuffix.Length == 0 || titleKinds.Count == 0) continue;
+            }
+            else
+            {
+                if (ct.Length == 0) continue;         // no control type → cannot identify the composer
+                if (prefixes.Count == 0) continue;    // nothing to strip → nothing readable
+            }
             var generics = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             object rawGenerics;
             if (d.TryGetValue("genericNames", out rawGenerics) && rawGenerics != null)
@@ -1013,6 +1104,8 @@ public static class CfaiEnforcer
                     if (g.Length > 0) generics.Add(g);
                 }
             }
+            bool hostApp = JsBool(d, "hostApp");
+            if (hostApp) { foreach (string p in procs) hostApps.Add(p); }
             surfaces.Add(new AgentSurface
             {
                 Id = id,
@@ -1020,10 +1113,20 @@ public static class CfaiEnforcer
                 ControlType = ct,
                 NamePrefixes = prefixes,
                 GenericNames = generics,
+                ReadFrom = titleMode ? "window_title" : "composer_name",
+                TitleSeparator = titleSep,
+                TitleSuffix = titleSuffix,
+                TitleKinds = titleKinds,
+                HostApp = hostApp,
                 Enforce = JsBool(d, "enforce"),
                 Verified = JsBool(d, "verified"),
             });
         }
+        // The HostApp process set travels with the surfaces it is derived from,
+        // and is assigned in the same "only at the very end" style: a throw
+        // anywhere above leaves BOTH untouched, so a malformed payload can
+        // never half-arm a host app.
+        _hostAppProcs = hostApps;
         _agentSurfaces = surfaces;
     }
 
@@ -1091,6 +1194,15 @@ public static class CfaiEnforcer
     {
         agentName = "";
         if (surface == null) return AgentReadOutcome.NotComposer;
+        // DISPATCH on how this surface names its agent, mirroring the JS side.
+        // A window-title surface gets the TITLE in `name` (the read site puts it
+        // there) and ignores controlType, which describes an element it does not
+        // read. Every other surface — m365_copilot included — falls through to
+        // the composer-Name path below, byte-for-byte unchanged.
+        if (string.Equals(surface.ReadFrom, "window_title", StringComparison.OrdinalIgnoreCase))
+        {
+            return ExtractAgentNameFromTitle(surface, name, out agentName);
+        }
         string ct = (controlType ?? "").Trim();
         if (ct.Length == 0) return AgentReadOutcome.NotComposer;
         if (!string.Equals(ct, surface.ControlType, StringComparison.OrdinalIgnoreCase)) return AgentReadOutcome.NotComposer;
@@ -1115,6 +1227,138 @@ public static class CfaiEnforcer
         return AgentReadOutcome.NotComposer;
     }
 
+    // ── Window-title agent reads (host apps) ────────────────────────────────
+    // Bound on the title we will parse. Well past the longest measured Teams
+    // title; a window title is set by another process and must never be able to
+    // make this loop expensive.
+    const int TITLE_PARSE_MAX = 512;
+    const int PARTICIPANT_MAX_SEGMENT = 40;
+    const int PARTICIPANT_MAX_WORD = 20;
+    const int PARTICIPANT_MAX_WORDS = 3;
+    static readonly string PARTICIPANT_SEP = ", ";
+
+    // One character of a plausible person display-name fragment. char.IsLetter
+    // (the Unicode letter CATEGORY, so accented and non-Latin names count), plus
+    // space/tab, apostrophe (both the ASCII and the typographic one), hyphen and
+    // period. ANY digit disqualifies outright.
+    static bool IsNameChar(char c)
+    {
+        if (c >= '0' && c <= '9') return false;
+        if (c == ' ' || c == '\t') return true;
+        // ’ (the typographic apostrophe) written as an escape, not as a
+        // literal: this C# lives inside a PowerShell here-string, and a
+        // non-ASCII character literal would depend on how the .ps1 file is
+        // decoded at load time.
+        if (c == '\'' || c == '\u2019') return true;
+        if (c == '-' || c == '.') return true;
+        return char.IsLetter(c);
+    }
+
+    // C# port of looksLikeParticipantList() in ai-processes.js — Microsoft
+    // Teams' OWN default name for a multi-person group chat, the participants'
+    // display names comma+space joined ("alex, max").
+    //
+    // A group chat and an agent conversation give IDENTICALLY-shaped titles, so
+    // the kind segment alone cannot separate them; this recognises the
+    // no-deliberate-intent case. It does NOT stop a deliberate rename of a chat
+    // to a string that exactly equals a blocked agent's name — that residual
+    // risk is accepted, not solved. Defence in depth, and its failure direction
+    // is the safe one: a false positive here only ever means "do not block".
+    //
+    // No Regex, same rule as every other comparison in this path, and a plain
+    // character loop like NormalizeAgentName's.
+    static bool LooksLikeParticipantList(string name)
+    {
+        string value = name ?? "";
+        // No comma+space anywhere → not Teams' joined form at all.
+        if (value.IndexOf(PARTICIPANT_SEP, StringComparison.Ordinal) < 0) return false;
+        string[] segments = value.Split(new string[] { PARTICIPANT_SEP }, StringSplitOptions.None);
+        int nonEmpty = 0;
+        foreach (string s in segments) { if (s.Trim().Length > 0) nonEmpty++; }
+        if (nonEmpty < 2) return false;   // one segment is a name, not a list
+        foreach (string segment in segments)
+        {
+            if (segment.Length > PARTICIPANT_MAX_SEGMENT) return false;
+            int words = 0, wordLen = 0;
+            // i == segment.Length feeds a virtual trailing space, so the last
+            // word is counted without duplicating the tally after the loop.
+            for (int i = 0; i <= segment.Length; i++)
+            {
+                char c = (i < segment.Length) ? segment[i] : ' ';
+                if (i < segment.Length && !IsNameChar(c)) return false;
+                if (c == ' ' || c == '\t')
+                {
+                    if (wordLen > 0) { words++; if (wordLen > PARTICIPANT_MAX_WORD) return false; }
+                    wordLen = 0;
+                }
+                else wordLen++;
+            }
+            if (words < 1 || words > PARTICIPANT_MAX_WORDS) return false;
+        }
+        return true;
+    }
+
+    // C# port of extractAgentNameFromTitle() in ai-processes.js. PURE: given the
+    // surface and the foreground window's TITLE, decide NotComposer / Generic /
+    // Named(X). "Unreadable" is not decided here — only the read site knows it.
+    //
+    // Keep in lockstep with the JS side, which is the single source of truth and
+    // is unit-tested against the measured live titles in
+    // agent/tests/ai-processes.test.mjs.
+    //
+    // The title is parsed, compared against the blocklist and dropped. It is
+    // never emitted, logged or persisted — the same rule the composer-Name read
+    // follows, and the stricter one here, because a Teams title carries a
+    // colleague's name and the signed-in user's email address.
+    static AgentReadOutcome ExtractAgentNameFromTitle(AgentSurface surface, string title, out string agentName)
+    {
+        agentName = "";
+        if (surface == null) return AgentReadOutcome.NotComposer;
+        string raw = title ?? "";
+        if (raw.Length == 0) return AgentReadOutcome.NotComposer;
+        if (raw.Length > TITLE_PARSE_MAX) raw = raw.Substring(0, TITLE_PARSE_MAX);
+        // Strip a leading unread-count decoration, e.g. "(3) Chat | ...".
+        // HYPOTHESISED, not live-measured — done defensively because it costs
+        // nothing if it never fires and a missed strip would disable the read.
+        if (raw[0] == '(')
+        {
+            int i = 1;
+            while (i < raw.Length && raw[i] >= '0' && raw[i] <= '9') i++;
+            if (i > 1 && i < raw.Length && raw[i] == ')')
+            {
+                i++;
+                while (i < raw.Length && (raw[i] == ' ' || raw[i] == '\t')) i++;
+                raw = raw.Substring(i);
+            }
+        }
+        string normalized = NormalizeAgentName(raw);
+        if (normalized.Length == 0) return AgentReadOutcome.NotComposer;
+        string sep = surface.TitleSeparator ?? "";
+        string suffix = NormalizeAgentName(surface.TitleSuffix);
+        if (sep.Length == 0 || suffix.Length == 0) return AgentReadOutcome.NotComposer;
+        string[] parts = normalized.Split(new string[] { sep }, StringSplitOptions.None);
+        // The LAST segment must be the app's own suffix, exactly. This is what
+        // stops any other window in any other app being parsed as a Teams title.
+        if (!string.Equals(NormalizeAgentName(parts[parts.Length - 1]), suffix, StringComparison.OrdinalIgnoreCase))
+            return AgentReadOutcome.NotComposer;
+        // …and the FIRST segment must be a kind that introduces a NAMEABLE
+        // conversation. A plain 1:1 DM has no kind segment at all, so it lands
+        // here as no evidence rather than as an agent named after a colleague;
+        // so do a channel view, the Activity tab and the generic Copilot panel.
+        if (parts.Length < 3) return AgentReadOutcome.NotComposer;
+        string kind = NormalizeAgentName(parts[0]);
+        if (surface.TitleKinds == null || !surface.TitleKinds.Contains(kind)) return AgentReadOutcome.NotComposer;
+        // The conversation name is the SECOND segment. Everything between it and
+        // the suffix (org, tenant, the signed-in email) identifies the USER, not
+        // the conversation, and is ignored and never retained.
+        string name = NormalizeAgentName(parts[1]);
+        if (name.Length == 0) return AgentReadOutcome.NotComposer;
+        if (LooksLikeParticipantList(name)) return AgentReadOutcome.Generic;
+        if (surface.GenericNames != null && surface.GenericNames.Contains(name)) return AgentReadOutcome.Generic;
+        agentName = name;
+        return AgentReadOutcome.Named;
+    }
+
     // C# port of agentNameMatches() in ai-processes.js. WHOLE-STRING equality after
     // normalisation, deliberately NOT the substring test the browser extension
     // uses: its signal (a name found somewhere in a page header) is much messier
@@ -1137,10 +1381,44 @@ public static class CfaiEnforcer
     // evidence about the foreground surface unless the element belongs to it.
     //
     // NOTHING read here is ever emitted, logged or persisted.
-    static AgentReadOutcome ReadFocusedAgentName(AgentSurface surface, uint fgPid, out string agentName)
+    //
+    // `fgHwnd` is the SAME handle UpdateForeground already fetched for this tick
+    // — no second GetForegroundWindow() call — and is used only by the
+    // window-title mode below.
+    static AgentReadOutcome ReadFocusedAgentName(AgentSurface surface, uint fgPid, IntPtr fgHwnd, out string agentName)
     {
         agentName = "";
         if (surface == null) return AgentReadOutcome.Unreadable;
+        // WINDOW-TITLE MODE (Microsoft Teams). No accessibility read at all:
+        // Teams' composer Name is the same literal "Type a message" in every
+        // conversation, so the title is the only thing that says which
+        // conversation is open. It sits behind the identical privacy gate as the
+        // composer read — the caller only reaches here when the current
+        // blocklist holds an agent-scoped row covering this process AND the
+        // surface has passed its live pass — and an empty/failed read is
+        // Unreadable (no evidence), never "no agent open".
+        if (string.Equals(surface.ReadFrom, "window_title", StringComparison.OrdinalIgnoreCase))
+        {
+            if (fgHwnd == IntPtr.Zero) return AgentReadOutcome.Unreadable;
+            string title = "";
+            try
+            {
+                int len = GetWindowTextLength(fgHwnd);
+                if (len <= 0) return AgentReadOutcome.Unreadable;
+                // +1 for the terminator, then capped: a Teams title runs long
+                // (kind, name, org, signed-in address, suffix) but never near
+                // this, and an unbounded allocation off another process's window
+                // is not something this loop should be able to be handed.
+                int cap = len + 1;
+                if (cap > WINDOW_TITLE_MAX) cap = WINDOW_TITLE_MAX;
+                var sb = new StringBuilder(cap);
+                if (GetWindowText(fgHwnd, sb, cap) <= 0) return AgentReadOutcome.Unreadable;
+                title = sb.ToString();
+            }
+            catch { return AgentReadOutcome.Unreadable; }
+            if (title.Trim().Length == 0) return AgentReadOutcome.Unreadable;
+            return ExtractAgentName(surface, "", title, out agentName);
+        }
         AutomationElement el;
         try { el = AutomationElement.FocusedElement; } catch { return AgentReadOutcome.Unreadable; }
         if (el == null) return AgentReadOutcome.Unreadable;
@@ -1267,7 +1545,17 @@ public static class CfaiEnforcer
     // "the user left the panel" is a read failure dressed up as a fact. That
     // distinction is what the platform-block latch keys on: see
     // PanelBlockLatchHeld and the IDE branch of UpdateForeground.
-    static PanelSig ReadFocusedPanel(string proc, uint fgPid, out string runtimeIdKey, out bool readable)
+    //
+    // `allowChildProcess` widens the pid rule from "this exact process" to
+    // "this process or a DIRECT CHILD of it", via the same
+    // ElementPidBelongsToForeground the agent read already uses. FALSE for every
+    // IDE — VS Code and Cursor were verified live with the exact-match rule and
+    // widening a code editor's read is a separate decision with its own
+    // false-positive surface. TRUE only for a HOST APP: new Teams (ms-teams.exe)
+    // hosts its real UI in a child msedgewebview2.exe, confirmed live via
+    // Win32_Process ParentProcessId, exactly as M365Copilot does — so with the
+    // exact rule its composer could never be matched at all.
+    static PanelSig ReadFocusedPanel(string proc, uint fgPid, out string runtimeIdKey, out bool readable, bool allowChildProcess)
     {
         runtimeIdKey = "";
         readable = false;
@@ -1295,7 +1583,11 @@ public static class CfaiEnforcer
         // So an element we cannot attribute to the foreground process is treated
         // as a read FAILURE (readable stays false, no panel), which is the
         // "no evidence" state the latch already survives.
-        try { if (el.Current.ProcessId != (int)fgPid) return null; }
+        try
+        {
+            if (allowChildProcess) { if (!ElementPidBelongsToForeground(el.Current.ProcessId, fgPid)) return null; }
+            else if (el.Current.ProcessId != (int)fgPid) return null;
+        }
         catch { return null; }
 
         string ctName = "", name = "", cls = "";
@@ -1336,8 +1628,17 @@ public static class CfaiEnforcer
     // both capture (FgIsAiNow) and blocking (CheckFgBlocked's panel branch,
     // PanelUiaOk) on this is what makes "detection-only" mean genuinely zero
     // live effect rather than "no effect in one of the two places".
+    //
+    // A HOST APP (Microsoft Teams) is stated POSITIVELY rather than inheriting
+    // the "not a panel → fine" default: a host app is only ever an AI surface
+    // while the one governed conversation's composer is focused, so if that is
+    // not what this tick is looking at, nothing about it may enforce or capture.
+    // ApplyForegroundTick already refuses to set _fgIsAi otherwise, so this is
+    // belt-and-braces — but it is the kind of default a future change must have
+    // to opt out of deliberately, not fall out of by accident.
     static bool PanelEnforceOk()
     {
+        if (_hostAppProcs.Contains(_app)) return _fgIsPanel && _fgPanelEnforce;
         if (!_fgIsPanel) return true;   // pure chat app, or an IDE whole-app fallback
         return _fgPanelEnforce;
     }
@@ -1353,9 +1654,17 @@ public static class CfaiEnforcer
     // in the code editor, and a UIA read then reflects source code or terminal
     // output (routinely full of real keys and tokens), which is precisely the
     // false-positive the old blanket IDE-name exclusion existed to avoid.
+    //
+    // A HOST APP (Microsoft Teams) gets the IDE treatment for exactly the same
+    // reason: the foreground process being Teams says nothing about whether the
+    // focused element is the one governed conversation's composer. Between them
+    // sit every DM, every channel and every meeting chat, whose content this
+    // must never read. Only while the governed composer is focused RIGHT NOW —
+    // which, for a host app, ApplyForegroundTick only ever sets when a blocked
+    // agent is provably open — may a UIA-derived signal be trusted.
     static bool PanelUiaOk()
     {
-        if (!_ideProcs.Contains(_app)) return true;
+        if (!_ideProcs.Contains(_app) && !_hostAppProcs.Contains(_app)) return true;
         return _fgIsPanel && _fgPanelEnforce && _fgLeftAiTicks == 0;
     }
 
@@ -1851,7 +2160,13 @@ public static class CfaiEnforcer
         // against. _ideProcs replaces the old hardcoded name set here with no
         // behavior change for Cursor/Code; standalone Microsoft Copilot, which
         // that set wrongly contained, now gets routing like the chat app it is.
-        if (!_fgIsAi || _ideProcs.Contains(_app) || Disarmed()) { ClearPendingRoute(); return; }
+        //
+        // HOST APPS are excluded on the same terms and for a stronger reason:
+        // there is no model picker in Microsoft Teams to detect or drive, and
+        // the picker search (FindModelPickerButton) is a descendant-wide UIA
+        // walk of the foreground window that has no business running over a
+        // chat client's tree on the poll thread.
+        if (!_fgIsAi || _ideProcs.Contains(_app) || _hostAppProcs.Contains(_app) || Disarmed()) { ClearPendingRoute(); return; }
         // Block always wins, and a live Tokenize & Send offer must never be
         // disturbed — same precedence RunRewrite's callers already respect.
         if (_fgIsBlocked || _blockUia || _blockTyped) { ClearPendingRoute(); return; }
@@ -3042,6 +3357,37 @@ public static class CfaiEnforcer
         _agentScopedProcs = procs;
     }
 
+    // Does the CURRENT blocklist hold an agent-scoped row that names THIS agent
+    // inside THIS process? Read-only: it decides nothing and writes nothing.
+    //
+    // Used by ApplyForegroundTick's host-app branch to answer "is there a policy
+    // reason to treat this general-purpose app as an AI surface on this tick",
+    // BEFORE any capture is enabled. CheckFgBlocked runs the same test again a
+    // moment later to actually arm the block — deliberately not shared state:
+    // this one gates whether the app counts as a surface at all, that one gates
+    // the block, and collapsing them would let a capture decision ride on a
+    // block decision's side effects.
+    //
+    // Matching is exactly the existing pair: PLATFORM_PROCS for "does this row's
+    // platform cover this process" and AgentNameMatches for the name. No new
+    // comparison semantics.
+    static bool BlockedListHasMatchingAgentRow(string proc, string agentName)
+    {
+        if (_blockedList == null || _blockedList.Count == 0) return false;
+        if (string.IsNullOrEmpty(proc) || string.IsNullOrEmpty(agentName)) return false;
+        string name = StripExe(proc).Trim();
+        if (name.Length == 0) return false;
+        foreach (var agent in _blockedList)
+        {
+            if (!string.Equals(agent["agent_scope"], "agent", StringComparison.OrdinalIgnoreCase)) continue;
+            HashSet<string> procs;
+            if (!PLATFORM_PROCS.TryGetValue(agent["platform"], out procs)) continue;
+            if (procs == null || !procs.Contains(name)) continue;
+            if (AgentNameMatches(agentName, agent["agent_name"])) return true;
+        }
+        return false;
+    }
+
     // Arm the platform-block latch — called only from the two ELEMENT-scoped
     // branches of CheckFgBlocked, and only on a tick whose focused-element read
     // really succeeded, so the TTL below is measured from "the last time an
@@ -3137,6 +3483,23 @@ public static class CfaiEnforcer
             ClearFgBlocked();
             return;
         }
+        // A HOST APP NEVER PRODUCES AN APP-SCOPED BLOCK. Not from a platform
+        // row, not from a host-keyed process_name row, not from a panel row.
+        //
+        // Every coarse arm below exists as a FAIL-CLOSED fallback: "we cannot
+        // tell which agent is open, so block the whole app". That is safe when
+        // the app is an AI product — the user loses an AI tool. It is not safe
+        // when the app is Microsoft Teams, where it means the user cannot send a
+        // message to a colleague, post in a channel or reply in a meeting,
+        // because one agent inside the app is blocked. For a host app the
+        // correct direction is fail-OPEN: no block at all.
+        //
+        // This is deliberately keyed on the PROCESS being a host app, not on the
+        // surface being verified: an UNVERIFIED host-app surface must produce no
+        // block either, which is the opposite of what an unverified chat-app
+        // surface does. tests/enforcer-panel-block.test.mjs asserts exactly that
+        // — it is the single most important behavioural test of this feature.
+        bool hostApp = _hostAppProcs.Contains(_app);
         foreach (var agent in _blockedList) {
             HashSet<string> procs;
             if (PLATFORM_PROCS.TryGetValue(agent["platform"], out procs)) {
@@ -3188,7 +3551,7 @@ public static class CfaiEnforcer
                     // the next row), because another row may still cover this
                     // foreground some other way. Same reasoning as the
                     // detection-only panel fall-through below.
-                    if (!narrowed) {
+                    if (!narrowed && !hostApp) {
                         _fgIsBlocked = true;
                         _blockedByElement = false;   // process-keyed — see _blockedByElement
                         _blockScope = "app";
@@ -3206,7 +3569,12 @@ public static class CfaiEnforcer
             // lookup above so first-match-wins ordering across the file is
             // unchanged — a per-agent row earlier in the array still wins.
             if (!string.IsNullOrEmpty(agent["process_name"])) {
-                if (string.Equals(agent["process_name"], _app, StringComparison.OrdinalIgnoreCase)) {
+                // …and never for a host app. ai-processes.js's processesForHost
+                // already refuses to synthesize such a row, so this should be
+                // unreachable; it is stated anyway because "unreachable" here
+                // depends on a rule in a different file, and the failure mode is
+                // swallowing Enter across a company's whole chat client.
+                if (!hostApp && string.Equals(agent["process_name"], _app, StringComparison.OrdinalIgnoreCase)) {
                     _fgIsBlocked = true;
                     _blockedByElement = false;   // process-keyed — see _blockedByElement
                     _blockScope = "app";
@@ -3226,7 +3594,13 @@ public static class CfaiEnforcer
             // branches above so first-match-wins ordering across the file is
             // unchanged.
             if (_fgIsPanel && !string.IsNullOrEmpty(agent["panel"])) {
-                if (string.Equals(agent["panel"], _fgPanelId, StringComparison.OrdinalIgnoreCase)) {
+                // Excluded for a host app for the same reason its panel entry
+                // carries host:null in ai-processes.js — a panel-keyed row
+                // against teams_composer would disable the composer in EVERY
+                // Teams conversation, which is "disable all of Teams" reached by
+                // a different route. panelForHost() cannot produce such a row;
+                // this makes sure nothing else can either.
+                if (!hostApp && string.Equals(agent["panel"], _fgPanelId, StringComparison.OrdinalIgnoreCase)) {
                     // A detection-only panel (AI_PANELS enforce:false) never
                     // blocks, even with a matching row present. This is the same
                     // gate FgIsAiNow/PanelUiaOk apply on the capture side; both
@@ -3498,13 +3872,34 @@ public static class CfaiEnforcer
         string proc = ProcName(pid);
 
         bool isIde = (proc != null && _ideProcs.Contains(proc));
+        // A HOST APP whose governed path is FULLY ARMED for this tick. Three
+        // conditions, and every one of them is a gate, not a convenience:
+        //   * the process carries a HostApp agent surface;
+        //   * the CURRENT blocklist holds an agent-scoped row covering it —
+        //     the same privacy gate the composer read uses. No agent policy for
+        //     Teams means Teams is never looked at, at all;
+        //   * that surface is BOTH verified and enforcing. Unlike a chat app —
+        //     where an unverified surface still has the pre-existing whole-app
+        //     block to fall back to, so the reads have to happen — a host app
+        //     that has not passed its live pass must do NOTHING WHATSOEVER: no
+        //     title read, no accessibility read, no state. That is what makes an
+        //     unverified host-app surface completely inert rather than merely
+        //     non-blocking.
+        bool hostAppArmed = !isIde && proc != null && _hostAppProcs.Contains(proc)
+            && _agentScopedProcs.Contains(proc) && EnforcingAgentSurface(proc) != null;
         string panelRid = "";
         bool panelReadable = false;
         PanelSig hit = null;
         // The ONE UIA call. Everything that interprets its result lives in
         // ApplyForegroundTick, so the offline harness can drive the real state
         // machine with a substituted read instead of re-implementing it.
-        if (isIde) hit = ReadFocusedPanel(proc, pid, out panelRid, out panelReadable);
+        //
+        // A host app needs the SAME read for the opposite reason an IDE does:
+        // one Teams window holds every conversation the user has open, so only
+        // the focused ELEMENT can say the composer is what has focus — and the
+        // composer lives in a child WebView2 process, hence allowChildProcess.
+        if (isIde) hit = ReadFocusedPanel(proc, pid, out panelRid, out panelReadable, false);
+        else if (hostAppArmed) hit = ReadFocusedPanel(proc, pid, out panelRid, out panelReadable, true);
 
         // The SECOND (and only other) UIA call, for "which named agent is open".
         //
@@ -3518,13 +3913,19 @@ public static class CfaiEnforcer
         //   * the CURRENT blocklist holds an agent-scoped row covering it.
         // Any one missing and no read happens, the outcome stays Unreadable, and
         // an agent-scoped row behaves exactly as it does today.
+        //
+        // A HOST APP reaches this read through hostAppArmed instead of _aiProcs
+        // — it is deliberately absent from that set (ai-processes.js keeps every
+        // hostApp entry out of the watcher list), and hostAppArmed is the
+        // STRICTER gate of the two: it additionally requires the surface to have
+        // passed its live pass.
         AgentReadOutcome agentOutcome = AgentReadOutcome.Unreadable;
         string agentName = "";
-        if (!isIde && proc != null && _aiProcs != null && _aiProcs.Contains(proc)
-            && _agentScopedProcs.Contains(proc))
+        if ((!isIde && proc != null && _aiProcs != null && _aiProcs.Contains(proc)
+            && _agentScopedProcs.Contains(proc)) || hostAppArmed)
         {
             AgentSurface surface = MatchAgentSurface(proc);
-            if (surface != null) agentOutcome = ReadFocusedAgentName(surface, pid, out agentName);
+            if (surface != null) agentOutcome = ReadFocusedAgentName(surface, pid, fg, out agentName);
         }
         ApplyForegroundTick(pid, proc, isIde, hit, panelRid, panelReadable, agentOutcome, agentName);
     }
@@ -3618,6 +4019,72 @@ public static class CfaiEnforcer
             // to PANEL_BLOCK_LATCH_TTL, because 3s of unreadable reads while the
             // SAME host window stays in the foreground used to tear the block
             // down and let the next Enter through. See _panelBlockLatch.
+        }
+        else if (proc != null && _hostAppProcs.Contains(proc))
+        {
+            // ── HOST APP (Microsoft Teams) ──────────────────────────────────
+            //
+            // THE CORE PRIVACY PROPERTY OF THIS FEATURE. A host app is a
+            // general-purpose application — the company's chat client — and it
+            // is treated as an AI surface for EXACTLY the ticks on which a
+            // blocked agent is provably the open conversation. On every other
+            // tick isAi stays false, so FgIsAiNow() is false, so no keystroke is
+            // buffered, no clipboard/UIA content is scanned and no block
+            // decision is even evaluated. DLP capture is confined to an
+            // already-blocked agent's conversation and to nowhere else in Teams:
+            // not a DM, not a channel, not a meeting chat, not the Copilot
+            // panel, not the Activity tab.
+            //
+            // Four independent conditions, ALL required:
+            //   surface   — a HostApp AGENT_SURFACES entry that is BOTH verified
+            //               and enforcing. Both ship false, so today this branch
+            //               can never do anything at all.
+            //   hit       — the focused ELEMENT matched the app's composer
+            //               signature (teams_composer) and that panel is itself
+            //               past the same two-flag gate. The process being in
+            //               the foreground is not evidence; only the element is.
+            //   Named     — the read produced an AUTHORITATIVE conversation name.
+            //               Generic ("Teams named this group chat after its
+            //               participants") and the two no-evidence outcomes can
+            //               never satisfy this.
+            //   row match — the CURRENT blocklist really holds an agent-scoped
+            //               row for that name on a platform covering this
+            //               process. Without it there is no policy reason to
+            //               look at this app, so there is no reason to treat it
+            //               as one.
+            AgentSurface hostSurface = EnforcingAgentSurface(proc);
+            bool governed = hostSurface != null
+                && hit != null && hit.Enforce
+                && agentOutcome == AgentReadOutcome.Named
+                && BlockedListHasMatchingAgentRow(proc, agentName);
+            if (governed)
+            {
+                isAi = true; isPanel = true; panelId = hit.Id; panelEnforce = hit.Enforce;
+            }
+            // The latch rule, and it is WIDER here than in the chat-app branch
+            // below. There, NotComposer is a no-evidence outcome the latch must
+            // survive: it means the global focused-element read landed on the
+            // transcript, or on some unrelated window, and says nothing about
+            // which agent is open.
+            //
+            // In WINDOW-TITLE mode it means something completely different.
+            // NotComposer there comes from a title that WAS read successfully
+            // and simply is not a nameable Chat conversation — a channel view,
+            // the Activity tab, a 1:1 DM, the generic Copilot panel. That is
+            // positive evidence that the blocked conversation is NOT open, and
+            // treating it as "no evidence" would keep Enter swallowed after the
+            // user navigated away, in a general-purpose chat client. So only a
+            // genuine read FAILURE (Unreadable — no window handle, GetWindowText
+            // returned nothing) survives here.
+            //
+            // This is the fail-OPEN direction, which is the correct one for a
+            // host app throughout: an ambiguous tick must release the block, not
+            // hold it. CheckFgBlocked re-arms on the very next tick that proves
+            // the blocked agent is open again.
+            if (AgentBlockLatched() && agentOutcome != AgentReadOutcome.Unreadable)
+            {
+                ClearPanelBlockLatch();
+            }
         }
         else if (proc != null && _aiProcs != null && _aiProcs.Contains(proc))
         {
@@ -3718,7 +4185,14 @@ public static class CfaiEnforcer
         // IDE panel's Send button, and no click-to-send prompt capture there.
         // Enter-to-send is fully blocked via the keystroke hook, which is the
         // separate and primary path.
-        if (_ideProcs.Contains(_app)) { _hasRect = false; return; }
+        //
+        // A HOST APP is skipped on both counts as well. Teams' accessibility
+        // tree is a chat client's, not an editor's, but attempt 2's "the
+        // bottom-right corner is the send button" heuristic is just as wrong
+        // there: which composer that corner belongs to depends on which
+        // conversation is open, and caching a rect across a conversation switch
+        // would swallow an ordinary click in an ordinary chat.
+        if (_ideProcs.Contains(_app) || _hostAppProcs.Contains(_app)) { _hasRect = false; return; }
         try
         {
             IntPtr fg = GetForegroundWindow();
@@ -3821,7 +4295,15 @@ public static class CfaiEnforcer
         // code). Note IDE prompts are frequently multi-line and
         // ComputeMaskCandidate still rejects multi-line text outright — that
         // pre-existing limitation is untouched here and tracked separately.
-        if (!_fgIsAi || !PanelUiaOk() || Disarmed())
+        // A HOST APP is excluded ENTIRELY, not merely panel-scoped like an IDE.
+        // Tokenize & Send is the one path in this file that WRITES into another
+        // app's composer, and offering it inside a general-purpose chat client —
+        // where the "composer" it would read and rewrite could be a message to a
+        // colleague — is not something this feature has been designed or
+        // verified for. PanelUiaOk() already refuses it, since a host app only
+        // ever sets _fgIsPanel on a governed tick; this states it outright so it
+        // cannot be re-enabled as a side effect of a later change to that gate.
+        if (!_fgIsAi || !PanelUiaOk() || _hostAppProcs.Contains(_app) || Disarmed())
         {
             lock (_pendingLock) { _pendingRewritable = false; _pendingBlockId = ""; }
             return;

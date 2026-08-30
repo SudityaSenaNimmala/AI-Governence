@@ -53,7 +53,15 @@ function Call([string]$n, [object[]]$a = @()) {
 
 # ── real catalog payloads (byte-identical to what enforcer.js ships) ─────────
 $IDE_JSON    = '[{"name":"code","panelFallback":false},{"name":"cursor","panelFallback":false}]'
-$PANELS_JSON = '[{"id":"claude_code","procs":["Code","Cursor"],"controlType":"Edit","nameEquals":"Message input","namePrefix":"","classEquals":"","classPrefix":"messageInput_","enforce":true},{"id":"vscode_chat","procs":["Code","Cursor"],"controlType":"Edit","nameEquals":"","namePrefix":"Chat Input","classEquals":"","classPrefix":"","enforce":false},{"id":"cursor_composer","procs":["Cursor"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"aislash-editor-input","classPrefix":"","enforce":true}]'
+# The three IDE panels, byte-identical to buildAiPanelConfig()'s output, plus
+# teams_composer — which ships enforce:false, exactly as the catalog has it.
+# $PANELS_TEAMS_ARMED is the TEST-ONLY flip, paired with $SURFACES_TEAMS_ARMED
+# below; both flags have to be on for a host app to gate anything.
+$IDE_PANELS = '{"id":"claude_code","procs":["Code","Cursor"],"controlType":"Edit","nameEquals":"Message input","namePrefix":"","classEquals":"","classPrefix":"messageInput_","enforce":true},{"id":"vscode_chat","procs":["Code","Cursor"],"controlType":"Edit","nameEquals":"","namePrefix":"Chat Input","classEquals":"","classPrefix":"","enforce":false},{"id":"cursor_composer","procs":["Cursor"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"aislash-editor-input","classPrefix":"","enforce":true}'
+$TEAMS_PANEL_OFF = '{"id":"teams_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"ck-editor__editable","classPrefix":"","enforce":false}'
+$TEAMS_PANEL_ON  = '{"id":"teams_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"ck-editor__editable","classPrefix":"","enforce":true}'
+$PANELS_JSON        = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_OFF + ']'
+$PANELS_TEAMS_ARMED = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_ON + ']'
 # exactly synthesizePlatformBlocks([{ host: 'claude.ai', product: 'Claude', blocked: true }])
 $ROWS_CLAUDE = '[{"platform":"ai_platform","process_name":"claude","agent_name":"Claude","agent_id":"","host":"claude.ai","reason":"Blocked by organization policy"},{"platform":"ai_platform","panel":"claude_code","agent_name":"Claude","agent_id":"","host":"claude.ai","reason":"Blocked by organization policy"}]'
 # a detection-only panel with a row of its own — must still never block
@@ -85,10 +93,25 @@ Call 'LoadAiPanels'     @($PANELS_JSON)
 # exactly the whole-app block it produced before this feature existed. Both
 # entries are present in the same payload, so one tick sequence shows a verified
 # surface narrowing and an unverified one not.
-$SURFACES_SHIPPED = '[{"id":"m365_copilot","procs":["M365Copilot"],"controlType":"Edit","composerNamePrefixes":["Message "],"genericNames":["Copilot"],"enforce":true,"verified":true}]'
-$SURFACES_WITH_UNVERIFIED = '[{"id":"m365_copilot","procs":["M365Copilot"],"controlType":"Edit","composerNamePrefixes":["Message "],"genericNames":["Copilot"],"enforce":true,"verified":true},{"id":"copilot_standalone","procs":["Copilot"],"controlType":"Edit","composerNamePrefixes":["Message "],"genericNames":["Copilot"],"enforce":false,"verified":false}]'
+#
+# $SURFACES_SHIPPED and $SURFACES_WITH_UNVERIFIED now BOTH carry the shipping
+# teams_desktop entry (enforce:false, verified:false) — byte-identical to what
+# buildAgentSurfaceConfig() ships today — so the scenarios that prove a host app
+# is inert are proving it against the real payload, not a fixture.
+# $SURFACES_TEAMS_ARMED is the TEST-ONLY flip of those two flags, used to drive
+# the mechanism that Stage 3 will turn on. Flipping them here is not a catalog
+# change: agent/tests/ai-processes.test.mjs pins the shipped values at false.
+$TEAMS_SURFACE_OFF = '{"id":"teams_desktop","procs":["ms-teams"],"controlType":"Edit","composerNamePrefixes":[],"genericNames":["Copilot","Chat","Microsoft Teams","Meeting chat"],"read":"window_title","titleSeparator":" | ","titleSuffix":"Microsoft Teams","titleKinds":["Chat"],"hostApp":true,"enforce":false,"verified":false}'
+$TEAMS_SURFACE_ON  = '{"id":"teams_desktop","procs":["ms-teams"],"controlType":"Edit","composerNamePrefixes":[],"genericNames":["Copilot","Chat","Microsoft Teams","Meeting chat"],"read":"window_title","titleSeparator":" | ","titleSuffix":"Microsoft Teams","titleKinds":["Chat"],"hostApp":true,"enforce":true,"verified":true}'
+$M365_SURFACE      = '{"id":"m365_copilot","procs":["M365Copilot"],"controlType":"Edit","composerNamePrefixes":["Message "],"genericNames":["Copilot"],"read":"composer_name","titleSeparator":"","titleSuffix":"","titleKinds":[],"hostApp":false,"enforce":true,"verified":true}'
+$COPILOT_SURFACE   = '{"id":"copilot_standalone","procs":["Copilot"],"controlType":"Edit","composerNamePrefixes":["Message "],"genericNames":["Copilot"],"read":"composer_name","titleSeparator":"","titleSuffix":"","titleKinds":[],"hostApp":false,"enforce":false,"verified":false}'
+
+$SURFACES_SHIPPED = '[' + $M365_SURFACE + ',' + $TEAMS_SURFACE_OFF + ']'
+$SURFACES_WITH_UNVERIFIED = '[' + $M365_SURFACE + ',' + $COPILOT_SURFACE + ',' + $TEAMS_SURFACE_OFF + ']'
+$SURFACES_TEAMS_ARMED = '[' + $M365_SURFACE + ',' + $TEAMS_SURFACE_ON + ']'
 
 function LoadSurfaces([string]$json) { Call 'LoadAgentSurfaces' @($json) | Out-Null }
+function LoadPanels([string]$json) { Call 'LoadAiPanels' @($json) | Out-Null }
 
 # Start() is never called, so _aiProcs (which it builds) is null. The chat-app
 # branch of ApplyForegroundTick and CheckFgBlocked's PLATFORM_PROCS branch both
@@ -184,6 +207,47 @@ $FOCUS_CURSOR_MONACO = @('Edit', 'The editor is not accessible at this time. To 
 # not widen anything.
 $FOCUS_CURSOR_AGENT_SEARCH = @('Edit', 'Search Agents…', 'agent-sidebar-search-input')
 
+# ── MEASURED Microsoft Teams values (new Teams, MSIX) ───────────────────────
+# Probed live 2026-08 against a real install with a real Copilot Studio agent
+# ("IT Help Desk Agent") added to Teams.
+$TEAMS_PID = [uint32]13472
+# The composer element. Its Name is the literal "Type a message" in EVERY
+# conversation — a DM, a group chat, an agent chat and the Copilot panel all
+# report it identically — so it says nothing about which conversation is open
+# and is deliberately not a signal. The ClassName is the verbatim token list:
+# stable CKEditor semantic classes mixed with Fluent-UI build hashes.
+$FOCUS_TEAMS_COMPOSER = @('Edit', 'Type a message', 'ck ck-content ck-editor__editable ck-rounded-corners ck-editor__editable_inline ck-blurred ___1czdayc f1poobt0 f1cktdmf f13htf1t f1ubnyt4 f1couhl3 f1ahpp82 f11qra4b f6dzj5z f1p9o1ba fokg9q4')
+# The message list above the composer — a real element in the same window that
+# is NOT the composer, so no host-app tick may ever be governed while it holds
+# focus.
+$FOCUS_TEAMS_MESSAGE_LIST = @('List', 'Message list', 'fui-ChatList')
+
+# VERBATIM window titles, all six measured live.
+$TITLE_TEAMS_AGENT    = 'Chat | IT Help Desk Agent | filefuze | erik@filefuze.co | Microsoft Teams'
+$TITLE_TEAMS_GROUP    = 'Chat | alex, max | filefuze | erik@filefuze.co | Microsoft Teams'
+$TITLE_TEAMS_DM       = 'Sruthi Chimata | CloudFuze, Inc | Pravallika.Punumalli@cloudfuze.com | Microsoft Teams'
+$TITLE_TEAMS_COPILOT  = 'Copilot | filefuze | erik@filefuze.co | Microsoft Teams'
+$TITLE_TEAMS_CHANNEL  = 'Teams and Channels | CFQMSG END-END Sanity testing for public channel-ivy2 | General | filefuze | erik@filefuze.co | Microsoft Teams'
+$TITLE_TEAMS_ACTIVITY = 'Activity | Workflows | filefuze | erik@filefuze.co | Microsoft Teams'
+
+# One agent-scoped row for the Teams agent. teams_chat_agent is the Teams-only
+# platform id; PLATFORM_PROCS maps it to ms-teams and to nothing else.
+$ROWS_TEAMS_AGENT = '[{"platform":"teams_chat_agent","agent_name":"IT Help Desk Agent","agent_id":"agent-ithelp","reason":"Blocked by admin","agent_scope":"agent"}]'
+# The SAME agent, reached through copilot_studio instead — a Copilot Studio
+# agent added to Teams. PLATFORM_PROCS maps that platform to both Copilot builds
+# AND to ms-teams, so the row must cover Teams too.
+$ROWS_TEAMS_VIA_COPILOT_STUDIO = '[{"platform":"copilot_studio","agent_name":"IT Help Desk Agent","agent_id":"agent-ithelp","reason":"Blocked by admin","agent_scope":"agent"}]'
+# The SAME agent, PLATFORM-scoped (no agent_scope). For a chat app this is a
+# whole-app block. For a HOST APP it must be no block at all — the inversion.
+$ROWS_TEAMS_PLATFORM = '[{"platform":"teams_chat_agent","agent_name":"IT Help Desk Agent","agent_id":"agent-ithelp","reason":"Blocked by admin"}]'
+# The row shape an Inventory host toggle would produce IF processesForHost did
+# not exclude a host app. It cannot be synthesised (asserted in
+# ai-processes.test.mjs) — this proves the .ps1 refuses it even if one appeared.
+$ROWS_TEAMS_PROCESS_NAME = '[{"platform":"ai_platform","process_name":"ms-teams","agent_name":"Microsoft Teams","agent_id":"","host":"teams.microsoft.com","reason":"Blocked by organization policy"}]'
+# Likewise for a panel-keyed row against teams_composer — panelForHost() returns
+# null for it (host:null), so this too is unsynthesisable by construction.
+$ROWS_TEAMS_PANEL = '[{"platform":"ai_platform","panel":"teams_composer","agent_name":"Microsoft Teams","agent_id":"","host":"teams.microsoft.com","reason":"Blocked by organization policy"}]'
+
 function LoadRows([string]$json) {
   $script:tmpFile = Join-Path ([System.IO.Path]::GetTempPath()) ("cfai-panel-harness-" + [guid]::NewGuid().ToString('N') + '.json')
   Set-Content -LiteralPath $script:tmpFile -Value $json -Encoding UTF8
@@ -278,6 +342,63 @@ function AgentTick([string]$scenario, [int]$n, $focus, [uint32]$fgPid = $M365_PI
   Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $null, '', $false, $outcome, $agentName) | Out-Null
   Call 'CheckFgBlocked' | Out-Null
   Report $scenario $n $null $false $outcome
+}
+
+# One poll tick with the foreground a HOST APP (Microsoft Teams) — the
+# agent-scoped path driven by a WINDOW TITLE rather than a composer name.
+#
+# Everything that DECIDES is production code. The harness reproduces exactly two
+# things UpdateForeground does that cannot run offline:
+#   1. the hostAppArmed gate, evaluated against the REAL _hostAppProcs /
+#      _agentScopedProcs sets and the REAL EnforcingAgentSurface — so the gate
+#      itself is under test, not assumed. No agent policy for Teams, or an
+#      unverified surface, and nothing is read at all;
+#   2. the two substituted reads: AutomationElement.FocusedElement (fed through
+#      the REAL MatchPanelSignature, with the REAL ElementPidBelongsToForeground
+#      deciding ownership) and GetWindowText (fed through the REAL
+#      ExtractAgentName, in its window_title mode).
+#
+# $focus is the focused-element triple, or $null for an unreadable/absent read.
+# $title is the window title, or $null for a failed GetWindowText.
+# $elPid is the pid the ELEMENT belongs to; -1 means the foreground process
+# itself. Teams' composer really lives in a child WebView2 process, so this is
+# what models that.
+function TeamsTick([string]$scenario, [int]$n, $focus, [string]$title,
+                   [uint32]$fgPid = $TEAMS_PID, [string]$proc = 'ms-teams', [int]$elPid = -1) {
+  $hit = $null
+  $readable = $false
+  $outcome = $OUT_UNREADABLE
+  $agentName = ''
+  # UpdateForeground's hostAppArmed, verbatim. Note it does NOT consult _aiProcs:
+  # a host app is deliberately absent from that set (ai-processes.js keeps every
+  # hostApp entry out of the watcher list), which is why the harness's own
+  # $aiProcSet has no ms-teams in it either.
+  $armed = (HasProc '_hostAppProcs' $proc) `
+           -and (HasProc '_agentScopedProcs' $proc) `
+           -and ($null -ne (Call 'EnforcingAgentSurface' @($proc)))
+  if ($armed) {
+    if ($null -ne $focus) {
+      $ownerPid = if ($elPid -lt 0) { [int]$fgPid } else { $elPid }
+      $owned = [bool](Call 'ElementPidBelongsToForeground' @([int]$ownerPid, [uint32]$fgPid))
+      if ($owned) {
+        $ct = $focus[0]; $nm = $focus[1]; $cls = $focus[2]
+        $readable = ($ct.Trim().Length -gt 0) -and (($nm.Trim().Length -gt 0) -or ($cls.Trim().Length -gt 0))
+        $hit = Call 'MatchPanelSignature' @($proc, $ct, $nm, $cls)
+      }
+    }
+    # ReadFocusedAgentName's own rule for the title read: an empty/failed
+    # GetWindowText is Unreadable — no evidence — never "no agent open".
+    $surface = Call 'MatchAgentSurface' @($proc)
+    if ($null -ne $surface -and $null -ne $title -and $title.Trim().Length -gt 0) {
+      $params = [object[]]@($surface, '', $title, $null)
+      $outcome = $M_EXTRACT.Invoke($null, $params)
+      $agentName = [string]$params[3]
+    }
+  }
+  $rid = if ($null -ne $hit) { '7.3311.4.9.31.90210' } else { '' }
+  Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $hit, $rid, $readable, $outcome, $agentName) | Out-Null
+  Call 'CheckFgBlocked' | Out-Null
+  Report $scenario $n $hit $readable $outcome
 }
 
 function Report([string]$scenario, [int]$n, $hit, [bool]$readable, $agentOutcome = $null) {
@@ -710,8 +831,290 @@ finally {
   }
 }
 
+# ═══ HOST APPS: agent-scoped blocks inside Microsoft Teams ══════════════════
+#
+# Teams is NOT an AI app. It is a general-purpose communications client that
+# happens to host one Copilot Studio agent among a company's DMs, channels and
+# meetings. Everything below exists to prove ONE property: the enforcement it
+# can produce is confined to an already-blocked agent's conversation, and
+# ANYTHING it cannot prove results in no block at all — never a whole-app block.
+#
+# Teams also cannot use the composer-name signal at all: its composer's UIA Name
+# is the literal "Type a message" in every conversation, measured. The window
+# TITLE is what names the conversation, which is why these ticks drive the
+# window_title read mode.
+
+# ── TA: THE SHIPPING STATE — completely inert ───────────────────────────────
+# teams_desktop and teams_composer both ship enforce:false/verified:false. With
+# a real agent-scoped row present AND the blocked agent's conversation open AND
+# its composer focused, absolutely nothing may happen: no block, and no read of
+# any kind (agentOutcome stays Unreadable, which is what proves no title was
+# ever read and no accessibility call was ever made).
+LoadPanels $PANELS_JSON
+LoadSurfaces $SURFACES_SHIPPED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 5; $i++) { TeamsTick 'teams_shipped_is_inert' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT }
+
+# ── TB: THE MOST IMPORTANT TEST IN THIS FEATURE ─────────────────────────────
+# The same unverified surface, but now asked the question the whole design turns
+# on: the row's agent IS open, and the surface cannot narrow to it. For a CHAT
+# app (scenario N above) that means a whole-app block — the fail-CLOSED default.
+# For a HOST APP it must mean NO BLOCK AT ALL. A whole-app block here would stop
+# the user messaging a colleague, posting in a channel or replying in a meeting,
+# because one agent inside the app is blocked.
+LoadPanels $PANELS_JSON
+LoadSurfaces $SURFACES_SHIPPED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsTick 'teams_unverified_never_whole_app' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+TeamsTick 'teams_unverified_never_whole_app' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_DM
+TeamsTick 'teams_unverified_never_whole_app' 2 $null $TITLE_TEAMS_AGENT
+TeamsTick 'teams_unverified_never_whole_app' 3 $FOCUS_TEAMS_MESSAGE_LIST $TITLE_TEAMS_CHANNEL
+
+# ── TC: …and neither does a PLATFORM-scoped row ─────────────────────────────
+# An absent agent_scope is the pre-existing row shape and means "block the whole
+# platform". Against a host app that is exactly the outcome this feature exists
+# to prevent, so it must produce nothing — armed catalog or not.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_PLATFORM
+ResetState
+for ($i = 0; $i -lt 3; $i++) { TeamsTick 'teams_platform_row_never_blocks' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT }
+
+# ── TD: …nor a host-keyed process_name row, nor a panel-keyed one ───────────
+# Neither can be synthesised (processesForHost excludes a host app;
+# teams_composer carries host:null), so these prove the .ps1 refuses a row that
+# could only arrive through a bug in the other file.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_PROCESS_NAME
+ResetState
+for ($i = 0; $i -lt 3; $i++) { TeamsTick 'teams_process_row_never_blocks' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT }
+
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_PANEL
+ResetState
+for ($i = 0; $i -lt 3; $i++) { TeamsTick 'teams_panel_row_never_blocks' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT }
+
+# ── TE: PRIVACY GATE — no agent policy for Teams means no read at all ───────
+# The armed catalog, but the only agent-scoped row is for ChatGPT
+# (openai_assistant), a platform PLATFORM_PROCS does not map to ms-teams. Teams
+# is therefore absent from _agentScopedProcs, hostAppArmed is false, and NOTHING
+# is read — no window title, no accessibility call — even with the blocked
+# agent's own composer focused. Reading a company's chat window titles to learn
+# what is open is justified only by a policy that needs the answer.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_AGENT_CHATGPT
+ResetState
+for ($i = 0; $i -lt 3; $i++) { TeamsTick 'teams_no_policy_no_read' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT }
+
+# ── TE2: …and a PLATFORM-scoped Teams row does not license the read either ──
+# Only agent_scope:'agent' puts a process into _agentScopedProcs. This is the
+# same gate the composer read has, asserted here because for a host app it is
+# the difference between "we look at Teams" and "we do not".
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_PLATFORM
+ResetState
+for ($i = 0; $i -lt 3; $i++) { TeamsTick 'teams_platform_row_no_read' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT }
+
+# ═══ The mechanism, driven with the TEST-ONLY armed flags ═══════════════════
+# Everything below flips teams_desktop and teams_composer to enforce+verified.
+# That is NOT a catalog change — ai-processes.test.mjs pins the shipped values
+# at false. It is how Stage 1-2 proves the mechanism it builds actually works
+# before Stage 3 turns it on for real.
+
+# ── TF: the blocked agent's conversation, composer focused — the ONE block ──
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 20; $i++) { TeamsTick 'teams_agent_blocked' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT }
+
+# ── TF2: the same agent reached through copilot_studio instead ──────────────
+# PLATFORM_PROCS maps copilot_studio to both Copilot builds AND to ms-teams, so
+# a Copilot Studio agent added to Teams is covered by its own platform id.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_VIA_COPILOT_STUDIO
+ResetState
+for ($i = 0; $i -lt 5; $i++) { TeamsTick 'teams_agent_via_copilot_studio' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT }
+
+# ── TG: a 1:1 DM must never be touched ──────────────────────────────────────
+# Measured: a plain DM's title has NO leading kind segment at all — segment 0 is
+# the colleague's display name. Without the kind check this would read as an
+# agent named after a person.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 5; $i++) { TeamsTick 'teams_dm_never_blocks' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_DM }
+
+# ── TH: a default-named human GROUP CHAT must never be touched ──────────────
+# Its title has the IDENTICAL 5-segment shape as the agent's, so the kind
+# segment cannot separate them. Teams' own participant naming is what does.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 5; $i++) { TeamsTick 'teams_group_chat_never_blocks' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GROUP }
+
+# ── TI: channels, the Activity tab and the generic Copilot panel likewise ───
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsTick 'teams_other_surfaces_never_block' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_CHANNEL
+TeamsTick 'teams_other_surfaces_never_block' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_ACTIVITY
+TeamsTick 'teams_other_surfaces_never_block' 2 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT
+
+# ── TJ: leaving the blocked conversation RELEASES within one tick ───────────
+# The fail-OPEN direction, and the reason a host app's latch rule is wider than
+# a chat app's: a successfully-read title that is not a nameable Chat is
+# positive evidence the blocked conversation is not open, not a failed read.
+# Holding the block past it would leave Enter dead in a channel.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsTick 'teams_release_to_channel' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+TeamsTick 'teams_release_to_channel' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_CHANNEL
+TeamsTick 'teams_release_to_channel' 2 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_CHANNEL
+
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsTick 'teams_release_to_activity' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+TeamsTick 'teams_release_to_activity' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_ACTIVITY
+TeamsTick 'teams_release_to_activity' 2 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_ACTIVITY
+
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsTick 'teams_release_to_dm' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+TeamsTick 'teams_release_to_dm' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_DM
+TeamsTick 'teams_release_to_dm' 2 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_DM
+
+# ── TK: the composer is NOT focused — the block holds, capture does not ─────
+# The user is scrolling the blocked agent's transcript. The title still says the
+# agent conversation is open, so the block is correct to stand (via the sticky
+# window); but _fgIsPanel is false, so PanelUiaOk/PanelEnforceOk deny every
+# content read. Tick 2 ages the sticky window out to show it does not stand
+# indefinitely on an unfocused composer — the fail-OPEN direction again.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsTick 'teams_composer_not_focused' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+TeamsTick 'teams_composer_not_focused' 1 $FOCUS_TEAMS_MESSAGE_LIST $TITLE_TEAMS_AGENT
+Age '_fgLeftAiTicks' 4000
+TeamsTick 'teams_composer_not_focused' 2 $FOCUS_TEAMS_MESSAGE_LIST $TITLE_TEAMS_AGENT
+
+# ── TL: an unreadable TITLE is no evidence — the latch survives it ──────────
+# The one outcome that is a genuine read failure rather than a fact. Bounded by
+# the same PANEL_BLOCK_LATCH_TTL every other latch use is.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsTick 'teams_unreadable_title' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+for ($i = 1; $i -lt 6; $i++) { TeamsTick 'teams_unreadable_title' $i $FOCUS_TEAMS_COMPOSER $null }
+Age '_panelBlockLatchTicks' 11000
+Age '_fgLeftAiTicks' 4000
+TeamsTick 'teams_latch_expires' 0 $FOCUS_TEAMS_COMPOSER $null
+
+# ── TM: switching to a DIFFERENT, unblocked agent clears in one tick ────────
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsTick 'teams_other_agent_clears' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+TeamsTick 'teams_other_agent_clears' 1 $FOCUS_TEAMS_COMPOSER 'Chat | Expenses Helper | filefuze | erik@filefuze.co | Microsoft Teams'
+TeamsTick 'teams_other_agent_clears' 2 $FOCUS_TEAMS_COMPOSER 'Chat | Expenses Helper | filefuze | erik@filefuze.co | Microsoft Teams'
+
+# ── TN: an admin lifting the block takes effect at once ─────────────────────
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsTick 'teams_admin_unblocks' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+LoadRows $ROWS_EMPTY
+TeamsTick 'teams_admin_unblocks' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+
+# ── TO: the panic hotkey still overrides a Teams block ──────────────────────
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsTick 'teams_panic_hotkey' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+SetF '_disarmedUntilTicks' ([long]([DateTime]::UtcNow.Ticks + [TimeSpan]::FromSeconds(600).Ticks))
+TeamsTick 'teams_panic_hotkey' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+
+# ── TP: the WebView2 child-process composer, with REAL processes ────────────
+# ms-teams.exe hosts its real UI in a child msedgewebview2.exe — confirmed live
+# via Win32_Process ParentProcessId, exactly as M365Copilot does. With the
+# panel read's default exact-pid rule the composer could never be matched at
+# all, so allowChildProcess is what makes the whole feature reachable. Modelled
+# with genuine child processes rather than invented pids, same as scenario AD.
+$teamsChildA = $null
+$teamsChildB = $null
+try {
+  $psi2 = New-Object System.Diagnostics.ProcessStartInfo
+  $psi2.FileName = 'ping.exe'
+  $psi2.Arguments = '-n 30 127.0.0.1'
+  $psi2.UseShellExecute = $false
+  $psi2.CreateNoWindow = $true
+  $psi2.RedirectStandardOutput = $true
+  $teamsChildA = [System.Diagnostics.Process]::Start($psi2)
+  $teamsChildB = [System.Diagnostics.Process]::Start($psi2)
+  $selfPid2 = [uint32]$PID
+
+  LoadPanels $PANELS_TEAMS_ARMED
+  LoadSurfaces $SURFACES_TEAMS_ARMED
+  LoadRows $ROWS_TEAMS_AGENT
+  ResetState
+  for ($i = 0; $i -lt 3; $i++) {
+    TeamsTick 'teams_webview_child_pid' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT $selfPid2 'ms-teams' $teamsChildA.Id
+  }
+
+  # …and the safety check it PRESERVES: a genuinely unrelated process's element
+  # is still rejected, so a global FocusedElement read that lands in another app
+  # can never make a Teams tick governed.
+  LoadPanels $PANELS_TEAMS_ARMED
+  LoadSurfaces $SURFACES_TEAMS_ARMED
+  LoadRows $ROWS_TEAMS_AGENT
+  ResetState
+  TeamsTick 'teams_unrelated_pid_rejected' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT ([uint32]$teamsChildA.Id) 'ms-teams' $teamsChildB.Id
+  ResetState
+  TeamsTick 'teams_unrelated_pid_rejected' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT ([uint32]$teamsChildA.Id) 'ms-teams' ([int]$selfPid2)
+}
+finally {
+  foreach ($c in @($teamsChildA, $teamsChildB)) {
+    if ($null -ne $c) { try { $c.Kill() } catch { } ; try { $c.Dispose() } catch { } }
+  }
+}
+
+# ── TQ: an M365Copilot tick is byte-for-byte unaffected by all of the above ─
+# The regression guard for the composer-name path. Run LAST, with the shipped
+# catalog reloaded, so a fixture-only payload cannot be what makes it pass.
+LoadPanels $PANELS_JSON
+LoadSurfaces $SURFACES_SHIPPED
+LoadRows $ROWS_AGENT
+ResetState
+AgentTick 'm365_unaffected_by_host_apps' 0 $FOCUS_M365_ADVISOR
+AgentTick 'm365_unaffected_by_host_apps' 1 $FOCUS_M365_GENERIC
+AgentTick 'm365_unaffected_by_host_apps' 2 $FOCUS_M365_ADVISOR
+AgentTick 'm365_unaffected_by_host_apps' 3 $FOCUS_M365_TRANSCRIPT
+AgentTick 'm365_unaffected_by_host_apps' 4 $null
+
 # Leave the catalog exactly as it SHIPS, so nothing after this point could
 # accidentally observe a fixture-only payload.
+LoadPanels $PANELS_JSON
 LoadSurfaces $SURFACES_SHIPPED
 
 if ($script:tmpFile) { Remove-Item -LiteralPath $script:tmpFile -Force -ErrorAction SilentlyContinue }

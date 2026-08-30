@@ -56,6 +56,34 @@
 // Pick the host a user would actually type to reach the same product, matching
 // the extension's manifest host_permissions — not an API endpoint, and not a
 // marketing site.
+//
+// `hostApp`: this process is NOT an AI app.
+//
+// Every other entry in this array means "whenever this process is in the
+// foreground, treat it as an AI surface" — scan the clipboard, watch its file
+// dialogs and attachment chips, read its typed prompts. `hostApp: true` means
+// the exact opposite: a GENERAL-PURPOSE application (Microsoft Teams) that only
+// becomes AI-relevant inside ONE specific conversation, which is gated
+// independently by AGENT_SURFACES + AI_PANELS and by an agent-scoped blocklist
+// row. Nothing about the app at large is ever watched, scanned or captured.
+//
+// A host-app entry exists here for exactly three passive reasons:
+//   * hostForProcess()   — so the process resolves to a canonical vendor host
+//   * hostsForPlatform() — so an admin's approved teams.microsoft.com exception
+//                          can lift a Teams-related agent block via
+//                          filterBlockedAgents()
+//   * identifyAiProcess() — product/vendor attribution on an event that some
+//                          OTHER, narrowly-scoped mechanism already produced
+// It unlocks NOTHING passive. Every consumer of AI_PROCESSES that assumes "in
+// this list == always scan/watch/capture" must check `!hostApp` first:
+//   * index.js's aiProcNames (clipboard poller + file-dialog / attachment /
+//     prompt watchers + CFAI_AI_PROCESSES for the enforcer)
+//   * processForHost / processesForHost — an Inventory host-block toggle on
+//     teams.microsoft.com must NEVER synthesize a process_name:'ms-teams'
+//     app-scoped block row, because that is "disable all of Teams".
+// agent/tests/ai-processes.test.mjs and os-monitor-safety.test.mjs assert both.
+//
+// Undefined (i.e. falsy) on every other entry — their behaviour is unchanged.
 export const AI_PROCESSES = [
   // ChatGPT Desktop (Microsoft Store) — sandboxed, no asar injection possible,
   // and pins TLS certs (confirmed 2026-05-20 via ERR_SSL_SSLV3_ALERT_CERTIFICATE_UNKNOWN).
@@ -104,6 +132,15 @@ export const AI_PROCESSES = [
 
   // GitHub Copilot Chat — IDE plugin, not standalone. No scrub.
   { match: /^github copilot$/i,  product: 'GitHub Copilot',    vendor: 'GitHub',     host: 'github.com',                useAttachmentWatcher: false, unhookableSandbox: false },
+
+  // Microsoft Teams (new Teams, MSIX — process name "ms-teams"). A HOST APP,
+  // not an AI app: see the `hostApp` note above. It is here ONLY so a Teams
+  // agent conversation resolves to a host for the access-exception chain and so
+  // an event some narrower mechanism already produced can be attributed to a
+  // product/vendor. It is excluded from every passive watcher and from
+  // host-keyed process blocking. Blocking a company's chat client because one
+  // Copilot Studio agent inside it is blocked is not an option this product has.
+  { match: /^ms-teams$/i,        product: 'Microsoft Teams',   vendor: 'Microsoft',  host: 'teams.microsoft.com',       useAttachmentWatcher: false, unhookableSandbox: false, hostApp: true },
 ];
 
 // ── IDE-hosted AI panels ────────────────────────────────────────────────────
@@ -201,6 +238,49 @@ export const AI_PANELS = [
     classEquals: 'aislash-editor-input',
     enforce: true, verified: true,
   },
+  // Microsoft Teams' message composer (new Teams, MSIX). ONE composer element
+  // serves every conversation in the app — a DM, a channel post, an agent chat
+  // and the Teams-generic Copilot panel all focus the same shape of element —
+  // so this signature alone says NOTHING about which conversation is open. That
+  // question is answered separately by the `teams_desktop` AGENT_SURFACES entry
+  // (which reads the WINDOW TITLE), and only both together ever gate anything.
+  //
+  // Measured live 2026-08 by a read-only UIA probe of a real new-Teams window:
+  //   Name        — ALWAYS the literal "Type a message", identical in a DM, a
+  //                 group chat, an agent conversation and the Copilot panel. It
+  //                 carries no conversation identity at all, which is exactly
+  //                 why it is NOT used as a signal here.
+  //   AutomationId— "new-message-<uuid>", the uuid differing per conversation
+  //                 instance. Stable in shape, but there is no AutomationId rule
+  //                 in this schema and adding one would be new plumbing for a
+  //                 second signal we do not need.
+  //   ClassName   — a long space-separated token list mixing stable CKEditor
+  //                 semantic classes with Fluent-UI build hashes ("___1czdayc",
+  //                 "f1poobt0", …). `ck-editor__editable` is the semantic
+  //                 CKEditor marker in that list, so it is the token matched;
+  //                 the hashed utility classes are deliberately untouched
+  //                 because they look build-specific.
+  //
+  // `classEquals` is TOKEN matching, not whole-string — see classRuleMatches,
+  // which already splits on whitespace and compares each token, exactly as the
+  // Cursor/VS Code entries rely on. No new matching logic, just a data entry.
+  //
+  // `host: null` IS LOAD-BEARING. panelForHost('teams.microsoft.com') must
+  // return null for this entry, so an Inventory host-block toggle can never
+  // synthesize a panel-level block row against it. Such a row would disable
+  // this composer in EVERY Teams conversation — DMs, channels, everyone — i.e.
+  // "disable all of Teams", which is precisely what this whole feature exists
+  // to avoid. The panel is reachable ONLY through the agent-scoped path in
+  // enforcer-win.ps1, never through a host toggle.
+  //
+  // Ships DETECTION-ONLY (enforce:false, verified:false), the same two-flag
+  // gate every new surface ships behind.
+  {
+    id: 'teams_composer', product: 'Microsoft Teams', vendor: 'Microsoft', host: null,
+    procs: ['ms-teams'], controlType: 'Edit',
+    classEquals: 'ck-editor__editable',
+    enforce: false, verified: false,
+  },
 ];
 
 // ── Agent surfaces: one named agent INSIDE one AI app ───────────────────────
@@ -256,6 +336,11 @@ export const AI_PANELS = [
 // is the single place that reads both flags, and
 // tests/enforcer-panel-block.test.mjs asserts the mechanism behaviourally
 // against a still-unverified surface.
+//
+// `read`: WHICH signal names the open agent. Absent/undefined — the case for
+// m365_copilot and for every entry that existed before Microsoft Teams — means
+// 'composer_name', the original behaviour above, completely unchanged. The one
+// alternative is 'window_title', added for Teams and explained on that entry.
 export const AGENT_SURFACES = [
   {
     id: 'm365_copilot',
@@ -265,6 +350,59 @@ export const AGENT_SURFACES = [
     genericNames: ['Copilot'],
     enforce: true,
     verified: true,
+  },
+  // Microsoft Teams (new Teams, MSIX). A HOST APP surface — see AI_PROCESSES'
+  // `hostApp` note — and the first entry here that reads the WINDOW TITLE.
+  //
+  // WHY THE TITLE. Measured live 2026-08 against a real Copilot Studio agent
+  // ("IT Help Desk Agent") added to Teams: the composer's UIA Name is ALWAYS the
+  // literal "Type a message", byte-identical in a DM, a group chat, an agent
+  // conversation and the Teams-generic Copilot panel. Unlike M365Copilot — where
+  // the composer label changes per agent and IS the signal — Teams' composer
+  // carries no conversation identity whatsoever. The window title does:
+  //
+  //   Chat | IT Help Desk Agent | filefuze | erik@filefuze.co | Microsoft Teams
+  //   Chat | alex, max | filefuze | erik@filefuze.co | Microsoft Teams
+  //   Sruthi Chimata | CloudFuze, Inc | p@cloudfuze.com | Microsoft Teams
+  //   Copilot | filefuze | erik@filefuze.co | Microsoft Teams
+  //   Teams and Channels | <channel> | General | filefuze | e@f.co | Microsoft Teams
+  //   Activity | Workflows | filefuze | erik@filefuze.co | Microsoft Teams
+  //
+  // All six verbatim. Note the plain 1:1 DM has NO leading kind segment at all —
+  // that is what `titleKinds` keys on, and why a DM correctly reads as "no
+  // evidence" rather than as an agent named after a colleague.
+  //
+  // NOT confirmed live, and deliberately not guessed at: the unread-count
+  // prefix format (extractAgentNameFromTitle strips a leading "(3) "
+  // defensively — a hypothesis, not a measurement), a popped-out chat window's
+  // title shape, and a personal M365 Copilot agent's title shape when opened
+  // inside Teams' Copilot panel. Each is an open question for the live pass that
+  // has to happen before either flag here is flipped.
+  //
+  // `hostApp: true` INVERTS the fail direction, and this is the single most
+  // important line in the entry. For m365_copilot, "cannot tell which agent is
+  // open → block the whole app" is a safe fail-CLOSED fallback, because the
+  // whole app IS an AI product. For teams_desktop the same fallback would
+  // disable a company's general communications client — chats with colleagues,
+  // channels, meeting chat, everything — because one agent inside it is blocked.
+  // That is never acceptable, at any confidence level. So a host-app surface
+  // NEVER falls back to a whole-app block: "cannot tell" means NO BLOCK AT ALL.
+  // The correct fail direction here is OPEN, and enforcer-win.ps1's CheckFgBlocked
+  // enforces that by excluding a host-app surface from all three coarse arms.
+  //
+  // Ships INERT (enforce:false, verified:false), like every new surface.
+  {
+    id: 'teams_desktop',
+    procs: ['ms-teams'],
+    controlType: 'Edit',
+    read: 'window_title',
+    titleSeparator: ' | ',
+    titleSuffix: 'Microsoft Teams',
+    titleKinds: ['Chat'],
+    genericNames: ['Copilot', 'Chat', 'Microsoft Teams', 'Meeting chat'],
+    hostApp: true,
+    enforce: false,
+    verified: false,
   },
 ];
 
@@ -317,9 +455,20 @@ export function agentSurfaceForProcess(processName) {
 // Never throws: every input comes from another process's accessibility tree and
 // can be null, empty or garbage.
 export function extractAgentName(focused) {
-  const { process: processName, controlType, name } = focused || {};
+  const { process: processName, controlType, name, title } = focused || {};
   const surface = agentSurfaceForProcess(processName);
   if (!surface) return AGENT_NAME_NOT_COMPOSER;
+  // DISPATCH on how this surface names its agent. An absent `read` — every
+  // entry that existed before Microsoft Teams, m365_copilot included — takes
+  // the composer-Name path below, byte-for-byte unchanged.
+  //
+  // A window-title surface reads `title`, falling back to `name` so the same
+  // one-string-in contract holds on both sides of the C# port: ExtractAgentName
+  // in enforcer-win.ps1 has a single string parameter and the read site puts
+  // the title in it.
+  if (surface.read === 'window_title') {
+    return extractAgentNameFromTitle(surface, title ?? name);
+  }
   const ct = String(controlType ?? '').trim().toLowerCase();
   if (!ct || ct !== String(surface.controlType).toLowerCase()) return AGENT_NAME_NOT_COMPOSER;
   const nm = String(name ?? '').trim();
@@ -340,6 +489,149 @@ export function extractAgentName(focused) {
     return remainder;
   }
   return AGENT_NAME_NOT_COMPOSER;
+}
+
+// ── Window-title agent reads (host apps) ────────────────────────────────────
+
+// Does this string look like Microsoft Teams' OWN default name for a
+// multi-person group chat — the participants' display names, comma+space
+// joined ("alex, max"; "Alex Morgan, Max Chen")?
+//
+// WHAT IT IS FOR. A Teams group chat and a Teams agent conversation produce
+// title bars of the IDENTICAL shape — "Chat | <name> | <org> | <email> |
+// Microsoft Teams" — so the kind segment alone cannot tell them apart. Without
+// this check, a group chat whose auto-generated name happened to collide with a
+// blocked agent's name would be silently blocked. This recognises the
+// no-deliberate-intent case: Teams named the chat, nobody chose that string.
+//
+// WHAT IT IS NOT. It does NOT stop a DELIBERATE rename of a group chat (or a DM
+// with a person whose display name matches) to a non-comma string that happens
+// to equal a real blocked agent's name exactly. That residual risk is
+// explicitly ACCEPTED, not solved. This is a defence-in-depth layer, not a
+// complete fix — and its failure direction is the safe one, since a false
+// positive here only means "do not block", never "block something else".
+//
+// The letter test uses the Unicode letter CATEGORY so accented and non-Latin
+// display names are treated as names, matching the C# port's char.IsLetter
+// exactly. (JS exposes no non-regex equivalent of char.IsLetter; the C# side —
+// where a Regex would need REGEX_TIMEOUT and is banned outright in the agent
+// path — is a plain character loop. That is the only difference between them.)
+const PARTICIPANT_SEP = ', ';
+const PARTICIPANT_MAX_SEGMENT = 40;
+const PARTICIPANT_MAX_WORD = 20;
+const PARTICIPANT_MAX_WORDS = 3;
+const LETTER_RE = /\p{L}/u;
+
+function isNameChar(ch) {
+  if (ch >= '0' && ch <= '9') return false;              // any digit disqualifies
+  if (ch === ' ' || ch === '\t') return true;
+  if (ch === "'" || ch === '\u2019') return true;        // O'Brien, O’Brien
+  if (ch === '-' || ch === '.') return true;             // Smith-Jones, J. Doe
+  return LETTER_RE.test(ch);
+}
+
+export function looksLikeParticipantList(name) {
+  const value = String(name ?? '');
+  // No comma+space anywhere → not Teams' joined form. One segment is a name,
+  // not a list.
+  if (!value.includes(PARTICIPANT_SEP)) return false;
+  const segments = value.split(PARTICIPANT_SEP);
+  let nonEmpty = 0;
+  for (const segment of segments) if (segment.trim().length > 0) nonEmpty += 1;
+  if (nonEmpty < 2) return false;
+  for (const segment of segments) {
+    if (segment.length > PARTICIPANT_MAX_SEGMENT) return false;
+    let words = 0;
+    let wordLen = 0;
+    for (let i = 0; i <= segment.length; i += 1) {
+      const ch = i < segment.length ? segment[i] : ' ';
+      if (i < segment.length && !isNameChar(ch)) return false;
+      if (ch === ' ' || ch === '\t') {
+        if (wordLen > 0) { words += 1; if (wordLen > PARTICIPANT_MAX_WORD) return false; }
+        wordLen = 0;
+      } else {
+        wordLen += 1;
+      }
+    }
+    if (words < 1 || words > PARTICIPANT_MAX_WORDS) return false;
+  }
+  return true;
+}
+
+// The agent name a WINDOW TITLE names, for a `read: 'window_title'` surface.
+//
+// Same three-outcome contract as extractAgentName, and for the same reason —
+// the caller must be able to tell "no evidence" apart from the authoritative
+// "no agent is open":
+//   AGENT_NAME_NOT_COMPOSER — no evidence. Not a Teams title at all, or a title
+//                             shape this catalog cannot name a conversation
+//                             from (a DM, a channel, the Activity tab, the
+//                             generic Copilot panel).
+//   AGENT_NAME_GENERIC      — AUTHORITATIVE: a nameable conversation is open and
+//                             it is definitely not a specific agent (Teams' own
+//                             group-chat naming, or a generic app label).
+//   any other string        — AUTHORITATIVE: that named conversation is open.
+//
+// PURE and side-effect free, like extractAgentName/matchPanelSignature, so it is
+// unit-testable with no live UI and the C# port in enforcer-win.ps1 can be held
+// in lockstep with it. NEVER throws and never retains the title: the string
+// comes from another process's window and is compared against the blocklist and
+// nothing else.
+export function extractAgentNameFromTitle(surface, title) {
+  if (!surface) return AGENT_NAME_NOT_COMPOSER;
+  let raw = String(title ?? '');
+  if (!raw) return AGENT_NAME_NOT_COMPOSER;
+  // Bound the work. A title is attacker-influenceable in the sense that any app
+  // can set one; 512 chars is well past the longest measured Teams title.
+  raw = raw.slice(0, 512);
+  // Strip a leading unread-count decoration, e.g. "(3) Chat | …". HYPOTHESISED,
+  // not live-measured — implemented defensively because it costs nothing if it
+  // never triggers, and a missed strip would silently disable the whole read.
+  if (raw.charAt(0) === '(') {
+    let i = 1;
+    while (i < raw.length && raw[i] >= '0' && raw[i] <= '9') i += 1;
+    if (i > 1 && raw.charAt(i) === ')') {
+      i += 1;
+      while (i < raw.length && (raw[i] === ' ' || raw[i] === '\t')) i += 1;
+      raw = raw.slice(i);
+    }
+  }
+  const normalized = normalizeAgentName(raw);
+  if (!normalized) return AGENT_NAME_NOT_COMPOSER;
+  const sep = String(surface.titleSeparator ?? '');
+  const suffix = normalizeAgentName(surface.titleSuffix);
+  if (!sep || !suffix) return AGENT_NAME_NOT_COMPOSER;
+  const parts = normalized.split(sep);
+  // The LAST segment must be the app's own suffix, exactly. This is what stops
+  // any other window in any other app from ever being parsed as a Teams title.
+  if (normalizeAgentName(parts[parts.length - 1]).toLowerCase() !== suffix.toLowerCase()) {
+    return AGENT_NAME_NOT_COMPOSER;
+  }
+  // …and the FIRST segment must be a kind that introduces a NAMEABLE
+  // conversation. A plain 1:1 DM has no kind segment at all (measured:
+  // "Sruthi Chimata | CloudFuze, Inc | … | Microsoft Teams"), so it lands here
+  // and correctly reads as no evidence rather than as an agent named after a
+  // colleague. So do a channel view ("Teams and Channels"), the Activity tab
+  // ("Activity") and the generic Copilot panel ("Copilot", which has no name
+  // segment of its own at all).
+  if (parts.length < 3) return AGENT_NAME_NOT_COMPOSER;
+  const kind = normalizeAgentName(parts[0]).toLowerCase();
+  const kinds = surface.titleKinds || [];
+  let kindOk = false;
+  for (const k of kinds) if (normalizeAgentName(k).toLowerCase() === kind) { kindOk = true; break; }
+  if (!kindOk) return AGENT_NAME_NOT_COMPOSER;
+  // The conversation name is the SECOND segment. Everything between it and the
+  // suffix (org, tenant, signed-in email) is ignored — it identifies the USER,
+  // never the conversation, and is never retained.
+  const name = normalizeAgentName(parts[1]);
+  if (!name) return AGENT_NAME_NOT_COMPOSER;
+  // Teams' own multi-person naming is AUTHORITATIVE "not an agent" — see
+  // looksLikeParticipantList for exactly what that does and does not cover.
+  if (looksLikeParticipantList(name)) return AGENT_NAME_GENERIC;
+  for (const generic of surface.genericNames || []) {
+    if (normalizeAgentName(generic).toLowerCase() === name.toLowerCase()) return AGENT_NAME_GENERIC;
+  }
+  return name;
 }
 
 // Does the extracted agent name identify the agent a blocklist row names?
@@ -502,9 +794,19 @@ export function identifyAiProcess(processName) {
 // an approved exception can be subtracted from the file before the enforcer
 // sees it. The two must agree — agent/tests/os-monitor-safety.test.mjs parses
 // the .ps1 and fails if they drift.
+//
+// 'ms-teams' appears under THREE keys. A Copilot Studio agent and a personal
+// M365 agent are both reachable INSIDE Microsoft Teams as well as in the two
+// standalone Copilot builds, and teams_chat_agent is the platform id for an
+// agent that only ever lives in Teams. Membership here is what lets an
+// agent-scoped row cover the Teams process at all — and, via hostsForPlatform,
+// what lets an approved teams.microsoft.com exception lift such a row. It does
+// NOT make Teams an AI app: see AI_PROCESSES' `hostApp` note, and note that
+// enforcer-win.ps1 never produces a whole-app block for a host-app process.
 export const PLATFORM_PROCS = Object.freeze({
-  copilot_studio:    ['Copilot', 'M365Copilot'],
-  personal_agent:    ['Copilot', 'M365Copilot'],
+  copilot_studio:    ['Copilot', 'M365Copilot', 'ms-teams'],
+  personal_agent:    ['Copilot', 'M365Copilot', 'ms-teams'],
+  teams_chat_agent:  ['ms-teams'],
   openai_assistant:  ['ChatGPT'],
   custom_gpt:        ['ChatGPT'],
   claude_ai_project: ['Claude'],
@@ -568,11 +870,20 @@ function processNameForEntry(entry) {
 // run through the server's normalizeHost(), so no subdomain/URL handling is
 // needed here — and guessing at it would risk blocking a whole vendor's desktop
 // app off an unrelated subdomain row.
+// A HOST APP (`hostApp: true` — Microsoft Teams) is excluded too, and this is
+// the stronger of the two exclusions: an Inventory toggle on
+// teams.microsoft.com must never synthesize a process_name:'ms-teams' row,
+// because that row is matched process-WIDE by enforcer-win.ps1 and would
+// swallow Enter in every DM, channel and meeting chat in the company's comms
+// client. Stated as its own guard rather than leaning on the flag above, so
+// that flipping useAttachmentWatcher on a host app later cannot quietly
+// re-enable whole-app blocking for it.
 export function processForHost(host) {
   const target = String(host || '').trim().toLowerCase();
   if (!target) return null;
   for (const entry of AI_PROCESSES) {
     if (String(entry.host || '').trim().toLowerCase() !== target) continue;
+    if (entry.hostApp === true) return null;
     if (entry.useAttachmentWatcher === false) return null;
     return processNameForEntry(entry);
   }
@@ -596,11 +907,33 @@ export function processesForHost(host) {
   const names = [];
   for (const entry of AI_PROCESSES) {
     if (String(entry.host || '').trim().toLowerCase() !== target) continue;
+    // Same two exclusions, same reasons, as processForHost — this is the
+    // function synthesizePlatformBlocks actually calls, so the host-app guard
+    // here is the one that stops an Inventory toggle from producing a
+    // whole-app Teams block row.
+    if (entry.hostApp === true) continue;
     if (entry.useAttachmentWatcher === false) continue;
     const name = processNameForEntry(entry);
     if (name && !names.includes(name)) names.push(name);
   }
   return names;
+}
+
+// The process names the PASSIVE watchers may key on — the clipboard poller and
+// the file-dialog / attachment-chip / prompt-text UIA watchers in index.js,
+// plus CFAI_AI_PROCESSES for the keystroke enforcer.
+//
+// Excludes `hostApp: true` entries, and that exclusion IS the privacy property
+// of the host-app feature: Microsoft Teams' presence in AI_PROCESSES must never
+// turn on clipboard scanning, attachment watching or prompt reading across a
+// company's whole communications client. Only the narrow, independently-gated
+// agent-conversation path in enforcer-win.ps1 may ever look at Teams, and it is
+// gated on a blocked agent actually being open.
+export function watcherProcessNames() {
+  return AI_PROCESSES
+    .filter((entry) => entry.hostApp !== true)
+    .map((entry) => processNameForEntry(entry))
+    .filter(Boolean);
 }
 
 // ── Helper env payloads (CFAI_IDE_PROCESSES / CFAI_AI_PANELS) ───────────────
@@ -654,6 +987,10 @@ export function buildAiPanelConfig() {
 // `verified` AND `enforce`, so dropping either here would silently change which
 // side of that gate the surface lands on. `product`/`vendor`/`host` do not — the
 // .ps1 displays nothing and a blocked row carries its own identity fields.
+// The title-mode fields travel alongside the composer-mode ones rather than
+// replacing them: LoadAgentSurfaces branches on `read`, so an entry that does
+// not set it (m365_copilot) ships exactly the payload it always did, with the
+// title fields present and empty and read by nothing.
 export function buildAgentSurfaceConfig() {
   return AGENT_SURFACES.map((surface) => ({
     id: surface.id,
@@ -661,6 +998,14 @@ export function buildAgentSurfaceConfig() {
     controlType: surface.controlType,
     composerNamePrefixes: (surface.composerNamePrefixes || []).slice(),
     genericNames: (surface.genericNames || []).slice(),
+    // 'composer_name' is stated explicitly for an absent `read` rather than
+    // shipped as "", so the C# default and the JS default are the same word in
+    // the same place and cannot drift apart silently.
+    read: surface.read === 'window_title' ? 'window_title' : 'composer_name',
+    titleSeparator: surface.titleSeparator || '',
+    titleSuffix: surface.titleSuffix || '',
+    titleKinds: (surface.titleKinds || []).slice(),
+    hostApp: surface.hostApp === true,
     enforce: surface.enforce === true,
     verified: surface.verified === true,
   }));
