@@ -273,13 +273,17 @@ export const AI_PANELS = [
   // to avoid. The panel is reachable ONLY through the agent-scoped path in
   // enforcer-win.ps1, never through a host toggle.
   //
-  // Ships DETECTION-ONLY (enforce:false, verified:false), the same two-flag
-  // gate every new surface ships behind.
+  // LIVE-VERIFIED and ENFORCING (both flags true). The verification pass ran
+  // 2026-08-30 against a real Microsoft Teams desktop install with a real
+  // blocked agent ("IT Help Desk Agent", a Copilot Studio agent): sending in
+  // that agent's conversation was swallowed, while a 1:1 DM, the "alex, max"
+  // group chat, and a channel post all sent normally, and switching away from
+  // the blocked agent and back correctly released then re-armed the block.
   {
     id: 'teams_composer', product: 'Microsoft Teams', vendor: 'Microsoft', host: null,
     procs: ['ms-teams'], controlType: 'Edit',
     classEquals: 'ck-editor__editable',
-    enforce: false, verified: false,
+    enforce: true, verified: true,
   },
 ];
 
@@ -390,7 +394,20 @@ export const AGENT_SURFACES = [
   // The correct fail direction here is OPEN, and enforcer-win.ps1's CheckFgBlocked
   // enforces that by excluding a host-app surface from all three coarse arms.
   //
-  // Ships INERT (enforce:false, verified:false), like every new surface.
+  // LIVE-VERIFIED and ENFORCING (both flags true). The verification pass ran
+  // 2026-08-30 against a real Microsoft Teams desktop install with a real
+  // blocked agent ("IT Help Desk Agent", a Copilot Studio agent): blocking it
+  // via AI Hub swallowed sends only in that agent's own conversation, while a
+  // 1:1 DM, the default-named "alex, max" group chat, and a channel post all
+  // sent normally — confirming the naming-collision path never triggers on
+  // Teams' own default group-chat naming. Switching away from the blocked
+  // agent released the block, and switching back re-armed it. One accepted
+  // gap, found during this same pass and tracked separately: the
+  // enforcement_block event this produces was not observed reaching the
+  // server's DLP log, even though the enforcer's own EmitBlock call site is
+  // identical to the one every other Enter-swallow already uses — the send
+  // itself is genuinely blocked either way, so this affects audit visibility,
+  // not enforcement, but it needs its own investigation.
   {
     id: 'teams_desktop',
     procs: ['ms-teams'],
@@ -401,8 +418,7 @@ export const AGENT_SURFACES = [
     titleKinds: ['Chat'],
     genericNames: ['Copilot', 'Chat', 'Microsoft Teams', 'Meeting chat'],
     hostApp: true,
-    enforce: false,
-    verified: false,
+    enforce: true, verified: true,
   },
 ];
 

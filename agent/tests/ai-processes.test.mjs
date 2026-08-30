@@ -524,14 +524,17 @@ test('the safety gate holds for every entry: nothing may enforce without being v
   }
 });
 
-test('teams_desktop ships INERT, reads the title, and never falls back to a whole-app block', () => {
+test('teams_desktop ships VERIFIED and ENFORCING, reads the title, and never falls back to a whole-app block', () => {
   const teams = AGENT_SURFACES.find((s) => s.id === 'teams_desktop');
   assert.ok(teams, 'the teams_desktop surface is missing');
-  // Stage 1-2 ship the mechanism, not the enforcement. Both flags false means
-  // enforcer-win.ps1 does nothing at all for Teams: no title read, no
-  // accessibility read, no block.
-  assert.equal(teams.enforce, false);
-  assert.equal(teams.verified, false);
+  // Live-verified 2026-08-30 against a real Microsoft Teams desktop install with
+  // a real blocked Copilot Studio agent ("IT Help Desk Agent"): the send was
+  // swallowed only in that agent's conversation, while a 1:1 DM, a group chat and
+  // a channel post all sent normally, and switching away from the agent released
+  // the block while switching back re-armed it. Both flags true means
+  // enforcer-win.ps1 reads the title and arms the agent-scoped block for Teams.
+  assert.equal(teams.enforce, true);
+  assert.equal(teams.verified, true);
   // The discriminator, and the measured title grammar behind it.
   assert.equal(teams.read, 'window_title');
   assert.equal(teams.titleSeparator, ' | ');
@@ -668,8 +671,8 @@ test('buildAgentSurfaceConfig serialises the catalog without aliasing it', () =>
     titleSuffix: 'Microsoft Teams',
     titleKinds: ['Chat'],
     hostApp: true,
-    enforce: false,
-    verified: false,
+    enforce: true,
+    verified: true,
   });
   // Copies, so a consumer mutating the payload cannot reach back into the catalog.
   entry.procs.push('Notepad');

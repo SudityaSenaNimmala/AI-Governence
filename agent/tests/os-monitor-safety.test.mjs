@@ -2139,11 +2139,17 @@ test('AGENT_SURFACES: an entry may only enforce once a live pass verified it', a
   // existed (a whole-app block), asserted behaviourally against the hypothetical
   // unverified surface in tests/enforcer-panel-block.test.mjs.
   //
-  // m365_copilot is the one entry PAST that gate: verified live 2026-08-27
-  // against a real Microsoft 365 Copilot install with a real added agent, and now
-  // enforcing. If you are here because this test failed after you flipped a flag
-  // on a NEW entry: that is the point. Confirm the live verification actually
-  // happened and record it, rather than loosening this.
+  // Two entries are PAST that gate, each verified live against a real install
+  // with a real blocked agent:
+  //   m365_copilot   — 2026-08-27, Microsoft 365 Copilot with a real added agent
+  //   teams_desktop  — 2026-08-30, Microsoft Teams desktop with a real blocked
+  //                    Copilot Studio agent ("IT Help Desk Agent"): the send was
+  //                    swallowed only in that agent's conversation, while a 1:1
+  //                    DM, a group chat and a channel post were all unaffected,
+  //                    and switching conversations released then re-armed it.
+  // If you are here because this test failed after you flipped a flag on a NEW
+  // entry: that is the point. Confirm the live verification actually happened and
+  // record it, rather than loosening this.
   const { AGENT_SURFACES, buildAgentSurfaceConfig } = await import('../src/os_monitor/ai-processes.js');
   assert.ok(AGENT_SURFACES.length > 0, 'expected at least one agent surface');
   for (const surface of AGENT_SURFACES) {
@@ -2179,14 +2185,16 @@ test('AGENT_SURFACES: an entry may only enforce once a live pass verified it', a
       assert.ok(Array.isArray(entry.composerNamePrefixes) && entry.composerNamePrefixes.length > 0);
     }
   }
-  // teams_desktop ships INERT — Stage 1-2 ship the mechanism, not the
-  // enforcement. It is a HOST APP, so unlike an unverified chat-app surface it
-  // does not even fall back to a whole-app block: it does nothing at all.
+  // teams_desktop is past the gate too, live-verified 2026-08-30. Its hostApp
+  // flag is now LOAD-BEARING rather than latent: with enforcement armed, that
+  // flag is the only thing standing between "block one agent inside Teams" and
+  // "the user cannot message a colleague". It must stay true for as long as this
+  // surface enforces.
   const teams = AGENT_SURFACES.find((s2) => s2.id === 'teams_desktop');
   assert.ok(teams, 'the teams_desktop surface is missing');
-  assert.equal(teams.enforce, false, 'teams_desktop has not had its live pass — it must not enforce');
-  assert.equal(teams.verified, false);
-  assert.equal(teams.hostApp, true);
+  assert.equal(teams.enforce, true, 'teams_desktop was live-verified 2026-08-30 and must stay enforcing');
+  assert.equal(teams.verified, true);
+  assert.equal(teams.hostApp, true, 'teams_desktop enforces, so it must still fail OPEN as a host app');
 });
 
 test('a HOST-APP surface can never fall back to a whole-app block', async () => {

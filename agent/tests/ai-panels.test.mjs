@@ -194,13 +194,14 @@ test('Copilot Chat ships enforce:false and the matcher does not treat that as "d
   // Detection must still fire, or the whole point of shipping it detection-first
   // (exercising the plumbing, gathering telemetry) is lost.
   assert.equal(matchPanelSignature(COPILOT_CHAT)?.id, 'vscode_chat');
-  // …and the non-enforcing panels are exactly the two unverified ones. Both
-  // ship detection-only until a human runs their own live pass:
-  //   vscode_chat    — signature inferred, never probed against a real install
-  //   teams_composer — probed live, but the FEATURE it gates (agent-scoped
-  //                    enforcement inside a general-purpose chat client) has not
-  //                    had its end-to-end pass yet, so it ships inert
-  assert.deepEqual(AI_PANELS.filter((p) => !p.enforce).map((p) => p.id), ['vscode_chat', 'teams_composer']);
+  // …and vscode_chat is now the ONLY non-enforcing panel: its signature was
+  // inferred and has never been probed against a real install, so it stays
+  // detection-only until a human runs that live pass. teams_composer used to sit
+  // alongside it here — not because its signature was unproven, but because the
+  // FEATURE it gates (agent-scoped enforcement inside a general-purpose chat
+  // client) had not had its end-to-end pass. That pass ran live 2026-08-30, so it
+  // enforces now and has left this list.
+  assert.deepEqual(AI_PANELS.filter((p) => !p.enforce).map((p) => p.id), ['vscode_chat']);
 });
 
 // ── Negative cases ───────────────────────────────────────────────────────────
