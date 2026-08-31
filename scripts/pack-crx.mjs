@@ -128,7 +128,30 @@ const cbcmToken = args.get('cbcm-token') || process.env.CBCM_TOKEN || '';
 
 for (const name of ['intune-provision-extension.ps1', 'macos-provision-extension.sh']) {
   let src = readFileSync(join(root, 'scripts', name), 'utf8');
-  src = src.replace(/REPLACE_WITH_ID_FROM_pack-crx/g, extensionId);
+  // WHICH ID THE POLICY MUST NAME IS THE ID OF WHOEVER SIGNS THE PACKAGE THE
+  // BROWSER ACTUALLY DOWNLOADS — and on this deployment that is not necessarily
+  // this script.
+  //
+  // The governance server can pack the extension itself from source
+  // (extension-hosting.js, "packaged_from": "source"), signing with the
+  // CRX_SIGNING_KEY in its own environment and rewriting manifest.json's `key` to
+  // match. That package is internally consistent and installable — it simply has a
+  // different id from the one this script derives from the local .pem.
+  //
+  // Point a force-install policy at the wrong one and the browser fetches the CRX,
+  // finds an id that does not match the policy, and refuses it. Nothing is logged
+  // and the admin console shows a successful policy push, which is the single most
+  // expensive way for this rollout to fail.
+  //
+  // So --id lets the provisioning artifacts name the SERVED id. Get it from the
+  // server itself, which is the only authority on what it will hand out:
+  //   curl <url>/api/v1/extension/extension-info   -> .extension_id / .policy_hint
+  const policyId = args.get('id') || extensionId;
+  if (policyId !== extensionId) {
+    console.log(`\n  NOTE: provisioning scripts will name ${policyId}`);
+    console.log(`        (this local package is ${extensionId} — the server signs with a different key)\n`);
+  }
+  src = src.replace(/REPLACE_WITH_ID_FROM_pack-crx/g, policyId);
   if (enrollSecret) src = src.replace(/REPLACE_WITH_ENROLL_SECRET/g, enrollSecret);
   if (cbcmToken) {
     src = src.replace("$ChromeCbcmToken = ''", `$ChromeCbcmToken = '${cbcmToken}'`)

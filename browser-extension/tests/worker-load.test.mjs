@@ -815,11 +815,37 @@ test('with no managed policy present, managed auto-config is a no-op on install'
 // really does schedule its periodic refreshes, so unref'ing them cannot mask a
 // regression where they stop being scheduled at all.
 test('the worker schedules its periodic refreshes at load', () => {
-  assert.ok(_scheduledIntervals.length > 0,
-    'the worker scheduled no intervals — its periodic refreshes are gone');
-  for (const ms of _scheduledIntervals) {
-    assert.ok(Number.isFinite(ms) && ms > 0, `interval scheduled with a bad period: ${ms}`);
+  assert.ok(chrome._alarmsCreated.length > 0,
+    'the worker created no alarms — its periodic refreshes are gone');
+  for (const { name, periodInMinutes } of chrome._alarmsCreated) {
+    assert.ok(name, 'an alarm was created without a name');
+    assert.ok(Number.isFinite(periodInMinutes) && periodInMinutes > 0,
+      `alarm ${name} scheduled with a bad period: ${periodInMinutes}`);
   }
+});
+
+test('periodic work is scheduled with alarms, never setInterval', () => {
+  // THE BUG THIS GUARDS. The feature-flag poller used to be
+  // `setInterval(refreshFeatureFlags, 2 * 60 * 1000)`. In MV3 that is close to
+  // dead code: Chrome terminates an idle service worker after ~30 seconds and
+  // every timer dies with it, so a two-minute interval fired only on the rare
+  // occasion the worker happened to stay alive that long. In practice a machine
+  // kept whatever flags it fetched at startup, and an admin turning off
+  // enforcement from the dashboard never reached it — silently, because nothing
+  // errors when a timer simply never runs.
+  //
+  // chrome.alarms is the supported mechanism: it wakes the worker on schedule.
+  assert.deepEqual(_scheduledIntervals, [],
+    'a setInterval in an MV3 service worker stops when the worker is terminated — use chrome.alarms');
+});
+
+test('the feature-flag poller is one of those alarms', () => {
+  // The switches behind the dashboard's Settings page reach already-deployed
+  // machines only because this alarm exists.
+  const features = chrome._alarmsCreated.find((al) => /feature/i.test(al.name));
+  assert.ok(features, 'no feature-flag refresh alarm — dashboard toggles would never reach this machine');
+  assert.ok(features.periodInMinutes <= 5,
+    `feature flags refresh every ${features.periodInMinutes} min — an admin disabling enforcement waits that long`);
 });
 
 // --- Identity on a browser-only fleet ------------------------------------------

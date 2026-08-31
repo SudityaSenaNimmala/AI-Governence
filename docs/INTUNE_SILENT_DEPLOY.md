@@ -17,12 +17,16 @@ There are three capture surfaces. Each is deployed differently, but all end up i
 ## How the auto-connect works (already built)
 
 - **Identity beacon** — the agent runs a localhost-only HTTP server on
-  `127.0.0.1:19532-19536` serving `GET /cfai/identity` → `{hostname, user, machineId}`
+  `127.0.0.1:19532-19536` serving `GET /cfai/identity` →
+  `{hostname, user, osUser, identitySource, machineId}`
   (`agent/src/identity-beacon.js`). On startup the extension probes those ports
   (`background/service-worker.js` → `fetchBeacon`) and re-enrolls as
   `<HOSTNAME>-browser-extension`, which the server maps back to that machine's user.
   Result: **browser usage attributes to the same person as the desktop agent**, with no
   browser sign-in and no per-user config.
+- **One identity string across all four surfaces** — see *Part A0* below. The agent
+  reports the corporate UPN, not the OS username, so the desktop agent, the browser
+  extension and the Claude Code CLI all group under one name.
 - **Managed config** — the extension reads `serverUrl` + `enrollSecret` from
   `chrome.storage.managed` (populated by Intune/GPO) and **auto-enrolls on install** and
   whenever the policy changes. Managed policy overrides any local settings and locks the
@@ -38,6 +42,45 @@ Both the force-install list and the managed-config policy target that ID (per br
 
 ---
 
+## Part A0 — One identity across every surface (read this first)
+
+The agent and the extension enrol **separately**, and `server/src/routes/ai-usage.js`
+groups usage by `machines.user` with an **exact string match**. So they only show up
+as one person if they report byte-identical identities. Before 2026-08-31 they did
+not, and the failure was silent — two plausible rows, two plausible names, nothing
+marking them as the same human:
+
+| Surface | Reported | Source |
+|---|---|---|
+| Desktop agent | `SatyaPinniti` | `os.userInfo().username` |
+| Browser extension | `satya.pinniti@cloudfuze.com` | Intune UPN via managed policy |
+| Claude Code CLI | `satya.pinniti@cloudfuze.com` | OTel `user.email` |
+
+**The agent now resolves the same corporate UPN** (`agent/src/util/corporate-identity.js`):
+
+| # | Source | `identity_source` | Notes |
+|---|---|---|---|
+| 1 | `whoami /upn` | `session_upn` | The tracker runs in the **user's own session**, so this names the person at the keyboard — correct even on a shared machine |
+| 2 | `HKLM\SOFTWARE\Microsoft\Enrollments\*\UPN` | `intune_upn` | The same key the provisioning script reads, so a 1:1 laptop matches by construction |
+| 3 | `os.userInfo().username` | `os_user` | Local/unenrolled account, or a UPN outside the domain. **Will not merge** — the tracker logs a warning when it lands here |
+
+Guarded by `CFAI_IDENTITY_DOMAIN`, the agent-side twin of the extension's
+`identityDomain`: a UPN from another tenant is refused rather than attributed.
+
+**Case is folded server-side, and it has to be.** On one real Entra-joined machine
+`whoami /upn` returns `satya.pinniti@cloudfuze.com` while the enrolment registry
+key holds `Satya.Pinniti@cloudfuze.com`. Exact-match grouping splits those into two
+rows, so `routes/enroll.js` lowercases email-shaped identities on enrol. An OS
+username is left alone — it is a display name, not an address.
+
+**Install order is now belt-and-braces, not load-bearing.** The extension gets the
+UPN from managed policy on its first enrolment, so a machine whose beacon is slow or
+absent is still attributed to the right person. What the beacon still supplies is the
+real **hostname**, which is what links the browser's enrolment to the agent's machine
+record. Order the apps anyway (Part A, step 4) — it costs nothing.
+
+---
+
 ## Part A — Desktop agent `.exe` (Intune Win32 app, zero clicks)
 
 The agent has a dedicated **silent, all-users** install mode so nobody double-clicks
@@ -47,9 +90,23 @@ interactive session** (which is the only place keystroke/UIA capture works). It 
 admin — which the Intune SYSTEM context already has — and prints to the Intune log, no
 window.
 
-1. Build the binary (Windows only — Node SEA is platform-bound):
-   `npm run build:claude-tracker` from `AI-Governence/agent/`. Keep
-   `CloudFuzeClaudeTracker.exe` and `prompt-watcher.ps1` **together**.
+1. Build the binary (Windows only — Node SEA is platform-bound). Configuration is
+   baked in at build time, so set all three or the fleet build is wrong in a way
+   nothing at install time will tell you:
+
+   ```bash
+   cd AI-Governence/agent
+   CFAI_SERVER_URL=https://agentgovernence.cftools.live \
+   CFAI_ENROLL_SECRET=<the server's ENROLL_SECRET> \
+   CFAI_IDENTITY_DOMAIN=cloudfuze.com \
+   npm run build:claude-tracker
+   ```
+
+   The build prints the server and the identity domain it baked in — read those two
+   lines. An empty domain means the UPN guard is **off** and a machine enrolled into
+   another tenant would be attributed under that tenant's UPN.
+
+   Keep `CloudFuzeClaudeTracker.exe` and `prompt-watcher.ps1` **together**.
 2. Wrap both files with the **Microsoft Win32 Content Prep Tool**
    (`IntuneWinAppUtil.exe`) → `.intunewin`.
 3. Intune → **Apps → Windows → Add → Windows app (Win32)**:
@@ -59,6 +116,29 @@ window.
    - **Detection rule:** file exists →
      `%ProgramData%\CloudFuze\ClaudeTracker\CloudFuzeClaudeTracker.exe`.
    - Assign to device groups as **Required**.
+4. **Order the extension behind it.** Package `intune-provision-extension.ps1` as a
+   second Win32 app and set this agent app as its **dependency**, so Intune installs
+   the agent first. Identity does not depend on this (Part A0), but the beacon — and
+   so the hostname link — comes up before the extension first enrols.
+
+### Machines that were in the pilot
+
+The old double-click installer was **per-user**: `%LOCALAPPDATA%` plus an `HKCU\…\Run`
+value. The fleet installer is machine-wide. Deploying the second over the first used
+to leave **both** autostarts, and at the next logon they raced: the pilot copy started
+first, took the `19531` single-instance lock and beacon port `19532`, and the fleet
+copy found the lock held and exited. The machine then kept running the pilot build
+forever — still reporting the OS username, still not merging — while the dashboard
+showed an agent present and healthy.
+
+Two mechanisms now prevent that, and `--install-system` prints what it did:
+
+- the installer sweeps `HKEY_USERS\<sid>\…\Run` for the stale value across every
+  loaded hive (**including Entra `S-1-12-1-…` SIDs**, which is most of this estate —
+  matching only `S-1-5-21-…` finds nobody here);
+- the machine-wide copy, at startup, removes this user's stale autostart and stops any
+  other instance **before** taking the lock, so it always wins rather than politely
+  deferring to an older build.
 
 No user click, no console, no per-user setup. Anyone who logs in gets the agent running
 in their session, and its identity beacon comes up automatically for the extension to
@@ -405,6 +485,13 @@ Ingest the **Edge** and **Google Chrome** ADMX, then set:
 Valid deployment, but identity works differently and the difference is silent, so
 read this before choosing it.
 
+> **Where this still applies (2026-08-31): macOS only.** Windows now deploys the
+> desktop agent (Part A) and sets `$BrowserOnly = $false`. The tracker needs Windows
+> UI Automation and exits on darwin, so a Mac has no beacon to wait for and keeps
+> `BROWSER_ONLY=1`. Mac identity therefore comes from the `userEmail` the macOS
+> script pushes, guarded by `identityDomain` — the name still merges with everything
+> else, but **desktop-app AI usage on a Mac is not captured at all**.
+
 ### What you get with zero user action
 
 Everything enforcement-related works with no identity at all: blocking AI apps and
@@ -562,12 +649,19 @@ CLI prompts/tokens then flow to `POST /api/v1/otel/v1/logs` and attribute per us
 
 ## Verification
 
-1. **Agent**: on a test box, browse to `http://127.0.0.1:19532/cfai/identity` — you should
-   get `{hostname,user,machineId}`.
-2. **Extension**: `edge://extensions` / `chrome://extensions` shows the extension
+1. **Agent**: on a test box, browse to `http://127.0.0.1:19532/cfai/identity`. `user`
+   must be the **corporate email**, not the OS account name, and `identitySource`
+   should read `session_upn` or `intune_upn` — `os_user` means this machine will not
+   merge with its own extension. (If the tracker's log says the beacon landed on
+   19533+, something else is holding 19532: on a pilot machine that is usually an old
+   per-user copy that the supersede step above should have cleared.)
+2. **Same name on both records**: `GET /api/v1/machines` — the agent's row and the
+   `<HOST>-browser-extension` row must carry the **same** `user` string. This is the
+   check that actually proves the merge; the rest is inference.
+3. **Extension**: `edge://extensions` / `chrome://extensions` shows the extension
    **Installed by your organization** and non-removable. Its options page shows
    *"Configured by your organization (managed policy)."*
-3. **End-to-end**: send a prompt on claude.ai and in Claude Desktop, then open the
+4. **End-to-end**: send a prompt on claude.ai and in Claude Desktop, then open the
    **AI Usage** dashboard — both should appear under the same real user within a minute.
 
 ## Notes / limits

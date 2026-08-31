@@ -97,7 +97,14 @@ if (values.proxy) {
 
   // Start identity beacon so the browser extension can auto-discover this machine
   const { startIdentityBeacon } = await import('./identity-beacon.js');
-  startIdentityBeacon({ machineId: creds?.machineId || 'unknown', log: log.child('beacon') });
+  // Resolved here rather than read off `config`: --proxy is a standalone subcommand
+  // handled at module top level, and `config` does not exist until main() runs.
+  const { resolveCorporateUser } = await import('./util/corporate-identity.js');
+  startIdentityBeacon({
+    machineId: creds?.machineId || 'unknown',
+    user: resolveCorporateUser(),
+    log: log.child('beacon'),
+  });
   await runProxy({
     serverUrl: creds?.serverUrl || values.server,
     token: creds?.token,
@@ -144,7 +151,7 @@ async function main() {
 
     // Start identity beacon so the browser extension can auto-discover this machine
     const { startIdentityBeacon } = await import('./identity-beacon.js');
-    startIdentityBeacon({ machineId: config.machineId, log: log.child('beacon') });
+    startIdentityBeacon({ machineId: config.machineId, user: config.user, log: log.child('beacon') });
 
     const monitor = new OsMonitor({
       serverUrl: creds?.serverUrl || values.server,
@@ -262,6 +269,9 @@ async function main() {
         serverUrl: values.server,
         machineId: config.machineId,
         hostname: config.hostname,
+        // Was omitted, so a machine enrolled by the full agent carried no user at
+        // all and could not be matched to a person until something else set one.
+        user: config.user,
         enrollSecret: values['enroll-secret'],
       });
       log.info(`Enrolled. Token stored at ~/.cloudfuze-aigov/credentials.json`);

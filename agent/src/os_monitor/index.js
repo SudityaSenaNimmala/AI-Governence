@@ -23,6 +23,7 @@ import {
 } from './ai-processes.js';
 import { scan, lengthBucket, BLOCK_PATTERNS, getBlockPatterns, isTextReadable, isBinaryParseable, isImage, isArchive } from './classifier.js';
 import { PolicySync } from './policy-sync.js';
+import { FeatureSync } from './feature-sync.js';
 import { buildFileUploadEvent } from './file-handler.js';
 import { FileDialogWatcher } from './file-dialog-watcher.js';
 import { AttachmentWatcher } from './attachment-watcher.js';
@@ -113,6 +114,30 @@ export class OsMonitor {
         this.enforcer.updateBlockPatterns(blockPatterns);
       },
     });
+    // Fleet-wide feature switches, thrown from the dashboard's Settings page.
+    //
+    // WHAT THIS REPLACES. The keystroke enforcer used to be controlled ONLY by
+    // CFAI_ENFORCER_ENABLED, an Electron checkbox passed into this child process
+    // as an env var (see settings-env.js). That made it per-machine and invisible:
+    // a user could switch blocking off locally and the dashboard would still show
+    // it running. The env var is now only the value used until the first poll
+    // answers — after that the server decides, for every machine at once.
+    //
+    // Every subsystem below already had start()/stop(), so a flag change starts or
+    // stops the real thing rather than merely being recorded.
+    this.featureSync = new FeatureSync({
+      serverUrl,
+      log,
+      onChange: ({ features, changed }) => this.#applyFeatures(features, changed),
+    });
+    // Tracks what is actually running, so a poll that reports a flag we already
+    // honour does not restart a healthy subsystem — restarting the enforcer means
+    // tearing down and reinstalling a keyboard hook, which is not free.
+    this.running = {
+      clipboard_monitor: false,
+      dlp: false,
+      agent_enforcer: false,
+    };
     this.currentFocus = null;  // { pid, process, title, aiInfo? }
     // Map<"seq|process", lastFiredAtMs> — used to suppress duplicate fires
     // when the user pastes the same clipboard contents repeatedly into the
@@ -800,20 +825,17 @@ export class OsMonitor {
       this.log?.info(`os_monitor: OVERRIDE send into ${ai.product} — [${ev.patterns}]`);
     });
 
-    this.poller.start();
-    this.dialogWatcher.start();
-    this.attachmentWatcher.start();
-    this.promptWatcher.start();
-
-    if (this.enforcerEnabled) {
-      this.enforcer.start();
-      // Spawn the watchdog alongside the enforcer — and only alongside it.
-      // Nothing else in the monitor installs a keyboard hook, so there is
-      // nothing for it to reap when the enforcer is off.
-      this.enforcerWatchdog = spawnEnforcerWatchdog({ parentPid: process.pid, log: this.log });
-    } else {
-      this.log?.info('os_monitor: keystroke enforcer disabled by settings — passive DLP watchers still active');
-    }
+    // Start from what we know before the server has answered: everything on,
+    // except an enforcer the local env var explicitly disabled. Waiting for the
+    // first poll instead would leave a minute of every boot ungoverned.
+    this.#applyFeatures(
+      { clipboard_monitor: true, dlp: true, agent_enforcer: this.enforcerEnabled },
+      ['clipboard_monitor', 'dlp', 'agent_enforcer'],
+    );
+    // Then let the fleet setting take over. It reports every flag as changed on
+    // its first successful fetch, so anything the admin has turned off stops
+    // within a poll of startup.
+    this.featureSync.start();
 
     if (process.platform === 'win32') {
       this.log?.info(
@@ -833,8 +855,76 @@ export class OsMonitor {
     return this.enforcer.tokenize(blockId);
   }
 
+  /**
+   * Start or stop subsystems to match the fleet settings.
+   *
+   * Only keys in `changed` are acted on. Re-applying an unchanged flag would tear
+   * down and reinstall a working keyboard hook every poll — expensive, and a
+   * window in which sends are not blocked.
+   */
+  #applyFeatures(features, changed) {
+    const want = (key) => features[key] !== false;   // unknown → keep governing
+
+    // Clipboard + typed-prompt capture. These are the passive watchers: they see
+    // what is going into an AI app but never stop it.
+    if (changed.includes('clipboard_monitor')) {
+      const on = want('clipboard_monitor');
+      if (on !== this.running.clipboard_monitor) {
+        if (on) { this.poller.start(); this.promptWatcher.start(); }
+        else    { this.poller.stop();  this.promptWatcher.stop(); }
+        this.running.clipboard_monitor = on;
+        this.log?.info(`os_monitor: clipboard + prompt monitoring ${on ? 'ON' : 'OFF'} (fleet setting)`);
+      }
+    }
+
+    // File-based DLP — the Open dialog and drag-drop watchers exist only to catch
+    // files on their way into an AI app.
+    if (changed.includes('dlp')) {
+      const on = want('dlp');
+      if (on !== this.running.dlp) {
+        if (on) { this.dialogWatcher.start(); this.attachmentWatcher.start(); }
+        else    { this.dialogWatcher.stop();  this.attachmentWatcher.stop(); }
+        this.running.dlp = on;
+        this.log?.info(`os_monitor: file DLP watchers ${on ? 'ON' : 'OFF'} (fleet setting)`);
+      }
+    }
+
+    // The keystroke send-blocker, and its watchdog. The watchdog exists solely to
+    // release the keyboard hook if this process is hard-killed, so it lives and
+    // dies with the enforcer — leaving it running with no hook to reap would have
+    // it watching for something that cannot happen.
+    if (changed.includes('agent_enforcer')) {
+      const on = want('agent_enforcer');
+      if (on !== this.running.agent_enforcer) {
+        if (on) {
+          this.enforcer.start();
+          this.enforcerWatchdog = spawnEnforcerWatchdog({ parentPid: process.pid, log: this.log });
+        } else {
+          // Order matters, and it is the same order stop() uses: kill the hook
+          // BEFORE reaping the watchdog, so the watchdog finds nothing to act on
+          // and exits without killing anything.
+          this.enforcer.stop();
+          if (this.enforcerWatchdog) {
+            try { this.enforcerWatchdog.kill(); } catch {}
+            this.enforcerWatchdog = null;
+          }
+        }
+        this.running.agent_enforcer = on;
+        // enforcerEnabled is what policySync's onChange consults before pushing
+        // new patterns to the hook; leaving it stale would let a policy poll
+        // restart a hook the admin just switched off.
+        this.enforcerEnabled = on;
+        this.log?.info(
+          `os_monitor: keystroke send-blocker ${on ? 'ON' : 'OFF'} (fleet setting)`
+          + (on ? '' : ' — passive DLP watchers still active'),
+        );
+      }
+    }
+  }
+
   stop() {
     this.#stopAttachHoldRefresh();
+    this.featureSync.stop();
     this.poller.stop();
     this.dialogWatcher.stop();
     this.attachmentWatcher.stop();

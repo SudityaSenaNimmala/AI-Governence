@@ -1,5 +1,6 @@
 import os from 'node:os';
 import { getMachineId } from './util/machine.js';
+import { resolveCorporateUser } from './util/corporate-identity.js';
 import { getUserPaths } from './util/paths.js';
 
 // Version is injected at build time by esbuild's `define`. Falls back for dev runs.
@@ -19,7 +20,10 @@ export async function loadConfig({ only = [], skip = [] } = {}) {
     hostname: os.hostname(),
     osRelease: os.release(),
     machineId,
-    user: os.userInfo().username,
+    // The corporate UPN where there is one, so this agent, the browser extension
+    // and the Claude Code CLI all name the same person with the same string.
+    // Falls back to the OS username on a machine with no work identity.
+    user: resolveCorporateUser(),
     paths,
     only,
     skip,

@@ -6655,6 +6655,156 @@ function InstallationsView() {
 // Tab definitions with feature keys. Tabs where feat is disabled are filtered
 // out at render time. If all tabs in a group are disabled, the group won't
 // appear in the nav (handled by SideNav's own filter).
+// ── Settings — the fleet-wide feature switches ───────────────────────────────
+//
+// These reach the browser extension and the desktop agent on every deployed
+// machine within about a minute, because both poll GET /api/v1/features. Nothing
+// needs repacking or reinstalling.
+//
+// TWO KINDS OF SWITCH ARE SHOWN APART, deliberately. Turning off a dashboard
+// section changes what an admin sees. Turning off DLP or the send-blocker changes
+// what happens on someone's laptop — data that would have been stopped now leaves.
+// Presenting them in one undifferentiated list would make those look equivalent.
+function FeatureSettingsView() {
+  const [registry, setRegistry] = useState(null);
+  const [state, setState] = useState(null);
+  const [saving, setSaving] = useState(null);     // key currently in flight
+  const [err, setErr] = useState("");
+  const [audit, setAudit] = useState([]);
+
+  const load = async () => {
+    try {
+      const [reg, cur] = await Promise.all([
+        adminFetch("/features/registry").then((r) => r.json()),
+        adminFetch("/features").then((r) => r.json()),
+      ]);
+      setRegistry(reg); setState(cur);
+    } catch (e) { setErr("Could not load settings. " + (e?.message || "")); }
+    try {
+      const res = await adminFetch("/features/audit?limit=10");
+      if (res.ok) setAudit(await res.json());
+    } catch { /* the audit trail is context, not a blocker */ }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const toggle = async (key, next) => {
+    setSaving(key); setErr("");
+    try {
+      const res = await adminFetch("/features", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ features: { [key]: next } }),
+      });
+      if (res.status === 401 || res.status === 403) {
+        setErr("Not authorised to change settings. See the note about VITE_ADMIN_TOKEN.");
+      } else if (!res.ok) {
+        setErr((await res.json().catch(() => ({}))).error || `Server returned ${res.status}`);
+      } else {
+        // Re-read rather than trusting the click: a compliance pack may have
+        // refused the change, and the page must show what is actually true.
+        await load();
+      }
+    } catch (e) { setErr("Could not save. " + (e?.message || "")); }
+    setSaving(null);
+  };
+
+  if (err && !registry) return <div className="aihub_error">{err}</div>;
+  if (!registry || !state) return <div className="aihub_text_muted">Loading settings…</div>;
+
+  const rows = registry.features;
+  const groups = [...new Set(rows.map((f) => f.group))];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <div className="aihub_card">
+        <div className="aihub_text_primary" style={{ fontWeight: 600 }}>How these apply</div>
+        <div className="aihub_text_muted" style={{ marginTop: 6, lineHeight: 1.6 }}>
+          A change here reaches every browser extension and desktop agent already
+          installed, usually within a minute. Nothing needs reinstalling.
+          {state.updated_at ? ` Last changed ${new Date(state.updated_at).toLocaleString()}.` : ""}
+        </div>
+      </div>
+
+      {err ? <div className="aihub_error">{err}</div> : null}
+
+      {groups.map((group) => (
+        <div key={group} className="aihub_card">
+          <div className="aihub_text_primary" style={{ fontWeight: 600, marginBottom: 4 }}>{group}</div>
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            {rows.filter((f) => f.group === group).map((f) => {
+              const cur = state.features[f.key] || {};
+              const on = cur.status === "enabled";
+              const locked = Array.isArray(cur.locked_by) && cur.locked_by.length > 0;
+              // Where this switch reaches. Without it an admin cannot tell a
+              // cosmetic tab toggle from one that stops enforcement on laptops.
+              const reaches = (f.surfaces || []).filter((s) => s !== "dashboard");
+              return (
+                <div key={f.key} style={{
+                  display: "flex", alignItems: "flex-start", gap: 14,
+                  padding: "12px 0", borderTop: "1px solid rgba(128,128,128,.18)",
+                }}>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={on}
+                    aria-label={f.label}
+                    disabled={locked || saving === f.key}
+                    onClick={() => toggle(f.key, !on)}
+                    title={locked ? `Required by ${cur.locked_by.join(", ")}` : ""}
+                    style={{
+                      flex: "0 0 auto", width: 40, height: 22, borderRadius: 11, marginTop: 2,
+                      border: "1px solid rgba(128,128,128,.35)",
+                      background: on ? "#1f7a4d" : "rgba(128,128,128,.28)",
+                      cursor: locked ? "not-allowed" : "pointer",
+                      opacity: saving === f.key ? 0.5 : 1,
+                      position: "relative", transition: "background .15s",
+                    }}
+                  >
+                    <span style={{
+                      position: "absolute", top: 2, left: on ? 20 : 2,
+                      width: 16, height: 16, borderRadius: "50%", background: "#fff",
+                      transition: "left .15s",
+                    }} />
+                  </button>
+                  <div style={{ minWidth: 0 }}>
+                    <div className="aihub_text_primary">{f.label}</div>
+                    <div className="aihub_text_muted" style={{ fontSize: 12.5, marginTop: 2 }}>
+                      {reaches.length
+                        ? `Applies on every ${reaches.join(" and ")} in the fleet.`
+                        : "Dashboard only — this does not change what is enforced."}
+                    </div>
+                    {locked ? (
+                      <div className="aihub_text_muted" style={{ fontSize: 12.5, marginTop: 4 }}>
+                        Locked on by {cur.locked_by.join(", ")}. Undeploy that policy pack to change it.
+                        {cur.override_suppressed
+                          ? " Your saved preference is off and will apply if the pack is removed."
+                          : ""}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+
+      {audit.length ? (
+        <div className="aihub_card">
+          <div className="aihub_text_primary" style={{ fontWeight: 600, marginBottom: 8 }}>Recent changes</div>
+          {audit.map((row, i) => (
+            <div key={i} className="aihub_text_muted" style={{ fontSize: 12.5, padding: "3px 0" }}>
+              {new Date(row.at).toLocaleString()} — {row.actor} —{" "}
+              {row.changes.map((c) => `${c.key}: ${c.from} → ${c.to}`).join(", ")}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 const TAB_GROUPS_RAW = {
   Inventory: {
     title: "Inventory",
@@ -6706,6 +6856,10 @@ const TAB_GROUPS_RAW = {
       { slug: "installations",  label: "Installations",  component: InstallationsView,  feat: "installations" },
       { slug: "integrations",   label: "Integrations",   component: IntegrationsView,   feat: "integrations" },
       { slug: "server-monitor", label: "Server Monitor", component: ServerMonitorView,  feat: "server_monitor" },
+      // Deliberately carries no `feat` of its own. Every other tab can be hidden
+      // by a feature flag; this is the page those flags are set from, so gating it
+      // behind one would let an admin switch off the only way back.
+      { slug: "settings",       label: "Settings",       component: FeatureSettingsView },
     ],
   },
 };

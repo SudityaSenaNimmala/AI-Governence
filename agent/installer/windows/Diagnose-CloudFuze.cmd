@@ -23,8 +23,14 @@ echo [3] Scheduled task (all-users logon)
 schtasks /Query /TN "CloudFuze\ClaudeTracker" /V /FO LIST 2>&1 | findstr /I "TaskName Status Run Author Logon Next Last"
 echo.
 
-echo [4] Identity beacon (should return JSON with hostname/user)
-powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:19532/cfai/identity).Content } catch { 'beacon NOT responding: ' + $_.Exception.Message }"
+REM PROBES ALL FIVE PORTS, not just 19532. The beacon falls through to 19533+ when
+REM something already holds 19532 — which on a machine that was in the pilot is an
+REM old per-user tracker. Checking only 19532 reported 'NOT responding' in exactly
+REM that case: the beacon was fine, and the real fault (a squatter defining this
+REM machine's identity) went unseen. The extension takes the FIRST port that answers,
+REM so which port replies is the diagnosis, not a detail.
+echo [4] Identity beacon - 'user' must be the CORPORATE EMAIL, not the OS account name
+powershell -NoProfile -Command "$ok=0; foreach ($p in 19532..19536) { try { $c=(Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 ('http://127.0.0.1:'+$p+'/cfai/identity')).Content; if ($ok -eq 0 -and $p -ne 19532) { Write-Output '   WARNING: 19532 is held by something else. The extension takes the FIRST port that answers, so that other process defines this machine identity - check [1] for a stale per-user install.' }; $ok=1; Write-Output ('   port '+$p+': '+$c) } catch { Write-Output ('   port '+$p+': no answer') } }; if ($ok -eq 0) { Write-Output '   beacon NOT responding on any port 19532-19536' }"
 echo.
 
 echo [5] Last 15 log lines

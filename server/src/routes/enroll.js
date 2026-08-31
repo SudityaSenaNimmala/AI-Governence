@@ -1,6 +1,7 @@
 import { ENROLL_SECRET, signMachineToken, constantTimeEqual } from '../auth.js';
 import { a } from '../util.js';
 import { resolveProfiles } from './identity.js';
+import { normalizeIdentity } from '../lib/identity-normalize.js';
 
 export function mountEnroll(app, db) {
   app.post('/api/v1/enroll', a(async (req, res) => {
@@ -14,7 +15,25 @@ export function mountEnroll(app, db) {
 
     const now = new Date();
     const set = { id: machineId, hostname, last_seen: now };
-    if (user) set.user = user;   // only overwrite when the client actually sends one
+    // Only overwrite when the client actually sends one.
+    //
+    // NORMALISED, because the same person arrives spelled two ways. Windows hands
+    // `whoami /upn` back as "satya.pinniti@cloudfuze.com" and the Intune
+    // enrolment registry key as "Satya.Pinniti@cloudfuze.com" — verified on a
+    // real Entra-joined machine, not hypothetical. ai-usage.js groups by this
+    // field with an exact match, so without folding case the desktop agent and
+    // the browser extension still land in two rows and every other part of the
+    // UPN alignment is defeated by capitalisation.
+    //
+    // Only email-shaped values are lowercased. An OS username is left alone: it
+    // is a display name for a Windows account, and "SatyaPinniti" is how the
+    // person expects to see it.
+    // Shared with the access-request path deliberately: an identity normalised
+    // here and not there is one human displayed as two.
+    if (user) {
+      const u = normalizeIdentity(user);
+      if (u) set.user = u;
+    }
     if (claudeAccountEmail) set.claude_account_email = String(claudeAccountEmail).toLowerCase();
     if (displayName) set.display_name = displayName;
     if (req.body?.type) set.type = req.body.type;  // 'server-monitor' or 'desktop-agent'

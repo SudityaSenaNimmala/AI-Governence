@@ -124,6 +124,10 @@ const binaryPath = join(outDir, binaryName);
 
 const SERVER_URL = process.env.CFAI_SERVER_URL || 'http://localhost:8787';
 const ENROLL_SECRET = process.env.CFAI_ENROLL_SECRET || 'dev-enroll-secret-change-me';
+// Corporate domain for the UPN guard. Empty by default so a dev build still runs;
+// a FLEET build must set it, or a machine enrolled into another tenant enrols
+// under that tenant's UPN.
+const IDENTITY_DOMAIN = process.env.CFAI_IDENTITY_DOMAIN || '';
 
 async function bundle() {
   console.log('[1/3] bundling with esbuild…');
@@ -142,6 +146,7 @@ async function bundle() {
       __CFAI_SERVER_URL__: JSON.stringify(SERVER_URL),
       __CFAI_ENROLL_SECRET__: JSON.stringify(ENROLL_SECRET),
       __CFAI_TRACKER_VERSION__: JSON.stringify(pkg.version),
+      __CFAI_IDENTITY_DOMAIN__: JSON.stringify(IDENTITY_DOMAIN),
     },
     minify: false,
     sourcemap: false,
@@ -151,6 +156,7 @@ async function bundle() {
   const s = await stat(bundlePath);
   console.log(`   ${bundlePath} (${(s.size / 1024).toFixed(1)} KB)`);
   console.log(`   server baked in: ${SERVER_URL}`);
+  console.log(`   identity domain: ${IDENTITY_DOMAIN || '(none — dev build, UPN guard OFF)'}`);
   console.log(`   enroll secret baked in: ${ENROLL_SECRET ? 'yes' : 'NO — set CFAI_ENROLL_SECRET'}`);
 }
 

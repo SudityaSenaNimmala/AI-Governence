@@ -1,0 +1,16 @@
+# Windows batch files MUST be CRLF.
+#
+# cmd.exe mis-parses an LF-only .cmd: it eats a leading character from some lines,
+# so `REM CloudFuze …` runs as `CloudFuze …` and `setlocal` runs as `etlocal`, and
+# the script fails with "'CloudFuze' is not recognized as an internal or external
+# command" instead of doing anything. All three installer scripts shipped that way
+# — verified by running the same file twice, LF vs CRLF, on Windows 11.
+#
+# These are checked out on Linux CI and on macOS too, hence pinning eol rather than
+# relying on core.autocrlf, which is a per-clone setting nobody sets.
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+
+# The PowerShell helpers are read by powershell.exe, which is tolerant of LF, but
+# they sit beside the .cmd files and are edited together — keep them consistent.
+*.ps1  text eol=crlf
