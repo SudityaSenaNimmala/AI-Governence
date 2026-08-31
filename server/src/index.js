@@ -19,6 +19,7 @@ import { mountDiscovered } from './routes/discovered.js';
 import { mountClassifications } from './routes/classifications.js';
 import { mountAiPlatforms } from './routes/ai-platforms.js';
 import { mountAiSurfaces } from './routes/ai-surfaces.js';
+import { mountFeatureSettings } from './routes/feature-settings.js';
 import { mountRouting } from './routes/routing.js';
 import { mountIdentity, resolveProfiles } from './routes/identity.js';
 import { mountRiskScore } from './routes/risk-score.js';
@@ -80,41 +81,16 @@ app.get('/api/v1/health', (req, res) => {
 });
 
 // ── Feature flags (server-driven) ────────────────────────────────────────────
-// All features default to true. Set FEAT_<NAME>=false in server/.env to disable.
-// Dashboard, browser extension, and desktop agent all read this endpoint.
-(() => {
-  // One toggle per feature — controls dashboard tab + extension + agent together.
-  const FEATURES = {
-    overview:           { label: 'Overview' },
-    ai_systems:         { label: 'AI Systems — registry + platform blocking (extension)' },
-    agents_mcp:         { label: 'Agents & MCP — dashboard + MCP/agent discovery (agent)' },
-    dlp:                { label: 'DLP — dashboard + scanning + guardrails (extension)' },
-    claude_usage:       { label: 'Claude Usage' },
-    policies:           { label: 'Policies' },
-    risk_scores:        { label: 'Risk Scores' },
-    access_requests:    { label: 'Access Requests — dashboard + access gate (extension)' },
-    agent_governance:   { label: 'Agent Governance' },
-    installations:      { label: 'Installations' },
-    integrations:       { label: 'Integrations' },
-    server_monitor:     { label: 'Server Monitor' },
-    sdk:                { label: 'Developer SDK' },
-    session_replay:     { label: 'Session Replay — dashboard + recording (extension)' },
-    model_routing:      { label: 'Model Routing — dashboard + enforcement (extension)' },
-    endpoint_scan:      { label: 'Endpoint Scan — AI tool discovery (agent)' },
-    clipboard_monitor:  { label: 'Clipboard Monitor — prompt monitoring (agent)' },
-  };
-
-  app.get('/api/v1/features', (req, res) => {
-    const result = {};
-    for (const [key, def] of Object.entries(FEATURES)) {
-      const envKey = 'FEAT_' + key.toUpperCase();
-      const envVal = process.env[envKey];
-      const enabled = envVal !== 'false' && envVal !== '0';
-      result[key] = { label: def.label, status: enabled ? 'enabled' : 'disabled' };
-    }
-    res.json({ features: result });
-  });
-})();
+// The map that used to live here now sits in lib/feature-registry.js and the route
+// in routes/feature-settings.js, because this endpoint became writable.
+//
+// It was read-only and sourced only from FEAT_* env vars, so turning a feature off
+// meant editing server/.env and restarting — impossible from the dashboard, and
+// impossible at all without shell access to the host. The switches existed but
+// nobody could throw them. The env vars remain as the floor beneath the stored
+// value, so a deployment that sets them behaves exactly as it did.
+//
+// Mounted with the other routes below; see mountFeatureSettings.
 
 mountEnroll(app, db);
 mountReports(app, db);
@@ -162,6 +138,10 @@ resolveProfiles(db, await db.collection('machines').find({}).project({ _id: 0 })
   .then(s => console.log(`[identity] resolved ${s.total_profiles} employee profiles (${s.created} new, ${s.updated} updated)`))
   .catch(e => console.warn('[identity] auto-resolve failed:', e.message));
 mountAiUsage(app, db);
+// Fleet-wide feature switches — GET/PUT /api/v1/features. Polled by the dashboard,
+// the browser extension and the desktop agent, so a toggle reaches already-deployed
+// machines without a repack or a reinstall.
+mountFeatureSettings(app, db);
 mountClaudeUsage(app, db);
 mountOtel(app, db);
 mountSignals(app, db);

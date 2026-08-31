@@ -1209,6 +1209,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // ── Feature flags — fetched from server, cached in storage ──────────────────
+//
+// These are the fleet-wide switches an admin throws from the dashboard's Settings
+// page (GET/PUT /api/v1/features). Turning one off here stops that enforcement on
+// every machine already running the extension — no repack, no reinstall.
+//
+// FAIL-SAFE RULES, and the reason for each. They match the ones policy-sync.js
+// applies to pattern policy, because the failure modes are identical:
+//   - A failed fetch keeps the cached flags. Falling back to "all on" would look
+//     like a successful sync while re-enabling something the admin disabled.
+//   - A malformed body is ignored for the same reason.
+//   - Never-fetched means everything on (see isFeatureOn). This is a governance
+//     product, so the state to fall back to is the governed one.
 async function refreshFeatureFlags() {
   try {
     const config = await getConfig();
@@ -1219,22 +1231,50 @@ async function refreshFeatureFlags() {
     if (!urls.includes('http://localhost:8787')) urls.push('http://localhost:8787');
     for (const base of urls) {
       try {
-        const res = await fetch(`${base}/api/v1/features`, { signal: AbortSignal.timeout(3000) });
+        // ?surface=extension trims the payload to the flags this surface actually
+        // gates on — the dashboard-only ones (Overview, Installations, …) change
+        // nothing here and would just be noise in storage.
+        const res = await fetch(`${base}/api/v1/features?surface=extension`, {
+          signal: AbortSignal.timeout(3000),
+        });
         if (!res.ok) continue;
         const data = await res.json();
-        if (data?.features) {
-          await setStored('cfai.features', data);
-          chrome.storage.local.set({ 'cfai.features': data });
-          return;
+        if (!data?.features || typeof data.features !== 'object') continue;
+
+        const prev = await getStored('cfai.features');
+        await setStored('cfai.features', data);
+
+        // Content scripts re-read this through chrome.storage.onChanged, so an
+        // already-open tab picks the change up without navigating.
+        if (data.version && data.version !== prev?.version) {
+          const off = Object.entries(data.features)
+            .filter(([, v]) => v?.status === 'disabled').map(([k]) => k);
+          console.info(`[cfai] features ${data.version}`
+            + (off.length ? ` — disabled: ${off.join(', ')}` : ' — all on'));
         }
+        return;
       } catch {}
     }
   } catch {}
 }
-// Refresh on startup, again after 3s (in case server was slow), then every 2 minutes
+
+// WHY AN ALARM AND NOT setInterval. This used to be
+// `setInterval(refreshFeatureFlags, 2 * 60 * 1000)`, which does not survive in
+// MV3: Chrome terminates an idle service worker after ~30 seconds and every timer
+// dies with it. The interval therefore fired at most once, on the rare occasion
+// the worker happened to stay alive for two minutes — so in practice a machine
+// kept whatever flags it fetched at startup, and an admin's change reached it only
+// when the worker next woke for some unrelated reason. chrome.alarms is the
+// supported mechanism: it wakes the worker on schedule. 1 minute is the platform
+// floor, and an admin switching off enforcement expects it to stop promptly.
+const FEATURES_ALARM = 'cfai-features-refresh';
+chrome.alarms.create(FEATURES_ALARM, { periodInMinutes: 1 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === FEATURES_ALARM) refreshFeatureFlags();
+});
+// Once at load too: the first alarm is a minute away and a freshly woken worker
+// should not run on stale flags until then.
 refreshFeatureFlags();
-setTimeout(refreshFeatureFlags, 3000);
-setInterval(refreshFeatureFlags, 2 * 60 * 1000);
 
 // ── Session Replay — the worker half of the rrweb recorder ──────────────────
 // WHAT USED TO BE HERE, AND WHY IT IS GONE

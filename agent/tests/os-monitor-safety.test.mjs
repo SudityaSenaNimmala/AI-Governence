@@ -283,17 +283,50 @@ test('Enforcer with enabled:false stays down across a policy update', () => {
 });
 
 test('OsMonitor only spawns the enforcer + watchdog when enabled', async () => {
-  // Constructing OsMonitor starts pollers, so assert on the source of start()
-  // instead: the enforcer and its watchdog must both sit behind the flag, and
-  // the passive watchers must not.
+  // Constructing OsMonitor starts pollers, so assert on the source instead.
+  //
+  // The gate MOVED but did not weaken. It used to be `if (this.enforcerEnabled)`
+  // inside start(), fed by an Electron checkbox via CFAI_ENFORCER_ENABLED. It is
+  // now the `agent_enforcer` branch of #applyFeatures, fed by the fleet setting —
+  // which means the same switch can also be thrown from the dashboard, for every
+  // machine at once, instead of only locally on one.
+  //
+  // The property under test is unchanged, and is the one that matters: the
+  // keyboard hook and its watchdog live behind the flag together, and the passive
+  // watchers — which observe but never block — do not.
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
-  const gated = src.match(/if \(this\.enforcerEnabled\) \{([\s\S]*?)\n    \} else \{/);
-  assert.ok(gated, 'expected an `if (this.enforcerEnabled)` block in start()');
-  assert.match(gated[1], /this\.enforcer\.start\(\)/);
-  assert.match(gated[1], /spawnEnforcerWatchdog\(/);
+
+  const from = src.indexOf("changed.includes('agent_enforcer')");
+  assert.ok(from > 0, 'expected an agent_enforcer branch in #applyFeatures');
+  const to = src.indexOf('  stop() {', from);
+  assert.ok(to > from, 'could not find the end of the feature applier');
+  const gated = src.slice(from, to);
+
+  assert.match(gated, /this\.enforcer\.start\(\)/);
+  assert.match(gated, /spawnEnforcerWatchdog\(/);
+
+  // Started in exactly one place, so there is no second path that could install
+  // the hook while the flag says off.
+  assert.equal(src.split('this.enforcer.start()').length - 1, 1,
+    'the enforcer must start in exactly one place, or the gate can be bypassed');
+  assert.equal(src.split('spawnEnforcerWatchdog(').length - 1, 1,
+    'the watchdog must be spawned in exactly one place — a second site could outlive the hook');
+
   for (const passive of ['this.poller.start()', 'this.dialogWatcher.start()', 'this.attachmentWatcher.start()', 'this.promptWatcher.start()']) {
-    assert.equal(gated[1].includes(passive), false, `${passive} must NOT be gated on the enforcer flag`);
+    assert.equal(gated.includes(passive), false, `${passive} must NOT be gated on the enforcer flag`);
   }
+});
+
+test('turning the enforcer off also clears enforcerEnabled, so a policy poll cannot restart it', async () => {
+  // policy-sync's onChange calls enforcer.updateBlockPatterns(), which RESTARTS
+  // the helper — and it skips that only when this.enforcerEnabled is false. If the
+  // fleet setting switched the hook off without updating that flag, the next
+  // pattern-policy poll (every 5 minutes) would quietly reinstall the keyboard
+  // hook an admin had just disabled.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  const from = src.indexOf("changed.includes('agent_enforcer')");
+  const to = src.indexOf('  stop() {', from);
+  assert.match(src.slice(from, to), /this\.enforcerEnabled = on/);
 });
 
 // ── Model routing (desktop): always on, no setting ────────────────────────────
