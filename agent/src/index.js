@@ -154,6 +154,18 @@ async function main() {
     monitor.start();
     log.info('Monitor running. Ctrl+C to stop.');
 
+    // Blocked-agents / platform-block / access-exception sync. This writes
+    // ~/.cloudfuze-aigov/blocked-agents.json, which enforcer-win.ps1 re-reads
+    // every 10s — without it the enforcer still scans keystrokes locally but
+    // every server-driven block enforces NOTHING. The Electron entry point
+    // (electron/monitor-runner.mjs) calls the same shared module.
+    const { startBlockedAgentsSync } = await import('./os_monitor/blocked-agents-sync.js');
+    startBlockedAgentsSync({
+      serverUrl: creds?.serverUrl || values.server,
+      token: creds?.token,
+      log: log.child('blocked-agents-sync'),
+    });
+
     // Auto-updater — checks for updates every hour, applies silently
     const { startAutoUpdater } = await import('./auto-updater.js');
     const updater = startAutoUpdater({

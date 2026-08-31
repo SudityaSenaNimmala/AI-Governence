@@ -29,6 +29,11 @@ import { Enforcer } from '../src/os_monitor/enforcer.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_DIR = join(__dirname, '..');
 const WATCHDOG = join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-watchdog.js');
+// The blocked-agents / platform-block / access-exception sync. Shared by BOTH
+// agent entry points; it used to live inline in electron/monitor-runner.mjs,
+// which is why the bare-Node CLI / .exe install enforced no server-driven block
+// at all. The behavioural assertions below moved here with it.
+const BLOCKED_SYNC = join(AGENT_DIR, 'src', 'os_monitor', 'blocked-agents-sync.js');
 
 async function tempDir() {
   return mkdtemp(join(tmpdir(), 'cfai-enforcer-test-'));
@@ -800,11 +805,55 @@ test('the preload bridge exposes only the two access-request calls plus the even
   assert.match(src, /ipcRenderer\.on\('access-request-dialog', handler\)/);
 });
 
-test('monitor-runner subtracts access exceptions from blocked-agents.json, and fails CLOSED', async () => {
+// ── Both entry points must actually START the sync ───────────────────────────
+// The bug these two pin: the sync lived inline in monitor-runner.mjs, so it ran
+// ONLY under the Electron app. Installed via install.ps1 / build:sea (bare-Node
+// CLI, `ai-gov-agent --monitor`), blocked-agents.json was never written, the
+// enforcer read a file that did not exist, and every agent-scoped block,
+// platform block and access exception silently enforced nothing — while the
+// keystroke enforcer itself kept running, so the install looked healthy.
+//
+// Source-level, like the other entry-point tests here: both files have top-level
+// side effects (credentials, singleton lock, spawning watchers) and cannot be
+// imported.
+
+test('the bare-Node CLI --monitor path starts the blocked-agents sync', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'index.js'), 'utf8');
+  const monitorBlock = src.slice(src.indexOf('if (values.monitor) {'), src.indexOf('// Deferred background scan'));
+  assert.ok(monitorBlock.length > 0, 'expected an `if (values.monitor)` block in main()');
+  assert.match(monitorBlock, /startBlockedAgentsSync\b/, 'the CLI/.exe install enforces no server-driven block without this');
+  assert.match(monitorBlock, /await import\('\.\/os_monitor\/blocked-agents-sync\.js'\)/);
+  // Credentials come from loadCredentials() here, not from reading
+  // credentials.json — with --server as the fallback the OsMonitor above uses.
+  assert.match(monitorBlock, /serverUrl: creds\?\.serverUrl \|\| values\.server/);
+  assert.match(monitorBlock, /token: creds\?\.token/);
+  // It must be started, not merely imported.
+  const importIdx = monitorBlock.indexOf("blocked-agents-sync.js'");
+  assert.ok(monitorBlock.indexOf('startBlockedAgentsSync({', importIdx) > importIdx, 'imported but never called');
+});
+
+test('the Electron monitor-runner starts the blocked-agents sync from the SAME shared module', async () => {
+  // …and holds no copy of its own. One implementation, two callers: a fix or a
+  // fail-closed guard added to the module must reach both installs.
+  const src = await readFile(join(AGENT_DIR, 'electron', 'monitor-runner.mjs'), 'utf8');
+  assert.match(src, /import \{ startBlockedAgentsSync \} from '\.\.\/src\/os_monitor\/blocked-agents-sync\.js';/);
+  assert.match(src, /startBlockedAgentsSync\(\{ serverUrl: creds\.serverUrl, token: creds\.token, log \}\);/);
+  // No duplicated implementation left behind.
+  for (const moved of ['async function refreshBlockedAgents', 'async function fetchAiPlatforms', 'async function fetchMyExceptions', 'async function flushPendingAccessRequest', 'setInterval(tick']) {
+    assert.equal(src.includes(moved), false, `${moved} must live only in blocked-agents-sync.js`);
+  }
+  // The Electron-only pieces stay HERE and are deliberately NOT shared — the CLI
+  // has no Electron dialog to relay a tokenize command from.
+  assert.match(src, /msg\.cmd === 'tokenize' && msg\.block_id/);
+  assert.match(src, /acquireMonitorLock\(\)/);
+  assert.match(src, /reapOrphans\(/);
+});
+
+test('blocked-agents-sync subtracts access exceptions from blocked-agents.json, and fails CLOSED', async () => {
   // The whole desktop un-blocking path: enforcer-win.ps1 is unchanged and just
   // re-reads the file, so if this filter does not run an approved exception
   // does nothing on the desktop.
-  const src = await readFile(join(AGENT_DIR, 'electron', 'monitor-runner.mjs'), 'utf8');
+  const src = await readFile(BLOCKED_SYNC, 'utf8');
   assert.match(src, /access-exceptions\/mine/);
   assert.match(src, /filterBlockedAgents\(list, exceptions, log\)/);
   // null (could not ask) must keep the blocklist intact; [] (no exceptions) is
@@ -815,11 +864,14 @@ test('monitor-runner subtracts access exceptions from blocked-agents.json, and f
   // from 30s to 10s so it matches enforcer-win.ps1's own BLOCKED_CHECK_INTERVAL
   // and a block/approval reaches the keyboard hook in ~20s worst case.
   assert.match(src, /setInterval\(tick, 10_000\)/);
-  assert.match(src, /flushPendingAccessRequest\(\)/);
+  assert.match(src, /flushPendingAccessRequest\(serverUrl, token, log\)/);
+  // The timer must stay unref()'d — this poller may never be the reason the
+  // process refuses to exit.
+  assert.match(src, /blockedInterval\.unref\(\)/);
 });
 
 test('the offline access-request queue is one slot and is not retried forever', async () => {
-  const src = await readFile(join(AGENT_DIR, 'electron', 'monitor-runner.mjs'), 'utf8');
+  const src = await readFile(BLOCKED_SYNC, 'utf8');
   assert.match(src, /pending-access-request\.json/);
   // A 4xx is a verdict (already pending / rejected in cooldown / bad payload) —
   // clear the slot. Only 5xx or a thrown network error keeps it.
@@ -833,8 +885,8 @@ test('the offline access-request queue is one slot and is not retried forever', 
 // it into the desktop keystroke enforcer, none of which can be exercised
 // without spawning a keyboard hook.
 
-test('monitor-runner fetches ai-platforms unfiltered and merges synthesised platform blocks', async () => {
-  const src = await readFile(join(AGENT_DIR, 'electron', 'monitor-runner.mjs'), 'utf8');
+test('blocked-agents-sync fetches ai-platforms unfiltered and merges synthesised platform blocks', async () => {
+  const src = await readFile(BLOCKED_SYNC, 'utf8');
   assert.match(src, /synthesizePlatformBlocks/);
   // Unfiltered on purpose: no admin UI has ever set `surface`, so every row is
   // 'browser' and ?surface=desktop would return nothing useful.
@@ -844,16 +896,16 @@ test('monitor-runner fetches ai-platforms unfiltered and merges synthesised plat
   // extension's precedent, so requiring auth later needs no agent change.
   const fetcher = src.slice(src.indexOf('async function fetchAiPlatforms('), src.indexOf('async function refreshBlockedAgents('));
   assert.ok(fetcher.length > 0, 'expected a fetchAiPlatforms function');
-  assert.match(fetcher, /authorization: `Bearer \$\{creds\.token\}`/);
+  assert.match(fetcher, /authorization: `Bearer \$\{token\}`/);
   // Agent rows FIRST — CheckFgBlocked returns on its first match, so array
   // order is the precedence between the two sources.
   assert.match(src, /agentRows[\s\S]{0,80}\.concat\(synthesizePlatformBlocks\(platforms\)\)/);
 });
 
-test('monitor-runner fails CLOSED when EITHER source is unreachable — never a partial rewrite', async () => {
+test('blocked-agents-sync fails CLOSED when EITHER source is unreachable — never a partial rewrite', async () => {
   // A file built from only one source silently drops every block the other
   // source contributed. A stale file keeps enforcing the last known policy.
-  const src = await readFile(join(AGENT_DIR, 'electron', 'monitor-runner.mjs'), 'utf8');
+  const src = await readFile(BLOCKED_SYNC, 'utf8');
   const fn = src.slice(src.indexOf('async function refreshBlockedAgents('), src.indexOf('// ── Offline access-request queue'));
   assert.ok(fn.length > 0, 'expected a refreshBlockedAgents function');
   // blocked-agents unreachable → bail before any write.
@@ -2484,19 +2536,19 @@ test('enforcer-win.ps1: agent-name matching is whole-string, normalised, and Reg
   assert.equal(section.includes('"Message "'), false, 'the composer prefix must come from the catalog, not the .ps1');
 });
 
-test("monitor-runner.mjs sanitises the server's per-agent rows before they reach the enforcer", async () => {
+test("blocked-agents-sync sanitises the server's per-agent rows before they reach the enforcer", async () => {
   // The latent bug this feature makes load-bearing. The .ps1 parses
   // blocked-agents.json with a hand-rolled extractor that derails on the WHOLE
   // FILE for one stray quote/backslash/brace in one value — silently dropping
   // every other block too. synthesizePlatformBlocks has always sanitised its
   // fields; the server's per-agent rows were sent RAW. That only risked a
   // corrupted display string before; now agent_name is the MATCHING KEY.
-  const src = await readFile(join(AGENT_DIR, 'electron', 'monitor-runner.mjs'), 'utf8');
-  assert.match(src, /import \{ filterBlockedAgents, synthesizePlatformBlocks, normalizeAgentRows \} from '\.\.\/src\/os_monitor\/ai-processes\.js';/);
+  const src = await readFile(BLOCKED_SYNC, 'utf8');
+  assert.match(src, /import \{ filterBlockedAgents, synthesizePlatformBlocks, normalizeAgentRows \} from '\.\/ai-processes\.js';/);
   assert.match(src, /const list = normalizeAgentRows\(Array\.isArray\(agentRows\) \? agentRows : \[\], log\)\r?\n\s*\.concat\(synthesizePlatformBlocks\(platforms\)\);/);
   // Agent rows still come FIRST, so a more specific per-agent block still wins:
   // CheckFgBlocked returns on its first match, so array order IS the precedence.
-  const fn = src.slice(src.indexOf('async function refreshBlockedAgents()'), src.indexOf('// ── Offline access-request queue'));
+  const fn = src.slice(src.indexOf('async function refreshBlockedAgents('), src.indexOf('// ── Offline access-request queue'));
   assert.ok(fn.indexOf('normalizeAgentRows(') < fn.indexOf('synthesizePlatformBlocks('), 'agent rows must stay first');
   // And the exception filter still runs on the combined list, after this.
   assert.ok(fn.indexOf('const list =') < fn.indexOf('filterBlockedAgents(list'));
