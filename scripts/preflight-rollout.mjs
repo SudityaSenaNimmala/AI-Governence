@@ -36,6 +36,33 @@ const baseUrl = (args.get('url') || 'https://agentgovernence.cftools.live').repl
 // them — an unchecked posture is how the two halves drift apart unnoticed.
 const browserOnlyRollout = args.has('browser-only');
 
+// THE ID THE POLICY MUST NAME IS THE SERVER'S, NOT THIS MACHINE'S.
+//
+// The governance server can pack the extension itself from source
+// (extension-hosting.js, "packaged_from": "source"), signing with the
+// CRX_SIGNING_KEY in its own environment and rewriting manifest.json's `key` to
+// match. That package is coherent and installable — it just has a different id
+// from the one pack-crx derives from the local .pem, and it is the one browsers
+// actually download.
+//
+// This check used to compare the provisioning scripts against the LOCAL id, which
+// is why a mismatch with production could sit here reporting PASS. Point a
+// force-install at the wrong id and the browser fetches the CRX, sees an id that
+// does not match the policy, and refuses it — with nothing logged and a green
+// Intune console.
+let servedId = null;
+let servedVersion = null;
+try {
+  const res = await fetch(`${baseUrl}/api/v1/extension/extension-info`, {
+    signal: AbortSignal.timeout(15000),
+  });
+  if (res.ok) {
+    const info = await res.json();
+    servedId = info?.extension_id || null;
+    servedVersion = info?.version || null;
+  }
+} catch { /* offline / unreachable — reported below, never assumed away */ }
+
 const results = [];
 const record = (state, requirement, check, detail) => results.push({ state, requirement, check, detail });
 const pass = (r, c, d) => record('PASS', r, c, d);
@@ -148,9 +175,18 @@ for (const [file, label] of [[PS1, 'Windows'], [SH, 'macOS']]) {
   } else {
     pass('all machines', `${label} script configured`, file);
   }
-  if (packedId && !src.includes(packedId)) {
-    block('all machines', `${label} script names the packed ID`,
-      `${file} does not contain ${packedId}`);
+  // Compare against the SERVED id where we could reach the server, and fall back
+  // to the local one only when we could not — saying so, rather than quietly
+  // checking the weaker thing.
+  const authoritativeId = servedId || packedId;
+  if (authoritativeId && !src.includes(authoritativeId)) {
+    block('all machines', `${label} script names the served ID`,
+      `${file} does not name ${authoritativeId}`
+      + (servedId ? ' — the id the server actually hands to browsers' : ' (server unreachable; compared against the local package)')
+      + `. Repack with --id ${authoritativeId}`);
+  } else if (authoritativeId) {
+    pass('all machines', `${label} script names the served ID`,
+      servedId ? `${servedId} (from the live server)` : `${packedId} (local package; server unreachable)`);
   }
 
   // A PLACEHOLDER IS NOT THE ONLY WAY THIS SHIPS WRONG. The placeholder check
@@ -172,6 +208,25 @@ for (const [file, label] of [[PS1, 'Windows'], [SH, 'macOS']]) {
       `${file} ships "${weak[1]}" — rotate ENROLL_SECRET on the server, then repack with --secret`);
   } else if (weak) {
     pass('all machines', `${label} enroll secret is not a dev default`, 'a deliberate secret is baked in');
+  }
+}
+
+// ── 3a2. Does this machine's package agree with the one being served? ───────
+{
+  if (!servedId) {
+    warn('no store publishing', 'served package identity',
+      `could not reach ${baseUrl} — could not confirm which id browsers will be handed`);
+  } else if (packedId && servedId !== packedId) {
+    // NOT a blocker: the served package is internally consistent and installs
+    // fine, and the provisioning check above already pins the policy to it. This
+    // is a WARN so the divergence is a known fact rather than a surprise for
+    // whoever inherits this — and so nobody "fixes" the policy to the local id.
+    warn('no store publishing', 'served package identity',
+      `the server serves ${servedId}${servedVersion ? ` v${servedVersion}` : ''} but this machine packs ${packedId}`
+      + ' — the server signs with its own CRX_SIGNING_KEY. Policy must name the served id (pack with --id).');
+  } else {
+    pass('no store publishing', 'served package identity',
+      `${servedId}${servedVersion ? ` v${servedVersion}` : ''} — matches the local package`);
   }
 }
 
