@@ -335,10 +335,10 @@ if ($ReportCoverage) {
   foreach ($probe in @(
     @{ n = 'chrome';   p = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe" },
     @{ n = 'edge';     p = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" },
-    @{ n = 'brave';    p = "$env:ProgramFiles\BraveSoftware\Brave-Browser\Applicationrave.exe" },
-    @{ n = 'vivaldi';  p = "$env:LOCALAPPDATA\Vivaldi\Applicationivaldi.exe" },
+    @{ n = 'brave';    p = "$env:ProgramFiles\BraveSoftware\Brave-Browser\Application\brave.exe" },
+    @{ n = 'vivaldi';  p = "$env:LOCALAPPDATA\Vivaldi\Application\vivaldi.exe" },
     @{ n = 'opera';    p = "$env:LOCALAPPDATA\Programs\Opera\opera.exe" },
-    @{ n = 'firefox';  p = "$env:ProgramFiles\Mozilla Firefoxirefox.exe" }
+    @{ n = 'firefox';  p = "$env:ProgramFiles\Mozilla Firefox\firefox.exe" }
   )) { if (Test-Path $probe.p) { $browsers += $probe.n } }
 
   $body = @{

@@ -230,6 +230,39 @@ for (const [file, label] of [[PS1, 'Windows'], [SH, 'macOS']]) {
   }
 }
 
+// ── 3a3. No stray control bytes in the provisioning scripts ─────────────────
+//
+// WHAT THIS CAUGHT, in the committed script rather than hypothetically. Three
+// Windows paths held a literal control byte where the author had written a
+// separator plus a letter:
+//
+//   ...\Application\brave.exe    -> 0x08 backspace       ("\b")
+//   ...\Application\vivaldi.exe  -> 0x0B vertical tab     ("\v")
+//   ...\Mozilla Firefox\firefox.exe -> 0x0C form feed     ("\f")
+//
+// Something interpreted the escapes on the way in. Test-Path can never match a
+// path containing a control byte, so Brave, Vivaldi and Firefox were silently
+// undetectable in the coverage report — the script ran clean, exited zero, and
+// under-reported the estate. It is invisible on screen too: a terminal renders
+// 0x08 by backspacing over the preceding character, so the line LOOKS almost
+// right in any log or editor that does not escape control codes.
+for (const [file, label] of [[PS1, 'Windows'], [SH, 'macOS']]) {
+  const raw = read(file);
+  const bad = [];
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw.charCodeAt(i);
+    if (c < 32 && c !== 9 && c !== 10 && c !== 13) {
+      bad.push(`line ${raw.slice(0, i).split('\n').length} (0x${c.toString(16).padStart(2, '0')})`);
+    }
+  }
+  if (bad.length) {
+    block('all machines', `${label} script has no stray control bytes`,
+      `${file}: ${bad.join(', ')} — almost certainly an escape sequence that was interpreted, e.g. a path separator turned into 0x08`);
+  } else {
+    pass('all machines', `${label} script has no stray control bytes`, 'clean');
+  }
+}
+
 // ── 3b. Is the CBCM token in the artifacts? ─────────────────────────────────
 // Chrome ignores an off-store force-install unless the machine is AD-domain-joined
 // or CBCM-enrolled. A WARN rather than a BLOCK: an Edge-only estate genuinely does
