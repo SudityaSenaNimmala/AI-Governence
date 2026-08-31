@@ -21,6 +21,7 @@
 
 import crypto from 'node:crypto';
 import { a } from '../util.js';
+import { normalizeIdentity } from '../lib/identity-normalize.js';
 import { requireMachineAuth, requireReviewAuth } from '../auth.js';
 import { fireWebhooks } from './webhooks.js';
 import { UNIDENTIFIED_NAME } from './risk-score.js';
@@ -119,6 +120,14 @@ async function identityByMachine(db, machineIds) {
 //      while the hash at least tells two installs apart. Nothing is lost either
 //      way: UserCell renders the hostname underneath whatever name it gets.
 //   5. hostnames — a device, not a person, and the last thing worth printing.
+// Fold the identity the same way enrolment does. Without this, a request filed
+// with "Chaitanya.Malle@cloudfuze.com" and one filed with the lowercase form are
+// two different employees to every consumer of this route — which is the state the
+// live data was actually in.
+function normalizedUser(row, ident) {
+  return normalizeIdentity(row?.user) ?? normalizeIdentity(ident?.user) ?? null;
+}
+
 function employeeNameFor(row, ident) {
   const profile = ident?.display_name || null;
   const named = profile && !UNIDENTIFIED_NAME.test(profile) ? profile : null;
@@ -198,7 +207,7 @@ export function mountAccessRequests(app, db) {
       id: crypto.randomUUID(),
       machine_id,
       hostname: hostname || null,
-      user: clean(body.user, FIELD_MAX),
+      user: normalizeIdentity(clean(body.user, FIELD_MAX)),
       tool_host,
       tool_name: clean(body.tool_name, FIELD_MAX) || tool_host,
       tool_vendor: clean(body.tool_vendor, FIELD_MAX),
@@ -314,7 +323,9 @@ export function mountAccessRequests(app, db) {
       return {
         ...r,
         employee_name: employeeNameFor(r, ident),
-        user:     r.user ?? ident?.user ?? null,
+        // Normalised on read as well as on write, because 40 rows predate the
+        // write-side fix and would otherwise keep rendering one person twice.
+        user:     normalizedUser(r, ident),
         hostname: r.hostname ?? ident?.hostname ?? null,
       };
     });

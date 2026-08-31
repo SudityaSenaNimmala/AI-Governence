@@ -1,6 +1,7 @@
 import { ENROLL_SECRET, signMachineToken, constantTimeEqual } from '../auth.js';
 import { a } from '../util.js';
 import { resolveProfiles } from './identity.js';
+import { normalizeIdentity } from '../lib/identity-normalize.js';
 
 export function mountEnroll(app, db) {
   app.post('/api/v1/enroll', a(async (req, res) => {
@@ -27,9 +28,11 @@ export function mountEnroll(app, db) {
     // Only email-shaped values are lowercased. An OS username is left alone: it
     // is a display name for a Windows account, and "SatyaPinniti" is how the
     // person expects to see it.
+    // Shared with the access-request path deliberately: an identity normalised
+    // here and not there is one human displayed as two.
     if (user) {
-      const u = String(user).trim();
-      set.user = /^[^\s@]+@[^\s@]+$/.test(u) ? u.toLowerCase() : u;
+      const u = normalizeIdentity(user);
+      if (u) set.user = u;
     }
     if (claudeAccountEmail) set.claude_account_email = String(claudeAccountEmail).toLowerCase();
     if (displayName) set.display_name = displayName;
