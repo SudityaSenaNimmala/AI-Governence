@@ -355,6 +355,32 @@ const Settings = () => {
                 />
               </div>
             </div> */}
+            {/* AI governance feature switches.
+                WHY A CARD HERE AND NOT A SECOND COPY OF THE PAGE. The switches
+                live in the AI Hub, next to the data they govern, and are reached
+                at /AIHub/Setup?tab=settings. But nobody looking for "settings"
+                clicks "AI Hub" — they click Settings in the sidebar, land here,
+                and find no way through, which is exactly what happened. One link
+                fixes the discoverability without duplicating a view that would
+                then have to be kept in step. */}
+            <div className="cf_main_userManagement">
+              <div className="cf_main_userManagement_title">
+                <h2>AI Governance Features</h2>
+              </div>
+              <div className="cf_main_userManagement_body">
+                <p style={{ fontSize: 13, color: "#5b6472", margin: "0 0 10px", lineHeight: 1.5 }}>
+                  Turn capture, enforcement and dashboard sections on or off. Changes
+                  reach every browser extension and desktop agent in the fleet within
+                  about a minute — no reinstall.
+                </p>
+                <ButtonComponent
+                  isLoading={false}
+                  isDisabled={false}
+                  buttonName="Manage Features"
+                  buttonClickAction={() => navigate("/AIHub/Setup?tab=settings")}
+                />
+              </div>
+            </div>
             <div className="cf_main_userManagement">
               <div className="cf_main_userManagement_title">
                 <h2>CloudFuze Access Token</h2>
