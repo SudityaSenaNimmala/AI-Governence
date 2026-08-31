@@ -105,6 +105,44 @@ test('rows stored before the fix are folded on read', async () => {
   });
 });
 
+test('employee_name is normalised too — it is the field the dashboard renders', async () => {
+  // THE MISS THIS CATCHES, found by measuring production rather than trusting the
+  // first fix. Folding only `user` left the roster visually unchanged: the
+  // dashboard renders employee_name, and employeeNameFor() was still returning the
+  // raw row.user. The API reported the identity as canonical while the screen
+  // showed "Chaitanya.Malle@cloudfuze.com" beside lowercase addresses — the exact
+  // duplicate this work exists to remove, hidden behind a field nobody was
+  // checking.
+  await withServer(async ({ list }) => {
+    const names = [...new Set((await list()).map((r) => r.employee_name))];
+    assert.deepEqual(names, ['chaitanya.malle@cloudfuze.com'],
+      'both spellings must render as ONE employee in the reviewer roster');
+  }, async (db) => {
+    await db.collection('access_requests').insertMany([
+      { id: 'a', machine_id: 'm1', tool_host: 'notion.so',  status: 'pending', user: 'Chaitanya.Malle@cloudfuze.com', submitted_at: new Date('2026-08-01') },
+      { id: 'b', machine_id: 'm2', tool_host: 'cursor.com', status: 'pending', user: 'chaitanya.malle@cloudfuze.com', submitted_at: new Date('2026-08-02') },
+    ]);
+  });
+});
+
+test('a named profile still outranks the raw identity', async () => {
+  // Normalising must not cost us the good name. Where identity.js has resolved a
+  // real display name, that is what a reviewer should see — not an address.
+  await withServer(async ({ list }) => {
+    const [row] = await list();
+    assert.equal(row.employee_name, 'Suditya Nimmala');
+  }, async (db) => {
+    await db.collection('access_requests').insertOne({
+      id: 'a', machine_id: 'm5', tool_host: 'claude.ai', status: 'pending',
+      user: 'Suditya.Nimmala@cloudfuze.com', submitted_at: new Date(),
+    });
+    await db.collection('machines').insertOne({ id: 'm5', hostname: 'SUDITYA-PC', user: 'SudityaNimmala' });
+    await db.collection('employee_profiles').insertOne({
+      id: 'p1', display_name: 'Suditya Nimmala', machine_ids: ['m5'],
+    });
+  });
+});
+
 test('a row with no user falls back to the enrolment record, normalised', async () => {
   await withServer(async ({ list }) => {
     const [row] = await list();

@@ -131,8 +131,13 @@ function normalizedUser(row, ident) {
 function employeeNameFor(row, ident) {
   const profile = ident?.display_name || null;
   const named = profile && !UNIDENTIFIED_NAME.test(profile) ? profile : null;
+  // NORMALISED HERE TOO, and this is the field that actually matters: the
+  // dashboard renders employee_name, not user. Folding only `user` left the
+  // roster looking exactly as fragmented as before — "Chaitanya.Malle@…" still on
+  // screen beside lowercase addresses — while the API reported the identity as
+  // fixed. Verified against live data rather than assumed.
   return named
-    || row?.user || ident?.user
+    || normalizedUser(row, ident)
     || profile
     || row?.hostname || ident?.hostname
     || 'Unknown';
