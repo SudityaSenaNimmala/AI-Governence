@@ -43,7 +43,22 @@ $IdentityDomain = 'cloudfuze.com'
 
 # $true when the desktop agent is NOT deployed. Skips the extension's five-minute
 # wait for an agent identity beacon that will never arrive.
-$BrowserOnly = $true
+#
+# $false FOR THIS ROLLOUT (changed 2026-08-31): the desktop agent IS deployed on
+# Windows, as an Intune Win32 app that this script is ordered behind. The beacon
+# therefore does arrive and the wait is legitimate.
+#
+# Note the wait is now a safety net rather than the mechanism. Identity comes from
+# the UPN pushed below as `userEmail`, which the extension trusts ABOVE the beacon,
+# so a machine enrols with the right person's name on its first attempt whether or
+# not the agent has started yet. What the beacon still supplies is the real
+# hostname, which is what links this browser's enrolment to the agent's machine
+# record on the server.
+#
+# macOS stays browser-only (BROWSER_ONLY=1 in macos-provision-extension.sh) and
+# that is not an oversight: the tracker needs Windows UI Automation and refuses to
+# run on darwin, so a Mac has no beacon to wait for.
+$BrowserOnly = $false
 
 # Private browsing bypasses governance entirely: a force-installed extension is
 # disabled in Incognito / InPrivate and NO policy can force it on. Set this to
@@ -255,7 +270,15 @@ foreach ($b in $browsers) {
   }
   if ($ComputerName)  { Set-RegValue -Path $policyKey -Name 'computerName'   -Value $ComputerName }
   if ($IdentityDomain){ Set-RegValue -Path $policyKey -Name 'identityDomain' -Value $IdentityDomain }
-  if ($BrowserOnly)   { Set-RegValue -Path $policyKey -Name 'browserOnly'    -Value '1' }
+  # Written as '1' only when set. When the agent IS deployed we must not write '0'
+  # either — the extension reads browserOnly as a boolean and treats the string
+  # '0' as absent anyway, but leaving a stale '1' behind from an earlier
+  # browser-only push would keep the beacon wait disabled forever. So remove it.
+  if ($BrowserOnly) {
+    Set-RegValue -Path $policyKey -Name 'browserOnly' -Value '1'
+  } else {
+    Remove-ItemProperty -Path $policyKey -Name 'browserOnly' -ErrorAction SilentlyContinue
+  }
 
   # PRIVATE BROWSING IS A HOLE, AND THERE IS NO POLICY THAT CLOSES IT DIRECTLY.
   # A force-installed extension is DISABLED in Incognito / InPrivate unless the

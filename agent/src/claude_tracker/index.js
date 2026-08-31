@@ -35,11 +35,15 @@ import { PromptWatcher } from '../os_monitor/prompt-watcher.js';
 // Shared with the full agent, deliberately: the extension probes one fixed set of
 // localhost ports, so two implementations would be two chances to drift apart.
 import { startIdentityBeacon } from '../identity-beacon.js';
+// Resolves the corporate UPN ("satya.pinniti@cloudfuze.com") rather than the OS
+// account name ("SatyaPinniti"). Shared with the full agent so the two cannot
+// drift apart, for the same reason the beacon itself is shared.
+import { resolveCorporateIdentity } from '../util/corporate-identity.js';
 import { ensureClaudeCodeTelemetry } from './claude-code-settings.js';
 import { detectClaudeAccount } from './claude-account.js';
 import { readNewActivity } from './transcript-reader.js';
 import {
-  SERVER_URL, ENROLL_SECRET, VERSION,
+  SERVER_URL, ENROLL_SECRET, VERSION, IDENTITY_DOMAIN,
   DESKTOP_PROCESSES, BROWSER_PROCESSES, FLUSH_INTERVAL_MS,
 } from './config.js';
 import {
@@ -50,6 +54,7 @@ import {
   installFiles, relaunchDetached, uninstall,
   installFilesSystem, registerSystemAutostart, unregisterSystemAutostart,
   isSystemAutostartRegistered, runSystemTaskNow, uninstallSystem,
+  sweepPerUserAutostart, supersedePerUserInstall, isSystemCopy,
 } from './service.js';
 
 const STATE_DIR = join(os.homedir(), '.cloudfuze-claude-tracker');
@@ -107,18 +112,36 @@ async function saveCreds(creds) {
 async function enroll({ quiet = false } = {}) {
   const id = machineId();
 
+  // WHY A UPN AND NOT THE OS USERNAME. The browser extension enrols with the
+  // Intune enrolment UPN pushed as managed policy, and the Claude Code CLI
+  // attributes by user.email over OpenTelemetry. Reporting os.userInfo().username
+  // here made this machine a THIRD spelling of the same person, and
+  // server/src/routes/ai-usage.js groups by machines.user — so one human showed
+  // up as two rows with nothing to say they were one. Resolve the same email
+  // every other surface already uses.
+  const identity = resolveCorporateIdentity({ domain: IDENTITY_DOMAIN });
+
   // Report the signed-in Claude account so the server can show this machine's
   // Claude Code usage and its desktop/browser usage as ONE person.
   const account = await detectClaudeAccount();
   if (!quiet) {
     if (account) log.info(`Claude account on this machine: ${account.email}`);
     else log.info('no signed-in Claude account found — reporting under OS username only');
+    // Logged because os_user is the one value that will NOT merge with the browser
+    // extension. Seeing it here is the cheapest way to catch a machine that is not
+    // Entra-joined, or a UPN outside the configured domain, before it turns up as
+    // a mystery second row in the dashboard.
+    log.info(`reporting as: ${identity.user} (source: ${identity.source})`);
+    if (identity.source === 'os_user') {
+      log.warn('no corporate UPN found — this machine will NOT merge with its browser extension');
+    }
   }
 
   const body = {
     machineId: id,
     hostname: os.hostname(),
-    user: os.userInfo().username,
+    user: identity.user,
+    identitySource: identity.source,
     claudeAccountEmail: account?.email || undefined,
     displayName: account?.displayName || undefined,
     enrollSecret: ENROLL_SECRET,
@@ -266,7 +289,15 @@ async function runTracker() {
   try {
     // This log object is a plain {info,warn,error}; the beacon calls through
     // optional chaining, so it needs no child-logger support.
-    startIdentityBeacon({ machineId: creds.machineId, log });
+    // The SAME identity this process just enrolled with, so an extension reading
+    // the beacon cannot attribute to a different string than the agent beside it.
+    const identity = resolveCorporateIdentity({ domain: IDENTITY_DOMAIN });
+    startIdentityBeacon({
+      machineId: creds.machineId,
+      user: identity.user,
+      identitySource: identity.source,
+      log,
+    });
   } catch (err) {
     // Never fatal: the beacon is a convenience for the extension, and prompt
     // tracking — the reason this binary exists — does not depend on it.
@@ -287,7 +318,7 @@ async function runTracker() {
   }
 
   const poster = new Poster(creds.token);
-  const user = os.userInfo().username;
+  const user = resolveCorporateIdentity({ domain: IDENTITY_DOMAIN }).user;
 
   const watcher = new PromptWatcher({
     log,
@@ -463,6 +494,12 @@ async function runSystemInstaller() {
   }
   try {
     await stopRunningInstances();
+    // A machine from the pilot still has a per-user HKCU autostart pointing at the
+    // old build. Left in place it starts first at the next logon, takes the
+    // single-instance lock and the beacon port, and the fleet copy exits — so the
+    // machine keeps reporting the OS username and never merges with its extension.
+    const swept = await sweepPerUserAutostart();
+    if (swept.length) console.log(`superseded ${swept.length} per-user pilot autostart(s)`);
     const files = await installFilesSystem(watcherScript);
     console.log(`files      ${files.dir}`);
     await registerSystemAutostart(files.exe);
@@ -542,6 +579,18 @@ async function main() {
 
   // --service: the detached run.
   sink = fileLogger();
+  // THE MACHINE-WIDE COPY TAKES PRECEDENCE, it does not queue behind a pilot.
+  // Deferring to whoever holds the lock is right between two equal copies and
+  // wrong here: the other holder may be an old per-user pilot build that will
+  // hold it forever, keeping the machine on the pre-UPN identity. So claim the
+  // ground first — drop this user's stale HKCU autostart and stop any other
+  // instance — and only then take the lock.
+  if (isSystemCopy()) {
+    const r = await supersedePerUserInstall();
+    if (r.removedKey || r.killed) {
+      log.info(`superseded a per-user install (autostart removed: ${r.removedKey}, process stopped: ${r.killed})`);
+    }
+  }
   const lock = await acquireSingleInstanceLock();
   if (!lock) {
     log.info('another tracker instance is already running — exiting');

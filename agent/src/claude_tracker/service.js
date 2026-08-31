@@ -210,6 +210,94 @@ export async function uninstall() {
   return { removedKey, dir: INSTALL_DIR };
 }
 
+// ── superseding a per-user pilot install ─────────────────────────────────────
+//
+// THE PROBLEM THIS SOLVES, which is not hypothetical — it was reproduced on a
+// machine from the pilot. The double-click path installs per-user (LOCALAPPDATA +
+// an HKCU Run value). The fleet path installs machine-wide and registers a logon
+// task. Deploying the second over the first leaves BOTH autostarts in place, and
+// at the next logon they race:
+//
+//   1. the old HKCU copy starts, binds the 19531 single-instance lock, and binds
+//      identity-beacon port 19532;
+//   2. the fleet copy starts, finds the lock held, logs "another tracker instance
+//      is already running" and EXITS.
+//
+// So the machine keeps running the pilot build forever. Worse, the pilot build
+// serves the OS username from the beacon, and the extension takes the first port
+// that answers — so every pilot machine silently keeps the duplicate-row bug that
+// the corporate-UPN change exists to fix, while the dashboard shows an agent
+// present and healthy.
+//
+// Removing the HKCU value from the SYSTEM-context installer cannot fix it alone:
+// HKCU under SYSTEM is SYSTEM's own hive, not the user's. Hence two mechanisms —
+// a sweep of the loaded user hives at install time, and a stand-down at startup
+// for whichever copy is not the machine-wide one.
+
+// Delete our per-user Run value from every LOADED user hive.
+//
+// Runs as SYSTEM from the installer, where HKCU is the wrong hive, so it goes
+// through HKEY_USERS instead. Only loaded hives are visible — which covers the
+// user logged in when Intune deploys, the case that matters. A profile that is
+// not loaded is handled by the startup stand-down below instead.
+export async function sweepPerUserAutostart() {
+  const removed = [];
+  let sids = [];
+  try {
+    const { stdout } = await execFileAsync('reg', ['query', 'HKU']);
+    // WHICH SIDS ARE REAL USERS. Two prefixes, and missing the second one makes
+    // this a silent no-op on the estate it was written for: S-1-5-21-… is a local
+    // or on-prem-AD account, but an ENTRA-joined account is S-1-12-1-… . Verified
+    // on a CloudFuze machine — its only user hive is S-1-12-1-…, so matching just
+    // S-1-5-21 found nobody and swept nothing while reporting success.
+    //
+    // Excluded: .DEFAULT (the profile template) and the service accounts
+    // S-1-5-18/19/20 (SYSTEM, LOCAL SERVICE, NETWORK SERVICE), which never ran a
+    // double-click install; and the _Classes shadow of each user hive, which holds
+    // COM registration rather than a Run key.
+    //
+    // Deliberately liberal otherwise: deleting a value that is not there is a
+    // no-op, so a SID form we failed to anticipate costs nothing, whereas one we
+    // filter out too eagerly leaves a pilot running forever.
+    sids = stdout
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => /\\(S-1-5-21|S-1-12-1)-[\d-]+$/.test(l))
+      .filter((l) => !l.endsWith('_Classes'))
+      .map((l) => l.slice(l.lastIndexOf('\\') + 1));
+  } catch {
+    return removed;   // no reg.exe or no access — nothing we can do here
+  }
+  for (const sid of sids) {
+    const key = `HKU\\${sid}\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`;
+    try {
+      await execFileAsync('reg', ['delete', key, '/v', RUN_VALUE, '/f']);
+      removed.push(sid);
+    } catch { /* value not present in this hive — the normal case */ }
+  }
+  return removed;
+}
+
+// True when this process IS the machine-wide copy.
+export function isSystemCopy() {
+  return process.execPath.toLowerCase() === SYSTEM_INSTALLED_EXE.toLowerCase();
+}
+
+/**
+ * Called by the machine-wide copy at startup, BEFORE it tries the lock, so that
+ * it always wins the race against a pilot copy rather than politely exiting.
+ *
+ * Runs in the user's own session (the logon task's whole point), so HKCU here is
+ * genuinely that user's hive — which is why this is the mechanism that reaches a
+ * profile the installer's sweep could not see.
+ */
+export async function supersedePerUserInstall() {
+  const removedKey = await unregisterAutostart();   // this user's HKCU, correctly
+  const killed = await stopRunningInstances();      // any other tracker, incl. the pilot
+  if (killed) await waitForLockRelease();           // give the OS time to free 19531
+  return { removedKey, killed };
+}
+
 // ── fleet install (silent, all users) ─────────────────────────────────────────
 
 // The Scheduled Task definition. Two choices make it work fleet-wide:

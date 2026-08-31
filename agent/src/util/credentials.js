@@ -22,11 +22,13 @@ export async function saveCredentials(creds) {
   return CRED_PATH;
 }
 
-export async function enroll({ serverUrl, machineId, hostname, enrollSecret }) {
+export async function enroll({ serverUrl, machineId, hostname, user, enrollSecret }) {
   const res = await fetch(`${serverUrl.replace(/\/$/, '')}/api/v1/enroll`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ machineId, hostname, enrollSecret }),
+    // `user` is optional and the server only overwrites when it is sent, so an
+    // older caller that omits it enrols exactly as before.
+    body: JSON.stringify({ machineId, hostname, user, enrollSecret }),
   });
   if (!res.ok) {
     const text = await res.text();

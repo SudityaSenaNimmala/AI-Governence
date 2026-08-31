@@ -30,6 +30,11 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i].replace(/^--/, ''), process.argv[i + 1]);
 const baseUrl = (args.get('url') || 'https://agentgovernence.cftools.live').replace(/\/$/, '');
+// The Windows fleet ships the desktop agent alongside the extension, so that is
+// the default posture this checks. `--browser-only` asserts the opposite (the
+// pre-2026-08-31 rollout) and flips section 5's expectations rather than skipping
+// them — an unchecked posture is how the two halves drift apart unnoticed.
+const browserOnlyRollout = args.has('browser-only');
 
 const results = [];
 const record = (state, requirement, check, detail) => results.push({ state, requirement, check, detail });
@@ -147,6 +152,27 @@ for (const [file, label] of [[PS1, 'Windows'], [SH, 'macOS']]) {
     block('all machines', `${label} script names the packed ID`,
       `${file} does not contain ${packedId}`);
   }
+
+  // A PLACEHOLDER IS NOT THE ONLY WAY THIS SHIPS WRONG. The placeholder check
+  // above passes the moment pack-crx substitutes ANY value — including the dev
+  // default, which is what happens when someone packs on a machine whose .env was
+  // never changed from the checked-in example. That was the actual state of
+  // dist/provision before this check existed.
+  //
+  // Shipping it fleet-wide publishes the enrolment credential: the secret is the
+  // only thing standing between the internet and POST /api/v1/enroll, so anyone
+  // who knows it can register machines and post fabricated DLP events into the
+  // governance record. On a compliance product that is the whole product.
+  //
+  // Matched loosely on purpose — any secret advertising itself as a dev value is
+  // one nobody chose deliberately for a fleet.
+  const weak = src.match(/(?:EnrollSecret|ENROLL_SECRET)\s*=\s*["']([^"']+)["']/);
+  if (weak && /^(dev-|test-|changeme|change-me|placeholder|secret)|change-me$/i.test(weak[1])) {
+    block('all machines', `${label} enroll secret is not a dev default`,
+      `${file} ships "${weak[1]}" — rotate ENROLL_SECRET on the server, then repack with --secret`);
+  } else if (weak) {
+    pass('all machines', `${label} enroll secret is not a dev default`, 'a deliberate secret is baked in');
+  }
 }
 
 // ── 3b. Is the CBCM token in the artifacts? ─────────────────────────────────
@@ -189,10 +215,96 @@ for (const [src, label] of [[ps1, 'Windows'], [sh, 'macOS']]) {
   else pass('all machines', `${label} off-store allowances`, 'forcelist + allowlist + sources');
 }
 
-// ── 5. No desktop agent ─────────────────────────────────────────────────────
+// ── 5. Desktop agent, and ONE identity across both surfaces ─────────────────
+//
+// WHY THIS SECTION IS THE FIDDLY ONE. The agent and the extension enrol
+// separately, and server/src/routes/ai-usage.js groups usage by machines.user with
+// an EXACT string match. So the two only merge into one person if they report
+// byte-identical identities — and every way that can fail is silent: the dashboard
+// shows two plausible rows with two plausible names and nothing marking them as
+// the same human. These checks pin the alignment down.
 
-if (!ps1.includes('browserOnly')) block('no desktop agent', 'browserOnly is provisioned', `${PS1} does not set browserOnly`);
-else pass('no desktop agent', 'browserOnly is provisioned', 'skips the 5-minute agent wait');
+const REQ5 = browserOnlyRollout ? 'no desktop agent' : 'agent + extension, one identity';
+
+if (browserOnlyRollout) {
+  if (!/\$BrowserOnly\s*=\s*\$true/.test(ps1)) {
+    block(REQ5, 'Windows declares browser-only', 'a browser-only rollout must set $BrowserOnly = $true');
+  } else {
+    pass(REQ5, 'Windows declares browser-only', 'skips the 5-minute agent wait');
+  }
+} else {
+  // browserOnly tells the extension not to wait for a beacon. With the agent
+  // deployed the beacon does arrive, and suppressing the wait throws away the
+  // hostname link that ties this browser's enrolment to the agent's machine record.
+  if (!/\$BrowserOnly\s*=\s*\$false/.test(ps1)) {
+    block(REQ5, 'Windows waits for the agent beacon', '$BrowserOnly must be $false where the agent is deployed');
+  } else {
+    pass(REQ5, 'Windows waits for the agent beacon', '$BrowserOnly = $false');
+  }
+
+  // Not an oversight to be caught: the tracker needs Windows UI Automation and
+  // exits on darwin, so a Mac has no beacon and must not wait for one.
+  if (!/BROWSER_ONLY=1/.test(sh)) {
+    block(REQ5, 'macOS stays browser-only', 'no agent runs on darwin — BROWSER_ONLY must stay 1');
+  } else {
+    pass(REQ5, 'macOS stays browser-only', 'no agent exists on darwin');
+  }
+
+  // The agent must resolve the same corporate UPN the extension gets from policy,
+  // not the OS username.
+  const ident = 'agent/src/util/corporate-identity.js';
+  if (!existsSync(join(root, ident))) {
+    block(REQ5, 'agent resolves a corporate UPN', `${ident} is missing`);
+  } else {
+    pass(REQ5, 'agent resolves a corporate UPN', 'util/corporate-identity.js');
+  }
+
+  const tracker = read('agent/src/claude_tracker/index.js');
+  if (!tracker.includes('resolveCorporateIdentity')) {
+    block(REQ5, 'agent enrols as the UPN', 'claude_tracker enrols without resolveCorporateIdentity');
+  } else if (/user:\s*os\.userInfo\(\)\.username/.test(tracker)) {
+    block(REQ5, 'agent enrols as the UPN', 'claude_tracker still enrols with the OS username');
+  } else {
+    pass(REQ5, 'agent enrols as the UPN', 'resolveCorporateIdentity()');
+  }
+
+  // The beacon must serve what the caller enrolled with. If it derived its own
+  // identity the extension could be told a different name than the server was.
+  const beacon = read('agent/src/identity-beacon.js');
+  if (!/startIdentityBeacon\(\{[^}]*\buser\b/.test(beacon)) {
+    block(REQ5, 'beacon serves the enrolled identity', 'startIdentityBeacon does not accept a user');
+  } else {
+    pass(REQ5, 'beacon serves the enrolled identity', 'caller-supplied, cannot disagree with enrolment');
+  }
+
+  // Case folding. Verified on real hardware: `whoami /upn` returns
+  // "satya.pinniti@cloudfuze.com" and the Intune enrolment key
+  // "Satya.Pinniti@cloudfuze.com". Exact-match grouping splits those into two rows.
+  if (!/toLowerCase\(\)/.test(read('server/src/routes/enroll.js'))) {
+    block(REQ5, 'server folds identity case', 'enroll.js does not normalise user case');
+  } else {
+    pass(REQ5, 'server folds identity case', 'email-shaped identities lowercased on enrol');
+  }
+
+  // A fleet build with no domain baked in accepts a UPN from any tenant.
+  if (!read('agent/scripts/build-claude-tracker.mjs').includes('CFAI_IDENTITY_DOMAIN')) {
+    block(REQ5, 'tracker build bakes the UPN guard', 'CFAI_IDENTITY_DOMAIN is not a build input');
+  } else {
+    pass(REQ5, 'tracker build bakes the UPN guard', 'CFAI_IDENTITY_DOMAIN');
+  }
+
+  // A pilot machine's per-user autostart outlives the fleet install and wins the
+  // single-instance lock, keeping the old build (and the old identity) forever.
+  const svc = read('agent/src/claude_tracker/service.js');
+  if (!svc.includes('sweepPerUserAutostart')) {
+    block(REQ5, 'fleet install supersedes a pilot', 'no sweep of per-user autostarts');
+  } else if (!/S-1-12-1/.test(svc)) {
+    block(REQ5, 'fleet install supersedes a pilot',
+      'the sweep does not match Entra SIDs (S-1-12-1) — it would find nobody on this estate');
+  } else {
+    pass(REQ5, 'fleet install supersedes a pilot', 'sweeps HKEY_USERS incl. Entra SIDs');
+  }
+}
 
 // ── 6. Accurate username ────────────────────────────────────────────────────
 
