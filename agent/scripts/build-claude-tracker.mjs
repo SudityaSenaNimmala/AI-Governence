@@ -180,6 +180,19 @@ async function buildSea() {
   if (platform === 'darwin' && !isCross) {
     try { await execFileAsync('codesign', ['--remove-signature', binaryPath]); } catch {}
   }
+  // The Windows equivalent, which was missing. Node's SEA docs say to remove the
+  // existing signature before injecting, and skipping it produces a binary that
+  // CANNOT BE SIGNED afterwards: postject appends the blob after the Microsoft
+  // signature that shipped on node.exe, Authenticode then finds the certificate
+  // table is no longer the last thing in the file, and every signing tool refuses
+  // with "%1 is not a valid Win32 application".
+  //
+  // That matters more here than the usual SmartScreen argument: this agent installs
+  // a WH_KEYBOARD_LL hook, which is the keylogger signature. An unsigned binary
+  // doing that at every logon is what Defender and EDR quarantine, and a signature
+  // is what lets a security team allow-list by publisher instead of by file hash —
+  // a hash allow-list breaks on every rebuild.
+  if (platform === 'win32') await stripPeSignature(binaryPath);
 
   const { inject } = await import('postject');
   const blobData = await readFile(seaPrep);
@@ -263,4 +276,47 @@ try {
 } catch (err) {
   console.error(err?.stack || err?.message || String(err));
   process.exit(1);
+}
+
+// Remove an Authenticode signature from a PE, the way `signtool remove /s` does,
+// but without needing the Windows SDK installed.
+//
+// The Certificate Table is data directory index 4 of the PE optional header, and —
+// unlike every other directory — it holds a FILE OFFSET rather than an RVA, and
+// must be the last thing in the file. Clearing it is therefore two steps: truncate
+// the signature bytes off the end, then zero the directory entry that pointed at
+// them. Doing only the second leaves several KB of orphaned signature on the end
+// of the binary, which is harmless but ships in every copy.
+async function stripPeSignature(file) {
+  const { open } = await import('node:fs/promises');
+  const fh = await open(file, 'r+');
+  try {
+    const readAt = async (off, len) => {
+      const b = Buffer.alloc(len);
+      await fh.read(b, 0, len, off);
+      return b;
+    };
+
+    const eLfanew = (await readAt(0x3c, 4)).readUInt32LE(0);
+    if ((await readAt(eLfanew, 4)).toString('latin1') !== 'PE\0\0') return false;
+
+    const optOff = eLfanew + 24;
+    const magic = (await readAt(optOff, 2)).readUInt16LE(0);
+    const isPE32Plus = magic === 0x20b;
+    const ddOff = optOff + (isPE32Plus ? 112 : 96);
+    const entry = ddOff + 4 * 8;   // index 4 = Certificate Table
+
+    const certOff = (await readAt(entry, 4)).readUInt32LE(0);
+    const certSize = (await readAt(entry + 4, 4)).readUInt32LE(0);
+    if (certOff === 0 && certSize === 0) return false;   // already clean
+
+    await fh.write(Buffer.alloc(8), 0, 8, entry);        // zero offset + size
+    const { size } = await fh.stat();
+    if (certOff > 0 && certOff <= size) await fh.truncate(certOff);
+
+    console.log(`   stripped the inherited node.exe signature (${certSize} bytes) so this build can be signed`);
+    return true;
+  } finally {
+    await fh.close();
+  }
 }
