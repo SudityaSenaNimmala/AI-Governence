@@ -6,10 +6,12 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { helperScript } from './helper-path.js';
 import { EventEmitter } from 'node:events';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const SCRIPT = join(__dirname, 'mac-poller.osa.js');
+// helperScript() rather than import.meta.url — see helper-path.js. Bundled to
+// CommonJS this expression threw at load and took the whole agent with it.
+const SCRIPT = helperScript('mac-poller.osa.js');
 
 export class MacPoller extends EventEmitter {
   constructor({ log }) {

@@ -11,9 +11,11 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { helperScript } from './helper-path.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const HELPER_SCRIPT = join(__dirname, 'toast-helper.ps1');
+// helperScript() rather than import.meta.url — see helper-path.js. Bundled to
+// CommonJS this expression threw at load and took the whole agent with it.
+const HELPER_SCRIPT = helperScript('toast-helper.ps1');
 
 export class ToastService {
   constructor({ log }) {

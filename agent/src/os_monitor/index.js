@@ -66,9 +66,18 @@ export class OsMonitor {
   // plumbed through from Electron. False turns OFF only the active
   // keystroke-blocking piece — every passive DLP watcher (clipboard, file
   // dialogs, attachments, typed prompts) keeps running.
-  constructor({ serverUrl, token, log, enforcerEnabled = true }) {
+  // `skipPromptWatcher` exists for one caller: the packaged agent, which already
+  // runs a PromptWatcher of its own in Claude-tracker mode (CFAI_CLAUDE_TRACKER=1
+  // switches the PS1 into browser-aware behaviour the Claude Usage dashboard
+  // depends on). Two PromptWatchers would spawn two prompt-watcher.ps1 helpers
+  // reading the same UI Automation tree and emit every typed prompt twice, so the
+  // host widens its own watcher to cover every AI process instead and tells this
+  // one to stand down. Everything else here — the enforcer, clipboard, dialogs,
+  // attachments, policy and feature sync — still runs.
+  constructor({ serverUrl, token, log, enforcerEnabled = true, skipPromptWatcher = false }) {
     this.log = log;
     this.enforcerEnabled = enforcerEnabled !== false;
+    this.skipPromptWatcher = skipPromptWatcher === true;
     this.poller = createPoller({ log });
     this.reporter = new Reporter({ serverUrl, token, log });
     this.toast = createNotifier({ log });
@@ -870,8 +879,8 @@ export class OsMonitor {
     if (changed.includes('clipboard_monitor')) {
       const on = want('clipboard_monitor');
       if (on !== this.running.clipboard_monitor) {
-        if (on) { this.poller.start(); this.promptWatcher.start(); }
-        else    { this.poller.stop();  this.promptWatcher.stop(); }
+        if (on) { this.poller.start(); if (!this.skipPromptWatcher) this.promptWatcher.start(); }
+        else    { this.poller.stop();  if (!this.skipPromptWatcher) this.promptWatcher.stop(); }
         this.running.clipboard_monitor = on;
         this.log?.info(`os_monitor: clipboard + prompt monitoring ${on ? 'ON' : 'OFF'} (fleet setting)`);
       }
@@ -928,7 +937,7 @@ export class OsMonitor {
     this.poller.stop();
     this.dialogWatcher.stop();
     this.attachmentWatcher.stop();
-    this.promptWatcher.stop();
+    if (!this.skipPromptWatcher) this.promptWatcher.stop();
     // Order matters: stop the enforcer (kills the helper, clears the pid +
     // heartbeat files) BEFORE reaping the watchdog, so the watchdog has
     // nothing left to act on and exits without killing anything.

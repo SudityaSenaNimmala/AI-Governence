@@ -7,10 +7,12 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { helperScript } from './helper-path.js';
 import { EventEmitter } from 'node:events';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const POLLER_SCRIPT = join(__dirname, 'win-poller.ps1');
+// helperScript() rather than import.meta.url — see helper-path.js. Bundled to
+// CommonJS this expression threw at load and took the whole agent with it.
+const POLLER_SCRIPT = helperScript('win-poller.ps1');
 
 export class WinPoller extends EventEmitter {
   constructor({ log }) {

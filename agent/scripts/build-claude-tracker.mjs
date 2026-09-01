@@ -18,9 +18,10 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { copyFile, mkdir, rm, writeFile, readFile, chmod, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -147,6 +148,16 @@ async function bundle() {
       __CFAI_ENROLL_SECRET__: JSON.stringify(ENROLL_SECRET),
       __CFAI_TRACKER_VERSION__: JSON.stringify(pkg.version),
       __CFAI_IDENTITY_DOMAIN__: JSON.stringify(IDENTITY_DOMAIN),
+      // The model-router lexicons, compiled now rather than read at runtime.
+      //
+      // model-router-config.js parses them out of
+      // browser-extension/content/complexity.js — repo SOURCE, which is not on any
+      // deployed machine. The read happens inside the enforcer's spawn env, so on a
+      // packaged agent it threw ENOENT and the keystroke send-blocker never
+      // started: the one component that actually PREVENTS a sensitive send, taken
+      // out by a missing source file. Baking it keeps routing working and removes
+      // the filesystem dependency entirely.
+      __CFAI_MODEL_ROUTER_CONFIG__: JSON.stringify(await bakedModelRouterConfig()),
     },
     minify: false,
     sourcemap: false,
@@ -157,6 +168,7 @@ async function bundle() {
   console.log(`   ${bundlePath} (${(s.size / 1024).toFixed(1)} KB)`);
   console.log(`   server baked in: ${SERVER_URL}`);
   console.log(`   identity domain: ${IDENTITY_DOMAIN || '(none — dev build, UPN guard OFF)'}`);
+  console.log(`   model router   : ${_bakedRouterOk ? 'lexicons baked in' : 'NOT baked — desktop model routing will be off'}`);
   console.log(`   enroll secret baked in: ${ENROLL_SECRET ? 'yes' : 'NO — set CFAI_ENROLL_SECRET'}`);
 }
 
@@ -206,13 +218,42 @@ async function buildSea() {
   console.log(`   ${binaryPath} (${(s.size / 1024 / 1024).toFixed(1)} MB)`);
 }
 
+// Every PowerShell helper the binary shells out to at runtime. These are NOT
+// bundled by esbuild — they are spawned by path, so a missing one is a silent
+// capability loss rather than a build error: the subsystem simply never starts
+// and nothing says so.
+//
+// prompt-watcher was the only one staged while this binary was a Claude-only
+// tracker. The other five arrived with the governance stack:
+//   win-poller            clipboard scanning
+//   file-dialog-watcher   files chosen through an Open dialog
+//   attachment-watcher    files dragged onto an AI app
+//   enforcer-win          the WH_KEYBOARD_LL send-blocker — the only piece that
+//                         actually PREVENTS a sensitive send
+//   toast-helper          the user-facing notification on a block
+const PS1_HELPERS = [
+  'prompt-watcher.ps1',
+  'win-poller.ps1',
+  'file-dialog-watcher.ps1',
+  'attachment-watcher.ps1',
+  'enforcer-win.ps1',
+  'toast-helper.ps1',
+];
+
 async function stage() {
   console.log('[3/3] staging side files…');
-  // The UIA helper must sit beside the binary — the tracker looks for it there.
-  await copyFile(
-    join(agentRoot, 'src', 'os_monitor', 'prompt-watcher.ps1'),
-    join(outDir, 'prompt-watcher.ps1'),
-  );
+  // The helpers must sit beside the binary — it looks for them there.
+  for (const name of PS1_HELPERS) {
+    const src = join(agentRoot, 'src', 'os_monitor', name);
+    if (!existsSync(src)) {
+      throw new Error(
+        `missing runtime helper ${name} at ${src} — shipping without it would `
+        + 'disable that subsystem silently on every machine',
+      );
+    }
+    await copyFile(src, join(outDir, name));
+  }
+  console.log(`   copied ${PS1_HELPERS.length} PowerShell helpers`);
   console.log('   copied prompt-watcher.ps1');
 
   // Windows one-click installer scripts, so the downloaded package can be run
@@ -318,5 +359,29 @@ async function stripPeSignature(file) {
     return true;
   } finally {
     await fh.close();
+  }
+}
+
+// Evaluate the model-router lexicons at BUILD time so the packaged binary carries
+// them instead of parsing repo source it will never have.
+//
+// Returns null on failure rather than throwing: a broken lexicon parse should cost
+// desktop model routing, not the entire agent build. The build log says which
+// happened, because "routing quietly stopped working" is the failure this whole
+// change exists to prevent.
+// var, not let: this is declared below its first use in the define block above,
+// and let would sit in the temporal dead zone and throw at build time.
+var _bakedRouterOk = false;
+async function bakedModelRouterConfig() {
+  try {
+    const mod = await import(
+      pathToFileURL(join(agentRoot, 'src', 'os_monitor', 'model-router-config.js')).href
+    );
+    const cfg = mod.buildModelRouterConfig();
+    _bakedRouterOk = !!cfg;
+    return cfg;
+  } catch (err) {
+    console.warn(`   WARNING: model router lexicons not baked (${err?.message || err})`);
+    return null;
   }
 }

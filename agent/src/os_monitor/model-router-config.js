@@ -26,7 +26,25 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+/* global __CFAI_MODEL_ROUTER_CONFIG__ */
+// BAKED AT BUILD TIME for the packaged binary.
+//
+// The lexicons below are parsed out of browser-extension/content/complexity.js —
+// repo SOURCE, which exists on a developer's machine and on no deployed laptop.
+// In the packaged agent the readFileSync threw ENOENT from inside the enforcer's
+// spawn env, so the keystroke send-blocker never started: the one component that
+// actually PREVENTS a sensitive send, defeated by a missing source file.
+//
+// build-claude-tracker.mjs now evaluates this at build time and injects the
+// result, so the packaged binary carries the compiled lexicons and never touches
+// the filesystem. A dev run finds the constant undefined and parses as before.
+const BAKED = typeof __CFAI_MODEL_ROUTER_CONFIG__ !== 'undefined'
+  ? __CFAI_MODEL_ROUTER_CONFIG__
+  : null;
+
+const __dirname = (() => {
+  try { return dirname(fileURLToPath(import.meta.url)); } catch { return ''; }
+})();
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 const COMPLEXITY_JS_PATH = join(REPO_ROOT, 'browser-extension', 'content', 'complexity.js');
 const CONTENT_JS_PATH = join(REPO_ROOT, 'browser-extension', 'content', 'content.js');
@@ -172,6 +190,7 @@ const TIER_UI_NAMES = {
  * matters here); the enforcer only calls this once per helper spawn.
  */
 export function buildModelRouterConfig() {
+  if (BAKED) return BAKED;
   const complexitySrc = readFileSync(COMPLEXITY_JS_PATH, 'utf8');
 
   const positiveCategories = POSITIVE_CATEGORY_NAMES.map((name) => {

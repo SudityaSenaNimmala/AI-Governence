@@ -36,6 +36,7 @@
 import { spawn, execFile } from 'node:child_process';
 import { readFile, writeFile, unlink, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -61,8 +62,24 @@ export function spawnEnforcerWatchdog({ parentPid = process.pid, statePath = ENF
     return null;
   }
 
-  const selfPath = fileURLToPath(import.meta.url);
-  const child = spawn(process.execPath, [selfPath, String(parentPid), statePath], {
+  // HOW THE WATCHDOG RE-LAUNCHES ITSELF, in both shapes this code ships in.
+  //
+  // From source it is a real file, so node runs it directly. In the packaged
+  // binary there is no file to point at — the old fileURLToPath(import.meta.url)
+  // threw at this line, and because the caller spawns the watchdog immediately
+  // after starting the enforcer, the throw took the enforcer down with it.
+  //
+  // Packaged, the agent re-execs ITSELF behind a private flag; main() routes
+  // --enforcer-watchdog straight into watchdogMain() below.
+  let selfPath = null;
+  try { selfPath = fileURLToPath(import.meta.url); } catch { /* bundled */ }
+
+  const packaged = !selfPath || !existsSync(selfPath);
+  const args = packaged
+    ? ['--enforcer-watchdog', String(parentPid), statePath]
+    : [selfPath, String(parentPid), statePath];
+
+  const child = spawn(process.execPath, args, {
     // detached + stdio:ignore = child survives parent death cleanly.
     detached: true,
     stdio: 'ignore',
@@ -175,7 +192,9 @@ export async function reapEnforcer(statePath = ENFORCER_PID_PATH, {
  * Runs in the detached child. Polls parent existence; when the parent is gone,
  * kills the orphaned helper and exits.
  */
-async function runWatcher(parentPid, statePath) {
+// Exported for the packaged binary: there is no separate script file to spawn,
+// so the agent re-execs itself with --enforcer-watchdog and calls straight in.
+export async function runWatcher(parentPid, statePath) {
   // If the parent already isn't there (race on spawn), reap immediately.
   // Otherwise poll until it goes away.
   while (parentAlive(parentPid)) {

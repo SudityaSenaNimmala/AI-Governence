@@ -8,10 +8,14 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { helperScript } from './helper-path.js';
 import { EventEmitter } from 'node:events';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const WATCHER_SCRIPT = join(__dirname, 'file-dialog-watcher.ps1');
+// Resolved through helperScript() rather than import.meta.url: this module is
+// bundled to CommonJS for the packaged binary, where import.meta does not exist
+// and the old expression threw at load time — killing the whole agent before it
+// printed anything. See helper-path.js.
+const WATCHER_SCRIPT = helperScript('file-dialog-watcher.ps1');
 
 export class FileDialogWatcher extends EventEmitter {
   constructor({ log, aiProcessNames }) {

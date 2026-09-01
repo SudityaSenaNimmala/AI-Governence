@@ -32,6 +32,13 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PromptWatcher } from '../os_monitor/prompt-watcher.js';
+// The full governance stack: keystroke send-blocker, clipboard scanning, file
+// dialog + drag-drop capture, DLP pattern policy sync, and the fleet feature
+// toggles. Previously this binary shipped without any of it — it counted Claude
+// prompts and nothing else — so desktop AI use outside Claude was invisible and
+// nothing was ever BLOCKED on the desktop.
+import { OsMonitor } from '../os_monitor/index.js';
+import { watcherProcessNames } from '../os_monitor/ai-processes.js';
 // Shared with the full agent, deliberately: the extension probes one fixed set of
 // localhost ports, so two implementations would be two chances to drift apart.
 import { startIdentityBeacon } from '../identity-beacon.js';
@@ -320,9 +327,19 @@ async function runTracker() {
   const poster = new Poster(creds.token);
   const user = resolveCorporateIdentity({ domain: IDENTITY_DOMAIN }).user;
 
+  // EVERY AI desktop app, not just Claude.
+  //
+  // This list used to be DESKTOP_PROCESSES (['Claude']), which is what made the
+  // binary a Claude-only tracker: Cursor, ChatGPT Desktop and Copilot-in-IDE
+  // typed prompts were never seen. watcherProcessNames() is the same catalog the
+  // OS monitor uses, so the two cannot drift.
+  //
+  // trackerMode stays on. It sets CFAI_CLAUDE_TRACKER=1, which the PS1 uses for
+  // its browser-side behaviour, and the Claude Usage dashboard depends on the
+  // events that produces.
   const watcher = new PromptWatcher({
     log,
-    aiProcessNames: DESKTOP_PROCESSES,
+    aiProcessNames: watcherProcessNames(),
     browserProcessNames: BROWSER_PROCESSES,
     trackerMode: true,
     scriptPath: watcherScript,
@@ -343,8 +360,32 @@ async function runTracker() {
   });
 
   watcher.start();
-  log.info(`watching: Claude Desktop + claude.ai in ${BROWSER_PROCESSES.join(', ')}`);
+  log.info(`watching: ${watcherProcessNames().length} AI desktop apps + claude.ai in ${BROWSER_PROCESSES.join(', ')}`);
   log.info('Prompt text is never sent — only a character count. Ctrl+C to stop.');
+
+  // The governance half. skipPromptWatcher because `watcher` above already covers
+  // typed prompts for the same process list — two watchers would double-count
+  // every prompt and run two copies of the PowerShell helper.
+  //
+  // Non-fatal by design: if the enforcer cannot arm (a locked-down machine, a
+  // missing helper), prompt counting and the identity beacon must still work.
+  // A machine that reports nothing is worse than one that reports without
+  // blocking.
+  let monitor = null;
+  try {
+    monitor = new OsMonitor({
+      serverUrl: SERVER_URL,
+      token: creds.token,
+      log,
+      skipPromptWatcher: true,
+    });
+    monitor.start();
+    log.info('governance: clipboard + file dialogs + drag-drop + send-blocker armed');
+  } catch (err) {
+    monitor = null;
+    log.warn(`governance stack not started: ${err?.message || err}`);
+    log.warn('prompt counting and identity still active');
+  }
 
   const timer = setInterval(() => poster.flush(), FLUSH_INTERVAL_MS);
 
@@ -414,6 +455,10 @@ async function runTracker() {
     clearInterval(accountTimer);
     clearInterval(transcriptTimer);
     watcher.stop();
+    // Before the poster flush: stopping the monitor releases the low-level
+    // keyboard hook, and leaving that installed after exit is what the enforcer
+    // watchdog exists to clean up.
+    try { monitor?.stop(); } catch { /* best effort — never block shutdown */ }
     await poster.flush();
     process.exit(0);
   };
@@ -547,6 +592,32 @@ async function main() {
   if (process.platform !== 'win32') {
     log.error('This tracker relies on Windows UI Automation and only runs on Windows.');
     process.exit(1);
+  }
+
+  // THE WATCHDOG RE-ENTRY, checked before anything else.
+  //
+  // The keystroke enforcer installs a WH_KEYBOARD_LL hook. If this process is
+  // hard-killed the hook outlives it, so a detached sibling watches the parent
+  // and releases it. From source that sibling is enforcer-watchdog.js run by
+  // node; in the packaged binary there is no such file, so the agent re-execs
+  // ITSELF with this flag and lands here.
+  //
+  // First in main() deliberately: this path must not enrol, start a beacon, take
+  // the single-instance lock, or do anything else the real agent does.
+  if (process.argv.includes('--enforcer-watchdog')) {
+    const i = process.argv.indexOf('--enforcer-watchdog');
+    const parentPid = parseInt(process.argv[i + 1], 10);
+    const statePath = process.argv[i + 2] || undefined;
+    if (!parentPid) {
+      process.stderr.write('usage: --enforcer-watchdog <parentPid> [statePath]\n');
+      process.exit(2);
+    }
+    const { runWatcher, ENFORCER_PID_PATH } = await import('../os_monitor/enforcer-watchdog.js');
+    await runWatcher(parentPid, statePath || ENFORCER_PID_PATH).catch((e) => {
+      process.stderr.write(`enforcer-watchdog fatal: ${e?.stack || e}\n`);
+      process.exit(1);
+    });
+    return;
   }
 
   const argv = new Set(process.argv.slice(2));

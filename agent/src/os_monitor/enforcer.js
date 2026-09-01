@@ -11,6 +11,7 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { helperScript } from './helper-path.js';
 import { EventEmitter } from 'node:events';
 import { writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
 import {
@@ -23,8 +24,11 @@ import {
 import { buildModelRouterConfig } from './model-router-config.js';
 import { buildIdeProcessConfig, buildAiPanelConfig, buildAgentSurfaceConfig } from './ai-processes.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const ENFORCER_SCRIPT = join(__dirname, 'enforcer-win.ps1');
+// Resolved through helperScript() rather than import.meta.url: this module is
+// bundled to CommonJS for the packaged binary, where import.meta does not exist
+// and the old expression threw at load time — killing the whole agent before it
+// printed anything. See helper-path.js.
+const ENFORCER_SCRIPT = helperScript('enforcer-win.ps1');
 
 // How often we refresh the liveness heartbeat the PowerShell deadman reads.
 // The helper gives up on us at 30s stale, so 5s leaves 6 missed beats of slack
