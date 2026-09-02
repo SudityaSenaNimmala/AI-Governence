@@ -949,6 +949,200 @@ test('ARMED: the Teams WebView2 child-process composer matches, unrelated proces
   }
 });
 
+// ── THE SECOND UI ROUTE: Teams' embedded Copilot tab ────────────────────────
+//
+// Teams reaches an agent two ways, and only one of them was covered. The
+// Chat-list route names the open conversation in the WINDOW TITLE and is
+// live-verified above. The embedded "Copilot" tab does NOT: measured live
+// 2026-09, its title is the generic, CONSTANT "Copilot | <tenant> | <email> |
+// Microsoft Teams" no matter which agent is open. The title parse therefore
+// correctly reads NO EVIDENCE there — a real, silent detection gap on that one
+// route, not a false positive anywhere.
+//
+// The agent's name is in the PANE instead, on an accessible heading, which costs
+// a tree walk. So the mechanism is a gated background search plus a cache behind
+// its OWN second pair of flags, separate from the Chat-list route's. That pair
+// shipped false/false and was flipped to true/true by this route's own live pass
+// on 2026-09-02; the two tests below drive the fixture on BOTH sides of the gate,
+// because the inert side is what every FUTURE route still ships in.
+
+test('UNVERIFIED-ROUTE FIXTURE: the Copilot-tab route is inert, and attempts no search at all', { skip: !win }, async () => {
+  // Driven with the Chat-list route fully ARMED, so this is emphatically not
+  // "nothing is switched on": the blocked agent's conversation is open in the
+  // Copilot tab, its composer is focused and matched, and a heading naming that
+  // agent is sitting right there. The fallback's own two flags are held false by
+  // the fixture, so FallbackReadArmed refuses before anything else happens.
+  const rows = await scenario('copilot_tab_is_inert');
+  assert.equal(rows.length, 5);
+  for (const r of rows) {
+    assert.equal(r.searchAttempted, false, `tick ${r.tick}: no pane search may even be attempted`);
+    assert.equal(r.agentOutcome, 'NotComposer', `tick ${r.tick}: the title still names nothing`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.fgIsAi, false, `tick ${r.tick}: Teams must not become an AI surface`);
+    // The composer IS still matched — detection and enforcement stay separate,
+    // exactly as they do for vscode_chat.
+    assert.equal(r.matched, 'teams_copilot_composer', `tick ${r.tick}`);
+  }
+});
+
+test('ARMED: the agent\'s own message heading names it, and blocks at AGENT scope', { skip: !win }, async () => {
+  // The SHIPPED state as of 2026-09-02: both pairs flipped, which is what the
+  // route's own live pass exercised for real. The measured heading here is the
+  // same one that pass used: class token fai-CopilotMessage__accessibleHeading,
+  // Name "IT Help Desk Agent said:".
+  const rows = await scenario('copilot_tab_message_heading');
+  assert.equal(rows.length, 10);
+  for (const r of rows) {
+    assert.equal(r.searchAttempted, true, `tick ${r.tick}`);
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    // Through the Copilot tab's OWN composer, not the Chat-list one.
+    assert.equal(r.matched, 'teams_copilot_composer', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}`);
+    assert.equal(r.blockedByElement, true, `tick ${r.tick}`);
+    // The SAME latch key the Chat-list route uses: this is a second way to reach
+    // one outcome, not a second state machine.
+    assert.equal(r.latchKey, 'agent:teams_desktop', `tick ${r.tick}`);
+    // The name in the block comes from the admin-typed ROW, never from the pane.
+    assert.equal(r.blockedAgent, 'IT Help Desk Agent', `tick ${r.tick}`);
+  }
+  // Headings ACCUMULATE — confirmed live that a second exchange did not replace
+  // the first message's heading — and two that AGREE are one confirmed answer.
+  const two = await scenario('copilot_tab_two_messages');
+  assert.equal(two.length, 5);
+  for (const r of two) {
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}`);
+  }
+});
+
+test('ARMED: a freshly-opened conversation is named by its LANDING heading', { skip: !win }, async () => {
+  // The state before any message is sent — and the common one right after
+  // opening an agent, since re-opening a Copilot-tab conversation resets it to
+  // empty (confirmed live). Measured Name: "IT Help Desk Agent Created by Your
+  // developer name".
+  const rows = await scenario('copilot_tab_landing_heading');
+  assert.equal(rows.length, 5);
+  for (const r of rows) {
+    assert.equal(r.searchAttempted, true, `tick ${r.tick}`);
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}`);
+    assert.equal(r.latchKey, 'agent:teams_desktop', `tick ${r.tick}`);
+  }
+});
+
+test('ARMED: headings that DISAGREE block nothing — for a host app, ambiguity fails OPEN', { skip: !win }, async () => {
+  // A mixed or stale transcript, or a pane that re-rendered mid-walk. One of the
+  // headings names the very agent an admin blocked, and it still must not block:
+  // "cannot tell which agent is open" can never mean "block anyway" in a
+  // company's communications client.
+  const rows = await scenario('copilot_tab_disagreeing');
+  assert.equal(rows.length, 5);
+  for (const r of rows) {
+    assert.equal(r.searchAttempted, true, `tick ${r.tick}: the search DID run`);
+    assert.equal(r.agentOutcome, 'NotComposer', `tick ${r.tick}: …and produced no evidence`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.latchKey, '', `tick ${r.tick}`);
+  }
+  // Only the USER has spoken. Their heading carries a DIFFERENT class (measured:
+  // fai-UserMessage__accessibleHeading vs fai-CopilotMessage__accessibleHeading),
+  // so a human's own message can never be read as the agent's — even though its
+  // Name has the identical "<x> said:" shape.
+  const user = await scenario('copilot_tab_user_only');
+  assert.equal(user.length, 3);
+  for (const r of user) {
+    assert.equal(r.agentOutcome, 'NotComposer', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+  }
+  // …and a pane the walk found nothing in is no evidence either, never a block.
+  const none = await scenario('copilot_tab_no_headings');
+  assert.equal(none.length, 3);
+  for (const r of none) {
+    assert.equal(r.agentOutcome, 'NotComposer', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+  }
+});
+
+test('ARMED: no pane search is EVER attempted outside the Copilot tab', { skip: !win }, async () => {
+  // The structural half of the privacy story, and the reason paneKinds exists as
+  // its own list. Every tick here is fully armed and carries headings that WOULD
+  // name the blocked agent if anything looked at them — the only difference is
+  // which view the title names. A colleague DM, a group chat, a channel and the
+  // Activity tab must never have their pane walked.
+  const rows = await scenario('copilot_tab_no_search_off_route');
+  assert.equal(rows.length, 5);
+  for (const r of rows) {
+    assert.equal(r.searchAttempted, false, `tick ${r.tick}: no search outside the Copilot tab`);
+  }
+  // A DM has no kind segment at all; the channel and Activity kinds are simply
+  // not in paneKinds. All no evidence, all unblocked.
+  assert.deepEqual(rows.slice(0, 4).map((r) => r.agentOutcome),
+    ['NotComposer', 'Generic', 'NotComposer', 'NotComposer']);
+  for (const r of rows.slice(0, 4)) {
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+  }
+  // …and the Chat-list route's own positive case still resolves through the
+  // TITLE alone, with no search: stage B is only ever reached from no evidence,
+  // so it can add coverage and can never override a title that DID name one.
+  assert.equal(rows[4].agentOutcome, 'Named');
+  assert.equal(rows[4].matched, 'teams_composer');
+  assert.equal(rows[4].searchAttempted, false, 'a title that names a conversation needs no search');
+  assert.equal(rows[4].blockScope, 'agent');
+  assert.equal(rows[4].enterBlocked, true);
+});
+
+test('ARMED: leaving the Copilot tab, or switching agent inside it, releases at once', { skip: !win }, async () => {
+  // The fail-OPEN direction, same as the Chat-list route's.
+  const away = await scenario('copilot_tab_release');
+  assert.equal(away.length, 3);
+  assert.equal(away[0].enterBlocked, true);
+  for (const r of away.slice(1)) {
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}: navigating away must release`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.latchKey, '', `tick ${r.tick}`);
+  }
+  // Same tab, same title, same window — only the pane's headings changed. In
+  // production that is what the cache TTL bounds; the outcome must be a release.
+  const other = await scenario('copilot_tab_other_agent');
+  assert.equal(other.length, 3);
+  assert.equal(other[0].enterBlocked, true);
+  for (const r of other.slice(1)) {
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}: a different agent is authoritatively named`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}: and no row covers it`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+  }
+});
+
+test('ARMED: the privacy gate and the host-app inversion still govern the new route', { skip: !win }, async () => {
+  // No agent-scoped row covering Teams → nothing about Teams is read, and no
+  // pane is searched, even with the blocked agent's conversation open.
+  const noPolicy = await scenario('copilot_tab_no_policy_no_read');
+  assert.equal(noPolicy.length, 3);
+  for (const r of noPolicy) {
+    assert.equal(r.agentOutcome, 'Unreadable', `tick ${r.tick}: no read may occur at all`);
+    assert.equal(r.searchAttempted, false, `tick ${r.tick}`);
+    assert.equal(r.matched, '', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+  }
+  // A PLATFORM-scoped row still blocks nothing on this route either — the
+  // host-app exclusion is keyed on the PROCESS, not on any of this.
+  const platform = await scenario('copilot_tab_platform_row_never_blocks');
+  assert.equal(platform.length, 3);
+  for (const r of platform) {
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}: a host app is never blocked whole`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.searchAttempted, false, `tick ${r.tick}`);
+  }
+});
+
 test('REGRESSION: M365Copilot behaves exactly as before, with host apps in the catalog', { skip: !win }, async () => {
   // Run last in the harness, with the SHIPPED catalog reloaded, so a
   // fixture-only payload cannot be what makes it pass. Every outcome here is

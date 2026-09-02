@@ -60,8 +60,18 @@ $IDE_JSON    = '[{"name":"code","panelFallback":false},{"name":"cursor","panelFa
 $IDE_PANELS = '{"id":"claude_code","procs":["Code","Cursor"],"controlType":"Edit","nameEquals":"Message input","namePrefix":"","classEquals":"","classPrefix":"messageInput_","enforce":true},{"id":"vscode_chat","procs":["Code","Cursor"],"controlType":"Edit","nameEquals":"","namePrefix":"Chat Input","classEquals":"","classPrefix":"","enforce":false},{"id":"cursor_composer","procs":["Cursor"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"aislash-editor-input","classPrefix":"","enforce":true}'
 $TEAMS_PANEL_OFF = '{"id":"teams_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"ck-editor__editable","classPrefix":"","enforce":false}'
 $TEAMS_PANEL_ON  = '{"id":"teams_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"ck-editor__editable","classPrefix":"","enforce":true}'
-$PANELS_JSON        = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_OFF + ']'
-$PANELS_TEAMS_ARMED = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_ON + ']'
+# The SECOND Teams composer: the one inside the embedded "Copilot" tab. A
+# genuinely different editor implementation from the CKEditor above (measured
+# live 2026-09 — no ck-editor__editable token anywhere in its ClassName), so it
+# needs its own signature. Ships enforce:false, exactly as the catalog has it;
+# $TEAMS_COPILOT_PANEL_ON is the TEST-ONLY flip.
+$TEAMS_COPILOT_PANEL_OFF = '{"id":"teams_copilot_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"fai-EditorInput__input","classPrefix":"","enforce":false}'
+$TEAMS_COPILOT_PANEL_ON  = '{"id":"teams_copilot_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"fai-EditorInput__input","classPrefix":"","enforce":true}'
+$PANELS_JSON        = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_OFF + ',' + $TEAMS_COPILOT_PANEL_OFF + ']'
+$PANELS_TEAMS_ARMED = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_ON + ',' + $TEAMS_COPILOT_PANEL_OFF + ']'
+# Both Teams composers armed — what the Copilot-tab scenarios need, since that
+# route's block has to come through ITS panel, not the Chat-list one.
+$PANELS_COPILOT_ARMED = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_ON + ',' + $TEAMS_COPILOT_PANEL_ON + ']'
 # exactly synthesizePlatformBlocks([{ host: 'claude.ai', product: 'Claude', blocked: true }])
 $ROWS_CLAUDE = '[{"platform":"ai_platform","process_name":"claude","agent_name":"Claude","agent_id":"","host":"claude.ai","reason":"Blocked by organization policy"},{"platform":"ai_platform","panel":"claude_code","agent_name":"Claude","agent_id":"","host":"claude.ai","reason":"Blocked by organization policy"}]'
 # a detection-only panel with a row of its own — must still never block
@@ -94,21 +104,42 @@ Call 'LoadAiPanels'     @($PANELS_JSON)
 # entries are present in the same payload, so one tick sequence shows a verified
 # surface narrowing and an unverified one not.
 #
-# $SURFACES_SHIPPED and $SURFACES_WITH_UNVERIFIED now BOTH carry the shipping
-# teams_desktop entry (enforce:false, verified:false) — byte-identical to what
-# buildAgentSurfaceConfig() ships today — so the scenarios that prove a host app
-# is inert are proving it against the real payload, not a fixture.
-# $SURFACES_TEAMS_ARMED is the TEST-ONLY flip of those two flags, used to drive
-# the mechanism that Stage 3 will turn on. Flipping them here is not a catalog
-# change: agent/tests/ai-processes.test.mjs pins the shipped values at false.
-$TEAMS_SURFACE_OFF = '{"id":"teams_desktop","procs":["ms-teams"],"controlType":"Edit","composerNamePrefixes":[],"genericNames":["Copilot","Chat","Microsoft Teams","Meeting chat"],"read":"window_title","titleSeparator":" | ","titleSuffix":"Microsoft Teams","titleKinds":["Chat"],"hostApp":true,"enforce":false,"verified":false}'
-$TEAMS_SURFACE_ON  = '{"id":"teams_desktop","procs":["ms-teams"],"controlType":"Edit","composerNamePrefixes":[],"genericNames":["Copilot","Chat","Microsoft Teams","Meeting chat"],"read":"window_title","titleSeparator":" | ","titleSuffix":"Microsoft Teams","titleKinds":["Chat"],"hostApp":true,"enforce":true,"verified":true}'
+# NONE of the *_OFF fixtures below describe the shipped catalog any more. Every
+# pair in the real catalog is now past its gate — teams_desktop's own pair since
+# its 2026-08-30 live pass, the nested fallbackRead pair since its own pass on
+# 2026-09-02 — and ai-processes.test.mjs is what pins those shipped values. The
+# false/false variants here are DELIBERATE FIXTURES, kept precisely because no
+# shipped entry is an example of an unverified surface any more, and the safety
+# gate still has to be exercised:
+#   $TEAMS_SURFACE_OFF — the shape teams_desktop had before 2026-08-30. Keeps the
+#                        "an unverified HOST-APP surface blocks nothing at all"
+#                        inversion under test.
+#   $TEAMS_FB_OFF      — the same idea for the SECOND UI route (Teams' embedded
+#                        Copilot tab, whose window title names no conversation).
+#                        It carries its OWN enforce/verified pair; this fixture
+#                        holds that pair at false to test the "route not yet
+#                        verified" scenario specifically.
+#   $TEAMS_FB_ON       — that pair at its shipped true/true, used to drive the
+#                        mechanism.
+# So the payload matching buildAgentSurfaceConfig()'s current output is
+# $TEAMS_SURFACE_COPILOT_ON (both pairs true), not $TEAMS_SURFACE_ON. The
+# variable names are historical; the flags in each string are what matters, and
+# setting them here is never a catalog change.
+$TEAMS_FB_OFF = '"fallbackRead":{"mode":"message_heading","paneKinds":["Copilot"],"headingClass":"fai-CopilotMessage__accessibleHeading","headingSuffix":" said:","landingInfix":" Created by ","genericNames":["Copilot","Microsoft 365 Copilot","You"],"enforce":false,"verified":false}'
+$TEAMS_FB_ON  = '"fallbackRead":{"mode":"message_heading","paneKinds":["Copilot"],"headingClass":"fai-CopilotMessage__accessibleHeading","headingSuffix":" said:","landingInfix":" Created by ","genericNames":["Copilot","Microsoft 365 Copilot","You"],"enforce":true,"verified":true}'
+$TEAMS_SURFACE_HEAD = '{"id":"teams_desktop","procs":["ms-teams"],"controlType":"Edit","composerNamePrefixes":[],"genericNames":["Copilot","Chat","Microsoft Teams","Meeting chat"],"read":"window_title","titleSeparator":" | ","titleSuffix":"Microsoft Teams","titleKinds":["Chat"],"hostApp":true,'
+$TEAMS_SURFACE_OFF = $TEAMS_SURFACE_HEAD + '"enforce":false,"verified":false,' + $TEAMS_FB_OFF + '}'
+$TEAMS_SURFACE_ON  = $TEAMS_SURFACE_HEAD + '"enforce":true,"verified":true,' + $TEAMS_FB_OFF + '}'
+# The Chat-list route armed AND the Copilot-tab fallback armed. Two independent
+# gates, so this is the only payload under which the fallback can do anything.
+$TEAMS_SURFACE_COPILOT_ON = $TEAMS_SURFACE_HEAD + '"enforce":true,"verified":true,' + $TEAMS_FB_ON + '}'
 $M365_SURFACE      = '{"id":"m365_copilot","procs":["M365Copilot"],"controlType":"Edit","composerNamePrefixes":["Message "],"genericNames":["Copilot"],"read":"composer_name","titleSeparator":"","titleSuffix":"","titleKinds":[],"hostApp":false,"enforce":true,"verified":true}'
 $COPILOT_SURFACE   = '{"id":"copilot_standalone","procs":["Copilot"],"controlType":"Edit","composerNamePrefixes":["Message "],"genericNames":["Copilot"],"read":"composer_name","titleSeparator":"","titleSuffix":"","titleKinds":[],"hostApp":false,"enforce":false,"verified":false}'
 
 $SURFACES_SHIPPED = '[' + $M365_SURFACE + ',' + $TEAMS_SURFACE_OFF + ']'
 $SURFACES_WITH_UNVERIFIED = '[' + $M365_SURFACE + ',' + $COPILOT_SURFACE + ',' + $TEAMS_SURFACE_OFF + ']'
 $SURFACES_TEAMS_ARMED = '[' + $M365_SURFACE + ',' + $TEAMS_SURFACE_ON + ']'
+$SURFACES_COPILOT_ARMED = '[' + $M365_SURFACE + ',' + $TEAMS_SURFACE_COPILOT_ON + ']'
 
 function LoadSurfaces([string]$json) { Call 'LoadAgentSurfaces' @($json) | Out-Null }
 function LoadPanels([string]$json) { Call 'LoadAiPanels' @($json) | Out-Null }
@@ -129,6 +160,12 @@ if (-not $OUTCOME_T) { throw 'no nested AgentReadOutcome enum' }
 $OUT_UNREADABLE = [Enum]::Parse($OUTCOME_T, 'Unreadable')
 $M_EXTRACT = $T.GetMethod('ExtractAgentName', $FLAGS)
 if (-not $M_EXTRACT) { throw 'no method ExtractAgentName' }
+# The SECOND Teams route's pure extractor. Same deal: the only thing substituted
+# for it is the tree walk that COLLECTS the heading candidates — the decision
+# about what those candidates mean is production code, and so is the gate
+# (FallbackReadArmed) that decides whether a walk may happen at all.
+$M_EXTRACT_HEADING = $T.GetMethod('ExtractAgentNameFromHeading', $FLAGS)
+if (-not $M_EXTRACT_HEADING) { throw 'no method ExtractAgentNameFromHeading' }
 
 # ── MEASURED M365Copilot composer values ────────────────────────────────────
 # Captured live 2026-08 by a read-only UIA probe of a real Microsoft 365 Copilot
@@ -229,6 +266,55 @@ $TITLE_TEAMS_DM       = 'Sruthi Chimata | CloudFuze, Inc | Pravallika.Punumalli@
 $TITLE_TEAMS_COPILOT  = 'Copilot | filefuze | erik@filefuze.co | Microsoft Teams'
 $TITLE_TEAMS_CHANNEL  = 'Teams and Channels | CFQMSG END-END Sanity testing for public channel-ivy2 | General | filefuze | erik@filefuze.co | Microsoft Teams'
 $TITLE_TEAMS_ACTIVITY = 'Activity | Workflows | filefuze | erik@filefuze.co | Microsoft Teams'
+
+# ── MEASURED Microsoft Teams COPILOT-TAB values (the second UI route) ───────
+# Probed live 2026-09 against the same install, with the same blocked agent, in
+# the embedded "Copilot" tab rather than the Chat list.
+#
+# The composer. A genuinely DIFFERENT editor from the CKEditor one above — no
+# ck-editor__editable token anywhere in its ClassName — which is why it needs
+# its own AI_PANELS signature. Its Name is generic ("Message Copilot" with no
+# agent selected) and is deliberately not a signal.
+$FOCUS_TEAMS_COPILOT_COMPOSER = @('Edit', 'Message Copilot', 'fai-EditorInput__input r18fti29 r18aquq2 ___10kbave f1pha7fy f1immsc2 f1mk8lai')
+# The pane headings the background walk collects, as (className, name) pairs.
+# THE landing heading of a freshly-opened conversation, before any message —
+# and, since re-opening resets the conversation, the common state right after
+# opening an agent.
+# NOTE the unary comma on every SINGLE-element list below: @( @('a','b') )
+# collapses to a flat two-string array in PowerShell, which would silently feed
+# this harness one character per "heading". @( ,@('a','b') ) is the one-element
+# list of pairs actually intended.
+$HEAD_LANDING = @(
+  ,@('fui-Title1 fui-Text ___4t6usk0 fk6fouc fccw675 f1ebx5kk flh3ekv f17mccla f1w7gpdv f6juhto f1gl81tg f2jf649 f19n0e5 f1pnz6pm f1jsk80 ffay0gz f1mix7af f138trxt fhvk2gl f1trf6pf',
+    'IT Help Desk Agent Created by Your developer name')
+)
+# One exchange: the agent's own message heading plus the user's. The two carry
+# DIFFERENT classes (measured), which is what makes it impossible to read a
+# human's own message as the agent's.
+$HEAD_ONE_MESSAGE = @(
+  @('fai-CopilotMessage__accessibleHeading rhgro0h', 'IT Help Desk Agent said:'),
+  @('fai-UserMessage__accessibleHeading r183b29h', 'You said:')
+)
+# Headings ACCUMULATE — confirmed live that a second exchange did not replace
+# the first message's heading. Two that agree are one confirmed answer.
+$HEAD_TWO_MESSAGES = @(
+  @('fai-CopilotMessage__accessibleHeading rhgro0h', 'IT Help Desk Agent said:'),
+  @('fai-UserMessage__accessibleHeading r183b29h', 'You said:'),
+  @('fai-CopilotMessage__accessibleHeading rhgro0h', 'IT Help Desk Agent said:'),
+  @('fai-UserMessage__accessibleHeading r183b29h', 'You said:')
+)
+# SYNTHETIC (not measured): headings that DISAGREE — a mixed or stale
+# transcript, or a pane that re-rendered mid-walk. Must be no evidence, never a
+# block: for a host app "cannot tell which agent is open" can never mean "block
+# anyway".
+$HEAD_DISAGREE = @(
+  @('fai-CopilotMessage__accessibleHeading rhgro0h', 'IT Help Desk Agent said:'),
+  @('fai-CopilotMessage__accessibleHeading rhgro0h', 'Expenses Helper said:')
+)
+# Only the user has spoken — no agent heading at all.
+$HEAD_USER_ONLY = @(
+  ,@('fai-UserMessage__accessibleHeading r183b29h', 'You said:')
+)
 
 # One agent-scoped row for the Teams agent. teams_chat_agent is the Teams-only
 # platform id; PLATFORM_PROCS maps it to ms-teams and to nothing else.
@@ -401,7 +487,78 @@ function TeamsTick([string]$scenario, [int]$n, $focus, [string]$title,
   Report $scenario $n $hit $readable $outcome
 }
 
-function Report([string]$scenario, [int]$n, $hit, [bool]$readable, $agentOutcome = $null) {
+# One poll tick with the foreground Teams' embedded COPILOT TAB — the second UI
+# route, where the window title names no conversation at all.
+#
+# Everything that DECIDES is production code. The harness reproduces the same two
+# things TeamsTick does (the hostAppArmed gate and the two substituted reads),
+# plus exactly one more: the TREE WALK that collects the pane's heading
+# candidates. What those candidates MEAN is decided by the real
+# ExtractAgentNameFromHeading, and whether a walk may be attempted AT ALL is
+# decided by the real FallbackReadArmed + TitleKindOf — so the inert-by-default
+# gate is under test rather than assumed.
+#
+# $headings is an array of (className, name) pairs — whatever the walk would have
+# found — or $null for a pane where it found nothing.
+#
+# The reported `searchAttempted` is FallbackReadArmed's real answer, which is how
+# a scenario can assert STRUCTURALLY that no search is ever attempted (an
+# unverified route, or a title kind this route does not apply to).
+function TeamsCopilotTick([string]$scenario, [int]$n, $focus, [string]$title, $headings,
+                          [uint32]$fgPid = $TEAMS_PID, [string]$proc = 'ms-teams', [int]$elPid = -1) {
+  $hit = $null
+  $readable = $false
+  $outcome = $OUT_UNREADABLE
+  $agentName = ''
+  $searchAttempted = $false
+  $armed = (HasProc '_hostAppProcs' $proc) `
+           -and (HasProc '_agentScopedProcs' $proc) `
+           -and ($null -ne (Call 'EnforcingAgentSurface' @($proc)))
+  if ($armed) {
+    if ($null -ne $focus) {
+      $ownerPid = if ($elPid -lt 0) { [int]$fgPid } else { $elPid }
+      $owned = [bool](Call 'ElementPidBelongsToForeground' @([int]$ownerPid, [uint32]$fgPid))
+      if ($owned) {
+        $ct = $focus[0]; $nm = $focus[1]; $cls = $focus[2]
+        $readable = ($ct.Trim().Length -gt 0) -and (($nm.Trim().Length -gt 0) -or ($cls.Trim().Length -gt 0))
+        $hit = Call 'MatchPanelSignature' @($proc, $ct, $nm, $cls)
+      }
+    }
+    $surface = Call 'MatchAgentSurface' @($proc)
+    if ($null -ne $surface -and $null -ne $title -and $title.Trim().Length -gt 0) {
+      # STAGE A — the primary title parse, unchanged. On this route it always
+      # lands in NotComposer, because the title names no conversation.
+      $params = [object[]]@($surface, '', $title, $null)
+      $outcome = $M_EXTRACT.Invoke($null, $params)
+      $agentName = [string]$params[3]
+      if ("$outcome" -eq 'NotComposer') {
+        # STAGE B — the real gate, then the substituted walk.
+        $kind = [string](Call 'TitleKindOf' @($surface, $title))
+        $searchAttempted = [bool](Call 'FallbackReadArmed' @($surface, $kind))
+        if ($searchAttempted -and $null -ne $headings) {
+          # Built as genuine string[] (not PowerShell object arrays) because the
+          # C# side takes two PARALLEL string arrays — the same shape Start()
+          # already uses for the pattern table.
+          $classes = [string[]]::new($headings.Count)
+          $names = [string[]]::new($headings.Count)
+          for ($h = 0; $h -lt $headings.Count; $h++) {
+            $classes[$h] = [string]$headings[$h][0]
+            $names[$h] = [string]$headings[$h][1]
+          }
+          $hp = [object[]]@($surface, [string[]]$classes, [string[]]$names, $null)
+          $outcome = $M_EXTRACT_HEADING.Invoke($null, $hp)
+          $agentName = [string]$hp[3]
+        }
+      }
+    }
+  }
+  $rid = if ($null -ne $hit) { '7.3311.4.9.31.90211' } else { '' }
+  Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $hit, $rid, $readable, $outcome, $agentName) | Out-Null
+  Call 'CheckFgBlocked' | Out-Null
+  Report $scenario $n $hit $readable $outcome $searchAttempted
+}
+
+function Report([string]$scenario, [int]$n, $hit, [bool]$readable, $agentOutcome = $null, [bool]$searchAttempted = $false) {
   # The REAL Enter predicate, with no content signal armed — so a True here can
   # only be the platform block.
   $enterBlocked = Call 'EnterBlockActive' @($false, $false, $false, $false)
@@ -430,6 +587,10 @@ function Report([string]$scenario, [int]$n, $hit, [bool]$readable, $agentOutcome
     focusMoved    = [bool](Call 'FocusCouldHaveMoved')
     enterBlocked  = [bool]$enterBlocked
     panelField    = [string](Call 'PlatformBlockPanelField')
+    # The Copilot-tab route's gate, as the REAL FallbackReadArmed answered it.
+    # False on every other tick — nothing else in this harness can attempt a
+    # pane search, which is what makes "no search ever happened" assertable.
+    searchAttempted = [bool]$searchAttempted
   }
   Write-Output ($obj | ConvertTo-Json -Compress)
 }
@@ -1097,6 +1258,150 @@ finally {
   foreach ($c in @($teamsChildA, $teamsChildB)) {
     if ($null -ne $c) { try { $c.Kill() } catch { } ; try { $c.Dispose() } catch { } }
   }
+}
+
+# ═══ THE SECOND UI ROUTE: Teams' embedded Copilot tab ═══════════════════════
+# Its window title is the generic, CONSTANT "Copilot | <tenant> | <email> |
+# Microsoft Teams" no matter which agent is open, so the primary title parse
+# correctly names nothing there and that route was a silent detection gap. The
+# agent's name is in the PANE instead. Two independent gates have to be open
+# before any of it does anything: teams_desktop's own pair (the Chat-list route)
+# AND the nested fallbackRead pair.
+
+# ── TR: THE UNVERIFIED-ROUTE FIXTURE — completely inert ─────────────────────
+# The Chat-list route fully ARMED (so this is not "nothing is on"), the
+# Copilot-tab fallback held at false/false by the fixture — the shape it shipped
+# in before its 2026-09-02 live pass, and the shape any future route ships in.
+# This is what the gate has to keep doing forever. The blocked agent's own
+# conversation is open in the Copilot tab, its composer focused, and a matching
+# message heading is sitting right there — and nothing may happen, including no
+# search being attempted at all.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 5; $i++) {
+  TeamsCopilotTick 'copilot_tab_is_inert' $i $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+}
+
+# ═══ The mechanism, driven with BOTH pairs flipped (TEST-ONLY) ══════════════
+
+# ── TS: one exchange — the agent's own message heading names it ─────────────
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 10; $i++) {
+  TeamsCopilotTick 'copilot_tab_message_heading' $i $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+}
+
+# ── TS2: two exchanges — headings ACCUMULATE and must still agree ───────────
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 5; $i++) {
+  TeamsCopilotTick 'copilot_tab_two_messages' $i $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_TWO_MESSAGES
+}
+
+# ── TT: a FRESH conversation — the landing heading names it ────────────────
+# The common state right after opening an agent, since re-opening resets the
+# Copilot-tab conversation to empty (confirmed live).
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 5; $i++) {
+  TeamsCopilotTick 'copilot_tab_landing_heading' $i $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_LANDING
+}
+
+# ── TU: DISAGREEING headings are NO EVIDENCE, never a block ────────────────
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 5; $i++) {
+  TeamsCopilotTick 'copilot_tab_disagreeing' $i $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_DISAGREE
+}
+
+# ── TU2: only the USER has spoken — a different class, so no agent evidence ─
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsCopilotTick 'copilot_tab_user_only' $i $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_USER_ONLY
+}
+# …and a pane the walk found nothing in at all.
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsCopilotTick 'copilot_tab_no_headings' $i $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $null
+}
+
+# ── TV: a DM and a group chat NEVER trigger a search at all ────────────────
+# Fully armed, and the ONLY thing different is which view the title names. A DM's
+# title has no kind segment (segment 0 is the colleague's display name) and a
+# group chat's kind is "Chat" — neither is in paneKinds, so FallbackReadArmed is
+# false and no walk of a colleague conversation's pane is ever attempted. The
+# headings passed here would name the blocked agent if anything looked at them.
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsCopilotTick 'copilot_tab_no_search_off_route' 0 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_DM $HEAD_ONE_MESSAGE
+TeamsCopilotTick 'copilot_tab_no_search_off_route' 1 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_GROUP $HEAD_ONE_MESSAGE
+TeamsCopilotTick 'copilot_tab_no_search_off_route' 2 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_CHANNEL $HEAD_ONE_MESSAGE
+TeamsCopilotTick 'copilot_tab_no_search_off_route' 3 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_ACTIVITY $HEAD_ONE_MESSAGE
+# …and the Chat-list route's OWN positive case still resolves through the TITLE,
+# with no search: stage B is only ever reached from no evidence.
+TeamsCopilotTick 'copilot_tab_no_search_off_route' 4 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT $HEAD_ONE_MESSAGE
+
+# ── TW: leaving the Copilot tab RELEASES within one tick ───────────────────
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsCopilotTick 'copilot_tab_release' 0 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+TeamsCopilotTick 'copilot_tab_release' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_CHANNEL $null
+TeamsCopilotTick 'copilot_tab_release' 2 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_CHANNEL $null
+
+# ── TX: switching to a DIFFERENT agent inside the Copilot tab clears ───────
+# Same tab, same title, same window — only the pane's headings change. This is
+# the case the cache TTL exists to bound in production; here the substituted
+# walk simply returns the new pane's headings.
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+$HEAD_OTHER_AGENT = @(
+  ,@('fai-CopilotMessage__accessibleHeading rhgro0h', 'Expenses Helper said:')
+)
+TeamsCopilotTick 'copilot_tab_other_agent' 0 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+TeamsCopilotTick 'copilot_tab_other_agent' 1 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_OTHER_AGENT
+TeamsCopilotTick 'copilot_tab_other_agent' 2 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_OTHER_AGENT
+
+# ── TY: the privacy gate still governs the new route ───────────────────────
+# Fully armed catalog, blocked agent open in the Copilot tab — but the only
+# agent-scoped row is for ChatGPT, so Teams is absent from _agentScopedProcs and
+# nothing about Teams is read or searched.
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_AGENT_CHATGPT
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsCopilotTick 'copilot_tab_no_policy_no_read' $i $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+}
+
+# ── TZ: a PLATFORM-scoped row still blocks nothing on this route either ────
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_PLATFORM
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsCopilotTick 'copilot_tab_platform_row_never_blocks' $i $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
 }
 
 # ── TQ: an M365Copilot tick is byte-for-byte unaffected by all of the above ─

@@ -34,6 +34,8 @@ import {
   agentSurfaceForProcess,
   extractAgentName,
   extractAgentNameFromTitle,
+  extractAgentNameFromHeading,
+  titleKindOf,
   looksLikeParticipantList,
   agentNameMatches,
   normalizeAgentRows,
@@ -660,6 +662,10 @@ test('buildAgentSurfaceConfig serialises the catalog without aliasing it', () =>
     enforce: true,
     verified: true,
   });
+  // The m365_copilot payload carries NO fallbackRead key at all — the nested
+  // block is omitted rather than shipped empty, so a surface that never declares
+  // a second UI route sends byte-for-byte the payload it always did.
+  assert.equal('fallbackRead' in entry, false, 'm365_copilot must not gain a fallbackRead key');
   assert.deepEqual(teams, {
     id: 'teams_desktop',
     procs: ['ms-teams'],
@@ -673,16 +679,38 @@ test('buildAgentSurfaceConfig serialises the catalog without aliasing it', () =>
     hostApp: true,
     enforce: true,
     verified: true,
+    // The SECOND UI ROUTE (the embedded Copilot tab), with its OWN two-flag gate
+    // — now both true, after that route's own live pass on 2026-09-02. The C#
+    // side reaches it only when both are true, so dropping either from the
+    // payload would silently move the route to the wrong side of its own gate.
+    fallbackRead: {
+      mode: 'message_heading',
+      paneKinds: ['Copilot'],
+      headingClass: 'fai-CopilotMessage__accessibleHeading',
+      headingSuffix: ' said:',
+      landingInfix: ' Created by ',
+      genericNames: ['Copilot', 'Microsoft 365 Copilot', 'You'],
+      enforce: true,
+      verified: true,
+    },
   });
   // Copies, so a consumer mutating the payload cannot reach back into the catalog.
   entry.procs.push('Notepad');
   entry.composerNamePrefixes.push('x');
   teams.titleKinds.push('Channel');
   teams.genericNames.push('x');
+  teams.fallbackRead.paneKinds.push('Activity');
+  teams.fallbackRead.genericNames.push('x');
   assert.deepEqual(AGENT_SURFACES[0].procs, ['M365Copilot']);
   assert.deepEqual(AGENT_SURFACES[0].composerNamePrefixes, ['Message ']);
   assert.deepEqual(AGENT_SURFACES[1].titleKinds, ['Chat']);
   assert.deepEqual(AGENT_SURFACES[1].genericNames, ['Copilot', 'Chat', 'Microsoft Teams', 'Meeting chat']);
+  assert.deepEqual(AGENT_SURFACES[1].fallbackRead.paneKinds, ['Copilot']);
+  assert.deepEqual(AGENT_SURFACES[1].fallbackRead.genericNames, ['Copilot', 'Microsoft 365 Copilot', 'You']);
+  // Survives JSON round-tripping, which is how it actually reaches the helper —
+  // the nested block is the first structured value on this channel.
+  const config = buildAgentSurfaceConfig();
+  assert.deepEqual(JSON.parse(JSON.stringify(config)), config);
 });
 
 // ── Window-title agent reads (Microsoft Teams) ───────────────────────────────
@@ -861,6 +889,268 @@ test('agentSurfaceForProcess resolves the Teams host app', () => {
   }
   // The old Teams process name is a different app and is not covered.
   assert.equal(agentSurfaceForProcess('Teams'), null);
+});
+
+// ── The SECOND Teams UI route: the embedded Copilot tab ──────────────────────
+//
+// Teams reaches an agent two ways. The Chat-list route names the conversation in
+// the WINDOW TITLE and is covered above. The embedded "Copilot" tab does NOT:
+// measured live 2026-09, its title is the generic, CONSTANT "Copilot | filefuze |
+// erik@filefuze.co | Microsoft Teams" no matter which agent is open, so the title
+// parse correctly returns NO EVIDENCE there and that route was a silent
+// detection gap. The agent's name is in the PANE instead, on an accessible
+// heading. Every string below is a VERBATIM live capture.
+
+// The agent's own message heading — class and Name, both measured. The trailing
+// hash token is a stable per-component-type hash (identical across two messages
+// in one session), not a per-instance id, but nothing here depends on that: the
+// SEMANTIC token is what is matched.
+const H_AGENT_MSG_CLASS = 'fai-CopilotMessage__accessibleHeading rhgro0h';
+const H_AGENT_MSG_NAME = 'IT Help Desk Agent said:';
+// The USER's own message heading — a DIFFERENT class, confirmed live. This is
+// what makes it impossible to read a human's message as the agent's.
+const H_USER_MSG_CLASS = 'fai-UserMessage__accessibleHeading r183b29h';
+const H_USER_MSG_NAME = 'You said:';
+// The landing heading of a freshly-opened conversation, before any message is
+// sent. A generic Fluent title style, so it cannot be class-filtered — the
+// " Created by " infix is the whole signal.
+const H_LANDING_CLASS = 'fui-Title1 fui-Text ___4t6usk0 fk6fouc fccw675 f1ebx5kk flh3ekv f17mccla f1w7gpdv f6juhto f1gl81tg f2jf649 f19n0e5 f1pnz6pm f1jsk80 ffay0gz f1mix7af f138trxt fhvk2gl f1trf6pf';
+const H_LANDING_NAME = 'IT Help Desk Agent Created by Your developer name';
+
+test('the Copilot-tab route CANNOT be a second AGENT_SURFACES entry — it would be shadowed', () => {
+  // The structural reason `fallbackRead` is nested on teams_desktop rather than
+  // being an entry of its own. agentSurfaceForProcess is FIRST-MATCH-WINS per
+  // process name, so a second entry carrying procs:['ms-teams'] could never be
+  // reached at all. Asserted here so the reasoning cannot quietly stop holding.
+  const forTeams = AGENT_SURFACES.filter((s) => s.procs.some((p) => p.toLowerCase() === 'ms-teams'));
+  assert.equal(forTeams.length, 1, 'exactly one AGENT_SURFACES entry may name ms-teams');
+  assert.equal(forTeams[0].id, 'teams_desktop');
+  assert.equal(agentSurfaceForProcess('ms-teams').id, 'teams_desktop');
+  // …and the surface that IS returned is the one carrying the fallback block.
+  assert.ok(agentSurfaceForProcess('ms-teams').fallbackRead, 'the reachable surface must carry the fallback');
+});
+
+test('the Copilot-tab route is VERIFIED and ENFORCING — both of its own flags are true', () => {
+  // Its OWN pair, deliberately separate from teams_desktop's (true/true since the
+  // Chat-list route's 2026-08-30 pass). Hanging this route off that pair would
+  // have shipped it live-armed on day one against a route nobody had verified
+  // end-to-end; instead it shipped false/false and was flipped only by its own
+  // live pass on 2026-09-02 (blocked agent reached through the Copilot tab, send
+  // stopped, with the Chat-list route / M365Copilot / a DM / a generic agent all
+  // re-confirmed correct in the same pass). The pair stays separate so a future
+  // third route still starts inert.
+  const fb = AGENT_SURFACES.find((s) => s.id === 'teams_desktop').fallbackRead;
+  assert.ok(fb, 'the fallbackRead block is missing');
+  assert.equal(fb.enforce, true, 'the Copilot-tab route enforces after its own live pass');
+  assert.equal(fb.verified, true, 'the 2026-09-02 live pass is what allows enforce to be true');
+  assert.equal(fb.mode, 'message_heading');
+  // The measured data, pinned.
+  assert.deepEqual(fb.paneKinds, ['Copilot']);
+  assert.equal(fb.headingClass, 'fai-CopilotMessage__accessibleHeading');
+  assert.equal(fb.headingSuffix, ' said:');
+  assert.equal(fb.landingInfix, ' Created by ');
+  assert.deepEqual(fb.genericNames, ['Copilot', 'Microsoft 365 Copilot', 'You']);
+  // AND the load-bearing separation: 'Copilot' must NOT have been added to
+  // titleKinds. On this route the title's SECOND segment is the tenant/org name,
+  // so a titleKinds match would make the primary parse read "filefuze" as the
+  // open agent's name.
+  const teams = AGENT_SURFACES.find((s) => s.id === 'teams_desktop');
+  assert.deepEqual(teams.titleKinds, ['Chat'], 'Copilot must never become a titleKind');
+  assert.equal(extractAgentNameFromTitle(teams, T_COPILOT), AGENT_NAME_NOT_COMPOSER,
+    'the Copilot tab title must still name nothing through the primary parse');
+});
+
+test('titleKindOf answers "which Teams view is this" once, for both consumers', () => {
+  // The measured shapes.
+  assert.equal(titleKindOf(TEAMS_SURFACE, T_AGENT), 'Chat');
+  assert.equal(titleKindOf(TEAMS_SURFACE, T_GROUP), 'Chat');
+  assert.equal(titleKindOf(TEAMS_SURFACE, T_COPILOT), 'Copilot');
+  assert.equal(titleKindOf(TEAMS_SURFACE, T_CHANNEL), 'Teams and Channels');
+  assert.equal(titleKindOf(TEAMS_SURFACE, T_ACTIVITY), 'Activity');
+  // A 1:1 DM has NO kind segment at all — segment 0 is the colleague's display
+  // name, so that is what comes back. Harmless and correct: the value is only
+  // ever compared against a catalog list, never used as a name.
+  assert.equal(titleKindOf(TEAMS_SURFACE, T_DM), 'Sruthi Chimata');
+  // Unparseable → '' — not this app's window at all, too few segments, or junk.
+  for (const bad of [
+    'index.js - my-project - Visual Studio Code',
+    'Chat | IT Help Desk Agent | filefuze | erik@filefuze.co | Slack',
+    'Chat | Microsoft Teams',          // only two segments
+    'Microsoft Teams',
+    '', '   ', null, undefined, 0, {},
+  ]) {
+    assert.equal(titleKindOf(TEAMS_SURFACE, bad), '', JSON.stringify(bad));
+  }
+  assert.equal(titleKindOf(null, T_AGENT), '');
+  assert.equal(titleKindOf({}, T_AGENT), '');
+  // The unread-count strip and whitespace normalisation are shared with the
+  // primary parse, because both go through the same segmentation.
+  assert.equal(titleKindOf(TEAMS_SURFACE, `(3) ${T_COPILOT}`), 'Copilot');
+  assert.equal(titleKindOf(TEAMS_SURFACE, '  Copilot  | filefuze | e@f.co | Microsoft Teams '), 'Copilot');
+});
+
+test('extractAgentNameFromHeading reads the landing heading of a fresh conversation', () => {
+  // The state confirmed BEFORE any message is sent — and, since re-opening an
+  // agent's Copilot-tab conversation resets it to empty, the common state right
+  // after opening one.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [{ className: H_LANDING_CLASS, name: H_LANDING_NAME }]),
+    'IT Help Desk Agent',
+  );
+  // Whitespace is normalised on the way out, same as every other reader here.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [{ className: H_LANDING_CLASS, name: '  IT  Help Desk Agent Created by  Someone ' }]),
+    'IT Help Desk Agent',
+  );
+  // The infix must actually be there, and something must precede it.
+  for (const name of ['IT Help Desk Agent', 'Created by Your developer name', ' Created by X']) {
+    assert.equal(
+      extractAgentNameFromHeading(TEAMS_SURFACE, [{ className: H_LANDING_CLASS, name }]),
+      AGENT_NAME_NOT_COMPOSER, name,
+    );
+  }
+});
+
+test('extractAgentNameFromHeading reads the agent\'s own message headings, and only those', () => {
+  // One message sent.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [{ className: H_AGENT_MSG_CLASS, name: H_AGENT_MSG_NAME }]),
+    'IT Help Desk Agent',
+  );
+  // Headings ACCUMULATE — confirmed live that a second exchange did not replace
+  // the first message's heading. Two that AGREE are one confirmed answer.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [
+      { className: H_AGENT_MSG_CLASS, name: H_AGENT_MSG_NAME },
+      { className: H_USER_MSG_CLASS, name: H_USER_MSG_NAME },
+      { className: H_AGENT_MSG_CLASS, name: H_AGENT_MSG_NAME },
+    ]),
+    'IT Help Desk Agent',
+  );
+  // THE class filter. The USER's heading is a different class (measured), so a
+  // human's own message can never be read as the agent's — even though its Name
+  // has the identical "<x> said:" shape.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [{ className: H_USER_MSG_CLASS, name: H_USER_MSG_NAME }]),
+    AGENT_NAME_NOT_COMPOSER,
+  );
+  // …and a heading whose class does not contain the token is ignored outright,
+  // however convincing its Name looks. This is what stops the plain bare-name
+  // Text control near each response (measured: Name "IT Help Desk Agent", no
+  // distinguishing class) from ever being the signal.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [{ className: 'fai-SomethingElse r1', name: 'Finance Analyst said:' }]),
+    AGENT_NAME_NOT_COMPOSER,
+  );
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [{ className: '', name: 'IT Help Desk Agent' }]),
+    AGENT_NAME_NOT_COMPOSER,
+  );
+  // Token matching, not a substring test: a class that merely CONTAINS the token
+  // as part of a longer word must not satisfy it.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [{ className: 'x-fai-CopilotMessage__accessibleHeading', name: H_AGENT_MSG_NAME }]),
+    AGENT_NAME_NOT_COMPOSER,
+  );
+  // The suffix has to be there, and something has to precede it.
+  for (const name of ['IT Help Desk Agent', 'said:', ' said:', 'IT Help Desk Agent says:']) {
+    assert.equal(
+      extractAgentNameFromHeading(TEAMS_SURFACE, [{ className: H_AGENT_MSG_CLASS, name }]),
+      AGENT_NAME_NOT_COMPOSER, JSON.stringify(name),
+    );
+  }
+});
+
+test('extractAgentNameFromHeading treats DISAGREEING headings as NO EVIDENCE, never a block', () => {
+  // A mixed or stale transcript, or a pane that re-rendered mid-walk. For a HOST
+  // APP the fail direction is inverted: "cannot tell which agent is open" must
+  // never mean "block anyway" in a company's communications client.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [
+      { className: H_AGENT_MSG_CLASS, name: 'IT Help Desk Agent said:' },
+      { className: H_AGENT_MSG_CLASS, name: 'Finance Analyst said:' },
+    ]),
+    AGENT_NAME_NOT_COMPOSER,
+  );
+  // …and a disagreement does NOT fall through to the landing heading either: an
+  // ambiguous pane stays ambiguous.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [
+      { className: H_AGENT_MSG_CLASS, name: 'IT Help Desk Agent said:' },
+      { className: H_AGENT_MSG_CLASS, name: 'Finance Analyst said:' },
+      { className: H_LANDING_CLASS, name: H_LANDING_NAME },
+    ]),
+    AGENT_NAME_NOT_COMPOSER,
+  );
+  // Two landing headings that disagree are ambiguous for the same reason.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [
+      { className: H_LANDING_CLASS, name: 'IT Help Desk Agent Created by A' },
+      { className: H_LANDING_CLASS, name: 'Finance Analyst Created by B' },
+    ]),
+    AGENT_NAME_NOT_COMPOSER,
+  );
+  // Case and whitespace differences are NOT a disagreement — same normalisation
+  // both sides of every comparison in this catalog.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [
+      { className: H_AGENT_MSG_CLASS, name: 'IT Help Desk Agent said:' },
+      { className: H_AGENT_MSG_CLASS, name: 'it  help desk  agent said:' },
+    ]),
+    'IT Help Desk Agent',
+  );
+});
+
+test('extractAgentNameFromHeading applies the Generic filter BEFORE any match', () => {
+  // Same ordering as every other reader here, so an agent literally named
+  // "Copilot" can never be matched through this route either.
+  for (const label of ['Copilot', 'Microsoft 365 Copilot', 'You', 'copilot', ' You ']) {
+    assert.equal(
+      extractAgentNameFromHeading(TEAMS_SURFACE, [{ className: H_AGENT_MSG_CLASS, name: `${label} said:` }]),
+      AGENT_NAME_GENERIC, label,
+    );
+  }
+  // A message heading wins over the landing heading when both are present —
+  // step 3 runs only when step 2 found nothing at all.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [
+      { className: H_LANDING_CLASS, name: 'Finance Analyst Created by B' },
+      { className: H_AGENT_MSG_CLASS, name: H_AGENT_MSG_NAME },
+    ]),
+    'IT Help Desk Agent',
+  );
+});
+
+test('extractAgentNameFromHeading never throws and refuses a surface with no fallback', () => {
+  // Every input comes from another process's accessibility tree.
+  for (const bad of [null, undefined, [], [null], [{}], [{ className: null, name: null }], 'x', 0, {}]) {
+    assert.equal(extractAgentNameFromHeading(TEAMS_SURFACE, bad), AGENT_NAME_NOT_COMPOSER, JSON.stringify(bad));
+  }
+  // m365_copilot declares no fallbackRead at all, so this route does not exist
+  // for it — the same headings must name nothing.
+  const m365 = AGENT_SURFACES.find((s) => s.id === 'm365_copilot');
+  assert.equal(m365.fallbackRead, undefined, 'm365_copilot must not gain a fallback route');
+  assert.equal(
+    extractAgentNameFromHeading(m365, [{ className: H_AGENT_MSG_CLASS, name: H_AGENT_MSG_NAME }]),
+    AGENT_NAME_NOT_COMPOSER,
+  );
+  for (const bad of [null, undefined, {}, { fallbackRead: {} }, { fallbackRead: { mode: 'nope' } }]) {
+    assert.equal(
+      extractAgentNameFromHeading(bad, [{ className: H_AGENT_MSG_CLASS, name: H_AGENT_MSG_NAME }]),
+      AGENT_NAME_NOT_COMPOSER, JSON.stringify(bad),
+    );
+  }
+});
+
+test('a name read off a Copilot-tab heading still has to match a blocklist row whole', () => {
+  // The extracted name is not special: it goes through the same whole-string
+  // agentNameMatches every other read does, so a row for "Advisor" cannot block
+  // "IT Help Desk Agent" via this route either.
+  const name = extractAgentNameFromHeading(TEAMS_SURFACE, [{ className: H_AGENT_MSG_CLASS, name: H_AGENT_MSG_NAME }]);
+  assert.equal(agentNameMatches(name, 'IT Help Desk Agent'), true);
+  assert.equal(agentNameMatches(name, 'Help Desk'), false);
+  // A sentinel outcome can never match anything.
+  assert.equal(agentNameMatches(extractAgentNameFromHeading(TEAMS_SURFACE, []), 'IT Help Desk Agent'), false);
 });
 
 // ── normalizeAgentRows: the transport the matching key has to survive ───────

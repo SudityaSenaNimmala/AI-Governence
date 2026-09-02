@@ -768,6 +768,39 @@ public static class CfaiEnforcer
         public bool HostApp;
         public bool Enforce;
         public bool Verified;
+        // ── The nested SECOND UI ROUTE (`fallbackRead` in ai-processes.js) ──
+        // Microsoft Teams' embedded "Copilot" tab keeps a GENERIC, CONSTANT
+        // window title regardless of which agent is open, so the title parse
+        // above correctly reads NO EVIDENCE there and the whole Chat-list
+        // mechanism is blind to that route. The agent's name lives in the PANE
+        // instead, on an accessible heading. These fields describe how to read
+        // it; see ExtractAgentNameFromHeading and GetCachedCopilotHeadings.
+        //
+        // FallbackMode is the opt-in: anything other than "message_heading"
+        // (including the empty string a surface with no fallback block gets)
+        // means NO FALLBACK EXISTS and nothing below is ever consulted, so
+        // m365_copilot — whose payload never carries this block at all — is
+        // completely unaffected by these fields existing.
+        //
+        // FallbackPaneKinds is checked against the title's KIND segment only,
+        // and is deliberately NOT TitleKinds: on this route the title's second
+        // segment is the tenant/org name, not a conversation name, so folding
+        // 'Copilot' into TitleKinds would make the primary parse read the ORG
+        // NAME as the open agent. Two different questions, one shared answer
+        // (TitleKindOf) about which view is open.
+        //
+        // Its OWN Enforce/Verified pair, separate from the entry's. The entry
+        // itself is live-verified and enforcing for the Chat-list route; this
+        // route has had no live pass, and bolting it onto the entry's pair
+        // would ship it armed on day one.
+        public string FallbackMode;
+        public HashSet<string> FallbackPaneKinds;
+        public string FallbackHeadingClass;
+        public string FallbackHeadingSuffix;
+        public string FallbackLandingInfix;
+        public HashSet<string> FallbackGenericNames;
+        public bool FallbackEnforce;
+        public bool FallbackVerified;
     }
     static List<AgentSurface> _agentSurfaces = new List<AgentSurface>();
 
@@ -1106,6 +1139,81 @@ public static class CfaiEnforcer
             }
             bool hostApp = JsBool(d, "hostApp");
             if (hostApp) { foreach (string p in procs) hostApps.Add(p); }
+            // ── The nested SECOND-ROUTE block, when the entry declares one ──
+            //
+            // ABSENT is the normal case and must cost nothing: every field stays
+            // null/empty/false, FallbackConfigured() is false, and not one line
+            // of the fallback path can ever run. m365_copilot's payload never
+            // carries this key, so its behaviour here is byte-for-byte what it
+            // has always been.
+            //
+            // MALFORMED / PARTIAL is DROPPED ENTIRELY rather than partially
+            // applied — same "build locals, assign only at the end" discipline
+            // the rest of this parser uses, and the same fail direction: a
+            // half-configured fallback that could read a name from one signal
+            // but not the other is exactly the kind of thing that silently
+            // half-works. Anything missing means the route simply does not
+            // exist on this surface.
+            //
+            // NOTE the two literal strings are NOT normalized here. " said:"
+            // and " Created by " carry leading/trailing spaces that ARE the
+            // delimiter; running them through NormalizeAgentName (as the title
+            // suffix and the kinds legitimately are) would trim exactly the
+            // characters that make them work.
+            string fbMode = "";
+            var fbPaneKinds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string fbHeadingClass = "", fbHeadingSuffix = "", fbLandingInfix = "";
+            var fbGenerics = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            bool fbEnforce = false, fbVerified = false;
+            object rawFallback;
+            if (d.TryGetValue("fallbackRead", out rawFallback) && rawFallback is Dictionary<string, object>)
+            {
+                var fb = (Dictionary<string, object>)rawFallback;
+                string mode = JsStr(fb, "mode");
+                string headingClass = JsStr(fb, "headingClass");
+                string headingSuffix = JsStr(fb, "headingSuffix");
+                string landingInfix = JsStr(fb, "landingInfix");
+                var paneKinds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                object rawPaneKinds;
+                if (fb.TryGetValue("paneKinds", out rawPaneKinds) && rawPaneKinds != null)
+                {
+                    foreach (var x in (IEnumerable)rawPaneKinds)
+                    {
+                        string k = NormalizeAgentName(Convert.ToString(x));
+                        if (k.Length > 0) paneKinds.Add(k);
+                    }
+                }
+                var fbGen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                object rawFbGenerics;
+                if (fb.TryGetValue("genericNames", out rawFbGenerics) && rawFbGenerics != null)
+                {
+                    foreach (var x in (IEnumerable)rawFbGenerics)
+                    {
+                        string g = NormalizeAgentName(Convert.ToString(x));
+                        if (g.Length > 0) fbGen.Add(g);
+                    }
+                }
+                // Every field this mode needs, or the whole block is dropped.
+                // A pane-kind list is required too: without it the gate would be
+                // "attempt the walk in EVERY Teams view", which is precisely the
+                // cost and privacy expansion the gate exists to prevent.
+                bool ok = string.Equals(mode, "message_heading", StringComparison.OrdinalIgnoreCase)
+                    && paneKinds.Count > 0
+                    && headingClass.Length > 0
+                    && headingSuffix.Length > 0
+                    && landingInfix.Length > 0;
+                if (ok)
+                {
+                    fbMode = "message_heading";
+                    fbPaneKinds = paneKinds;
+                    fbHeadingClass = headingClass;
+                    fbHeadingSuffix = headingSuffix;
+                    fbLandingInfix = landingInfix;
+                    fbGenerics = fbGen;
+                    fbEnforce = JsBool(fb, "enforce");
+                    fbVerified = JsBool(fb, "verified");
+                }
+            }
             surfaces.Add(new AgentSurface
             {
                 Id = id,
@@ -1120,6 +1228,14 @@ public static class CfaiEnforcer
                 HostApp = hostApp,
                 Enforce = JsBool(d, "enforce"),
                 Verified = JsBool(d, "verified"),
+                FallbackMode = fbMode,
+                FallbackPaneKinds = fbPaneKinds,
+                FallbackHeadingClass = fbHeadingClass,
+                FallbackHeadingSuffix = fbHeadingSuffix,
+                FallbackLandingInfix = fbLandingInfix,
+                FallbackGenericNames = fbGenerics,
+                FallbackEnforce = fbEnforce,
+                FallbackVerified = fbVerified,
             });
         }
         // The HostApp process set travels with the surfaces it is derived from,
@@ -1310,12 +1426,15 @@ public static class CfaiEnforcer
     // never emitted, logged or persisted — the same rule the composer-Name read
     // follows, and the stricter one here, because a Teams title carries a
     // colleague's name and the signed-in user's email address.
-    static AgentReadOutcome ExtractAgentNameFromTitle(AgentSurface surface, string title, out string agentName)
+    // C# port of titleSegments() in ai-processes.js. Splits a window title into
+    // its normalized segments, or returns null when the string is not this
+    // surface's title at all. Written down ONCE so TitleKindOf and
+    // ExtractAgentNameFromTitle cannot disagree about what a title even is.
+    static string[] TitleParts(AgentSurface surface, string title)
     {
-        agentName = "";
-        if (surface == null) return AgentReadOutcome.NotComposer;
+        if (surface == null) return null;
         string raw = title ?? "";
-        if (raw.Length == 0) return AgentReadOutcome.NotComposer;
+        if (raw.Length == 0) return null;
         if (raw.Length > TITLE_PARSE_MAX) raw = raw.Substring(0, TITLE_PARSE_MAX);
         // Strip a leading unread-count decoration, e.g. "(3) Chat | ...".
         // HYPOTHESISED, not live-measured — done defensively because it costs
@@ -1332,21 +1451,55 @@ public static class CfaiEnforcer
             }
         }
         string normalized = NormalizeAgentName(raw);
-        if (normalized.Length == 0) return AgentReadOutcome.NotComposer;
+        if (normalized.Length == 0) return null;
         string sep = surface.TitleSeparator ?? "";
         string suffix = NormalizeAgentName(surface.TitleSuffix);
-        if (sep.Length == 0 || suffix.Length == 0) return AgentReadOutcome.NotComposer;
+        if (sep.Length == 0 || suffix.Length == 0) return null;
         string[] parts = normalized.Split(new string[] { sep }, StringSplitOptions.None);
         // The LAST segment must be the app's own suffix, exactly. This is what
         // stops any other window in any other app being parsed as a Teams title.
         if (!string.Equals(NormalizeAgentName(parts[parts.Length - 1]), suffix, StringComparison.OrdinalIgnoreCase))
-            return AgentReadOutcome.NotComposer;
-        // …and the FIRST segment must be a kind that introduces a NAMEABLE
+            return null;
+        // Fewer than three segments cannot name anything: no room for a kind, a
+        // name and the app suffix.
+        if (parts.Length < 3) return null;
+        return parts;
+    }
+
+    // C# port of titleKindOf() in ai-processes.js. WHICH VIEW of the app the
+    // title says is open — its first ("kind") segment, normalized — or "" when
+    // the string is not this surface's title at all.
+    //
+    // THE single definition of "which Teams view is this", with two consumers
+    // that must never disagree: the primary title parse (which requires a
+    // TitleKinds match before it will read a conversation NAME out of segment 1)
+    // and the Copilot-tab heading fallback's gate (which requires a
+    // FallbackPaneKinds match before it will attempt anything at all). Different
+    // lists on purpose; one answer about the view.
+    //
+    // The value is only ever COMPARED against a catalog list — never used as a
+    // name, never retained, never emitted.
+    static string TitleKindOf(AgentSurface surface, string title)
+    {
+        string[] parts = TitleParts(surface, title);
+        if (parts == null) return "";
+        return NormalizeAgentName(parts[0]);
+    }
+
+    static AgentReadOutcome ExtractAgentNameFromTitle(AgentSurface surface, string title, out string agentName)
+    {
+        agentName = "";
+        if (surface == null) return AgentReadOutcome.NotComposer;
+        string[] parts = TitleParts(surface, title);
+        if (parts == null) return AgentReadOutcome.NotComposer;
+        // The FIRST segment must be a kind that introduces a NAMEABLE
         // conversation. A plain 1:1 DM has no kind segment at all, so it lands
         // here as no evidence rather than as an agent named after a colleague;
-        // so do a channel view, the Activity tab and the generic Copilot panel.
-        if (parts.Length < 3) return AgentReadOutcome.NotComposer;
-        string kind = NormalizeAgentName(parts[0]);
+        // so do a channel view, the Activity tab and the generic Copilot panel
+        // (whose second segment is the TENANT, not a conversation name — which
+        // is why 'Copilot' must never be a TitleKind, and why the Copilot tab
+        // needs the separate heading fallback instead).
+        string kind = TitleKindOf(surface, title);
         if (surface.TitleKinds == null || !surface.TitleKinds.Contains(kind)) return AgentReadOutcome.NotComposer;
         // The conversation name is the SECOND segment. Everything between it and
         // the suffix (org, tenant, the signed-in email) identifies the USER, not
@@ -1356,6 +1509,96 @@ public static class CfaiEnforcer
         if (LooksLikeParticipantList(name)) return AgentReadOutcome.Generic;
         if (surface.GenericNames != null && surface.GenericNames.Contains(name)) return AgentReadOutcome.Generic;
         agentName = name;
+        return AgentReadOutcome.Named;
+    }
+
+    // ── Copilot-tab heading reads (the SECOND Teams UI route) ───────────────
+    //
+    // C# port of extractAgentNameFromHeading() in ai-processes.js. PURE: given
+    // the surface and a set of ALREADY-COLLECTED heading candidates, decide
+    // NotComposer / Generic / Named(X). It does no walking and no reading of its
+    // own — exactly like ExtractAgentNameFromTitle takes a title string rather
+    // than fetching one. The collecting is GetCachedCopilotHeadings' job, on a
+    // background thread, and lives well away from here.
+    //
+    // Candidates arrive as two PARALLEL ARRAYS rather than a struct list: same
+    // shape Start() already uses for the pattern table, and it is what lets the
+    // offline harness drive this function by reflection with no type plumbing.
+    //
+    // Keep in lockstep with the JS side, which is the single source of truth and
+    // is unit-tested against the measured live strings in
+    // agent/tests/ai-processes.test.mjs.
+    //
+    // AMBIGUITY IS NO EVIDENCE. Two headings that disagree about the agent's
+    // name (a mixed or stale transcript, a pane that re-rendered mid-walk) yield
+    // NotComposer, never a block. For a HOST APP the fail direction is inverted
+    // — "cannot tell which agent is open" must never mean "block anyway" when
+    // the app is a company's communications client.
+    //
+    // Nothing read here is ever emitted, logged or persisted.
+    static AgentReadOutcome ExtractAgentNameFromHeading(AgentSurface surface, string[] headingClasses, string[] headingNames, out string agentName)
+    {
+        agentName = "";
+        if (surface == null) return AgentReadOutcome.NotComposer;
+        if (!string.Equals(surface.FallbackMode, "message_heading", StringComparison.OrdinalIgnoreCase))
+            return AgentReadOutcome.NotComposer;
+        if (headingNames == null || headingNames.Length == 0) return AgentReadOutcome.NotComposer;
+        string headingClass = surface.FallbackHeadingClass ?? "";
+        string suffix = surface.FallbackHeadingSuffix ?? "";
+        string infix = surface.FallbackLandingInfix ?? "";
+
+        string found = "";
+        bool conflict = false;
+
+        // 1+2. The agent's OWN message headings, identified by CLASS. The user's
+        // own headings carry a DIFFERENT class (measured live), so this filter is
+        // what makes it impossible to read a human's message as the agent's.
+        // Token matching via the existing ClassRuleMatches — a web-hosted
+        // element's ClassName is the DOM class ATTRIBUTE and carries build hashes
+        // alongside the semantic token.
+        if (headingClass.Length > 0 && suffix.Length > 0)
+        {
+            for (int i = 0; i < headingNames.Length; i++)
+            {
+                string cls = (headingClasses != null && i < headingClasses.Length) ? (headingClasses[i] ?? "") : "";
+                if (cls.Length == 0 || !ClassRuleMatches(cls, headingClass, false)) continue;
+                string nm = NormalizeAgentName(headingNames[i]);
+                if (nm.Length <= suffix.Length) continue;
+                if (!nm.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) continue;
+                string cand = NormalizeAgentName(nm.Substring(0, nm.Length - suffix.Length));
+                if (cand.Length == 0) continue;
+                if (found.Length == 0) found = cand;
+                else if (!string.Equals(found, cand, StringComparison.OrdinalIgnoreCase)) conflict = true;
+            }
+        }
+
+        // 3. Only when NO message heading matched at all: the landing heading of
+        // a freshly-opened conversation ("<Agent> Created by <author>").
+        // Deliberately NOT class-filtered — it is a different element entirely,
+        // whose class is a generic Fluent heading style shared with other titles,
+        // so the infix is the whole signal.
+        if (found.Length == 0 && !conflict && infix.Length > 0)
+        {
+            for (int i = 0; i < headingNames.Length; i++)
+            {
+                string nm = NormalizeAgentName(headingNames[i]);
+                int at = nm.IndexOf(infix, StringComparison.OrdinalIgnoreCase);
+                if (at <= 0) continue;
+                string cand = NormalizeAgentName(nm.Substring(0, at));
+                if (cand.Length == 0) continue;
+                if (found.Length == 0) found = cand;
+                else if (!string.Equals(found, cand, StringComparison.OrdinalIgnoreCase)) conflict = true;
+            }
+        }
+
+        if (conflict) return AgentReadOutcome.NotComposer;   // cannot tell → no evidence
+        if (found.Length == 0) return AgentReadOutcome.NotComposer;
+        // Same ordering as every other reader here: the Generic filter runs
+        // BEFORE any matching, so an agent literally named "Copilot" (or a
+        // heading that says "You said:") can never be matched through this route.
+        if (surface.FallbackGenericNames != null && surface.FallbackGenericNames.Contains(found))
+            return AgentReadOutcome.Generic;
+        agentName = found;
         return AgentReadOutcome.Named;
     }
 
@@ -1417,7 +1660,14 @@ public static class CfaiEnforcer
             }
             catch { return AgentReadOutcome.Unreadable; }
             if (title.Trim().Length == 0) return AgentReadOutcome.Unreadable;
-            return ExtractAgentName(surface, "", title, out agentName);
+            // Not ExtractAgentName directly any more: a title-mode surface may
+            // declare a SECOND UI route whose title carries no conversation name
+            // at all (Teams' embedded Copilot tab). ReadTitleModeAgentName runs
+            // the primary title parse first and only then, on no evidence and
+            // behind that route's own two-flag gate, consults the cached pane
+            // headings. With the route unconfigured or unarmed — which is how it
+            // ships — it is exactly the ExtractAgentName call this line was.
+            return ReadTitleModeAgentName(surface, fgHwnd, title, out agentName);
         }
         AutomationElement el;
         try { el = AutomationElement.FocusedElement; } catch { return AgentReadOutcome.Unreadable; }
@@ -1666,6 +1916,359 @@ public static class CfaiEnforcer
     {
         if (!_ideProcs.Contains(_app) && !_hostAppProcs.Contains(_app)) return true;
         return _fgIsPanel && _fgPanelEnforce && _fgLeftAiTicks == 0;
+    }
+
+    // ── Copilot-tab heading fallback: background search + cache ──────────────
+    //
+    // WHAT THIS IS FOR. Microsoft Teams has TWO routes to an agent. The Chat-list
+    // route names the open conversation in the WINDOW TITLE ("Chat | <agent> |
+    // …") and is what the title parse above reads; that route is live-verified
+    // and enforcing. The embedded "Copilot" tab does not: its title is the
+    // generic, CONSTANT "Copilot | <tenant> | <email> | Microsoft Teams" no
+    // matter which agent is open (measured live 2026-09), so the title parse
+    // correctly returns NO EVIDENCE and the agent is invisible to it. The name is
+    // in the PANE instead, on an accessible heading — which means finding it
+    // costs a tree walk, and a tree walk is exactly what the read path above
+    // must never do.
+    //
+    // WHY IT LOOKS LIKE THE MODEL PICKER'S MACHINERY. Because it is the same
+    // problem, and this file already solved it once: an expensive UIA search that
+    // cannot run on the 150ms poll thread. SearchModelPickerBackground /
+    // GetCachedModelPicker are the pattern — background STA thread, a
+    // reentrancy guard, a minimum interval between searches, and a poll thread
+    // that only ever reads whatever is currently cached and NEVER waits. This is
+    // deliberately the same shape rather than a second invention.
+    //
+    // WHY A MANUAL TreeWalker AND NOT FindAll. Both measured facts in this file
+    // apply here and point the same way:
+    //   * a full FindAll(Descendants) tree walk measured 1.4-5.8s live against a
+    //     real chat app — an order of magnitude too slow for the poll loop, which
+    //     is why this runs on its own thread at all;
+    //   * FindAll with a PropertyCondition/OrCondition filter against a
+    //     Chromium/WebView2-hosted app's OWN web-rendered controls was measured
+    //     finding NOTHING (four real attempts) while a plain TreeWalker walk over
+    //     the same content found the target without difficulty. Teams' Copilot
+    //     tab is exactly such a surface, so a property-filtered FindAll is not an
+    //     option here — see FindMenuItemByLabel, which made the same call.
+    //
+    // WALK TIMING — exercised live, not instrumented. The two strategies below
+    // (parent-hop-then-bounded-walk, and the window-rooted depth-capped walk)
+    // were exercised live on 2026-09-02, multiple times across multiple
+    // scenarios, against this specific Teams pane: the block armed and the send
+    // was stopped each time it should have been, and released each time it
+    // should not, with no perceptible lag during real interactive use. That is
+    // the practical thing this note was gating on — the background search +
+    // cache resolves fast enough for the block to arm before the user sends —
+    // and it is satisfied.
+    //
+    // WHAT WAS NOT MEASURED, stated plainly: no instrumented per-walk duration
+    // was captured, so there is no millisecond figure for either strategy and
+    // none is claimed here. The bounds remain structural (a hop limit, a depth
+    // cap, a node cap) and the walk still runs off the poll thread, so a slow
+    // walk can only ever delay the cache, never stall the loop. Adding real
+    // duration logging around both strategies is a genuine open improvement and
+    // the only way this gets a number.
+    //
+    // THE PRIVACY RULE, enforced in code and not by convention — see
+    // CollectCopilotHeadings.
+    const int COPILOT_PANE_PARENT_HOPS = 6;
+    // The same depth cap FindMenuItemByLabel / FindModelPickerButton already use
+    // (and the same one the probe and attachment-watcher use), not a new number.
+    const int COPILOT_WALK_MAX_DEPTH = 30;
+    // A second, independent bound: depth alone does not bound a WIDE tree, and a
+    // long transcript is wide. Whichever limit is hit first stops the walk.
+    const int COPILOT_WALK_MAX_NODES = 4000;
+    // Headings ACCUMULATE in this pane (confirmed live: a second message did not
+    // replace the first message's heading), so the collection is capped too.
+    const int COPILOT_MAX_HEADINGS = 32;
+    static readonly long COPILOT_SEARCH_MIN_INTERVAL = TimeSpan.FromSeconds(1).Ticks;
+    // Back off hard once the pane has repeatedly yielded nothing — an idle
+    // Copilot home/history view with no conversation in it must not spin.
+    static readonly long COPILOT_SEARCH_BACKOFF_INTERVAL = TimeSpan.FromSeconds(5).Ticks;
+    const int COPILOT_EMPTY_RUNS_BEFORE_BACKOFF = 3;
+    // The cached answer EXPIRES. This is the fail-OPEN bound: for a host app a
+    // stale "the blocked agent is open" must never outlive the evidence for it,
+    // and switching agents inside the Copilot tab changes neither the window
+    // handle nor the title kind, so the TTL is what bounds that case.
+    static readonly long COPILOT_CACHE_TTL = TimeSpan.FromSeconds(5).Ticks;
+
+    static volatile bool _copilotSearchInProgress = false;
+    static IntPtr _copilotCacheHwnd = IntPtr.Zero;
+    static string _copilotCacheKind = "";
+    static string[] _copilotCacheClasses = null;
+    static string[] _copilotCacheNames = null;
+    static long _copilotCacheTicks = 0;
+    // The key the LAST search was started for, kept apart from the cache's own
+    // key so that "we have never searched this pane" and "we searched it and
+    // found nothing" stay distinguishable — the first must search at once, the
+    // second must back off.
+    static IntPtr _copilotSearchHwnd = IntPtr.Zero;
+    static string _copilotSearchKind = "";
+    static long _copilotLastSearchTicks = 0;
+    static int _copilotEmptyRuns = 0;
+
+    // Is this surface's SECOND ROUTE configured, past its OWN two-flag gate, and
+    // relevant to the view the title says is open?
+    //
+    // Its own pair, NOT the entry's. teams_desktop is Verified+Enforce for the
+    // Chat-list route; this route has had no live pass of its own and ships
+    // false/false. Mirrors EnforcingAgentSurface's discipline — both flags, read
+    // in ONE place — so no call site can forget one.
+    static bool FallbackReadArmed(AgentSurface surface, string kind)
+    {
+        if (surface == null) return false;
+        if (!string.Equals(surface.FallbackMode, "message_heading", StringComparison.OrdinalIgnoreCase)) return false;
+        if (!(surface.FallbackVerified && surface.FallbackEnforce)) return false;
+        if (surface.FallbackPaneKinds == null || string.IsNullOrEmpty(kind)) return false;
+        // The KIND segment only. Never the name segment — on this route that is
+        // the tenant, not a conversation.
+        return surface.FallbackPaneKinds.Contains(kind);
+    }
+
+    // The title-mode read, in two stages.
+    //
+    // STAGE A is the primary title parse, byte-for-byte what this used to be.
+    // Anything AUTHORITATIVE (Named/Generic) returns immediately; the fallback is
+    // only ever reached from NO EVIDENCE, so it can add coverage and can never
+    // override or contradict a title that did name a conversation.
+    //
+    // STAGE B is the Copilot-tab heading fallback, and it is gated three ways:
+    // the route must be configured, past its own two flags, and the title's kind
+    // must be one this route applies to. With the flags false — how it ships —
+    // FallbackReadArmed returns false before anything else happens, so NOT ONE
+    // UIA call, thread or cache write occurs. That is what "inert" means here.
+    static AgentReadOutcome ReadTitleModeAgentName(AgentSurface surface, IntPtr fgHwnd, string title, out string agentName)
+    {
+        AgentReadOutcome outcome = ExtractAgentName(surface, "", title, out agentName);
+        if (outcome != AgentReadOutcome.NotComposer) return outcome;
+        string kind = TitleKindOf(surface, title);
+        if (!FallbackReadArmed(surface, kind)) return outcome;
+        string[] classes, names;
+        if (!GetCachedCopilotHeadings(surface, fgHwnd, kind, out classes, out names)) return outcome;
+        return ExtractAgentNameFromHeading(surface, classes, names, out agentName);
+    }
+
+    // The poll thread's half: read the cache, never wait on a search.
+    //
+    // Modelled on GetCachedModelPicker. The difference is what gets cached —
+    // there, a live AutomationElement whose Name is re-read each tick; here, the
+    // already-extracted heading STRINGS, because re-walking a subtree per tick is
+    // the cost this whole mechanism exists to avoid. The liveness probe a cached
+    // element gives for free is replaced by an explicit key + TTL:
+    //   * a different window handle, or a different title kind, is a different
+    //     pane — the cache does not apply and a search starts AT ONCE;
+    //   * an expired cache is dropped rather than served, which is the fail-OPEN
+    //     direction a host app requires.
+    //
+    // NOT keyed on the focused element's identity, and this is a deliberate,
+    // documented limitation rather than an oversight: the per-tick element key
+    // this file already computes (_fgOwnerKey) is only maintained on ticks where
+    // the app IS a governed AI surface, which — on this route, by construction —
+    // is exactly what has not been established yet. The (handle, kind) key plus
+    // the TTL is what bounds staleness instead.
+    static bool GetCachedCopilotHeadings(AgentSurface surface, IntPtr fg, string kind, out string[] classes, out string[] names)
+    {
+        classes = null;
+        names = null;
+        if (fg == IntPtr.Zero) return false;
+        long now = DateTime.UtcNow.Ticks;
+        if (_copilotCacheNames != null
+            && _copilotCacheHwnd == fg
+            && string.Equals(_copilotCacheKind ?? "", kind ?? "", StringComparison.OrdinalIgnoreCase)
+            && (now - _copilotCacheTicks) <= COPILOT_CACHE_TTL)
+        {
+            classes = _copilotCacheClasses;
+            names = _copilotCacheNames;
+        }
+        else
+        {
+            _copilotCacheClasses = null;
+            _copilotCacheNames = null;
+            _copilotCacheHwnd = IntPtr.Zero;
+            _copilotCacheKind = "";
+            _copilotCacheTicks = 0;
+        }
+        bool newPane = _copilotSearchHwnd != fg
+            || !string.Equals(_copilotSearchKind ?? "", kind ?? "", StringComparison.OrdinalIgnoreCase);
+        if (newPane) _copilotEmptyRuns = 0;
+        long interval = (_copilotEmptyRuns >= COPILOT_EMPTY_RUNS_BEFORE_BACKOFF)
+            ? COPILOT_SEARCH_BACKOFF_INTERVAL : COPILOT_SEARCH_MIN_INTERVAL;
+        if (!_copilotSearchInProgress && (newPane || (now - _copilotLastSearchTicks) > interval))
+        {
+            _copilotSearchHwnd = fg;
+            _copilotSearchKind = kind ?? "";
+            _copilotLastSearchTicks = now;
+            _copilotSearchInProgress = true;
+            var t = new Thread(() => SearchCopilotHeadingsBackground(surface, fg, kind));
+            t.IsBackground = true;
+            t.SetApartmentState(ApartmentState.STA);   // UIA requires STA, same as the poll thread
+            t.Start();
+        }
+        return names != null && names.Length > 0;
+    }
+
+    // Runs on its OWN background STA thread, never the poll thread — see the
+    // section header for the two measured reasons.
+    //
+    // Two strategies, in order:
+    //   1. PARENT HOP. Start at the focused element (on this route, the Copilot
+    //      tab's composer), walk up a bounded number of parents to reach the
+    //      conversation pane, then collect downwards from there. Cheap, and it
+    //      keeps the walk off the rest of the window.
+    //   2. WINDOW-ROOTED, depth-capped. Used only when (1) found nothing, e.g.
+    //      because focus is not in the composer at all.
+    // A wrong root is harmless rather than dangerous: CollectCopilotHeadings only
+    // ever keeps nodes whose CLASS says they are headings, so an unhelpful
+    // subtree simply yields nothing and falls through to (2).
+    static void SearchCopilotHeadingsBackground(AgentSurface surface, IntPtr fg, string kind)
+    {
+        try
+        {
+            var classes = new List<string>();
+            var names = new List<string>();
+
+            AutomationElement root = null;
+            try
+            {
+                AutomationElement el = AutomationElement.FocusedElement;
+                if (el != null)
+                {
+                    uint fgPid = 0;
+                    GetWindowThreadProcessId(fg, out fgPid);
+                    // The SAME non-negotiable ownership rule every other read in
+                    // this file applies. FocusedElement is a GLOBAL read that was
+                    // measured returning elements from other windows in other
+                    // processes; and Teams hosts its UI in a CHILD WebView2
+                    // process, which is why the one-generation rule is used here
+                    // rather than an exact pid compare.
+                    if (ElementPidBelongsToForeground(el.Current.ProcessId, fgPid))
+                    {
+                        var up = TreeWalker.ControlViewWalker;
+                        AutomationElement cur = el;
+                        for (int i = 0; i < COPILOT_PANE_PARENT_HOPS && cur != null; i++)
+                        {
+                            cur = up.GetParent(cur);
+                            if (cur != null) root = cur;
+                        }
+                    }
+                }
+            }
+            catch { }
+            if (root != null) CollectCopilotHeadings(surface, root, classes, names);
+
+            if (names.Count == 0)
+            {
+                AutomationElement win = null;
+                try { win = AutomationElement.FromHandle(fg); } catch { }
+                if (win != null)
+                {
+                    classes.Clear();
+                    names.Clear();
+                    CollectCopilotHeadings(surface, win, classes, names);
+                }
+            }
+
+            // Assigned only at the END, and only on a search that actually found
+            // something — same "never half-apply a result" discipline the catalog
+            // parsers use. A search that found nothing leaves the previous cache
+            // (and its TTL) exactly as it was and counts toward the backoff.
+            if (names.Count > 0)
+            {
+                _copilotCacheClasses = classes.ToArray();
+                _copilotCacheNames = names.ToArray();
+                _copilotCacheHwnd = fg;
+                _copilotCacheKind = kind ?? "";
+                _copilotCacheTicks = DateTime.UtcNow.Ticks;
+                _copilotEmptyRuns = 0;
+            }
+            else if (_copilotEmptyRuns < COPILOT_EMPTY_RUNS_BEFORE_BACKOFF)
+            {
+                _copilotEmptyRuns++;
+            }
+        }
+        catch { }
+        finally { _copilotSearchInProgress = false; }
+    }
+
+    // A depth- and node-capped TreeWalker walk that collects HEADING candidates.
+    //
+    // THE PRIVACY RULE OF THIS WHOLE MECHANISM, and it is enforced here in code
+    // rather than left to the caller's good behaviour. In a Chromium
+    // accessibility tree an ordinary message body's Name IS the message text. So:
+    //
+    //   * ClassName is read FIRST, for every node, always.
+    //   * A node's Name is read ONLY when its class already says it is the
+    //     agent's message heading, or — for the landing heading, whose class is a
+    //     generic Fluent title style and cannot be filtered on — when the node is
+    //     a Text control and the value is being tested against the landing infix
+    //     and nothing else.
+    //   * A Name that fails that test is a LOCAL that goes out of scope. It is
+    //     never appended to the lists, never cached, never returned, and there is
+    //     no Emit/Console path anywhere in this file's fallback section at all.
+    //
+    // So what leaves this function is only ever strings of the shape
+    // "<Agent> said:" / "<Agent> Created by <author>" — the same class of value
+    // the title read already handles, subject to the same rule: compared against
+    // the blocklist and dropped.
+    static void CollectCopilotHeadings(AgentSurface surface, AutomationElement root, List<string> classes, List<string> names)
+    {
+        if (surface == null || root == null) return;
+        string headingClass = surface.FallbackHeadingClass ?? "";
+        string infix = surface.FallbackLandingInfix ?? "";
+        if (headingClass.Length == 0 && infix.Length == 0) return;
+        try
+        {
+            var walker = TreeWalker.ControlViewWalker;
+            var stack = new Stack<KeyValuePair<AutomationElement, int>>();
+            stack.Push(new KeyValuePair<AutomationElement, int>(root, 0));
+            int visited = 0;
+            while (stack.Count > 0)
+            {
+                var cur = stack.Pop();
+                if (cur.Value > COPILOT_WALK_MAX_DEPTH) continue;
+                if (++visited > COPILOT_WALK_MAX_NODES) break;
+                AutomationElement el = cur.Key;
+                if (names.Count < COPILOT_MAX_HEADINGS)
+                {
+                    string cls = "";
+                    try { cls = el.Current.ClassName ?? ""; } catch { }
+                    bool isHeading = headingClass.Length > 0 && cls.Length > 0
+                        && ClassRuleMatches(cls, headingClass, false);
+                    bool isText = false;
+                    if (!isHeading && infix.Length > 0)
+                    {
+                        try { isText = (el.Current.ControlType == ControlType.Text); } catch { }
+                    }
+                    if (isHeading || isText)
+                    {
+                        string nm = "";
+                        try { nm = el.Current.Name ?? ""; } catch { }
+                        // isHeading — the class already identified this node, keep
+                        // it and let the pure extractor decide.
+                        // isText     — keep it ONLY if it carries the landing
+                        // infix. Every other message-body Name ends here, unread
+                        // by anything and unreferenced after this line.
+                        if (nm.Length > 0
+                            && (isHeading || nm.IndexOf(infix, StringComparison.OrdinalIgnoreCase) > 0))
+                        {
+                            classes.Add(cls);
+                            names.Add(nm);
+                        }
+                    }
+                }
+                try
+                {
+                    AutomationElement child = walker.GetFirstChild(el);
+                    while (child != null)
+                    {
+                        stack.Push(new KeyValuePair<AutomationElement, int>(child, cur.Value + 1));
+                        child = walker.GetNextSibling(child);
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
     }
 
     // ── Model routing (Smart Model Router, desktop) ──────────────────────────
@@ -4037,8 +4640,10 @@ public static class CfaiEnforcer
             //
             // Four independent conditions, ALL required:
             //   surface   — a HostApp AGENT_SURFACES entry that is BOTH verified
-            //               and enforcing. Both ship false, so today this branch
-            //               can never do anything at all.
+            //               and enforcing. Teams' entry now ships true/true
+            //               (live pass 2026-08-30), so this branch is live; the
+            //               two-flag check stays because it is what keeps any
+            //               future host-app entry inert until its own pass.
             //   hit       — the focused ELEMENT matched the app's composer
             //               signature (teams_composer) and that panel is itself
             //               past the same two-flag gate. The process being in

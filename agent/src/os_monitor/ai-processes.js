@@ -285,6 +285,53 @@ export const AI_PANELS = [
     classEquals: 'ck-editor__editable',
     enforce: true, verified: true,
   },
+  // Microsoft Teams' OTHER composer: the one inside the embedded "Copilot" tab,
+  // which is a DIFFERENT composer implementation from the Chat-list route's
+  // CKEditor above — confirmed live, not assumed. Measured 2026-09 against a
+  // real new-Teams install with a real Copilot Studio agent open in that tab:
+  //
+  //   ClassName    — "fai-EditorInput__input r18fti29 r18aquq2 ___10kbave
+  //                  f1pha7fy f1immsc2 f1mk8lai". No `ck-editor__editable`
+  //                  anywhere in it, so `teams_composer` does NOT match this
+  //                  element and never could: the Chat-list route and the
+  //                  Copilot tab genuinely ship two different editors.
+  //   AutomationId — "m365-chat-editor-target-element". Stable-looking, but
+  //                  there is no AutomationId rule in this schema and adding one
+  //                  would be new plumbing for a second signal we do not need.
+  //   Name         — GENERIC and deliberately unused. "Message Copilot" with no
+  //                  agent selected, and observed transiently carrying
+  //                  agent-ish text otherwise. It is not a reliable identity
+  //                  signal and nothing here reads it.
+  //
+  // `classEquals` is TOKEN matching (see classRuleMatches), so the SEMANTIC
+  // token `fai-EditorInput__input` is what is matched and the Fluent-UI build
+  // hashes beside it ("r18fti29", "___10kbave", …) are deliberately untouched —
+  // exactly the reasoning already applied to teams_composer's
+  // `ck-editor__editable` choice.
+  //
+  // `host: null` for the IDENTICAL, load-bearing reason teams_composer carries
+  // it: panelForHost('teams.microsoft.com') must return null, so an Inventory
+  // host-block toggle can never synthesize a panel-level row against this entry
+  // either. Such a row would disable this composer in every Copilot-tab
+  // conversation — reached by a second route to the same "disable all of Teams"
+  // outcome this whole feature exists to avoid.
+  //
+  // LIVE-VERIFIED and ENFORCING (both flags true). The verification pass ran
+  // 2026-09-02 against a real Microsoft Teams desktop install with a real
+  // blocked agent ("IT Help Desk Agent", a Copilot Studio agent): reaching it
+  // through the Copilot tab specifically (not the Chat list) and sending was
+  // blocked, while re-confirming the same agent via the Chat list, M365Copilot,
+  // a DM, and a different/generic agent all continued to behave correctly
+  // (blocked where expected, sent normally everywhere else). Paired with
+  // teams_desktop's `fallbackRead` block below, which is separately gated by
+  // its OWN enforce/verified pair — both pairs were flipped together after
+  // this same pass.
+  {
+    id: 'teams_copilot_composer', product: 'Microsoft Teams', vendor: 'Microsoft', host: null,
+    procs: ['ms-teams'], controlType: 'Edit',
+    classEquals: 'fai-EditorInput__input',
+    enforce: true, verified: true,
+  },
 ];
 
 // ── Agent surfaces: one named agent INSIDE one AI app ───────────────────────
@@ -408,6 +455,70 @@ export const AGENT_SURFACES = [
   // identical to the one every other Enter-swallow already uses — the send
   // itself is genuinely blocked either way, so this affects audit visibility,
   // not enforcement, but it needs its own investigation.
+  //
+  // `fallbackRead` — THE SECOND UI ROUTE (Teams' embedded "Copilot" tab).
+  //
+  // WHY IT IS NESTED ON THIS ENTRY rather than being a second AGENT_SURFACES
+  // entry. agentSurfaceForProcess() is FIRST-MATCH-WINS per process name: it
+  // returns the first entry whose `procs` contains the process and stops. A
+  // second entry with procs:['ms-teams'] would therefore be permanently
+  // shadowed by this one and could never be reached, on either side of the port
+  // (enforcer-win.ps1's MatchAgentSurface has the identical first-match loop).
+  // A nested block is not a style choice — it is the only shape that works.
+  //
+  // WHY IT HAS ITS OWN enforce/verified PAIR. This entry's own pair is
+  // true/true (the Chat-list route passed its live pass 2026-08-30). Hanging the
+  // new route off THAT pair would have shipped it live-armed on day one, against
+  // a route nobody had verified end-to-end — which is precisely what the
+  // two-flag discipline exists to prevent. So it shipped FALSE/FALSE and stayed
+  // completely inert (enforcer-win.ps1 reaches the fallback only when BOTH are
+  // true: no tree walk, no extra read, no state) until this route got a live
+  // pass of its own. That pass ran 2026-09-02 — recorded on the `fallbackRead`
+  // block below and on the `teams_copilot_composer` AI_PANELS entry above — and
+  // BOTH flags here are now true, so the fallback is live. The separate pair is
+  // still the right shape: each UI route arms only on its own evidence, and a
+  // future third route added here starts at false/false again regardless of
+  // what these two say.
+  //
+  // WHY `paneKinds` IS NOT `titleKinds`. Measured live 2026-09: the Copilot tab
+  // keeps a GENERIC, CONSTANT window title no matter which agent is open —
+  // "Copilot | filefuze | erik@filefuze.co | Microsoft Teams" — and it never
+  // becomes "Chat | <agent> | …" (that shape is exclusive to the Chat-list
+  // route). Note the SECOND segment there is the TENANT ("filefuze"), not a
+  // conversation name. So adding 'Copilot' to `titleKinds` would make the
+  // primary title parse read the ORG NAME as the open agent's name. These are
+  // two genuinely different questions that happen to look alike:
+  //   titleKinds — "this title's kind segment introduces a conversation whose
+  //                NAME is in segment 1"; used to EXTRACT a name.
+  //   paneKinds  — "this title's kind segment says we are in a view where the
+  //                heading fallback is worth attempting at all"; used only to
+  //                GATE, never to extract.
+  // titleKindOf() is the one function that answers "which Teams view is this",
+  // and both consult it.
+  //
+  // THE SIGNAL, all measured verbatim 2026-09 against the real blocked agent
+  // "IT Help Desk Agent":
+  //   * before any message is sent, a Text control whose Name is
+  //     "IT Help Desk Agent Created by Your developer name" — hence
+  //     `landingInfix`, and hence "everything before the infix".
+  //   * once messages exist, per-message headings ACCUMULATE (confirmed: the
+  //     first message's heading was still present after a second was sent).
+  //     The AGENT's heading carries the class token
+  //     `fai-CopilotMessage__accessibleHeading` and the Name
+  //     "IT Help Desk Agent said:" — hence `headingSuffix`.
+  //   * the USER's own heading is a DIFFERENT class
+  //     (`fai-UserMessage__accessibleHeading`, Name "You said:"), confirmed
+  //     live, so filtering on the agent's class alone can never read a human's
+  //     own message as the agent. "You" is in `genericNames` anyway, as a second
+  //     line of defence rather than the primary one.
+  //   * the AutomationId on those headings ("copilot-message-r7f-title" /
+  //     "copilot-message-r8j-title") DIFFERS between two messages in the same
+  //     session, so it is NOT a stable match target and is deliberately unused.
+  //     ClassName is the only reliable one.
+  //   * a plain bare-name Text control ("IT Help Desk Agent", no distinguishing
+  //     ClassName, no AutomationId) also appears near each response. It exists,
+  //     but nothing here keys on it: a text node with no distinguishing
+  //     attribute is not a match target, it is a coincidence waiting to happen.
   {
     id: 'teams_desktop',
     procs: ['ms-teams'],
@@ -419,6 +530,19 @@ export const AGENT_SURFACES = [
     genericNames: ['Copilot', 'Chat', 'Microsoft Teams', 'Meeting chat'],
     hostApp: true,
     enforce: true, verified: true,
+    fallbackRead: {
+      mode: 'message_heading',
+      paneKinds: ['Copilot'],              // gates the attempt; never used to extract a name
+      headingClass: 'fai-CopilotMessage__accessibleHeading',
+      headingSuffix: ' said:',             // "<Agent> said:" -> everything before this suffix
+      landingInfix: ' Created by ',        // "<Agent> Created by <author>" -> everything before this
+      genericNames: ['Copilot', 'Microsoft 365 Copilot', 'You'],
+      // LIVE-VERIFIED and ENFORCING. Pass ran 2026-09-02 with a real blocked
+      // agent reached specifically through the Copilot tab: send blocked;
+      // re-confirmed in the same pass that the Chat-list route, M365Copilot,
+      // a DM, and a different/generic agent all still behaved correctly.
+      enforce: true, verified: true,
+    },
   },
 ];
 
@@ -593,10 +717,17 @@ export function looksLikeParticipantList(name) {
 // in lockstep with it. NEVER throws and never retains the title: the string
 // comes from another process's window and is compared against the blocklist and
 // nothing else.
-export function extractAgentNameFromTitle(surface, title) {
-  if (!surface) return AGENT_NAME_NOT_COMPOSER;
+// Split a window title into its normalized segments, or null when the string is
+// not this surface's title at all.
+//
+// Extracted so that "how a Teams title is taken apart" is written down exactly
+// ONCE, and both consumers — titleKindOf and extractAgentNameFromTitle — share
+// it. Returns null (rather than an empty array) for every non-title, so a caller
+// cannot accidentally treat "unparseable" as "parsed into nothing".
+function titleSegments(surface, title) {
+  if (!surface) return null;
   let raw = String(title ?? '');
-  if (!raw) return AGENT_NAME_NOT_COMPOSER;
+  if (!raw) return null;
   // Bound the work. A title is attacker-influenceable in the sense that any app
   // can set one; 512 chars is well past the longest measured Teams title.
   raw = raw.slice(0, 512);
@@ -613,25 +744,58 @@ export function extractAgentNameFromTitle(surface, title) {
     }
   }
   const normalized = normalizeAgentName(raw);
-  if (!normalized) return AGENT_NAME_NOT_COMPOSER;
+  if (!normalized) return null;
   const sep = String(surface.titleSeparator ?? '');
   const suffix = normalizeAgentName(surface.titleSuffix);
-  if (!sep || !suffix) return AGENT_NAME_NOT_COMPOSER;
+  if (!sep || !suffix) return null;
   const parts = normalized.split(sep);
   // The LAST segment must be the app's own suffix, exactly. This is what stops
   // any other window in any other app from ever being parsed as a Teams title.
-  if (normalizeAgentName(parts[parts.length - 1]).toLowerCase() !== suffix.toLowerCase()) {
-    return AGENT_NAME_NOT_COMPOSER;
-  }
-  // …and the FIRST segment must be a kind that introduces a NAMEABLE
-  // conversation. A plain 1:1 DM has no kind segment at all (measured:
-  // "Sruthi Chimata | CloudFuze, Inc | … | Microsoft Teams"), so it lands here
-  // and correctly reads as no evidence rather than as an agent named after a
-  // colleague. So do a channel view ("Teams and Channels"), the Activity tab
-  // ("Activity") and the generic Copilot panel ("Copilot", which has no name
-  // segment of its own at all).
-  if (parts.length < 3) return AGENT_NAME_NOT_COMPOSER;
-  const kind = normalizeAgentName(parts[0]).toLowerCase();
+  if (normalizeAgentName(parts[parts.length - 1]).toLowerCase() !== suffix.toLowerCase()) return null;
+  // Fewer than three segments cannot name anything: there is no room for a kind,
+  // a name and the app suffix.
+  if (parts.length < 3) return null;
+  return parts;
+}
+
+// WHICH VIEW of this app the title says is open — its first ("kind") segment,
+// normalized, or '' when the string is not this surface's title at all.
+//
+// THE single definition of "which Teams view is this", deliberately, because
+// there are now two consumers that must never disagree:
+//   * extractAgentNameFromTitle's primary parse, which requires the kind to be
+//     one of `titleKinds` before it will read a conversation NAME out of
+//     segment 1;
+//   * the Copilot-tab heading fallback's gate, which requires the kind to be one
+//     of `fallbackRead.paneKinds` before it will attempt anything at all.
+// Those are different lists on purpose — see the fallbackRead comment on
+// teams_desktop — but "what kind is this title" must be one answer.
+//
+// Note this returns the raw first segment: for a 1:1 DM (measured: no kind
+// segment at all, segment 0 IS the colleague's display name) it returns that
+// name. That is correct and harmless — the value is only ever COMPARED against
+// a catalog list, never used as a name, and never retained.
+//
+// PURE, never throws, and ported to C# as TitleKindOf.
+export function titleKindOf(surface, title) {
+  const parts = titleSegments(surface, title);
+  if (!parts) return '';
+  return normalizeAgentName(parts[0]);
+}
+
+export function extractAgentNameFromTitle(surface, title) {
+  if (!surface) return AGENT_NAME_NOT_COMPOSER;
+  const parts = titleSegments(surface, title);
+  if (!parts) return AGENT_NAME_NOT_COMPOSER;
+  // The FIRST segment must be a kind that introduces a NAMEABLE conversation. A
+  // plain 1:1 DM has no kind segment at all (measured: "Sruthi Chimata |
+  // CloudFuze, Inc | … | Microsoft Teams"), so it lands here and correctly reads
+  // as no evidence rather than as an agent named after a colleague. So do a
+  // channel view ("Teams and Channels"), the Activity tab ("Activity") and the
+  // generic Copilot panel ("Copilot", whose second segment is the TENANT, not a
+  // conversation name — which is exactly why 'Copilot' must never be added to
+  // titleKinds, and why the Copilot tab needs the separate heading fallback).
+  const kind = titleKindOf(surface, title).toLowerCase();
   const kinds = surface.titleKinds || [];
   let kindOk = false;
   for (const k of kinds) if (normalizeAgentName(k).toLowerCase() === kind) { kindOk = true; break; }
@@ -648,6 +812,98 @@ export function extractAgentNameFromTitle(surface, title) {
     if (normalizeAgentName(generic).toLowerCase() === name.toLowerCase()) return AGENT_NAME_GENERIC;
   }
   return name;
+}
+
+// ── Copilot-tab heading reads (the SECOND Teams UI route) ───────────────────
+
+// The agent name a set of already-collected pane HEADINGS names, for a surface
+// carrying a `fallbackRead` block.
+//
+// WHY THIS EXISTS. Teams' embedded Copilot tab keeps a generic, constant window
+// title regardless of which agent is open (measured: "Copilot | filefuze |
+// erik@filefuze.co | Microsoft Teams"), so extractAgentNameFromTitle correctly
+// returns NO EVIDENCE there and the Chat-list route's mechanism simply cannot
+// see this route at all. The agent's name is in the PANE instead: either the
+// landing heading of a fresh conversation, or the accessible heading on each of
+// the agent's own messages.
+//
+// PURE and side-effect free, exactly like extractAgentNameFromTitle: it takes
+// candidates that have ALREADY been collected and does no walking, no reading
+// and no I/O of its own. `headings` is an array of { className, name } pairs.
+// Same three-outcome contract, and it matters for the same reason — the caller
+// must be able to tell "no evidence" from the authoritative "no agent open":
+//   AGENT_NAME_NOT_COMPOSER — no evidence. Nothing matched, or the candidates
+//                             DISAGREE about which agent this is.
+//   AGENT_NAME_GENERIC      — AUTHORITATIVE: a heading was read and it names a
+//                             generic label ("Copilot", "You"), not an agent.
+//   any other string        — AUTHORITATIVE: that named agent is open.
+//
+// AMBIGUITY IS NO EVIDENCE, NOT A BLOCK. If two message headings disagree — a
+// mixed or stale transcript, a pane that re-rendered mid-walk — this returns
+// NOT_COMPOSER. For a HOST APP the fail direction is inverted (see the
+// teams_desktop entry): "cannot tell which agent is open" must never mean
+// "block anyway" when the app is a company's communications client.
+//
+// Never throws: every input comes from another process's accessibility tree and
+// can be null, empty or garbage.
+export function extractAgentNameFromHeading(surface, headings) {
+  const fb = surface?.fallbackRead;
+  if (!fb || fb.mode !== 'message_heading') return AGENT_NAME_NOT_COMPOSER;
+  if (!Array.isArray(headings) || headings.length === 0) return AGENT_NAME_NOT_COMPOSER;
+  const headingClass = String(fb.headingClass ?? '').toLowerCase();
+  const suffix = String(fb.headingSuffix ?? '');
+  const infix = String(fb.landingInfix ?? '');
+
+  let found = '';
+  let conflict = false;
+  const offer = (candidate) => {
+    if (!candidate) return;
+    if (!found) found = candidate;
+    else if (found.toLowerCase() !== candidate.toLowerCase()) conflict = true;
+  };
+
+  // 1+2. The agent's OWN message headings, identified by CLASS. The user's own
+  // headings carry a different class (measured: fai-UserMessage__accessibleHeading
+  // vs fai-CopilotMessage__accessibleHeading), so this filter is what makes it
+  // impossible to read a human's message as the agent's. Token matching is the
+  // existing classRuleMatches — a web-hosted element's ClassName is the DOM class
+  // ATTRIBUTE and carries build hashes alongside the semantic token.
+  if (headingClass && suffix) {
+    for (const heading of headings) {
+      const cls = String(heading?.className ?? '').trim().toLowerCase();
+      if (!cls || !classRuleMatches(cls, headingClass, false)) continue;
+      const nm = normalizeAgentName(heading?.name);
+      if (nm.length <= suffix.length) continue;
+      if (nm.slice(nm.length - suffix.length).toLowerCase() !== suffix.toLowerCase()) continue;
+      offer(normalizeAgentName(nm.slice(0, nm.length - suffix.length)));
+    }
+  }
+
+  // 3. Only when NO message heading matched at all: the landing heading of a
+  // freshly-opened conversation ("<Agent> Created by <author>"). Deliberately NOT
+  // class-filtered — it is a different element entirely (measured class token
+  // `fui-Title1`, i.e. a generic Fluent heading style shared with other titles),
+  // so the infix is the whole signal. Confirmed live that re-opening an agent's
+  // Copilot-tab conversation resets it to empty, which makes this the common
+  // state immediately after opening one.
+  if (!found && !conflict && infix) {
+    for (const heading of headings) {
+      const nm = normalizeAgentName(heading?.name);
+      const at = nm.toLowerCase().indexOf(infix.toLowerCase());
+      if (at <= 0) continue;
+      offer(normalizeAgentName(nm.slice(0, at)));
+    }
+  }
+
+  if (conflict) return AGENT_NAME_NOT_COMPOSER;   // cannot tell → no evidence
+  if (!found) return AGENT_NAME_NOT_COMPOSER;
+  // Same ordering as every other reader here: the Generic filter runs BEFORE any
+  // matching, so an agent literally named "Copilot" can never be matched through
+  // this mechanism either.
+  for (const generic of fb.genericNames || []) {
+    if (normalizeAgentName(generic).toLowerCase() === found.toLowerCase()) return AGENT_NAME_GENERIC;
+  }
+  return found;
 }
 
 // Does the extracted agent name identify the agent a blocklist row names?
@@ -1024,6 +1280,27 @@ export function buildAgentSurfaceConfig() {
     hostApp: surface.hostApp === true,
     enforce: surface.enforce === true,
     verified: surface.verified === true,
+    // The nested SECOND-ROUTE block, present only on an entry that declares one.
+    // OMITTED entirely otherwise, so m365_copilot's payload is byte-for-byte the
+    // one it has always shipped — LoadAgentSurfaces treats an absent block as
+    // "no fallback configured" and leaves every field null/empty/false.
+    //
+    // Both flags travel for the same reason the entry's own pair does: the C#
+    // side reaches the fallback only when it is verified AND enforcing, so
+    // dropping either here would silently move the route to the wrong side of
+    // its own gate.
+    ...(surface.fallbackRead ? {
+      fallbackRead: {
+        mode: surface.fallbackRead.mode === 'message_heading' ? 'message_heading' : '',
+        paneKinds: (surface.fallbackRead.paneKinds || []).slice(),
+        headingClass: surface.fallbackRead.headingClass || '',
+        headingSuffix: surface.fallbackRead.headingSuffix || '',
+        landingInfix: surface.fallbackRead.landingInfix || '',
+        genericNames: (surface.fallbackRead.genericNames || []).slice(),
+        enforce: surface.fallbackRead.enforce === true,
+        verified: surface.fallbackRead.verified === true,
+      },
+    } : {}),
   }));
 }
 

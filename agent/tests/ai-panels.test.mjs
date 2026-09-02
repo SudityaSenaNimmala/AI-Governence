@@ -194,14 +194,56 @@ test('Copilot Chat ships enforce:false and the matcher does not treat that as "d
   // Detection must still fire, or the whole point of shipping it detection-first
   // (exercising the plumbing, gathering telemetry) is lost.
   assert.equal(matchPanelSignature(COPILOT_CHAT)?.id, 'vscode_chat');
-  // …and vscode_chat is now the ONLY non-enforcing panel: its signature was
+  // …and vscode_chat is again the ONLY non-enforcing panel: its signature was
   // inferred and has never been probed against a real install, so it stays
-  // detection-only until a human runs that live pass. teams_composer used to sit
-  // alongside it here — not because its signature was unproven, but because the
-  // FEATURE it gates (agent-scoped enforcement inside a general-purpose chat
-  // client) had not had its end-to-end pass. That pass ran live 2026-08-30, so it
-  // enforces now and has left this list.
+  // detection-only until a human runs that live pass. TWO Teams composers have
+  // now passed through this list and left it, both for the same reason — not a
+  // doubted signature, but an unverified ROUTE:
+  //   teams_composer         — the Chat-list route; pass ran 2026-08-30.
+  //   teams_copilot_composer — the embedded Copilot tab; its signature was
+  //                            measured live in 2026-09, and the route's own
+  //                            end-to-end pass ran 2026-09-02, so it enforces
+  //                            now and has left this list too.
   assert.deepEqual(AI_PANELS.filter((p) => !p.enforce).map((p) => p.id), ['vscode_chat']);
+});
+
+test('teams_copilot_composer is a SECOND, different Teams composer — verified and enforcing', () => {
+  // Measured live 2026-09 against the embedded Copilot tab of a real new-Teams
+  // install: its ClassName is "fai-EditorInput__input r18fti29 r18aquq2
+  // ___10kbave f1pha7fy f1immsc2 f1mk8lai" with NO ck-editor__editable token
+  // anywhere in it. The Chat-list route and the Copilot tab genuinely ship two
+  // different editors, so one signature cannot cover both.
+  const COPILOT_TAB_CLASS = 'fai-EditorInput__input r18fti29 r18aquq2 ___10kbave f1pha7fy f1immsc2 f1mk8lai';
+  const entry = AI_PANELS.find((p) => p.id === 'teams_copilot_composer');
+  assert.ok(entry, 'the teams_copilot_composer panel is missing');
+  assert.equal(entry.enforce, true, 'the Copilot-tab route enforces after its 2026-09-02 live pass');
+  assert.equal(entry.verified, true);
+  // The SEMANTIC token is what is matched — not the Fluent-UI build hashes
+  // beside it — exactly as teams_composer matches ck-editor__editable.
+  assert.equal(entry.classEquals, 'fai-EditorInput__input');
+  assert.equal(
+    matchPanelSignature({ process: 'ms-teams', controlType: 'Edit', name: 'Message Copilot', className: COPILOT_TAB_CLASS })?.id,
+    'teams_copilot_composer',
+  );
+  // The two composers do not match each other's signature, in either direction.
+  assert.equal(matchPanelSignature(TEAMS_COMPOSER)?.id, 'teams_composer');
+  assert.equal(COPILOT_TAB_CLASS.includes('ck-editor__editable'), false);
+  // The composer's Name is generic and deliberately unused: "Message Copilot"
+  // with no agent selected, and observed carrying agent-ish text otherwise. The
+  // class alone decides, so an empty or misleading Name changes nothing.
+  assert.equal(
+    matchPanelSignature({ process: 'ms-teams', controlType: 'Edit', name: '', className: COPILOT_TAB_CLASS })?.id,
+    'teams_copilot_composer',
+  );
+  // host:null, for the IDENTICAL load-bearing reason teams_composer carries it —
+  // an Inventory toggle on teams.microsoft.com must not be able to synthesize a
+  // panel row against this entry either.
+  assert.equal(entry.host, null);
+  assert.equal(hostForPanel('teams_copilot_composer'), null);
+  assert.deepEqual(
+    synthesizePlatformBlocks([{ host: 'teams.microsoft.com', product: 'Microsoft Teams', vendor: 'Microsoft', blocked: true }]),
+    [],
+  );
 });
 
 // ── Negative cases ───────────────────────────────────────────────────────────

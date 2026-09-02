@@ -12,6 +12,7 @@ import { runInjector } from './desktop_injector/index.js';
 import { OsMonitor } from './os_monitor/index.js';
 import { acquireMonitorLock, releaseMonitorLock } from './os_monitor/lock.js';
 import { reapOrphans } from './os_monitor/reap-orphans.js';
+import { enforcerEnabledFromEnv } from './os_monitor/settings-env.js';
 
 const { values } = parseArgs({
   options: {
@@ -153,10 +154,25 @@ async function main() {
     const { startIdentityBeacon } = await import('./identity-beacon.js');
     startIdentityBeacon({ machineId: config.machineId, user: config.user, log: log.child('beacon') });
 
+    // CFAI_ENFORCER_ENABLED — the same env-var contract electron/monitor-runner.mjs
+    // already honours. It was never decoded here, so setting it had no effect on
+    // the CLI path: `--monitor` always ran with the enforcer on, silently
+    // ignoring the one switch that turns it off. Unset still means enabled, so
+    // this changes nothing for anyone who does not set it.
+    const enforcerEnabled = enforcerEnabledFromEnv(process.env);
+    if (!enforcerEnabled) {
+      log.info('Keystroke enforcer disabled by CFAI_ENFORCER_ENABLED — passive DLP watchers only.');
+    }
+
     const monitor = new OsMonitor({
       serverUrl: creds?.serverUrl || values.server,
       token: creds?.token,
       log: log.child('os_monitor'),
+      enforcerEnabled,
+      // No `legacyStdout` here, deliberately. The @@CFAI-* lines exist only so
+      // Electron's main process can scrape this child's stdout; a CLI run has no
+      // scraper, and printing them would dump machine-readable relay lines into
+      // the user's console. The CLI consumes monitor.on('ui', …) instead.
     });
     monitor.start();
     log.info('Monitor running. Ctrl+C to stop.');

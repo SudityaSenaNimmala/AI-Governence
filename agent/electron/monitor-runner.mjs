@@ -53,6 +53,12 @@ const monitor = new OsMonitor({
   token: creds.token,
   log: log.child('os_monitor'),
   enforcerEnabled,
+  // Electron's main process scrapes the `@@CFAI-*` lines off this child's
+  // stdout to drive the native dialogs and the blocked-platform bar, so this
+  // entry point — and only this one — keeps them. OsMonitor also emits every
+  // relay as a structured 'ui' event now; the bare-Node CLI entry point
+  // (src/index.js --monitor) has no scraper and uses that instead.
+  legacyStdout: true,
 });
 monitor.start();
 log.info('Monitor running. Ctrl+C to stop.');

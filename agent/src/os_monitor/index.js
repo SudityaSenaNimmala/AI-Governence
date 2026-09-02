@@ -10,6 +10,7 @@
 //     1. enqueue an event for the governance server (Reporter)
 //     2. fire a native Windows toast if severity is high/critical (notify)
 
+import { EventEmitter } from 'node:events';
 import { createPoller } from './poller-factory.js';
 import { createNotifier } from './notify-factory.js';
 import {
@@ -61,11 +62,22 @@ function identifyEventAi(ev) {
 // clipboard. The OS monitor is detect + notify + report only; real blocking is
 // owned by the browser extension (web apps) and the proxy (API/CLI traffic).
 
-export class OsMonitor {
+export class OsMonitor extends EventEmitter {
+  // Sink for the legacy `@@CFAI-*` stdout relay lines. See the long comment on
+  // #ui() for why the gate is a console-shaped sink rather than a condition
+  // repeated at each relay site.
+  #console;
+
   // `enforcerEnabled` is the desktop app's "Keystroke enforcer" setting,
-  // plumbed through from Electron. False turns OFF only the active
-  // keystroke-blocking piece — every passive DLP watcher (clipboard, file
-  // dialogs, attachments, typed prompts) keeps running.
+  // plumbed through from Electron (and, for the CLI, from CFAI_ENFORCER_ENABLED).
+  // False turns OFF only the active keystroke-blocking piece — every passive DLP
+  // watcher (clipboard, file dialogs, attachments, typed prompts) keeps running.
+  //
+  // `legacyStdout` prints the machine-readable `@@CFAI-*` relay lines on stdout
+  // for Electron's main.js, which scrapes this child's stdout. It is OFF by
+  // default: the CLI has no scraper and consumes monitor.on('ui', …) instead, so
+  // printing them there would dump relay lines into the user's console.
+  //
   // `skipPromptWatcher` exists for one caller: the packaged agent, which already
   // runs a PromptWatcher of its own in Claude-tracker mode (CFAI_CLAUDE_TRACKER=1
   // switches the PS1 into browser-aware behaviour the Claude Usage dashboard
@@ -74,10 +86,28 @@ export class OsMonitor {
   // host widens its own watcher to cover every AI process instead and tells this
   // one to stand down. Everything else here — the enforcer, clipboard, dialogs,
   // attachments, policy and feature sync — still runs.
-  constructor({ serverUrl, token, log, enforcerEnabled = true, skipPromptWatcher = false }) {
+  constructor({ serverUrl, token, log, enforcerEnabled = true, skipPromptWatcher = false, legacyStdout = false }) {
+    super();
     this.log = log;
-    this.enforcerEnabled = enforcerEnabled !== false;
+    // The LOCAL setting. Written once, here, and never again — #applyFeatures
+    // must not be able to overwrite it, or a fleet flag saying "allowed" would
+    // silently re-enable an enforcer the user/admin switched off on this machine.
+    this.localEnforcerEnabled = enforcerEnabled !== false;
+    // The DERIVED, currently-effective value: local AND fleet. This is what gates
+    // the enforcer and what policySync's onChange consults. Before the first
+    // feature poll answers there is no fleet opinion, so it starts at the local
+    // setting.
+    this.enforcerEnabled = this.localEnforcerEnabled;
     this.skipPromptWatcher = skipPromptWatcher === true;
+    this.legacyStdout = legacyStdout === true;
+    this.#console = this.legacyStdout ? console : { log() {} };
+    // Lifecycle flag, distinct from the per-feature `this.running` map below:
+    // false means start() has not run or stop() has already run, and
+    // #applyFeatures must do nothing at all. An in-flight FeatureSync poll can
+    // resolve AFTER stop() (its stop() only clears the interval — it cannot
+    // abort a fetch already awaiting), and without this its onChange would
+    // resurrect the keyboard hook on a monitor that had fully torn down.
+    this.isRunning = false;
     this.poller = createPoller({ log });
     this.reporter = new Reporter({ serverUrl, token, log });
     this.toast = createNotifier({ log });
@@ -103,7 +133,10 @@ export class OsMonitor {
       log,
       aiProcessNames: aiProcNames,
       blockPatterns: getBlockPatterns(),
-      enabled: this.enforcerEnabled,
+      // The Enforcer's own master switch is the LOCAL setting: a fleet flag can
+      // start and stop it (via #applyFeatures), but it can never make a locally
+      // disabled enforcer spawnable.
+      enabled: this.localEnforcerEnabled,
     });
     // Detached sibling that releases the keyboard hook if THIS process is
     // hard-killed. Handle kept so shutdown can reap it.
@@ -209,6 +242,34 @@ export class OsMonitor {
     return true;
   }
 
+  /**
+   * One UI relay, two channels.
+   *
+   * Emits the payload as a structured `ui` event — `monitor.on('ui', …)` — and
+   * returns it unchanged so the caller can hand the very same object to the
+   * legacy `@@CFAI-*` stdout line that Electron's main.js scrapes. The event is
+   * the channel every non-Electron consumer uses (the CLI); the stdout copy only
+   * prints when `legacyStdout` is set, because a CLI run has no scraper.
+   *
+   * `kind` is spread FIRST so a payload that already carries its own `kind`
+   * (the raw enforcer events relayed on @@CFAI-REWRITE / @@CFAI-ROUTE) keeps it.
+   *
+   * WHY THE GATE IS A SINK, NOT AN `if` AT EACH SITE. The relay lines are a
+   * pinned contract: main.js parses them byte-for-byte (its own comment says the
+   * @@CFAI-BLOCK guard is "left byte-for-byte as it was" because a test pins its
+   * exact text), and tests pin this side by slicing the source forward from each
+   * relay call to read the payload literal that follows it. So the payload
+   * literal has to stay inside that call — which is also what keeps it the single
+   * source of truth for both channels instead of being duplicated per site.
+   * #console is the real console when legacyStdout is set and a no-op sink
+   * otherwise, so nothing is ever printed without a consumer, while the emit
+   * above always happens.
+   */
+  #ui(kind, payload) {
+    this.emit('ui', { kind, ...payload });
+    return payload;
+  }
+
   start() {
     // Universal coverage: clipboard text + foreground + notifications work on
     // Windows, macOS, and Linux. The two UIA-based watchers (file dialog +
@@ -218,6 +279,10 @@ export class OsMonitor {
       this.log?.warn(`os_monitor: unsupported platform ${process.platform} — monitor inert`);
       return;
     }
+
+    // Set AFTER the platform guard, which starts nothing: on an unsupported
+    // platform the monitor never runs, so it must never look like it did.
+    this.isRunning = true;
 
     this.reporter.start();
     this.toast.start();
@@ -700,7 +765,7 @@ export class OsMonitor {
       // the Tokenize one; tool_host/tool_name/tool_vendor are pre-resolved here
       // so the Electron layer never needs the process→host catalog itself, and
       // are named to match the /api/v1/access-requests body exactly.
-      console.log('@@CFAI-BLOCK ' + JSON.stringify({
+      this.#console.log('@@CFAI-BLOCK ' + JSON.stringify(this.#ui('block', {
         app: ai.product, patterns: ev.patterns, block_id: ev.block_id || '',
         rewritable: !!ev.rewritable, preview: ev.preview || '', why_not: ev.why_not || '',
         reason: ev.reason || '', filename: ev.filename || '',
@@ -720,7 +785,7 @@ export class OsMonitor {
         // _blockedByPanel. Not the same question as `panel` above, which is
         // attribution and can carry a panel id for an app-scoped block.
         block_scope: ev.block_scope || '',
-      }));
+      })));
     });
 
     // Standing blocked-platform bar (desktop) — the counterpart of the browser
@@ -740,7 +805,7 @@ export class OsMonitor {
     this.enforcer.on('blockstate', (ev) => {
       const active = !!ev.active;
       const ai = active ? (identifyEventAi(ev) || { product: ev.process, vendor: null }) : null;
-      console.log('@@CFAI-BLOCKSTATE ' + JSON.stringify({
+      this.#console.log('@@CFAI-BLOCKSTATE ' + JSON.stringify(this.#ui('blockstate', {
         active,
         scope: ev.scope || '',
         // Display name for the bar. The admin-typed agent name first (the same
@@ -755,7 +820,7 @@ export class OsMonitor {
         win_y: Number(ev.win_y) || 0,
         win_w: Number(ev.win_w) || 0,
         win_h: Number(ev.win_h) || 0,
-      }));
+      })));
     });
 
     // Panic hotkey. The helper's own bar state already includes !Disarmed(), so
@@ -763,7 +828,11 @@ export class OsMonitor {
     // case where that tick never arrives (helper wedged, stdout stalled), on the
     // same presentation-only channel and with the same no-reporting rule.
     this.enforcer.on('disarmed', () => {
-      console.log('@@CFAI-BLOCKSTATE ' + JSON.stringify({ active: false }));
+      // The one relay site that does not pass its payload through #ui() inline:
+      // the literal `JSON.stringify({ active: false })` is itself pinned, so the
+      // emit is a separate call over the same (trivially small) payload.
+      this.#ui('blockstate', { active: false });
+      this.#console.log('@@CFAI-BLOCKSTATE ' + JSON.stringify({ active: false }));
     });
 
     // Tier B mask-and-rewrite result. 'ok' means the composer was verified to
@@ -771,7 +840,7 @@ export class OsMonitor {
     // the same way the browser extension's Tokenize & Send reports
     // enforcement_redact, masked content only, original never sent here.
     this.enforcer.on('rewrite', (ev) => {
-      console.log('@@CFAI-REWRITE ' + JSON.stringify(ev));
+      this.#console.log('@@CFAI-REWRITE ' + JSON.stringify(this.#ui('rewrite', ev)));
       if (ev.result !== 'ok') return;
       this.reporter.enqueue({
         kind: 'enforcement_redact',
@@ -795,7 +864,7 @@ export class OsMonitor {
     // route event can never carry a panel id. Using the panel-first resolver
     // here would imply support that does not exist.
     this.enforcer.on('route', (ev) => {
-      console.log('@@CFAI-ROUTE ' + JSON.stringify(ev));
+      this.#console.log('@@CFAI-ROUTE ' + JSON.stringify(this.#ui('route', ev)));
       const ai = identifyAiProcess(ev.process) || { product: ev.process, vendor: null };
       this.reporter.enqueue({
         kind: 'model_routed',
@@ -835,10 +904,12 @@ export class OsMonitor {
     });
 
     // Start from what we know before the server has answered: everything on,
-    // except an enforcer the local env var explicitly disabled. Waiting for the
-    // first poll instead would leave a minute of every boot ungoverned.
+    // which is also FeatureSync's own pre-first-fetch stance. Waiting for the
+    // first poll instead would leave a minute of every boot ungoverned. These are
+    // FLEET values — an enforcer the local setting disabled still does not start,
+    // because #applyFeatures ANDs the fleet flag with the local one.
     this.#applyFeatures(
-      { clipboard_monitor: true, dlp: true, agent_enforcer: this.enforcerEnabled },
+      { clipboard_monitor: true, dlp: true, agent_enforcer: true },
       ['clipboard_monitor', 'dlp', 'agent_enforcer'],
     );
     // Then let the fleet setting take over. It reports every flag as changed on
@@ -865,6 +936,19 @@ export class OsMonitor {
   }
 
   /**
+   * May the keystroke enforcer run, given the fleet flag?
+   *
+   * The two switches COMPOSE AS AND — they do not override each other. The fleet
+   * flag says what the org allows on every machine; the local setting says what
+   * this machine's user/admin allows. Either one saying "off" is a no, so a fleet
+   * flag that merely says "allowed" can never re-enable an enforcer that was
+   * disabled locally (via the Electron checkbox or CFAI_ENFORCER_ENABLED).
+   */
+  #enforcerAllowed(fleetOn) {
+    return this.localEnforcerEnabled && fleetOn !== false;
+  }
+
+  /**
    * Start or stop subsystems to match the fleet settings.
    *
    * Only keys in `changed` are acted on. Re-applying an unchanged flag would tear
@@ -872,6 +956,12 @@ export class OsMonitor {
    * window in which sends are not blocked.
    */
   #applyFeatures(features, changed) {
+    // A FeatureSync poll already in flight when stop() ran still resolves and
+    // still calls onChange — its stop() clears the interval, it cannot abort the
+    // pending fetch. Without this guard that late callback would start the
+    // keyboard hook and its watchdog again on a monitor that has torn down.
+    if (!this.isRunning) return;
+
     const want = (key) => features[key] !== false;   // unknown → keep governing
 
     // Clipboard + typed-prompt capture. These are the passive watchers: they see
@@ -903,7 +993,9 @@ export class OsMonitor {
     // dies with the enforcer — leaving it running with no hook to reap would have
     // it watching for something that cannot happen.
     if (changed.includes('agent_enforcer')) {
-      const on = want('agent_enforcer');
+      // AND, not override: the fleet flag alone is not enough — see
+      // #enforcerAllowed. Everything below this line reads the composed value.
+      const on = this.#enforcerAllowed(want('agent_enforcer'));
       if (on !== this.running.agent_enforcer) {
         if (on) {
           this.enforcer.start();
@@ -921,7 +1013,8 @@ export class OsMonitor {
         this.running.agent_enforcer = on;
         // enforcerEnabled is what policySync's onChange consults before pushing
         // new patterns to the hook; leaving it stale would let a policy poll
-        // restart a hook the admin just switched off.
+        // restart a hook the admin just switched off. It holds the DERIVED value
+        // — localEnforcerEnabled is never written here.
         this.enforcerEnabled = on;
         this.log?.info(
           `os_monitor: keystroke send-blocker ${on ? 'ON' : 'OFF'} (fleet setting)`
@@ -932,6 +1025,10 @@ export class OsMonitor {
   }
 
   stop() {
+    // FIRST, before anything else is torn down: a FeatureSync poll already
+    // awaiting its fetch will still fire onChange after this returns, and
+    // #applyFeatures no-ops on this flag rather than restarting the hook.
+    this.isRunning = false;
     this.#stopAttachHoldRefresh();
     this.featureSync.stop();
     this.poller.stop();

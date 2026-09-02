@@ -2433,8 +2433,22 @@ test('enforcer-win.ps1: the WebView2 pid rule accepts a DIRECT child and nothing
   const code = codeOnly(src);
   assert.equal((code.match(/CreateToolhelp32Snapshot\(TH32CS_SNAPPROCESS/g) || []).length, 1,
     'exactly one snapshot site');
-  assert.equal((code.match(/ElementPidBelongsToForeground\(/g) || []).length, 3,
-    'the rule is declared once and called twice — the agent read and the host-app panel read');
+  assert.equal((code.match(/ElementPidBelongsToForeground\(/g) || []).length, 4,
+    'the rule is declared once and called three times — the agent read, the host-app panel '
+    + 'read, and the Copilot-tab heading search. Every call site must go through THIS rule; '
+    + 'a new one that rolls its own pid check is what this count exists to catch');
+  // The third call site: the background heading search for Teams' Copilot tab.
+  // It starts from AutomationElement.FocusedElement like the other two, so it
+  // needs the identical ownership rule — the same GLOBAL-read hazard, and the
+  // same WebView2 child process.
+  const search = src.slice(
+    src.indexOf('static void SearchCopilotHeadingsBackground('),
+    src.indexOf('static void CollectCopilotHeadings('),
+  );
+  assert.ok(search.length > 0, 'expected a SearchCopilotHeadingsBackground body');
+  assert.match(search, /if \(ElementPidBelongsToForeground\(el\.Current\.ProcessId, fgPid\)\)/);
+  assert.ok(search.indexOf('ElementPidBelongsToForeground(') < search.indexOf('GetParent('),
+    'the ownership check must precede any tree walk');
   // The PANEL read's DEFAULT stays exact-pid: VS Code and Cursor were verified
   // live with it, and widening a code editor's read is a separate decision with
   // its own false-positive surface. The one-generation rule is reachable there
@@ -2478,6 +2492,230 @@ test('enforcer-win.ps1: the agent name read out of another app is never emitted 
     assert.ok(fn.length > 0, `expected a ${name} body`);
     assert.equal(/_fgAgentName|_fgAgentOutcome/.test(fn), false, `${name} must not carry the read agent name`);
   }
+});
+
+// ── The SECOND Teams UI route: the embedded Copilot tab ─────────────────────
+//
+// Teams' Copilot tab keeps a GENERIC, CONSTANT window title regardless of which
+// agent is open (measured live 2026-09), so the title parse correctly reads NO
+// EVIDENCE there and that route was a silent detection gap. Closing it needs a
+// tree walk, which is exactly what the poll-thread read path must never do — so
+// the mechanism is a background search plus a cache, modelled on the model
+// picker's, and it sits behind its OWN two flags, separate from the Chat-list
+// route's. It shipped inert behind them and went live on its own pass
+// (2026-09-02); the gate itself is what these tests pin.
+
+test('enforcer-win.ps1: the Copilot-tab fallback is INERT unless BOTH of its own flags are true', async () => {
+  // The whole point of a second flag pair. teams_desktop itself has been
+  // Verified+Enforce for the Chat-list route since 2026-08-30; this route had to
+  // do NOTHING — no tree walk, no thread, no cache write — until its OWN pair was
+  // flipped by its own live pass. Both flags are read in ONE place, mirroring
+  // EnforcingAgentSurface, so no call site can forget one. The gate stays exactly
+  // as strict now that the flags are true: it is what keeps the NEXT route inert.
+  const src = await enforcerSrc();
+  const armed = src.slice(
+    src.indexOf('static bool FallbackReadArmed(AgentSurface surface, string kind)'),
+    src.indexOf('// The title-mode read, in two stages.'),
+  );
+  assert.ok(armed.length > 0, 'expected a FallbackReadArmed body');
+  assert.match(armed, /if \(!\(surface\.FallbackVerified && surface\.FallbackEnforce\)\) return false;/);
+  // …and the mode opt-in, so a surface with no fallback block (m365_copilot)
+  // can never reach any of this even if the flags were somehow set.
+  assert.match(armed, /if \(!string\.Equals\(surface\.FallbackMode, "message_heading", StringComparison\.OrdinalIgnoreCase\)\) return false;/);
+  // The KIND gate is the third condition, and it is checked against
+  // FallbackPaneKinds — NOT TitleKinds. Conflating the two would make the primary
+  // parse read this route's tenant/org segment as the open agent's name.
+  assert.match(armed, /return surface\.FallbackPaneKinds\.Contains\(kind\);/);
+  assert.equal(/TitleKinds/.test(armed), false, 'the pane gate must not consult TitleKinds');
+
+  // The gate is the FIRST thing the fallback path does, before any search: the
+  // stage-B branch returns the primary outcome untouched when it is not armed.
+  const stage = src.slice(
+    src.indexOf('static AgentReadOutcome ReadTitleModeAgentName('),
+    src.indexOf('// The poll thread\'s half: read the cache, never wait on a search.'),
+  );
+  assert.ok(stage.length > 0, 'expected a ReadTitleModeAgentName body');
+  // Stage A first, and anything AUTHORITATIVE returns immediately — the fallback
+  // can only ever ADD coverage on no evidence, never override a title that DID
+  // name a conversation.
+  assert.match(stage, /AgentReadOutcome outcome = ExtractAgentName\(surface, "", title, out agentName\);/);
+  assert.match(stage, /if \(outcome != AgentReadOutcome\.NotComposer\) return outcome;/);
+  assert.match(stage, /if \(!FallbackReadArmed\(surface, kind\)\) return outcome;/);
+  assert.ok(stage.indexOf('FallbackReadArmed(') < stage.indexOf('GetCachedCopilotHeadings('),
+    'nothing may be searched before the gate is decided');
+  // Exactly one caller of the search-and-cache entry point, and it is behind that
+  // gate. A second call site would be a way around it.
+  const code = codeOnly(src);
+  assert.equal((code.match(/GetCachedCopilotHeadings\(/g) || []).length, 2,
+    'declared once, called once — only the gated stage-B branch may reach the cache');
+  // And the catalog really does ship both flags true, so the gated path above is
+  // the live one — which is exactly why the gate's shape is pinned so tightly.
+  const { AGENT_SURFACES } = await import('../src/os_monitor/ai-processes.js');
+  const fb = AGENT_SURFACES.find((s2) => s2.id === 'teams_desktop').fallbackRead;
+  assert.ok(fb, 'the fallbackRead block is missing');
+  assert.equal(fb.enforce, true, 'the Copilot-tab route enforces after its 2026-09-02 live pass');
+  assert.equal(fb.verified, true, 'enforce may only be true because that pass was recorded');
+});
+
+test('enforcer-win.ps1: the Copilot-tab walk reads ClassName FIRST and never keeps message text', async () => {
+  // THE privacy rule of this mechanism, and it has to be enforced in code, not by
+  // convention: in a Chromium accessibility tree an ordinary message body's Name
+  // IS the message text. A walk that read every Name would be reading the user's
+  // conversation with the agent.
+  const src = await enforcerSrc();
+  const collect = src.slice(
+    src.indexOf('static void CollectCopilotHeadings('),
+    src.indexOf('// ── Model routing'),
+  );
+  assert.ok(collect.length > 0, 'expected a CollectCopilotHeadings body');
+  // ClassName is read first, unconditionally; the class decision is made from it
+  // before any Name read exists at all.
+  const clsIdx = collect.indexOf('cls = el.Current.ClassName');
+  const nameIdx = collect.indexOf('nm = el.Current.Name');
+  assert.ok(clsIdx >= 0 && nameIdx >= 0, 'expected both property reads');
+  assert.ok(clsIdx < nameIdx, 'ClassName must be read before Name');
+  assert.match(collect, /bool isHeading = headingClass\.Length > 0 && cls\.Length > 0\r?\n\s*&& ClassRuleMatches\(cls, headingClass, false\);/);
+  // A Name is read only for a class-matched heading or a Text control, and is
+  // KEPT only when the class matched or the landing infix is present. Everything
+  // else is a local that goes out of scope unreferenced.
+  assert.match(collect, /if \(isHeading \|\| isText\)/);
+  assert.match(collect, /if \(nm\.Length > 0\r?\n\s*&& \(isHeading \|\| nm\.IndexOf\(infix, StringComparison\.OrdinalIgnoreCase\) > 0\)\)/);
+  // Exactly ONE place appends to the collected lists.
+  assert.equal((codeOnly(collect).match(/names\.Add\(/g) || []).length, 1,
+    'exactly one place may keep a Name');
+  // The walk is bounded three independent ways — depth, node count and how many
+  // candidates may be kept — so a long transcript cannot make it expensive.
+  assert.match(collect, /if \(cur\.Value > COPILOT_WALK_MAX_DEPTH\) continue;/);
+  assert.match(collect, /if \(\+\+visited > COPILOT_WALK_MAX_NODES\) break;/);
+  assert.match(collect, /if \(names\.Count < COPILOT_MAX_HEADINGS\)/);
+  assert.match(src, /const int COPILOT_WALK_MAX_DEPTH = 30;/);
+});
+
+test('enforcer-win.ps1: nothing read off a Copilot-tab heading may ever be emitted or logged', async () => {
+  // Same rule the window-title read already follows, and for the same reason: the
+  // strings collected here come out of another app's accessibility tree. They are
+  // compared against the blocklist and dropped. Every name that reaches stdout
+  // comes from the blocked ROW (admin-typed).
+  const src = await enforcerSrc();
+  const section = src.slice(
+    src.indexOf('// ── Copilot-tab heading fallback: background search + cache ──'),
+    src.indexOf('// ── Model routing'),
+  );
+  assert.ok(section.length > 0, 'expected the Copilot-tab fallback section');
+  // codeOnly, because the comments in this section deliberately NAME the thing
+  // the code must not do — the explanation must not trip the test it explains.
+  assert.equal(/Emit\(|EmitBlock\(|EmitBlockState\(|EmitRewrite\(|EmitRoute\(|Console\.Out|Console\.Error/.test(codeOnly(section)), false,
+    'the Copilot-tab fallback must emit nothing at all');
+  // The pure extractor likewise.
+  const extract = src.slice(
+    src.indexOf('static AgentReadOutcome ExtractAgentNameFromHeading('),
+    src.indexOf('// C# port of agentNameMatches()'),
+  );
+  assert.ok(extract.length > 0, 'expected an ExtractAgentNameFromHeading body');
+  assert.equal(/Emit\(|EmitBlock\(|Console\.Out/.test(extract), false);
+  // The collected strings live in exactly two fields, and neither reaches an
+  // emitter. Counted the same way _fgAgentName is, so a new reference has to be
+  // re-reviewed for PII rather than sliding in.
+  const code = codeOnly(src);
+  // _copilotCacheNames: the declaration, the cache-validity check, the
+  // invalidation, the hand-off to the poll thread, and the one write in the
+  // background search. _copilotCacheClasses is the same minus the validity check
+  // (only the names array is tested for null).
+  for (const [field, expected] of [['_copilotCacheNames', 5], ['_copilotCacheClasses', 4]]) {
+    const uses = (code.match(new RegExp(field, 'g')) || []).length;
+    assert.ok(uses > 0, `expected ${field} to exist`);
+    assert.equal(uses, expected, `${field} gained a reference (${uses}) — every use must be re-reviewed for PII`);
+  }
+  for (const [name, from, to] of [
+    ['Emit', 'static void Emit(string kind', 'static string Esc(string s)'],
+    ['EmitBlock', 'static void EmitBlock(', 'static void EmitRewrite('],
+    ['EmitBlockState', 'static void EmitBlockState(', 'static void ClearFgBlocked()'],
+    ['EmitRoute', 'static void EmitRoute(', 'static readonly object _routeLock'],
+  ]) {
+    const body = src.slice(src.indexOf(from), src.indexOf(to));
+    assert.ok(body.length > 0, `expected a ${name} body`);
+    for (const forbidden of ['_copilotCache', 'heading', 'Heading']) {
+      assert.equal(body.includes(forbidden), false, `${name} must not carry a pane heading (${forbidden})`);
+    }
+  }
+  // The extracted name still leaves through `out agentName` into _fgAgentName,
+  // which its own test pins at exactly three references, none an emitter.
+});
+
+test('enforcer-win.ps1: the Copilot-tab search runs OFF the poll thread and is throttled', async () => {
+  // Two measured facts in this file force the shape, and both are about cost and
+  // reliability rather than taste: a full FindAll(Descendants) walk was 1.4-5.8s
+  // live (so it cannot run inline in a 150ms loop), and a property-FILTERED
+  // FindAll against a Chromium-hosted app's own web-rendered controls found
+  // nothing at all while a plain TreeWalker found the target easily.
+  const src = await enforcerSrc();
+  const section = src.slice(
+    src.indexOf('// ── Copilot-tab heading fallback: background search + cache ──'),
+    src.indexOf('// ── Model routing'),
+  );
+  // A manual TreeWalker, never a filtered FindAll. codeOnly, because the section
+  // header explains WHY FindAll is wrong here and must not trip its own check.
+  assert.match(section, /TreeWalker\.ControlViewWalker/);
+  assert.equal(/FindAll\(|PropertyCondition|OrCondition/.test(codeOnly(section)), false,
+    'a property-filtered FindAll is measured unreliable against this app');
+  // Its own background STA thread, with the same reentrancy guard + min-interval
+  // shape GetCachedModelPicker uses. The poll thread never waits on it.
+  assert.match(section, /var t = new Thread\(\(\) => SearchCopilotHeadingsBackground\(surface, fg, kind\)\);/);
+  assert.match(section, /t\.SetApartmentState\(ApartmentState\.STA\);/);
+  assert.match(section, /if \(!_copilotSearchInProgress && \(newPane \|\| \(now - _copilotLastSearchTicks\) > interval\)\)/);
+  assert.match(section, /finally \{ _copilotSearchInProgress = false; \}/);
+  // Throttled to ~1s, backing off to 5s once the pane has repeatedly yielded
+  // nothing, so an idle Copilot home view never spins.
+  assert.match(src, /static readonly long COPILOT_SEARCH_MIN_INTERVAL = TimeSpan\.FromSeconds\(1\)\.Ticks;/);
+  assert.match(src, /static readonly long COPILOT_SEARCH_BACKOFF_INTERVAL = TimeSpan\.FromSeconds\(5\)\.Ticks;/);
+  // The cached answer EXPIRES — the fail-OPEN bound a host app requires, since
+  // switching agents inside the Copilot tab changes neither the window handle
+  // nor the title kind.
+  assert.match(src, /static readonly long COPILOT_CACHE_TTL = TimeSpan\.FromSeconds\(5\)\.Ticks;/);
+  assert.match(section, /&& \(now - _copilotCacheTicks\) <= COPILOT_CACHE_TTL\)/);
+  // A search that found nothing must not half-apply: the cache is written only
+  // when there is something to write.
+  assert.match(section, /if \(names\.Count > 0\)\r?\n\s*\{\r?\n\s*_copilotCacheClasses = classes\.ToArray\(\);/);
+});
+
+test('enforcer-win.ps1: the Copilot-tab route leaves the primary title path untouched', async () => {
+  // The stage-B branch may only ADD an outcome on no evidence. Everything
+  // downstream — CheckFgBlocked, the governed gate, the host-app whole-app-block
+  // exclusion, PanelUiaOk/PanelEnforceOk, the latch and its retirement rules —
+  // consumes the same AgentReadOutcome enum and is deliberately unchanged.
+  const src = await enforcerSrc();
+  const code = codeOnly(src);
+  // Still exactly one window-title read site, still inside ReadFocusedAgentName.
+  assert.equal((code.match(/GetWindowText\(/g) || []).length, 2);
+  // The read site hands off to the two-stage reader, which begins with the
+  // unchanged primary parse. No new outcome value, no new consumer.
+  const read = src.slice(src.indexOf('static AgentReadOutcome ReadFocusedAgentName('), src.indexOf('static readonly char[] CLASS_TOKEN_SEP'));
+  assert.match(read, /return ReadTitleModeAgentName\(surface, fgHwnd, title, out agentName\);/);
+  assert.match(code, /enum AgentReadOutcome \{ Unreadable = 0, NotComposer = 1, Generic = 2, Named = 3 \}/);
+  // …and the poll-thread read really is still one property read and no tree walk:
+  // every walk lives in the background section, which is outside this slice.
+  assert.equal(/FindAll|TreeWalker|GetFirstChild/.test(read), false);
+  // m365_copilot's payload never carries the nested block at all, so the C# side
+  // parses nothing new for it and its fallback fields stay empty/false — while
+  // teams_desktop's nested pair ships true/true and really does arm the route.
+  const { buildAgentSurfaceConfig } = await import('../src/os_monitor/ai-processes.js');
+  const [m365, teams] = buildAgentSurfaceConfig();
+  assert.equal(m365.id, 'm365_copilot');
+  assert.equal('fallbackRead' in m365, false, 'm365_copilot must not gain a fallbackRead key');
+  assert.equal(m365.read, 'composer_name');
+  assert.equal(teams.id, 'teams_desktop');
+  assert.equal(teams.fallbackRead.enforce, true);
+  assert.equal(teams.fallbackRead.verified, true);
+  // A malformed / partial fallback block is DROPPED, never half-applied — the
+  // same "assign only at the end" discipline the rest of this parser uses.
+  const load = src.slice(src.indexOf('static void LoadAgentSurfaces(string json)'), src.indexOf('static AgentSurface MatchAgentSurface(string proc)'));
+  assert.match(load, /bool ok = string\.Equals\(mode, "message_heading", StringComparison\.OrdinalIgnoreCase\)\r?\n\s*&& paneKinds\.Count > 0\r?\n\s*&& headingClass\.Length > 0\r?\n\s*&& headingSuffix\.Length > 0\r?\n\s*&& landingInfix\.Length > 0;/);
+  assert.match(load, /if \(ok\)\r?\n\s*\{\r?\n\s*fbMode = "message_heading";/);
+  // The two delimiters must NOT be normalised on load: " said:" and " Created by "
+  // carry the spaces that make them delimiters, and NormalizeAgentName would trim
+  // exactly those.
+  assert.match(load, /string headingSuffix = JsStr\(fb, "headingSuffix"\);/);
+  assert.match(load, /string landingInfix = JsStr\(fb, "landingInfix"\);/);
 });
 
 test('enforcer-win.ps1: the extra accessibility read happens ONLY when an agent-scoped policy needs it', async () => {
