@@ -50,4 +50,9 @@ export class LinuxNotifier {
       this.log?.warn('notify linux failed: ' + err.message);
     }
   }
+
+  // Part of the shared notifier surface — see MacNotifier.showRequestDialog.
+  showRequestDialog() {
+    return Promise.resolve({ action: 'unavailable', reason: '' });
+  }
 }

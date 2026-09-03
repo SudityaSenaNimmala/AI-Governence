@@ -1,6 +1,9 @@
 // Platform factory for native notifications.
 //
-// All backends share the same surface: { start(), stop(), show({title, message}) }.
+// All backends share the same surface:
+//   { start(), stop(), show({title, message}), showRequestDialog({…}) }
+// showRequestDialog resolves { action, reason }; only the Windows backend can
+// actually draw one, and everything else answers action:'unavailable'.
 //   - Windows: persistent STA PowerShell helper (toast-helper.ps1), custom AUMID
 //   - macOS:   per-call `osascript display notification`
 //   - Linux:   per-call `notify-send` (libnotify, freedesktop D-Bus)
@@ -22,4 +25,5 @@ export function createNotifier({ log }) {
 
 class NoopNotifier {
   start() {} stop() {} show() {}
+  showRequestDialog() { return Promise.resolve({ action: 'unavailable', reason: '' }); }
 }

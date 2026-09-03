@@ -1472,10 +1472,48 @@ export function hostsForPlatform(platform) {
 // FAIL CLOSED is the caller's job, not this function's: passing an empty list
 // legitimately means "no exceptions", so a caller that could not REACH the
 // server must skip this call entirely rather than pass [].
+//
+// SCOPE-AWARE since agent-level blocks exist. /access-exceptions/mine now
+// carries `scope` ('host' | 'agent'), `agent_id` and `agent_name` per row, and
+// the two scopes subtract completely differently:
+//
+//   scope:'host' — and a row with NO scope at all, which is every exception
+//     approved before agent scoping existed — lifts EVERY blocked row for every
+//     platform mapping to that host. Byte-for-byte today's behaviour, and the
+//     default, because that is what those grants meant when they were made.
+//
+//   scope:'agent' — lifts ONLY the row for that same agent, and only if the row
+//     is itself agent-scoped (agent_scope:'agent'). Approving "the IT help-desk
+//     bot in Teams" must leave every other blocked agent in Teams blocked, and
+//     must never lift the synthesised whole-platform row for that host — that
+//     row is "all of this app is disallowed", which is not what was approved.
+//     This mirrors the server's own /access-exceptions/check, which answers
+//     allowed:false for an agent it has no matching grant for even when a
+//     DIFFERENT agent on the same host is approved.
 export function filterBlockedAgents(list, exceptions, logger) {
   if (!Array.isArray(list) || !Array.isArray(exceptions) || exceptions.length === 0) return list;
-  const allowed = new Set(exceptions.map((e) => String(e?.tool_host || '').toLowerCase()).filter(Boolean));
-  if (allowed.size === 0) return list;
+  const hostAllowed = new Set();
+  const agentAllowed = [];
+  for (const ex of exceptions) {
+    const host = String(ex?.tool_host || '').trim().toLowerCase();
+    if (!host) continue;
+    if (String(ex?.scope || '').trim().toLowerCase() !== 'agent') {
+      // 'host', absent, null, or anything unrecognised. Unrecognised lands here
+      // deliberately: 'host' is both the legacy meaning and the WIDER grant, so
+      // a scope value this build does not know cannot silently narrow an
+      // approval the admin already made into "nothing was lifted".
+      hostAllowed.add(host);
+      continue;
+    }
+    const id = String(ex?.agent_id ?? '').trim();
+    const name = normalizeAgentName(ex?.agent_name).toLowerCase();
+    // An agent-scoped grant that names no agent can match no agent, and must
+    // NOT fall back to lifting the host — that fallback is exactly the widening
+    // the server removed.
+    if (!id && !name) continue;
+    agentAllowed.push({ host, id, name });
+  }
+  if (hostAllowed.size === 0 && agentAllowed.length === 0) return list;
   return list.filter((row) => {
     // Two ways a row names the host an exception would be granted against:
     //
@@ -1494,8 +1532,33 @@ export function filterBlockedAgents(list, exceptions, logger) {
     const own = String(row?.host || '').trim().toLowerCase();
     if (own) candidates.push(own);
     for (const h of hostsForPlatform(row?.platform)) if (!candidates.includes(h)) candidates.push(h);
-    const hit = candidates.find((h) => allowed.has(h));
-    if (hit) logger?.info(`access-exceptions: ${row.host || row.platform} unblocked on this device (exception for ${hit})`);
-    return !hit;
+    const hit = candidates.find((h) => hostAllowed.has(h));
+    if (hit) {
+      logger?.info(`access-exceptions: ${row.host || row.platform} unblocked on this device (exception for ${hit})`);
+      return false;
+    }
+    // AGENT-scoped grants, checked only against an AGENT-scoped row. A
+    // synthesised whole-platform row (agent_scope null, and normalizeAgentRows
+    // also downgrades a row whose name cannot survive the enforcer transport)
+    // can never be lifted here, no matter how well its agent_name matches: the
+    // grant was for one agent, that row is for the whole app.
+    if (String(row?.agent_scope || '').trim().toLowerCase() === 'agent') {
+      const rowId = String(row?.agent_id ?? '').trim();
+      const rowName = normalizeAgentName(row?.agent_name).toLowerCase();
+      // Identity first, exactly as the server matches: when BOTH sides carry an
+      // agent_id that IS the answer and a name collision cannot widen it. The
+      // normalized, case-insensitive name is the fallback for the rows that have
+      // no id on one side — the same allowance normalizeAgentName exists for.
+      const agentHit = agentAllowed.find((ex) => candidates.includes(ex.host)
+        && ((ex.id && rowId) ? ex.id === rowId : Boolean(ex.name && rowName) && ex.name === rowName));
+      if (agentHit) {
+        logger?.info(
+          `access-exceptions: agent "${row.agent_name || row.agent_id}" unblocked on this device `
+          + `(agent-scoped exception for ${agentHit.host})`,
+        );
+        return false;
+      }
+    }
+    return true;
   });
 }

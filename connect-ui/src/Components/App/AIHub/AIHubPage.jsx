@@ -3805,6 +3805,58 @@ function surfaceDetail(row) {
   return <div className="aihub_text_muted">{parts.join(" · ")}</div>;
 }
 
+// WHAT was blocked, and therefore what an approval actually grants. A block can
+// name a whole app, an embedded AI panel, or ONE named agent inside a host app —
+// and "approve Microsoft Teams" is a very different grant from "approve the IT
+// Help Desk Agent inside Microsoft Teams". Without this badge the two rows are
+// indistinguishable in the list, so an admin cannot tell how wide their click is.
+//
+// Requests carry `block_scope` ('app' | 'panel' | 'agent'); exceptions carry
+// `scope` ('host' | 'agent'). Both are optional on rows that predate agent-scoped
+// blocking — the admin listing spreads the stored document, so `block_scope` can
+// be absent entirely, and 'host' is the exceptions default. 'host' and 'app' mean
+// the same thing to an admin (the whole app), so both read as "App"; anything
+// missing or unrecognised falls back there too, rather than rendering an "unknown"
+// state that would only ever mean "old row".
+const SCOPE_META = {
+  agent: { label:"Agent", color:"#db2777", hint:"Only the named agent inside the host app is blocked. Other agents in that app are unaffected." },
+  panel: { label:"Panel", color:"#0891b2", hint:"An AI panel embedded in the host app is blocked." },
+  app:   { label:"App",   color:"#6b7280", hint:"The whole app is blocked, including every agent inside it." },
+};
+function scopeOf(row) {
+  const raw = row?.block_scope ?? row?.scope;
+  if (raw === "agent") return "agent";
+  if (raw === "panel") return "panel";
+  return "app";
+}
+// Same render-helper shape as surfaceBadge above (no `{ row }` component, so no
+// react/prop-types entry per field read), and the same Badge, so the two badges
+// sit side by side in one visual vocabulary.
+function scopeBadge(row) {
+  const meta = SCOPE_META[scopeOf(row)];
+  return <span title={meta.hint}><Badge text={meta.label} color={meta.color}/></span>;
+}
+// The agent's display name, or null when the row is not agent-scoped. agent_id is
+// the fallback because the server only guarantees ONE of id/name is present on an
+// agent-scoped request — leading with an empty bold label would be worse than
+// showing the id.
+function agentLabelOf(row) {
+  if (scopeOf(row) !== "agent") return null;
+  return row?.agent_name || row?.agent_id || null;
+}
+// PRIMARY label for a row. Agent-scoped rows lead with the agent, because that is
+// the thing the admin is being asked to recognise; app- and panel-scoped rows are
+// untouched and still lead with the app name.
+function primaryToolLabel(row) {
+  return agentLabelOf(row) || row?.tool_name || row?.tool_host;
+}
+// The secondary line that carries the host app once the agent has taken the
+// headline. Renders nothing for app/panel rows, so their layout is unchanged.
+function hostAppLine(row) {
+  if (!agentLabelOf(row)) return null;
+  return <div className="aihub_text_muted" style={{fontSize:12.7}}>in {row.tool_name || row.tool_host}</div>;
+}
+
 // A denied write, phrased for the person who clicked the button. Same cause as
 // the sdkAuthNotice panel below, but that panel only explains an empty list —
 // an alert is what an admin needs when Approve does nothing.
@@ -3917,10 +3969,12 @@ function AccessRequestsView() {
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
               <div>
                 <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}>
-                  <span style={{fontSize:16.2,fontWeight:700}}>{r.tool_name||r.tool_host}</span>
+                  <span style={{fontSize:16.2,fontWeight:700}}>{primaryToolLabel(r)}</span>
                   {r.tool_vendor&&<Tag text={r.tool_vendor}/>}
                   {surfaceBadge(r)}
+                  {scopeBadge(r)}
                 </div>
+                {hostAppLine(r)}
                 {surfaceDetail(r)}
                 {/* Name the device too, but only when it adds something: on a
                     machine with no detected user employee_name IS the hostname,
@@ -3936,6 +3990,18 @@ function AccessRequestsView() {
 
             {approving===r.id?(
               <div style={{background:"#f0f9ff",borderRadius:10,padding:14,marginTop:8}}>
+                {/* Scope-aware, and ONLY for agent-scoped requests: an app-scoped
+                    panel is byte-identical to what it was, because "approve this
+                    request" already means the whole app there and a restatement
+                    would add nothing. For an agent-scoped one the narrowness is
+                    the fact the admin needs before clicking Approve — the grant
+                    stops at this agent. */}
+                {agentLabelOf(r)&&(
+                  <div style={{fontSize:13.2,color:"#374151",lineHeight:1.6,marginBottom:10}}>
+                    Approve access to <strong>{agentLabelOf(r)}</strong> in {r.tool_name||r.tool_host}?
+                    {" "}This will not affect other agents in {r.tool_name||r.tool_host}.
+                  </div>
+                )}
                 <div style={{fontSize:13.7,fontWeight:600,marginBottom:8}}>Set expiry (required)</div>
                 <div style={{display:"flex",gap:8,marginBottom:10}}>
                   <button onClick={()=>setExpiryMode("hours")} style={{padding:"5px 12px",borderRadius:6,fontSize:13.2,border:"1px solid",cursor:"pointer",background:expiryMode==="hours"?"#0044cc14":"#fff",color:expiryMode==="hours"?"#0052e0":"#6b7280",borderColor:expiryMode==="hours"?"#0044cc40":"#e2e5ea"}}>Hours</button>
@@ -3973,7 +4039,16 @@ function AccessRequestsView() {
     {/* Active Exceptions Tab */}
     {tab==="active"&&(<div className="aihub_card">
       <DataTable columns={[
-        {label:"Tool",render:r=><div className="aihub_text_primary">{r.tool_name||r.tool_host}</div>},
+        {label:"Tool",render:r=><><div className="aihub_text_primary">{primaryToolLabel(r)}</div>{hostAppLine(r)}
+          <div style={{marginTop:3}}>{scopeBadge(r)}</div></>},
+        // An exception that lifts one agent and one that lifts a whole app are the
+        // same row shape, so the difference has to be a column. Host-scoped rows —
+        // including every row that predates agent-scoped blocking — carry no
+        // agent_name and render this table's em-dash, titled so the dash is not
+        // read as "unknown".
+        {label:"Agent",render:r=>agentLabelOf(r)
+          ?<div className="aihub_text_primary" style={{fontSize:13.2}}>{agentLabelOf(r)}</div>
+          :<span className="aihub_text_muted" title="Whole app — every agent inside it">—</span>},
         {label:"Employee",render:r=><UserCell row={r}/>},
         {label:"Machine",render:r=><Mono>{r.machine_id?.slice(0,12)}</Mono>},
         {label:"Granted",render:r=>relTime(r.granted_at)},
@@ -3992,8 +4067,8 @@ function AccessRequestsView() {
     {/* History Tab */}
     {tab==="history"&&(<div className="aihub_card">
       <DataTable columns={[
-        {label:"Tool",render:r=><><div className="aihub_text_primary">{r.tool_name||r.tool_host}</div>
-          <div style={{marginTop:3,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>{surfaceBadge(r)}{surfaceDetail(r)}</div></>},
+        {label:"Tool",render:r=><><div className="aihub_text_primary">{primaryToolLabel(r)}</div>{hostAppLine(r)}
+          <div style={{marginTop:3,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>{surfaceBadge(r)}{scopeBadge(r)}{surfaceDetail(r)}</div></>},
         {label:"Employee",render:r=><UserCell row={r}/>},
         {label:"Reason",render:r=><div style={{fontSize:12,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.reason||"—"}</div>},
         {label:"Status",render:r=><Badge text={r.status} color={r.status==="approved"?"#22c55e":r.status==="rejected"?"#ef4444":r.status==="revoked"?"#f59e0b":"#9ca3af"}/>},

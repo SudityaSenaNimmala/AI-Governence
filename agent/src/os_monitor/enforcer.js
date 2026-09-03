@@ -289,6 +289,17 @@ export class Enforcer extends EventEmitter {
         // already hit once for 'route'.)
         this.emit('blockstate', ev);
         break;
+      case 'request_access_offer':
+        // A platform/agent/panel block just swallowed a send, and the helper is
+        // offering to show the ephemeral Request Access dialog for it. Emitted
+        // once per block session by the .ps1 (see OfferAccessRequest).
+        //
+        // Deliberately NOT logged: the block itself is already recorded by the
+        // 'block' path above, and this line adds no new fact — only a UI
+        // opportunity. index.js owns everything that happens next (the pending
+        // pre-check, the dialog, the authenticated POST).
+        this.emit('requestaccessoffer', ev);
+        break;
       case 'enforcement_disarmed':
         // Panic hotkey (Ctrl+Alt+Shift+F12) — all blocking off for ev.seconds,
         // then it resumes by itself. Worth an audit record: it is a deliberate,

@@ -1814,6 +1814,16 @@ function assignsTo(src, field) {
   return new RegExp(`${field}\\s*=(?!=)`).test(src);
 }
 
+// codeOnly()'s sibling for a .ps1 that embeds C#: PowerShell comments with #,
+// the compiled dialog type's with //. Both have to go before any "this
+// identifier does not appear" assertion.
+function psCodeOnly(src) {
+  return src
+    .split(/\r?\n/)
+    .filter((l) => !l.trim().startsWith('#') && !l.trim().startsWith('//'))
+    .join('\n');
+}
+
 function bannerStateFn(src) {
   const start = src.indexOf('static void UpdateBannerState()');
   const end = src.indexOf('static void EmitBlockState(');
@@ -2823,4 +2833,258 @@ test("blocked-agents-sync sanitises the server's per-agent rows before they reac
   assert.ok(fn.indexOf('normalizeAgentRows(') < fn.indexOf('synthesizePlatformBlocks('), 'agent rows must stay first');
   // And the exception filter still runs on the combined list, after this.
   assert.ok(fn.indexOf('const list =') < fn.indexOf('filterBlockedAgents(list'));
+});
+
+// ── Request Access at the moment of the block (non-Electron desktop) ─────────
+//
+// The Electron app is retired, and with it the ONLY trigger the desktop Request
+// Access flow ever had. These pin the replacement, which is deliberately narrow:
+// the enforcer offers a dialog from the send site it already blocks at, the
+// long-lived hidden toast helper draws it on its own STA thread, and Node files
+// the request with the enrolment token it already holds.
+//
+// THE STANDING RULE THIS FEATURE LIVES UNDER: this agent shows no persistent
+// window, no taskbar entry and no tray icon. The dialog is the one exception,
+// it exists for the length of one blocked send-attempt, and the assertions
+// below are what keep it that way.
+
+test('enforcer-win.ps1: the send site offers a Request Access dialog ALONGSIDE EmitBlock, not instead of it', async () => {
+  const src = await enforcerSrc();
+  const code = codeOnly(src);
+  // The existing block emit is untouched and still first.
+  assert.match(code, /string blockReason = attachHold \? "attachment" : "send";/);
+  assert.match(code, /EmitBlock\(_app, pats, blockReason\);/);
+  const emitIdx = code.indexOf('EmitBlock(_app, pats, blockReason);');
+  const offerIdx = code.indexOf('OfferAccessRequest(_app, blockReason);');
+  assert.ok(emitIdx >= 0 && offerIdx > emitIdx, 'the offer must come after EmitBlock, never replace it');
+  // …and the swallow still happens.
+  assert.match(code.slice(offerIdx, offerIdx + 200), /return \(IntPtr\)1;/);
+  // EXACTLY TWO offer call sites, and they are the two sites that already
+  // swallow a send: Enter (keyboard hook) and the send-button click (mouse
+  // hook). A third would mean a new trigger, which is what "reuse the existing
+  // block-emit hooks, add no new detection" rules out.
+  assert.equal((code.match(/OfferAccessRequest\(/g) || []).length, 3,
+    'exactly two OfferAccessRequest call sites (plus its definition)');
+});
+
+test('enforcer-win.ps1: the send-BUTTON click site offers the same dialog, on the same session latch', async () => {
+  // Clicking the send arrow is a send attempt too — the common one in Teams and
+  // Copilot — so a user who clicks instead of pressing Enter must not be left
+  // with a block and no way to ask.
+  const src = await enforcerSrc();
+  const code = codeOnly(src);
+  // The pre-existing mouse-path emit is untouched, and the offer sits after it.
+  assert.match(code, /EmitBlock\(_app, ActivePatterns\(\), "click"\);/);
+  const emitIdx = code.indexOf('EmitBlock(_app, ActivePatterns(), "click");');
+  const offerIdx = code.indexOf('OfferAccessRequest(_app, "click");');
+  assert.ok(emitIdx >= 0 && offerIdx > emitIdx, 'the click offer must come after its EmitBlock, never replace it');
+  // Both still live behind the same WM_LBUTTONDOWN guard and the same swallow,
+  // so the offer cannot fire on button-UP (which would double it per click).
+  const site = code.slice(code.indexOf('if (BlockActiveForMouse())'), offerIdx + 200);
+  assert.match(site, /if \(msg == WM_LBUTTONDOWN\)/);
+  assert.match(site, /return \(IntPtr\)1;/);
+  // "click", never an attachment variant: this path has never drawn that
+  // distinction, and changing the literal would change the blocked_for/how
+  // index.js reports off the same event.
+  assert.equal(/OfferAccessRequest\(_app, attachHold/.test(site), false);
+  // Both sites call the SAME stateless function, so neither can drift into
+  // having its own suppression rule. Rapid clicks cannot stack windows —
+  // that is the helper's `Open` guard, which releases when the dialog closes —
+  // and a click after one was answered offers again, exactly like Enter.
+  const fn = src.slice(src.indexOf('static void OfferAccessRequest('), src.indexOf('// ── Tier B rewrite'));
+  assert.equal(/_accessOffer|ACCESS_OFFER|DateTime\.UtcNow/.test(codeOnly(fn)), false,
+    'no per-session or time-based suppression may live in the shared offer path');
+});
+
+test('enforcer-win.ps1: EVERY blocked send offers — the Request Access offer is stateless and self-gating', async () => {
+  // MEASURED IN LIVE USE, and the reason the old one-per-block-session latch is
+  // gone. A user got the dialog, submitted, was DECLINED by the admin, typed
+  // their next message, pressed Enter, was blocked again — and got nothing,
+  // because the latch remembered it had already offered for that block. They
+  // were still blocked and now had no visible way to ask. A blocked send is
+  // exactly the moment the offer is wanted, every time.
+  const src = await enforcerSrc();
+  const code = codeOnly(src);
+  const fn = src.slice(src.indexOf('static void OfferAccessRequest('), src.indexOf('// ── Tier B rewrite'));
+  assert.ok(fn.length > 0, 'expected an OfferAccessRequest body');
+  // Only a real platform/agent/panel block, never an attachment hold and never
+  // a pattern-based content block — asking for "access" makes no sense there.
+  assert.match(fn, /if \(!_fgIsBlocked\) return;/);
+  assert.match(fn, /if \(reason == "attachment"\) return;/);
+  // EXACTLY those two early returns. A third is how a latch comes back: any new
+  // "have we offered already?" gate has to fail this test and be argued for.
+  assert.equal((codeOnly(fn).match(/return;/g) || []).length, 2,
+    'the only gates are the block check and the attachment check');
+  // NO PERSISTENT STATE, anywhere in the file — not a key, not a timestamp, not
+  // a minimum interval.
+  assert.equal(/_accessOffer|ACCESS_OFFER/.test(code), false,
+    'the per-session offer latch must not come back');
+  // …and the function itself keeps no clock and writes no field: it reads the
+  // block that is in force right now and emits.
+  assert.equal(/DateTime\.UtcNow/.test(codeOnly(fn)), false, 'the offer must not be time-gated');
+  assert.equal(/^\s*_\w+ =(?!=)/m.test(codeOnly(fn)), false, 'the offer must assign to no static field');
+  // ClearFgBlocked has nothing of its own to clear here any more — the block
+  // identity it already resets is the only thing the offer reads.
+  const clear = codeOnly(src.slice(src.indexOf('static void ClearFgBlocked()'), src.indexOf('static string ExtractJsonString(')));
+  assert.equal(/_accessOffer/.test(clear), false);
+  assert.match(clear, /_blockedAgentId = "";/);
+});
+
+test('enforcer-win.ps1: the Request Access offer carries ONLY blocklist-row identity — no read name, no title', async () => {
+  // Same PII rule as EmitBlock/EmitBlockState, and for a stronger reason: these
+  // values are what the user's access request is FILED under, so a parsed
+  // conversation name here would be sent to the server and shown to an admin.
+  const src = await enforcerSrc();
+  const fn = src.slice(src.indexOf('static void OfferAccessRequest('), src.indexOf('// ── Tier B rewrite'));
+  // The admin-typed / server-issued row values, and the block's own scope.
+  assert.match(fn, /",\\"blocked_agent\\":\\"" \+ Esc\(_blockedAgentName\) \+ "\\""/);
+  assert.match(fn, /",\\"blocked_agent_id\\":\\"" \+ Esc\(_blockedAgentId\) \+ "\\""/);
+  assert.match(fn, /",\\"block_scope\\":\\"" \+ Esc\(scope\) \+ "\\""/);
+  // NEVER the read one, and never a window title.
+  for (const forbidden of ['_fgAgentName', '_fgAgentOutcome', '_copilotCache', 'GetWindowText', 'title', 'Title', 'heading', 'Heading', 'pats', 'preview']) {
+    assert.equal(fn.includes(forbidden), false, `the offer must not carry ${forbidden}`);
+  }
+  // Emitted under the same stdout lock every other emit in this file uses, so a
+  // line can never interleave with a block or a bar transition.
+  assert.match(fn, /lock \(_emitLock\) \{ Console\.Out\.WriteLine\(json\); Console\.Out\.Flush\(\); \}/);
+});
+
+test('enforcer.js dispatches request_access_offer without logging it', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer.js'), 'utf8');
+  const idx = src.indexOf("case 'request_access_offer':");
+  assert.ok(idx >= 0, 'the enforcer wrapper must know this kind — otherwise it lands in the unknown-kind warn');
+  const branch = codeOnly(src.slice(idx, src.indexOf("case 'enforcement_disarmed':")));
+  assert.match(branch, /this\.emit\('requestaccessoffer', ev\);/);
+  assert.equal(/this\.log/.test(branch), false, 'the block itself is already recorded by the block path');
+});
+
+test('toast-helper.ps1: show_request_dialog runs on its own STA thread and never blocks the stdin loop', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'toast-helper.ps1'), 'utf8');
+  // The command exists and is wired into the main switch.
+  assert.match(src, /'show_request_dialog' \{ Show-CFAIRequestDialog \$cmd \}/);
+  // A DEDICATED STA thread with its own message loop — never ShowDialog() on the
+  // thread that owns the stdin read, which must keep pumping toasts while a
+  // dialog is up.
+  assert.match(src, /new Thread\(delegate\(\) \{ Run\(requestId, key, agentName, appName\); \}\)/);
+  assert.match(src, /t\.SetApartmentState\(ApartmentState\.STA\);/);
+  assert.match(src, /t\.IsBackground = true;/);
+  assert.match(src, /Application\.Run\(form\);/);
+  // Comments stripped BOTH ways — this file is PowerShell (#) wrapping C# (//),
+  // and its header explains WHY there is no ShowDialog. Naming it there must not
+  // trip the check on the code, same convention as codeOnly().
+  assert.equal(/ShowDialog\(/.test(psCodeOnly(src)), false, 'a blocking ShowDialog would freeze the command loop');
+  // The stdin loop is still a bare blocking ReadLine, unchanged.
+  assert.match(src, /\$line = \[Console\]::In\.ReadLine\(\)/);
+});
+
+test('toast-helper.ps1: every stdout write goes through ONE lock', async () => {
+  // Two writers now (the stdin loop and the dialog thread), so a half-written
+  // result line could otherwise land inside a {"kind":"pong"}.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'toast-helper.ps1'), 'utf8');
+  assert.match(src, /lock \(OutLock\)\s*\r?\n\s*\{\s*\r?\n\s*Console\.Out\.WriteLine\(line\);/);
+  // The PowerShell side writes only through that same path…
+  assert.match(src, /function Write-CFAILine\(\[string\]\$line\) \{/);
+  assert.match(src, /\[CfaiRequestDialog\]::Write\(\$line\)/);
+  // …and the only remaining raw [Console]::Out use is Write-CFAILine's own
+  // fallback for a build where the dialog type could not be compiled.
+  const raw = psCodeOnly(src).match(/\[Console\]::Out\.WriteLine/g) || [];
+  assert.equal(raw.length, 1, `raw stdout writes outside the lock: ${raw.length}`);
+});
+
+test('toast-helper.ps1: the dialog is ephemeral — no taskbar entry, one at a time, capped reason', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'toast-helper.ps1'), 'utf8');
+  // The user's standing requirement: nothing this process shows may look like a
+  // running app.
+  assert.match(src, /form\.ShowInTaskbar = false;/);
+  assert.equal(/NotifyIcon|ContextMenuStrip|TrayIcon/.test(src), false, 'no tray icon may ever be created here');
+  // CONCURRENCY dedupe, and since the enforcer's per-session latch was removed
+  // this is the guard that carries the weight: the enforcer now offers on every
+  // blocked send, so holding Enter down would stack windows without it. Scoped
+  // to "already on screen" only — the key is released when the form closes, so
+  // the next attempt opens a fresh dialog. index.js keeps its own in-flight set
+  // for the same window, but this is the layer that actually draws.
+  assert.match(src, /if \(Open\.ContainsKey\(key\)\) return false;/);
+  assert.match(src, /"action":"suppressed"/);
+  // Client-side cap matching REASON_MAX in server/src/routes/access-requests.js.
+  assert.match(src, /public const int ReasonMax = 500;/);
+  assert.match(src, /box\.MaxLength = ReasonMax;/);
+  // Submit / cancel are the only two outcomes, and cancel is also what a closed
+  // window produces (the result is written after Application.Run returns).
+  assert.match(src, /string action = "cancel";/);
+  assert.match(src, /action = "submit";/);
+  assert.match(src, /access_request_result/);
+});
+
+test('notify.js exposes the dialog without queueing it, and settles every waiter on helper exit', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'notify.js'), 'utf8');
+  assert.match(src, /showRequestDialog\(\{ agentName = '', appName = '', dedupeKey = '' \} = \{\}\)/);
+  // NOT queued behind `ready` like a toast is: a dialog that arrives after the
+  // moment of the block has lost its context and would appear over whatever the
+  // user moved on to.
+  const fn = src.slice(src.indexOf('showRequestDialog({'), src.indexOf('#settleDialog(requestId, result)'));
+  assert.equal(/queueBeforeReady/.test(fn), false, 'a dialog must never be queued for later');
+  assert.match(fn, /if \(!this\.ready \|\| !this\.dialogSupported \|\| !this\.child\)/);
+  assert.match(fn, /action: 'unavailable'/);
+  // Correlated by a generated id, so two dialogs can never cross their answers.
+  assert.match(fn, /const requestId = randomUUID\(\);/);
+  assert.match(fn, /this\.pendingDialogs\.set\(requestId, \{ resolve, timer \}\);/);
+  // A helper crash answers every waiter rather than leaving a promise that can
+  // never settle.
+  const exit = src.slice(src.indexOf("this.child.on('exit'"), src.indexOf("this.child.on('error'"));
+  assert.match(exit, /this\.#settleDialog\(id, \{ action: 'unavailable', reason: '' \}\)/);
+});
+
+test('index.js files the access request with the enrolment token and the block scope', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  // Triggered by the enforcer's offer, never by anything this file detects.
+  assert.match(src, /this\.enforcer\.on\('requestaccessoffer', \(ev\) => \{/);
+  // ONE host resolver, shared with the block relay — a second copy is how an
+  // approval silently fails to lift the block it was granted for.
+  assert.match(src, /function blockToolHost\(ev\) \{\s*\r?\n\s*return hostForPanel\(ev\.panel\) \|\| hostForProcess\(ev\.process\) \|\| hostsForPlatform\(ev\.blocked_platform\)\[0\] \|\| '';/);
+  assert.equal((src.match(/blockToolHost\(ev\)/g) || []).length, 3,
+    'blockToolHost must have exactly two callers (plus its definition)');
+  // block_scope is 'agent' ONLY with an identity to name — the server 400s
+  // otherwise, and claiming agent scope for a whole-app block would mint an
+  // agent-keyed exception that lifts nothing.
+  const offer = src.slice(src.indexOf('async #offerAccessRequest(ev)'), src.indexOf('async #findOpenAccessRequest('));
+  assert.match(offer, /ev\.block_scope === 'agent' && \(agentId \|\| agentName\)/);
+  assert.match(offer, /ev\.block_scope === 'panel' \? 'panel' : 'app'/);
+  // The identity comes from the enforcer's ARMED ROW fields, never from a title.
+  assert.match(offer, /String\(ev\.blocked_agent_id \|\| ''\)\.trim\(\)/);
+  assert.match(offer, /String\(ev\.blocked_agent \|\| ''\)\.trim\(\)/);
+  assert.equal(/window_title|ev\.title|ev\.patterns|ev\.preview/.test(offer), false,
+    'no prompt content or window title may reach the access request');
+  // Cancel sends nothing.
+  assert.match(offer, /if \(result\.action !== 'submit'\) return;/);
+  // The POST reuses the machine bearer token, and does not invent machine_id.
+  const post = src.slice(src.indexOf('async #submitAccessRequest(body, subject)'));
+  assert.match(post, /authorization: `Bearer \$\{this\.token\}`/);
+  assert.match(post, /\$\{this\.serverUrl\}\/api\/v1\/access-requests/);
+  assert.match(post, /surface: 'desktop'/);
+  assert.equal(/agent_key/.test(post), false, 'agent_key is server-derived — sending one is ignored at best');
+  // Offline → the SAME single slot blocked-agents-sync.js already drains.
+  assert.match(post, /PENDING_REQUEST_PATH/);
+  assert.match(post, /queued_at: new Date\(\)\.toISOString\(\)/);
+  // The 429 retry time comes from the server's body, never from a local guess.
+  assert.match(post, /err\?\.retry_after/);
+});
+
+test('index.js pre-checks for an open request per AGENT, not per host', async () => {
+  // Host-only, a pending request for the finance bot would suppress the dialog
+  // for the IT help-desk bot — and the server's own 409 is agent-keyed, so the
+  // pre-check would be answering a different question than the POST.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  const fn = src.slice(src.indexOf('async #findOpenAccessRequest('), src.indexOf('async #submitAccessRequest('));
+  assert.match(fn, /\/api\/v1\/access-requests\/mine/);
+  assert.match(fn, /r\?\.status === 'pending'/);
+  assert.match(fn, /agentMatchKey\(r\) === wantKey/);
+  // Fails OPEN: a dialog withheld because /mine was unreachable is the wrong
+  // trade — the server still enforces the real rule with a 409.
+  assert.match(fn, /return null;/);
+  // The local offline slot counts as "already open" too, since a queued request
+  // has not reached the server and can never come back on /mine.
+  assert.match(fn, /return 'queued';/);
+  // The fold matches the server's agentKeyFor: id first, then the normalized name.
+  assert.match(src, /function agentMatchKey\(\{ block_scope, agent_id, agent_name \}\) \{/);
+  assert.match(src, /if \(block_scope !== 'agent'\) return '';/);
 });

@@ -453,6 +453,27 @@ public static class CfaiEnforcer
     static long _lastBlockedCheck = 0;
     static readonly long BLOCKED_CHECK_INTERVAL = TimeSpan.FromSeconds(10).Ticks;
 
+    // ── Request Access offer ──────────────────────────────────────────────────
+    // The moment a platform/agent/panel block actually swallows a send is the
+    // ONLY moment this process offers the ephemeral Request Access dialog — the
+    // same instant the browser extension shows its own. There is no window, no
+    // tray icon and no standing UI on this path: Node opens a form, the user
+    // submits or cancels, it disappears.
+    //
+    // NO STATE LIVES HERE, deliberately. This used to hold a
+    // one-offer-per-block-session key plus a 60s floor, and live use killed it:
+    // a user whose request was DECLINED (or who cancelled) then typed the next
+    // message, pressed Enter, was blocked again — and got nothing, because the
+    // latch said "already offered for this block". The block is still in force
+    // and they are still stuck, so every blocked send attempt must be able to
+    // offer again. See OfferAccessRequest, which is now stateless.
+    //
+    // The only duplicate-suppression left is CONCURRENCY, and it lives where the
+    // dialog actually is: toast-helper.ps1's `Open` dictionary refuses a second
+    // form for a key already on screen (and replies action:"suppressed"), and
+    // index.js drops an offer for a block it is already mid-flight on. Both
+    // release as soon as the dialog closes, so the next Enter offers at once.
+
     // ── Standing "this app is blocked" bar (presentation state only) ──────────
     // Feeds the desktop overlay bar — the counterpart of the browser
     // extension's showPlatformBanner(). PURELY DERIVED, and READ-ONLY with
@@ -3465,7 +3486,32 @@ public static class CfaiEnforcer
                     {
                         if (BlockActiveForMouse())
                         {
-                            if (msg == WM_LBUTTONDOWN) EmitBlock(_app, ActivePatterns(), "click");
+                            if (msg == WM_LBUTTONDOWN)
+                            {
+                                EmitBlock(_app, ActivePatterns(), "click");
+                                // Clicking the send arrow IS a send attempt — in
+                                // Teams and Copilot it is the common one — so it
+                                // gets the same Request Access offer the Enter
+                                // path does, from the same instant. Both sites
+                                // call the same stateless function: a click while
+                                // a dialog is already open is dropped by the
+                                // helper's own concurrency guard, and a click
+                                // after one was answered offers again.
+                                //
+                                // The reason stays "click" rather than gaining an
+                                // attachment variant. This path has never drawn
+                                // that distinction (ActivePatterns() is what
+                                // carries an attachment hold's patterns here), and
+                                // changing the literal would change the
+                                // blocked_for/how that index.js reports. It costs
+                                // nothing: on this path EmitBlock's own
+                                // platformBlock term reduces to _fgIsBlocked,
+                                // which is exactly OfferAccessRequest's first
+                                // gate — so the offer fires precisely when the
+                                // block being reported is platform_block:true, and
+                                // an attachment-only hold still offers nothing.
+                                OfferAccessRequest(_app, "click");
+                            }
                             return (IntPtr)1;   // swallow both down and up on the send button
                         }
                         // Benign send-button click — capture the prompt (LENGTH ONLY),
@@ -3664,7 +3710,22 @@ public static class CfaiEnforcer
                                 // approval optional. The panic hotkey is
                                 // untouched and still disarms everything.
                                 if (ctrl && alt && !attachHold && !_fgIsBlocked) { Emit("override", _app, pats, ""); }  // allow, logged
-                                else { EmitBlock(_app, pats, attachHold ? "attachment" : "send"); return (IntPtr)1; }  // swallow
+                                else {
+                                    string blockReason = attachHold ? "attachment" : "send";
+                                    EmitBlock(_app, pats, blockReason);
+                                    // The blocked send just happened — this is the
+                                    // one moment the Request Access dialog is
+                                    // offered, and it is a SECOND line alongside
+                                    // EmitBlock rather than a change to it: the
+                                    // block itself is reported, cooled down and
+                                    // toasted exactly as before. Self-gating (a
+                                    // platform/agent/panel block only) and
+                                    // stateless — EVERY blocked send offers, so
+                                    // a user who was declined can ask again on
+                                    // their next attempt. See OfferAccessRequest.
+                                    OfferAccessRequest(_app, blockReason);
+                                    return (IntPtr)1;
+                                }  // swallow
                             }
                             else
                             {
@@ -5341,6 +5402,58 @@ public static class CfaiEnforcer
             + ",\"block_id\":\"" + Esc(blockId ?? "") + "\""
             + ",\"result\":\"" + Esc(result) + "\""
             + (!string.IsNullOrEmpty(reason) ? ",\"reason\":\"" + Esc(reason) + "\"" : "")
+            + "}";
+        lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
+    }
+
+    // ── Request Access offer ──────────────────────────────────────────────────
+    // Called from the two swallow branches that stop a send — the Enter decision
+    // in the keyboard hook and the send-button click in the mouse hook —
+    // immediately AFTER EmitBlock and without changing a single thing about it:
+    // the toast, the `block` line, the cooldown stamp and the latch bookkeeping
+    // all happen exactly as they did. This is a second, independent line that
+    // says "a blocked send just happened, offer the user a way to ask for
+    // access".
+    //
+    // STATELESS, AND EVERY BLOCKED SEND OFFERS. There is no per-session latch
+    // and no minimum interval; both existed and both were wrong. A user whose
+    // request was declined — or who cancelled, or mistyped their reason — is
+    // still blocked, and the next message they try is exactly when they need the
+    // dialog again. Suppressing it there left them stuck with no visible way to
+    // ask.
+    //
+    // What stops a DUPLICATE is concurrency-scoped and lives with the dialog,
+    // not here: toast-helper.ps1 refuses a second form while one is on screen
+    // for the same key, and index.js drops an offer for a block it is already
+    // mid-flight on. Both release the moment the dialog closes. So holding Enter
+    // down cannot stack windows, while pressing it again after answering offers
+    // again straight away — which is the whole point.
+    //
+    // GATES, and only these two. The first mirrors EmitBlock's own
+    // `platformBlock`: a real platform/agent/panel block, never a pattern-based
+    // content block. The second excludes an attachment hold. Asking an admin for
+    // "access" makes no sense for either of those — the remedy there is removing
+    // the sensitive data or detaching the file, which the block toast already
+    // says.
+    //
+    // PII: every value below comes from the ARMED BLOCKLIST ROW (admin-typed
+    // agent name, server-issued agent id, platform id) or from the process /
+    // panel catalog. Nothing parsed out of a window title or a UIA element can
+    // reach this line — that is the same discipline EmitBlock and EmitBlockState
+    // hold, and the reason the name emitted here is _blockedAgentName rather
+    // than the read one.
+    static void OfferAccessRequest(string app, string reason)
+    {
+        if (!_fgIsBlocked) return;
+        if (reason == "attachment") return;
+        string scope = BlockScope();
+        string json = "{\"kind\":\"request_access_offer\""
+            + ",\"block_scope\":\"" + Esc(scope) + "\""
+            + (app.Length > 0 ? ",\"process\":\"" + Esc(app) + "\"" : "")
+            + PlatformBlockPanelField()
+            + ",\"blocked_platform\":\"" + Esc(_blockedPlatform) + "\""
+            + ",\"blocked_agent\":\"" + Esc(_blockedAgentName) + "\""
+            + ",\"blocked_agent_id\":\"" + Esc(_blockedAgentId) + "\""
             + "}";
         lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }

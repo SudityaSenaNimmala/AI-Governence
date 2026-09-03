@@ -217,6 +217,127 @@ test('filterBlockedAgents drops only the rows an exception actually covers', () 
   assert.deepEqual(kept.map((r) => r.agent_id), ['a2', 'a4']);
 });
 
+// ── Scope-aware exception subtraction ───────────────────────────────────────
+// /access-exceptions/mine now carries scope ('host' | 'agent'), agent_id and
+// agent_name. An agent-scoped approval must lift ONE agent and leave every
+// other blocked agent on the same host blocked — the desktop mirror of the
+// server's own /access-exceptions/check, which answers allowed:false for an
+// agent it has no grant for even when a different agent on that host is
+// approved. A host-scoped (or scope-less, i.e. pre-existing) approval must keep
+// lifting everything, unchanged.
+
+test('filterBlockedAgents: an agent-scoped exception lifts only that agent', () => {
+  const list = [
+    { agent_id: 'ag-1', agent_name: 'IT Help Desk Agent', platform: 'teams_chat_agent', agent_scope: 'agent' },
+    { agent_id: 'ag-2', agent_name: 'Finance Bot',        platform: 'teams_chat_agent', agent_scope: 'agent' },
+  ];
+  const kept = filterBlockedAgents(list, [
+    { tool_host: 'teams.microsoft.com', scope: 'agent', agent_id: 'ag-1', agent_name: 'IT Help Desk Agent' },
+  ]);
+  assert.deepEqual(kept.map((r) => r.agent_id), ['ag-2'],
+    'the other agent on the same host must stay blocked');
+});
+
+test('filterBlockedAgents: an agent-scoped exception never lifts a whole-platform row', () => {
+  // The important one. A row with no agent_scope is "all of this app is
+  // disallowed" — either a synthesised Inventory platform block or a per-agent
+  // row normalizeAgentRows downgraded because its name could not survive the
+  // enforcer transport. Neither is what "approve the IT help-desk bot" granted,
+  // even though the agent_name on the coarse row can match perfectly.
+  //
+  // chatgpt.com rather than a Teams host on purpose: Teams is a HOST APP, so
+  // processesForHost refuses to synthesize a whole-process row for it at all
+  // (blocking a company's chat client off an Inventory toggle), and this case
+  // needs a host that really does produce one.
+  const list = [
+    { agent_id: 'ag-1', agent_name: 'Team GPT', platform: 'openai_assistant' },              // downgraded
+    { agent_id: 'ag-1', agent_name: 'Team GPT', platform: 'openai_assistant', agent_scope: 'platform' },
+    ...synthesizePlatformBlocks([{ host: 'chatgpt.com', product: 'Team GPT', blocked: true }]),
+  ];
+  // The synthesised rows even carry the SAME agent_name (and no agent_id), so
+  // nothing but the missing agent_scope keeps them blocked.
+  assert.ok(list.length > 2, 'expected the Inventory bridge to synthesize a row here');
+  const kept = filterBlockedAgents(list, [
+    { tool_host: 'chatgpt.com', scope: 'agent', agent_id: 'ag-1', agent_name: 'Team GPT' },
+  ]);
+  assert.deepEqual(kept, list, 'an agent-scoped grant must subtract nothing here');
+});
+
+test('filterBlockedAgents: an agent-scoped exception matches on the normalized name when either side has no id', () => {
+  const list = [
+    { agent_name: 'IT Help  Desk Agent', platform: 'personal_agent', agent_scope: 'agent' },
+    { agent_name: 'Finance Bot',         platform: 'personal_agent', agent_scope: 'agent' },
+  ];
+  // Doubled space + different case on the row, no agent_id on either side.
+  const kept = filterBlockedAgents(list, [
+    { tool_host: 'M365.CLOUD.MICROSOFT', scope: 'agent', agent_id: null, agent_name: 'it help desk agent' },
+  ]);
+  assert.deepEqual(kept.map((r) => r.agent_name), ['Finance Bot']);
+
+  // …and an id on BOTH sides is decisive: a name collision cannot widen it.
+  const byId = [
+    { agent_id: 'ag-1', agent_name: 'Shared Name', platform: 'personal_agent', agent_scope: 'agent' },
+    { agent_id: 'ag-2', agent_name: 'Shared Name', platform: 'personal_agent', agent_scope: 'agent' },
+  ];
+  assert.deepEqual(
+    filterBlockedAgents(byId, [
+      { tool_host: 'm365.cloud.microsoft', scope: 'agent', agent_id: 'ag-2', agent_name: 'Shared Name' },
+    ]).map((r) => r.agent_id),
+    ['ag-1'],
+  );
+});
+
+test('filterBlockedAgents: an agent-scoped exception for a DIFFERENT host lifts nothing', () => {
+  const list = [
+    { agent_id: 'ag-1', agent_name: 'IT Help Desk Agent', platform: 'teams_chat_agent', agent_scope: 'agent' },
+  ];
+  assert.deepEqual(
+    filterBlockedAgents(list, [
+      { tool_host: 'chatgpt.com', scope: 'agent', agent_id: 'ag-1', agent_name: 'IT Help Desk Agent' },
+    ]),
+    list,
+  );
+});
+
+test('filterBlockedAgents: an agent-scoped exception naming no agent lifts nothing', () => {
+  // It cannot match an agent, and it must NOT fall back to lifting the host —
+  // that widening is the security bug the server removed.
+  const list = [
+    { agent_id: 'ag-1', agent_name: 'IT Help Desk Agent', platform: 'teams_chat_agent', agent_scope: 'agent' },
+    { agent_id: 'ag-2', agent_name: 'Finance Bot',        platform: 'teams_chat_agent' },
+  ];
+  assert.deepEqual(
+    filterBlockedAgents(list, [{ tool_host: 'teams.microsoft.com', scope: 'agent', agent_id: null, agent_name: null }]),
+    list,
+  );
+});
+
+test('REGRESSION: a host-scoped or legacy exception still lifts every row for that host', () => {
+  // Byte-for-byte the pre-agent-scope behaviour, for all three shapes an
+  // exception row can arrive in: scope:'host', scope absent (every approval
+  // granted before the field existed), and scope:null.
+  const list = [
+    { agent_id: 'ag-1', agent_name: 'Team GPT',   platform: 'openai_assistant', agent_scope: 'agent' },
+    { agent_id: 'ag-2', agent_name: 'Custom GPT', platform: 'custom_gpt' },
+    ...synthesizePlatformBlocks([{ host: 'chatgpt.com', product: 'ChatGPT', blocked: true }]),
+    { agent_id: 'ag-3', agent_name: 'IT Help Desk Agent', platform: 'teams_chat_agent', agent_scope: 'agent' },
+  ];
+  for (const ex of [
+    { tool_host: 'chatgpt.com', scope: 'host' },
+    { tool_host: 'chatgpt.com' },
+    { tool_host: 'chatgpt.com', scope: null },
+    // An unrecognised scope must land on the WIDE branch, never silently
+    // narrow an approval an admin already made into "nothing was lifted".
+    { tool_host: 'chatgpt.com', scope: 'something_new' },
+  ]) {
+    assert.deepEqual(
+      filterBlockedAgents(list, [ex]).map((r) => r.agent_id),
+      ['ag-3'],
+      `scope=${JSON.stringify(ex.scope)}`,
+    );
+  }
+});
+
 test('filterBlockedAgents is a no-op for an empty or malformed exception list', () => {
   const list = [{ agent_id: 'a1', platform: 'claude_ai_project' }];
   assert.deepEqual(filterBlockedAgents(list, []), list);

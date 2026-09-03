@@ -10,6 +10,25 @@
 //
 // The exception is per-machine — only the requesting employee gets access, not everyone.
 //
+// TWO SCOPES, ONE COLLECTION. A block used to be "this whole app on this host",
+// so a request and its exception were keyed only by {machine_id, tool_host}.
+// Blocks can now be narrowed to ONE NAMED AGENT inside a host app (an agent in
+// Microsoft Teams, a particular M365 Copilot agent), and a host-keyed grant is
+// wrong for that: approving "IT Help Desk Agent" on teams.microsoft.com used to
+// mint an exception that lifted EVERY agent-scoped block on that host — and, via
+// the enforcer's shared-process platforms, on its siblings too.
+//
+// So both documents carry an agent identity now:
+//   access_requests    block_scope 'app' | 'panel' | 'agent', agent_name, agent_key
+//   access_exceptions  scope 'host' | 'agent', agent_id, agent_name, agent_key
+// agent_key is ALWAYS derived here (agentKeyFor below) and never read from the
+// request body — a client that could name its own key could name the empty one
+// and widen its own grant to the whole host.
+//
+// NO MIGRATION. Rows written before this lack the fields entirely, so every read
+// treats a missing agent_key as '' (keyMatch) and a missing scope as 'host'
+// (HOST_SCOPED). Whole-app blocks behave exactly as they did.
+//
 // TWO SURFACES, ONE CONTRACT. The browser extension (surface:'browser') has no
 // machine token and posts its own machine_id in the body. The desktop agent
 // (surface:'desktop', Electron) holds an enrolment JWT and sends it as a bearer
@@ -53,6 +72,67 @@ function clean(value, max) {
   if (value === null || value === undefined) return null;
   const s = String(value).replace(CONTROL_CHARS, ' ').slice(0, max).trim();
   return s.length ? s : null;
+}
+
+// How narrow the block was. 'app' is the whole host application (the only thing
+// that existed before), 'panel' one side panel / surface of it, 'agent' one named
+// agent inside it. Only 'agent' makes the grant agent-keyed.
+const BLOCK_SCOPES = new Set(['app', 'panel', 'agent']);
+
+// Fold an agent DISPLAY NAME to a comparison key: control characters already
+// stripped by clean(), then whitespace collapsed and lowercased, because the
+// enforcer reads the name off a UI label ("IT Help Desk  Agent") and the
+// extension off the DOM ("IT Help Desk Agent") — the same agent, spelled two
+// ways. Deliberately NOT normalizeIdentity(): that one preserves the case of a
+// non-email so a Windows username still renders as its owner types it, which is
+// the opposite of what a match key needs.
+export function normalizeAgentName(value) {
+  const s = clean(value, FIELD_MAX);
+  return s ? s.replace(/\s+/gu, ' ').trim().toLowerCase() : '';
+}
+
+// The stable key for "which agent this block/grant is about". SERVER-DERIVED,
+// always — see the header. '' means host-wide, which is what every whole-app
+// request and every pre-existing row is.
+export function agentKeyFor({ block_scope, agent_id, agent_name }) {
+  if (block_scope !== 'agent') return '';
+  return clean(agent_id, FIELD_MAX) || normalizeAgentName(agent_name);
+}
+
+// Match one agent_key, tolerating rows that predate the field. A host-wide
+// lookup ('') has to find documents where agent_key is absent as well as those
+// where it is the empty string; an agent lookup matches only itself.
+function keyMatch(agent_key) {
+  return { $in: agent_key === '' ? ['', null] : [agent_key] };
+}
+
+// "This exception is host-wide" — written as scope:'host' by the approve route
+// below, and ABSENT on every row created before agent scoping existed. Both must
+// keep unblocking the whole app.
+const HOST_SCOPED = [{ scope: 'host' }, { scope: { $exists: false } }, { scope: null }];
+
+// Does an agent-scoped exception cover the agent the caller is asking about?
+//
+// Identity first: when BOTH sides carry an agent_id, that is the answer and a
+// name collision cannot widen it. When either side lacks one — the extension
+// often has a DOM label and no id — fall back to the normalized display name.
+// Never returns true for a caller that named no agent at all, which is the whole
+// point: an agent-scoped grant for A must not read as "allowed" for anything but A.
+function agentMatches(exception, want) {
+  const exId = clean(exception?.agent_id, FIELD_MAX) || '';
+  const wantId = clean(want?.agent_id, FIELD_MAX) || '';
+  if (exId && wantId) return exId === wantId;
+
+  const exName = normalizeAgentName(exception?.agent_name);
+  const wantName = normalizeAgentName(want?.agent_name);
+  if (exName && wantName) return exName === wantName;
+
+  // Last resort, and only ever an exact hit: the derived keys. Covers a grant
+  // that stored an id with no name against a caller that sends that same id
+  // under either field.
+  const exKey = clean(exception?.agent_key, FIELD_MAX) || '';
+  const wantKey = wantId || wantName;
+  return Boolean(exKey) && exKey === wantKey;
 }
 
 // Optional machine auth for POST /access-requests.
@@ -100,6 +180,22 @@ async function identityByMachine(db, machineIds) {
     }
   }
   return map;
+}
+
+// Every machine_id belonging to the SAME PERSON as the one given, including
+// itself. `employee_profiles.machine_ids` is the identity scanner's existing
+// cross-device link (desktop agent + browser extension installs all land in
+// one profile once matched by hostname/OS user) — reused here rather than
+// building a second identity graph.
+//
+// Falls back to [machineId] when the machine isn't linked into any profile
+// yet: an unmatched device sees only its own exceptions, exactly like before
+// this existed, rather than erroring or over-widening.
+async function siblingMachineIds(db, machineId) {
+  const profile = await db.collection('employee_profiles')
+    .findOne({ machine_ids: machineId }, { projection: { _id: 0, machine_ids: 1 } });
+  const ids = profile?.machine_ids?.filter(Boolean);
+  return ids && ids.length ? ids : [machineId];
 }
 
 // The name to show for a row, best identification first. Two rules stacked:
@@ -171,10 +267,38 @@ export function mountAccessRequests(app, db) {
       return res.status(400).json({ error: "surface must be 'browser' or 'desktop'" });
     }
 
-    // Check if there's already a pending request for this machine + tool
+    // How narrow the block was. Absent ⇒ 'app', so the shipped extension and
+    // every older desktop build keep filing exactly the whole-app request they
+    // always did.
+    const block_scope = body.block_scope === undefined || body.block_scope === null
+      ? 'app' : String(body.block_scope);
+    if (!BLOCK_SCOPES.has(block_scope)) {
+      return res.status(400).json({ error: "block_scope must be 'app', 'panel' or 'agent'" });
+    }
+
+    const agent_id = clean(body.agent_id, FIELD_MAX);
+    const agent_name = clean(body.agent_name, FIELD_MAX);
+
+    // An agent-scoped request that names no agent has nothing to scope TO, and
+    // the derived key would come out '' — i.e. a host-wide request wearing an
+    // agent-scoped label, which on approval grants the whole app. Refuse it
+    // rather than silently widening it.
+    if (block_scope === 'agent' && !agent_id && !agent_name) {
+      return res.status(400).json({ error: "block_scope 'agent' requires agent_id or agent_name" });
+    }
+
+    // Derived here, never taken from the body.
+    const agent_key = agentKeyFor({ block_scope, agent_id, agent_name });
+    const agentClause = keyMatch(agent_key);
+
+    // Check if there's already a pending request for this machine + tool + AGENT.
+    // Agent-keyed so a pending ask about agent A does not 409 an ask about agent
+    // B on the same host; for a whole-app request agent_key is '' and this is the
+    // host-only check it has always been.
     const existing = await requests().findOne({
       machine_id,
       tool_host,
+      agent_key: agentClause,
       status: 'pending',
     });
     if (existing) {
@@ -184,28 +308,40 @@ export function mountAccessRequests(app, db) {
     // 24h cooldown after a rejection. An admin who declines gets a day of quiet:
     // without this the desktop dialog is one click away from re-asking forever,
     // and each re-ask fires the access_request webhook again.
-    const cooldownSince = new Date(Date.now() - REJECT_COOLDOWN_MS);
-    let rejected = await requests().findOne({
-      machine_id, tool_host, status: 'rejected', reviewed_at: { $gt: cooldownSince },
-    });
-    // Extension installs mint their own machine_id, so a reinstall would
-    // otherwise reset the cooldown. Hostname is a weaker key (shared/re-imaged
-    // devices) and is only consulted for a body-trust caller, where it is the
-    // only continuity there is; a token-authenticated machine is already
-    // identified exactly and needs no second guess.
-    if (!rejected && !req.machine && hostname) {
-      rejected = await requests().findOne({
-        hostname, tool_host, status: 'rejected', reviewed_at: { $gt: cooldownSince },
+    //
+    // Agent-keyed for the same reason the pending check is: "no, not the finance
+    // bot" is not an answer about the IT help-desk bot, and a shared cooldown
+    // would let one decline gag every other agent on that host for a day.
+    //
+    // NOT applied to block_scope 'agent': the desktop dialog now reopens on
+    // every blocked send attempt (not once per block session), so a day-long
+    // gag after one decline would silently swallow every later attempt with no
+    // feedback beyond a 429 the dialog does not surface distinctly. Whole-app
+    // requests keep the cooldown — that flow's dialog is one-shot per session.
+    if (block_scope !== 'agent') {
+      const cooldownSince = new Date(Date.now() - REJECT_COOLDOWN_MS);
+      let rejected = await requests().findOne({
+        machine_id, tool_host, agent_key: agentClause, status: 'rejected', reviewed_at: { $gt: cooldownSince },
       });
-    }
-    if (rejected) {
-      const retryAfter = new Date(new Date(rejected.reviewed_at).getTime() + REJECT_COOLDOWN_MS);
-      return res.status(429).json({
-        error: 'This request was recently rejected. You can ask again after ' + retryAfter.toISOString() + '.',
-        code: 'recently_rejected',
-        rejected_at: rejected.reviewed_at,
-        retry_after: retryAfter,
-      });
+      // Extension installs mint their own machine_id, so a reinstall would
+      // otherwise reset the cooldown. Hostname is a weaker key (shared/re-imaged
+      // devices) and is only consulted for a body-trust caller, where it is the
+      // only continuity there is; a token-authenticated machine is already
+      // identified exactly and needs no second guess.
+      if (!rejected && !req.machine && hostname) {
+        rejected = await requests().findOne({
+          hostname, tool_host, agent_key: agentClause, status: 'rejected', reviewed_at: { $gt: cooldownSince },
+        });
+      }
+      if (rejected) {
+        const retryAfter = new Date(new Date(rejected.reviewed_at).getTime() + REJECT_COOLDOWN_MS);
+        return res.status(429).json({
+          error: 'This request was recently rejected. You can ask again after ' + retryAfter.toISOString() + '.',
+          code: 'recently_rejected',
+          rejected_at: rejected.reviewed_at,
+          retry_after: retryAfter,
+        });
+      }
     }
 
     const request = {
@@ -223,7 +359,13 @@ export function mountAccessRequests(app, db) {
       surface,
       platform: clean(body.platform, FIELD_MAX),
       process_name: clean(body.process_name, FIELD_MAX),
-      agent_id: clean(body.agent_id, FIELD_MAX),
+      agent_id,
+      // What exactly was blocked, and — when it was one named agent — which one.
+      // agent_key is the derived match key; body.agent_key, if a client sends
+      // one, is discarded above.
+      block_scope,
+      agent_name,
+      agent_key,
       status: 'pending',        // pending → approved → expired | pending → rejected
       submitted_at: new Date(),
       reviewed_at: null,
@@ -234,13 +376,23 @@ export function mountAccessRequests(app, db) {
 
     await requests().insertOne(request);
 
-    // Fire webhook for access_request trigger
+    // Fire webhook for access_request trigger.
+    //
+    // An agent-scoped ask names the AGENT, with the host app in parentheses:
+    // "IT Help Desk Agent (Microsoft Teams)". Sent as just the host app it read
+    // as a request for all of Teams, which is both wrong and the sort of thing an
+    // approver says yes to too quickly.
+    const toolLabel = request.tool_name || request.tool_host;
+    const subject = request.block_scope === 'agent'
+      ? (request.agent_name || request.agent_id) + ' (' + toolLabel + ')'
+      : toolLabel;
     fireWebhooks(db, 'access_request', {
-      title: 'New Access Request: ' + (request.tool_name || request.tool_host),
-      body: (request.user || request.hostname || 'An employee') + ' is requesting access to ' + (request.tool_name || request.tool_host) + '.\nReason: ' + (request.reason || 'No reason provided'),
+      title: 'New Access Request: ' + subject,
+      body: (request.user || request.hostname || 'An employee') + ' is requesting access to ' + subject + '.\nReason: ' + (request.reason || 'No reason provided'),
       severity: 'info',
       employee: request.user || request.hostname || 'Unknown',
-      tool: request.tool_name || request.tool_host,
+      tool: toolLabel,
+      agent: request.block_scope === 'agent' ? (request.agent_name || request.agent_id) : null,
       trigger: 'access_request',
     });
 
@@ -265,12 +417,19 @@ export function mountAccessRequests(app, db) {
     // The desktop dialog uses this to render "already pending" instead of
     // submitting and getting a 409 back. review_note is deliberately NOT
     // included: it is an admin-to-admin note, not a message to the employee.
+    //
+    // The agent identity is included so the caller can pre-check PER AGENT.
+    // Host-only, the desktop dialog showed "already pending" for agent B because
+    // agent A on the same host had a request open.
     res.json(rows.map((r) => ({
       id: r.id,
       tool_host: r.tool_host,
       tool_name: r.tool_name || r.tool_host,
       status: r.status,
       surface: r.surface || 'browser',
+      block_scope: r.block_scope || 'app',
+      agent_id: r.agent_id ?? null,
+      agent_name: r.agent_name ?? null,
       submitted_at: r.submitted_at,
       reviewed_at: r.reviewed_at ?? null,
       expires_at: r.expires_at ?? null,
@@ -278,18 +437,32 @@ export function mountAccessRequests(app, db) {
   }));
 
   app.get('/api/v1/access-exceptions/mine', requireMachineAuth, a(async (req, res) => {
+    // Cross-surface: the same person's desktop agent and browser extension
+    // enroll as two different machine_ids, so a request approved from one
+    // surface used to be invisible to the other — an "approved" agent stayed
+    // blocked wherever the approval didn't literally originate. Widen to every
+    // machine_id the identity scanner has already linked to this one person;
+    // an unlinked machine still only sees its own grants (see
+    // siblingMachineIds).
+    const machineIds = await siblingMachineIds(db, req.machine.id);
     const rows = await exceptions()
-      .find({ machine_id: req.machine.id, active: true, expires_at: { $gt: new Date() } })
+      .find({ machine_id: { $in: machineIds }, active: true, expires_at: { $gt: new Date() } })
       .sort({ expires_at: 1 })
       .project({ _id: 0 })
       .toArray();
 
     // This is what monitor-runner.mjs subtracts from blocked-agents.json, so an
     // approved desktop exception actually unblocks the app. Host + display name
-    // + expiry is all the agent needs.
+    // + expiry, PLUS the scope: a 'host' row lifts the whole app as before, an
+    // 'agent' row lifts only the named agent and the enforcer must leave the rest
+    // of that host's blocked agents in place. scope is defaulted here, so every
+    // pre-existing row arrives as 'host'.
     res.json(rows.map((r) => ({
       tool_host: r.tool_host,
       tool_name: r.tool_name || r.tool_host,
+      scope: r.scope || 'host',
+      agent_id: r.agent_id ?? null,
+      agent_name: r.agent_name ?? null,
       expires_at: r.expires_at,
     })));
   }));
@@ -332,6 +505,9 @@ export function mountAccessRequests(app, db) {
         // write-side fix and would otherwise keep rendering one person twice.
         user:     normalizedUser(r, ident),
         hostname: r.hostname ?? ident?.hostname ?? null,
+        // Same default POST applies when block_scope is omitted — rows that
+        // predate agent-scoped blocking never had the field written at all.
+        block_scope: r.block_scope ?? 'app',
       };
     });
 
@@ -376,14 +552,37 @@ export function mountAccessRequests(app, db) {
       expires_at: expiryDate,
     }});
 
-    // Create access exception — this is what the extension checks
+    // Create access exception — this is what the extension and the desktop
+    // enforcer check.
+    //
+    // KEYED ON THE AGENT AS WELL AS THE HOST. With {machine_id, tool_host} alone,
+    // approving agent B overwrote the live grant for agent A on that host (one
+    // document, last writer wins) and, worse, the resulting host-keyed exception
+    // read as "allowed" for every agent there. The approved request's own derived
+    // agent_key decides the row; agent_key is re-derived rather than trusted, so
+    // a request row hand-edited to carry a blank key cannot launder itself into a
+    // host-wide grant.
+    const scope = request.block_scope === 'agent' ? 'agent' : 'host';
+    const agent_key = agentKeyFor({
+      block_scope: request.block_scope,
+      agent_id: request.agent_id,
+      agent_name: request.agent_name,
+    });
+
     await exceptions().updateOne(
-      { machine_id: request.machine_id, tool_host: request.tool_host },
+      // keyMatch, not a bare agent_key: a host-wide approval must still land on
+      // the exception row an earlier build created for that host, which has no
+      // agent_key field at all.
+      { machine_id: request.machine_id, tool_host: request.tool_host, agent_key: keyMatch(agent_key) },
       { $set: {
         machine_id: request.machine_id,
         tool_host: request.tool_host,
         tool_name: request.tool_name,
         request_id: request.id,
+        scope,
+        agent_id: request.agent_id ?? null,
+        agent_name: request.agent_name ?? null,
+        agent_key,
         granted_at: new Date(),
         expires_at: expiryDate,
         active: true,
@@ -391,7 +590,7 @@ export function mountAccessRequests(app, db) {
       { upsert: true },
     );
 
-    res.json({ ok: true, expires_at: expiryDate });
+    res.json({ ok: true, expires_at: expiryDate, scope });
   }));
 
   // ── Reject request ──
@@ -418,36 +617,70 @@ export function mountAccessRequests(app, db) {
   }));
 
   // ── Check exception (extension calls this to know if a blocked tool is temporarily allowed) ──
-
+  //
+  // Read by BOTH surfaces: the browser extension's content script and the desktop
+  // enforcer, so one approval is honoured in the tab and in the app.
+  //
+  // TWO ANSWERS, NOT ONE. A host-scoped exception (or any legacy row, which has
+  // no scope field) allows the whole app, exactly as it always did. An
+  // agent-scoped exception allows ONLY the agent it names — so a caller that
+  // names no agent, or names a different one, gets allowed:false even though a
+  // live exception exists for that host. That asymmetry is the fix: while this
+  // route matched on {machine_id, tool_host} alone, the first per-agent approval
+  // on a host silently unblocked every other blocked agent there.
   app.get('/api/v1/access-exceptions/check', a(async (req, res) => {
     const { machine_id, tool_host } = req.query;
     if (!machine_id || !tool_host) {
       return res.status(400).json({ error: 'machine_id and tool_host required' });
     }
 
-    // String() on both, and this is the highest-impact instance in the file: this
-    // route is what the extension asks "is this blocked tool temporarily allowed
-    // for THIS machine". Passing the raw values let `?machine_id[$ne]=x` match any
-    // machine's exception, turning one person's approved 8-hour access into a
-    // fleet-wide bypass — exactly the per-machine scoping this file's header calls
-    // out as the security property.
-    const exception = await exceptions().findOne({
-      machine_id: String(machine_id),
-      tool_host: String(tool_host),
-      active: true,
-      expires_at: { $gt: new Date() },
-    });
+    // String() on every query value, and this is the highest-impact instance in
+    // the file: this route is what the extension asks "is this blocked tool
+    // temporarily allowed for THIS machine". Passing the raw values let
+    // `?machine_id[$ne]=x` match any machine's exception, turning one person's
+    // approved 8-hour access into a fleet-wide bypass — exactly the per-machine
+    // scoping this file's header calls out as the security property. The agent
+    // params go through clean(), which stringifies for the same reason.
+    const machineId = String(machine_id);
+    const toolHost = String(tool_host);
+    const want = {
+      agent_id: clean(req.query.agent_id, FIELD_MAX),
+      agent_name: clean(req.query.agent_name, FIELD_MAX),
+    };
+    const namesAnAgent = Boolean(want.agent_id || want.agent_name);
 
-    if (exception) {
-      res.json({ allowed: true, expires_at: exception.expires_at });
-    } else {
-      // Clean up expired exceptions
-      await exceptions().updateMany(
-        { machine_id, tool_host, expires_at: { $lte: new Date() } },
-        { $set: { active: false } },
-      );
-      res.json({ allowed: false });
+    const live = await exceptions()
+      .find({ machine_id: machineId, tool_host: toolHost, active: true, expires_at: { $gt: new Date() } })
+      .toArray();
+
+    // Host-wide first: it subsumes any agent-scoped row and is the answer every
+    // caller of the old contract expects.
+    const hostWide = live.find((e) => !e.scope || e.scope === 'host');
+    if (hostWide) {
+      return res.json({ allowed: true, scope: 'host', expires_at: hostWide.expires_at });
     }
+
+    if (namesAnAgent) {
+      const forAgent = live.find((e) => e.scope === 'agent' && agentMatches(e, want));
+      if (forAgent) {
+        return res.json({
+          allowed: true,
+          scope: 'agent',
+          agent_id: forAgent.agent_id ?? null,
+          agent_name: forAgent.agent_name ?? null,
+          expires_at: forAgent.expires_at,
+        });
+      }
+    }
+
+    // Clean up expired exceptions. String()-scoped like the read above; it was
+    // passing the raw query values, so the same operator injection applied to a
+    // WRITE that deactivates other machines' exceptions.
+    await exceptions().updateMany(
+      { machine_id: machineId, tool_host: toolHost, expires_at: { $lte: new Date() } },
+      { $set: { active: false } },
+    );
+    res.json({ allowed: false });
   }));
 
   // ── List active exceptions (admin view) ──
@@ -499,6 +732,12 @@ export function mountAccessRequests(app, db) {
         employee_name: employeeNameFor(src, ident),
         user:     src?.user ?? ident?.user ?? null,
         hostname: src?.hostname ?? ident?.hostname ?? null,
+        // Defaulted rather than just spread, so the admin UI can render "whole
+        // app" vs "one agent" without special-casing rows that predate the
+        // field. Additive: no existing key changes shape.
+        scope:      r.scope || 'host',
+        agent_id:   r.agent_id ?? null,
+        agent_name: r.agent_name ?? null,
       };
     }));
   }));

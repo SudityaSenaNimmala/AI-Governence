@@ -32,11 +32,38 @@ import { PromptWatcher } from './prompt-watcher.js';
 import { Enforcer } from './enforcer.js';
 import { spawnEnforcerWatchdog } from './enforcer-watchdog.js';
 import { Reporter } from './reporter.js';
+// The single-slot offline queue for a Request Access submission, and the poller
+// that drains it. Owned by blocked-agents-sync.js — one path files these, one
+// path retries them.
+import { PENDING_REQUEST_PATH } from './blocked-agents-sync.js';
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 // How long after firing a toast for a (clipboardSeq, processName) pair we
 // suppress re-firing for the same pair. 10s prevents rapid-fire spam while
 // still re-warning on repeated paste attempts.
 const FIRE_DEDUP_TTL_MS = 10_000;
+
+// Mirrors REASON_MAX in server/src/routes/access-requests.js. The server
+// truncates past this; the dialog's own textbox refuses past it (see
+// CfaiRequestDialog.ReasonMax in toast-helper.ps1), and this is the belt-and-
+// braces cap on the value that actually leaves the machine.
+const REASON_MAX = 500;
+
+// "Which agent is this block/request about", folded to a comparison key the
+// same way the server folds it (agentKeyFor + normalizeAgentName in
+// access-requests.js): the server-issued id when there is one, otherwise the
+// display name with whitespace collapsed and case dropped. '' means host-wide.
+//
+// Used ONLY for local comparisons — the pending-request pre-check and the
+// in-flight dedupe. The server derives its own key from what we post and never
+// trusts one sent to it.
+function agentMatchKey({ block_scope, agent_id, agent_name }) {
+  if (block_scope !== 'agent') return '';
+  const id = String(agent_id ?? '').trim();
+  if (id) return id;
+  return String(agent_name ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
 
 // Product identity for an enforcer event, panel FIRST.
 //
@@ -53,6 +80,21 @@ const FIRE_DEDUP_TTL_MS = 10_000;
 // panel focused), where process:"Cursor" is the correct identity.
 function identifyEventAi(ev) {
   return (ev?.panel ? identifyAiPanel(ev.panel) : null) || identifyAiProcess(ev?.process);
+}
+
+// The access-exception key for a platform/agent/panel block event. Most
+// specific first: the PANEL names the exact AI surface inside an IDE (and
+// "Code" has no host of its own), then the process name because it names the
+// app actually in the foreground, then the platform mapping as the fallback for
+// a process the catalog does not carry a host for.
+//
+// ONE function, two callers — the 'block' relay and the Request Access flow.
+// They MUST agree: the host the dialog asks for an exception against is the same
+// host /access-exceptions/check is later consulted with, and the same one
+// filterBlockedAgents subtracts on. A second copy of this expression is a
+// silent way for an approval to never lift the block it was granted for.
+function blockToolHost(ev) {
+  return hostForPanel(ev.panel) || hostForProcess(ev.process) || hostsForPlatform(ev.blocked_platform)[0] || '';
 }
 
 // Clipboard scrubbing was removed on 2026-06-15: the clipboard path now fires
@@ -108,6 +150,13 @@ export class OsMonitor extends EventEmitter {
     // abort a fetch already awaiting), and without this its onChange would
     // resurrect the keyboard hook on a monitor that had fully torn down.
     this.isRunning = false;
+    // Kept for the Request Access flow, which is the one path here that makes
+    // its own authenticated call instead of going through the Reporter's queue:
+    // a request the user is standing in front of has to be answered now, and it
+    // goes to a different route (/api/v1/access-requests, not /api/v1/dlp).
+    // Same enrolment machine JWT either way — see #submitAccessRequest.
+    this.serverUrl = String(serverUrl || '').replace(/\/$/, '');
+    this.token = token || null;
     this.poller = createPoller({ log });
     this.reporter = new Reporter({ serverUrl, token, log });
     this.toast = createNotifier({ log });
@@ -201,6 +250,14 @@ export class OsMonitor extends EventEmitter {
     // passed between attaching a file and testing it (talking, reviewing a
     // separate change) with the file never removed and re-attached.
     this.attachHoldRefreshTimer = null;
+    // Blocks with a Request Access dialog already in flight, keyed on host +
+    // agent identity. CONCURRENCY only, never a "we already asked once" memory:
+    // the enforcer deliberately offers on EVERY blocked send (a user who was
+    // declined must be able to ask again on their next attempt), so this covers
+    // exactly the window where a second offer would race the first — including
+    // the /mine pre-check, which is a network round trip. Released in the
+    // finally, so the next blocked send opens a fresh dialog immediately.
+    this.accessRequestInFlight = new Set();
     setInterval(() => this.#pruneFired(), 60_000).unref();
   }
 
@@ -240,6 +297,215 @@ export class OsMonitor extends EventEmitter {
     if (Date.now() - lastFired < FIRE_DEDUP_TTL_MS) return false;
     this.firedAt.set(key, Date.now());
     return true;
+  }
+
+  // ── Request Access (desktop, non-Electron) ─────────────────────────────────
+  //
+  // Driven by the enforcer's request_access_offer line, i.e. by the instant a
+  // platform/agent/panel block swallowed a send. Four steps, in this order,
+  // because each one can end the flow without bothering the user:
+  //   1. resolve the block's identity (host / agent / scope) from the ARMED ROW
+  //      the enforcer reported — never from anything read off the screen;
+  //   2. ask the server whether this device already has a request open for that
+  //      exact agent, so a second block does not become a second ask;
+  //   3. open the ephemeral dialog and wait for submit/cancel;
+  //   4. POST it, or park it in the single-slot offline queue.
+  //
+  // NOTHING the user typed into the AI app travels on this path. The only free
+  // text is the reason they type into the dialog, which is the whole point of it.
+  async #offerAccessRequest(ev) {
+    const ai = identifyEventAi(ev) || { product: ev.process, vendor: null };
+    // The SAME resolver the 'block' relay uses — see blockToolHost().
+    const toolHost = blockToolHost(ev);
+    const agentId = String(ev.blocked_agent_id || '').trim();
+    const agentName = String(ev.blocked_agent || '').trim();
+    // 'agent' ONLY when the enforcer says it armed on a named agent AND it has
+    // an identity to name. The server rejects block_scope:'agent' with neither
+    // (400), and claiming agent scope for a whole-app block would mint an
+    // agent-keyed exception that lifts nothing. A 'panel' block is passed
+    // through as itself: the server accepts it and keys the grant on the host,
+    // which is correct — a panel is not a named agent.
+    const blockScope = ev.block_scope === 'agent' && (agentId || agentName)
+      ? 'agent'
+      : ev.block_scope === 'panel' ? 'panel' : 'app';
+
+    if (!toolHost) {
+      // Nothing to ask for: an exception is granted against a host, and this
+      // catalog carries none for this process/panel/platform. Silent to the
+      // user by design — a dialog whose Submit could only ever fail is worse
+      // than no dialog.
+      this.log?.warn(`access-request: no tool_host for ${ev.process || '(unknown process)'} — no dialog offered`);
+      return;
+    }
+
+    const identity = { tool_host: toolHost, block_scope: blockScope, agent_id: agentId, agent_name: agentName };
+    const key = `${toolHost.toLowerCase()}|${agentMatchKey(identity)}`;
+    if (this.accessRequestInFlight.has(key)) return;
+    this.accessRequestInFlight.add(key);
+    try {
+      const subject = blockScope === 'agent' && agentName ? agentName : (ai.product || ev.process || toolHost);
+      if (!this.serverUrl || !this.token) {
+        this.toast.show({
+          title: `${subject} is blocked`,
+          message: 'This device is not enrolled with CloudFuze AI Governance, so it cannot request access.\n'
+            + 'Ask your administrator to enroll it.',
+        });
+        return;
+      }
+
+      const already = await this.#findOpenAccessRequest(identity);
+      if (already) {
+        this.toast.show({
+          title: `${subject} - request already open`,
+          message: already === 'queued'
+            ? 'Your access request for this is saved and will be sent as soon as this device is back online.'
+            : 'You already have a pending access request for this. Your administrator has not answered it yet.',
+        });
+        return;
+      }
+
+      const result = await this.toast.showRequestDialog({
+        agentName: blockScope === 'agent' ? agentName : '',
+        appName: ai.product || ev.process || toolHost,
+        dedupeKey: key,
+      });
+      if (result.action === 'unavailable') {
+        this.toast.show({
+          title: `${subject} is blocked`,
+          message: 'Access requests cannot be shown on this device right now.\n'
+            + 'Ask your administrator for temporary access to it.',
+        });
+        return;
+      }
+      // 'cancel' / 'suppressed' / 'timeout' — the user said no, or a dialog for
+      // this same block session is already on screen. Nothing is sent, and
+      // nothing is said: they know what they just dismissed.
+      if (result.action !== 'submit') return;
+
+      await this.#submitAccessRequest({
+        ...identity,
+        tool_name: ai.product || ev.process || toolHost,
+        tool_vendor: ai.vendor || '',
+        platform: ev.blocked_platform || '',
+        process_name: ev.process || '',
+        reason: String(result.reason || '').slice(0, REASON_MAX),
+      }, subject);
+    } finally {
+      this.accessRequestInFlight.delete(key);
+    }
+  }
+
+  // 'server' | 'queued' | null. Fails OPEN (returns null) on any error: the
+  // pre-check is a courtesy that saves the user a pointless dialog, and the
+  // server enforces the real rule — a duplicate POST comes back 409 and is
+  // surfaced as such. Refusing to show a dialog because /mine was unreachable
+  // would be the wrong trade.
+  async #findOpenAccessRequest(identity) {
+    const wantKey = agentMatchKey(identity);
+    const wantHost = String(identity.tool_host || '').toLowerCase();
+    // The local queue first — it is free, and a request parked there has not
+    // reached the server yet, so it can never come back on /mine.
+    try {
+      if (existsSync(PENDING_REQUEST_PATH)) {
+        const queued = JSON.parse(readFileSync(PENDING_REQUEST_PATH, 'utf8'));
+        if (String(queued?.tool_host || '').toLowerCase() === wantHost && agentMatchKey(queued) === wantKey) {
+          return 'queued';
+        }
+      }
+    } catch {
+      // Unreadable queue file — blocked-agents-sync.js drops it on its own tick.
+    }
+    try {
+      const res = await fetch(`${this.serverUrl}/api/v1/access-requests/mine`, {
+        headers: { authorization: `Bearer ${this.token}` },
+      });
+      if (!res.ok) return null;
+      const rows = await res.json();
+      if (!Array.isArray(rows)) return null;
+      const hit = rows.find((r) => r?.status === 'pending'
+        && String(r.tool_host || '').toLowerCase() === wantHost
+        // PER AGENT, not per host: "pending" for the finance bot is not an
+        // answer about the IT help-desk bot, and the server's own 409 is keyed
+        // the same way. Both sides fold the identity with agentMatchKey.
+        && agentMatchKey(r) === wantKey);
+      return hit ? 'server' : null;
+    } catch (err) {
+      this.log?.warn(`access-request: pre-check failed — ${err?.message || err}`);
+      return null;
+    }
+  }
+
+  // POST /api/v1/access-requests with the enrolment machine JWT — the same
+  // bearer token the Reporter and blocked-agents-sync.js use. The server derives
+  // machine_id and hostname from the verified claims and ignores anything the
+  // body says about them, and it derives agent_key from block_scope + the agent
+  // identity, so none of that is sent.
+  async #submitAccessRequest(body, subject) {
+    const payload = { ...body, surface: 'desktop' };
+    try {
+      const res = await fetch(`${this.serverUrl}/api/v1/access-requests`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) {
+        this.log?.info(`access-request: submitted for ${payload.tool_host} (scope=${payload.block_scope})`);
+        this.toast.show({
+          title: `${subject} - access request sent`,
+          message: 'Your administrator has been notified. You will be able to use it here if they approve.',
+        });
+        return;
+      }
+      const err = await res.json().catch(() => ({}));
+      if (res.status === 401) {
+        this.toast.show({
+          title: 'Access request not sent',
+          message: 'This device needs to be enrolled again before it can request access.\nAsk your administrator.',
+        });
+      } else if (res.status === 409) {
+        this.toast.show({
+          title: `${subject} - request already open`,
+          message: 'You already have a pending access request for this.',
+        });
+      } else if (res.status === 429) {
+        // The server's own cooldown, with its own retry time — never a number
+        // invented here, which would drift from the server's REJECT_COOLDOWN_MS.
+        const when = err?.retry_after ? new Date(err.retry_after) : null;
+        const whenText = when && !Number.isNaN(when.getTime()) ? ` You can ask again after ${when.toLocaleString()}.` : '';
+        this.toast.show({
+          title: `${subject} - request declined`,
+          message: `This request was reviewed and declined recently.${whenText}`,
+        });
+      } else {
+        this.toast.show({
+          title: 'Access request not sent',
+          message: String(err?.error || `The server returned ${res.status}.`).slice(0, 300),
+        });
+      }
+      this.log?.warn(`access-request: server returned ${res.status} for ${payload.tool_host}`);
+    } catch (netErr) {
+      // Offline. Park it in the single slot blocked-agents-sync.js drains on its
+      // 10s tick (24h TTL, and a second Submit overwrites rather than stacks).
+      try {
+        mkdirSync(dirname(PENDING_REQUEST_PATH), { recursive: true });
+        writeFileSync(
+          PENDING_REQUEST_PATH,
+          JSON.stringify({ ...payload, queued_at: new Date().toISOString() }, null, 2),
+          'utf8',
+        );
+        this.toast.show({
+          title: `${subject} - access request saved`,
+          message: 'This device is offline. Your request will be sent automatically once it can reach the server.',
+        });
+        this.log?.info(`access-request: offline — queued for ${payload.tool_host}`);
+      } catch (writeErr) {
+        this.toast.show({
+          title: 'Access request not sent',
+          message: 'This device could not reach the server and could not save the request. Please try again.',
+        });
+        this.log?.warn(`access-request: offline and could not queue — ${netErr.message} / ${writeErr.message}`);
+      }
+    }
   }
 
   /**
@@ -701,14 +967,9 @@ export class OsMonitor extends EventEmitter {
       const isPlatform = !!ev.platform_block;
       const matches = isPlatform ? [] : patterns.map((p) => ({ pattern: p, severity: 'high', count: 1 }));
       const agentName = ev.blocked_agent || ai.product;
-      // The access-exception key. Most specific first: the PANEL names the exact
-      // AI surface inside an IDE (and "Code" has no host of its own), then the
-      // process name because it names the app actually in the foreground, then
-      // the platform mapping as the fallback for a process the catalog does not
-      // carry a host for.
-      const toolHost = isPlatform
-        ? (hostForPanel(ev.panel) || hostForProcess(ev.process) || hostsForPlatform(ev.blocked_platform)[0] || '')
-        : '';
+      // The access-exception key — see blockToolHost(), which the Request
+      // Access flow below shares so the two can never resolve a different host.
+      const toolHost = isPlatform ? blockToolHost(ev) : '';
       // reason: 'send' (Enter) | 'paste' (Ctrl+V) | 'click' (send button) | 'attachment' (sensitive file attached).
       const reason = isPlatform ? 'platform' : isAttachment ? 'file_upload' : ev.reason === 'paste' ? 'prompt_paste' : 'prompt_submit';
       const how = isPlatform ? 'blocked platform' : isAttachment ? `attachment "${ev.filename}"` : ev.reason === 'paste' ? 'paste' : ev.reason === 'click' ? 'send-button click' : 'send';
@@ -786,6 +1047,23 @@ export class OsMonitor extends EventEmitter {
         // attribution and can carry a panel id for an app-scoped block.
         block_scope: ev.block_scope || '',
       })));
+    });
+
+    // ── Request Access, at the moment of the block ────────────────────────────
+    //
+    // The enforcer emits ONE of these per block session, from the same instant
+    // it swallowed the send (see OfferAccessRequest in enforcer-win.ps1). This
+    // is the only visible UI the agent ever produces, and it exists for the
+    // seconds the dialog is on screen — mirroring how the browser extension
+    // already asks. There is no window, no tray icon and no standing surface.
+    //
+    // Errors are swallowed into a log line on purpose: this runs off an
+    // enforcer stdout line, so an unhandled rejection here would be an
+    // unhandled rejection in the monitor.
+    this.enforcer.on('requestaccessoffer', (ev) => {
+      this.#offerAccessRequest(ev).catch((err) => {
+        this.log?.warn(`access-request: offer failed — ${err?.message || err}`);
+      });
     });
 
     // Standing blocked-platform bar (desktop) — the counterpart of the browser

@@ -9,6 +9,7 @@
 // Governance" instead of "Windows PowerShell".
 
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { helperScript } from './helper-path.js';
@@ -17,6 +18,14 @@ import { helperScript } from './helper-path.js';
 // CommonJS this expression threw at load and took the whole agent with it.
 const HELPER_SCRIPT = helperScript('toast-helper.ps1');
 
+// How long a Request Access dialog may stay unanswered before this side stops
+// waiting for it. The dialog is ephemeral by design; if the user walks away with
+// it open, the correlation entry must not live forever. The helper's form is NOT
+// closed by this — it is still theirs to submit, and a late submit simply finds
+// no correlation entry and is dropped, which is the correct outcome: by then the
+// pre-check the caller ran is stale.
+const REQUEST_DIALOG_TIMEOUT_MS = 5 * 60 * 1000;
+
 export class ToastService {
   constructor({ log }) {
     this.log = log;
@@ -24,6 +33,14 @@ export class ToastService {
     this.ready = false;
     this.queueBeforeReady = [];
     this.stopRequested = false;
+    // request_id -> { resolve, timer }. In memory only, deliberately: a dialog
+    // is answered within seconds of the block that opened it, and a request that
+    // outlives the process was never submitted.
+    this.pendingDialogs = new Map();
+    // Whether the helper managed to compile its dialog type at startup. False
+    // means every showRequestDialog() answers 'unavailable' immediately instead
+    // of waiting on a form that can never appear.
+    this.dialogSupported = false;
   }
 
   start() {
@@ -50,10 +67,19 @@ export class ToastService {
           const ev = JSON.parse(line);
           if (ev.kind === 'ready') {
             this.ready = true;
-            this.log?.info(`toast: helper ready (aumid=${ev.aumid})`);
+            this.dialogSupported = ev.dialog === true;
+            this.log?.info(`toast: helper ready (aumid=${ev.aumid}, dialog=${this.dialogSupported})`);
             // Flush any toasts queued before ready
             for (const c of this.queueBeforeReady) this.#write(c);
             this.queueBeforeReady.length = 0;
+          } else if (ev.kind === 'access_request_result') {
+            // The user answered (or the helper refused to open a second dialog
+            // for the same block session). Only the action and the reason THEY
+            // typed come back — see toast-helper.ps1.
+            this.#settleDialog(ev.request_id, {
+              action: String(ev.action || 'cancel'),
+              reason: typeof ev.reason === 'string' ? ev.reason : '',
+            });
           }
         } catch {
           // ignore non-JSON lines
@@ -70,7 +96,14 @@ export class ToastService {
     this.child.on('exit', (code, signal) => {
       this.log?.warn(`toast: helper exited code=${code} signal=${signal}`);
       this.ready = false;
+      this.dialogSupported = false;
       this.child = null;
+      // Any dialog that was on screen died with the helper. Answer every
+      // waiting caller now rather than leaving it holding a promise that can
+      // never settle — 'unavailable' is truthful and makes no request.
+      for (const id of [...this.pendingDialogs.keys()]) {
+        this.#settleDialog(id, { action: 'unavailable', reason: '' });
+      }
       if (!this.stopRequested) {
         // Auto-restart after a short delay so a one-off crash doesn't
         // silently disable notifications for the rest of the agent's life.
@@ -113,6 +146,63 @@ export class ToastService {
       return;
     }
     this.#write(cmd);
+  }
+
+  /**
+   * Open the ephemeral Request Access dialog and resolve with what the user
+   * did. The ONLY visible UI this agent ever produces: it appears at the moment
+   * a blocked send was swallowed and disappears on submit/cancel — no window,
+   * no taskbar entry, no tray icon (toast-helper.ps1 sets ShowInTaskbar=false
+   * and this process is spawned windowsHide:true).
+   *
+   * Resolves { action, reason } where action is:
+   *   'submit'      — the user typed a reason and asked. `reason` is that text
+   *                   and nothing else; no prompt content exists on this path.
+   *   'cancel'      — they dismissed it (or closed the window, or pressed Esc).
+   *   'suppressed'  — a dialog for this same block session is already on screen,
+   *                   so nothing new was shown.
+   *   'unavailable' — no helper, not Windows, or the helper could not build its
+   *                   dialog type. The caller should fall back to a toast.
+   *   'timeout'     — left unanswered past REQUEST_DIALOG_TIMEOUT_MS.
+   *
+   * `dedupeKey` is what the helper dedupes on, and must identify the BLOCK
+   * (agent id / host), not the individual attempt — so repeated Enter-presses
+   * while a dialog is up all resolve to the one form. The guard is CONCURRENCY
+   * only: the helper releases the key when the form closes, and the next
+   * blocked send legitimately opens a new dialog.
+   */
+  showRequestDialog({ agentName = '', appName = '', dedupeKey = '' } = {}) {
+    if (process.platform !== 'win32') return Promise.resolve({ action: 'unavailable', reason: '' });
+    // Deliberately NOT queued behind `ready` like a toast is: a dialog that
+    // arrives after the moment of the block has lost its whole context, and
+    // would appear over whatever the user moved on to.
+    if (!this.ready || !this.dialogSupported || !this.child) {
+      return Promise.resolve({ action: 'unavailable', reason: '' });
+    }
+    const requestId = randomUUID();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.#settleDialog(requestId, { action: 'timeout', reason: '' });
+      }, REQUEST_DIALOG_TIMEOUT_MS);
+      timer.unref?.();
+      this.pendingDialogs.set(requestId, { resolve, timer });
+      this.#write({
+        cmd: 'show_request_dialog',
+        request_id: requestId,
+        dedupe_key: dedupeKey || requestId,
+        agent_name: agentName,
+        app_name: appName,
+      });
+    });
+  }
+
+  #settleDialog(requestId, result) {
+    const id = String(requestId || '');
+    const entry = this.pendingDialogs.get(id);
+    if (!entry) return;              // unknown / already settled / timed out
+    this.pendingDialogs.delete(id);
+    clearTimeout(entry.timer);
+    entry.resolve(result);
   }
 
   #write(cmd) {

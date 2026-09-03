@@ -2844,15 +2844,28 @@
                 submitBtn.disabled = true;
                 try {
                   // Route through service worker to avoid mixed-content blocks
+                  const message = {
+                    kind: 'access_request',
+                    tool_host: opts.requestAccess.tool_host,
+                    tool_name: opts.requestAccess.tool_name,
+                    tool_vendor: opts.requestAccess.tool_vendor,
+                    reason,
+                  };
+                  // Agent-scoped block (Teams/Copilot per-agent narrowing): name
+                  // the ONE agent the admin blocked so the approval can be
+                  // narrowed to it instead of granting the whole host app. Set
+                  // only when the caller supplied it, so a whole-host block's
+                  // message keeps exactly the shape it has always had.
+                  //
+                  // These values come from the matched blocklist row — what an
+                  // admin typed in AI Hub — never from the page's own agent UI.
+                  // See showBlockedAgentPopup().
+                  if (opts.requestAccess.block_scope) message.block_scope = opts.requestAccess.block_scope;
+                  if (opts.requestAccess.agent_id) message.agent_id = opts.requestAccess.agent_id;
+                  if (opts.requestAccess.agent_name) message.agent_name = opts.requestAccess.agent_name;
                   const result = await new Promise((resolve, reject) => {
                     try {
-                      chrome.runtime.sendMessage({
-                        kind: 'access_request',
-                        tool_host: opts.requestAccess.tool_host,
-                        tool_name: opts.requestAccess.tool_name,
-                        tool_vendor: opts.requestAccess.tool_vendor,
-                        reason,
-                      }, (response) => {
+                      chrome.runtime.sendMessage(message, (response) => {
                         if (chrome.runtime.lastError) {
                           const msg = chrome.runtime.lastError.message || '';
                           if (msg.includes('invalidated') || msg.includes('Receiving end does not exist')) {
@@ -2871,6 +2884,11 @@
                     }
                   });
                   actionsDiv.innerHTML = '<div style="text-align:center;padding:12px;color:#22c55e;font-weight:600;">✓ Request submitted! Your admin will review it.</div>';
+                  // Lets the caller stop re-offering "Request Access" for
+                  // something now pending — the agent-block path uses it so the
+                  // next Enter press shows the plain notice instead of a form
+                  // the server would 409.
+                  try { opts.requestAccess.onSubmitted?.(); } catch (e) {}
                 } catch (err) {
                   let msg;
                   if (err.message?.includes('invalidated') || err.message?.includes('Receiving end')) {
@@ -4463,6 +4481,86 @@
     return null;
   }
 
+  // ── Agent-block Request Access ─────────────────────────────────────────────
+  // The whole-HOST block has offered a reason box since the access-requests
+  // feature shipped (showPlatformBlockPopup → showCfaiPopup's requestAccess
+  // branch). The per-AGENT block below only ever raised showWarning(), a
+  // dismiss-only toast with no button, so an employee who hit "this one Copilot
+  // agent is blocked" had no way to ask for it at all and no reason to believe
+  // asking was possible. Same modal, same message channel, same server route —
+  // the only additions are block_scope:'agent' and the agent's identity.
+  //
+  // WHICH IDENTITY. `agent` is the row isBlockedAgentActive() matched out of
+  // _blockedList, i.e. GET /api/lifecycle/blocked-agents, i.e. what an admin
+  // typed in AI Hub. getHeaderAgentText() scrapes the page to decide WHETHER
+  // that row matched, and nothing it read is used here or sent anywhere — the
+  // desktop enforcer holds the same line (a parsed foreground window title never
+  // leaves the process, only the configured value does), and a governance
+  // product that quietly uploaded whatever string it found in a customer's page
+  // header would be indefensible.
+  let _agentAccessRequested = new Set();
+
+  function agentBlockKey(agent) {
+    const id = String(agent?.agent_id ?? '').trim();
+    if (id) return 'id:' + id;
+    const name = String(agent?.agent_name ?? '').trim().toLowerCase();
+    return name ? 'name:' + name : '';
+  }
+
+  function showBlockedAgentPopup(agent) {
+    const label = agent?.agent_name || agent?.agent_id || 'This AI agent';
+    const notice = () => showWarning(
+      [{ pattern: 'Blocked agent: ' + label, severity: 'critical', count: 1 }],
+      'Agent blocked by organization policy'
+    );
+
+    const key = agentBlockKey(agent);
+    // ONE popup per block session. This runs from the Enter/click handlers, so
+    // without these two guards every send attempt would tear down and re-render
+    // the modal — including one the user is mid-sentence in.
+    //   • existingCfaiModal() — a popup (ours or the DLP one) is already up.
+    //   • _agentAccessRequested — a request for THIS EXACT agent already went
+    //     through in this page session, so re-offering the form would only earn
+    //     a 409. Keyed per agent, never per host: a pending ask about agent A is
+    //     not an answer about agent B on the same host, which is exactly the
+    //     asymmetry the server's agent_key gives us.
+    // A server-side pending request from a PREVIOUS page load is not known here
+    // (the extension caches no /access-requests/mine state), and does not need
+    // to be: the submit path already renders the 409 as "You already have a
+    // pending request for this tool."
+    if (existingCfaiModal()) return;
+    // No agent identity ⇒ the server would 400 a block_scope:'agent' request,
+    // and rightly so. Fall back to today's dismiss-only notice rather than
+    // rendering a button that cannot succeed.
+    if (!key || !isFeatureOn('access_requests')) { notice(); return; }
+    if (_agentAccessRequested.has(key)) { notice(); return; }
+
+    showCfaiPopup({
+      title: `${label} is blocked`,
+      body:  'CloudFuze AI Governance has disallowed this AI agent for your organization. Prompts cannot be sent to it. Other agents and the rest of this app are unaffected.',
+      matches: [],
+      hint:  'Need access to this agent? Click below to submit a request to your administrator.',
+      hardBlock: true,
+      requestAccess: {
+        // The host app the agent is published into — what an approved exception
+        // is granted against, and what the server pairs with agent_name to read
+        // "IT Help Desk Agent (teams.microsoft.com)" in the approval queue.
+        tool_host:   location.hostname,
+        tool_name:   location.hostname,
+        tool_vendor: null,
+        block_scope: 'agent',
+        agent_id:    agent?.agent_id || null,
+        agent_name:  agent?.agent_name || null,
+        onSubmitted: () => { if (key) _agentAccessRequested.add(key); },
+      },
+    });
+  }
+  // ── end agent-block Request Access ─────────────────────────────────────────
+  // (The sentinels above are a test seam — tests/load-agent-block-request.mjs
+  // slices this exact region out of the shipped file and drives it with stubs,
+  // rather than asserting on source text. Keep the region free of any dependency
+  // beyond the five injected there.)
+
   function enforceBlockedAgent() {
     const blocked = isBlockedAgentActive();
     const inputs = document.querySelectorAll(
@@ -4472,6 +4570,13 @@
     if (blocked) {
       // Disable all input fields
       inputs.forEach(el => {
+        // NEVER OUR OWN UI. This selector matches the Request Access reason box
+        // too, and this loop runs every 500ms — so in the light-DOM fallback
+        // (no adopted stylesheet, modal not in a shadow root) it would set
+        // pointer-events:none on the textarea the user is being invited to type
+        // into, half a second after offering it. Shadow DOM hides the modal from
+        // querySelectorAll; the fallback needs this guard.
+        if (el.closest(MODAL_HOST_SELECTOR + ', .cfai-toast')) return;
         if (!el.dataset.cfaiBlocked) {
           el.dataset.cfaiBlocked = '1';
           el.dataset.cfaiOrigPointerEvents = el.style.pointerEvents || '';
@@ -4492,15 +4597,15 @@
         // Block Enter key at capture phase (before app sees it)
         document.addEventListener('keydown', function(e) {
           if (e.key === 'Enter' && !e.shiftKey) {
+            // Our own modal owns its keystrokes — Enter in the reason box, or on
+            // the Submit/Got it buttons, is not a send attempt at this agent.
+            if (isCfaiOwnUiEvent(e)) return;
             const activeBlocked = isBlockedAgentActive();
             if (activeBlocked) {
               e.preventDefault();
               e.stopPropagation();
               e.stopImmediatePropagation();
-              showWarning(
-                [{ pattern: 'Blocked agent: ' + activeBlocked.agent_name, severity: 'critical', count: 1 }],
-                'Agent blocked by organization policy'
-              );
+              showBlockedAgentPopup(activeBlocked);
               return false;
             }
           }
@@ -4508,6 +4613,9 @@
 
         // Block send button clicks — ONLY buttons inside/near the input area
         document.addEventListener('click', function(e) {
+          // Clicks on our own modal (Request Access, Submit, Cancel, Got it) are
+          // not send attempts and must not be cancelled here.
+          if (isCfaiOwnUiEvent(e)) return;
           const activeBlocked = isBlockedAgentActive();
           if (!activeBlocked) return;
 
@@ -4527,10 +4635,7 @@
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
-            showWarning(
-              [{ pattern: 'Blocked agent: ' + activeBlocked.agent_name, severity: 'critical', count: 1 }],
-              'Agent blocked by organization policy'
-            );
+            showBlockedAgentPopup(activeBlocked);
             return false;
           }
         }, true); // capture phase

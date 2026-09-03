@@ -295,7 +295,16 @@ test('/access-exceptions/mine returns this machine\'s live exceptions only', asy
     assert.equal(res.body[0].tool_name, 'Claude');
     assert.ok(res.body[0].expires_at);
     // machine_id / request_id are not part of the agent-facing shape.
-    assert.deepEqual(Object.keys(res.body[0]).sort(), ['expires_at', 'tool_host', 'tool_name']);
+    //
+    // scope / agent_id / agent_name ARE, deliberately: the enforcer has to know
+    // whether a grant lifts the whole app or only one named agent, and a row
+    // written before agent scoping existed reports scope:'host' with both agent
+    // fields null — which is what all four seeded rows below are.
+    assert.deepEqual(Object.keys(res.body[0]).sort(),
+      ['agent_id', 'agent_name', 'expires_at', 'scope', 'tool_host', 'tool_name']);
+    assert.equal(res.body[0].scope, 'host', 'a legacy row with no scope field must read as host-wide');
+    assert.equal(res.body[0].agent_id, null);
+    assert.equal(res.body[0].agent_name, null);
   }, async (db) => {
     await db.collection('access_exceptions').insertOne({
       machine_id: MACHINE, tool_host: 'claude.ai', tool_name: 'Claude', request_id: 'r1',
@@ -483,10 +492,342 @@ test('approving a desktop request produces an exception the agent can read back'
     const mine = await get('/api/v1/access-exceptions/mine', { token: desktopToken() });
     assert.deepEqual(mine.body.map((r) => r.tool_host), ['claude.ai'],
       'the exception key is the canonical vendor host, which is what the agent filters blocked-agents.json on');
+    assert.equal(mine.body[0].scope, 'host',
+      'a request with no block_scope is a whole-app block, so the grant is host-wide');
 
     // …and the request itself now reads as approved on the device.
     const reqs = await get('/api/v1/access-requests/mine', { token: desktopToken() });
     assert.equal(reqs.body[0].status, 'approved');
     assert.ok(reqs.body[0].expires_at);
+    assert.equal(reqs.body[0].block_scope, 'app');
+  });
+});
+
+// ── 5. Per-agent scope ───────────────────────────────────────────────────────
+//
+// A block can be narrowed to ONE NAMED AGENT inside a host app (an agent in
+// Microsoft Teams, one M365 Copilot agent). Everything below is about the
+// over-grant that the host-only key produced: a single {machine_id, tool_host}
+// exception document meant the FIRST per-agent approval on a host both
+// overwrote any other agent's live grant and read back as "allowed" for every
+// agent there, on the desktop enforcer and via /check in the browser alike.
+
+const TEAMS = { tool_host: 'teams.microsoft.com', tool_name: 'Microsoft Teams' };
+const AGENT_A = {
+  ...DESKTOP_BODY, ...TEAMS, platform: 'ms_teams', process_name: 'ms-teams',
+  block_scope: 'agent', agent_id: 'agent-a', agent_name: 'IT Help Desk Agent',
+};
+const AGENT_B = { ...AGENT_A, agent_id: 'agent-b', agent_name: 'Finance Bot' };
+
+const checkUrl = (host, query = '', machineId = MACHINE) =>
+  `/api/v1/access-exceptions/check?machine_id=${machineId}&tool_host=${host}${query}`;
+
+test('approving one agent on a host grants only that agent', async () => {
+  await withServer(async ({ post, put, get, db }) => {
+    const a = await post('/api/v1/access-requests', { token: desktopToken(), body: AGENT_A });
+    const b = await post('/api/v1/access-requests', { token: desktopToken(), body: AGENT_B });
+    assert.equal(a.status, 201);
+    assert.equal(b.status, 201, 'a pending ask about agent A must not 409 an ask about agent B');
+
+    const approved = await put(`/api/v1/access-requests/${a.body.id}/approve`, {
+      token: ADMIN_TOKEN, body: { expires_in_hours: 8 },
+    });
+    assert.equal(approved.status, 200);
+    assert.equal(approved.body.scope, 'agent');
+
+    // (a) Agent B's request is untouched, and exactly ONE exception exists —
+    // agent A's. Nothing was minted or overwritten on B's behalf.
+    assert.equal(db._rows('access_requests').find((r) => r.id === b.body.id).status, 'pending');
+    const exc = db._rows('access_exceptions');
+    assert.equal(exc.length, 1);
+    assert.equal(exc[0].scope, 'agent');
+    assert.equal(exc[0].agent_key, 'agent-a');
+    assert.equal(exc[0].agent_name, 'IT Help Desk Agent');
+
+    // (b) A caller that names NO agent is not allowed: there is no host-scoped
+    // grant here, only an agent-scoped one. This is the over-grant itself.
+    const anon = await get(checkUrl('teams.microsoft.com'));
+    assert.equal(anon.status, 200);
+    assert.equal(anon.body.allowed, false);
+
+    // (c) The approved agent is allowed, and says so as an agent grant.
+    const okA = await get(checkUrl('teams.microsoft.com', '&agent_id=agent-a'));
+    assert.equal(okA.body.allowed, true);
+    assert.equal(okA.body.scope, 'agent');
+    assert.equal(okA.body.agent_name, 'IT Help Desk Agent');
+    assert.ok(okA.body.expires_at);
+
+    // (d) The agent that was NOT approved stays blocked, by id or by name.
+    assert.equal((await get(checkUrl('teams.microsoft.com', '&agent_id=agent-b'))).body.allowed, false);
+    assert.equal((await get(checkUrl('teams.microsoft.com', '&agent_name=Finance%20Bot'))).body.allowed, false);
+
+    // …and the grant does not leak to another machine, agent id notwithstanding.
+    assert.equal((await get(checkUrl('teams.microsoft.com', '&agent_id=agent-a', OTHER))).body.allowed, false);
+  });
+});
+
+test('approving a second agent on the same host does not overwrite the first grant', async () => {
+  await withServer(async ({ post, put, get, db }) => {
+    const a = await post('/api/v1/access-requests', { token: desktopToken(), body: AGENT_A });
+    const b = await post('/api/v1/access-requests', { token: desktopToken(), body: AGENT_B });
+
+    for (const id of [a.body.id, b.body.id]) {
+      assert.equal((await put(`/api/v1/access-requests/${id}/approve`, {
+        token: ADMIN_TOKEN, body: { expires_in_hours: 8 },
+      })).status, 200);
+    }
+
+    // Two documents, not one. {machine_id, tool_host} alone made the second
+    // approval a last-writer-wins update over the first.
+    const exc = db._rows('access_exceptions').filter((e) => e.tool_host === 'teams.microsoft.com');
+    assert.equal(exc.length, 2);
+    assert.deepEqual(exc.map((e) => e.agent_key).sort(), ['agent-a', 'agent-b']);
+
+    assert.equal((await get(checkUrl('teams.microsoft.com', '&agent_id=agent-a'))).body.allowed, true);
+    assert.equal((await get(checkUrl('teams.microsoft.com', '&agent_id=agent-b'))).body.allowed, true);
+    assert.equal((await get(checkUrl('teams.microsoft.com'))).body.allowed, false,
+      'two agent grants are still not a grant for the whole app');
+  });
+});
+
+test('a host-scoped grant allows the whole app, agent named or not', async () => {
+  await withServer(async ({ get }) => {
+    for (const query of ['', '&agent_id=agent-a', '&agent_name=Some%20Other%20Agent']) {
+      const res = await get(checkUrl('claude.ai', query));
+      assert.equal(res.body.allowed, true, `host-wide grant must cover "${query}"`);
+      assert.equal(res.body.scope, 'host');
+    }
+  }, async (db) => {
+    // No `scope` field at all — a row exactly as earlier builds wrote it.
+    await db.collection('access_exceptions').insertOne({
+      machine_id: MACHINE, tool_host: 'claude.ai', tool_name: 'Claude', request_id: 'r1',
+      active: true, expires_at: new Date(Date.now() + 8 * 3600000),
+    });
+  });
+});
+
+test('an agent grant with no id matches on the normalized display name', async () => {
+  await withServer(async ({ get }) => {
+    // The enforcer reads the name off a UI label, the extension off the DOM, so
+    // case and internal whitespace differ between the two for the same agent.
+    const spellings = ['IT Help Desk Agent', 'it  help   desk agent', 'IT HELP DESK AGENT '];
+    for (const name of spellings) {
+      const res = await get(checkUrl('teams.microsoft.com', '&agent_name=' + encodeURIComponent(name)));
+      assert.equal(res.body.allowed, true, `"${name}" is the same agent`);
+      assert.equal(res.body.scope, 'agent');
+    }
+    assert.equal((await get(checkUrl('teams.microsoft.com', '&agent_name=Finance%20Bot'))).body.allowed, false);
+    assert.equal((await get(checkUrl('teams.microsoft.com'))).body.allowed, false);
+  }, async (db) => {
+    await db.collection('access_exceptions').insertOne({
+      machine_id: MACHINE, ...TEAMS, request_id: 'r-agent', scope: 'agent',
+      agent_id: null, agent_name: 'IT Help Desk Agent', agent_key: 'it help desk agent',
+      active: true, expires_at: new Date(Date.now() + 8 * 3600000),
+    });
+  });
+});
+
+test("block_scope 'agent' with no agent identity is a 400, not a host-wide request", async () => {
+  await withServer(async ({ post, db }) => {
+    for (const body of [
+      { ...AGENT_A, agent_id: null, agent_name: null },
+      { ...AGENT_A, agent_id: '', agent_name: '   ' },
+      { ...AGENT_A, agent_id: undefined, agent_name: undefined },
+    ]) {
+      const res = await post('/api/v1/access-requests', { token: desktopToken(), body });
+      assert.equal(res.status, 400, 'an agent-scoped ask that names no agent grants the whole app on approval');
+    }
+    assert.equal(db._rows('access_requests').length, 0);
+  });
+});
+
+test('an unknown block_scope is rejected instead of stored', async () => {
+  await withServer(async ({ post, db }) => {
+    assert.equal((await post('/api/v1/access-requests', {
+      token: desktopToken(), body: { ...AGENT_A, block_scope: 'everything' },
+    })).status, 400);
+    assert.equal(db._rows('access_requests').length, 0);
+    // The three that ARE allowed.
+    for (const block_scope of ['app', 'panel', 'agent']) {
+      assert.equal((await post('/api/v1/access-requests', {
+        token: desktopToken(), body: { ...AGENT_A, block_scope, tool_host: block_scope + '.example.com' },
+      })).status, 201);
+    }
+  });
+});
+
+test('agent_key is derived server-side and never taken from the body', async () => {
+  await withServer(async ({ post, db }) => {
+    // A client trying to name its own key: '' would be a host-wide grant.
+    const res = await post('/api/v1/access-requests', {
+      token: desktopToken(),
+      body: { ...AGENT_A, agent_id: null, agent_name: 'IT  Help Desk  Agent', agent_key: '' },
+    });
+    assert.equal(res.status, 201);
+    const [row] = db._rows('access_requests');
+    assert.equal(row.agent_key, 'it help desk agent');
+    assert.equal(row.agent_name, 'IT  Help Desk  Agent', 'the display name is stored as seen');
+    assert.equal(row.block_scope, 'agent');
+
+    // An id beats the name, verbatim — ids are not case-folded.
+    assert.equal((await post('/api/v1/access-requests', {
+      token: desktopToken(), body: { ...AGENT_A, agent_id: 'Agent-XYZ', tool_host: 'copilot.microsoft.com' },
+    })).status, 201);
+    assert.equal(db._rows('access_requests').find((r) => r.tool_host === 'copilot.microsoft.com').agent_key, 'Agent-XYZ');
+
+    // A whole-app request has no agent key at all, even when it carries the
+    // enforcer's agent_id for provenance.
+    assert.equal((await post('/api/v1/access-requests', { token: desktopToken(), body: DESKTOP_BODY })).status, 201);
+    const app = db._rows('access_requests').find((r) => r.tool_host === 'claude.ai');
+    assert.equal(app.block_scope, 'app');
+    assert.equal(app.agent_key, '');
+    assert.equal(app.agent_id, 'agent-77');
+  });
+});
+
+test('a rejection for an agent-scoped request does not gag an immediate retry, or another agent', async () => {
+  await withServer(async ({ post }) => {
+    // Agent-scoped requests carry no rejection cooldown — the desktop dialog
+    // reopens on every blocked send attempt, so a 24h gag would silently
+    // swallow every later attempt. Immediate resubmission is allowed.
+    const same = await post('/api/v1/access-requests', { token: desktopToken(), body: AGENT_A });
+    assert.equal(same.status, 201);
+
+    // A different agent on the same host is a different question, same as before.
+    assert.equal((await post('/api/v1/access-requests', { token: desktopToken(), body: AGENT_B })).status, 201);
+  }, async (db) => {
+    await db.collection('access_requests').insertOne({
+      id: 'req-rej-agent-a', machine_id: MACHINE, hostname: 'DESKTOP-CFAI', ...TEAMS,
+      status: 'rejected', surface: 'desktop', block_scope: 'agent',
+      agent_id: 'agent-a', agent_name: 'IT Help Desk Agent', agent_key: 'agent-a',
+      submitted_at: new Date(Date.now() - 7200000), reviewed_at: new Date(Date.now() - 3600000),
+    });
+  });
+});
+
+test('the hostname cooldown fallback does not apply to agent-scoped requests', async () => {
+  // Body-trust path: a reinstall mints a new machine_id, so the hostname is the
+  // only continuity — but agent-scoped requests carry no rejection cooldown at
+  // all now, on either identity path.
+  await withServer(async ({ post }) => {
+    assert.equal((await post('/api/v1/access-requests', {
+      body: { machine_id: 'mach-ext-new', hostname: 'LAPTOP-1', ...TEAMS,
+        block_scope: 'agent', agent_id: 'agent-a', agent_name: 'IT Help Desk Agent' },
+    })).status, 201);
+    assert.equal((await post('/api/v1/access-requests', {
+      body: { machine_id: 'mach-ext-new', hostname: 'LAPTOP-1', ...TEAMS,
+        block_scope: 'agent', agent_id: 'agent-b', agent_name: 'Finance Bot' },
+    })).status, 201);
+  }, async (db) => {
+    await db.collection('access_requests').insertOne({
+      id: 'req-ext-rej-a', machine_id: 'mach-ext-old', hostname: 'LAPTOP-1', ...TEAMS,
+      status: 'rejected', block_scope: 'agent', agent_id: 'agent-a',
+      agent_name: 'IT Help Desk Agent', agent_key: 'agent-a',
+      submitted_at: new Date(Date.now() - 7200000), reviewed_at: new Date(Date.now() - 3600000),
+    });
+  });
+});
+
+test('/access-requests/mine carries the agent identity so the client can pre-check per agent', async () => {
+  await withServer(async ({ post, get }) => {
+    await post('/api/v1/access-requests', { token: desktopToken(), body: AGENT_A });
+    const res = await get('/api/v1/access-requests/mine', { token: desktopToken() });
+    assert.equal(res.status, 200);
+    assert.equal(res.body[0].block_scope, 'agent');
+    assert.equal(res.body[0].agent_id, 'agent-a');
+    assert.equal(res.body[0].agent_name, 'IT Help Desk Agent');
+    // agent_key is an internal match key; it is not part of the client contract.
+    assert.equal('agent_key' in res.body[0], false);
+  });
+});
+
+test('the admin exception list carries the scope and agent for the AI Hub', async () => {
+  await withServer(async ({ get }) => {
+    const res = await get('/api/v1/access-exceptions', { token: ADMIN_TOKEN });
+    assert.equal(res.status, 200);
+    const byHost = Object.fromEntries(res.body.map((r) => [r.tool_host, r]));
+
+    assert.equal(byHost['teams.microsoft.com'].scope, 'agent');
+    assert.equal(byHost['teams.microsoft.com'].agent_id, 'agent-a');
+    assert.equal(byHost['teams.microsoft.com'].agent_name, 'IT Help Desk Agent');
+
+    // A row from before agent scoping: defaulted, never undefined.
+    assert.equal(byHost['claude.ai'].scope, 'host');
+    assert.equal(byHost['claude.ai'].agent_id, null);
+    assert.equal(byHost['claude.ai'].agent_name, null);
+    // Existing fields are unchanged.
+    assert.equal(byHost['claude.ai'].machine_id, MACHINE);
+    assert.equal(byHost['claude.ai'].tool_name, 'Claude');
+  }, async (db) => {
+    await db.collection('access_exceptions').insertOne({
+      machine_id: MACHINE, ...TEAMS, request_id: 'r-agent', scope: 'agent',
+      agent_id: 'agent-a', agent_name: 'IT Help Desk Agent', agent_key: 'agent-a',
+      active: true, expires_at: new Date(Date.now() + 8 * 3600000),
+    });
+    await db.collection('access_exceptions').insertOne({
+      machine_id: MACHINE, tool_host: 'claude.ai', tool_name: 'Claude', request_id: 'r1',
+      active: true, expires_at: new Date(Date.now() + 8 * 3600000),
+    });
+  });
+});
+
+test('a host-wide approval still lands on the exception row an older build created', async () => {
+  // The legacy row has no agent_key field, so a bare `agent_key: ''` filter would
+  // miss it and mint a SECOND host exception for the same host.
+  await withServer(async ({ put, db }) => {
+    assert.equal(db._rows('access_exceptions').length, 1);
+    assert.equal((await put('/api/v1/access-requests/req-legacy/approve', {
+      token: ADMIN_TOKEN, body: { expires_in_hours: 8 },
+    })).status, 200);
+
+    const exc = db._rows('access_exceptions');
+    assert.equal(exc.length, 1, 'the pre-existing host row is updated, not duplicated');
+    assert.equal(exc[0].scope, 'host');
+    assert.equal(exc[0].agent_key, '');
+    assert.equal(exc[0].request_id, 'req-legacy');
+  }, async (db) => {
+    await db.collection('access_requests').insertOne({
+      id: 'req-legacy', machine_id: MACHINE, tool_host: 'claude.ai', tool_name: 'Claude',
+      status: 'pending', surface: 'browser', submitted_at: new Date(Date.now() - 3600000),
+    });
+    await db.collection('access_exceptions').insertOne({
+      machine_id: MACHINE, tool_host: 'claude.ai', tool_name: 'Claude', request_id: 'r-old',
+      active: true, expires_at: new Date(Date.now() - 3600000),
+    });
+  });
+});
+
+// ── Cross-surface: the same person's desktop agent and browser extension ────
+
+test('an exception granted to the desktop machine is visible to the same person\'s browser extension', async () => {
+  await withServer(async ({ post, put, get }) => {
+    assert.equal((await post('/api/v1/access-requests', { token: desktopToken(), body: AGENT_A })).status, 201);
+    const [pending] = (await get('/api/v1/access-requests/mine', { token: desktopToken() })).body;
+    assert.equal((await put(`/api/v1/access-requests/${pending.id}/approve`, {
+      token: ADMIN_TOKEN, body: { expires_in_hours: 8 },
+    })).status, 200);
+
+    // MACHINE requested and was approved — sees it, unsurprisingly.
+    const mine = await get('/api/v1/access-exceptions/mine', { token: desktopToken() });
+    assert.equal(mine.body.length, 1);
+    assert.equal(mine.body[0].agent_id, 'agent-a');
+
+    // OTHER is a different machine_id (the browser extension's own enrolment)
+    // but the identity scanner already linked it to the same person as MACHINE
+    // — the exception must be visible there too, not just on the exact machine
+    // that filed the request.
+    const browserSide = await get('/api/v1/access-exceptions/mine', { token: desktopToken(OTHER, 'LAPTOP-BROWSER') });
+    assert.equal(browserSide.body.length, 1, 'same person, different surface — must see the grant');
+    assert.equal(browserSide.body[0].agent_id, 'agent-a');
+    assert.equal(browserSide.body[0].scope, 'agent');
+
+    // A third, UNLINKED machine must see nothing — this is not a fleet-wide
+    // bypass, only a same-person one.
+    const stranger = await get('/api/v1/access-exceptions/mine', { token: desktopToken('mach-unrelated', 'SOMEONE-ELSES-PC') });
+    assert.equal(stranger.body.length, 0, 'an unlinked machine gets no grant it did not earn');
+  }, async (db) => {
+    await db.collection('employee_profiles').insertOne({
+      display_name: 'Pravallika', machine_ids: [MACHINE, OTHER],
+    });
   });
 });

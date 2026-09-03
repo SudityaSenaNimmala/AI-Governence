@@ -163,6 +163,18 @@ export async function applyInitialSchema(db) {
   await db.collection('webhook_log').createIndex({ webhook_id: 1 });
 
   // access_requests
+  //
+  // PER-AGENT SCOPE. A block is no longer always "this whole app on this host":
+  // it can be narrowed to one named agent inside a host app (an agent in Microsoft
+  // Teams, a specific M365 Copilot agent). So a request additionally carries
+  //   block_scope  'app' | 'panel' | 'agent'   (absent ⇒ 'app')
+  //   agent_name   the display name the enforcer/extension saw
+  //   agent_key    derived SERVER-side, never trusted from the body:
+  //                agent_id || lower(collapse-whitespace(agent_name)) for an
+  //                agent-scoped request, '' otherwise
+  // There is no migration: rows written before this simply lack the fields, and
+  // every query treats a missing agent_key as '' so whole-app behaviour is
+  // untouched (see routes/access-requests.js, keyMatch()).
   await db.collection('access_requests').createIndex({ id: 1 }, { unique: true });
   await db.collection('access_requests').createIndex({ machine_id: 1, tool_host: 1 });
   await db.collection('access_requests').createIndex({ status: 1 });
@@ -171,9 +183,23 @@ export async function applyInitialSchema(db) {
   // continuity there is (routes/access-requests.js). Without this the check is a
   // collection scan on every extension submit that is NOT in cooldown.
   await db.collection('access_requests').createIndex({ hostname: 1, tool_host: 1 });
+  // The same two lookups once agent_key is part of the key. Both the pending-dupe
+  // check and the cooldown check now filter on it, so without these the narrowed
+  // form of the hottest write path on this collection degrades to the host-only
+  // index plus an in-memory filter.
+  await db.collection('access_requests').createIndex({ machine_id: 1, tool_host: 1, agent_key: 1 });
+  await db.collection('access_requests').createIndex({ hostname: 1, tool_host: 1, agent_key: 1 });
 
   // access_exceptions
+  //
+  // A grant is scoped the same way the block was:
+  //   scope      'host' | 'agent'   (absent ⇒ 'host', which is every legacy row)
+  //   agent_id / agent_name / agent_key   copied from the approved request
+  // {machine_id, tool_host, agent_key} — not {machine_id, tool_host} — is the
+  // upsert key, because approving agent B on a host must not overwrite the grant
+  // already held for agent A on that same host.
   await db.collection('access_exceptions').createIndex({ machine_id: 1, tool_host: 1 });
+  await db.collection('access_exceptions').createIndex({ machine_id: 1, tool_host: 1, agent_key: 1 });
   await db.collection('access_exceptions').createIndex({ expires_at: 1 });
 
   // sdk_projects — Developer SDK projects, i.e. the per-developer Langfuse

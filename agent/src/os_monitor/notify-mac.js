@@ -42,6 +42,14 @@ export class MacNotifier {
       this.log?.warn('notify mac failed: ' + err.message);
     }
   }
+
+  // Part of the shared notifier surface. The ephemeral Request Access dialog is
+  // Windows-only (WinForms on the toast helper's STA thread) — and so is the
+  // keystroke enforcer that would open one, so this can only ever be reached by
+  // a caller that does not check the platform first.
+  showRequestDialog() {
+    return Promise.resolve({ action: 'unavailable', reason: '' });
+  }
 }
 
 function sanitize(s) {

@@ -21,6 +21,11 @@ import {
   remainingDailyMs,
   accrueDaily,
 } from '../lib/recording.js';
+// The exception-subtraction rule for the blocked-agent list. Pure, and shared
+// with nothing else — content.js cannot import it (classic content script), so
+// enforcement of "an approval actually unblocks this agent" happens HERE, once,
+// before the list is cached and broadcast.
+import { subtractAccessExceptions } from '../lib/blocked-agents.js';
 
 const STORAGE = {
   CONFIG:    'cfai.config',
@@ -942,13 +947,46 @@ syncIdentity().catch(() => {});
 
 // --- blocked agents sync ---
 
+// GET /api/v1/access-exceptions/mine — this device's live, unexpired approvals.
+// Machine-scoped by the token's own claims (requireMachineAuth), so nothing here
+// can name another device; authedFetch supplies the JWT this worker already
+// holds for every other server call, plus its 401 re-enroll retry. This is the
+// same route and the same machine-token auth the desktop poller uses.
+//
+// Returns null (NOT an empty list) on any failure. [] means "no exceptions",
+// which would be indistinguishable from a real answer and would re-block an app
+// the user has approved access to; null means "don't touch the list".
+async function fetchMyAccessExceptions() {
+  try {
+    const res = await authedFetch('/api/v1/access-exceptions/mine');
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return Array.isArray(rows) ? rows : null;
+  } catch {
+    // Not configured / not enrolled / offline — all indistinguishable here, and
+    // all mean the same thing: enforce the last known policy.
+    return null;
+  }
+}
+
 async function refreshBlockedAgents() {
   const config = await getConfig();
   if (!config.serverUrl) return;
   try {
     const res = await fetch(`${config.serverUrl}/api/lifecycle/blocked-agents`);
     if (!res.ok) return;
-    const list = await res.json();
+    const raw = await res.json();
+    // Subtract this device's approved exceptions BEFORE caching or broadcasting.
+    // The content script enforces whatever it is handed, so this is the only
+    // place a browser-side approval can take effect.
+    //
+    // FAIL CLOSED on an exception fetch failure — keep blocking. The user can
+    // still ask again; silently unblocking a disallowed agent because the server
+    // was briefly unreachable is the one outcome that is not recoverable.
+    const exceptions = await fetchMyAccessExceptions();
+    const list = exceptions === null
+      ? (Array.isArray(raw) ? raw : [])
+      : subtractAccessExceptions(Array.isArray(raw) ? raw : [], exceptions);
     await setStored(STORAGE.BLOCKED, list);
     await setStored(STORAGE.BLOCKED_AT, Date.now());
     // Notify content scripts so they can enforce immediately. Only http(s)
@@ -998,6 +1036,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const config = await getConfig();
         if (!config.serverUrl) { sendResponse({ error: 'Extension is not configured. Open extension settings and enter the server URL.' }); return; }
         const machineId = await getOrCreateMachineId();
+        // How narrow the block the user hit actually was. 'app' when the caller
+        // says nothing, which keeps the whole-host block popup's request body
+        // byte-identical to what it has always sent. The agent fields ride along
+        // ONLY when the caller supplied them — the server rejects
+        // block_scope:'agent' with no agent identity (it would grant the whole
+        // app on approval), so an omitted field must stay omitted rather than
+        // becoming an empty string.
+        //
+        // agent_name here is the value an ADMIN typed into the blocklist, passed
+        // through from the matched blocked-agents row. Nothing scraped from the
+        // live page reaches this payload; see showBlockedAgentPopup() in
+        // content/content.js. agent_key is deliberately NOT sent — the server
+        // derives it and discards a client-supplied one.
+        const scope = msg.block_scope || 'app';
+        const agentFields = {};
+        if (msg.agent_id) agentFields.agent_id = msg.agent_id;
+        if (msg.agent_name) agentFields.agent_name = msg.agent_name;
         const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/access-requests`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -1016,6 +1071,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             tool_name: msg.tool_name,
             tool_vendor: msg.tool_vendor,
             reason: msg.reason || '',
+            block_scope: scope,
+            ...agentFields,
           }),
         });
         if (!res.ok) {
@@ -1623,9 +1680,36 @@ const CONTROL_KINDS = new Set([
   'replayComplete',
   'replayDailyAccrued',
 ]);
+
+// The one control message that arrives on `kind` rather than `__cfai_kind`.
+//
+// `access_request` predates the __cfai_kind convention and content.js's block
+// modal still sends it as { kind: 'access_request' }, so isControlMessage() did
+// not recognise it and it fell through to the event path — which is exactly the
+// failure mode the comment above warns about, with two consequences:
+//
+//   1. The REASON THE USER TYPED ("I need Claude for the Acme migration") was
+//      queued and POSTed to /api/v1/dlp as a governance event. Nothing consumes
+//      an access_request event there; the request itself is a row in
+//      access_requests. So this was free-text employee prose landing in the DLP
+//      store for no purpose at all.
+//   2. The event path answered FIRST — Chrome gives the response to whichever
+//      listener calls sendResponse first — so the modal got
+//      { ok:true, session_id:null } instead of the server's verdict. Every
+//      submission rendered "✓ Request submitted!", including a 409 "you already
+//      have one pending" and a total network failure. The dedicated handler's
+//      careful error messages were unreachable.
+//
+// Listed as its own set rather than being added to CONTROL_KINDS so nothing
+// starts believing `kind` and `__cfai_kind` are interchangeable.
+const CONTROL_MESSAGE_KINDS = new Set([
+  'access_request',
+]);
+
 function isControlMessage(msg) {
   if (!msg || typeof msg !== 'object') return false;
   if (msg.__cfai_kind && CONTROL_KINDS.has(msg.__cfai_kind)) return true;
+  if (msg.kind && CONTROL_MESSAGE_KINDS.has(msg.kind)) return true;
   return !!(msg.type && CONTROL_TYPES.has(msg.type));
 }
 

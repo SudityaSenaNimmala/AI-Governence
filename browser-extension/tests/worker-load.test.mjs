@@ -1026,3 +1026,227 @@ test('enrollment reports which browser it is', async () => {
   assert.ok(['edge', 'chrome', 'other'].includes(enroll.body.browser),
     `unexpected browser value: ${enroll.body.browser}`);
 });
+
+// ── Access requests: block scope + agent identity ───────────────────────────
+//
+// The extension has two block UIs and now ONE message channel between them and
+// the server. The whole-host popup sends {kind:'access_request'} with
+// tool_host/tool_name/tool_vendor/reason; the per-agent popup sends the same
+// message plus block_scope:'agent' and the blocked agent's identity. This
+// handler is where either becomes a POST /api/v1/access-requests body, so it is
+// where "an agent-scoped ask must not read as a request for the whole app" is
+// either true or lost.
+
+const accessRequest = (msg) => send({ kind: 'access_request', ...msg });
+
+function seedEnrolled() {
+  chrome._store['cfai.config'] = { serverUrl: 'https://gov.example.test', enrollSecret: 's3cret' };
+  chrome._store['cfai.token'] = 'test-jwt';
+  server.reset();
+}
+
+test('a whole-host access request still posts exactly the body it always did', async () => {
+  seedEnrolled();
+  server.route('POST /api/v1/access-requests', jsonResponse(201, { ok: true, id: 'req-1' }));
+
+  const resp = await accessRequest({
+    tool_host: 'claude.ai', tool_name: 'Claude', tool_vendor: 'Anthropic', reason: 'client demo',
+  });
+  assert.deepEqual(resp, { ok: true, id: 'req-1' });
+
+  const body = server.of('/api/v1/access-requests').at(-1).body;
+  assert.equal(body.tool_host, 'claude.ai');
+  assert.equal(body.tool_name, 'Claude');
+  assert.equal(body.tool_vendor, 'Anthropic');
+  assert.equal(body.reason, 'client demo');
+  // Defaulted, not omitted — the server defaults an absent value to 'app' too,
+  // so the two agree, and the field being explicit is what makes an agent-scoped
+  // request a deliberate statement rather than an accident of shape.
+  assert.equal(body.block_scope, 'app');
+  // NOT present at all. An `agent_id: undefined` key would serialise away here
+  // but survive any future refactor that stopped using JSON.stringify, and
+  // block_scope 'app' with an agent named is a contradiction.
+  assert.equal('agent_id' in body, false);
+  assert.equal('agent_name' in body, false);
+});
+
+test('an agent-scoped request forwards block_scope and the agent identity', async () => {
+  seedEnrolled();
+  server.route('POST /api/v1/access-requests', jsonResponse(201, { ok: true, id: 'req-2' }));
+
+  await accessRequest({
+    tool_host: 'teams.microsoft.com',
+    tool_name: 'teams.microsoft.com',
+    tool_vendor: null,
+    reason: 'need the help desk bot',
+    block_scope: 'agent',
+    agent_id: 'agt-7f3c',
+    agent_name: 'IT Help Desk Agent',
+  });
+
+  const body = server.of('/api/v1/access-requests').at(-1).body;
+  assert.equal(body.block_scope, 'agent');
+  assert.equal(body.agent_id, 'agt-7f3c');
+  assert.equal(body.agent_name, 'IT Help Desk Agent');
+  assert.equal(body.tool_host, 'teams.microsoft.com');
+  // Server-derived. A client-supplied one is discarded there; sending one would
+  // still be claiming a say in the match key.
+  assert.equal('agent_key' in body, false);
+});
+
+test('an agent named with no id (or an id with no name) forwards just what it has', async () => {
+  seedEnrolled();
+  server.route('POST /api/v1/access-requests', jsonResponse(201, { ok: true, id: 'req-3' }));
+
+  await accessRequest({
+    tool_host: 'gemini.google.com', reason: '', block_scope: 'agent',
+    agent_id: null, agent_name: 'Gemini Conversation Agent 1',
+  });
+  let body = server.of('/api/v1/access-requests').at(-1).body;
+  assert.equal(body.agent_name, 'Gemini Conversation Agent 1');
+  assert.equal('agent_id' in body, false, 'a null id must be omitted, not sent as null');
+
+  await accessRequest({
+    tool_host: 'gemini.google.com', reason: '', block_scope: 'agent',
+    agent_id: 'agt-xyz', agent_name: null,
+  });
+  body = server.of('/api/v1/access-requests').at(-1).body;
+  assert.equal(body.agent_id, 'agt-xyz');
+  assert.equal('agent_name' in body, false);
+});
+
+test('a 409 on a pending agent request reaches the popup as an error it can explain', async () => {
+  seedEnrolled();
+  server.route('POST /api/v1/access-requests',
+    jsonResponse(409, { error: 'A pending request already exists for this tool', code: 'pending' }));
+
+  const resp = await accessRequest({
+    tool_host: 'teams.microsoft.com', reason: 'x', block_scope: 'agent', agent_name: 'IT Help Desk Agent',
+  });
+  // content.js matches /pending/ on this string to render "You already have a
+  // pending request for this tool" instead of a generic failure.
+  assert.match(resp.error, /pending/);
+});
+
+// ── Blocked agents: scope-aware exception subtraction ───────────────────────
+//
+// GET /api/lifecycle/blocked-agents is fleet-wide policy; GET
+// /api/v1/access-exceptions/mine is THIS device's approvals. The content script
+// enforces whatever it is handed, so subtracting one from the other here is the
+// only place a browser-side approval can actually take effect.
+
+const BLOCKED_ROWS = [
+  { agent_id: 'agt-A', agent_name: 'IT Help Desk Agent',    platform: 'copilot_studio',    agent_scope: 'agent' },
+  { agent_id: 'agt-B', agent_name: 'Finance Approvals Bot', platform: 'copilot_studio',    agent_scope: 'agent' },
+  { agent_id: 'agt-C', agent_name: 'Copilot',               platform: 'copilot_studio',    agent_scope: 'platform' },
+  { agent_id: 'agt-D', agent_name: 'Acme Project',          platform: 'claude_ai_project', agent_scope: 'agent' },
+];
+
+/** Drive one blocked-agents refresh and return what got cached. */
+async function refreshBlocked({ rows = BLOCKED_ROWS, exceptions = [] } = {}) {
+  seedEnrolled();
+  delete chrome._store['cfai.blocked'];
+  server.route('/api/lifecycle/blocked-agents', jsonResponse(200, rows));
+  if (exceptions === null) server.route('GET /api/v1/access-exceptions/mine', jsonResponse(503, { error: 'down' }));
+  else server.route('GET /api/v1/access-exceptions/mine', jsonResponse(200, exceptions));
+
+  for (const fn of chrome._listeners.alarm) fn({ name: 'cfai-blocked-refresh' });
+  await settle();
+  return chrome._store['cfai.blocked'];
+}
+
+test('the exceptions poll goes out with the machine JWT, to the machine-scoped route', async () => {
+  // /access-exceptions/mine is requireMachineAuth and scopes itself from the
+  // token's own claims — there is no machine_id query param to get wrong. This
+  // is the same route and the same auth the desktop poller uses.
+  await refreshBlocked();
+  const calls = server.of('/api/v1/access-exceptions/mine');
+  assert.ok(calls.length > 0, 'the worker must actually ask');
+  for (const call of calls) {
+    assert.equal(call.method, 'GET');
+    assert.match(String(call.headers.authorization || ''), /^Bearer /);
+    assert.equal(call.path.includes('machine_id'), false);
+  }
+});
+
+test('with no exceptions the whole blocklist is cached and broadcast', async () => {
+  const cached = await refreshBlocked({ exceptions: [] });
+  assert.deepEqual(cached.map((r) => r.agent_id), ['agt-A', 'agt-B', 'agt-C', 'agt-D']);
+});
+
+test('an agent-scoped exception lifts only that agent, leaving the rest of the host blocked', async () => {
+  const cached = await refreshBlocked({
+    exceptions: [{
+      tool_host: 'teams.microsoft.com', tool_name: 'Microsoft Teams', scope: 'agent',
+      agent_id: 'agt-A', agent_name: 'IT Help Desk Agent', expires_at: '2099-01-01T00:00:00.000Z',
+    }],
+  });
+  assert.deepEqual(cached.map((r) => r.agent_id), ['agt-B', 'agt-C', 'agt-D'],
+    'approving one bot must not unblock the finance bot or Copilot itself');
+});
+
+test('a host-scoped exception lifts every blocked row for that host', async () => {
+  const cached = await refreshBlocked({
+    exceptions: [{ tool_host: 'teams.microsoft.com', scope: 'host', expires_at: '2099-01-01T00:00:00.000Z' }],
+  });
+  assert.deepEqual(cached.map((r) => r.agent_id), ['agt-D'],
+    'only the claude.ai row survives — it is a different host');
+});
+
+test('a legacy exception row with no scope is host-wide, exactly as it used to be', async () => {
+  const cached = await refreshBlocked({
+    exceptions: [{ tool_host: 'claude.ai', tool_name: 'Claude', expires_at: '2099-01-01T00:00:00.000Z' }],
+  });
+  assert.deepEqual(cached.map((r) => r.agent_id), ['agt-A', 'agt-B', 'agt-C']);
+});
+
+test('the content scripts are told about the FILTERED list, not the raw one', async () => {
+  const broadcasts = [];
+  const realSendMessage = chrome.tabs.sendMessage;
+  chrome.tabs.query = async () => [{ id: 11, url: 'https://teams.microsoft.com/x' }];
+  chrome.tabs.sendMessage = (tabId, msg) => { broadcasts.push({ tabId, msg }); };
+  try {
+    await refreshBlocked({
+      exceptions: [{ tool_host: 'teams.microsoft.com', scope: 'agent', agent_id: 'agt-A' }],
+    });
+  } finally {
+    chrome.tabs.sendMessage = realSendMessage;
+    chrome.tabs.query = async () => [];
+  }
+  const update = broadcasts.find((b) => b.msg?.type === 'cfai-blocked-update');
+  assert.ok(update, 'the broadcast is what makes an approval take effect on an open tab');
+  assert.deepEqual(update.msg.blocked.map((r) => r.agent_id), ['agt-B', 'agt-C', 'agt-D']);
+});
+
+test('an unreachable exceptions route FAILS CLOSED — the blocklist is not weakened', async () => {
+  // [] would be indistinguishable from "no exceptions" and would re-block
+  // nothing; the danger runs the other way. Silently unblocking a disallowed
+  // agent because the server was briefly unreachable is the one outcome that is
+  // not recoverable, so a failed poll keeps the full list.
+  const cached = await refreshBlocked({ exceptions: null });
+  assert.deepEqual(cached.map((r) => r.agent_id), ['agt-A', 'agt-B', 'agt-C', 'agt-D']);
+});
+
+test('an access request is a control message — the typed reason never enters the DLP queue', async () => {
+  // access_request arrives on `kind`, not `__cfai_kind`, so isControlMessage()
+  // used to miss it and the message fell through to the event path. Two things
+  // broke: the employee's free-text justification was queued and POSTed to
+  // /api/v1/dlp as a governance event nothing consumes, and — because Chrome
+  // gives the response to whichever listener answers first — the modal received
+  // { ok:true, session_id:null } and rendered "✓ Request submitted!" even for a
+  // 409 or a dead network.
+  seedEnrolled();
+  server.route('POST /api/v1/access-requests', jsonResponse(201, { ok: true, id: 'req-9' }));
+  const before = queue().length;
+
+  const resp = await accessRequest({
+    tool_host: 'teams.microsoft.com', reason: 'I need the payroll bot for the Acme migration',
+    block_scope: 'agent', agent_name: 'Payroll Assistant',
+  });
+
+  assert.deepEqual(resp, { ok: true, id: 'req-9' }, 'the server verdict is what reaches the modal');
+  assert.equal(queue().length, before, 'nothing was queued as a governance event');
+  for (const e of queue()) {
+    assert.doesNotMatch(JSON.stringify(e), /Acme migration/, 'the typed reason is not in the DLP queue');
+  }
+});
