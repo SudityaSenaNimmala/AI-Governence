@@ -65,12 +65,19 @@ t("tenant reads as a Workspace domain, not onmicrosoft.com", () => {
   if (!/Google/i.test(r.tenant.license)) throw new Error("licence does not read as Google: " + r.tenant.license);
   return `${r.tenant.name} / ${r.tenant.domain} / ${r.tenant.license}`;
 });
-t("every platform the scope selector can pick has agents", () => {
+// AGENTS ONLY. Gemini inside Gmail / Docs / Sheets / Slides / Meet / Drive is a
+// feature of those apps, and a standalone Gemini seat is a chat surface —
+// neither is an agent, so neither belongs in an agent inventory. Their
+// prompt-level activity is what the AI Hub's Activity screens are for.
+t("only agent-bearing platforms, no Gemini-in-app or seat rows", () => {
   const byPlat = {};
   for (const a of AG_DEMO_AGENTS) byPlat[a.platform] = (byPlat[a.platform] || 0) + 1;
-  const workspace = ["gemini_gmail","gemini_docs","gemini_sheets","gemini_slides","gemini_meet","gemini_drive"];
-  const missing = workspace.filter(p => !byPlat[p]);
-  if (missing.length) throw new Error("Workspace view would show empty cards for: " + missing.join(", "));
+  const AGENT_PLATFORMS = new Set(["vertex_ai", "gemini_enterprise", "gemini_gems", "google_chat", "apps_script"]);
+  const unexpected = Object.keys(byPlat).filter(p => !AGENT_PLATFORMS.has(p));
+  if (unexpected.length) throw new Error("not an agent surface: " + unexpected.join(", "));
+  const missing = [...AGENT_PLATFORMS].filter(p => !byPlat[p]);
+  if (missing.length) throw new Error("scope chip with no agents behind it: " + missing.join(", "));
+  if (AG_DEMO_AGENTS.some(a => /^Gemini (in|Advanced)/.test(a.name))) throw new Error("a Gemini-in-app or seat row survived");
   return Object.entries(byPlat).map(([k, v]) => `${k}:${v}`).join("  ");
 });
 
