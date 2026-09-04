@@ -72,11 +72,14 @@ export class Enforcer extends EventEmitter {
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ENFORCER_SCRIPT],
       {
         windowsHide: true,
-        // stdin is now 'pipe', not 'ignore' — see tokenize() below. The only
-        // thing ever written to it is {cmd:"tokenize", block_id}; the helper
-        // validates the id against its own pinned pending block before doing
-        // anything, so a compromised parent can at most replay a stale/wrong
-        // id, which the helper already refuses.
+        // stdin is now 'pipe', not 'ignore' — see tokenize() below. What goes
+        // down it is {cmd:"tokenize", block_id}, optionally with the user's own
+        // edited replacement as `text`, {cmd:"tokenize_edit"} and
+        // {cmd:"attach_hold"}; the helper validates the id against its own
+        // pinned pending block before doing anything and re-verifies the target
+        // window, element and composer contents before typing a character, so a
+        // compromised parent can at most replay a stale/wrong id (refused) or
+        // offer a string that has to survive all of that.
         stdio: ['pipe', 'pipe', 'pipe'],
         env: {
           ...process.env,
@@ -204,20 +207,57 @@ export class Enforcer extends EventEmitter {
 
   /**
    * Ask the helper to mask-and-rewrite the pending block identified by
-   * blockId. This is the ONLY thing ever written to the helper's stdin — no
-   * text ever crosses this channel, just an id the helper independently
-   * validates against its own pinned pending-block state (single-use, 15s
-   * TTL, bound to the exact element/window/text it was computed from). A
-   * stale or wrong id is simply ignored by the helper; there is nothing more
-   * for a compromised caller to exploit here than that.
+   * blockId. Normally just an id the helper independently validates against
+   * its own pinned pending-block state (single-use, TTL-bounded, bound to the
+   * exact element/window/text it was computed from). A stale or wrong id is
+   * simply ignored by the helper.
+   *
+   * `text`, when given, is the user's OWN hand-edited replacement from the
+   * Tokenize popup's "Edit manually" box, and it is the one and only piece of
+   * free text this channel carries. It is:
+   *   * text the USER typed into our own dialog — nothing read off a screen,
+   *     a clipboard or another process, and never the original prompt, which
+   *     exists only inside the helper's memory and has no route to this side;
+   *   * omitted entirely when absent, not sent as "", so the helper can tell
+   *     "use your own masked candidate" from "the user cleared the box" (which
+   *     it refuses);
+   *   * not a licence to type anything: the helper still requires the pinned
+   *     id, re-runs its length and write-budget gates against this exact
+   *     string, re-verifies the target window/element/composer contents before
+   *     typing, and rescans the read-back before it sends.
+   * It is never logged — not here, not in the failure path below.
    */
-  tokenize(blockId) {
+  tokenize(blockId, text = '') {
     if (!this.child?.stdin || this.child.stdin.destroyed) return false;
     try {
-      this.child.stdin.write(JSON.stringify({ cmd: 'tokenize', block_id: blockId }) + '\n');
+      const cmd = { cmd: 'tokenize', block_id: blockId };
+      if (text) cmd.text = String(text);
+      this.child.stdin.write(JSON.stringify(cmd) + '\n');
       return true;
     } catch (err) {
       this.log?.warn(`enforcer: tokenize command failed — ${err?.message || err}`);
+      return false;
+    }
+  }
+
+  /**
+   * Hold (or release) the pinned block while the user retypes the prompt by
+   * hand in the popup's edit box. An id and an on/off, nothing else.
+   *
+   * The helper only ever lets this move ONE expiry, and only for a block that
+   * is already pinned and already rewritable — it cannot create a pin, widen
+   * one, or change the window/element/text a pin was computed from. See
+   * HoldPendingRewrite in enforcer-win.ps1.
+   */
+  tokenizeEditHold(blockId, on) {
+    if (!this.child?.stdin || this.child.stdin.destroyed) return false;
+    try {
+      this.child.stdin.write(JSON.stringify({
+        cmd: 'tokenize_edit', block_id: blockId, state: on ? 'on' : 'off',
+      }) + '\n');
+      return true;
+    } catch (err) {
+      this.log?.warn(`enforcer: tokenize_edit command failed — ${err?.message || err}`);
       return false;
     }
   }
@@ -273,6 +313,14 @@ export class Enforcer extends EventEmitter {
         this.emit('override', ev);
         break;
       case 'rewrite':
+        // Tier B's outcome, forwarded WHOLE and untouched — including the
+        // `masked` field the helper now puts on a result:"ok" line (the masked
+        // text that was verified and sent; never the original — see
+        // enforcer-win.ps1's EmitRewrite). Nothing is picked out or reshaped
+        // here on purpose: this wrapper is a transport, and the event's shape is
+        // the .ps1's contract. Deliberately NOT logged either — the masked
+        // prompt is content, and the audit record for it is the
+        // `enforcement_redact` event index.js reports, not a log line.
         this.emit('rewrite', ev);
         break;
       case 'route':

@@ -5,6 +5,7 @@ import { DataverseClient } from "../services/dataverseClient.js";
 import { getDb } from "../db.js";
 import { decrypt } from "../crypto.js";
 import { normalizeAgentScope } from "../agent-scope.js";
+import { normalizeDlpMonitor, setDlpMonitor, listGovernedAgents } from "../dlp-monitor.js";
 import type { GoogleServiceAccountKey } from "../services/googleWorkspaceClient.js";
 
 const router = Router();
@@ -531,6 +532,70 @@ router.get("/blocked-agents", async (_req, res) => {
     }
 
     res.json(list.map(b => ({ ...b, orphaned: !known.has(String(b.agent_id)) })));
+  } catch (err) {
+    res.json([]);
+  }
+});
+
+// ── DLP-monitor agents — governed, but NOT blocked ──────────────────────────
+// A second, independent flag on the same `blocked_agents` row. See
+// ../dlp-monitor.ts for why this state exists and why blocked always wins over
+// it. The write shape, the filter and the projection all live there so they have
+// one definition and can be tested without a Mongo connection.
+
+router.post("/dlp-monitor", async (req, res) => {
+  try {
+    const { agent_id, agent_name, platform, reason, oauth_key_id, agent_scope, dlp_monitor } = req.body;
+    if (!agent_id) {
+      res.status(400).json({ error: "agent_id is required" });
+      return;
+    }
+    // Explicit boolean, no default — an empty body must not start (or stop)
+    // monitoring an agent by accident.
+    const monitor = normalizeDlpMonitor(dlp_monitor);
+    if (monitor === undefined) {
+      res.status(400).json({ error: "dlp_monitor must be true or false" });
+      return;
+    }
+    // Same enum and same refusal-rather-than-coercion as /block.
+    const scope = normalizeAgentScope(agent_scope);
+    if (scope === undefined) {
+      res.status(400).json({ error: "agent_scope must be 'agent', 'platform', or omitted" });
+      return;
+    }
+    const result = await setDlpMonitor(getDb(), {
+      agent_id,
+      dlp_monitor: monitor,
+      // Passed through only when the caller actually supplied them; omitted keys
+      // stay untouched on an existing row rather than being blanked.
+      ...(agent_name === undefined ? {} : { agent_name }),
+      ...(platform === undefined ? {} : { platform }),
+      ...(reason === undefined ? {} : { reason }),
+      ...(oauth_key_id === undefined ? {} : { oauth_key_id }),
+      ...(agent_scope === undefined ? {} : { agent_scope: scope }),
+    });
+    res.json({
+      ok: true,
+      agent_id,
+      dlp_monitor: monitor,
+      status: monitor ? "dlp_monitored" : "dlp_monitor_cleared",
+      // Honest about whether anything was actually written: clearing the flag
+      // never creates a row, so a call naming an unknown agent matches nothing.
+      matched: result.matched,
+      created: result.created,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "dlp_monitor update failed" });
+  }
+});
+
+// Public endpoint — no auth required, exactly like /blocked-agents above, because
+// the same two unauthenticated consumers (the desktop agent and the browser
+// extension) poll it. Disjoint from /blocked-agents by construction: a blocked
+// agent is never returned here.
+router.get("/governed-agents", async (_req, res) => {
+  try {
+    res.json(await listGovernedAgents(getDb()));
   } catch (err) {
     res.json([]);
   }

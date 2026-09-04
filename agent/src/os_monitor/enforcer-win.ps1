@@ -27,7 +27,9 @@
 #   ComputeMaskCandidate/UpdatePendingRewrite) and pins a masked candidate
 #   {block_id, original, masked, RuntimeId, HWND, PID}, valid for 15s.
 #   Confirming (hotkey or dialog click) re-verifies every pinned fact still
-#   holds, then synthesizes Ctrl+A, Delete, and the masked text via SendInput.
+#   holds, then synthesizes Ctrl+A, Delete, and the masked text via SendInput —
+#   line by line for multi-line text, with the surface's own newline key
+#   combination (never a literal newline) between the segments.
 #   Once the read-back positively confirms the composer holds exactly that
 #   masked text and nothing else, it sends Enter too — an explicit, twice-
 #   confirmed user decision, not the original design (which stopped short of
@@ -58,7 +60,11 @@
 #   {"kind":"block","reason":"send"|"paste"|"click"|"attachment","process":"claude","patterns":"aws-access-key","block_id":"...","rewritable":true,"preview":"[AWS-KEY]"}
 #   {"kind":"block","reason":"attachment","filename":"payroll.xlsx",...} — a sensitive file is attached; never rewritable (Tokenize & Send masks text, not files)
 #   {"kind":"override","process":"claude","patterns":"..."}
-#   {"kind":"rewrite","block_id":"...","result":"ok"|"aborted"|"failed","reason":"..."}
+#   {"kind":"rewrite","block_id":"...","result":"ok"|"aborted"|"failed","reason":"...","masked":"my ssn is [SSN]"}
+#     — `masked` is present ONLY on result:"ok", and is the MASKED text that was
+#       verified and sent, never the original. It is the one field on any event
+#       from this file that carries prompt content, on purpose: the tokenization
+#       audit trail matches the browser extension's. See EmitRewrite.
 #   {"kind":"enforcement_disarmed","reason":"panic_hotkey","seconds":600}
 #   {"kind":"error","message":"..."}
 #
@@ -73,10 +79,19 @@
 # send button with the mouse is not swallowed. The typed buffer is a best-effort
 # reconstruction (mouse-editing mid-string can desync) but errs toward catching
 # the secret. Charset covers the secret patterns (A-Za-z0-9 _ - . /). Tier B
-# rewrite only offers itself for single-line, maskable text under 2000 chars in a
-# surface where UIA can be trusted (a chat app, or an IDE panel that actually has
-# focus — see PanelUiaOk) — anything else stays block-only with no Ctrl+Alt+T
-# offer at all.
+# rewrite only offers itself for maskable text short enough to actually TYPE
+# inside its write budget — 456 chars, and fewer when the text has many line
+# breaks, because the write is paced keystroke by keystroke (see
+# REWRITE_MAX_CHARS / EstimateWriteMs, which are computed from that pacing
+# rather than written down beside it) — in a surface
+# where UIA can be trusted (a chat app, an IDE panel that actually has focus, or
+# a DLP-governed host-app conversation — see PanelUiaOk and _fgDlpGoverned) —
+# anything else stays block-only with no Ctrl+Alt+T offer at all. MULTI-LINE text
+# is maskable: the write types each line and sends the surface's own newline key
+# combination (AI_PANELS' `newlineKeys`, default Shift+Enter) between them, never
+# a literal newline, which in a chat composer would submit the message
+# half-written. A surface whose declared combination this file cannot synthesize
+# gets no multi-line offer at all.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
@@ -283,6 +298,13 @@ public static class CfaiEnforcer
     // only via StartRewrite(), which requires a pinned block_id minted by the
     // poll thread's UpdatePendingRewrite() — never a general "type anything"
     // primitive. See RunRewrite() for the full pre-flight/abort/verify story.
+    //
+    // StartRewrite does now accept a caller-supplied string (the user's own
+    // hand-edited replacement, from the Tokenize popup's "Edit manually" box),
+    // and that is still not a "type anything" primitive: it types only into the
+    // composer a pinned block was computed on, only while that composer still
+    // holds the exact original text, and only after the same read-back
+    // verification and rescan every computed mask goes through.
     [StructLayout(LayoutKind.Sequential)]
     struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
     // Real Windows INPUT is a union of MOUSEINPUT/KEYBDINPUT/HARDWAREINPUT —
@@ -339,19 +361,153 @@ public static class CfaiEnforcer
     const uint KEYEVENTF_KEYUP = 0x0002;
     const uint KEYEVENTF_UNICODE = 0x0004;
 
-    // Rewrite tuning. Chunked typing + a foreground re-check between chunks
-    // bounds how much masked text could land in a wrongly-focused window if
-    // focus changes mid-write; a hard total time budget bounds a runaway
-    // write. See RunRewrite().
-    const int REWRITE_MAX_CHARS = 2000;
+    // ── Rewrite tuning: ONE set of timing facts, everything else derived ─────
+    //
+    // Chunked typing + a foreground re-check between chunks bounds how much
+    // masked text could land in a wrongly-focused window if focus changes
+    // mid-write; a hard total time budget bounds a runaway write. See
+    // RunRewrite().
+    //
+    // WHY THESE ARE CONSTANTS RATHER THAN LITERALS AT THE SLEEP SITES. They used
+    // to be literals, and the character cap was a hand-written number derived
+    // from a pacing that no longer existed: the comment here said "4ms apart, so
+    // 2000 chars = 8s", while SendUnicodeChunk had since been changed to 15ms
+    // per character. The real cap at 15ms was about 580 characters, so any
+    // masked prompt longer than that aborted with "interrupted_mid_write" AFTER
+    // Ctrl+A/Delete had already cleared the composer — a partially retyped
+    // message, from a limit the file documented as 2000. The numbers below are
+    // now used BY the write loop (Thread.Sleep(REWRITE_CHAR_DELAY_MS), …) and
+    // the cap and the admission check are computed FROM them, so the arithmetic
+    // cannot go stale again while the behaviour changes underneath it.
+    //
+    // MEASURED, not tuned by taste:
+    //   REWRITE_CHAR_DELAY_MS — one SendInput per character with a pause
+    //     between. Batching a chunk into one SendInput with no pause corrupted
+    //     the result in the target app (confirmed live: "my ssn is [SSN]" landed
+    //     as "my ssn ]]]]" — the target's input pipeline cannot keep up with an
+    //     instantaneous burst). This is the delay that makes the read-back
+    //     verification reliable, so it is NOT a knob to turn down for speed:
+    //     doing that trades a refused long prompt for corrupted text typed into
+    //     someone's composer.
+    //   REWRITE_CHUNK_DELAY_MS — the per-chunk settle, alongside the abort /
+    //     budget / foreground re-check that runs between chunks.
+    //   REWRITE_KEY_DELAY_MS — spacing between the key events of a synthetic
+    //     combination (Ctrl+A, Delete, Enter, and a newline combo).
+    const int REWRITE_CHAR_DELAY_MS = 15;
+    const int REWRITE_CHUNK_DELAY_MS = 10;
+    const int REWRITE_KEY_DELAY_MS = 5;
     const int REWRITE_CHUNK = 24;
     static readonly long REWRITE_TTL = TimeSpan.FromSeconds(15).Ticks;
-    // Sized for the worst case now that SendUnicodeChunk paces individual
-    // characters (4ms apart) instead of bursting a whole chunk at once:
-    // REWRITE_MAX_CHARS(2000) * 4ms = 8s, plus margin. Still comfortably
-    // inside REWRITE_TTL (15s) alongside the verify (<=400ms) and settle
-    // (150ms) delays that follow.
-    static readonly long REWRITE_WRITE_BUDGET = TimeSpan.FromSeconds(9).Ticks;
+
+    // ── How long a pin may be HELD while the user rewrites the prompt by hand ─
+    // The Tokenize popup's second view ("Edit manually") is a text box the user
+    // types their own replacement into, and 15s is not a sane budget for typing
+    // a sentence. Requested explicitly, per block, over the control channel
+    // ({"cmd":"tokenize_edit"}) — never the default, and never for the plain
+    // Tokenize & Send path, which still answers inside REWRITE_TTL.
+    //
+    // WHY A LONGER PIN IS NOT A LONGER LICENCE. The TTL is not what makes a
+    // rewrite safe; RunRewrite's pre-flight is. An older pin still has to find
+    // the SAME foreground window, the SAME focused element by runtime id and
+    // the SAME unchanged composer text before a single character is typed, and
+    // it still has to pass read-back verification and post-send confirmation
+    // afterwards. What the TTL bounds is how long a pin can sit around waiting
+    // for an answer that may never come, and the answer this one waits for is a
+    // human typing into a box that closes itself first (see
+    // CfaiTokenizeDialog.EditTimeoutMs in toast-helper.ps1, 90s) — with the
+    // Node-side backstop between the two (TOKENIZE_EDIT_TIMEOUT_MS, 100s), so
+    // every client clock lapses before this one does.
+    static readonly long REWRITE_EDIT_TTL = TimeSpan.FromSeconds(120).Ticks;
+
+    // THE CEILING THE BUDGET ANSWERS TO. Tier B is confirmed from a dialog that
+    // closes ITSELF after 16s (block-dialog.js's `setTimeout(() => window.close(),
+    // 16000)`), so a rewrite that has not reported by then leaves the user with
+    // no answer at all. Working backwards from that 16s: the pre-write wait for
+    // the user's fingers to come off the confirm chord is up to 2.5s
+    // ("modifiers_stuck"), Ctrl+A + Delete cost ~80ms, and the tail after the
+    // write is the verify poll (<=400ms) + settle (300ms) + the post-send
+    // CONFIRMATION WINDOW — REWRITE_POST_SEND_MS (200ms) by default, and at most
+    // REWRITE_POST_SEND_MAX_MS (1500ms) on a surface the catalog gives a longer
+    // one. So the tail is ~0.9s by default and ~2.2s at the ceiling: 9s of
+    // writing lands at ~12.6s in the default case and ~13.8s in the worst case,
+    // both inside REWRITE_TTL (15s) and inside the dialog's own 16s timeout
+    // (~3.4s / ~2.2s of margin respectively).
+    //
+    // NOT RAISED to buy a bigger cap, deliberately. It could go to ~11s on this
+    // arithmetic, which would buy ~120 more characters and spend the entire
+    // remaining margin — and this window is the one during which this process is
+    // synthesizing keystrokes into another application. The limit that was wrong
+    // was the character cap, so that is the one that moved.
+    const int REWRITE_WRITE_BUDGET_MS = 9000;
+    static readonly long REWRITE_WRITE_BUDGET = TimeSpan.FromMilliseconds(REWRITE_WRITE_BUDGET_MS).Ticks;
+
+    // Wall time one FULL chunk of typing costs: every character's pace plus the
+    // chunk settle. 24 * 15 + 10 = 370ms, i.e. ~15.4ms per character.
+    const int REWRITE_CHUNK_MS = REWRITE_CHUNK * REWRITE_CHAR_DELAY_MS + REWRITE_CHUNK_DELAY_MS;
+
+    // Slow-clock margin, applied to every estimate rather than baked into the
+    // constants. Thread.Sleep(n) guarantees only "at least n": on a machine
+    // whose timer resolution has not been raised, a 15ms sleep routinely takes
+    // ~15.6ms, and a loaded box is worse. 4/5 (a 25% allowance) is what keeps a
+    // write that the admission check accepted from aborting mid-way on a slow
+    // tick — the failure this whole correction is about.
+    const int REWRITE_BUDGET_MARGIN_NUM = 4;
+    const int REWRITE_BUDGET_MARGIN_DEN = 5;
+    const int REWRITE_USABLE_BUDGET_MS = REWRITE_WRITE_BUDGET_MS * REWRITE_BUDGET_MARGIN_NUM / REWRITE_BUDGET_MARGIN_DEN;
+
+    // The character cap, DERIVED: the most characters the write loop can pace
+    // out inside the usable budget, rounded down to a whole chunk because whole
+    // chunks are what the loop actually types.
+    //   (9000 * 4/5) / 370 = 19 chunks  ->  19 * 24 = 456 characters.
+    // This is a coarse pre-filter with a second job: it bounds the cost of
+    // running every pattern over the text at all, before any masking happens.
+    // The ACCURATE gate is EstimateWriteMs/WriteFitsBudget below, which is
+    // computed from the masked text's real shape — a line break costs more than
+    // a character, so a 456-character prompt full of them is refused by that
+    // check even though it passes this one.
+    const int REWRITE_MAX_CHARS = REWRITE_CHUNK * (REWRITE_USABLE_BUDGET_MS / REWRITE_CHUNK_MS);
+
+    // ── Confirming the SEND actually landed ──────────────────────────────────
+    // Pressing Enter is not evidence that the message went, so RunRewrite reads
+    // the composer back afterwards and treats "it still holds exactly what we
+    // typed" as NOT SENT. WHEN to read is the subtle part, and the reason these
+    // are constants rather than a literal at the read site.
+    //
+    // REWRITE_POST_SEND_MS is the FIRST read, and it is unchanged: a native
+    // composer (M365 Copilot, Claude Desktop) has cleared well inside 200ms.
+    //
+    // THE BUG THAT PUT A POLL HERE. That first read used to be the ONLY read —
+    // one shot at +200ms, and anything still present was reported
+    // "failed"/"not_submitted". Confirmed live against Microsoft Teams: the
+    // masked message WAS sent (it is in the conversation, with the value
+    // masked) and the rewrite was still reported as failed, so index.js's
+    // 'rewrite' handler took its `ev.result !== 'ok'` early return and NO
+    // enforcement_redact audit event was ever recorded for a governed send that
+    // really happened — a governance gap, not a cosmetic one. Teams hosts both
+    // of its composers in a WebView2 CHILD PROCESS (see the ms-teams notes in
+    // ai-processes.js and the child-process walk in this file), so "the
+    // composer is empty now" has to cross a Chromium accessibility
+    // serialization before UIA can report it. That is the same class of lag the
+    // read-back verify poll above was already added for, after a one-shot read
+    // at +60ms was confirmed to catch a mid-write composer.
+    //
+    // So the post-send check polls as well, and the WINDOW is catalog data
+    // (AI_PANELS' `postSendVerifyMs`, read via PostSendVerifyMsFor) rather than
+    // a longer wait imposed on every app. A surface that states nothing keeps
+    // exactly today's single read at +200ms, byte for byte.
+    //
+    // POLLING CANNOT WEAKEN THE CHECK. It only ever lets a composer that
+    // genuinely did clear be SEEN to have cleared; a message that really was
+    // not submitted sits in the composer for the whole window and is still
+    // reported "not_submitted". Identical argument to the verify poll's.
+    const int REWRITE_POST_SEND_MS = 200;
+    const int REWRITE_POST_SEND_POLL_MS = 40;
+    // The CEILING on any catalog value, applied at load time (LoadAiPanels) so
+    // the budget arithmetic above cannot be invalidated by a payload: an entry
+    // asking for 30s would leave the user's dialog timing out before the rewrite
+    // reported anything at all. 2.5s + 9s + 0.4s + 0.3s + this lands at ~13.8s,
+    // inside both REWRITE_TTL and the dialog's 16s.
+    const int REWRITE_POST_SEND_MAX_MS = 1500;
 
     static IntPtr _hook = IntPtr.Zero;
     static IntPtr _mouseHook = IntPtr.Zero;
@@ -383,6 +539,21 @@ public static class CfaiEnforcer
     // blocked or captured because of it — see PanelEnforceOk/PanelUiaOk and the
     // panel branch of CheckFgBlocked, which all consult this.
     static volatile bool _fgPanelEnforce = false;
+    // ── "This HOST-APP tick is DLP-GOVERNED, and is NOT blocked" ─────────────
+    // The third state a Microsoft Teams conversation can be in. The other two
+    // are unchanged: BLOCKED (a named blocked-agents.json row — everything
+    // swallowed) and UNTOUCHED (no capture at all, the overwhelming majority of
+    // Teams use). This flag marks the middle one: an agent the org asked to
+    // DLP-MONITOR but explicitly did NOT block, so its prompts are scanned and
+    // Tokenize & Send is offered, while every Enter still goes through.
+    //
+    // Set ONLY by ApplyForegroundTick's host-app branch, and only for a tick
+    // that is not blockGoverned. Read in ONE place — UpdatePendingRewrite, to
+    // lift the blanket host-app exclusion from Tier B. It is deliberately NOT
+    // read by any block decision: nothing in CheckFgBlocked, EnterBlockActive or
+    // the hook consults it, so a governed-only tick cannot swallow a keystroke
+    // through it even if a future change forgot the host-app guards.
+    static volatile bool _fgDlpGoverned = false;
     // Composite identity of "whose keystrokes are in the typed buffer":
     // pid + panel id (or "none") + the focused element's RuntimeId. Moving
     // between two panels, or between a panel and the editor, INSIDE one process
@@ -452,6 +623,32 @@ public static class CfaiEnforcer
     static string _blockedAgentFile = "";
     static long _lastBlockedCheck = 0;
     static readonly long BLOCKED_CHECK_INTERVAL = TimeSpan.FromSeconds(10).Ticks;
+
+    // ── The GOVERNED (DLP-monitored, NOT blocked) list ───────────────────────
+    // ~/.cloudfuze-aigov/governed-agents.json, written by
+    // blocked-agents-sync.js from GET /api/lifecycle/governed-agents. Same row
+    // shape as blocked-agents.json (deliberately — normalizeGovernedRows runs
+    // the rows through the same sanitiser), so the same hand-rolled parser reads
+    // both and there is no second convention to learn.
+    //
+    // WHAT IT CAN AND CANNOT DO. It can make a host-app tick DLP-GOVERNED:
+    // prompts scanned, Tokenize & Send offered. It can NEVER arm a block — no
+    // code path reads this list from CheckFgBlocked, EnterBlockActive or the
+    // hook, and the arm sites all require a row from _blockedList.
+    //
+    // MISSING FILE = nothing is governed (the sync has not completed yet), the
+    // same convention an unreadable blocked list follows. An EMPTY ARRAY is
+    // meaningful and different in intent ("nothing is currently monitored") but
+    // identical in effect, so both land in the same place: an empty list.
+    //
+    // PRECEDENCE IS NOT RE-DERIVED HERE. The sync layer guarantees, at write
+    // time, that an agent on the blocked list never reaches this file
+    // (filterGovernedAgents, asserted in os-monitor-safety.test.mjs). The
+    // enforcer still cannot produce "blocked AND governed" even if that
+    // guarantee broke, because ApplyForegroundTick computes blockGoverned first
+    // and dlpGoverned only for a tick that is not blockGoverned.
+    static string _governedAgentFile = "";
+    static List<Dictionary<string, string>> _governedList = new List<Dictionary<string, string>>();
 
     // ── Request Access offer ──────────────────────────────────────────────────
     // The moment a platform/agent/panel block actually swallows a send is the
@@ -750,6 +947,28 @@ public static class CfaiEnforcer
         public string ClassEquals;
         public string ClassPrefix;
         public bool Enforce;
+        // What a HOST APP must prove before this composer is DLP-GOVERNED
+        // (scanned + Tokenize & Send eligible). Data from ai-processes.js's
+        // `dlpMatch`; the comparison lives in PanelDlpMatchesOnPanelAlone.
+        //   "agent" (the default) — the open conversation must ALSO be named by
+        //                           a governed-agents.json row.
+        //   "panel"               — the panel match alone is enough, because the
+        //                           composer has no non-AI use (Teams' embedded
+        //                           Copilot tab).
+        // NEVER consulted by any block decision — see CheckFgBlocked, which bars
+        // a host app from all three coarse arms whatever this says.
+        public string DlpMatch;
+        // Which key combination inserts a LINE BREAK here without submitting.
+        // Read only by Tier B's rewrite; see NewlineKeysFor/ResolveNewlineKeys.
+        public string NewlineKeys;
+        // How long to keep confirming that a rewrite's synthetic Enter actually
+        // submitted, for THIS composer. Data from ai-processes.js's
+        // `postSendVerifyMs`, already clamped by LoadAiPanels; read only by
+        // RunRewrite's post-send check, via PostSendVerifyMsFor. Teams' two
+        // composers are the surfaces that need more than the default — their UI
+        // lives in a WebView2 child process, so the composer clearing has to
+        // cross a Chromium accessibility hop before UIA can see it.
+        public int PostSendVerifyMs;
     }
     static List<PanelSig> _panels = new List<PanelSig>();
 
@@ -832,10 +1051,13 @@ public static class CfaiEnforcer
     // Read in five places, all of them EXCLUSIONS that keep a general-purpose
     // app from being treated as a chat app: CheckFgBlocked (no whole-app block),
     // PanelEnforceOk / PanelUiaOk (element-scoped, like an IDE), UpdateSendRect
-    // (no send-button hunt), UpdatePendingRewrite and UpdateModelRouting (no
-    // Tokenize & Send offer, no model routing). ApplyForegroundTick's own
-    // host-app branch is the single place it can be treated as an AI surface at
-    // all, and only for the exact tick a blocked agent is provably open.
+    // (no send-button hunt), UpdateModelRouting (no model routing) and
+    // UpdatePendingRewrite (no Tokenize & Send offer — the one exclusion that is
+    // now governance-scoped rather than blanket: it stands for every host-app
+    // tick except a DLP-GOVERNED one, see _fgDlpGoverned). ApplyForegroundTick's
+    // own host-app branch is the single place a host app can be treated as an AI
+    // surface at all, and only for the exact tick an agent the org has a policy
+    // about is provably open.
     static HashSet<string> _hostAppProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
     // What one ReadFocusedAgentName() call established. Getting this taxonomy
@@ -869,6 +1091,17 @@ public static class CfaiEnforcer
     // so a tick can decide about the process it is actually looking at, with no
     // one-tick lag that would read the wrong app.
     static HashSet<string> _agentScopedProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    // The SAME privacy gate for the GOVERNED list: the process names the current
+    // governed-agents.json holds an agent-scoped row for. Recomputed with that
+    // list and only there, so the poll path stays a HashSet lookup.
+    //
+    // Why it is a second set rather than being folded into _agentScopedProcs:
+    // that set is also the gate for a whole-app fail-CLOSED block on a chat app
+    // (CheckFgBlocked's coarse arm reads the blocklist it is derived from), and
+    // adding DLP-monitored processes to it would mean a monitor-only policy
+    // started licensing block decisions. This one licenses exactly one thing —
+    // reading, on a tick, whether a governed conversation is open.
+    static HashSet<string> _dlpScopedProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
     // One entry per active block pattern. Label is empty for guardrail
     // patterns (prompt-injection, jailbreak, ...) — there is no value to
@@ -897,6 +1130,23 @@ public static class CfaiEnforcer
     static IntPtr _pendingHwnd = IntPtr.Zero;
     static uint _pendingPid = 0;
     static long _pendingExpiresAt = 0;
+    // ── The pin is HELD, not being refreshed ─────────────────────────────────
+    // True on any tick where UpdatePendingRewrite could not recompute the
+    // candidate because the foreground is no longer the AI surface it was
+    // computed on — the user is looking at something else. The pin is kept
+    // (until _pendingExpiresAt) rather than dropped, which is what lets the
+    // Tokenize popup's "Edit manually" view take keyboard focus without
+    // destroying the very block it is editing; see UpdatePendingRewrite's own
+    // note, and HoldPendingRewrite for the expiry side of it.
+    //
+    // A FROZEN PIN IS NOT AN OFFER. EmitBlock and the confirm hotkey both
+    // refuse it, because a frozen pin's preview/id describe the composer of
+    // whatever surface it was computed on — offering it against a block that
+    // fired somewhere else would show one app's masked text in the other's
+    // popup. What a frozen pin can still do is answer the ONE tokenize command
+    // that was already issued for its own id, which RunRewrite then re-verifies
+    // against the pinned window, element and text exactly as always.
+    static bool _pendingFrozen = false;
     // Debug-only telemetry (length/count, never content) surfaced via the
     // confirm hotkey's "not_offered" event so a refusal reason is diagnosable
     // without ever logging the actual text.
@@ -917,6 +1167,12 @@ public static class CfaiEnforcer
         _blockedAgentFile = System.IO.Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".cloudfuze-aigov", "blocked-agents.json");
+        // The DLP-monitored-but-not-blocked list. A SEPARATE file on purpose —
+        // see _governedList: one wrong parse of a merged file would either block
+        // a monitored agent or monitor a blocked one.
+        _governedAgentFile = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".cloudfuze-aigov", "governed-agents.json");
         _aiProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var p in aiProcs) { if (!string.IsNullOrEmpty(p)) _aiProcs.Add(p.Replace(".exe", "")); }
         _patInfos = new List<PatInfo>();
@@ -1021,6 +1277,25 @@ public static class CfaiEnforcer
         return false;
     }
 
+    // A numeric catalog field, CLAMPED here rather than trusted. Absent, null,
+    // non-numeric and out-of-range all land on a value inside [min, max], so no
+    // payload — an older build, a typo, a hand-edited env var — can push a
+    // timing constant outside the range the surrounding arithmetic was reasoned
+    // about. Same fail-safe direction as JsBool's `false` and JsStr's "".
+    static int JsIntClamped(Dictionary<string, object> d, string key, int fallback, int min, int max)
+    {
+        object v;
+        if (d == null || !d.TryGetValue(key, out v) || v == null) return fallback;
+        int parsed;
+        // Invariant culture explicitly: the payload is JSON, not localized text.
+        if (!int.TryParse(Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture),
+                          System.Globalization.NumberStyles.Integer,
+                          System.Globalization.CultureInfo.InvariantCulture, out parsed)) return fallback;
+        if (parsed < min) return min;
+        if (parsed > max) return max;
+        return parsed;
+    }
+
     static void LoadIdeProcesses(string json)
     {
         var serializer = new JavaScriptSerializer();
@@ -1071,6 +1346,24 @@ public static class CfaiEnforcer
                 ClassEquals = JsStr(d, "classEquals"),
                 ClassPrefix = JsStr(d, "classPrefix"),
                 Enforce = JsBool(d, "enforce"),
+                // Absent / anything but the one literal means the STRICT
+                // "a named agent row is required" rule, so a payload from an
+                // older build (or a malformed entry) can never widen DLP
+                // governance by accident.
+                DlpMatch = string.Equals(JsStr(d, "dlpMatch"), "panel", StringComparison.OrdinalIgnoreCase) ? "panel" : "agent",
+                // Absent means the default combo; a value this side does not
+                // recognise is kept VERBATIM so ResolveNewlineKeys can refuse it
+                // rather than fall back to a combo the app might treat as send.
+                NewlineKeys = JsStr(d, "newlineKeys"),
+                // Absent means the DEFAULT single read at +200ms — i.e. exactly
+                // the behaviour that shipped before this field existed. Clamped
+                // to [REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MAX_MS] so an
+                // entry can only ever lengthen the confirmation window, never
+                // shorten it below the read that native composers rely on, and
+                // never past the point where the rewrite would outlive the
+                // dialog waiting for its answer.
+                PostSendVerifyMs = JsIntClamped(d, "postSendVerifyMs",
+                    REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MAX_MS),
             });
         }
         _panels = panels;
@@ -1649,7 +1942,13 @@ public static class CfaiEnforcer
     // `fgHwnd` is the SAME handle UpdateForeground already fetched for this tick
     // — no second GetForegroundWindow() call — and is used only by the
     // window-title mode below.
-    static AgentReadOutcome ReadFocusedAgentName(AgentSurface surface, uint fgPid, IntPtr fgHwnd, out string agentName)
+    //
+    // `panelId` is the panel THIS tick's panel read already matched (or "" for
+    // none). It is not a gate and it is not evidence — the only thing it does is
+    // key the Copilot-tab heading cache, which needs it now that both Teams
+    // routes can present the same title kind in the same window. See
+    // _copilotCachePane.
+    static AgentReadOutcome ReadFocusedAgentName(AgentSurface surface, uint fgPid, IntPtr fgHwnd, string panelId, out string agentName)
     {
         agentName = "";
         if (surface == null) return AgentReadOutcome.Unreadable;
@@ -1688,7 +1987,7 @@ public static class CfaiEnforcer
             // behind that route's own two-flag gate, consults the cached pane
             // headings. With the route unconfigured or unarmed — which is how it
             // ships — it is exactly the ExtractAgentName call this line was.
-            return ReadTitleModeAgentName(surface, fgHwnd, title, out agentName);
+            return ReadTitleModeAgentName(surface, fgHwnd, title, panelId, out agentName);
         }
         AutomationElement el;
         try { el = AutomationElement.FocusedElement; } catch { return AgentReadOutcome.Unreadable; }
@@ -1931,8 +2230,8 @@ public static class CfaiEnforcer
     // focused element is the one governed conversation's composer. Between them
     // sit every DM, every channel and every meeting chat, whose content this
     // must never read. Only while the governed composer is focused RIGHT NOW —
-    // which, for a host app, ApplyForegroundTick only ever sets when a blocked
-    // agent is provably open — may a UIA-derived signal be trusted.
+    // which, for a host app, ApplyForegroundTick only ever sets on a tick that
+    // is blockGoverned or dlpGoverned — may a UIA-derived signal be trusted.
     static bool PanelUiaOk()
     {
         if (!_ideProcs.Contains(_app) && !_hostAppProcs.Contains(_app)) return true;
@@ -1992,6 +2291,27 @@ public static class CfaiEnforcer
     //
     // THE PRIVACY RULE, enforced in code and not by convention — see
     // CollectCopilotHeadings.
+    //
+    // ── WHY THE ANCESTOR SEARCH COLLECTS AT EVERY HOP (changed 2026-09-04) ──
+    // This mechanism was built for, and measured against, the Copilot TAB, where
+    // the focused composer sits a known distance below the conversation pane.
+    // Then Teams was observed live serving the Copilot-shaped title
+    // ("Copilot | <tenant> | <email> | Microsoft Teams") for a CHAT-LIST
+    // conversation — see the pane-key note on _copilotCachePane — which routes a
+    // COMPLETELY DIFFERENT composer (CKEditor, nested to its own depth) into this
+    // same search. "Hop exactly N parents, then collect from there" encodes an
+    // assumption about one route's DOM nesting, and there is no measurement for
+    // the other's. Collecting at EACH hop from the nearest outward and stopping
+    // at the first ancestor whose subtree yields a heading makes the strategy
+    // depth-agnostic instead: it finds the nearest ancestor that actually
+    // contains the transcript, whatever route put focus where it is.
+    //
+    // It is not more expensive. The node budget is now SHARED across the hops
+    // (CollectCopilotHeadings takes `ref int visited`), so the total node count
+    // for the whole ancestor search is the same COPILOT_WALK_MAX_NODES a single
+    // walk was already capped at — and the inner subtrees are strict subsets of
+    // the outer ones, so the common case (headings found close by) is cheaper
+    // than before, never dearer.
     const int COPILOT_PANE_PARENT_HOPS = 6;
     // The same depth cap FindMenuItemByLabel / FindModelPickerButton already use
     // (and the same one the probe and attachment-watcher use), not a new number.
@@ -2015,7 +2335,32 @@ public static class CfaiEnforcer
 
     static volatile bool _copilotSearchInProgress = false;
     static IntPtr _copilotCacheHwnd = IntPtr.Zero;
-    static string _copilotCacheKind = "";
+    // WHICH PANE the cached headings came from. The title's KIND SEGMENT ALONE
+    // used to be this key, and on 2026-09-04 that stopped identifying a pane.
+    //
+    // THE OBSERVATION. Teams was seen live serving the four-segment Copilot-tab
+    // title shape — "Copilot | <tenant> | <email> | Microsoft Teams", no
+    // conversation name at all — for a CHAT-LIST conversation the user had not
+    // navigated away from. Teams chose that; nothing here can prevent it, and
+    // the fallback is right to fire on it (that is what recovers the agent's
+    // name when the title no longer carries it).
+    //
+    // WHAT IT BROKE. Both Teams routes live in ONE window, so with kind alone as
+    // the key (hwnd, kind) is now the SAME key for two genuinely different panes:
+    // the Copilot tab's conversation and a re-titled Chat-list conversation. A
+    // cache filled from one could be served to the other for up to the TTL, in
+    // either direction — a stale name for the pane actually open. In a
+    // governance product that is a false NEGATIVE and a false POSITIVE from the
+    // same defect: the wrong agent named is as wrong as no agent named.
+    //
+    // THE FIX is to key on the focused PANEL ID as well (PaneKeyOf), because
+    // that is the one signal that still separates the two routes now that the
+    // title does not: teams_composer is the Chat-list CKEditor,
+    // teams_copilot_composer is the Copilot tab's Fluent editor, and they can
+    // never match the same element (measured — no shared class token). Switching
+    // between them is therefore a NEW pane again: the cache does not apply, the
+    // empty-runs backoff resets, and a search starts at once.
+    static string _copilotCachePane = "";
     static string[] _copilotCacheClasses = null;
     static string[] _copilotCacheNames = null;
     static long _copilotCacheTicks = 0;
@@ -2024,9 +2369,21 @@ public static class CfaiEnforcer
     // found nothing" stay distinguishable — the first must search at once, the
     // second must back off.
     static IntPtr _copilotSearchHwnd = IntPtr.Zero;
-    static string _copilotSearchKind = "";
+    static string _copilotSearchPane = "";
     static long _copilotLastSearchTicks = 0;
     static int _copilotEmptyRuns = 0;
+
+    // The cache/search key for "which pane are we looking at": the title's kind
+    // segment AND the focused panel id. See _copilotCachePane for why the kind
+    // alone stopped being enough.
+    //
+    // Neither half is a name and neither is ever retained beyond the key: the
+    // kind is a view label compared against the catalog, the panel id is our own
+    // AI_PANELS identifier.
+    static string PaneKeyOf(string kind, string panelId)
+    {
+        return (kind ?? "") + "|" + (panelId ?? "");
+    }
 
     // Is this surface's SECOND ROUTE configured, past its OWN two-flag gate, and
     // relevant to the view the title says is open?
@@ -2058,14 +2415,32 @@ public static class CfaiEnforcer
     // must be one this route applies to. With the flags false — how it ships —
     // FallbackReadArmed returns false before anything else happens, so NOT ONE
     // UIA call, thread or cache write occurs. That is what "inert" means here.
-    static AgentReadOutcome ReadTitleModeAgentName(AgentSurface surface, IntPtr fgHwnd, string title, out string agentName)
+    //
+    // THE GATE IS THE TITLE'S KIND, NEVER "the title named nothing". That
+    // distinction is the whole safety boundary of this route and it is worth
+    // stating at the call site, because 2026-09-04 made it load-bearing in a way
+    // it was not before: Teams was observed serving the Copilot-shaped title for
+    // a CHAT-LIST conversation, so the fallback now legitimately fires on the
+    // Chat-list composer too — and it must STILL never fire for a 1:1 DM (no
+    // kind segment), a renamed human group chat or a channel post, all of which
+    // also reach here with NotComposer. They keep their own kinds, none of which
+    // is in FallbackPaneKinds, so no walk of a colleague conversation's pane is
+    // ever attempted. Widening this gate to "any no-evidence title" would put a
+    // human conversation's transcript under the walk, which is exactly what the
+    // host-app design exists to prevent.
+    //
+    // `panelId` is the focused panel's id (or "" when nothing matched) and is
+    // used ONLY as part of the pane cache key — see _copilotCachePane. It is
+    // deliberately not a gate: the gate is the kind, and adding a panel-id
+    // condition here would silently narrow the route rather than key its cache.
+    static AgentReadOutcome ReadTitleModeAgentName(AgentSurface surface, IntPtr fgHwnd, string title, string panelId, out string agentName)
     {
         AgentReadOutcome outcome = ExtractAgentName(surface, "", title, out agentName);
         if (outcome != AgentReadOutcome.NotComposer) return outcome;
         string kind = TitleKindOf(surface, title);
         if (!FallbackReadArmed(surface, kind)) return outcome;
         string[] classes, names;
-        if (!GetCachedCopilotHeadings(surface, fgHwnd, kind, out classes, out names)) return outcome;
+        if (!GetCachedCopilotHeadings(surface, fgHwnd, PaneKeyOf(kind, panelId), out classes, out names)) return outcome;
         return ExtractAgentNameFromHeading(surface, classes, names, out agentName);
     }
 
@@ -2076,18 +2451,28 @@ public static class CfaiEnforcer
     // already-extracted heading STRINGS, because re-walking a subtree per tick is
     // the cost this whole mechanism exists to avoid. The liveness probe a cached
     // element gives for free is replaced by an explicit key + TTL:
-    //   * a different window handle, or a different title kind, is a different
+    //   * a different window handle, or a different PANE KEY, is a different
     //     pane — the cache does not apply and a search starts AT ONCE;
     //   * an expired cache is dropped rather than served, which is the fail-OPEN
     //     direction a host app requires.
     //
-    // NOT keyed on the focused element's identity, and this is a deliberate,
-    // documented limitation rather than an oversight: the per-tick element key
-    // this file already computes (_fgOwnerKey) is only maintained on ticks where
-    // the app IS a governed AI surface, which — on this route, by construction —
-    // is exactly what has not been established yet. The (handle, kind) key plus
-    // the TTL is what bounds staleness instead.
-    static bool GetCachedCopilotHeadings(AgentSurface surface, IntPtr fg, string kind, out string[] classes, out string[] names)
+    // The pane key is (title kind, focused panel id) — see _copilotCachePane for
+    // why the kind alone stopped being enough on 2026-09-04. Including the panel
+    // id also fixes the SECOND half of that defect: `newPane` is what resets
+    // _copilotEmptyRuns, so with kind alone as the key, sitting in an idle
+    // Copilot home view (three empty runs → the 5s backoff) and then opening a
+    // re-titled Chat-list agent conversation looked like the SAME pane, kept the
+    // backoff, and delayed the block by up to 5s in the conversation that
+    // actually needed it.
+    //
+    // NOT keyed on the focused element's runtime identity, and this is a
+    // deliberate, documented limitation rather than an oversight: the per-tick
+    // element key this file already computes (_fgOwnerKey) is only maintained on
+    // ticks where the app IS a governed AI surface, which — on this route, by
+    // construction — is exactly what has not been established yet. The (handle,
+    // kind, panel id) key plus the TTL is what bounds staleness instead, and the
+    // TTL is still what covers switching agents WITHIN one pane.
+    static bool GetCachedCopilotHeadings(AgentSurface surface, IntPtr fg, string paneKey, out string[] classes, out string[] names)
     {
         classes = null;
         names = null;
@@ -2095,7 +2480,7 @@ public static class CfaiEnforcer
         long now = DateTime.UtcNow.Ticks;
         if (_copilotCacheNames != null
             && _copilotCacheHwnd == fg
-            && string.Equals(_copilotCacheKind ?? "", kind ?? "", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(_copilotCachePane ?? "", paneKey ?? "", StringComparison.OrdinalIgnoreCase)
             && (now - _copilotCacheTicks) <= COPILOT_CACHE_TTL)
         {
             classes = _copilotCacheClasses;
@@ -2106,21 +2491,21 @@ public static class CfaiEnforcer
             _copilotCacheClasses = null;
             _copilotCacheNames = null;
             _copilotCacheHwnd = IntPtr.Zero;
-            _copilotCacheKind = "";
+            _copilotCachePane = "";
             _copilotCacheTicks = 0;
         }
         bool newPane = _copilotSearchHwnd != fg
-            || !string.Equals(_copilotSearchKind ?? "", kind ?? "", StringComparison.OrdinalIgnoreCase);
+            || !string.Equals(_copilotSearchPane ?? "", paneKey ?? "", StringComparison.OrdinalIgnoreCase);
         if (newPane) _copilotEmptyRuns = 0;
         long interval = (_copilotEmptyRuns >= COPILOT_EMPTY_RUNS_BEFORE_BACKOFF)
             ? COPILOT_SEARCH_BACKOFF_INTERVAL : COPILOT_SEARCH_MIN_INTERVAL;
         if (!_copilotSearchInProgress && (newPane || (now - _copilotLastSearchTicks) > interval))
         {
             _copilotSearchHwnd = fg;
-            _copilotSearchKind = kind ?? "";
+            _copilotSearchPane = paneKey ?? "";
             _copilotLastSearchTicks = now;
             _copilotSearchInProgress = true;
-            var t = new Thread(() => SearchCopilotHeadingsBackground(surface, fg, kind));
+            var t = new Thread(() => SearchCopilotHeadingsBackground(surface, fg, paneKey));
             t.IsBackground = true;
             t.SetApartmentState(ApartmentState.STA);   // UIA requires STA, same as the poll thread
             t.Start();
@@ -2132,23 +2517,31 @@ public static class CfaiEnforcer
     // section header for the two measured reasons.
     //
     // Two strategies, in order:
-    //   1. PARENT HOP. Start at the focused element (on this route, the Copilot
-    //      tab's composer), walk up a bounded number of parents to reach the
-    //      conversation pane, then collect downwards from there. Cheap, and it
-    //      keeps the walk off the rest of the window.
+    //   1. ANCESTOR SEARCH. Start at the focused element (a Teams message
+    //      composer — either route's), walk up a bounded number of parents and
+    //      collect downwards FROM EACH ONE, nearest first, stopping at the first
+    //      ancestor whose subtree yields a heading. Cheap, keeps the walk off the
+    //      rest of the window, and — unlike the "hop exactly N then collect"
+    //      shape this replaced — encodes no assumption about how deeply a
+    //      particular route nests its composer. See COPILOT_PANE_PARENT_HOPS for
+    //      why that mattered from 2026-09-04, and for why the shared node budget
+    //      means this is not more expensive.
     //   2. WINDOW-ROOTED, depth-capped. Used only when (1) found nothing, e.g.
     //      because focus is not in the composer at all.
     // A wrong root is harmless rather than dangerous: CollectCopilotHeadings only
     // ever keeps nodes whose CLASS says they are headings, so an unhelpful
-    // subtree simply yields nothing and falls through to (2).
-    static void SearchCopilotHeadingsBackground(AgentSurface surface, IntPtr fg, string kind)
+    // subtree simply yields nothing and the search moves outward, then to (2).
+    static void SearchCopilotHeadingsBackground(AgentSurface surface, IntPtr fg, string paneKey)
     {
         try
         {
             var classes = new List<string>();
             var names = new List<string>();
 
-            AutomationElement root = null;
+            // ONE node budget for the whole ancestor search, so walking several
+            // ancestors costs no more in total than the single walk this
+            // replaced. Strategy 2 gets its own, since it discards (1)'s result.
+            int visited = 0;
             try
             {
                 AutomationElement el = AutomationElement.FocusedElement;
@@ -2166,16 +2559,16 @@ public static class CfaiEnforcer
                     {
                         var up = TreeWalker.ControlViewWalker;
                         AutomationElement cur = el;
-                        for (int i = 0; i < COPILOT_PANE_PARENT_HOPS && cur != null; i++)
+                        for (int i = 0; i < COPILOT_PANE_PARENT_HOPS && names.Count == 0; i++)
                         {
                             cur = up.GetParent(cur);
-                            if (cur != null) root = cur;
+                            if (cur == null) break;
+                            CollectCopilotHeadings(surface, cur, classes, names, ref visited);
                         }
                     }
                 }
             }
             catch { }
-            if (root != null) CollectCopilotHeadings(surface, root, classes, names);
 
             if (names.Count == 0)
             {
@@ -2185,7 +2578,8 @@ public static class CfaiEnforcer
                 {
                     classes.Clear();
                     names.Clear();
-                    CollectCopilotHeadings(surface, win, classes, names);
+                    int winVisited = 0;
+                    CollectCopilotHeadings(surface, win, classes, names, ref winVisited);
                 }
             }
 
@@ -2198,7 +2592,7 @@ public static class CfaiEnforcer
                 _copilotCacheClasses = classes.ToArray();
                 _copilotCacheNames = names.ToArray();
                 _copilotCacheHwnd = fg;
-                _copilotCacheKind = kind ?? "";
+                _copilotCachePane = paneKey ?? "";
                 _copilotCacheTicks = DateTime.UtcNow.Ticks;
                 _copilotEmptyRuns = 0;
             }
@@ -2231,7 +2625,13 @@ public static class CfaiEnforcer
     // "<Agent> said:" / "<Agent> Created by <author>" — the same class of value
     // the title read already handles, subject to the same rule: compared against
     // the blocklist and dropped.
-    static void CollectCopilotHeadings(AgentSurface surface, AutomationElement root, List<string> classes, List<string> names)
+    //
+    // `visited` is passed by REFERENCE so a caller that walks several roots (the
+    // ancestor search) spends ONE COPILOT_WALK_MAX_NODES budget across all of
+    // them rather than one each. The node cap is what bounds this walk's cost
+    // against a long transcript, and it would stop bounding anything if walking
+    // N roots meant N times the cap.
+    static void CollectCopilotHeadings(AgentSurface surface, AutomationElement root, List<string> classes, List<string> names, ref int visited)
     {
         if (surface == null || root == null) return;
         string headingClass = surface.FallbackHeadingClass ?? "";
@@ -2242,7 +2642,6 @@ public static class CfaiEnforcer
             var walker = TreeWalker.ControlViewWalker;
             var stack = new Stack<KeyValuePair<AutomationElement, int>>();
             stack.Push(new KeyValuePair<AutomationElement, int>(root, 0));
-            int visited = 0;
             while (stack.Count > 0)
             {
                 var cur = stack.Pop();
@@ -3259,10 +3658,32 @@ public static class CfaiEnforcer
         }
     }
 
-    // Control channel from the Node parent (ultimately the Electron dialog).
-    // The ONLY accepted command is {"cmd":"tokenize","block_id":"..."} — no
-    // text ever arrives here, just an id StartRewrite independently validates
-    // against its own pinned state. Anything else is ignored.
+    // Control channel from the Node parent (the Electron dialog, or the CLI
+    // agent's own Tokenize popup). Three commands, and nothing else is read:
+    //
+    //   {"cmd":"tokenize","block_id":"…"}
+    //       Mask-and-send the pinned block. An id, which StartRewrite validates
+    //       against its own pinned state.
+    //
+    //   {"cmd":"tokenize","block_id":"…","text":"…"}
+    //       The SAME command with the user's own hand-edited replacement, from
+    //       the popup's "Edit manually" view. `text` is THE ONLY FREE TEXT THIS
+    //       CHANNEL ACCEPTS, and it is text the user typed into our own dialog
+    //       — not anything read off a screen, a clipboard or another process.
+    //       It cannot widen what a rewrite may do: StartRewrite still requires
+    //       the pinned id, still re-runs every length/write-budget gate against
+    //       this text, and RunRewrite still re-verifies window, element and
+    //       composer contents before typing and still verifies the read-back
+    //       (including a full pattern rescan) before sending. What it replaces
+    //       is only WHICH string gets typed — the enforcer's own masked
+    //       candidate, or the user's edit of it.
+    //
+    //   {"cmd":"tokenize_edit","block_id":"…","state":"on"|"off"}
+    //       Hold the pinned block while that text box is open. Extends an
+    //       EXISTING pin's expiry and nothing else — see HoldPendingRewrite.
+    //
+    //   {"cmd":"attach_hold",…}
+    //       The attachment send-hold, unchanged.
     static void StdinLoop()
     {
         string line;
@@ -3278,7 +3699,21 @@ public static class CfaiEnforcer
                     if (cmd == "tokenize")
                     {
                         string bid = ExtractJsonString(line, "block_id");
-                        if (!string.IsNullOrEmpty(bid)) StartRewrite(bid);
+                        // ExtractJsonStringUnescaped, not ExtractJsonString: an
+                        // edited prompt legitimately contains quotes, newlines
+                        // and backslashes, all of which arrive JSON-escaped and
+                        // would be truncated or typed literally by the plain
+                        // extractor. NULL when the field is absent, which is
+                        // how "no edit, use the enforcer's own mask" is told
+                        // apart from "the user cleared the box" (refused).
+                        string edited = ExtractJsonStringUnescaped(line, "text");
+                        if (!string.IsNullOrEmpty(bid)) StartRewrite(bid, edited);
+                    }
+                    else if (cmd == "tokenize_edit")
+                    {
+                        string bid = ExtractJsonString(line, "block_id");
+                        string state = ExtractJsonString(line, "state");
+                        if (!string.IsNullOrEmpty(bid)) HoldPendingRewrite(bid, state == "on");
                     }
                     else if (cmd == "attach_hold")
                     {
@@ -3589,7 +4024,12 @@ public static class CfaiEnforcer
                     {
                         string bid; bool rewritable; string whyNot; int readLen; int labeled;
                         lock (_pendingLock) {
-                            bid = _pendingBlockId; rewritable = _pendingRewritable; whyNot = _pendingWhyNot;
+                            bid = _pendingBlockId;
+                            // Same refusal EmitBlock makes: a FROZEN pin belongs
+                            // to a surface that no longer has the foreground, so
+                            // it is not an offer this hotkey may take up.
+                            rewritable = _pendingRewritable && !_pendingFrozen;
+                            whyNot = _pendingFrozen ? "surface_changed" : _pendingWhyNot;
                             readLen = _pendingReadLen; labeled = _pendingLabeledPatterns;
                         }
                         if (rewritable && !string.IsNullOrEmpty(bid)) StartRewrite(bid);
@@ -3955,6 +4395,12 @@ public static class CfaiEnforcer
             return;
         }
         _lastBlockedCheck = now;
+        // The GOVERNED list rides the same 10s tick, and is refreshed BEFORE the
+        // blocked read rather than after it: the blocked read's own
+        // file-missing path returns early, and DLP monitoring must not depend on
+        // blocked-agents.json existing. Fully independent otherwise — it decides
+        // nothing about blocking and CheckFgBlocked never reads it.
+        UpdateGovernedAgents();
         try {
             if (!System.IO.File.Exists(_blockedAgentFile)) { _blockedList.Clear(); RebuildAgentScopedProcs(); ClearFgBlocked(); return; }
             string json = System.IO.File.ReadAllText(_blockedAgentFile);
@@ -4019,6 +4465,109 @@ public static class CfaiEnforcer
             if (!string.IsNullOrEmpty(agent["process_name"])) procs.Add(agent["process_name"]);
         }
         _agentScopedProcs = procs;
+    }
+
+    // Read governed-agents.json — the DLP-monitored-but-NOT-blocked list.
+    //
+    // Deliberately a near-copy of the blocked read above rather than a shared
+    // generic reader: the two differ in the one place that matters (this one
+    // never touches _fgIsBlocked, never calls ClearFgBlocked, and never rebuilds
+    // the blocked gate), and a shared reader parameterised by "which file" would
+    // put those differences behind a flag. Same parser, same row shape, same
+    // "assign only at the end" discipline.
+    //
+    // FAIL CLOSED IN THE DLP DIRECTION: a missing file, an unparseable file or
+    // any exception leaves the list EMPTY, which means nothing is DLP-governed —
+    // i.e. Teams goes back to being completely untouched. That is the safe
+    // direction here: the failure mode of guessing wrong is capturing prompt
+    // content the org did not ask for.
+    static void UpdateGovernedAgents()
+    {
+        try {
+            if (string.IsNullOrEmpty(_governedAgentFile) || !System.IO.File.Exists(_governedAgentFile))
+            { _governedList.Clear(); RebuildDlpScopedProcs(); return; }
+            string json = System.IO.File.ReadAllText(_governedAgentFile).Trim();
+            var list = new List<Dictionary<string, string>>();
+            if (json.StartsWith("[")) {
+                foreach (string item in SplitJsonArray(json)) {
+                    var d = new Dictionary<string, string>();
+                    d["platform"] = ExtractJsonString(item, "platform");
+                    d["agent_name"] = ExtractJsonString(item, "agent_name");
+                    d["agent_id"] = ExtractJsonString(item, "agent_id");
+                    // Only 'agent' scope is honoured, exactly as the blocked
+                    // list's narrowing branch does. A platform-scoped (or
+                    // scope-less) governed row would mean "DLP-monitor every
+                    // prompt typed anywhere in this app", which for a HOST APP
+                    // is the whole-app capture this feature exists to prevent —
+                    // so such a row governs nothing at all.
+                    d["agent_scope"] = ExtractJsonString(item, "agent_scope");
+                    if (!string.IsNullOrEmpty(d["platform"])) list.Add(d);
+                }
+            }
+            _governedList = list;
+            RebuildDlpScopedProcs();
+        } catch {
+            // A read caught mid-write, or a malformed file: govern nothing this
+            // tick rather than half of it. The next tick re-reads.
+            _governedList = new List<Dictionary<string, string>>();
+            RebuildDlpScopedProcs();
+        }
+    }
+
+    // The GOVERNED privacy gate's data — which processes the current governed
+    // list holds an agent-scoped row for. Mirrors RebuildAgentScopedProcs' shape
+    // and rebuild discipline exactly, over the other list.
+    static void RebuildDlpScopedProcs()
+    {
+        var procs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var agent in _governedList)
+        {
+            if (!string.Equals(agent["agent_scope"], "agent", StringComparison.OrdinalIgnoreCase)) continue;
+            HashSet<string> mapped;
+            if (PLATFORM_PROCS.TryGetValue(agent["platform"], out mapped))
+            {
+                foreach (string p in mapped) procs.Add(p);
+            }
+        }
+        _dlpScopedProcs = procs;
+    }
+
+    // Does the CURRENT governed list hold an agent-scoped row that names THIS
+    // agent inside THIS process? Read-only, and the exact counterpart of
+    // BlockedListHasMatchingAgentRow below — same PLATFORM_PROCS coverage test,
+    // same AgentNameMatches comparison, no new matching semantics.
+    //
+    // Used by ApplyForegroundTick's host-app branch for the Chat-list route,
+    // where a panel match alone cannot distinguish an agent conversation from a
+    // renamed human group chat, so the NAME is the only available evidence.
+    // Never consulted by any block decision.
+    static bool GovernedListHasMatchingAgentRow(string proc, string agentName)
+    {
+        if (_governedList == null || _governedList.Count == 0) return false;
+        if (string.IsNullOrEmpty(proc) || string.IsNullOrEmpty(agentName)) return false;
+        string name = StripExe(proc).Trim();
+        if (name.Length == 0) return false;
+        foreach (var agent in _governedList)
+        {
+            if (!string.Equals(agent["agent_scope"], "agent", StringComparison.OrdinalIgnoreCase)) continue;
+            HashSet<string> procs;
+            if (!PLATFORM_PROCS.TryGetValue(agent["platform"], out procs)) continue;
+            if (procs == null || !procs.Contains(name)) continue;
+            if (AgentNameMatches(agentName, agent["agent_name"])) return true;
+        }
+        return false;
+    }
+
+    // Is this panel one whose DLP governance needs NO name-list match — i.e. a
+    // composer with no non-AI use at all? Data from ai-processes.js's `dlpMatch`
+    // (see PanelSig.DlpMatch); the comparison is here and only here.
+    //
+    // Positive-only by construction: anything other than the one literal is the
+    // strict "a named row is required" rule, so a null panel, an older payload
+    // or a typo can never widen governance.
+    static bool PanelDlpMatchesOnPanelAlone(PanelSig hit)
+    {
+        return hit != null && string.Equals(hit.DlpMatch, "panel", StringComparison.OrdinalIgnoreCase);
     }
 
     // Does the CURRENT blocklist hold an agent-scoped row that names THIS agent
@@ -4493,6 +5042,64 @@ public static class CfaiEnforcer
         return json.Substring(start, end - start);
     }
 
+    // The same lookup, but ESCAPE-AWARE, for the one field on the control
+    // channel that carries free text (the "Edit manually" replacement — see
+    // StdinLoop). ExtractJsonString above stops at the first '"' and returns
+    // the raw slice, which is exactly right for the ids, names and enum-ish
+    // values every other caller reads and exactly wrong here: a prompt
+    // containing a quote would be truncated mid-word, and one containing a
+    // newline would have the two characters '\' and 'n' typed into the
+    // composer.
+    //
+    // Returns NULL when the key is absent, so a caller can tell "no such field"
+    // from "the field was an empty string" — the difference between "use the
+    // enforcer's own masked candidate" and "the user submitted an empty box",
+    // which are opposite decisions.
+    //
+    // Deliberately NOT a JSON parser: it finds one key at the top level, reads
+    // one string value, and understands only the escapes Esc() and
+    // JSON.stringify actually produce. Anything malformed ends the value rather
+    // than throwing — this runs on the stdin thread, and a bad line must never
+    // take the enforcer down.
+    static string ExtractJsonStringUnescaped(string json, string key)
+    {
+        if (json == null) return null;
+        string search = "\"" + key + "\":\"";
+        int i = json.IndexOf(search, StringComparison.OrdinalIgnoreCase);
+        if (i < 0) return null;
+        int p = i + search.Length;
+        var sb = new StringBuilder();
+        while (p < json.Length)
+        {
+            char c = json[p];
+            if (c == '"') break;                       // end of the value
+            if (c != '\\') { sb.Append(c); p++; continue; }
+            p++;
+            if (p >= json.Length) break;               // trailing backslash
+            char e = json[p++];
+            if (e == 'n') sb.Append('\n');
+            else if (e == 'r') sb.Append('\r');
+            else if (e == 't') sb.Append('\t');
+            else if (e == 'b') sb.Append('\b');
+            else if (e == 'f') sb.Append('\f');
+            else if (e == '"' || e == '\\' || e == '/') sb.Append(e);
+            else if (e == 'u')
+            {
+                if (p + 4 > json.Length) break;
+                int cp;
+                if (!int.TryParse(json.Substring(p, 4),
+                                  System.Globalization.NumberStyles.HexNumber,
+                                  System.Globalization.CultureInfo.InvariantCulture, out cp)) break;
+                sb.Append((char)cp);
+                p += 4;
+            }
+            // Anything else is not an escape this side produces; drop the
+            // backslash and keep the character rather than guessing.
+            else sb.Append(e);
+        }
+        return sb.ToString();
+    }
+
     // Bare (unquoted) numeric field, e.g. "ttl_ms":60000 — ExtractJsonString
     // only handles quoted string values. Returns fallback on anything
     // malformed or missing rather than throwing, since a bad/attacker-
@@ -4539,9 +5146,14 @@ public static class CfaiEnforcer
         // A HOST APP whose governed path is FULLY ARMED for this tick. Three
         // conditions, and every one of them is a gate, not a convenience:
         //   * the process carries a HostApp agent surface;
-        //   * the CURRENT blocklist holds an agent-scoped row covering it —
-        //     the same privacy gate the composer read uses. No agent policy for
-        //     Teams means Teams is never looked at, at all;
+        //   * the CURRENT policy holds an agent-scoped row covering it — the
+        //     same privacy gate the composer read uses. NO agent policy for
+        //     Teams means Teams is never looked at, at all. "Policy" is now
+        //     either list: a BLOCKED row (swallow every keystroke in that
+        //     conversation) or a GOVERNED row (scan its prompts and offer to
+        //     tokenize). Both are an org instruction about an agent inside this
+        //     app, and either one is what justifies the read; neither list being
+        //     interested in Teams still means nothing is read;
         //   * that surface is BOTH verified and enforcing. Unlike a chat app —
         //     where an unverified surface still has the pre-existing whole-app
         //     block to fall back to, so the reads have to happen — a host app
@@ -4550,7 +5162,8 @@ public static class CfaiEnforcer
         //     unverified host-app surface completely inert rather than merely
         //     non-blocking.
         bool hostAppArmed = !isIde && proc != null && _hostAppProcs.Contains(proc)
-            && _agentScopedProcs.Contains(proc) && EnforcingAgentSurface(proc) != null;
+            && (_agentScopedProcs.Contains(proc) || _dlpScopedProcs.Contains(proc))
+            && EnforcingAgentSurface(proc) != null;
         string panelRid = "";
         bool panelReadable = false;
         PanelSig hit = null;
@@ -4589,7 +5202,11 @@ public static class CfaiEnforcer
             && _agentScopedProcs.Contains(proc)) || hostAppArmed)
         {
             AgentSurface surface = MatchAgentSurface(proc);
-            if (surface != null) agentOutcome = ReadFocusedAgentName(surface, pid, fg, out agentName);
+            // `hit` comes from the panel read above, on this same tick. It is
+            // handed down ONLY as part of the Copilot-tab heading cache's pane
+            // key — see _copilotCachePane — never as a gate or as evidence; the
+            // gating on `hit` happens once, in ApplyForegroundTick.
+            if (surface != null) agentOutcome = ReadFocusedAgentName(surface, pid, fg, hit != null ? hit.Id : "", out agentName);
         }
         ApplyForegroundTick(pid, proc, isIde, hit, panelRid, panelReadable, agentOutcome, agentName);
     }
@@ -4607,6 +5224,10 @@ public static class CfaiEnforcer
         _fgPid = pid;
 
         bool isAi = false, isPanel = false, panelEnforce = false;
+        // "This tick is DLP-governed and NOT blocked" — see _fgDlpGoverned.
+        // Declared with the other per-tick locals so EVERY branch leaves it
+        // false and only the host-app branch can ever set it.
+        bool dlpGoverned = false;
         string panelId = "";
         if (panelRid == null) panelRid = "";
         // Always mirrors THIS tick's read — Unreadable whenever UpdateForeground
@@ -4690,16 +5311,37 @@ public static class CfaiEnforcer
             //
             // THE CORE PRIVACY PROPERTY OF THIS FEATURE. A host app is a
             // general-purpose application — the company's chat client — and it
-            // is treated as an AI surface for EXACTLY the ticks on which a
-            // blocked agent is provably the open conversation. On every other
-            // tick isAi stays false, so FgIsAiNow() is false, so no keystroke is
-            // buffered, no clipboard/UIA content is scanned and no block
-            // decision is even evaluated. DLP capture is confined to an
-            // already-blocked agent's conversation and to nowhere else in Teams:
-            // not a DM, not a channel, not a meeting chat, not the Copilot
-            // panel, not the Activity tab.
+            // is treated as an AI surface for EXACTLY the ticks on which an
+            // agent the org has a policy about is provably the open
+            // conversation. On every other tick isAi stays false, so FgIsAiNow()
+            // is false, so no keystroke is buffered, no clipboard/UIA content is
+            // scanned and no block decision is even evaluated. Capture is
+            // confined to those conversations and to nowhere else in Teams: not
+            // a DM, not a channel, not a meeting chat, not the Activity tab.
             //
-            // Four independent conditions, ALL required:
+            // THERE ARE NOW TWO KINDS OF POLICY, and the split below is the
+            // whole point:
+            //
+            //   blockGoverned — EXACTLY the pre-existing rule, unchanged. Drives
+            //                   _fgIsBlocked via CheckFgBlocked: every Enter and
+            //                   every send-button click in that conversation is
+            //                   swallowed.
+            //   dlpGoverned   — NEW, and STRICTLY WEAKER. The agent is one the
+            //                   org asked to DLP-MONITOR and explicitly did NOT
+            //                   block. It makes the tick an AI surface — so
+            //                   prompts are scanned and Tokenize & Send is
+            //                   offered — and NOTHING ELSE. It cannot arm a
+            //                   platform/agent/panel block: it is never read by
+            //                   CheckFgBlocked, it supplies no blocklist row,
+            //                   and a host app is barred from all three coarse
+            //                   arms there anyway.
+            //
+            // They are computed in that order and dlpGoverned requires
+            // !blockGoverned, so BLOCKED WINS structurally. The sync layer
+            // already guarantees the two lists are disjoint on disk; this makes
+            // "blocked and governed at once" unrepresentable here regardless.
+            //
+            // Four independent conditions for blockGoverned, ALL required:
             //   surface   — a HostApp AGENT_SURFACES entry that is BOTH verified
             //               and enforcing. Teams' entry now ships true/true
             //               (live pass 2026-08-30), so this branch is live; the
@@ -4719,12 +5361,49 @@ public static class CfaiEnforcer
             //               look at this app, so there is no reason to treat it
             //               as one.
             AgentSurface hostSurface = EnforcingAgentSurface(proc);
-            bool governed = hostSurface != null
-                && hit != null && hit.Enforce
+            // The shared preconditions of BOTH kinds of governance: a host-app
+            // surface past its two-flag gate, and a focused ELEMENT that matched
+            // an ENFORCING composer signature. The process being in the
+            // foreground is never evidence; only the element is.
+            bool hostSurfaceOk = hostSurface != null && hit != null && hit.Enforce;
+            bool blockGoverned = hostSurfaceOk
                 && agentOutcome == AgentReadOutcome.Named
                 && BlockedListHasMatchingAgentRow(proc, agentName);
-            if (governed)
+            // The DLP-only state. Two routes into it, and they differ in exactly
+            // one thing — whether the agent has to be NAMED:
+            //
+            //   the Chat-list composer (dlpMatch 'agent', the default) — the
+            //     conversation must be Named AND present in governed-agents.json.
+            //     ONE composer element serves every conversation in Teams' Chat
+            //     list, so a panel match there is equally true of a DM, a channel
+            //     post and a renamed human group chat. The name is the only
+            //     signal that can tell an agent conversation from a colleague's,
+            //     and without it this would capture colleague conversations —
+            //     precisely what the host-app design exists to prevent.
+            //
+            //   the embedded Copilot tab (dlpMatch 'panel') — PANEL MATCH ALONE,
+            //     with no name-list check at all, so ANY conversation in that
+            //     tab is DLP-governed, including the generic unnamed Copilot
+            //     assistant. Safe here and only here because that composer has
+            //     no non-AI use whatsoever: there is no DM, no channel and no
+            //     meeting chat behind it, so "the caret is in this element"
+            //     already means "the user is typing at an AI". The privacy gate
+            //     upstream still applies — hostAppArmed requires the org to hold
+            //     SOME agent policy for Teams before anything here is read.
+            //
+            // !blockGoverned is what makes blocked take precedence; see above.
+            dlpGoverned = !blockGoverned && hostSurfaceOk
+                && (PanelDlpMatchesOnPanelAlone(hit)
+                    || (agentOutcome == AgentReadOutcome.Named
+                        && GovernedListHasMatchingAgentRow(proc, agentName)));
+            if (blockGoverned || dlpGoverned)
             {
+                // Identical surface state for both. isAi/isPanel are what make
+                // capture, DLP scanning and Tier B masking eligible — and for a
+                // host app they are also what PanelUiaOk/PanelEnforceOk demand
+                // before any content may be read. What the two states do NOT
+                // share is any input to a block decision: that comes solely from
+                // a matching blocked-agents.json row inside CheckFgBlocked.
                 isAi = true; isPanel = true; panelId = hit.Id; panelEnforce = hit.Enforce;
             }
             // The latch rule, and it is WIDER here than in the chat-app branch
@@ -4785,6 +5464,13 @@ public static class CfaiEnforcer
                 ClearPanelBlockLatch();
             }
         }
+
+        // Always mirrors THIS tick's decision, on every branch — a host-app tick
+        // that stopped being governed, an IDE tick, a chat-app tick and a tick
+        // with no AI surface at all all assign false here. So the flag can never
+        // outlive the tick that earned it and leak a Tier B offer into the sticky
+        // window, where the state is second-hand by definition.
+        _fgDlpGoverned = dlpGoverned;
 
         if (isAi)
         {
@@ -4958,20 +5644,59 @@ public static class CfaiEnforcer
         // Send was NEVER offered in an IDE before; it is now offered while an
         // enforcing AI panel actually has focus, and still refused in the editor
         // or the terminal (where the "composer text" this reads would be source
-        // code). Note IDE prompts are frequently multi-line and
-        // ComputeMaskCandidate still rejects multi-line text outright — that
-        // pre-existing limitation is untouched here and tracked separately.
-        // A HOST APP is excluded ENTIRELY, not merely panel-scoped like an IDE.
-        // Tokenize & Send is the one path in this file that WRITES into another
-        // app's composer, and offering it inside a general-purpose chat client —
-        // where the "composer" it would read and rewrite could be a message to a
-        // colleague — is not something this feature has been designed or
-        // verified for. PanelUiaOk() already refuses it, since a host app only
-        // ever sets _fgIsPanel on a governed tick; this states it outright so it
-        // cannot be re-enabled as a side effect of a later change to that gate.
-        if (!_fgIsAi || !PanelUiaOk() || _hostAppProcs.Contains(_app) || Disarmed())
+        // code). Multi-line prompts are now maskable too (see
+        // ComputeMaskCandidate and RunRewrite's line-break handling), which is
+        // what makes the offer useful in an IDE panel and in a chat client at
+        // all — a Teams message is routinely more than one line.
+        //
+        // A HOST APP is still excluded, but the exclusion is now GOVERNANCE-
+        // SCOPED rather than blanket. Tokenize & Send is the one path in this
+        // file that WRITES into another app's composer, and offering that inside
+        // a general-purpose chat client would be unacceptable if the "composer"
+        // could be a message to a colleague — so it is offered on exactly the
+        // ticks where it provably cannot be: a DLP-GOVERNED tick, i.e. one where
+        // ApplyForegroundTick has already established (from the focused element
+        // plus either a named governed-agents.json row or a composer with no
+        // non-AI use at all) that the user is typing at an AI. Every other Teams
+        // tick — DM, channel, meeting chat, an ungoverned agent — is refused
+        // exactly as before.
+        //
+        // A BLOCKED host-app tick is refused too, and by two independent
+        // mechanisms: _fgDlpGoverned is false whenever blockGoverned is true (so
+        // this line refuses it), and EmitBlock separately forces rewritable=false
+        // for any _fgIsBlocked tick because RunRewrite ends in a synthetic Enter
+        // the hook would swallow. Neither relies on the other.
+        //
+        // A SURFACE CHANGE FREEZES THE PIN, IT NO LONGER DESTROYS IT. Same
+        // reasoning as the two transient-read branches below, which already
+        // leave a still-unexpired candidate alone rather than believing one bad
+        // tick: dropping it here made the Tokenize popup's "Edit manually" text
+        // box impossible, because a box the user can type into has to hold
+        // keyboard focus, and the instant it did, this tick saw a non-AI
+        // foreground and wiped the pin out from under the very block being
+        // edited (StartRewrite then answers "stale_block_id"). The pin now
+        // survives its own expiry instead — REWRITE_TTL normally, and
+        // REWRITE_EDIT_TTL while HoldPendingRewrite says a text box is open.
+        //
+        // This is not a licence to rewrite anything later. It only preserves an
+        // ANSWER to a question already asked: nothing new is offered off a
+        // frozen pin (_pendingFrozen, refused by EmitBlock and by the confirm
+        // hotkey), and the tokenize command that can consume it still has to
+        // get past RunRewrite's pre-flight — the same foreground window, the
+        // same focused element by runtime id, the same unchanged composer text
+        // — before one character is typed. A user who walked away to another
+        // window cannot have their old prompt typed into it.
+        //
+        // THE PANIC HOTKEY STILL CLEARS OUTRIGHT. Disarmed() is the one term
+        // here that means "stop touching the keyboard", so it may not freeze.
+        if (!_fgIsAi || !PanelUiaOk() || (_hostAppProcs.Contains(_app) && !_fgDlpGoverned) || Disarmed())
         {
-            lock (_pendingLock) { _pendingRewritable = false; _pendingBlockId = ""; }
+            lock (_pendingLock)
+            {
+                if (!_pendingRewritable || Disarmed() || DateTime.UtcNow.Ticks > _pendingExpiresAt)
+                { _pendingRewritable = false; _pendingBlockId = ""; _pendingFrozen = false; }
+                else _pendingFrozen = true;
+            }
             return;
         }
         AutomationElement el;
@@ -5017,7 +5742,16 @@ public static class CfaiEnforcer
             int labeled = 0;
             foreach (var p in _patInfos) if (!string.IsNullOrEmpty(p.Label)) labeled++;
             _pendingLabeledPatterns = labeled;
-            if (mask.Ok && rid != null)
+            // MULTI-LINE PRE-CHECK, decided HERE rather than inside
+            // ComputeMaskCandidate: whether a line break can be typed at all is
+            // a property of the SURFACE (which key combination inserts a newline
+            // without submitting), not of the text, and ComputeMaskCandidate is
+            // deliberately pure over the text. A surface whose catalog entry
+            // declares a combo this file cannot synthesize gets no offer for
+            // multi-line text — fail closed, and reported with its own reason
+            // rather than a silent refusal. Single-line text is unaffected.
+            bool newlineOk = !HasLineBreak(mask.Masked) || CanInsertNewline();
+            if (mask.Ok && rid != null && newlineOk)
             {
                 // Reuse the existing block_id when the underlying text hasn't
                 // actually changed, instead of always minting a fresh one.
@@ -5040,10 +5774,31 @@ public static class CfaiEnforcer
                 bool samePrompt = _pendingRewritable && NormalizeWs(_pendingOriginalFull) == NormalizeWs(text);
                 if (!samePrompt) _pendingBlockId = Guid.NewGuid().ToString("N");
                 _pendingRewritable = true;
+                // Recomputed on the surface it belongs to, so it is a live
+                // offer again — and its expiry goes back to REWRITE_TTL below,
+                // discarding any edit hold that was extending it.
+                _pendingFrozen = false;
                 _pendingWhyNot = "";
                 _pendingOriginalFull = text;
                 _pendingMaskedFull = mask.Masked;
-                _pendingPreview = mask.Masked.Length > 300 ? mask.Masked.Substring(0, 300) : mask.Masked;
+                // THE WHOLE masked candidate, not a 300-char slice of it. The
+                // slice was fine while `preview` only ever had to be READ ("this
+                // is what gets sent"); it stopped being fine the moment the CLI
+                // popup grew an "Edit manually" box, because that box is
+                // PRE-FILLED from this field and its contents are what gets
+                // typed — a truncated pre-fill would let the user send half a
+                // message without necessarily noticing. Display truncation
+                // belongs in the thing doing the displaying, and that is where
+                // it now lives (toast-helper.ps1's PreviewMax).
+                //
+                // This is not unbounded: the candidate is already capped by
+                // ComputeMaskCandidate's REWRITE_MAX_CHARS pre-filter and, more
+                // tightly, by WriteFitsBudget — a masked string that cannot be
+                // typed inside the write budget is never pinned at all. The cap
+                // below is therefore belt-and-braces, and it is the same number
+                // the enforcer would refuse to type past.
+                _pendingPreview = mask.Masked.Length > REWRITE_MAX_CHARS
+                    ? mask.Masked.Substring(0, REWRITE_MAX_CHARS) : mask.Masked;
                 _pendingRuntimeId = rid;
                 _pendingHwnd = fg;
                 _pendingPid = _fgPid;
@@ -5052,9 +5807,37 @@ public static class CfaiEnforcer
             else
             {
                 _pendingRewritable = false;
-                _pendingWhyNot = mask.Ok ? "no_runtime_id" : mask.Reason;
+                _pendingFrozen = false;
+                _pendingWhyNot = !mask.Ok ? mask.Reason
+                               : rid == null ? "no_runtime_id"
+                               : "multiline_no_newline_key";
                 _pendingBlockId = "";
             }
+        }
+    }
+
+    // ── Holding the pin while the user retypes the prompt by hand ────────────
+    // Driven by {"cmd":"tokenize_edit","block_id":"…","state":"on"|"off"} — the
+    // CLI agent's Tokenize popup sends "on" the moment its "Edit manually" text
+    // box opens and "off" if the user cancels or it lapses.
+    //
+    // ALL IT CAN DO IS MOVE ONE EXPIRY. It cannot create a pin, cannot make an
+    // unrewritable block rewritable, and cannot change the window, element,
+    // text or id a pin was computed from — it returns without touching anything
+    // unless the block id it names is ALREADY the pinned, already-rewritable
+    // one. So a wrong, replayed or invented id is a no-op, which is the same
+    // answer StartRewrite gives one.
+    //
+    // Nothing is emitted from here. The command is a hint about how long a
+    // human is likely to take; whether the rewrite is allowed at all is still
+    // decided entirely by StartRewrite and RunRewrite when it is asked for.
+    static void HoldPendingRewrite(string blockId, bool on)
+    {
+        if (string.IsNullOrEmpty(blockId)) return;
+        lock (_pendingLock)
+        {
+            if (!_pendingRewritable || _pendingBlockId != blockId) return;
+            _pendingExpiresAt = DateTime.UtcNow.Ticks + (on ? REWRITE_EDIT_TTL : REWRITE_TTL);
         }
     }
 
@@ -5072,10 +5855,13 @@ public static class CfaiEnforcer
 
     // Some UIA text providers (confirmed live: Windows 11 Notepad's
     // TextPattern) always include a final line terminator even for
-    // single-line content — without trimming it, ComputeMaskCandidate's
-    // multiline check would reject every single-line prompt, not just
-    // genuinely multi-line ones. Trim ONLY a trailing terminator, never an
-    // embedded one — that preserves the real multiline signal.
+    // single-line content. Trimming it mattered when ComputeMaskCandidate
+    // rejected every multi-line prompt (it made single-line content read as
+    // multi-line); it still matters now that multi-line IS maskable, for a
+    // different reason: a phantom trailing terminator would make RunRewrite
+    // type one extra newline key the user never typed, and would put a
+    // difference into the read-back comparison. Trim ONLY a trailing
+    // terminator, never an embedded one — the real line structure is content.
     static string ReadText(AutomationElement el)
     {
         try
@@ -5240,7 +6026,21 @@ public static class CfaiEnforcer
     {
         var result = new MaskResult { Ok = false, Masked = text, Reason = "" };
         if (string.IsNullOrEmpty(text)) { result.Reason = "empty"; return result; }
-        if (text.IndexOf('\n') >= 0 || text.IndexOf('\r') >= 0) { result.Reason = "multiline"; return result; }
+        // MULTI-LINE TEXT IS MASKABLE. This used to reject any text containing
+        // \n or \r outright, which made the whole feature nearly inert in a chat
+        // client (a Teams message is routinely more than one line) and in an IDE
+        // panel (where prompts almost always are). Nothing about the masking
+        // itself needed the restriction: span collection, cluster resolution and
+        // the splice are ordinary string/regex operations over the text, and .NET
+        // regexes without RegexOptions.Singleline do not let `.` cross a line
+        // break — so a pattern still cannot match across two lines, which is the
+        // conservative direction.
+        //
+        // What genuinely could not handle it was the WRITE path: typing a literal
+        // newline into a chat composer submits the message half-written. That is
+        // fixed where it belongs, in RunRewrite (line segments plus the surface's
+        // own newline key combination), and gated by the surface's catalog entry
+        // in UpdatePendingRewrite — not by refusing to mask.
         if (text.Length > REWRITE_MAX_CHARS) { result.Reason = "too_long"; return result; }
 
         var spans = CollectMaskSpans(text);
@@ -5261,6 +6061,21 @@ public static class CfaiEnforcer
 
         string masked = SpliceMaskRegions(text, regions);
         if (masked == text) { result.Reason = "masked_equals_original"; return result; }
+
+        // THE ACCURATE LENGTH GATE, on the text that will actually be TYPED.
+        // The REWRITE_MAX_CHARS check above is a coarse pre-filter on the input
+        // (it also bounds the regex cost); this one models the write loop's real
+        // wall time — see EstimateWriteMs — and is what keeps the promise the old
+        // hand-written cap broke: a rewrite this file OFFERS is a rewrite it can
+        // finish. Two reasons why the two checks are not the same number:
+        //   * a mask can make the text LONGER (a short match, a longer label),
+        //     and it is the masked text that gets typed;
+        //   * a line break costs ~25ms where a typed character costs ~15.4ms, so
+        //     456 characters of prose fit and 456 characters full of line breaks
+        //     do not.
+        // Refusing here costs the user an offer they never had; getting it wrong
+        // costs them a cleared composer holding half a message.
+        if (!WriteFitsBudget(masked)) { result.Reason = "too_long_to_write"; return result; }
 
         string residual = ScanNames(masked);
         if (residual.Length > 0) { result.Reason = "residual_match"; return result; }
@@ -5331,7 +6146,34 @@ public static class CfaiEnforcer
         lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }
 
-    static string Esc(string s) { return s.Replace("\\", "\\\\").Replace("\"", "\\\""); }
+    // JSON string escaping for every field this file emits.
+    //
+    // Backslash and quote were the whole of it, which was sufficient only while
+    // nothing emitted here could contain a CONTROL CHARACTER. Multi-line masked
+    // text can (that is the point of it), and an unescaped newline in a value
+    // does not merely produce invalid JSON — it splits the NDJSON line in two,
+    // so the Node side sees a truncated event followed by a garbage line. Every
+    // field routes through here, so fixing it here fixes `preview` (a masked
+    // substring), the rewrite's `masked`, and any future field at once.
+    //
+    // \u escapes rather than the short forms for the rare ones: one branch,
+    // valid JSON for every C0 character including the ones with no short form.
+    static string Esc(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        var sb = new StringBuilder(s.Length + 8);
+        foreach (char c in s)
+        {
+            if (c == '\\') sb.Append("\\\\");
+            else if (c == '"') sb.Append("\\\"");
+            else if (c == '\n') sb.Append("\\n");
+            else if (c == '\r') sb.Append("\\r");
+            else if (c == '\t') sb.Append("\\t");
+            else if (c < ' ' || c == (char)0x7f) sb.Append("\\u").Append(((int)c).ToString("x4"));
+            else sb.Append(c);
+        }
+        return sb.ToString();
+    }
 
     // Extended "block" event carrying the Tier B rewrite offer, if any. Reads
     // the pending state the poll thread already prepared — no new UIA/regex
@@ -5343,10 +6185,18 @@ public static class CfaiEnforcer
         lock (_pendingLock)
         {
             blockId = _pendingBlockId;
-            rewritable = _pendingRewritable && blockId.Length > 0;
+            // A FROZEN pin is never offered. It was computed on a surface that
+            // no longer has the foreground (see _pendingFrozen), so its id and
+            // its preview describe some other composer than the one this block
+            // just fired on — offering it would put one app's masked text in a
+            // popup labelled with another's, and the rewrite would abort on
+            // RunRewrite's foreground check anyway. The next poll tick on the
+            // real surface unfreezes it and this block becomes offerable again.
+            rewritable = _pendingRewritable && !_pendingFrozen && blockId.Length > 0;
             preview = _pendingPreview;
-            whyNot = _pendingWhyNot;
+            whyNot = _pendingFrozen ? "surface_changed" : _pendingWhyNot;
         }
+        if (!rewritable) blockId = "";
         // An attachment hold is never rewritable — Tokenize & Send only ever
         // masks TEXT, never removes a file. _pendingRewritable/_pendingBlockId
         // are a fully independent pin (the composer TEXT might separately be
@@ -5396,12 +6246,43 @@ public static class CfaiEnforcer
         lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }
 
-    static void EmitRewrite(string blockId, string result, string reason)
+    // The Tier B outcome line.
+    //
+    // ── `masked`: THE ONE PLACE PROMPT TEXT LEAVES THIS PROCESS ──────────────
+    // A deliberate, reviewed change to this channel's contract, made so the
+    // tokenization audit trail matches the browser extension's, which has always
+    // recorded the masked prompt for an `enforcement_redact` event. Everything
+    // about it is narrow:
+    //
+    //   * MASKED ONLY. The caller passes the exact string that was typed and
+    //     sent — either the output of ComputeMaskCandidate, whose every
+    //     sensitive span has been replaced by a fixed category label, or the
+    //     user's own hand-edited replacement from the Tokenize popup's "Edit
+    //     manually" box. EITHER WAY it is the string RunRewrite read back out of
+    //     the composer and RESCANNED to prove no active pattern still matches
+    //     it, which is the property this field's contract actually rests on —
+    //     an "edit" that still carried the secret never reaches this line at
+    //     all, it fails "verify_mismatch". The original text exists in this file
+    //     as `original`/_pendingOriginalFull and is never passed here; there is
+    //     no parameter it could arrive through.
+    //   * ONLY ON A VERIFIED SEND. Every abort/failure path calls this with no
+    //     masked argument at all, so a rewrite that did not complete carries
+    //     nothing. The one call site that passes it is the final "ok"/"sent"
+    //     line, reached only after the composer was read back and confirmed to
+    //     hold exactly that text and after the send was confirmed to have
+    //     cleared it.
+    //   * OMITTED, NOT EMPTY, when absent — so a consumer can tell "no content
+    //     on this event" from "an empty prompt", and every existing
+    //     abort/failure line stays byte-for-byte what it was.
+    // Esc() escapes control characters (see its own comment), which is what
+    // makes a multi-line masked prompt safe to put on an NDJSON line at all.
+    static void EmitRewrite(string blockId, string result, string reason, string masked = null)
     {
         string json = "{\"kind\":\"rewrite\""
             + ",\"block_id\":\"" + Esc(blockId ?? "") + "\""
             + ",\"result\":\"" + Esc(result) + "\""
             + (!string.IsNullOrEmpty(reason) ? ",\"reason\":\"" + Esc(reason) + "\"" : "")
+            + (masked != null ? ",\"masked\":\"" + Esc(masked) + "\"" : "")
             + "}";
         lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }
@@ -5473,13 +6354,203 @@ public static class CfaiEnforcer
 
     // Rich editors legitimately reflow whitespace on read-back (same allowance
     // the browser extension's redact() makes) — normalize before comparing.
+    //
+    // This is ALSO what makes the multi-line read-back comparison work, with no
+    // change needed: "\s+" already collapses every line terminator, so a
+    // composer that reports "\r\n" where we typed a Shift+Enter, or "\n" where
+    // it stores " ", compares equal to the masked text we pinned. The
+    // allowance is deliberately no wider than it already was for single-line
+    // text — it is the same one call, applied to both sides of every comparison.
     static string NormalizeWs(string s)
     {
         if (s == null) return "";
         return Regex.Replace(s.Trim(), "\\s+", " ");
     }
 
-    static void StartRewrite(string blockId)
+    // ── Line breaks in a masked rewrite ──────────────────────────────────────
+    // Typing a literal '\n' with SendInput submits the message in every chat
+    // composer this feature targets (that is exactly what the Enter-swallow
+    // exists to intercept), so a multi-line rewrite may never do it. It types
+    // each line as text and sends the SURFACE'S OWN newline combination between
+    // the segments instead.
+    //
+    // WHICH combination is a catalog fact, not an assumption baked in here: it
+    // travels per AI_PANELS entry as `newlineKeys` (see PanelSig.NewlineKeys).
+    // NEWLINE_KEYS_DEFAULT is the fallback for a surface with no panel entry at
+    // all — a pure chat app like Claude Desktop, which has no AI_PANELS row —
+    // and MIRRORS ai-processes.js's DEFAULT_NEWLINE_KEYS. The two are held in
+    // lockstep by agent/tests/os-monitor-safety.test.mjs, the same way
+    // PLATFORM_PROCS is.
+    const string NEWLINE_KEYS_DEFAULT = "shift_enter";
+
+    static bool HasLineBreak(string s)
+    {
+        return !string.IsNullOrEmpty(s) && (s.IndexOf('\n') >= 0 || s.IndexOf('\r') >= 0);
+    }
+
+    // The newline combination declared for the surface that has focus right now.
+    // A matched panel's entry wins; anything else gets the default.
+    static string NewlineKeysFor()
+    {
+        if (_fgIsPanel && !string.IsNullOrEmpty(_fgPanelId))
+        {
+            var panels = _panels;
+            if (panels != null)
+            {
+                foreach (var p in panels)
+                {
+                    if (!string.Equals(p.Id, _fgPanelId, StringComparison.OrdinalIgnoreCase)) continue;
+                    // An entry that states nothing gets the default; an entry
+                    // that states something unrecognised keeps saying it, so
+                    // ResolveNewlineKeys can refuse rather than silently
+                    // substitute a combo the app might treat as send.
+                    return string.IsNullOrEmpty(p.NewlineKeys) ? NEWLINE_KEYS_DEFAULT : p.NewlineKeys;
+                }
+            }
+        }
+        return NEWLINE_KEYS_DEFAULT;
+    }
+
+    // Map a catalog value to a modifier+key pair. FALSE for anything this file
+    // does not know how to synthesize — the caller then refuses the multi-line
+    // rewrite instead of guessing, because the wrong guess here sends a
+    // half-written message rather than inserting a line.
+    static bool ResolveNewlineKeys(string keys, out int vkMod, out int vkKey)
+    {
+        vkMod = 0; vkKey = 0;
+        if (string.IsNullOrEmpty(keys)) return false;
+        if (string.Equals(keys, "shift_enter", StringComparison.OrdinalIgnoreCase))
+        { vkMod = VK_SHIFT; vkKey = VK_RETURN; return true; }
+        if (string.Equals(keys, "ctrl_enter", StringComparison.OrdinalIgnoreCase))
+        { vkMod = VK_CONTROL; vkKey = VK_RETURN; return true; }
+        return false;
+    }
+
+    static bool CanInsertNewline()
+    {
+        int mod, key;
+        return ResolveNewlineKeys(NewlineKeysFor(), out mod, out key);
+    }
+
+    // Split masked text into the segments between line breaks. "\r\n", "\n" and
+    // a bare "\r" are all one break; the terminators themselves are dropped,
+    // because they are what the newline KEY replaces. An empty segment is kept
+    // (a blank line in the middle of a prompt is content), so the reconstructed
+    // line count always matches what was read.
+    static List<string> SplitMaskedLines(string masked)
+    {
+        var lines = new List<string>();
+        if (masked == null) { lines.Add(""); return lines; }
+        int start = 0;
+        for (int i = 0; i < masked.Length; i++)
+        {
+            char c = masked[i];
+            if (c != '\n' && c != '\r') continue;
+            lines.Add(masked.Substring(start, i - start));
+            if (c == '\r' && i + 1 < masked.Length && masked[i + 1] == '\n') i++;
+            start = i + 1;
+        }
+        lines.Add(masked.Substring(start));
+        return lines;
+    }
+
+    // ── How long the write will actually take ────────────────────────────────
+    // An EXACT model of RunRewrite's write loop, built from the same constants
+    // the loop sleeps on:
+    //   * every character of a segment costs REWRITE_CHAR_DELAY_MS
+    //     (SendUnicodeChunk paces one SendInput per character);
+    //   * every chunk of a segment costs REWRITE_CHUNK_DELAY_MS on top
+    //     (the settle after each SendUnicodeChunk call);
+    //   * every line break between segments costs a SendKeyCombo — three
+    //     inter-event pauses — plus that same settle.
+    //
+    // A LINE BREAK IS THE EXPENSIVE CHARACTER: 3*5+10 = 25ms against ~15.4ms
+    // for a typed one. That is precisely why a pure character cap cannot answer
+    // this question on its own, and why multi-line support is what made the
+    // stale arithmetic worth correcting rather than just documenting.
+    //
+    // Deliberately an OVER-estimate where it is not exact: the ceil() on chunks
+    // charges a partial chunk as a whole settle, and the margin below assumes
+    // every sleep overshoots. Erring long means a write the check accepted
+    // finishes; erring short means the composer is cleared and half retyped.
+    static int EstimateWriteMs(string masked)
+    {
+        var segments = SplitMaskedLines(masked);
+        int ms = 0;
+        for (int i = 0; i < segments.Count; i++)
+        {
+            // The newline combination between two segments.
+            if (i > 0) ms += 3 * REWRITE_KEY_DELAY_MS + REWRITE_CHUNK_DELAY_MS;
+            int len = segments[i].Length;
+            ms += len * REWRITE_CHAR_DELAY_MS;
+            ms += ((len + REWRITE_CHUNK - 1) / REWRITE_CHUNK) * REWRITE_CHUNK_DELAY_MS;
+        }
+        return ms;
+    }
+
+    // Will typing this masked text finish inside the write budget, with the
+    // slow-clock margin? Compared against REWRITE_USABLE_BUDGET_MS rather than
+    // inflating the estimate, so the margin lives in exactly one place.
+    static bool WriteFitsBudget(string masked)
+    {
+        return EstimateWriteMs(masked) <= REWRITE_USABLE_BUDGET_MS;
+    }
+
+    // How long to keep confirming the send for the surface that has focus right
+    // now. Deliberately the SAME shape as NewlineKeysFor: a matched panel's
+    // catalog entry wins, and anything else — a pure chat app with no AI_PANELS
+    // row, an unknown panel id, no panel at all — gets the default, which is one
+    // read at +REWRITE_POST_SEND_MS and therefore the pre-existing behaviour.
+    //
+    // The entry's value is already clamped by LoadAiPanels, so this returns a
+    // number inside [REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MAX_MS] whatever
+    // the payload said.
+    static int PostSendVerifyMsFor()
+    {
+        if (_fgIsPanel && !string.IsNullOrEmpty(_fgPanelId))
+        {
+            var panels = _panels;
+            if (panels != null)
+            {
+                foreach (var p in panels)
+                {
+                    if (!string.Equals(p.Id, _fgPanelId, StringComparison.OrdinalIgnoreCase)) continue;
+                    return p.PostSendVerifyMs < REWRITE_POST_SEND_MS ? REWRITE_POST_SEND_MS : p.PostSendVerifyMs;
+                }
+            }
+        }
+        return REWRITE_POST_SEND_MS;
+    }
+
+    // `editedText` is the user's OWN replacement, typed into the Tokenize
+    // popup's "Edit manually" box, and NULL on every pre-existing path (the
+    // confirm hotkey and a plain {"cmd":"tokenize"}), which keeps this file's own
+    // masked candidate the default.
+    //
+    // WHAT IT DOES NOT CHANGE — every one of these is re-run or re-verified for
+    // the edited text exactly as for a computed mask:
+    //   * the pinned-id check and the pin's expiry, below;
+    //   * the length gate and the WRITE BUDGET, both recomputed FROM THIS TEXT
+    //     rather than inherited from the mask that was pinned — an edit can be
+    //     longer, shorter, or turn a one-line prompt into five, and a line break
+    //     costs more wall time to type than a character does (EstimateWriteMs);
+    //   * RunRewrite's whole pre-flight: same foreground window, same focused
+    //     element by runtime id, and a composer still holding the ORIGINAL
+    //     unchanged text — an edit is a replacement for what the user typed at
+    //     the AI, so the thing being replaced still has to be there;
+    //   * the newline-key gate, which RunRewrite already resolves against the
+    //     text it is handed, so a multi-line edit on a surface with no usable
+    //     combination is refused ("no_newline_key") rather than typed;
+    //   * read-back verification, INCLUDING the full pattern rescan of what
+    //     landed in the composer. That is what keeps this honest without a
+    //     second content scan here: an "edit" that still carries the secret
+    //     fails "verify_mismatch" and is never sent.
+    //
+    // WHAT IT DELIBERATELY DOES NOT DO is re-run masking. The user has just
+    // hand-edited this text for the express purpose of removing the sensitive
+    // part; the job here is "type exactly this and send it", with the same
+    // reliability guarantees, not a second opinion about their wording.
+    static void StartRewrite(string blockId, string editedText = null)
     {
         // Every rejection here is reported, never silently dropped — a
         // dialog that got no response at all (stuck on "Masking…" until its
@@ -5498,6 +6569,22 @@ public static class CfaiEnforcer
             rid = _pendingRuntimeId; hwnd = _pendingHwnd; pid = _pendingPid; expiresAt = _pendingExpiresAt;
         }
         if (DateTime.UtcNow.Ticks > expiresAt) { EmitRewrite(blockId, "failed", "expired"); return; }
+
+        if (editedText != null)
+        {
+            // FAIL CLOSED, LOUDLY, on anything the write loop could not finish.
+            // Never truncate: a silently shortened prompt is a message the user
+            // did not write, sent under their name — strictly worse than
+            // refusing and leaving the block standing, which is what every
+            // other rejection on this path does. Same two gates
+            // ComputeMaskCandidate applies, in the same order, against THIS
+            // string: the coarse character cap first, then the accurate model
+            // of the write loop's real wall time.
+            if (editedText.Trim().Length == 0) { EmitRewrite(blockId, "aborted", "edit_empty"); return; }
+            if (editedText.Length > REWRITE_MAX_CHARS) { EmitRewrite(blockId, "aborted", "edit_too_long"); return; }
+            if (!WriteFitsBudget(editedText)) { EmitRewrite(blockId, "aborted", "edit_too_long_to_write"); return; }
+            masked = editedText;
+        }
 
         _rewriteInProgress = true;
         _rewriteAbort = false;
@@ -5523,6 +6610,26 @@ public static class CfaiEnforcer
             try { curText = ReadText(el); } catch { }
             if (NormalizeWs(curText) != NormalizeWs(original)) { EmitRewrite(blockId, "aborted", "text_changed"); return; }
 
+            // Multi-line pre-flight, and it happens BEFORE Ctrl+A/Delete so a
+            // refusal costs nothing: the composer is untouched and the block is
+            // still armed. UpdatePendingRewrite already refuses to pin such a
+            // candidate, so this is the second, independent statement of the
+            // same rule — the write path must never be able to type a line
+            // break it cannot type safely, whatever the pin says.
+            int nlMod = 0, nlKey = 0;
+            bool multiline = HasLineBreak(masked);
+            if (multiline && !ResolveNewlineKeys(NewlineKeysFor(), out nlMod, out nlKey))
+            { EmitRewrite(blockId, "aborted", "no_newline_key"); return; }
+
+            // How long the post-send confirmation at the very end of this method
+            // may keep re-reading the composer, for THIS surface. Captured HERE,
+            // in the pre-flight, for the same reason the newline combination is:
+            // both are read off the panel state the poll thread maintains, and
+            // that thread keeps sampling while we clear and retype the composer.
+            // One read of it, pinned, so the window cannot change underneath the
+            // confirmation it governs.
+            int postSendMs = PostSendVerifyMsFor();
+
             // The user may still be holding Ctrl+Alt (from the confirm
             // hotkey) or Enter (from the block itself) — wait briefly for a
             // clean keyboard state before synthesizing anything.
@@ -5542,14 +6649,49 @@ public static class CfaiEnforcer
             SendKeyPress(VK_DELETE);
             Thread.Sleep(30);
 
+            // The write. One segment per line, with the surface's newline
+            // combination between segments instead of a typed '\n' — see
+            // SplitMaskedLines and NewlineKeysFor.
+            //
+            // Single-line text takes exactly the path it always did: one segment,
+            // the same chunk loop, the same per-chunk abort/budget/foreground
+            // re-check, no key combination sent at all.
+            //
+            // BUDGET. The newline combinations ARE accounted for, and not by
+            // hand: EstimateWriteMs models this exact loop — every character's
+            // pace, every chunk's settle, and 3*REWRITE_KEY_DELAY_MS +
+            // REWRITE_CHUNK_DELAY_MS (25ms) for every break — and
+            // ComputeMaskCandidate refuses to offer a rewrite whose estimate
+            // does not fit REWRITE_USABLE_BUDGET_MS. A break is the EXPENSIVE
+            // character (25ms vs ~15.4ms), so the estimate is what decides, not
+            // the coarse character cap.
+            // The check below therefore should not fire for an offered rewrite
+            // at all; it stays as the runtime backstop it always was, for a
+            // machine slower than the margin allows for. When it does fire the
+            // outcome is unchanged: abort, block still armed, nothing sent.
             long budgetEnd = DateTime.UtcNow.Ticks + REWRITE_WRITE_BUDGET;
-            for (int i = 0; i < masked.Length; i += REWRITE_CHUNK)
+            var segments = SplitMaskedLines(masked);
+            for (int seg = 0; seg < segments.Count; seg++)
             {
-                if (_rewriteAbort || DateTime.UtcNow.Ticks > budgetEnd || GetForegroundWindow() != pinnedHwnd)
-                { EmitRewrite(blockId, "aborted", "interrupted_mid_write"); return; }
-                int len = Math.Min(REWRITE_CHUNK, masked.Length - i);
-                SendUnicodeChunk(masked.Substring(i, len));
-                Thread.Sleep(10);
+                if (seg > 0)
+                {
+                    // Same three abort conditions as a chunk, checked before the
+                    // combination as well as before each chunk: a line break is
+                    // input into the target app just as much as a character is.
+                    if (_rewriteAbort || DateTime.UtcNow.Ticks > budgetEnd || GetForegroundWindow() != pinnedHwnd)
+                    { EmitRewrite(blockId, "aborted", "interrupted_mid_write"); return; }
+                    SendKeyCombo(nlMod, nlKey);
+                    Thread.Sleep(REWRITE_CHUNK_DELAY_MS);
+                }
+                string line = segments[seg];
+                for (int i = 0; i < line.Length; i += REWRITE_CHUNK)
+                {
+                    if (_rewriteAbort || DateTime.UtcNow.Ticks > budgetEnd || GetForegroundWindow() != pinnedHwnd)
+                    { EmitRewrite(blockId, "aborted", "interrupted_mid_write"); return; }
+                    int len = Math.Min(REWRITE_CHUNK, line.Length - i);
+                    SendUnicodeChunk(line.Substring(i, len));
+                    Thread.Sleep(REWRITE_CHUNK_DELAY_MS);
+                }
             }
 
             // Verify by positive identification, not absence: the read-back
@@ -5649,13 +6791,48 @@ public static class CfaiEnforcer
             // reporting a false failure. A real send clears the composer; if
             // it still holds precisely what we just typed after a beat,
             // treat that as not sent rather than assume success.
-            Thread.Sleep(200);
+            //
+            // POLLED, not a single read — this was the last one-shot read left
+            // in the rewrite flow and it was producing false failures. The first
+            // read is still at +REWRITE_POST_SEND_MS, which is all a native
+            // composer ever needed; after that it re-reads every
+            // REWRITE_POST_SEND_POLL_MS until this surface's own window closes
+            // (REWRITE_POST_SEND_MS by default, so a surface with no catalog
+            // value takes exactly one read and behaves as it always did).
+            //
+            // Confirmed live against Microsoft Teams: the masked message was in
+            // the conversation and this check still said "not_submitted", which
+            // cost the enforcement_redact audit event for a real governed send
+            // (index.js's 'rewrite' handler returns early on any non-"ok"
+            // result). Teams renders its composers in a WebView2 child process,
+            // so the cleared composer has to cross a Chromium accessibility
+            // serialization before UIA reports it — see REWRITE_POST_SEND_MS.
+            //
+            // Waiting longer cannot turn a genuine failure into a success: text
+            // that was never submitted stays in the composer for the whole
+            // window and still reports "not_submitted". The loop exits the
+            // instant the composer no longer holds the masked text, so the
+            // common case costs nothing extra.
+            Thread.Sleep(REWRITE_POST_SEND_MS);
+            long postSendDeadline = DateTime.UtcNow.Ticks
+                + TimeSpan.FromMilliseconds(postSendMs - REWRITE_POST_SEND_MS).Ticks;
             string postSend = null;
             try { postSend = ReadText(el); } catch { }
             bool stillThere = NormalizeWs(postSend) == NormalizeWs(masked);
+            while (stillThere && DateTime.UtcNow.Ticks < postSendDeadline)
+            {
+                Thread.Sleep(REWRITE_POST_SEND_POLL_MS);
+                postSend = null;
+                try { postSend = ReadText(el); } catch { }
+                stillThere = NormalizeWs(postSend) == NormalizeWs(masked);
+            }
             if (stillThere) { EmitRewrite(blockId, "failed", "not_submitted"); return; }
 
-            EmitRewrite(blockId, "ok", "sent");
+            // The ONE call that carries content, and only after: the read-back
+            // proved the composer held exactly this masked text, a full rescan of
+            // it found no active pattern, and the post-send read proved it
+            // actually left the composer. `masked` — never `original`.
+            EmitRewrite(blockId, "ok", "sent", masked);
         }
         catch (Exception ex)
         {
@@ -5691,12 +6868,15 @@ public static class CfaiEnforcer
         uint sent = SendInput(1, inp, Marshal.SizeOf(typeof(INPUT)));
         CheckSendInputResult(1, sent);
     }
-    static void SendKeyPress(int vk) { SendKeyEvent(vk, false); Thread.Sleep(5); SendKeyEvent(vk, true); }
+    // The inter-event pauses are REWRITE_KEY_DELAY_MS, not a literal, because
+    // EstimateWriteMs charges a newline combination exactly three of them — see
+    // that method for why the arithmetic and the sleeps must share one constant.
+    static void SendKeyPress(int vk) { SendKeyEvent(vk, false); Thread.Sleep(REWRITE_KEY_DELAY_MS); SendKeyEvent(vk, true); }
     static void SendKeyCombo(int vkMod, int vkKey)
     {
-        SendKeyEvent(vkMod, false); Thread.Sleep(5);
-        SendKeyEvent(vkKey, false); Thread.Sleep(5);
-        SendKeyEvent(vkKey, true); Thread.Sleep(5);
+        SendKeyEvent(vkMod, false); Thread.Sleep(REWRITE_KEY_DELAY_MS);
+        SendKeyEvent(vkKey, false); Thread.Sleep(REWRITE_KEY_DELAY_MS);
+        SendKeyEvent(vkKey, true); Thread.Sleep(REWRITE_KEY_DELAY_MS);
         SendKeyEvent(vkMod, true);
     }
     static void SendUnicodeChunk(string chunk)
@@ -5708,9 +6888,18 @@ public static class CfaiEnforcer
         // [SSN]" landed as "my ssn ]]]]", the tail collapsing into repeats
         // of the last character. The target's input pipeline (raw input
         // thread, IME/dead-key state, or its own message-loop coalescing)
-        // can't keep up with an instantaneous burst. A few ms between
-        // characters costs nothing against the 3s write budget and is the
-        // standard fix for this exact class of synthetic-input corruption.
+        // can't keep up with an instantaneous burst. Pacing individual
+        // characters is the standard fix for this exact class of
+        // synthetic-input corruption.
+        //
+        // THE PACE IS THE CONSTANT, and it is what the character cap is computed
+        // from — REWRITE_CHAR_DELAY_MS(15) * REWRITE_MAX_CHARS(456) plus the
+        // per-chunk settles is the write budget's usable 7.2s. It used to be a
+        // literal here while a comment beside the cap claimed 4ms, which is
+        // exactly how a documented 2000-character limit came to abort at ~580.
+        // Changing this value changes REWRITE_MAX_CHARS automatically; changing
+        // it DOWN to buy a bigger cap would trade a refused long prompt for the
+        // corruption above, which is not a trade this feature makes.
         foreach (char c in chunk)
         {
             var pair = new INPUT[2];
@@ -5718,7 +6907,7 @@ public static class CfaiEnforcer
             pair[1] = new INPUT(); pair[1].type = INPUT_KEYBOARD; pair[1].ki.wVk = 0; pair[1].ki.wScan = (ushort)c; pair[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP; pair[1].ki.dwExtraInfo = IntPtr.Zero;
             uint sent = SendInput(2, pair, Marshal.SizeOf(typeof(INPUT)));
             CheckSendInputResult(2, sent);
-            Thread.Sleep(15);
+            Thread.Sleep(REWRITE_CHAR_DELAY_MS);
         }
     }
 }

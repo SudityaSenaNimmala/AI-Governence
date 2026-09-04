@@ -44,6 +44,16 @@ import { dirname } from 'node:path';
 // still re-warning on repeated paste attempts.
 const FIRE_DEDUP_TTL_MS = 10_000;
 
+// How long a block's match information stays available to the Tokenize & Send
+// rewrite that may follow it (see #pinRewriteContext). Derived from the
+// helper's own arithmetic rather than picked: enforcer-win.ps1 pins a
+// rewritable block for REWRITE_TTL (15s), the write itself is budgeted at
+// REWRITE_WRITE_BUDGET_MS (9s), and the "ok" line is only emitted after the
+// composer read-back and the send confirmation on top of that. 60s clears all
+// of it with room to spare, and expiry only costs the audit record its match
+// fields — never the record itself.
+const REWRITE_CONTEXT_TTL_MS = 60_000;
+
 // Mirrors REASON_MAX in server/src/routes/access-requests.js. The server
 // truncates past this; the dialog's own textbox refuses past it (see
 // CfaiRequestDialog.ReasonMax in toast-helper.ps1), and this is the belt-and-
@@ -258,6 +268,16 @@ export class OsMonitor extends EventEmitter {
     // the /mine pre-check, which is a network round trip. Released in the
     // finally, so the next blocked send opens a fresh dialog immediately.
     this.accessRequestInFlight = new Set();
+    // The same idea for the Tokenize & Send popup, keyed on block_id. The helper
+    // already refuses to draw a second window for a block it is showing one for,
+    // so this exists to stop a held-down Enter piling up pending PROMISES on this
+    // side (each of which would otherwise sit until its own timeout). Released in
+    // the finally, so the next distinct block offers again.
+    this.tokenizeOfferInFlight = new Set();
+    // What the last REWRITABLE block knew, for the enforcement_redact record of
+    // the Tokenize & Send that may follow it. Single slot, no content — see
+    // #pinRewriteContext.
+    this.rewriteContext = null;
     setInterval(() => this.#pruneFired(), 60_000).unref();
   }
 
@@ -288,6 +308,47 @@ export class OsMonitor extends EventEmitter {
     }
   }
 
+  // ── Tokenize & Send: what the BLOCK knew, for the REWRITE that follows ─────
+  //
+  // The helper's `rewrite` line carries the outcome, the block id and (on a
+  // verified send) the masked text — and nothing else: no process, no panel and
+  // no pattern list (see EmitRewrite in enforcer-win.ps1). So the audit record
+  // for a completed rewrite reuses the values the BLOCK that armed it already
+  // derived and already reported, verbatim. Re-deriving them here would be a
+  // second copy that could disagree with the block's own record; re-SCANNING is
+  // not even an option, because the only text this side ever sees again is the
+  // masked one, which by construction matches nothing.
+  //
+  // SINGLE SLOT, mirroring the helper: enforcer-win.ps1 pins exactly one
+  // pending block (_pendingBlockId) and a rewrite is single-use and bound to
+  // it, so once a second block is armed the first can no longer be rewritten.
+  // It is keyed on block_id all the same, so a late or stale rewrite can never
+  // be attributed to a different block's patterns.
+  //
+  // NO CONTENT, EVER. Only the fields the 'block' handler already enqueues: a
+  // pattern-NAME list with severities and counts, a product identity and a
+  // process name. The composer text, the `preview` masked substring and the
+  // masked prompt are all absent by construction — the masked prompt travels on
+  // the rewrite event itself and is read there, at the one site that reports it.
+  #pinRewriteContext(payload) {
+    this.rewriteContext = { ...payload, pinnedAt: Date.now() };
+  }
+
+  // The matching pin, consumed. Returns null — never a partial guess — when
+  // there is nothing pinned, when the ids disagree, or when the pin is older
+  // than a rewrite could possibly take; the caller then omits the fields it
+  // cannot determine rather than inventing them.
+  #takeRewriteContext(blockId) {
+    const ctx = this.rewriteContext;
+    // A mismatch leaves the pin alone: it may belong to a NEWER block whose own
+    // rewrite has not happened yet, and clearing it here would cost that one
+    // its match fields.
+    if (!ctx || !blockId || ctx.block_id !== blockId) return null;
+    this.rewriteContext = null;  // single-use, like the helper's own pin
+    if (Date.now() - ctx.pinnedAt > REWRITE_CONTEXT_TTL_MS) return null;
+    return ctx;
+  }
+
   // Shared one-shot gate. Returns true at most once per key per TTL. Used by
   // BOTH the clipboard-paste and typed-prompt paths so a single paste (which
   // the clipboard watcher AND the UIA prompt watcher both observe) only fires
@@ -297,6 +358,104 @@ export class OsMonitor extends EventEmitter {
     if (Date.now() - lastFired < FIRE_DEDUP_TTL_MS) return false;
     this.firedAt.set(key, Date.now());
     return true;
+  }
+
+  // ── Tokenize & Send (desktop, non-Electron) ────────────────────────────────
+  //
+  // The offer half of the feature. Everything that COMPUTES the mask and
+  // performs the rewrite already existed and already worked
+  // (enforcer-win.ps1's ComputeMaskCandidate / RunRewrite, reached by the
+  // {cmd:'tokenize', block_id} stdin command Enforcer.tokenize writes) — but the
+  // popup that asks the user had only ever been built for Electron
+  // (electron/renderer/block-dialog.js, opened by main.js off the @@CFAI-BLOCK
+  // line). On the CLI agent there is no Electron, so nothing ever opened it and
+  // the whole feature was unreachable: the user got the plain "Send blocked …
+  // Override (logged): Ctrl+Alt+Enter" toast and no way to choose. Confirmed by
+  // live testing, across every app the enforcer covers. This is the missing
+  // trigger, and NOTHING downstream of it changed.
+  //
+  // NO CONTENT LEAVES THE MACHINE ON THIS PATH, and none is logged. Two values
+  // reach the popup: the matched pattern NAMES the block already reported, and
+  // `ev.preview` — which is the enforcer's already-masked text, the same string
+  // it would type into the composer. The original prompt is not on this side of
+  // the pipe at all.
+  //
+  // What comes back is one word, plus — for the popup's "Edit manually" → Send
+  // outcome only — the user's own rewording of that already-masked text. That
+  // string is passed straight back to the enforcer as the thing to type and is
+  // touched by nothing else here: not logged, not reported, not stored. The
+  // audit record for the send still comes from the enforcer's own verified
+  // rewrite line, as it always did (see the 'rewrite' handler).
+  //
+  // STALENESS is the enforcer's to judge, deliberately. Its pin is single-use,
+  // bound to the exact element/window/text it was computed from, and expires
+  // (REWRITE_TTL, 15s); StartRewrite answers a wrong or late id with
+  // "stale_block_id"/"expired" and RunRewrite re-verifies foreground window,
+  // element runtime id and composer text before it types anything. A second
+  // clock here could only disagree with that one.
+  async #offerTokenize(ev, ai) {
+    const blockId = String(ev.block_id || '');
+    if (this.tokenizeOfferInFlight.has(blockId)) return;
+    this.tokenizeOfferInFlight.add(blockId);
+    // Whether we asked the enforcer to hold its pin for a text box that opened.
+    // Released on every path that does not go on to consume it, so a cancelled
+    // edit does not leave a block pinned for the hold's full window.
+    let editHold = false;
+    try {
+      const result = await this.toast.showTokenizeDialog({
+        appName: ai.product || ev.process || '',
+        categories: ev.patterns || '',
+        preview: ev.preview || '',
+        dedupeKey: blockId,
+        // The popup's "Edit manually" box has opened. It has to hold keyboard
+        // focus to be typed into, and the enforcer's poll thread used to drop
+        // its pinned block the moment the foreground stopped being the AI app —
+        // so it is told, and holds the pin for as long as typing takes instead.
+        // An id and an on/off; no content on this call at all.
+        onEditing: () => { editHold = this.enforcer.tokenizeEditHold(blockId, true); },
+      });
+
+      // "Edit manually" → the user reworded the masked text and pressed Send.
+      // The SAME rewrite mechanism, asked to type THEIR string instead of the
+      // enforcer's own masked candidate — which the enforcer re-gates for
+      // length and write budget, re-verifies the target for, and rescans the
+      // read-back of, exactly as it does its own. It consumes the hold.
+      if (result.action === 'edit_send') {
+        const text = typeof result.text === 'string' ? result.text : '';
+        // Nothing to type. Fail closed rather than clearing the composer and
+        // sending an empty message; the enforcer refuses this too.
+        if (!text.trim()) {
+          this.log?.warn('tokenize: the edit box came back empty — nothing was rewritten and the block stands');
+          return;
+        }
+        // The hold is CONSUMED, not released: the command below reads the pin's
+        // extended expiry, and the enforcer's own poll thread puts it back to
+        // the normal TTL on its next tick over that surface.
+        editHold = false;
+        if (!this.tokenize(blockId, text)) {
+          this.log?.warn('tokenize: enforcer stdin unavailable — nothing was rewritten and the block stands');
+        }
+        return;
+      }
+
+      // 'edit' / 'timeout' / 'suppressed' / 'unavailable' — DO NOTHING. The block
+      // stands and the user edits the prompt themselves, which is exactly the
+      // behaviour this path had before the popup existed, so every non-answer
+      // degrades to the safe outcome rather than to a send.
+      if (result.action !== 'tokenize') return;
+      // The SAME command the Electron dialog's 'tokenize-block' IPC handler
+      // writes, through the same wrapper — this is a second trigger for one
+      // mechanism, not a second mechanism.
+      if (!this.tokenize(blockId)) {
+        this.log?.warn('tokenize: enforcer stdin unavailable — nothing was rewritten and the block stands');
+      }
+    } finally {
+      // Every path that did NOT go on to use the hold gives it back — including
+      // a popup that threw, which is why this lives in the finally rather than
+      // next to each outcome.
+      if (editHold) this.enforcer.tokenizeEditHold(blockId, false);
+      this.tokenizeOfferInFlight.delete(blockId);
+    }
   }
 
   // ── Request Access (desktop, non-Electron) ─────────────────────────────────
@@ -966,6 +1125,10 @@ export class OsMonitor extends EventEmitter {
       // extension's equivalent (blocked_for:'platform') reports matches:[] too.
       const isPlatform = !!ev.platform_block;
       const matches = isPlatform ? [] : patterns.map((p) => ({ pattern: p, severity: 'high', count: 1 }));
+      // Named rather than written inline in the enqueue below, so the rewrite
+      // pin can carry the SAME value instead of a second copy of the same
+      // expression that could later drift from it.
+      const highestSeverity = isPlatform ? 'critical' : 'high';
       const agentName = ev.blocked_agent || ai.product;
       // The access-exception key — see blockToolHost(), which the Request
       // Access flow below shares so the two can never resolve a different host.
@@ -991,8 +1154,23 @@ export class OsMonitor extends EventEmitter {
         // they are actually consumed, and reach the server on the access request
         // itself. blocked_for/mechanism already carry "this was a platform block".
         matches,
-        highest_severity: isPlatform ? 'critical' : 'high',
+        highest_severity: highestSeverity,
       });
+      // Everything the enforcement_redact record will need if the user takes the
+      // Tokenize & Send offer this block just made. Pinned only when the block
+      // is actually rewritable — EmitBlock clears block_id for an attachment
+      // hold and for a platform block, neither of which can ever be masked — and
+      // pinned AFTER the enqueue above so the two carry identical values.
+      if (ev.rewritable && ev.block_id) {
+        this.#pinRewriteContext({
+          block_id: ev.block_id,
+          service: ai.product,
+          vendor: ai.vendor,
+          process_name: ev.process,
+          matches,
+          highest_severity: highestSeverity,
+        });
+      }
       this.log?.info(`os_monitor: BLOCKED ${how} into ${ai.product} — [${ev.patterns}]`);
       if (this.#shouldFire(`enf|${ev.process}|${ev.patterns}|${ev.filename || ''}`)) {
         // Honest framing per the design decision: this stops the MESSAGE,
@@ -1047,6 +1225,34 @@ export class OsMonitor extends EventEmitter {
         // attribution and can carry a panel id for an app-scoped block.
         block_scope: ev.block_scope || '',
       })));
+
+      // ── The Tokenize & Send offer, for the CLI agent ──────────────────────
+      //
+      // Narrowly scoped to the ONE case that previously had nothing actionable
+      // to offer: a plain content-pattern block the enforcer says it can mask.
+      //   - isPlatform blocks are not maskable (EmitBlock clears block_id for
+      //     them) and already route to the Request Access dialog via the
+      //     enforcer's request_access_offer line;
+      //   - isAttachment holds are never rewritable — Tokenize & Send masks
+      //     TEXT and cannot remove a file, and the enforcer refuses to offer
+      //     one. Both are asserted on `rewritable` alone as well, so the two
+      //     exclusions below are the second, independent statement of a rule
+      //     the .ps1 already enforces.
+      //   - ev.preview must be non-empty: it IS the popup's whole content, and
+      //     a popup showing an empty "This is what gets sent" box would be
+      //     worse than the toast it accompanies.
+      // Electron users are unaffected — main.js still opens its own dialog off
+      // the @@CFAI-BLOCK line above, and this popup only ever draws when the
+      // toast helper is running, which the Electron path does not use for it.
+      //
+      // Errors are swallowed into a log line on purpose: this runs off an
+      // enforcer stdout line, so an unhandled rejection here would be an
+      // unhandled rejection in the monitor.
+      if (ev.rewritable && ev.block_id && !isPlatform && !isAttachment && ev.preview) {
+        this.#offerTokenize(ev, ai).catch((err) => {
+          this.log?.warn(`tokenize: offer failed — ${err?.message || err}`);
+        });
+      }
     });
 
     // ── Request Access, at the moment of the block ────────────────────────────
@@ -1120,14 +1326,56 @@ export class OsMonitor extends EventEmitter {
     this.enforcer.on('rewrite', (ev) => {
       this.#console.log('@@CFAI-REWRITE ' + JSON.stringify(this.#ui('rewrite', ev)));
       if (ev.result !== 'ok') return;
+      // The block that armed this rewrite — its pattern list, severity and
+      // product identity, exactly as that block reported them. null when the
+      // pin is gone (ids disagree, or it expired), and then every field it
+      // would have supplied is OMITTED rather than guessed: "we do not know
+      // what was matched" is a different and honest claim from "nothing was".
+      const ctx = this.#takeRewriteContext(ev.block_id);
+      // The MASKED prompt, and the only content field on this event. It is the
+      // string the helper typed into the composer, read back and verified
+      // pattern-free before Enter was synthesized (see EmitRewrite: `masked` is
+      // present ONLY on result:"ok", the original text has no parameter it could
+      // arrive through, and this is the only place it is read on this side).
+      // Deliberate parity with the browser extension's Tokenize & Send, which
+      // has always recorded the masked prompt for an enforcement_redact event.
+      const masked = typeof ev.masked === 'string' && ev.masked.length > 0 ? ev.masked : null;
       this.reporter.enqueue({
         kind: 'enforcement_redact',
         mechanism: 'keystroke_rewrite',
         source: 'os_monitor_enforcer',
         decision_for: ev.block_id,
         sent: true,
+        // Same field names and same shapes as the 'block' handler above, so the
+        // block and its outcome pair up field-for-field on the dashboard, and
+        // the same ones content.js sends for mechanism:'extension_dom'.
+        ...(ctx ? {
+          service: ctx.service,
+          vendor: ctx.vendor,
+          process_name: ctx.process_name,
+          matches: ctx.matches,
+          highest_severity: ctx.highest_severity,
+        } : {}),
+        // Length OF THE MASKED TEXT — the text this record actually carries and
+        // the text that was actually sent. (The browser side reports the
+        // pre-mask length here; the desktop enforcer never hands the original's
+        // length across its stdout contract, and inferring one would be a
+        // number nobody measured.) lengthBucket is the shared helper every other
+        // reported event uses.
+        ...(masked ? {
+          content_length: masked.length,
+          length_bucket: lengthBucket(masked.length),
+          content_text: masked,
+        } : {}),
+        // Unconditional, exactly as content.js sets it: it is a statement about
+        // the EVENT — any prompt text on it has been masked — not about whether
+        // this particular one happened to carry text.
+        content_redacted: true,
       });
-      this.log?.info(`os_monitor: TOKENIZED + sent — block_id=${ev.block_id}`);
+      this.log?.info(
+        `os_monitor: TOKENIZED + sent — block_id=${ev.block_id}` +
+        (ctx ? ` [${ctx.matches.map((m) => m.pattern).join(', ')}]` : '')
+      );
     });
 
     // Smart Model Router (desktop). Reported for every attempt, not just
@@ -1208,9 +1456,18 @@ export class OsMonitor extends EventEmitter {
     }
   }
 
-  /** Relay a Tokenize click from the Electron dialog down to the enforcer. */
-  tokenize(blockId) {
-    return this.enforcer.tokenize(blockId);
+  /**
+   * Relay a Tokenize click down to the enforcer. TWO callers, one mechanism:
+   * the Electron dialog (via monitor-runner.mjs's stdin relay) and, on the CLI
+   * agent, #offerTokenize's own popup.
+   *
+   * `text` is only ever passed by the latter, for the popup's "Edit manually"
+   * → Send path: it is the user's own rewording of the masked text, and the
+   * enforcer re-gates and re-verifies it exactly as it does its own candidate.
+   * The Electron caller never sends it, so that path is byte-for-byte unchanged.
+   */
+  tokenize(blockId, text = '') {
+    return this.enforcer.tokenize(blockId, text);
   }
 
   /**

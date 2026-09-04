@@ -39,6 +39,8 @@ import {
   looksLikeParticipantList,
   agentNameMatches,
   normalizeAgentRows,
+  normalizeGovernedRows,
+  filterGovernedAgents,
   buildAgentSurfaceConfig,
 } from '../src/os_monitor/ai-processes.js';
 
@@ -1110,6 +1112,64 @@ test('titleKindOf answers "which Teams view is this" once, for both consumers', 
   assert.equal(titleKindOf(TEAMS_SURFACE, '  Copilot  | filefuze | e@f.co | Microsoft Teams '), 'Copilot');
 });
 
+test('LIVE 2026-09-04: Teams serves the Copilot title shape for a CHAT-LIST conversation too', () => {
+  // THE OBSERVATION. In the same Chat-list agent conversation, with no
+  // navigation away from it, Teams stopped serving
+  //   "Chat | IT Help Desk Agent | filefuze | erik@filefuze.co | Microsoft Teams"
+  // and started serving the four-segment shape that had only ever been measured
+  // in the embedded Copilot TAB:
+  //   "Copilot | filefuze | erik@filefuze.co | Microsoft Teams"
+  // — no conversation name segment at all. Teams chose that.
+  //
+  // The pure layer must be UNCHANGED by it, and this pins that in both
+  // directions, because the tempting "fix" is the wrong one.
+  const RETITLED = 'Copilot | filefuze | erik@filefuze.co | Microsoft Teams';
+  assert.equal(RETITLED, T_COPILOT, 'the live title is byte-identical to the measured Copilot-tab one');
+
+  // 1. It PARSES — four segments, the app suffix last — so nothing errors and
+  //    nothing falls off the end. Three segments is the minimum; this has four.
+  assert.equal(titleKindOf(TEAMS_SURFACE, RETITLED), 'Copilot');
+
+  // 2. The primary parse still names NOTHING, and that is correct rather than a
+  //    gap to close here. The second segment is the TENANT ("filefuze"), so
+  //    adding 'Copilot' to titleKinds — the obvious-looking fix — would make
+  //    this read the ORG NAME as the open agent's name and match it against the
+  //    blocklist. That is why the recovery route is the heading scan instead.
+  assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, RETITLED), AGENT_NAME_NOT_COMPOSER);
+  assert.equal(agentNameMatches(extractAgentNameFromTitle(TEAMS_SURFACE, RETITLED), 'filefuze'), false);
+  assert.deepEqual(TEAMS_SURFACE.titleKinds, ['Chat'], 'Copilot must still never be a titleKind');
+
+  // 3. The kind IS in paneKinds, which is what routes this title to the heading
+  //    scan — and paneKinds gates only, never extracts. The gate is therefore
+  //    the same one whichever composer holds focus, which is why the Chat-list
+  //    route needed no widening to be covered.
+  assert.ok(TEAMS_SURFACE.fallbackRead.paneKinds.includes(titleKindOf(TEAMS_SURFACE, RETITLED)));
+
+  // 4. THE BOUNDARY. Every OTHER no-evidence Teams title keeps a kind that is
+  //    NOT in paneKinds, so none of them can reach the heading scan. This is the
+  //    distinction that must survive: "the title's kind is a pane we scan" is a
+  //    different question from "the title failed to name a conversation", and
+  //    only the first may trigger a walk of a conversation's message content.
+  for (const [title, why] of [
+    [T_DM, 'a 1:1 DM has no kind segment at all'],
+    [T_CHANNEL, 'a channel view'],
+    [T_ACTIVITY, 'the Activity tab'],
+  ]) {
+    assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, title), AGENT_NAME_NOT_COMPOSER, why);
+    assert.equal(TEAMS_SURFACE.fallbackRead.paneKinds.includes(titleKindOf(TEAMS_SURFACE, title)), false,
+      `${why} must never reach the heading scan`);
+  }
+  // A group chat — Teams' own participant naming and a DELIBERATE rename alike —
+  // keeps kind "Chat", which is not in paneKinds either. The rename reads Named
+  // (the accepted residual risk documented on looksLikeParticipantList) and the
+  // participant list reads Generic; neither is walked.
+  for (const title of [T_GROUP, 'Chat | Q4 launch war room | filefuze | e@f.co | Microsoft Teams']) {
+    assert.equal(TEAMS_SURFACE.fallbackRead.paneKinds.includes(titleKindOf(TEAMS_SURFACE, title)), false,
+      'no human conversation may ever reach the heading scan');
+  }
+  assert.equal(extractAgentNameFromTitle(TEAMS_SURFACE, T_GROUP), AGENT_NAME_GENERIC);
+});
+
 test('extractAgentNameFromHeading reads the landing heading of a fresh conversation', () => {
   // The state confirmed BEFORE any message is sent — and, since re-opening an
   // agent's Copilot-tab conversation resets it to empty, the common state right
@@ -1382,4 +1442,129 @@ test('a normalised row can never break out of the .ps1 string extractor', () => 
     assert.equal(/["\\{}\u0000-\u001f\u007f]/.test(value), false, `${key} kept a parser-breaking character`);
     assert.ok(value.length <= 200, `${key} was not truncated`);
   }
+});
+
+// ── governed-agents.json: DLP-monitored, NOT blocked ────────────────────────
+// The second file blocked-agents-sync.js writes, from GET
+// /api/lifecycle/governed-agents. Same shape as the blocked rows on purpose, so
+// the enforcer-side parser is shared rather than duplicated, with two
+// differences that both exist to avoid governing more than was asked for.
+
+test('normalizeGovernedRows produces the SAME on-disk shape as the blocked rows', () => {
+  const [row] = normalizeGovernedRows([{
+    agent_id: 'ag-1',
+    agent_name: 'IT Help "Desk"',
+    platform: 'teams_chat_agent',
+    reason: 'Sensitive {data}',
+    oauth_key_id: 'k1',
+    agent_scope: 'platform',
+    dlp_monitor: true,
+    dlp_monitor_at: '2026-09-01T10:00:00.000Z',
+    orphaned: false,
+  }]);
+  // Field for field, with the same sanitising and the same agent_scope enum the
+  // blocked list uses — no renamed and no invented fields.
+  assert.deepEqual(row, {
+    agent_id: 'ag-1',
+    agent_name: 'IT Help Desk',
+    platform: 'teams_chat_agent',
+    reason: 'Sensitive data',
+    oauth_key_id: 'k1',
+    agent_scope: 'platform',
+    dlp_monitor: true,
+    dlp_monitor_at: '2026-09-01T10:00:00.000Z',
+    orphaned: false,
+  });
+  // Junk in, no throw — this runs on a network poll path.
+  assert.deepEqual(normalizeGovernedRows(null), []);
+  assert.deepEqual(normalizeGovernedRows('nope'), []);
+  assert.deepEqual(normalizeGovernedRows([null, 'x', 7]), []);
+});
+
+test('normalizeGovernedRows DROPS an agent-scoped row whose name cannot survive, instead of widening it', () => {
+  // The one deliberate divergence from the blocked list. There, a name the
+  // enforcer could never match is downgraded to a whole-app BLOCK — fail-closed.
+  // Here the same downgrade would turn "DLP-monitor this one agent" into
+  // "scan everything typed in this app", i.e. capture far more prompt content
+  // than the admin asked for, so the row is dropped instead.
+  const warnings = [];
+  const rows = normalizeGovernedRows([
+    { agent_id: 'ag-1', agent_name: 'Advisor "Prime"', platform: 'personal_agent', agent_scope: 'agent' },
+    { agent_id: 'ag-2', agent_name: 'Finance Bot', platform: 'personal_agent', agent_scope: 'agent' },
+  ], { warn: (m) => warnings.push(m) });
+  assert.deepEqual(rows.map((r) => r.agent_id), ['ag-2']);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /dropped/);
+  // A row the SERVER already sent as platform- or no-scope is untouched: that
+  // breadth is the admin's own decision, not a transport artefact.
+  const wide = normalizeGovernedRows([
+    { agent_id: 'ag-3', agent_name: 'Bad "name"', platform: 'personal_agent', agent_scope: 'platform' },
+    { agent_id: 'ag-4', agent_name: 'Bad "name"', platform: 'personal_agent' },
+  ]);
+  assert.deepEqual(wide.map((r) => [r.agent_id, r.agent_name, r.agent_scope]),
+    [['ag-3', 'Bad name', 'platform'], ['ag-4', 'Bad name', null]]);
+});
+
+test('filterGovernedAgents: BLOCKED WINS — a blocked agent is never also governed', () => {
+  const blocked = [
+    { agent_id: 'ag-1', agent_name: 'IT Help Desk Agent', platform: 'teams_chat_agent', agent_scope: 'agent' },
+  ];
+  const governed = [
+    { agent_id: 'ag-1', agent_name: 'IT Help Desk Agent', platform: 'teams_chat_agent', agent_scope: 'agent' },
+    { agent_id: 'ag-2', agent_name: 'Finance Bot', platform: 'teams_chat_agent', agent_scope: 'agent' },
+  ];
+  const logged = [];
+  const kept = filterGovernedAgents(governed, blocked, { info: (m) => logged.push(m) });
+  assert.deepEqual(kept.map((r) => r.agent_id), ['ag-2']);
+  assert.match(logged.join('\n'), /blocked wins/);
+});
+
+test('filterGovernedAgents matches ids first and the normalized name as the fallback', () => {
+  // Same convention as filterBlockedAgents' agent-scoped branch: an id on BOTH
+  // sides is decisive, so a display-name collision cannot drop the wrong row…
+  const byId = filterGovernedAgents(
+    [
+      { agent_id: 'ag-1', agent_name: 'Shared Name', platform: 'personal_agent' },
+      { agent_id: 'ag-2', agent_name: 'Shared Name', platform: 'personal_agent' },
+    ],
+    [{ agent_id: 'ag-2', agent_name: 'Shared Name', platform: 'personal_agent' }],
+  );
+  assert.deepEqual(byId.map((r) => r.agent_id), ['ag-1']);
+
+  // …and with no id on one side the whitespace-normalised, case-insensitive
+  // name is what collides. This is the race the sync-layer filter exists for:
+  // a synthesised platform block carries no agent_id at all.
+  const byName = filterGovernedAgents(
+    [
+      { agent_id: 'ag-1', agent_name: 'IT Help  Desk Agent', platform: 'personal_agent' },
+      { agent_id: 'ag-2', agent_name: 'Finance Bot', platform: 'personal_agent' },
+    ],
+    [{ agent_id: '', agent_name: 'it help desk agent', platform: 'ai_platform' }],
+  );
+  assert.deepEqual(byName.map((r) => r.agent_id), ['ag-2']);
+
+  // The platform is NOT part of the key: two lists that disagree about it still
+  // collide, and blocked still wins.
+  const crossPlatform = filterGovernedAgents(
+    [{ agent_id: 'ag-9', agent_name: 'Roaming Agent', platform: 'teams_chat_agent' }],
+    [{ agent_id: 'ag-9', agent_name: 'Roaming Agent', platform: 'personal_agent' }],
+  );
+  assert.deepEqual(crossPlatform, []);
+});
+
+test('filterGovernedAgents is a no-op for an empty or malformed blocked list', () => {
+  const governed = [{ agent_id: 'ag-1', agent_name: 'Finance Bot', platform: 'personal_agent' }];
+  assert.deepEqual(filterGovernedAgents(governed, []), governed);
+  assert.deepEqual(filterGovernedAgents(governed, null), governed);
+  // A blocked row naming NEITHER an id nor a name can match nothing — it must
+  // not swallow the whole governed list.
+  assert.deepEqual(filterGovernedAgents(governed, [{}, { agent_id: '  ', agent_name: '  ' }]), governed);
+  assert.deepEqual(filterGovernedAgents([], [{ agent_id: 'ag-1' }]), []);
+  assert.deepEqual(filterGovernedAgents(null, [{ agent_id: 'ag-1' }]), []);
+  // A governed row with neither id nor name is kept: there is no evidence it is
+  // the blocked one, and the enforcer cannot match it to anything either way.
+  assert.deepEqual(
+    filterGovernedAgents([{ platform: 'personal_agent' }], [{ agent_id: 'ag-1', agent_name: 'Finance Bot' }]),
+    [{ platform: 'personal_agent' }],
+  );
 });

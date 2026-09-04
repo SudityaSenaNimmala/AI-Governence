@@ -26,6 +26,32 @@ const HELPER_SCRIPT = helperScript('toast-helper.ps1');
 // pre-check the caller ran is stale.
 const REQUEST_DIALOG_TIMEOUT_MS = 5 * 60 * 1000;
 
+// The same idea for the Tokenize & Send popup, but two orders of magnitude
+// shorter, because that popup answers a question with a deadline: the enforcer
+// only holds a rewritable block for REWRITE_TTL (15s), and the helper closes its
+// own form at CfaiTokenizeDialog.TimeoutMs (16s) and writes a 'timeout' line.
+// This is purely the backstop for a helper that never wrote that line at all —
+// 20s, so it can only ever fire after the helper's own expiry has been missed.
+//
+// A late answer is harmless either way: enforcer-win.ps1's StartRewrite
+// validates the block id against its own single-use pin and answers a stale one
+// with "stale_block_id"/"expired" instead of touching the composer. There is
+// deliberately no second staleness clock on this side.
+const TOKENIZE_DIALOG_TIMEOUT_MS = 20 * 1000;
+
+// The same backstop, re-armed once the helper reports that the user opened the
+// popup's "Edit manually" text box. 20s is the right budget for reading two
+// buttons and clicking one; it is not a budget for typing a sentence, so from
+// that moment on the clocks are:
+//   helper's CfaiTokenizeDialog.EditTimeoutMs  90s   (the form closes itself)
+//   this                                      100s   (backstop, as above: it
+//                                                     can only fire after the
+//                                                     helper missed its line)
+//   enforcer's REWRITE_EDIT_TTL               120s   (the pin outlives both)
+// Nothing here re-decides staleness — same reasoning as above, the enforcer
+// still owns it, and a late answer still gets "stale_block_id"/"expired".
+const TOKENIZE_EDIT_TIMEOUT_MS = 100 * 1000;
+
 export class ToastService {
   constructor({ log }) {
     this.log = log;
@@ -79,6 +105,38 @@ export class ToastService {
             this.#settleDialog(ev.request_id, {
               action: String(ev.action || 'cancel'),
               reason: typeof ev.reason === 'string' ? ev.reason : '',
+            });
+          } else if (ev.kind === 'tokenize_dialog_editing') {
+            // The user opened the popup's "Edit manually" text box. NOT an
+            // answer — the dialog is still open — so nothing is settled here.
+            // Two things happen instead: this side's give-up clock is re-armed
+            // for how long typing takes, and the caller is told, so it can ask
+            // the enforcer to hold the pinned block for the same reason.
+            //
+            // Correlation id only. This line carries no content by construction
+            // (see toast-helper.ps1) and nothing about it is logged.
+            this.#extendDialog(ev.request_id);
+          } else if (ev.kind === 'tokenize_dialog_result') {
+            // The user chose, or the helper refused a second popup for the same
+            // block, or one of its own expiries fired.
+            //
+            // `text` is present for exactly one action — 'edit_send' — and is
+            // what the user typed into our own box: the string the enforcer is
+            // being asked to type, and the only reason that action exists. It is
+            // read here and passed to the caller, never logged. The masked
+            // preview is still not echoed back for any other action (see the
+            // helper's own note on that line): this side already has it, and it
+            // is content.
+            //
+            // Anything that is not exactly 'tokenize' or 'edit_send' is a no-op
+            // for the caller, so an unrecognised value degrades to "leave the
+            // block standing".
+            const action = String(ev.action || 'edit');
+            this.#settleDialog(ev.request_id, {
+              action,
+              // Only ever carried off the one action, so a helper that put text
+              // on some other line could not smuggle it into a rewrite.
+              text: action === 'edit_send' && typeof ev.text === 'string' ? ev.text : '',
             });
           }
         } catch {
@@ -194,6 +252,93 @@ export class ToastService {
         app_name: appName,
       });
     });
+  }
+
+  /**
+   * Open the ephemeral Tokenize & Send popup and resolve with what the user
+   * chose. The CLI agent's counterpart of the Electron block dialog
+   * (electron/renderer/block-dialog.js), which is unreachable on this path
+   * because there is no Electron process to host it — the popup simply never
+   * appeared for anyone running `ai-gov-agent --monitor`, so the feature's
+   * enforcer-side machinery had no trigger at all.
+   *
+   * Resolves { action, text } where action is:
+   *   'tokenize'    — mask the sensitive values and send anyway.
+   *   'edit_send'   — they took "Edit manually", reworded the masked text
+   *                   themselves and pressed Send. `text` is that wording, and
+   *                   is the string the caller asks the enforcer to type; it is
+   *                   empty on every other action.
+   *   'edit'        — they cancelled the edit box, or closed the window.
+   *   'timeout'     — nobody answered (the helper's own expiry for whichever
+   *                   view was up, or this side's backstop).
+   *   'suppressed'  — a popup for this same block is already on screen.
+   *   'unavailable' — no helper, not Windows, or the helper could not build its
+   *                   dialog type.
+   * Every one of those except 'tokenize' and 'edit_send' means "leave the block
+   * standing", which is exactly what happened before this popup existed.
+   *
+   * `onEditing`, if given, is called once if and when the user opens the edit
+   * box — before this promise settles. It exists so the caller can hold the
+   * enforcer's pinned block for as long as typing takes; see index.js's
+   * #offerTokenize. It is handed nothing, and a throw from it is swallowed.
+   *
+   * `preview` is the ALREADY-MASKED text the enforcer computed and put on the
+   * block event — the same string it would type into the composer. The original
+   * prompt is not on this side of the pipe and must never be passed here.
+   *
+   * `dedupeKey` must be the BLOCK ID: the enforcer keeps that id stable while
+   * the composer text is unchanged, so repeated Enter-presses against the same
+   * prompt all resolve to the one popup, while a genuinely new prompt gets a
+   * fresh one. Same concurrency-only guard as showRequestDialog's.
+   */
+  showTokenizeDialog({ appName = '', categories = '', preview = '', dedupeKey = '', onEditing = null } = {}) {
+    if (process.platform !== 'win32') return Promise.resolve({ action: 'unavailable', text: '' });
+    // Not queued behind `ready`, for a sharper version of the reason
+    // showRequestDialog is not: this popup offers to rewrite a composer whose
+    // exact contents the enforcer pinned seconds ago, and that pin expires.
+    if (!this.ready || !this.dialogSupported || !this.child) {
+      return Promise.resolve({ action: 'unavailable', text: '' });
+    }
+    const requestId = randomUUID();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.#settleDialog(requestId, { action: 'timeout', text: '' });
+      }, TOKENIZE_DIALOG_TIMEOUT_MS);
+      timer.unref?.();
+      this.pendingDialogs.set(requestId, { resolve, timer, onEditing });
+      this.#write({
+        cmd: 'show_tokenize_dialog',
+        request_id: requestId,
+        dedupe_key: dedupeKey || requestId,
+        app_name: appName,
+        categories,
+        preview,
+      });
+    });
+  }
+
+  /**
+   * The popup moved into its edit view: re-arm the give-up clock for how long
+   * typing takes and tell the caller, once. Nothing is resolved — the dialog is
+   * still on screen — and an unknown/already-settled id is ignored, same as
+   * #settleDialog's.
+   */
+  #extendDialog(requestId) {
+    const id = String(requestId || '');
+    const entry = this.pendingDialogs.get(id);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => {
+      this.#settleDialog(id, { action: 'timeout', text: '' });
+    }, TOKENIZE_EDIT_TIMEOUT_MS);
+    entry.timer.unref?.();
+    // At most once per dialog, and a throw from the caller's callback must not
+    // take down the helper's stdout reader.
+    const cb = entry.onEditing;
+    entry.onEditing = null;
+    if (typeof cb === 'function') {
+      try { cb(); } catch (err) { this.log?.warn('toast: onEditing failed: ' + err.message); }
+    }
   }
 
   #settleDialog(requestId, result) {

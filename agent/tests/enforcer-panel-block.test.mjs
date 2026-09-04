@@ -1143,6 +1143,163 @@ test('ARMED: the privacy gate and the host-app inversion still govern the new ro
   }
 });
 
+// ── TEAMS RE-TITLES THE CHAT-LIST ROUTE (observed live 2026-09-04) ──────────
+//
+// THE OBSERVATION. In the SAME Chat-list agent conversation, with no navigation
+// away from it, Teams stopped serving
+//   "Chat | IT Help Desk Agent | filefuze | erik@filefuze.co | Microsoft Teams"
+// and started serving the four-segment Copilot-tab shape
+//   "Copilot | filefuze | erik@filefuze.co | Microsoft Teams"
+// which carries NO conversation name at all. Teams chose that; nothing on our
+// side can prevent it.
+//
+// WHAT THE MECHANISM ALREADY DOES, which these tests PIN rather than change.
+// ReadTitleModeAgentName's stage-B gate is FallbackReadArmed, which keys on the
+// title's KIND SEGMENT ALONE and never on which composer holds focus. So a
+// Copilot-kind title reaches the heading fallback whichever Teams composer is
+// focused — the Chat-list CKEditor included — and the recovered name flows into
+// exactly the same block and DLP decisions as a title-derived one. The read side
+// needed no widening, and widening it would have been actively wrong: adding
+// 'Copilot' to titleKinds would make the primary parse read the TENANT segment
+// ("filefuze") as the open agent's name.
+//
+// THE BOUNDARY, and why it is safe. The fallback is NOT reached because "the
+// title named nothing" — it is reached only when the title's KIND is one this
+// route applies to. A 1:1 DM (no kind segment at all), a renamed human group
+// chat and a channel post all also arrive at stage B with no evidence, and all
+// keep their own kinds, none of which is in paneKinds. So none of them is ever
+// walked. That is the distinction chatlist_human_chat_no_search holds.
+
+test('LIVE 2026-09-04: a Chat-list conversation Teams re-titled to the Copilot shape is still recognised', { skip: !win }, async () => {
+  // The exact live title, on the Chat-list CKEditor composer
+  // (ck-editor__editable, panel teams_composer — NOT the Copilot tab's
+  // fai-EditorInput__input). The title names nothing, the heading fallback
+  // recovers "IT Help Desk Agent", and it blocks at AGENT scope through the same
+  // latch key both routes already share.
+  const rows = await scenario('chatlist_retitled_copilot_heading');
+  assert.equal(rows.length, 5);
+  for (const r of rows) {
+    assert.equal(r.matched, 'teams_composer', `tick ${r.tick}: the CHAT-LIST composer, not the tab's`);
+    assert.equal(r.searchAttempted, true, `tick ${r.tick}: a Copilot-kind title reaches the fallback`);
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}: the pane names what the title no longer does`);
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}: never a whole-app block in a chat client`);
+    assert.equal(r.blockedByElement, true, `tick ${r.tick}`);
+    assert.equal(r.latchKey, 'agent:teams_desktop', `tick ${r.tick}`);
+    // The name in the block comes from the admin-typed ROW, never from the pane.
+    assert.equal(r.blockedAgent, 'IT Help Desk Agent', `tick ${r.tick}`);
+  }
+  // Freshly opened, before any message — the landing heading carries it instead.
+  const landing = await scenario('chatlist_retitled_copilot_landing');
+  assert.equal(landing.length, 3);
+  for (const r of landing) {
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}`);
+  }
+  // The re-title is TRANSIENT — Teams flipped format mid-conversation — so the
+  // two shapes interleave. Both resolve to the same block with no ungoverned
+  // tick between them; only the Copilot-shaped ticks need a search.
+  const flaps = await scenario('chatlist_title_shape_flaps');
+  assert.equal(flaps.length, 4);
+  assert.deepEqual(flaps.map((r) => r.searchAttempted), [false, true, false, true],
+    'a title that DID name the conversation still needs no search');
+  for (const r of flaps) {
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}: the block must not flicker with the title shape`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}`);
+  }
+});
+
+test('LIVE 2026-09-04: the re-titled conversation is DLP-governed when the agent is on the governed list', { skip: !win }, async () => {
+  // The other half of the live report: the agent may be DLP-monitored rather
+  // than blocked. teams_composer is dlpMatch:'agent', so a panel match alone is
+  // NOT enough here — the name recovered from the pane is the only thing that
+  // can make this tick governed, which is exactly what this pins.
+  const rows = await scenario('chatlist_retitled_copilot_governed');
+  assert.equal(rows.length, 3);
+  for (const r of rows) {
+    assert.equal(r.matched, 'teams_composer', `tick ${r.tick}`);
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    assert.equal(r.dlpGoverned, true, `tick ${r.tick}: scanned and Tier B eligible`);
+    assert.equal(r.tierBReached, true, `tick ${r.tick}`);
+    // GOVERNED never blocks the conversation, and a sensitive prompt in it is
+    // still stopped and offered Tokenize & Send.
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.contentBlock, true, `tick ${r.tick}`);
+  }
+});
+
+test('REGRESSION 2026-09-04: a human Teams conversation is STILL never walked or captured', { skip: !win }, async () => {
+  // The protection that had to survive the fix, and the reason the boundary is
+  // the title's KIND rather than "the title named nothing". Same fully-armed
+  // catalog, same Chat-list composer, and headings naming the blocked agent
+  // sitting right there — the only difference is which view the title names.
+  const rows = await scenario('chatlist_human_chat_no_search');
+  assert.equal(rows.length, 4);
+  for (const r of rows) {
+    assert.equal(r.searchAttempted, false,
+      `tick ${r.tick}: no colleague conversation's pane may EVER be walked`);
+    assert.equal(r.fgIsAi, false, `tick ${r.tick}: and no keystroke in it may be captured`);
+    assert.equal(r.fgIsPanel, false, `tick ${r.tick}`);
+    assert.equal(r.dlpGoverned, false, `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.contentBlock, false, `tick ${r.tick}: no content may be scanned either`);
+    assert.equal(r.tierBReached, false, `tick ${r.tick}`);
+  }
+  // A DM has no kind segment (segment 0 is the colleague's display name); Teams'
+  // own participant-list naming is AUTHORITATIVE "not an agent"; a channel view
+  // has its own kind. The DELIBERATELY RENAMED group chat reads Named — that
+  // residual risk is accepted and documented on the JS side — and it still
+  // governs nothing, because no policy row names "Q4 launch war room".
+  assert.deepEqual(rows.map((r) => r.agentOutcome),
+    ['NotComposer', 'Generic', 'Named', 'NotComposer']);
+
+  // The re-titled title plus a naming heading is STILL not enough on its own:
+  // the focused element has to be an enforcing composer. Focus on the transcript
+  // recovers the name and governs nothing.
+  const list = await scenario('chatlist_retitled_not_composer');
+  assert.equal(list.length, 3);
+  for (const r of list) {
+    assert.equal(r.matched, '', `tick ${r.tick}: the message list is not a composer`);
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}: the read still succeeds`);
+    assert.equal(r.fgIsAi, false, `tick ${r.tick}: and the tick is still not governed`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+  }
+
+  // The fallback widens COVERAGE, never POLICY: an agent nobody has a policy
+  // about is authoritatively named and left completely alone.
+  const unpoliced = await scenario('chatlist_retitled_unpoliced');
+  assert.equal(unpoliced.length, 3);
+  for (const r of unpoliced) {
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    assert.equal(r.fgIsAi, false, `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.dlpGoverned, false, `tick ${r.tick}`);
+  }
+
+  // THE HONEST LIMIT of this route, pinned so it cannot be mistaken for
+  // coverage. When Teams serves the Copilot-shaped title AND the pane yields no
+  // heading the extractor recognises, there is no signal left anywhere: the
+  // outcome is no evidence and, for a host app, that correctly fails OPEN. If
+  // this state is ever observed live on the Chat-list route, the thing to
+  // re-measure is the heading CLASS that route renders — nothing here should be
+  // loosened to compensate.
+  const none = await scenario('chatlist_retitled_no_headings');
+  assert.equal(none.length, 3);
+  for (const r of none) {
+    assert.equal(r.searchAttempted, true, `tick ${r.tick}: the search DID run`);
+    assert.equal(r.agentOutcome, 'NotComposer', `tick ${r.tick}: …and found no evidence`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+  }
+});
+
 test('REGRESSION: M365Copilot behaves exactly as before, with host apps in the catalog', { skip: !win }, async () => {
   // Run last in the harness, with the SHIPPED catalog reloaded, so a
   // fixture-only payload cannot be what makes it pass. Every outcome here is
@@ -1165,4 +1322,258 @@ test('REGRESSION: M365Copilot behaves exactly as before, with host apps in the c
   // surface — the wider host-app latch rule must not have leaked into it.
   assert.equal(rows[3].latchKey, 'agent:m365_copilot');
   assert.equal(rows[4].latchKey, 'agent:m365_copilot');
+});
+
+// ═══ GOVERNED FOR DLP ONLY — the third state a Teams conversation can be in ══
+//
+// Blocked (every send swallowed), GOVERNED (prompts scanned, Tokenize & Send
+// offered, nothing ever swallowed), or untouched (no capture at all). The
+// governed list is its own file — governed-agents.json, written by
+// blocked-agents-sync.js from GET /api/lifecycle/governed-agents — read by the
+// real UpdateGovernedAgents in the harness.
+//
+// TWO COLUMNS carry this:
+//   dlpGoverned  — _fgDlpGoverned as ApplyForegroundTick left it.
+//   tierBReached — whether the REAL UpdatePendingRewrite got past its exclusion
+//                  gate, i.e. whether Tier B is eligible on this tick at all.
+//                  NOT "a mask was produced": the harness has no composer to
+//                  read, and eligibility is the thing this feature changes.
+//
+// The combination that must never occur anywhere below is dlpGoverned AND
+// fgIsBlocked.
+
+test('GOVERNED: a DLP-monitored Teams agent is captured and Tier B eligible — and never blocked', { skip: !win }, async () => {
+  const rows = await scenario('teams_governed_dlp_only');
+  assert.equal(rows.length, 10);
+  for (const r of rows) {
+    // The composer matched and the title named the governed agent.
+    assert.equal(r.matched, 'teams_composer', `tick ${r.tick}`);
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    // Governed: an AI surface, so the prompt is captured and scanned.
+    assert.equal(r.dlpGoverned, true, `tick ${r.tick}`);
+    assert.equal(r.fgIsAi, true, `tick ${r.tick}`);
+    assert.equal(r.fgIsPanel, true, `tick ${r.tick}`);
+    // …and Tier B is offered, which is the whole point of the state.
+    assert.equal(r.tierBReached, true, `tick ${r.tick}`);
+    // NOT blocked. Not by any route: no _fgIsBlocked, no scope, no latch, and
+    // the real Enter predicate lets the send through.
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}: a governed agent must never be blocked`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}: a governed tick must never swallow Enter`);
+    assert.equal(r.blockScope, 'app', `tick ${r.tick}: "app" is BlockScope()'s no-block default`);
+    assert.equal(r.latchHeld, false, `tick ${r.tick}`);
+    assert.equal(r.latchKey, '', `tick ${r.tick}`);
+    // …and the DLP half really is armed: with a content match present, the same
+    // real Enter predicate DOES swallow the send. That is what "monitored"
+    // means — a sensitive prompt is stopped and offered Tokenize & Send, while
+    // the conversation itself is never blocked.
+    assert.equal(r.contentBlock, true, `tick ${r.tick}: a DLP content match must still stop the send`);
+  }
+});
+
+test('GOVERNED: the two lists act on two different conversations, and never on one at once', { skip: !win }, async () => {
+  // One agent DLP-monitored, a different one blocked, both policies live. Each
+  // conversation gets exactly its own treatment as the user moves between them.
+  const rows = await scenario('teams_governed_beside_blocked');
+  assert.equal(rows.length, 6);
+  const governed = [rows[0], rows[1], rows[4], rows[5]];
+  const blocked = [rows[2], rows[3]];
+  for (const r of governed) {
+    assert.equal(r.dlpGoverned, true, `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.tierBReached, true, `tick ${r.tick}`);
+  }
+  for (const r of blocked) {
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}`);
+    // A blocked host-app tick is NOT Tier B eligible — masking cannot unblock a
+    // send the org disallowed outright, and RunRewrite's own synthetic Enter
+    // would be swallowed by the same hook.
+    assert.equal(r.dlpGoverned, false, `tick ${r.tick}`);
+    assert.equal(r.tierBReached, false, `tick ${r.tick}`);
+  }
+  // Never both, on any tick.
+  for (const r of rows) assert.equal(r.dlpGoverned && r.fgIsBlocked, false, `tick ${r.tick}`);
+});
+
+test('GOVERNED: an agent on BOTH lists is BLOCKED — blocked wins, never both, never neither', { skip: !win }, async () => {
+  // The sync layer subtracts the blocked list from the governed one before
+  // writing, so this cannot happen on disk. Tested defensively anyway, because
+  // the failure mode — offering "Tokenize & Send" for an agent the org refuses
+  // outright, or letting its send through — is exactly what precedence exists
+  // to prevent. ApplyForegroundTick computes blockGoverned FIRST and requires
+  // !blockGoverned for dlpGoverned, so the overlap is unrepresentable here.
+  const rows = await scenario('teams_governed_and_blocked_same_agent');
+  assert.equal(rows.length, 5);
+  for (const r of rows) {
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}: blocked must win`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}`);
+    assert.equal(r.dlpGoverned, false, `tick ${r.tick}: never both`);
+    assert.equal(r.tierBReached, false, `tick ${r.tick}: no Tokenize & Send for a blocked agent`);
+  }
+});
+
+test('GOVERNED: DLP monitoring one agent governs nothing else in Teams', { skip: !win }, async () => {
+  // THE privacy property, from the governed side. A DM, a default-named human
+  // group chat, a channel post, the Activity tab, and the transcript above a
+  // governed composer — every one untouched: not an AI surface, no capture, no
+  // Tier B, no block. A governed policy is not a licence to read Teams.
+  const rows = await scenario('teams_governed_leaves_teams_alone');
+  assert.equal(rows.length, 5);
+  for (const r of rows) {
+    assert.equal(r.dlpGoverned, false, `tick ${r.tick}`);
+    assert.equal(r.fgIsAi, false, `tick ${r.tick}: Teams must not become an AI surface here`);
+    assert.equal(r.fgIsPanel, false, `tick ${r.tick}`);
+    assert.equal(r.tierBReached, false, `tick ${r.tick}: nothing may read this composer`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    // Not even a content match could stop a send here — PanelEnforceOk refuses
+    // outright, so a colleague conversation cannot be enforced on by any route.
+    assert.equal(r.contentBlock, false, `tick ${r.tick}: no DLP enforcement outside a governed conversation`);
+  }
+  // …and an agent conversation nobody governs is equally untouched: the
+  // Chat-list route needs the NAME, because one composer element serves every
+  // conversation in the app.
+  const ungoverned = await scenario('teams_ungoverned_agent_untouched');
+  assert.equal(ungoverned.length, 3);
+  for (const r of ungoverned) {
+    assert.equal(r.matched, 'teams_composer', `tick ${r.tick}: the composer still matches`);
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}: and the agent is named`);
+    assert.equal(r.dlpGoverned, false, `tick ${r.tick}: but no row names it, so nothing is governed`);
+    assert.equal(r.fgIsAi, false, `tick ${r.tick}`);
+    assert.equal(r.tierBReached, false, `tick ${r.tick}`);
+    assert.equal(r.contentBlock, false, `tick ${r.tick}`);
+  }
+});
+
+test('GOVERNED: the Copilot tab is DLP-governed by PANEL MATCH ALONE, for any conversation', { skip: !win }, async () => {
+  // Teams' embedded Copilot tab carries dlpMatch:'panel'. Every conversation in
+  // it is with an assistant — there is no DM, no channel and no meeting chat
+  // behind that composer — so the element match alone is enough for DLP, with
+  // no name-list check at all. Tick 0 has no headings whatsoever (nothing names
+  // anything anywhere), tick 1's heading names an agent on no list, tick 2 has
+  // only the user's own heading. All three governed.
+  const rows = await scenario('copilot_tab_panel_alone_dlp');
+  assert.equal(rows.length, 3);
+  for (const r of rows) {
+    assert.equal(r.matched, 'teams_copilot_composer', `tick ${r.tick}`);
+    assert.equal(r.dlpGoverned, true, `tick ${r.tick}: panel match alone governs here`);
+    assert.equal(r.fgIsAi, true, `tick ${r.tick}`);
+    assert.equal(r.fgIsPanel, true, `tick ${r.tick}`);
+    assert.equal(r.tierBReached, true, `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}: DLP governance never blocks`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.contentBlock, true, `tick ${r.tick}: a DLP content match still stops the send`);
+  }
+  // Tick 0 is the sharpest case: NO agent name exists on this tick at all —
+  // the title is the generic Copilot one and the pane search found nothing —
+  // and it is still governed.
+  assert.equal(rows[0].agentOutcome, 'NotComposer');
+
+  // THE CONTROL. Identical scenario, identical reads, one catalog field
+  // different: dlpMatch:'agent' instead of 'panel'. The unnamed conversation is
+  // then NOT governed — which is what proves the panel-alone rule comes from the
+  // catalog and is not the Copilot tab being special-cased in the C#.
+  const strict = await scenario('copilot_tab_strict_control');
+  assert.equal(strict.length, 2);
+  assert.equal(strict[0].matched, 'teams_copilot_composer');
+  assert.equal(strict[0].dlpGoverned, false, 'under the strict rule an unnamed conversation is untouched');
+  assert.equal(strict[0].fgIsAi, false);
+  assert.equal(strict[0].tierBReached, false);
+  // Even a NAMED agent is untouched under the strict rule here, because this
+  // scenario's governed list names a different one.
+  assert.equal(strict[1].agentOutcome, 'Named');
+  assert.equal(strict[1].dlpGoverned, false);
+
+  // …and a BLOCKED Copilot-tab conversation is still blocked, and still refused
+  // Tier B. The panel-alone DLP rule may not soften a block.
+  const blocked = await scenario('copilot_tab_blocked_no_tier_b');
+  assert.equal(blocked.length, 3);
+  for (const r of blocked) {
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.dlpGoverned, false, `tick ${r.tick}`);
+    assert.equal(r.tierBReached, false, `tick ${r.tick}`);
+  }
+});
+
+test('GOVERNED: the privacy gate still decides whether Teams is looked at at all', { skip: !win }, async () => {
+  // A governed row for a platform that does not map to ms-teams leaves Teams in
+  // NEITHER policy set, so hostAppArmed is false and nothing is read: no window
+  // title, no accessibility call, no panel match — in the Copilot tab either,
+  // whose panel-alone rule is unreachable without the gate.
+  for (const name of [
+    'teams_governed_no_policy_no_read',
+    // A governed row with no agent scope licenses nothing either: for a host app
+    // "monitor the whole platform" would mean capturing every prompt typed
+    // anywhere in Teams.
+    'teams_governed_platform_row_no_read',
+    // No governed file yet (the sync has not completed)…
+    'teams_governed_file_absent',
+    // …and an empty one ("nothing is currently monitored"). Different intent,
+    // identical effect.
+    'teams_governed_file_empty',
+  ]) {
+    const rows = await scenario(name);
+    assert.equal(rows.length, 2, name);
+    for (const r of rows) {
+      assert.equal(r.agentOutcome, 'Unreadable', `${name} tick ${r.tick}: no read may occur`);
+      assert.equal(r.matched, '', `${name} tick ${r.tick}: no panel read either`);
+      assert.equal(r.searchAttempted, false, `${name} tick ${r.tick}`);
+      assert.equal(r.dlpGoverned, false, `${name} tick ${r.tick}`);
+      assert.equal(r.fgIsAi, false, `${name} tick ${r.tick}`);
+      assert.equal(r.tierBReached, false, `${name} tick ${r.tick}`);
+      assert.equal(r.fgIsBlocked, false, `${name} tick ${r.tick}`);
+    }
+  }
+});
+
+test('GOVERNED: lifting DLP monitoring closes Tier B on the very next tick', { skip: !win }, async () => {
+  // No grace period for the OFFER, unlike a block decision: the sticky window
+  // exists so an already-correct block is not torn down by a bad read, and it
+  // still keeps _fgIsAi/_fgIsPanel up here — but _fgDlpGoverned mirrors only
+  // THIS tick, so the write-into-another-app path closes immediately.
+  const rows = await scenario('teams_governed_lifted');
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].dlpGoverned, true);
+  assert.equal(rows[0].tierBReached, true);
+  assert.equal(rows[1].dlpGoverned, false, 'monitoring lifted — governance ends on this tick');
+  assert.equal(rows[1].tierBReached, false, 'and so does the Tokenize & Send offer');
+  assert.equal(rows[1].fgIsBlocked, false);
+  assert.equal(rows[1].enterBlocked, false);
+});
+
+test('REGRESSION: a non-host-app AI app is completely unaffected by the DLP list', { skip: !win }, async () => {
+  // The governed list names an agent inside a CHAT app. Everything about the
+  // chat-app branch must be exactly what it was: isAi from the process, panel
+  // state untouched, the blocked narrowing unchanged, dlpGoverned never set (the
+  // flag is host-app-only), and Tier B eligible exactly as before — a chat app
+  // was never excluded from it in the first place.
+  const rows = await scenario('m365_unaffected_by_dlp_list');
+  assert.equal(rows.length, 4);
+  assert.deepEqual(rows.map((r) => r.agentOutcome), ['Named', 'Named', 'Generic', 'Named']);
+  assert.deepEqual(rows.map((r) => r.fgIsBlocked), [true, false, false, true]);
+  assert.deepEqual(rows.map((r) => r.enterBlocked), [true, false, false, true]);
+  for (const r of rows) {
+    assert.equal(r.dlpGoverned, false, `tick ${r.tick}: the flag is host-app-only`);
+    assert.equal(r.fgIsAi, true, `tick ${r.tick}`);
+    assert.equal(r.fgIsPanel, false, `tick ${r.tick}: an agent surface is not a panel`);
+    // UpdatePendingRewrite's host-app term cannot apply to a chat app, so the
+    // gate is open on every tick here — including the blocked ones, where
+    // EmitBlock's own platformBlock override is what refuses the offer (a
+    // separate, unchanged mechanism with its own test in
+    // os-monitor-safety.test.mjs).
+    assert.equal(r.tierBReached, true, `tick ${r.tick}`);
+  }
+  const chat = await scenario('chat_app_unaffected_by_dlp_list');
+  assert.equal(chat.length, 3);
+  for (const r of chat) {
+    assert.equal(r.fgIsAi, true, `tick ${r.tick}`);
+    assert.equal(r.dlpGoverned, false, `tick ${r.tick}`);
+    assert.equal(r.tierBReached, true, `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+  }
 });

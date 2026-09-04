@@ -57,21 +57,34 @@ $IDE_JSON    = '[{"name":"code","panelFallback":false},{"name":"cursor","panelFa
 # teams_composer — which ships enforce:false, exactly as the catalog has it.
 # $PANELS_TEAMS_ARMED is the TEST-ONLY flip, paired with $SURFACES_TEAMS_ARMED
 # below; both flags have to be on for a host app to gate anything.
-$IDE_PANELS = '{"id":"claude_code","procs":["Code","Cursor"],"controlType":"Edit","nameEquals":"Message input","namePrefix":"","classEquals":"","classPrefix":"messageInput_","enforce":true},{"id":"vscode_chat","procs":["Code","Cursor"],"controlType":"Edit","nameEquals":"","namePrefix":"Chat Input","classEquals":"","classPrefix":"","enforce":false},{"id":"cursor_composer","procs":["Cursor"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"aislash-editor-input","classPrefix":"","enforce":true}'
-$TEAMS_PANEL_OFF = '{"id":"teams_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"ck-editor__editable","classPrefix":"","enforce":false}'
-$TEAMS_PANEL_ON  = '{"id":"teams_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"ck-editor__editable","classPrefix":"","enforce":true}'
+#
+# `dlpMatch` / `newlineKeys` travel on every entry, exactly as
+# buildAiPanelConfig() ships them: 'agent' is the strict default (a named
+# governed/blocked row is required before a HOST-APP tick is governed), and only
+# teams_copilot_composer carries 'panel'.
+$IDE_PANELS = '{"id":"claude_code","procs":["Code","Cursor"],"controlType":"Edit","nameEquals":"Message input","namePrefix":"","classEquals":"","classPrefix":"messageInput_","enforce":true,"dlpMatch":"agent","newlineKeys":"shift_enter"},{"id":"vscode_chat","procs":["Code","Cursor"],"controlType":"Edit","nameEquals":"","namePrefix":"Chat Input","classEquals":"","classPrefix":"","enforce":false,"dlpMatch":"agent","newlineKeys":"shift_enter"},{"id":"cursor_composer","procs":["Cursor"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"aislash-editor-input","classPrefix":"","enforce":true,"dlpMatch":"agent","newlineKeys":"shift_enter"}'
+$TEAMS_PANEL_OFF = '{"id":"teams_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"ck-editor__editable","classPrefix":"","enforce":false,"dlpMatch":"agent","newlineKeys":"shift_enter"}'
+$TEAMS_PANEL_ON  = '{"id":"teams_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"ck-editor__editable","classPrefix":"","enforce":true,"dlpMatch":"agent","newlineKeys":"shift_enter"}'
 # The SECOND Teams composer: the one inside the embedded "Copilot" tab. A
 # genuinely different editor implementation from the CKEditor above (measured
 # live 2026-09 — no ck-editor__editable token anywhere in its ClassName), so it
 # needs its own signature. Ships enforce:false, exactly as the catalog has it;
 # $TEAMS_COPILOT_PANEL_ON is the TEST-ONLY flip.
-$TEAMS_COPILOT_PANEL_OFF = '{"id":"teams_copilot_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"fai-EditorInput__input","classPrefix":"","enforce":false}'
-$TEAMS_COPILOT_PANEL_ON  = '{"id":"teams_copilot_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"fai-EditorInput__input","classPrefix":"","enforce":true}'
+$TEAMS_COPILOT_PANEL_OFF = '{"id":"teams_copilot_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"fai-EditorInput__input","classPrefix":"","enforce":false,"dlpMatch":"panel","newlineKeys":"shift_enter"}'
+$TEAMS_COPILOT_PANEL_ON  = '{"id":"teams_copilot_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"fai-EditorInput__input","classPrefix":"","enforce":true,"dlpMatch":"panel","newlineKeys":"shift_enter"}'
+# The SAME Copilot-tab composer with the STRICT default instead of 'panel'. Not
+# a shipped shape — a fixture, and the control for the panel-alone scenarios: it
+# proves those pass because of the catalog field and not because the Copilot tab
+# is special-cased anywhere in the C#.
+$TEAMS_COPILOT_PANEL_STRICT = '{"id":"teams_copilot_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"fai-EditorInput__input","classPrefix":"","enforce":true,"dlpMatch":"agent","newlineKeys":"shift_enter"}'
 $PANELS_JSON        = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_OFF + ',' + $TEAMS_COPILOT_PANEL_OFF + ']'
 $PANELS_TEAMS_ARMED = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_ON + ',' + $TEAMS_COPILOT_PANEL_OFF + ']'
 # Both Teams composers armed — what the Copilot-tab scenarios need, since that
 # route's block has to come through ITS panel, not the Chat-list one.
 $PANELS_COPILOT_ARMED = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_ON + ',' + $TEAMS_COPILOT_PANEL_ON + ']'
+# Both armed, but the Copilot tab held at the strict 'agent' rule — the control
+# for the panel-alone DLP scenarios.
+$PANELS_COPILOT_STRICT = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_ON + ',' + $TEAMS_COPILOT_PANEL_STRICT + ']'
 # exactly synthesizePlatformBlocks([{ host: 'claude.ai', product: 'Claude', blocked: true }])
 $ROWS_CLAUDE = '[{"platform":"ai_platform","process_name":"claude","agent_name":"Claude","agent_id":"","host":"claude.ai","reason":"Blocked by organization policy"},{"platform":"ai_platform","panel":"claude_code","agent_name":"Claude","agent_id":"","host":"claude.ai","reason":"Blocked by organization policy"}]'
 # a detection-only panel with a row of its own — must still never block
@@ -150,6 +163,18 @@ function LoadPanels([string]$json) { Call 'LoadAiPanels' @($json) | Out-Null }
 $aiProcSet = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($p in @('M365Copilot', 'Copilot', 'ChatGPT', 'Claude', 'Gemini')) { $null = $aiProcSet.Add($p) }
 SetF '_aiProcs' $aiProcSet
+
+# Start() also builds _patInfos (the compiled pattern table). Left null it would
+# make any call into the masking path throw a NullReferenceException instead of
+# answering, so the harness supplies an EMPTY table: enough for
+# UpdatePendingRewrite to run for real, and it deliberately masks nothing — the
+# only thing asserted through it here is whether the tick got PAST the host-app
+# exclusion gate, never what a mask would have produced. (The masking itself is
+# driven, with real patterns, by tests/helpers/rewrite-multiline-harness.ps1.)
+$PATINFO_T = $T.GetNestedType('PatInfo', $FLAGS)
+if (-not $PATINFO_T) { throw 'no nested PatInfo class' }
+$patListType = [System.Collections.Generic.List`1].MakeGenericType($PATINFO_T)
+SetF '_patInfos' ([Activator]::CreateInstance($patListType))
 
 # The AgentReadOutcome enum, and the reflection handle for the real pure
 # extractor. The ONE thing substituted for the agent path — exactly as for the
@@ -342,6 +367,26 @@ function LoadRows([string]$json) {
   Call 'UpdateBlockedAgents' | Out-Null
 }
 
+# ── The GOVERNED (DLP-monitored, NOT blocked) list ──────────────────────────
+# ~/.cloudfuze-aigov/governed-agents.json, written by blocked-agents-sync.js.
+# Loaded exactly the way the blocked rows are — a real file on disk, read by the
+# REAL UpdateGovernedAgents (and therefore the real hand-rolled parser and the
+# real RebuildDlpScopedProcs) — so nothing about the parse or the privacy gate
+# is reimplemented here.
+#
+# $null means "the file does not exist", which is the state before the first
+# successful sync and must mean "nothing is governed".
+function LoadGoverned($json) {
+  if ($null -eq $json) {
+    SetF '_governedAgentFile' (Join-Path ([System.IO.Path]::GetTempPath()) ("cfai-governed-absent-" + [guid]::NewGuid().ToString('N') + '.json'))
+  } else {
+    $script:tmpGovFile = Join-Path ([System.IO.Path]::GetTempPath()) ("cfai-governed-harness-" + [guid]::NewGuid().ToString('N') + '.json')
+    Set-Content -LiteralPath $script:tmpGovFile -Value $json -Encoding UTF8
+    SetF '_governedAgentFile' $script:tmpGovFile
+  }
+  Call 'UpdateGovernedAgents' | Out-Null
+}
+
 function ResetState() {
   SetF '_fgIsAi' $false
   SetF '_fgIsPanel' $false
@@ -459,8 +504,13 @@ function TeamsTick([string]$scenario, [int]$n, $focus, [string]$title,
   # a host app is deliberately absent from that set (ai-processes.js keeps every
   # hostApp entry out of the watcher list), which is why the harness's own
   # $aiProcSet has no ms-teams in it either.
+  #
+  # EITHER policy list satisfies the middle term — a BLOCKED agent-scoped row or
+  # a GOVERNED (DLP-monitor) one. Both sets are the REAL ones, rebuilt by the
+  # real loaders from the real files, so the privacy gate stays under test: with
+  # neither list naming Teams, nothing is read at all.
   $armed = (HasProc '_hostAppProcs' $proc) `
-           -and (HasProc '_agentScopedProcs' $proc) `
+           -and ((HasProc '_agentScopedProcs' $proc) -or (HasProc '_dlpScopedProcs' $proc)) `
            -and ($null -ne (Call 'EnforcingAgentSurface' @($proc)))
   if ($armed) {
     if ($null -ne $focus) {
@@ -511,8 +561,10 @@ function TeamsCopilotTick([string]$scenario, [int]$n, $focus, [string]$title, $h
   $outcome = $OUT_UNREADABLE
   $agentName = ''
   $searchAttempted = $false
+  # hostAppArmed, verbatim — see TeamsTick's copy for why either policy list
+  # satisfies the middle term.
   $armed = (HasProc '_hostAppProcs' $proc) `
-           -and (HasProc '_agentScopedProcs' $proc) `
+           -and ((HasProc '_agentScopedProcs' $proc) -or (HasProc '_dlpScopedProcs' $proc)) `
            -and ($null -ne (Call 'EnforcingAgentSurface' @($proc)))
   if ($armed) {
     if ($null -ne $focus) {
@@ -558,6 +610,26 @@ function TeamsCopilotTick([string]$scenario, [int]$n, $focus, [string]$title, $h
   Report $scenario $n $hit $readable $outcome $searchAttempted
 }
 
+# Did UpdatePendingRewrite get PAST its exclusion gate on the state this tick
+# left behind — i.e. is Tier B (Tokenize & Send) eligible here at all?
+#
+# The REAL function, run for real. The gate is its first statement, and the
+# branch it guards returns WITHOUT touching _pendingWhyNot; everything past it
+# writes that field. So a sentinel is the exact observation: still there means
+# the tick was excluded, overwritten means it reached the composer read (which
+# offline has no composer to read, hence "empty_read"/"no_focused_element" — and
+# that is fine, because eligibility is the question, not the mask).
+#
+# This is why the host-app relaxation can be tested behaviourally at all: no
+# UIA composer is needed to establish which side of the gate a tick lands on.
+function TierBReached() {
+  SetF '_pendingWhyNot' 'HARNESS_SENTINEL'
+  SetF '_pendingRewritable' $false
+  SetF '_pendingExpiresAt' ([long]0)
+  Call 'UpdatePendingRewrite' | Out-Null
+  return ([string](GetF '_pendingWhyNot') -ne 'HARNESS_SENTINEL')
+}
+
 function Report([string]$scenario, [int]$n, $hit, [bool]$readable, $agentOutcome = $null, [bool]$searchAttempted = $false) {
   # The REAL Enter predicate, with no content signal armed — so a True here can
   # only be the platform block.
@@ -591,6 +663,27 @@ function Report([string]$scenario, [int]$n, $hit, [bool]$readable, $agentOutcome
     # False on every other tick — nothing else in this harness can attempt a
     # pane search, which is what makes "no search ever happened" assertable.
     searchAttempted = [bool]$searchAttempted
+    # ── The DLP-only state (governed, NOT blocked) ─────────────────────────
+    # _fgDlpGoverned as ApplyForegroundTick left it. The pair to watch is
+    # (dlpGoverned, fgIsBlocked): a governed-only tick must show true/false, a
+    # blocked tick false/true, and an untouched Teams tick false/false. There is
+    # no state in which both are true.
+    dlpGoverned  = [bool](GetF '_fgDlpGoverned')
+    # Would a DLP CONTENT match swallow the send on this tick?
+    #
+    # The hook's Enter decision, modelled exactly: it runs at all only inside
+    # `if (_fgIsAi || PanelBlockLatchHeld())`, and it computes its UIA term as
+    # `PanelUiaOk() && _blockUia` before calling the predicate. So this is the
+    # real predicate, asked with a UIA content match present — the whole point
+    # of the governed state: a sensitive prompt in a monitored conversation IS
+    # still stopped (and offered Tokenize & Send), while the conversation itself
+    # is never blocked. False wherever the surface cannot enforce or capture at
+    # all, which is every untouched Teams tick.
+    contentBlock = (([bool](GetF '_fgIsAi') -or [bool](Call 'PanelBlockLatchHeld')) `
+                    -and [bool](Call 'EnterBlockActive' @($false, [bool](Call 'PanelUiaOk'), $false, $false)))
+    # Whether Tier B is eligible on this tick, from the real UpdatePendingRewrite
+    # gate. Reported LAST so nothing it touches can affect the columns above.
+    tierBReached = [bool](TierBReached)
   }
   Write-Output ($obj | ConvertTo-Json -Compress)
 }
@@ -1404,6 +1497,366 @@ for ($i = 0; $i -lt 3; $i++) {
   TeamsCopilotTick 'copilot_tab_platform_row_never_blocks' $i $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
 }
 
+# ═══ TEAMS RE-TITLES THE CHAT-LIST ROUTE (live 2026-09-04) ══════════════════
+#
+# THE OBSERVATION. In the SAME Chat-list agent conversation the user had not
+# navigated away from, Teams stopped serving
+#   "Chat | IT Help Desk Agent | filefuze | erik@filefuze.co | Microsoft Teams"
+# and started serving
+#   "Copilot | filefuze | erik@filefuze.co | Microsoft Teams"
+# — the four-segment Copilot-tab shape, carrying NO conversation name at all.
+# Teams chose that; nothing on our side can prevent it.
+#
+# WHY THE MECHANISM ALREADY COVERS IT, and why these scenarios PIN that rather
+# than change it. ReadTitleModeAgentName's stage-B gate is FallbackReadArmed,
+# which keys on the TITLE'S KIND SEGMENT ALONE — never on which composer holds
+# focus. So a Copilot-kind title reaches the heading fallback whichever Teams
+# composer is focused, the Chat-list CKEditor included. The scenarios below drive
+# exactly that: $FOCUS_TEAMS_COMPOSER (ck-editor__editable, the Chat-list route)
+# with $TITLE_TEAMS_COPILOT.
+#
+# WHY THE BOUNDARY IS SAFE, stated as the thing under test rather than as a
+# claim. The fallback is NOT reached because "the title failed to name a
+# conversation" — it is reached only when the title's kind is one this route
+# applies to. A 1:1 DM (no kind segment), a renamed human group chat and a
+# channel post all keep their own kinds, so they never reach it; the
+# renamed_group_chat_no_search scenario below drives those with headings that
+# WOULD name the blocked agent, and nothing may look at them.
+
+# A group chat a human DELIBERATELY renamed to something that is not Teams' own
+# participant-list form. looksLikeParticipantList cannot recognise it — that
+# residual risk is accepted and documented on the JS side — so the ONLY thing
+# keeping it out of the heading walk is its title KIND still being "Chat". That
+# is the boundary these scenarios exist to hold.
+$TITLE_TEAMS_RENAMED_GROUP = 'Chat | Q4 launch war room | filefuze | erik@filefuze.co | Microsoft Teams'
+# The governed (DLP-monitored, NOT blocked) list naming the very agent the
+# measured headings name, so the recovered name is what has to make the tick
+# governed. Same row shape blocked-agents-sync.js writes.
+$GOV_TEAMS_AGENT_ITHELP = '[{"agent_id":"agent-ithelp","agent_name":"IT Help Desk Agent","platform":"teams_chat_agent","reason":"DLP monitored","oauth_key_id":"k1","agent_scope":"agent","dlp_monitor":true,"dlp_monitor_at":"2026-09-04T10:00:00.000Z","orphaned":false}]'
+
+# ── CT1: the re-titled Chat-list conversation, named by its message heading ──
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 5; $i++) {
+  TeamsCopilotTick 'chatlist_retitled_copilot_heading' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+}
+
+# ── CT2: the same, freshly opened — the LANDING heading names it ─────────────
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsCopilotTick 'chatlist_retitled_copilot_landing' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_LANDING
+}
+
+# ── CT3: the re-titled conversation, GOVERNED-for-DLP rather than blocked ────
+# The other half of the live report: the agent may be on the governed list, in
+# which case the same recovered name has to make the tick DLP-governed (scanned,
+# Tier B eligible) and block nothing. teams_composer is dlpMatch:'agent', so a
+# panel match alone is NOT enough here — the recovered name is the only thing
+# that can make this true, which is precisely what it pins.
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadGoverned $GOV_TEAMS_AGENT_ITHELP
+LoadRows $ROWS_EMPTY
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsCopilotTick 'chatlist_retitled_copilot_governed' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+}
+LoadGoverned $null
+
+# ── CT4: THE PROTECTION THAT MUST SURVIVE — a human conversation, never read ─
+# Same fully-armed catalog, same Chat-list composer, and headings that name the
+# blocked agent sitting right there. The ONLY difference is the title's kind: a
+# 1:1 DM (no kind segment at all — segment 0 is the colleague's display name), a
+# renamed group chat and Teams' own participant-list naming all keep kind "Chat"
+# or no kind, so FallbackReadArmed refuses and no walk of a colleague
+# conversation's pane is ever attempted.
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsCopilotTick 'chatlist_human_chat_no_search' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_DM $HEAD_ONE_MESSAGE
+TeamsCopilotTick 'chatlist_human_chat_no_search' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GROUP $HEAD_ONE_MESSAGE
+TeamsCopilotTick 'chatlist_human_chat_no_search' 2 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_RENAMED_GROUP $HEAD_ONE_MESSAGE
+TeamsCopilotTick 'chatlist_human_chat_no_search' 3 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_CHANNEL $HEAD_ONE_MESSAGE
+
+# ── CT5: the MESSAGE LIST focused, not the composer ─────────────────────────
+# The re-titled title plus a naming heading is still not enough on its own: the
+# focused ELEMENT has to be an enforcing composer. Focus on the transcript must
+# leave the tick ungoverned even though the read itself recovers the name.
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsCopilotTick 'chatlist_retitled_not_composer' $i $FOCUS_TEAMS_MESSAGE_LIST $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+}
+
+# ── CT6: the re-title is TRANSIENT — switching shapes must not lose the block ─
+# Teams flipped the format mid-conversation, so the two shapes interleave. Both
+# have to resolve to the same block, with no ungoverned tick in between.
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsCopilotTick 'chatlist_title_shape_flaps' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT $HEAD_ONE_MESSAGE
+TeamsCopilotTick 'chatlist_title_shape_flaps' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+TeamsCopilotTick 'chatlist_title_shape_flaps' 2 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT $HEAD_ONE_MESSAGE
+TeamsCopilotTick 'chatlist_title_shape_flaps' 3 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+
+# ── CT7: re-titled, and the pane names an agent NOBODY has a policy about ────
+# The recovered name is authoritative, and it is not on either list. No block, no
+# DLP governance, no capture — the fallback widens coverage, never policy.
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+$HEAD_UNPOLICED_AGENT = @(
+  ,@('fai-CopilotMessage__accessibleHeading rhgro0h', 'Expenses Helper said:')
+)
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsCopilotTick 'chatlist_retitled_unpoliced' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_UNPOLICED_AGENT
+}
+
+# ── CT8: re-titled, and the walk found NOTHING in the pane ──────────────────
+# The honest limitation of this route, pinned so it cannot be mistaken for
+# coverage: when Teams serves the Copilot-shaped title AND the pane yields no
+# heading the extractor recognises, there is no signal left anywhere and the
+# outcome is no evidence. For a host app that is the correct fail direction
+# (open), and it is why the heading classes this route keys on are the thing to
+# re-measure if this state is ever observed live on the Chat-list route.
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsCopilotTick 'chatlist_retitled_no_headings' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $null
+}
+
+# ═══ GOVERNED-FOR-DLP-ONLY: the third state a Teams conversation can be in ══
+#
+# Blocked (swallow every send), GOVERNED (scan the prompt, offer Tokenize &
+# Send, never swallow anything), or untouched (no capture at all). The pair
+# (dlpGoverned, fgIsBlocked) is what every scenario below is really about, and
+# the one combination that must never occur is TRUE/TRUE.
+#
+# The governed list is a SEPARATE file read by the real UpdateGovernedAgents —
+# see LoadGoverned. Its rows are the shape blocked-agents-sync.js writes.
+
+# A DLP-monitored (not blocked) Teams agent. Deliberately a DIFFERENT agent from
+# the blocked fixture's "IT Help Desk Agent", so a scenario can hold both lists
+# at once and show them acting on different conversations.
+$GOV_TEAMS_AGENT = '[{"agent_id":"ag-gov-1","agent_name":"Expenses Helper","platform":"teams_chat_agent","reason":"DLP monitored","oauth_key_id":"k1","agent_scope":"agent","dlp_monitor":true,"dlp_monitor_at":"2026-09-01T10:00:00.000Z","orphaned":false}]'
+# The SAME agent the blocked fixture names, on BOTH lists. The sync layer
+# guarantees this cannot happen on disk (filterGovernedAgents subtracts the
+# blocked list); this fixture is the defensive case — if it ever did, blocked
+# must win outright, never "both" and never "neither".
+$GOV_TEAMS_ALSO_BLOCKED = '[{"agent_id":"agent-ithelp","agent_name":"IT Help Desk Agent","platform":"teams_chat_agent","reason":"DLP monitored","oauth_key_id":"k1","agent_scope":"agent","dlp_monitor":true,"orphaned":false}]'
+# A governed row with NO agent scope. For a host app "monitor this whole
+# platform" would mean capturing every prompt typed anywhere in Teams, so it
+# must govern nothing at all — and must not even license the read.
+$GOV_TEAMS_PLATFORM = '[{"agent_id":"ag-gov-2","agent_name":"Expenses Helper","platform":"teams_chat_agent","reason":"DLP monitored","agent_scope":null,"dlp_monitor":true}]'
+# A governed row for a platform that does not map to ms-teams — the privacy gate
+# again, from the governed side.
+$GOV_CHATGPT = '[{"agent_id":"ag-gov-3","agent_name":"Research Assistant","platform":"openai_assistant","reason":"DLP monitored","agent_scope":"agent","dlp_monitor":true}]'
+# A governed M365Copilot agent, for the non-host-app regression pin.
+$GOV_M365_AGENT = '[{"agent_id":"ag-gov-4","agent_name":"HR Helper","platform":"personal_agent","reason":"DLP monitored","agent_scope":"agent","dlp_monitor":true}]'
+$GOV_EMPTY = '[]'
+
+$TITLE_TEAMS_GOV_AGENT = 'Chat | Expenses Helper | filefuze | erik@filefuze.co | Microsoft Teams'
+
+# ── GA: a governed agent, and NOTHING on the blocked list ───────────────────
+# The plain case. The conversation is DLP-governed: captured and scanned, Tier B
+# eligible — and every Enter still goes through.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_TEAMS_AGENT
+LoadRows $ROWS_EMPTY
+ResetState
+for ($i = 0; $i -lt 10; $i++) {
+  TeamsTick 'teams_governed_dlp_only' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+}
+
+# ── GB: both lists live, acting on two different conversations ──────────────
+# Tick 0-1 the governed agent (DLP only), tick 2-3 the blocked one (blocked, and
+# NOT Tier B eligible — masking cannot unblock a send the org disallowed), tick
+# 4-5 back to the governed one.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_TEAMS_AGENT
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsTick 'teams_governed_beside_blocked' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+TeamsTick 'teams_governed_beside_blocked' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+TeamsTick 'teams_governed_beside_blocked' 2 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+TeamsTick 'teams_governed_beside_blocked' 3 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+TeamsTick 'teams_governed_beside_blocked' 4 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+TeamsTick 'teams_governed_beside_blocked' 5 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+
+# ── GC: THE PRECEDENCE CASE — the same agent on BOTH lists ──────────────────
+# Cannot happen on disk; must be unrepresentable here anyway. BLOCKED WINS: the
+# send is swallowed and Tier B is refused, and the tick is never both.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_TEAMS_ALSO_BLOCKED
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 5; $i++) {
+  TeamsTick 'teams_governed_and_blocked_same_agent' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+}
+
+# ── GD: THE PRIVACY CASE — a governed policy does not govern the rest of Teams
+# A DM, a default-named human group chat, a channel post, the Activity tab, and
+# the transcript above a governed composer. Every one of them must be untouched:
+# no capture, no Tier B, no block.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_TEAMS_AGENT
+LoadRows $ROWS_EMPTY
+ResetState
+TeamsTick 'teams_governed_leaves_teams_alone' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_DM
+Age '_fgLeftAiTicks' 4000
+TeamsTick 'teams_governed_leaves_teams_alone' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GROUP
+Age '_fgLeftAiTicks' 4000
+TeamsTick 'teams_governed_leaves_teams_alone' 2 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_CHANNEL
+Age '_fgLeftAiTicks' 4000
+TeamsTick 'teams_governed_leaves_teams_alone' 3 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_ACTIVITY
+Age '_fgLeftAiTicks' 4000
+TeamsTick 'teams_governed_leaves_teams_alone' 4 $FOCUS_TEAMS_MESSAGE_LIST $TITLE_TEAMS_GOV_AGENT
+
+# ── GE: an agent nobody governs, in the Chat list, is untouched ─────────────
+# The Chat-list route requires the NAME: one composer element serves every Teams
+# conversation, so a panel match there proves nothing on its own.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_TEAMS_AGENT
+LoadRows $ROWS_EMPTY
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsTick 'teams_ungoverned_agent_untouched' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+}
+
+# ── GF: the COPILOT TAB is governed by PANEL MATCH ALONE ────────────────────
+# dlpMatch:'panel'. ANY conversation in that tab is DLP-governed, including the
+# generic assistant with no agent name anywhere: tick 0 has no headings at all
+# (nothing names anything), tick 1's heading names an agent on NO list. Both are
+# governed, and neither is blocked. Safe because that composer has no non-AI use
+# — there is no DM behind it.
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadGoverned $GOV_TEAMS_AGENT
+LoadRows $ROWS_EMPTY
+ResetState
+TeamsCopilotTick 'copilot_tab_panel_alone_dlp' 0 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $null
+TeamsCopilotTick 'copilot_tab_panel_alone_dlp' 1 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+TeamsCopilotTick 'copilot_tab_panel_alone_dlp' 2 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_USER_ONLY
+
+# ── GF2: the CONTROL for GF — the same tab under the strict 'agent' rule ────
+# Identical everything except the catalog field. dlpMatch:'agent' means the
+# generic/unnamed conversation is NOT governed, which is what proves GF passes
+# because of the catalog and not because the Copilot tab is special-cased in C#.
+LoadPanels $PANELS_COPILOT_STRICT
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadGoverned $GOV_TEAMS_AGENT
+LoadRows $ROWS_EMPTY
+ResetState
+TeamsCopilotTick 'copilot_tab_strict_control' 0 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $null
+TeamsCopilotTick 'copilot_tab_strict_control' 1 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+
+# ── GG: the blocked Copilot tab is still blocked, and never Tier B eligible ──
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadGoverned $GOV_TEAMS_AGENT
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsCopilotTick 'copilot_tab_blocked_no_tier_b' $i $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+}
+
+# ── GH: PRIVACY GATE, from the governed side ────────────────────────────────
+# The only governed row is for ChatGPT, so Teams is in NEITHER policy set: no
+# title is read, no accessibility call is made, nothing is governed — even in
+# the Copilot tab, whose panel-alone rule cannot be reached without the gate.
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadGoverned $GOV_CHATGPT
+LoadRows $ROWS_EMPTY
+ResetState
+TeamsTick 'teams_governed_no_policy_no_read' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+TeamsCopilotTick 'teams_governed_no_policy_no_read' 1 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+
+# ── GH2: …and a PLATFORM-scoped governed row licenses nothing either ────────
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadGoverned $GOV_TEAMS_PLATFORM
+LoadRows $ROWS_EMPTY
+ResetState
+TeamsTick 'teams_governed_platform_row_no_read' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+TeamsCopilotTick 'teams_governed_platform_row_no_read' 1 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+
+# ── GI: no governed file yet, and an empty one ──────────────────────────────
+# A missing file is "the sync has not completed" and an empty array is "nothing
+# is currently monitored". Different intent, identical effect: nothing governed.
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadGoverned $null
+LoadRows $ROWS_EMPTY
+ResetState
+TeamsTick 'teams_governed_file_absent' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+TeamsCopilotTick 'teams_governed_file_absent' 1 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+
+LoadGoverned $GOV_EMPTY
+LoadRows $ROWS_EMPTY
+ResetState
+TeamsTick 'teams_governed_file_empty' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+TeamsCopilotTick 'teams_governed_file_empty' 1 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $HEAD_ONE_MESSAGE
+
+# ── GJ: an admin lifting DLP monitoring takes effect at once ────────────────
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_TEAMS_AGENT
+LoadRows $ROWS_EMPTY
+ResetState
+TeamsTick 'teams_governed_lifted' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+LoadGoverned $GOV_EMPTY
+Age '_fgLeftAiTicks' 4000
+TeamsTick 'teams_governed_lifted' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+
+# ── GK: REGRESSION PIN — a non-host-app AI app is untouched by all of this ──
+# A governed list naming an agent in a CHAT app (M365Copilot). The chat-app
+# branch must behave exactly as it always has: isAi from the process, isPanel
+# false, dlpGoverned false (the flag is host-app-only), the blocked narrowing
+# unchanged, and Tier B eligible exactly as it was — a chat app was never
+# excluded from it. Nothing about the DLP list may reach any of it.
+LoadPanels $PANELS_JSON
+LoadSurfaces $SURFACES_SHIPPED
+LoadGoverned $GOV_M365_AGENT
+LoadRows $ROWS_AGENT
+ResetState
+AgentTick 'm365_unaffected_by_dlp_list' 0 $FOCUS_M365_ADVISOR
+AgentTick 'm365_unaffected_by_dlp_list' 1 $FOCUS_M365_HR
+AgentTick 'm365_unaffected_by_dlp_list' 2 $FOCUS_M365_GENERIC
+AgentTick 'm365_unaffected_by_dlp_list' 3 $FOCUS_M365_ADVISOR
+
+# …and a pure chat app with no agent surface at all (Claude Desktop). Tier B
+# stays eligible on every tick, which is the property the host-app relaxation
+# must not have disturbed anywhere else.
+LoadPanels $PANELS_JSON
+LoadSurfaces $SURFACES_SHIPPED
+LoadGoverned $GOV_M365_AGENT
+LoadRows $ROWS_EMPTY
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  AgentTick 'chat_app_unaffected_by_dlp_list' $i $FOCUS_CHATGPT ([uint32]7788) 'Claude'
+}
+
+# Governed monitoring off again, so nothing after this point observes it.
+LoadGoverned $GOV_EMPTY
+
 # ── TQ: an M365Copilot tick is byte-for-byte unaffected by all of the above ─
 # The regression guard for the composer-name path. Run LAST, with the shipped
 # catalog reloaded, so a fixture-only payload cannot be what makes it pass.
@@ -1423,3 +1876,4 @@ LoadPanels $PANELS_JSON
 LoadSurfaces $SURFACES_SHIPPED
 
 if ($script:tmpFile) { Remove-Item -LiteralPath $script:tmpFile -Force -ErrorAction SilentlyContinue }
+if ($script:tmpGovFile) { Remove-Item -LiteralPath $script:tmpGovFile -Force -ErrorAction SilentlyContinue }

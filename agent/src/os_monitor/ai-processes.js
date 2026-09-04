@@ -219,6 +219,57 @@ export const IDE_PROCESSES = [
 // and confirm no non-chat VS Code input shares that Name prefix. Matching and
 // enforcing are separate concerns: matchPanelSignature() must keep matching a
 // detection-only panel, the ENFORCEMENT paths are what consult `enforce`.
+//
+// ── `dlpMatch` — what a HOST APP needs to prove before this composer is
+//    DLP-governed (scanned + Tokenize-&-Send eligible) ─────────────────────────
+// Absent/'agent' is the default and the strict answer: the open conversation
+// must ALSO be named by an entry in governed-agents.json (or blocked-agents.json
+// for the block path). That is required for teams_composer, because ONE element
+// serves every Teams conversation — a DM, a channel post and an agent chat all
+// focus the same shape — so a panel match there says nothing about whether the
+// thing being typed is a message to a colleague.
+// 'panel' means the panel match ALONE is sufficient for DLP governance, because
+// the composer has no non-AI use at all (Teams' embedded Copilot tab: every
+// conversation in it is with an assistant). It NEVER widens BLOCKING — a block
+// still needs a named blocked-agents.json row, and enforcer-win.ps1's
+// CheckFgBlocked excludes a host app from all three coarse arms regardless.
+//
+// ── `newlineKeys` — which key combination inserts a LINE BREAK in this
+//    composer without submitting the message ────────────────────────────────────
+// Read only by Tier B's rewrite (mask-and-send): the masked text is typed with
+// synthetic keystrokes, and typing a literal "\n" into a chat composer submits
+// the message half-written. So a multi-line rewrite types each line and sends
+// this combo between the segments instead. Absent means DEFAULT_NEWLINE_KEYS
+// ('shift_enter'), which is what every composer probed so far uses; it is a
+// per-entry field rather than a constant in the .ps1 so an app that needs
+// something else is a data change, not a code change. An UNRECOGNISED value
+// means "no safe newline key for this surface", and Tier B then refuses to
+// offer itself for multi-line text there at all (fail closed — it never
+// guesses).
+//
+// ── `postSendVerifyMs` — how long to keep confirming that a mask-and-send
+//    actually submitted, for this composer ───────────────────────────────────
+// Read only by Tier B's rewrite. After typing the masked text the enforcer
+// synthesizes an Enter and then reads the composer back: if it STILL holds
+// exactly the masked text, the send did not land and the rewrite is reported
+// failed ("not_submitted") rather than claimed as sent. That read used to be a
+// single shot at +200ms, which is all a native composer needs.
+//
+// It is not enough for a composer rendered in a WebView2 CHILD PROCESS. Measured
+// live 2026-09 against Microsoft Teams: the masked message was genuinely in the
+// conversation and the rewrite was still reported failed, because "the composer
+// is empty now" has to cross a Chromium accessibility serialization before UIA
+// can report it. The visible outcome of that false failure was a GOVERNANCE GAP,
+// not a cosmetic one — index.js's 'rewrite' handler returns early on any
+// non-'ok' result, so no enforcement_redact audit event was recorded for a
+// governed send that really happened.
+//
+// So the check polls, and this field is how long for. Absent means
+// DEFAULT_POST_SEND_VERIFY_MS (200ms), i.e. the single read that shipped before
+// this field existed — every non-Teams surface is unchanged. enforcer-win.ps1
+// CLAMPS the value into [200, 1500] at load time, because the rewrite's whole
+// time budget is reasoned about against the 16s at which the block dialog closes
+// itself; a longer window here would leave the user with no answer at all.
 export const AI_PANELS = [
   {
     id: 'claude_code', product: 'Claude Code', vendor: 'Anthropic', host: 'claude.ai',
@@ -284,6 +335,22 @@ export const AI_PANELS = [
     procs: ['ms-teams'], controlType: 'Edit',
     classEquals: 'ck-editor__editable',
     enforce: true, verified: true,
+    // The STRICT default, stated explicitly on the one entry where getting it
+    // wrong would capture a colleague conversation: this composer is shared by
+    // every Teams conversation, so DLP governance here requires the open
+    // conversation to be NAMED by a governed-agents.json row.
+    dlpMatch: 'agent',
+    // Shift+Enter inserts a newline in the Teams composer; plain Enter sends.
+    // Measured behaviour of the shipping client, and the reason Tier B cannot
+    // type a literal newline into it.
+    newlineKeys: 'shift_enter',
+    // A LONGER post-send confirmation window than the 200ms default, because
+    // this composer is CKEditor inside Teams' WebView2 child process: the
+    // cleared composer only becomes visible to UIA after Chromium serializes
+    // its accessibility tree across that hop. With the default single read, a
+    // mask-and-send that genuinely landed in the conversation was reported
+    // "not_submitted" and its enforcement_redact audit event was lost.
+    postSendVerifyMs: 1500,
   },
   // Microsoft Teams' OTHER composer: the one inside the embedded "Copilot" tab,
   // which is a DIFFERENT composer implementation from the Chat-list route's
@@ -331,8 +398,63 @@ export const AI_PANELS = [
     procs: ['ms-teams'], controlType: 'Edit',
     classEquals: 'fai-EditorInput__input',
     enforce: true, verified: true,
+    // DLP governance by PANEL MATCH ALONE — the one entry that carries this, and
+    // the reason it can: this composer exists ONLY inside the embedded Copilot
+    // tab, where every conversation is with an assistant. There is no DM, no
+    // channel and no meeting chat behind it, so "the caret is in this element"
+    // already means "the user is typing at an AI". The Chat-list route
+    // (teams_composer above) cannot say that and keeps the strict 'agent' rule.
+    //
+    // Scope of what this widens, exactly: prompt scanning and the Tokenize &
+    // Send offer for the tab's own composer. It adds NO block of any kind — a
+    // block still requires a named blocked-agents.json row read through
+    // teams_desktop, and CheckFgBlocked bars a host app from every coarse arm.
+    dlpMatch: 'panel',
+    // Shift+Enter, same as the Chat-list composer (both are Teams message
+    // composers where plain Enter sends).
+    newlineKeys: 'shift_enter',
+    // Same longer post-send window, for the same reason, and stated on this
+    // entry independently rather than inherited: this is a DIFFERENT editor
+    // (Fluent's fai-EditorInput__input, not CKEditor), but it is rendered in the
+    // same WebView2 child process, so it is behind the same accessibility hop.
+    postSendVerifyMs: 1500,
   },
 ];
+
+// What `newlineKeys` means when an AI_PANELS entry does not state one.
+//
+// Shift+Enter is near-universal across chat composers (measured in Teams both
+// routes; the same combo is what Claude Desktop, ChatGPT and the IDE composers
+// use), so it is the default rather than a required field on every entry. It
+// lives HERE, next to the catalog, and is mirrored by exactly one C# constant in
+// enforcer-win.ps1 (NEWLINE_KEYS_DEFAULT) which
+// agent/tests/os-monitor-safety.test.mjs holds in lockstep with this value —
+// same discipline PLATFORM_PROCS is kept under.
+export const DEFAULT_NEWLINE_KEYS = 'shift_enter';
+
+// The `newlineKeys` values the enforcer knows how to synthesize. Anything else
+// (including a typo in a future entry) is treated as "no safe newline key here",
+// which makes Tier B refuse multi-line text on that surface rather than guess a
+// combination that might submit the message.
+export const NEWLINE_KEY_COMBOS = ['shift_enter', 'ctrl_enter'];
+
+// What `postSendVerifyMs` means when an AI_PANELS entry does not state one, and
+// the ceiling any entry is clamped to.
+//
+// The DEFAULT is the single post-send read that shipped before the field
+// existed, so an entry saying nothing keeps exactly the old behaviour. Both
+// values live HERE, next to the catalog, and are mirrored by exactly two C#
+// constants in enforcer-win.ps1 (REWRITE_POST_SEND_MS and
+// REWRITE_POST_SEND_MAX_MS) which agent/tests holds in lockstep with them —
+// the same discipline DEFAULT_NEWLINE_KEYS and PLATFORM_PROCS are kept under.
+//
+// The MAX is not a taste knob. The rewrite's time budget is reasoned about
+// backwards from the 16s at which block-dialog.js closes itself: 2.5s waiting
+// for the confirm chord to be released + 9s of writing + 0.4s verify poll +
+// 0.3s settle + this. At 1500ms the worst case lands at ~13.8s, inside both the
+// dialog's timeout and the 15s pin TTL.
+export const DEFAULT_POST_SEND_VERIFY_MS = 200;
+export const MAX_POST_SEND_VERIFY_MS = 1500;
 
 // ── Agent surfaces: one named agent INSIDE one AI app ───────────────────────
 //
@@ -1240,6 +1362,16 @@ export function buildIdeProcessConfig() {
 // do not (nothing on that side displays them — index.js resolves those from the
 // panel id via identifyAiPanel), and `host` does not either (blocked-agents.json
 // rows already carry their own host).
+// Absent, non-numeric and out-of-range all resolve into
+// [DEFAULT_POST_SEND_VERIFY_MS, MAX_POST_SEND_VERIFY_MS]. The lower bound is the
+// default rather than 0 on purpose: an entry may only ever LENGTHEN the
+// confirmation window, never shorten the read that native composers rely on.
+export function clampPostSendVerifyMs(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_POST_SEND_VERIFY_MS;
+  return Math.min(MAX_POST_SEND_VERIFY_MS, Math.max(DEFAULT_POST_SEND_VERIFY_MS, Math.round(n)));
+}
+
 export function buildAiPanelConfig() {
   return AI_PANELS.map((panel) => ({
     id: panel.id,
@@ -1250,6 +1382,27 @@ export function buildAiPanelConfig() {
     classEquals: panel.classEquals || '',
     classPrefix: panel.classPrefix || '',
     enforce: panel.enforce === true,
+    // 'agent' is stated explicitly for an absent dlpMatch rather than shipped
+    // as "", so the JS default and the C# default are the same word in the same
+    // place and cannot drift apart silently — the same convention `read` uses on
+    // the agent-surface payload. Only 'panel' opts into panel-alone DLP
+    // governance; every other value, including a typo, lands on the strict side.
+    dlpMatch: panel.dlpMatch === 'panel' ? 'panel' : 'agent',
+    // The per-entry newline combo, resolved here so the C# side never has to
+    // distinguish missing from empty. An unrecognised value travels VERBATIM
+    // (not silently rewritten to the default): the enforcer must be able to tell
+    // "this surface declares a combo I cannot synthesize" — which refuses
+    // multi-line Tier B there — from "this surface said nothing", which gets the
+    // default.
+    newlineKeys: panel.newlineKeys === undefined ? DEFAULT_NEWLINE_KEYS : String(panel.newlineKeys),
+    // The per-entry post-send confirmation window, resolved to a NUMBER here so
+    // the C# side never has to distinguish missing from empty, and clamped on
+    // BOTH sides: here so the payload is already sane, and again in
+    // enforcer-win.ps1's LoadAiPanels because that side must not trust an env
+    // var it did not build. Clamping (rather than dropping a bad value) keeps a
+    // typo from silently reverting a surface to the single read this field
+    // exists to replace.
+    postSendVerifyMs: clampPostSendVerifyMs(panel.postSendVerifyMs),
   }));
 }
 
@@ -1443,6 +1596,99 @@ export function synthesizePlatformBlocks(platformRows) {
     }
   }
   return rows;
+}
+
+// GET /api/lifecycle/governed-agents rows → governed-agents.json rows.
+//
+// Same sanitiser as the blocked list, for the same reason: the enforcer parses
+// both files with the same hand-rolled extractor, where one stray quote,
+// backslash or brace derails the WHOLE file rather than its own row. Running the
+// rows through normalizeAgentRows also means the two files carry the SAME shape
+// — identical field names, agent_scope normalised to 'agent' | 'platform' | null
+// — so the enforcer-side parser can be shared instead of learning a second
+// convention.
+//
+// ONE deliberate difference from the blocked list. normalizeAgentRows DOWNGRADES
+// an 'agent'-scoped row whose agent_name cannot survive that transport to
+// platform scope, because for a BLOCK that widening is the fail-closed answer
+// (a whole-app block instead of an agent-scoped block that matches nothing).
+// For a GOVERNED row the same widening is the wrong direction: it would turn
+// "DLP-monitor this one named agent" into "DLP-monitor everything typed in this
+// app", i.e. capture far more prompt content than the admin asked for. Such a
+// row is DROPPED instead — monitoring nothing is recoverable on the next tick,
+// over-collecting is not.
+//
+// The object pre-filter is what keeps the two arrays index-aligned:
+// normalizeAgentRows skips non-object entries and nothing else.
+export function normalizeGovernedRows(governedRows, logger) {
+  const rows = Array.isArray(governedRows) ? governedRows.filter((r) => r && typeof r === 'object') : [];
+  // logger deliberately not passed: its downgrade warning is worded for the
+  // blocked list, and a downgrade here is reported as a drop below instead.
+  const normalized = normalizeAgentRows(rows, null);
+  const out = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const asked = String(rows[i].agent_scope ?? '').trim().toLowerCase();
+    if (asked === 'agent' && normalized[i].agent_scope !== 'agent') {
+      logger?.warn(
+        `governed-agents: agent-scoped row ${rows[i].agent_id || '(no id)'} dropped — its agent name cannot `
+        + 'survive the enforcer transport intact, and widening it to whole-app monitoring would capture more '
+        + 'than was asked for',
+      );
+      continue;
+    }
+    out.push(normalized[i]);
+  }
+  return out;
+}
+
+// BLOCKED WINS: subtract the blocked list from the governed (DLP-monitor) list.
+//
+// The enforcer reads blocked-agents.json and governed-agents.json independently,
+// and the same agent must never appear in both — offering "Tokenize & Send" for
+// an agent the org refuses outright is precisely the outcome this precedence
+// exists to prevent.
+//
+// The SERVER already guarantees the two payloads are disjoint (its governed
+// query excludes blocked rows). This is not redundant with that: the agent
+// fetches the two lists with two separate GETs a fraction of a second apart, so
+// an admin flipping a block in between — or either list being one poll cycle
+// stale relative to the other — can hand this process two lists that overlap
+// even though neither response was wrong when it was generated. Filtering here,
+// where both lists are in hand, makes the overlap structurally impossible on
+// disk regardless of any timing race or any future server-side regression.
+//
+// Matching mirrors filterBlockedAgents' agent-scoped branch exactly: an
+// agent_id present on BOTH sides is decisive (a name collision cannot widen it),
+// otherwise the whitespace-normalised, case-insensitive agent_name is the
+// fallback for rows carrying no id on one side. `platform` is deliberately NOT
+// part of the key — if a blocked row and a governed row disagree about the
+// platform, they still collide and blocked still wins.
+export function filterGovernedAgents(list, blockedRows, logger) {
+  if (!Array.isArray(list)) return [];
+  if (!Array.isArray(blockedRows) || blockedRows.length === 0 || list.length === 0) return list;
+  const blocked = [];
+  for (const row of blockedRows) {
+    const id = String(row?.agent_id ?? '').trim();
+    const name = normalizeAgentName(row?.agent_name).toLowerCase();
+    if (!id && !name) continue;   // names nothing — can match nothing
+    blocked.push({ id, name });
+  }
+  if (blocked.length === 0) return list;
+  return list.filter((row) => {
+    const id = String(row?.agent_id ?? '').trim();
+    const name = normalizeAgentName(row?.agent_name).toLowerCase();
+    const hit = blocked.find((b) => ((b.id && id)
+      ? b.id === id
+      : Boolean(b.name && name) && b.name === name));
+    if (hit) {
+      logger?.info(
+        `governed-agents: "${row?.agent_name || row?.agent_id}" is also BLOCKED — dropped from the `
+        + 'governed list (blocked wins)',
+      );
+      return false;
+    }
+    return true;
+  });
 }
 
 // Every host a blocked platform can be reached at on the desktop. More than one

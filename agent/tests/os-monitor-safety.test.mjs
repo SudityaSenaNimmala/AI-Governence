@@ -8,9 +8,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFile, writeFile, mkdtemp, rm, stat } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { HELPER_SCRIPTS, HELPER_SCRIPT_PATTERN } from '../src/os_monitor/reap-orphans.js';
@@ -941,14 +941,263 @@ test('blocked-agents-sync fails CLOSED when EITHER source is unreachable — nev
   const src = await readFile(BLOCKED_SYNC, 'utf8');
   const fn = src.slice(src.indexOf('async function refreshBlockedAgents('), src.indexOf('// ── Offline access-request queue'));
   assert.ok(fn.length > 0, 'expected a refreshBlockedAgents function');
-  // blocked-agents unreachable → bail before any write.
-  assert.match(fn, /if \(!res\.ok\) return;/);
+  // blocked-agents unreachable → bail before any write. `null`, not a bare
+  // return: the function's result is now the blocked set the governed sync
+  // filters against, and null is what tells it "unknown — write nothing".
+  assert.match(fn, /if \(!res\.ok\) return null;/);
   // ai-platforms unreachable → bail before any write, too.
   const platformGuard = fn.indexOf('if (platforms === null) {');
   const write = fn.indexOf('writeFileSync(BLOCKED_PATH');
   assert.ok(platformGuard >= 0, 'expected an explicit platforms === null guard');
   assert.ok(platformGuard < write, 'the fail-closed guard must come before the write');
-  assert.match(fn.slice(platformGuard, write), /return;/);
+  assert.match(fn.slice(platformGuard, write), /return null;/);
+});
+
+// ── governed-agents.json — DLP-monitored, NOT blocked ───────────────────────
+// The SECOND file blocked-agents-sync.js writes, from GET
+// /api/lifecycle/governed-agents. These cases are BEHAVIOURAL rather than
+// source-level, because what matters is what lands on disk: the shape the
+// enforcer will parse, and the blocked-wins precedence, which is a property of
+// the written file and not of any one function.
+//
+// Nothing here spawns anything (the module is file I/O plus four fetches, all
+// stubbed) and nothing touches the real ~/.cloudfuze-aigov: homedir() is
+// repointed at a temp dir for the duration of each case.
+
+const SYNC_SERVER = 'http://127.0.0.1:1';
+const SYNC_TOKEN = 'test-token';
+const GOVERNED_ROUTE = '/api/lifecycle/governed-agents';
+const BLOCKED_ROUTE = '/api/lifecycle/blocked-agents';
+
+/** Records everything the sync logged, so a fail-closed path can be asserted on. */
+function recordingLog() {
+  const lines = [];
+  return { lines, info: (m) => lines.push(m), warn: (m) => lines.push(m), error: (m) => lines.push(m) };
+}
+
+const jsonOk = (body) => () => ({ ok: true, status: 200, json: async () => body });
+const jsonStatus = (code) => () => ({ ok: false, status: code, json: async () => ({}) });
+const offline = () => () => { throw new Error('getaddrinfo ENOTFOUND'); };
+
+/** Route fetch by URL fragment; an unexpected URL is a test bug, not a 500. */
+function stubFetch(routes) {
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    for (const [fragment, handler] of Object.entries(routes)) if (u.includes(fragment)) return handler();
+    throw new Error(`unexpected fetch: ${u}`);
+  };
+  return () => { globalThis.fetch = real; };
+}
+
+/**
+ * Import a FRESH copy of blocked-agents-sync.js with homedir() pointed at a temp
+ * directory — the module resolves BLOCKED_PATH / GOVERNED_PATH once, at import
+ * time, so the env has to be set before the import and the URL needs a
+ * cache-buster. os.homedir() reads USERPROFILE on Windows and HOME on POSIX;
+ * both are set so this behaves identically on either.
+ */
+async function withSyncModule(fn) {
+  const dir = await mkdtemp(join(tmpdir(), 'cfai-govsync-'));
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = dir;
+  process.env.USERPROFILE = dir;
+  try {
+    const mod = await import(`${pathToFileURL(BLOCKED_SYNC).href}?home=${encodeURIComponent(dir)}`);
+    return await fn(mod, dir);
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/** One full tick: the blocked write, then the governed write it feeds. */
+async function runTick(mod, log) {
+  const blocked = await mod.refreshBlockedAgents(SYNC_SERVER, SYNC_TOKEN, log);
+  await mod.refreshGovernedAgents(SYNC_SERVER, SYNC_TOKEN, log, blocked);
+  return blocked;
+}
+
+test('governed-agents.json is a SEPARATE file, written field-for-field in the blocked rows shape', async () => {
+  const restore = stubFetch({
+    '/api/v1/access-exceptions/mine': jsonOk([]),
+    '/api/v1/ai-platforms': jsonOk([]),
+    [BLOCKED_ROUTE]: jsonOk([]),
+    [GOVERNED_ROUTE]: jsonOk([{
+      agent_id: 'ag-1',
+      agent_name: 'IT Help Desk Agent',
+      platform: 'teams_chat_agent',
+      reason: 'Monitored by policy',
+      oauth_key_id: 'k1',
+      agent_scope: 'agent',
+      dlp_monitor: true,
+      dlp_monitor_at: '2026-09-01T10:00:00.000Z',
+      orphaned: false,
+    }]),
+  });
+  try {
+    await withSyncModule(async (mod, dir) => {
+      const log = recordingLog();
+      await runTick(mod, log);
+
+      assert.equal(mod.GOVERNED_PATH, join(dir, '.cloudfuze-aigov', 'governed-agents.json'));
+      assert.notEqual(mod.GOVERNED_PATH, mod.BLOCKED_PATH, 'the two lists must never share one file');
+      const written = JSON.parse(await readFile(mod.GOVERNED_PATH, 'utf8'));
+      // Exactly the server's identity + enforcement fields, same names as the
+      // blocked rows, agent_scope normalised to the enum. No invented fields.
+      assert.deepEqual(written, [{
+        agent_id: 'ag-1',
+        agent_name: 'IT Help Desk Agent',
+        platform: 'teams_chat_agent',
+        reason: 'Monitored by policy',
+        oauth_key_id: 'k1',
+        agent_scope: 'agent',
+        dlp_monitor: true,
+        dlp_monitor_at: '2026-09-01T10:00:00.000Z',
+        orphaned: false,
+      }]);
+      // The blocked file is written from its own sources and stays empty.
+      assert.deepEqual(JSON.parse(await readFile(mod.BLOCKED_PATH, 'utf8')), []);
+      assert.match(log.lines.join('\n'), /governed-agents: synced 1 DLP-monitored agent\(s\)/);
+    });
+  } finally {
+    restore();
+  }
+});
+
+test('BLOCKED WINS at the SYNC layer: an agent on both lists never reaches governed-agents.json', async () => {
+  // The race this defends against: the two lists are two separate GETs a
+  // fraction of a second apart, so an admin flipping a block between them (or
+  // one list being a poll cycle stale) can hand the agent two overlapping
+  // lists even though the server excludes blocked rows from /governed-agents.
+  // Filtering here makes the overlap impossible ON DISK.
+  const restore = stubFetch({
+    '/api/v1/access-exceptions/mine': jsonOk([]),
+    '/api/v1/ai-platforms': jsonOk([]),
+    [BLOCKED_ROUTE]: jsonOk([
+      { agent_id: 'ag-1', agent_name: 'IT Help Desk Agent', platform: 'teams_chat_agent', agent_scope: 'agent' },
+      { agent_id: '', agent_name: 'Roaming Agent', platform: 'teams_chat_agent', agent_scope: 'agent' },
+    ]),
+    [GOVERNED_ROUTE]: jsonOk([
+      // Same agent_id as a blocked row — the server should never send this, and
+      // if it ever does it must still not be governed.
+      { agent_id: 'ag-1', agent_name: 'IT Help Desk Agent', platform: 'teams_chat_agent', agent_scope: 'agent', dlp_monitor: true },
+      // No id on the blocked side: the normalized, case-insensitive name is the
+      // fallback key, and it must still collide.
+      { agent_id: 'ag-9', agent_name: 'roaming  agent', platform: 'teams_chat_agent', agent_scope: 'agent', dlp_monitor: true },
+      { agent_id: 'ag-2', agent_name: 'Finance Bot', platform: 'teams_chat_agent', agent_scope: 'agent', dlp_monitor: true },
+    ]),
+  });
+  try {
+    await withSyncModule(async (mod) => {
+      const log = recordingLog();
+      await runTick(mod, log);
+
+      const governed = JSON.parse(await readFile(mod.GOVERNED_PATH, 'utf8'));
+      assert.deepEqual(governed.map((r) => r.agent_id), ['ag-2'],
+        'a blocked agent must never appear in the governed file, by id or by name');
+      // …and the intersection of the two files on disk is empty, stated as the
+      // property the enforcer depends on rather than as a row list.
+      const blocked = JSON.parse(await readFile(mod.BLOCKED_PATH, 'utf8'));
+      const keyOf = (r) => `${String(r.agent_id || '').trim()}|${String(r.agent_name || '').replace(/\s+/g, ' ').trim().toLowerCase()}`;
+      const blockedKeys = new Set(blocked.map(keyOf));
+      for (const row of governed) {
+        assert.equal(blockedKeys.has(keyOf(row)), false, `${row.agent_id} is in BOTH files`);
+      }
+      assert.match(log.lines.join('\n'), /blocked wins/);
+    });
+  } finally {
+    restore();
+  }
+});
+
+test('governed-agents fetch failure leaves the existing file UNTOUCHED — never an empty list', async () => {
+  // An empty file reads as "nothing is monitored", which would silently switch
+  // off prompt scanning for every governed agent. A stale file keeps enforcing
+  // the last known policy until the next tick, 10s away.
+  for (const failure of [jsonStatus(500), jsonStatus(404), offline()]) {
+    const restore = stubFetch({
+      '/api/v1/access-exceptions/mine': jsonOk([]),
+      '/api/v1/ai-platforms': jsonOk([]),
+      [BLOCKED_ROUTE]: jsonOk([]),
+      [GOVERNED_ROUTE]: failure,
+    });
+    try {
+      await withSyncModule(async (mod, dir) => {
+        // A previous tick's good file, already on disk.
+        const good = '[{"agent_id":"ag-1","agent_name":"Finance Bot","platform":"personal_agent","agent_scope":"agent"}]';
+        await mkdir(join(dir, '.cloudfuze-aigov'), { recursive: true });
+        await writeFile(mod.GOVERNED_PATH, good, 'utf8');
+
+        const log = recordingLog();
+        await runTick(mod, log);
+
+        assert.equal(await readFile(mod.GOVERNED_PATH, 'utf8'), good,
+          'a transient failure must not overwrite good data');
+        assert.match(log.lines.join('\n'), /governed-agents: (server returned|fetch failed)/);
+      });
+    } finally {
+      restore();
+    }
+  }
+});
+
+test('an UNKNOWN blocked list stops the governed write too — precedence cannot be proven without it', async () => {
+  // Fail closed in the other direction: if this tick could not establish what is
+  // blocked, writing a governed list that might name an agent the (stale)
+  // blocked file also names would let the enforcer offer to tokenize a prompt
+  // for an agent it is meant to refuse outright.
+  for (const [label, routes] of [
+    ['blocked-agents unreachable', { [BLOCKED_ROUTE]: jsonStatus(503), '/api/v1/ai-platforms': jsonOk([]) }],
+    ['ai-platforms unreachable', { [BLOCKED_ROUTE]: jsonOk([]), '/api/v1/ai-platforms': jsonStatus(500) }],
+  ]) {
+    const restore = stubFetch({
+      '/api/v1/access-exceptions/mine': jsonOk([]),
+      ...routes,
+      // Perfectly healthy — and still must not be written.
+      [GOVERNED_ROUTE]: jsonOk([{ agent_id: 'ag-1', agent_name: 'Finance Bot', platform: 'personal_agent', dlp_monitor: true }]),
+    });
+    try {
+      await withSyncModule(async (mod) => {
+        const log = recordingLog();
+        const blocked = await runTick(mod, log);
+        assert.equal(blocked, null, `${label}: the blocked set must be reported as unknown`);
+        await assert.rejects(() => readFile(mod.GOVERNED_PATH, 'utf8'), /ENOENT/,
+          `${label}: nothing may be written when the blocked set is unknown`);
+        await assert.rejects(() => readFile(mod.BLOCKED_PATH, 'utf8'), /ENOENT/,
+          `${label}: the blocked file is left alone too`);
+        assert.match(log.lines.join('\n'), /governed-agents: the blocked list is unknown this tick/);
+      });
+    } finally {
+      restore();
+    }
+  }
+});
+
+test('the poll runs on the SAME 10s tick, chained so the governed write sees the fresh blocked set', async () => {
+  const src = await readFile(BLOCKED_SYNC, 'utf8');
+  // One route, one interval, one file each.
+  assert.match(src, /\/api\/lifecycle\/governed-agents`/);
+  assert.match(src, /governed-agents\.json'\)/);
+  assert.match(src, /setInterval\(tick, 10_000\)/);
+  // Chained, not parallel: the governed write consumes refreshBlockedAgents'
+  // return value, which is what makes the precedence filter use this tick's
+  // blocked set rather than a list it fetched independently.
+  assert.match(src, /refreshBlockedAgents\(serverUrl, token, log\)\r?\n\s*\.then\(\(blocked\) => refreshGovernedAgents\(serverUrl, token, log, blocked\)\)/);
+  // Fail-closed guard before the write, same discipline as the blocked list.
+  const fn = src.slice(src.indexOf('async function refreshGovernedAgents('), src.indexOf('// ── Offline access-request queue'));
+  assert.ok(fn.length > 0, 'expected a refreshGovernedAgents function');
+  const guard = fn.indexOf('if (!Array.isArray(blockedRows))');
+  const fetchGuard = fn.indexOf('if (rows === null) return;');
+  const write = fn.indexOf('writeFileSync(GOVERNED_PATH');
+  assert.ok(guard >= 0 && guard < write, 'the unknown-blocked-set guard must come before the write');
+  assert.ok(fetchGuard >= 0 && fetchGuard < write, 'the fetch-failure guard must come before the write');
+  // The filter runs on the way to the write, and on the blocked rows passed in.
+  assert.match(fn, /filterGovernedAgents\(normalized, blockedRows, log\)/);
+  assert.ok(fn.indexOf('filterGovernedAgents(') < write, 'blocked-wins must be applied before the write');
 });
 
 test('enforcer-win.ps1: a host-keyed platform block matches on process_name, keeping the sentinel out of PLATFORM_PROCS', async () => {
@@ -1054,11 +1303,16 @@ test('enforcer-win.ps1: PanelUiaOk gates the Enter decision and Tokenize & Send,
   assert.equal(/bool isIde = /.test(hookBody), false, 'the old isIde local must be gone from the hook');
   // Tokenize & Send: same replacement, so it is now available in a focused,
   // enforcing panel and still refused in the editor.
-  // A HOST APP is excluded from it ENTIRELY, not merely panel-scoped: Tokenize
-  // & Send is the only path in the file that WRITES into another app's
-  // composer, and the "composer" inside a general-purpose chat client could be
-  // a message to a colleague.
-  assert.match(src, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| _hostAppProcs\.Contains\(_app\) \|\| Disarmed\(\)\)/);
+  // A HOST APP is excluded from it unless the tick is DLP-GOVERNED. The blanket
+  // exclusion was the right answer while a host app could only ever be BLOCKED
+  // (Tokenize & Send is the only path in the file that WRITES into another app's
+  // composer, and the "composer" inside a general-purpose chat client could be a
+  // message to a colleague); it is now scoped to the ticks where that cannot be
+  // the case, i.e. where ApplyForegroundTick has already proved the user is
+  // typing at a DLP-monitored agent. `&& !_fgDlpGoverned` is the whole of the
+  // widening, and _fgDlpGoverned is false on every non-host-app tick, on every
+  // ungoverned Teams tick, and on every BLOCKED tick.
+  assert.match(src, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| \(_hostAppProcs\.Contains\(_app\) && !_fgDlpGoverned\) \|\| Disarmed\(\)\)/);
   // …and the UIA read itself is gated, so the PII patterns never run over the
   // user's source code on the poll loop in the first place.
   assert.match(src, /if \(!_fgIsAi \|\| !PanelUiaOk\(\)\) \{ _blockUia = false; _uiaPatterns = ""; return; \}/);
@@ -1556,7 +1810,10 @@ test('enforcer-win.ps1: the ONLY window-title read is the gated agent read, and 
   // …and it reuses the foreground HWND the tick already has: no second
   // GetForegroundWindow(), so it can never read a different window than the one
   // every other decision on this tick was made about.
-  assert.match(read, /static AgentReadOutcome ReadFocusedAgentName\(AgentSurface surface, uint fgPid, IntPtr fgHwnd, out string agentName\)/);
+  // `panelId` was added 2026-09-04 and is DATA, not a gate: the Copilot-tab
+  // heading cache needs it as part of its pane key, because both Teams routes
+  // can now present the same title kind in the same window. See _copilotCachePane.
+  assert.match(read, /static AgentReadOutcome ReadFocusedAgentName\(AgentSurface surface, uint fgPid, IntPtr fgHwnd, string panelId, out string agentName\)/);
   assert.equal(/GetForegroundWindow\(\)/.test(read), false, 'the title read must reuse the tick\'s HWND');
 
   // 3. THE PII RULE: the title never reaches an emitter. Not the raw title, not
@@ -2333,6 +2590,188 @@ test('a HOST-APP surface can never fall back to a whole-app block', async () => 
   assert.match(load, /_hostAppProcs = hostApps;\s*\r?\n\s*_agentSurfaces = surfaces;\s*\r?\n\s*\}/);
 });
 
+// ── GOVERNED FOR DLP ONLY: the third state, and its one safety property ─────
+//
+// A Teams conversation can now be blocked (every send swallowed), GOVERNED
+// (prompts scanned, Tokenize & Send offered, nothing ever swallowed) or
+// untouched. The behavioural cases live in tests/enforcer-panel-block.test.mjs;
+// these are the SOURCE invariants for the property that matters most —
+// a governed-only tick must never be able to produce a block, by any route.
+
+test('THE SAFETY PROPERTY: a DLP-governed tick can never contribute to a block', async () => {
+  const src = await enforcerSrc();
+  // psCodeOnly, not codeOnly: this file's own header documents the flag in a
+  // PowerShell (#) comment, and the reference count below has to be of CODE.
+  const code = psCodeOnly(src);
+
+  // 1. BLOCKED WINS STRUCTURALLY. dlpGoverned requires !blockGoverned, so the
+  //    two states are mutually exclusive at the point they are computed — not by
+  //    a later precedence check that a future edit could reorder.
+  const tick = src.slice(src.indexOf('static void ApplyForegroundTick('), src.indexOf('// When a block is active, locate the send button'));
+  assert.ok(tick.length > 0, 'expected an ApplyForegroundTick body');
+  assert.match(tick, /bool blockGoverned = hostSurfaceOk\r?\n\s*&& agentOutcome == AgentReadOutcome\.Named\r?\n\s*&& BlockedListHasMatchingAgentRow\(proc, agentName\);/);
+  assert.match(tick, /dlpGoverned = !blockGoverned && hostSurfaceOk\r?\n\s*&& \(PanelDlpMatchesOnPanelAlone\(hit\)\r?\n\s*\|\| \(agentOutcome == AgentReadOutcome\.Named\r?\n\s*&& GovernedListHasMatchingAgentRow\(proc, agentName\)\)\);/);
+  // The block half is EXACTLY the pre-existing rule: a Named read plus a
+  // matching row in the BLOCKED list. The governed list is not part of it.
+  const blockLine = tick.slice(tick.indexOf('bool blockGoverned ='), tick.indexOf('dlpGoverned = !blockGoverned'));
+  assert.equal(/Governed(List|Agents)/.test(blockLine), false,
+    'the block decision must not consult the governed list');
+
+  // 2. THE FLAG IS READ IN EXACTLY ONE PLACE, and it is not a block decision.
+  //    Counted the same way _fgAgentName is, so a new reference has to be
+  //    re-reviewed rather than sliding in: the declaration, the per-tick
+  //    assignment in ApplyForegroundTick, and the UpdatePendingRewrite gate.
+  const uses = (code.match(/_fgDlpGoverned/g) || []).length;
+  assert.equal(uses, 3, `_fgDlpGoverned gained a reference (${uses}) — every use must be re-reviewed`);
+  assert.match(code, /static volatile bool _fgDlpGoverned = false;/);
+  assert.match(code, /_fgDlpGoverned = dlpGoverned;/);
+  assert.match(code, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| \(_hostAppProcs\.Contains\(_app\) && !_fgDlpGoverned\) \|\| Disarmed\(\)\)/);
+
+  // 3. NO BLOCK-DECISION CODE MENTIONS IT — or the governed list, or the
+  //    governed privacy-gate set. CheckFgBlocked is the only place a block is
+  //    armed; EnterBlockActive and BlockActiveForMouse are the only places one is
+  //    acted on; the hook is where a keystroke is actually swallowed.
+  const regions = [
+    ['CheckFgBlocked', 'static void CheckFgBlocked()', 'static string BlockScope()'],
+    ['EnterBlockActive', 'static bool EnterBlockActive(', 'static string ActivePatterns()'],
+    ['HookCallback', 'static IntPtr HookCallback(', '// Scans the typed buffer'],
+    ['EmitBlock', 'static void EmitBlock(', 'static void EmitRewrite('],
+    ['OfferAccessRequest', 'static void OfferAccessRequest(', '// ── Tier B rewrite'],
+  ];
+  for (const [name, from, to] of regions) {
+    const body = codeOnly(src.slice(src.indexOf(from), src.indexOf(to)));
+    assert.ok(body.length > 0, `expected a ${name} body`);
+    for (const forbidden of ['_fgDlpGoverned', '_governedList', '_dlpScopedProcs', 'GovernedListHasMatchingAgentRow', 'dlpGoverned']) {
+      assert.equal(body.includes(forbidden), false, `${name} must not consult ${forbidden}`);
+    }
+  }
+
+  // 4. The governed read writes NONE of the block state. Not _fgIsBlocked, not
+  //    the scope, not the latch — it cannot even clear one, which is what keeps
+  //    a governed-list refresh from disturbing an armed block.
+  const gov = src.slice(src.indexOf('static void UpdateGovernedAgents()'), src.indexOf('// Does the CURRENT governed list hold'));
+  assert.ok(gov.length > 0, 'expected an UpdateGovernedAgents body');
+  for (const forbidden of ['_fgIsBlocked', 'ClearFgBlocked', '_blockScope', '_blockedByElement', 'ArmPanelBlockLatch', 'ClearPanelBlockLatch', '_blockedList']) {
+    assert.equal(codeOnly(gov).includes(forbidden), false, `the governed read must not touch ${forbidden}`);
+  }
+  // …and it FAILS CLOSED in the DLP direction: a missing, malformed or
+  // mid-write file governs nothing rather than half of something. Capturing
+  // prompt content nobody asked for is the failure mode that matters here.
+  assert.match(gov, /\{ _governedList\.Clear\(\); RebuildDlpScopedProcs\(\); return; \}/);
+  assert.match(gov, /catch \{[\s\S]{0,400}_governedList = new List<Dictionary<string, string>>\(\);\r?\n\s*RebuildDlpScopedProcs\(\);/);
+  // Only agent_scope:'agent' rows count. A platform-scoped governed row would
+  // mean "monitor every prompt typed anywhere in this app", which for a host app
+  // is exactly the whole-app capture the design exists to prevent.
+  assert.match(gov, /d\["agent_scope"\] = ExtractJsonString\(item, "agent_scope"\);/);
+  const rebuild = src.slice(src.indexOf('static void RebuildDlpScopedProcs()'), src.indexOf('// Does the CURRENT governed list hold'));
+  assert.match(rebuild, /if \(!string\.Equals\(agent\["agent_scope"\], "agent", StringComparison\.OrdinalIgnoreCase\)\) continue;/);
+  const match = src.slice(src.indexOf('static bool GovernedListHasMatchingAgentRow('), src.indexOf('// Is this panel one whose DLP governance'));
+  assert.match(match, /if \(!string\.Equals\(agent\["agent_scope"\], "agent", StringComparison\.OrdinalIgnoreCase\)\) continue;/);
+  // Same matching semantics as the blocked list — no second convention.
+  assert.match(match, /if \(!PLATFORM_PROCS\.TryGetValue\(agent\["platform"\], out procs\)\) continue;/);
+  assert.match(match, /if \(AgentNameMatches\(agentName, agent\["agent_name"\]\)\) return true;/);
+  // The gate set is written in exactly one place, like _agentScopedProcs.
+  assert.equal((code.match(/_dlpScopedProcs = procs;/g) || []).length, 1, 'exactly one place may write the DLP gate set');
+  // A SEPARATE file, never merged with the blocked one: one wrong parse of a
+  // merged file would either block a monitored agent or monitor a blocked one.
+  assert.match(src, /"\.cloudfuze-aigov", "governed-agents\.json"\);/);
+  assert.notEqual(src.indexOf('"blocked-agents.json"'), -1);
+});
+
+test('the Copilot tab\'s panel-alone DLP rule is CATALOG DATA, not a special case in the .ps1', async () => {
+  // The .ps1 owns the comparison, ai-processes.js owns the data — the same rule
+  // every panel signature already follows. A hardcoded "teams_copilot_composer"
+  // in the C# would be a second place the catalog is written down, and the one
+  // that silently stops matching when an id changes.
+  const src = await enforcerSrc();
+  const code = codeOnly(src);
+  assert.equal(code.includes('teams_copilot_composer'), false,
+    'the panel id must arrive as data, never as a C# literal');
+  assert.equal(code.includes('teams_composer'), false);
+  const fn = src.slice(src.indexOf('static bool PanelDlpMatchesOnPanelAlone('), src.indexOf('// Does the CURRENT blocklist hold'));
+  assert.ok(fn.length > 0, 'expected a PanelDlpMatchesOnPanelAlone body');
+  // POSITIVE-ONLY: only the one literal opts in, so a null panel, an older
+  // payload or a typo lands on the strict "a named row is required" side.
+  assert.match(fn, /return hit != null && string\.Equals\(hit\.DlpMatch, "panel", StringComparison\.OrdinalIgnoreCase\);/);
+  const load = src.slice(src.indexOf('static void LoadAiPanels(string json)'), src.indexOf('// CFAI_AGENT_SURFACES'));
+  assert.match(load, /DlpMatch = string\.Equals\(JsStr\(d, "dlpMatch"\), "panel", StringComparison\.OrdinalIgnoreCase\) \? "panel" : "agent",/);
+
+  // The catalog side: exactly ONE entry may carry the panel-alone rule, and it
+  // is the composer with no non-AI use at all. Every other entry — above all
+  // teams_composer, which is shared by every DM and channel post in Teams —
+  // must require a named row.
+  const { AI_PANELS, buildAiPanelConfig } = await import('../src/os_monitor/ai-processes.js');
+  const panelAlone = AI_PANELS.filter((p2) => p2.dlpMatch === 'panel').map((p2) => p2.id);
+  assert.deepEqual(panelAlone, ['teams_copilot_composer'],
+    'only Teams\' embedded Copilot tab may be DLP-governed by panel match alone');
+  assert.equal(AI_PANELS.find((p2) => p2.id === 'teams_composer').dlpMatch, 'agent');
+  // …and the field survives the handoff for every entry, resolved to one of the
+  // two words so the C# default and the JS default cannot drift.
+  for (const entry of buildAiPanelConfig()) {
+    assert.ok(['agent', 'panel'].includes(entry.dlpMatch), `${entry.id}.dlpMatch must be resolved`);
+    const source = AI_PANELS.find((p2) => p2.id === entry.id);
+    assert.equal(entry.dlpMatch, source.dlpMatch === 'panel' ? 'panel' : 'agent', `${entry.id}.dlpMatch`);
+  }
+});
+
+test('the rewrite event carries the MASKED text only, and only on a verified send', async () => {
+  // A deliberate, reviewed change to this channel's contract — it previously
+  // carried no prompt content at all — made so the tokenization audit trail
+  // matches the browser extension's, which has always recorded the masked
+  // prompt for an enforcement_redact event. The narrowness is the safety:
+  const src = await enforcerSrc();
+  // NOTE the end marker: "// ── Request Access offer" also appears in the field
+  // declarations far above, so slicing to it would produce an empty string.
+  const fn = src.slice(src.indexOf('static void EmitRewrite('), src.indexOf('static void OfferAccessRequest('));
+  assert.ok(fn.length > 0, 'expected an EmitRewrite body');
+  // The parameter is `masked`, defaulted to null, and OMITTED from the JSON when
+  // absent — so a consumer can tell "no content on this event" from "an empty
+  // prompt", and every pre-existing failure line is byte-for-byte unchanged.
+  assert.match(fn, /static void EmitRewrite\(string blockId, string result, string reason, string masked = null\)/);
+  assert.match(fn, /\(masked != null \? ",\\"masked\\":\\"" \+ Esc\(masked\) \+ "\\"" : ""\)/);
+  // There is NO parameter the original text could arrive through, and the
+  // function reads no field that holds it.
+  for (const forbidden of ['_pendingOriginalFull', 'original', '_typed', 'ReadText']) {
+    assert.equal(codeOnly(fn).includes(forbidden), false, `EmitRewrite must not reach ${forbidden}`);
+  }
+  // EXACTLY ONE call site passes content, and it is the final verified-send line.
+  const code = codeOnly(src);
+  const withMasked = code.match(/EmitRewrite\([^)]*,\s*masked\)/g) || [];
+  assert.deepEqual(withMasked, ['EmitRewrite(blockId, "ok", "sent", masked)'],
+    'only the verified-send line may carry prompt content');
+  // …and no call site anywhere passes the ORIGINAL.
+  assert.equal(/EmitRewrite\([^)]*original[^)]*\)/.test(code), false,
+    'the original text must never be emitted');
+
+  // Esc() must escape control characters, or a multi-line masked prompt does not
+  // merely produce invalid JSON — it SPLITS the NDJSON line, so the Node side
+  // sees a truncated event followed by garbage. This protects `preview` (also a
+  // masked substring) on the block event too.
+  const esc = src.slice(src.indexOf('static string Esc(string s)'), src.indexOf('// Extended "block" event'));
+  assert.ok(esc.length > 0, 'expected an Esc body');
+  assert.match(esc, /if \(c == '\\\\'\) sb\.Append\("\\\\\\\\"\);/);
+  assert.match(esc, /else if \(c == '"'\) sb\.Append\("\\\\\\""\);/);
+  assert.match(esc, /else if \(c == '\\n'\) sb\.Append\("\\\\n"\);/);
+  assert.match(esc, /else if \(c == '\\r'\) sb\.Append\("\\\\r"\);/);
+  assert.match(esc, /else if \(c < ' ' \|\| c == \(char\)0x7f\) sb\.Append\("\\\\u"\)/);
+});
+
+test('enforcer.js forwards the rewrite event WHOLE, and logs no prompt content', async () => {
+  // The wrapper is a transport: the event's shape is the .ps1's contract, so the
+  // new `masked` field travels through untouched with nothing picked out or
+  // reshaped. The audit record for it is the enforcement_redact event index.js
+  // reports — never a log line, which is why this branch must stay log-free.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer.js'), 'utf8');
+  const idx = src.indexOf("case 'rewrite':");
+  assert.ok(idx >= 0, 'the wrapper must know this kind');
+  const branch = codeOnly(src.slice(idx, src.indexOf("case 'route':")));
+  assert.match(branch, /this\.emit\('rewrite', ev\);/);
+  assert.equal(/this\.log/.test(branch), false, 'the masked prompt must never be logged');
+  // No reshaping: the whole event object, not a picked-apart copy.
+  assert.equal(/ev\.masked|ev\['masked'\]/.test(branch), false,
+    'the wrapper must not read the content field at all');
+});
+
 test('the agent catalog is separate from AI_PANELS and adds no process to any watcher', async () => {
   // Same separation AI_PANELS/IDE_PROCESSES already keep, for the same reason: a
   // process name landing in the wrong catalog silently turns on clipboard and
@@ -2670,7 +3109,7 @@ test('enforcer-win.ps1: the Copilot-tab search runs OFF the poll thread and is t
     'a property-filtered FindAll is measured unreliable against this app');
   // Its own background STA thread, with the same reentrancy guard + min-interval
   // shape GetCachedModelPicker uses. The poll thread never waits on it.
-  assert.match(section, /var t = new Thread\(\(\) => SearchCopilotHeadingsBackground\(surface, fg, kind\)\);/);
+  assert.match(section, /var t = new Thread\(\(\) => SearchCopilotHeadingsBackground\(surface, fg, paneKey\)\);/);
   assert.match(section, /t\.SetApartmentState\(ApartmentState\.STA\);/);
   assert.match(section, /if \(!_copilotSearchInProgress && \(newPane \|\| \(now - _copilotLastSearchTicks\) > interval\)\)/);
   assert.match(section, /finally \{ _copilotSearchInProgress = false; \}/);
@@ -2688,6 +3127,85 @@ test('enforcer-win.ps1: the Copilot-tab search runs OFF the poll thread and is t
   assert.match(section, /if \(names\.Count > 0\)\r?\n\s*\{\r?\n\s*_copilotCacheClasses = classes\.ToArray\(\);/);
 });
 
+test('enforcer-win.ps1: the heading cache is keyed per PANE, not per title kind', async () => {
+  // WHY. Observed live 2026-09-04: Teams served the four-segment Copilot-tab
+  // title shape ("Copilot | <tenant> | <email> | Microsoft Teams", no
+  // conversation name at all) for a CHAT-LIST conversation the user had not
+  // navigated away from. Both Teams routes live in ONE window, so from that
+  // moment (window handle, title kind) was the SAME key for two genuinely
+  // different panes, and a cache filled from one could be served to the other
+  // for up to the TTL. Naming the WRONG agent is as wrong as naming none.
+  //
+  // The focused panel id is what still separates them: teams_composer is the
+  // Chat-list CKEditor, teams_copilot_composer is the Copilot tab's Fluent
+  // editor, and no element can match both (no shared class token — asserted in
+  // ai-processes.test.mjs).
+  const src = await enforcerSrc();
+  const code = codeOnly(src);
+  // ONE definition of the pane key, so the cache read, the search key and the
+  // cache write cannot drift apart.
+  assert.match(code, /static string PaneKeyOf\(string kind, string panelId\)/);
+  assert.equal((code.match(/PaneKeyOf\(/g) || []).length, 2,
+    'declared once, called once — the single stage-B call site');
+  assert.match(code, /GetCachedCopilotHeadings\(surface, fgHwnd, PaneKeyOf\(kind, panelId\), out classes, out names\)/);
+  // The kind alone must no longer be a cache key anywhere.
+  assert.equal(/_copilotCacheKind|_copilotSearchKind/.test(code), false,
+    'the kind-only cache key is what the 2026-09-04 title collision broke');
+  const section = src.slice(
+    src.indexOf('// ── Copilot-tab heading fallback: background search + cache ──'),
+    src.indexOf('// ── Model routing'),
+  );
+  assert.match(section, /string\.Equals\(_copilotCachePane \?\? "", paneKey \?\? "", StringComparison\.OrdinalIgnoreCase\)/);
+  assert.match(section, /\|\| !string\.Equals\(_copilotSearchPane \?\? "", paneKey \?\? "", StringComparison\.OrdinalIgnoreCase\);/);
+  // `newPane` is also what resets the empty-runs backoff, which is the second
+  // half of the same defect: with kind alone, an idle Copilot home view's three
+  // empty runs carried over into a re-titled Chat-list conversation and delayed
+  // the block there by up to the 5s backoff.
+  assert.match(section, /if \(newPane\) _copilotEmptyRuns = 0;/);
+  // The panel id reaches the read as DATA, not as a gate — the gate stays the
+  // title's kind, so a DM or a renamed group chat can still never be walked.
+  const fg = src.slice(src.indexOf('static void UpdateForeground()'), src.indexOf('static void ApplyForegroundTick('));
+  assert.match(fg, /ReadFocusedAgentName\(surface, pid, fg, hit != null \? hit\.Id : "", out agentName\)/);
+  const stage = src.slice(
+    src.indexOf('static AgentReadOutcome ReadTitleModeAgentName('),
+    src.indexOf('// The poll thread\'s half: read the cache, never wait on a search.'),
+  );
+  assert.equal(/if \(panelId/.test(stage), false, 'the panel id must not become a second gate');
+});
+
+test('enforcer-win.ps1: the ancestor search is depth-agnostic and shares ONE node budget', async () => {
+  // The old shape hopped exactly COPILOT_PANE_PARENT_HOPS parents and collected
+  // from that one ancestor — an assumption about how deeply ONE route nests its
+  // composer, measured only for the Copilot tab. From 2026-09-04 the same search
+  // also serves the Chat-list CKEditor, whose nesting was never measured, so it
+  // collects at each hop from the nearest outward and stops at the first
+  // ancestor that yields a heading.
+  const src = await enforcerSrc();
+  const search = src.slice(
+    src.indexOf('static void SearchCopilotHeadingsBackground('),
+    src.indexOf('static void CollectCopilotHeadings('),
+  );
+  assert.ok(search.length > 0, 'expected a SearchCopilotHeadingsBackground body');
+  // Collect INSIDE the hop loop, and stop as soon as something was found.
+  assert.match(search, /for \(int i = 0; i < COPILOT_PANE_PARENT_HOPS && names\.Count == 0; i\+\+\)/);
+  assert.match(search, /CollectCopilotHeadings\(surface, cur, classes, names, ref visited\);/);
+  // The budget is declared once for the whole ancestor search and passed by
+  // reference, so N ancestors cost ONE node cap in total rather than N.
+  // Otherwise the cap — the only thing bounding this walk against a long
+  // transcript — would stop bounding anything.
+  assert.match(search, /int visited = 0;/);
+  const collect = src.slice(
+    src.indexOf('static void CollectCopilotHeadings('),
+    src.indexOf('// ── Model routing'),
+  );
+  assert.match(collect, /List<string> names, ref int visited\)/);
+  assert.equal(/int visited = 0;/.test(collect), false,
+    'the walk must not reset the shared budget it was handed');
+  // Strategy 2 discards strategy 1's result, so it gets its own budget.
+  assert.match(search, /int winVisited = 0;/);
+  assert.match(search, /CollectCopilotHeadings\(surface, win, classes, names, ref winVisited\);/);
+});
+
 test('enforcer-win.ps1: the Copilot-tab route leaves the primary title path untouched', async () => {
   // The stage-B branch may only ADD an outcome on no evidence. Everything
   // downstream — CheckFgBlocked, the governed gate, the host-app whole-app-block
@@ -2700,7 +3218,7 @@ test('enforcer-win.ps1: the Copilot-tab route leaves the primary title path unto
   // The read site hands off to the two-stage reader, which begins with the
   // unchanged primary parse. No new outcome value, no new consumer.
   const read = src.slice(src.indexOf('static AgentReadOutcome ReadFocusedAgentName('), src.indexOf('static readonly char[] CLASS_TOKEN_SEP'));
-  assert.match(read, /return ReadTitleModeAgentName\(surface, fgHwnd, title, out agentName\);/);
+  assert.match(read, /return ReadTitleModeAgentName\(surface, fgHwnd, title, panelId, out agentName\);/);
   assert.match(code, /enum AgentReadOutcome \{ Unreadable = 0, NotComposer = 1, Generic = 2, Named = 3 \}/);
   // …and the poll-thread read really is still one property read and no tree walk:
   // every walk lives in the background section, which is outside this slice.
@@ -2737,14 +3255,21 @@ test('enforcer-win.ps1: the extra accessibility read happens ONLY when an agent-
   const fg = src.slice(src.indexOf('static void UpdateForeground()'), src.indexOf('// Everything UpdateForeground does once the focused-element read is in.'));
   assert.ok(fg.length > 0, 'expected an UpdateForeground body');
   assert.match(fg, /if \(\(!isIde && proc != null && _aiProcs != null && _aiProcs\.Contains\(proc\)\r?\n\s*&& _agentScopedProcs\.Contains\(proc\)\) \|\| hostAppArmed\)/);
-  assert.match(fg, /if \(surface != null\) agentOutcome = ReadFocusedAgentName\(surface, pid, fg, out agentName\);/);
+  // `hit.Id` is handed down purely as part of the heading cache's pane key (see
+  // _copilotCachePane), never as a gate — all gating on `hit` happens once, in
+  // ApplyForegroundTick, which this same file pins separately.
+  assert.match(fg, /if \(surface != null\) agentOutcome = ReadFocusedAgentName\(surface, pid, fg, hit != null \? hit\.Id : "", out agentName\);/);
   // A HOST APP reaches the read through hostAppArmed instead of _aiProcs — it is
   // deliberately absent from that set — and hostAppArmed is the STRICTER of the
   // two gates: it additionally requires the surface to have passed its live
   // pass. That is what makes an unverified host-app surface completely inert
   // (no title read, no accessibility read, no state at all) rather than merely
   // non-blocking, which is what an unverified CHAT-app surface is.
-  assert.match(fg, /bool hostAppArmed = !isIde && proc != null && _hostAppProcs\.Contains\(proc\)\r?\n\s*&& _agentScopedProcs\.Contains\(proc\) && EnforcingAgentSurface\(proc\) != null;/);
+  // Either list satisfies the "is there a policy about an agent in this app"
+  // half of the gate: a BLOCKED row (swallow the send) or a GOVERNED row (scan
+  // the prompt and offer to tokenize). Both are an org instruction about an
+  // agent inside this app; neither list naming it still means nothing is read.
+  assert.match(fg, /bool hostAppArmed = !isIde && proc != null && _hostAppProcs\.Contains\(proc\)\r?\n\s*&& \(_agentScopedProcs\.Contains\(proc\) \|\| _dlpScopedProcs\.Contains\(proc\)\)\r?\n\s*&& EnforcingAgentSurface\(proc\) != null;/);
   const armedIdx = fg.indexOf('bool hostAppArmed =');
   assert.ok(armedIdx >= 0 && armedIdx < fg.indexOf('ReadFocusedPanel('),
     'the host-app gate must be decided before any read happens');
@@ -2825,7 +3350,14 @@ test("blocked-agents-sync sanitises the server's per-agent rows before they reac
   // fields; the server's per-agent rows were sent RAW. That only risked a
   // corrupted display string before; now agent_name is the MATCHING KEY.
   const src = await readFile(BLOCKED_SYNC, 'utf8');
-  assert.match(src, /import \{ filterBlockedAgents, synthesizePlatformBlocks, normalizeAgentRows \} from '\.\/ai-processes\.js';/);
+  // One import statement from the catalog module, carrying at least these three.
+  // Matched by name rather than as a literal list so adding a helper (the
+  // governed-agents pair did) cannot fail this case for the wrong reason.
+  const catalogImports = src.match(/import \{[\s\S]*?\} from '\.\/ai-processes\.js';/g) || [];
+  assert.equal(catalogImports.length, 1, 'the catalog must be imported once, in one statement');
+  for (const name of ['filterBlockedAgents', 'synthesizePlatformBlocks', 'normalizeAgentRows']) {
+    assert.match(catalogImports[0], new RegExp(`\\b${name}\\b`), `${name} must be imported from the catalog`);
+  }
   assert.match(src, /const list = normalizeAgentRows\(Array\.isArray\(agentRows\) \? agentRows : \[\], log\)\r?\n\s*\.concat\(synthesizePlatformBlocks\(platforms\)\);/);
   // Agent rows still come FIRST, so a more specific per-agent block still wins:
   // CheckFgBlocked returns on its first match, so array order IS the precedence.

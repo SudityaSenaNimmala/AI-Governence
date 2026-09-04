@@ -3203,6 +3203,11 @@ function RiskRowDetail({ detail, loading }) {
 // ── AI Registry View ──────────────────────────────────────────────────────
 
 const REGISTRY_API = "/api/v1/registry";
+// Allow/block for an inventory row is host-keyed (ai_platforms) or sanction-keyed
+// (registry). DLP monitoring is neither: it is a second, independent flag on the
+// AGENT-keyed `blocked_agents` row, reached through the governance lifecycle
+// routes that the browser extension and the desktop enforcer already poll.
+const LIFECYCLE_API = "/api/lifecycle";
 
 const STATUS_COLORS = { approved: "#22c55e", blocked: "#ef4444", unknown: "#f59e0b" };
 const CATEGORY_ICONS = {
@@ -3240,6 +3245,37 @@ function RegistryStatusBadge({ status }) {
   const label = status === 'approved' ? 'Allowed' : status === 'blocked' ? 'Blocked' : 'Unreviewed';
   const c = STATUS_COLORS[status] || "#f59e0b";
   return <span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 10px",borderRadius:8,fontSize:12.7,fontWeight:700,background:c+"14",color:c,border:"1px solid "+c+"30"}}>{label}</span>;
+}
+
+// Which inventory rows can be DLP-monitored — i.e. which rows are an INDIVIDUAL
+// AGENT rather than a host or a platform.
+//
+// Deliberately the same predicate the server uses to decide that a status change
+// is an agent decision rather than a host decision (registry.js `looksLikeAgent`:
+// `source === 'governance' || category === 'autonomous-agent'`). The two must
+// agree, because they key the same collection: blocking an agent row mirrors it
+// into `blocked_agents` under this row's `id`, and POST /lifecycle/dlp-monitor
+// sets its second flag on that same `agent_id`. A predicate wider than the
+// server's would let an admin create `blocked_agents` rows for hosts and catalog
+// entries — agent_id: "plat:openai.com" — that no enforcing surface can ever
+// match, since both match a row by AGENT NAME inside a host app.
+//
+// Catalog-only rows are refused outright: those are a host in the known-services
+// list, not an agent anyone has discovered. Block them by host instead.
+function canDlpMonitor(row) {
+  if (!row || row._catalogOnly) return false;
+  return row.source === "governance" || row.category === "autonomous-agent";
+}
+
+// Row-level marker so monitoring state is visible without expanding every row.
+// Indigo, never red or green: this is not a variant of the allow/block decision
+// and must not read as one.
+function DlpMonitorBadge() {
+  return <span title="Prompts to this agent are scanned for sensitive data. It is not blocked."
+    style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 8px",borderRadius:8,fontSize:11.7,
+            fontWeight:700,background:"#6366f114",color:"#4f46e5",border:"1px solid #6366f130",whiteSpace:"nowrap"}}>
+    <Eye size={11}/> DLP monitored
+  </span>;
 }
 
 function RegistryToggle({ status, onChange, pending }) {
@@ -3315,6 +3351,51 @@ function AIRegistryView() {
   const [selected,setSelected]=useState(null);
   const [showAdd,setShowAdd]=useState(false);
 
+  // ── DLP monitoring (independent of the allow/block decision) ──────────────
+  // The registry build does not read `blocked_agents` at all — it aggregates
+  // discovered_agents, findings, sanctions, dlp_events and ai_platforms — so
+  // `dlp_monitor` is not, and cannot be, a field on a registry row. It comes
+  // from its own list instead: GET /lifecycle/governed-agents, which is
+  // monitored-AND-not-blocked by construction (server-side filter
+  // `{ dlp_monitor: true, blocked: { $ne: true } }`), so it is disjoint from
+  // /blocked-agents and needs no client-side reconciliation of the two.
+  //
+  // null, NOT an empty Set, while the state is unknown — still loading, or the
+  // request failed. An empty Set is indistinguishable from "nothing is
+  // monitored" and would render every toggle confidently OFF on a failed fetch,
+  // which is the one thing a governance control must never do.
+  const [governedIds,setGovernedIds]=useState(null);
+  // THE AGENT BLOCKLIST, and it is what decides "is this agent blocked" for the
+  // monitoring control — deliberately NOT the row's own `status`.
+  //
+  // `row.status` cannot answer that question for an agent in this view. The
+  // cross-reference in loadAll below rewrites a row's status from the live
+  // ai_platforms host list, and a Copilot Studio / M365 agent has no host of its
+  // own: its matched_hosts is the broad Microsoft suite (office.com,
+  // outlook.office365.com, openai.azure.com, teams.microsoft.com, sharepoint.com,
+  // …). Several of those ARE blocked platforms, so EVERY Microsoft agent row
+  // renders "Blocked" whenever the live registry build answers with hosts
+  // attached — measured against production: 0 of 244 agent rows are blocked in
+  // the registry payload itself, 2 are on the agent blocklist, and the override
+  // flips all the Copilot Studio ones to Blocked purely because office.com is.
+  // Gating on that would disable this toggle for exactly the agents the feature
+  // exists to monitor (named agents inside Teams / M365 Copilot).
+  //
+  // GET /lifecycle/blocked-agents is the honest signal: it is the same
+  // `blocked_agents` collection `dlp_monitor` itself lives on, it is what
+  // content.js and the desktop enforcer actually poll to stop a named agent, and
+  // it is what the Agent Governance Discovery and User Activity tabs already use
+  // for their own block toggles.
+  //
+  // The status override itself is a pre-existing display bug in the block
+  // control, not something this toggle introduced, and it is left alone here —
+  // but where the two disagree, the helper text says so rather than leaving the
+  // admin with a row badged Blocked next to a live monitoring switch.
+  const [blockedAgentIds,setBlockedAgentIds]=useState(null);
+  const [governedErr,setGovernedErr]=useState(null);
+  const [monitorPendingIds,setMonitorPendingIds]=useState(()=>new Set());
+  const [monitorErrs,setMonitorErrs]=useState({});   // row id → message
+
   // Fetch ALL data once on mount — filter client-side for instant response.
   // Returns the promise chain (previously fire-and-forget) so a caller that
   // needs to know when the refreshed data has actually landed — e.g. clearing
@@ -3324,7 +3405,26 @@ function AIRegistryView() {
       fetch(REGISTRY_API).then(r=>r.json()),
       fetch(`${REGISTRY_API}/summary`).then(r=>r.json()),
       fetch(`${API}/ai-platforms`).then(r=>r.json()).catch(()=>[]),
-    ]).then(([reg,s,plats])=>{
+      // Folded into a sentinel rather than left to reject, so a governed-agents
+      // outage cannot take the whole inventory down with it — but deliberately
+      // NOT swallowed to `[]`, which would claim "nothing is monitored". The
+      // difference is what `governedIds === null` means; see its declaration.
+      fetch(`${LIFECYCLE_API}/governed-agents`)
+        .then(r=>r.ok?r.json():Promise.reject(new Error(`HTTP ${r.status}`)))
+        .catch(e=>({__error:e?.message||"request failed"})),
+      fetch(`${LIFECYCLE_API}/blocked-agents`)
+        .then(r=>r.ok?r.json():Promise.reject(new Error(`HTTP ${r.status}`)))
+        .catch(e=>({__error:e?.message||"request failed"})),
+    ]).then(([reg,s,plats,gov,blk])=>{
+      // Both lists must land for the monitor control to be safe to operate: one
+      // says whether monitoring is on, the other whether the agent is blocked,
+      // and blocked wins. Either missing → the control renders inert rather
+      // than acting on half the picture.
+      const govErr=Array.isArray(gov)?null:(gov?.__error||"request failed");
+      const blkErr=Array.isArray(blk)?null:(blk?.__error||"request failed");
+      setGovernedIds(govErr?null:new Set(gov.map(g=>String(g.agent_id)).filter(Boolean)));
+      setBlockedAgentIds(blkErr?null:new Set(blk.map(b=>String(b.agent_id)).filter(Boolean)));
+      setGovernedErr(govErr||blkErr);
       // Merge the platform catalog in, skipping anything the registry already
       // covers. Dedup on product name AND host: the registry keys platform rows by
       // host but names them by product, so matching on one alone double-lists a
@@ -3441,6 +3541,127 @@ function AIRegistryView() {
     }
   };
 
+  // Turn DLP monitoring on/off for ONE agent. Not a variant of setRowStatus:
+  // different endpoint, different collection key, and it never touches
+  // `blocked` — POST /lifecycle/dlp-monitor writes only the dlp_monitor fields,
+  // exactly as /block and /unblock never write dlp_monitor. So the two controls
+  // cannot clobber each other and the row is not reloaded here.
+  const setRowMonitor=async(row,on)=>{
+    setMonitorPendingIds(prev=>new Set(prev).add(row.id));
+    setMonitorErrs(prev=>{ const next={...prev}; delete next[row.id]; return next; });
+    try{
+      // Only fields we actually HAVE go in the body. The server writes every key
+      // that is present, so sending `platform: null` for a row with no platform
+      // would blank the platform on an existing blocked_agents row — and
+      // platform is what content.js's isBlockedAgentActive() and the desktop
+      // enforcer's process lookup both key on. Omitted keys are left untouched.
+      const body={ agent_id:row.id, dlp_monitor:on };
+      if(on){
+        if(row.name) body.agent_name=row.name;
+        if(row.platform && row.platform!=="unknown") body.platform=row.platform;
+        // 'agent', matching what registry.js's block mirror writes from this same
+        // view: the row is one named agent, never the whole host app it lives in.
+        body.agent_scope="agent";
+        body.reason="DLP monitoring enabled by admin from AI Systems";
+      }
+      const res=await fetch(`${LIFECYCLE_API}/dlp-monitor`,{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(body),
+      });
+      const out=await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(out.error||`Request failed (${res.status})`);
+      // Turning monitoring OFF only ever relaxes an EXISTING row — it never
+      // creates one — so a call that matched nothing changed nothing. Say so
+      // rather than flipping the toggle off on the strength of a no-op.
+      if(!on && !out.matched) throw new Error("No governance record for this agent — nothing to turn off.");
+      setGovernedIds(prev=>{
+        const next=new Set(prev||[]);
+        if(on) next.add(String(row.id)); else next.delete(String(row.id));
+        return next;
+      });
+      setGovernedErr(null);
+    } catch(e){
+      setMonitorErrs(prev=>({...prev,[row.id]:e?.message||"Update failed"}));
+    } finally {
+      setMonitorPendingIds(prev=>{ const next=new Set(prev); next.delete(row.id); return next; });
+    }
+  };
+
+  // Blocked per the agent blocklist — see the note on blockedAgentIds for why
+  // the row's displayed status is not used for this.
+  const isRowBlocked=(row)=>!!blockedAgentIds?.has(String(row.id));
+
+  // Is this row monitored right now? Blocked rows answer false unconditionally:
+  // blocked wins over monitoring, and /governed-agents excludes them anyway, so
+  // showing "DLP monitored" next to a blocked agent would describe a state that
+  // has no effect on any enforcing surface.
+  const isMonitored=(row)=>!!governedIds&&!isRowBlocked(row)&&governedIds.has(String(row.id));
+
+  // The monitoring control for one row. A closure rather than a component so it
+  // reads the same state the row badge does, with no second copy of it.
+  const renderDlpMonitor=(row)=>{
+    if(!canDlpMonitor(row)) return null;
+    const blocked=isRowBlocked(row);
+    const pending=monitorPendingIds.has(row.id);
+    const unknown=governedIds===null||blockedAgentIds===null;
+    const on=isMonitored(row);
+    const rowErr=monitorErrs[row.id];
+    // Inert, not hidden, when blocked: an admin looking for this setting should
+    // find it and be told why it does nothing here, not find nothing at all.
+    const disabled=blocked||pending||unknown;
+    const why=blocked
+      ? "Already blocked — unblock this agent first if you want monitoring only."
+      : unknown
+        ? "Current monitoring state could not be loaded."
+        : on
+          ? "Stop scanning prompts to this agent"
+          : "Scan prompts to this agent for sensitive data, without blocking it";
+    return (<div>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+        <button type="button" role="switch" aria-checked={on} disabled={disabled} title={why}
+          aria-label={`Monitor prompts to ${row.name||"this agent"} for sensitive data`}
+          onClick={()=>setRowMonitor(row,!on)}
+          style={{display:"inline-flex",alignItems:"center",gap:8,padding:"6px 12px",borderRadius:8,
+                  fontSize:13.2,fontWeight:600,fontFamily:"inherit",
+                  border:"1px solid "+(on?"#6366f140":"#e5e7eb"),
+                  background:on?"#6366f114":"#fff",color:on?"#4f46e5":"#4b5563",
+                  cursor:disabled?"not-allowed":"pointer",opacity:disabled?0.55:1}}>
+          <span style={{width:34,height:18,borderRadius:9,flexShrink:0,position:"relative",
+                        background:on?"#6366f1":"#cbd5e1",transition:"background .2s"}}>
+            <span style={{width:14,height:14,borderRadius:7,background:"#fff",position:"absolute",
+                          top:2,left:on?18:2,transition:"left .2s",boxShadow:"0 1px 2px rgba(0,0,0,.25)"}}/>
+          </span>
+          <Eye size={13}/> Monitor prompts for sensitive data
+        </button>
+        {pending
+          ? <RefreshCw size={13} className="aihub_spin" style={{color:"#6b7280"}}/>
+          : <span style={{fontSize:12.7,fontWeight:700,color:on?"#4f46e5":"#9ca3af"}}>
+              {unknown?"Unavailable":on?"On":"Off"}
+            </span>}
+      </div>
+      <div className="aihub_text_muted" style={{fontSize:12.2,marginTop:6,maxWidth:660}}>
+        {blocked
+          ? "This agent is on the agent blocklist, so monitoring it would change nothing — a blocked agent is refused outright rather than scanned, and offering to tokenize a prompt for it would contradict the block. Unblock it first if you want it watched but usable."
+          : unknown
+            ? "This control is inert rather than guessing at a state it could not read."
+            : <>
+                Independent of the decision above. Prompts typed into this agent are scanned for
+                sensitive data and the user is offered “Tokenize & Send” — the conversation itself is
+                not blocked. Endpoints pick the change up on their next sync.
+                {/* Only when the two genuinely disagree, so it is not noise on the
+                    rows where the status is fine. */}
+                {row.status==="blocked"&&<> The status above reads Blocked because a platform this
+                agent shares hosts with is blocked; a host-level block cannot stop a named agent, and
+                this agent is not on the agent blocklist, so monitoring it still takes effect.</>}
+              </>}
+      </div>
+      {unknown&&governedErr&&<div className="aihub_error" style={{marginTop:8}}>
+        <AlertTriangle size={14}/> Could not load monitoring state ({governedErr}).
+      </div>}
+      {rowErr&&<div className="aihub_error" style={{marginTop:8}}><AlertTriangle size={14}/> {rowErr}</div>}
+    </div>);
+  };
+
   const updateStatus=async(id,status,productName,matchedHosts)=>{
     await fetch(`${REGISTRY_API}/${encodeURIComponent(id)}/status`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status,product_name:productName,matched_hosts:matchedHosts||[]})});
     loadAll();
@@ -3536,7 +3757,10 @@ function AIRegistryView() {
               <div className="aihub_text_muted">{r.vendor||""}{r.platform?" · "+r.platform:""}</div>
             </div>
           </div>},
-          {label:"Status",render:r=><RegistryStatusBadge status={r.status}/>},
+          {label:"Status",render:r=><div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-start"}}>
+            <RegistryStatusBadge status={r.status}/>
+            {isMonitored(r)&&<DlpMonitorBadge/>}
+          </div>},
           {label:"Risk",render:r=><span style={{whiteSpace:"nowrap"}}><RiskLevelBadge level={r.risk_level} score={r.risk_score}/></span>},
           {label:"Owner",render:r=><div style={{whiteSpace:"nowrap"}}>
             <div style={{fontSize:13.2}}>{r.owner||"—"}</div>
@@ -3550,7 +3774,9 @@ function AIRegistryView() {
         rows={items}
         onRow={r=>setSelected(selected===r.id?null:r.id)}
         isExpanded={r=>selected===r.id}
-        renderExpanded={r=><RegistryRowDetail row={r} onStatus={s=>setRowStatus(r,s)} pending={pendingIds.has(r.id)}/>}
+        renderExpanded={r=><RegistryRowDetail row={r} onStatus={s=>setRowStatus(r,s)} pending={pendingIds.has(r.id)}>
+          {renderDlpMonitor(r)}
+        </RegistryRowDetail>}
         empty="No AI systems found matching your filters."
         paginate={25}
       />
@@ -3676,7 +3902,7 @@ function AddPlatformForm({ onDone }) {
  * empty "Risk analysis" heading: absence of activity is not absence of risk, and a
  * blank section reads as a clean bill of health.
  */
-function RegistryRowDetail({ row, onStatus, pending }) {
+function RegistryRowDetail({ row, onStatus, pending, children }) {
   const cell=(label,value)=>value?<div><span style={{color:"#9ca3af"}}>{label}:</span> <span style={{fontWeight:600}}>{value}</span></div>:null;
   const H=({children})=><div style={{fontSize:12.7,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:6}}>{children}</div>;
   return (<div style={{padding:"16px 20px",borderTop:"1px solid #e5e7eb"}}>
@@ -3686,6 +3912,20 @@ function RegistryRowDetail({ row, onStatus, pending }) {
       <H>Decision</H>
       <RegistryToggle status={row.status} onChange={onStatus} pending={pending}/>
     </div>
+
+    {/* The SECOND, independent governance decision for an individual agent:
+        scan its prompts for sensitive data without blocking it. Supplied as
+        children by the caller rather than built here, so it reads exactly the
+        same /governed-agents state as the row badge in the table above.
+        Immediately under Decision because the two are read together and are the
+        easiest pair in this product to confuse — Decision refuses the agent,
+        this one lets it run and watches what is typed into it. Null for any row
+        that is not an individual agent (see canDlpMonitor), which is why this is
+        conditional rather than an always-present empty section. */}
+    {children&&<div style={{marginBottom:14}}>
+      <H>Sensitive-data monitoring</H>
+      {children}
+    </div>}
 
     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:8,marginBottom:14,fontSize:13.2}}>
       {cell("Category",row.category)}

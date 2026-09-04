@@ -195,6 +195,15 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   process catalog at all, so it gets zero platform-block enforcement. Anyone blocked from an
   AI platform on desktop can bypass it entirely by using that platform's CLI in a terminal.
 
+- [ ] **Browser extension's blocked-agent enforcement doesn't cover file uploads**
+  `enforceBlockedAgent()` in `content.js` only disables text composer elements (`textarea`,
+  `[contenteditable]`, `[role="textbox"]`) and blocks Enter + clicks inside the composer's
+  container. Drag-and-drop (`emitFileUpload(f, 'drop')`) and clipboard-paste-of-a-file
+  (`emitFileUpload(f, 'clipboard')`) run independently and never check agent-block state, and
+  the `input[type="file"]` element itself is never disabled — a blocked agent can still
+  receive a file through any of these three paths even though typed prompts are correctly
+  stopped.
+
 ---
 
 ## P2 — enterprise distribution
@@ -287,17 +296,15 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   `who wrote Hamlet` all bill at the standard tier. Needs terms that cannot misfire —
   "who is responsible for our GDPR compliance" must not become simple.
 
-- [ ] **Tokenize & Send support for IDE apps (Cursor/VSCode/Copilot)**
-  The desktop enforcer's mask-and-auto-send flow (`enforcer-win.ps1`) excludes
-  `_ideApps` from UIA-based masking entirely, since UIA in an IDE reads code/
-  terminal content, not a single composer field. IDE users blocked for a
-  sensitive paste currently have no Tokenize & Send option at all.
+- [x] **Tokenize & Send support for IDE apps (Cursor/VSCode/Copilot)**
+  Already works — `PanelUiaOk()` in `enforcer-win.ps1` now offers Tier B while an
+  enforcing IDE panel has focus. This item was stale; found and corrected while
+  designing Microsoft-workspace tokenization support.
 
-- [ ] **Tokenize & Send support for multi-line prompts**
-  `ComputeMaskCandidate` in `enforcer-win.ps1` rejects any composer text
-  containing `\n`/`\r` as unmaskable ("multiline"), so a blocked multi-line
-  prompt always falls back to "remove it yourself and resend" with no
-  Tokenize & Send option.
+- [x] **Tokenize & Send support for multi-line prompts**
+  Fixed while building Microsoft-workspace tokenization support: masked
+  multi-line text is now typed with a catalog-declared newline combo
+  (Shift+Enter by default) between segments instead of being rejected.
 
 - [ ] **Populate `ai_platforms.surface` from the admin UI**
   The field is schema'd and validated server-side (`browser`/`desktop`/`cli`/`all`)
@@ -318,6 +325,27 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   Currently public/unauthenticated. The desktop agent already sends a bearer
   token on this route that the server ignores; the browser extension's own use
   of this endpoint would need checking before tightening it.
+
+- [ ] **Notify the employee on access-request approval or expiry**
+  Today the desktop's blocked-agents-sync only logs "agent X unblocked on this
+  device" — nothing user-facing tells the employee their Request Access ask was
+  approved, or that a temporary grant just expired and the agent is blocked
+  again. Add a toast on both transitions, on desktop and (once it has the same
+  exception polling) the browser extension.
+
+- [ ] **Browser extension DLP coverage for Teams' native Chat-list agent conversations**
+  `EMBEDDED_AI_FLOOR['teams.microsoft.com']` only matches Copilot-labelled
+  containers, so a Copilot Studio agent reached through Teams' Chat list (not
+  the embedded Copilot tab) gets no DLP scan and no Tokenize & Send in the
+  browser — the mirror image of the desktop gap fixed by Microsoft-workspace
+  tokenization support.
+
+- [ ] **Warn the admin when blocking an agent whose name can never enforce**
+  A blocklist row whose name is generic (matches `genericNames`, e.g. "Copilot",
+  "Chat") or looks like a Teams group-chat participant list can never arm on the
+  desktop enforcer — the block silently does nothing there. AI Hub has no
+  indication of this today; surfacing it at block time (or in the inventory)
+  would save an admin from assuming a block is enforcing when it isn't.
 
 ---
 
