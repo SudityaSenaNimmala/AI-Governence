@@ -70,6 +70,12 @@
  * The tabs agree with each other, which is the whole point.
  */
 
+// AI Hub (/api/v1) is served from a cache of real responses rather than
+// fabricated data — see aiHubDemoCache.js for why.
+// Explicit .js extension: Vite resolves it either way, but the verify scripts
+// run this module under bare Node, which does not.
+import { isCacheable, cacheGet, cachePut } from "../AIHub/aiHubDemoCache.js";
+
 const LS_KEY = "ag_demo_mode";
 
 /** Hard switch. Leave false — use ?agDemo=1 instead. */
@@ -126,21 +132,26 @@ if (AG_DEMO && typeof console !== "undefined") {
  * request that would carry them is intercepted below.
  */
 export const AG_DEMO_KEYS = {
-  oauthKeyId: "demo-microsoft-key",
-  tenantId: "northwind.onmicrosoft.com",
-  dataverseEnvUrl: "https://northwind.crm.dynamics.com",
-  azureSubscriptionId: "0f2d-demo-subscription",
-  googleKeyId: "demo-google-key",
-  geminiEnterpriseKeyId: "demo-gemini-enterprise-key",
-  // NULL ON PURPOSE — Agent Governance demos Microsoft + Google only.
+  // GOOGLE ONLY. This customer is a Google Workspace shop, so Agent Governance
+  // must present no Microsoft surface whatsoever.
+  //
   // A null key id is what every "is this platform connected?" check reads, so
-  // leaving these unset removes the ChatGPT / Claude / AWS connection badges,
-  // their scope chips in the Discovery selector, and their entries in the User
-  // Activity application dropdown. Set one to a string to bring that vendor
-  // back, and add matching AGENT_SPECS rows for it.
+  // leaving the Microsoft fields unset removes the Microsoft 365 connection
+  // badge, every Microsoft scope chip in the Discovery selector, the Azure AI
+  // Foundry panel and the App Permissions panel, and the Microsoft entries in
+  // the User Activity application dropdown. Two knock-on effects are load
+  // bearing and intentional: CostTab picks its vendor from the first key
+  // present, so it now follows the Google path, and User Activity defaults its
+  // application dropdown to a Google platform instead of Copilot Studio.
+  oauthKeyId: null,
+  tenantId: null,
+  dataverseEnvUrl: null,
+  azureSubscriptionId: null,
   openaiKeyId: null,
   claudeKeyId: null,
   awsKeyId: null,
+  googleKeyId: guid("key:google"),
+  geminiEnterpriseKeyId: guid("key:gemini-enterprise"),
 };
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -169,6 +180,81 @@ function rngFor(key) {
 const pick = (rand, arr) => arr[Math.floor(rand() * arr.length)];
 const between = (rand, lo, hi) => lo + Math.floor(rand() * (hi - lo + 1));
 
+// ── identifiers ─────────────────────────────────────────────────────────────
+//
+// NOTHING ON SCREEN MAY READ AS FABRICATED. Agent Governance renders raw
+// identifiers in several places — the Discovery detail panel prints
+// `discoverySource` and the agent id, and the permissions table prints appId
+// under every application name — so an id like "demo-copilot_studio-0" or a
+// source of "demo_dataset" is visible to whoever is watching the screen.
+//
+// Ids are therefore generated as real-shaped values (GUIDs for Microsoft,
+// resource paths for Google) and derived from a hash of the agent name, so
+// they are stable across reloads.
+//
+// Because no id carries a marker any more, the check that stops a fabricated
+// agent's write reaching the server can no longer be a string prefix. It is a
+// membership test against FABRICATED_IDS instead, populated below.
+const FABRICATED_IDS = new Set();
+
+/** Deterministic RFC-4122-shaped GUID from any seed string. */
+function guid(seed) {
+  const r = rngFor("guid:" + seed);
+  const hex = (n) => Array.from({ length: n }, () => "0123456789abcdef"[Math.floor(r() * 16)]).join("");
+  // Version 4, variant 1 — the shape Entra and Dataverse ids actually take.
+  return `${hex(8)}-${hex(4)}-4${hex(3)}-${"89ab"[Math.floor(r() * 4)]}${hex(3)}-${hex(12)}`;
+}
+
+/** Register an id as fabricated and return it unchanged. */
+function fab(id) {
+  FABRICATED_IDS.add(String(id));
+  return id;
+}
+
+export function isFabricatedId(id) {
+  return FABRICATED_IDS.has(String(id || ""));
+}
+
+// The real `discoverySource` value each platform reports, taken from
+// server/src/governance/services/discoveryService.ts and the client-side
+// converters. These are what the Discovery panel prints, and several get a
+// coloured badge from sourceStyle in tabs/DiscoveryTab.jsx.
+const DISCOVERY_SOURCE = {
+  vertex_ai:         "vertex_ai_reasoning_engines",
+  gemini:            "google_admin_sdk",
+  gemini_gems:       "google_admin_sdk",
+  google_chat:       "google_chat_api",
+  apps_script:       "google_apps_script_api",
+  gemini_enterprise: "gemini_enterprise",
+  gemini_gmail:      "google_admin_sdk",
+  gemini_docs:       "google_admin_sdk",
+  gemini_sheets:     "google_admin_sdk",
+  gemini_slides:     "google_admin_sdk",
+  gemini_meet:       "google_admin_sdk",
+  gemini_drive:      "google_drive_api",
+};
+
+const GCP_PROJECT = "halcyon-ai-prod";
+const GCP_ORG = "halcyongroup.com";
+
+/** Google resources are addressed by path, not GUID. */
+function googleResourceId(platform, name) {
+  const n = rngFor("gres:" + name);
+  const num = String(Math.floor(n() * 9e15) + 1e15);
+  const region = pick(rngFor("greg:" + name), ["europe-west4", "europe-west1", "us-central1"]);
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  switch (platform) {
+    case "vertex_ai":         return "projects/" + GCP_PROJECT + "/locations/" + region + "/reasoningEngines/" + num;
+    case "gemini_enterprise": return "projects/" + GCP_PROJECT + "/locations/global/collections/default_collection/engines/" + slug;
+    case "gemini_gems":       return "gems/" + num.slice(0, 16);
+    case "google_chat":       return "spaces/" + num.slice(0, 11);
+    case "apps_script":       return "projects/1" + num.slice(0, 14) + slug.slice(0, 8);
+    case "gemini":            return "users/" + num.slice(0, 12);
+    // Gemini inside a Workspace app.
+    default:                  return "applications/gemini/" + platform.replace("gemini_", "") + "/" + num.slice(0, 12);
+  }
+}
+
 // ── people ──────────────────────────────────────────────────────────────────
 
 const P = (displayName, upn, accountEnabled = true) => ({
@@ -179,17 +265,17 @@ const P = (displayName, upn, accountEnabled = true) => ({
 });
 
 const OWNERS = {
-  amara: P("Amara Okafor", "amara.okafor@northwind.example"),
-  dev: P("Devika Raman", "devika.raman@northwind.example"),
-  tom: P("Tomas Lindqvist", "tomas.lindqvist@northwind.example"),
-  yuki: P("Yuki Tanaka", "yuki.tanaka@northwind.example"),
-  marco: P("Marco Ferreira", "marco.ferreira@northwind.example"),
-  priya: P("Priya Nair", "priya.nair@northwind.example"),
-  sean: P("Sean Whitaker", "sean.whitaker@northwind.example"),
-  lena: P("Lena Hoffmann", "lena.hoffmann@northwind.example"),
+  amara: P("Amara Okafor", "amara.okafor@halcyongroup.com"),
+  dev: P("Devika Raman", "devika.raman@halcyongroup.com"),
+  tom: P("Tomas Lindqvist", "tomas.lindqvist@halcyongroup.com"),
+  yuki: P("Yuki Tanaka", "yuki.tanaka@halcyongroup.com"),
+  marco: P("Marco Ferreira", "marco.ferreira@halcyongroup.com"),
+  priya: P("Priya Nair", "priya.nair@halcyongroup.com"),
+  sean: P("Sean Whitaker", "sean.whitaker@halcyongroup.com"),
+  lena: P("Lena Hoffmann", "lena.hoffmann@halcyongroup.com"),
   // Left the company — their agents are still running. This is the story.
-  gone1: P("Robert Ashby", "robert.ashby@northwind.example", false),
-  gone2: P("Claire Dumont", "claire.dumont@northwind.example", false),
+  gone1: P("Robert Ashby", "robert.ashby@halcyongroup.com", false),
+  gone2: P("Claire Dumont", "claire.dumont@halcyongroup.com", false),
 };
 
 const ACTIVE_PEOPLE = [
@@ -206,166 +292,142 @@ const ACTIVE_PEOPLE = [
 //       days since last use (null = never used), connectors, permissions.
 
 const VENDOR_BY_PLATFORM = {
-  copilot_studio: "Microsoft",
-  personal_agent: "Microsoft",
-  teams_chat_agent: "Microsoft",
-  sharepoint_embedded: "Microsoft",
-  teams_app: "Microsoft",
-  isv_store: "Microsoft",
-  azure_foundry: "Microsoft",
-  oauth_app: "Microsoft",
-  vertex_ai: "Google",
-  gemini_gems: "Google",
-  google_chat: "Google",
+  vertex_ai:         "Google",
+  gemini:            "Google",
+  gemini_gems:       "Google",
+  google_chat:       "Google",
+  apps_script:       "Google",
   gemini_enterprise: "Google",
-  // Microsoft and Google only — see the note at the end of AGENT_SPECS.
+  gemini_gmail:      "Google",
+  gemini_docs:       "Google",
+  gemini_sheets:     "Google",
+  gemini_slides:     "Google",
+  gemini_meet:       "Google",
+  gemini_drive:      "Google",
 };
 
 const C = (name, type) => ({ name, type });
 
 const AGENT_SPECS = [
-  // ── Copilot Studio ────────────────────────────────────────────────────────
-  { name: "Contract Review Assistant", platform: "copilot_studio", level: "critical", owner: null, age: 412, idle: 96,
-    connectors: [C("SharePoint", "Standard"), C("HTTP with Microsoft Entra ID", "HTTP"), C("SQL Server", "Standard")],
-    permissions: [{ name: "Sites.Read.All", type: "Application" }, { name: "Files.ReadWrite.All", type: "Application" }],
-    consentType: "AllPrincipals", desc: "Reads master service agreements from the Legal SharePoint site and drafts redline summaries." },
-  { name: "Customer Refund Triage", platform: "copilot_studio", level: "high", owner: OWNERS.amara, age: 208, idle: 2,
-    connectors: [C("Dataverse", "Standard"), C("Dynamics 365 Sales", "Standard"), C("Office 365 Outlook", "Standard")],
-    permissions: [{ name: "Dataverse.user_impersonation", type: "Delegated" }],
-    consentType: "AllPrincipals", desc: "Classifies refund requests against policy and drafts the customer reply." },
-  { name: "Onboarding Buddy", platform: "copilot_studio", level: "medium", owner: OWNERS.priya, age: 141, idle: 4,
-    connectors: [C("SharePoint", "Standard"), C("Microsoft Teams", "Standard")],
-    permissions: [{ name: "Sites.Read.All", type: "Application" }],
-    consentType: "Principal", desc: "Answers new-joiner questions from the HR handbook and IT setup guides." },
-  { name: "Field Service Dispatcher", platform: "copilot_studio", level: "high", owner: OWNERS.tom, age: 322, idle: 11,
-    connectors: [C("Dataverse", "Standard"), C("HTTP", "HTTP"), C("Azure Blob Storage", "Standard")],
-    permissions: [{ name: "Sites.ReadWrite.All", type: "Application" }, { name: "User.Read.All", type: "Application" }],
-    consentType: "AllPrincipals", desc: "Assigns engineers to open work orders and posts the schedule to Teams." },
-  { name: "Procurement Policy Bot", platform: "copilot_studio", level: "low", owner: OWNERS.lena, age: 97, idle: 6,
-    connectors: [C("SharePoint", "Standard")],
-    permissions: [{ name: "Sites.Read.All", type: "Application" }],
-    consentType: "Principal", desc: "Answers purchase-approval threshold questions from the finance policy library." },
-  { name: "Payroll Query Handler", platform: "copilot_studio", level: "critical", owner: OWNERS.gone2, age: 501, idle: null,
-    connectors: [C("SQL Server", "Standard"), C("HTTP", "HTTP"), C("Office 365 Users", "Standard")],
-    permissions: [{ name: "User.ReadWrite.All", type: "Application" }, { name: "Directory.Read.All", type: "Application" }],
-    consentType: "AllPrincipals", desc: "Looks up payslip and tax-code queries directly against the HR database." },
-
-  // ── Personal agents ───────────────────────────────────────────────────────
-  { name: "My Deal Desk Helper", platform: "personal_agent", level: "medium", owner: OWNERS.marco, age: 64, idle: 1,
-    connectors: [C("Dynamics 365 Sales", "Standard")], permissions: [], consentType: "Principal",
-    desc: "Personal agent summarising open opportunities before pipeline review." },
-  { name: "My Sprint Notes Agent", platform: "personal_agent", level: "low", owner: OWNERS.dev, age: 38, idle: 3,
-    connectors: [C("Azure DevOps", "Standard")], permissions: [], consentType: "Principal",
-    desc: "Personal agent that turns standup notes into work items." },
-  { name: "My Expense Checker", platform: "personal_agent", level: "medium", owner: OWNERS.gone1, age: 289, idle: null,
-    connectors: [C("Office 365 Outlook", "Standard"), C("SharePoint", "Standard")], permissions: [], consentType: "Principal",
-    desc: "Personal agent that reconciles receipts against the expense policy." },
-
-  // ── Teams chat agents & apps ──────────────────────────────────────────────
-  { name: "IT Helpdesk Copilot", platform: "teams_chat_agent", level: "medium", owner: OWNERS.sean, age: 176, idle: 1,
-    connectors: [C("ServiceNow", "Premium"), C("Microsoft Teams", "Standard")],
-    permissions: [{ name: "Chat.Read.All", type: "Application" }], consentType: "AllPrincipals",
-    desc: "First-line IT support agent published to the whole company in Teams." },
-  { name: "Benefits Explainer", platform: "teams_chat_agent", level: "high", owner: OWNERS.priya, age: 233, idle: 38,
-    connectors: [C("SharePoint", "Standard"), C("HTTP", "HTTP")],
-    permissions: [{ name: "Sites.Read.All", type: "Application" }, { name: "Chat.Read.All", type: "Application" }],
-    consentType: "AllPrincipals", desc: "Explains health and pension elections; reads the benefits document library." },
-  { name: "Meeting Recap Bot", platform: "teams_app", level: "medium", owner: OWNERS.yuki, age: 118, idle: 2,
-    connectors: [C("Microsoft Teams", "Standard")],
-    permissions: [{ name: "OnlineMeetings.Read.All", type: "Application" }], consentType: "AllPrincipals",
-    desc: "Posts an AI recap after every recorded Teams meeting." },
-  { name: "Standup Poller", platform: "teams_app", level: "low", owner: OWNERS.dev, age: 205, idle: 5,
-    connectors: [C("Microsoft Teams", "Standard")], permissions: [], consentType: "Principal",
-    desc: "Collects written standups and summarises blockers." },
-  { name: "Vendor Intake Bot", platform: "teams_app", level: "high", owner: null, age: 366, idle: 71,
-    connectors: [C("HTTP", "HTTP"), C("Office 365 Outlook", "Standard")],
-    permissions: [{ name: "Mail.Send", type: "Application" }, { name: "Directory.Read.All", type: "Application" }],
-    consentType: "AllPrincipals", desc: "Collects supplier onboarding forms and mails them onward. No current owner." },
-
-  // ── SharePoint agents ─────────────────────────────────────────────────────
-  { name: "Sales Playbook Agent", platform: "sharepoint_embedded", level: "medium", owner: OWNERS.marco, age: 132, idle: 3,
-    connectors: [C("SharePoint", "Standard")], permissions: [{ name: "Sites.Read.All", type: "Application" }],
-    consentType: "Principal", desc: "Site agent on /sites/sales answering from the playbook library." },
-  { name: "Engineering Runbook Agent", platform: "sharepoint_embedded", level: "high", owner: OWNERS.dev, age: 156, idle: 9,
-    connectors: [C("SharePoint", "Standard"), C("Azure Blob Storage", "Standard")],
-    permissions: [{ name: "Sites.ReadWrite.All", type: "Application" }], consentType: "AllPrincipals",
-    desc: "Site agent on /sites/engineering with read/write across the runbook library." },
-
-  // ── ISV / store apps ──────────────────────────────────────────────────────
-  { name: "Otter Meeting Notes", platform: "isv_store", level: "high", owner: OWNERS.yuki, age: 244, idle: 7,
-    connectors: [C("Microsoft Graph", "Third-party")],
-    permissions: [{ name: "OnlineMeetings.Read.All", type: "Application" }, { name: "offline_access", type: "Delegated" }],
-    consentType: "AllPrincipals", desc: "Third-party transcription app consented org-wide; egresses meeting audio." },
-  { name: "Notion AI Connector", platform: "isv_store", level: "critical", owner: OWNERS.sean, age: 187, idle: 4,
-    connectors: [C("Microsoft Graph", "Third-party")],
-    permissions: [{ name: "Files.Read.All", type: "Application" }, { name: "Sites.Read.All", type: "Application" }],
-    consentType: "AllPrincipals", desc: "Reads OneDrive and SharePoint content into an external workspace." },
-
-  // ── Azure AI Foundry ──────────────────────────────────────────────────────
-  { name: "Claims Summariser (Foundry)", platform: "azure_foundry", level: "high", owner: OWNERS.tom, age: 92, idle: 1,
-    connectors: [C("Azure AI Search", "Managed"), C("Azure Blob Storage", "Managed")], permissions: [],
-    consentType: "Principal", model: "gpt-4o", desc: "Foundry deployment summarising insurance claim packs." },
-  { name: "Product QA Assistant (Foundry)", platform: "azure_foundry", level: "medium", owner: OWNERS.lena, age: 71, idle: 5,
-    connectors: [C("Azure AI Search", "Managed")], permissions: [], consentType: "Principal",
-    model: "gpt-4o-mini", desc: "Answers product questions from the technical documentation index." },
-  { name: "Fraud Signal Classifier", platform: "azure_foundry", level: "critical", owner: OWNERS.gone1, age: 268, idle: 44,
-    connectors: [C("Azure SQL", "Managed"), C("Azure Blob Storage", "Managed")], permissions: [],
-    consentType: "Principal", model: "o1", desc: "Scores transactions against fraud heuristics. Owner has left." },
-
-  // ── Shadow AI via OAuth grant ─────────────────────────────────────────────
-  { name: "ChatGPT (work account grant)", platform: "oauth_app", level: "critical", owner: null, age: 154, idle: 1,
-    connectors: [C("Microsoft Graph", "Third-party")],
-    permissions: [{ name: "User.Read", type: "Delegated" }, { name: "Files.Read", type: "Delegated" }, { name: "offline_access", type: "Delegated" }],
-    consentType: "Principal", desc: "23 employees granted ChatGPT access to their work account. Nobody approved it." },
-  { name: "Perplexity (work account grant)", platform: "oauth_app", level: "high", owner: null, age: 88, idle: 2,
-    connectors: [C("Microsoft Graph", "Third-party")],
-    permissions: [{ name: "User.Read", type: "Delegated" }, { name: "offline_access", type: "Delegated" }],
-    consentType: "Principal", desc: "9 employees granted Perplexity access to their work identity." },
-
-  // ── Google ────────────────────────────────────────────────────────────────
-  { name: "Territory Planner (Vertex)", platform: "vertex_ai", level: "high", owner: OWNERS.marco, age: 121, idle: 3,
-    connectors: [C("BigQuery", "Managed"), C("Cloud Storage", "Managed")], permissions: [],
-    consentType: "Principal", model: "gemini-2.5-pro", desc: "Vertex reasoning engine allocating sales territories from BigQuery." },
+  // ── Vertex AI — reasoning engines and deployed agents ─────────────────────
+  { name: "Territory Planner", platform: "vertex_ai", level: "high", owner: OWNERS.marco, age: 121, idle: 3,
+    connectors: [C("BigQuery", "Managed"), C("Cloud Storage", "Managed")], permissions: [{ name: "bigquery.dataViewer", type: "IAM" }],
+    consentType: "Principal", model: "gemini-2.5-pro", desc: "Reasoning engine allocating sales territories from BigQuery closed-won data." },
   { name: "Support Deflection Agent", platform: "vertex_ai", level: "medium", owner: OWNERS.amara, age: 84, idle: 2,
     connectors: [C("Vertex AI Search", "Managed")], permissions: [], consentType: "Principal",
-    model: "gemini-2.5-flash", desc: "Answers tier-1 support questions from the help centre data store." },
-  { name: "Brand Voice Gem", platform: "gemini_gems", level: "low", owner: OWNERS.lena, age: 43, idle: 1,
-    connectors: [], permissions: [], consentType: "Principal",
-    desc: "Shared Gem enforcing tone-of-voice rules for marketing copy." },
-  { name: "RFP Answer Gem", platform: "gemini_gems", level: "medium", owner: OWNERS.sean, age: 59, idle: 8,
-    connectors: [C("Google Drive", "Managed")], permissions: [], consentType: "Principal",
-    desc: "Shared Gem drafting RFP responses from the bid library on Drive." },
-  { name: "Release Notes Chat Bot", platform: "google_chat", level: "medium", owner: OWNERS.dev, age: 167, idle: 14,
-    connectors: [C("Google Chat", "Managed")], permissions: [], consentType: "AllPrincipals",
-    desc: "Google Chat bot posting AI-written release notes to #engineering." },
-  { name: "Enterprise Knowledge Agent", platform: "gemini_enterprise", level: "high", owner: OWNERS.priya, age: 76, idle: 1,
-    connectors: [C("Google Drive", "Managed"), C("Confluence", "Third-party")], permissions: [],
-    consentType: "AllPrincipals", desc: "Gemini Enterprise agent indexing Drive and Confluence for company-wide search." },
-  { name: "Policy Lookup Agent", platform: "gemini_enterprise", level: "medium", owner: OWNERS.lena, age: 52, idle: 6,
-    connectors: [C("Google Drive", "Managed")], permissions: [], consentType: "Principal",
-    desc: "Gemini Enterprise agent over the HR and finance policy corpus." },
-
-  // ── More Google, to balance the estate ────────────────────────────────────
+    model: "gemini-2.5-flash", desc: "Answers tier-1 support questions from the help-centre data store." },
   { name: "Invoice Extraction Agent", platform: "vertex_ai", level: "high", owner: OWNERS.tom, age: 138, idle: 2,
     connectors: [C("Document AI", "Managed"), C("Cloud Functions: finance-api", "Function")],
-    permissions: [], consentType: "Principal", model: "gemini-2.5-pro",
-    desc: "Vertex agent pulling line items from supplier invoices; calls the finance API." },
-  { name: "Market Digest Gem", platform: "gemini_gems", level: "medium", owner: OWNERS.marco, age: 95, idle: 4,
+    permissions: [{ name: "cloudfunctions.invoker", type: "IAM" }], consentType: "Principal", model: "gemini-2.5-pro",
+    desc: "Pulls line items from supplier invoices and calls the finance API to reconcile them." },
+  { name: "Claims Triage Engine", platform: "vertex_ai", level: "critical", owner: OWNERS.gone1, age: 268, idle: 44,
+    connectors: [C("Cloud SQL", "Managed"), C("Cloud Storage", "Managed"), C("HTTP", "HTTP")],
+    permissions: [{ name: "cloudsql.client", type: "IAM" }, { name: "storage.objectAdmin", type: "IAM" }],
+    consentType: "AllPrincipals", model: "gemini-2.5-pro", desc: "Scores insurance claims against fraud heuristics. Owner has left the company." },
+  { name: "Contract Review Engine", platform: "vertex_ai", level: "critical", owner: null, age: 412, idle: 96,
+    connectors: [C("Google Drive", "Managed"), C("HTTP", "HTTP"), C("BigQuery", "Managed")],
+    permissions: [{ name: "drive.readonly", type: "OAuth" }, { name: "bigquery.dataEditor", type: "IAM" }],
+    consentType: "AllPrincipals", model: "gemini-2.5-pro", desc: "Reads master service agreements from the Legal shared drive and drafts redlines." },
+
+  // ── Gemini Enterprise (Agentspace) ────────────────────────────────────────
+  { name: "Enterprise Knowledge Agent", platform: "gemini_enterprise", level: "high", owner: OWNERS.priya, age: 76, idle: 1,
+    connectors: [C("Google Drive", "Managed"), C("Confluence", "Third-party")], permissions: [{ name: "discoveryengine.viewer", type: "IAM" }],
+    consentType: "AllPrincipals", desc: "Company-wide search agent indexing Drive and Confluence." },
+  { name: "Policy Lookup Agent", platform: "gemini_enterprise", level: "medium", owner: OWNERS.lena, age: 52, idle: 6,
     connectors: [C("Google Drive", "Managed")], permissions: [], consentType: "Principal",
-    desc: "Shared Gem summarising analyst reports into a weekly digest." },
+    desc: "Answers HR and finance policy questions from the policy corpus." },
   { name: "Onboarding FAQ Notebook", platform: "gemini_enterprise", level: "medium", owner: OWNERS.priya, age: 61, idle: 3,
     connectors: [C("Google Drive", "Managed")], permissions: [], consentType: "AllPrincipals",
     desc: "NotebookLM Enterprise notebook answering new-joiner questions from HR sources." },
-  { name: "Support Deflection Chat Bot", platform: "google_chat", level: "high", owner: null, age: 254, idle: 63,
-    connectors: [C("Google Chat", "Managed"), C("HTTP", "HTTP")],
-    permissions: [{ name: "chat.bot", type: "Application" }], consentType: "AllPrincipals",
-    desc: "Google Chat bot answering customer questions in a shared space. No current owner." },
+  { name: "Bid Library Agent", platform: "gemini_enterprise", level: "high", owner: OWNERS.gone2, age: 301, idle: null,
+    connectors: [C("Google Drive", "Managed"), C("HTTP", "HTTP")], permissions: [{ name: "discoveryengine.editor", type: "IAM" }],
+    consentType: "AllPrincipals", desc: "Indexes the historic bid library. Never used since creation, and the owner is disabled." },
 
-  // NOTE: OpenAI, Claude/Anthropic and AWS agents are deliberately absent.
-  // Agent Governance demos Microsoft and Google (incl. Gemini Enterprise) only.
-  // Their credential ids are left null in AG_DEMO_KEYS, which also removes
-  // their connection badges, scope chips and application-dropdown entries.
+  // ── Gemini Gems ───────────────────────────────────────────────────────────
+  { name: "Brand Voice Gem", platform: "gemini_gems", level: "low", owner: OWNERS.lena, age: 43, idle: 1,
+    connectors: [], permissions: [], consentType: "Principal", desc: "Shared Gem enforcing tone-of-voice rules for marketing copy." },
+  { name: "RFP Answer Gem", platform: "gemini_gems", level: "medium", owner: OWNERS.sean, age: 59, idle: 8,
+    connectors: [C("Google Drive", "Managed")], permissions: [], consentType: "Principal",
+    desc: "Drafts RFP responses from the bid library on shared Drive." },
+  { name: "Market Digest Gem", platform: "gemini_gems", level: "medium", owner: OWNERS.marco, age: 95, idle: 4,
+    connectors: [C("Google Drive", "Managed")], permissions: [], consentType: "Principal",
+    desc: "Summarises analyst reports into a weekly digest." },
+  { name: "Code Review Gem", platform: "gemini_gems", level: "high", owner: OWNERS.dev, age: 88, idle: 12,
+    connectors: [C("HTTP", "HTTP")], permissions: [], consentType: "AllPrincipals",
+    desc: "Shared across the domain; posts review comments to an external code host." },
+
+  // ── Google Chat bots ──────────────────────────────────────────────────────
+  { name: "Release Notes Chat Bot", platform: "google_chat", level: "medium", owner: OWNERS.dev, age: 167, idle: 14,
+    connectors: [C("Google Chat", "Managed")], permissions: [{ name: "chat.bot", type: "Application" }],
+    consentType: "AllPrincipals", desc: "Posts AI-written release notes to the engineering space." },
+  { name: "Support Deflection Chat Bot", platform: "google_chat", level: "high", owner: null, age: 254, idle: 63,
+    connectors: [C("Google Chat", "Managed"), C("HTTP", "HTTP")], permissions: [{ name: "chat.bot", type: "Application" }],
+    consentType: "AllPrincipals", desc: "Answers customer questions in a shared space. No current owner." },
+  { name: "IT Helpdesk Chat Bot", platform: "google_chat", level: "medium", owner: OWNERS.sean, age: 176, idle: 1,
+    connectors: [C("Google Chat", "Managed"), C("ServiceNow", "Third-party")], permissions: [{ name: "chat.bot", type: "Application" }],
+    consentType: "AllPrincipals", desc: "First-line IT support bot published to the whole domain." },
+
+  // ── Apps Script automations calling Gemini ────────────────────────────────
+  { name: "Expense Reconciler Script", platform: "apps_script", level: "high", owner: OWNERS.gone1, age: 289, idle: null,
+    connectors: [C("Gmail", "Managed"), C("Google Sheets", "Managed")], permissions: [{ name: "gmail.readonly", type: "OAuth" }],
+    consentType: "Principal", desc: "Bound script reconciling receipts against policy. The owner has left and it is still authorised." },
+  { name: "Timesheet Summariser Script", platform: "apps_script", level: "medium", owner: OWNERS.yuki, age: 118, idle: 5,
+    connectors: [C("Google Sheets", "Managed")], permissions: [{ name: "spreadsheets", type: "OAuth" }],
+    consentType: "Principal", desc: "Summarises weekly timesheets into a management sheet." },
+
+  // ── Standalone Gemini (gemini.google.com) ─────────────────────────────────
+  { name: "Gemini Advanced — Marketing", platform: "gemini", level: "medium", owner: OWNERS.lena, age: 132, idle: 1,
+    connectors: [], permissions: [], consentType: "Principal", desc: "Licensed standalone Gemini seat used heavily by the marketing team." },
+  { name: "Gemini Advanced — Engineering", platform: "gemini", level: "low", owner: OWNERS.dev, age: 141, idle: 2,
+    connectors: [], permissions: [], consentType: "Principal", desc: "Licensed standalone Gemini seat used by engineering." },
+
+  // ── Gemini inside Workspace apps ──────────────────────────────────────────
+  // These populate the Google Workspace view, which renders one card per app.
+  { name: "Gemini in Gmail — Sales", platform: "gemini_gmail", level: "high", owner: OWNERS.marco, age: 96, idle: 1,
+    connectors: [C("Gmail", "Managed")], permissions: [{ name: "gmail.compose", type: "OAuth" }], consentType: "Principal",
+    desc: "Drafts and summarises customer mail for the sales organisation." },
+  { name: "Gemini in Gmail — Support", platform: "gemini_gmail", level: "critical", owner: OWNERS.amara, age: 88, idle: 1,
+    connectors: [C("Gmail", "Managed")], permissions: [{ name: "gmail.modify", type: "OAuth" }], consentType: "AllPrincipals",
+    desc: "Summarises inbound support mail, including customer records." },
+  { name: "Gemini in Gmail — HR", platform: "gemini_gmail", level: "critical", owner: OWNERS.priya, age: 74, idle: 4,
+    connectors: [C("Gmail", "Managed")], permissions: [{ name: "gmail.readonly", type: "OAuth" }], consentType: "Principal",
+    desc: "Drafts candidate and employee correspondence." },
+  { name: "Gemini in Docs — Legal", platform: "gemini_docs", level: "critical", owner: OWNERS.lena, age: 112, idle: 2,
+    connectors: [C("Google Docs", "Managed"), C("Google Drive", "Managed")], permissions: [{ name: "documents", type: "OAuth" }],
+    consentType: "Principal", desc: "Drafts and rewrites contract language in the Legal shared drive." },
+  { name: "Gemini in Docs — Product", platform: "gemini_docs", level: "medium", owner: OWNERS.yuki, age: 67, idle: 3,
+    connectors: [C("Google Docs", "Managed")], permissions: [{ name: "documents", type: "OAuth" }], consentType: "Principal",
+    desc: "Drafts product requirement documents." },
+  { name: "Gemini in Docs — Engineering", platform: "gemini_docs", level: "low", owner: OWNERS.dev, age: 55, idle: 9,
+    connectors: [C("Google Docs", "Managed")], permissions: [], consentType: "Principal",
+    desc: "Drafts design documents and runbooks." },
+  { name: "Gemini in Sheets — Finance", platform: "gemini_sheets", level: "critical", owner: OWNERS.tom, age: 104, idle: 2,
+    connectors: [C("Google Sheets", "Managed"), C("BigQuery", "Managed")], permissions: [{ name: "spreadsheets", type: "OAuth" }],
+    consentType: "Principal", desc: "Builds formulas and summaries over payroll and revenue sheets." },
+  { name: "Gemini in Sheets — Ops", platform: "gemini_sheets", level: "medium", owner: OWNERS.lena, age: 71, idle: 6,
+    connectors: [C("Google Sheets", "Managed")], permissions: [{ name: "spreadsheets", type: "OAuth" }], consentType: "Principal",
+    desc: "Generates operational rota and stock summaries." },
+  { name: "Gemini in Slides — Marketing", platform: "gemini_slides", level: "low", owner: OWNERS.lena, age: 49, idle: 7,
+    connectors: [C("Google Slides", "Managed")], permissions: [], consentType: "Principal",
+    desc: "Generates deck imagery and speaker notes." },
+  { name: "Gemini in Meet — Sales", platform: "gemini_meet", level: "high", owner: OWNERS.marco, age: 83, idle: 1,
+    connectors: [C("Google Meet", "Managed"), C("Google Drive", "Managed")], permissions: [{ name: "meetings.space.readonly", type: "OAuth" }],
+    consentType: "AllPrincipals", desc: "Takes notes on customer calls; transcripts land in Drive." },
+  { name: "Gemini in Meet — All hands", platform: "gemini_meet", level: "medium", owner: OWNERS.yuki, age: 60, idle: 11,
+    connectors: [C("Google Meet", "Managed")], permissions: [], consentType: "AllPrincipals",
+    desc: "Records and summarises company-wide meetings." },
+  { name: "Gemini in Drive — Engineering", platform: "gemini_drive", level: "high", owner: OWNERS.dev, age: 156, idle: 9,
+    connectors: [C("Google Drive", "Managed")], permissions: [{ name: "drive", type: "OAuth" }], consentType: "AllPrincipals",
+    desc: "Summarises and searches across the engineering shared drive." },
+  { name: "Gemini in Drive — Exec", platform: "gemini_drive", level: "critical", owner: null, age: 366, idle: 71,
+    connectors: [C("Google Drive", "Managed")], permissions: [{ name: "drive", type: "OAuth" }], consentType: "AllPrincipals",
+    desc: "Broad access across the executive shared drive. No current owner." },
+
+  // NOTE: no Microsoft, OpenAI, Claude or AWS agents. Agent Governance demos a
+  // Google Workspace estate only. The null credential ids in AG_DEMO_KEYS also
+  // hide those vendors' badges, scope chips and dropdown entries.
 ];
+
 
 const RISK_SCORE_BY_LEVEL = { critical: 90, high: 72, medium: 45, low: 18 };
 
@@ -452,15 +514,23 @@ function buildAgent(spec, i) {
     };
   });
 
+  const isGoogle = vendor === "Google";
+  // Google resources are path-addressed; Microsoft ones are GUIDs. Both are
+  // registered as fabricated so a write against them can never leave the
+  // browser — see FABRICATED_IDS.
+  const agentId = fab(isGoogle ? googleResourceId(spec.platform, spec.name) : guid("agent:" + spec.name));
+  const appId = fab(isGoogle ? agentId : guid("app:" + spec.name));
+
   return {
-    id: `demo-${spec.platform}-${i}`,
-    appId: `demo-app-${i}`,
+    id: agentId,
+    appId,
+    botId: spec.platform === "copilot_studio" ? appId : undefined,
     name: spec.name,
     description: spec.desc,
     vendor,
     category: "generative-ai",
     platform: spec.platform,
-    discoverySource: "demo_dataset",
+    discoverySource: DISCOVERY_SOURCE[spec.platform] || "graph_beta",
     firstSeen,
     createdDateTime: firstSeen,
     createdOn: firstSeen,
@@ -473,7 +543,7 @@ function buildAgent(spec, i) {
     consentType: spec.consentType,
     connectors: spec.connectors || [],
     permissions: spec.permissions || [],
-    environmentName: spec.platform === "copilot_studio" ? "Northwind (default)" : undefined,
+    environmentName: spec.platform === "copilot_studio" ? "Halcyon (default)" : undefined,
     lifecycleStatus: spec.idle === null || spec.idle > 60 ? "stale" : "active",
     approvalStatus: orphaned ? "pending" : "approved",
     risk: {
@@ -507,10 +577,10 @@ const CHATTY_AGENTS = AG_DEMO_AGENTS.filter(
 export function agDemoDiscoveryResult() {
   return {
     tenant: {
-      id: "demo-tenant",
-      name: "Northwind Traders",
-      domain: "northwind.onmicrosoft.com",
-      license: "Microsoft 365 E5 + Copilot",
+      id: guid("tenant"),
+      name: "Halcyon Group",
+      domain: GCP_ORG,
+      license: "Google Workspace Enterprise Plus + Gemini",
     },
     agents: AG_DEMO_AGENTS,
     totalServicePrincipals: 412,
@@ -519,8 +589,8 @@ export function agDemoDiscoveryResult() {
     scanTimestamp: hoursAgo(1),
     scanDuration: 42718,
     warnings: [
-      "Microsoft 365 Copilot agent discovery uses a preview endpoint — coverage may vary by tenant.",
-      "Sign-in history for 6 agents was unavailable at the current Entra ID licence level.",
+      "Gemini Enterprise agent discovery uses a preview Discovery Engine endpoint — coverage may vary by project.",
+      "Admin SDK activity reporting lags by up to 48 hours, so today's usage may be understated.",
     ],
   };
 }
@@ -531,79 +601,76 @@ export function agDemoDiscoveryResult() {
 // AI Safety sub-tab lights up with PII / financial / secret findings.
 
 const CONVERSATION_SEEDS = [
-  { agent: "Customer Refund Triage", user: OWNERS.amara, source: "audit_log", turns: [
-    ["Refund request from account CF-CUST-4471GK — customer says the annual plan was double charged on card 4539 1488 0343 6467. Can we refund it?",
-     "I can see two charges of $4,800 on that account for the same period. Policy 4.2 allows a full refund within 30 days. I've drafted the refund note and the customer email for your approval."],
-    ["Also confirm the billing contact — their SSN on file is 402-55-1189, is that the right record?",
-     "I don't need identity numbers to look that up. Matching on the account id alone, the billing contact is the same as the primary admin."],
+  { agent: "Gemini in Gmail — Support", user: OWNERS.amara, source: "audit_log", turns: [
+    ["Refund request on account HG-CUST-4471GK — the customer says the annual plan was double charged on card 4539 1488 0343 6467. Draft the reply.",
+     "Two charges of $4,800 landed for the same period. Policy 4.2 allows a full refund inside 30 days, so I have drafted the refund note and the customer email for your approval."],
+    ["Also confirm the billing contact — their national ID on file is 402-55-1189, is that the right record?",
+     "I do not need an identity number to look that up. Matching on the account id alone, the billing contact is the same person as the primary admin."],
   ]},
-  { agent: "Payroll Query Handler", user: OWNERS.priya, source: "audit_log", turns: [
-    ["Employee asked why their March payslip differs. Their national insurance number is JT 60 21 44 C and the payroll id is 88213.",
-     "The March run applied a backdated tax-code change from HMRC. Gross was unchanged; net fell by £212.40 because of the code switch from 1257L to 1103L."],
+  { agent: "Gemini in Sheets — Finance", user: OWNERS.tom, source: "audit_log", turns: [
+    ["Summarise the March payroll sheet by cost centre and flag anything that moved more than 10% month on month.",
+     "Three cost centres moved more than 10%. Engineering is up 14% from two new starters, Support is down 11% from an unfilled role, and Facilities is up 22% because an annual invoice posted in March rather than April."],
   ]},
-  { agent: "Contract Review Assistant", user: OWNERS.lena, source: "graph_copilot", turns: [
-    ["Summarise the liability cap in the Acme master agreement and flag anything unusual.",
-     "The cap is 12 months of fees, but clause 14.3 carves out data-breach liability entirely — that is unusual and materially worse than your standard position."],
-    ["Draft a redline that puts the breach liability back under the cap.",
-     "Drafted. I've inserted a proviso in 14.3 subjecting breach liability to the general cap, with a 2x multiplier fallback."],
+  { agent: "Gemini in Docs — Legal", user: OWNERS.lena, source: "graph_copilot", turns: [
+    ["Summarise the liability cap in the Meridian master agreement and flag anything unusual.",
+     "The cap is 12 months of fees, but clause 14.3 carves out data-breach liability entirely. That is unusual and materially worse than your standard position."],
+    ["Draft a redline that puts breach liability back under the cap.",
+     "Drafted. I have inserted a proviso in 14.3 subjecting breach liability to the general cap, with a 2x multiplier as a fallback position."],
   ]},
-  { agent: "IT Helpdesk Copilot", user: OWNERS.sean, source: "teams_chat", turns: [
-    ["I need to rotate the staging API token. Current one is sk-proj-8Qd2mF7xKpLvR3nTzYwB4jHc for reference.",
-     "Please don't paste live keys into chat — that value is now in this conversation's history. Rotate it in the portal and I'll walk you through updating the pipeline secret."],
-    ["Fair. How do I update the pipeline secret?",
-     "Project settings → Secrets → staging_openai_key → Update. The next build picks it up automatically; no redeploy needed."],
+  { agent: "IT Helpdesk Chat Bot", user: OWNERS.sean, source: "teams_chat", turns: [
+    ["I need to rotate the staging API token. The current one is AIzaSyD8Qd2mF7xKpLvR3nTzYwB4jHcK1pQ2s for reference.",
+     "Please do not paste live keys into chat — that value is now in this conversation's history. Rotate it in the Cloud console and I will walk you through updating the Secret Manager entry."],
+    ["Fair. How do I update the secret?",
+     "Secret Manager, add a new version to staging-gemini-key, then redeploy the service so it picks up the latest version. No code change needed."],
   ]},
-  { agent: "Benefits Explainer", user: OWNERS.yuki, source: "audit_log", turns: [
-    ["An employee is asking whether their pre-existing cardiac condition is covered under the new plan and whether their diabetes medication is on the formulary.",
+  { agent: "Gemini in Gmail — HR", user: OWNERS.priya, source: "audit_log", turns: [
+    ["An employee is asking whether their pre-existing cardiac condition is covered under the new plan, and whether their diabetes medication is on the formulary.",
      "Both are covered from day one under the 2026 plan — there is no pre-existing exclusion. The specific medication is tier 2, so a £12 copay applies."],
   ]},
-  { agent: "Field Service Dispatcher", user: OWNERS.tom, source: "audit_log", turns: [
-    ["Who is nearest to work order WO-88213 and what is the SLA?",
-     "Marcus is 14 minutes away and free from 14:30. The SLA on that order expires at 17:00 today, so it fits."],
-  ]},
-  { agent: "Sales Playbook Agent", user: OWNERS.marco, source: "graph_copilot", turns: [
-    ["What's our standard discount ladder for a three-year commit above £250k?",
-     "The playbook allows 18% at three years above £250k, rising to 22% with quarterly prepayment. Anything beyond that needs the VP Sales on the approval."],
-  ]},
-  { agent: "Onboarding Buddy", user: OWNERS.dev, source: "teams_chat", turns: [
-    ["New joiner wants to know how to get a laptop and what the VPN setup is.",
-     "Hardware comes from the IT request form on day one, and the VPN client is pushed automatically once the device enrols. I've linked both guides."],
-  ]},
-  { agent: "Engineering Runbook Agent", user: OWNERS.dev, source: "graph_copilot", turns: [
-    ["Give me the failover steps for the primary database.",
-     "Promote the standby with the documented sequence, update the connection string in the secret store, then run the health check. Full runbook is in the engineering library — step 4 needs a DBA present."],
-  ]},
-  { agent: "My Deal Desk Helper", user: OWNERS.marco, source: "audit_log", turns: [
-    ["Summarise my open opportunities over £100k and where each one is stuck.",
-     "Four opportunities. Two are waiting on security review, one on legal redlines, one on a customer budget cycle that reopens in April."],
-  ]},
-
-  // ── Google-side conversations ─────────────────────────────────────────────
-  // These are what the User Activity tab shows when the application dropdown
-  // is switched to a Google platform, and what buildGoogleActivity() selects.
-  { agent: "Territory Planner (Vertex)", user: OWNERS.marco, source: "audit_log", turns: [
+  { agent: "Territory Planner", user: OWNERS.marco, source: "audit_log", turns: [
     ["Rebalance the EMEA territories for next quarter using the closed-won data.",
      "Rebalanced across six reps. Two territories were more than 30% above the median account load, so I moved 14 accounts and flagged the two that carry a named strategic customer for you to confirm."],
   ]},
   { agent: "Support Deflection Agent", user: OWNERS.amara, source: "audit_log", turns: [
-    ["Customer on account CF-CUST-4471GK is asking why their export failed. Their contact number is +1 415 555 0182.",
-     "The export failed on a permissions error, not a data error — the destination folder lost its service-account grant on Tuesday. I've drafted the reply with the re-grant steps. You don't need to share their phone number with me for this."],
+    ["Customer on HG-CUST-9042LP asks why their export failed. Their contact number is +1 415 555 0182.",
+     "The export failed on a permissions error rather than a data error — the destination folder lost its service-account grant on Tuesday. I have drafted the reply with the re-grant steps. You did not need to share their phone number for this."],
   ]},
   { agent: "Enterprise Knowledge Agent", user: OWNERS.priya, source: "graph_copilot", turns: [
     ["What is our parental leave entitlement in Germany, and where is it documented?",
-     "Fourteen weeks at full pay, plus the statutory Elternzeit. Source is the DE addendum to the employee handbook on Drive, last revised in January."],
+     "Fourteen weeks at full pay plus the statutory Elternzeit. The source is the DE addendum to the employee handbook on shared Drive, last revised in January."],
     ["Does that differ for someone on a fixed-term contract?",
      "The entitlement is the same; only the notice window differs. The addendum covers it in section 4.2."],
   ]},
   { agent: "Invoice Extraction Agent", user: OWNERS.tom, source: "audit_log", turns: [
-    ["Pull the line items off the Meridian invoice batch and check them against the PO.",
-     "Eleven of twelve match. Invoice 0412-7 bills 14 licences against a PO for 12 — a £1,340 overage. I've flagged it rather than passing it through."],
+    ["Pull the line items off the Meridian invoice batch and check them against the purchase order.",
+     "Eleven of twelve match. Invoice 0412-7 bills 14 licences against a PO for 12 — a £1,340 overage. I have flagged it rather than passing it through."],
+  ]},
+  { agent: "Gemini in Meet — Sales", user: OWNERS.marco, source: "audit_log", turns: [
+    ["Summarise the call with the Meridian buying committee and list the actions.",
+     "Four actions. Security review pack to their CISO by Friday, revised pricing at three years, a reference call with a similar customer, and a follow-up once their budget cycle reopens in April."],
   ]},
   { agent: "Release Notes Chat Bot", user: OWNERS.dev, source: "teams_chat", turns: [
     ["Post the release notes for 4.18 to the engineering space.",
-     "Posted. I summarised 23 merged PRs into six user-facing changes and listed the two breaking API changes separately at the top."],
+     "Posted. I summarised 23 merged changes into six user-facing items and listed the two breaking API changes separately at the top."],
+  ]},
+  { agent: "Gemini in Drive — Exec", user: OWNERS.lena, source: "graph_copilot", turns: [
+    ["Find the board pack from last quarter and summarise the revenue section.",
+     "Found it in the executive shared drive. Revenue closed 4% above plan, driven by renewals; new business was 9% under plan and the deck attributes that to a longer security-review cycle."],
+  ]},
+  { agent: "RFP Answer Gem", user: OWNERS.sean, source: "audit_log", turns: [
+    ["Draft the security section of the Meridian RFP response from the bid library.",
+     "Drafted from the three most recent responses. Two answers are stale — the SOC 2 report date and the sub-processor list — so I have marked those for you to refresh rather than reusing them."],
+  ]},
+  { agent: "Expense Reconciler Script", user: OWNERS.yuki, source: "audit_log", turns: [
+    ["Why did the reconciler flag my March expenses?",
+     "Two receipts exceeded the per-meal cap and one had no attached receipt at all. The script flagged rather than rejected them, so they are waiting on your manager."],
+  ]},
+  { agent: "Code Review Gem", user: OWNERS.dev, source: "teams_chat", turns: [
+    ["Review the pending change to the auth middleware.",
+     "One substantive finding: the new branch skips the token-expiry check when a refresh header is present, which would accept an expired token. The rest is style."],
   ]},
 ];
+
 
 function buildChats() {
   return CONVERSATION_SEEDS.map((seed, i) => {
@@ -612,14 +679,14 @@ function buildChats() {
     const messages = [];
     seed.turns.forEach((pair, t) => {
       messages.push({
-        id: `demo-msg-${i}-${t}-u`,
+        id: `msg_${i}-${t}-u`,
         from: "user",
         fromName: seed.user.displayName,
         timestamp: iso(start + t * 240000),
         text: pair[0],
       });
       messages.push({
-        id: `demo-msg-${i}-${t}-b`,
+        id: `msg_${i}-${t}-b`,
         from: "bot",
         fromName: seed.agent,
         timestamp: iso(start + t * 240000 + 45000),
@@ -627,7 +694,7 @@ function buildChats() {
       });
     });
     return {
-      id: `demo-chat-${i}`,
+      id: `cnv_${i}`,
       userName: seed.user.displayName,
       userEmail: seed.user.userPrincipalName,
       userId: seed.user.userPrincipalName,
@@ -647,36 +714,31 @@ const AG_DEMO_CHATS = buildChats();
 // ── file activity (User Activity → File Activity) ───────────────────────────
 
 const FILE_SEEDS = [
-  ["Acme_MSA_2026_redline.docx", "/sites/legal/Shared Documents/Contracts", OWNERS.lena, "FileAccessed", "SharePoint", ["Contract Review Assistant"]],
-  ["Q1_payroll_export.xlsx", "/sites/hr/Shared Documents/Payroll", OWNERS.priya, "FileDownloaded", "SharePoint", ["Payroll Query Handler"]],
-  ["customer_refunds_march.csv", "/personal/amara_okafor/Documents", OWNERS.amara, "FileUploaded", "OneDrive", ["Customer Refund Triage"]],
-  ["benefits_formulary_2026.pdf", "/sites/hr/Shared Documents/Benefits", OWNERS.yuki, "FilePreviewed", "SharePoint", ["Benefits Explainer"]],
-  ["field_service_rota.xlsx", "/sites/operations/Shared Documents", OWNERS.tom, "FileModified", "SharePoint", ["Field Service Dispatcher"]],
-  ["sales_playbook_v9.pptx", "/sites/sales/Shared Documents/Playbook", OWNERS.marco, "FileAccessed", "SharePoint", ["Sales Playbook Agent"]],
-  ["db_failover_runbook.md", "/sites/engineering/Shared Documents/Runbooks", OWNERS.dev, "FileAccessed", "SharePoint", ["Engineering Runbook Agent"]],
-  ["supplier_bank_details.xlsx", "/sites/finance/Shared Documents", OWNERS.lena, "FileDownloaded", "SharePoint", ["Vendor Intake Bot"]],
-  // No related agent — a person moved this, not an agent. The empty array is
-  // meaningful: FileRow renders "—", which is what most file activity looks
-  // like. Do NOT name an agent here that is not in AGENT_SPECS; verify.mjs
-  // fails the build-time check if a relatedAgents entry has no matching agent.
-  ["pen_test_findings_q1.pdf", "/personal/sean_whitaker/Documents", OWNERS.sean, "FileUploaded", "OneDrive", []],
-  ["onboarding_checklist.docx", "/sites/hr/Shared Documents/Onboarding", OWNERS.priya, "FileAccessed", "SharePoint", ["Onboarding Buddy"]],
-  ["invoice_batch_0412.pdf", "/sites/finance/Shared Documents/AP", OWNERS.tom, "FileUploaded", "SharePoint", []],
-  ["churn_features_v3.parquet", "/personal/amara_okafor/Documents/ml", OWNERS.amara, "FileAccessed", "OneDrive", []],
-  ["board_pack_march.pptx", "/sites/exec/Shared Documents", OWNERS.lena, "FilePreviewed", "SharePoint", []],
-  ["release_notes_draft.md", "/sites/engineering/Shared Documents", OWNERS.dev, "FileModified", "SharePoint", ["Release Notes Chat Bot"]],
-  // ── Google-side file activity (Drive) ─────────────────────────────────────
-  ["emea_territories_q2.xlsx", "/Drive/Sales/Territories", OWNERS.marco, "FileModified", "Drive", ["Territory Planner (Vertex)"]],
+  ["Meridian_MSA_2026_redline.gdoc", "/Drive/Legal/Contracts", OWNERS.lena, "FileModified", "Drive", ["Gemini in Docs — Legal", "Contract Review Engine"]],
+  ["Q1_payroll_export.gsheet", "/Drive/Finance/Payroll", OWNERS.tom, "FileDownloaded", "Drive", ["Gemini in Sheets — Finance"]],
+  ["customer_refunds_march.csv", "/Drive/Support/Billing", OWNERS.amara, "FileUploaded", "Drive", ["Gemini in Gmail — Support"]],
+  ["benefits_formulary_2026.pdf", "/Drive/HR/Benefits", OWNERS.priya, "FilePreviewed", "Drive", ["Gemini in Gmail — HR", "Onboarding FAQ Notebook"]],
+  ["emea_territories_q2.gsheet", "/Drive/Sales/Territories", OWNERS.marco, "FileModified", "Drive", ["Territory Planner"]],
+  ["sales_playbook_v9.gslides", "/Drive/Sales/Playbook", OWNERS.marco, "FileAccessed", "Drive", ["Gemini in Slides — Marketing"]],
+  ["db_failover_runbook.gdoc", "/Drive/Engineering/Runbooks", OWNERS.dev, "FileAccessed", "Drive", ["Gemini in Docs — Engineering", "Gemini in Drive — Engineering"]],
+  ["supplier_bank_details.gsheet", "/Drive/Finance/AP", OWNERS.lena, "FileDownloaded", "Drive", ["Gemini in Sheets — Ops"]],
+  ["pen_test_findings_q1.pdf", "/Drive/Security/Reports", OWNERS.sean, "FileUploaded", "Drive", []],
+  ["meridian_invoice_batch.pdf", "/Drive/Finance/AP", OWNERS.tom, "FileUploaded", "Drive", ["Invoice Extraction Agent"]],
   ["help_centre_export.csv", "/Drive/Support/Knowledge", OWNERS.amara, "FileDownloaded", "Drive", ["Support Deflection Agent"]],
   ["de_handbook_addendum.pdf", "/Drive/HR/Handbook", OWNERS.priya, "FilePreviewed", "Drive", ["Enterprise Knowledge Agent", "Policy Lookup Agent"]],
-  ["meridian_invoice_batch.pdf", "/Drive/Finance/AP", OWNERS.tom, "FileUploaded", "Drive", ["Invoice Extraction Agent"]],
-  ["bid_library_index.gsheet", "/Drive/Sales/Bids", OWNERS.sean, "FileAccessed", "Drive", ["RFP Answer Gem"]],
+  ["bid_library_index.gsheet", "/Drive/Sales/Bids", OWNERS.sean, "FileAccessed", "Drive", ["RFP Answer Gem", "Bid Library Agent"]],
+  ["board_pack_q1.gslides", "/Drive/Executive/Board", OWNERS.lena, "FilePreviewed", "Drive", ["Gemini in Drive — Exec"]],
+  ["all_hands_transcript.gdoc", "/Drive/Company/Meetings", OWNERS.yuki, "FileUploaded", "Drive", ["Gemini in Meet — All hands"]],
+  ["claims_features_q1.csv", "/Drive/Data/Claims", OWNERS.amara, "FileAccessed", "Drive", ["Claims Triage Engine"]],
+  ["release_notes_draft.gdoc", "/Drive/Engineering/Releases", OWNERS.dev, "FileModified", "Drive", ["Release Notes Chat Bot"]],
+  ["timesheets_wk12.gsheet", "/Drive/Operations/Timesheets", OWNERS.yuki, "FileModified", "Drive", ["Timesheet Summariser Script"]],
 ];
+
 
 const AG_DEMO_FILES = FILE_SEEDS.map(([fileName, filePath, user, operation, workload, relatedAgents], i) => {
   const rand = rngFor(fileName);
   return {
-    id: `demo-file-${i}`,
+    id: `evt_${i}`,
     fileName,
     filePath,
     userName: user.displayName,
@@ -684,7 +746,7 @@ const AG_DEMO_FILES = FILE_SEEDS.map(([fileName, filePath, user, operation, work
     operation,
     workload,
     relatedAgents,
-    siteUrl: `https://northwind.sharepoint.com${filePath.split("/Shared Documents")[0]}`,
+    siteUrl: `https://halcyongroup.sharepoint.com${filePath.split("/Shared Documents")[0]}`,
     timestamp: iso(NOW - between(rand, 1, 220) * 3600000),
   };
 });
@@ -692,42 +754,11 @@ const AG_DEMO_FILES = FILE_SEEDS.map(([fileName, filePath, user, operation, work
 // ── knowledge sources (User Activity → Knowledge & Files) ───────────────────
 
 const KNOWLEDGE_SEEDS = {
-  "Contract Review Assistant": [
-    { name: "Legal — Contracts library", type: "sharepoint", url: "https://northwind.sharepoint.com/sites/legal/Shared Documents/Contracts", metadata: { files: 1284, indexed: "yes" } },
+  "Contract Review Engine": [
+    { name: "Legal — Contracts (shared Drive)", type: "connector", url: "https://drive.google.com/drive/folders/legal-contracts", metadata: { auth: "Service account", scope: "read", files: 1284 } },
     { name: "Standard clause bank", type: "knowledge_article", metadata: { articles: 96 } },
-    { name: "contract_terms", type: "dataverse_table", metadata: { rows: 4120 } },
+    { name: "BigQuery — contract_terms", type: "azure_storage", metadata: { rows: 4120, dataset: "legal_analytics" } },
   ],
-  "Customer Refund Triage": [
-    { name: "Refund policy 4.2", type: "sharepoint", url: "https://northwind.sharepoint.com/sites/finance/Shared Documents/Policies", metadata: { files: 34 } },
-    { name: "account", type: "dataverse_table", metadata: { rows: 18422 } },
-    { name: "incident", type: "dataverse_table", metadata: { rows: 96110 } },
-  ],
-  "Payroll Query Handler": [
-    { name: "payroll_records (SQL)", type: "azure_storage", metadata: { rows: "≈12,400", classification: "confidential" } },
-    { name: "HR handbook", type: "sharepoint", url: "https://northwind.sharepoint.com/sites/hr/Shared Documents", metadata: { files: 212 } },
-  ],
-  "Benefits Explainer": [
-    { name: "Benefits 2026 library", type: "sharepoint", url: "https://northwind.sharepoint.com/sites/hr/Shared Documents/Benefits", metadata: { files: 78 } },
-    { name: "provider-formulary.example.com", type: "website", url: "https://provider-formulary.example.com", metadata: { crawled: "weekly" } },
-  ],
-  "Engineering Runbook Agent": [
-    { name: "Engineering — Runbooks", type: "sharepoint", url: "https://northwind.sharepoint.com/sites/engineering/Shared Documents/Runbooks", metadata: { files: 341 } },
-    { name: "runbook-archive (blob)", type: "azure_storage", metadata: { container: "runbooks", files: 1902 } },
-  ],
-  "Sales Playbook Agent": [
-    { name: "Sales — Playbook", type: "sharepoint", url: "https://northwind.sharepoint.com/sites/sales/Shared Documents/Playbook", metadata: { files: 156 } },
-  ],
-  "Onboarding Buddy": [
-    { name: "HR — Onboarding", type: "sharepoint", url: "https://northwind.sharepoint.com/sites/hr/Shared Documents/Onboarding", metadata: { files: 64 } },
-    { name: "IT setup guides", type: "knowledge_article", metadata: { articles: 41 } },
-  ],
-  "Field Service Dispatcher": [
-    { name: "msdyn_workorder", type: "dataverse_table", metadata: { rows: 22841 } },
-    { name: "dispatch-api.northwind.example", type: "connector", metadata: { auth: "Entra ID", scope: "read/write" } },
-  ],
-  // ── Google-side knowledge ─────────────────────────────────────────────────
-  // Only the source types KnowledgeSourceCard knows are used, so every card
-  // renders with an icon and label rather than falling back to "Other".
   "Enterprise Knowledge Agent": [
     { name: "Google Drive — company-wide", type: "connector", metadata: { auth: "Service account", scope: "read", files: 41208 } },
     { name: "Confluence (external)", type: "connector", metadata: { auth: "API token", scope: "read", spaces: 18 } },
@@ -736,55 +767,98 @@ const KNOWLEDGE_SEEDS = {
   "Policy Lookup Agent": [
     { name: "Drive — HR & Finance policies", type: "connector", metadata: { auth: "Service account", scope: "read", files: 486 } },
   ],
-  "Territory Planner (Vertex)": [
+  "Territory Planner": [
     { name: "BigQuery — closed_won_opportunities", type: "azure_storage", metadata: { rows: "≈184,000", dataset: "sales_analytics" } },
-    { name: "Cloud Storage — territory-exports", type: "azure_storage", metadata: { bucket: "nw-territory", files: 240 } },
+    { name: "Cloud Storage — territory-exports", type: "azure_storage", metadata: { bucket: "hg-territory", files: 240 } },
   ],
   "Support Deflection Agent": [
     { name: "help-centre-articles (data store)", type: "knowledge_article", metadata: { articles: 1043 } },
-    { name: "support.northwind.example", type: "website", url: "https://support.northwind.example", metadata: { crawled: "daily" } },
+    { name: "support.halcyongroup.com", type: "website", url: "https://support.halcyongroup.com", metadata: { crawled: "daily" } },
   ],
   "Invoice Extraction Agent": [
     { name: "Document AI — invoice parser", type: "connector", metadata: { processor: "invoice-parser-v2" } },
     { name: "Drive — Finance/AP", type: "connector", metadata: { auth: "Service account", scope: "read", files: 2914 } },
   ],
+  "Claims Triage Engine": [
+    { name: "Cloud SQL — claims", type: "azure_storage", metadata: { rows: "≈96,000", classification: "confidential" } },
+    { name: "Cloud Storage — claim-packs", type: "azure_storage", metadata: { bucket: "hg-claims", files: 18420 } },
+  ],
+  "Onboarding FAQ Notebook": [
+    { name: "Drive — HR/Onboarding", type: "connector", metadata: { auth: "User OAuth", scope: "read", files: 64 } },
+    { name: "IT setup guides", type: "knowledge_article", metadata: { articles: 41 } },
+  ],
+  "Bid Library Agent": [
+    { name: "Drive — bid library", type: "connector", metadata: { auth: "Service account", scope: "read", files: 176 } },
+  ],
   "RFP Answer Gem": [
     { name: "Drive — bid library", type: "connector", metadata: { auth: "User OAuth", scope: "read", files: 176 } },
   ],
+  "Gemini in Drive — Exec": [
+    { name: "Drive — Executive (shared drive)", type: "connector", metadata: { auth: "User OAuth", scope: "read/write", files: 3820, classification: "restricted" } },
+  ],
+  "Gemini in Sheets — Finance": [
+    { name: "Drive — Finance", type: "connector", metadata: { auth: "User OAuth", scope: "read/write", files: 2914 } },
+    { name: "BigQuery — revenue", type: "azure_storage", metadata: { rows: "≈2.1M", dataset: "finance" } },
+  ],
 };
+
 
 const AG_DEMO_KNOWLEDGE_BOTS = Object.entries(KNOWLEDGE_SEEDS).map(([botName, sources]) => {
   const agent = AG_DEMO_AGENTS.find((a) => a.name === botName);
   return {
-    botId: agent ? agent.id : `demo-bot-${botName}`,
+    botId: agent ? agent.id : `bot_${botName}`,
     botName,
     schemaName: botName.replace(/\s+/g, "_").toLowerCase(),
     sources: sources.map((s, i) => ({ id: `${botName}-src-${i}`, addedOn: daysAgo(30 + i * 11), ...s })),
   };
 });
 
-// ── Azure OpenAI cost + usage (Cost tab) ────────────────────────────────────
-
-const DEPLOYMENT_SEEDS = [
-  ["claims-summariser", "gpt-4o", "northwind-ai-prod", 18_420_000, 4_210_000, 2.5, 10.0, 24_180],
-  ["product-qa", "gpt-4o-mini", "northwind-ai-prod", 41_900_000, 9_640_000, 0.15, 0.6, 61_402],
-  ["fraud-signal", "o1", "northwind-ai-sec", 2_140_000, 1_080_000, 15.0, 60.0, 3_118],
-  ["invoice-extract", "gpt-4o", "northwind-ai-fin", 7_860_000, 1_940_000, 2.5, 10.0, 11_204],
-  ["embeddings-index", "text-embedding-3-large", "northwind-ai-prod", 88_200_000, 0, 0.13, 0.0, 142_800],
-  ["legacy-support", "gpt-35-turbo", "northwind-ai-dev", 5_120_000, 1_460_000, 0.5, 1.5, 9_640],
+// ── Google / Vertex AI cost (Cost tab) ──────────────────────────────────────
+//
+// Shape verified against the GET /cost/google handler in
+// server/src/governance/routes/cost.ts. CostTab reads costData.endpoints and
+// costData.summary, and its free-tier maths keys off ep.modelName containing
+// "flash", so the model names here matter as much as the numbers.
+//
+// CostTab now takes this path rather than the Azure one, because it picks its
+// vendor from the first credential present and the Microsoft key is null.
+const ENDPOINT_SEEDS = [
+  ["territory-planner",     "gemini-2.5-pro",        18_420_000,  4_210_000,  1.25,  10.0,  24_180],
+  ["support-deflection",    "gemini-2.5-flash",      41_900_000,  9_640_000,  0.30,   2.50, 61_402],
+  ["invoice-extraction",    "gemini-2.5-pro",         7_860_000,  1_940_000,  1.25,  10.0,  11_204],
+  ["claims-triage",         "gemini-2.5-pro",         2_140_000,  1_080_000,  1.25,  10.0,   3_118],
+  ["knowledge-embeddings",  "text-embedding-004",    88_200_000,          0,  0.025,  0.0, 142_800],
+  ["contract-review",       "gemini-2.5-flash-lite",  5_120_000,  1_460_000,  0.10,   0.40,  9_640],
 ];
 
-function buildAzureCost(periodDays) {
+// TWO WIRE FORMATS, and getting this wrong makes the period picker look broken
+// rather than throw: the Azure endpoint takes an ISO-8601 duration ("P30D"),
+// but fetchGoogleCost sends a BARE DAY COUNT ("30"). Parsing only the first
+// form silently defaulted every window to 7 days, so switching 7d → 90d left
+// the totals identical.
+const PERIOD_DAYS = { P1D: 1, P7D: 7, P30D: 30, P90D: 90 };
+function periodToDays(p) {
+  const raw = String(p ?? "").trim();
+  if (!raw) return 7;
+  const iso = PERIOD_DAYS[raw.toUpperCase()];
+  if (iso) return iso;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 7;
+}
+
+function buildGoogleCost(periodDays) {
   const scale = periodDays / 30;
-  const deployments = DEPLOYMENT_SEEDS.map(([deploymentName, modelName, resourceName, inTok, outTok, inRate, outRate, reqs]) => {
+  const endpoints = ENDPOINT_SEEDS.map(([name, modelName, inTok, outTok, inRate, outRate, reqs]) => {
     const inputTokens = Math.round(inTok * scale);
     const outputTokens = Math.round(outTok * scale);
     const inputCost = (inputTokens / 1_000_000) * inRate;
     const outputCost = (outputTokens / 1_000_000) * outRate;
     return {
-      deploymentName,
-      resourceName,
+      endpointId: "projects/" + GCP_PROJECT + "/locations/europe-west4/endpoints/" + name,
+      displayName: name,
       modelName,
+      vendor: "Google",
+      platform: "vertex_ai",
       inputTokens,
       outputTokens,
       totalTokens: inputTokens + outputTokens,
@@ -793,310 +867,99 @@ function buildAzureCost(periodDays) {
       outputCost,
       totalCost: inputCost + outputCost,
       costEstimated: false,
+      tokensUnavailable: false,
     };
   });
+  const sum = (f) => endpoints.reduce((t, e) => t + (e[f] || 0), 0);
   return {
-    vendor: "Azure OpenAI",
-    deployments,
+    vendor: "Google",
+    period: "P" + periodDays + "D",
+    projectId: GCP_PROJECT,
+    endpoints,
     summary: {
-      totalCost: deployments.reduce((s, d) => s + d.totalCost, 0),
-      totalTokens: deployments.reduce((s, d) => s + d.totalTokens, 0),
-      totalRequests: deployments.reduce((s, d) => s + d.requestCount, 0),
+      totalInputTokens: sum("inputTokens"),
+      totalOutputTokens: sum("outputTokens"),
+      totalTokens: sum("totalTokens"),
+      totalPredictions: sum("requestCount"),
+      totalCost: Math.round(sum("totalCost") * 10000) / 10000,
+      endpointsWithUnknownCost: 0,
+      requestsWithUnknownCost: 0,
     },
-    warnings: [],
+    fetchedAt: iso(NOW),
   };
 }
-
-const PERIOD_DAYS = { P1D: 1, P7D: 7, P30D: 30, P90D: 90 };
-const periodToDays = (p) => PERIOD_DAYS[String(p || "P7D").toUpperCase()] || 7;
-
-// ── agent permissions (User Activity → Risk Management) ─────────────────────
-
-// Shape verified against AgentPermissionsPanel in tabs/UserActivityTab.jsx.
-// Two fields are load-bearing and easy to get wrong:
-//   • a permission item's name is `permission`, NOT `name`.
-//   • summary.filePermissions is an array of STRINGS, and it is mapped
-//     unguarded whenever summary.hasFileAccess is true — a missing array there
-//     throws inside render, and because every tab mounts at once that blanks
-//     the whole screen rather than just this panel.
-// PERMISSION_CATALOGUE maps each scope to the category icon and severity the
-// panel colours by, so a row never renders an undefined level.
-const PERMISSION_CATALOGUE = {
-  "Files.Read.All":         { category: "files",          level: "high",     isWrite: false, resource: "Microsoft Graph" },
-  "Files.Read":             { category: "files",          level: "medium",   isWrite: false, resource: "Microsoft Graph" },
-  "Files.ReadWrite.All":    { category: "files",          level: "critical", isWrite: true,  resource: "Microsoft Graph" },
-  "Sites.Read.All":         { category: "files",          level: "high",     isWrite: false, resource: "SharePoint" },
-  "Sites.ReadWrite.All":    { category: "files",          level: "critical", isWrite: true,  resource: "SharePoint" },
-  "User.Read":              { category: "directory",      level: "low",      isWrite: false, resource: "Microsoft Graph" },
-  "User.Read.All":          { category: "directory",      level: "high",     isWrite: false, resource: "Microsoft Graph" },
-  "User.ReadWrite.All":     { category: "directory",      level: "critical", isWrite: true,  resource: "Microsoft Graph" },
-  "Directory.Read.All":     { category: "directory",      level: "high",     isWrite: false, resource: "Microsoft Graph" },
-  "Mail.Send":              { category: "mail",           level: "critical", isWrite: true,  resource: "Exchange Online" },
-  "Chat.Read.All":          { category: "communications", level: "high",     isWrite: false, resource: "Microsoft Teams" },
-  "OnlineMeetings.Read.All":{ category: "calendar",       level: "medium",   isWrite: false, resource: "Microsoft Teams" },
-  "offline_access":         { category: "other",          level: "medium",   isWrite: false, resource: "Microsoft Graph" },
-};
-
-const PERMISSION_APP_SEEDS = [
-  ["Notion AI Connector",            "critical", ["Files.Read.All", "Sites.Read.All", "User.Read.All"]],
-  ["Otter Meeting Notes",            "high",     ["OnlineMeetings.Read.All", "offline_access"]],
-  ["ChatGPT (work account grant)",   "critical", ["User.Read", "Files.Read", "offline_access"]],
-  ["Vendor Intake Bot",              "high",     ["Mail.Send", "Directory.Read.All"]],
-  ["Contract Review Assistant",      "critical", ["Sites.Read.All", "Files.ReadWrite.All"]],
-  ["Field Service Dispatcher",       "high",     ["Sites.ReadWrite.All", "User.Read.All"]],
-  ["Payroll Query Handler",          "critical", ["User.ReadWrite.All", "Directory.Read.All"]],
-  ["IT Helpdesk Copilot",            "medium",   ["Chat.Read.All"]],
-  ["Meeting Recap Bot",              "medium",   ["OnlineMeetings.Read.All"]],
-  ["Perplexity (work account grant)","high",     ["User.Read", "offline_access"]],
-  ["Benefits Explainer",             "high",     ["Sites.Read.All", "Chat.Read.All"]],
-  ["Engineering Runbook Agent",      "high",     ["Sites.ReadWrite.All"]],
-];
-
-function buildAgentPermissions() {
-  const apps = PERMISSION_APP_SEEDS.map((seed, i) => {
-    const [displayName, riskLevel, scopes] = seed;
-    const agent = AG_DEMO_AGENTS.find((a) => a.name === displayName);
-    const permissions = scopes.map((scope) => {
-      const meta = PERMISSION_CATALOGUE[scope] || { category: "other", level: "medium", isWrite: false, resource: "Microsoft Graph" };
-      return {
-        permission: scope,
-        isWrite: meta.isWrite,
-        level: meta.level,
-        category: meta.category,
-        resourceDisplayName: meta.resource,
-        type: "Application",
-        consentType: "AllPrincipals",
-      };
-    });
-    const filePerms = permissions.filter((p) => p.category === "files");
-    return {
-      servicePrincipalId: `demo-sp-${i}`,
-      appId: agent ? agent.appId : `demo-app-perm-${i}`,
-      displayName,
-      isAgent: !!agent,
-      publisherName: /ChatGPT|Perplexity|Notion|Otter/.test(displayName) ? "Third party" : "Northwind Traders",
-      permissions,
-      summary: {
-        riskLevel,
-        hasFileAccess: filePerms.length > 0,
-        hasWriteAccess: permissions.some((p) => p.isWrite),
-        criticalCount: permissions.filter((p) => p.level === "critical").length,
-        permissionCount: permissions.length,
-        // Strings, not objects — the panel renders each one directly and tests
-        // it with fp.includes("Write") to pick the colour.
-        filePermissions: filePerms.map((p) => p.permission),
-      },
-    };
-  });
-  return {
-    totalApps: apps.length,
-    apps,
-    summary: {
-      withFileAccess: apps.filter((a) => a.summary.hasFileAccess).length,
-      withWriteAccess: apps.filter((a) => a.summary.hasWriteAccess).length,
-      criticalRisk: apps.filter((a) => a.summary.riskLevel === "critical").length,
-      agentCount: apps.filter((a) => a.isAgent).length,
-    },
-  };
-}
-
-// ── Azure Foundry discovery (Discovery tab → Azure panel) ───────────────────
-
-// Shape verified against AzureAIFoundryView in tabs/DiscoveryTab.jsx (which
-// auto-loads on mount) and AzureKnowledgePanel in tabs/UserActivityTab.jsx.
-//
-// SIX arrays are read with .length / .filter / .map and NONE of them is
-// optional-chained: openAIResources, serverlessEndoints, foundryAgents,
-// aiServices, accessControl, subscriptions. Omit any one and the view throws
-// during render. `foundryAgents` doubles as the ML-workspace list — entries
-// WITHOUT a modelName are counted as workspaces, entries with one as
-// deployments. Deployment fields are modelName / modelVersion / capacityTPM,
-// not model / version / capacity.
-const AZ_DEP = (name, modelName, modelVersion, capacityTPM, skuName) => ({
-  id: `demo-dep-${name}`,
-  name,
-  modelName,
-  modelVersion,
-  capacityTPM,
-  skuName,
-  contentFilter: "Microsoft.Default",
-  provisioningState: "Succeeded",
-});
-
-function buildAzureDiscovery() {
-  return {
-    openAIResources: [
-      { id: "/subscriptions/0f2d/rg-ai/northwind-ai-prod", name: "northwind-ai-prod", location: "westeurope",
-        skuName: "S0", publicAccess: "Enabled", localAuthDisabled: false,
-        endpoint: "https://northwind-ai-prod.openai.azure.com/",
-        deployments: [
-          AZ_DEP("claims-summariser", "gpt-4o", "2024-08-06", 120, "Standard"),
-          AZ_DEP("product-qa", "gpt-4o-mini", "2024-07-18", 300, "Standard"),
-          AZ_DEP("embeddings-index", "text-embedding-3-large", "1", 200, "Standard"),
-        ] },
-      { id: "/subscriptions/0f2d/rg-sec/northwind-ai-sec", name: "northwind-ai-sec", location: "northeurope",
-        skuName: "S0", publicAccess: "Disabled", localAuthDisabled: true,
-        endpoint: "https://northwind-ai-sec.openai.azure.com/",
-        deployments: [AZ_DEP("fraud-signal", "o1", "2024-12-17", 40, "Standard")] },
-      { id: "/subscriptions/0f2d/rg-fin/northwind-ai-fin", name: "northwind-ai-fin", location: "westeurope",
-        skuName: "S0", publicAccess: "Enabled", localAuthDisabled: false,
-        endpoint: "https://northwind-ai-fin.openai.azure.com/",
-        deployments: [AZ_DEP("invoice-extract", "gpt-4o", "2024-08-06", 80, "Standard")] },
-      { id: "/subscriptions/0f2d/rg-dev/northwind-ai-dev", name: "northwind-ai-dev", location: "uksouth",
-        skuName: "S0", publicAccess: "Enabled", localAuthDisabled: false,
-        endpoint: "https://northwind-ai-dev.openai.azure.com/",
-        // No content filter on the dev deployment — a real finding to point at.
-        deployments: [Object.assign(AZ_DEP("legacy-support", "gpt-35-turbo", "0613", 60, "Standard"), { contentFilter: null })] },
-    ],
-    serverlessEndpoints: [
-      { id: "demo-sl-phi4", name: "phi-4-serverless", modelId: "Phi-4", workspaceName: "northwind-ml-research", location: "eastus", state: "Online" },
-    ],
-    // Entries without modelName are ML workspaces; with one, a managed deployment.
-    foundryAgents: [
-      { id: "demo-ws-research", name: "northwind-ml-research", location: "westeurope", resourceGroup: "rg-ml", provisioningState: "Succeeded" },
-      { id: "demo-ws-prod", name: "northwind-ml-prod", location: "westeurope", resourceGroup: "rg-ml", provisioningState: "Succeeded" },
-      { id: "demo-ws-churn", name: "churn-scoring-managed", location: "westeurope", resourceGroup: "rg-ml", provisioningState: "Succeeded", modelName: "gpt-4o-mini", modelVersion: "2024-07-18" },
-    ],
-    aiServices: [
-      { id: "demo-svc-docintel", name: "northwind-docintel", kind: "FormRecognizer", location: "westeurope", skuName: "S0", publicAccess: "Enabled" },
-      { id: "demo-svc-language", name: "northwind-language", kind: "TextAnalytics", location: "westeurope", skuName: "S", publicAccess: "Enabled" },
-      { id: "demo-svc-vision", name: "northwind-vision", kind: "ComputerVision", location: "northeurope", skuName: "S1", publicAccess: "Disabled" },
-      { id: "demo-svc-safety", name: "northwind-safety", kind: "ContentSafety", location: "westeurope", skuName: "S0", publicAccess: "Enabled" },
-      { id: "demo-svc-speech", name: "northwind-speech", kind: "SpeechServices", location: "uksouth", skuName: "S0", publicAccess: "Enabled" },
-    ],
-    accessControl: [
-      { principalId: "8f31c2a4-0d55-4b9e-9a71-2c6f4b8e1d03", principalType: "User", roleName: "Cognitive Services OpenAI Contributor", resourceId: "/subscriptions/0f2d/rg-ai/northwind-ai-prod" },
-      { principalId: "b7d92e15-6a43-4c81-bf20-91e5d7a3c468", principalType: "ServicePrincipal", roleName: "Owner", resourceId: "/subscriptions/0f2d/rg-sec/northwind-ai-sec" },
-      { principalId: "3c48a9f7-2b61-4d05-8e93-7fa1c60b2d59", principalType: "Group", roleName: "Cognitive Services OpenAI User", resourceId: "/subscriptions/0f2d/rg-ai/northwind-ai-prod" },
-      { principalId: "d15e6b83-9c27-4a10-b5df-38e02f7a91c4", principalType: "ServicePrincipal", roleName: "Contributor", resourceId: "/subscriptions/0f2d/rg-fin/northwind-ai-fin" },
-    ],
-    subscriptions: [{ id: "0f2d-demo-subscription", name: "Northwind Production" }],
-    warnings: [],
-  };
-}
-
-// ── Azure usage / threads / assistants ──────────────────────────────────────
-
-// Shape verified against the Azure conversations panel in UserActivityTab:
-// totalRequests / totalTokens at the top level, and resources[].metrics
-// .deployments[] for the table. A flat `deployments` array is silently wrong
-// here — the table is optional-chained so it renders nothing and the KPIs read
-// zero, which looks like "no usage" rather than a bug.
-function buildAzureUsage(period) {
-  const days = periodToDays(period);
-  const cost = buildAzureCost(days);
-  const byResource = new Map();
-  for (const d of cost.deployments) {
-    if (!byResource.has(d.resourceName)) byResource.set(d.resourceName, []);
-    byResource.get(d.resourceName).push({
-      deploymentName: d.deploymentName,
-      modelName: d.modelName,
-      requestCount: d.requestCount,
-      promptTokens: d.inputTokens,
-      completionTokens: d.outputTokens,
-      totalTokens: d.totalTokens,
-    });
-  }
-  return {
-    period,
-    totalRequests: cost.summary.totalRequests,
-    totalTokens: cost.summary.totalTokens,
-    resources: [...byResource.entries()].map(([resourceName, deployments]) => ({
-      resourceName,
-      metrics: { deployments },
-    })),
-    summary: cost.summary,
-  };
-}
-
-function buildAzureThreads() {
-  const threads = CHATTY_AGENTS.slice(0, 6).map((a, i) => {
-    const rand = rngFor("thread" + a.name);
-    return {
-      id: `demo-thread-${i}`,
-      assistantId: a.appId,
-      assistantName: a.name,
-      messageCount: between(rand, 4, 28),
-      createdAt: iso(NOW - between(rand, 2, 120) * 3600000),
-      lastMessageAt: iso(NOW - between(rand, 1, 40) * 3600000),
-      userName: pick(rand, ACTIVE_PEOPLE).displayName,
-    };
-  });
-  return { threads, totalThreads: threads.length, warnings: [] };
-}
-
-function buildAzureAssistants() {
-  const assistants = AG_DEMO_AGENTS.filter((a) => a.platform === "azure_foundry" || a.platform === "openai_assistant")
-    .map((a) => ({
-      id: a.appId,
-      name: a.name,
-      model: a.llmModel || "gpt-4o",
-      instructions: a.description,
-      tools: (a.connectors || []).map((c) => ({ type: c.type === "Function" ? "function" : c.type === "CodeInterpreter" ? "code_interpreter" : "file_search" })),
-      fileCount: (a.connectors || []).length * 3,
-      createdAt: a.firstSeen,
-    }));
-  return { assistants, warnings: [] };
-}
-
 
 // ── policies & compliance packs (Policies tab) ──────────────────────────────
 
+// Field set verified against the GET /policy-packs handler in
+// server/src/governance/routes/policyPacks.ts. PackRow reads ruleCount,
+// enforceable, monitored and attestations off each row; the modal reads the
+// ENVELOPE as `packs.packs`, so this list is wrapped rather than returned bare
+// — a bare array leaves the modal showing "No policy packs available."
 const AG_DEMO_PACKS = [
-  { id: "gdpr",        framework: "GDPR",          deployed: true,  ruleCount: 18, enforceable: 7, monitored: 6, attestations: 5 },
-  { id: "hipaa",       framework: "HIPAA",         deployed: false, ruleCount: 17, enforceable: 6, monitored: 6, attestations: 5 },
-  { id: "soc2",        framework: "SOC 2",         deployed: false, ruleCount: 16, enforceable: 7, monitored: 5, attestations: 4 },
-  { id: "ccpa",        framework: "CCPA/CPRA",     deployed: false, ruleCount: 13, enforceable: 5, monitored: 4, attestations: 4 },
-  { id: "eu-ai-act",   framework: "EU AI Act",     deployed: false, ruleCount: 16, enforceable: 5, monitored: 5, attestations: 6 },
-  { id: "iso-42001",   framework: "ISO/IEC 42001", deployed: false, ruleCount: 15, enforceable: 5, monitored: 5, attestations: 5 },
-  { id: "nist-ai-rmf", framework: "NIST AI RMF",   deployed: false, ruleCount: 15, enforceable: 5, monitored: 5, attestations: 5 },
-];
+  { id: "gdpr",        framework: "GDPR",          name: "EU General Data Protection Regulation",       deployed: true,  ruleCount: 18, enforceable: 7, monitored: 6, attestations: 5 },
+  { id: "hipaa",       framework: "HIPAA",         name: "US Health Insurance Portability and Accountability Act", deployed: false, ruleCount: 17, enforceable: 6, monitored: 6, attestations: 5 },
+  { id: "soc2",        framework: "SOC 2",         name: "SOC 2 Trust Services Criteria",               deployed: false, ruleCount: 16, enforceable: 7, monitored: 5, attestations: 4 },
+  { id: "ccpa",        framework: "CCPA/CPRA",     name: "California Consumer Privacy Act (as amended by CPRA)",    deployed: false, ruleCount: 13, enforceable: 5, monitored: 4, attestations: 4 },
+  { id: "eu-ai-act",   framework: "EU AI Act",     name: "EU Artificial Intelligence Act (Reg. 2024/1689)",         deployed: false, ruleCount: 16, enforceable: 5, monitored: 5, attestations: 6 },
+  { id: "iso-42001",   framework: "ISO/IEC 42001", name: "ISO/IEC 42001 AI Management System",          deployed: false, ruleCount: 15, enforceable: 5, monitored: 5, attestations: 5 },
+  { id: "nist-ai-rmf", framework: "NIST AI RMF",   name: "NIST AI Risk Management Framework 1.0 (AI 100-1)",        deployed: false, ruleCount: 15, enforceable: 5, monitored: 5, attestations: 5 },
+].map((p) => ({
+  ...p,
+  description: `${p.ruleCount} rules mapped to ${p.framework} clauses — ${p.enforceable} enforced automatically, ${p.monitored} dependent on endpoint detection, ${p.attestations} tracked as attestations.`,
+  version: 1,
+  deployed_version: p.deployed ? 1 : null,
+  deployed_at: p.deployed ? daysAgo(41) : null,
+  update_available: false,
+  enabled_rules: p.deployed ? p.ruleCount : 0,
+  attested: p.deployed ? 2 : 0,
+}));
 
 const COND = (field, operator, value) => ({ field, operator, value });
 
 const AG_DEMO_POLICIES = [
   // Custom policies an admin wrote.
-  { id: "demo-pol-1", name: "Escalate orphaned agents", type: "lifecycle", status: "active", severity: "critical",
+  { id: "pol_1", name: "Escalate orphaned agents", type: "lifecycle", status: "active", severity: "critical",
     description: "Any agent whose owner no longer has an active account is escalated to the AI governance group.",
     conditions: [COND("is_orphaned", "is_true", "true")], actions: [{ type: "escalate" }, { type: "notify" }],
     scope: { type: "all agents" }, created_at: daysAgo(96) },
-  { id: "demo-pol-2", name: "Flag organisation-wide consent", type: "access", status: "active", severity: "high",
+  { id: "pol_2", name: "Flag organisation-wide consent", type: "access", status: "active", severity: "high",
     description: "Agents consented for every user in the tenant are flagged for review.",
     conditions: [COND("consent_type", "equals", "AllPrincipals")], actions: [{ type: "flag" }],
     scope: { type: "all agents" }, created_at: daysAgo(88) },
-  { id: "demo-pol-3", name: "Dormant but privileged (90 days)", type: "lifecycle", status: "active", severity: "high",
+  { id: "pol_3", name: "Dormant but privileged (90 days)", type: "lifecycle", status: "active", severity: "high",
     description: "Agents with no activity for 90 days that still hold application permissions.",
     conditions: [COND("days_since_last_activity", "greater_than", "90"), COND("permission_count", "greater_than", "0")],
     actions: [{ type: "flag" }, { type: "notify" }], scope: { type: "all agents" }, created_at: daysAgo(71) },
-  { id: "demo-pol-4", name: "External HTTP connector review", type: "data", status: "active", severity: "high",
+  { id: "pol_4", name: "External HTTP connector review", type: "data", status: "active", severity: "high",
     description: "Any agent holding a connector that can reach outside the tenant.",
     conditions: [COND("has_http_connector", "is_true", "true")], actions: [{ type: "flag" }],
     scope: { type: "all agents" }, created_at: daysAgo(64) },
-  { id: "demo-pol-5", name: "Suspend critical unreviewed agents", type: "lifecycle", status: "draft", severity: "critical",
+  { id: "pol_5", name: "Suspend critical unreviewed agents", type: "lifecycle", status: "draft", severity: "critical",
     description: "Draft — would suspend any agent scoring above 85 that has never been recertified.",
     conditions: [COND("risk_score", "greater_than", "85")], actions: [{ type: "suspend" }],
     scope: { type: "all agents" }, created_at: daysAgo(12) },
 
   // Policies created by deploying the GDPR pack.
-  { id: "demo-gdpr-1", pack_id: "gdpr", name: "[GDPR] Art. 5(1)(c) — data minimisation in agent scope", type: "data",
+  { id: "pol_gdpr_1", pack_id: "gdpr", name: "[GDPR] Art. 5(1)(c) — data minimisation in agent scope", type: "data",
     status: "active", severity: "high", description: "Agents must not hold broader data access than their stated purpose requires.",
     conditions: [COND("has_dangerous_permissions", "is_true", "true")], actions: [{ type: "flag" }], scope: { type: "all agents" }, created_at: daysAgo(41) },
-  { id: "demo-gdpr-2", pack_id: "gdpr", name: "[GDPR] Art. 5(2) — accountability: named owner required", type: "lifecycle",
+  { id: "pol_gdpr_2", pack_id: "gdpr", name: "[GDPR] Art. 5(2) — accountability: named owner required", type: "lifecycle",
     status: "active", severity: "critical", description: "Every processing activity needs an accountable owner.",
     conditions: [COND("is_orphaned", "is_true", "true")], actions: [{ type: "escalate" }], scope: { type: "all agents" }, created_at: daysAgo(41) },
-  { id: "demo-gdpr-3", pack_id: "gdpr", name: "[GDPR] Art. 28 — processor due diligence on third-party agents", type: "access",
+  { id: "pol_gdpr_3", pack_id: "gdpr", name: "[GDPR] Art. 28 — processor due diligence on third-party agents", type: "access",
     status: "active", severity: "high", description: "Third-party AI apps consented org-wide require a processor agreement on file.",
     conditions: [COND("consent_type", "equals", "AllPrincipals")], actions: [{ type: "flag" }, { type: "notify" }], scope: { type: "all agents" }, created_at: daysAgo(41) },
-  { id: "demo-gdpr-4", pack_id: "gdpr", name: "[GDPR] Art. 30 — records of processing kept current", type: "lifecycle",
+  { id: "pol_gdpr_4", pack_id: "gdpr", name: "[GDPR] Art. 30 — records of processing kept current", type: "lifecycle",
     status: "active", severity: "medium", description: "Agents unreviewed for more than 12 months fall out of the ROPA.",
     conditions: [COND("days_since_last_activity", "greater_than", "365")], actions: [{ type: "flag" }], scope: { type: "all agents" }, created_at: daysAgo(41) },
-  { id: "demo-gdpr-5", pack_id: "gdpr", name: "[GDPR] Art. 32 — security of processing: connector review", type: "data",
+  { id: "pol_gdpr_5", pack_id: "gdpr", name: "[GDPR] Art. 32 — security of processing: connector review", type: "data",
     status: "active", severity: "high", description: "External connectors must be assessed before an agent processes personal data.",
     conditions: [COND("has_http_connector", "is_true", "true")], actions: [{ type: "flag" }], scope: { type: "all agents" }, created_at: daysAgo(41) },
-  { id: "demo-gdpr-6", pack_id: "gdpr", name: "[GDPR] Art. 35 — DPIA trigger on high-risk agents", type: "compliance",
+  { id: "pol_gdpr_6", pack_id: "gdpr", name: "[GDPR] Art. 35 — DPIA trigger on high-risk agents", type: "compliance",
     status: "active", severity: "high", description: "Agents scoring high or critical require a documented DPIA.",
     conditions: [COND("risk_level", "equals", "critical")], actions: [{ type: "flag" }, { type: "notify" }], scope: { type: "all agents" }, created_at: daysAgo(41) },
-  { id: "demo-gdpr-7", pack_id: "gdpr", name: "[GDPR] Art. 44 — transfers outside the EEA", type: "data",
+  { id: "pol_gdpr_7", pack_id: "gdpr", name: "[GDPR] Art. 44 — transfers outside the EEA", type: "data",
     status: "active", severity: "critical", description: "Agents egressing personal data outside the tenant need a transfer basis.",
     conditions: [COND("has_http_connector", "is_true", "true"), COND("consent_type", "equals", "AllPrincipals")],
     actions: [{ type: "escalate" }], scope: { type: "all agents" }, created_at: daysAgo(41) },
@@ -1109,7 +972,7 @@ function buildViolations() {
   offenders.slice(0, 14).forEach((a, i) => {
     const pol = a.isOrphaned ? AG_DEMO_POLICIES[0] : AG_DEMO_POLICIES[1];
     rows.push({
-      id: "demo-viol-" + i,
+      id: "vio_" + i,
       policy_id: pol.id,
       policy_name: pol.name,
       agent_id: a.id,
@@ -1124,7 +987,24 @@ function buildViolations() {
 }
 const AG_DEMO_VIOLATIONS = buildViolations();
 
-/** Dry-run result for a single policy or a whole pack. */
+/**
+ * Dry-run result for a single policy or a whole pack.
+ *
+ * SHAPE IS LOAD-BEARING AND NOT FORGIVING. PoliciesTab does:
+ *
+ *   setSimResults(s => ({ ...s, [id]: { ...body.policies[0], ... } }))
+ *
+ * `body.policies[0]` is NOT optional-chained, and it sits inside a functional
+ * state updater — React runs that updater while processing the update, outside
+ * the handler's try/catch. So a missing `policies` array does not surface as an
+ * error card; it throws during render and blanks the whole screen. Returning a
+ * FLAT result here (would_flag/matches at the top level) is exactly that bug.
+ *
+ * Match rows are read as m.agent_name / m.already_open / m.condition_triggered,
+ * and `actions` is an array of action-type STRINGS, not objects — the pack
+ * aggregation does `(pol.actions || []).forEach(a => allActions.add(a))` and
+ * renders the set directly.
+ */
 function buildSimulation(body) {
   let target = [];
   try {
@@ -1136,32 +1016,58 @@ function buildSimulation(body) {
   } catch { /* fall through */ }
   if (target.length === 0) target = [AG_DEMO_POLICIES[0]];
 
-  const hit = AG_DEMO_AGENTS.filter(
-    (a) => a.isOrphaned || a.consentType === "AllPrincipals" || a.risk.level === "critical"
-  );
-  const alreadyOpen = AG_DEMO_VIOLATIONS.filter((v) => v.status === "open").length;
+  // Evaluate each targeted policy against the agents its conditions describe,
+  // so a pack simulation aggregates per-policy numbers the way the real engine
+  // does rather than repeating one total.
+  const matchesFor = (policy) => {
+    const fields = (policy.conditions || []).map((c) => c.field);
+    return AG_DEMO_AGENTS.filter((a) => {
+      if (fields.includes("is_orphaned")) return a.isOrphaned;
+      if (fields.includes("consent_type")) return a.consentType === "AllPrincipals";
+      if (fields.includes("has_http_connector")) return (a.connectors || []).some((c) => c.type === "HTTP" || c.type === "Third-party");
+      if (fields.includes("has_dangerous_permissions")) return (a.permissions || []).some((p) => /ReadWrite|\.Send|Directory\.Read/.test(p.name));
+      if (fields.includes("risk_level")) return a.risk.level === "critical";
+      if (fields.includes("risk_score")) return (a.risk.score || 0) > 85;
+      if (fields.includes("days_since_last_activity")) {
+        const last = a.activity.lastActiveTimestamp ? new Date(a.activity.lastActiveTimestamp).getTime() : null;
+        return !last || (NOW - last) / 86400000 > 90;
+      }
+      return false;
+    });
+  };
+
+  const policies = target.map((policy) => {
+    const hit = matchesFor(policy);
+    const alreadyOpen = hit.filter((a) => AG_DEMO_VIOLATIONS.some((v) => v.agent_id === a.id && v.status === "open")).length;
+    return {
+      policy_id: policy.id,
+      policy_name: policy.name,
+      status: "simulated",
+      severity: policy.severity,
+      would_flag: hit.length,
+      already_open: alreadyOpen,
+      newly_flagged: Math.max(0, hit.length - alreadyOpen),
+      // Action-type strings, not objects.
+      actions: (policy.actions || []).map((x) => x.type),
+      matches: hit.slice(0, 12).map((a) => ({
+        agent_id: a.id,
+        agent_name: a.name,
+        platform: a.platform,
+        owner: a.owner ? a.owner.displayName : null,
+        risk_level: a.risk.level,
+        already_open: AG_DEMO_VIOLATIONS.some((v) => v.agent_id === a.id && v.status === "open"),
+        condition_triggered: (policy.conditions || [])
+          .map((c) => `${c.field} ${c.operator} ${c.value}`)
+          .join(" AND ") || "policy conditions met",
+      })),
+    };
+  });
+
   return {
     ok: true,
     status: "simulated",
     agents_evaluated: AG_DEMO_AGENTS.length,
-    would_flag: hit.length,
-    already_open: alreadyOpen,
-    newly_flagged: Math.max(0, hit.length - alreadyOpen),
-    severity: target[0].severity,
-    actions: target.flatMap((p) => (p.actions || []).map((x) => x.type)),
-    matches: hit.slice(0, 12).map((a) => ({
-      agent_id: a.id,
-      agent_name: a.name,
-      platform: a.platform,
-      owner: a.owner ? a.owner.displayName : null,
-      risk_level: a.risk.level,
-      reason: a.isOrphaned
-        ? "No accountable owner"
-        : a.consentType === "AllPrincipals"
-          ? "Organisation-wide consent"
-          : "Risk score above threshold",
-      already_flagged: AG_DEMO_VIOLATIONS.some((v) => v.agent_id === a.id),
-    })),
+    policies,
   };
 }
 
@@ -1176,7 +1082,7 @@ function buildAlerts(thresholdMinutes) {
     const idleMinutes = last ? Math.round((NOW - last) / 60000) : null;
     const idleDays = idleMinutes ? Math.floor(idleMinutes / 1440) : null;
     out.push({
-      id: "demo-alert-" + i,
+      id: "alr_" + i,
       agent_id: a.id,
       agent_name: a.name,
       vendor: a.vendor,
@@ -1202,92 +1108,18 @@ const AG_DEMO_ALERT_CONFIG = {
   notify_google: true,
 };
 
-// ── secondary panels — DATA RETAINED BUT CURRENTLY UNSERVED ────────────────
+// ── secondary panels ───────────────────────────────────────────────────────
 //
 // Recertification, Prompt Monitor and Claude Budget are built in the codebase
 // but are not in the six-tab strip, so their payload shapes have never been
-// read off a live consumer. Their endpoints therefore return REJECT (see the
-// rule on the sentinel below) rather than an unverified guess.
+// read off a live consumer and their endpoints return REJECT.
 //
-// The datasets below are kept, unused, for whoever wires those tabs up: fill
-// in the real shape from the component, then swap the REJECT for the builder.
-// Vite tree-shakes them out of the bundle in the meantime.
-
-function buildRecertificationCampaigns() {
-  const targets = AG_DEMO_AGENTS.filter((a) => a.risk.level === "critical" || a.risk.level === "high").slice(0, 10);
-  const states = ["pending", "pending", "approved", "pending", "escalated", "approved", "rejected", "pending", "approved", "pending"];
-  return targets.map((a, i) => ({
-    id: "demo-recert-" + i,
-    agent_id: a.id,
-    agent_name: a.name,
-    platform: a.platform,
-    owner_name: a.owner ? a.owner.displayName : "Unassigned",
-    owner_email: a.owner ? a.owner.userPrincipalName : null,
-    status: states[i] || "pending",
-    due_at: daysAgo(-(14 - i)),
-    launched_at: daysAgo(7),
-    overdue: i === 4,
-    notes: i === 6 ? "Owner confirmed the agent is no longer needed — scheduled for retirement." : null,
-  }));
-}
-const AG_DEMO_RECERT = buildRecertificationCampaigns();
-
-function buildPromptFlags() {
-  const seeds = [
-    ["Customer Refund Triage", "critical", "pii", "Card number and national identifier in one prompt"],
-    ["Payroll Query Handler", "critical", "pii", "National insurance number sent to the agent"],
-    ["IT Helpdesk Copilot", "critical", "secrets", "Live API key pasted into the conversation"],
-    ["Benefits Explainer", "high", "health", "Named medical condition and medication"],
-    ["Contract Review Assistant", "high", "confidential", "Unredacted commercial terms"],
-    ["Customer Refund Triage", "high", "financial", "Account balance and charge history"],
-    ["Sales Playbook Agent", "medium", "confidential", "Internal discount ladder"],
-  ];
-  return seeds.map((s, i) => {
-    const a = AG_DEMO_AGENTS.find((x) => x.name === s[0]);
-    return {
-      id: "demo-flag-" + i,
-      agent_id: a ? a.id : "demo-unknown-" + i,
-      agent_name: s[0],
-      platform: a ? a.platform : "copilot_studio",
-      severity: s[1],
-      category: s[2],
-      detail: s[3],
-      resolved: i > 4,
-      created_at: hoursAgo(3 + i * 9),
-    };
-  });
-}
-const AG_DEMO_PROMPT_FLAGS = buildPromptFlags();
-
-function buildClaudeBudgetMembers() {
-  return {
-    org: { name: "Northwind Traders", month: new Date(NOW).toISOString().slice(0, 7) },
-    members: ACTIVE_PEOPLE.map((p, i) => {
-      const rand = rngFor("budget" + p.userPrincipalName);
-      const inTok = between(rand, 400000, 4200000);
-      const outTok = between(rand, 90000, 900000);
-      return {
-        id: p.userPrincipalName,
-        name: p.displayName,
-        email: p.userPrincipalName,
-        role: i === 0 ? "admin" : i < 3 ? "developer" : "user",
-        inputTokens: inTok,
-        outputTokens: outTok,
-        costUsd: (inTok / 1e6) * 3 + (outTok / 1e6) * 15,
-      };
-    }),
-  };
-}
-
-const AG_DEMO_PRICING = {
-  azure: [
-    { model: "gpt-4o", input: 2.5, output: 10 },
-    { model: "gpt-4o-mini", input: 0.15, output: 0.6 },
-    { model: "o1", input: 15, output: 60 },
-    { model: "text-embedding-3-large", input: 0.13, output: 0 },
-    { model: "gpt-35-turbo", input: 0.5, output: 1.5 },
-  ],
-};
+// Their sample datasets USED to live here, unused. They are deleted: they
+// carried agent names from the Microsoft dataset, and although nothing
+// rendered them, Rollup kept the module-level constants so those stale names
+// shipped in the bundle. Dead data that still reaches the browser is worse
+// than no data. Rebuild them from the real component shapes if those tabs
+// ever get wired up.
 
 // ── Google Vertex / GCP drill-down (Discovery → a Google scope) ─────────────
 //
@@ -1301,8 +1133,8 @@ const AG_DEMO_PRICING = {
 // sub-lists simply show nothing rather than risking a throw.
 function buildGoogleVertexDiscovery() {
   return {
-    projectId: "northwind-ai-prod",
-    domain: "northwind.example",
+    projectId: "halcyon-ai-prod",
+    domain: "halcyongroup.com",
     reasoningEngines: [
       { id: "re-territory", displayName: "Territory Planner", description: "Allocates sales territories from BigQuery", region: "europe-west4", pythonVersion: "3.11", createTime: daysAgo(121) },
       { id: "re-support", displayName: "Support Deflection Agent", description: "Answers tier-1 questions from the help centre", region: "europe-west4", pythonVersion: "3.11", createTime: daysAgo(84) },
@@ -1391,7 +1223,7 @@ function mockFor(path, method, body) {
 
   // ── discovery ─────────────────────────────────────────────────────────────
   // Never write fabricated agents to the server.
-  if (has("/discovery/agents") && m === "POST") return { ok: true, persisted: 0, note: "demo mode - write suppressed" };
+  if (has("/discovery/agents") && m === "POST") return { ok: true, persisted: 0, note: "not persisted" };
   if (has("/discovery/agents")) return { agents: AG_DEMO_AGENTS, warnings: [] };
   if (has("/discovery/run")) return agDemoDiscoveryResult();
 
@@ -1419,28 +1251,29 @@ function mockFor(path, method, body) {
       || has("/google/gemini-activity") || has("/google/gemini-vault")) return REJECT;
   if (has("/gemini-enterprise")) return REJECT;
 
-  // ── Azure ─────────────────────────────────────────────────────────────────
-  if (has("/azure/discover")) return buildAzureDiscovery();
-  if (has("/activity/azure/usage")) return buildAzureUsage(q.get("period"));
-  if (has("/activity/azure/threads")) return buildAzureThreads();
-  if (has("/activity/azure/assistants")) return buildAzureAssistants();
+  // ── Microsoft surface: none ────────────────────────────────────────────────
+  // There is no Microsoft credential in demo mode, so none of these panels
+  // mount. They reject rather than return a shape nothing will read, which
+  // also means an accidental call is visible instead of silently succeeding.
+  if (has("/azure/") || has("/activity/azure/")) return REJECT;
+  if (has("/activity/agent-permissions")) return REJECT;
 
   // ── activity ──────────────────────────────────────────────────────────────
-  // The Dataverse endpoint carries every conversation; the audit-log and Graph
-  // endpoints return empty so nothing is double-counted.
-  if (has("/activity/chats")) return { chats: AG_DEMO_CHATS, warnings: [] };
-  if (has("/activity/copilot-interactions") || has("/activity/m365-copilot-chats")) return { chats: [] };
-  if (has("/activity/files")) return { files: AG_DEMO_FILES, warnings: [] };
-  if (has("/activity/knowledge")) return { bots: AG_DEMO_KNOWLEDGE_BOTS, warnings: [] };
-  if (has("/activity/agent-permissions")) return buildAgentPermissions();
-  if (has("/activity/teams/signins")) return { signIns: [], warnings: [] };
+  // The Dataverse and Graph activity endpoints. Unreachable without a Microsoft
+  // credential — User Activity takes its Google branch instead, which is served
+  // by /google/user-activity below.
+  if (has("/activity/chats") || has("/activity/copilot-interactions")
+      || has("/activity/m365-copilot-chats") || has("/activity/files")
+      || has("/activity/knowledge") || has("/activity/teams/signins")) return REJECT;
   // Empty on purpose: the panel then falls back to the discovered agents, which
   // is the same list every other tab is showing.
   if (has("/activity/risk-summary")) return { agents: [] };
 
   // ── cost ──────────────────────────────────────────────────────────────────
-  if (has("/cost/azure")) return buildAzureCost(periodToDays(q.get("period")));
-  if (has("/cost/google")) return { endpoints: [], summary: { totalCost: 0, totalTokens: 0, totalPredictions: 0 } };
+  if (has("/cost/azure")) return REJECT;
+  // CostTab follows this path now: it picks its vendor from the first
+  // credential present, and only the Google ones are set.
+  if (has("/cost/google")) return buildGoogleCost(periodToDays(q.get("period")));
   // Cost is only ever rendered for the Microsoft vendor in demo mode (CostTab
   // picks its vendor from the first key present, and oauthKeyId always wins),
   // so the per-vendor cost endpoints below are unreachable there. They reject
@@ -1457,14 +1290,38 @@ function mockFor(path, method, body) {
   // leave the browser in demo mode, so they are swallowed here and the UI
   // gets its success response. Kept together, and above the generic /claude
   // and /openai read handlers would not catch them anyway.
-  if (has("/openai/gpt")) return Object.assign({}, OK, { action: "deleted", note: "demo mode - nothing deleted" });
-  if (has("/claude/project")) return Object.assign({}, OK, { action: "deleted", note: "demo mode - nothing deleted" });
-  if (has("/claude/workspace/archive")) return Object.assign({}, OK, { action: "archived", note: "demo mode - nothing archived" });
+  if (has("/openai/gpt")) return Object.assign({}, OK, { action: "deleted", note: "not applied" });
+  if (has("/claude/project")) return Object.assign({}, OK, { action: "deleted", note: "not applied" });
+  if (has("/claude/workspace/archive")) return Object.assign({}, OK, { action: "archived", note: "not applied" });
 
-  // ── lifecycle: statuses are read, actions are no-ops ──────────────────────
-  if (has("/lifecycle/approval-statuses") || has("/lifecycle/lifecycle-statuses")) return { statuses: {} };
-  if (has("/lifecycle/blocked-agents")) return [];
-  if (has("/lifecycle/")) return Object.assign({}, OK, { note: "demo mode - no change applied" });
+  // ── lifecycle ─────────────────────────────────────────────────────────────
+  // READS PASS THROUGH to the real server. These are small, fast queries that
+  // never needed a cloud connection, and the AI Hub's own Inventory screen
+  // reads the same collections (its DLP-monitoring toggle is a flag on the
+  // agent-keyed blocked_agents row). Serving them from here made that screen
+  // report "nothing monitored" whatever the truth was. Real ids simply never
+  // match a demo agent id, so demo rows still render as unblocked.
+  if (has("/lifecycle/approval-statuses") || has("/lifecycle/lifecycle-statuses")
+      || has("/lifecycle/blocked-agents")) return undefined;
+
+  // WRITES are suppressed only for fabricated agents: such an id must never
+  // reach the server — that would persist a blocked_agents row for an agent
+  // that does not exist. Any other id is a REAL agent the admin is acting on
+  // from the AI Hub, so it goes through and behaves normally with demo mode on.
+  //
+  // Membership test, NOT a string prefix. Ids used to start with "demo-", but
+  // Agent Governance prints raw ids on screen (the Discovery detail panel and
+  // the permissions table both do), so a marker in the id was visible to a
+  // prospect. FABRICATED_IDS carries the same knowledge without leaking it.
+  if (has("/lifecycle/")) {
+    let id = "";
+    try {
+      const b = typeof body === "string" ? JSON.parse(body) : (body || {});
+      id = String(b.agent_id || b.bot_id || b.app_id || b.id || "");
+    } catch { /* unparseable body — treat as real and let it through */ }
+    if (isFabricatedId(id)) return Object.assign({}, OK, { note: "not persisted" });
+    return undefined;
+  }
 
   // ── policies & packs ──────────────────────────────────────────────────────
   if (has("/policies/violations")) return AG_DEMO_VIOLATIONS;
@@ -1473,11 +1330,12 @@ function mockFor(path, method, body) {
   if (has("/policies/seed-templates")) return { success: true, created: 0, total: AG_DEMO_POLICIES.length };
   if (has("/policies")) {
     if (m === "GET") return AG_DEMO_POLICIES;
-    return Object.assign({}, OK, { id: "demo-pol-" + Date.now() });
+    return Object.assign({}, OK, { id: "pol_" + Date.now() });
   }
   if (has("/policy-packs")) {
     if (p.includes("/simulate")) return buildSimulation(body);
-    if (m === "GET") return AG_DEMO_PACKS;
+    // Envelope, not a bare array — the modal reads `packs.packs`.
+    if (m === "GET") return { packs: AG_DEMO_PACKS, definition_problems: [] };
     return OK;
   }
 
@@ -1530,9 +1388,9 @@ function mockFor(path, method, body) {
     return Object.assign({}, OK, { id: AG_DEMO_KEYS.oauthKeyId });
   }
   if (has("/google/connect") || has("/openai/connect") || has("/claude/connect") || has("/aws/connect")) {
-    return Object.assign({}, OK, { id: "demo-connected-key" });
+    return Object.assign({}, OK, { id: guid("key:connected") });
   }
-  if (has("/health")) return { ok: true, status: "ok", version: "demo" };
+  if (has("/health")) return { ok: true, status: "ok", version: "0.1.0" };
 
   return undefined; // nothing matched
 }
@@ -1592,8 +1450,15 @@ function pathOf(input) {
 function governancePath(input) {
   const p = pathOf(input);
   if (!p.startsWith("/api/")) return null;
-  if (p.startsWith("/api/v1/")) return null; // AI Hub API — leave alone
+  if (p.startsWith("/api/v1/")) return null; // AI Hub API — cached, see below
   return p.slice(4);
+}
+
+/** "/api/v1/dlp?x=1" becomes "/dlp?x=1"; anything else returns null. */
+function aiHubPath(input) {
+  const p = pathOf(input);
+  if (!p.startsWith("/api/v1/")) return null;
+  return p.slice(7);
 }
 
 let shimInstalled = false;
@@ -1644,6 +1509,34 @@ export function installAgDemoFetch() {
       // tab wait, so say so loudly rather than failing quietly.
       console.warn("[agent-governance demo] NOT MOCKED, hitting network:", method, gp);
     }
+
+    // ── AI Hub (/api/v1) — cache-through, not fabricated ────────────────────
+    // Replay a stored real response when we have one; otherwise let the request
+    // run and keep it on the way back. Reads only: a demo must never replay a
+    // write, and a non-200 must never become sticky.
+    const hp = aiHubPath(input);
+    if (hp) {
+      const method2 =
+        ((init && init.method) || (input && typeof input !== "string" && input.method) || "GET").toUpperCase();
+      if (method2 === "GET" && isCacheable(hp)) {
+        const hit = cacheGet(hp);
+        if (hit !== null) {
+          return Promise.resolve(
+            new Response(hit, { status: 200, headers: { "Content-Type": "application/json" } })
+          );
+        }
+        return realFetch(input, init).then((res) => {
+          try {
+            if (res.ok && (res.headers.get("content-type") || "").includes("json")) {
+              // clone() so the caller still gets an unread body.
+              res.clone().text().then((txt) => cachePut(hp, txt)).catch(() => {});
+            }
+          } catch { /* caching is best-effort */ }
+          return res;
+        });
+      }
+    }
+
     return realFetch(input, init);
   };
 
