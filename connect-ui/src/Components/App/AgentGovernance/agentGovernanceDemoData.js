@@ -1467,10 +1467,29 @@ function mockFor(path, method, body) {
   if (has("/claude/project")) return Object.assign({}, OK, { action: "deleted", note: "demo mode - nothing deleted" });
   if (has("/claude/workspace/archive")) return Object.assign({}, OK, { action: "archived", note: "demo mode - nothing archived" });
 
-  // ── lifecycle: statuses are read, actions are no-ops ──────────────────────
-  if (has("/lifecycle/approval-statuses") || has("/lifecycle/lifecycle-statuses")) return { statuses: {} };
-  if (has("/lifecycle/blocked-agents")) return [];
-  if (has("/lifecycle/")) return Object.assign({}, OK, { note: "demo mode - no change applied" });
+  // ── lifecycle ─────────────────────────────────────────────────────────────
+  // READS PASS THROUGH to the real server. These are small, fast queries that
+  // never needed a cloud connection, and the AI Hub's own Inventory screen
+  // reads the same collections (its DLP-monitoring toggle is a flag on the
+  // agent-keyed blocked_agents row). Serving them from here made that screen
+  // report "nothing monitored" whatever the truth was. Real ids simply never
+  // match a demo agent id, so demo rows still render as unblocked.
+  if (has("/lifecycle/approval-statuses") || has("/lifecycle/lifecycle-statuses")
+      || has("/lifecycle/blocked-agents")) return undefined;
+
+  // WRITES are suppressed only for fabricated agents. A `demo-` id must never
+  // reach the server — that would persist a blocked_agents row for an agent
+  // that does not exist. Any other id is a REAL agent the admin is acting on
+  // from the AI Hub, so it goes through and behaves normally with demo mode on.
+  if (has("/lifecycle/")) {
+    let id = "";
+    try {
+      const b = typeof body === "string" ? JSON.parse(body) : (body || {});
+      id = String(b.agent_id || b.bot_id || b.app_id || b.id || "");
+    } catch { /* unparseable body — treat as real and let it through */ }
+    if (id.startsWith("demo-")) return Object.assign({}, OK, { note: "demo agent - not persisted" });
+    return undefined;
+  }
 
   // ── policies & packs ──────────────────────────────────────────────────────
   if (has("/policies/violations")) return AG_DEMO_VIOLATIONS;

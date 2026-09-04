@@ -123,6 +123,42 @@ t("packs rows", () => g("/policy-packs").map(pk => [pk.id, pk.framework, pk.depl
 t("simulate result", () => { const s = g("/policies/simulate", "POST"); s.matches.map(mm => mm.agent_name); return `would_flag ${s.would_flag}, ${s.matches.length} match rows`; });
 t("alerts/check", () => g("/alerts/check", "POST").alerts.map(a => a.message).length + " alerts");
 
+console.log("\n=== lifecycle: real reads, demo-only writes suppressed ===");
+const raw = (p, m, body) => agDemoResponse(p, { method: m || "GET", body });
+t("status reads pass through to the real server", () => {
+  for (const p of ["/lifecycle/blocked-agents", "/lifecycle/approval-statuses", "/lifecycle/lifecycle-statuses"]) {
+    if (raw(p) !== undefined) throw new Error(p + " was served locally — the AI Hub Inventory screen reads this too");
+  }
+  return "blocked-agents, approval-statuses, lifecycle-statuses all live";
+});
+t("a write for a FABRICATED agent is suppressed", () => {
+  const r = raw("/lifecycle/block", "POST", JSON.stringify({ agent_id: "demo-copilot_studio-0", reason: "x" }));
+  if (r === undefined) throw new Error("a demo agent id reached the network");
+  if (r.ok !== true) throw new Error("should still report success to the UI");
+  return "suppressed, UI still sees success";
+});
+t("a write for a REAL agent goes through", () => {
+  for (const body of [
+    JSON.stringify({ agent_id: "9f31c2a4-real-agent" }),
+    JSON.stringify({ bot_id: "crXXX_realbot" }),
+    JSON.stringify({ app_id: "00000003-0000-0ff1-ce00-000000000000" }),
+  ]) {
+    if (raw("/lifecycle/block", "POST", body) !== undefined) throw new Error("a real id was suppressed: " + body);
+  }
+  return "agent_id, bot_id and app_id forms all reach the server";
+});
+t("an unparseable body is treated as real, not swallowed", () => {
+  if (raw("/lifecycle/block", "POST", "<<not json>>") !== undefined) throw new Error("suppressed an unknown write");
+  return "passes through";
+});
+t("vendor deletes stay hard no-ops regardless of id", () => {
+  for (const p of ["/openai/gpt?id=x", "/claude/project?id=x", "/claude/workspace/archive"]) {
+    const r = raw(p, "DELETE", JSON.stringify({ id: "real-looking-id" }));
+    if (r === undefined) throw new Error(p + " would delete against a real tenant");
+  }
+  return "no delete or archive can leave the browser";
+});
+
 console.log("\n=== Cross-reference integrity ===");
 t("every referenced agent name exists in AGENT_SPECS", () => {
   const known = new Set(AG_DEMO_AGENTS.map(a => a.name));
