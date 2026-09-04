@@ -759,38 +759,80 @@ const periodToDays = (p) => PERIOD_DAYS[String(p || "P7D").toUpperCase()] || 7;
 
 // ── agent permissions (User Activity → Risk Management) ─────────────────────
 
+// Shape verified against AgentPermissionsPanel in tabs/UserActivityTab.jsx.
+// Two fields are load-bearing and easy to get wrong:
+//   • a permission item's name is `permission`, NOT `name`.
+//   • summary.filePermissions is an array of STRINGS, and it is mapped
+//     unguarded whenever summary.hasFileAccess is true — a missing array there
+//     throws inside render, and because every tab mounts at once that blanks
+//     the whole screen rather than just this panel.
+// PERMISSION_CATALOGUE maps each scope to the category icon and severity the
+// panel colours by, so a row never renders an undefined level.
+const PERMISSION_CATALOGUE = {
+  "Files.Read.All":         { category: "files",          level: "high",     isWrite: false, resource: "Microsoft Graph" },
+  "Files.Read":             { category: "files",          level: "medium",   isWrite: false, resource: "Microsoft Graph" },
+  "Files.ReadWrite.All":    { category: "files",          level: "critical", isWrite: true,  resource: "Microsoft Graph" },
+  "Sites.Read.All":         { category: "files",          level: "high",     isWrite: false, resource: "SharePoint" },
+  "Sites.ReadWrite.All":    { category: "files",          level: "critical", isWrite: true,  resource: "SharePoint" },
+  "User.Read":              { category: "directory",      level: "low",      isWrite: false, resource: "Microsoft Graph" },
+  "User.Read.All":          { category: "directory",      level: "high",     isWrite: false, resource: "Microsoft Graph" },
+  "User.ReadWrite.All":     { category: "directory",      level: "critical", isWrite: true,  resource: "Microsoft Graph" },
+  "Directory.Read.All":     { category: "directory",      level: "high",     isWrite: false, resource: "Microsoft Graph" },
+  "Mail.Send":              { category: "mail",           level: "critical", isWrite: true,  resource: "Exchange Online" },
+  "Chat.Read.All":          { category: "communications", level: "high",     isWrite: false, resource: "Microsoft Teams" },
+  "OnlineMeetings.Read.All":{ category: "calendar",       level: "medium",   isWrite: false, resource: "Microsoft Teams" },
+  "offline_access":         { category: "other",          level: "medium",   isWrite: false, resource: "Microsoft Graph" },
+};
+
 const PERMISSION_APP_SEEDS = [
-  ["Notion AI Connector", "critical", true, true, [["Files.Read.All", false], ["Sites.Read.All", false], ["User.Read.All", false]]],
-  ["Otter Meeting Notes", "high", true, false, [["OnlineMeetings.Read.All", false], ["offline_access", false]]],
-  ["ChatGPT (work account grant)", "critical", true, false, [["User.Read", false], ["Files.Read", false], ["offline_access", false]]],
-  ["Vendor Intake Bot", "high", false, true, [["Mail.Send", true], ["Directory.Read.All", false]]],
-  ["Contract Review Assistant", "critical", true, true, [["Sites.Read.All", false], ["Files.ReadWrite.All", true]]],
-  ["Field Service Dispatcher", "high", true, true, [["Sites.ReadWrite.All", true], ["User.Read.All", false]]],
-  ["Payroll Query Handler", "critical", false, true, [["User.ReadWrite.All", true], ["Directory.Read.All", false]]],
-  ["IT Helpdesk Copilot", "medium", false, false, [["Chat.Read.All", false]]],
-  ["Meeting Recap Bot", "medium", false, false, [["OnlineMeetings.Read.All", false]]],
-  ["Perplexity (work account grant)", "high", false, false, [["User.Read", false], ["offline_access", false]]],
-  ["Benefits Explainer", "high", true, false, [["Sites.Read.All", false], ["Chat.Read.All", false]]],
-  ["Engineering Runbook Agent", "high", true, true, [["Sites.ReadWrite.All", true]]],
+  ["Notion AI Connector",            "critical", ["Files.Read.All", "Sites.Read.All", "User.Read.All"]],
+  ["Otter Meeting Notes",            "high",     ["OnlineMeetings.Read.All", "offline_access"]],
+  ["ChatGPT (work account grant)",   "critical", ["User.Read", "Files.Read", "offline_access"]],
+  ["Vendor Intake Bot",              "high",     ["Mail.Send", "Directory.Read.All"]],
+  ["Contract Review Assistant",      "critical", ["Sites.Read.All", "Files.ReadWrite.All"]],
+  ["Field Service Dispatcher",       "high",     ["Sites.ReadWrite.All", "User.Read.All"]],
+  ["Payroll Query Handler",          "critical", ["User.ReadWrite.All", "Directory.Read.All"]],
+  ["IT Helpdesk Copilot",            "medium",   ["Chat.Read.All"]],
+  ["Meeting Recap Bot",              "medium",   ["OnlineMeetings.Read.All"]],
+  ["Perplexity (work account grant)","high",     ["User.Read", "offline_access"]],
+  ["Benefits Explainer",             "high",     ["Sites.Read.All", "Chat.Read.All"]],
+  ["Engineering Runbook Agent",      "high",     ["Sites.ReadWrite.All"]],
 ];
 
 function buildAgentPermissions() {
-  const apps = PERMISSION_APP_SEEDS.map(([displayName, riskLevel, hasFileAccess, hasWriteAccess, perms], i) => {
+  const apps = PERMISSION_APP_SEEDS.map((seed, i) => {
+    const [displayName, riskLevel, scopes] = seed;
     const agent = AG_DEMO_AGENTS.find((a) => a.name === displayName);
+    const permissions = scopes.map((scope) => {
+      const meta = PERMISSION_CATALOGUE[scope] || { category: "other", level: "medium", isWrite: false, resource: "Microsoft Graph" };
+      return {
+        permission: scope,
+        isWrite: meta.isWrite,
+        level: meta.level,
+        category: meta.category,
+        resourceDisplayName: meta.resource,
+        type: "Application",
+        consentType: "AllPrincipals",
+      };
+    });
+    const filePerms = permissions.filter((p) => p.category === "files");
     return {
       servicePrincipalId: `demo-sp-${i}`,
       appId: agent ? agent.appId : `demo-app-perm-${i}`,
       displayName,
       isAgent: !!agent,
       publisherName: /ChatGPT|Perplexity|Notion|Otter/.test(displayName) ? "Third party" : "Northwind Traders",
-      permissions: perms.map(([name, isWrite]) => ({
-        name,
-        isWrite,
-        type: "Application",
-        consentType: "AllPrincipals",
-        description: `${isWrite ? "Write" : "Read"} access granted via ${name}`,
-      })),
-      summary: { riskLevel, hasFileAccess, hasWriteAccess, permissionCount: perms.length },
+      permissions,
+      summary: {
+        riskLevel,
+        hasFileAccess: filePerms.length > 0,
+        hasWriteAccess: permissions.some((p) => p.isWrite),
+        criticalCount: permissions.filter((p) => p.level === "critical").length,
+        permissionCount: permissions.length,
+        // Strings, not objects — the panel renders each one directly and tests
+        // it with fp.includes("Write") to pick the colour.
+        filePermissions: filePerms.map((p) => p.permission),
+      },
     };
   });
   return {
@@ -807,56 +849,108 @@ function buildAgentPermissions() {
 
 // ── Azure Foundry discovery (Discovery tab → Azure panel) ───────────────────
 
+// Shape verified against AzureAIFoundryView in tabs/DiscoveryTab.jsx (which
+// auto-loads on mount) and AzureKnowledgePanel in tabs/UserActivityTab.jsx.
+//
+// SIX arrays are read with .length / .filter / .map and NONE of them is
+// optional-chained: openAIResources, serverlessEndoints, foundryAgents,
+// aiServices, accessControl, subscriptions. Omit any one and the view throws
+// during render. `foundryAgents` doubles as the ML-workspace list — entries
+// WITHOUT a modelName are counted as workspaces, entries with one as
+// deployments. Deployment fields are modelName / modelVersion / capacityTPM,
+// not model / version / capacity.
+const AZ_DEP = (name, modelName, modelVersion, capacityTPM, skuName) => ({
+  id: `demo-dep-${name}`,
+  name,
+  modelName,
+  modelVersion,
+  capacityTPM,
+  skuName,
+  contentFilter: "Microsoft.Default",
+  provisioningState: "Succeeded",
+});
+
 function buildAzureDiscovery() {
   return {
     openAIResources: [
-      { id: "/subscriptions/demo/rg-ai/northwind-ai-prod", name: "northwind-ai-prod", location: "westeurope", kind: "OpenAI", sku: "S0",
+      { id: "/subscriptions/0f2d/rg-ai/northwind-ai-prod", name: "northwind-ai-prod", location: "westeurope",
+        skuName: "S0", publicAccess: "Enabled", localAuthDisabled: false,
+        endpoint: "https://northwind-ai-prod.openai.azure.com/",
         deployments: [
-          { name: "claims-summariser", model: "gpt-4o", capacity: 120, version: "2024-08-06" },
-          { name: "product-qa", model: "gpt-4o-mini", capacity: 300, version: "2024-07-18" },
-          { name: "embeddings-index", model: "text-embedding-3-large", capacity: 200, version: "1" },
+          AZ_DEP("claims-summariser", "gpt-4o", "2024-08-06", 120, "Standard"),
+          AZ_DEP("product-qa", "gpt-4o-mini", "2024-07-18", 300, "Standard"),
+          AZ_DEP("embeddings-index", "text-embedding-3-large", "1", 200, "Standard"),
         ] },
-      { id: "/subscriptions/demo/rg-sec/northwind-ai-sec", name: "northwind-ai-sec", location: "northeurope", kind: "OpenAI", sku: "S0",
-        deployments: [{ name: "fraud-signal", model: "o1", capacity: 40, version: "2024-12-17" }] },
-      { id: "/subscriptions/demo/rg-fin/northwind-ai-fin", name: "northwind-ai-fin", location: "westeurope", kind: "OpenAI", sku: "S0",
-        deployments: [{ name: "invoice-extract", model: "gpt-4o", capacity: 80, version: "2024-08-06" }] },
-      { id: "/subscriptions/demo/rg-dev/northwind-ai-dev", name: "northwind-ai-dev", location: "uksouth", kind: "OpenAI", sku: "S0",
-        deployments: [{ name: "legacy-support", model: "gpt-35-turbo", capacity: 60, version: "0613" }] },
-    ],
-    aiServices: [
-      { name: "northwind-docintel", kind: "FormRecognizer", location: "westeurope" },
-      { name: "northwind-language", kind: "TextAnalytics", location: "westeurope" },
-      { name: "northwind-vision", kind: "ComputerVision", location: "northeurope" },
-      { name: "northwind-safety", kind: "ContentSafety", location: "westeurope" },
-      { name: "northwind-speech", kind: "SpeechServices", location: "uksouth" },
-    ],
-    mlWorkspaces: [
-      { name: "northwind-ml-research", location: "westeurope" },
-      { name: "northwind-ml-prod", location: "westeurope" },
+      { id: "/subscriptions/0f2d/rg-sec/northwind-ai-sec", name: "northwind-ai-sec", location: "northeurope",
+        skuName: "S0", publicAccess: "Disabled", localAuthDisabled: true,
+        endpoint: "https://northwind-ai-sec.openai.azure.com/",
+        deployments: [AZ_DEP("fraud-signal", "o1", "2024-12-17", 40, "Standard")] },
+      { id: "/subscriptions/0f2d/rg-fin/northwind-ai-fin", name: "northwind-ai-fin", location: "westeurope",
+        skuName: "S0", publicAccess: "Enabled", localAuthDisabled: false,
+        endpoint: "https://northwind-ai-fin.openai.azure.com/",
+        deployments: [AZ_DEP("invoice-extract", "gpt-4o", "2024-08-06", 80, "Standard")] },
+      { id: "/subscriptions/0f2d/rg-dev/northwind-ai-dev", name: "northwind-ai-dev", location: "uksouth",
+        skuName: "S0", publicAccess: "Enabled", localAuthDisabled: false,
+        endpoint: "https://northwind-ai-dev.openai.azure.com/",
+        // No content filter on the dev deployment — a real finding to point at.
+        deployments: [Object.assign(AZ_DEP("legacy-support", "gpt-35-turbo", "0613", 60, "Standard"), { contentFilter: null })] },
     ],
     serverlessEndpoints: [
-      { name: "phi-4-serverless", model: "Phi-4", location: "eastus" },
+      { id: "demo-sl-phi4", name: "phi-4-serverless", modelId: "Phi-4", workspaceName: "northwind-ml-research", location: "eastus", state: "Online" },
     ],
-    subscriptions: [{ subscriptionId: "0f2d-demo-subscription", displayName: "Northwind Production" }],
+    // Entries without modelName are ML workspaces; with one, a managed deployment.
+    foundryAgents: [
+      { id: "demo-ws-research", name: "northwind-ml-research", location: "westeurope", resourceGroup: "rg-ml", provisioningState: "Succeeded" },
+      { id: "demo-ws-prod", name: "northwind-ml-prod", location: "westeurope", resourceGroup: "rg-ml", provisioningState: "Succeeded" },
+      { id: "demo-ws-churn", name: "churn-scoring-managed", location: "westeurope", resourceGroup: "rg-ml", provisioningState: "Succeeded", modelName: "gpt-4o-mini", modelVersion: "2024-07-18" },
+    ],
+    aiServices: [
+      { id: "demo-svc-docintel", name: "northwind-docintel", kind: "FormRecognizer", location: "westeurope", skuName: "S0", publicAccess: "Enabled" },
+      { id: "demo-svc-language", name: "northwind-language", kind: "TextAnalytics", location: "westeurope", skuName: "S", publicAccess: "Enabled" },
+      { id: "demo-svc-vision", name: "northwind-vision", kind: "ComputerVision", location: "northeurope", skuName: "S1", publicAccess: "Disabled" },
+      { id: "demo-svc-safety", name: "northwind-safety", kind: "ContentSafety", location: "westeurope", skuName: "S0", publicAccess: "Enabled" },
+      { id: "demo-svc-speech", name: "northwind-speech", kind: "SpeechServices", location: "uksouth", skuName: "S0", publicAccess: "Enabled" },
+    ],
+    accessControl: [
+      { principalId: "8f31c2a4-0d55-4b9e-9a71-2c6f4b8e1d03", principalType: "User", roleName: "Cognitive Services OpenAI Contributor", resourceId: "/subscriptions/0f2d/rg-ai/northwind-ai-prod" },
+      { principalId: "b7d92e15-6a43-4c81-bf20-91e5d7a3c468", principalType: "ServicePrincipal", roleName: "Owner", resourceId: "/subscriptions/0f2d/rg-sec/northwind-ai-sec" },
+      { principalId: "3c48a9f7-2b61-4d05-8e93-7fa1c60b2d59", principalType: "Group", roleName: "Cognitive Services OpenAI User", resourceId: "/subscriptions/0f2d/rg-ai/northwind-ai-prod" },
+      { principalId: "d15e6b83-9c27-4a10-b5df-38e02f7a91c4", principalType: "ServicePrincipal", roleName: "Contributor", resourceId: "/subscriptions/0f2d/rg-fin/northwind-ai-fin" },
+    ],
+    subscriptions: [{ id: "0f2d-demo-subscription", name: "Northwind Production" }],
     warnings: [],
   };
 }
 
 // ── Azure usage / threads / assistants ──────────────────────────────────────
 
+// Shape verified against the Azure conversations panel in UserActivityTab:
+// totalRequests / totalTokens at the top level, and resources[].metrics
+// .deployments[] for the table. A flat `deployments` array is silently wrong
+// here — the table is optional-chained so it renders nothing and the KPIs read
+// zero, which looks like "no usage" rather than a bug.
 function buildAzureUsage(period) {
   const days = periodToDays(period);
   const cost = buildAzureCost(days);
-  return {
-    period,
-    deployments: cost.deployments.map((d) => ({
+  const byResource = new Map();
+  for (const d of cost.deployments) {
+    if (!byResource.has(d.resourceName)) byResource.set(d.resourceName, []);
+    byResource.get(d.resourceName).push({
       deploymentName: d.deploymentName,
-      resourceName: d.resourceName,
       modelName: d.modelName,
       requestCount: d.requestCount,
       promptTokens: d.inputTokens,
       completionTokens: d.outputTokens,
       totalTokens: d.totalTokens,
+    });
+  }
+  return {
+    period,
+    totalRequests: cost.summary.totalRequests,
+    totalTokens: cost.summary.totalTokens,
+    resources: [...byResource.entries()].map(([resourceName, deployments]) => ({
+      resourceName,
+      metrics: { deployments },
     })),
     summary: cost.summary,
   };
@@ -1055,7 +1149,16 @@ const AG_DEMO_ALERT_CONFIG = {
   notify_google: true,
 };
 
-// ── secondary panels (built, but not in the current 6-tab strip) ────────────
+// ── secondary panels — DATA RETAINED BUT CURRENTLY UNSERVED ────────────────
+//
+// Recertification, Prompt Monitor and Claude Budget are built in the codebase
+// but are not in the six-tab strip, so their payload shapes have never been
+// read off a live consumer. Their endpoints therefore return REJECT (see the
+// rule on the sentinel below) rather than an unverified guess.
+//
+// The datasets below are kept, unused, for whoever wires those tabs up: fill
+// in the real shape from the component, then swap the REJECT for the builder.
+// Vite tree-shakes them out of the bundle in the meantime.
 
 function buildRecertificationCampaigns() {
   const targets = AG_DEMO_AGENTS.filter((a) => a.risk.level === "critical" || a.risk.level === "high").slice(0, 10);
@@ -1143,6 +1246,28 @@ const AG_DEMO_PRICING = {
 
 const OK = { ok: true, success: true };
 
+/**
+ * Sentinel: "answer locally, but as a FAILURE".
+ *
+ * This exists because of a real bug this file shipped with. A mock that returns
+ * a half-formed object looks like success to the component, which then maps
+ * over a field that is not there and throws inside render. Every Agent
+ * Governance tab mounts at once (AgentGovernance.jsx renders all six and
+ * toggles display), so one such throw blanks the ENTIRE screen, not just the
+ * panel that caused it.
+ *
+ * A rejection is strictly safer. Every one of these panels already handles a
+ * failed fetch — that is exactly what they do today with no cloud connection —
+ * so they fall back to their own empty or error state and the rest of the page
+ * keeps working. It is still instant: a rejected promise settles in a
+ * microtask with no network involved.
+ *
+ * RULE: return real data only for a payload whose shape has been read off the
+ * consuming component. Anything else returns REJECT. Never return a guess.
+ */
+const REJECT = Symbol("ag-demo-reject");
+const NOT_CONNECTED = "This platform is not connected.";
+
 function mockFor(path, method, body) {
   const p = String(path || "");
   const m = String(method || "GET").toUpperCase();
@@ -1158,14 +1283,19 @@ function mockFor(path, method, body) {
   // ── per-platform scans ────────────────────────────────────────────────────
   // The merge helpers are all optional-chained, so an empty object is safe —
   // the full agent list already arrives from /discovery/run.
-  if (has("/google/scan-platform") || has("/google/discover")) return {};
+  // The four scan-platform endpoints are safe to answer with {}: the parent's
+  // merge helpers read every field optional-chained (r.assistants?.length and
+  // friends), and the full agent list already arrives via /discovery/run.
+  if (has("/google/scan-platform")) return {};
   if (has("/openai/scan-platform") || has("/claude/scan-platform") || has("/aws/scan-platform")) return {};
-  if (has("/google/agent-details")) return { agent: null, warnings: [] };
-  if (has("/google/user-activity")) return { chats: [], users: [], warnings: [] };
-  if (has("/google/conversations") || has("/google/gemini-activity")) return { conversations: [], chats: [], warnings: [] };
-  if (has("/google/gemini-vault")) return { messages: [], warnings: [] };
-  if (has("/gemini-enterprise/cost")) return { methods: [], summary: { totalRequests: 0 } };
-  if (has("/gemini-enterprise")) return { engine: null, agents: [], chats: [], files: [], fileActivity: [], warnings: [] };
+
+  // Everything below feeds a per-vendor panel whose shape has not been read off
+  // the component, so it rejects rather than risk a render throw. These panels
+  // only mount when their vendor is selected, and they show their own
+  // not-connected state on failure.
+  if (has("/google/discover") || has("/google/agent-details") || has("/google/user-activity")
+      || has("/google/conversations") || has("/google/gemini-activity") || has("/google/gemini-vault")) return REJECT;
+  if (has("/gemini-enterprise")) return REJECT;
 
   // ── Azure ─────────────────────────────────────────────────────────────────
   if (has("/azure/discover")) return buildAzureDiscovery();
@@ -1189,18 +1319,16 @@ function mockFor(path, method, body) {
   // ── cost ──────────────────────────────────────────────────────────────────
   if (has("/cost/azure")) return buildAzureCost(periodToDays(q.get("period")));
   if (has("/cost/google")) return { endpoints: [], summary: { totalCost: 0, totalTokens: 0, totalPredictions: 0 } };
-  if (has("/cost/history")) return { history: [], warnings: [] };
-  if (has("/cost/pricing")) return AG_DEMO_PRICING;
-  if (has("/openai/usage") || has("/openai/cost")) return buildAzureCost(periodToDays(q.get("period")));
-  if (has("/openai/activity")) return { activity: [], warnings: [] };
-  if (has("/openai/knowledge")) return { files: [], vectorStores: [], warnings: [] };
-  if (has("/openai/threads")) return { chats: [], warnings: [] };
-  if (has("/openai/files")) return { files: [], warnings: [] };
-  if (has("/claude/usage")) return buildAzureCost(periodToDays(q.get("period")));
-  if (has("/claude/files")) return { files: [], warnings: [] };
-  if (has("/claude/budget/members")) return buildClaudeBudgetMembers();
-  if (has("/claude/debug-admin")) return { ok: true, note: "demo mode" };
-  if (has("/aws/usage")) return { models: [], summary: { totalCost: 0, totalTokens: 0, totalRequests: 0 } };
+  // Cost is only ever rendered for the Microsoft vendor in demo mode (CostTab
+  // picks its vendor from the first key present, and oauthKeyId always wins),
+  // so the per-vendor cost endpoints below are unreachable there. They reject
+  // rather than feed an unverified shape into a table.
+  if (has("/cost/history") || has("/cost/pricing")) return REJECT;
+  if (has("/openai/usage") || has("/openai/cost") || has("/openai/activity")
+      || has("/openai/knowledge") || has("/openai/threads") || has("/openai/files")) return REJECT;
+  if (has("/claude/usage") || has("/claude/files") || has("/claude/budget/members")
+      || has("/claude/debug-admin")) return REJECT;
+  if (has("/aws/usage")) return REJECT;
 
   // ── destructive vendor actions — answered as no-ops ───────────────────────
   // These delete or archive a real agent in a real tenant. They must never
@@ -1247,50 +1375,23 @@ function mockFor(path, method, body) {
     return OK;
   }
 
-  // ── sensitivity / prompt monitor / recertification / metadata ─────────────
-  if (has("/sensitivity/summary")) return { total: AG_DEMO_PROMPT_FLAGS.length, byLevel: { critical: 3, high: 3, medium: 1 } };
-  if (has("/sensitivity/agent/")) return { agentId: p.split("/sensitivity/agent/")[1], classifications: [] };
-  if (has("/sensitivity/")) return { scanned: AG_DEMO_AGENTS.length, findings: [] };
-
-  if (has("/prompts/summary")) {
-    return {
-      total_flags: AG_DEMO_PROMPT_FLAGS.length,
-      critical_count: AG_DEMO_PROMPT_FLAGS.filter((f) => f.severity === "critical").length,
-      high_count: AG_DEMO_PROMPT_FLAGS.filter((f) => f.severity === "high").length,
-      unresolved_count: AG_DEMO_PROMPT_FLAGS.filter((f) => !f.resolved).length,
-      affected_agents: new Set(AG_DEMO_PROMPT_FLAGS.map((f) => f.agent_id)).size,
-    };
-  }
-  if (has("/prompts/flags")) {
-    if (m === "GET") return { flags: AG_DEMO_PROMPT_FLAGS };
-    return OK;
-  }
-  if (has("/prompts/")) return Object.assign({ flags: [] }, OK);
-
-  if (has("/recertification/stats")) {
-    const by = (s) => AG_DEMO_RECERT.filter((r) => r.status === s).length;
-    return {
-      total: AG_DEMO_RECERT.length,
-      pending: by("pending"),
-      approved: by("approved"),
-      rejected: by("rejected"),
-      escalated: by("escalated"),
-      overdue: AG_DEMO_RECERT.filter((r) => r.overdue).length,
-    };
-  }
-  if (has("/recertification")) {
-    if (m === "GET") return { campaigns: AG_DEMO_RECERT, total: AG_DEMO_RECERT.length };
-    return OK;
+  // ── panels outside the current 6-tab strip ────────────────────────────────
+  // Recertification, Prompt Monitor and the sensitivity views are built but not
+  // wired into TABS, so their shapes have not been read off a live consumer.
+  // Writes are still swallowed (nothing must reach the server); reads reject.
+  if (has("/sensitivity/") || has("/prompts/") || has("/recertification")) {
+    return m === "GET" ? REJECT : OK;
   }
 
-  if (has("/agent-metadata/stats/summary")) {
-    return { total: 0, withPurpose: 0, withOwner: AG_DEMO_AGENTS.filter((a) => a.owner).length };
-  }
+  // AgentMetadataPanel is the one verified consumer here: it reads
+  // res.exists and fills an empty form when false. The list and stats
+  // endpoints have no verified consumer, so they reject.
+  if (has("/agent-metadata/stats/summary")) return REJECT;
   if (has("/agent-metadata")) {
     if (m !== "GET") return OK;
-    // "/agent-metadata/<id>" is a single record; "/agent-metadata" is a list.
+    // "/agent-metadata/<id>" is a single record; bare "/agent-metadata" a list.
     const segs = p.split("?")[0].split("/").filter(Boolean);
-    return segs.length > 1 ? { exists: false } : { items: [] };
+    return segs.length > 1 ? { exists: false } : REJECT;
   }
 
   // ── credential plumbing — answered locally so a fake key id never 400s ────
@@ -1323,6 +1424,10 @@ export function agDemoResponse(path, options) {
   if (!AG_DEMO) return undefined;
   try {
     const out = mockFor(path, options && options.method, options && options.body);
+    // Answer locally as a failure. request() is async, so returning a rejected
+    // promise surfaces in the caller's existing catch — no network, no throw
+    // inside render.
+    if (out === REJECT) return Promise.reject(new Error(NOT_CONNECTED));
     // The only deliberate wait in the whole file, and it is opt-in (0 by default).
     if (out !== undefined && AG_DEMO_SCAN_MS > 0 && String(path).startsWith("/discovery/run")) {
       return delay(AG_DEMO_SCAN_MS, out);
@@ -1392,6 +1497,16 @@ export function installAgDemoFetch() {
         mock = mockFor(gp, method, body);
       } catch (e) {
         console.error("[agent-governance demo] mock threw for", gp, e);
+      }
+      // Deliberate local failure — 503 so request()'s !res.ok path throws with
+      // the message, exactly as a real unreachable platform would.
+      if (mock === REJECT) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: NOT_CONNECTED }), {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          })
+        );
       }
       if (mock !== undefined) {
         const wait = AG_DEMO_SCAN_MS > 0 && gp.startsWith("/discovery/run") ? AG_DEMO_SCAN_MS : 0;
