@@ -18,10 +18,17 @@ import { EventEmitter } from 'node:events';
 const WATCHER_SCRIPT = helperScript('file-dialog-watcher.ps1');
 
 export class FileDialogWatcher extends EventEmitter {
-  constructor({ log, aiProcessNames }) {
+  /**
+   * `onRespawn` — see AttachmentWatcher's constructor for the full reasoning.
+   * The host_arm state lives in the CHILD, so a respawned helper comes up
+   * disarmed and needs the current state re-stated or it stays blind for as long
+   * as the already-open governed conversation lasts.
+   */
+  constructor({ log, aiProcessNames, onRespawn = null }) {
     super();
     this.log = log;
     this.aiProcessNames = aiProcessNames;
+    this.onRespawn = onRespawn;
     this.child = null;
     this.buffer = '';
     this.stopRequested = false;
@@ -37,11 +44,18 @@ export class FileDialogWatcher extends EventEmitter {
       ['-NoProfile', '-NonInteractive', '-Sta', '-ExecutionPolicy', 'Bypass', '-File', WATCHER_SCRIPT],
       {
         windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        // stdin is 'pipe', not 'ignore' — see hostArm().
+        stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, CFAI_AI_PROCESSES: this.aiProcessNames.join(',') },
       }
     );
 
+    // See AttachmentWatcher's copy of this: an in-flight write to a helper that
+    // has just died raises EPIPE asynchronously, and an unhandled stream 'error'
+    // is an uncaughtException.
+    this.child.stdin.on('error', (err) => {
+      this.log?.warn(`file-dialog-watcher: stdin write failed — ${err?.message || err}`);
+    });
     this.child.stdout.setEncoding('utf8');
     this.child.stdout.on('data', (chunk) => this.#onStdout(chunk));
 
@@ -56,6 +70,10 @@ export class FileDialogWatcher extends EventEmitter {
       this.child = null;
       if (!this.stopRequested) setTimeout(() => this.start(), 2000);
     });
+    // AFTER the child exists, so the callback can write to its stdin.
+    try { this.onRespawn?.(this); } catch (err) {
+      this.log?.warn(`file-dialog-watcher: re-arm hook failed — ${err?.message || err}`);
+    }
   }
 
   stop() {
@@ -63,6 +81,30 @@ export class FileDialogWatcher extends EventEmitter {
     if (this.child) {
       try { this.child.kill(); } catch {}
       this.child = null;
+    }
+  }
+
+  /**
+   * Add or remove a HOST APP (Microsoft Teams) from the set of processes whose
+   * file pickers this helper tracks. Same contract, same payload and the same
+   * privacy reasoning as AttachmentWatcher.hostArm() — a bare process name and
+   * an on/off, nothing else.
+   *
+   * The helper LATCHES this onto each dialog when the dialog is first seen,
+   * because a picker steals focus and so the arm is already gone by the time it
+   * closes. See $HostDisarmedAt in file-dialog-watcher.ps1.
+   */
+  hostArm(processName, on) {
+    if (!processName) return false;
+    if (!this.child?.stdin || this.child.stdin.destroyed) return false;
+    try {
+      this.child.stdin.write(JSON.stringify({
+        cmd: 'host_arm', process: String(processName), state: on ? 'on' : 'off',
+      }) + '\n');
+      return true;
+    } catch (err) {
+      this.log?.warn(`file-dialog-watcher: host_arm command failed — ${err?.message || err}`);
+      return false;
     }
   }
 

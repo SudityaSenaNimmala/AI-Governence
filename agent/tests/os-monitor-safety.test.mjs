@@ -7,6 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -25,6 +26,7 @@ import {
   reapEnforcer,
 } from '../src/os_monitor/enforcer-watchdog.js';
 import { Enforcer } from '../src/os_monitor/enforcer.js';
+import { OsMonitor } from '../src/os_monitor/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_DIR = join(__dirname, '..');
@@ -503,10 +505,15 @@ test('Enforcer passes the heartbeat path to the helper and beats every 5s', asyn
 
 // ── Attachment hold: block the send while a sensitive file is attached ───────
 
-test('Enforcer.attachHold writes only cmd/state/filename/patterns/ttl_ms to stdin — no file content', async () => {
+test('Enforcer.attachHold writes only cmd/state/filename/patterns/ttl_ms/process to stdin — no file content', async () => {
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer.js'), 'utf8');
-  assert.match(src, /attachHold\(state, \{ filename = '', patterns = '', ttlMs = 3000 \} = \{\}\)/);
-  assert.match(src, /cmd: 'attach_hold', state, filename, patterns, ttl_ms: ttlMs/);
+  // `process` was added when the hold gained a process BINDING — a hold armed
+  // for one app used to swallow the next Enter in whatever app the user
+  // alt-tabbed to. It is a bare process name, which is the same class of value
+  // the filename and pattern-name fields already are; still no file content and
+  // still no free text.
+  assert.match(src, /attachHold\(state, \{ filename = '', patterns = '', ttlMs = 3000, process: processName = '' \} = \{\}\)/);
+  assert.match(src, /cmd: 'attach_hold', state, filename, patterns, ttl_ms: ttlMs, process: processName/);
 });
 
 test('enforcer-win.ps1: attach_hold ORs into both the Enter and mouse-click block decisions', async () => {
@@ -518,10 +525,27 @@ test('enforcer-win.ps1: attach_hold ORs into both the Enter and mouse-click bloc
   // asserted on the content OR-chain it actually belongs to.
   const mouseGate = src.slice(src.indexOf('static bool BlockActiveForMouse()'), src.indexOf('// Precedence matches the Enter path'));
   assert.ok(mouseGate.length > 0, 'expected a BlockActiveForMouse body');
-  assert.match(mouseGate, /return _attachHoldActive \|\| TypedBlockFresh\(\) \|\| _blockUia \|\| \(recentPaste && _blockPaste\) \|\| cooldown;/);
+  // Both gates now read the hold through AttachHoldActive() rather than the raw
+  // flag. That accessor is the PROCESS BINDING: the flag alone had no process
+  // identity, so a hold armed for a flagged attachment in one app swallowed the
+  // next Enter in whatever app the user alt-tabbed to. Every keystroke decision
+  // goes through the accessor so the binding cannot be forgotten at one site.
+  assert.match(mouseGate, /return AttachHoldActive\(\) \|\| TypedBlockFresh\(\) \|\| _blockUia \|\| \(recentPaste && _blockPaste\) \|\| cooldown;/);
   assert.match(mouseGate, /if \(_fgIsBlocked && \(_blockedByElement \|\| PanelEnforceOk\(\)\)\) return true;/);
   // Enter-decision gate.
-  assert.match(src, /bool attachHold = _attachHoldActive;/);
+  assert.match(src, /bool attachHold = AttachHoldActive\(\);/);
+  // The accessor itself: the raw flag AND a case-insensitive match against the
+  // foreground app, with "unbound" (no process on the command) still counting so
+  // a missing field can never silently stop holding a sensitive attachment.
+  const holdGate = src.slice(src.indexOf('static bool AttachHoldActive()'), src.indexOf('static bool BlockActiveForSend('));
+  assert.ok(holdGate.length > 0, 'expected an AttachHoldActive body');
+  assert.match(holdGate, /if \(!_attachHoldActive\) return false;/);
+  assert.match(holdGate, /return string\.Equals\(owner, _app \?\? "", StringComparison\.OrdinalIgnoreCase\);/);
+  // Every keystroke-decision read goes through the accessor. The only places the
+  // raw flag may still be touched are its declaration, the stdin command, the
+  // TTL sweep and the accessor itself.
+  const rawReads = (psCodeOnly(src).match(/_attachHoldActive/g) || []).length;
+  assert.equal(rawReads, 6, `_attachHoldActive gained a raw reference (${rawReads}) — it must be read through AttachHoldActive()`);
   const enterPred = src.slice(src.indexOf('static bool EnterBlockActive('), src.indexOf('static string ActivePatterns()'));
   assert.match(enterPred, /return attachHold \|\| TypedBlockFresh\(\) \|\| uiaBlock \|\| clipBlock \|\| cooldown;/);
   assert.match(enterPred, /if \(_fgIsBlocked && \(_blockedByElement \|\| PanelEnforceOk\(\)\)\) return true;/);
@@ -636,46 +660,93 @@ test('OsMonitor arms a provisional hold before the file scan resolves, and only 
     src.indexOf("this.attachmentWatcher.on('attachment_appeared'"),
     src.indexOf("this.attachmentWatcher.on('attachment_disappeared'"),
   );
-  const provisionalIdx = appearedHandler.indexOf("attachHold('on', { filename: ev.filename, patterns: '', ttlMs: 3000 })");
+  // Arming now goes through #armAttachHold, which owns the hold MAP (several
+  // files can be held at once) and the refresh ticker. The 3s TTL and the
+  // arm-before-the-scan ORDERING are unchanged, and the ordering is still the
+  // property under test.
+  const provisionalIdx = appearedHandler.indexOf("this.#armAttachHold(ev.filename, { patterns: '', ttlMs: 3000, processName: ev.process })");
   const scanIdx = appearedHandler.indexOf('buildFileUploadEvent(');
-  assert.ok(provisionalIdx >= 0, 'expected a provisional attachHold(on) call');
+  assert.ok(provisionalIdx >= 0, 'expected a provisional #armAttachHold call');
   assert.ok(scanIdx >= 0, 'expected a buildFileUploadEvent call');
   assert.ok(provisionalIdx < scanIdx, 'the provisional hold must be armed BEFORE the scan starts, not after');
   // Escalation threshold matches the browser extension's existing file-block
-  // severity (high/critical only, not moderate).
-  assert.match(appearedHandler, /shouldHold = severity === 'high' \|\| severity === 'critical'/);
+  // severity (high/critical only, not moderate) — PLUS the fail-closed case,
+  // which is gated on the conversation being governed/blocked so that nothing
+  // changes for any ordinary AI app.
+  assert.match(appearedHandler, /shouldHold = severity === 'high' \|\| severity === 'critical' \|\| failClosed/);
+  assert.match(appearedHandler, /const failClosed = !!governed && unverified;/);
 });
 
-test('OsMonitor refreshes a confirmed attach hold so it survives past its own TTL while the file stays attached', async () => {
+test('OsMonitor refreshes EVERY attach hold — provisional included — so one cannot lapse while the file stays attached', async () => {
   // Regression: attachment_appeared only fires once, on first appearance —
   // it does not keep firing while a chip just sits there unchanged.
   // Confirmed live: a confirmed hold (60s TTL) silently expired with the
   // sensitive file never removed, and the next Enter went through
   // unblocked, because nothing was re-sending attach_hold('on', ...) to
   // keep it alive. #startAttachHoldRefresh is the fix.
+  //
+  // SECOND HALF of the same bug, fixed later: the ticker used to start only for
+  // a CONFIRMED hold, so the 3s PROVISIONAL one — whose entire job is to win the
+  // race against a fast Enter while the scan runs — could lapse before the scan
+  // returned. A slow extraction (OCR, a big PDF, a deep zip) is exactly the case
+  // where that happens, and exactly the file most worth holding. #syncAttachHold
+  // is now the single arming path and it always starts the ticker.
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
-  assert.match(src, /#startAttachHoldRefresh\(filename, patterns, ttlMs\)/);
+  assert.match(src, /#startAttachHoldRefresh\(payload, everyMs\)/);
   assert.match(src, /this\.attachHoldRefreshTimer = setInterval\(/);
-  const appearedHandler = src.slice(
-    src.indexOf("this.attachmentWatcher.on('attachment_appeared'"),
-    src.indexOf("this.attachmentWatcher.on('attachment_disappeared'"),
-  );
-  assert.match(appearedHandler, /this\.#startAttachHoldRefresh\(ev\.filename, patternNames, ttlMs\);/);
-  // The refresh timer must stop itself once the hold it was refreshing is no
-  // longer the active one — otherwise a released hold could get silently
-  // re-armed a few seconds later by a stale interval nobody cleared.
-  assert.match(src, /if \(this\.attachHoldFilename !== filename\) \{ this\.#stopAttachHoldRefresh\(\); return; \}/);
+  // Every arm goes through #syncAttachHold, and it starts the ticker
+  // unconditionally — there is no "only if confirmed" branch left.
+  const sync = src.slice(src.indexOf('#syncAttachHold()'), src.indexOf('#armAttachHold('));
+  assert.ok(sync.length > 0, 'expected a #syncAttachHold body');
+  assert.match(sync, /this\.enforcer\.attachHold\('on', payload\);/);
+  assert.match(sync, /this\.#startAttachHoldRefresh\(payload, Math\.max\(500, Math\.floor\(shortestTtl \/ 3\)\)\);/);
+  // The interval is derived from the SHORTEST TTL in force. The old
+  // Math.max(5000, ttlMs/3) refreshed a 3s hold every 5s, i.e. never in time.
+  assert.match(sync, /shortestTtl = Math\.min\(shortestTtl, held\.ttlMs\)/);
+  // The refresh timer stops itself once nothing is held — otherwise a released
+  // hold could get silently re-armed by a stale interval nobody cleared.
+  assert.match(src, /if \(this\.attachHolds\.size === 0\) \{ this\.#stopAttachHoldRefresh\(\); return; \}/);
+});
+
+test('OsMonitor tracks holds PER FILE, so releasing one never releases another', async () => {
+  // The multi-file defect. attachHoldFilename was a single string, so a second
+  // attachment overwrote the first's tracking, and — the half that actually let
+  // a sensitive file through — an attachment_disappeared for a CLEAN file B
+  // released the hold that FLAGGED file A still needed.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  assert.match(src, /this\.attachHolds = new Map\(\);/);
+  // The single-string field is gone entirely — no call site can resurrect the
+  // "one slot" assumption.
+  assert.equal(codeOnly(src).includes('attachHoldFilename'), false,
+    'the single-slot hold field must not come back');
+  // Release deletes ONE key, and only tells the helper to release when nothing
+  // is left; otherwise it re-states the hold with the narrowed union.
+  const release = src.slice(src.indexOf('#releaseAttachHold(filename)'), src.indexOf('#startAttachHoldRefresh(payload, everyMs)'));
+  assert.ok(release.length > 0, 'expected a #releaseAttachHold body');
+  assert.match(release, /if \(!this\.attachHolds\.delete\(filename\)\) return false;/);
+  assert.match(release, /if \(this\.attachHolds\.size === 0\) \{/);
+  assert.match(release, /this\.enforcer\.attachHold\('off', \{ filename, process: processName \}\);/);
+  assert.match(release, /\} else \{\s*\r?\n\s*this\.#syncAttachHold\(\);/);
+  // The pattern list and the filename the helper is told about are the UNION
+  // across every file still held, so a block never under-reports what holds it.
+  const sync = src.slice(src.indexOf('#syncAttachHold()'), src.indexOf('#armAttachHold('));
+  assert.match(sync, /filename: \[\.\.\.this\.attachHolds\.keys\(\)\]\.join\(', '\)/);
+  assert.match(sync, /patterns: \[\.\.\.patterns\]\.join\(','\)/);
+  // …and the hold is bound to the app it was armed for.
+  assert.match(sync, /process: this\.attachHoldProcess \|\| ''/);
 });
 
 test('OsMonitor releases the hold when the flagged attachment disappears, and stops refreshing it', async () => {
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
   const disappearedHandler = src.slice(src.indexOf("this.attachmentWatcher.on('attachment_disappeared'"));
-  assert.match(disappearedHandler.slice(0, 500), /attachHold\('off', \{ filename: ev\.filename \}\)/);
-  assert.match(disappearedHandler.slice(0, 500), /this\.#stopAttachHoldRefresh\(\);/);
-  // Guarded on filename match, not a blanket release — an unrelated file
-  // disappearing must not release a hold armed for a different, still-
-  // present flagged file.
-  assert.match(disappearedHandler.slice(0, 300), /if \(this\.attachHoldFilename !== ev\.filename\) return;/);
+  // Both the 'off' command and the ticker stop now live in #releaseAttachHold —
+  // which is what makes the release PER FILE. The handler's own job is only to
+  // ask for this one file to be released, and to say nothing when it was not
+  // held (an unrelated file's disappearance must change nothing at all).
+  assert.match(disappearedHandler.slice(0, 400), /if \(!this\.#releaseAttachHold\(ev\.filename\)\) return;/);
+  const release = src.slice(src.indexOf('#releaseAttachHold(filename)'), src.indexOf('#startAttachHoldRefresh(payload, everyMs)'));
+  assert.match(release, /attachHold\('off', \{ filename, process: processName \}\)/);
+  assert.match(release, /this\.#stopAttachHoldRefresh\(\);/);
 });
 
 test('a blocked attachment reports blocked_for:file_upload and never claims the upload itself was prevented', async () => {
@@ -1907,6 +1978,275 @@ test('IDE_PROCESSES never reaches aiProcNames or any passive watcher', async () 
     /aiProcessNames.*(IDE|buildIdeProcessConfig)|(IDE|buildIdeProcessConfig).*aiProcessNames/.test(pw),
     false,
     'the IDE catalog must never be mixed into prompt-watcher.js aiProcessNames',
+  );
+});
+
+// ── The host-app guard on index.js's OWN handlers ────────────────────────────
+//
+// watcherProcessNames() (asserted above) covers every watcher that is HANDED a
+// process list. Three handlers are not: the clipboard poller emits for whatever
+// process is focused, and index.js filters those events itself with
+// identifyAiProcess() — which resolves a host app by design, because that
+// function is product ATTRIBUTION, not capture permission. Until
+// isHostAppProcess() was added at those three sites, "Microsoft Teams is
+// focused" was enough to
+//   * report the FULL clipboard text of a paste into a private 1:1 DM,
+//   * read, extract, scan and upload a file pasted into one, and
+//   * write a window title carrying a colleague's name and both parties' email
+//     addresses into the agent's own log file
+// with no way for any of it to know which conversation was open. There is
+// nothing to narrow at these sites, so host apps are excluded outright — the
+// same treatment they already get from every other passive path here. The
+// narrow, gated read inside an identified governed agent conversation stays
+// where it belongs, in enforcer-win.ps1.
+//
+// NOTHING here spawns anything: enforcerEnabled:false, every subsystem replaced
+// with an inert stub before start(), and no network I/O (PolicySync/FeatureSync
+// never start, the Reporter is a stub). Same convention as
+// os-monitor-redact-audit.test.mjs.
+
+const HOST_APP_PROC = 'ms-teams';
+// Verbatim shape from ai-processes.js' teams_desktop entry (measured live): a
+// colleague's display name, the tenant, and the signed-in user's email.
+const TEAMS_DM_TITLE = 'Sruthi Chimata | CloudFuze, Inc | p@cloudfuze.com | Microsoft Teams';
+const SECRET_TEXT = 'my aws key is AKIAIOSFODNN7EXAMPLE and my ssn is 123-45-6789';
+
+function inertWatcher() {
+  const stub = new EventEmitter();
+  stub.start = () => {};
+  stub.stop = () => {};
+  return stub;
+}
+
+/** A started monitor whose every subsystem is inert, plus its captured output. */
+function inertMonitor() {
+  const reported = [];
+  const logged = [];
+  const push = (m) => { logged.push(String(m)); };
+  const log = { info: push, warn: push, error: push };
+  log.child = () => log;
+  const monitor = new OsMonitor({
+    serverUrl: '', token: '', log, enforcerEnabled: false,
+  });
+  monitor.poller = inertWatcher();
+  monitor.dialogWatcher = inertWatcher();
+  monitor.attachmentWatcher = inertWatcher();
+  monitor.promptWatcher = inertWatcher();
+  monitor.enforcer = Object.assign(new EventEmitter(), {
+    start() {}, stop() {}, attachHold() {}, updateBlockPatterns() {}, tokenize() {},
+  });
+  monitor.toast = { start() {}, stop() {}, show() {} };
+  monitor.reporter = { start() {}, stop() {}, enqueue: (e) => reported.push(e) };
+  monitor.policySync.start = () => {};
+  monitor.featureSync.start = () => {};
+  monitor.start();
+  return { monitor, reported, logged };
+}
+
+/** The clipboard_files handler is async — wait for it to settle. */
+async function settle(pred, ms = 5000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    if (pred()) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+/** Every catalog process name that is NOT a host app, as a bare literal. */
+async function nonHostAppProcs() {
+  const { AI_PROCESSES } = await import('../src/os_monitor/ai-processes.js');
+  return AI_PROCESSES
+    .filter((e) => e.hostApp !== true)
+    .map((e) => e.match.source.replace(/^\^/, '').replace(/\$$/, '').replace(/[\\/]i?$/, ''));
+}
+
+test('isHostAppProcess answers the capture question identifyAiProcess does not', async () => {
+  const { isHostAppProcess, identifyAiProcess, AI_PROCESSES } =
+    await import('../src/os_monitor/ai-processes.js');
+  // The two questions are separate on purpose. Attribution still resolves Teams
+  // — removing it from the catalog is NOT the fix, because a narrowly-gated
+  // Teams event still needs a product name.
+  assert.deepEqual(identifyAiProcess(HOST_APP_PROC), { product: 'Microsoft Teams', vendor: 'Microsoft' });
+  assert.equal(isHostAppProcess(HOST_APP_PROC), true);
+  assert.equal(isHostAppProcess('MS-Teams.exe'), true, 'same .exe/case folding as the rest of the catalog');
+  // Every host-app entry, so a second one added later is covered without a test edit.
+  for (const entry of AI_PROCESSES) {
+    if (entry.hostApp !== true) continue;
+    const literal = entry.match.source.replace(/^\^/, '').replace(/\$$/, '').replace(/[\\/]i?$/, '');
+    assert.equal(isHostAppProcess(literal), true, `${literal} must read as a host app`);
+  }
+  for (const name of await nonHostAppProcs()) {
+    assert.equal(isHostAppProcess(name), false, `${name} is a real AI app — it must not be gated`);
+  }
+  // "Is this a host app", not "is this an AI app": an unknown process is not one.
+  assert.equal(isHostAppProcess('Code'), false);
+  assert.equal(isHostAppProcess(''), false);
+  assert.equal(isHostAppProcess(null), false);
+});
+
+test('a paste into a host app reports nothing — no clipboard text, no window title', () => {
+  const h = inertMonitor();
+  try {
+    h.monitor.poller.emit('clipboard', {
+      process: HOST_APP_PROC, title: TEAMS_DM_TITLE, text: SECRET_TEXT,
+      len: SECRET_TEXT.length, cause: 'seq_change',
+    });
+    // Not "an event without content_text" — no event at all, the same as every
+    // other passive path a host app is excluded from.
+    assert.deepEqual(h.reported, [], 'a paste into an unknown Teams conversation must report nothing');
+    const serialized = JSON.stringify(h.reported) + '\n' + h.logged.join('\n');
+    for (const forbidden of [SECRET_TEXT, 'AKIAIOSFODNN7EXAMPLE', '123-45-6789', TEAMS_DM_TITLE, 'Sruthi Chimata', 'p@cloudfuze.com']) {
+      assert.equal(serialized.includes(forbidden), false, `leaked into a report or a log line: ${forbidden}`);
+    }
+  } finally { h.monitor.stop(); }
+});
+
+test('a file pasted into a host app is never read, scanned or reported', async () => {
+  const dir = await tempDir();
+  try {
+    // A ".bin" is the branch that base64s the whole file for dashboard preview
+    // (file-handler.js' last-resort else), so this is the content_base64 path.
+    const p = join(dir, 'payroll.bin');
+    await writeFile(p, SECRET_TEXT, 'utf8');
+
+    const teams = inertMonitor();
+    try {
+      teams.monitor.poller.emit('clipboard_files', {
+        process: HOST_APP_PROC, title: TEAMS_DM_TITLE, paths: [p],
+      });
+      // The handler is async; give it longer than it would need to finish.
+      await new Promise((r) => setTimeout(r, 250));
+      assert.deepEqual(teams.reported, [], 'no file_upload event may be built for a host app');
+      const serialized = JSON.stringify(teams.reported) + '\n' + teams.logged.join('\n');
+      for (const forbidden of [
+        Buffer.from(SECRET_TEXT, 'utf8').toString('base64'),
+        'AKIAIOSFODNN7EXAMPLE', TEAMS_DM_TITLE, 'p@cloudfuze.com',
+      ]) {
+        assert.equal(serialized.includes(forbidden), false, `leaked: ${forbidden}`);
+      }
+    } finally { teams.monitor.stop(); }
+
+    // Positive control, same file: a real AI app still gets the full event,
+    // bytes included. Without this the test above would also pass if the whole
+    // path were broken.
+    const claude = inertMonitor();
+    try {
+      claude.monitor.poller.emit('clipboard_files', {
+        process: 'Claude', title: 'Claude', paths: [p],
+      });
+      await settle(() => claude.reported.length > 0);
+      const ev = claude.reported.find((e) => e.kind === 'file_upload');
+      assert.ok(ev, 'a real AI app must still report a pasted file');
+      assert.equal(ev.filename, 'payroll.bin');
+      assert.equal(ev.service, 'Claude');
+      assert.equal(ev.content_base64, Buffer.from(SECRET_TEXT, 'utf8').toString('base64'));
+    } finally { claude.monitor.stop(); }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('the focus log line drops the window title for a host app, and keeps it for AI apps', async () => {
+  const h = inertMonitor();
+  try {
+    h.monitor.poller.emit('focus', { pid: 4242, process: HOST_APP_PROC, title: TEAMS_DM_TITLE });
+    const line = h.logged.find((l) => l.includes('AI process focused'));
+    assert.ok(line, 'the focus event must still be logged — only the title is withheld');
+    // Everything else about the event survives: product and pid.
+    assert.match(line, /Microsoft Teams/);
+    assert.match(line, /pid=4242/);
+    // The title, and each PII field inside it, does not.
+    for (const forbidden of [TEAMS_DM_TITLE, 'Sruthi Chimata', 'p@cloudfuze.com', 'CloudFuze, Inc']) {
+      assert.equal(line.includes(forbidden), false, `the focus log line still carries ${forbidden}`);
+    }
+    assert.equal(/title="/.test(line), false, 'no title field at all for a host app');
+  } finally { h.monitor.stop(); }
+
+  // Unchanged for every non-host-app entry in the catalog.
+  for (const proc of await nonHostAppProcs()) {
+    const g = inertMonitor();
+    try {
+      g.monitor.poller.emit('focus', { pid: 7, process: proc, title: `${proc} — window` });
+      const line = g.logged.find((l) => l.includes('AI process focused'));
+      assert.ok(line, `${proc} must still log a focus line`);
+      assert.match(line, new RegExp(`title="${proc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} — window"`),
+        `${proc} lost its window title from the focus log line`);
+    } finally { g.monitor.stop(); }
+  }
+});
+
+test('every non-host-app process still gets its paste scanned and reported in full', async () => {
+  // The regression net for the guard: it must have changed behaviour for host
+  // apps ONLY. One monitor per process so the fire-dedup map cannot mask a miss.
+  const { scan } = await import('../src/os_monitor/classifier.js');
+  const expected = scan(SECRET_TEXT);
+  assert.ok(expected.matches.length > 0, 'the fixture must be detectable at all');
+  for (const proc of await nonHostAppProcs()) {
+    const h = inertMonitor();
+    try {
+      h.monitor.poller.emit('clipboard', {
+        process: proc, title: `${proc} window`, text: SECRET_TEXT,
+        len: SECRET_TEXT.length, cause: 'seq_change',
+      });
+      const ev = h.reported.find((e) => e.kind === 'prompt_paste');
+      assert.ok(ev, `${proc} must still report a sensitive paste`);
+      assert.equal(ev.process_name, proc);
+      assert.equal(ev.content_text, SECRET_TEXT, `${proc} lost its content capture`);
+      assert.equal(ev.window_title, `${proc} window`);
+      assert.deepEqual(ev.matches, expected.matches, `${proc} lost its match detail`);
+      assert.equal(ev.highest_severity, expected.highestSeverity);
+    } finally { h.monitor.stop(); }
+  }
+});
+
+test('the host-app guard sits at all three capture sites, before anything is read', async () => {
+  // Source-level, because the ORDER is the property: a guard placed after the
+  // read, the scan or the enqueue would still leak.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  assert.match(src, /^\s*isHostAppProcess,$/m, 'index.js must import the shared predicate');
+  // Never re-implemented at a call site — one definition, in the catalog module.
+  assert.equal(/hostApp/.test(codeOnly(src).replace(/isHostAppProcess/g, '')), false,
+    'index.js must not read the hostApp field itself — use isHostAppProcess()');
+
+  const clip = src.slice(src.indexOf("this.poller.on('clipboard', ("), src.indexOf("this.poller.on('clipboard_files', "));
+  assert.ok(clip.length > 0, "expected a poller.on('clipboard') handler");
+  const clipCode = codeOnly(clip);
+  assert.match(clipCode, /if \(isHostAppProcess\(ev\.process\)\) return;/);
+  assert.ok(
+    clipCode.indexOf('isHostAppProcess') < clipCode.indexOf('scan(ev.text)'),
+    'the host-app guard must precede the clipboard scan',
+  );
+  assert.ok(
+    clipCode.indexOf('isHostAppProcess') < clipCode.indexOf('content_text: ev.text'),
+    'the host-app guard must precede the content capture',
+  );
+
+  const files = src.slice(src.indexOf("this.poller.on('clipboard_files', "), src.indexOf("this.poller.on('poller-error'"));
+  assert.ok(files.length > 0, "expected a poller.on('clipboard_files') handler");
+  const filesCode = codeOnly(files);
+  // THE ONE SITE GOVERNANCE OPENS. A host app is still excluded here by
+  // default; the `&& !governed` clause lets a file pasted into an
+  // already-verified governed/blocked agent conversation through, and nothing
+  // else. #hostGovernedFor() answers null for every non-host app and for every
+  // ungoverned tick in Teams, so the exclusion is unchanged everywhere the org
+  // has not asked for governance.
+  //
+  // The clipboard-TEXT site above deliberately keeps its unconditional guard —
+  // asserted separately, a few lines up.
+  assert.match(filesCode, /const governed = this\.#hostGovernedFor\(ev\.process\);/);
+  assert.match(filesCode, /if \(isHostAppProcess\(ev\.process\) && !governed\) return;/);
+  assert.ok(
+    filesCode.indexOf('isHostAppProcess') < filesCode.indexOf('buildFileUploadEvent'),
+    'the host-app guard must precede buildFileUploadEvent — that call is what reads the file',
+  );
+
+  const focus = codeOnly(src.slice(src.indexOf("this.poller.on('focus', ("), src.indexOf("this.poller.on('clipboard', (")));
+  assert.ok(focus.length > 0, "expected a poller.on('focus') handler");
+  assert.match(focus, /isHostAppProcess\(ev\.process\)/);
+  // Exactly one branch carries the title, and it is the non-host-app one.
+  const titled = focus.split('\n').filter((l) => l.includes('title="'));
+  assert.equal(titled.length, 1, `exactly one titled log line expected, got ${titled.length}`);
+  assert.ok(
+    focus.indexOf('isHostAppProcess') < focus.indexOf('title="'),
+    'the title must only be reachable through the host-app branch',
   );
 });
 
@@ -3619,4 +3959,378 @@ test('index.js pre-checks for an open request per AGENT, not per host', async ()
   // The fold matches the server's agentKeyFor: id first, then the normalized name.
   assert.match(src, /function agentMatchKey\(\{ block_scope, agent_id, agent_name \}\) \{/);
   assert.match(src, /if \(block_scope !== 'agent'\) return '';/);
+});
+
+// ── govstate: the FILE-SCANNING arm signal ───────────────────────────────────
+//
+// Behaviour is driven in tests/enforcer-panel-block.test.mjs (govstate_*
+// scenarios) and tests/os-monitor-host-files.test.mjs. These are the SOURCE
+// invariants, same convention as every other .ps1 check in this file.
+
+test('the govstate payload carries NO content — a bool, a scope, a panel id, admin-typed names, a process and a pid', async () => {
+  // The strictest PII rule in this feature, and stricter than EmitBlockState's
+  // for a reason: this event's whole job is to ARM a file watcher inside a
+  // company's chat client. If it could carry a window title, a UIA element
+  // Name, a message heading, a filename or a path, the act of arming would
+  // itself be the leak it exists to make unnecessary.
+  const src = await enforcerSrc();
+  const emit = src.slice(src.indexOf('static void EmitGovState('), src.indexOf('static void UpdateForeground()'));
+  assert.ok(emit.length > 0, 'expected an EmitGovState body');
+
+  const keys = [...emit.matchAll(/\\"([a-z_]+)\\":/g)].map((m) => m[1]).sort();
+  assert.deepEqual(keys, [
+    'active', 'agent', 'agent_id', 'kind', 'panel', 'pid', 'process', 'scope',
+  ], 'the govstate payload gained or lost a field — every addition must be re-reviewed for PII');
+
+  for (const forbidden of [
+    // Titles and accessibility reads — the two things this file goes out of its
+    // way never to emit anywhere else either.
+    'GetWindowText', '.Current.Name', '_fgAgentName', '_copilotHeading', 'heading',
+    // File identity, which is what the armed watchers themselves report.
+    'filename', 'path', '_attachHoldFilename',
+    // Prompt content, in any of its forms.
+    'patterns', '_blockedReason', 'preview', '_pendingPreview', '_typed', 'ActivePatterns', 'block_id',
+    // No window rect either: nothing renders from this event, unlike the bar.
+    'GetWindowRect',
+  ]) {
+    assert.equal(emit.includes(forbidden), false, `${forbidden} must never reach the govstate payload`);
+  }
+  // Every string field goes through the same escaper every other emit uses, so
+  // an admin-typed name containing a quote cannot break the line.
+  assert.equal((emit.match(/Esc\(/g) || []).length, 5, 'every string field must be escaped');
+});
+
+test('govstate is emitted on TRANSITIONS only, from the poll thread, and decides nothing', async () => {
+  const src = await enforcerSrc();
+  const fn = src.slice(src.indexOf('static void UpdateGovState()'), src.indexOf('static void EmitGovState('));
+  assert.ok(fn.length > 0, 'expected an UpdateGovState body');
+  const code = codeOnly(fn);
+
+  // FIRST-HAND ONLY, and it is the SAME term UpdateBannerState uses. Inside the
+  // 3s sticky window _fgIsAi is still (correctly) true, so without this the
+  // event would stay "active" after the user left the governed conversation —
+  // leaving Teams' file watchers armed over whatever they moved to.
+  assert.match(code, /bool firstHand = _fgLeftAiTicks == 0;/);
+  assert.match(code, /bool want = _fgHostGoverned && firstHand && !Disarmed\(\);/);
+
+  // Exactly two emit sites: one clear, one arm. Anything else would be a line
+  // per 150ms poll tick.
+  assert.equal((code.match(/EmitGovState\(/g) || []).length, 2, 'exactly one clear and one arm');
+  assert.match(code, /if \(_govActive\)\s*\r?\n\s*\{/);
+  assert.match(code, /if \(!want\) return;/);
+
+  // OBSERVES, NEVER DECIDES. It may not touch a single field a block decision
+  // owns — the same read-only rule UpdateBannerState/EmitBlockState hold to.
+  const emit = src.slice(src.indexOf('static void EmitGovState('), src.indexOf('static void UpdateForeground()'));
+  for (const region of [code, codeOnly(emit)]) {
+    for (const forbidden of ['ClearFgBlocked', 'ArmPanelBlockLatch', 'ClearPanelBlockLatch']) {
+      assert.equal(region.includes(forbidden), false, `UpdateGovState/EmitGovState must not call ${forbidden}`);
+    }
+    // assignsTo, not a substring test: `_fgLeftAiTicks == 0` contains
+    // `_fgLeftAiTicks =`, and READING that field is exactly what the first-hand
+    // guard above is supposed to do.
+    for (const field of ['_fgIsBlocked', '_blockScope', '_blockedByElement', '_attachHoldActive', '_fgIsAi', '_fgLeftAiTicks', '_fgDlpGoverned']) {
+      assert.equal(assignsTo(region, field), false, `UpdateGovState/EmitGovState must not write ${field}`);
+    }
+  }
+  // Runs on the POLL thread, right after the bar state, so it reads this tick's
+  // freshly decided block rather than the previous one's.
+  const poll = src.slice(src.indexOf('static void PollLoop('), src.indexOf('static void CheckAttachHoldExpiry()'));
+  assert.match(poll, /UpdateBannerState\(\); UpdateGovState\(\);/);
+  // …and never from the hook thread, which must do no work at all.
+  const hook = src.slice(src.indexOf('static IntPtr HookCallback('), src.indexOf('// Scans the typed buffer'));
+  assert.equal(hook.includes('UpdateGovState'), false, 'the hook thread must not run the govstate sweep');
+});
+
+test('govstate carries the ADMIN-TYPED agent identity, never a name read out of another app', async () => {
+  const src = await enforcerSrc();
+  // The per-tick fields UpdateGovState reads are filled from GovernedRowIdentity
+  // — the matched POLICY ROW's agent_name/agent_id, i.e. values an administrator
+  // typed into the dashboard. `agentName`, the string parsed out of the other
+  // app's window title or accessibility tree, is only ever the LOOKUP KEY.
+  const rowFn = src.slice(src.indexOf('static void GovernedRowIdentity('), src.indexOf('// Arm the platform-block latch'));
+  assert.ok(rowFn.length > 0, 'expected a GovernedRowIdentity body');
+  assert.match(rowFn, /rowName = agent\["agent_name"\] \?\? "";/);
+  assert.match(rowFn, /rowId = agent\["agent_id"\] \?\? "";/);
+  // No new matching semantics — the existing pair, exactly as both list checks
+  // already use them.
+  assert.match(rowFn, /if \(!PLATFORM_PROCS\.TryGetValue\(agent\["platform"\], out procs\)\) continue;/);
+  assert.match(rowFn, /if \(!AgentNameMatches\(agentName, agent\["agent_name"\]\)\) continue;/);
+  assert.match(rowFn, /if \(!string\.Equals\(agent\["agent_scope"\], "agent", StringComparison\.OrdinalIgnoreCase\)\) continue;/);
+  // Read-only: it decides nothing and writes no field.
+  assert.equal(/^\s*_\w+ =(?!=)/m.test(codeOnly(rowFn)), false, 'the row lookup must assign to no static field');
+
+  // The govstate state fields are assigned on EVERY branch of the tick, exactly
+  // as _fgDlpGoverned is, so a governed tick's identity cannot outlive it.
+  const tick = src.slice(src.indexOf('static void ApplyForegroundTick('), src.indexOf('// When a block is active, locate the send button'));
+  assert.match(tick, /_fgHostGoverned = hostGoverned;/);
+  assert.match(tick, /_fgHostGovAgent = hostGovAgent;/);
+  assert.match(tick, /GovernedRowIdentity\(blockGoverned, proc, agentName, out hostGovAgent, out hostGovAgentId\);/);
+  // Set ONLY inside the host-app branch's governed arm, so no chat app and no
+  // IDE panel can ever arm host file capture.
+  assert.equal((codeOnly(tick).match(/hostGoverned = true;/g) || []).length, 1,
+    'exactly one place may arm host file capture');
+  // The blocked row's identity is preferred, mirroring the tick's own precedence.
+  const fn = codeOnly(src.slice(src.indexOf('static void UpdateGovState()'), src.indexOf('static void EmitGovState(')));
+  assert.match(fn, /bool blockedAgent = _fgIsBlocked && BlockScope\(\) == "agent";/);
+  assert.match(fn, /string agent = blockedAgent \? _blockedAgentName : _fgHostGovAgent;/);
+});
+
+test('enforcer.js dispatches govstate without logging it', async () => {
+  // Same class of bug this repo already hit for 'route' and 'blockstate': a
+  // missing switch case silently discards every event AND lands in Electron's
+  // plain-text line scraper as an "unknown kind" warning.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer.js'), 'utf8');
+  assert.match(src, /case 'govstate':/);
+  assert.match(src, /this\.emit\('govstate', ev\);/);
+  const c = src.slice(src.indexOf("case 'govstate':"), src.indexOf("case 'request_access_offer':"));
+  // Not logged: it carries an admin-typed agent name, and a line per Teams
+  // conversation switch would write the user's agent-usage timeline into the
+  // agent's own log file.
+  assert.equal(/this\.log/.test(c), false, 'govstate must not be logged in the dispatcher');
+});
+
+// ── The host-app file routes: armed at runtime, never by the catalog ─────────
+
+test('the two UIA watchers keep Teams out of their DEFAULT process set — arming is a separate set', async () => {
+  // The pinned property the whole host-app design rests on, restated at the
+  // level of the two helpers that actually walk another app's UI. The env var
+  // comes from watcherProcessNames() (asserted above); these are the FALLBACK
+  // lists each .ps1 uses when it is absent, and the armed set that is OR'd in.
+  const { AI_PROCESSES } = await import('../src/os_monitor/ai-processes.js');
+  const hostLiterals = AI_PROCESSES
+    .filter((e) => e.hostApp === true)
+    .map((e) => e.match.source.replace(/^\^/, '').replace(/\$$/, '').toLowerCase());
+  assert.ok(hostLiterals.length > 0, 'expected at least one host app in the catalog');
+
+  for (const file of ['attachment-watcher.ps1', 'file-dialog-watcher.ps1']) {
+    const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', file), 'utf8');
+    const fallback = src.slice(src.indexOf('$AiProcesses = if ($env:CFAI_AI_PROCESSES)'), src.indexOf('# ── Runtime-armed HOST APPS'));
+    assert.ok(fallback.length > 0, `expected an $AiProcesses default in ${file}`);
+    for (const literal of hostLiterals) {
+      assert.equal(fallback.toLowerCase().includes(literal), false,
+        `${file}'s default process list must never contain the host app ${literal}`);
+    }
+    // The armed set starts EMPTY and is a SECOND set — $AiProcesses is never
+    // modified, so the default (unarmed) answer for a host app stays a flat no
+    // even while the arming path exists.
+    assert.match(src, /\$ArmedHostProcs = New-Object 'System\.Collections\.Generic\.HashSet\[string\]' -ArgumentList @\(\[System\.StringComparer\]::OrdinalIgnoreCase\)/,
+      `${file} must declare an empty armed-host set`);
+    const code = src.split(/\r?\n/).filter((l) => !l.trim().startsWith('#')).join('\n');
+    assert.equal(/\$AiProcesses\s*\.\s*Add|\$AiProcesses\s*\+=|\$AiProcesses\s*=\s*\$AiProcesses/.test(code), false,
+      `${file} must never mutate the catalog process list`);
+    // host_arm is the only command either helper accepts, and it carries a
+    // process name and an on/off — no path, no filename, no free text.
+    assert.match(code, /if \(\$cmd\.cmd -eq 'host_arm' -and \$cmd\.process\)/);
+    assert.equal((code.match(/\$cmd\.cmd -eq/g) || []).length, 1, `${file} must accept exactly one command`);
+  }
+});
+
+test('the govstate handler arms both file watchers and nothing else — and never reports the state', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  const start = src.indexOf("this.enforcer.on('govstate'");
+  assert.ok(start >= 0, "expected an enforcer.on('govstate') handler");
+  const handler = codeOnly(src.slice(start, src.indexOf("this.enforcer.on('rewrite'")));
+  // "A governed conversation is open" is not an enforcement event. The file
+  // events that may follow are the records.
+  assert.equal(handler.includes('reporter.enqueue'), false, 'govstate must never become a server record');
+  assert.equal(handler.includes('toast.show'), false, 'and must never toast');
+  // Both file watchers, and NOT the prompt watcher: typed prompt text in Teams
+  // is enforcer-win.ps1's job, at the element level, and was never asked for
+  // here — arming a window-level prompt reader would be the capture the
+  // host-app design exists to prevent.
+  assert.match(handler, /this\.attachmentWatcher\.hostArm\(this\.hostGoverned\.process, true\);/);
+  assert.match(handler, /this\.dialogWatcher\.hostArm\(this\.hostGoverned\.process, true\);/);
+  assert.equal(handler.includes('promptWatcher'), false, 'the prompt watcher must never be armed for a host app');
+  // The state is taken verbatim off the event — nothing is re-derived, and no
+  // conversation name read off a screen can enter it.
+  assert.match(handler, /agent: String\(ev\.agent \|\| ''\)/);
+  assert.match(handler, /agent_id: String\(ev\.agent_id \|\| ''\)/);
+  assert.equal(/GetWindowText|window_title|ev\.title/.test(handler), false, 'no title may reach this state');
+  // The log line names the process and the scope, never the agent.
+  const logLine = handler.slice(handler.indexOf('this.log?.info('));
+  assert.equal(/ev\.agent\b|hostGoverned\.agent\b/.test(logLine), false,
+    'the agent name must not be logged — that would be the user\'s agent-usage timeline');
+});
+
+test('#hostGovernedFor is the ONLY gate the three file routes consult, and it is process-matched', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  const fn = src.slice(src.indexOf('#hostGovernedFor(processName) {'), src.indexOf('  // Stamp WHICH governed agent') >= 0
+    ? src.indexOf('#hostGovernedFor(processName) {') + 900
+    : undefined);
+  assert.ok(fn.length > 0, 'expected a #hostGovernedFor body');
+  // Null for every non-host app, always: an ordinary AI app's file coverage does
+  // not depend on this and must not start depending on it.
+  assert.match(fn, /if \(!processName \|\| !isHostAppProcess\(processName\)\) return null;/);
+  // …and the process must MATCH, so a govstate for one host app cannot arm a
+  // route for a different one.
+  assert.match(fn, /\.replace\(\/\\\.exe\$\/i, ''\)\.trim\(\)\.toLowerCase\(\)/);
+
+  // Exactly three call sites — the three file routes — plus the declaration.
+  const code = codeOnly(src);
+  assert.equal((code.match(/#hostGovernedFor\(/g) || []).length, 4,
+    '#hostGovernedFor gained a call site — every one must be re-reviewed');
+  for (const [route, from, to] of [
+    ['clipboard_files', "this.poller.on('clipboard_files', ", "this.poller.on('poller-error'"],
+    ['file_dialog_pick', "this.dialogWatcher.on('file_dialog_pick'", "this.attachmentWatcher.on('attachment_appeared'"],
+    ['attachment_appeared', "this.attachmentWatcher.on('attachment_appeared'", "this.attachmentWatcher.on('attachment_disappeared'"],
+  ]) {
+    const body = codeOnly(src.slice(src.indexOf(from), src.indexOf(to)));
+    assert.ok(body.length > 0, `expected a ${route} handler`);
+    assert.match(body, /#hostGovernedFor\(ev\.process\)/, `${route} must consult the governance gate`);
+    // …BEFORE buildFileUploadEvent, which is the call that reads the file off
+    // disk and puts its bytes on the event. A gate after it would still leak.
+    assert.ok(
+      body.indexOf('#hostGovernedFor') < body.indexOf('buildFileUploadEvent'),
+      `${route}: the governance gate must precede the read`,
+    );
+  }
+});
+
+test('file-handler.js bounds every read it does and puts a deadline on every extraction', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'file-handler.js'), 'utf8');
+  // readFile() has no size argument, so the capture sites used to read whole
+  // files into memory — including in the `too_large` branch, which had ALREADY
+  // decided the file was too big to look at. A multi-GB file dropped into a chat
+  // window could take down the one process that has to still be alive to block
+  // the send.
+  assert.match(src, /CONTENT_CAPTURE_MAX_BYTES/);
+  assert.match(src, /async function readCapped\(path, max, size\)/);
+  assert.match(src, /const \{ bytesRead \} = await fh\.read\(buf, 0, max, 0\);/);
+  // No unbounded read is left on any capture path. The one remaining plain
+  // readFile is the text-readable branch, which is already gated by
+  // CONTENT_SCAN_MAX_BYTES and needs the whole text to scan it.
+  const captures = (src.match(/await readCapped\(path, CONTENT_CAPTURE_MAX_BYTES, st\.size\)/g) || []).length;
+  assert.equal(captures, 4, 'every binary/archive/oversize/unknown capture must be bounded');
+  // Two whole-file reads remain, and both are already size-bounded:
+  //   * the text-readable SCAN path, which is gated by CONTENT_SCAN_MAX_BYTES
+  //     and needs the whole text to run the pattern catalog over it;
+  //   * readCapped's own fast path, taken only when the file is already known to
+  //     be at or under the cap, so there is nothing to bound.
+  assert.equal((src.match(/await readFile\(path\)/g) || []).length, 2,
+    'a new unbounded read appeared — every read of a user file must be size-bounded');
+  assert.match(src, /if \(size != null && size <= max\) return \{ buf: await readFile\(path\), truncated: false \};/);
+
+  // A DEADLINE on extraction, for the same reason REWRITE_WRITE_BUDGET_MS
+  // exists: the attachment hold needs an answer within a bounded time, and an
+  // extraction that never returns leaves the send in limbo.
+  assert.match(src, /export const EXTRACTION_BUDGET_MS = 8000;/);
+  assert.match(src, /await withExtractionBudget\(extractTextFromBinary\(path, ext\)\)/);
+  assert.match(src, /await withExtractionBudget\(extractZip\(\{ path, scan, log \}\)\)/);
+  assert.match(src, /reason: 'extraction_timeout'/);
+  // The timeout is a SENTINEL, not a message match, so a parser error and a
+  // deadline can never be confused for each other.
+  assert.match(src, /const TIMED_OUT = Symbol\('extraction_timeout'\);/);
+  assert.match(src, /extraction === TIMED_OUT/);
+
+  // …and the timing plumbing never touches the file's contents.
+  // Block comments are not stripped by codeOnly, and readCapped's own JSDoc
+  // legitimately explains why readFile() had to be replaced — so the slice ends
+  // at that doc comment rather than at the function it documents.
+  const budget = src.slice(src.indexOf('async function withExtractionBudget'), src.indexOf(' * Read at most'));
+  assert.ok(budget.length > 0 && budget.length < 1200, 'expected a tight withExtractionBudget slice');
+  for (const forbidden of ['readFile', 'toString', 'content_', 'scan(']) {
+    assert.equal(budget.includes(forbidden), false, `the deadline wrapper must not touch ${forbidden}`);
+  }
+});
+
+test('the scan result says WHETHER WE COULD VERIFY the file, and only for formats that should be readable', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'file-handler.js'), 'utf8');
+  // The one fact `severity` cannot express: a file that was never scanned has no
+  // contentSeverity to raise, so an encrypted PDF full of customer data scores
+  // exactly what an empty one does.
+  assert.match(src, /if \(contentScan && contentScan\.scanned !== true\) \{\s*\r?\n\s*contentScan\.unverified = isDocumentLikeFormat\(filename\);/);
+
+  const cls = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'classifier.js'), 'utf8');
+  assert.match(cls, /export function isDocumentLikeFormat\(filename\)/);
+  // A SUPERSET of the three "we have an extractor" predicates, because a format
+  // we cannot open at all is the strongest version of "unverified", not an
+  // exemption from it.
+  assert.match(cls, /if \(isTextReadable\(filename\) \|\| isBinaryParseable\(filename\) \|\| isArchive\(filename\)\) return true;/);
+  assert.match(cls, /return UNREADABLE_DOCUMENT_EXTENSIONS\.has\(extOf\(filename\)\);/);
+
+  const { isDocumentLikeFormat } = await import('../src/os_monitor/classifier.js');
+  // FAIL CLOSED side: formats that carry text by definition. An encrypted PDF, a
+  // password-protected workbook, an archive we cannot open, a legacy .doc.
+  for (const name of [
+    'q3.pdf', 'salaries.docx', 'salaries.doc', 'book.xlsx', 'book.xls', 'deck.pptx',
+    'notes.odt', 'archive.zip', 'archive.7z', 'archive.rar', 'archive.tar', 'db.sqlite',
+    'dump.bak', 'export.parquet', 'session.har', 'mail.msg', 'store.pfx', 'creds.p12',
+    'secrets.env', 'people.csv', 'config.yaml', 'main.py',
+  ]) {
+    assert.equal(isDocumentLikeFormat(name), true, `${name} should have been readable — it must fail CLOSED`);
+  }
+  // FAIL OPEN side, unchanged: nothing here was ever going to yield text, and
+  // blocking it would be an unexplainable permanent block on a video. Images are
+  // deliberately on this side even though they DO get an OCR attempt — a failed
+  // OCR says nothing about hidden text, because there was none to extract.
+  for (const name of [
+    'standup.mp4', 'call.mov', 'song.mp3', 'clip.webm', 'audio.wav',
+    'photo.png', 'photo.jpg', 'scan.jpeg', 'anim.gif', 'icon.bmp', 'shot.webp',
+    'binary.exe', 'lib.dll', 'thing.unknownext', 'noextension',
+  ]) {
+    assert.equal(isDocumentLikeFormat(name), false, `${name} must keep today's fail-OPEN behaviour`);
+  }
+
+  // The capture ceiling is the server's own storage limit, so we never read
+  // bytes only to have them truncated on arrival.
+  const { CONTENT_CAPTURE_MAX_BYTES, CONTENT_SCAN_MAX_BYTES } = await import('../src/os_monitor/classifier.js');
+  assert.equal(CONTENT_CAPTURE_MAX_BYTES, 25 * 1024 * 1024);
+  assert.ok(CONTENT_CAPTURE_MAX_BYTES > CONTENT_SCAN_MAX_BYTES, 'we may capture more than we parse');
+  const dlp = await readFile(join(AGENT_DIR, '..', 'server', 'src', 'routes', 'dlp.js'), 'utf8').catch(() => '');
+  if (dlp) {
+    assert.match(dlp, /const MAX_CONTENT_BYTES = 25 \* 1024 \* 1024;/,
+      'the agent capture cap is derived from the server ceiling — re-check both if this changed');
+  }
+});
+
+test('the fail-closed hold is scoped to a governed conversation and names its own reason', async () => {
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  const handler = src.slice(
+    src.indexOf("this.attachmentWatcher.on('attachment_appeared'"),
+    src.indexOf("this.attachmentWatcher.on('attachment_disappeared'"),
+  );
+  // Escalating on "we could not read it" for EVERY app would start blocking .7z
+  // archives and legacy .doc files across the board, which nobody asked for.
+  assert.match(handler, /const unverified = cs\?\.scanned !== true && cs\?\.unverified === true;/);
+  assert.match(handler, /const failClosed = !!governed && unverified;/);
+  // The block has to be able to say WHY, and "high" would be a claim about
+  // content nobody read.
+  assert.match(handler, /\? `unscannable file \(\$\{cs\?\.reason \|\| 'not readable'\}\)`/);
+});
+
+test('the attach hold is bound to ONE app on both sides of the stdin channel', async () => {
+  // The defect: _attachHoldActive was a global bool with no process identity, so
+  // a hold armed for a flagged attachment in one app swallowed the next Enter in
+  // whatever app the user alt-tabbed to — a dead Enter in an unrelated window
+  // with nothing on screen to explain it.
+  const ps = await enforcerSrc();
+  assert.match(ps, /static string _attachHoldProcess = "";/);
+  assert.match(ps, /_attachHoldProcess = ExtractJsonString\(line, "process"\);/);
+  // Cleared with the hold, on BOTH release paths, so a stale owner cannot
+  // outlive it.
+  const stdin = ps.slice(ps.indexOf('static void StdinLoop()'), ps.indexOf('static void PumpLoop()'));
+  assert.match(stdin, /_attachHoldFilename = ""; _attachHoldPatterns = ""; _attachHoldProcess = "";/);
+  const expiry = ps.slice(ps.indexOf('static void CheckAttachHoldExpiry()'), ps.indexOf('static void CheckHeartbeat()'));
+  assert.match(expiry, /_attachHoldFilename = ""; _attachHoldPatterns = ""; _attachHoldProcess = "";/);
+
+  const js = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  assert.match(js, /this\.attachHoldProcess = null;/);
+  // An arm from a different app REPLACES the set rather than merging into it:
+  // the helper has one hold slot, so the previous app's holds cannot still be in
+  // it, and reporting them under this app's name would be a lie.
+  assert.match(js, /if \(processName && this\.attachHoldProcess && processName !== this\.attachHoldProcess\) \{/);
+  assert.match(js, /this\.attachHolds\.clear\(\);/);
+});
+
+test('an in-flight stdin write to a dead helper cannot crash the agent', async () => {
+  // EPIPE arrives ASYNCHRONOUSLY, after the write call has already returned
+  // true, and an unhandled 'error' on a stream is an uncaughtException — which
+  // would take down the very process that is supposed to outlive a dead helper
+  // and respawn it. Observed while exercising the host_arm channel.
+  for (const file of ['enforcer.js', 'attachment-watcher.js', 'file-dialog-watcher.js']) {
+    const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', file), 'utf8');
+    assert.match(src, /this\.child\.stdin\.on\('error', \(err\) => \{/, `${file} must handle stdin errors`);
+    assert.match(src, /stdin write failed/, `${file} must log rather than throw`);
+  }
 });

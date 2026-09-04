@@ -165,6 +165,14 @@ export function mountDlp(app, db) {
             via: e.via,
             tab_host: e.tabHost,
             content_scan: e.content_scan ?? null,
+            // Which governed/blocked agent this file was attached to, for a
+            // host-app surface (e.g. Microsoft Teams) where the same app hosts
+            // many agents — without this a file event only says "Teams", not
+            // which conversation. Absent (undefined, not null) for every
+            // dedicated-AI-app file event, which has no agent dimension.
+            agent_name: e.agent_name ?? undefined,
+            agent_id: e.agent_id ?? undefined,
+            agent_scope: e.agent_scope ?? undefined,
           } : isAiResponse ? {
             // How the reply was decoded on the client, and whether the page-side
             // buffer had to cut it short. No content here — the text itself goes

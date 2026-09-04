@@ -690,6 +690,41 @@ public static class CfaiEnforcer
     static volatile uint _bannerPid = 0;
     static string _bannerAgent = "";
 
+    // ── Standing "a governed agent conversation is open" state (host apps) ────
+    // Same shape and the same discipline as the bar state above — PURELY
+    // DERIVED, READ-ONLY with respect to every enforcement field, one line per
+    // real transition — for a completely different consumer.
+    //
+    // WHAT IT IS FOR. index.js ARMS the three file watchers (drag-drop chip,
+    // file-picker dialog, clipboard file paste) for Microsoft Teams for exactly
+    // as long as this says a governed or blocked agent conversation is the open
+    // one, and disarms them the instant it stops saying so. Teams is absent from
+    // watcherProcessNames() and must stay absent — a passive watcher on a
+    // company's chat client would see every DM. This event is what lets the
+    // narrow, already-verified governed window be covered without widening that
+    // list.
+    //
+    // WHY IT IS NOT _fgDlpGoverned. That flag is the DLP-only MIDDLE state
+    // ("governed and explicitly NOT blocked") and has exactly one reader by
+    // design. This one is the UNION of governed and blocked, because a file
+    // attached inside a BLOCKED conversation is the stronger case, not an
+    // exemption from scanning.
+    static volatile bool _govActive = false;
+    static volatile uint _govPid = 0;
+    static string _govKey = "";
+
+    // What THIS tick's host-app branch decided, handed to UpdateGovState a few
+    // microseconds later in the same poll tick. Assigned on EVERY branch of
+    // ApplyForegroundTick (exactly as _fgDlpGoverned is) so a governed tick's
+    // state can never outlive the tick that earned it.
+    //
+    // The agent name/id are the ADMIN-TYPED row values (GovernedRowIdentity),
+    // never the name read off the other app's title or accessibility tree.
+    static volatile bool _fgHostGoverned = false;
+    static volatile string _fgHostGovPanel = "";
+    static volatile string _fgHostGovAgent = "";
+    static volatile string _fgHostGovAgentId = "";
+
     // ── Platform-block latch for IDE-hosted panels ───────────────────────────
     // Fixes a real, reproduced race (2 of 3 Enters blocked, the third sent).
     //
@@ -815,6 +850,21 @@ public static class CfaiEnforcer
     static string _attachHoldFilename = "";
     static string _attachHoldPatterns = "";
     static long _attachHoldExpiresAt = 0;
+    // WHICH APP the hold belongs to, as a bare process name.
+    //
+    // The flag above used to be the whole state, with no process identity in it
+    // at all — so a hold armed for a flagged attachment in one app swallowed the
+    // next Enter in whatever app the user alt-tabbed to. A dead Enter in an
+    // unrelated window, with no toast and nothing on screen to explain it: the
+    // worst failure mode this file has, because it looks like the keyboard
+    // broke. AttachHoldActive() is the gate; every read of the raw flag that
+    // participates in a keystroke decision goes through it.
+    //
+    // EMPTY means "unbound", and unbound still counts. That is the fail-CLOSED
+    // direction and it is only reachable from a command that omitted the field
+    // (index.js always sends it): the alternative would be to silently stop
+    // holding a sensitive attachment because a field was missing.
+    static string _attachHoldProcess = "";
     // Platform → process name mapping for desktop enforcement.
     // MIRRORS ai-processes.js's PLATFORM_PROCS byte for byte; the two are held
     // in lockstep by agent/tests/ai-processes.test.mjs, which parses this block.
@@ -3682,8 +3732,12 @@ public static class CfaiEnforcer
     //       Hold the pinned block while that text box is open. Extends an
     //       EXISTING pin's expiry and nothing else — see HoldPendingRewrite.
     //
-    //   {"cmd":"attach_hold",…}
-    //       The attachment send-hold, unchanged.
+    //   {"cmd":"attach_hold","state":"on"|"off","filename":"…","patterns":"…",
+    //    "ttl_ms":N,"process":"…"}
+    //       The attachment send-hold. `process` BINDS the hold to one app, so a
+    //       hold armed for an attachment in one window can no longer swallow the
+    //       next Enter in an unrelated one — see _attachHoldProcess. Still no
+    //       free text: a filename, pattern NAMES, a process name and a number.
     static void StdinLoop()
     {
         string line;
@@ -3722,6 +3776,10 @@ public static class CfaiEnforcer
                         {
                             _attachHoldFilename = ExtractJsonString(line, "filename");
                             _attachHoldPatterns = ExtractJsonString(line, "patterns");
+                            // A bare PROCESS NAME, and the only new field on this
+                            // command. It binds the hold to one app — see
+                            // _attachHoldProcess / AttachHoldActive.
+                            _attachHoldProcess = ExtractJsonString(line, "process");
                             long ttlMs = ExtractJsonNumber(line, "ttl_ms", 3000);
                             _attachHoldExpiresAt = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(ttlMs).Ticks;
                             _attachHoldActive = true;
@@ -3729,7 +3787,7 @@ public static class CfaiEnforcer
                         else if (state == "off")
                         {
                             _attachHoldActive = false;
-                            _attachHoldFilename = ""; _attachHoldPatterns = "";
+                            _attachHoldFilename = ""; _attachHoldPatterns = ""; _attachHoldProcess = "";
                         }
                     }
                 }
@@ -3817,6 +3875,26 @@ public static class CfaiEnforcer
         return _blockTyped && (DateTime.UtcNow.Ticks - _typedBlockTicks) < TYPED_BLOCK_TTL;
     }
 
+    // Is the attachment hold in force FOR THE APP THAT HAS FOCUS?
+    //
+    // The process check is the whole point — see _attachHoldProcess. Compared
+    // against _app (the sticky foreground app name, the same field every other
+    // block decision in this file is attributed to) case-insensitively, because
+    // a process name arrives from Get-Process on one side and from
+    // Process.ProcessName on the other and neither promises a casing.
+    //
+    // Every keystroke decision that consults the hold goes through this, so the
+    // binding cannot be forgotten at one call site: the Enter path
+    // (HookCallback), the send-button path (BlockActiveForMouse) and the
+    // patterns attribution (ActivePatterns).
+    static bool AttachHoldActive()
+    {
+        if (!_attachHoldActive) return false;
+        string owner = _attachHoldProcess ?? "";
+        if (owner.Length == 0) return true;   // unbound — see _attachHoldProcess
+        return string.Equals(owner, _app ?? "", StringComparison.OrdinalIgnoreCase);
+    }
+
     // Block is active for Enter/send decisions: typed-buffer (fresh) or
     // paste-in-session.  UIA is intentionally excluded — see comment above.
     static bool BlockActiveForSend(bool pastedThisSession, bool clipBlock)
@@ -3839,7 +3917,7 @@ public static class CfaiEnforcer
         if (!PanelEnforceOk()) return false;   // detection-only panel — zero live effect
         bool recentPaste = (DateTime.UtcNow.Ticks - _lastPasteTicks) < PASTE_WINDOW;
         bool cooldown = (DateTime.UtcNow.Ticks - _lastBlockFiredTicks) < BLOCK_COOLDOWN;
-        return _attachHoldActive || TypedBlockFresh() || _blockUia || (recentPaste && _blockPaste) || cooldown;
+        return AttachHoldActive() || TypedBlockFresh() || _blockUia || (recentPaste && _blockPaste) || cooldown;
     }
 
     // The Enter-decision predicate, factored out of HookCallback so the offline
@@ -3867,7 +3945,7 @@ public static class CfaiEnforcer
     // Precedence matches the Enter path's `pats` chain, platform block first —
     // otherwise a send-button click on a fully blocked app emitted a block with
     // an empty patterns field and no way for the Node side to tell what it was.
-    static string ActivePatterns() { return _fgIsBlocked ? _blockedReason : _attachHoldActive ? _attachHoldPatterns : _blockTyped ? _typedPatterns : _blockUia ? _uiaPatterns : ""; }
+    static string ActivePatterns() { return _fgIsBlocked ? _blockedReason : AttachHoldActive() ? _attachHoldPatterns : _blockTyped ? _typedPatterns : _blockUia ? _uiaPatterns : ""; }
 
     // Mouse hook — swallows a click on the send button while a block is active.
     // Only acts on left-button down/up that land inside the cached send-button
@@ -4108,7 +4186,7 @@ public static class CfaiEnforcer
                             // A sensitive-file attachment holds the send exactly
                             // like a flagged prompt does — see _attachHoldActive's
                             // own comment for the provisional/confirmed story.
-                            bool attachHold = _attachHoldActive;
+                            bool attachHold = AttachHoldActive();
                             // Cooldown: if a block fired recently, keep blocking
                             bool cooldown = (DateTime.UtcNow.Ticks - _lastBlockFiredTicks) < BLOCK_COOLDOWN;
                             // Panic hotkey wins over every other signal: while
@@ -4302,7 +4380,10 @@ public static class CfaiEnforcer
             // only caller of CheckFgBlocked) so the bar's state is derived from
             // this tick's block decision, not the previous one's. It emits at
             // most one line per real transition and nothing at all while idle.
-            try { UpdateForeground(); UpdateBlockedAgents(); UpdateBannerState(); UpdatePaste(); UpdateUia(); UpdateSendRect(); UpdatePendingRewrite(); CheckHeartbeat(); CheckAttachHoldExpiry(); UpdateModelRouting(); }
+            // UpdateGovState sits immediately after UpdateBannerState and for the
+            // same reason: both observe the block decision UpdateBlockedAgents
+            // just made, and both emit at most one line per real transition.
+            try { UpdateForeground(); UpdateBlockedAgents(); UpdateBannerState(); UpdateGovState(); UpdatePaste(); UpdateUia(); UpdateSendRect(); UpdatePendingRewrite(); CheckHeartbeat(); CheckAttachHoldExpiry(); UpdateModelRouting(); }
             catch { }
             // The 150ms cadence above is unchanged; inside it we look at the
             // typed-buffer dirty flag every 30ms so the verdict trails the last
@@ -4337,7 +4418,7 @@ public static class CfaiEnforcer
         if (DateTime.UtcNow.Ticks > _attachHoldExpiresAt)
         {
             _attachHoldActive = false;
-            _attachHoldFilename = ""; _attachHoldPatterns = "";
+            _attachHoldFilename = ""; _attachHoldPatterns = ""; _attachHoldProcess = "";
         }
     }
 
@@ -4599,6 +4680,48 @@ public static class CfaiEnforcer
             if (AgentNameMatches(agentName, agent["agent_name"])) return true;
         }
         return false;
+    }
+
+    // The ADMIN-TYPED identity of the policy row that covers this agent inside
+    // this process, for the govstate event and for nothing else.
+    //
+    // `blocked` selects which list to consult and mirrors ApplyForegroundTick's
+    // own precedence — a blocked conversation is decided first, so its row is
+    // the one that names it. Read-only: decides nothing, writes nothing, and is
+    // never consulted by a block decision.
+    //
+    // WHY NOT THE READ NAME. `agentName` here is a string read out of ANOTHER
+    // APP's window title or accessibility tree, which is exactly what every
+    // emitter in this file refuses to put on the wire. The row's own
+    // agent_name / agent_id are values an ADMINISTRATOR typed into the
+    // dashboard — the same two values EmitBlock and OfferAccessRequest already
+    // carry — so govstate carries no new class of data.
+    //
+    // ("","") when no row names this agent, which is the NORMAL outcome for the
+    // panel-alone route: there, governance comes from the composer signature and
+    // there is no named row to quote.
+    //
+    // Matching is the existing pair, unchanged: PLATFORM_PROCS for "does this
+    // row's platform cover this process" and AgentNameMatches for the name.
+    static void GovernedRowIdentity(bool blocked, string proc, string agentName, out string rowName, out string rowId)
+    {
+        rowName = ""; rowId = "";
+        List<Dictionary<string, string>> list = blocked ? _blockedList : _governedList;
+        if (list == null || list.Count == 0) return;
+        if (string.IsNullOrEmpty(proc) || string.IsNullOrEmpty(agentName)) return;
+        string name = StripExe(proc).Trim();
+        if (name.Length == 0) return;
+        foreach (var agent in list)
+        {
+            if (!string.Equals(agent["agent_scope"], "agent", StringComparison.OrdinalIgnoreCase)) continue;
+            HashSet<string> procs;
+            if (!PLATFORM_PROCS.TryGetValue(agent["platform"], out procs)) continue;
+            if (procs == null || !procs.Contains(name)) continue;
+            if (!AgentNameMatches(agentName, agent["agent_name"])) continue;
+            rowName = agent["agent_name"] ?? "";
+            rowId = agent["agent_id"] ?? "";
+            return;
+        }
     }
 
     // Arm the platform-block latch — called only from the two ELEMENT-scoped
@@ -5135,6 +5258,96 @@ public static class CfaiEnforcer
         catch { return null; }
     }
 
+    // Recompute "a governed or blocked agent conversation is open in a host
+    // app" and emit ONE line per real transition. Called from the poll tick
+    // straight after UpdateBannerState, so it reads BOTH this tick's foreground
+    // decision (ApplyForegroundTick, via the _fgHostGov* fields) and this tick's
+    // freshly decided block (CheckFgBlocked, for the blocked row's identity).
+    //
+    // Deliberately observes, never decides — modelled line for line on
+    // UpdateBannerState, including its fast clear.
+    static void UpdateGovState()
+    {
+        // FIRST-HAND ONLY, and it is the SAME term UpdateBannerState uses for
+        // the same reason. _fgLeftAiTicks == 0 means "this tick's read really is
+        // of the surface in front of the user"; the tick on which focus leaves a
+        // governed surface stamps it, and it stays stamped for FG_STICKY_TTL.
+        //
+        // It is load-bearing in a way it is not even for the bar. Inside that
+        // sticky window _fgIsAi is still (correctly) true, so without this term
+        // a govstate would stay "active" after the user alt-tabbed out of the
+        // governed conversation — leaving Teams' file watchers armed over
+        // whatever they moved to. That is capture outside a governed
+        // conversation, i.e. the one outcome this entire design exists to
+        // prevent. It is also what makes "the surface held for a full tick"
+        // true: a tick cannot be both first-hand and mid-sticky.
+        bool firstHand = _fgLeftAiTicks == 0;
+        // !Disarmed() for the same reason the bar carries it: the panic hotkey
+        // means "stop", and an armed file watcher whose hold can no longer
+        // swallow anything would be capture with no enforcement to justify it.
+        bool want = _fgHostGoverned && firstHand && !Disarmed();
+        uint pid = _fgPid;
+        // Blocked row first, mirroring ApplyForegroundTick's precedence.
+        // CheckFgBlocked has already run this tick, so for a blocked
+        // conversation these are the current block's own admin-typed values —
+        // the same pair EmitBlock and OfferAccessRequest carry.
+        bool blockedAgent = _fgIsBlocked && BlockScope() == "agent";
+        string agent = blockedAgent ? _blockedAgentName : _fgHostGovAgent;
+        string agentId = blockedAgent ? _blockedAgentId : _fgHostGovAgentId;
+        // "agent" when a named policy row is what governs this conversation,
+        // "panel" when the composer signature alone is (the Copilot tab, whose
+        // dlpMatch is 'panel' — see PanelDlpMatchesOnPanelAlone). Emitting the
+        // truth rather than a constant is what keeps the enum worth reading.
+        string scope = (agent != null && agent.Length > 0) ? "agent" : "panel";
+        // Identity of the CURRENT state, so switching between two governed
+        // conversations re-announces instead of silently keeping the first one's
+        // agent name. Same idea as _bannerAgent, one field wider.
+        string key = (agent ?? "") + "|" + (agentId ?? "") + "|" + (_fgHostGovPanel ?? "");
+        if (_govActive)
+        {
+            if (!want || pid != _govPid || !string.Equals(_govKey, key, StringComparison.Ordinal))
+            {
+                _govActive = false;
+                _govPid = 0;
+                _govKey = "";
+                EmitGovState(false, "", "", "", "", "", 0);
+            }
+            return;
+        }
+        if (!want) return;
+        _govActive = true;
+        _govPid = pid;
+        _govKey = key;
+        EmitGovState(true, _app, scope, _fgHostGovPanel, agent, agentId, pid);
+    }
+
+    // The govstate payload. PII discipline identical to EmitBlockState's, and
+    // one field TIGHTER — no window rect, because nothing renders from this.
+    //
+    // What may travel: a bool, a fixed scope enum, OUR OWN catalog panel id, the
+    // admin-typed agent name + id (the same pair the block and request-access
+    // lines already carry), a process name and a pid.
+    //
+    // What may NEVER travel, and the reason the rule is stricter here than
+    // anywhere else in this file: a window title, a UIA element Name, a message
+    // heading, a filename, a path, `patterns`, or a prompt preview. This event's
+    // whole job is to ARM a file watcher inside a company's chat client — if it
+    // could carry any of those, the act of arming would itself be the leak it is
+    // supposed to make unnecessary.
+    static void EmitGovState(bool active, string process, string scope, string panel, string agent, string agentId, uint pid)
+    {
+        string json = "{\"kind\":\"govstate\""
+            + ",\"active\":" + (active ? "true" : "false")
+            + ",\"process\":\"" + Esc(process ?? "") + "\""
+            + ",\"pid\":" + pid
+            + ",\"scope\":\"" + Esc(scope ?? "") + "\""
+            + ",\"panel\":\"" + Esc(panel ?? "") + "\""
+            + ",\"agent\":\"" + Esc(agent ?? "") + "\""
+            + ",\"agent_id\":\"" + Esc(agentId ?? "") + "\""
+            + "}";
+        lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
+    }
+
     static void UpdateForeground()
     {
         IntPtr fg = GetForegroundWindow();
@@ -5228,6 +5441,12 @@ public static class CfaiEnforcer
         // Declared with the other per-tick locals so EVERY branch leaves it
         // false and only the host-app branch can ever set it.
         bool dlpGoverned = false;
+        // "This HOST-APP tick is governed, by EITHER policy" — the union that
+        // arms Teams file scanning. Declared with the other per-tick locals for
+        // the same reason: every branch leaves it false, and only the host-app
+        // branch can set it. See _fgHostGoverned.
+        bool hostGoverned = false;
+        string hostGovPanel = "", hostGovAgent = "", hostGovAgentId = "";
         string panelId = "";
         if (panelRid == null) panelRid = "";
         // Always mirrors THIS tick's read — Unreadable whenever UpdateForeground
@@ -5405,6 +5624,18 @@ public static class CfaiEnforcer
                 // share is any input to a block decision: that comes solely from
                 // a matching blocked-agents.json row inside CheckFgBlocked.
                 isAi = true; isPanel = true; panelId = hit.Id; panelEnforce = hit.Enforce;
+                // ── The FILE-SCANNING arm signal (govstate) ─────────────────
+                // Set for BOTH kinds of governance, and that is deliberate: a
+                // sensitive file attached inside a BLOCKED conversation is the
+                // stronger case for scanning it, not an exemption. Nothing here
+                // is a block input — it is read only by UpdateGovState, which
+                // emits state to the Node side and decides nothing itself.
+                hostGoverned = true;
+                hostGovPanel = hit.Id;
+                // The ADMIN-TYPED row identity, blocked list first to match the
+                // precedence computed above. Empty for the panel-alone route,
+                // where there is no named row — see GovernedRowIdentity.
+                GovernedRowIdentity(blockGoverned, proc, agentName, out hostGovAgent, out hostGovAgentId);
             }
             // The latch rule, and it is WIDER here than in the chat-app branch
             // below. There, NotComposer is a no-evidence outcome the latch must
@@ -5471,6 +5702,13 @@ public static class CfaiEnforcer
         // outlive the tick that earned it and leak a Tier B offer into the sticky
         // window, where the state is second-hand by definition.
         _fgDlpGoverned = dlpGoverned;
+        // Same rule, same reason, for the file-scanning arm signal: assigned on
+        // every branch, so a tick that stopped being governed cannot leave Teams'
+        // file watchers armed. UpdateGovState adds the first-hand guard on top.
+        _fgHostGoverned = hostGoverned;
+        _fgHostGovPanel = hostGovPanel;
+        _fgHostGovAgent = hostGovAgent;
+        _fgHostGovAgentId = hostGovAgentId;
 
         if (isAi)
         {

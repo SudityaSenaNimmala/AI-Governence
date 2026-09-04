@@ -18,6 +18,12 @@
 #   {"kind":"heartbeat","tick":N}
 #   {"kind":"error","message":"..."}
 #
+# Input schema (NDJSON on stdin), one command:
+#   {"cmd":"host_arm","process":"ms-teams","state":"on"|"off"}
+#       Temporarily add a HOST APP (Microsoft Teams) to the set of processes
+#       whose file pickers this watcher tracks — see $ArmedHostProcs and
+#       $HostDisarmedAt.
+#
 # Limitations:
 #   - WinUI 3 file pickers (modern XAML islands used by some Store apps)
 #     don't expose their FileName edit via UIA. For those we still emit
@@ -41,6 +47,51 @@ $AiProcesses = if ($env:CFAI_AI_PROCESSES) {
     @('ChatGPT', 'Claude', 'Cursor', 'Copilot', 'Comet', 'Gemini', 'Poe')
 }
 
+# ── Runtime-armed HOST APPS ─────────────────────────────────────────────────
+#
+# EMPTY AT STARTUP, always. See attachment-watcher.ps1's copy of this comment for
+# the full reasoning: $AiProcesses comes from watcherProcessNames(), which
+# excludes every `hostApp: true` entry, and that exclusion is not relaxed here —
+# this is a SECOND set, armed only by an explicit host_arm command.
+$ArmedHostProcs = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @([System.StringComparer]::OrdinalIgnoreCase)
+
+# ── Why arming alone is not enough on THIS watcher ──────────────────────────
+#
+# A file picker STEALS FOCUS from the app that opened it. The enforcer decides
+# "a governed agent conversation is open" from the focused ELEMENT of the
+# foreground window, so the instant the picker appears that becomes false, a
+# govstate(active:false) is emitted, and index.js sends host_arm off — all of it
+# before this watcher has necessarily even observed the dialog once (it polls
+# every 400ms; the enforcer every 150ms).
+#
+# Re-checking "is it armed?" at the CLOSE event is therefore always wrong: by
+# then the answer is no, for every picker ever opened from Teams. What matters is
+# whether the app was governed when the picker OPENED, so the arm state is
+# latched onto the per-dialog $Tracked entry at the moment the dialog is first
+# seen, and never consulted again for that dialog.
+#
+# HOST_ARM_GRACE_MS closes the last gap: "armed right now" can already be false
+# by the first sighting, so a process counts as armed-for-a-new-dialog if it was
+# disarmed within this window. The window is deliberately short — the disarm and
+# the first sighting are at most a tick or two apart — and its only cost is that
+# a picker opened in Teams within 5s of leaving a governed conversation is also
+# tracked. Anything longer would start covering ordinary "send a colleague a
+# file" pickers, which is not what the org asked to govern.
+$HostDisarmedAt = @{}
+$HOST_ARM_GRACE_MS = 5000
+
+# Non-blocking stdin — same arrangement, and the same reason, as
+# attachment-watcher.ps1: the poll loop cannot sit in a blocking ReadLine().
+$StdinReader = [Console]::In
+$StdinPending = $null
+function Read-StdinLine {
+    if ($null -eq $script:StdinPending) { $script:StdinPending = $script:StdinReader.ReadLineAsync() }
+    if (-not $script:StdinPending.IsCompleted) { return $null }
+    $line = $script:StdinPending.Result
+    $script:StdinPending = $null
+    return $line
+}
+
 function Emit-Json($obj) {
     $line = $obj | ConvertTo-Json -Compress -Depth 5
     [Console]::Out.WriteLine($line)
@@ -51,6 +102,22 @@ function Is-AiProcess([string]$name) {
     if (-not $name) { return $false }
     $base = $name -replace '\.exe$',''
     foreach ($p in $AiProcesses) { if ($base -ieq $p) { return $true } }
+    return $false
+}
+
+# May a NEWLY-SEEN dialog owned by this process be tracked? True for an ordinary
+# AI app (unchanged), and for a host app that is armed now or was armed within
+# HOST_ARM_GRACE_MS. Consulted ONLY when a $Tracked entry is created.
+function Is-HostArmedForNewDialog([string]$name) {
+    if (-not $name) { return $false }
+    $base = $name -replace '\.exe$',''
+    if ($ArmedHostProcs.Contains($base)) { return $true }
+    foreach ($k in $HostDisarmedAt.Keys) {
+        if ($k -ieq $base) {
+            $age = ([DateTime]::UtcNow - $HostDisarmedAt[$k]).TotalMilliseconds
+            if ($age -ge 0 -and $age -le $HOST_ARM_GRACE_MS) { return $true }
+        }
+    }
     return $false
 }
 
@@ -97,6 +164,30 @@ $tick = 0
 
 while ($true) {
     $tick++
+    # ── Drain stdin: host_arm, and nothing else ─────────────────────────────
+    while ($true) {
+        $cmdLine = Read-StdinLine
+        if ($null -eq $cmdLine) { break }
+        $cmdLine = $cmdLine.Trim()
+        if ($cmdLine.Length -eq 0) { continue }
+        try {
+            $cmd = $cmdLine | ConvertFrom-Json
+            if ($cmd.cmd -eq 'host_arm' -and $cmd.process) {
+                $procName = ([string]$cmd.process) -replace '\.exe$',''
+                if ($cmd.state -eq 'on') {
+                    $null = $ArmedHostProcs.Add($procName)
+                    $HostDisarmedAt.Remove($procName)
+                } else {
+                    $null = $ArmedHostProcs.Remove($procName)
+                    # Stamped, not forgotten — the grace window above is measured
+                    # from here. See $HostDisarmedAt.
+                    $HostDisarmedAt[$procName] = [DateTime]::UtcNow
+                }
+            }
+        } catch {
+            Emit-Json @{ t = (Get-Date).ToUniversalTime().ToString('o'); kind = 'error'; message = 'bad stdin command' }
+        }
+    }
     try {
         $root = [System.Windows.Automation.AutomationElement]::RootElement
 
@@ -117,7 +208,13 @@ while ($true) {
                 if (-not $procId) { continue }
                 $proc = $null
                 try { $proc = Get-Process -Id $procId -ErrorAction Stop } catch { continue }
-                if (-not (Is-AiProcess $proc.ProcessName)) { continue }
+                # An ALREADY-TRACKED dialog is never re-gated. Its arm state was
+                # latched when it was first seen and the picker has held focus
+                # ever since, so re-asking would only ever answer "no" — see
+                # $HostDisarmedAt.
+                $known = $Tracked.ContainsKey($hwnd)
+                if (-not $known -and -not (Is-AiProcess $proc.ProcessName) `
+                    -and -not (Is-HostArmedForNewDialog $proc.ProcessName)) { continue }
 
                 # Capture current FileName text. We refresh every tick — the
                 # last value seen before the dialog closes is what the user
@@ -130,6 +227,11 @@ while ($true) {
                         pid     = $procId
                         title   = $d.Current.Name
                         names   = @()
+                        # WAS this dialog opened out of an armed host app? Latched
+                        # here, at first sighting, and read nowhere except the
+                        # emit below. False for every ordinary AI app, whose
+                        # coverage does not depend on arming at all.
+                        hostArmed = (-not (Is-AiProcess $proc.ProcessName))
                     }
                     $Tracked[$hwnd] = $entry
                 }
@@ -153,6 +255,11 @@ while ($true) {
                         pid     = $entry.pid
                         title   = $entry.title
                         path    = $n
+                        # The latched arm state, so the Node side knows this pick
+                        # came from a host app's governed conversation rather than
+                        # from an ordinary AI app — and can attribute it to the
+                        # agent that was open, which it tracks itself.
+                        host_armed = [bool]$entry.hostArmed
                     }
                 }
             }

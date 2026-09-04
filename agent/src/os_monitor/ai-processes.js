@@ -75,9 +75,16 @@
 //   * identifyAiProcess() — product/vendor attribution on an event that some
 //                          OTHER, narrowly-scoped mechanism already produced
 // It unlocks NOTHING passive. Every consumer of AI_PROCESSES that assumes "in
-// this list == always scan/watch/capture" must check `!hostApp` first:
+// this list == always scan/watch/capture" must check `!hostApp` first — use
+// isHostAppProcess() (below) rather than re-reading the field at a call site:
 //   * index.js's aiProcNames (clipboard poller + file-dialog / attachment /
 //     prompt watchers + CFAI_AI_PROCESSES for the enforcer)
+//   * index.js's clipboard / clipboard_files / focus handlers — these filter on
+//     identifyAiProcess() (which DOES match a host app, by design) rather than
+//     on aiProcNames, so they carry their own isHostAppProcess() guard. Without
+//     it a paste into any Teams DM was reported with its full text, a file
+//     pasted there was read and uploaded, and the window title — which carries a
+//     colleague's name and email — was written to the agent log.
 //   * processForHost / processesForHost — an Inventory host-block toggle on
 //     teams.microsoft.com must NEVER synthesize a process_name:'ms-teams'
 //     app-scoped block row, because that is "disable all of Teams".
@@ -1166,6 +1173,13 @@ export function isAttachmentWatcherEligible(processName) {
 }
 
 // Returns { product, vendor } if the process matches, else null.
+//
+// ATTRIBUTION ONLY. This resolves a HOST APP (`hostApp: true` — Microsoft
+// Teams) exactly like any other entry, on purpose: its whole reason for being in
+// the catalog is to put a product/vendor name on an event that some other,
+// narrowly-scoped mechanism already decided to produce. A non-null result here
+// is therefore NOT permission to capture anything — see isHostAppProcess below,
+// which every capture site must consult.
 export function identifyAiProcess(processName) {
   if (!processName) return null;
   const base = processName.replace(/\.exe$/i, '').trim();
@@ -1173,6 +1187,33 @@ export function identifyAiProcess(processName) {
     if (entry.match.test(base)) return { product: entry.product, vendor: entry.vendor };
   }
   return null;
+}
+
+// True when this process name is a HOST APP — a general-purpose application
+// (Microsoft Teams) that is in AI_PROCESSES for host/exception resolution and
+// product attribution only. See the `hostApp` note at the top of AI_PROCESSES.
+//
+// WHY THIS EXISTS AS ITS OWN PREDICATE. watcherProcessNames() already keeps host
+// apps out of every watcher that is *given a process list* (the UIA watchers, the
+// keystroke enforcer). But the clipboard poller is NOT given a list — it emits
+// for whatever is focused, and index.js filters the event itself with
+// identifyAiProcess(), which matches Teams. That made a paste into ANY Teams
+// window — a private 1:1 DM included — get its text reported, and a file pasted
+// there get read, extracted and uploaded. This is the guard those call sites
+// need: identity resolution and capture permission are two different questions,
+// and only this function answers the second one.
+//
+// Same `entry.hostApp === true` test as processForHost / processesForHost /
+// watcherProcessNames, stated positively. Unknown process ⇒ false: this answers
+// "is this a host app", not "is this an AI app" — the caller has already
+// established the latter with identifyAiProcess().
+export function isHostAppProcess(processName) {
+  if (!processName) return false;
+  const base = processName.replace(/\.exe$/i, '').trim();
+  for (const entry of AI_PROCESSES) {
+    if (entry.match.test(base)) return entry.hostApp === true;
+  }
+  return false;
 }
 
 // ── Access-exception keys ────────────────────────────────────────────────────

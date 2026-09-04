@@ -20,6 +20,13 @@
 #   {"kind":"attachment_disappeared","process":"ChatGPT","filename":"foo.csv"}
 #   {"kind":"heartbeat"}
 #   {"kind":"error","message":"..."}
+#
+# Input schema (NDJSON on stdin), one command:
+#   {"cmd":"host_arm","process":"ms-teams","state":"on"|"off"}
+#       Temporarily add a HOST APP (Microsoft Teams) to the set of processes this
+#       watcher looks at — see $ArmedHostProcs. Sent by index.js only while the
+#       enforcer says a governed or blocked agent conversation is the open one,
+#       and withdrawn the moment it stops saying so.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
@@ -38,6 +45,37 @@ $AiProcesses = if ($env:CFAI_AI_PROCESSES) {
     $env:CFAI_AI_PROCESSES -split ','
 } else {
     @('ChatGPT', 'Claude', 'Cursor', 'Copilot', 'Comet', 'Gemini', 'Poe')
+}
+
+# ── Runtime-armed HOST APPS ─────────────────────────────────────────────────
+#
+# EMPTY AT STARTUP, always. $AiProcesses above is built by watcherProcessNames(),
+# which deliberately excludes every `hostApp: true` catalog entry — Microsoft
+# Teams — because a passive watcher on a company's chat client would see the
+# filename of every attachment in every DM and channel. That exclusion is the
+# privacy property of the host-app design and it is NOT relaxed here: this set is
+# a SEPARATE one, $AiProcesses is never modified, and nothing puts a name in here
+# except an explicit host_arm command from the Node side.
+#
+# index.js sends that command only while the enforcer's govstate says a governed
+# or blocked agent conversation is the open one in that app, and sends "off" the
+# instant it stops. So the window in which Teams is watched at all is exactly the
+# window in which the org already asked for that conversation to be governed.
+$ArmedHostProcs = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @([System.StringComparer]::OrdinalIgnoreCase)
+
+# Non-blocking stdin. The main loop must keep polling UIA on its 800ms cadence,
+# so it cannot sit in a blocking ReadLine() the way toast-helper.ps1's command
+# loop does. One outstanding ReadLineAsync task, checked for completion each
+# tick; a completed task with a null result means stdin closed (parent gone) and
+# no further command can arrive.
+$StdinReader = [Console]::In
+$StdinPending = $null
+function Read-StdinLine {
+    if ($null -eq $script:StdinPending) { $script:StdinPending = $script:StdinReader.ReadLineAsync() }
+    if (-not $script:StdinPending.IsCompleted) { return $null }
+    $line = $script:StdinPending.Result
+    $script:StdinPending = $null
+    return $line
 }
 
 # Directories we'll search when resolving a filename → full path. Most user
@@ -64,6 +102,10 @@ function Is-AiProcess([string]$name) {
     if (-not $name) { return $false }
     $base = $name -replace '\.exe$',''
     foreach ($p in $AiProcesses) { if ($base -ieq $p) { return $true } }
+    # …OR a host app that is armed RIGHT NOW. Second set, checked second, and
+    # $AiProcesses itself is untouched — so the default (unarmed) answer for
+    # Microsoft Teams is still a flat no. See $ArmedHostProcs.
+    if ($ArmedHostProcs.Contains($base)) { return $true }
     return $false
 }
 
@@ -131,9 +173,57 @@ Emit-Json @{ kind = 'ready'; pid = $PID; ai_processes = $AiProcesses; search_dir
 
 # Per-process previously-seen set, so we only emit on NEW filenames.
 $Seen = @{}
+# Which process each tracked hwnd belongs to. Kept alongside $Seen (rather than
+# folded into it) purely to hold this change's diff down: it exists so an
+# arm/disarm can drop the BASELINE for the app it concerns and nothing else.
+$SeenProc = @{}
+
+# Forget every baseline belonging to $proc.
+#
+# Run on BOTH host_arm transitions, and it is what stops the one false positive
+# this feature could otherwise produce. $Seen is a per-hwnd snapshot of the
+# filename-shaped elements the window showed last tick; ONE Teams window holds
+# every conversation the user has open, so a baseline taken while an ungoverned
+# conversation was on screen describes that conversation's chat history. Diffing
+# a newly-governed conversation against it would report every filename in the new
+# view as a brand-new attachment — files the user never touched, from a
+# conversation nobody governed.
+#
+# Dropping it instead makes the next armed tick take a fresh SILENT baseline (the
+# `-not $Seen.ContainsKey` seed step below), so only files attached from that
+# point on are ever reported.
+function Reset-Baseline([string]$proc) {
+    if (-not $proc) { return }
+    $stale = @($SeenProc.Keys | Where-Object { $SeenProc[$_] -ieq $proc })
+    foreach ($h in $stale) { $Seen.Remove($h); $SeenProc.Remove($h) }
+}
+
 $tick = 0
 while ($true) {
     $tick++
+    # ── Drain stdin: host_arm, and nothing else ─────────────────────────────
+    # Deliberately the only command this watcher accepts, and it carries only a
+    # process name and an on/off — no path, no filename, no free text.
+    while ($true) {
+        $cmdLine = Read-StdinLine
+        if ($null -eq $cmdLine) { break }
+        $cmdLine = $cmdLine.Trim()
+        if ($cmdLine.Length -eq 0) { continue }
+        try {
+            $cmd = $cmdLine | ConvertFrom-Json
+            if ($cmd.cmd -eq 'host_arm' -and $cmd.process) {
+                $procName = ([string]$cmd.process) -replace '\.exe$',''
+                if ($cmd.state -eq 'on') {
+                    $null = $ArmedHostProcs.Add($procName)
+                } else {
+                    $null = $ArmedHostProcs.Remove($procName)
+                }
+                Reset-Baseline $procName
+            }
+        } catch {
+            Emit-Json @{ t = (Get-Date).ToUniversalTime().ToString('o'); kind = 'error'; message = 'bad stdin command' }
+        }
+    }
     try {
         $fg = Get-ForegroundAiWindow
         if ($fg) {
@@ -146,6 +236,7 @@ while ($true) {
             # as a brand-new attachment and fires a false attachment_appeared.
             if (-not $Seen.ContainsKey($fg.Hwnd)) {
                 $Seen[$fg.Hwnd] = $current
+                $SeenProc[$fg.Hwnd] = $fg.Process
                 if ($tick % 50 -eq 0) {
                     Emit-Json @{ t = (Get-Date).ToUniversalTime().ToString('o'); kind = 'heartbeat'; tick = $tick; tracked = $Seen.Count }
                 }
@@ -198,6 +289,7 @@ while ($true) {
                 }
             }
             $Seen[$fg.Hwnd] = $current
+            $SeenProc[$fg.Hwnd] = $fg.Process
         }
         if ($tick % 50 -eq 0) {
             Emit-Json @{ t = (Get-Date).ToUniversalTime().ToString('o'); kind = 'heartbeat'; tick = $tick; tracked = $Seen.Count }

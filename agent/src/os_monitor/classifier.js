@@ -275,6 +275,23 @@ const TEXT_READABLE = new Set([
 
 const CONTENT_SCAN_MAX_BYTES = 5 * 1024 * 1024;   // 5 MB cap
 
+// Ceiling on how many bytes we will ever READ off disk to forward as a preview.
+//
+// Distinct from CONTENT_SCAN_MAX_BYTES above, which bounds what we PARSE. The
+// capture path used to be unbounded: the `too_large` branch in file-handler.js
+// decided a file was too big to scan and then read the whole thing into memory
+// anyway to base64 it, so a multi-GB file dropped into a chat window could OOM
+// the agent process — the one process that is supposed to still be alive to
+// block the send.
+//
+// The number is the server's own storage ceiling (MAX_CONTENT_BYTES in
+// server/src/routes/dlp.js, 25 MB), because anything past it is truncated on
+// arrival: reading more would cost memory to produce bytes that are thrown
+// away. Deliberately stated here rather than imported — the agent has no
+// dependency on the server package — and a drift is only ever a bigger
+// truncation, never a missed scan.
+const CONTENT_CAPTURE_MAX_BYTES = 25 * 1024 * 1024;   // 25 MB
+
 export function isTextReadable(filename) {
   const lower = filename.toLowerCase();
   // Match by suffix so foo.env, .env, .env.local all hit.
@@ -325,5 +342,51 @@ export function extOf(filename) {
   return dot < 0 ? '' : lower.slice(dot);
 }
 
-export { CONTENT_SCAN_MAX_BYTES };
+// ── "Should this file have been readable?" ───────────────────────────────────
+//
+// The question a FAIL-CLOSED decision turns on, and it is NOT the same question
+// as "did we try to parse it". Two situations produce an unscanned file and they
+// mean opposite things:
+//
+//   a) A document or archive that carries text by definition — a PDF, a .docx,
+//      a spreadsheet, a .zip, and equally a .7z / .rar / legacy .doc / .pptx /
+//      .odt this agent has no extractor for at all. When we end up with no scan
+//      result for one of these, we have learnt NOTHING about a file that very
+//      plausibly holds customer data or secrets: an encrypted PDF, a
+//      password-protected workbook, an archive format we cannot open, or an
+//      extraction that ran past its deadline. Inside a governed or blocked
+//      conversation that is a reason to hold the send, not to wave it through —
+//      "we could not verify this" is not "this is clean".
+//
+//   b) A file that was never going to yield text: media, and images (which DO
+//      get an OCR attempt, and whose failure says nothing about hidden text
+//      because there was never text to extract in the first place), and
+//      genuinely unknown extensions. Blocking those would be an unexplainable
+//      permanent block on a holiday video, so they stay fail-OPEN exactly as
+//      they are today.
+//
+// This predicate answers (a). It is deliberately a SUPERSET of the three
+// "we have an extractor" predicates above, because a format we cannot open is
+// the strongest version of "unverified", not an exemption from it.
+const UNREADABLE_DOCUMENT_EXTENSIONS = new Set([
+  // Office / word-processing formats with no Node extractor here.
+  '.doc', '.ppt', '.pptx', '.pps', '.ppsx',
+  '.odt', '.ods', '.odp', '.rtf', '.pages', '.numbers', '.keynote',
+  '.msg', '.eml', '.pst', '.ost', '.one', '.onepkg', '.vsdx', '.mpp',
+  // Archive formats we cannot open (only .zip has an extractor).
+  '.7z', '.rar', '.tar', '.tgz', '.gz', '.bz2', '.xz', '.zst', '.iso', '.cab',
+  // Structured data stores — the highest-value targets in this whole catalog.
+  '.sqlite', '.sqlite3', '.db', '.mdb', '.accdb', '.dump', '.bak',
+  '.parquet', '.avro', '.orc', '.har',
+  // Keystores. .pem/.key are TEXT_READABLE; these are the binary siblings.
+  '.pfx', '.p12', '.jks', '.keystore',
+]);
+
+export function isDocumentLikeFormat(filename) {
+  if (!filename) return false;
+  if (isTextReadable(filename) || isBinaryParseable(filename) || isArchive(filename)) return true;
+  return UNREADABLE_DOCUMENT_EXTENSIONS.has(extOf(filename));
+}
+
+export { CONTENT_SCAN_MAX_BYTES, CONTENT_CAPTURE_MAX_BYTES };
 

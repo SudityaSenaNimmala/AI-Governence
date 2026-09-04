@@ -16,6 +16,7 @@ import { createNotifier } from './notify-factory.js';
 import {
   watcherProcessNames,
   identifyAiProcess,
+  isHostAppProcess,
   isAttachmentWatcherEligible,
   hostForProcess,
   hostsForPlatform,
@@ -183,8 +184,35 @@ export class OsMonitor extends EventEmitter {
     // avoid. Same separation, and the same reason, that keeps the IDE catalog
     // out of this file entirely.
     const aiProcNames = watcherProcessNames();
-    this.dialogWatcher = new FileDialogWatcher({ log, aiProcessNames: aiProcNames });
-    this.attachmentWatcher = new AttachmentWatcher({ log, aiProcessNames: aiProcNames });
+    // ── "A governed agent conversation is open in a host app" ─────────────────
+    //
+    // { process, pid, agent, agent_id, scope } while the enforcer's govstate says
+    // so, null otherwise — and null is the state for the overwhelming majority of
+    // Microsoft Teams use. Written ONLY by the enforcer's 'govstate' handler.
+    //
+    // This is the sole thing that lets any file route look at Teams at all. It is
+    // read in exactly four places: the three file-capture routes (drag-drop chip,
+    // file picker, clipboard file paste) and the watcher re-arm hook. Teams is
+    // NOT in aiProcNames above and must never be — the watchers stay blind to it
+    // by default, and this arms them for the narrow window the org's own policy
+    // already asked to be governed.
+    //
+    // Declared before the watchers so their re-arm hooks can read it.
+    this.hostGoverned = null;
+    // The re-arm hook, shared by both UIA watchers. host_arm state lives in the
+    // CHILD process, so a crashed-and-respawned helper comes up disarmed; without
+    // this it would sit permanently blind to a governed conversation that was
+    // already open, because index.js only sends host_arm on a govstate
+    // TRANSITION and no further transition is coming.
+    const reArm = (watcher) => {
+      const proc = this.hostGoverned?.process;
+      if (proc) {
+        watcher.hostArm(proc, true);
+        this.log?.info(`os_monitor: re-armed host capture for ${proc} after a watcher respawn`);
+      }
+    };
+    this.dialogWatcher = new FileDialogWatcher({ log, aiProcessNames: aiProcNames, onRespawn: reArm });
+    this.attachmentWatcher = new AttachmentWatcher({ log, aiProcessNames: aiProcNames, onRespawn: reArm });
     this.promptWatcher = new PromptWatcher({ log, aiProcessNames: aiProcNames });
     // Keystroke send-blocker — actually prevents the send (swallows Enter /
     // Ctrl+V) when the focused AI prompt or clipboard holds a blocked pattern.
@@ -244,21 +272,47 @@ export class OsMonitor extends EventEmitter {
     // when the user pastes the same clipboard contents repeatedly into the
     // same AI surface. Pruned periodically to bound memory.
     this.firedAt = new Map();
-    // Filename currently held (Enter/send-click swallowed) by the
-    // attachment-hold mechanism, or null. Single-slot by design for v1 — see
-    // the attachment_appeared handler's comments for the provisional/
-    // confirmed two-stage story; "more than one flagged attachment at once"
-    // is a known simplification, not yet handled per-file.
-    this.attachHoldFilename = null;
-    // Keeps a CONFIRMED attach hold alive past its own TTL for as long as the
-    // flagged file stays attached. attachment_appeared only fires once, on
-    // first appearance — it does NOT keep firing while a chip just sits
-    // there unchanged, so without an active refresh the hold silently
-    // expires (60s) even though the sensitive file never left the composer,
-    // and a send that should still be blocked goes through with no warning
-    // at all. Confirmed live: exactly this happened when enough real time
-    // passed between attaching a file and testing it (talking, reviewing a
-    // separate change) with the file never removed and re-attached.
+    // Filenames currently held (Enter/send-click swallowed) by the
+    // attachment-hold mechanism: Map<filename, { patterns, severity, ttlMs }>.
+    // The hold is in force while this map is non-empty.
+    //
+    // WAS A SINGLE STRING, and that was a real defect with two halves. A second
+    // attachment overwrote the slot, so tracking of the first file was simply
+    // lost; and — the half that actually let a sensitive file through — an
+    // `attachment_disappeared` for a CLEAN file B released the hold that FLAGGED
+    // file A still needed, because the guard only compared the one filename it
+    // had room for. Removing one file now deletes only its own key, and the
+    // pattern list re-stated on the hold is the UNION across every file still
+    // held (see #syncAttachHold), so the block never under-reports what is
+    // holding it.
+    this.attachHolds = new Map();
+    // Which app the current holds belong to. The helper has ONE hold slot, so
+    // holds from two different apps cannot coexist in it: an arm from a
+    // different process REPLACES the set rather than merging into it. The helper
+    // independently refuses to apply a hold whose process is not the foreground
+    // app — see AttachHoldActive in enforcer-win.ps1 — so this side and that
+    // side have to agree on which app it is.
+    this.attachHoldProcess = null;
+    // Keeps an attach hold alive past its own TTL for as long as the flagged
+    // file stays attached. attachment_appeared only fires once, on first
+    // appearance — it does NOT keep firing while a chip just sits there
+    // unchanged, so without an active refresh the hold silently expires even
+    // though the sensitive file never left the composer, and a send that should
+    // still be blocked goes through with no warning at all. Confirmed live:
+    // exactly this happened when enough real time passed between attaching a
+    // file and testing it (talking, reviewing a separate change) with the file
+    // never removed and re-attached.
+    //
+    // NOW COVERS THE PROVISIONAL HOLD TOO. It used to start only for a CONFIRMED
+    // hold, which left the 3s provisional one — the whole point of which is to
+    // win the race against a fast Enter while the scan runs — able to lapse
+    // BEFORE the scan that would have confirmed it returned. A slow extraction
+    // (OCR, a big PDF, a deep zip: exactly the files most worth holding) is
+    // precisely the case where 3s is not enough, so the hold expired and the
+    // sensitive file went out un-scanned and un-blocked. #syncAttachHold starts
+    // the ticker for every hold, and the interval is derived from the shortest
+    // TTL in force rather than being a constant, so a 3s hold is refreshed every
+    // ~1s instead of every 5.
     this.attachHoldRefreshTimer = null;
     // Blocks with a Request Access dialog already in flight, keyed on host +
     // agent identity. CONCURRENCY only, never a "we already asked once" memory:
@@ -288,16 +342,91 @@ export class OsMonitor extends EventEmitter {
     }
   }
 
-  // Re-sends attach_hold('on', ...) on an interval well inside the C# side's
-  // TTL, so a still-attached flagged file's hold never lapses on its own.
-  // One timer at a time (single-slot hold, matching attachHoldFilename) —
-  // starting a new one always clears whatever was running before.
-  #startAttachHoldRefresh(filename, patterns, ttlMs) {
+  // ── The attachment hold: one helper slot, N held files ────────────────────
+  //
+  // The helper has exactly one hold (a flag, a filename, a pattern string and a
+  // TTL), and this side may be holding several files at once. #syncAttachHold is
+  // the single place that projects the map onto that slot, so arming and
+  // releasing cannot disagree about what the helper currently believes.
+  //
+  // Re-sends attach_hold('on', ...) on an interval well inside the shortest TTL
+  // in force, so a still-attached flagged file's hold never lapses on its own.
+
+  // Push the CURRENT set of holds to the helper and (re)start the refresh
+  // ticker. Returns the payload sent, or null when nothing is held.
+  #syncAttachHold() {
+    if (this.attachHolds.size === 0) { this.#stopAttachHoldRefresh(); return null; }
+    const patterns = new Set();
+    let ttlMs = 0;
+    let shortestTtl = Infinity;
+    for (const held of this.attachHolds.values()) {
+      for (const p of String(held.patterns || '').split(',')) { if (p) patterns.add(p); }
+      ttlMs = Math.max(ttlMs, held.ttlMs);
+      shortestTtl = Math.min(shortestTtl, held.ttlMs);
+    }
+    const payload = {
+      // EVERY held filename, not just the newest. The helper puts this on the
+      // block it emits, and naming one of two flagged attachments would be a
+      // false statement about the other.
+      filename: [...this.attachHolds.keys()].join(', '),
+      // The UNION of pattern names across every held file, for the same reason.
+      patterns: [...patterns].join(','),
+      // The LONGEST TTL in force — the hold must outlive its most durable
+      // reason, and a shorter one being refreshed more often costs nothing.
+      ttlMs,
+      // Binds the hold to one app on the helper side. See attachHoldProcess.
+      process: this.attachHoldProcess || '',
+    };
+    this.enforcer.attachHold('on', payload);
+    // Derived from the SHORTEST TTL, not a constant: a 3s provisional hold
+    // refreshed on a 5s interval — which is what the old Math.max(5000, …) did —
+    // is a hold that expires.
+    this.#startAttachHoldRefresh(payload, Math.max(500, Math.floor(shortestTtl / 3)));
+    return payload;
+  }
+
+  // Add (or re-state) a hold for one file.
+  #armAttachHold(filename, { patterns = '', severity = null, ttlMs = 3000, processName = '' } = {}) {
+    if (processName && this.attachHoldProcess && processName !== this.attachHoldProcess) {
+      // A different app's attachment. The helper has one slot, so the previous
+      // app's holds cannot still be in it — drop them rather than report them
+      // under this app's name.
+      this.attachHolds.clear();
+    }
+    if (processName) this.attachHoldProcess = processName;
+    this.attachHolds.set(filename, { patterns, severity, ttlMs });
+    return this.#syncAttachHold();
+  }
+
+  // Drop the hold for ONE file. Returns true if that file was actually held.
+  //
+  // The other half of the multi-file fix: when other files are still held this
+  // re-states the hold with the narrowed union instead of releasing it. Before,
+  // any release released everything — so removing a clean attachment unblocked a
+  // send that a sensitive one was still holding.
+  #releaseAttachHold(filename) {
+    if (!this.attachHolds.delete(filename)) return false;
+    if (this.attachHolds.size === 0) {
+      this.#stopAttachHoldRefresh();
+      const processName = this.attachHoldProcess || '';
+      this.attachHoldProcess = null;
+      this.enforcer.attachHold('off', { filename, process: processName });
+    } else {
+      this.#syncAttachHold();
+    }
+    return true;
+  }
+
+  #startAttachHoldRefresh(payload, everyMs) {
     this.#stopAttachHoldRefresh();
     this.attachHoldRefreshTimer = setInterval(() => {
-      if (this.attachHoldFilename !== filename) { this.#stopAttachHoldRefresh(); return; }
-      this.enforcer.attachHold('on', { filename, patterns, ttlMs });
-    }, Math.max(5000, ttlMs / 3));
+      // The map emptying is the one condition that stops the ticker on its own,
+      // so a released hold can never be silently re-armed by a stale interval
+      // nobody cleared. Every arm/release re-enters #syncAttachHold, which
+      // replaces this timer with one carrying the fresh payload.
+      if (this.attachHolds.size === 0) { this.#stopAttachHoldRefresh(); return; }
+      this.enforcer.attachHold('on', payload);
+    }, everyMs);
     this.attachHoldRefreshTimer.unref?.();
   }
 
@@ -306,6 +435,49 @@ export class OsMonitor extends EventEmitter {
       clearInterval(this.attachHoldRefreshTimer);
       this.attachHoldRefreshTimer = null;
     }
+  }
+
+  // ── May a file route look at this HOST APP right now? ─────────────────────
+  //
+  // Returns the governed-conversation context ({ process, pid, agent, agent_id,
+  // scope }) when the enforcer's govstate says a governed or blocked agent
+  // conversation is the open one in THIS process, and null otherwise.
+  //
+  // Null for every non-host app, always — an ordinary AI app's file coverage
+  // does not depend on this and must not start depending on it. Null for a host
+  // app whenever govstate is inactive, which is the normal state of Microsoft
+  // Teams: a DM, a channel, a meeting chat and the Activity tab all land here
+  // and are never read, extracted, scanned or reported.
+  //
+  // The process comparison is what stops a govstate for one host app from
+  // arming a route for a different one.
+  // Stamp WHICH governed agent conversation a host-app file event came from.
+  //
+  // "Microsoft Teams" alone is not a useful attribution for a governance
+  // record — the whole point of the host-app design is that only one narrow
+  // conversation inside Teams was ever looked at, and the record has to say
+  // which. The values are the admin-typed ones off govstate; nothing is derived
+  // here and no conversation name read off a screen is ever used.
+  //
+  // Top-level agent_name / agent_id / agent_scope, the same shape
+  // blocked-agents.json rows and normalizeAgentRows use — POST /api/v1/dlp's
+  // file_upload metadata allowlist carries these through now (server/src/
+  // routes/dlp.js), so this is the single place the attribution lives; no
+  // content_scan mirror needed.
+  #attributeToAgent(fileEvent, governed) {
+    if (!fileEvent || !governed) return fileEvent;
+    fileEvent.agent_name = governed.agent || '';
+    fileEvent.agent_id = governed.agent_id || '';
+    fileEvent.agent_scope = governed.scope || '';
+    return fileEvent;
+  }
+
+  #hostGovernedFor(processName) {
+    if (!processName || !isHostAppProcess(processName)) return null;
+    const g = this.hostGoverned;
+    if (!g || !g.process) return null;
+    const base = String(processName).replace(/\.exe$/i, '').trim().toLowerCase();
+    return String(g.process).replace(/\.exe$/i, '').trim().toLowerCase() === base ? g : null;
   }
 
   // ── Tokenize & Send: what the BLOCK knew, for the REWRITE that follows ─────
@@ -717,7 +889,18 @@ export class OsMonitor extends EventEmitter {
       const ai = identifyAiProcess(ev.process);
       this.currentFocus = { pid: ev.pid, process: ev.process, title: ev.title, aiInfo: ai };
       if (ai) {
-        this.log?.info(`os_monitor: AI process focused — ${ai.product} (pid=${ev.pid}, title="${ev.title}")`);
+        // NO TITLE FOR A HOST APP. A Microsoft Teams window title is measured to
+        // read "Chat | Sruthi Chimata | CloudFuze, Inc | p@cloudfuze.com |
+        // Microsoft Teams" (see the teams_desktop entry in ai-processes.js) — a
+        // colleague's name plus two email-identifiable parties. Logging that for
+        // every Teams focus wrote the user's private contact graph into the
+        // agent's own log file. Everything else about the focus event still
+        // logs, so the line stays useful for debugging.
+        this.log?.info(
+          isHostAppProcess(ev.process)
+            ? `os_monitor: AI process focused — ${ai.product} (pid=${ev.pid}, title suppressed: host app)`
+            : `os_monitor: AI process focused — ${ai.product} (pid=${ev.pid}, title="${ev.title}")`
+        );
       }
     });
 
@@ -726,6 +909,17 @@ export class OsMonitor extends EventEmitter {
       // we filter to AI processes here so non-AI activity is ignored.
       const ai = identifyAiProcess(ev.process);
       if (!ai) return;
+      // …and a HOST APP is not an AI surface, even though identifyAiProcess
+      // names one. This handler reports the FULL clipboard text (content_text
+      // below) plus the window title, and the only thing it knows is "Teams is
+      // focused" — not which conversation. That is a private 1:1 DM with a
+      // colleague as often as it is an agent chat, so there is nothing to
+      // narrow here and the whole path is skipped, exactly as
+      // watcherProcessNames() already skips host apps for every watcher that
+      // takes a process list. Narrow capture inside an already-identified
+      // governed agent conversation is enforcer-win.ps1's job, gated on a
+      // blocked agent actually being open.
+      if (isHostAppProcess(ev.process)) return;
 
       const { matches, highestSeverity } = scan(ev.text);
       if (matches.length === 0) {
@@ -791,6 +985,25 @@ export class OsMonitor extends EventEmitter {
       // emit one file_upload event per path.
       const ai = identifyAiProcess(ev.process);
       if (!ai) return;
+      // HOST APPS: excluded unless the enforcer says this exact conversation is
+      // governed or blocked.
+      //
+      // The guard is BEFORE buildFileUploadEvent() rather than after, because
+      // that helper reads the file off disk and puts its bytes on the event
+      // (content_text / content_base64) — running it at all for a file pasted
+      // into an unknown Teams conversation is already the leak. When
+      // #hostGovernedFor() answers null nothing is read, extracted, scanned or
+      // reported, exactly as before.
+      //
+      // This is the ONE clipboard site that governance opens. The clipboard-TEXT
+      // handler above stays unconditionally excluded for host apps: typed and
+      // pasted prompt text inside a governed Teams conversation is already
+      // handled, narrowly and at the element level, by enforcer-win.ps1 — a
+      // second, window-level copy of it here would report the whole clipboard
+      // with the window title attached, which is what that exclusion exists to
+      // prevent. Files are different: nothing else can see them.
+      const governed = this.#hostGovernedFor(ev.process);
+      if (isHostAppProcess(ev.process) && !governed) return;
 
       for (const p of (ev.paths || [])) {
         try {
@@ -800,10 +1013,15 @@ export class OsMonitor extends EventEmitter {
             service: ai.product,
             vendor: ai.vendor,
             processName: ev.process,
-            windowTitle: ev.title,
+            // NO WINDOW TITLE for a host app — a Teams title carries a
+            // colleague's name and two email addresses (see the focus handler).
+            // The agent fields below say which conversation it was, which is the
+            // part that has governance value.
+            windowTitle: governed ? '' : ev.title,
             log: this.log,
           });
           if (!fileEvent) continue;
+          if (governed) this.#attributeToAgent(fileEvent, governed);
 
           // Dedup: same file path + same AI process within TTL. Path is a
           // good identity for files (filename collisions in different dirs
@@ -859,7 +1077,18 @@ export class OsMonitor extends EventEmitter {
       // opening any file in Cursor got reported as if it had been uploaded to
       // an AI — the dialog fires for every "Open" the OS shows this process,
       // not just an AI app's own attach-file picker.
-      if (!isAttachmentWatcherEligible(ev.process)) return;
+      //
+      // A HOST APP reaches this through the second clause instead. It is
+      // deliberately NOT in isAttachmentWatcherEligible's catalog answer (Teams
+      // ships useAttachmentWatcher:false as well as hostApp:true) — the helper's
+      // own $ArmedHostProcs is what let the dialog be tracked at all, and this is
+      // the Node-side statement of the same rule. `host_armed` on the event is
+      // the helper's LATCHED answer from when the picker opened, which is the
+      // only correct time to ask: a picker steals focus from Teams, so
+      // this.hostGoverned is usually already null by the time it closes.
+      const governed = this.#hostGovernedFor(ev.process);
+      const hostPick = isHostAppProcess(ev.process) && ev.host_armed === true;
+      if (!isAttachmentWatcherEligible(ev.process) && !hostPick) return;
       try {
         const fileEvent = await buildFileUploadEvent({
           path: ev.path,
@@ -867,10 +1096,18 @@ export class OsMonitor extends EventEmitter {
           service: ai.product,
           vendor: ai.vendor,
           processName: ev.process,
-          windowTitle: ev.title,
+          // The dialog's own window Name ("Open"), and never a Teams window
+          // title — see the clipboard_files handler for why that distinction
+          // matters for a host app.
+          windowTitle: hostPick ? '' : ev.title,
           log: this.log,
         });
         if (!fileEvent) return;
+        // The conversation the picker was opened FROM, when we still know it.
+        // Null when the user browsed long enough for the govstate to have
+        // cleared — the file is still reported and still held, just without an
+        // agent name, which is the honest outcome rather than a guess.
+        if (hostPick && governed) this.#attributeToAgent(fileEvent, governed);
 
         const dedupKey = `file|${ev.path}|${ev.process}`;
         const lastFired = this.firedAt.get(dedupKey) ?? 0;
@@ -917,7 +1154,16 @@ export class OsMonitor extends EventEmitter {
       // For those apps the asar-injected desktop hook handles actual uploads
       // at the DOM level. The OS-level watcher would just generate false
       // positives for every file the user happens to be editing.
-      if (!isAttachmentWatcherEligible(ev.process)) {
+      //
+      // A HOST APP is never eligible by catalog answer and never will be. It
+      // reaches this handler at all only because a govstate armed the helper for
+      // it, and only for as long as that arming lasts — so the second clause is
+      // the Node-side statement of the same rule the helper's $ArmedHostProcs
+      // enforces. In a plain Teams chat #hostGovernedFor() is null, the event
+      // cannot even be produced, and if one somehow were it would stop here:
+      // nothing read, nothing scanned, nothing held, nothing reported.
+      const governed = this.#hostGovernedFor(ev.process);
+      if (!isAttachmentWatcherEligible(ev.process) && !governed) {
         return;
       }
 
@@ -940,10 +1186,16 @@ export class OsMonitor extends EventEmitter {
       // permanently dead — see enforcer-win.ps1's CheckAttachHoldExpiry.
       // Not armed for unscannable extensions (media, unknown types) — same
       // "don't block what we can't explain" reasoning as the !ev.path case.
+      //
+      // …and it is now REFRESHED while it is provisional (see
+      // #syncAttachHold / attachHoldRefreshTimer). Before, only the confirmed
+      // hold was, so a slow extraction — OCR, a large PDF, a deep zip, i.e.
+      // exactly the files most worth holding — outlasted the provisional hold's
+      // own 3s TTL and the send went through before the scan that would have
+      // confirmed it had even returned.
       const scannable = isTextReadable(ev.filename) || isBinaryParseable(ev.filename) || isImage(ev.filename) || isArchive(ev.filename);
       if (scannable) {
-        this.attachHoldFilename = ev.filename;
-        this.enforcer.attachHold('on', { filename: ev.filename, patterns: '', ttlMs: 3000 });
+        this.#armAttachHold(ev.filename, { patterns: '', ttlMs: 3000, processName: ev.process });
       }
 
       try {
@@ -957,36 +1209,55 @@ export class OsMonitor extends EventEmitter {
           log: this.log,
         });
         if (!fileEvent) {
-          if (scannable && this.attachHoldFilename === ev.filename) {
-            this.attachHoldFilename = null;
-            this.#stopAttachHoldRefresh();
-            this.enforcer.attachHold('off', { filename: ev.filename });
-          }
+          if (scannable) this.#releaseAttachHold(ev.filename);
           return;
         }
+        // Which governed Teams conversation this came from, when it came from
+        // one. Null for every ordinary AI app.
+        if (governed) this.#attributeToAgent(fileEvent, governed);
 
-        // CONFIRMED hold — only high/critical, matching the browser
-        // extension's existing file-upload block threshold. A longer TTL
-        // than the provisional one, and — unlike the provisional hold —
-        // actively kept alive by #startAttachHoldRefresh for as long as the
-        // attachment stays present, since this is a real finding that must
-        // survive until the file actually disappears, not expire on its own.
+        // CONFIRMED hold — high/critical, matching the browser extension's
+        // existing file-upload block threshold, PLUS the fail-closed case
+        // below. A longer TTL than the provisional one, and kept alive for as
+        // long as the attachment stays present, since this is a real finding
+        // that must survive until the file actually disappears.
         const cs = fileEvent.content_scan;
         const severity = fileEvent.severity;
-        const shouldHold = severity === 'high' || severity === 'critical';
+        // ── FAIL CLOSED on a file we could not verify ──────────────────────
+        //
+        // `severity` cannot express this: a file that was never scanned has no
+        // contentSeverity to raise, so an encrypted PDF or a password-protected
+        // workbook full of customer data scores exactly what an empty one does.
+        // content_scan.unverified is the fact (set in file-handler.js — it is
+        // true only for a format that SHOULD have been readable, so media and
+        // unknown extensions are untouched and still fail OPEN).
+        //
+        // ONLY INSIDE A GOVERNED OR BLOCKED CONVERSATION. Everywhere else the
+        // severity threshold is exactly what it was: escalating on "we could not
+        // read it" for every app would start blocking .7z archives and legacy
+        // .doc files across the board, which nobody asked for. Where the org HAS
+        // asked for the conversation to be governed, "we could not verify this"
+        // is a reason to hold the send rather than a reason to wave it through.
+        const unverified = cs?.scanned !== true && cs?.unverified === true;
+        const failClosed = !!governed && unverified;
+        const shouldHold = severity === 'high' || severity === 'critical' || failClosed;
         if (shouldHold) {
-          const patternNames = (cs?.matches || []).map((m) => m.pattern).join(',') || fileEvent.file_class;
-          this.attachHoldFilename = ev.filename;
-          const ttlMs = 60_000;
-          this.enforcer.attachHold('on', { filename: ev.filename, patterns: patternNames, ttlMs });
-          this.#startAttachHoldRefresh(ev.filename, patternNames, ttlMs);
-        } else if (this.attachHoldFilename === ev.filename) {
+          // For a fail-closed hold there are no pattern names to report, so the
+          // reason itself is what the block names — the toast has to be able to
+          // say WHY, and "high" would be a claim about content nobody read.
+          const patternNames = failClosed && !(cs?.matches || []).length
+            ? `unscannable file (${cs?.reason || 'not readable'})`
+            : (cs?.matches || []).map((m) => m.pattern).join(',') || fileEvent.file_class;
+          this.#armAttachHold(ev.filename, {
+            patterns: patternNames, severity, ttlMs: 60_000, processName: ev.process,
+          });
+        } else {
           // Scan came back clean (or below the hold threshold) — release the
           // provisional hold armed above rather than letting it ride out its
-          // TTL with the send needlessly stuck for up to 3 more seconds.
-          this.attachHoldFilename = null;
-          this.#stopAttachHoldRefresh();
-          this.enforcer.attachHold('off', { filename: ev.filename });
+          // TTL with the send needlessly stuck. A no-op when this file was
+          // never held, and it releases ONLY this file: other flagged files
+          // still in the map keep the hold in force.
+          this.#releaseAttachHold(ev.filename);
         }
         const dedupKey = `file|${ev.path}|${ev.process}`;
         const lastFired = this.firedAt.get(dedupKey) ?? 0;
@@ -1014,6 +1285,11 @@ export class OsMonitor extends EventEmitter {
           });
         }
       } catch (err) {
+        // Release the PROVISIONAL hold on the way out. Without this an
+        // extraction that threw left Enter dead until the helper's own TTL
+        // lapsed, with nothing on screen to explain it — and the refresh ticker
+        // now keeps that TTL from lapsing at all, so the leak became permanent.
+        if (scannable) this.#releaseAttachHold(ev.filename);
         this.log?.warn(`os_monitor: attachment event build failed: ${err?.message || err}`);
       }
     });
@@ -1023,14 +1299,19 @@ export class OsMonitor extends EventEmitter {
     // comment — scrolled out of the UIA tree in a long chat). Best-effort:
     // if this fires wrongly for a still-present file, the next
     // attachment_appeared poll tick will just re-observe it and re-arm.
-    // Guarded on filename match so an unrelated file's disappearance can't
-    // release a hold armed for a DIFFERENT, still-present flagged file.
+    //
+    // PER FILE, via the hold map: removing one attachment deletes only its own
+    // key and re-states the hold with the remaining files' patterns. The old
+    // single-slot version released EVERYTHING here, so removing a clean
+    // attachment unblocked a send that a sensitive one was still holding.
     this.attachmentWatcher.on('attachment_disappeared', (ev) => {
-      if (this.attachHoldFilename !== ev.filename) return;
-      this.attachHoldFilename = null;
-      this.#stopAttachHoldRefresh();
-      this.enforcer.attachHold('off', { filename: ev.filename });
-      this.log?.info(`os_monitor: attachment "${ev.filename}" removed — send hold released`);
+      if (!this.#releaseAttachHold(ev.filename)) return;
+      this.log?.info(
+        `os_monitor: attachment "${ev.filename}" removed — ` +
+        (this.attachHolds.size === 0
+          ? 'send hold released'
+          : `hold still active for ${this.attachHolds.size} other file(s)`)
+      );
     });
 
     // UIA typed-prompt watcher — reads what the user TYPES into an AI app's
@@ -1189,7 +1470,17 @@ export class OsMonitor extends EventEmitter {
         } : isAttachment ? {
           title: `${ai.product} - attachment blocked`,
           message: `Send blocked: "${ev.filename}" contains ${ev.patterns}\n` +
-            `Remove the attachment to send. If the app already uploaded it on attach, this only stops it from being used in the conversation.`,
+            `Remove the attachment to send. If the app already uploaded it on attach, this only stops it from being used in the conversation.` +
+            // HOST APPS: one extra sentence, and it names a real gap rather
+            // than glossing it. UpdateSendRect returns early for every host app
+            // (a descendant-wide UIA search of a Teams window is too expensive,
+            // and its send button is not reliably locatable), so the mouse hook
+            // has no rectangle to swallow a click in — Enter is covered, the
+            // Send button is not. Saying "blocked" without that qualifier would
+            // be the overclaim this file's copy rules exist to prevent.
+            (isHostAppProcess(ev.process)
+              ? `\nPressing Enter is blocked; clicking Send is not yet covered — remove the attachment to be safe.`
+              : ''),
         } : {
           title: `${ai.product} - BLOCKED`,
           message: `Send blocked: prompt contains ${ev.patterns}\n` +
@@ -1317,6 +1608,64 @@ export class OsMonitor extends EventEmitter {
       // emit is a separate call over the same (trivially small) payload.
       this.#ui('blockstate', { active: false });
       this.#console.log('@@CFAI-BLOCKSTATE ' + JSON.stringify({ active: false }));
+    });
+
+    // ── govstate: arm the file routes for a governed host-app conversation ────
+    //
+    // The enforcer says a governed or blocked agent conversation is (or is no
+    // longer) the open one in a host app — Microsoft Teams. STATE, on transitions
+    // only, and the ONLY thing that ever lets a file route look at Teams.
+    //
+    // Two effects, and nothing else happens here:
+    //   1. this.hostGoverned is set or cleared. The three file routes consult it
+    //      through #hostGovernedFor() before they read a single byte off disk.
+    //   2. the two UIA watchers are armed or disarmed for that process, so the
+    //      drag-drop chip watcher and the file-picker watcher start (and stop)
+    //      seeing it. Teams stays out of watcherProcessNames() — this is a
+    //      separate, explicitly-armed set inside each helper.
+    //
+    // Deliberately NOT reported to the server and NOT logged with its identity:
+    // "a governed conversation is open" is not an enforcement event, and a log
+    // line per Teams conversation switch would write the user's agent-usage
+    // timeline into the agent's own log file. The file events that may follow
+    // are the records.
+    this.enforcer.on('govstate', (ev) => {
+      const active = !!ev.active;
+      const processName = String(ev.process || '').trim();
+      const previous = this.hostGoverned;
+      if (active && processName) {
+        this.hostGoverned = {
+          process: processName,
+          pid: Number(ev.pid) || 0,
+          // Admin-typed row values, straight off the event — the same pair the
+          // 'block' and Request Access paths already carry. Never re-derived
+          // here, and never a conversation name read off a screen.
+          agent: String(ev.agent || ''),
+          agent_id: String(ev.agent_id || ''),
+          scope: String(ev.scope || ''),
+          panel: String(ev.panel || ''),
+        };
+      } else {
+        this.hostGoverned = null;
+      }
+      // Arm/disarm on the PROCESS. When a transition moves from one host app to
+      // another (not possible today — Teams is the only one — but the state
+      // machine allows it), the previous process is disarmed first so it can
+      // never be left armed by a transition that only mentioned the new one.
+      if (previous?.process && previous.process !== this.hostGoverned?.process) {
+        this.attachmentWatcher.hostArm(previous.process, false);
+        this.dialogWatcher.hostArm(previous.process, false);
+      }
+      if (this.hostGoverned) {
+        this.attachmentWatcher.hostArm(this.hostGoverned.process, true);
+        this.dialogWatcher.hostArm(this.hostGoverned.process, true);
+      }
+      // Process + scope only. No agent name, so the line cannot become the
+      // usage timeline described above.
+      this.log?.info(
+        `os_monitor: host file capture ${this.hostGoverned ? 'ARMED' : 'disarmed'}` +
+        ` for ${processName || previous?.process || '?'} (scope=${String(ev.scope || '')})`
+      );
     });
 
     // Tier B mask-and-rewrite result. 'ok' means the composer was verified to

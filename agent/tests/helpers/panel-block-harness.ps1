@@ -407,7 +407,19 @@ function ResetState() {
   SetF '_blockUia' $false
   SetF '_blockPaste' $false
   SetF '_attachHoldActive' $false
+  SetF '_attachHoldProcess' ''
   SetF '_lastPasteTicks' ([long]0)
+  # The govstate machine, and the per-tick host-governance fields
+  # ApplyForegroundTick owns. Reset so each scenario starts from "nothing is
+  # governed" and its first armed tick is a genuine transition.
+  SetF '_govActive' $false
+  SetF '_govPid' ([uint32]0)
+  SetF '_govKey' ''
+  SetF '_fgHostGoverned' $false
+  SetF '_fgHostGovPanel' ''
+  SetF '_fgHostGovAgent' ''
+  SetF '_fgHostGovAgentId' ''
+  $script:govEmitted = $false
   # No click and no navigation key — the state a quiet wait before an Enter is
   # actually in. Scenarios that model the user moving the caret set it.
   SetF '_lastFocusMoveInputTicks' ([long]0)
@@ -418,6 +430,30 @@ function ResetState() {
 # it: a timestamp, nothing else.
 function FocusMoveInput([int]$msAgo = 0) {
   SetF '_lastFocusMoveInputTicks' ([long]([DateTime]::UtcNow.Ticks - [TimeSpan]::FromMilliseconds($msAgo).Ticks))
+}
+
+# ── govstate, run for real on every tick ────────────────────────────────────
+#
+# UpdateGovState is what tells the Node side "a governed or blocked agent
+# conversation is open in a host app right now", which is the ONE thing that
+# arms Teams' file watchers. Called here in the same position PollLoop calls it:
+# immediately after CheckFgBlocked, so it reads this tick's freshly decided
+# block and this tick's foreground decision.
+#
+# It emits at most one line per real transition, straight to stdout — those
+# {"kind":"govstate",...} lines land in this harness's own output and the tests
+# read them there, which is how the PII discipline of the payload is asserted
+# against the REAL emitter rather than a copy of it.
+#
+# $script:govEmitted records whether THIS tick emitted. _govActive changes value
+# at exactly the two emit sites and nowhere else, so a change is precisely
+# equivalent to "a line was written" — that is what makes "transitions only"
+# assertable without parsing interleaved output.
+$script:govEmitted = $false
+function RunGovState() {
+  $before = [bool](GetF '_govActive')
+  Call 'UpdateGovState' | Out-Null
+  $script:govEmitted = ($before -ne [bool](GetF '_govActive'))
 }
 
 # One poll tick. $focus is a (controlType, name, className) triple, or $null for
@@ -434,6 +470,7 @@ function Tick([string]$scenario, [int]$n, $focus, [uint32]$fgPid = $CODE_PID, [s
   $rid = if ($null -ne $hit) { '42.9047508.4.9.49.164537' } else { '' }
   Call 'ApplyForegroundTick' @($fgPid, $proc, $true, $hit, $rid, $readable, $OUT_UNREADABLE, '') | Out-Null
   Call 'CheckFgBlocked' | Out-Null
+  RunGovState
   Report $scenario $n $hit $readable
 }
 
@@ -472,6 +509,7 @@ function AgentTick([string]$scenario, [int]$n, $focus, [uint32]$fgPid = $M365_PI
   }
   Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $null, '', $false, $outcome, $agentName) | Out-Null
   Call 'CheckFgBlocked' | Out-Null
+  RunGovState
   Report $scenario $n $null $false $outcome
 }
 
@@ -534,6 +572,7 @@ function TeamsTick([string]$scenario, [int]$n, $focus, [string]$title,
   $rid = if ($null -ne $hit) { '7.3311.4.9.31.90210' } else { '' }
   Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $hit, $rid, $readable, $outcome, $agentName) | Out-Null
   Call 'CheckFgBlocked' | Out-Null
+  RunGovState
   Report $scenario $n $hit $readable $outcome
 }
 
@@ -607,6 +646,7 @@ function TeamsCopilotTick([string]$scenario, [int]$n, $focus, [string]$title, $h
   $rid = if ($null -ne $hit) { '7.3311.4.9.31.90211' } else { '' }
   Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $hit, $rid, $readable, $outcome, $agentName) | Out-Null
   Call 'CheckFgBlocked' | Out-Null
+  RunGovState
   Report $scenario $n $hit $readable $outcome $searchAttempted
 }
 
@@ -669,6 +709,20 @@ function Report([string]$scenario, [int]$n, $hit, [bool]$readable, $agentOutcome
     # blocked tick false/true, and an untouched Teams tick false/false. There is
     # no state in which both are true.
     dlpGoverned  = [bool](GetF '_fgDlpGoverned')
+    # ── The FILE-SCANNING arm signal (govstate) ────────────────────────────
+    # The UNION of governed and blocked, unlike dlpGoverned above, because a
+    # file attached inside a BLOCKED conversation is the stronger case for
+    # scanning it. What to watch:
+    #   * false on every untouched Teams tick — a DM, a channel, a meeting
+    #     chat, the message list. That is the must-not-regress property: with
+    #     it false, index.js never arms a watcher and Teams is never looked at.
+    #   * false during the 3s sticky window after leaving a governed surface,
+    #     even though _fgIsAi is still (correctly) true there.
+    # govEmitted is "this tick wrote a govstate line", so a run of identical
+    # ticks must show exactly one.
+    govActive    = [bool](GetF '_govActive')
+    govEmitted   = [bool]$script:govEmitted
+    govKey       = [string](GetF '_govKey')
     # Would a DLP CONTENT match swallow the send on this tick?
     #
     # The hook's Enter decision, modelled exactly: it runs at all only inside
@@ -1869,6 +1923,183 @@ AgentTick 'm365_unaffected_by_host_apps' 1 $FOCUS_M365_GENERIC
 AgentTick 'm365_unaffected_by_host_apps' 2 $FOCUS_M365_ADVISOR
 AgentTick 'm365_unaffected_by_host_apps' 3 $FOCUS_M365_TRANSCRIPT
 AgentTick 'm365_unaffected_by_host_apps' 4 $null
+
+# ═══ govstate: the FILE-SCANNING arm signal ═════════════════════════════════
+#
+# The Node side arms Microsoft Teams' three file-capture routes (drag-drop chip,
+# file picker, clipboard file paste) for exactly as long as govstate says a
+# governed or blocked agent conversation is the open one, and disarms them the
+# instant it stops. Teams is absent from watcherProcessNames() and stays absent,
+# so this signal is the only thing that ever lets those routes look at it.
+#
+# What every scenario below is really asserting is one of two things:
+#   * govActive is FALSE wherever the org has not asked for governance — that is
+#     the must-not-regress property, because false means no watcher is armed and
+#     no file in Teams is ever read;
+#   * a line is emitted only on a real TRANSITION, so a conversation left open
+#     for minutes produces one line, not one per 150ms tick.
+
+# A governed row whose agent_name is spelled in a DIFFERENT CASE from what the
+# window title reads. AgentNameMatches is case-insensitive so it still matches —
+# and that is what makes it a PROOF: whatever govstate carries has to be the
+# lowercase ADMIN-TYPED spelling from this row, never the "Expenses Helper" the
+# title parse produced. The event may carry admin-typed identity only.
+$GOV_TEAMS_AGENT_LOWER = '[{"agent_id":"ag-gov-lower","agent_name":"expenses helper","platform":"teams_chat_agent","reason":"DLP monitored","agent_scope":"agent","dlp_monitor":true}]'
+# Two governed agents, for the switch-between-conversations case.
+$GOV_TEAMS_TWO = '[{"agent_id":"ag-gov-1","agent_name":"Expenses Helper","platform":"teams_chat_agent","reason":"DLP monitored","agent_scope":"agent","dlp_monitor":true},{"agent_id":"ag-gov-5","agent_name":"Travel Desk","platform":"teams_chat_agent","reason":"DLP monitored","agent_scope":"agent","dlp_monitor":true}]'
+$TITLE_TEAMS_GOV_AGENT2 = 'Chat | Travel Desk | filefuze | erik@filefuze.co | Microsoft Teams'
+
+# ── GS1: a GOVERNED Chat-list conversation arms, once ───────────────────────
+# Ten identical ticks. govActive true on all ten; exactly ONE of them emitted.
+# The key carries the row's lowercase spelling, proving the identity is the
+# admin's and not the one read out of the window title.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_TEAMS_AGENT_LOWER
+LoadRows $ROWS_EMPTY
+ResetState
+for ($i = 0; $i -lt 10; $i++) {
+  TeamsTick 'govstate_governed_chat_list' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+}
+
+# ── GS2: a BLOCKED Chat-list conversation arms too ─────────────────────────
+# The union, not the DLP-only middle state: a file attached inside a conversation
+# the org BLOCKED is the stronger case for scanning it, not an exemption. The key
+# comes from the blocked row (CheckFgBlocked's own _blockedAgentName/Id).
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_EMPTY
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 5; $i++) {
+  TeamsTick 'govstate_blocked_chat_list' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT
+}
+
+# ── GS3: THE PROTECTION — a plain human conversation NEVER arms ────────────
+# A 1:1 DM, a renamed human group chat, a channel and the Activity tab, with the
+# composer genuinely focused and both policy lists live. Every tick must be
+# govActive false and must never have emitted anything at all: nothing arms, so
+# no file in any of these conversations is ever read.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_TEAMS_AGENT
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsTick 'govstate_human_chat_never_arms' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_DM
+TeamsTick 'govstate_human_chat_never_arms' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GROUP
+TeamsTick 'govstate_human_chat_never_arms' 2 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_CHANNEL
+TeamsTick 'govstate_human_chat_never_arms' 3 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_ACTIVITY
+
+# ── GS4: the STICKY WINDOW must not stay armed ─────────────────────────────
+# Tick 0 is the governed composer. Tick 1 focuses the MESSAGE LIST in the same
+# window: _fgIsAi is still true (the 3s sticky window is deliberately generous
+# for BLOCK decisions) but the state is second-hand, and a govstate that stayed
+# active there would leave Teams' file watchers armed over a conversation nobody
+# is typing in. It must go false on that very tick.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_TEAMS_AGENT
+LoadRows $ROWS_EMPTY
+ResetState
+TeamsTick 'govstate_sticky_window' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+TeamsTick 'govstate_sticky_window' 1 $FOCUS_TEAMS_MESSAGE_LIST $TITLE_TEAMS_GOV_AGENT
+TeamsTick 'govstate_sticky_window' 2 $FOCUS_TEAMS_MESSAGE_LIST $TITLE_TEAMS_GOV_AGENT
+
+# ── GS5: the COPILOT TAB arms on PANEL MATCH ALONE ─────────────────────────
+# dlpMatch:'panel', no named row required — decision #1. Tick 0 has no headings
+# at all, so there is no agent name anywhere: it must STILL arm (that composer
+# has no non-AI use), with an empty agent in the key and the panel id present.
+LoadPanels $PANELS_COPILOT_ARMED
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadGoverned $GOV_TEAMS_AGENT
+LoadRows $ROWS_EMPTY
+ResetState
+TeamsCopilotTick 'govstate_copilot_tab_panel_alone' 0 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $null
+TeamsCopilotTick 'govstate_copilot_tab_panel_alone' 1 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $null
+
+# ── GS5b: the CONTROL — the same tab under the strict 'agent' rule ─────────
+# Identical everything except the catalog's dlpMatch field. Proves GS5 arms
+# because of catalog DATA and not because the Copilot tab is special-cased.
+LoadPanels $PANELS_COPILOT_STRICT
+LoadSurfaces $SURFACES_COPILOT_ARMED
+LoadGoverned $GOV_TEAMS_AGENT
+LoadRows $ROWS_EMPTY
+ResetState
+TeamsCopilotTick 'govstate_copilot_tab_strict_control' 0 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $null
+TeamsCopilotTick 'govstate_copilot_tab_strict_control' 1 $FOCUS_TEAMS_COPILOT_COMPOSER $TITLE_TEAMS_COPILOT $null
+
+# ── GS6: switching between two governed conversations re-announces ─────────
+# The key changes, so the helper must drop the old state (one false line) and
+# re-arm on the next tick (one true line) rather than silently keep attributing
+# files to the first agent.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_TEAMS_TWO
+LoadRows $ROWS_EMPTY
+ResetState
+TeamsTick 'govstate_switch_agents' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+TeamsTick 'govstate_switch_agents' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+TeamsTick 'govstate_switch_agents' 2 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT2
+TeamsTick 'govstate_switch_agents' 3 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT2
+TeamsTick 'govstate_switch_agents' 4 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT2
+
+# ── GS7: the PRIVACY GATE still governs the arm signal ─────────────────────
+# Neither policy list names Teams, so nothing is read at all — and nothing arms.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_CHATGPT
+LoadRows $ROWS_EMPTY
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsTick 'govstate_privacy_gate' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+}
+
+# ── GS7b: an UNVERIFIED host-app surface arms nothing ──────────────────────
+# The two-flag gate. A surface that has not passed its own live pass must do
+# NOTHING WHATSOEVER, which includes never arming a file watcher.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_SHIPPED
+LoadGoverned $GOV_TEAMS_AGENT
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsTick 'govstate_unverified_surface' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+}
+
+# ── GS8: the PANIC HOTKEY takes the arm signal down ────────────────────────
+# Ctrl+Alt+Shift+F12 means "stop". An armed file watcher whose hold can no longer
+# swallow anything would be capture with no enforcement to justify it.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_TEAMS_AGENT
+LoadRows $ROWS_EMPTY
+ResetState
+TeamsTick 'govstate_panic_hotkey' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+SetF '_disarmedUntilTicks' ([long]([DateTime]::UtcNow.Ticks + [TimeSpan]::FromMinutes(10).Ticks))
+TeamsTick 'govstate_panic_hotkey' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+SetF '_disarmedUntilTicks' ([long]0)
+TeamsTick 'govstate_panic_hotkey' 2 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+
+# ── GS9: a NON-host-app AI app never arms this at all ──────────────────────
+# govstate exists to cover a general-purpose chat client narrowly. Copilot and
+# M365Copilot already have ordinary, unconditional file coverage through their
+# catalog entries, so arming must stay false for them — otherwise the same file
+# would be seen twice, by two mechanisms with different scoping rules.
+LoadPanels $PANELS_JSON
+LoadSurfaces $SURFACES_SHIPPED
+LoadGoverned $GOV_M365_AGENT
+LoadRows $ROWS_AGENT
+ResetState
+AgentTick 'govstate_chat_app_never_arms' 0 $FOCUS_M365_ADVISOR
+AgentTick 'govstate_chat_app_never_arms' 1 $FOCUS_M365_HR
+AgentTick 'govstate_chat_app_never_arms' 2 $FOCUS_M365_GENERIC
+# …and an IDE panel, the other element-scoped kind.
+LoadRows $ROWS_CLAUDE
+ResetState
+Tick 'govstate_ide_panel_never_arms' 0 $FOCUS_CLAUDE_COMPOSER
+Tick 'govstate_ide_panel_never_arms' 1 $FOCUS_CODE_EDITOR
+
+LoadGoverned $GOV_EMPTY
 
 # Leave the catalog exactly as it SHIPS, so nothing after this point could
 # accidentally observe a fixture-only payload.

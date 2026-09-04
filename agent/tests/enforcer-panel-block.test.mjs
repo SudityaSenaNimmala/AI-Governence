@@ -69,11 +69,24 @@ async function run() {
   const rows = lines.map((l) => JSON.parse(l));
   const byScenario = new Map();
   for (const r of rows) {
+    // A govstate line is the REAL emitter's own output, interleaved with the
+    // harness's per-tick reports (see RunGovState). It carries no `scenario`, so
+    // it is kept out of the per-scenario buckets and read through emittedGovstates()
+    // instead — which is how the payload's PII discipline is asserted against
+    // the production emitter rather than against a copy of it.
+    if (r.kind === 'govstate') continue;
     if (!byScenario.has(r.scenario)) byScenario.set(r.scenario, []);
     byScenario.get(r.scenario).push(r);
   }
   cached = byScenario;
+  cachedFlat = rows;
   return cached;
+}
+
+let cachedFlat = null;
+async function emittedGovstates() {
+  await run();
+  return cachedFlat.filter((r) => r.kind === 'govstate');
 }
 
 async function scenario(name) {
@@ -1575,5 +1588,202 @@ test('REGRESSION: a non-host-app AI app is completely unaffected by the DLP list
     assert.equal(r.dlpGoverned, false, `tick ${r.tick}`);
     assert.equal(r.tierBReached, true, `tick ${r.tick}`);
     assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+  }
+});
+
+// ═══ govstate: the FILE-SCANNING arm signal ══════════════════════════════════
+//
+// The Node side arms Microsoft Teams' three file-capture routes (drag-drop chip,
+// file picker, clipboard file paste) for exactly as long as govstate says a
+// governed or blocked agent conversation is the open one there, and disarms them
+// the instant it stops. Teams is absent from watcherProcessNames() and stays
+// absent, so this signal is the only thing that ever lets those routes look at
+// it — which makes "govActive is false" the load-bearing assertion in most of
+// what follows.
+
+test('govstate: a GOVERNED Chat-list conversation arms, and emits ONE line for a whole sitting', async () => {
+  if (!win) return;
+  const rows = await scenario('govstate_governed_chat_list');
+  assert.equal(rows.length, 10);
+  for (const r of rows) {
+    assert.equal(r.govActive, true, `tick ${r.tick}: a governed conversation must arm file capture`);
+  }
+  // TRANSITIONS ONLY. Ten identical poll ticks (1.5s of real time at the 150ms
+  // cadence) must produce exactly one line — a conversation left open for
+  // minutes must not produce one every tick.
+  assert.deepEqual(rows.map((r) => r.govEmitted), [true, false, false, false, false, false, false, false, false, false]);
+  // ADMIN-TYPED IDENTITY ONLY. The governed row spells the agent "expenses
+  // helper" in lower case while the window title reads "Expenses Helper";
+  // AgentNameMatches is case-insensitive so it still matched, and what the event
+  // carries is the ROW's spelling. That is the proof that no string read out of
+  // another app's window title can reach this payload.
+  for (const r of rows) {
+    assert.equal(r.govKey, 'expenses helper|ag-gov-lower|teams_composer', `tick ${r.tick}`);
+  }
+});
+
+test('govstate: a BLOCKED conversation arms too — the union, not the DLP-only middle state', async () => {
+  if (!win) return;
+  const rows = await scenario('govstate_blocked_chat_list');
+  assert.equal(rows.length, 5);
+  for (const r of rows) {
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
+    // dlpGoverned is FALSE here (blocked wins structurally), so an arm signal
+    // built on that flag would have missed this case entirely — a file attached
+    // inside a conversation the org BLOCKED is the stronger case for scanning
+    // it, not an exemption from it.
+    assert.equal(r.dlpGoverned, false, `tick ${r.tick}`);
+    assert.equal(r.govActive, true, `tick ${r.tick}`);
+    assert.equal(r.govKey, 'IT Help Desk Agent|agent-ithelp|teams_composer', `tick ${r.tick}`);
+  }
+  assert.deepEqual(rows.map((r) => r.govEmitted), [true, false, false, false, false]);
+});
+
+test('govstate: THE PROTECTION — a DM, a group chat, a channel and Activity never arm', async () => {
+  if (!win) return;
+  // The must-not-regress case for the whole feature. Both policy lists are live
+  // and the Teams composer is genuinely focused in all four; with govActive
+  // false, index.js arms no watcher, so no file in any of these conversations is
+  // ever read, scanned, held or reported.
+  const rows = await scenario('govstate_human_chat_never_arms');
+  assert.equal(rows.length, 4);
+  for (const r of rows) {
+    assert.equal(r.govActive, false, `tick ${r.tick}: a human conversation must never arm file capture`);
+    assert.equal(r.govEmitted, false, `tick ${r.tick}: nothing to announce`);
+    assert.equal(r.fgIsAi, false, `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+  }
+});
+
+test('govstate: the 3s STICKY window does not stay armed', async () => {
+  if (!win) return;
+  const rows = await scenario('govstate_sticky_window');
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows.map((r) => r.govActive), [true, false, false]);
+  // …and it drops on the VERY tick the composer loses focus, while _fgIsAi is
+  // still true. That sticky window is deliberately generous for BLOCK decisions
+  // (it closes the dismiss-toast-then-quick-send bypass), but a govstate that
+  // rode it would leave Teams' file watchers armed over a conversation nobody is
+  // typing in — capture outside a governed conversation.
+  assert.equal(rows[1].fgIsAi, true, 'the sticky window must still be open on tick 1');
+  assert.deepEqual(rows.map((r) => r.govEmitted), [true, true, false]);
+});
+
+test('govstate: the COPILOT TAB arms on PANEL MATCH ALONE, with no named row', async () => {
+  if (!win) return;
+  const rows = await scenario('govstate_copilot_tab_panel_alone');
+  assert.equal(rows.length, 2);
+  for (const r of rows) {
+    assert.equal(r.govActive, true, `tick ${r.tick}: any conversation in that tab is governed`);
+    // No agent name anywhere — no headings were found at all — and it still
+    // arms. The key's agent and agent_id halves are empty and the PANEL id is
+    // what identifies the surface.
+    assert.equal(r.govKey, '||teams_copilot_composer', `tick ${r.tick}`);
+  }
+  assert.deepEqual(rows.map((r) => r.govEmitted), [true, false]);
+  // The CONTROL: the same tab, same reads, same policy — only the catalog's
+  // dlpMatch field differs. Proves the coverage above comes from catalog DATA
+  // and not from the Copilot tab being special-cased in the C#.
+  const control = await scenario('govstate_copilot_tab_strict_control');
+  for (const r of control) {
+    assert.equal(r.govActive, false, `tick ${r.tick}: the strict rule needs a named row`);
+  }
+});
+
+test('govstate: switching between two governed conversations re-announces rather than keeping the first', async () => {
+  if (!win) return;
+  const rows = await scenario('govstate_switch_agents');
+  assert.equal(rows.length, 5);
+  // Fast clear on the tick the identity changes, re-arm on the next — the same
+  // shape UpdateBannerState uses, so a file attached in the second conversation
+  // can never be attributed to the first.
+  assert.deepEqual(rows.map((r) => r.govActive), [true, true, false, true, true]);
+  assert.deepEqual(rows.map((r) => r.govEmitted), [true, false, true, true, false]);
+  assert.equal(rows[0].govKey, 'Expenses Helper|ag-gov-1|teams_composer');
+  assert.equal(rows[4].govKey, 'Travel Desk|ag-gov-5|teams_composer');
+});
+
+test('govstate: the privacy gate and the two-flag surface gate both keep it disarmed', async () => {
+  if (!win) return;
+  // No policy naming Teams ⇒ nothing is read at all, so nothing can arm.
+  for (const r of await scenario('govstate_privacy_gate')) {
+    assert.equal(r.govActive, false, `tick ${r.tick}`);
+    assert.equal(r.govEmitted, false, `tick ${r.tick}`);
+  }
+  // An UNVERIFIED host-app surface must do nothing whatsoever — including never
+  // arming a file watcher — even with both policy lists naming the conversation.
+  for (const r of await scenario('govstate_unverified_surface')) {
+    assert.equal(r.govActive, false, `tick ${r.tick}`);
+    assert.equal(r.govEmitted, false, `tick ${r.tick}`);
+  }
+});
+
+test('govstate: the panic hotkey takes the arm signal down and restores it', async () => {
+  if (!win) return;
+  const rows = await scenario('govstate_panic_hotkey');
+  // Ctrl+Alt+Shift+F12 means "stop". An armed file watcher whose hold can no
+  // longer swallow anything would be capture with no enforcement to justify it.
+  assert.deepEqual(rows.map((r) => r.govActive), [true, false, true]);
+  assert.deepEqual(rows.map((r) => r.govEmitted), [true, true, true]);
+});
+
+test('govstate: a chat app and an IDE panel never arm it — host apps only', async () => {
+  if (!win) return;
+  // Copilot / M365Copilot already have ordinary, unconditional file coverage
+  // through their catalog entries (useAttachmentWatcher:true). Arming them here
+  // too would have the same file seen twice by two mechanisms with different
+  // scoping rules.
+  for (const r of await scenario('govstate_chat_app_never_arms')) {
+    assert.equal(r.fgIsAi, true, `tick ${r.tick}`);
+    assert.equal(r.govActive, false, `tick ${r.tick}`);
+  }
+  for (const r of await scenario('govstate_ide_panel_never_arms')) {
+    assert.equal(r.govActive, false, `tick ${r.tick}`);
+  }
+});
+
+test('govstate PII: the payload is a bool, a scope, a panel id, admin names, a process and a pid — nothing else', async () => {
+  if (!win) return;
+  // Asserted against the REAL emitter's output. This event's whole job is to arm
+  // a file watcher inside a company's chat client, so if it could carry a window
+  // title, a UIA element name, a message heading, a filename or a path, the act
+  // of arming would itself be the leak it exists to make unnecessary.
+  const lines = await emittedGovstates();
+  assert.ok(lines.length >= 8, `expected govstate lines from the harness, got ${lines.length}`);
+  for (const ev of lines) {
+    assert.deepEqual(
+      Object.keys(ev).sort(),
+      ['active', 'agent', 'agent_id', 'kind', 'panel', 'pid', 'process', 'scope'],
+      'the govstate payload gained or lost a field — every addition must be re-reviewed for PII',
+    );
+    assert.equal(typeof ev.active, 'boolean');
+    assert.ok(['agent', 'panel', ''].includes(ev.scope), `unexpected scope ${JSON.stringify(ev.scope)}`);
+    assert.ok(['ms-teams', ''].includes(ev.process), `unexpected process ${JSON.stringify(ev.process)}`);
+    assert.equal(typeof ev.pid, 'number');
+    // Every measured window title in this harness is separator-delimited and
+    // ends in "Microsoft Teams"; every measured heading ends in " said:" or
+    // carries the landing infix; the composer's own Name is "Type a message" and
+    // its ClassName carries "ck-editor". None of that may appear in any field.
+    const blob = JSON.stringify(ev);
+    for (const forbidden of ['Microsoft Teams', ' said:', ' Created by ', 'filefuze', '@', 'Type a message', 'ck-editor', 'fai-']) {
+      assert.equal(blob.includes(forbidden), false, `govstate must never carry ${JSON.stringify(forbidden)}: ${blob}`);
+    }
+  }
+  // An INACTIVE line carries no identity at all — a stale agent name must not
+  // outlive the conversation it described.
+  for (const ev of lines.filter((e) => e.active === false)) {
+    assert.deepEqual(
+      [ev.process, ev.scope, ev.panel, ev.agent, ev.agent_id, ev.pid],
+      ['', '', '', '', '', 0],
+      'an inactive govstate must be empty',
+    );
+  }
+  // Every ACTIVE line names a real surface, and its agent name is either an
+  // admin-typed fixture value or empty (the panel-alone route).
+  const known = new Set(['IT Help Desk Agent', 'Expenses Helper', 'expenses helper', 'Travel Desk', '']);
+  for (const ev of lines.filter((e) => e.active === true)) {
+    assert.ok(['teams_composer', 'teams_copilot_composer'].includes(ev.panel), `unexpected panel ${ev.panel}`);
+    assert.ok(known.has(ev.agent), `govstate carried an agent name no policy row supplied: ${JSON.stringify(ev.agent)}`);
+    assert.ok(ev.pid > 0);
   }
 });

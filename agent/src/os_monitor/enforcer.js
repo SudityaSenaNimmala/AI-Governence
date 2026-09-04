@@ -121,6 +121,14 @@ export class Enforcer extends EventEmitter {
       this.log?.warn(`enforcer: could not write pid state — ${err?.message || err}`);
     });
 
+    // A write still in flight when the helper dies raises EPIPE asynchronously,
+    // after tokenize()/attachHold() have already returned true. An unhandled
+    // stream 'error' is an uncaughtException, which would take down the monitor
+    // that is supposed to outlive a dead helper and respawn it.
+    this.child.stdin.on('error', (err) => {
+      this.log?.warn(`enforcer: stdin write failed — ${err?.message || err}`);
+    });
+
     this.child.stdout.setEncoding('utf8');
     this.child.stdout.on('data', (chunk) => this.#onStdout(chunk));
 
@@ -271,11 +279,18 @@ export class Enforcer extends EventEmitter {
    * CheckAttachHoldExpiry) — the caller is still responsible for calling this
    * again to refresh a hold that should outlive the TTL, or to release it
    * once the file is gone / scanned clean.
+   *
+   * `process` BINDS the hold to one app. The helper's hold used to be a global
+   * bool with no process identity at all, so a hold armed for a flagged
+   * attachment in (say) ChatGPT swallowed the next Enter in whatever app the
+   * user alt-tabbed to — a dead Enter in an unrelated window, with no toast and
+   * no explanation. It is a bare process name (the same value that arrives on
+   * every watcher event), never a window title or a path.
    */
-  attachHold(state, { filename = '', patterns = '', ttlMs = 3000 } = {}) {
+  attachHold(state, { filename = '', patterns = '', ttlMs = 3000, process: processName = '' } = {}) {
     if (!this.child?.stdin || this.child.stdin.destroyed) return false;
     try {
-      this.child.stdin.write(JSON.stringify({ cmd: 'attach_hold', state, filename, patterns, ttl_ms: ttlMs }) + '\n');
+      this.child.stdin.write(JSON.stringify({ cmd: 'attach_hold', state, filename, patterns, ttl_ms: ttlMs, process: processName }) + '\n');
       return true;
     } catch (err) {
       this.log?.warn(`enforcer: attach_hold command failed — ${err?.message || err}`);
@@ -336,6 +351,23 @@ export class Enforcer extends EventEmitter {
         // scraper and pollutes recentAlerts. (Same class of bug this file
         // already hit once for 'route'.)
         this.emit('blockstate', ev);
+        break;
+      case 'govstate':
+        // "A host app (Microsoft Teams) is CURRENTLY inside a governed or
+        // blocked agent conversation." STATE, emitted only on a real transition
+        // — the counterpart of 'blockstate' above and forwarded the same way.
+        //
+        // index.js is the only consumer: it uses this to ARM the three file
+        // watchers for Teams for exactly as long as such a conversation is open,
+        // and to disarm them the instant it is not. Nothing else may act on it.
+        //
+        // Deliberately NOT logged, for the same reason 'blockstate' is not: it
+        // carries an admin-typed agent name, and a log line per Teams
+        // conversation switch would write the user's agent-usage timeline into
+        // the agent's own log file. The helper's own emitter already refuses to
+        // put a window title, a heading, a filename or a path on it — see
+        // EmitGovState in enforcer-win.ps1.
+        this.emit('govstate', ev);
         break;
       case 'request_access_offer':
         // A platform/agent/panel block just swallowed a send, and the helper is
