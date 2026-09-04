@@ -6740,6 +6740,62 @@ function InstallationsView() {
 // section changes what an admin sees. Turning off DLP or the send-blocker changes
 // what happens on someone's laptop — data that would have been stopped now leaves.
 // Presenting them in one undifferentiated list would make those look equivalent.
+// ── DEMO MODE (remove to revert) ────────────────────────────────────────────
+//
+// Agent Governance demo data: On / Off, for this browser only.
+//
+// Why a reload rather than live state: the demo flag is read once at module
+// load and its fetch shim installs at import time, so flipping it mid-session
+// would leave half the app on one source and half on the other. Reloading is
+// the honest switch — and it is what makes "Off" genuinely mean real data.
+function AgentGovernanceDemoSwitch() {
+  const KEY = "ag_demo_mode";
+  const on = (() => { try { return localStorage.getItem(KEY) === "1"; } catch { return false; } })();
+
+  const set = (next) => {
+    try {
+      if (next) localStorage.setItem(KEY, "1");
+      else localStorage.removeItem(KEY);
+    } catch { /* private mode — nothing we can do */ }
+    // Land on Agent Governance so the change is immediately visible.
+    window.location.assign("/CloudFuze/AIHub/AgentGovernance");
+  };
+
+  const btn = (active, tone) => ({
+    padding: "6px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer",
+    fontFamily: "inherit", borderRadius: 6,
+    border: `1px solid ${active ? tone : "#e5e7eb"}`,
+    background: active ? tone : "#fff",
+    color: active ? "#fff" : "#6b7280",
+  });
+
+  return (
+    <div className="aihub_card">
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
+        <div style={{ flex: 1, minWidth: 260 }}>
+          <div className="aihub_text_primary" style={{ fontWeight: 600 }}>
+            Agent Governance demo data
+          </div>
+          <div className="aihub_text_muted" style={{ marginTop: 6, lineHeight: 1.6 }}>
+            {on
+              ? "On — Agent Governance is showing a sample Microsoft and Google estate, and every tab loads instantly with no cloud connection. Switch off to go back to your real discovered agents."
+              : "Off — Agent Governance is showing your real discovered agents. Switch on to load a sample Microsoft and Google estate for a demo, with every tab instant and no cloud connection needed."}
+          </div>
+          <div className="aihub_text_muted" style={{ marginTop: 6, fontSize: 12.5 }}>
+            Applies to this browser only — nobody else's view changes. Nothing is
+            ever written to the server while it is on.
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", paddingTop: 2 }}>
+          <button onClick={() => set(false)} style={btn(!on, "#4b5563")}>Off</button>
+          <button onClick={() => set(true)} style={btn(on, "#0052e0")}>Demo on</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+// ── END DEMO MODE ───────────────────────────────────────────────────────────
+
 function FeatureSettingsView() {
   const [registry, setRegistry] = useState(null);
   const [state, setState] = useState(null);
@@ -6800,6 +6856,14 @@ function FeatureSettingsView() {
           {state.updated_at ? ` Last changed ${new Date(state.updated_at).toLocaleString()}.` : ""}
         </div>
       </div>
+
+      {/* ── DEMO MODE (remove to revert) ──────────────────────────────────
+          On/Off switch for the Agent Governance demo dataset. Deliberately
+          NOT a server feature flag: it lives in this browser's localStorage,
+          so switching it on never changes what anyone else sees.
+          Detail + revert steps: ../AgentGovernance/agentGovernanceDemoData.js */}
+      <AgentGovernanceDemoSwitch />
+      {/* ── END DEMO MODE ─────────────────────────────────────────────── */}
 
       {err ? <div className="aihub_error">{err}</div> : null}
 

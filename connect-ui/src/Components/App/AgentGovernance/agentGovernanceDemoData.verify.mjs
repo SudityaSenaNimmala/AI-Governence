@@ -123,8 +123,52 @@ t("packs rows", () => g("/policy-packs").map(pk => [pk.id, pk.framework, pk.depl
 t("simulate result", () => { const s = g("/policies/simulate", "POST"); s.matches.map(mm => mm.agent_name); return `would_flag ${s.would_flag}, ${s.matches.length} match rows`; });
 t("alerts/check", () => g("/alerts/check", "POST").alerts.map(a => a.message).length + " alerts");
 
+console.log("\n=== Microsoft + Google ONLY ===");
+t("no OpenAI / Claude / AWS agents", () => {
+  const vendors = [...new Set(AG_DEMO_AGENTS.map(a => a.vendor))].sort();
+  const banned = vendors.filter(v => !["Microsoft", "Google"].includes(v));
+  if (banned.length) throw new Error("unexpected vendor(s): " + banned.join(", "));
+  const plats = [...new Set(AG_DEMO_AGENTS.map(a => a.platform))];
+  const badPlats = plats.filter(p => /openai|claude|aws|sagemaker|bedrock|custom_gpt/.test(p));
+  if (badPlats.length) throw new Error("unexpected platform(s): " + badPlats.join(", "));
+  const ms = AG_DEMO_AGENTS.filter(a => a.vendor === "Microsoft").length;
+  const gg = AG_DEMO_AGENTS.filter(a => a.vendor === "Google").length;
+  return `${vendors.join(" + ")} — ${ms} Microsoft, ${gg} Google`;
+});
+
+console.log("\n=== GoogleVertexView (Discovery -> a Google scope) ===");
+const gv = g("/google/discover?oauth_key_id=k");
+t("all eight unguarded arrays present", () => {
+  for (const k of ["reasoningEngines","agentBuilderApps","dialogflowAgents","chatBots","endpoints","models","dataStores","warnings"]) {
+    if (!Array.isArray(gv[k])) throw new Error(`${k} is ${gv[k] === undefined ? "MISSING" : typeof gv[k]}`);
+  }
+  return "reasoningEngines, agentBuilderApps, dialogflowAgents, chatBots, endpoints, models, dataStores, warnings";
+});
+t("row fields render", () => {
+  gv.reasoningEngines.map(re => [re.id, re.displayName, re.description, re.region, re.pythonVersion, re.createTime]);
+  gv.agentBuilderApps.map(a => [a.id, a.displayName, a.location, a.solutionType, a.dataStoreCount, a.createTime]);
+  gv.chatBots.map(b => { b.spaces.map(s => s); return [b.id, b.displayName, b.adminInstalled, b.firstSeen]; });
+  gv.endpoints.map(ep => { void ep.deployedModels.length; return [ep.id, ep.displayName, ep.region]; });
+  gv.models.map(m => [m.id, m.displayName, m.description, m.model, m.region, m.sourceType, m.createTime]);
+  gv.dataStores.map(ds => [ds.id, ds.displayName, ds.contentConfig, ds.createTime]);
+  return `${gv.reasoningEngines.length} engines, ${gv.chatBots.length} bots, ${gv.models.length} models, ${gv.dataStores.length} data stores`;
+});
+
+console.log("\n=== Google / Gemini Enterprise user activity ===");
+for (const path of ["/google/user-activity?oauth_key_id=k", "/gemini-enterprise/data?oauth_key_id=k"]) {
+  t(path, () => {
+    const r = g(path);
+    if (!Array.isArray(r.chats) || !Array.isArray(r.files) || !Array.isArray(r.knowledge)) throw new Error("missing chats/files/knowledge");
+    if (r.chats.length === 0) throw new Error("no Google conversations — the name filter matched nothing");
+    if (r.knowledge.length === 0) throw new Error("no Google knowledge sources");
+    for (const c of r.chats) c.messages.filter(mm => mm.from === "bot");
+    for (const b of r.knowledge) b.sources.map(s => s.type);
+    return `${r.chats.length} chats, ${r.files.length} files, ${r.knowledge.length} knowledge sets`;
+  });
+}
+
 console.log("\n=== REJECT paths must reject, not return junk ===");
-const rejects = ["/google/discover?oauth_key_id=k","/google/user-activity","/gemini-enterprise/data","/openai/threads?oauth_key_id=k","/claude/budget/members?oauth_key_id=k","/aws/usage?oauth_key_id=k","/cost/pricing","/prompts/summary","/recertification/stats","/sensitivity/summary","/agent-metadata?limit=50"];
+const rejects = ["/google/gemini-vault","/google/conversations?days=7","/openai/threads?oauth_key_id=k","/claude/budget/members?oauth_key_id=k","/aws/usage?oauth_key_id=k","/cost/pricing","/prompts/summary","/recertification/stats","/sensitivity/summary","/agent-metadata?limit=50"];
 for (const p of rejects) {
   const r = g(p);
   const isPromise = r && typeof r.then === "function";

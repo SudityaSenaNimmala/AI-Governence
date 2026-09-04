@@ -6,26 +6,35 @@
  * Lets every Agent Governance tab render a full, coherent tenant WITHOUT any
  * OAuth connection, for prospect demos.
  *
- * ── HOW TO TURN IT ON ──────────────────────────────────────────────────────
- *   Visit any page once with  ?agDemo=1   e.g.
- *     /CloudFuze/AIHub/AgentGovernance?agDemo=1
- *   It persists in localStorage, so it survives tab clicks and reloads.
+ * SCOPE: Microsoft and Google only, Gemini Enterprise included. There are
+ * deliberately no OpenAI, Claude or AWS agents — see the note at the end of
+ * AGENT_SPECS and the null key ids in AG_DEMO_KEYS.
  *
- * ── HOW TO TURN IT OFF ─────────────────────────────────────────────────────
- *     /CloudFuze/AIHub/AgentGovernance?agDemo=0
- *   (or clear the `ag_demo_mode` localStorage key)
+ * ── HOW TO TURN IT ON AND OFF ──────────────────────────────────────────────
+ *   AI Hub → Setup → Settings → "Agent Governance demo data" → Demo on / Off.
+ *   The switch reloads onto Agent Governance so the change is immediate.
+ *
+ *   ON  = sample Microsoft + Google estate, every tab instant, no network.
+ *   OFF = your real discovered agents, exactly as before. Nothing in this file
+ *         runs at all; the fetch shim is not even installed.
+ *
+ *   It is per-browser (localStorage `ag_demo_mode`), never a server flag, so
+ *   turning it on never changes what anyone else sees.
+ *
+ *   The URL form still works if you would rather not click through:
+ *     ?agDemo=1  turns it on      ?agDemo=0  turns it off
  *
  * ── HOW TO REVERT THE CODE COMPLETELY ──────────────────────────────────────
- *   1. Delete this file.
+ *   1. Delete this file and agentGovernanceDemoData.verify.mjs beside it.
  *   2. Delete every block fenced between
  *          ── DEMO MODE (remove to revert) ──
  *      and ── END DEMO MODE ──
  *      in these three files (8 blocks total):
- *        AgentGovernanceContext.jsx                      (4 — import, keys, 2 effects)
+ *        AgentGovernanceContext.jsx                       (4 — import, keys, 2 effects)
  *        AgentGovernanceActions/AgentGovernanceActions.js (2 — import, request hook)
- *        AgentGovernance.jsx                              (2 — import, header badge)
+ *        ../AIHub/AIHubPage.jsx                           (2 — the Settings switch + its render)
  *      Find them all with:
- *          grep -rn "DEMO MODE" connect-ui/src/Components/App/AgentGovernance
+ *          grep -rn "DEMO MODE" connect-ui/src/Components/App
  *   Nothing else in the codebase references this file.
  *
  * ── WHY IT IS INSTANT ──────────────────────────────────────────────────────
@@ -51,9 +60,10 @@
  *   • THE AI HUB IS UNTOUCHED. Only the governance API (`/api/…`) is served
  *     locally; `/api/v1/…` always goes to the real server, so the DLP,
  *     Inventory and Access Request screens keep showing live data.
- *   • A small "Demo data" badge renders in the Agent Governance header so no
- *     one mistakes this for a real tenant. Remove the badge block in
- *     AgentGovernance.jsx if you would rather it not show on the call.
+ *   • NOTHING MARKS THE SCREEN as demo data — there is no badge, by request.
+ *     The only signal is a console warning on load. That puts the burden on
+ *     whoever flipped the switch to remember it is on, so switch it back Off
+ *     in Settings when the demo is over.
  *
  * Every agent name below comes from ONE list (AGENT_SPECS), so the same names
  * appear in Discovery, Stale Agents, Risk Management, User Activity and Cost.
@@ -121,10 +131,16 @@ export const AG_DEMO_KEYS = {
   dataverseEnvUrl: "https://northwind.crm.dynamics.com",
   azureSubscriptionId: "0f2d-demo-subscription",
   googleKeyId: "demo-google-key",
-  openaiKeyId: "demo-openai-key",
-  claudeKeyId: "demo-claude-key",
   geminiEnterpriseKeyId: "demo-gemini-enterprise-key",
-  awsKeyId: "demo-aws-key",
+  // NULL ON PURPOSE — Agent Governance demos Microsoft + Google only.
+  // A null key id is what every "is this platform connected?" check reads, so
+  // leaving these unset removes the ChatGPT / Claude / AWS connection badges,
+  // their scope chips in the Discovery selector, and their entries in the User
+  // Activity application dropdown. Set one to a string to bring that vendor
+  // back, and add matching AGENT_SPECS rows for it.
+  openaiKeyId: null,
+  claudeKeyId: null,
+  awsKeyId: null,
 };
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -202,13 +218,7 @@ const VENDOR_BY_PLATFORM = {
   gemini_gems: "Google",
   google_chat: "Google",
   gemini_enterprise: "Google",
-  openai_assistant: "OpenAI",
-  custom_gpt: "OpenAI",
-  openai_api_key: "OpenAI",
-  claude_ai_project: "Claude / Anthropic",
-  claude_agent: "Claude / Anthropic",
-  aws_bedrock: "AWS",
-  aws_sagemaker: "AWS",
+  // Microsoft and Google only — see the note at the end of AGENT_SPECS.
 };
 
 const C = (name, type) => ({ name, type });
@@ -335,45 +345,26 @@ const AGENT_SPECS = [
     connectors: [C("Google Drive", "Managed")], permissions: [], consentType: "Principal",
     desc: "Gemini Enterprise agent over the HR and finance policy corpus." },
 
-  // ── OpenAI ────────────────────────────────────────────────────────────────
-  { name: "Invoice Extraction Assistant", platform: "openai_assistant", level: "high", owner: OWNERS.tom, age: 138, idle: 2,
-    connectors: [C("Vector Store 1", "VectorStore"), C("extract_invoice_fields", "Function"), C("Code Interpreter", "CodeInterpreter")],
-    permissions: [], consentType: "Principal", model: "gpt-4o", desc: "Pulls line items from supplier invoices; can call the finance API." },
-  { name: "Market Digest Assistant", platform: "openai_assistant", level: "medium", owner: OWNERS.marco, age: 95, idle: 4,
-    connectors: [C("Vector Store 2", "VectorStore")], permissions: [], consentType: "Principal",
-    model: "gpt-4o-mini", desc: "Summarises analyst reports into a weekly digest." },
-  { name: "Northwind Support GPT", platform: "custom_gpt", level: "medium", owner: OWNERS.amara, age: 61, idle: 3,
-    connectors: [C("Web Browsing", "Tool"), C("Code Interpreter", "Tool")],
-    permissions: [{ name: "Public", type: "public_access" }], consentType: "Principal",
-    desc: "Publicly shared Custom GPT trained on the support knowledge base." },
-  { name: "Pricing Calculator GPT", platform: "custom_gpt", level: "low", owner: OWNERS.marco, age: 34, idle: 9,
-    connectors: [C("Code Interpreter", "Tool")], permissions: [], consentType: "Principal",
-    desc: "Private Custom GPT that models discount scenarios." },
-  { name: "prod-ingest-key", platform: "openai_api_key", level: "medium", owner: OWNERS.dev, age: 298, idle: 1,
-    connectors: [], permissions: [], consentType: "Principal",
-    desc: "OpenAI API key in project \"northwind-prod\" · created by Devika Raman." },
+  // ── More Google, to balance the estate ────────────────────────────────────
+  { name: "Invoice Extraction Agent", platform: "vertex_ai", level: "high", owner: OWNERS.tom, age: 138, idle: 2,
+    connectors: [C("Document AI", "Managed"), C("Cloud Functions: finance-api", "Function")],
+    permissions: [], consentType: "Principal", model: "gemini-2.5-pro",
+    desc: "Vertex agent pulling line items from supplier invoices; calls the finance API." },
+  { name: "Market Digest Gem", platform: "gemini_gems", level: "medium", owner: OWNERS.marco, age: 95, idle: 4,
+    connectors: [C("Google Drive", "Managed")], permissions: [], consentType: "Principal",
+    desc: "Shared Gem summarising analyst reports into a weekly digest." },
+  { name: "Onboarding FAQ Notebook", platform: "gemini_enterprise", level: "medium", owner: OWNERS.priya, age: 61, idle: 3,
+    connectors: [C("Google Drive", "Managed")], permissions: [], consentType: "AllPrincipals",
+    desc: "NotebookLM Enterprise notebook answering new-joiner questions from HR sources." },
+  { name: "Support Deflection Chat Bot", platform: "google_chat", level: "high", owner: null, age: 254, idle: 63,
+    connectors: [C("Google Chat", "Managed"), C("HTTP", "HTTP")],
+    permissions: [{ name: "chat.bot", type: "Application" }], consentType: "AllPrincipals",
+    desc: "Google Chat bot answering customer questions in a shared space. No current owner." },
 
-  // ── Claude / Anthropic ────────────────────────────────────────────────────
-  { name: "Security Review Project", platform: "claude_ai_project", level: "medium", owner: OWNERS.sean, age: 47, idle: 1,
-    connectors: [], permissions: [], consentType: "Principal",
-    desc: "Shared Claude.ai project holding threat models and pen-test reports." },
-  { name: "Migration Runbook Project", platform: "claude_ai_project", level: "low", owner: OWNERS.dev, age: 29, idle: 4,
-    connectors: [], permissions: [], consentType: "Principal",
-    desc: "Private Claude.ai project drafting cutover runbooks." },
-  { name: "ci-pipeline-key", platform: "claude_agent", level: "medium", owner: OWNERS.dev, age: 191, idle: 1,
-    connectors: [], permissions: [], consentType: "Principal",
-    desc: "Claude API key in workspace \"engineering\" · used by the CI pipeline." },
-
-  // ── AWS ───────────────────────────────────────────────────────────────────
-  { name: "Warranty Claims Agent (Bedrock)", platform: "aws_bedrock", level: "high", owner: OWNERS.tom, age: 103, idle: 3,
-    connectors: [C("Bedrock Knowledge Base", "Managed"), C("Lambda: claims-lookup", "Function")], permissions: [],
-    consentType: "Principal", model: "claude-sonnet-4-5", desc: "Bedrock agent resolving warranty claims against the parts catalogue." },
-  { name: "Inventory Forecast Agent", platform: "aws_bedrock", level: "medium", owner: OWNERS.lena, age: 67, idle: 12,
-    connectors: [C("Bedrock Knowledge Base", "Managed")], permissions: [], consentType: "Principal",
-    model: "claude-haiku-4-5", desc: "Bedrock agent producing weekly stock forecasts." },
-  { name: "churn-scoring-endpoint", platform: "aws_sagemaker", level: "medium", owner: OWNERS.amara, age: 224, idle: 21,
-    connectors: [], permissions: [], consentType: "Principal",
-    desc: "SageMaker inference endpoint scoring churn probability nightly." },
+  // NOTE: OpenAI, Claude/Anthropic and AWS agents are deliberately absent.
+  // Agent Governance demos Microsoft and Google (incl. Gemini Enterprise) only.
+  // Their credential ids are left null in AG_DEMO_KEYS, which also removes
+  // their connection badges, scope chips and application-dropdown entries.
 ];
 
 const RISK_SCORE_BY_LEVEL = { critical: 90, high: 72, medium: 45, low: 18 };
@@ -586,6 +577,32 @@ const CONVERSATION_SEEDS = [
     ["Summarise my open opportunities over £100k and where each one is stuck.",
      "Four opportunities. Two are waiting on security review, one on legal redlines, one on a customer budget cycle that reopens in April."],
   ]},
+
+  // ── Google-side conversations ─────────────────────────────────────────────
+  // These are what the User Activity tab shows when the application dropdown
+  // is switched to a Google platform, and what buildGoogleActivity() selects.
+  { agent: "Territory Planner (Vertex)", user: OWNERS.marco, source: "audit_log", turns: [
+    ["Rebalance the EMEA territories for next quarter using the closed-won data.",
+     "Rebalanced across six reps. Two territories were more than 30% above the median account load, so I moved 14 accounts and flagged the two that carry a named strategic customer for you to confirm."],
+  ]},
+  { agent: "Support Deflection Agent", user: OWNERS.amara, source: "audit_log", turns: [
+    ["Customer on account CF-CUST-4471GK is asking why their export failed. Their contact number is +1 415 555 0182.",
+     "The export failed on a permissions error, not a data error — the destination folder lost its service-account grant on Tuesday. I've drafted the reply with the re-grant steps. You don't need to share their phone number with me for this."],
+  ]},
+  { agent: "Enterprise Knowledge Agent", user: OWNERS.priya, source: "graph_copilot", turns: [
+    ["What is our parental leave entitlement in Germany, and where is it documented?",
+     "Fourteen weeks at full pay, plus the statutory Elternzeit. Source is the DE addendum to the employee handbook on Drive, last revised in January."],
+    ["Does that differ for someone on a fixed-term contract?",
+     "The entitlement is the same; only the notice window differs. The addendum covers it in section 4.2."],
+  ]},
+  { agent: "Invoice Extraction Agent", user: OWNERS.tom, source: "audit_log", turns: [
+    ["Pull the line items off the Meridian invoice batch and check them against the PO.",
+     "Eleven of twelve match. Invoice 0412-7 bills 14 licences against a PO for 12 — a £1,340 overage. I've flagged it rather than passing it through."],
+  ]},
+  { agent: "Release Notes Chat Bot", user: OWNERS.dev, source: "teams_chat", turns: [
+    ["Post the release notes for 4.18 to the engineering space.",
+     "Posted. I summarised 23 merged PRs into six user-facing changes and listed the two breaking API changes separately at the top."],
+  ]},
 ];
 
 function buildChats() {
@@ -644,6 +661,12 @@ const FILE_SEEDS = [
   ["churn_features_v3.parquet", "/personal/amara_okafor/Documents/ml", OWNERS.amara, "FileAccessed", "OneDrive", ["churn-scoring-endpoint"]],
   ["board_pack_march.pptx", "/sites/exec/Shared Documents", OWNERS.lena, "FilePreviewed", "SharePoint", []],
   ["release_notes_draft.md", "/sites/engineering/Shared Documents", OWNERS.dev, "FileModified", "SharePoint", ["Release Notes Chat Bot"]],
+  // ── Google-side file activity (Drive) ─────────────────────────────────────
+  ["emea_territories_q2.xlsx", "/Drive/Sales/Territories", OWNERS.marco, "FileModified", "Drive", ["Territory Planner (Vertex)"]],
+  ["help_centre_export.csv", "/Drive/Support/Knowledge", OWNERS.amara, "FileDownloaded", "Drive", ["Support Deflection Agent"]],
+  ["de_handbook_addendum.pdf", "/Drive/HR/Handbook", OWNERS.priya, "FilePreviewed", "Drive", ["Enterprise Knowledge Agent", "Policy Lookup Agent"]],
+  ["meridian_invoice_batch.pdf", "/Drive/Finance/AP", OWNERS.tom, "FileUploaded", "Drive", ["Invoice Extraction Agent"]],
+  ["bid_library_index.gsheet", "/Drive/Sales/Bids", OWNERS.sean, "FileAccessed", "Drive", ["RFP Answer Gem"]],
 ];
 
 const AG_DEMO_FILES = FILE_SEEDS.map(([fileName, filePath, user, operation, workload, relatedAgents], i) => {
@@ -697,6 +720,32 @@ const KNOWLEDGE_SEEDS = {
   "Field Service Dispatcher": [
     { name: "msdyn_workorder", type: "dataverse_table", metadata: { rows: 22841 } },
     { name: "dispatch-api.northwind.example", type: "connector", metadata: { auth: "Entra ID", scope: "read/write" } },
+  ],
+  // ── Google-side knowledge ─────────────────────────────────────────────────
+  // Only the source types KnowledgeSourceCard knows are used, so every card
+  // renders with an icon and label rather than falling back to "Other".
+  "Enterprise Knowledge Agent": [
+    { name: "Google Drive — company-wide", type: "connector", metadata: { auth: "Service account", scope: "read", files: 41208 } },
+    { name: "Confluence (external)", type: "connector", metadata: { auth: "API token", scope: "read", spaces: 18 } },
+    { name: "hr-finance-policies (data store)", type: "knowledge_article", metadata: { articles: 312 } },
+  ],
+  "Policy Lookup Agent": [
+    { name: "Drive — HR & Finance policies", type: "connector", metadata: { auth: "Service account", scope: "read", files: 486 } },
+  ],
+  "Territory Planner (Vertex)": [
+    { name: "BigQuery — closed_won_opportunities", type: "azure_storage", metadata: { rows: "≈184,000", dataset: "sales_analytics" } },
+    { name: "Cloud Storage — territory-exports", type: "azure_storage", metadata: { bucket: "nw-territory", files: 240 } },
+  ],
+  "Support Deflection Agent": [
+    { name: "help-centre-articles (data store)", type: "knowledge_article", metadata: { articles: 1043 } },
+    { name: "support.northwind.example", type: "website", url: "https://support.northwind.example", metadata: { crawled: "daily" } },
+  ],
+  "Invoice Extraction Agent": [
+    { name: "Document AI — invoice parser", type: "connector", metadata: { processor: "invoice-parser-v2" } },
+    { name: "Drive — Finance/AP", type: "connector", metadata: { auth: "Service account", scope: "read", files: 2914 } },
+  ],
+  "RFP Answer Gem": [
+    { name: "Drive — bid library", type: "connector", metadata: { auth: "User OAuth", scope: "read", files: 176 } },
   ],
 };
 
@@ -1236,6 +1285,68 @@ const AG_DEMO_PRICING = {
   ],
 };
 
+// ── Google Vertex / GCP drill-down (Discovery → a Google scope) ─────────────
+//
+// Shape verified against GoogleVertexView in tabs/DiscoveryTab.jsx. EIGHT
+// arrays are read unguarded — reasoningEngines, agentBuilderApps,
+// dialogflowAgents, chatBots, endpoints, models, dataStores, warnings — so all
+// eight must exist even when empty.
+//
+// `bot.spaces` and `ep.deployedModels` are mapped but their item shapes are not
+// verified, so both stay empty arrays: the parent rows render, the unverified
+// sub-lists simply show nothing rather than risking a throw.
+function buildGoogleVertexDiscovery() {
+  return {
+    projectId: "northwind-ai-prod",
+    domain: "northwind.example",
+    reasoningEngines: [
+      { id: "re-territory", displayName: "Territory Planner", description: "Allocates sales territories from BigQuery", region: "europe-west4", pythonVersion: "3.11", createTime: daysAgo(121) },
+      { id: "re-support", displayName: "Support Deflection Agent", description: "Answers tier-1 questions from the help centre", region: "europe-west4", pythonVersion: "3.11", createTime: daysAgo(84) },
+      { id: "re-invoice", displayName: "Invoice Extraction Agent", description: "Extracts line items from supplier invoices", region: "europe-west1", pythonVersion: "3.12", createTime: daysAgo(138) },
+    ],
+    agentBuilderApps: [
+      { id: "ab-helpcentre", displayName: "Help Centre Search", location: "eu", solutionType: "SOLUTION_TYPE_SEARCH", dataStoreCount: 2, createTime: daysAgo(96) },
+      { id: "ab-policy", displayName: "Policy Assistant", location: "eu", solutionType: "SOLUTION_TYPE_CHAT", dataStoreCount: 1, createTime: daysAgo(52) },
+    ],
+    dialogflowAgents: [],
+    chatBots: [
+      { id: "cb-release", displayName: "Release Notes Chat Bot", adminInstalled: true, firstSeen: daysAgo(167), spaces: [], spaceTypes: [] },
+      { id: "cb-support", displayName: "Support Deflection Chat Bot", adminInstalled: true, firstSeen: daysAgo(254), spaces: [], spaceTypes: [] },
+    ],
+    endpoints: [
+      { id: "ep-gemini-pro", displayName: "gemini-pro-endpoint", region: "europe-west4", deployedModels: [] },
+      { id: "ep-gemini-flash", displayName: "gemini-flash-endpoint", region: "europe-west1", deployedModels: [] },
+    ],
+    models: [
+      { id: "m-gemini-pro", displayName: "gemini-2.5-pro", description: "Managed foundation model", model: "gemini-2.5-pro", region: "europe-west4", sourceType: "MODEL_GARDEN", createTime: daysAgo(121) },
+      { id: "m-gemini-flash", displayName: "gemini-2.5-flash", description: "Managed foundation model", model: "gemini-2.5-flash", region: "europe-west1", sourceType: "MODEL_GARDEN", createTime: daysAgo(84) },
+    ],
+    dataStores: [
+      { id: "ds-helpcentre", displayName: "help-centre-articles", contentConfig: "CONTENT_REQUIRED", createTime: daysAgo(96) },
+      { id: "ds-policies", displayName: "hr-finance-policies", contentConfig: "CONTENT_REQUIRED", createTime: daysAgo(52) },
+      { id: "ds-bidlibrary", displayName: "bid-library", contentConfig: "CONTENT_REQUIRED", createTime: daysAgo(59) },
+    ],
+    warnings: [],
+  };
+}
+
+// ── Google / Gemini Enterprise user activity ────────────────────────────────
+//
+// Both endpoints return {chats, files, knowledge} and the loaders push them
+// into the SAME state the Microsoft path uses, so all three shapes are already
+// verified. Google-flavoured slices of the same datasets keep the demo
+// consistent when someone switches the application dropdown.
+const GOOGLE_AGENT_NAMES = new Set(
+  AG_DEMO_AGENTS.filter((a) => a.vendor === "Google").map((a) => a.name)
+);
+
+function buildGoogleActivity() {
+  const chats = AG_DEMO_CHATS.filter((c) => GOOGLE_AGENT_NAMES.has(c.botName));
+  const files = AG_DEMO_FILES.filter((f) => (f.relatedAgents || []).some((n) => GOOGLE_AGENT_NAMES.has(n)));
+  const knowledge = AG_DEMO_KNOWLEDGE_BOTS.filter((b) => GOOGLE_AGENT_NAMES.has(b.botName));
+  return { chats, files, knowledge, warnings: [] };
+}
+
 // ── mocked responses, by request path ───────────────────────────────────────
 //
 // COMPLETE COVERAGE, on purpose. In demo mode every governance call is answered
@@ -1289,12 +1400,19 @@ function mockFor(path, method, body) {
   if (has("/google/scan-platform")) return {};
   if (has("/openai/scan-platform") || has("/claude/scan-platform") || has("/aws/scan-platform")) return {};
 
-  // Everything below feeds a per-vendor panel whose shape has not been read off
-  // the component, so it rejects rather than risk a render throw. These panels
-  // only mount when their vendor is selected, and they show their own
-  // not-connected state on failure.
-  if (has("/google/discover") || has("/google/agent-details") || has("/google/user-activity")
-      || has("/google/conversations") || has("/google/gemini-activity") || has("/google/gemini-vault")) return REJECT;
+  // ── Google (verified shapes) ──────────────────────────────────────────────
+  // GoogleVertexView reads eight arrays unguarded; the activity endpoints
+  // return {chats, files, knowledge} into the same state the Microsoft path
+  // uses, so those three shapes are already verified.
+  if (has("/google/discover")) return buildGoogleVertexDiscovery();
+  if (has("/google/user-activity")) return buildGoogleActivity();
+  // fetchGeminiEnterpriseAuto / -Data feed the same three collections.
+  if (has("/gemini-enterprise/data") || has("/gemini-enterprise/auto")) return buildGoogleActivity();
+  if (has("/gemini-enterprise/preview") || has("/gemini-enterprise/connect")) return Object.assign({}, OK, { id: AG_DEMO_KEYS.geminiEnterpriseKeyId });
+
+  // Still unverified: per-agent detail and the Vault / raw-conversation feeds.
+  if (has("/google/agent-details") || has("/google/conversations")
+      || has("/google/gemini-activity") || has("/google/gemini-vault")) return REJECT;
   if (has("/gemini-enterprise")) return REJECT;
 
   // ── Azure ─────────────────────────────────────────────────────────────────
@@ -1398,12 +1516,11 @@ function mockFor(path, method, body) {
   if (has("/auth/token")) return { ok: true, expires_in: 3600 };
   if (has("/oauth-keys")) {
     if (m === "GET") {
+      // Microsoft + Google only. No openai / claude / aws rows, so nothing can
+      // restore those vendors behind the scenes.
       return [
         { id: AG_DEMO_KEYS.oauthKeyId, vendor: "microsoft", tenant_id: AG_DEMO_KEYS.tenantId, dataverse_env_url: AG_DEMO_KEYS.dataverseEnvUrl, azure_subscription_id: AG_DEMO_KEYS.azureSubscriptionId },
         { id: AG_DEMO_KEYS.googleKeyId, vendor: "google" },
-        { id: AG_DEMO_KEYS.openaiKeyId, vendor: "openai" },
-        { id: AG_DEMO_KEYS.claudeKeyId, vendor: "claude" },
-        { id: AG_DEMO_KEYS.awsKeyId, vendor: "aws" },
       ];
     }
     return Object.assign({}, OK, { id: AG_DEMO_KEYS.oauthKeyId });
