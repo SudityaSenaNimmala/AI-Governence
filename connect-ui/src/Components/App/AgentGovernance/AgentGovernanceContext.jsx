@@ -1,5 +1,10 @@
 import { createContext, useContext, useReducer, useState, useCallback, useEffect } from "react";
 import { agentGovernanceApi } from "./AgentGovernanceActions/AgentGovernanceActions";
+// ── DEMO MODE (remove to revert) ────────────────────────────────────────────
+// Fake credential ids + a seeded tenant so every tab renders without OAuth.
+// Inert unless ?agDemo=1. Detail + revert steps: ./agentGovernanceDemoData.js
+import { AG_DEMO, AG_DEMO_KEYS, agDemoDiscoveryResult } from "./agentGovernanceDemoData";
+// ── END DEMO MODE ───────────────────────────────────────────────────────────
 
 const STORAGE_KEY = "ag_oauth_key_id";
 const TENANT_KEY = "ag_tenant_id";
@@ -286,15 +291,22 @@ export function AgentGovernanceProvider({ children, initialTab }) {
     initialTab ? { ...governanceInitialState, activeTab: initialTab } : governanceInitialState
   );
 
-  const [oauthKeyId, setOauthKeyId] = useState(() => localStorage.getItem(STORAGE_KEY));
-  const [tenantId, setTenantId] = useState(() => localStorage.getItem(TENANT_KEY));
-  const [dataverseEnvUrl, setDataverseEnvUrl] = useState(() => localStorage.getItem(DV_ENV_KEY));
-  const [azureSubscriptionId, setAzureSubscriptionId] = useState(() => localStorage.getItem(AZ_SUB_KEY));
-  const [googleKeyId, setGoogleKeyId] = useState(() => localStorage.getItem(GCP_KEY));
-  const [openaiKeyId, setOpenaiKeyId] = useState(() => localStorage.getItem(OPENAI_KEY));
-  const [claudeKeyId, setClaudeKeyId] = useState(() => localStorage.getItem(CLAUDE_KEY));
-  const [geminiEnterpriseKeyId, setGeminiEnterpriseKeyId] = useState(() => localStorage.getItem(GEMINI_ENTERPRISE_KEY));
-  const [awsKeyId, setAwsKeyId] = useState(() => localStorage.getItem(AWS_KEY));
+  // ── DEMO MODE (remove to revert) ────────────────────────────────────────
+  // In demo mode every platform reads as connected, so the scope chips and the
+  // per-vendor panels all appear. `D` is null when demo mode is off, and each
+  // initializer below then falls through to localStorage exactly as before.
+  const D = AG_DEMO ? AG_DEMO_KEYS : null;
+  // ── END DEMO MODE ───────────────────────────────────────────────────────
+
+  const [oauthKeyId, setOauthKeyId] = useState(() => (D ? D.oauthKeyId : localStorage.getItem(STORAGE_KEY)));
+  const [tenantId, setTenantId] = useState(() => (D ? D.tenantId : localStorage.getItem(TENANT_KEY)));
+  const [dataverseEnvUrl, setDataverseEnvUrl] = useState(() => (D ? D.dataverseEnvUrl : localStorage.getItem(DV_ENV_KEY)));
+  const [azureSubscriptionId, setAzureSubscriptionId] = useState(() => (D ? D.azureSubscriptionId : localStorage.getItem(AZ_SUB_KEY)));
+  const [googleKeyId, setGoogleKeyId] = useState(() => (D ? D.googleKeyId : localStorage.getItem(GCP_KEY)));
+  const [openaiKeyId, setOpenaiKeyId] = useState(() => (D ? D.openaiKeyId : localStorage.getItem(OPENAI_KEY)));
+  const [claudeKeyId, setClaudeKeyId] = useState(() => (D ? D.claudeKeyId : localStorage.getItem(CLAUDE_KEY)));
+  const [geminiEnterpriseKeyId, setGeminiEnterpriseKeyId] = useState(() => (D ? D.geminiEnterpriseKeyId : localStorage.getItem(GEMINI_ENTERPRISE_KEY)));
+  const [awsKeyId, setAwsKeyId] = useState(() => (D ? D.awsKeyId : localStorage.getItem(AWS_KEY)));
   const [isConnecting, setIsConnecting] = useState(false);
   const [authError, setAuthError] = useState(null);
 
@@ -303,6 +315,11 @@ export function AgentGovernanceProvider({ children, initialTab }) {
   // Auto-restore connections from server if localStorage is empty.
   // OAuth keys are persisted in MongoDB — fetch them and restore state.
   useEffect(() => {
+    // ── DEMO MODE (remove to revert) ──────────────────────────────────────
+    // Keys are already seeded above; nothing to restore from the server.
+    if (AG_DEMO) return;
+    // ── END DEMO MODE ─────────────────────────────────────────────────────
+
     // Only skip if ALL platforms are already in localStorage
     if (oauthKeyId && googleKeyId && openaiKeyId && claudeKeyId && awsKeyId) return;
     (async () => {
@@ -354,6 +371,15 @@ export function AgentGovernanceProvider({ children, initialTab }) {
   // there is nothing to gate on: if the server has agents, show them.
   const isAnyKeyPresent = !!oauthKeyId || !!googleKeyId || !!openaiKeyId || !!claudeKeyId || !!geminiEnterpriseKeyId || !!awsKeyId;
   useEffect(() => {
+    // ── DEMO MODE (remove to revert) ──────────────────────────────────────
+    // Seed the fabricated tenant instead of reading the real collection, so
+    // the demo never depends on — or mixes with — persisted discovery data.
+    if (AG_DEMO) {
+      govDispatch({ type: "DISCOVERY_SUCCESS", result: agDemoDiscoveryResult() });
+      return;
+    }
+    // ── END DEMO MODE ─────────────────────────────────────────────────────
+
     (async () => {
       try {
         // Fetch all persisted agents (no oauth_key_id filter — returns everything)

@@ -1,6 +1,18 @@
 const BASE = "/api";
 
+// ── DEMO MODE (remove to revert) ────────────────────────────────────────────
+// Returns fabricated responses for the OAuth-dependent reads so Agent
+// Governance demos without a tenant connection. Inert unless ?agDemo=1.
+// Full detail + revert steps: ../agentGovernanceDemoData.js
+import { agDemoResponse } from "../agentGovernanceDemoData";
+// ── END DEMO MODE ───────────────────────────────────────────────────────────
+
 async function request(path, options, timeoutMs = 60000) {
+  // ── DEMO MODE (remove to revert) ──────────────────────────────────────────
+  const demo = agDemoResponse(path, options);
+  if (demo !== undefined) return demo;
+  // ── END DEMO MODE ─────────────────────────────────────────────────────────
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {

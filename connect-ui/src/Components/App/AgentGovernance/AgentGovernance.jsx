@@ -11,6 +11,9 @@ import { UserActivityTab } from "./tabs/UserActivityTab";
 import { AlertsTab } from "./tabs/AlertsTab";
 import { CostTab } from "./tabs/CostTab";
 import { ShieldCheck, RefreshCw, LogOut, Plus, Radar, Shield, Settings2, Activity, ChevronDown, Cloud, Bell, DollarSign } from "lucide-react";
+// ── DEMO MODE (remove to revert) ────────────────────────────────────────────
+import { AG_DEMO } from "./agentGovernanceDemoData";
+// ── END DEMO MODE ───────────────────────────────────────────────────────────
 import "./css/AgentGovernance.css";
 
 // Band mid-points for PLATFORM BASELINES — see common/riskScale.js.
@@ -1007,6 +1010,21 @@ function AgentGovernanceInner() {
             <ShieldCheck size={20} color="#6366f1" />
             Agent Governance
           </div>
+
+          {/* ── DEMO MODE (remove to revert) ────────────────────────────────
+              Marks the screen as fabricated data so nobody mistakes it for a
+              real tenant. Delete this block if you would rather it not appear
+              during the call. Renders only when ?agDemo=1 is active. */}
+          {AG_DEMO && (
+            <span
+              title="Fabricated demo data — no tenant is connected. Turn off with ?agDemo=0"
+              style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px", borderRadius: 10, fontSize: 10, fontWeight: 700, background: "#b4530915", color: "#b45309", border: "1px solid #b4530940", letterSpacing: "0.03em" }}
+            >
+              <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#b45309" }} />
+              Demo data
+            </span>
+          )}
+          {/* ── END DEMO MODE ───────────────────────────────────────────── */}
 
           {/* Connection badges */}
           {connectionBadges.map((b) => (
