@@ -221,17 +221,10 @@ export function isFabricatedId(id) {
 // coloured badge from sourceStyle in tabs/DiscoveryTab.jsx.
 const DISCOVERY_SOURCE = {
   vertex_ai:         "vertex_ai_reasoning_engines",
-  gemini:            "google_admin_sdk",
+  gemini_enterprise: "gemini_enterprise",
   gemini_gems:       "google_admin_sdk",
   google_chat:       "google_chat_api",
   apps_script:       "google_apps_script_api",
-  gemini_enterprise: "gemini_enterprise",
-  gemini_gmail:      "google_admin_sdk",
-  gemini_docs:       "google_admin_sdk",
-  gemini_sheets:     "google_admin_sdk",
-  gemini_slides:     "google_admin_sdk",
-  gemini_meet:       "google_admin_sdk",
-  gemini_drive:      "google_drive_api",
 };
 
 const GCP_PROJECT = "halcyon-ai-prod";
@@ -249,9 +242,8 @@ function googleResourceId(platform, name) {
     case "gemini_gems":       return "gems/" + num.slice(0, 16);
     case "google_chat":       return "spaces/" + num.slice(0, 11);
     case "apps_script":       return "projects/1" + num.slice(0, 14) + slug.slice(0, 8);
-    case "gemini":            return "users/" + num.slice(0, 12);
-    // Gemini inside a Workspace app.
-    default:                  return "applications/gemini/" + platform.replace("gemini_", "") + "/" + num.slice(0, 12);
+    // Every platform above is covered; this is a guard, not a live branch.
+    default:                  return "projects/" + GCP_PROJECT + "/locations/global/agents/" + slug;
   }
 }
 
@@ -292,18 +284,15 @@ const ACTIVE_PEOPLE = [
 //       days since last use (null = never used), connectors, permissions.
 
 const VENDOR_BY_PLATFORM = {
+  // The five surfaces that actually hold AGENTS. Gemini inside Gmail / Docs /
+  // Sheets / Slides / Meet / Drive is a feature of those apps, and a standalone
+  // Gemini seat is a chat surface — neither is an agent, so neither belongs in
+  // an agent inventory. Their prompt-level activity is the AI Hub's job.
   vertex_ai:         "Google",
-  gemini:            "Google",
+  gemini_enterprise: "Google",
   gemini_gems:       "Google",
   google_chat:       "Google",
   apps_script:       "Google",
-  gemini_enterprise: "Google",
-  gemini_gmail:      "Google",
-  gemini_docs:       "Google",
-  gemini_sheets:     "Google",
-  gemini_slides:     "Google",
-  gemini_meet:       "Google",
-  gemini_drive:      "Google",
 };
 
 const C = (name, type) => ({ name, type });
@@ -323,16 +312,26 @@ const AGENT_SPECS = [
   { name: "Claims Triage Engine", platform: "vertex_ai", level: "critical", owner: OWNERS.gone1, age: 268, idle: 44,
     connectors: [C("Cloud SQL", "Managed"), C("Cloud Storage", "Managed"), C("HTTP", "HTTP")],
     permissions: [{ name: "cloudsql.client", type: "IAM" }, { name: "storage.objectAdmin", type: "IAM" }],
-    consentType: "AllPrincipals", model: "gemini-2.5-pro", desc: "Scores insurance claims against fraud heuristics. Owner has left the company." },
+    consentType: "AllPrincipals", model: "gemini-2.5-pro", desc: "Scores insurance claims against fraud heuristics. The owner has left the company." },
   { name: "Contract Review Engine", platform: "vertex_ai", level: "critical", owner: null, age: 412, idle: 96,
     connectors: [C("Google Drive", "Managed"), C("HTTP", "HTTP"), C("BigQuery", "Managed")],
     permissions: [{ name: "drive.readonly", type: "OAuth" }, { name: "bigquery.dataEditor", type: "IAM" }],
     consentType: "AllPrincipals", model: "gemini-2.5-pro", desc: "Reads master service agreements from the Legal shared drive and drafts redlines." },
+  { name: "Field Dispatch Agent", platform: "vertex_ai", level: "high", owner: OWNERS.tom, age: 322, idle: 11,
+    connectors: [C("Cloud SQL", "Managed"), C("HTTP", "HTTP"), C("Google Chat", "Managed")],
+    permissions: [{ name: "cloudsql.client", type: "IAM" }], consentType: "AllPrincipals", model: "gemini-2.5-flash",
+    desc: "Assigns engineers to open work orders and posts the schedule to a Chat space." },
+  { name: "Churn Scoring Agent", platform: "vertex_ai", level: "medium", owner: OWNERS.amara, age: 224, idle: 21,
+    connectors: [C("BigQuery", "Managed")], permissions: [{ name: "bigquery.jobUser", type: "IAM" }],
+    consentType: "Principal", model: "gemini-2.5-flash-lite", desc: "Scores churn probability nightly and writes results back to BigQuery." },
+  { name: "Procurement Policy Agent", platform: "vertex_ai", level: "low", owner: OWNERS.lena, age: 97, idle: 6,
+    connectors: [C("Vertex AI Search", "Managed")], permissions: [], consentType: "Principal",
+    model: "gemini-2.5-flash", desc: "Answers purchase-approval threshold questions from the finance policy corpus." },
 
-  // ── Gemini Enterprise (Agentspace) ────────────────────────────────────────
+  // ── Gemini Enterprise (Agentspace) and NotebookLM Enterprise ─────────────
   { name: "Enterprise Knowledge Agent", platform: "gemini_enterprise", level: "high", owner: OWNERS.priya, age: 76, idle: 1,
     connectors: [C("Google Drive", "Managed"), C("Confluence", "Third-party")], permissions: [{ name: "discoveryengine.viewer", type: "IAM" }],
-    consentType: "AllPrincipals", desc: "Company-wide search agent indexing Drive and Confluence." },
+    consentType: "AllPrincipals", desc: "Company-wide search agent indexing shared Drive and Confluence." },
   { name: "Policy Lookup Agent", platform: "gemini_enterprise", level: "medium", owner: OWNERS.lena, age: 52, idle: 6,
     connectors: [C("Google Drive", "Managed")], permissions: [], consentType: "Principal",
     desc: "Answers HR and finance policy questions from the policy corpus." },
@@ -342,8 +341,14 @@ const AGENT_SPECS = [
   { name: "Bid Library Agent", platform: "gemini_enterprise", level: "high", owner: OWNERS.gone2, age: 301, idle: null,
     connectors: [C("Google Drive", "Managed"), C("HTTP", "HTTP")], permissions: [{ name: "discoveryengine.editor", type: "IAM" }],
     consentType: "AllPrincipals", desc: "Indexes the historic bid library. Never used since creation, and the owner is disabled." },
+  { name: "Benefits Explainer Agent", platform: "gemini_enterprise", level: "high", owner: OWNERS.priya, age: 233, idle: 38,
+    connectors: [C("Google Drive", "Managed"), C("HTTP", "HTTP")], permissions: [{ name: "discoveryengine.viewer", type: "IAM" }],
+    consentType: "AllPrincipals", desc: "Explains health and pension elections; reads the benefits document library." },
+  { name: "Board Pack Notebook", platform: "gemini_enterprise", level: "critical", owner: null, age: 188, idle: 54,
+    connectors: [C("Google Drive", "Managed")], permissions: [{ name: "discoveryengine.viewer", type: "IAM" }],
+    consentType: "AllPrincipals", desc: "NotebookLM notebook over executive board packs. Shared domain-wide with no owner." },
 
-  // ── Gemini Gems ───────────────────────────────────────────────────────────
+  // ── Gemini Gems — user-built assistants with their own instructions ──────
   { name: "Brand Voice Gem", platform: "gemini_gems", level: "low", owner: OWNERS.lena, age: 43, idle: 1,
     connectors: [], permissions: [], consentType: "Principal", desc: "Shared Gem enforcing tone-of-voice rules for marketing copy." },
   { name: "RFP Answer Gem", platform: "gemini_gems", level: "medium", owner: OWNERS.sean, age: 59, idle: 8,
@@ -355,8 +360,14 @@ const AGENT_SPECS = [
   { name: "Code Review Gem", platform: "gemini_gems", level: "high", owner: OWNERS.dev, age: 88, idle: 12,
     connectors: [C("HTTP", "HTTP")], permissions: [], consentType: "AllPrincipals",
     desc: "Shared across the domain; posts review comments to an external code host." },
+  { name: "Deal Desk Gem", platform: "gemini_gems", level: "medium", owner: OWNERS.marco, age: 64, idle: 1,
+    connectors: [C("Google Sheets", "Managed")], permissions: [], consentType: "Principal",
+    desc: "Summarises open opportunities and discount positions before pipeline review." },
+  { name: "Payroll Query Gem", platform: "gemini_gems", level: "critical", owner: OWNERS.gone2, age: 501, idle: null,
+    connectors: [C("Google Sheets", "Managed"), C("HTTP", "HTTP")], permissions: [], consentType: "AllPrincipals",
+    desc: "Answers payslip and tax-code questions against an exported payroll sheet. Owner disabled, never used." },
 
-  // ── Google Chat bots ──────────────────────────────────────────────────────
+  // ── Google Chat bots ─────────────────────────────────────────────────────
   { name: "Release Notes Chat Bot", platform: "google_chat", level: "medium", owner: OWNERS.dev, age: 167, idle: 14,
     connectors: [C("Google Chat", "Managed")], permissions: [{ name: "chat.bot", type: "Application" }],
     consentType: "AllPrincipals", desc: "Posts AI-written release notes to the engineering space." },
@@ -366,67 +377,39 @@ const AGENT_SPECS = [
   { name: "IT Helpdesk Chat Bot", platform: "google_chat", level: "medium", owner: OWNERS.sean, age: 176, idle: 1,
     connectors: [C("Google Chat", "Managed"), C("ServiceNow", "Third-party")], permissions: [{ name: "chat.bot", type: "Application" }],
     consentType: "AllPrincipals", desc: "First-line IT support bot published to the whole domain." },
+  { name: "Standup Poller Bot", platform: "google_chat", level: "low", owner: OWNERS.dev, age: 205, idle: 5,
+    connectors: [C("Google Chat", "Managed")], permissions: [{ name: "chat.bot", type: "Application" }],
+    consentType: "Principal", desc: "Collects written standups and summarises blockers." },
+  { name: "Vendor Intake Bot", platform: "google_chat", level: "high", owner: null, age: 366, idle: 71,
+    connectors: [C("Google Chat", "Managed"), C("HTTP", "HTTP"), C("Gmail", "Managed")],
+    permissions: [{ name: "chat.bot", type: "Application" }, { name: "gmail.send", type: "OAuth" }],
+    consentType: "AllPrincipals", desc: "Collects supplier onboarding forms and mails them onward. No current owner." },
 
-  // ── Apps Script automations calling Gemini ────────────────────────────────
+  // ── Apps Script automations calling Gemini ───────────────────────────────
   { name: "Expense Reconciler Script", platform: "apps_script", level: "high", owner: OWNERS.gone1, age: 289, idle: null,
     connectors: [C("Gmail", "Managed"), C("Google Sheets", "Managed")], permissions: [{ name: "gmail.readonly", type: "OAuth" }],
     consentType: "Principal", desc: "Bound script reconciling receipts against policy. The owner has left and it is still authorised." },
   { name: "Timesheet Summariser Script", platform: "apps_script", level: "medium", owner: OWNERS.yuki, age: 118, idle: 5,
     connectors: [C("Google Sheets", "Managed")], permissions: [{ name: "spreadsheets", type: "OAuth" }],
     consentType: "Principal", desc: "Summarises weekly timesheets into a management sheet." },
+  { name: "Meeting Recap Script", platform: "apps_script", level: "medium", owner: OWNERS.yuki, age: 83, idle: 1,
+    connectors: [C("Google Meet", "Managed"), C("Google Drive", "Managed")], permissions: [{ name: "drive.file", type: "OAuth" }],
+    consentType: "AllPrincipals", desc: "Writes an AI recap to Drive after every recorded meeting." },
+  { name: "Contract Renewal Watcher", platform: "apps_script", level: "critical", owner: OWNERS.gone1, age: 341, idle: 118,
+    connectors: [C("Google Sheets", "Managed"), C("Gmail", "Managed"), C("HTTP", "HTTP")],
+    permissions: [{ name: "gmail.send", type: "OAuth" }, { name: "spreadsheets", type: "OAuth" }],
+    consentType: "AllPrincipals", desc: "Mails renewal reminders from a contracts sheet. Orphaned, dormant, still able to send mail." },
 
-  // ── Standalone Gemini (gemini.google.com) ─────────────────────────────────
-  { name: "Gemini Advanced — Marketing", platform: "gemini", level: "medium", owner: OWNERS.lena, age: 132, idle: 1,
-    connectors: [], permissions: [], consentType: "Principal", desc: "Licensed standalone Gemini seat used heavily by the marketing team." },
-  { name: "Gemini Advanced — Engineering", platform: "gemini", level: "low", owner: OWNERS.dev, age: 141, idle: 2,
-    connectors: [], permissions: [], consentType: "Principal", desc: "Licensed standalone Gemini seat used by engineering." },
-
-  // ── Gemini inside Workspace apps ──────────────────────────────────────────
-  // These populate the Google Workspace view, which renders one card per app.
-  { name: "Gemini in Gmail — Sales", platform: "gemini_gmail", level: "high", owner: OWNERS.marco, age: 96, idle: 1,
-    connectors: [C("Gmail", "Managed")], permissions: [{ name: "gmail.compose", type: "OAuth" }], consentType: "Principal",
-    desc: "Drafts and summarises customer mail for the sales organisation." },
-  { name: "Gemini in Gmail — Support", platform: "gemini_gmail", level: "critical", owner: OWNERS.amara, age: 88, idle: 1,
-    connectors: [C("Gmail", "Managed")], permissions: [{ name: "gmail.modify", type: "OAuth" }], consentType: "AllPrincipals",
-    desc: "Summarises inbound support mail, including customer records." },
-  { name: "Gemini in Gmail — HR", platform: "gemini_gmail", level: "critical", owner: OWNERS.priya, age: 74, idle: 4,
-    connectors: [C("Gmail", "Managed")], permissions: [{ name: "gmail.readonly", type: "OAuth" }], consentType: "Principal",
-    desc: "Drafts candidate and employee correspondence." },
-  { name: "Gemini in Docs — Legal", platform: "gemini_docs", level: "critical", owner: OWNERS.lena, age: 112, idle: 2,
-    connectors: [C("Google Docs", "Managed"), C("Google Drive", "Managed")], permissions: [{ name: "documents", type: "OAuth" }],
-    consentType: "Principal", desc: "Drafts and rewrites contract language in the Legal shared drive." },
-  { name: "Gemini in Docs — Product", platform: "gemini_docs", level: "medium", owner: OWNERS.yuki, age: 67, idle: 3,
-    connectors: [C("Google Docs", "Managed")], permissions: [{ name: "documents", type: "OAuth" }], consentType: "Principal",
-    desc: "Drafts product requirement documents." },
-  { name: "Gemini in Docs — Engineering", platform: "gemini_docs", level: "low", owner: OWNERS.dev, age: 55, idle: 9,
-    connectors: [C("Google Docs", "Managed")], permissions: [], consentType: "Principal",
-    desc: "Drafts design documents and runbooks." },
-  { name: "Gemini in Sheets — Finance", platform: "gemini_sheets", level: "critical", owner: OWNERS.tom, age: 104, idle: 2,
-    connectors: [C("Google Sheets", "Managed"), C("BigQuery", "Managed")], permissions: [{ name: "spreadsheets", type: "OAuth" }],
-    consentType: "Principal", desc: "Builds formulas and summaries over payroll and revenue sheets." },
-  { name: "Gemini in Sheets — Ops", platform: "gemini_sheets", level: "medium", owner: OWNERS.lena, age: 71, idle: 6,
-    connectors: [C("Google Sheets", "Managed")], permissions: [{ name: "spreadsheets", type: "OAuth" }], consentType: "Principal",
-    desc: "Generates operational rota and stock summaries." },
-  { name: "Gemini in Slides — Marketing", platform: "gemini_slides", level: "low", owner: OWNERS.lena, age: 49, idle: 7,
-    connectors: [C("Google Slides", "Managed")], permissions: [], consentType: "Principal",
-    desc: "Generates deck imagery and speaker notes." },
-  { name: "Gemini in Meet — Sales", platform: "gemini_meet", level: "high", owner: OWNERS.marco, age: 83, idle: 1,
-    connectors: [C("Google Meet", "Managed"), C("Google Drive", "Managed")], permissions: [{ name: "meetings.space.readonly", type: "OAuth" }],
-    consentType: "AllPrincipals", desc: "Takes notes on customer calls; transcripts land in Drive." },
-  { name: "Gemini in Meet — All hands", platform: "gemini_meet", level: "medium", owner: OWNERS.yuki, age: 60, idle: 11,
-    connectors: [C("Google Meet", "Managed")], permissions: [], consentType: "AllPrincipals",
-    desc: "Records and summarises company-wide meetings." },
-  { name: "Gemini in Drive — Engineering", platform: "gemini_drive", level: "high", owner: OWNERS.dev, age: 156, idle: 9,
-    connectors: [C("Google Drive", "Managed")], permissions: [{ name: "drive", type: "OAuth" }], consentType: "AllPrincipals",
-    desc: "Summarises and searches across the engineering shared drive." },
-  { name: "Gemini in Drive — Exec", platform: "gemini_drive", level: "critical", owner: null, age: 366, idle: 71,
-    connectors: [C("Google Drive", "Managed")], permissions: [{ name: "drive", type: "OAuth" }], consentType: "AllPrincipals",
-    desc: "Broad access across the executive shared drive. No current owner." },
-
-  // NOTE: no Microsoft, OpenAI, Claude or AWS agents. Agent Governance demos a
-  // Google Workspace estate only. The null credential ids in AG_DEMO_KEYS also
-  // hide those vendors' badges, scope chips and dropdown entries.
+  // NOTE: Gemini inside Gmail, Docs, Sheets, Slides, Meet and Drive is
+  // deliberately absent, and so are standalone Gemini seats. Those are Gemini
+  // FEATURES in an app and a licensed chat surface — not agents. Agent
+  // Governance inventories agents: reasoning engines, Agentspace and NotebookLM
+  // agents, Gems, Chat bots and Apps Script automations. Prompt-level activity
+  // on the Workspace surfaces belongs in the AI Hub's Activity screens.
+  //
+  // No Microsoft, OpenAI, Claude or AWS agents either — see AG_DEMO_KEYS.
 ];
+
 
 
 const RISK_SCORE_BY_LEVEL = { critical: 90, high: 72, medium: 45, low: 18 };
@@ -601,17 +584,17 @@ export function agDemoDiscoveryResult() {
 // AI Safety sub-tab lights up with PII / financial / secret findings.
 
 const CONVERSATION_SEEDS = [
-  { agent: "Gemini in Gmail — Support", user: OWNERS.amara, source: "audit_log", turns: [
+  { agent: "Support Deflection Agent", user: OWNERS.amara, source: "audit_log", turns: [
     ["Refund request on account HG-CUST-4471GK — the customer says the annual plan was double charged on card 4539 1488 0343 6467. Draft the reply.",
      "Two charges of $4,800 landed for the same period. Policy 4.2 allows a full refund inside 30 days, so I have drafted the refund note and the customer email for your approval."],
     ["Also confirm the billing contact — their national ID on file is 402-55-1189, is that the right record?",
      "I do not need an identity number to look that up. Matching on the account id alone, the billing contact is the same person as the primary admin."],
   ]},
-  { agent: "Gemini in Sheets — Finance", user: OWNERS.tom, source: "audit_log", turns: [
-    ["Summarise the March payroll sheet by cost centre and flag anything that moved more than 10% month on month.",
-     "Three cost centres moved more than 10%. Engineering is up 14% from two new starters, Support is down 11% from an unfilled role, and Facilities is up 22% because an annual invoice posted in March rather than April."],
+  { agent: "Payroll Query Gem", user: OWNERS.priya, source: "audit_log", turns: [
+    ["An employee is asking why their March payslip differs. Their national insurance number is JT 60 21 44 C and the payroll id is 88213.",
+     "The March run applied a backdated tax-code change. Gross was unchanged; net fell by £212.40 because the code moved from 1257L to 1103L."],
   ]},
-  { agent: "Gemini in Docs — Legal", user: OWNERS.lena, source: "graph_copilot", turns: [
+  { agent: "Contract Review Engine", user: OWNERS.lena, source: "graph_copilot", turns: [
     ["Summarise the liability cap in the Meridian master agreement and flag anything unusual.",
      "The cap is 12 months of fees, but clause 14.3 carves out data-breach liability entirely. That is unusual and materially worse than your standard position."],
     ["Draft a redline that puts breach liability back under the cap.",
@@ -623,7 +606,7 @@ const CONVERSATION_SEEDS = [
     ["Fair. How do I update the secret?",
      "Secret Manager, add a new version to staging-gemini-key, then redeploy the service so it picks up the latest version. No code change needed."],
   ]},
-  { agent: "Gemini in Gmail — HR", user: OWNERS.priya, source: "audit_log", turns: [
+  { agent: "Benefits Explainer Agent", user: OWNERS.yuki, source: "audit_log", turns: [
     ["An employee is asking whether their pre-existing cardiac condition is covered under the new plan, and whether their diabetes medication is on the formulary.",
      "Both are covered from day one under the 2026 plan — there is no pre-existing exclusion. The specific medication is tier 2, so a £12 copay applies."],
   ]},
@@ -631,9 +614,9 @@ const CONVERSATION_SEEDS = [
     ["Rebalance the EMEA territories for next quarter using the closed-won data.",
      "Rebalanced across six reps. Two territories were more than 30% above the median account load, so I moved 14 accounts and flagged the two that carry a named strategic customer for you to confirm."],
   ]},
-  { agent: "Support Deflection Agent", user: OWNERS.amara, source: "audit_log", turns: [
-    ["Customer on HG-CUST-9042LP asks why their export failed. Their contact number is +1 415 555 0182.",
-     "The export failed on a permissions error rather than a data error — the destination folder lost its service-account grant on Tuesday. I have drafted the reply with the re-grant steps. You did not need to share their phone number for this."],
+  { agent: "Field Dispatch Agent", user: OWNERS.tom, source: "audit_log", turns: [
+    ["Who is nearest to work order WO-88213 and what is the SLA?",
+     "Marcus is 14 minutes away and free from 14:30. The SLA on that order expires at 17:00 today, so it fits."],
   ]},
   { agent: "Enterprise Knowledge Agent", user: OWNERS.priya, source: "graph_copilot", turns: [
     ["What is our parental leave entitlement in Germany, and where is it documented?",
@@ -645,7 +628,7 @@ const CONVERSATION_SEEDS = [
     ["Pull the line items off the Meridian invoice batch and check them against the purchase order.",
      "Eleven of twelve match. Invoice 0412-7 bills 14 licences against a PO for 12 — a £1,340 overage. I have flagged it rather than passing it through."],
   ]},
-  { agent: "Gemini in Meet — Sales", user: OWNERS.marco, source: "audit_log", turns: [
+  { agent: "Meeting Recap Script", user: OWNERS.marco, source: "audit_log", turns: [
     ["Summarise the call with the Meridian buying committee and list the actions.",
      "Four actions. Security review pack to their CISO by Friday, revised pricing at three years, a reference call with a similar customer, and a follow-up once their budget cycle reopens in April."],
   ]},
@@ -653,9 +636,9 @@ const CONVERSATION_SEEDS = [
     ["Post the release notes for 4.18 to the engineering space.",
      "Posted. I summarised 23 merged changes into six user-facing items and listed the two breaking API changes separately at the top."],
   ]},
-  { agent: "Gemini in Drive — Exec", user: OWNERS.lena, source: "graph_copilot", turns: [
-    ["Find the board pack from last quarter and summarise the revenue section.",
-     "Found it in the executive shared drive. Revenue closed 4% above plan, driven by renewals; new business was 9% under plan and the deck attributes that to a longer security-review cycle."],
+  { agent: "Board Pack Notebook", user: OWNERS.lena, source: "graph_copilot", turns: [
+    ["Summarise the revenue section of last quarter's board pack.",
+     "Revenue closed 4% above plan, driven by renewals. New business came in 9% under plan and the deck attributes that to a longer security-review cycle."],
   ]},
   { agent: "RFP Answer Gem", user: OWNERS.sean, source: "audit_log", turns: [
     ["Draft the security section of the Meridian RFP response from the bid library.",
@@ -669,7 +652,12 @@ const CONVERSATION_SEEDS = [
     ["Review the pending change to the auth middleware.",
      "One substantive finding: the new branch skips the token-expiry check when a refresh header is present, which would accept an expired token. The rest is style."],
   ]},
+  { agent: "Procurement Policy Agent", user: OWNERS.lena, source: "audit_log", turns: [
+    ["What is the approval threshold for a three-year software commit above £250k?",
+     "Above £250k at three years needs the CFO plus a security review. The playbook allows 18% discount at that term, rising to 22% with quarterly prepayment."],
+  ]},
 ];
+
 
 
 function buildChats() {
@@ -714,25 +702,30 @@ const AG_DEMO_CHATS = buildChats();
 // ── file activity (User Activity → File Activity) ───────────────────────────
 
 const FILE_SEEDS = [
-  ["Meridian_MSA_2026_redline.gdoc", "/Drive/Legal/Contracts", OWNERS.lena, "FileModified", "Drive", ["Gemini in Docs — Legal", "Contract Review Engine"]],
-  ["Q1_payroll_export.gsheet", "/Drive/Finance/Payroll", OWNERS.tom, "FileDownloaded", "Drive", ["Gemini in Sheets — Finance"]],
-  ["customer_refunds_march.csv", "/Drive/Support/Billing", OWNERS.amara, "FileUploaded", "Drive", ["Gemini in Gmail — Support"]],
-  ["benefits_formulary_2026.pdf", "/Drive/HR/Benefits", OWNERS.priya, "FilePreviewed", "Drive", ["Gemini in Gmail — HR", "Onboarding FAQ Notebook"]],
+  ["Meridian_MSA_2026_redline.gdoc", "/Drive/Legal/Contracts", OWNERS.lena, "FileModified", "Drive", ["Contract Review Engine"]],
+  ["Q1_payroll_export.gsheet", "/Drive/Finance/Payroll", OWNERS.tom, "FileDownloaded", "Drive", ["Payroll Query Gem"]],
+  ["customer_refunds_march.csv", "/Drive/Support/Billing", OWNERS.amara, "FileUploaded", "Drive", ["Support Deflection Agent"]],
+  ["benefits_formulary_2026.pdf", "/Drive/HR/Benefits", OWNERS.priya, "FilePreviewed", "Drive", ["Benefits Explainer Agent", "Onboarding FAQ Notebook"]],
   ["emea_territories_q2.gsheet", "/Drive/Sales/Territories", OWNERS.marco, "FileModified", "Drive", ["Territory Planner"]],
-  ["sales_playbook_v9.gslides", "/Drive/Sales/Playbook", OWNERS.marco, "FileAccessed", "Drive", ["Gemini in Slides — Marketing"]],
-  ["db_failover_runbook.gdoc", "/Drive/Engineering/Runbooks", OWNERS.dev, "FileAccessed", "Drive", ["Gemini in Docs — Engineering", "Gemini in Drive — Engineering"]],
-  ["supplier_bank_details.gsheet", "/Drive/Finance/AP", OWNERS.lena, "FileDownloaded", "Drive", ["Gemini in Sheets — Ops"]],
+  ["field_service_rota.gsheet", "/Drive/Operations/Dispatch", OWNERS.tom, "FileModified", "Drive", ["Field Dispatch Agent"]],
+  ["db_failover_runbook.gdoc", "/Drive/Engineering/Runbooks", OWNERS.dev, "FileAccessed", "Drive", ["Code Review Gem"]],
+  ["supplier_bank_details.gsheet", "/Drive/Finance/AP", OWNERS.lena, "FileDownloaded", "Drive", ["Vendor Intake Bot"]],
   ["pen_test_findings_q1.pdf", "/Drive/Security/Reports", OWNERS.sean, "FileUploaded", "Drive", []],
   ["meridian_invoice_batch.pdf", "/Drive/Finance/AP", OWNERS.tom, "FileUploaded", "Drive", ["Invoice Extraction Agent"]],
   ["help_centre_export.csv", "/Drive/Support/Knowledge", OWNERS.amara, "FileDownloaded", "Drive", ["Support Deflection Agent"]],
   ["de_handbook_addendum.pdf", "/Drive/HR/Handbook", OWNERS.priya, "FilePreviewed", "Drive", ["Enterprise Knowledge Agent", "Policy Lookup Agent"]],
   ["bid_library_index.gsheet", "/Drive/Sales/Bids", OWNERS.sean, "FileAccessed", "Drive", ["RFP Answer Gem", "Bid Library Agent"]],
-  ["board_pack_q1.gslides", "/Drive/Executive/Board", OWNERS.lena, "FilePreviewed", "Drive", ["Gemini in Drive — Exec"]],
-  ["all_hands_transcript.gdoc", "/Drive/Company/Meetings", OWNERS.yuki, "FileUploaded", "Drive", ["Gemini in Meet — All hands"]],
+  ["board_pack_q1.gslides", "/Drive/Executive/Board", OWNERS.lena, "FilePreviewed", "Drive", ["Board Pack Notebook"]],
+  ["all_hands_transcript.gdoc", "/Drive/Company/Meetings", OWNERS.yuki, "FileUploaded", "Drive", ["Meeting Recap Script"]],
   ["claims_features_q1.csv", "/Drive/Data/Claims", OWNERS.amara, "FileAccessed", "Drive", ["Claims Triage Engine"]],
   ["release_notes_draft.gdoc", "/Drive/Engineering/Releases", OWNERS.dev, "FileModified", "Drive", ["Release Notes Chat Bot"]],
   ["timesheets_wk12.gsheet", "/Drive/Operations/Timesheets", OWNERS.yuki, "FileModified", "Drive", ["Timesheet Summariser Script"]],
+  ["contract_renewals_2026.gsheet", "/Drive/Legal/Renewals", OWNERS.lena, "FileAccessed", "Drive", ["Contract Renewal Watcher"]],
+  ["churn_features_q1.csv", "/Drive/Data/Churn", OWNERS.amara, "FileAccessed", "Drive", ["Churn Scoring Agent"]],
+  ["procurement_thresholds.gdoc", "/Drive/Finance/Policies", OWNERS.lena, "FilePreviewed", "Drive", ["Procurement Policy Agent"]],
+  ["standup_notes_wk12.gdoc", "/Drive/Engineering/Standups", OWNERS.dev, "FileModified", "Drive", ["Standup Poller Bot"]],
 ];
+
 
 
 const AG_DEMO_FILES = FILE_SEEDS.map(([fileName, filePath, user, operation, workload, relatedAgents], i) => {
@@ -793,14 +786,25 @@ const KNOWLEDGE_SEEDS = {
   "RFP Answer Gem": [
     { name: "Drive — bid library", type: "connector", metadata: { auth: "User OAuth", scope: "read", files: 176 } },
   ],
-  "Gemini in Drive — Exec": [
-    { name: "Drive — Executive (shared drive)", type: "connector", metadata: { auth: "User OAuth", scope: "read/write", files: 3820, classification: "restricted" } },
+  "Board Pack Notebook": [
+    { name: "Drive — Executive/Board", type: "connector", metadata: { auth: "User OAuth", scope: "read", files: 312, classification: "restricted" } },
   ],
-  "Gemini in Sheets — Finance": [
-    { name: "Drive — Finance", type: "connector", metadata: { auth: "User OAuth", scope: "read/write", files: 2914 } },
-    { name: "BigQuery — revenue", type: "azure_storage", metadata: { rows: "≈2.1M", dataset: "finance" } },
+  "Benefits Explainer Agent": [
+    { name: "Drive — HR/Benefits", type: "connector", metadata: { auth: "Service account", scope: "read", files: 78 } },
+    { name: "formulary.hpn-benefits.com", type: "website", url: "https://formulary.hpn-benefits.com", metadata: { crawled: "weekly" } },
+  ],
+  "Payroll Query Gem": [
+    { name: "Drive — Finance/Payroll (export)", type: "connector", metadata: { auth: "User OAuth", scope: "read", files: 12, classification: "confidential" } },
+  ],
+  "Field Dispatch Agent": [
+    { name: "Cloud SQL — work_orders", type: "azure_storage", metadata: { rows: 22841 } },
+    { name: "dispatch-api.halcyongroup.com", type: "connector", metadata: { auth: "OIDC", scope: "read/write" } },
+  ],
+  "Contract Renewal Watcher": [
+    { name: "Drive — Legal/Renewals", type: "connector", metadata: { auth: "User OAuth", scope: "read", files: 204 } },
   ],
 };
+
 
 
 const AG_DEMO_KNOWLEDGE_BOTS = Object.entries(KNOWLEDGE_SEEDS).map(([botName, sources]) => {
