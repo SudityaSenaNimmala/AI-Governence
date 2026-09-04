@@ -132,12 +132,12 @@ if (AG_DEMO && typeof console !== "undefined") {
  * request that would carry them is intercepted below.
  */
 export const AG_DEMO_KEYS = {
-  oauthKeyId: "demo-microsoft-key",
-  tenantId: "northwind.onmicrosoft.com",
-  dataverseEnvUrl: "https://northwind.crm.dynamics.com",
-  azureSubscriptionId: "0f2d-demo-subscription",
-  googleKeyId: "demo-google-key",
-  geminiEnterpriseKeyId: "demo-gemini-enterprise-key",
+  oauthKeyId: guid("key:microsoft"),
+  tenantId: "halcyongroup.onmicrosoft.com",
+  dataverseEnvUrl: "https://halcyongroup.crm.dynamics.com",
+  azureSubscriptionId: guid("subscription"),
+  googleKeyId: guid("key:google"),
+  geminiEnterpriseKeyId: guid("key:gemini-enterprise"),
   // NULL ON PURPOSE — Agent Governance demos Microsoft + Google only.
   // A null key id is what every "is this platform connected?" check reads, so
   // leaving these unset removes the ChatGPT / Claude / AWS connection badges,
@@ -175,6 +175,80 @@ function rngFor(key) {
 const pick = (rand, arr) => arr[Math.floor(rand() * arr.length)];
 const between = (rand, lo, hi) => lo + Math.floor(rand() * (hi - lo + 1));
 
+// ── identifiers ─────────────────────────────────────────────────────────────
+//
+// NOTHING ON SCREEN MAY READ AS FABRICATED. Agent Governance renders raw
+// identifiers in several places — the Discovery detail panel prints
+// `discoverySource` and the agent id, and the permissions table prints appId
+// under every application name — so an id like "demo-copilot_studio-0" or a
+// source of "demo_dataset" is visible to whoever is watching the screen.
+//
+// Ids are therefore generated as real-shaped values (GUIDs for Microsoft,
+// resource paths for Google) and derived from a hash of the agent name, so
+// they are stable across reloads.
+//
+// Because no id carries a marker any more, the check that stops a fabricated
+// agent's write reaching the server can no longer be a string prefix. It is a
+// membership test against FABRICATED_IDS instead, populated below.
+const FABRICATED_IDS = new Set();
+
+/** Deterministic RFC-4122-shaped GUID from any seed string. */
+function guid(seed) {
+  const r = rngFor("guid:" + seed);
+  const hex = (n) => Array.from({ length: n }, () => "0123456789abcdef"[Math.floor(r() * 16)]).join("");
+  // Version 4, variant 1 — the shape Entra and Dataverse ids actually take.
+  return `${hex(8)}-${hex(4)}-4${hex(3)}-${"89ab"[Math.floor(r() * 4)]}${hex(3)}-${hex(12)}`;
+}
+
+/** Register an id as fabricated and return it unchanged. */
+function fab(id) {
+  FABRICATED_IDS.add(String(id));
+  return id;
+}
+
+export function isFabricatedId(id) {
+  return FABRICATED_IDS.has(String(id || ""));
+}
+
+// The real `discoverySource` value each platform reports, taken from
+// server/src/governance/services/discoveryService.ts and the client-side
+// converters. These are what the Discovery panel prints, and several get a
+// coloured badge from sourceStyle in tabs/DiscoveryTab.jsx.
+const DISCOVERY_SOURCE = {
+  copilot_studio:      "dataverse",
+  personal_agent:      "graph_copilot_agents",
+  teams_chat_agent:    "graph_copilot_agents",
+  sharepoint_embedded: "graph_search_agents",
+  teams_app:           "graph_teams_catalog",
+  isv_store:           "graph_user_installed_apps",
+  azure_foundry:       "azure_management",
+  oauth_app:           "oauth",
+  vertex_ai:           "vertex_ai_reasoning_engines",
+  gemini_gems:         "google_admin_sdk",
+  google_chat:         "google_chat_api",
+  gemini_enterprise:   "gemini_enterprise",
+};
+
+const AZ_SUB = guid("subscription");
+const AZ_RG = `/subscriptions/${AZ_SUB}/resourceGroups/rg-ai`;
+/** Full ARM resource id — the shape Azure actually returns. */
+const arm = (rg, provider, name) => `/subscriptions/${AZ_SUB}/resourceGroups/${rg}/providers/${provider}/${name}`;
+const cog = (rg, name) => arm(rg, "Microsoft.CognitiveServices/accounts", name);
+const AZ_RG_ML = `/subscriptions/${AZ_SUB}/resourceGroups/rg-ml`;
+
+const GCP_PROJECT = "halcyon-ai-prod";
+
+/** Google resources are addressed by path, not GUID. */
+function googleResourceId(platform, name) {
+  const n = rngFor("gres:" + name);
+  const num = String(Math.floor(n() * 9e15) + 1e15);
+  const region = pick(rngFor("greg:" + name), ["europe-west4", "europe-west1", "us-central1"]);
+  if (platform === "vertex_ai") return `projects/${GCP_PROJECT}/locations/${region}/reasoningEngines/${num}`;
+  if (platform === "google_chat") return `spaces/${num.slice(0, 11)}`;
+  if (platform === "gemini_gems") return `gems/${num.slice(0, 16)}`;
+  return `projects/${GCP_PROJECT}/locations/global/collections/default_collection/engines/${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+}
+
 // ── people ──────────────────────────────────────────────────────────────────
 
 const P = (displayName, upn, accountEnabled = true) => ({
@@ -185,17 +259,17 @@ const P = (displayName, upn, accountEnabled = true) => ({
 });
 
 const OWNERS = {
-  amara: P("Amara Okafor", "amara.okafor@northwind.example"),
-  dev: P("Devika Raman", "devika.raman@northwind.example"),
-  tom: P("Tomas Lindqvist", "tomas.lindqvist@northwind.example"),
-  yuki: P("Yuki Tanaka", "yuki.tanaka@northwind.example"),
-  marco: P("Marco Ferreira", "marco.ferreira@northwind.example"),
-  priya: P("Priya Nair", "priya.nair@northwind.example"),
-  sean: P("Sean Whitaker", "sean.whitaker@northwind.example"),
-  lena: P("Lena Hoffmann", "lena.hoffmann@northwind.example"),
+  amara: P("Amara Okafor", "amara.okafor@halcyongroup.com"),
+  dev: P("Devika Raman", "devika.raman@halcyongroup.com"),
+  tom: P("Tomas Lindqvist", "tomas.lindqvist@halcyongroup.com"),
+  yuki: P("Yuki Tanaka", "yuki.tanaka@halcyongroup.com"),
+  marco: P("Marco Ferreira", "marco.ferreira@halcyongroup.com"),
+  priya: P("Priya Nair", "priya.nair@halcyongroup.com"),
+  sean: P("Sean Whitaker", "sean.whitaker@halcyongroup.com"),
+  lena: P("Lena Hoffmann", "lena.hoffmann@halcyongroup.com"),
   // Left the company — their agents are still running. This is the story.
-  gone1: P("Robert Ashby", "robert.ashby@northwind.example", false),
-  gone2: P("Claire Dumont", "claire.dumont@northwind.example", false),
+  gone1: P("Robert Ashby", "robert.ashby@halcyongroup.com", false),
+  gone2: P("Claire Dumont", "claire.dumont@halcyongroup.com", false),
 };
 
 const ACTIVE_PEOPLE = [
@@ -458,15 +532,23 @@ function buildAgent(spec, i) {
     };
   });
 
+  const isGoogle = vendor === "Google";
+  // Google resources are path-addressed; Microsoft ones are GUIDs. Both are
+  // registered as fabricated so a write against them can never leave the
+  // browser — see FABRICATED_IDS.
+  const agentId = fab(isGoogle ? googleResourceId(spec.platform, spec.name) : guid("agent:" + spec.name));
+  const appId = fab(isGoogle ? agentId : guid("app:" + spec.name));
+
   return {
-    id: `demo-${spec.platform}-${i}`,
-    appId: `demo-app-${i}`,
+    id: agentId,
+    appId,
+    botId: spec.platform === "copilot_studio" ? appId : undefined,
     name: spec.name,
     description: spec.desc,
     vendor,
     category: "generative-ai",
     platform: spec.platform,
-    discoverySource: "demo_dataset",
+    discoverySource: DISCOVERY_SOURCE[spec.platform] || "graph_beta",
     firstSeen,
     createdDateTime: firstSeen,
     createdOn: firstSeen,
@@ -479,7 +561,7 @@ function buildAgent(spec, i) {
     consentType: spec.consentType,
     connectors: spec.connectors || [],
     permissions: spec.permissions || [],
-    environmentName: spec.platform === "copilot_studio" ? "Northwind (default)" : undefined,
+    environmentName: spec.platform === "copilot_studio" ? "Halcyon (default)" : undefined,
     lifecycleStatus: spec.idle === null || spec.idle > 60 ? "stale" : "active",
     approvalStatus: orphaned ? "pending" : "approved",
     risk: {
@@ -513,9 +595,9 @@ const CHATTY_AGENTS = AG_DEMO_AGENTS.filter(
 export function agDemoDiscoveryResult() {
   return {
     tenant: {
-      id: "demo-tenant",
-      name: "Northwind Traders",
-      domain: "northwind.onmicrosoft.com",
+      id: guid("tenant"),
+      name: "Halcyon Group",
+      domain: "halcyongroup.onmicrosoft.com",
       license: "Microsoft 365 E5 + Copilot",
     },
     agents: AG_DEMO_AGENTS,
@@ -618,14 +700,14 @@ function buildChats() {
     const messages = [];
     seed.turns.forEach((pair, t) => {
       messages.push({
-        id: `demo-msg-${i}-${t}-u`,
+        id: `msg_${i}-${t}-u`,
         from: "user",
         fromName: seed.user.displayName,
         timestamp: iso(start + t * 240000),
         text: pair[0],
       });
       messages.push({
-        id: `demo-msg-${i}-${t}-b`,
+        id: `msg_${i}-${t}-b`,
         from: "bot",
         fromName: seed.agent,
         timestamp: iso(start + t * 240000 + 45000),
@@ -633,7 +715,7 @@ function buildChats() {
       });
     });
     return {
-      id: `demo-chat-${i}`,
+      id: `cnv_${i}`,
       userName: seed.user.displayName,
       userEmail: seed.user.userPrincipalName,
       userId: seed.user.userPrincipalName,
@@ -682,7 +764,7 @@ const FILE_SEEDS = [
 const AG_DEMO_FILES = FILE_SEEDS.map(([fileName, filePath, user, operation, workload, relatedAgents], i) => {
   const rand = rngFor(fileName);
   return {
-    id: `demo-file-${i}`,
+    id: `evt_${i}`,
     fileName,
     filePath,
     userName: user.displayName,
@@ -690,7 +772,7 @@ const AG_DEMO_FILES = FILE_SEEDS.map(([fileName, filePath, user, operation, work
     operation,
     workload,
     relatedAgents,
-    siteUrl: `https://northwind.sharepoint.com${filePath.split("/Shared Documents")[0]}`,
+    siteUrl: `https://halcyongroup.sharepoint.com${filePath.split("/Shared Documents")[0]}`,
     timestamp: iso(NOW - between(rand, 1, 220) * 3600000),
   };
 });
@@ -699,37 +781,37 @@ const AG_DEMO_FILES = FILE_SEEDS.map(([fileName, filePath, user, operation, work
 
 const KNOWLEDGE_SEEDS = {
   "Contract Review Assistant": [
-    { name: "Legal — Contracts library", type: "sharepoint", url: "https://northwind.sharepoint.com/sites/legal/Shared Documents/Contracts", metadata: { files: 1284, indexed: "yes" } },
+    { name: "Legal — Contracts library", type: "sharepoint", url: "https://halcyongroup.sharepoint.com/sites/legal/Shared Documents/Contracts", metadata: { files: 1284, indexed: "yes" } },
     { name: "Standard clause bank", type: "knowledge_article", metadata: { articles: 96 } },
     { name: "contract_terms", type: "dataverse_table", metadata: { rows: 4120 } },
   ],
   "Customer Refund Triage": [
-    { name: "Refund policy 4.2", type: "sharepoint", url: "https://northwind.sharepoint.com/sites/finance/Shared Documents/Policies", metadata: { files: 34 } },
+    { name: "Refund policy 4.2", type: "sharepoint", url: "https://halcyongroup.sharepoint.com/sites/finance/Shared Documents/Policies", metadata: { files: 34 } },
     { name: "account", type: "dataverse_table", metadata: { rows: 18422 } },
     { name: "incident", type: "dataverse_table", metadata: { rows: 96110 } },
   ],
   "Payroll Query Handler": [
     { name: "payroll_records (SQL)", type: "azure_storage", metadata: { rows: "≈12,400", classification: "confidential" } },
-    { name: "HR handbook", type: "sharepoint", url: "https://northwind.sharepoint.com/sites/hr/Shared Documents", metadata: { files: 212 } },
+    { name: "HR handbook", type: "sharepoint", url: "https://halcyongroup.sharepoint.com/sites/hr/Shared Documents", metadata: { files: 212 } },
   ],
   "Benefits Explainer": [
-    { name: "Benefits 2026 library", type: "sharepoint", url: "https://northwind.sharepoint.com/sites/hr/Shared Documents/Benefits", metadata: { files: 78 } },
-    { name: "provider-formulary.example.com", type: "website", url: "https://provider-formulary.example.com", metadata: { crawled: "weekly" } },
+    { name: "Benefits 2026 library", type: "sharepoint", url: "https://halcyongroup.sharepoint.com/sites/hr/Shared Documents/Benefits", metadata: { files: 78 } },
+    { name: "formulary.hpn-benefits.com", type: "website", url: "https://formulary.hpn-benefits.com", metadata: { crawled: "weekly" } },
   ],
   "Engineering Runbook Agent": [
-    { name: "Engineering — Runbooks", type: "sharepoint", url: "https://northwind.sharepoint.com/sites/engineering/Shared Documents/Runbooks", metadata: { files: 341 } },
+    { name: "Engineering — Runbooks", type: "sharepoint", url: "https://halcyongroup.sharepoint.com/sites/engineering/Shared Documents/Runbooks", metadata: { files: 341 } },
     { name: "runbook-archive (blob)", type: "azure_storage", metadata: { container: "runbooks", files: 1902 } },
   ],
   "Sales Playbook Agent": [
-    { name: "Sales — Playbook", type: "sharepoint", url: "https://northwind.sharepoint.com/sites/sales/Shared Documents/Playbook", metadata: { files: 156 } },
+    { name: "Sales — Playbook", type: "sharepoint", url: "https://halcyongroup.sharepoint.com/sites/sales/Shared Documents/Playbook", metadata: { files: 156 } },
   ],
   "Onboarding Buddy": [
-    { name: "HR — Onboarding", type: "sharepoint", url: "https://northwind.sharepoint.com/sites/hr/Shared Documents/Onboarding", metadata: { files: 64 } },
+    { name: "HR — Onboarding", type: "sharepoint", url: "https://halcyongroup.sharepoint.com/sites/hr/Shared Documents/Onboarding", metadata: { files: 64 } },
     { name: "IT setup guides", type: "knowledge_article", metadata: { articles: 41 } },
   ],
   "Field Service Dispatcher": [
     { name: "msdyn_workorder", type: "dataverse_table", metadata: { rows: 22841 } },
-    { name: "dispatch-api.northwind.example", type: "connector", metadata: { auth: "Entra ID", scope: "read/write" } },
+    { name: "dispatch-api.halcyongroup.com", type: "connector", metadata: { auth: "Entra ID", scope: "read/write" } },
   ],
   // ── Google-side knowledge ─────────────────────────────────────────────────
   // Only the source types KnowledgeSourceCard knows are used, so every card
@@ -744,11 +826,11 @@ const KNOWLEDGE_SEEDS = {
   ],
   "Territory Planner (Vertex)": [
     { name: "BigQuery — closed_won_opportunities", type: "azure_storage", metadata: { rows: "≈184,000", dataset: "sales_analytics" } },
-    { name: "Cloud Storage — territory-exports", type: "azure_storage", metadata: { bucket: "nw-territory", files: 240 } },
+    { name: "Cloud Storage — territory-exports", type: "azure_storage", metadata: { bucket: "hg-territory", files: 240 } },
   ],
   "Support Deflection Agent": [
     { name: "help-centre-articles (data store)", type: "knowledge_article", metadata: { articles: 1043 } },
-    { name: "support.northwind.example", type: "website", url: "https://support.northwind.example", metadata: { crawled: "daily" } },
+    { name: "support.halcyongroup.com", type: "website", url: "https://support.halcyongroup.com", metadata: { crawled: "daily" } },
   ],
   "Invoice Extraction Agent": [
     { name: "Document AI — invoice parser", type: "connector", metadata: { processor: "invoice-parser-v2" } },
@@ -762,7 +844,7 @@ const KNOWLEDGE_SEEDS = {
 const AG_DEMO_KNOWLEDGE_BOTS = Object.entries(KNOWLEDGE_SEEDS).map(([botName, sources]) => {
   const agent = AG_DEMO_AGENTS.find((a) => a.name === botName);
   return {
-    botId: agent ? agent.id : `demo-bot-${botName}`,
+    botId: agent ? agent.id : `bot_${botName}`,
     botName,
     schemaName: botName.replace(/\s+/g, "_").toLowerCase(),
     sources: sources.map((s, i) => ({ id: `${botName}-src-${i}`, addedOn: daysAgo(30 + i * 11), ...s })),
@@ -772,12 +854,12 @@ const AG_DEMO_KNOWLEDGE_BOTS = Object.entries(KNOWLEDGE_SEEDS).map(([botName, so
 // ── Azure OpenAI cost + usage (Cost tab) ────────────────────────────────────
 
 const DEPLOYMENT_SEEDS = [
-  ["claims-summariser", "gpt-4o", "northwind-ai-prod", 18_420_000, 4_210_000, 2.5, 10.0, 24_180],
-  ["product-qa", "gpt-4o-mini", "northwind-ai-prod", 41_900_000, 9_640_000, 0.15, 0.6, 61_402],
-  ["fraud-signal", "o1", "northwind-ai-sec", 2_140_000, 1_080_000, 15.0, 60.0, 3_118],
-  ["invoice-extract", "gpt-4o", "northwind-ai-fin", 7_860_000, 1_940_000, 2.5, 10.0, 11_204],
-  ["embeddings-index", "text-embedding-3-large", "northwind-ai-prod", 88_200_000, 0, 0.13, 0.0, 142_800],
-  ["legacy-support", "gpt-35-turbo", "northwind-ai-dev", 5_120_000, 1_460_000, 0.5, 1.5, 9_640],
+  ["claims-summariser", "gpt-4o", "halcyon-ai-prod", 18_420_000, 4_210_000, 2.5, 10.0, 24_180],
+  ["product-qa", "gpt-4o-mini", "halcyon-ai-prod", 41_900_000, 9_640_000, 0.15, 0.6, 61_402],
+  ["fraud-signal", "o1", "halcyon-ai-sec", 2_140_000, 1_080_000, 15.0, 60.0, 3_118],
+  ["invoice-extract", "gpt-4o", "halcyon-ai-fin", 7_860_000, 1_940_000, 2.5, 10.0, 11_204],
+  ["embeddings-index", "text-embedding-3-large", "halcyon-ai-prod", 88_200_000, 0, 0.13, 0.0, 142_800],
+  ["legacy-support", "gpt-35-turbo", "halcyon-ai-dev", 5_120_000, 1_460_000, 0.5, 1.5, 9_640],
 ];
 
 function buildAzureCost(periodDays) {
@@ -876,11 +958,11 @@ function buildAgentPermissions() {
     });
     const filePerms = permissions.filter((p) => p.category === "files");
     return {
-      servicePrincipalId: `demo-sp-${i}`,
-      appId: agent ? agent.appId : `demo-app-perm-${i}`,
+      servicePrincipalId: guid("sp:" + displayName),
+      appId: agent ? agent.appId : guid("app:" + displayName),
       displayName,
       isAgent: !!agent,
-      publisherName: /ChatGPT|Perplexity|Notion|Otter/.test(displayName) ? "Third party" : "Northwind Traders",
+      publisherName: /ChatGPT|Perplexity|Notion|Otter/.test(displayName) ? "Third party" : "Halcyon Group",
       permissions,
       summary: {
         riskLevel,
@@ -919,7 +1001,7 @@ function buildAgentPermissions() {
 // deployments. Deployment fields are modelName / modelVersion / capacityTPM,
 // not model / version / capacity.
 const AZ_DEP = (name, modelName, modelVersion, capacityTPM, skuName) => ({
-  id: `demo-dep-${name}`,
+  id: `${AZ_RG}/providers/Microsoft.CognitiveServices/accounts/halcyon-ai-prod/deployments/${name}`,
   name,
   modelName,
   modelVersion,
@@ -932,51 +1014,52 @@ const AZ_DEP = (name, modelName, modelVersion, capacityTPM, skuName) => ({
 function buildAzureDiscovery() {
   return {
     openAIResources: [
-      { id: "/subscriptions/0f2d/rg-ai/northwind-ai-prod", name: "northwind-ai-prod", location: "westeurope",
+      { id: cog("rg-ai", "halcyon-ai-prod"), name: "halcyon-ai-prod", location: "westeurope",
         skuName: "S0", publicAccess: "Enabled", localAuthDisabled: false,
-        endpoint: "https://northwind-ai-prod.openai.azure.com/",
+        endpoint: "https://halcyon-ai-prod.openai.azure.com/",
         deployments: [
           AZ_DEP("claims-summariser", "gpt-4o", "2024-08-06", 120, "Standard"),
           AZ_DEP("product-qa", "gpt-4o-mini", "2024-07-18", 300, "Standard"),
           AZ_DEP("embeddings-index", "text-embedding-3-large", "1", 200, "Standard"),
         ] },
-      { id: "/subscriptions/0f2d/rg-sec/northwind-ai-sec", name: "northwind-ai-sec", location: "northeurope",
+      { id: cog("rg-sec", "halcyon-ai-sec"), name: "halcyon-ai-sec", location: "northeurope",
         skuName: "S0", publicAccess: "Disabled", localAuthDisabled: true,
-        endpoint: "https://northwind-ai-sec.openai.azure.com/",
+        endpoint: "https://halcyon-ai-sec.openai.azure.com/",
         deployments: [AZ_DEP("fraud-signal", "o1", "2024-12-17", 40, "Standard")] },
-      { id: "/subscriptions/0f2d/rg-fin/northwind-ai-fin", name: "northwind-ai-fin", location: "westeurope",
+      { id: cog("rg-fin", "halcyon-ai-fin"), name: "halcyon-ai-fin", location: "westeurope",
         skuName: "S0", publicAccess: "Enabled", localAuthDisabled: false,
-        endpoint: "https://northwind-ai-fin.openai.azure.com/",
+        endpoint: "https://halcyon-ai-fin.openai.azure.com/",
         deployments: [AZ_DEP("invoice-extract", "gpt-4o", "2024-08-06", 80, "Standard")] },
-      { id: "/subscriptions/0f2d/rg-dev/northwind-ai-dev", name: "northwind-ai-dev", location: "uksouth",
+      { id: cog("rg-dev", "halcyon-ai-dev"), name: "halcyon-ai-dev", location: "uksouth",
         skuName: "S0", publicAccess: "Enabled", localAuthDisabled: false,
-        endpoint: "https://northwind-ai-dev.openai.azure.com/",
+        endpoint: "https://halcyon-ai-dev.openai.azure.com/",
         // No content filter on the dev deployment — a real finding to point at.
         deployments: [Object.assign(AZ_DEP("legacy-support", "gpt-35-turbo", "0613", 60, "Standard"), { contentFilter: null })] },
     ],
     serverlessEndpoints: [
-      { id: "demo-sl-phi4", name: "phi-4-serverless", modelId: "Phi-4", workspaceName: "northwind-ml-research", location: "eastus", state: "Online" },
+      { id: `${AZ_RG}/providers/Microsoft.MachineLearningServices/workspaces/halcyon-ml-research/serverlessEndpoints/phi-4-serverless`, name: "phi-4-serverless", modelId: "Phi-4", workspaceName: "halcyon-ml-research", location: "eastus", state: "Online" },
     ],
     // Entries without modelName are ML workspaces; with one, a managed deployment.
     foundryAgents: [
-      { id: "demo-ws-research", name: "northwind-ml-research", location: "westeurope", resourceGroup: "rg-ml", provisioningState: "Succeeded" },
-      { id: "demo-ws-prod", name: "northwind-ml-prod", location: "westeurope", resourceGroup: "rg-ml", provisioningState: "Succeeded" },
-      { id: "demo-ws-churn", name: "churn-scoring-managed", location: "westeurope", resourceGroup: "rg-ml", provisioningState: "Succeeded", modelName: "gpt-4o-mini", modelVersion: "2024-07-18" },
+      { id: `${AZ_RG_ML}/providers/Microsoft.MachineLearningServices/workspaces/halcyon-ml-research`, name: "halcyon-ml-research", location: "westeurope", resourceGroup: "rg-ml", provisioningState: "Succeeded" },
+      { id: `${AZ_RG_ML}/providers/Microsoft.MachineLearningServices/workspaces/halcyon-ml-prod`, name: "halcyon-ml-prod", location: "westeurope", resourceGroup: "rg-ml", provisioningState: "Succeeded" },
+      { id: `${AZ_RG_ML}/providers/Microsoft.MachineLearningServices/workspaces/halcyon-ml-prod/onlineEndpoints/churn-scoring-managed`, name: "churn-scoring-managed", location: "westeurope", resourceGroup: "rg-ml", provisioningState: "Succeeded", modelName: "gpt-4o-mini", modelVersion: "2024-07-18" },
     ],
     aiServices: [
-      { id: "demo-svc-docintel", name: "northwind-docintel", kind: "FormRecognizer", location: "westeurope", skuName: "S0", publicAccess: "Enabled" },
-      { id: "demo-svc-language", name: "northwind-language", kind: "TextAnalytics", location: "westeurope", skuName: "S", publicAccess: "Enabled" },
-      { id: "demo-svc-vision", name: "northwind-vision", kind: "ComputerVision", location: "northeurope", skuName: "S1", publicAccess: "Disabled" },
-      { id: "demo-svc-safety", name: "northwind-safety", kind: "ContentSafety", location: "westeurope", skuName: "S0", publicAccess: "Enabled" },
-      { id: "demo-svc-speech", name: "northwind-speech", kind: "SpeechServices", location: "uksouth", skuName: "S0", publicAccess: "Enabled" },
+      { id: `${AZ_RG}/providers/Microsoft.CognitiveServices/accounts/halcyon-docintel`, name: "halcyon-docintel", kind: "FormRecognizer", location: "westeurope", skuName: "S0", publicAccess: "Enabled" },
+      { id: `${AZ_RG}/providers/Microsoft.CognitiveServices/accounts/halcyon-language`, name: "halcyon-language", kind: "TextAnalytics", location: "westeurope", skuName: "S", publicAccess: "Enabled" },
+      { id: `${AZ_RG}/providers/Microsoft.CognitiveServices/accounts/halcyon-vision`, name: "halcyon-vision", kind: "ComputerVision", location: "northeurope", skuName: "S1", publicAccess: "Disabled" },
+      { id: `${AZ_RG}/providers/Microsoft.CognitiveServices/accounts/halcyon-safety`, name: "halcyon-safety", kind: "ContentSafety", location: "westeurope", skuName: "S0", publicAccess: "Enabled" },
+      { id: `${AZ_RG}/providers/Microsoft.CognitiveServices/accounts/halcyon-speech`, name: "halcyon-speech", kind: "SpeechServices", location: "uksouth", skuName: "S0", publicAccess: "Enabled" },
     ],
     accessControl: [
-      { principalId: "8f31c2a4-0d55-4b9e-9a71-2c6f4b8e1d03", principalType: "User", roleName: "Cognitive Services OpenAI Contributor", resourceId: "/subscriptions/0f2d/rg-ai/northwind-ai-prod" },
-      { principalId: "b7d92e15-6a43-4c81-bf20-91e5d7a3c468", principalType: "ServicePrincipal", roleName: "Owner", resourceId: "/subscriptions/0f2d/rg-sec/northwind-ai-sec" },
-      { principalId: "3c48a9f7-2b61-4d05-8e93-7fa1c60b2d59", principalType: "Group", roleName: "Cognitive Services OpenAI User", resourceId: "/subscriptions/0f2d/rg-ai/northwind-ai-prod" },
-      { principalId: "d15e6b83-9c27-4a10-b5df-38e02f7a91c4", principalType: "ServicePrincipal", roleName: "Contributor", resourceId: "/subscriptions/0f2d/rg-fin/northwind-ai-fin" },
+      { principalId: "8f31c2a4-0d55-4b9e-9a71-2c6f4b8e1d03", principalType: "User", roleName: "Cognitive Services OpenAI Contributor", resourceId: cog("rg-ai", "halcyon-ai-prod") },
+      { principalId: "b7d92e15-6a43-4c81-bf20-91e5d7a3c468", principalType: "ServicePrincipal", roleName: "Owner", resourceId: cog("rg-sec", "halcyon-ai-sec") },
+      { principalId: "3c48a9f7-2b61-4d05-8e93-7fa1c60b2d59", principalType: "Group", roleName: "Cognitive Services OpenAI User", resourceId: cog("rg-ai", "halcyon-ai-prod") },
+      { principalId: "d15e6b83-9c27-4a10-b5df-38e02f7a91c4", principalType: "ServicePrincipal", roleName: "Contributor", resourceId: cog("rg-fin", "halcyon-ai-fin") },
     ],
-    subscriptions: [{ id: "0f2d-demo-subscription", name: "Northwind Production" }],
+    // Rendered verbatim next to the subscription name in the Azure panel.
+    subscriptions: [{ id: AZ_SUB, name: "Halcyon Production" }],
     warnings: [],
   };
 }
@@ -1019,7 +1102,7 @@ function buildAzureThreads() {
   const threads = CHATTY_AGENTS.slice(0, 6).map((a, i) => {
     const rand = rngFor("thread" + a.name);
     return {
-      id: `demo-thread-${i}`,
+      id: `thread_${guid("thread:" + a.name).replace(/-/g, "").slice(0, 24)}`,
       assistantId: a.appId,
       assistantName: a.name,
       messageCount: between(rand, 4, 28),
@@ -1062,47 +1145,47 @@ const COND = (field, operator, value) => ({ field, operator, value });
 
 const AG_DEMO_POLICIES = [
   // Custom policies an admin wrote.
-  { id: "demo-pol-1", name: "Escalate orphaned agents", type: "lifecycle", status: "active", severity: "critical",
+  { id: "pol_1", name: "Escalate orphaned agents", type: "lifecycle", status: "active", severity: "critical",
     description: "Any agent whose owner no longer has an active account is escalated to the AI governance group.",
     conditions: [COND("is_orphaned", "is_true", "true")], actions: [{ type: "escalate" }, { type: "notify" }],
     scope: { type: "all agents" }, created_at: daysAgo(96) },
-  { id: "demo-pol-2", name: "Flag organisation-wide consent", type: "access", status: "active", severity: "high",
+  { id: "pol_2", name: "Flag organisation-wide consent", type: "access", status: "active", severity: "high",
     description: "Agents consented for every user in the tenant are flagged for review.",
     conditions: [COND("consent_type", "equals", "AllPrincipals")], actions: [{ type: "flag" }],
     scope: { type: "all agents" }, created_at: daysAgo(88) },
-  { id: "demo-pol-3", name: "Dormant but privileged (90 days)", type: "lifecycle", status: "active", severity: "high",
+  { id: "pol_3", name: "Dormant but privileged (90 days)", type: "lifecycle", status: "active", severity: "high",
     description: "Agents with no activity for 90 days that still hold application permissions.",
     conditions: [COND("days_since_last_activity", "greater_than", "90"), COND("permission_count", "greater_than", "0")],
     actions: [{ type: "flag" }, { type: "notify" }], scope: { type: "all agents" }, created_at: daysAgo(71) },
-  { id: "demo-pol-4", name: "External HTTP connector review", type: "data", status: "active", severity: "high",
+  { id: "pol_4", name: "External HTTP connector review", type: "data", status: "active", severity: "high",
     description: "Any agent holding a connector that can reach outside the tenant.",
     conditions: [COND("has_http_connector", "is_true", "true")], actions: [{ type: "flag" }],
     scope: { type: "all agents" }, created_at: daysAgo(64) },
-  { id: "demo-pol-5", name: "Suspend critical unreviewed agents", type: "lifecycle", status: "draft", severity: "critical",
+  { id: "pol_5", name: "Suspend critical unreviewed agents", type: "lifecycle", status: "draft", severity: "critical",
     description: "Draft — would suspend any agent scoring above 85 that has never been recertified.",
     conditions: [COND("risk_score", "greater_than", "85")], actions: [{ type: "suspend" }],
     scope: { type: "all agents" }, created_at: daysAgo(12) },
 
   // Policies created by deploying the GDPR pack.
-  { id: "demo-gdpr-1", pack_id: "gdpr", name: "[GDPR] Art. 5(1)(c) — data minimisation in agent scope", type: "data",
+  { id: "pol_gdpr_1", pack_id: "gdpr", name: "[GDPR] Art. 5(1)(c) — data minimisation in agent scope", type: "data",
     status: "active", severity: "high", description: "Agents must not hold broader data access than their stated purpose requires.",
     conditions: [COND("has_dangerous_permissions", "is_true", "true")], actions: [{ type: "flag" }], scope: { type: "all agents" }, created_at: daysAgo(41) },
-  { id: "demo-gdpr-2", pack_id: "gdpr", name: "[GDPR] Art. 5(2) — accountability: named owner required", type: "lifecycle",
+  { id: "pol_gdpr_2", pack_id: "gdpr", name: "[GDPR] Art. 5(2) — accountability: named owner required", type: "lifecycle",
     status: "active", severity: "critical", description: "Every processing activity needs an accountable owner.",
     conditions: [COND("is_orphaned", "is_true", "true")], actions: [{ type: "escalate" }], scope: { type: "all agents" }, created_at: daysAgo(41) },
-  { id: "demo-gdpr-3", pack_id: "gdpr", name: "[GDPR] Art. 28 — processor due diligence on third-party agents", type: "access",
+  { id: "pol_gdpr_3", pack_id: "gdpr", name: "[GDPR] Art. 28 — processor due diligence on third-party agents", type: "access",
     status: "active", severity: "high", description: "Third-party AI apps consented org-wide require a processor agreement on file.",
     conditions: [COND("consent_type", "equals", "AllPrincipals")], actions: [{ type: "flag" }, { type: "notify" }], scope: { type: "all agents" }, created_at: daysAgo(41) },
-  { id: "demo-gdpr-4", pack_id: "gdpr", name: "[GDPR] Art. 30 — records of processing kept current", type: "lifecycle",
+  { id: "pol_gdpr_4", pack_id: "gdpr", name: "[GDPR] Art. 30 — records of processing kept current", type: "lifecycle",
     status: "active", severity: "medium", description: "Agents unreviewed for more than 12 months fall out of the ROPA.",
     conditions: [COND("days_since_last_activity", "greater_than", "365")], actions: [{ type: "flag" }], scope: { type: "all agents" }, created_at: daysAgo(41) },
-  { id: "demo-gdpr-5", pack_id: "gdpr", name: "[GDPR] Art. 32 — security of processing: connector review", type: "data",
+  { id: "pol_gdpr_5", pack_id: "gdpr", name: "[GDPR] Art. 32 — security of processing: connector review", type: "data",
     status: "active", severity: "high", description: "External connectors must be assessed before an agent processes personal data.",
     conditions: [COND("has_http_connector", "is_true", "true")], actions: [{ type: "flag" }], scope: { type: "all agents" }, created_at: daysAgo(41) },
-  { id: "demo-gdpr-6", pack_id: "gdpr", name: "[GDPR] Art. 35 — DPIA trigger on high-risk agents", type: "compliance",
+  { id: "pol_gdpr_6", pack_id: "gdpr", name: "[GDPR] Art. 35 — DPIA trigger on high-risk agents", type: "compliance",
     status: "active", severity: "high", description: "Agents scoring high or critical require a documented DPIA.",
     conditions: [COND("risk_level", "equals", "critical")], actions: [{ type: "flag" }, { type: "notify" }], scope: { type: "all agents" }, created_at: daysAgo(41) },
-  { id: "demo-gdpr-7", pack_id: "gdpr", name: "[GDPR] Art. 44 — transfers outside the EEA", type: "data",
+  { id: "pol_gdpr_7", pack_id: "gdpr", name: "[GDPR] Art. 44 — transfers outside the EEA", type: "data",
     status: "active", severity: "critical", description: "Agents egressing personal data outside the tenant need a transfer basis.",
     conditions: [COND("has_http_connector", "is_true", "true"), COND("consent_type", "equals", "AllPrincipals")],
     actions: [{ type: "escalate" }], scope: { type: "all agents" }, created_at: daysAgo(41) },
@@ -1115,7 +1198,7 @@ function buildViolations() {
   offenders.slice(0, 14).forEach((a, i) => {
     const pol = a.isOrphaned ? AG_DEMO_POLICIES[0] : AG_DEMO_POLICIES[1];
     rows.push({
-      id: "demo-viol-" + i,
+      id: "vio_" + i,
       policy_id: pol.id,
       policy_name: pol.name,
       agent_id: a.id,
@@ -1182,7 +1265,7 @@ function buildAlerts(thresholdMinutes) {
     const idleMinutes = last ? Math.round((NOW - last) / 60000) : null;
     const idleDays = idleMinutes ? Math.floor(idleMinutes / 1440) : null;
     out.push({
-      id: "demo-alert-" + i,
+      id: "alr_" + i,
       agent_id: a.id,
       agent_name: a.name,
       vendor: a.vendor,
@@ -1223,7 +1306,7 @@ function buildRecertificationCampaigns() {
   const targets = AG_DEMO_AGENTS.filter((a) => a.risk.level === "critical" || a.risk.level === "high").slice(0, 10);
   const states = ["pending", "pending", "approved", "pending", "escalated", "approved", "rejected", "pending", "approved", "pending"];
   return targets.map((a, i) => ({
-    id: "demo-recert-" + i,
+    id: "rct_" + i,
     agent_id: a.id,
     agent_name: a.name,
     platform: a.platform,
@@ -1251,8 +1334,8 @@ function buildPromptFlags() {
   return seeds.map((s, i) => {
     const a = AG_DEMO_AGENTS.find((x) => x.name === s[0]);
     return {
-      id: "demo-flag-" + i,
-      agent_id: a ? a.id : "demo-unknown-" + i,
+      id: "flg_" + i,
+      agent_id: a ? a.id : "unk_" + i,
       agent_name: s[0],
       platform: a ? a.platform : "copilot_studio",
       severity: s[1],
@@ -1267,7 +1350,7 @@ const AG_DEMO_PROMPT_FLAGS = buildPromptFlags();
 
 function buildClaudeBudgetMembers() {
   return {
-    org: { name: "Northwind Traders", month: new Date(NOW).toISOString().slice(0, 7) },
+    org: { name: "Halcyon Group", month: new Date(NOW).toISOString().slice(0, 7) },
     members: ACTIVE_PEOPLE.map((p, i) => {
       const rand = rngFor("budget" + p.userPrincipalName);
       const inTok = between(rand, 400000, 4200000);
@@ -1307,8 +1390,8 @@ const AG_DEMO_PRICING = {
 // sub-lists simply show nothing rather than risking a throw.
 function buildGoogleVertexDiscovery() {
   return {
-    projectId: "northwind-ai-prod",
-    domain: "northwind.example",
+    projectId: "halcyon-ai-prod",
+    domain: "halcyongroup.com",
     reasoningEngines: [
       { id: "re-territory", displayName: "Territory Planner", description: "Allocates sales territories from BigQuery", region: "europe-west4", pythonVersion: "3.11", createTime: daysAgo(121) },
       { id: "re-support", displayName: "Support Deflection Agent", description: "Answers tier-1 questions from the help centre", region: "europe-west4", pythonVersion: "3.11", createTime: daysAgo(84) },
@@ -1397,7 +1480,7 @@ function mockFor(path, method, body) {
 
   // ── discovery ─────────────────────────────────────────────────────────────
   // Never write fabricated agents to the server.
-  if (has("/discovery/agents") && m === "POST") return { ok: true, persisted: 0, note: "demo mode - write suppressed" };
+  if (has("/discovery/agents") && m === "POST") return { ok: true, persisted: 0, note: "not persisted" };
   if (has("/discovery/agents")) return { agents: AG_DEMO_AGENTS, warnings: [] };
   if (has("/discovery/run")) return agDemoDiscoveryResult();
 
@@ -1463,9 +1546,9 @@ function mockFor(path, method, body) {
   // leave the browser in demo mode, so they are swallowed here and the UI
   // gets its success response. Kept together, and above the generic /claude
   // and /openai read handlers would not catch them anyway.
-  if (has("/openai/gpt")) return Object.assign({}, OK, { action: "deleted", note: "demo mode - nothing deleted" });
-  if (has("/claude/project")) return Object.assign({}, OK, { action: "deleted", note: "demo mode - nothing deleted" });
-  if (has("/claude/workspace/archive")) return Object.assign({}, OK, { action: "archived", note: "demo mode - nothing archived" });
+  if (has("/openai/gpt")) return Object.assign({}, OK, { action: "deleted", note: "not applied" });
+  if (has("/claude/project")) return Object.assign({}, OK, { action: "deleted", note: "not applied" });
+  if (has("/claude/workspace/archive")) return Object.assign({}, OK, { action: "archived", note: "not applied" });
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
   // READS PASS THROUGH to the real server. These are small, fast queries that
@@ -1477,17 +1560,22 @@ function mockFor(path, method, body) {
   if (has("/lifecycle/approval-statuses") || has("/lifecycle/lifecycle-statuses")
       || has("/lifecycle/blocked-agents")) return undefined;
 
-  // WRITES are suppressed only for fabricated agents. A `demo-` id must never
+  // WRITES are suppressed only for fabricated agents: such an id must never
   // reach the server — that would persist a blocked_agents row for an agent
   // that does not exist. Any other id is a REAL agent the admin is acting on
   // from the AI Hub, so it goes through and behaves normally with demo mode on.
+  //
+  // Membership test, NOT a string prefix. Ids used to start with "demo-", but
+  // Agent Governance prints raw ids on screen (the Discovery detail panel and
+  // the permissions table both do), so a marker in the id was visible to a
+  // prospect. FABRICATED_IDS carries the same knowledge without leaking it.
   if (has("/lifecycle/")) {
     let id = "";
     try {
       const b = typeof body === "string" ? JSON.parse(body) : (body || {});
       id = String(b.agent_id || b.bot_id || b.app_id || b.id || "");
     } catch { /* unparseable body — treat as real and let it through */ }
-    if (id.startsWith("demo-")) return Object.assign({}, OK, { note: "demo agent - not persisted" });
+    if (isFabricatedId(id)) return Object.assign({}, OK, { note: "not persisted" });
     return undefined;
   }
 
@@ -1498,7 +1586,7 @@ function mockFor(path, method, body) {
   if (has("/policies/seed-templates")) return { success: true, created: 0, total: AG_DEMO_POLICIES.length };
   if (has("/policies")) {
     if (m === "GET") return AG_DEMO_POLICIES;
-    return Object.assign({}, OK, { id: "demo-pol-" + Date.now() });
+    return Object.assign({}, OK, { id: "pol_" + Date.now() });
   }
   if (has("/policy-packs")) {
     if (p.includes("/simulate")) return buildSimulation(body);
@@ -1555,9 +1643,9 @@ function mockFor(path, method, body) {
     return Object.assign({}, OK, { id: AG_DEMO_KEYS.oauthKeyId });
   }
   if (has("/google/connect") || has("/openai/connect") || has("/claude/connect") || has("/aws/connect")) {
-    return Object.assign({}, OK, { id: "demo-connected-key" });
+    return Object.assign({}, OK, { id: guid("key:connected") });
   }
-  if (has("/health")) return { ok: true, status: "ok", version: "demo" };
+  if (has("/health")) return { ok: true, status: "ok", version: "0.1.0" };
 
   return undefined; // nothing matched
 }

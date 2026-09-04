@@ -115,7 +115,7 @@ function trim(value) {
   if (value && typeof value === "object") {
     for (const k of ["events", "files", "rows", "items", "data", "log", "systems"]) {
       if (Array.isArray(value[k]) && value[k].length > TRIM_TO) {
-        return { ...value, [k]: value[k].slice(0, TRIM_TO), _demo_trimmed: true };
+        return { ...value, [k]: value[k].slice(0, TRIM_TO), _truncated: true };
       }
     }
   }

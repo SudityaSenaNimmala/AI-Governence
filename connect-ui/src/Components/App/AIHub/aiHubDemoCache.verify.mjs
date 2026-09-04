@@ -80,9 +80,9 @@ await t("object with a big events[] trims that field and flags it", () => {
   if (!cachePut("/dlp/summary", JSON.stringify(big))) throw new Error("refused");
   const back = JSON.parse(cacheGet("/dlp/summary"));
   if (back.events.length !== 600) throw new Error("events " + back.events.length);
-  if (back._demo_trimmed !== true) throw new Error("not flagged as trimmed");
+  if (back._truncated !== true) throw new Error("not flagged as trimmed");
   if (back.byService.length !== 1) throw new Error("sibling field lost");
-  return "events trimmed, byService preserved, _demo_trimmed set";
+  return "events trimmed, byService preserved, _truncated set";
 });
 
 console.log("\n=== quota exhaustion must not corrupt existing entries ===");

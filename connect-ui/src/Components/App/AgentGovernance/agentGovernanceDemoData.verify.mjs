@@ -123,6 +123,60 @@ t("packs rows", () => g("/policy-packs").map(pk => [pk.id, pk.framework, pk.depl
 t("simulate result", () => { const s = g("/policies/simulate", "POST"); s.matches.map(mm => mm.agent_name); return `would_flag ${s.would_flag}, ${s.matches.length} match rows`; });
 t("alerts/check", () => g("/alerts/check", "POST").alerts.map(a => a.message).length + " alerts");
 
+console.log("\n=== NOTHING ON SCREEN MAY READ AS FABRICATED ===");
+// Agent Governance prints raw identifiers: the Discovery detail panel renders
+// `Source: {agent.discoverySource}` and the agent id, and the permissions table
+// prints appId under every application name. An id of "demo-copilot_studio-0"
+// or a source of "demo_dataset" was therefore visible to a prospect. This walks
+// every payload a tab can render and fails on the substring anywhere in it.
+t("no payload contains the word 'demo' or a placeholder tenant name", () => {
+  const PATHS = [
+    "/discovery/agents", "/discovery/run", "/azure/discover?oauth_key_id=k",
+    "/activity/chats?oauth_key_id=k", "/activity/files?oauth_key_id=k",
+    "/activity/knowledge?oauth_key_id=k", "/activity/agent-permissions?oauth_key_id=k",
+    "/activity/azure/usage?oauth_key_id=k&period=P7D", "/activity/azure/threads?oauth_key_id=k",
+    "/activity/azure/assistants?oauth_key_id=k", "/cost/azure?period=P30D",
+    "/policies", "/policy-packs", "/policies/violations", "/alerts/check",
+    "/google/discover?oauth_key_id=k", "/google/user-activity?oauth_key_id=k",
+    "/oauth-keys",
+  ];
+  // "Northwind" and "Contoso" are the canonical Microsoft sample datasets — a
+  // prospect who knows the ecosystem reads either as "this is a demo tenant".
+  const BANNED = [/demo/i, /northwind/i, /contoso/i, /fabrikam/i, /\bfoo\b/i, /lorem/i, /test[-_ ]?agent/i, /placeholder/i, /sample/i, /\.example\b/i];
+  const hits = [];
+  const walk = (node, where) => {
+    if (typeof node === "string") {
+      for (const re of BANNED) if (re.test(node)) hits.push(`${where} = ${JSON.stringify(node.slice(0, 90))}`);
+      return;
+    }
+    if (Array.isArray(node)) { node.forEach((v, i) => walk(v, `${where}[${i}]`)); return; }
+    if (node && typeof node === "object") {
+      for (const [k, v] of Object.entries(node)) {
+        for (const re of BANNED) if (re.test(k)) hits.push(`${where}.${k} (key)`);
+        walk(v, `${where}.${k}`);
+      }
+    }
+  };
+  for (const p of PATHS) {
+    const r = agDemoResponse(p, { method: p === "/policies/simulate" ? "POST" : "GET" });
+    if (r === undefined || (r && typeof r.then === "function")) continue;
+    walk(r, p);
+  }
+  if (hits.length) throw new Error(`${hits.length} leak(s):\n      ` + hits.slice(0, 14).join("\n      "));
+  return `${PATHS.length} payloads clean`;
+});
+t("agent ids and sources look like the real thing", () => {
+  const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const REAL_SOURCES = new Set(["dataverse","graph_copilot_agents","graph_search_agents","graph_teams_catalog","graph_user_installed_apps","azure_management","oauth","vertex_ai_reasoning_engines","google_admin_sdk","google_chat_api","gemini_enterprise"]);
+  for (const a of AG_DEMO_AGENTS) {
+    if (!REAL_SOURCES.has(a.discoverySource)) throw new Error(`${a.name}: discoverySource "${a.discoverySource}" is not a value the product actually reports`);
+    const looksReal = GUID.test(a.id) || a.id.startsWith("projects/") || a.id.startsWith("spaces/") || a.id.startsWith("gems/");
+    if (!looksReal) throw new Error(`${a.name}: id "${a.id}" does not look like a real resource id`);
+  }
+  const ms = AG_DEMO_AGENTS.filter(a => GUID.test(a.id)).length;
+  return `${ms} GUID ids, ${AG_DEMO_AGENTS.length - ms} Google resource paths, all sources real`;
+});
+
 console.log("\n=== lifecycle: real reads, demo-only writes suppressed ===");
 const raw = (p, m, body) => agDemoResponse(p, { method: m || "GET", body });
 t("status reads pass through to the real server", () => {
@@ -132,7 +186,7 @@ t("status reads pass through to the real server", () => {
   return "blocked-agents, approval-statuses, lifecycle-statuses all live";
 });
 t("a write for a FABRICATED agent is suppressed", () => {
-  const r = raw("/lifecycle/block", "POST", JSON.stringify({ agent_id: "demo-copilot_studio-0", reason: "x" }));
+  const r = raw("/lifecycle/block", "POST", JSON.stringify({ agent_id: AG_DEMO_AGENTS[0].id, reason: "x" }));
   if (r === undefined) throw new Error("a demo agent id reached the network");
   if (r.ok !== true) throw new Error("should still report success to the UI");
   return "suppressed, UI still sees success";
