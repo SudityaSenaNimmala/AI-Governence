@@ -1,11 +1,16 @@
-// Temp verification: replays the EXACT property expressions the Agent
-// Governance components evaluate during render, against the demo mocks.
-// Any expression that throws here would blank the live page.
+// Replays the EXACT property expressions the Agent Governance components
+// evaluate during render, against the demo dataset. Anything that throws here
+// would blank the live page, because AgentGovernance.jsx mounts all six tabs at
+// once and toggles display — one throw takes the whole screen.
+//
+// Run: node src/Components/App/AgentGovernance/agentGovernanceDemoData.verify.mjs
 globalThis.localStorage = { _v: {}, getItem(k){return this._v[k]??null;}, setItem(k,v){this._v[k]=String(v);}, removeItem(k){delete this._v[k];} };
 globalThis.window = { location: { search: "?agDemo=1", origin: "http://localhost" }, fetch: async () => { throw new Error("REAL NETWORK CALL"); } };
 
-const { agDemoResponse, AG_DEMO_AGENTS, agDemoDiscoveryResult } = await import("./agentGovernanceDemoData.js");
-const g = (p, m) => agDemoResponse(p, { method: m || "GET" });
+const { agDemoResponse, AG_DEMO_AGENTS, agDemoDiscoveryResult, AG_DEMO_KEYS } =
+  await import("./agentGovernanceDemoData.js");
+const g = (p, m, body) => agDemoResponse(p, { method: m || "GET", body });
+const rejects = (r) => r && typeof r.then === "function";
 
 let fails = 0;
 const t = (label, fn) => {
@@ -13,280 +18,60 @@ const t = (label, fn) => {
   catch (e) { console.log(`  THROW ${label}  ::  ${e.message}`); fails++; }
 };
 
-console.log("\n=== AgentPermissionsPanel (UserActivityTab) ===");
-const perms = g("/activity/agent-permissions?oauth_key_id=k");
-t("data.totalApps / data.summary.*", () => {
-  const s = perms.summary;
-  return `${perms.totalApps} apps, file=${s.withFileAccess} write=${s.withWriteAccess} crit=${s.criticalRisk} agents=${s.agentCount}`;
+console.log("\n=== GOOGLE ONLY — no Microsoft surface at all ===");
+t("no Microsoft / OpenAI / Claude / AWS agents", () => {
+  const vendors = [...new Set(AG_DEMO_AGENTS.map(a => a.vendor))];
+  if (vendors.length !== 1 || vendors[0] !== "Google") throw new Error("vendors present: " + vendors.join(", "));
+  const bad = AG_DEMO_AGENTS.map(a => a.platform).filter(p =>
+    /copilot|personal_agent|teams|sharepoint|isv|azure|oauth_app|openai|claude|aws|bedrock|sagemaker/.test(p));
+  if (bad.length) throw new Error("non-Google platform(s): " + [...new Set(bad)].join(", "));
+  const plats = [...new Set(AG_DEMO_AGENTS.map(a => a.platform))];
+  return `${AG_DEMO_AGENTS.length} agents, all Google, across ${plats.length} platforms`;
 });
-t("riskyApps filter (uses summary.criticalCount)", () =>
-  perms.apps.filter(a => a.summary.hasFileAccess || a.summary.hasWriteAccess || a.summary.criticalCount > 0).length + " risky");
-t("per-row read/write split + filePermissions map (THE CRASH)", () => {
-  let chips = 0, fileChips = 0;
-  for (const app of perms.apps) {
-    app.permissions.filter(p => !p.isWrite);
-    app.permissions.filter(p => p.isWrite);
-    if (!["critical","high","medium","low"].includes(app.summary.riskLevel)) throw new Error("bad riskLevel " + app.summary.riskLevel);
-    if (app.summary.hasFileAccess) fileChips += app.summary.filePermissions.map(fp => fp.includes("Write")).length;
-    for (const p of app.permissions) {
-      if (!p.permission) throw new Error("permission item missing .permission");
-      if (!["files","mail","directory","communications","calendar","other"].includes(p.category)) throw new Error("bad category " + p.category);
-      if (!["critical","high","medium","low"].includes(p.level)) throw new Error("bad level " + p.level);
-      if (!p.resourceDisplayName) throw new Error("missing resourceDisplayName");
-      chips++;
-    }
+t("Microsoft credentials are null so its UI never mounts", () => {
+  for (const k of ["oauthKeyId", "tenantId", "dataverseEnvUrl", "azureSubscriptionId", "openaiKeyId", "claudeKeyId", "awsKeyId"]) {
+    if (AG_DEMO_KEYS[k] !== null) throw new Error(`${k} is set — that would bring a non-Google surface back`);
   }
-  return `${chips} permission chips, ${fileChips} file-access chips`;
+  if (!AG_DEMO_KEYS.googleKeyId || !AG_DEMO_KEYS.geminiEnterpriseKeyId) throw new Error("Google keys must be set");
+  return "google + gemini_enterprise only";
+});
+t("Microsoft endpoints reject rather than serve a shape", () => {
+  for (const p of ["/azure/discover?oauth_key_id=k", "/activity/azure/usage?period=P7D",
+                   "/activity/azure/threads", "/activity/agent-permissions?oauth_key_id=k",
+                   "/activity/chats?oauth_key_id=k", "/activity/files?oauth_key_id=k",
+                   "/activity/knowledge?oauth_key_id=k", "/cost/azure?period=P7D"]) {
+    if (!rejects(g(p))) throw new Error(p + " returned data — a Microsoft panel could render from it");
+  }
+  return "azure, graph activity, permissions and azure cost all reject";
 });
 
-console.log("\n=== AzureAIFoundryView (DiscoveryTab, auto-loads on mount) ===");
-const az = g("/azure/discover?oauth_key_id=k");
-t("totalDeployments reduce", () => az.openAIResources.reduce((s, r) => s + r.deployments.length, 0) + " deployments");
-t("totalTPM nested reduce", () => az.openAIResources.reduce((s, r) => s + r.deployments.reduce((ds, d) => ds + (d.capacityTPM || 0), 0), 0) + " TPM");
-t("uniqueModels flatMap -> d.modelName", () => [...new Set(az.openAIResources.flatMap(r => r.deployments.map(d => d.modelName)))].join(", "));
-t("workspaceCount = foundryAgents.filter(!modelName)", () => az.foundryAgents.filter(a => !a.modelName).length + " workspaces");
-t("all six unguarded arrays present", () => {
-  for (const k of ["openAIResources","serverlessEndpoints","foundryAgents","aiServices","accessControl","subscriptions"]) {
-    if (!Array.isArray(az[k])) throw new Error(`${k} is ${az[k] === undefined ? "MISSING" : typeof az[k]}`);
-  }
-  return "openAIResources, serverlessEndpoints, foundryAgents, aiServices, accessControl, subscriptions";
-});
-t("deployment row fields", () => {
-  for (const r of az.openAIResources) for (const d of r.deployments) {
-    void d.id; void d.name; void d.modelName; void (d.modelVersion || "-");
-    void (d.capacityTPM >= 1000 ? d.capacityTPM / 1000 : d.capacityTPM);
-    void (d.contentFilter ? d.contentFilter : "None"); void (d.skuName || "-"); void (d.provisioningState || "Unknown");
-  }
-  return "ok";
-});
-t("accessControl row fields", () => az.accessControl.slice(0, 50)
-  .map(ac => `${ac.principalId.slice(0,8)}/${ac.principalType}/${ac.roleName.includes("Owner")}/${ac.resourceId.split("/").pop()}`).length + " rows");
-t("serverless + aiServices + subscriptions rows", () => {
-  az.serverlessEndpoints.map(ep => [ep.id, ep.name, ep.modelId, ep.workspaceName, ep.location, ep.state]);
-  az.aiServices.map(s => [s.id, s.name, s.kind, s.location, s.skuName, s.publicAccess]);
-  az.subscriptions.map(s => [s.id, s.name]);
-  return "ok";
-});
-
-console.log("\n=== Azure usage panel (UserActivityTab) ===");
-const usage = g("/activity/azure/usage?oauth_key_id=k&period=P7D");
-t("KPI values are non-zero", () => `${usage.totalRequests?.toLocaleString()} requests, ${usage.totalTokens?.toLocaleString()} tokens, ${usage.resources?.length} resources`);
-t("resources.flatMap(r => r.metrics.deployments.map(...))", () =>
-  usage.resources.flatMap(r => r.metrics.deployments.map(d =>
-    `${r.resourceName}/${d.deploymentName}/${d.requestCount.toLocaleString()}/${d.promptTokens.toLocaleString()}/${d.completionTokens.toLocaleString()}/${d.totalTokens.toLocaleString()}`)).length + " rows");
-t("threads shape", () => (g("/activity/azure/threads?oauth_key_id=k").threads || []).length + " threads");
-t("assistants shape", () => (g("/activity/azure/assistants?oauth_key_id=k").assistants || []).length + " assistants");
-
-console.log("\n=== ChatCard / FileRow / KnowledgeSourceCard ===");
-t("chats: messages split + startTime", () => {
-  const cs = g("/activity/chats?oauth_key_id=k").chats;
-  for (const c of cs) {
-    c.messages.filter(m => m.from !== "bot"); c.messages.filter(m => m.from === "bot");
-    if (Number.isNaN(new Date(c.startTime).getTime())) throw new Error("bad startTime");
-    for (const m of c.messages) { if (!m.text || !m.fromName) throw new Error("message missing text/fromName"); }
-  }
-  return cs.length + " chats";
-});
-t("files: relatedAgents are strings", () => {
-  const fs = g("/activity/files?oauth_key_id=k").files;
-  for (const f of fs) {
-    if (f.relatedAgents?.length > 0) for (const a of f.relatedAgents) if (typeof a !== "string") throw new Error("relatedAgents item is not a string");
-    if (Number.isNaN(new Date(f.timestamp).getTime())) throw new Error("bad timestamp");
-  }
-  return fs.length + " file rows";
-});
-t("knowledge: bots[].sources[] typed", () => {
-  const types = new Set(["sharepoint","website","dataverse_table","azure_storage","file_analysis","model_knowledge","knowledge_article","connector","uploaded_file","other"]);
-  const bots = g("/activity/knowledge?oauth_key_id=k").bots;
-  let n = 0;
-  for (const b of bots) for (const s of b.sources) { if (!types.has(s.type)) throw new Error("unknown source type " + s.type); n++; }
-  return `${bots.length} bots, ${n} sources`;
-});
-
-console.log("\n=== Overview / Discovery (context agents) ===");
+console.log("\n=== Discovery (context agents) ===");
 t("computeMetrics-style rollup", () => {
   const A = AG_DEMO_AGENTS, now = Date.now(), TH = 30 * 864e5;
   const dist = { critical:0, high:0, medium:0, low:0 };
-  for (const a of A) { dist[a.risk.level]++; a.risk.factors.map(f => [f.signal, f.weight, f.description]); a.connectors.map(c => c.name); a.permissions.map(pp => pp.name); }
+  for (const a of A) {
+    dist[a.risk.level]++;
+    a.risk.factors.map(f => [f.signal, f.weight, f.description]);
+    a.connectors.map(c => [c.name, c.type]);
+    a.permissions.map(pp => pp.name);
+  }
   const stale = A.filter(a => { const l = a.activity.lastActiveTimestamp ? new Date(a.activity.lastActiveTimestamp).getTime() : null; return !l || now - l > TH; });
-  return `${A.length} agents, ${stale.length} stale, dist ${JSON.stringify(dist)}`;
+  const orph = A.filter(a => a.isOrphaned);
+  return `${A.length} agents, ${stale.length} stale, ${orph.length} orphaned, dist ${JSON.stringify(dist)}`;
 });
-t("discovery result tenant fields", () => { const r = agDemoDiscoveryResult(); return `${r.tenant.name} / ${r.agents.length} agents / ${r.warnings.length} warnings`; });
-
-console.log("\n=== Policies / Packs / Alerts ===");
-t("policies array + pack grouping", () => {
-  const ps = g("/policies");
-  for (const p of ps) { p.conditions.map(c => `${c.field} ${c.operator} ${c.value}`); (p.actions || []).map(a => a.type); void p.scope?.type; }
-  return `${ps.length} policies, ${new Set(ps.filter(p => p.pack_id).map(p => p.pack_id)).size} pack group(s)`;
+t("tenant reads as a Workspace domain, not onmicrosoft.com", () => {
+  const r = agDemoDiscoveryResult();
+  if (/onmicrosoft/i.test(r.tenant.domain)) throw new Error("tenant domain still Microsoft: " + r.tenant.domain);
+  if (!/Google/i.test(r.tenant.license)) throw new Error("licence does not read as Google: " + r.tenant.license);
+  return `${r.tenant.name} / ${r.tenant.domain} / ${r.tenant.license}`;
 });
-// The modal reads the ENVELOPE (`packs.packs`), not a bare array. Returning an
-// array left it showing "No policy packs available."
-t("packs come back as an envelope the modal can read", () => {
-  const env = g("/policy-packs");
-  if (Array.isArray(env)) throw new Error("returned a bare array — the modal reads packs.packs and would render empty");
-  const rows = env.packs || [];
-  if (rows.length !== 7) throw new Error(`packs.packs has ${rows.length} rows`);
-  for (const pk of rows) {
-    for (const k of ["id", "framework", "name", "ruleCount", "enforceable", "monitored", "attestations", "deployed"]) {
-      if (pk[k] === undefined) throw new Error(`pack ${pk.id} missing ${k}`);
-    }
-  }
-  return `packs.packs = ${rows.length} rows, ${rows.reduce((s, p) => s + p.ruleCount, 0)} rules`;
-});
-
-// THE BLANK PAGE. handleSimulate does `body.policies[0]` un-chained inside a
-// setSimResults functional updater, which React runs outside the try/catch —
-// so a missing `policies` array throws during render and blanks the screen
-// rather than showing an error card. Replay that exact expression.
-t("simulate: body.policies[0] resolves (un-chained in PoliciesTab)", () => {
-  const body = g("/policies/simulate", "POST");
-  if (!Array.isArray(body.policies)) throw new Error("no policies[] — body.policies[0] would throw and blank the page");
-  const res = { ...body.policies[0], agents_evaluated: body.agents_evaluated };
-  for (const k of ["would_flag", "already_open", "newly_flagged", "severity", "actions", "matches"]) {
-    if (res[k] === undefined) throw new Error(`policies[0] missing ${k}`);
-  }
-  if (!Array.isArray(res.actions) || res.actions.some(a => typeof a !== "string")) {
-    throw new Error("actions must be action-type STRINGS — the pack aggregation adds them to a Set and renders them directly");
-  }
-  res.matches.map(mm => {
-    if (!mm.agent_name) throw new Error("match row missing agent_name");
-    if (mm.already_open === undefined) throw new Error("match row missing already_open");
-    if (!mm.condition_triggered) throw new Error("match row missing condition_triggered");
-  });
-  return `${res.agents_evaluated} evaluated, would_flag ${res.would_flag}, ${res.matches.length} match rows, actions [${res.actions.join(", ")}]`;
-});
-t("pack simulate aggregates per policy, not one repeated total", () => {
-  const totals = new Set();
-  for (const pid of ["pol_gdpr_2", "pol_gdpr_5", "pol_gdpr_7"]) {
-    const b = agDemoResponse("/policies/simulate", { method: "POST", body: JSON.stringify({ policy_id: pid }) });
-    const pol = b.policies?.[0];
-    if (!pol) throw new Error("no policies[0] for " + pid);
-    totals.add(pol.would_flag);
-  }
-  if (totals.size === 1) throw new Error("every policy returned the same count — the conditions are not being evaluated");
-  return `distinct would_flag values across policies: ${[...totals].join(", ")}`;
-});
-t("alerts/check", () => g("/alerts/check", "POST").alerts.map(a => a.message).length + " alerts");
-
-console.log("\n=== NOTHING ON SCREEN MAY READ AS FABRICATED ===");
-// Agent Governance prints raw identifiers: the Discovery detail panel renders
-// `Source: {agent.discoverySource}` and the agent id, and the permissions table
-// prints appId under every application name. An id of "demo-copilot_studio-0"
-// or a source of "demo_dataset" was therefore visible to a prospect. This walks
-// every payload a tab can render and fails on the substring anywhere in it.
-t("no payload contains the word 'demo' or a placeholder tenant name", () => {
-  const PATHS = [
-    "/discovery/agents", "/discovery/run", "/azure/discover?oauth_key_id=k",
-    "/activity/chats?oauth_key_id=k", "/activity/files?oauth_key_id=k",
-    "/activity/knowledge?oauth_key_id=k", "/activity/agent-permissions?oauth_key_id=k",
-    "/activity/azure/usage?oauth_key_id=k&period=P7D", "/activity/azure/threads?oauth_key_id=k",
-    "/activity/azure/assistants?oauth_key_id=k", "/cost/azure?period=P30D",
-    "/policies", "/policy-packs", "/policies/violations", "/alerts/check",
-    "/google/discover?oauth_key_id=k", "/google/user-activity?oauth_key_id=k",
-    "/oauth-keys",
-  ];
-  // "Northwind" and "Contoso" are the canonical Microsoft sample datasets — a
-  // prospect who knows the ecosystem reads either as "this is a demo tenant".
-  const BANNED = [/demo/i, /northwind/i, /contoso/i, /fabrikam/i, /\bfoo\b/i, /lorem/i, /test[-_ ]?agent/i, /placeholder/i, /sample/i, /\.example\b/i];
-  const hits = [];
-  const walk = (node, where) => {
-    if (typeof node === "string") {
-      for (const re of BANNED) if (re.test(node)) hits.push(`${where} = ${JSON.stringify(node.slice(0, 90))}`);
-      return;
-    }
-    if (Array.isArray(node)) { node.forEach((v, i) => walk(v, `${where}[${i}]`)); return; }
-    if (node && typeof node === "object") {
-      for (const [k, v] of Object.entries(node)) {
-        for (const re of BANNED) if (re.test(k)) hits.push(`${where}.${k} (key)`);
-        walk(v, `${where}.${k}`);
-      }
-    }
-  };
-  for (const p of PATHS) {
-    const r = agDemoResponse(p, { method: p === "/policies/simulate" ? "POST" : "GET" });
-    if (r === undefined || (r && typeof r.then === "function")) continue;
-    walk(r, p);
-  }
-  if (hits.length) throw new Error(`${hits.length} leak(s):\n      ` + hits.slice(0, 14).join("\n      "));
-  return `${PATHS.length} payloads clean`;
-});
-t("agent ids and sources look like the real thing", () => {
-  const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-  const REAL_SOURCES = new Set(["dataverse","graph_copilot_agents","graph_search_agents","graph_teams_catalog","graph_user_installed_apps","azure_management","oauth","vertex_ai_reasoning_engines","google_admin_sdk","google_chat_api","gemini_enterprise"]);
-  for (const a of AG_DEMO_AGENTS) {
-    if (!REAL_SOURCES.has(a.discoverySource)) throw new Error(`${a.name}: discoverySource "${a.discoverySource}" is not a value the product actually reports`);
-    const looksReal = GUID.test(a.id) || a.id.startsWith("projects/") || a.id.startsWith("spaces/") || a.id.startsWith("gems/");
-    if (!looksReal) throw new Error(`${a.name}: id "${a.id}" does not look like a real resource id`);
-  }
-  const ms = AG_DEMO_AGENTS.filter(a => GUID.test(a.id)).length;
-  return `${ms} GUID ids, ${AG_DEMO_AGENTS.length - ms} Google resource paths, all sources real`;
-});
-
-console.log("\n=== lifecycle: real reads, demo-only writes suppressed ===");
-const raw = (p, m, body) => agDemoResponse(p, { method: m || "GET", body });
-t("status reads pass through to the real server", () => {
-  for (const p of ["/lifecycle/blocked-agents", "/lifecycle/approval-statuses", "/lifecycle/lifecycle-statuses"]) {
-    if (raw(p) !== undefined) throw new Error(p + " was served locally — the AI Hub Inventory screen reads this too");
-  }
-  return "blocked-agents, approval-statuses, lifecycle-statuses all live";
-});
-t("a write for a FABRICATED agent is suppressed", () => {
-  const r = raw("/lifecycle/block", "POST", JSON.stringify({ agent_id: AG_DEMO_AGENTS[0].id, reason: "x" }));
-  if (r === undefined) throw new Error("a demo agent id reached the network");
-  if (r.ok !== true) throw new Error("should still report success to the UI");
-  return "suppressed, UI still sees success";
-});
-t("a write for a REAL agent goes through", () => {
-  for (const body of [
-    JSON.stringify({ agent_id: "9f31c2a4-real-agent" }),
-    JSON.stringify({ bot_id: "crXXX_realbot" }),
-    JSON.stringify({ app_id: "00000003-0000-0ff1-ce00-000000000000" }),
-  ]) {
-    if (raw("/lifecycle/block", "POST", body) !== undefined) throw new Error("a real id was suppressed: " + body);
-  }
-  return "agent_id, bot_id and app_id forms all reach the server";
-});
-t("an unparseable body is treated as real, not swallowed", () => {
-  if (raw("/lifecycle/block", "POST", "<<not json>>") !== undefined) throw new Error("suppressed an unknown write");
-  return "passes through";
-});
-t("vendor deletes stay hard no-ops regardless of id", () => {
-  for (const p of ["/openai/gpt?id=x", "/claude/project?id=x", "/claude/workspace/archive"]) {
-    const r = raw(p, "DELETE", JSON.stringify({ id: "real-looking-id" }));
-    if (r === undefined) throw new Error(p + " would delete against a real tenant");
-  }
-  return "no delete or archive can leave the browser";
-});
-
-console.log("\n=== Cross-reference integrity ===");
-t("every referenced agent name exists in AGENT_SPECS", () => {
-  const known = new Set(AG_DEMO_AGENTS.map(a => a.name));
-  const dangling = [];
-  for (const f of g("/activity/files?oauth_key_id=k").files)
-    for (const n of f.relatedAgents || []) if (!known.has(n)) dangling.push(`file "${f.fileName}" -> "${n}"`);
-  for (const c of g("/activity/chats?oauth_key_id=k").chats)
-    if (!known.has(c.botName)) dangling.push(`chat -> "${c.botName}"`);
-  for (const b of g("/activity/knowledge?oauth_key_id=k").bots)
-    if (!known.has(b.botName)) dangling.push(`knowledge -> "${b.botName}"`);
-  for (const a of g("/activity/agent-permissions?oauth_key_id=k").apps)
-    if (a.isAgent && !known.has(a.displayName)) dangling.push(`permissions -> "${a.displayName}"`);
-  for (const al of g("/alerts/check", "POST").alerts)
-    if (!known.has(al.agent_name)) dangling.push(`alert -> "${al.agent_name}"`);
-  if (dangling.length) throw new Error(`${dangling.length} dangling: ` + dangling.join("; "));
-  return "no chat, file, knowledge, permission or alert names a non-existent agent";
-});
-
-console.log("\n=== Microsoft + Google ONLY ===");
-t("no OpenAI / Claude / AWS agents", () => {
-  const vendors = [...new Set(AG_DEMO_AGENTS.map(a => a.vendor))].sort();
-  const banned = vendors.filter(v => !["Microsoft", "Google"].includes(v));
-  if (banned.length) throw new Error("unexpected vendor(s): " + banned.join(", "));
-  const plats = [...new Set(AG_DEMO_AGENTS.map(a => a.platform))];
-  const badPlats = plats.filter(p => /openai|claude|aws|sagemaker|bedrock|custom_gpt/.test(p));
-  if (badPlats.length) throw new Error("unexpected platform(s): " + badPlats.join(", "));
-  const ms = AG_DEMO_AGENTS.filter(a => a.vendor === "Microsoft").length;
-  const gg = AG_DEMO_AGENTS.filter(a => a.vendor === "Google").length;
-  return `${vendors.join(" + ")} — ${ms} Microsoft, ${gg} Google`;
+t("every platform the scope selector can pick has agents", () => {
+  const byPlat = {};
+  for (const a of AG_DEMO_AGENTS) byPlat[a.platform] = (byPlat[a.platform] || 0) + 1;
+  const workspace = ["gemini_gmail","gemini_docs","gemini_sheets","gemini_slides","gemini_meet","gemini_drive"];
+  const missing = workspace.filter(p => !byPlat[p]);
+  if (missing.length) throw new Error("Workspace view would show empty cards for: " + missing.join(", "));
+  return Object.entries(byPlat).map(([k, v]) => `${k}:${v}`).join("  ");
 });
 
 console.log("\n=== GoogleVertexView (Discovery -> a Google scope) ===");
@@ -295,41 +80,171 @@ t("all eight unguarded arrays present", () => {
   for (const k of ["reasoningEngines","agentBuilderApps","dialogflowAgents","chatBots","endpoints","models","dataStores","warnings"]) {
     if (!Array.isArray(gv[k])) throw new Error(`${k} is ${gv[k] === undefined ? "MISSING" : typeof gv[k]}`);
   }
-  return "reasoningEngines, agentBuilderApps, dialogflowAgents, chatBots, endpoints, models, dataStores, warnings";
+  return "all eight";
 });
 t("row fields render", () => {
   gv.reasoningEngines.map(re => [re.id, re.displayName, re.description, re.region, re.pythonVersion, re.createTime]);
   gv.agentBuilderApps.map(a => [a.id, a.displayName, a.location, a.solutionType, a.dataStoreCount, a.createTime]);
-  gv.chatBots.map(b => { b.spaces.map(s => s); return [b.id, b.displayName, b.adminInstalled, b.firstSeen]; });
+  gv.chatBots.map(b => { b.spaces.map(x => x); return [b.id, b.displayName, b.adminInstalled, b.firstSeen]; });
   gv.endpoints.map(ep => { void ep.deployedModels.length; return [ep.id, ep.displayName, ep.region]; });
-  gv.models.map(m => [m.id, m.displayName, m.description, m.model, m.region, m.sourceType, m.createTime]);
+  gv.models.map(mm => [mm.id, mm.displayName, mm.model, mm.region, mm.sourceType, mm.createTime]);
   gv.dataStores.map(ds => [ds.id, ds.displayName, ds.contentConfig, ds.createTime]);
-  return `${gv.reasoningEngines.length} engines, ${gv.chatBots.length} bots, ${gv.models.length} models, ${gv.dataStores.length} data stores`;
+  return `${gv.reasoningEngines.length} engines, ${gv.chatBots.length} bots, ${gv.dataStores.length} data stores`;
 });
 
-console.log("\n=== Google / Gemini Enterprise user activity ===");
+console.log("\n=== User Activity (the Google branch) ===");
 for (const path of ["/google/user-activity?oauth_key_id=k", "/gemini-enterprise/data?oauth_key_id=k"]) {
   t(path, () => {
     const r = g(path);
     if (!Array.isArray(r.chats) || !Array.isArray(r.files) || !Array.isArray(r.knowledge)) throw new Error("missing chats/files/knowledge");
-    if (r.chats.length === 0) throw new Error("no Google conversations — the name filter matched nothing");
-    if (r.knowledge.length === 0) throw new Error("no Google knowledge sources");
-    for (const c of r.chats) c.messages.filter(mm => mm.from === "bot");
-    for (const b of r.knowledge) b.sources.map(s => s.type);
+    if (!r.chats.length || !r.files.length || !r.knowledge.length) throw new Error("one of the three collections is empty");
+    // ChatCard
+    for (const c of r.chats) {
+      c.messages.filter(mm => mm.from !== "bot"); c.messages.filter(mm => mm.from === "bot");
+      if (Number.isNaN(new Date(c.startTime).getTime())) throw new Error("bad startTime");
+      for (const mm of c.messages) if (!mm.text || !mm.fromName) throw new Error("message missing text/fromName");
+    }
+    // FileRow
+    for (const f of r.files) {
+      for (const a of f.relatedAgents || []) if (typeof a !== "string") throw new Error("relatedAgents item is not a string");
+      if (Number.isNaN(new Date(f.timestamp).getTime())) throw new Error("bad timestamp");
+    }
+    // KnowledgeSourceCard
+    const types = new Set(["sharepoint","website","dataverse_table","azure_storage","file_analysis","model_knowledge","knowledge_article","connector","uploaded_file","other"]);
+    for (const b of r.knowledge) for (const src of b.sources) if (!types.has(src.type)) throw new Error("unknown source type " + src.type);
     return `${r.chats.length} chats, ${r.files.length} files, ${r.knowledge.length} knowledge sets`;
   });
 }
 
-console.log("\n=== REJECT paths must reject, not return junk ===");
-const rejects = ["/google/gemini-vault","/google/conversations?days=7","/openai/threads?oauth_key_id=k","/claude/budget/members?oauth_key_id=k","/aws/usage?oauth_key_id=k","/cost/pricing","/prompts/summary","/recertification/stats","/sensitivity/summary","/agent-metadata?limit=50"];
-for (const p of rejects) {
-  const r = g(p);
-  const isPromise = r && typeof r.then === "function";
-  if (!isPromise) { console.log(`  BAD   ${p} returned a value instead of rejecting`); fails++; }
-  else { r.catch(() => {}); console.log(`  PASS  ${p} rejects`); }
-}
-t("agent-metadata single record still {exists:false}", () => "exists=" + g("/agent-metadata/demo-copilot_studio-0").exists);
-t("AI Hub /v1 never intercepted", () => { if (g("/v1/overview") !== undefined) throw new Error("intercepted!"); return "passes through"; });
+console.log("\n=== Cost tab (Google vendor path) ===");
+t("/cost/google shape + CostBreakdownTable fields", () => {
+  const c = g("/cost/google?period=30");
+  if (!Array.isArray(c.endpoints) || !c.endpoints.length) throw new Error("no endpoints");
+  if (!c.summary || !(c.summary.totalCost > 0)) throw new Error("summary.totalCost is not positive");
+  for (const ep of c.endpoints) {
+    for (const k of ["endpointId","displayName","modelName","inputTokens","outputTokens","totalTokens","requestCount","inputCost","outputCost","totalCost"]) {
+      if (ep[k] === undefined) throw new Error(`endpoint ${ep.displayName} missing ${k}`);
+    }
+  }
+  // CostTab's free-tier maths keys off the model name containing "flash".
+  if (!c.endpoints.some(ep => /flash/i.test(ep.modelName))) throw new Error("no flash model — the free-tier branch would never exercise");
+  return `${c.endpoints.length} endpoints, $${c.summary.totalCost.toFixed(2)}, ${c.summary.totalPredictions.toLocaleString()} predictions`;
+});
+t("cost scales with the period", () => {
+  const a = g("/cost/google?period=7").summary.totalCost, b = g("/cost/google?period=90").summary.totalCost;
+  if (!(b > a)) throw new Error(`90d (${b}) is not greater than 7d (${a})`);
+  return `7d $${a.toFixed(2)} < 90d $${b.toFixed(2)}`;
+});
 
-console.log(fails === 0 ? "\nALL RENDER PATHS OK" : `\n${fails} FAILURE(S) — would crash the live page`);
+console.log("\n=== Policies / Packs / Alerts ===");
+t("policies array + pack grouping", () => {
+  const ps = g("/policies");
+  for (const p of ps) { p.conditions.map(c => `${c.field} ${c.operator} ${c.value}`); (p.actions || []).map(a => a.type); void p.scope?.type; }
+  return `${ps.length} policies, ${new Set(ps.filter(p => p.pack_id).map(p => p.pack_id)).size} pack group(s)`;
+});
+t("packs come back as an envelope the modal can read", () => {
+  const env = g("/policy-packs");
+  if (Array.isArray(env)) throw new Error("bare array — the modal reads packs.packs and would render empty");
+  const rows = env.packs || [];
+  if (rows.length !== 7) throw new Error(`packs.packs has ${rows.length} rows`);
+  for (const pk of rows) for (const k of ["id","framework","name","ruleCount","enforceable","monitored","attestations","deployed"]) {
+    if (pk[k] === undefined) throw new Error(`pack ${pk.id} missing ${k}`);
+  }
+  return `${rows.length} packs, ${rows.reduce((s, p) => s + p.ruleCount, 0)} rules`;
+});
+t("simulate: body.policies[0] resolves (un-chained in PoliciesTab)", () => {
+  const body = g("/policies/simulate", "POST");
+  if (!Array.isArray(body.policies)) throw new Error("no policies[] — body.policies[0] would throw and blank the page");
+  const res = { ...body.policies[0], agents_evaluated: body.agents_evaluated };
+  for (const k of ["would_flag","already_open","newly_flagged","severity","actions","matches"]) {
+    if (res[k] === undefined) throw new Error(`policies[0] missing ${k}`);
+  }
+  if (!Array.isArray(res.actions) || res.actions.some(a => typeof a !== "string")) throw new Error("actions must be action-type strings");
+  res.matches.map(mm => {
+    if (!mm.agent_name) throw new Error("match row missing agent_name");
+    if (mm.already_open === undefined) throw new Error("match row missing already_open");
+    if (!mm.condition_triggered) throw new Error("match row missing condition_triggered");
+  });
+  return `${res.agents_evaluated} evaluated, would_flag ${res.would_flag}, ${res.matches.length} match rows`;
+});
+t("pack simulate aggregates per policy, not one repeated total", () => {
+  const totals = new Set();
+  for (const pid of ["pol_gdpr_2", "pol_gdpr_5", "pol_gdpr_7"]) {
+    const b = g("/policies/simulate", "POST", JSON.stringify({ policy_id: pid }));
+    const pol = b.policies?.[0];
+    if (!pol) throw new Error("no policies[0] for " + pid);
+    totals.add(pol.would_flag);
+  }
+  if (totals.size === 1) throw new Error("every policy returned the same count — conditions are not being evaluated");
+  return `distinct would_flag: ${[...totals].join(", ")}`;
+});
+t("alerts/check", () => g("/alerts/check", "POST").alerts.map(a => a.message).length + " alerts");
+
+console.log("\n=== NOTHING ON SCREEN MAY READ AS FABRICATED ===");
+t("no payload contains 'demo' or a placeholder tenant name", () => {
+  const PATHS = ["/discovery/agents", "/discovery/run", "/google/discover?oauth_key_id=k",
+    "/google/user-activity?oauth_key_id=k", "/gemini-enterprise/data", "/cost/google?period=30",
+    "/policies", "/policy-packs", "/policies/violations", "/alerts/check", "/oauth-keys"];
+  const BANNED = [/demo/i, /northwind/i, /contoso/i, /fabrikam/i, /\bfoo\b/i, /lorem/i, /test[-_ ]?agent/i, /placeholder/i, /sample/i, /\.example\b/i];
+  const hits = [];
+  const walk = (node, where) => {
+    if (typeof node === "string") { for (const re of BANNED) if (re.test(node)) hits.push(`${where} = ${JSON.stringify(node.slice(0, 90))}`); return; }
+    if (Array.isArray(node)) { node.forEach((v, i) => walk(v, `${where}[${i}]`)); return; }
+    if (node && typeof node === "object") for (const [k, v] of Object.entries(node)) {
+      for (const re of BANNED) if (re.test(k)) hits.push(`${where}.${k} (key)`);
+      walk(v, `${where}.${k}`);
+    }
+  };
+  for (const p of PATHS) { const r = g(p, p === "/alerts/check" ? "POST" : "GET"); if (r === undefined || rejects(r)) continue; walk(r, p); }
+  if (hits.length) throw new Error(`${hits.length} leak(s):\n      ` + hits.slice(0, 14).join("\n      "));
+  return `${PATHS.length} payloads clean`;
+});
+t("ids and sources look like real Google resources", () => {
+  const REAL = new Set(["vertex_ai_reasoning_engines","google_admin_sdk","google_chat_api","google_apps_script_api","gemini_enterprise","google_drive_api"]);
+  for (const a of AG_DEMO_AGENTS) {
+    if (!REAL.has(a.discoverySource)) throw new Error(`${a.name}: discoverySource "${a.discoverySource}" is not a value the product reports`);
+    if (!/^(projects|spaces|gems|users|applications)\//.test(a.id)) throw new Error(`${a.name}: id "${a.id}" is not a Google resource path`);
+  }
+  return `${AG_DEMO_AGENTS.length} agents, all real Google resource paths and sources`;
+});
+
+console.log("\n=== lifecycle: real reads, fabricated writes suppressed ===");
+t("status reads pass through to the real server", () => {
+  for (const p of ["/lifecycle/blocked-agents", "/lifecycle/approval-statuses", "/lifecycle/lifecycle-statuses"]) {
+    if (g(p) !== undefined) throw new Error(p + " was served locally — the AI Hub Inventory screen reads this too");
+  }
+  return "all three live";
+});
+t("a write for a fabricated agent is suppressed", () => {
+  const r = g("/lifecycle/block", "POST", JSON.stringify({ agent_id: AG_DEMO_AGENTS[0].id }));
+  if (r === undefined) throw new Error("a fabricated agent id reached the network");
+  if (r.ok !== true) throw new Error("should still report success to the UI");
+  return "suppressed, UI still sees success";
+});
+t("a write for a real agent goes through", () => {
+  if (g("/lifecycle/block", "POST", JSON.stringify({ agent_id: "9f31c2a4-real-agent" })) !== undefined) throw new Error("a real id was suppressed");
+  return "passes through";
+});
+t("vendor deletes stay hard no-ops", () => {
+  for (const p of ["/openai/gpt?id=x", "/claude/project?id=x", "/claude/workspace/archive"]) {
+    if (g(p, "DELETE", JSON.stringify({ id: "real-looking-id" })) === undefined) throw new Error(p + " would reach a real tenant");
+  }
+  return "nothing can delete or archive";
+});
+
+console.log("\n=== Cross-reference integrity ===");
+t("every referenced agent name exists in AGENT_SPECS", () => {
+  const known = new Set(AG_DEMO_AGENTS.map(a => a.name));
+  const act = g("/google/user-activity?oauth_key_id=k");
+  const dangling = [];
+  for (const f of act.files) for (const n of f.relatedAgents || []) if (!known.has(n)) dangling.push(`file "${f.fileName}" -> "${n}"`);
+  for (const c of act.chats) if (!known.has(c.botName)) dangling.push(`chat -> "${c.botName}"`);
+  for (const b of act.knowledge) if (!known.has(b.botName)) dangling.push(`knowledge -> "${b.botName}"`);
+  for (const al of g("/alerts/check", "POST").alerts) if (!known.has(al.agent_name)) dangling.push(`alert -> "${al.agent_name}"`);
+  if (dangling.length) throw new Error(`${dangling.length} dangling: ` + dangling.join("; "));
+  return "no chat, file, knowledge or alert names a non-existent agent";
+});
+t("AI Hub /v1 is never intercepted here", () => { if (g("/v1/overview") !== undefined) throw new Error("intercepted"); return "passes through"; });
+
+console.log(fails === 0 ? "\nALL RENDER PATHS OK" : `\n${fails} FAILURE(S) — would break the live page`);
 process.exit(fails === 0 ? 0 : 1);
