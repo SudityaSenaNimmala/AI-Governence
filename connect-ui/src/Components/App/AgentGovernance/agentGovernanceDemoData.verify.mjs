@@ -123,6 +123,24 @@ t("packs rows", () => g("/policy-packs").map(pk => [pk.id, pk.framework, pk.depl
 t("simulate result", () => { const s = g("/policies/simulate", "POST"); s.matches.map(mm => mm.agent_name); return `would_flag ${s.would_flag}, ${s.matches.length} match rows`; });
 t("alerts/check", () => g("/alerts/check", "POST").alerts.map(a => a.message).length + " alerts");
 
+console.log("\n=== Cross-reference integrity ===");
+t("every referenced agent name exists in AGENT_SPECS", () => {
+  const known = new Set(AG_DEMO_AGENTS.map(a => a.name));
+  const dangling = [];
+  for (const f of g("/activity/files?oauth_key_id=k").files)
+    for (const n of f.relatedAgents || []) if (!known.has(n)) dangling.push(`file "${f.fileName}" -> "${n}"`);
+  for (const c of g("/activity/chats?oauth_key_id=k").chats)
+    if (!known.has(c.botName)) dangling.push(`chat -> "${c.botName}"`);
+  for (const b of g("/activity/knowledge?oauth_key_id=k").bots)
+    if (!known.has(b.botName)) dangling.push(`knowledge -> "${b.botName}"`);
+  for (const a of g("/activity/agent-permissions?oauth_key_id=k").apps)
+    if (a.isAgent && !known.has(a.displayName)) dangling.push(`permissions -> "${a.displayName}"`);
+  for (const al of g("/alerts/check", "POST").alerts)
+    if (!known.has(al.agent_name)) dangling.push(`alert -> "${al.agent_name}"`);
+  if (dangling.length) throw new Error(`${dangling.length} dangling: ` + dangling.join("; "));
+  return "no chat, file, knowledge, permission or alert names a non-existent agent";
+});
+
 console.log("\n=== Microsoft + Google ONLY ===");
 t("no OpenAI / Claude / AWS agents", () => {
   const vendors = [...new Set(AG_DEMO_AGENTS.map(a => a.vendor))].sort();

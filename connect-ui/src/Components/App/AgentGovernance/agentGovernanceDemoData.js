@@ -655,10 +655,14 @@ const FILE_SEEDS = [
   ["sales_playbook_v9.pptx", "/sites/sales/Shared Documents/Playbook", OWNERS.marco, "FileAccessed", "SharePoint", ["Sales Playbook Agent"]],
   ["db_failover_runbook.md", "/sites/engineering/Shared Documents/Runbooks", OWNERS.dev, "FileAccessed", "SharePoint", ["Engineering Runbook Agent"]],
   ["supplier_bank_details.xlsx", "/sites/finance/Shared Documents", OWNERS.lena, "FileDownloaded", "SharePoint", ["Vendor Intake Bot"]],
-  ["pen_test_findings_q1.pdf", "/personal/sean_whitaker/Documents", OWNERS.sean, "FileUploaded", "OneDrive", ["Security Review Project"]],
+  // No related agent — a person moved this, not an agent. The empty array is
+  // meaningful: FileRow renders "—", which is what most file activity looks
+  // like. Do NOT name an agent here that is not in AGENT_SPECS; verify.mjs
+  // fails the build-time check if a relatedAgents entry has no matching agent.
+  ["pen_test_findings_q1.pdf", "/personal/sean_whitaker/Documents", OWNERS.sean, "FileUploaded", "OneDrive", []],
   ["onboarding_checklist.docx", "/sites/hr/Shared Documents/Onboarding", OWNERS.priya, "FileAccessed", "SharePoint", ["Onboarding Buddy"]],
-  ["invoice_batch_0412.pdf", "/sites/finance/Shared Documents/AP", OWNERS.tom, "FileUploaded", "SharePoint", ["Invoice Extraction Assistant"]],
-  ["churn_features_v3.parquet", "/personal/amara_okafor/Documents/ml", OWNERS.amara, "FileAccessed", "OneDrive", ["churn-scoring-endpoint"]],
+  ["invoice_batch_0412.pdf", "/sites/finance/Shared Documents/AP", OWNERS.tom, "FileUploaded", "SharePoint", []],
+  ["churn_features_v3.parquet", "/personal/amara_okafor/Documents/ml", OWNERS.amara, "FileAccessed", "OneDrive", []],
   ["board_pack_march.pptx", "/sites/exec/Shared Documents", OWNERS.lena, "FilePreviewed", "SharePoint", []],
   ["release_notes_draft.md", "/sites/engineering/Shared Documents", OWNERS.dev, "FileModified", "SharePoint", ["Release Notes Chat Bot"]],
   // ── Google-side file activity (Drive) ─────────────────────────────────────
