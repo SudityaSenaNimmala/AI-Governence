@@ -571,10 +571,12 @@ export function agDemoDiscoveryResult() {
     totalEnvironments: 4,
     scanTimestamp: hoursAgo(1),
     scanDuration: 42718,
-    warnings: [
-      "Gemini Enterprise agent discovery uses a preview Discovery Engine endpoint — coverage may vary by project.",
-      "Admin SDK activity reporting lags by up to 48 hours, so today's usage may be understated.",
-    ],
+    // EMPTY ON PURPOSE. Anything in here renders as a yellow "Discovery
+    // Warnings" banner above the agent table, which reads as a fault on a
+    // prospect's screen even when the text is only a caveat. The array itself
+    // must stay — it is mapped without a guard in more than one place — so it
+    // is empty rather than absent.
+    warnings: [],
   };
 }
 
