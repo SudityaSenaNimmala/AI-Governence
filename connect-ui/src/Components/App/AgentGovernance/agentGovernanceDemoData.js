@@ -70,6 +70,12 @@
  * The tabs agree with each other, which is the whole point.
  */
 
+// AI Hub (/api/v1) is served from a cache of real responses rather than
+// fabricated data — see aiHubDemoCache.js for why.
+// Explicit .js extension: Vite resolves it either way, but the verify scripts
+// run this module under bare Node, which does not.
+import { isCacheable, cacheGet, cachePut } from "../AIHub/aiHubDemoCache.js";
+
 const LS_KEY = "ag_demo_mode";
 
 /** Hard switch. Leave false — use ?agDemo=1 instead. */
@@ -1592,8 +1598,15 @@ function pathOf(input) {
 function governancePath(input) {
   const p = pathOf(input);
   if (!p.startsWith("/api/")) return null;
-  if (p.startsWith("/api/v1/")) return null; // AI Hub API — leave alone
+  if (p.startsWith("/api/v1/")) return null; // AI Hub API — cached, see below
   return p.slice(4);
+}
+
+/** "/api/v1/dlp?x=1" becomes "/dlp?x=1"; anything else returns null. */
+function aiHubPath(input) {
+  const p = pathOf(input);
+  if (!p.startsWith("/api/v1/")) return null;
+  return p.slice(7);
 }
 
 let shimInstalled = false;
@@ -1644,6 +1657,34 @@ export function installAgDemoFetch() {
       // tab wait, so say so loudly rather than failing quietly.
       console.warn("[agent-governance demo] NOT MOCKED, hitting network:", method, gp);
     }
+
+    // ── AI Hub (/api/v1) — cache-through, not fabricated ────────────────────
+    // Replay a stored real response when we have one; otherwise let the request
+    // run and keep it on the way back. Reads only: a demo must never replay a
+    // write, and a non-200 must never become sticky.
+    const hp = aiHubPath(input);
+    if (hp) {
+      const method2 =
+        ((init && init.method) || (input && typeof input !== "string" && input.method) || "GET").toUpperCase();
+      if (method2 === "GET" && isCacheable(hp)) {
+        const hit = cacheGet(hp);
+        if (hit !== null) {
+          return Promise.resolve(
+            new Response(hit, { status: 200, headers: { "Content-Type": "application/json" } })
+          );
+        }
+        return realFetch(input, init).then((res) => {
+          try {
+            if (res.ok && (res.headers.get("content-type") || "").includes("json")) {
+              // clone() so the caller still gets an unread body.
+              res.clone().text().then((txt) => cachePut(hp, txt)).catch(() => {});
+            }
+          } catch { /* caching is best-effort */ }
+          return res;
+        });
+      }
+    }
+
     return realFetch(input, init);
   };
 

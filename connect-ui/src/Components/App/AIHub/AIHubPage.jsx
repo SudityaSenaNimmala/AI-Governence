@@ -14,6 +14,9 @@ import {
   Maximize2, Minimize2, Copy, Check, DollarSign, ExternalLink, Download, Boxes,
   ChevronDown,
 } from "lucide-react";
+// ── DEMO MODE (remove to revert) ────────────────────────────────────────────
+import { cacheStats, cacheClear, warmCache } from "./aiHubDemoCache";
+// ── END DEMO MODE ───────────────────────────────────────────────────────────
 import { sanitizeReplayEvents } from "./replaySanitize";
 import { createReplayHost, applyReplayIframeCsp } from "./rrwebHost";
 import "./AIHub.css";
@@ -6983,6 +6986,7 @@ function InstallationsView() {
 // ── DEMO MODE (remove to revert) ────────────────────────────────────────────
 //
 // Agent Governance demo data: On / Off, for this browser only.
+// Also owns the AI Hub response cache controls — see ./aiHubDemoCache.js.
 //
 // Why a reload rather than live state: the demo flag is read once at module
 // load and its fetch shim installs at import time, so flipping it mid-session
@@ -6992,6 +6996,9 @@ function AgentGovernanceDemoSwitch() {
   const KEY = "ag_demo_mode";
   const on = (() => { try { return localStorage.getItem(KEY) === "1"; } catch { return false; } })();
 
+  const [stats, setStats] = useState(() => cacheStats());
+  const [warming, setWarming] = useState(null); // {done,total,path} | null
+
   const set = (next) => {
     try {
       if (next) localStorage.setItem(KEY, "1");
@@ -7000,6 +7007,36 @@ function AgentGovernanceDemoSwitch() {
     // Land on Agent Governance so the change is immediately visible.
     window.location.assign("/CloudFuze/AIHub/AgentGovernance");
   };
+
+  // The demo shim has already replaced window.fetch, and its AI Hub branch
+  // would serve a cached copy back to us — so warm-up must bypass it. Nothing
+  // else in the app needs the original, hence fetching it off a fresh iframe.
+  const pristineFetch = () => {
+    try {
+      const f = document.createElement("iframe");
+      f.style.display = "none";
+      document.body.appendChild(f);
+      const raw = f.contentWindow.fetch.bind(window);
+      f.remove();
+      return raw;
+    } catch {
+      return window.fetch.bind(window);
+    }
+  };
+
+  const warm = async () => {
+    setWarming({ done: 0, total: 1, path: "" });
+    try {
+      const s = await warmCache(pristineFetch(), (done, total, path) => setWarming({ done, total, path }));
+      setStats(s);
+    } finally {
+      setWarming(null);
+      setStats(cacheStats());
+    }
+  };
+
+  const clear = () => { cacheClear(); setStats(cacheStats()); };
+  const fmtBytes = (b) => (b > 1e6 ? `${(b / 1e6).toFixed(1)} MB` : `${Math.round(b / 1024)} KB`);
 
   const btn = (active, tone) => ({
     padding: "6px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer",
@@ -7031,6 +7068,47 @@ function AgentGovernanceDemoSwitch() {
           <button onClick={() => set(true)} style={btn(on, "#0052e0")}>Demo on</button>
         </div>
       </div>
+
+      {/* Cache controls. Only meaningful while demo mode is on, so they stay
+          hidden otherwise rather than offering a button that does nothing. */}
+      {on && (
+        <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid #eff1f3" }}>
+          <div className="aihub_text_primary" style={{ fontWeight: 600, fontSize: 13.7 }}>
+            AI Hub tab speed
+          </div>
+          <div className="aihub_text_muted" style={{ marginTop: 6, lineHeight: 1.6 }}>
+            Agent Governance runs on a built-in sample tenant. The other AI Hub tabs —
+            Overview, Inventory, Activity, Policies &amp; Risk — keep showing your real
+            data, so the first visit to each is as slow as usual and every visit after
+            it is instant. Warm the cache now and none of them will be slow during a demo.
+          </div>
+          <div className="aihub_text_muted" style={{ marginTop: 6, fontSize: 12.5 }}>
+            {stats.count > 0
+              ? `${stats.count} response${stats.count === 1 ? "" : "s"} cached · ${fmtBytes(stats.bytes)}${stats.newest ? ` · last updated ${new Date(stats.newest).toLocaleString()}` : ""}`
+              : "Nothing cached yet — every tab will load at its normal speed."}
+          </div>
+          {warming && (
+            <div className="aihub_text_muted" style={{ marginTop: 8, fontSize: 12.5 }}>
+              Warming {warming.done} of {warming.total}
+              {warming.path ? ` — ${warming.path}` : ""}…
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            <button onClick={warm} disabled={!!warming}
+                    style={{ ...btn(false, "#0052e0"), background: warming ? "#f3f4f6" : "#fff", cursor: warming ? "wait" : "pointer" }}>
+              {warming ? "Warming…" : stats.count > 0 ? "Refresh cache" : "Warm cache now"}
+            </button>
+            {stats.count > 0 && !warming && (
+              <button onClick={clear} style={btn(false, "#4b5563")}>Clear cache</button>
+            )}
+          </div>
+          <div className="aihub_text_muted" style={{ marginTop: 8, fontSize: 12 }}>
+            Cached copies are read-only replays of your own data, kept in this browser.
+            Refresh after anything changes on the server, or the tabs will keep showing
+            the older snapshot. Turning demo mode off ignores the cache entirely.
+          </div>
+        </div>
+      )}
     </div>
   );
 }
