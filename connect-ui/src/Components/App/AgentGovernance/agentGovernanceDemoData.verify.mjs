@@ -119,8 +119,53 @@ t("policies array + pack grouping", () => {
   for (const p of ps) { p.conditions.map(c => `${c.field} ${c.operator} ${c.value}`); (p.actions || []).map(a => a.type); void p.scope?.type; }
   return `${ps.length} policies, ${new Set(ps.filter(p => p.pack_id).map(p => p.pack_id)).size} pack group(s)`;
 });
-t("packs rows", () => g("/policy-packs").map(pk => [pk.id, pk.framework, pk.deployed, pk.ruleCount, pk.enforceable, pk.monitored, pk.attestations]).length + " packs");
-t("simulate result", () => { const s = g("/policies/simulate", "POST"); s.matches.map(mm => mm.agent_name); return `would_flag ${s.would_flag}, ${s.matches.length} match rows`; });
+// The modal reads the ENVELOPE (`packs.packs`), not a bare array. Returning an
+// array left it showing "No policy packs available."
+t("packs come back as an envelope the modal can read", () => {
+  const env = g("/policy-packs");
+  if (Array.isArray(env)) throw new Error("returned a bare array — the modal reads packs.packs and would render empty");
+  const rows = env.packs || [];
+  if (rows.length !== 7) throw new Error(`packs.packs has ${rows.length} rows`);
+  for (const pk of rows) {
+    for (const k of ["id", "framework", "name", "ruleCount", "enforceable", "monitored", "attestations", "deployed"]) {
+      if (pk[k] === undefined) throw new Error(`pack ${pk.id} missing ${k}`);
+    }
+  }
+  return `packs.packs = ${rows.length} rows, ${rows.reduce((s, p) => s + p.ruleCount, 0)} rules`;
+});
+
+// THE BLANK PAGE. handleSimulate does `body.policies[0]` un-chained inside a
+// setSimResults functional updater, which React runs outside the try/catch —
+// so a missing `policies` array throws during render and blanks the screen
+// rather than showing an error card. Replay that exact expression.
+t("simulate: body.policies[0] resolves (un-chained in PoliciesTab)", () => {
+  const body = g("/policies/simulate", "POST");
+  if (!Array.isArray(body.policies)) throw new Error("no policies[] — body.policies[0] would throw and blank the page");
+  const res = { ...body.policies[0], agents_evaluated: body.agents_evaluated };
+  for (const k of ["would_flag", "already_open", "newly_flagged", "severity", "actions", "matches"]) {
+    if (res[k] === undefined) throw new Error(`policies[0] missing ${k}`);
+  }
+  if (!Array.isArray(res.actions) || res.actions.some(a => typeof a !== "string")) {
+    throw new Error("actions must be action-type STRINGS — the pack aggregation adds them to a Set and renders them directly");
+  }
+  res.matches.map(mm => {
+    if (!mm.agent_name) throw new Error("match row missing agent_name");
+    if (mm.already_open === undefined) throw new Error("match row missing already_open");
+    if (!mm.condition_triggered) throw new Error("match row missing condition_triggered");
+  });
+  return `${res.agents_evaluated} evaluated, would_flag ${res.would_flag}, ${res.matches.length} match rows, actions [${res.actions.join(", ")}]`;
+});
+t("pack simulate aggregates per policy, not one repeated total", () => {
+  const totals = new Set();
+  for (const pid of ["pol_gdpr_2", "pol_gdpr_5", "pol_gdpr_7"]) {
+    const b = agDemoResponse("/policies/simulate", { method: "POST", body: JSON.stringify({ policy_id: pid }) });
+    const pol = b.policies?.[0];
+    if (!pol) throw new Error("no policies[0] for " + pid);
+    totals.add(pol.would_flag);
+  }
+  if (totals.size === 1) throw new Error("every policy returned the same count — the conditions are not being evaluated");
+  return `distinct would_flag values across policies: ${[...totals].join(", ")}`;
+});
 t("alerts/check", () => g("/alerts/check", "POST").alerts.map(a => a.message).length + " alerts");
 
 console.log("\n=== NOTHING ON SCREEN MAY READ AS FABRICATED ===");

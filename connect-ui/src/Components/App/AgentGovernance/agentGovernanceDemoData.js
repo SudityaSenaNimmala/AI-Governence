@@ -1131,15 +1131,29 @@ function buildAzureAssistants() {
 
 // ── policies & compliance packs (Policies tab) ──────────────────────────────
 
+// Field set verified against the GET /policy-packs handler in
+// server/src/governance/routes/policyPacks.ts. PackRow reads ruleCount,
+// enforceable, monitored and attestations off each row; the modal reads the
+// ENVELOPE as `packs.packs`, so this list is wrapped rather than returned bare
+// — a bare array leaves the modal showing "No policy packs available."
 const AG_DEMO_PACKS = [
-  { id: "gdpr",        framework: "GDPR",          deployed: true,  ruleCount: 18, enforceable: 7, monitored: 6, attestations: 5 },
-  { id: "hipaa",       framework: "HIPAA",         deployed: false, ruleCount: 17, enforceable: 6, monitored: 6, attestations: 5 },
-  { id: "soc2",        framework: "SOC 2",         deployed: false, ruleCount: 16, enforceable: 7, monitored: 5, attestations: 4 },
-  { id: "ccpa",        framework: "CCPA/CPRA",     deployed: false, ruleCount: 13, enforceable: 5, monitored: 4, attestations: 4 },
-  { id: "eu-ai-act",   framework: "EU AI Act",     deployed: false, ruleCount: 16, enforceable: 5, monitored: 5, attestations: 6 },
-  { id: "iso-42001",   framework: "ISO/IEC 42001", deployed: false, ruleCount: 15, enforceable: 5, monitored: 5, attestations: 5 },
-  { id: "nist-ai-rmf", framework: "NIST AI RMF",   deployed: false, ruleCount: 15, enforceable: 5, monitored: 5, attestations: 5 },
-];
+  { id: "gdpr",        framework: "GDPR",          name: "EU General Data Protection Regulation",       deployed: true,  ruleCount: 18, enforceable: 7, monitored: 6, attestations: 5 },
+  { id: "hipaa",       framework: "HIPAA",         name: "US Health Insurance Portability and Accountability Act", deployed: false, ruleCount: 17, enforceable: 6, monitored: 6, attestations: 5 },
+  { id: "soc2",        framework: "SOC 2",         name: "SOC 2 Trust Services Criteria",               deployed: false, ruleCount: 16, enforceable: 7, monitored: 5, attestations: 4 },
+  { id: "ccpa",        framework: "CCPA/CPRA",     name: "California Consumer Privacy Act (as amended by CPRA)",    deployed: false, ruleCount: 13, enforceable: 5, monitored: 4, attestations: 4 },
+  { id: "eu-ai-act",   framework: "EU AI Act",     name: "EU Artificial Intelligence Act (Reg. 2024/1689)",         deployed: false, ruleCount: 16, enforceable: 5, monitored: 5, attestations: 6 },
+  { id: "iso-42001",   framework: "ISO/IEC 42001", name: "ISO/IEC 42001 AI Management System",          deployed: false, ruleCount: 15, enforceable: 5, monitored: 5, attestations: 5 },
+  { id: "nist-ai-rmf", framework: "NIST AI RMF",   name: "NIST AI Risk Management Framework 1.0 (AI 100-1)",        deployed: false, ruleCount: 15, enforceable: 5, monitored: 5, attestations: 5 },
+].map((p) => ({
+  ...p,
+  description: `${p.ruleCount} rules mapped to ${p.framework} clauses — ${p.enforceable} enforced automatically, ${p.monitored} dependent on endpoint detection, ${p.attestations} tracked as attestations.`,
+  version: 1,
+  deployed_version: p.deployed ? 1 : null,
+  deployed_at: p.deployed ? daysAgo(41) : null,
+  update_available: false,
+  enabled_rules: p.deployed ? p.ruleCount : 0,
+  attested: p.deployed ? 2 : 0,
+}));
 
 const COND = (field, operator, value) => ({ field, operator, value });
 
@@ -1213,7 +1227,24 @@ function buildViolations() {
 }
 const AG_DEMO_VIOLATIONS = buildViolations();
 
-/** Dry-run result for a single policy or a whole pack. */
+/**
+ * Dry-run result for a single policy or a whole pack.
+ *
+ * SHAPE IS LOAD-BEARING AND NOT FORGIVING. PoliciesTab does:
+ *
+ *   setSimResults(s => ({ ...s, [id]: { ...body.policies[0], ... } }))
+ *
+ * `body.policies[0]` is NOT optional-chained, and it sits inside a functional
+ * state updater — React runs that updater while processing the update, outside
+ * the handler's try/catch. So a missing `policies` array does not surface as an
+ * error card; it throws during render and blanks the whole screen. Returning a
+ * FLAT result here (would_flag/matches at the top level) is exactly that bug.
+ *
+ * Match rows are read as m.agent_name / m.already_open / m.condition_triggered,
+ * and `actions` is an array of action-type STRINGS, not objects — the pack
+ * aggregation does `(pol.actions || []).forEach(a => allActions.add(a))` and
+ * renders the set directly.
+ */
 function buildSimulation(body) {
   let target = [];
   try {
@@ -1225,32 +1256,58 @@ function buildSimulation(body) {
   } catch { /* fall through */ }
   if (target.length === 0) target = [AG_DEMO_POLICIES[0]];
 
-  const hit = AG_DEMO_AGENTS.filter(
-    (a) => a.isOrphaned || a.consentType === "AllPrincipals" || a.risk.level === "critical"
-  );
-  const alreadyOpen = AG_DEMO_VIOLATIONS.filter((v) => v.status === "open").length;
+  // Evaluate each targeted policy against the agents its conditions describe,
+  // so a pack simulation aggregates per-policy numbers the way the real engine
+  // does rather than repeating one total.
+  const matchesFor = (policy) => {
+    const fields = (policy.conditions || []).map((c) => c.field);
+    return AG_DEMO_AGENTS.filter((a) => {
+      if (fields.includes("is_orphaned")) return a.isOrphaned;
+      if (fields.includes("consent_type")) return a.consentType === "AllPrincipals";
+      if (fields.includes("has_http_connector")) return (a.connectors || []).some((c) => c.type === "HTTP" || c.type === "Third-party");
+      if (fields.includes("has_dangerous_permissions")) return (a.permissions || []).some((p) => /ReadWrite|\.Send|Directory\.Read/.test(p.name));
+      if (fields.includes("risk_level")) return a.risk.level === "critical";
+      if (fields.includes("risk_score")) return (a.risk.score || 0) > 85;
+      if (fields.includes("days_since_last_activity")) {
+        const last = a.activity.lastActiveTimestamp ? new Date(a.activity.lastActiveTimestamp).getTime() : null;
+        return !last || (NOW - last) / 86400000 > 90;
+      }
+      return false;
+    });
+  };
+
+  const policies = target.map((policy) => {
+    const hit = matchesFor(policy);
+    const alreadyOpen = hit.filter((a) => AG_DEMO_VIOLATIONS.some((v) => v.agent_id === a.id && v.status === "open")).length;
+    return {
+      policy_id: policy.id,
+      policy_name: policy.name,
+      status: "simulated",
+      severity: policy.severity,
+      would_flag: hit.length,
+      already_open: alreadyOpen,
+      newly_flagged: Math.max(0, hit.length - alreadyOpen),
+      // Action-type strings, not objects.
+      actions: (policy.actions || []).map((x) => x.type),
+      matches: hit.slice(0, 12).map((a) => ({
+        agent_id: a.id,
+        agent_name: a.name,
+        platform: a.platform,
+        owner: a.owner ? a.owner.displayName : null,
+        risk_level: a.risk.level,
+        already_open: AG_DEMO_VIOLATIONS.some((v) => v.agent_id === a.id && v.status === "open"),
+        condition_triggered: (policy.conditions || [])
+          .map((c) => `${c.field} ${c.operator} ${c.value}`)
+          .join(" AND ") || "policy conditions met",
+      })),
+    };
+  });
+
   return {
     ok: true,
     status: "simulated",
     agents_evaluated: AG_DEMO_AGENTS.length,
-    would_flag: hit.length,
-    already_open: alreadyOpen,
-    newly_flagged: Math.max(0, hit.length - alreadyOpen),
-    severity: target[0].severity,
-    actions: target.flatMap((p) => (p.actions || []).map((x) => x.type)),
-    matches: hit.slice(0, 12).map((a) => ({
-      agent_id: a.id,
-      agent_name: a.name,
-      platform: a.platform,
-      owner: a.owner ? a.owner.displayName : null,
-      risk_level: a.risk.level,
-      reason: a.isOrphaned
-        ? "No accountable owner"
-        : a.consentType === "AllPrincipals"
-          ? "Organisation-wide consent"
-          : "Risk score above threshold",
-      already_flagged: AG_DEMO_VIOLATIONS.some((v) => v.agent_id === a.id),
-    })),
+    policies,
   };
 }
 
@@ -1590,7 +1647,8 @@ function mockFor(path, method, body) {
   }
   if (has("/policy-packs")) {
     if (p.includes("/simulate")) return buildSimulation(body);
-    if (m === "GET") return AG_DEMO_PACKS;
+    // Envelope, not a bare array — the modal reads `packs.packs`.
+    if (m === "GET") return { packs: AG_DEMO_PACKS, definition_problems: [] };
     return OK;
   }
 
