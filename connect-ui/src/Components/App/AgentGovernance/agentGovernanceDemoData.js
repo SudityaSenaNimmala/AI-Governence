@@ -1108,92 +1108,18 @@ const AG_DEMO_ALERT_CONFIG = {
   notify_google: true,
 };
 
-// ── secondary panels — DATA RETAINED BUT CURRENTLY UNSERVED ────────────────
+// ── secondary panels ───────────────────────────────────────────────────────
 //
 // Recertification, Prompt Monitor and Claude Budget are built in the codebase
 // but are not in the six-tab strip, so their payload shapes have never been
-// read off a live consumer. Their endpoints therefore return REJECT (see the
-// rule on the sentinel below) rather than an unverified guess.
+// read off a live consumer and their endpoints return REJECT.
 //
-// The datasets below are kept, unused, for whoever wires those tabs up: fill
-// in the real shape from the component, then swap the REJECT for the builder.
-// Vite tree-shakes them out of the bundle in the meantime.
-
-function buildRecertificationCampaigns() {
-  const targets = AG_DEMO_AGENTS.filter((a) => a.risk.level === "critical" || a.risk.level === "high").slice(0, 10);
-  const states = ["pending", "pending", "approved", "pending", "escalated", "approved", "rejected", "pending", "approved", "pending"];
-  return targets.map((a, i) => ({
-    id: "rct_" + i,
-    agent_id: a.id,
-    agent_name: a.name,
-    platform: a.platform,
-    owner_name: a.owner ? a.owner.displayName : "Unassigned",
-    owner_email: a.owner ? a.owner.userPrincipalName : null,
-    status: states[i] || "pending",
-    due_at: daysAgo(-(14 - i)),
-    launched_at: daysAgo(7),
-    overdue: i === 4,
-    notes: i === 6 ? "Owner confirmed the agent is no longer needed — scheduled for retirement." : null,
-  }));
-}
-const AG_DEMO_RECERT = buildRecertificationCampaigns();
-
-function buildPromptFlags() {
-  const seeds = [
-    ["Customer Refund Triage", "critical", "pii", "Card number and national identifier in one prompt"],
-    ["Payroll Query Handler", "critical", "pii", "National insurance number sent to the agent"],
-    ["IT Helpdesk Copilot", "critical", "secrets", "Live API key pasted into the conversation"],
-    ["Benefits Explainer", "high", "health", "Named medical condition and medication"],
-    ["Contract Review Assistant", "high", "confidential", "Unredacted commercial terms"],
-    ["Customer Refund Triage", "high", "financial", "Account balance and charge history"],
-    ["Sales Playbook Agent", "medium", "confidential", "Internal discount ladder"],
-  ];
-  return seeds.map((s, i) => {
-    const a = AG_DEMO_AGENTS.find((x) => x.name === s[0]);
-    return {
-      id: "flg_" + i,
-      agent_id: a ? a.id : "unk_" + i,
-      agent_name: s[0],
-      platform: a ? a.platform : "copilot_studio",
-      severity: s[1],
-      category: s[2],
-      detail: s[3],
-      resolved: i > 4,
-      created_at: hoursAgo(3 + i * 9),
-    };
-  });
-}
-const AG_DEMO_PROMPT_FLAGS = buildPromptFlags();
-
-function buildClaudeBudgetMembers() {
-  return {
-    org: { name: "Halcyon Group", month: new Date(NOW).toISOString().slice(0, 7) },
-    members: ACTIVE_PEOPLE.map((p, i) => {
-      const rand = rngFor("budget" + p.userPrincipalName);
-      const inTok = between(rand, 400000, 4200000);
-      const outTok = between(rand, 90000, 900000);
-      return {
-        id: p.userPrincipalName,
-        name: p.displayName,
-        email: p.userPrincipalName,
-        role: i === 0 ? "admin" : i < 3 ? "developer" : "user",
-        inputTokens: inTok,
-        outputTokens: outTok,
-        costUsd: (inTok / 1e6) * 3 + (outTok / 1e6) * 15,
-      };
-    }),
-  };
-}
-
-const AG_DEMO_PRICING = {
-  azure: [
-    { model: "gpt-4o", input: 2.5, output: 10 },
-    { model: "gpt-4o-mini", input: 0.15, output: 0.6 },
-    { model: "o1", input: 15, output: 60 },
-    { model: "text-embedding-3-large", input: 0.13, output: 0 },
-    { model: "gpt-35-turbo", input: 0.5, output: 1.5 },
-  ],
-};
+// Their sample datasets USED to live here, unused. They are deleted: they
+// carried agent names from the Microsoft dataset, and although nothing
+// rendered them, Rollup kept the module-level constants so those stale names
+// shipped in the bundle. Dead data that still reaches the browser is worse
+// than no data. Rebuild them from the real component shapes if those tabs
+// ever get wired up.
 
 // ── Google Vertex / GCP drill-down (Discovery → a Google scope) ─────────────
 //
@@ -1333,9 +1259,7 @@ function mockFor(path, method, body) {
   if (has("/activity/agent-permissions")) return REJECT;
 
   // ── activity ──────────────────────────────────────────────────────────────
-  // The Dataverse endpoint carries every conversation; the audit-log and Graph
-  // endpoints return empty so nothing is double-counted.
-  // Dataverse and Graph activity endpoints. Unreachable without a Microsoft
+  // The Dataverse and Graph activity endpoints. Unreachable without a Microsoft
   // credential — User Activity takes its Google branch instead, which is served
   // by /google/user-activity below.
   if (has("/activity/chats") || has("/activity/copilot-interactions")
