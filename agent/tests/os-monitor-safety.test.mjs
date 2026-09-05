@@ -674,7 +674,14 @@ test('OsMonitor arms a provisional hold before the file scan resolves, and only 
   // which is gated on the conversation being governed/blocked so that nothing
   // changes for any ordinary AI app.
   assert.match(appearedHandler, /shouldHold = severity === 'high' \|\| severity === 'critical' \|\| failClosed/);
-  assert.match(appearedHandler, /const failClosed = !!governed && unverified;/);
+  // "Inside a governed conversation" is the condition, and the reliable
+  // statement of it is the helper's LATCHED host_armed — a live read of
+  // this.hostGoverned has usually already bounced to null by the time a chip is
+  // visible, which would fail OPEN on exactly the attachments this covers. Still
+  // false for every non-host app, so fail-closed stays governed-only.
+  assert.match(appearedHandler, /const inGovernedConversation = !!governed \|\| hostChip;/);
+  assert.match(appearedHandler, /const failClosed = inGovernedConversation && unverified;/);
+  assert.match(appearedHandler, /const hostChip = isHostAppProcess\(ev\.process\) && ev\.host_armed === true;/);
 });
 
 test('OsMonitor refreshes EVERY attach hold — provisional included — so one cannot lapse while the file stays attached', async () => {
@@ -4139,8 +4146,17 @@ test('the govstate handler arms both file watchers and nothing else — and neve
   // is enforcer-win.ps1's job, at the element level, and was never asked for
   // here — arming a window-level prompt reader would be the capture the
   // host-app design exists to prevent.
-  assert.match(handler, /this\.attachmentWatcher\.hostArm\(this\.hostGoverned\.process, true\);/);
-  assert.match(handler, /this\.dialogWatcher\.hostArm\(this\.hostGoverned\.process, true\);/);
+  //
+  // Both also carry the opaque conversation key. It is what lets the chip
+  // watcher tell the rapid on/off/on burst this handler produces as focus moves
+  // around the app from a real conversation switch, and only drop its filename
+  // baseline for the second — see hostArmKey().
+  assert.match(handler, /const key = hostArmKey\(this\.hostGoverned\);/);
+  assert.match(handler, /this\.attachmentWatcher\.hostArm\(this\.hostGoverned\.process, true, key\);/);
+  assert.match(handler, /this\.dialogWatcher\.hostArm\(this\.hostGoverned\.process, true, key\);/);
+  // The key is a DIGEST, derived elsewhere — the handler must not put the agent
+  // name itself on the channel.
+  assert.equal(/hostArm\([^)]*agent/.test(handler), false, 'no agent identity may travel on the arm channel');
   assert.equal(handler.includes('promptWatcher'), false, 'the prompt watcher must never be armed for a host app');
   // The state is taken verbatim off the event — nothing is re-derived, and no
   // conversation name read off a screen can enter it.
@@ -4293,7 +4309,12 @@ test('the fail-closed hold is scoped to a governed conversation and names its ow
   // Escalating on "we could not read it" for EVERY app would start blocking .7z
   // archives and legacy .doc files across the board, which nobody asked for.
   assert.match(handler, /const unverified = cs\?\.scanned !== true && cs\?\.unverified === true;/);
-  assert.match(handler, /const failClosed = !!governed && unverified;/);
+  // Governed-scoped, via the helper's latched host_armed rather than a live read
+  // of this.hostGoverned: the govstate bounces off the composer constantly, so a
+  // live read would fail OPEN on an unscannable file for nearly every real
+  // attachment. hostChip is false for every non-host app, so the scoping holds.
+  assert.match(handler, /const inGovernedConversation = !!governed \|\| hostChip;/);
+  assert.match(handler, /const failClosed = inGovernedConversation && unverified;/);
   // The block has to be able to say WHY, and "high" would be a claim about
   // content nobody read.
   assert.match(handler, /\? `unscannable file \(\$\{cs\?\.reason \|\| 'not readable'\}\)`/);

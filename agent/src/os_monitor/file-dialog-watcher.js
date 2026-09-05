@@ -32,6 +32,8 @@ export class FileDialogWatcher extends EventEmitter {
     this.child = null;
     this.buffer = '';
     this.stopRequested = false;
+    // Has the helper's POLL LOOP ever reported in? See #dispatch's heartbeat case.
+    this.sawHeartbeat = false;
   }
 
   start() {
@@ -39,6 +41,8 @@ export class FileDialogWatcher extends EventEmitter {
     if (this.child) return;
 
     this.log?.info('file-dialog-watcher: starting UIA helper');
+    // Per-helper, so a respawn that comes up wedged is visible too.
+    this.sawHeartbeat = false;
     this.child = spawn(
       'powershell',
       ['-NoProfile', '-NonInteractive', '-Sta', '-ExecutionPolicy', 'Bypass', '-File', WATCHER_SCRIPT],
@@ -94,12 +98,16 @@ export class FileDialogWatcher extends EventEmitter {
    * because a picker steals focus and so the arm is already gone by the time it
    * closes. See $HostDisarmedAt in file-dialog-watcher.ps1.
    */
-  hostArm(processName, on) {
+  hostArm(processName, on, key = '') {
     if (!processName) return false;
     if (!this.child?.stdin || this.child.stdin.destroyed) return false;
     try {
       this.child.stdin.write(JSON.stringify({
         cmd: 'host_arm', process: String(processName), state: on ? 'on' : 'off',
+        // Accepted and ignored by this helper — it holds no per-conversation
+        // baseline to invalidate. Present so both watchers take the identical
+        // command and one call site can arm both. See AttachmentWatcher.hostArm.
+        key: String(key || ''),
       }) + '\n');
       return true;
     } catch (err) {
@@ -131,6 +139,14 @@ export class FileDialogWatcher extends EventEmitter {
         this.emit('file_dialog_pick', ev);
         break;
       case 'heartbeat':
+        // First one only — see AttachmentWatcher's copy. `ready` proves the
+        // process started; only a heartbeat proves the dialog scan is running,
+        // and a helper wedged on a blocking stdin read said the former while
+        // never doing the latter.
+        if (!this.sawHeartbeat) {
+          this.sawHeartbeat = true;
+          this.log?.info('file-dialog-watcher: poll loop live');
+        }
         break;
       case 'error':
         this.log?.warn('file-dialog-watcher error: ' + ev.message);

@@ -19,10 +19,12 @@
 #   {"kind":"error","message":"..."}
 #
 # Input schema (NDJSON on stdin), one command:
-#   {"cmd":"host_arm","process":"ms-teams","state":"on"|"off"}
+#   {"cmd":"host_arm","process":"ms-teams","state":"on"|"off","key":"<opaque>"}
 #       Temporarily add a HOST APP (Microsoft Teams) to the set of processes
 #       whose file pickers this watcher tracks — see $ArmedHostProcs and
-#       $HostDisarmedAt.
+#       $HostDisarmedAt. `key` is accepted and ignored here: this watcher holds no
+#       per-conversation baseline to invalidate. It is on the command so both
+#       watchers take the identical line — see attachment-watcher.ps1.
 #
 # Limitations:
 #   - WinUI 3 file pickers (modern XAML islands used by some Store apps)
@@ -39,12 +41,27 @@ $WarningPreference     = 'SilentlyContinue'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 
+Add-Type -TypeDefinition @'
+namespace FileDlgWatch {
+  public class Win32 {
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    public static extern System.IntPtr GetWindow(System.IntPtr hWnd, uint uCmd);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint lpdwProcessId);
+  }
+}
+'@
+
 # Same AI process catalog as win-poller. We pass the JSON in via env var
 # so we don't duplicate the list in two places.
+# The fallback is only reached if the wrapper failed to pass the env var, but it
+# had drifted from watcherProcessNames(): 'M365Copilot' — the actual process name
+# of the Microsoft 365 Copilot desktop app, and the one this whole path exists
+# for — was missing, so a fallback run was blind to it.
 $AiProcesses = if ($env:CFAI_AI_PROCESSES) {
     $env:CFAI_AI_PROCESSES -split ','
 } else {
-    @('ChatGPT', 'Claude', 'Cursor', 'Copilot', 'Comet', 'Gemini', 'Poe')
+    @('ChatGPT', 'Claude', 'Cursor', 'Copilot', 'M365Copilot', 'Comet', 'Gemini', 'Poe')
 }
 
 # ── Runtime-armed HOST APPS ─────────────────────────────────────────────────
@@ -80,16 +97,48 @@ $ArmedHostProcs = New-Object 'System.Collections.Generic.HashSet[string]' -Argum
 $HostDisarmedAt = @{}
 $HOST_ARM_GRACE_MS = 5000
 
+# How often the poll loop says it is alive. Tick 1 always, then every Nth.
+# Overridable so a test can prove liveness in seconds instead of the 30s the
+# default cadence would take — see os-monitor-host-files.test.mjs.
+$HeartbeatTicks = 75
+if ($env:CFAI_WATCHER_HEARTBEAT_TICKS) {
+    $n = 0
+    if ([int]::TryParse($env:CFAI_WATCHER_HEARTBEAT_TICKS, [ref]$n) -and $n -gt 0) { $HeartbeatTicks = $n }
+}
+
 # Non-blocking stdin — same arrangement, and the same reason, as
-# attachment-watcher.ps1: the poll loop cannot sit in a blocking ReadLine().
-$StdinReader = [Console]::In
+# attachment-watcher.ps1: the poll loop cannot sit in a blocking read.
+#
+# And for the same reason it is NOT [Console]::In.ReadLineAsync(): that reader is
+# a SyncTextReader whose ReadLineAsync is `Task.FromResult(ReadLine())`, so it
+# blocks the caller and this loop's dialog scan never ran at all. See the long
+# note in attachment-watcher.ps1. Console.OpenStandardInput() returns a
+# __ConsoleStream that inherits the real Stream.ReadAsync, which does not.
+$StdinStream  = [Console]::OpenStandardInput()
+$StdinBuf     = New-Object byte[] 8192
 $StdinPending = $null
+$StdinAcc     = ''
+$StdinLines   = New-Object 'System.Collections.Generic.Queue[string]'
+$StdinClosed  = $false
 function Read-StdinLine {
-    if ($null -eq $script:StdinPending) { $script:StdinPending = $script:StdinReader.ReadLineAsync() }
+    if ($script:StdinLines.Count -gt 0) { return $script:StdinLines.Dequeue() }
+    if ($script:StdinClosed) { return $null }
+    if ($null -eq $script:StdinPending) {
+        try { $script:StdinPending = $script:StdinStream.ReadAsync($script:StdinBuf, 0, $script:StdinBuf.Length) }
+        catch { $script:StdinClosed = $true; return $null }
+    }
     if (-not $script:StdinPending.IsCompleted) { return $null }
-    $line = $script:StdinPending.Result
+    $n = 0
+    try { $n = $script:StdinPending.Result } catch { $script:StdinClosed = $true; $script:StdinPending = $null; return $null }
     $script:StdinPending = $null
-    return $line
+    if ($n -le 0) { $script:StdinClosed = $true; return $null }
+    $script:StdinAcc += [System.Text.Encoding]::UTF8.GetString($script:StdinBuf, 0, $n)
+    while (($i = $script:StdinAcc.IndexOf("`n")) -ge 0) {
+        $script:StdinLines.Enqueue($script:StdinAcc.Substring(0, $i))
+        $script:StdinAcc = $script:StdinAcc.Substring($i + 1)
+    }
+    if ($script:StdinLines.Count -gt 0) { return $script:StdinLines.Dequeue() }
+    return $null
 }
 
 function Emit-Json($obj) {
@@ -121,31 +170,244 @@ function Is-HostArmedForNewDialog([string]$name) {
     return $false
 }
 
-function Get-DialogFileNames($dialogElement) {
-    # Walk the dialog tree looking for Edit / ComboBox controls whose
-    # nearby label says "File name". Return any text we find.
-    $candidates = New-Object System.Collections.Generic.List[string]
+# ── Who really owns this dialog? ────────────────────────────────────────────
+#
+# NOT the app, in the case that matters most. Microsoft 365 Copilot and Microsoft
+# Teams are both WebView2 shells: M365Copilot.exe(9476) spawns
+# msedgewebview2.exe(10940) as a direct child, and the file picker behind the
+# paperclip button is an ordinary `<input type=file>` — which Chromium shows from
+# its BROWSER process. So the #32770 that appears belongs to msedgewebview2, and
+# the old `Is-AiProcess $proc.ProcessName` gate rejected it and `continue`d,
+# every single time. That is not a theory: Windows itself records the executable
+# that opened each common dialog in
+#   HKCU\...\Explorer\ComDlg32\LastVisitedPidlMRU
+# and on the box where this was diagnosed the most-recent entry was
+# msedgewebview2.exe, written at the exact second the shell wrote Recent\Test.lnk
+# and the picked .docx got its LastAccessTime.
+#
+# So resolve the governed app rather than assuming it opened the dialog itself:
+#   1. the dialog's own process        — a plain native app (ChatGPT, Cursor)
+#   2. the dialog's OWNER window       — a brokered picker (PickerHost.exe for a
+#                                        packaged app) leaves the requesting
+#                                        window as the modal owner
+#   3. ancestors of 1, then of 2       — the WebView2 case above
+# First hit wins, and the event is attributed to THAT process, not to the
+# helper — index.js feeds ev.process straight to identifyAiProcess(), which
+# answers null for 'msedgewebview2' and would drop the event anyway.
+#
+# Four hops, not unlimited: WebView2 is one hop, a packaged-app launcher shim is
+# two, and stopping short keeps the walk from ever reaching services.exe and
+# attributing some unrelated dialog to whatever sits above it. PIDs <= 4 are the
+# Idle/System pseudo-processes and end the walk.
+$PROC_WALK_MAX = 4
+
+# Parent-PID lookups are a CIM round-trip, so they are memoised — but PIDs get
+# recycled, so the cache is dropped wholesale on a cadence rather than trusted
+# for the life of the process. Cheap either way: the walk only runs for a dialog
+# whose own process is not already a governed app, and dialogs are rare.
+$ParentPidCache = @{}
+function Get-ParentProcessId([int]$processId) {
+    if ($processId -le 4) { return 0 }
+    if ($script:ParentPidCache.ContainsKey($processId)) { return $script:ParentPidCache[$processId] }
+    $ppid = 0
     try {
-        $editCond = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-            [System.Windows.Automation.ControlType]::Edit)
-        $comboCond = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-            [System.Windows.Automation.ControlType]::ComboBox)
-        $orCond = New-Object System.Windows.Automation.OrCondition($editCond, $comboCond)
-        $children = $dialogElement.FindAll([System.Windows.Automation.TreeScope]::Descendants, $orCond)
-        foreach ($c in $children) {
+        $ci = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction Stop
+        if ($ci) { $ppid = [int]$ci.ParentProcessId }
+    } catch {}
+    $script:ParentPidCache[$processId] = $ppid
+    return $ppid
+}
+
+function Get-ProcessNameById([int]$processId) {
+    if ($processId -le 4) { return $null }
+    try { return (Get-Process -Id $processId -ErrorAction Stop).ProcessName } catch { return $null }
+}
+
+function Get-OwnerWindowProcessId([int64]$hwnd) {
+    if ($hwnd -eq 0) { return 0 }
+    try {
+        $owner = [FileDlgWatch.Win32]::GetWindow([System.IntPtr]$hwnd, 4)  # GW_OWNER
+        if ($owner -eq [System.IntPtr]::Zero) { return 0 }
+        $op = 0
+        [void][FileDlgWatch.Win32]::GetWindowThreadProcessId($owner, [ref]$op)
+        return [int]$op
+    } catch { return 0 }
+}
+
+# Returns @{ Name; Pid; Catalog } for the governed app this dialog belongs to, or
+# $null if it belongs to nothing we govern. `Catalog` is true for an ordinary AI
+# app and false for an armed host app — the same distinction the old inline
+# `hostArmed = (-not (Is-AiProcess ...))` drew, computed once here.
+function Resolve-GovernedProcess([int64]$hwnd, [int]$procId) {
+    $seeds = New-Object System.Collections.Generic.List[int]
+    if ($procId -gt 4) { $seeds.Add($procId) }
+    $ownerPid = Get-OwnerWindowProcessId $hwnd
+    if ($ownerPid -gt 4 -and $ownerPid -ne $procId) { $seeds.Add($ownerPid) }
+
+    foreach ($seed in $seeds) {
+        $cur = $seed
+        for ($hop = 0; $hop -le $PROC_WALK_MAX -and $cur -gt 4; $hop++) {
+            $name = Get-ProcessNameById $cur
+            if (-not $name) { break }
+            if (Is-AiProcess $name) { return @{ Name = $name; Pid = $cur; Catalog = $true } }
+            if (Is-HostArmedForNewDialog $name) { return @{ Name = $name; Pid = $cur; Catalog = $false } }
+            $cur = Get-ParentProcessId $cur
+        }
+    }
+    return $null
+}
+
+# ── Reading the picked file out of the dialog ───────────────────────────────
+#
+# The previous implementation asked for descendants whose CONTROL TYPE is Edit or
+# ComboBox and read their ValuePattern. On Windows 11 that finds the file LIST's
+# grid cells — 'Name', 'Status', 'Date modified', 'Type', 'Size' for every visible
+# row, 41 of them in a measured run — and does not find the File name field at
+# all. Verified by walking a real Open dialog: the field is
+#
+#   [Pane] aid='1090' cls='Static'       name='File name:'
+#   [Pane] aid='1148' cls='ComboBoxEx32' name='Test'
+#     [Pane] aid='1148' cls='ComboBox'   name=''
+#       [Pane] aid='1148' cls='Edit'     name='Test'
+#
+# — ControlType **Pane**, not Edit, and it supports no ValuePattern, no
+# TextPattern and no LegacyIAccessible pattern. Its text is readable ONLY from the
+# Name property. AutomationId 1148 is the classic FileName control id and is what
+# we match on instead; ValuePattern is still tried first for the dialogs that do
+# expose it.
+#
+# Note also what the Name says: 'Test', not 'Test.docx' and never a full path.
+# Explorer hides known extensions, and the folder lives somewhere else entirely —
+# in the address breadcrumb (a ToolbarWindow32 named 'Address: C:\...\Desktop').
+# So the old `Looks-LikePath` gate could not have passed either. Three
+# independent defects, each sufficient on its own to emit nothing; none of them
+# had ever been reached because the poll loop was wedged on a blocking stdin read
+# until it was fixed.
+$FILENAME_FIELD_ID = '1148'
+
+# Returns @{ Names = List[string]; Folder = string }.
+function Get-DialogSelection($dialogElement) {
+    $result = @{ Names = (New-Object System.Collections.Generic.List[string]); Folder = '' }
+    try {
+        $idCond = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::AutomationIdProperty, $FILENAME_FIELD_ID)
+        $hits = $dialogElement.FindAll([System.Windows.Automation.TreeScope]::Descendants, $idCond)
+        $raw = ''
+        foreach ($h in $hits) {
             try {
+                $v = $null
                 $vp = $null
-                if ($c.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) {
-                    $v = $vp.Current.Value
-                    if ($v -and $v.Length -gt 2) { $candidates.Add($v) }
-                }
+                try {
+                    if ($h.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) { $v = $vp.Current.Value }
+                } catch {}
+                if (-not $v) { try { $v = $h.Current.Name } catch {} }
+                # The ComboBoxEx32 and its inner Edit report the same text; the
+                # bare ComboBox in between reports ''. Take the longest non-empty.
+                if ($v -and $v.Length -gt $raw.Length) { $raw = $v }
+            } catch {}
+        }
+        foreach ($n in (Split-FileNameField $raw)) { $result.Names.Add($n) | Out-Null }
+    } catch {}
+
+    # Folder, from the address breadcrumb. Matched on SHAPE, not on the English
+    # word 'Address' — the Name is localised, so anything of the form
+    # '<label>: <path>' (or a bare path) is accepted and only the path kept.
+    try {
+        $tbCond = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ClassNameProperty, 'ToolbarWindow32')
+        $bars = $dialogElement.FindAll([System.Windows.Automation.TreeScope]::Descendants, $tbCond)
+        foreach ($b in $bars) {
+            try {
+                $n = $b.Current.Name
+                if (-not $n) { continue }
+                $cand = $n -replace '^[^:]{0,40}:\s*', ''
+                if (Looks-LikePath $cand) { $result.Folder = $cand; break }
+                if (Looks-LikePath $n)    { $result.Folder = $n;    break }
             } catch {}
         }
     } catch {}
-    return $candidates
+    return $result
 }
+
+# The File name field holds either one bare name, or several in quotes when the
+# dialog is multi-select: "a.docx" "b.xlsx". Returns an array either way.
+function Split-FileNameField([string]$raw) {
+    $out = New-Object System.Collections.Generic.List[string]
+    if (-not $raw) { return ,$out.ToArray() }
+    $raw = $raw.Trim()
+    if ($raw -match '"') {
+        foreach ($m in [regex]::Matches($raw, '"([^"]+)"')) {
+            $v = $m.Groups[1].Value.Trim()
+            if ($v) { $out.Add($v) | Out-Null }
+        }
+    }
+    if ($out.Count -eq 0 -and $raw.Length -gt 0) { $out.Add($raw) | Out-Null }
+    return ,$out.ToArray()
+}
+
+# Turn what the field actually holds into a real path on disk, or $null.
+#
+# Three shapes, in order: an already-absolute path (typed or pasted); a name that
+# joins onto the breadcrumb folder; and — the normal case, because Explorer hides
+# known extensions — a name with its extension missing, which only resolves by
+# globbing '<name>.*' in that folder. Emitting is gated on the result EXISTING, so
+# a half-typed name in a dialog the user then cancelled reports nothing.
+function Resolve-DialogPath([string]$folder, [string]$name) {
+    if (-not $name) { return $null }
+    if (Looks-LikePath $name) {
+        if (Test-Path -LiteralPath $name -PathType Leaf) { return $name }
+        # Absolute but extension-hidden, e.g. C:\...\Desktop\Test
+        $parent = Split-Path -Parent $name
+        $leaf   = Split-Path -Leaf $name
+        return (Resolve-ByGlob $parent $leaf)
+    }
+    if (-not $folder) { return $null }
+    $joined = Join-Path $folder $name
+    if (Test-Path -LiteralPath $joined -PathType Leaf) { return $joined }
+    return (Resolve-ByGlob $folder $name)
+}
+
+# '<basename>.*' in one folder. Exactly one match is the answer; several means the
+# hidden extension is genuinely ambiguous (Test.docx AND Test.txt both sitting
+# there), and the most recently written one is the best available guess — the
+# dialog was showing the folder the user had just been browsing.
+function Resolve-ByGlob([string]$folder, [string]$leaf) {
+    if (-not $folder -or -not $leaf) { return $null }
+    if ($leaf -match '[\*\?]') { return $null }
+    try {
+        if (-not (Test-Path -LiteralPath $folder -PathType Container)) { return $null }
+        $hits = @(Get-ChildItem -LiteralPath $folder -Filter ($leaf + '.*') -File -ErrorAction SilentlyContinue)
+        if ($hits.Count -eq 0) { return $null }
+        if ($hits.Count -eq 1) { return $hits[0].FullName }
+        return (($hits | Sort-Object LastWriteTime -Descending)[0]).FullName
+    } catch { return $null }
+}
+
+# Enumerate the visible top-level Win32 common dialogs. Split out of the poll loop
+# so the loop body can be lifted verbatim into a test harness with this one
+# function stubbed — the same arrangement Get-ForegroundAiWindow gives
+# attachment-watcher.ps1. See tests/helpers/file-dialog-poll-harness.ps1.
+function Get-OpenCommonDialogs {
+    $out = New-Object System.Collections.Generic.List[object]
+    try {
+        $root = [System.Windows.Automation.AutomationElement]::RootElement
+        $cond = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ClassNameProperty, '#32770')
+        $dialogs = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)
+        foreach ($d in $dialogs) {
+            try {
+                $out.Add([pscustomobject]@{
+                    Hwnd      = [int64]$d.Current.NativeWindowHandle
+                    ProcessId = [int]$d.Current.ProcessId
+                    Title     = $d.Current.Name
+                    Element   = $d
+                }) | Out-Null
+            } catch {}
+        }
+    } catch {}
+    return ,$out
+}
+
 
 function Looks-LikePath([string]$s) {
     if (-not $s) { return $false }
@@ -189,53 +451,49 @@ while ($true) {
         }
     }
     try {
-        $root = [System.Windows.Automation.AutomationElement]::RootElement
+        # PID reuse would otherwise let a stale parent edge survive forever. See
+        # $ParentPidCache.
+        if ($tick % 500 -eq 0) { $ParentPidCache.Clear() }
 
-        # Find all top-level #32770 dialogs (Win32 common dialog class).
-        $cond = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::ClassNameProperty, '#32770')
-        $dialogs = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)
-
+        $dialogs = Get-OpenCommonDialogs
         $currentHwnds = New-Object System.Collections.Generic.HashSet[int64]
 
         foreach ($d in $dialogs) {
             try {
-                $hwnd = [int64]$d.Current.NativeWindowHandle
+                $hwnd = [int64]$d.Hwnd
                 $currentHwnds.Add($hwnd) | Out-Null
+                if (-not $d.ProcessId) { continue }
 
-                # Resolve owning process — if not an AI app, skip.
-                $procId = $d.Current.ProcessId
-                if (-not $procId) { continue }
-                $proc = $null
-                try { $proc = Get-Process -Id $procId -ErrorAction Stop } catch { continue }
                 # An ALREADY-TRACKED dialog is never re-gated. Its arm state was
                 # latched when it was first seen and the picker has held focus
                 # ever since, so re-asking would only ever answer "no" — see
                 # $HostDisarmedAt.
-                $known = $Tracked.ContainsKey($hwnd)
-                if (-not $known -and -not (Is-AiProcess $proc.ProcessName) `
-                    -and -not (Is-HostArmedForNewDialog $proc.ProcessName)) { continue }
-
-                # Capture current FileName text. We refresh every tick — the
-                # last value seen before the dialog closes is what the user
-                # confirmed.
-                $names = Get-DialogFileNames $d
                 $entry = $Tracked[$hwnd]
                 if (-not $entry) {
+                    # Resolve the governed app, which is NOT necessarily the
+                    # dialog's own process — see Resolve-GovernedProcess.
+                    $owner = Resolve-GovernedProcess $hwnd ([int]$d.ProcessId)
+                    if (-not $owner) { continue }
                     $entry = @{
-                        process = $proc.ProcessName
-                        pid     = $procId
-                        title   = $d.Current.Name
+                        process = $owner.Name
+                        pid     = $owner.Pid
+                        title   = $d.Title
                         names   = @()
+                        folder  = ''
                         # WAS this dialog opened out of an armed host app? Latched
                         # here, at first sighting, and read nowhere except the
                         # emit below. False for every ordinary AI app, whose
                         # coverage does not depend on arming at all.
-                        hostArmed = (-not (Is-AiProcess $proc.ProcessName))
+                        hostArmed = (-not $owner.Catalog)
                     }
                     $Tracked[$hwnd] = $entry
                 }
-                if ($names.Count -gt 0) { $entry.names = @($names) }
+
+                # Capture the current selection. We refresh every tick — the last
+                # value seen before the dialog closes is what the user confirmed.
+                $sel = Get-DialogSelection $d.Element
+                if ($sel.Names.Count -gt 0) { $entry.names = @($sel.Names) }
+                if ($sel.Folder) { $entry.folder = $sel.Folder }
             } catch {
                 # Dialog may have closed mid-traversal — ignore.
             }
@@ -247,14 +505,19 @@ while ($true) {
         foreach ($h in $closedHwnds) {
             $entry = $Tracked[$h]
             foreach ($n in $entry.names) {
-                if (Looks-LikePath $n) {
+                # The field holds a bare, extension-hidden basename far more often
+                # than a path, so the old `if (Looks-LikePath $n)` gate is now
+                # inside Resolve-DialogPath, which reassembles it against the
+                # breadcrumb folder and confirms the result exists on disk.
+                $resolved = Resolve-DialogPath $entry.folder $n
+                if ($resolved) {
                     Emit-Json @{
                         t       = (Get-Date).ToUniversalTime().ToString('o')
                         kind    = 'file_dialog_pick'
                         process = $entry.process
                         pid     = $entry.pid
                         title   = $entry.title
-                        path    = $n
+                        path    = $resolved
                         # The latched arm state, so the Node side knows this pick
                         # came from a host app's governed conversation rather than
                         # from an ordinary AI app — and can attribute it to the
@@ -266,7 +529,13 @@ while ($true) {
             $Tracked.Remove($h)
         }
 
-        if ($tick % 75 -eq 0) {
+        # tick 1 as well as every 75th. `ready` proves the process started; only a
+        # heartbeat proves THIS loop is running, and the SyncTextReader bug above
+        # was invisible for exactly that reason — a helper wedged in the drain
+        # loop said ready and then nothing, forever. The Node side logs the first
+        # one, so "the poll loop never came up" is now a visible line rather than
+        # an absence of lines.
+        if ($tick -eq 1 -or $tick % $HeartbeatTicks -eq 0) {
             Emit-Json @{ t = (Get-Date).ToUniversalTime().ToString('o'); kind = 'heartbeat'; tick = $tick }
         }
     } catch {

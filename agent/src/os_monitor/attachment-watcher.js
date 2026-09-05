@@ -34,12 +34,16 @@ export class AttachmentWatcher extends EventEmitter {
     this.child = null;
     this.buffer = '';
     this.stopRequested = false;
+    // Has the helper's POLL LOOP ever reported in? See #dispatch's heartbeat case.
+    this.sawHeartbeat = false;
   }
 
   start() {
     if (process.platform !== 'win32') return;
     if (this.child) return;
     this.log?.info('attachment-watcher: starting UIA helper');
+    // Per-helper, so a respawn that comes up wedged is visible too.
+    this.sawHeartbeat = false;
     this.child = spawn(
       'powershell',
       ['-NoProfile', '-NonInteractive', '-Sta', '-ExecutionPolicy', 'Bypass', '-File', WATCHER_SCRIPT],
@@ -91,18 +95,29 @@ export class AttachmentWatcher extends EventEmitter {
    * helper looks at, for as long as a governed/blocked agent conversation is the
    * open one there.
    *
+   * `key` is an opaque, non-reversible digest of the governed conversation this
+   * arm is for (see OsMonitor#hostArmKey). It is what stops the helper from
+   * resetting its filename baseline every time focus bounces off the composer —
+   * which it did on every arm/disarm, and which made a Teams attachment
+   * undetectable, because attaching a file IS a focus bounce.
+   *
    * The helper keeps this in a SEPARATE set from its CFAI_AI_PROCESSES list and
    * never modifies that list, so the default — Teams is not watched at all — is
    * unchanged, and the armed window is exactly the window the org's own policy
    * already asked to be governed. Carries a bare process name and an on/off:
    * no path, no filename, no window title, no free text of any kind.
    */
-  hostArm(processName, on) {
+  hostArm(processName, on, key = '') {
     if (!processName) return false;
     if (!this.child?.stdin || this.child.stdin.destroyed) return false;
     try {
       this.child.stdin.write(JSON.stringify({
         cmd: 'host_arm', process: String(processName), state: on ? 'on' : 'off',
+        // Opaque digest of WHICH governed conversation, so the helper can tell a
+        // focus bounce inside one conversation from a switch to another and only
+        // drop its baseline for the latter — see Reset-Baseline in the .ps1. Not
+        // reversible and not an identifier of anything outside this machine.
+        key: String(key || ''),
       }) + '\n');
       return true;
     } catch (err) {
@@ -137,6 +152,15 @@ export class AttachmentWatcher extends EventEmitter {
         this.emit('attachment_disappeared', ev);
         break;
       case 'heartbeat':
+        // The FIRST one is logged, once, and nothing after it. `ready` only
+        // proves the process started — a helper wedged before its first poll (as
+        // one was, on a blocking stdin read) still says ready and then goes
+        // silent forever. This line is the difference between that failure being
+        // visible and being an absence of lines nobody can grep for.
+        if (!this.sawHeartbeat) {
+          this.sawHeartbeat = true;
+          this.log?.info('attachment-watcher: poll loop live');
+        }
         break;
       case 'error':
         this.log?.warn('attachment-watcher error: ' + ev.message);

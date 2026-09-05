@@ -37,6 +37,7 @@ import { Reporter } from './reporter.js';
 // that drains it. Owned by blocked-agents-sync.js — one path files these, one
 // path retries them.
 import { PENDING_REQUEST_PATH } from './blocked-agents-sync.js';
+import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -106,6 +107,29 @@ function identifyEventAi(ev) {
 // silent way for an approval to never lift the block it was granted for.
 function blockToolHost(ev) {
   return hostForPanel(ev.panel) || hostForProcess(ev.process) || hostsForPlatform(ev.blocked_platform)[0] || '';
+}
+
+// ── WHICH governed conversation an arm is for, as an opaque digest ──────────
+//
+// Goes down the host_arm channel to both UIA watchers so the chip watcher can
+// tell "focus bounced off the composer inside this conversation" from "a
+// different conversation is now open", and only drop its filename baseline for
+// the second. Without that distinction it dropped the baseline on every
+// arm/disarm, and since attaching a file IS a focus bounce, the chip the diff
+// was supposed to notice was always already in the fresh baseline — a Teams
+// attachment could not be detected at all. See Reset-Baseline in
+// attachment-watcher.ps1.
+//
+// HASHED, not the values themselves. Truncated sha256 over the admin-typed agent
+// name + id and our own catalog panel id (the identity govstate already carries),
+// so what actually crosses into the watcher process is an opaque token: it
+// changes when the conversation changes and says nothing about which conversation
+// it is. Same construction as reporter.js's client event id. No window title, no
+// filename and no prompt text has any parameter here it could arrive through.
+function hostArmKey(g) {
+  if (!g) return '';
+  const seed = `${g.agent || ''}|${g.agent_id || ''}|${g.panel || ''}`;
+  return createHash('sha256').update(seed).digest('hex').slice(0, 16);
 }
 
 // Clipboard scrubbing was removed on 2026-06-15: the clipboard path now fires
@@ -207,7 +231,7 @@ export class OsMonitor extends EventEmitter {
     const reArm = (watcher) => {
       const proc = this.hostGoverned?.process;
       if (proc) {
-        watcher.hostArm(proc, true);
+        watcher.hostArm(proc, true, hostArmKey(this.hostGoverned));
         this.log?.info(`os_monitor: re-armed host capture for ${proc} after a watcher respawn`);
       }
     };
@@ -1162,8 +1186,20 @@ export class OsMonitor extends EventEmitter {
       // enforces. In a plain Teams chat #hostGovernedFor() is null, the event
       // cannot even be produced, and if one somehow were it would stop here:
       // nothing read, nothing scanned, nothing held, nothing reported.
+      //
+      // The eligibility answer for a host app is the helper's LATCHED
+      // `host_armed`, not a fresh read of this.hostGoverned — the same choice,
+      // for the same reason, as the file-picker route above. govstate is
+      // edge-triggered on the focused ELEMENT, and every way of attaching a file
+      // moves focus off the composer (a drag makes Explorer the foreground
+      // window; the paperclip opens a flyout or a picker), so by the time a chip
+      // is visible this.hostGoverned has usually already gone null. Gating on it
+      // rejected exactly the attachments this route exists to catch. `host_armed`
+      // is the helper's answer from the tick the chip was actually seen, and the
+      // helper only ever looks at Teams while armed.
       const governed = this.#hostGovernedFor(ev.process);
-      if (!isAttachmentWatcherEligible(ev.process) && !governed) {
+      const hostChip = isHostAppProcess(ev.process) && ev.host_armed === true;
+      if (!isAttachmentWatcherEligible(ev.process) && !governed && !hostChip) {
         return;
       }
 
@@ -1239,7 +1275,14 @@ export class OsMonitor extends EventEmitter {
         // asked for the conversation to be governed, "we could not verify this"
         // is a reason to hold the send rather than a reason to wave it through.
         const unverified = cs?.scanned !== true && cs?.unverified === true;
-        const failClosed = !!governed && unverified;
+        // `|| hostChip` for the same reason the eligibility gate above carries it:
+        // inside a governed conversation is the condition, and the helper's latch
+        // is the reliable statement of it. A live-only read would fail OPEN on an
+        // unscannable file whenever the govstate had already bounced — i.e. on
+        // nearly every real attachment. Still false for every non-host app, so
+        // "fail closed is governed-only" is unchanged.
+        const inGovernedConversation = !!governed || hostChip;
+        const failClosed = inGovernedConversation && unverified;
         const shouldHold = severity === 'high' || severity === 'critical' || failClosed;
         if (shouldHold) {
           // For a fail-closed hold there are no pattern names to report, so the
@@ -1657,8 +1700,14 @@ export class OsMonitor extends EventEmitter {
         this.dialogWatcher.hostArm(previous.process, false);
       }
       if (this.hostGoverned) {
-        this.attachmentWatcher.hostArm(this.hostGoverned.process, true);
-        this.dialogWatcher.hostArm(this.hostGoverned.process, true);
+        // …with WHICH conversation, as an opaque digest. govstate is edge-
+        // triggered on the focused element, so these arms arrive in rapid
+        // on/off/on bursts as focus moves around the app; the key is how the chip
+        // watcher tells that burst apart from a real conversation switch. See
+        // hostArmKey().
+        const key = hostArmKey(this.hostGoverned);
+        this.attachmentWatcher.hostArm(this.hostGoverned.process, true, key);
+        this.dialogWatcher.hostArm(this.hostGoverned.process, true, key);
       }
       // Process + scope only. No agent name, so the line cannot become the
       // usage timeline described above.
