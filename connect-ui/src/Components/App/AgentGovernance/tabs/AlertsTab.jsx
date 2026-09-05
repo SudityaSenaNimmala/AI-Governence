@@ -454,18 +454,29 @@ export function AlertsTab({ isActive = true }) {
               padding: "6px 10px", fontSize: 12, color: "#333",
             }}
           >
+            {/* Every option is gated on its own credential, so the filter can
+                only offer a platform this tenant is actually connected to.
+                Microsoft, Google and OpenAI were previously listed
+                unconditionally, which let you filter to a platform that has no
+                section to show. */}
             <option value="all">All Platforms</option>
-            <option value="Microsoft">Microsoft 365</option>
-            <option value="Google">Google Cloud</option>
-            <option value="OpenAI">ChatGPT / OpenAI</option>
+            {isAuthenticated && <option value="Microsoft">Microsoft 365</option>}
+            {googleKeyId && <option value="Google">Google Cloud</option>}
+            {openaiKeyId && <option value="OpenAI">ChatGPT / OpenAI</option>}
             {claudeKeyId && <option value="Claude / Anthropic">Claude / Anthropic</option>}
             {geminiEnterpriseKeyId && <option value="Gemini Enterprise">Gemini Enterprise</option>}
           </select>
         </div>
       </div>
 
-      {/* Microsoft Alerts */}
-      {(vendorFilter === "all" || vendorFilter === "Microsoft") && (
+      {/* Microsoft Alerts — only when Microsoft is actually connected.
+          The OpenAI, Claude and Gemini Enterprise sections below have always
+          been gated on their own credential; Microsoft and Google were not, so
+          a tenant connected to only one of them still got the other's empty
+          section and a reassuring "No stale agents detected" for a platform it
+          had never scanned. That reads as a clean bill of health rather than
+          "not connected", which is the wrong answer for a governance tool. */}
+      {isAuthenticated && (vendorFilter === "all" || vendorFilter === "Microsoft") && (
         <Section title={`Microsoft 365 Stale Agents (${microsoftAlerts.length})`}>
           {microsoftAlerts.length > 0 ? (
             <div className="ag_alerts_list">
@@ -486,8 +497,8 @@ export function AlertsTab({ isActive = true }) {
         </Section>
       )}
 
-      {/* Google Alerts */}
-      {(vendorFilter === "all" || vendorFilter === "Google") && (
+      {/* Google Alerts — same rule, for the mirror-image tenant. */}
+      {googleKeyId && (vendorFilter === "all" || vendorFilter === "Google") && (
         <Section title={`Google Cloud Stale Agents (${googleAlerts.length})`}>
           {googleAlerts.length > 0 ? (
             <div className="ag_alerts_list">

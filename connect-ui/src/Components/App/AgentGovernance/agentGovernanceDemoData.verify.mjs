@@ -59,6 +59,17 @@ t("computeMetrics-style rollup", () => {
   const orph = A.filter(a => a.isOrphaned);
   return `${A.length} agents, ${stale.length} stale, ${orph.length} orphaned, dist ${JSON.stringify(dist)}`;
 });
+// A populated warnings array renders a yellow "Discovery Warnings" banner over
+// the agent table, which reads as a fault on a prospect's screen. The array
+// must exist though — it is mapped without a guard in more than one place.
+t("no discovery warnings banner", () => {
+  const r = agDemoDiscoveryResult();
+  if (!Array.isArray(r.warnings)) throw new Error("warnings must be an array, not " + typeof r.warnings);
+  if (r.warnings.length) throw new Error(`${r.warnings.length} warning(s) would render a banner: ` + r.warnings.join(" | "));
+  const gvw = g("/google/discover?oauth_key_id=k").warnings;
+  if (!Array.isArray(gvw) || gvw.length) throw new Error("the Vertex view would show a warnings block");
+  return "scan result and Vertex view both clean";
+});
 t("tenant reads as a Workspace domain, not onmicrosoft.com", () => {
   const r = agDemoDiscoveryResult();
   if (/onmicrosoft/i.test(r.tenant.domain)) throw new Error("tenant domain still Microsoft: " + r.tenant.domain);
