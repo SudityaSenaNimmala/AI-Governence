@@ -22,7 +22,6 @@ import {
   getMaxChar,
   globalDebounce,
   isSessionValid,
-  makeFirstLetterCapital,
   notifyToast,
   clearLocalStorage,
   onlyGroupsRequired,
@@ -32,6 +31,29 @@ import NavTabSwitcher from "./NavTabSwitcher/NavTabSwitcher";
 import RenewalCalendar from "./RenewalCalendar";
 import Notifications from "./Notifications";
 import AgentSearch from "../../App/Agent/AgentSearch/AgentSearch";
+
+// Like makeFirstLetterCapital, but leaves words that are already fully
+// uppercase (acronyms such as "AI", "MCP", "DLP") untouched instead of
+// lowercasing them — so page headings built from labels like "Agents & MCP"
+// don't get rewritten to "Agents & Mcp".
+//
+// Invariant, no exceptions: every word's FIRST letter is capital in the output.
+// Both branches below guarantee this — the acronym branch returns the word
+// unchanged (it's already all-caps, so its first letter already is), and the
+// other branch explicitly upper-cases the first character.
+const titleCasePreservingAcronyms = (text) => {
+  if (!text) return "";
+  return text
+    ?.split(" ")
+    ?.map((word) => {
+      if (!word) return word;
+      const isAcronym = word === word.toUpperCase() && /[A-Z]/.test(word);
+      return isAcronym
+        ? word
+        : `${word.charAt(0).toUpperCase()}${word.slice(1).toLowerCase()}`;
+    })
+    ?.join(" ");
+};
 
 const TopNav = (props) => {
   const navigation = useNavigate();
@@ -307,9 +329,7 @@ const TopNav = (props) => {
       ) : (
         <div className="cf_topNav_title">
           {props?.pageName
-            ? props?.pageName?.includes("AI")
-              ? props?.pageName
-              : makeFirstLetterCapital(props?.pageName)
+            ? titleCasePreservingAcronyms(props?.pageName)
             : `Dashboard`}
         </div>
       )}
