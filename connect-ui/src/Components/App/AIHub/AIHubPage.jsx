@@ -869,7 +869,7 @@ function OverviewView() {
 
     {/* 1. KPI strip */}
     <div className="aihub_stat_grid">
-      <StatCard icon={<Monitor size={18}/>} label="Machines" value={d.totals.machines} hint="Reporting Endpoints" color="#0052e0" onClick={()=>nav(OV_ROUTE.machines)}/>
+      <StatCard icon={<Monitor size={18}/>} label="Systems" value={d.totals.machines} hint="Reporting Endpoints" color="#0052e0" onClick={()=>nav(OV_ROUTE.machines)}/>
       <StatCard icon={<Wrench size={18}/>} label="AI Tools & Systems"
                 value={toolsCount!=null?toolsCount:"…"}
                 hint="In the AI Registry" color="#8b5cf6" onClick={()=>nav("/AIHub/Inventory?tab=systems&showAll=1")}/>
@@ -934,10 +934,10 @@ function MachinesView() {
   const platLabel={win32:"Windows",darwin:"macOS",linux:"Linux"};
   const filtered=q?rows.filter(r=>[r.hostname,r.user,r.platform].join(" ").toLowerCase().includes(q.toLowerCase())):rows;
   return (<div>
-    <SectionHeader title="Enrolled Machines" hint={`${filtered.length} of ${rows.length} machines`} action={<div className="aihub_search_box"><Search size={14}/><input placeholder="Search hostname, user, OS..." value={q} onChange={e=>setQ(e.target.value)}/></div>}/>
+    <SectionHeader title="Enrolled Systems" hint={`${filtered.length} of ${rows.length} systems`} action={<div className="aihub_search_box"><Search size={14}/><input placeholder="Search hostname, user, OS..." value={q} onChange={e=>setQ(e.target.value)}/></div>}/>
     <div className="aihub_card">
       <DataTable columns={[
-        {label:"Machine",render:r=><><div className="aihub_text_primary">{r.hostname||r.id?.slice(0,12)}</div><div className="aihub_text_muted">{splitConcatenatedName(r.user)}</div></>},
+        {label:"System",render:r=><><div className="aihub_text_primary">{r.hostname||r.id?.slice(0,12)}</div><div className="aihub_text_muted">{splitConcatenatedName(r.user)}</div></>},
         {label:"Platform",render:r=><Badge text={platLabel[r.platform]||slugLabel(r.platform)} color={platTone[r.platform]||"#6b7280"}/>},
         {label:"Findings",key:"findings_count",right:true},
         {label:"Tools",key:"unique_tools",right:true},
@@ -969,7 +969,7 @@ function ToolsView() {
       <DataTable columns={[
         {label:"Product",render:r=><><div className="aihub_text_primary">{r.product||r.tool_key}</div><div className="aihub_text_muted">{r.vendor||"Unknown"}</div></>},
         {label:"Evidence",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.evidence_types||[]).slice(0,4).map((t,i)=><Tag key={i} text={slugLabel(t)}/>)}{(r.evidence_types||[]).length>4&&<Tag text={`+${r.evidence_types.length-4}`} color="#9ca3af"/>}</div>},
-        {label:"Machines",key:"machines",right:true},
+        {label:"Systems",key:"machines",right:true},
         {label:"Status",render:r=><SanctionBadge status={r.sanction}/>},
       ]} rows={filtered}/>
     </div>
@@ -1034,7 +1034,7 @@ function AgentsView() {
   const visibleCount=(showSection("mcp")?mcpRows.length:0)+Object.keys(catMap).reduce((n,c)=>n+(showSection(c)?catRows(c).length:0),0);
   const totalHint=n=>filterUser?`of ${n} total`:undefined;
 
-  const machineCol={label:"Machine",render:r=><Mono>{(r.machine_id||"").slice(0,10)}</Mono>};
+  const machineCol={label:"System",render:r=><Mono>{(r.machine_id||"").slice(0,10)}</Mono>};
   const userCol={label:"User",render:renderUser};
 
   return (<div>
@@ -1114,7 +1114,7 @@ function ServerAgentsView() {
       <StatCard icon={<Activity size={18}/>} label="Calls Observed" value={summary.totals.calls||0} color="#0052e0"/>
       <StatCard icon={<Wrench size={18}/>} label="Total Cost (USD)" value={fmtUsd(summary.totals.total_cost_usd)} color="#22c55e"/>
       <StatCard icon={<Monitor size={18}/>} label="Distinct Users" value={summary.totals.distinct_users||0} color="#8b5cf6"/>
-      <StatCard icon={<Server size={18}/>} label="Distinct Machines" value={summary.totals.distinct_machines||0} color="#f59e0b"/>
+      <StatCard icon={<Server size={18}/>} label="Distinct Systems" value={summary.totals.distinct_machines||0} color="#f59e0b"/>
     </div>
     <div className="aihub_two_col">
       <div className="aihub_card"><SectionHeader title="Cost by User"/><DataTable columns={[{label:"User",render:r=>splitConcatenatedName(r.user)},{label:"Calls",key:"calls",right:true},{label:"Cost",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byUser||[]}/></div>
@@ -2280,7 +2280,7 @@ function SessionTranscriptView({ session, machines, onBack }) {
     <div className="aihub_card">
       <div className="aihub_replay_meta">
         <div><div className="aihub_replay_meta_label">AI Service</div><div><Badge text={meta.ai_service||"Unknown"} color="#0052e0"/></div></div>
-        <div><div className="aihub_replay_meta_label">Machine / User</div><div className="aihub_text_primary">{userLabel}</div></div>
+        <div><div className="aihub_replay_meta_label">System / User</div><div className="aihub_text_primary">{userLabel}</div></div>
         <div><div className="aihub_replay_meta_label">Started</div><div className="aihub_text_primary">{fmtTime(meta.started_at)}</div></div>
         <div><div className="aihub_replay_meta_label">Last Activity</div><div className="aihub_text_primary">{fmtTime(meta.last_activity_at)}</div></div>
         <div><div className="aihub_replay_meta_label">Messages</div><div className="aihub_text_primary">{meta.message_count??messages.length}</div></div>
@@ -2384,7 +2384,7 @@ function SessionListView({ onOpen, machines }) {
       <StatCard icon={<History size={18}/>} label="Sessions" value={totalSessions} color="#0052e0"/>
       <StatCard icon={<MessageSquare size={18}/>} label="Messages Captured" value={totalMessages} color="#8b5cf6"/>
       <StatCard icon={<AlertTriangle size={18}/>} label="High / Critical Sessions" value={hiCrit} hint="Needs Review" color="#ef4444"/>
-      <StatCard icon={<Monitor size={18}/>} label="Distinct Machines" value={distinctMachines} color="#f59e0b"/>
+      <StatCard icon={<Monitor size={18}/>} label="Distinct Systems" value={distinctMachines} color="#f59e0b"/>
     </div>
 
     <div className="aihub_filter_bar">
@@ -2418,7 +2418,7 @@ function SessionListView({ onOpen, machines }) {
       <SectionHeader title="Sessions" hint={`${filtered.length} of ${rows.length} sessions`}/>
       <DataTable onRow={r=>onOpen(r)} columns={[
         {label:"When",render:r=>relTime(r.last_activity_at||r.started_at)},
-        {label:"Machine / User",render:r=><><div className="aihub_text_primary">{machineLabel(machines,r.machine_id)}</div><div className="aihub_text_muted">{r.machine_id}</div></>},
+        {label:"System / User",render:r=><><div className="aihub_text_primary">{machineLabel(machines,r.machine_id)}</div><div className="aihub_text_muted">{r.machine_id}</div></>},
         {label:"AI Service",render:r=><Badge text={r.ai_service||"Unknown"} color="#0052e0"/>},
         {label:"Messages",render:r=>r.message_count??0,right:true},
         {label:"Highest Severity",render:r=>{const s=sessionSeverity(r);return s?<SeverityBadge sev={s}/>:<span className="aihub_text_muted">—</span>;}},
@@ -4013,8 +4013,9 @@ function AIRegistryView() {
             <div style={{fontSize:13.2}}>{splitConcatenatedName(r.owner)||"—"}</div>
             {r.is_orphaned&&<span style={{fontSize:11.7,color:"#ef4444",fontWeight:600}}>⚠ Orphaned</span>}
           </div>},
-          {label:"Activity",render:r=><div style={{textAlign:"right",whiteSpace:"nowrap"}}>
-            <div style={{fontSize:13.7,fontWeight:600}}>{r.activity?.total?.toLocaleString()||0}</div>
+          {label:"Events",render:r=><div style={{textAlign:"right",whiteSpace:"nowrap"}}
+              title="Total captured DLP events for this tool — prompts, file uploads, and enforcement actions (blocks, redactions, overrides) combined.">
+            <div style={{fontSize:13.7,fontWeight:600}}>{r.activity?.total?.toLocaleString()||0} events</div>
             <div className="aihub_text_muted">{r.activity?.last_active?relTime(r.activity.last_active):"never"}</div>
           </div>,right:true},
         ]}
@@ -4201,7 +4202,7 @@ function RegistryRowDetail({ row, onStatus, pending, children }) {
       {cell("Source",row.source_detail||row.source)}
       {cell("First Seen",row.first_seen?relTime(row.first_seen):null)}
       {cell("Last Active",row.last_active?relTime(row.last_active):null)}
-      {cell("Machines",row.machine_count)}
+      {cell("Systems",row.machine_count)}
       {row.is_orphaned&&<div style={{gridColumn:"1/-1",color:"#ef4444",fontWeight:600}}>⚠ Owner account is disabled — this system is orphaned</div>}
     </div>
 
@@ -4555,7 +4556,7 @@ function AccessRequestsView() {
           ?<div className="aihub_text_primary" style={{fontSize:13.2}}>{agentLabelOf(r)}</div>
           :<span className="aihub_text_muted" title="Whole app — every agent inside it">—</span>},
         {label:"Employee",render:r=><UserCell row={r}/>},
-        {label:"Machine",render:r=><Mono>{r.machine_id?.slice(0,12)}</Mono>},
+        {label:"System",render:r=><Mono>{r.machine_id?.slice(0,12)}</Mono>},
         {label:"Granted",render:r=>relTime(r.granted_at)},
         {label:"Expires",render:r=>{
           const d=new Date(r.expires_at);
