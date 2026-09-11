@@ -247,8 +247,15 @@ function ServiceCell({ row }) {
 // Neither name nor host is guaranteed on a machine that was never enrolled, so
 // the machine id is the last resort: the row stays traceable instead of showing
 // a bare dash the admin can do nothing with.
+// OS account usernames often concatenate given+family name with no separator
+// ("SudityaNimmala" for Suditya Nimmala) — split on a lower→upper letter
+// boundary so names read as two words instead of one merged string. A no-op
+// on names that already have spaces, and on hostnames/ids (no such boundary).
+function splitConcatenatedName(name) {
+  return typeof name === "string" ? name.replace(/([a-z])([A-Z])/g, "$1 $2") : name;
+}
 function UserCell({ row }) {
-  const name = row?.employee_name || row?.user || null;
+  const name = splitConcatenatedName(row?.employee_name || row?.user || null);
   const host = row?.hostname || null;
   if (name) return (<><div className="aihub_text_primary">{name}</div>{host && host !== name && <div className="aihub_text_muted">{host}</div>}</>);
   if (host) return <div className="aihub_text_primary">{host}</div>;
@@ -320,9 +327,25 @@ function SectionHeader({ title, hint, action }) {
 function Badge({ text, color="#6b7280" }) {
   return <span className="aihub_badge" style={{background:color+"12",color,borderColor:color+"25"}}>{text}</span>;
 }
+// Internal one-word enum values (not external identifiers) — safe to display
+// Title Cased regardless of how they're cased in the data.
+function capitalizeWord(w) { return typeof w==="string" && w ? w.charAt(0).toUpperCase()+w.slice(1).toLowerCase() : w; }
+// MCP client/server names and scopes are short identifiers, not literal package
+// names — safe to display Title Cased. A few have a non-obvious "official" form
+// (GitHub, not Github); everything else gets plain hyphen/underscore→space Title Case.
+const KNOWN_SERVICE_LABELS = { github:"GitHub", gitlab:"GitLab", openai:"OpenAI", sqlite:"SQLite", postgresql:"PostgreSQL" };
+const SLUG_ACRONYMS = new Set(['mcp','ai','ide','ml','sdk','api','llm','os','ui','sql','id','cli','url','aws','gcp','ssh','ci']);
+function slugLabel(value) {
+  if (typeof value !== "string" || !value) return value;
+  return value.split(/[-_]/).map(w => {
+    const lw = w.toLowerCase();
+    if (KNOWN_SERVICE_LABELS[lw]) return KNOWN_SERVICE_LABELS[lw];
+    return SLUG_ACRONYMS.has(lw) ? lw.toUpperCase() : (w.charAt(0).toUpperCase()+w.slice(1).toLowerCase());
+  }).join(' ');
+}
 function RiskBadge({ score }) { if(score==null) return <span className="aihub_text_muted">—</span>; const c=score>=70?"#ef4444":score>=40?"#f59e0b":"#22c55e"; return <Badge text={score} color={c}/>; }
-function SanctionBadge({ status }) { const c={approved:"#22c55e",restricted:"#f59e0b",blocked:"#ef4444",unknown:"#9ca3af"}; return <Badge text={status||"unknown"} color={c[status]||c.unknown}/>; }
-function SeverityBadge({ sev }) { const c={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e"}; return <Badge text={sev||"—"} color={c[sev]||"#9ca3af"}/>; }
+function SanctionBadge({ status }) { const c={approved:"#22c55e",restricted:"#f59e0b",blocked:"#ef4444",unknown:"#9ca3af"}; return <Badge text={capitalizeWord(status)||"Unknown"} color={c[status]||c.unknown}/>; }
+function SeverityBadge({ sev }) { const c={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e"}; return <Badge text={capitalizeWord(sev)||"—"} color={c[sev]||"#9ca3af"}/>; }
 function Mono({ children }) { return <span className="aihub_text_mono">{children}</span>; }
 function Tag({ text, color="#6366f1" }) { return <span style={{display:"inline-block",padding:"2px 8px",borderRadius:6,fontSize:11.7,fontWeight:600,background:color+"12",color,marginRight:4,marginBottom:2,letterSpacing:"0.02em"}}>{text}</span>; }
 function Loading() { return <div className="aihub_loading"><RefreshCw size={18} className="aihub_spin"/> Loading...</div>; }
@@ -598,7 +621,7 @@ function DonutCard({ title, hint, segments, onClick, unavailable }) {
   return (<ClickCard title={title} hint={hint} onClick={onClick}>
     {loading ? <>
       <div><span className="aihub_shimmer_block" style={{width:64,height:28,borderRadius:6}}/></div>
-      <div className="aihub_chart_total_label">total</div>
+      <div className="aihub_chart_total_label">Total</div>
       <div className="aihub_donut_wrap">
         <div style={{width:132,height:132,borderRadius:"50%",background:"#f3f4f6"}}/>
         <ul className="aihub_legend">
@@ -607,7 +630,7 @@ function DonutCard({ title, hint, segments, onClick, unavailable }) {
       </div>
     </> : <>
       <div className="aihub_chart_total">{total.toLocaleString()}</div>
-      <div className="aihub_chart_total_label">total</div>
+      <div className="aihub_chart_total_label">Total</div>
       <div className="aihub_donut_wrap">
         <Donut segments={segments} label={`${title} — ${segments.map(s=>`${s.label}: ${s.value}`).join(", ")}`}/>
         <ul className="aihub_legend">
@@ -637,7 +660,7 @@ function ToggleDonutCard({ views, onClick, unavailable }) {
     </div>
     {unavailable ? <>
       <div><span className="aihub_shimmer_block" style={{width:64,height:28,borderRadius:6}}/></div>
-      <div className="aihub_chart_total_label">total</div>
+      <div className="aihub_chart_total_label">Total</div>
       <div className="aihub_donut_wrap">
         <div style={{width:132,height:132,borderRadius:"50%",background:"#f3f4f6"}}/>
         <ul className="aihub_legend">
@@ -646,7 +669,7 @@ function ToggleDonutCard({ views, onClick, unavailable }) {
       </div>
     </> : <>
       <div className="aihub_chart_total">{total.toLocaleString()}</div>
-      <div className="aihub_chart_total_label">total</div>
+      <div className="aihub_chart_total_label">Total</div>
       <div className="aihub_donut_wrap">
         <Donut segments={v.segments} label={`${v.title} — ${v.segments.map(s=>`${s.label}: ${s.value}`).join(", ")}`}/>
         <ul className="aihub_legend">
@@ -661,7 +684,7 @@ function ToggleDonutCard({ views, onClick, unavailable }) {
 // autonomous agents. Counts DO show in this legend — it is the only place they appear.
 function AutonomyCard({ segments, onClick, unavailable }) {
   const total=segments.reduce((s,x)=>s+x.value,0);
-  return (<ClickCard title="Agent autonomy" hint="How much of the AI footprint can act on its own." onClick={onClick}>
+  return (<ClickCard title="Agent Autonomy" hint="How much of the AI footprint can act on its own." onClick={onClick}>
     {unavailable ? <div>
       <div className="aihub_seg_bar" style={{background:"#f3f4f6"}}><div className="aihub_seg_empty"/></div>
       <ul className="aihub_seg_legend">{segments.map(s=><li key={s.key}><span className="aihub_legend_dot" style={{background:"#e2e5ea"}}/><span className="aihub_shimmer_block" style={{width:60,height:12,borderRadius:4}}/></li>)}</ul>
@@ -717,7 +740,7 @@ function SpendCard({ onClick }) {
     :st.status==="loading"?"Reading provider usage…"
     :st.status==="error"?"Cost unavailable — check the connection"
     :"Connect a provider to see spend";
-  return <StatCard icon={<DollarSign size={18}/>} label="LLM spend" value={value} hint={hint} color="#22c55e" onClick={onClick}/>;
+  return <StatCard icon={<DollarSign size={18}/>} label="LLM Spend" value={value} hint={hint} color="#22c55e" onClick={onClick}/>;
 }
 
 function OverviewView() {
@@ -809,13 +832,13 @@ function OverviewView() {
     {key:"high",label:"High",value:byRisk.high||0,color:RISK_TONE.high},
     {key:"medium",label:"Medium",value:byRisk.medium||0,color:RISK_TONE.medium},
     {key:"low",label:"Low",value:byRisk.low||0,color:RISK_TONE.low},
-    {key:"not_assessed",label:"Not assessed",value:byRisk.not_assessed||0,color:RISK_TONE.not_assessed},
+    {key:"not_assessed",label:"Not Assessed",value:byRisk.not_assessed||0,color:RISK_TONE.not_assessed},
   ];
   const autonomySegs=[
-    {key:"ai_app",label:"AI-using apps",value:cats.ai_app,color:AUTONOMY_TONE.ai_app},
-    {key:"mcp",label:"MCP servers",value:mcpCount,color:AUTONOMY_TONE.mcp},
-    {key:"ai_coding_agent",label:"AI coding agents",value:cats.ai_coding_agent,color:AUTONOMY_TONE.ai_coding_agent},
-    {key:"ai_agent",label:"Autonomous agents",value:cats.ai_agent,color:AUTONOMY_TONE.ai_agent},
+    {key:"ai_app",label:"AI-Using Apps",value:cats.ai_app,color:AUTONOMY_TONE.ai_app},
+    {key:"mcp",label:"MCP Servers",value:mcpCount,color:AUTONOMY_TONE.mcp},
+    {key:"ai_coding_agent",label:"AI Coding Agents",value:cats.ai_coding_agent,color:AUTONOMY_TONE.ai_coding_agent},
+    {key:"ai_agent",label:"Autonomous Agents",value:cats.ai_agent,color:AUTONOMY_TONE.ai_agent},
   ];
 
   // Max 4 rows, only for things that are actually outstanding. Never renders captured
@@ -835,8 +858,8 @@ function OverviewView() {
     {label:"EU AI Act",href:"https://artificialintelligenceact.eu/"},
     {label:"NIST AI RMF",href:"https://www.nist.gov/itl/ai-risk-management-framework"},
     {label:"ISO/IEC 42001",href:"https://www.iso.org/standard/81230.html"},
-    {label:"AI use policy",to:OV_ROUTE.policies},
-    {label:"Request a tool",to:OV_ROUTE.access},
+    {label:"AI Use Policy",to:OV_ROUTE.policies},
+    {label:"Request a Tool",to:OV_ROUTE.access},
   ];
 
   return (<div>
@@ -846,12 +869,12 @@ function OverviewView() {
 
     {/* 1. KPI strip */}
     <div className="aihub_stat_grid">
-      <StatCard icon={<Monitor size={18}/>} label="Machines" value={d.totals.machines} hint="Reporting endpoints" color="#0052e0" onClick={()=>nav(OV_ROUTE.machines)}/>
-      <StatCard icon={<Wrench size={18}/>} label="AI tools & systems"
+      <StatCard icon={<Monitor size={18}/>} label="Machines" value={d.totals.machines} hint="Reporting Endpoints" color="#0052e0" onClick={()=>nav(OV_ROUTE.machines)}/>
+      <StatCard icon={<Wrench size={18}/>} label="AI Tools & Systems"
                 value={toolsCount!=null?toolsCount:"…"}
-                hint="In the AI registry" color="#8b5cf6" onClick={()=>nav("/AIHub/Inventory?tab=systems&showAll=1")}/>
-      <StatCard icon={<ShieldAlert size={18}/>} label="DLP events" value={dlpCount!=null?dlpCount:"…"} hint="High/critical flagged" color="#ef4444" onClick={()=>nav(OV_ROUTE.dlp)}/>
-      <StatCard icon={<Bot size={18}/>} label="Autonomy" value={noAutonomy?"—":autonomy} hint={noAutonomy?"Counts unavailable":"Agents & MCP servers"} color="#f59e0b" onClick={()=>nav(OV_ROUTE.agents)}/>
+                hint="In the AI Registry" color="#8b5cf6" onClick={()=>nav("/AIHub/Inventory?tab=systems&showAll=1")}/>
+      <StatCard icon={<ShieldAlert size={18}/>} label="DLP Events" value={dlpCount!=null?dlpCount:"…"} hint="High/Critical Flagged" color="#ef4444" onClick={()=>nav(OV_ROUTE.dlp)}/>
+      <StatCard icon={<Bot size={18}/>} label="Autonomy" value={noAutonomy?"—":autonomy} hint={noAutonomy?"Counts Unavailable":"Agents & MCP Servers"} color="#f59e0b" onClick={()=>nav(OV_ROUTE.agents)}/>
     </div>
 
     {/* 2. Open governance items — two real counts */}
@@ -873,14 +896,14 @@ function OverviewView() {
     <div className="aihub_ov_grid">
       <ToggleDonutCard
         views={[
-          {key:"sanction",label:"By Status",title:"Tools by sanction",hint:"Allow/block decision per AI system.",segments:sanctionSegs},
-          {key:"risk",label:"By Risk",title:"Tools by risk level",hint:"Assessed risk per AI system.",segments:riskSegs},
+          {key:"sanction",label:"By Status",title:"Tools by Sanction",hint:"Allow/block decision per AI system.",segments:sanctionSegs},
+          {key:"risk",label:"By Risk",title:"Tools by Risk Level",hint:"Assessed risk per AI system.",segments:riskSegs},
         ]}
         unavailable={toolsCount==null}
         onClick={()=>nav(OV_ROUTE.tools)}
       />
       <div className="aihub_card">
-        <SectionHeader title="Needs attention" hint="Open items — each one links to where it is handled."/>
+        <SectionHeader title="Needs Attention" hint="Open items — each one links to where it is handled."/>
         {attn.length===0
           ? <div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"24px 0",color:"#9ca3af"}}>
               <Shield size={28} strokeWidth={1.5}/>
@@ -889,7 +912,7 @@ function OverviewView() {
           : <ul className="aihub_attn_list">{attn.slice(0,4).map(a=><AttnItem key={a.key} tone={a.tone} icon={a.icon} label={a.label} sub={a.sub} onClick={()=>nav(a.to)}/>)}</ul>}
       </div>
       <div className="aihub_card">
-        <SectionHeader title="Quick links" hint="Frameworks and compliance references."/>
+        <SectionHeader title="Quick Links" hint="Frameworks and compliance references."/>
         <div className="aihub_quick_links">
           {links.map(l=>l.href
             ? <a key={l.label} className="aihub_quick_link" href={l.href} target="_blank" rel="noreferrer">{l.label}<ExternalLink size={11}/></a>
@@ -908,16 +931,17 @@ function MachinesView() {
   useEffect(()=>{apiFetch("/machines").then(setRows).catch(x=>setE(x.message))},[]);
   if(e) return <Err msg={e}/>; if(!rows) return <Loading/>;
   const platTone={win32:"#0052e0",darwin:"#6b7280",linux:"#f59e0b"};
+  const platLabel={win32:"Windows",darwin:"macOS",linux:"Linux"};
   const filtered=q?rows.filter(r=>[r.hostname,r.user,r.platform].join(" ").toLowerCase().includes(q.toLowerCase())):rows;
   return (<div>
-    <SectionHeader title="Enrolled machines" hint={`${filtered.length} of ${rows.length} machines`} action={<div className="aihub_search_box"><Search size={14}/><input placeholder="Search hostname, user, OS..." value={q} onChange={e=>setQ(e.target.value)}/></div>}/>
+    <SectionHeader title="Enrolled Machines" hint={`${filtered.length} of ${rows.length} machines`} action={<div className="aihub_search_box"><Search size={14}/><input placeholder="Search hostname, user, OS..." value={q} onChange={e=>setQ(e.target.value)}/></div>}/>
     <div className="aihub_card">
       <DataTable columns={[
-        {label:"Machine",render:r=><><div className="aihub_text_primary">{r.hostname||r.id?.slice(0,12)}</div><div className="aihub_text_muted">{r.user}</div></>},
-        {label:"Platform",render:r=><Badge text={r.platform} color={platTone[r.platform]||"#6b7280"}/>},
+        {label:"Machine",render:r=><><div className="aihub_text_primary">{r.hostname||r.id?.slice(0,12)}</div><div className="aihub_text_muted">{splitConcatenatedName(r.user)}</div></>},
+        {label:"Platform",render:r=><Badge text={platLabel[r.platform]||slugLabel(r.platform)} color={platTone[r.platform]||"#6b7280"}/>},
         {label:"Findings",key:"findings_count",right:true},
         {label:"Tools",key:"unique_tools",right:true},
-        {label:"Last scan",render:r=>relTime(r.last_scan_at)},
+        {label:"Last Scan",render:r=>relTime(r.last_scan_at)},
       ]} rows={filtered}/>
     </div>
   </div>);
@@ -937,14 +961,14 @@ function ToolsView() {
   });
   const tabs=["all","approved","restricted","blocked","unknown"];
   return (<div>
-    <SectionHeader title="Tools catalog" hint={`${filtered.length} tools`} action={<div className="aihub_search_box"><Search size={14}/><input placeholder="Filter by vendor or product..." value={q} onChange={e=>setQ(e.target.value)}/></div>}/>
+    <SectionHeader title="Tools Catalog" hint={`${filtered.length} tools`} action={<div className="aihub_search_box"><Search size={14}/><input placeholder="Filter by vendor or product..." value={q} onChange={e=>setQ(e.target.value)}/></div>}/>
     <div style={{display:"flex",gap:6,marginBottom:14}}>
       {tabs.map(t=><button key={t} className={`aihub_filter_btn ${status===t?"active":""}`} onClick={()=>setStatus(t)}>{t}</button>)}
     </div>
     <div className="aihub_card">
       <DataTable columns={[
         {label:"Product",render:r=><><div className="aihub_text_primary">{r.product||r.tool_key}</div><div className="aihub_text_muted">{r.vendor||"Unknown"}</div></>},
-        {label:"Evidence",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.evidence_types||[]).slice(0,4).map((t,i)=><Tag key={i} text={t.replace(/_/g," ")}/>)}{(r.evidence_types||[]).length>4&&<Tag text={`+${r.evidence_types.length-4}`} color="#9ca3af"/>}</div>},
+        {label:"Evidence",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.evidence_types||[]).slice(0,4).map((t,i)=><Tag key={i} text={slugLabel(t)}/>)}{(r.evidence_types||[]).length>4&&<Tag text={`+${r.evidence_types.length-4}`} color="#9ca3af"/>}</div>},
         {label:"Machines",key:"machines",right:true},
         {label:"Status",render:r=><SanctionBadge status={r.sanction}/>},
       ]} rows={filtered}/>
@@ -978,7 +1002,7 @@ function AgentsView() {
 
   const mcpAll=Array.isArray(mcp)?mcp:[];
   const projectsAll=Array.isArray(projects)?projects:[];
-  const catMap={ai_agent:{title:"Autonomous AI agents",hint:"Projects using agent frameworks (LangChain, AutoGen, CrewAI, LlamaIndex, MCP SDK)",color:"#ef4444"},ai_coding_agent:{title:"AI coding agents",hint:"Projects managed by Claude Code, Cursor, Aider, Continue",color:"#f59e0b"},ai_app:{title:"AI-using apps",hint:"Projects that call LLM APIs",color:"#0052e0"}};
+  const catMap={ai_agent:{title:"Autonomous AI Agents",hint:"Projects using agent frameworks (LangChain, AutoGen, CrewAI, LlamaIndex, MCP SDK)",color:"#ef4444"},ai_coding_agent:{title:"AI Coding Agents",hint:"Projects managed by Claude Code, Cursor, Aider, Continue",color:"#f59e0b"},ai_app:{title:"AI-Using Apps",hint:"Projects that call LLM APIs",color:"#0052e0"}};
   const grouped={ai_agent:[],ai_coding_agent:[],ai_app:[]};
   projectsAll.forEach(f=>{const c=f.payload?.primaryCategory||"ai_app";(grouped[c]||(grouped[c]=[])).push(f)});
 
@@ -990,7 +1014,7 @@ function AgentsView() {
   const userKey=r=>{const m=machineById.get(r.machine_id); return m?.user||m?.hostname||UNKNOWN_USER;};
   const renderUser=r=>{
     const m=machineById.get(r.machine_id);
-    const label=m?.user||m?.hostname;
+    const label=splitConcatenatedName(m?.user)||m?.hostname;
     if(label) return <><div className="aihub_text_primary">{label}</div>{m?.user&&m?.hostname&&<div className="aihub_text_muted">{m.hostname}</div>}</>;
     // Unresolved: name the bucket, then the raw id so the row is still traceable.
     return <><div className="aihub_text_muted">{UNKNOWN_USER}</div><Mono>{(r.machine_id||"").slice(0,10)||"—"}</Mono></>;
@@ -1017,8 +1041,8 @@ function AgentsView() {
     <SectionHeader title="Agents & MCP" hint="AI agent projects and the MCP servers they can reach, across all machines."
       action={<div style={{display:"flex",gap:10,alignItems:"center"}}>
         <select value={filterUser} onChange={ev=>setFilterUser(ev.target.value)} aria-label="Filter by user" style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.2,fontWeight:600}}>
-          <option value="">All users</option>
-          {userOptions.map(u=><option key={u} value={u}>{u}</option>)}
+          <option value="">All Users</option>
+          {userOptions.map(u=><option key={u} value={u}>{splitConcatenatedName(u)}</option>)}
         </select>
         {filterSection&&<button className="aihub_filter_btn" onClick={()=>setFilterSection("")}>Clear selection</button>}
       </div>}/>
@@ -1026,24 +1050,24 @@ function AgentsView() {
     {/* Summary cards — click one to open just that list, click again to show all.
         Counts follow the visible pool, so they track the user filter. */}
     <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(4, 1fr)"}}>
-      <StatCard icon={<Server size={18}/>} label="MCP servers" value={mcpRows.length} hint={totalHint(mcpAll.length)||"Capabilities granted to agents"} color={AUTONOMY_TONE.mcp} onClick={()=>toggleSection("mcp")}/>
-      <StatCard icon={<Bot size={18}/>} label="Autonomous agents" value={catRows("ai_agent").length} hint={totalHint(grouped.ai_agent.length)||"Agent frameworks"} color={catMap.ai_agent.color} onClick={()=>toggleSection("ai_agent")}/>
-      <StatCard icon={<Wrench size={18}/>} label="AI coding agents" value={catRows("ai_coding_agent").length} hint={totalHint(grouped.ai_coding_agent.length)||"Claude Code, Cursor, Aider"} color={catMap.ai_coding_agent.color} onClick={()=>toggleSection("ai_coding_agent")}/>
-      <StatCard icon={<Monitor size={18}/>} label="AI-using apps" value={catRows("ai_app").length} hint={totalHint(grouped.ai_app.length)||"Projects calling LLM APIs"} color={catMap.ai_app.color} onClick={()=>toggleSection("ai_app")}/>
+      <StatCard icon={<Server size={18}/>} label="MCP Servers" value={mcpRows.length} hint={totalHint(mcpAll.length)||"Capabilities Granted to Agents"} color={AUTONOMY_TONE.mcp} onClick={()=>toggleSection("mcp")}/>
+      <StatCard icon={<Bot size={18}/>} label="Autonomous Agents" value={catRows("ai_agent").length} hint={totalHint(grouped.ai_agent.length)||"Agent Frameworks"} color={catMap.ai_agent.color} onClick={()=>toggleSection("ai_agent")}/>
+      <StatCard icon={<Wrench size={18}/>} label="AI Coding Agents" value={catRows("ai_coding_agent").length} hint={totalHint(grouped.ai_coding_agent.length)||"Claude Code, Cursor, Aider"} color={catMap.ai_coding_agent.color} onClick={()=>toggleSection("ai_coding_agent")}/>
+      <StatCard icon={<Monitor size={18}/>} label="AI-Using Apps" value={catRows("ai_app").length} hint={totalHint(grouped.ai_app.length)||"Projects Calling LLM APIs"} color={catMap.ai_app.color} onClick={()=>toggleSection("ai_app")}/>
     </div>
 
     {/* MCP Servers */}
     {showSection("mcp")&&<div className="aihub_card">
-      <SectionHeader title="MCP servers in use" hint="Each MCP server is a capability granted to an AI agent."/>
+      <SectionHeader title="MCP Servers in Use" hint="Each MCP server is a capability granted to an AI agent."/>
       <DataTable columns={[
         userCol,
         machineCol,
-        {label:"Client",render:r=>r.payload?.client||"—"},
-        {label:"Server",render:r=><span className="aihub_text_primary">{r.payload?.serverName||"—"}</span>},
-        {label:"Scopes",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.payload?.scopes||[]).map((s,i)=><Tag key={i} text={s}/>)}</div>},
+        {label:"Client",render:r=>slugLabel(r.payload?.client)||"—"},
+        {label:"Server",render:r=><span className="aihub_text_primary">{slugLabel(r.payload?.serverName)||"—"}</span>},
+        {label:"Scopes",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.payload?.scopes||[]).map((s,i)=><Tag key={i} text={slugLabel(s)}/>)}</div>},
         {label:"Command",render:r=><Mono>{[r.payload?.command,...(r.payload?.args||[])].filter(Boolean).join(" ").slice(0,60)}</Mono>},
-        {label:"Config file",render:r=>r.payload?.configPath?<Mono title={r.payload.configPath}>{r.payload.configPath}</Mono>:<span className="aihub_text_muted">—</span>},
-      ]} rows={mcpRows} empty={filterUser?`No MCP servers for ${filterUser}`:"No MCP servers found"}/>
+        {label:"Config File",render:r=>r.payload?.configPath?<Mono title={r.payload.configPath}>{r.payload.configPath}</Mono>:<span className="aihub_text_muted">—</span>},
+      ]} rows={mcpRows} empty={filterUser?`No MCP servers for ${splitConcatenatedName(filterUser)}`:"No MCP servers found"}/>
     </div>}
 
     {/* Agent project categories */}
@@ -1052,12 +1076,11 @@ function AgentsView() {
         <SectionHeader title={cfg.title} hint={cfg.hint}/>
         <DataTable columns={[
           userCol,
-          machineCol,
           {label:"Path",render:r=><Mono>{r.payload?.path||"—"}</Mono>},
-          {label:"Language",render:r=>r.payload?.language||"—"},
+          {label:"Language",render:r=>languageLabel(r.payload?.language)||"—"},
           {label:"Frameworks",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.payload?.frameworks||[]).map((f,i)=><Tag key={i} text={f} color={cfg.color}/>)}</div>},
           {label:"Modified",render:r=>relTime(r.payload?.lastModified)},
-        ]} rows={catRows(cat)} empty={filterUser?`No ${cfg.title.toLowerCase()} for ${filterUser}`:`No ${cfg.title.toLowerCase()} found`}/>
+        ]} rows={catRows(cat)} empty={filterUser?`No ${cfg.title.toLowerCase()} for ${splitConcatenatedName(filterUser)}`:`No ${cfg.title.toLowerCase()} found`}/>
       </div>
     ))}
 
@@ -1088,27 +1111,27 @@ function ServerAgentsView() {
   return (<div>
     <SectionHeader title="Server Agents" hint="LLM API calls intercepted from backend servers."/>
     <div className="aihub_stat_grid">
-      <StatCard icon={<Activity size={18}/>} label="Calls observed" value={summary.totals.calls||0} color="#0052e0"/>
-      <StatCard icon={<Wrench size={18}/>} label="Total cost (USD)" value={fmtUsd(summary.totals.total_cost_usd)} color="#22c55e"/>
-      <StatCard icon={<Monitor size={18}/>} label="Distinct users" value={summary.totals.distinct_users||0} color="#8b5cf6"/>
-      <StatCard icon={<Server size={18}/>} label="Distinct machines" value={summary.totals.distinct_machines||0} color="#f59e0b"/>
+      <StatCard icon={<Activity size={18}/>} label="Calls Observed" value={summary.totals.calls||0} color="#0052e0"/>
+      <StatCard icon={<Wrench size={18}/>} label="Total Cost (USD)" value={fmtUsd(summary.totals.total_cost_usd)} color="#22c55e"/>
+      <StatCard icon={<Monitor size={18}/>} label="Distinct Users" value={summary.totals.distinct_users||0} color="#8b5cf6"/>
+      <StatCard icon={<Server size={18}/>} label="Distinct Machines" value={summary.totals.distinct_machines||0} color="#f59e0b"/>
     </div>
     <div className="aihub_two_col">
-      <div className="aihub_card"><SectionHeader title="Cost by user"/><DataTable columns={[{label:"User",key:"user"},{label:"Calls",key:"calls",right:true},{label:"Cost",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byUser||[]}/></div>
-      <div className="aihub_card"><SectionHeader title="Cost by model"/><DataTable columns={[{label:"Model",render:r=><Mono>{r.model}</Mono>},{label:"Calls",key:"calls",right:true},{label:"Cost",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byModel||[]}/></div>
+      <div className="aihub_card"><SectionHeader title="Cost by User"/><DataTable columns={[{label:"User",render:r=>splitConcatenatedName(r.user)},{label:"Calls",key:"calls",right:true},{label:"Cost",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byUser||[]}/></div>
+      <div className="aihub_card"><SectionHeader title="Cost by Model"/><DataTable columns={[{label:"Model",render:r=><Mono>{r.model}</Mono>},{label:"Calls",key:"calls",right:true},{label:"Cost",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byModel||[]}/></div>
     </div>
     <div className="aihub_two_col">
-      <div className="aihub_card"><SectionHeader title="Trigger source"/><DataTable columns={[{label:"Source",render:r=><Badge text={r.trigger} color={triggerTone[r.trigger]||"#9ca3af"}/>},{label:"Calls",key:"calls",right:true},{label:"Cost",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byTrigger||[]}/></div>
-      <div className="aihub_card"><SectionHeader title="By provider"/><DataTable columns={[{label:"Provider",render:r=><Badge text={r.provider} color={providerTone[r.provider]||"#9ca3af"}/>},{label:"Calls",key:"calls",right:true},{label:"Cost",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byProvider||[]}/></div>
+      <div className="aihub_card"><SectionHeader title="Trigger Source"/><DataTable columns={[{label:"Source",render:r=><Badge text={slugLabel(r.trigger)} color={triggerTone[r.trigger]||"#9ca3af"}/>},{label:"Calls",key:"calls",right:true},{label:"Cost",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byTrigger||[]}/></div>
+      <div className="aihub_card"><SectionHeader title="By Provider"/><DataTable columns={[{label:"Provider",render:r=><Badge text={slugLabel(r.provider)} color={providerTone[r.provider]||"#9ca3af"}/>},{label:"Calls",key:"calls",right:true},{label:"Cost",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byProvider||[]}/></div>
     </div>
     <div className="aihub_card">
-      <SectionHeader title="Recent calls"/>
+      <SectionHeader title="Recent Calls"/>
       <DataTable columns={[
         {label:"When",render:r=>relTime(r.occurred_at)},
-        {label:"User",render:r=>r.user||"—"},
-        {label:"Trigger",render:r=><Badge text={r.trigger} color={triggerTone[r.trigger]||"#9ca3af"}/>},
+        {label:"User",render:r=>splitConcatenatedName(r.user)||"—"},
+        {label:"Trigger",render:r=><Badge text={slugLabel(r.trigger)} color={triggerTone[r.trigger]||"#9ca3af"}/>},
         {label:"Agent",render:r=><Mono>{(r.cmdline||"").slice(0,60)}</Mono>},
-        {label:"Provider",render:r=><Badge text={r.provider} color={providerTone[r.provider]||"#9ca3af"}/>},
+        {label:"Provider",render:r=><Badge text={slugLabel(r.provider)} color={providerTone[r.provider]||"#9ca3af"}/>},
         {label:"Model",render:r=><Mono>{r.model||"—"}</Mono>},
         {label:"Tokens",render:r=>fmtTokens(r.total_tokens),right:true},
         {label:"Cost",render:r=>fmtUsd(r.estimated_cost_usd),right:true},
@@ -1120,10 +1143,42 @@ function ServerAgentsView() {
 // ═══════════════════════════════════════════════════════════════════════════════
 // 6. DLP / AI ACTIVITY
 // ═══════════════════════════════════════════════════════════════════════════════
+
+// What KIND of egress a captured event is, read from `metadata.surface_kind`.
+//
+// The desktop agent's Outlook and OneDrive/SharePoint guardrails stamp
+// "data_egress": those events are a mail send or a file sync, not a prompt to a
+// model. They belong on a DLP screen — that is the whole point of capturing them
+// — but folding them into the AI counters would inflate every AI-usage number
+// here with traffic that never touched an AI service, so they are tagged per row
+// and can be scoped in or out.
+//
+// ABSENT MEANS AI SERVICE. Every browser-extension event, and every row written
+// before the desktop guardrails existed, carries no `surface_kind` at all;
+// defaulting those to data egress would empty the AI view and silently reclassify
+// years of history. Same reasoning as SURFACE_META further down this file.
+const EVENT_SURFACE_KINDS = {
+  ai_service:  { label:"AI Service",  color:"#0052e0", hint:"Prompt or upload sent to an AI service." },
+  data_egress: { label:"Data Egress", color:"#0891b2", hint:"Business data leaving through a non-AI channel — Outlook mail, or OneDrive/SharePoint sync — captured by the desktop agent." },
+};
+function eventSurfaceKind(ev) {
+  // Top-level field checked as well as metadata: the /dlp routes spread the whole
+  // stored row before attaching parsed metadata, so either shape can arrive.
+  const k = ev?.metadata?.surface_kind || ev?.surface_kind;
+  return k && EVENT_SURFACE_KINDS[k] ? k : "ai_service";
+}
+// Render helper, not a component: a `{ row }` signature trips react/prop-types on
+// every field it reads (see surfaceBadge below for the same reasoning).
+function surfaceKindBadge(row) {
+  const meta = EVENT_SURFACE_KINDS[eventSurfaceKind(row)];
+  return <span title={meta.hint}><Badge text={meta.label} color={meta.color}/></span>;
+}
+
 function DLPView() {
   const [summary,setS]=useState(null),[events,setEv]=useState(null),[files,setF]=useState(null),[e,setE]=useState(null);
   const [preview,setPreview]=useState(null);
   const [section,setSection]=useState(""); // "", "prompts", "files", "services"
+  const [kind,setKind]=useState("");       // "" = both, else an EVENT_SURFACE_KINDS key
   const [openRows,setOpenRows]=useState(()=>new Set()); // grouped rows expanded to show their members
   const toggleRow=id=>setOpenRows(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;});
   useEffect(()=>{
@@ -1131,8 +1186,13 @@ function DLPView() {
   },[]);
   if(e) return <Err msg={e}/>; if(!events) return <Loading/>;
 
-  const allPrompts=(events||[]).filter(ev=>ev.event_kind!=="file_upload");
-  const allFiles=files||[];
+  // Surface-kind scope, applied BEFORE the severity narrowing, the grouping and
+  // every counter below — so each card, group count and table on this screen
+  // describes exactly the population the selector names, with no card counting a
+  // channel the table underneath it excludes.
+  const inKind=ev=>!kind||eventSurfaceKind(ev)===kind;
+  const allPrompts=(events||[]).filter(ev=>ev.event_kind!=="file_upload").filter(inKind);
+  const allFiles=(files||[]).filter(inKind);
   const highCrit=allPrompts.filter(ev=>isHiCrit(ev.secret_class||ev.highest_severity)).length + allFiles.filter(f=>isHiCrit(f.severity||f.highest_severity)).length;
   const serviceCount=(summary?.byService||[]).length;
   const sourceTone={browser_extension:"#0052e0",desktop_hook:"#8b5cf6",os_monitor:"#f59e0b"};
@@ -1162,21 +1222,30 @@ function DLPView() {
     <SectionHeader title="AI Activity (DLP)" hint="Prompts and file uploads captured by the OS monitor and browser extension. High and critical severity only. On apps where AI is one panel, only the AI panel is governed."
       action={section?<button className="aihub_filter_btn" onClick={()=>setSection("")}>Clear selection</button>:null}/>
 
+    {/* Event Kind filter (surface_kind-based split between AI-service traffic and
+        desktop-guardrail data egress) is deliberately not rendered yet: nothing on
+        the server stamps `surface_kind` on events yet, so every row would default
+        to "ai_service" (see eventSurfaceKind()) and this UI would show a permanently
+        empty "Data Egress Only" filter and a counter stuck at "0 of N". Re-enable
+        once the desktop agent's Outlook/OneDrive guardrail actually stamps the
+        field — the EVENT_SURFACE_KINDS/eventSurfaceKind/surfaceKindBadge plumbing
+        below is already in place for that. */}
+
     <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(4,1fr)"}}>
-      <StatCard icon={<AlertTriangle size={18}/>} label="High / critical" value={highCrit} hint="total flagged" color="#ef4444"/>
-      <StatCard icon={<MessageSquare size={18}/>} label="Prompt events" value={promptRows.length} hint="high & critical" color="#0052e0" onClick={()=>toggle("prompts")}/>
-      <StatCard icon={<FileText size={18}/>} label="File uploads" value={fileRows.length} hint="high & critical" color="#f59e0b" onClick={()=>toggle("files")}/>
-      <StatCard icon={<Server size={18}/>} label="AI services" value={serviceCount} hint="breakdown" color="#8b5cf6" onClick={()=>toggle("services")}/>
+      <StatCard icon={<AlertTriangle size={18}/>} label="High / Critical" value={highCrit} hint="Total Flagged" color="#ef4444"/>
+      <StatCard icon={<MessageSquare size={18}/>} label="Prompt Events" value={promptRows.length} hint="High & Critical" color="#0052e0" onClick={()=>toggle("prompts")}/>
+      <StatCard icon={<FileText size={18}/>} label="File Uploads" value={fileRows.length} hint="High & Critical" color="#f59e0b" onClick={()=>toggle("files")}/>
+      <StatCard icon={<Server size={18}/>} label="AI Services" value={serviceCount} hint="Breakdown" color="#8b5cf6" onClick={()=>toggle("services")}/>
     </div>
 
     {section==="services"&&summary?.byService?.length>0&&<div className="aihub_card">
-      <SectionHeader title="Activity by AI service"/>
+      {/* Server-side rollup from /dlp/summary, which aggregates in Mongo. */}
+      <SectionHeader title="Activity by AI Service"/>
       <DataTable columns={[
         {label:"Service",key:"ai_service"},
         {label:"Prompts",key:"prompts",right:true},
-        {label:"File uploads",key:"file_uploads",right:true},
-        {label:"Total",key:"events",right:true},
-        {label:"Machines",key:"machines",right:true},
+        {label:"File Uploads",key:"file_uploads",right:true},
+        {label:"Systems",key:"machines",right:true},
       ]} rows={summary.byService||[]}/>
     </div>}
 
@@ -1184,7 +1253,7 @@ function DLPView() {
       {/* Rows are user ACTIONS, not raw events — a prompt and the block it
           triggered are one action. Both counts are stated so the difference from
           the "Prompt events" card above is visible rather than mysterious. */}
-      <SectionHeader title="Sensitive prompts"
+      <SectionHeader title="Sensitive Prompts"
         hint={`${promptGroups.length} actions from ${promptRows.length} events · high & critical severity only`}/>
       <DataTable onRow={r=>{ const c=contentMember(r); if(c) setPreview(c); }}
         isExpanded={r=>openRows.has(r.id)}
@@ -1201,7 +1270,7 @@ function DLPView() {
     </div>}
 
     {section==="files"&&<div className="aihub_card">
-      <SectionHeader title="File uploads" hint="High & critical severity only"/>
+      <SectionHeader title="File Uploads" hint="High & Critical Severity Only"/>
       <DataTable onRow={r=>{ if(r.has_content) setPreview(r); }} columns={[
         {label:"Time",render:r=>relTime(r.occurred_at)},
         {label:"User",render:r=><UserCell row={r}/>},
@@ -1252,19 +1321,19 @@ function PlatformsView() {
     <div className="aihub_stat_grid">
       <StatCard icon={<Server size={18}/>} label="Total" value={rows.length} color="#0052e0"/>
       <StatCard icon={<Shield size={18}/>} label="Governed" value={governed} color="#22c55e"/>
-      <StatCard icon={<Plus size={18}/>} label="Admin-added" value={adminAdded} color="#8b5cf6"/>
-      <StatCard icon={<Scan size={18}/>} label="LLM-discovered" value={llmDisc} color="#f59e0b"/>
+      <StatCard icon={<Plus size={18}/>} label="Admin-Added" value={adminAdded} color="#8b5cf6"/>
+      <StatCard icon={<Scan size={18}/>} label="LLM-Discovered" value={llmDisc} color="#f59e0b"/>
       <StatCard icon={<X size={18}/>} label="Blocked" value={blockedCount} color="#ef4444"/>
     </div>
-    <SectionHeader title="AI Platforms registry" action={<div className="aihub_search_box"><Search size={14}/><input placeholder="Filter by host, vendor, product..." value={q} onChange={e=>setQ(e.target.value)}/></div>}/>
+    <SectionHeader title="AI Platforms Registry" action={<div className="aihub_search_box"><Search size={14}/><input placeholder="Filter by host, vendor, product..." value={q} onChange={e=>setQ(e.target.value)}/></div>}/>
     <div className="aihub_card">
       <DataTable columns={[
         {label:"Host",render:r=><Mono>{r.host}</Mono>},
         {label:"Vendor",render:r=>r.vendor||"—"},
         {label:"Product",render:r=>r.product||"—"},
-        {label:"Category",render:r=>r.category?<Badge text={r.category} color="#6366f1"/>:<span className="aihub_text_muted">—</span>},
-        {label:"Sandbox",render:r=>r.sandbox?<Badge text={r.sandbox}/>:<span className="aihub_text_muted">—</span>},
-        {label:"Surface",render:r=>r.surface?<Badge text={r.surface} color={surfaceC[r.surface]||"#9ca3af"}/>:<span className="aihub_text_muted">—</span>},
+        {label:"Category",render:r=>r.category?<Badge text={categoryLabel(r.category)} color="#6366f1"/>:<span className="aihub_text_muted">—</span>},
+        {label:"Sandbox",render:r=>r.sandbox?<Badge text={slugLabel(r.sandbox)}/>:<span className="aihub_text_muted">—</span>},
+        {label:"Surface",render:r=>r.surface?<Badge text={surfaceLabel(r.surface)} color={surfaceC[r.surface]||"#9ca3af"}/>:<span className="aihub_text_muted">—</span>},
         {label:"Governed",render:r=><Badge text={r.governed?"on":"off"} color={r.governed?"#22c55e":"#9ca3af"}/>,right:true},
         {label:"Access",render:r=>(
           <button onClick={()=>toggleBlocked(r)} disabled={busy===r.host} title={r.blocked?"Click to allow":"Click to block (users can't send prompts)"}
@@ -1301,13 +1370,13 @@ function msgRole(m) {
 // content, so they render as a compact inline note instead of a chat bubble.
 const SYSTEM_KINDS={
   blocked:{label:"Blocked",color:"#ef4444"},
-  prompt_blocked:{label:"Prompt blocked",color:"#ef4444"},
-  policy_block:{label:"Blocked by policy",color:"#ef4444"},
-  file_blocked:{label:"File upload blocked",color:"#ef4444"},
-  redacted:{label:"Redacted before send",color:"#f59e0b"},
-  tokenized:{label:"Tokenized & sent",color:"#0891b2"},
-  warned:{label:"User warned",color:"#f59e0b"},
-  user_decision:{label:"User decision",color:"#8b5cf6"},
+  prompt_blocked:{label:"Prompt Blocked",color:"#ef4444"},
+  policy_block:{label:"Blocked by Policy",color:"#ef4444"},
+  file_blocked:{label:"File Upload Blocked",color:"#ef4444"},
+  redacted:{label:"Redacted Before Send",color:"#f59e0b"},
+  tokenized:{label:"Tokenized & Sent",color:"#0891b2"},
+  warned:{label:"User Warned",color:"#f59e0b"},
+  user_decision:{label:"User Decision",color:"#8b5cf6"},
   allowed:{label:"Allowed",color:"#22c55e"},
 };
 function systemNote(m) {
@@ -1806,7 +1875,7 @@ function ReplayPlayer({ replays, activeIdx, onSelect, man, apiRef, tickRef, onRe
   return (
     <div className="aihub_card aihub_rec_card">
       <SectionHeader
-        title="Session replay"
+        title="Session Replay"
         hint={replays.length>1
           ? `${replays.length} recorded runs in this session — recording pauses and resumes with the tab.`
           : "Reconstructed page activity for this conversation."}
@@ -2171,7 +2240,7 @@ function SessionTranscriptView({ session, machines, onBack }) {
       {err && <Err msg={err==="404"?"This session no longer exists on the server.":err}/>}
       {!err && !data && <Loading/>}
       {!err && data && messages.length===0 && (
-        <Empty icon={<MessageSquare size={32} strokeWidth={1.5}/>} title="No messages in this session" msg="This session was created by a bind event but no prompts or replies were captured for it."/>
+        <Empty icon={<MessageSquare size={32} strokeWidth={1.5}/>} title="No Messages in This Session" msg="This session was created by a bind event but no prompts or replies were captured for it."/>
       )}
       {!err && messages.length>0 && (<>
         {data?.messages_truncated && (
@@ -2210,12 +2279,12 @@ function SessionTranscriptView({ session, machines, onBack }) {
     />
     <div className="aihub_card">
       <div className="aihub_replay_meta">
-        <div><div className="aihub_replay_meta_label">AI service</div><div><Badge text={meta.ai_service||"unknown"} color="#0052e0"/></div></div>
-        <div><div className="aihub_replay_meta_label">Machine / user</div><div className="aihub_text_primary">{userLabel}</div></div>
+        <div><div className="aihub_replay_meta_label">AI Service</div><div><Badge text={meta.ai_service||"Unknown"} color="#0052e0"/></div></div>
+        <div><div className="aihub_replay_meta_label">Machine / User</div><div className="aihub_text_primary">{userLabel}</div></div>
         <div><div className="aihub_replay_meta_label">Started</div><div className="aihub_text_primary">{fmtTime(meta.started_at)}</div></div>
-        <div><div className="aihub_replay_meta_label">Last activity</div><div className="aihub_text_primary">{fmtTime(meta.last_activity_at)}</div></div>
+        <div><div className="aihub_replay_meta_label">Last Activity</div><div className="aihub_text_primary">{fmtTime(meta.last_activity_at)}</div></div>
         <div><div className="aihub_replay_meta_label">Messages</div><div className="aihub_text_primary">{meta.message_count??messages.length}</div></div>
-        <div><div className="aihub_replay_meta_label">Highest severity</div><div>{sev?<SeverityBadge sev={sev}/>:<span className="aihub_text_muted">—</span>}</div></div>
+        <div><div className="aihub_replay_meta_label">Highest Severity</div><div>{sev?<SeverityBadge sev={sev}/>:<span className="aihub_text_muted">—</span>}</div></div>
       </div>
       <div className="aihub_replay_ids">
         <span className="aihub_text_muted">Session</span> <Mono>{sid}</Mono>
@@ -2313,21 +2382,21 @@ function SessionListView({ onOpen, machines }) {
     />
     <div className="aihub_stat_grid">
       <StatCard icon={<History size={18}/>} label="Sessions" value={totalSessions} color="#0052e0"/>
-      <StatCard icon={<MessageSquare size={18}/>} label="Messages captured" value={totalMessages} color="#8b5cf6"/>
-      <StatCard icon={<AlertTriangle size={18}/>} label="High / critical sessions" value={hiCrit} hint="needs review" color="#ef4444"/>
-      <StatCard icon={<Monitor size={18}/>} label="Distinct machines" value={distinctMachines} color="#f59e0b"/>
+      <StatCard icon={<MessageSquare size={18}/>} label="Messages Captured" value={totalMessages} color="#8b5cf6"/>
+      <StatCard icon={<AlertTriangle size={18}/>} label="High / Critical Sessions" value={hiCrit} hint="Needs Review" color="#ef4444"/>
+      <StatCard icon={<Monitor size={18}/>} label="Distinct Machines" value={distinctMachines} color="#f59e0b"/>
     </div>
 
     <div className="aihub_filter_bar">
       <label className="aihub_filter_group">
-        <span className="aihub_filter_label">AI service</span>
+        <span className="aihub_filter_label">AI Service</span>
         <select className="aihub_select" value={service} onChange={e=>setService(e.target.value)}>
-          <option value="all">All services</option>
+          <option value="all">All Services</option>
           {services.map(s=><option key={s} value={s}>{s}</option>)}
         </select>
       </label>
       <label className="aihub_filter_group">
-        <span className="aihub_filter_label">Date range</span>
+        <span className="aihub_filter_label">Date Range</span>
         <select className="aihub_select" value={range} onChange={e=>setRange(e.target.value)}>
           {ranges.map(([v,l])=><option key={v} value={v}>{l}</option>)}
         </select>
@@ -2349,10 +2418,10 @@ function SessionListView({ onOpen, machines }) {
       <SectionHeader title="Sessions" hint={`${filtered.length} of ${rows.length} sessions`}/>
       <DataTable onRow={r=>onOpen(r)} columns={[
         {label:"When",render:r=>relTime(r.last_activity_at||r.started_at)},
-        {label:"Machine / user",render:r=><><div className="aihub_text_primary">{machineLabel(machines,r.machine_id)}</div><div className="aihub_text_muted">{r.machine_id}</div></>},
-        {label:"AI service",render:r=><Badge text={r.ai_service||"unknown"} color="#0052e0"/>},
+        {label:"Machine / User",render:r=><><div className="aihub_text_primary">{machineLabel(machines,r.machine_id)}</div><div className="aihub_text_muted">{r.machine_id}</div></>},
+        {label:"AI Service",render:r=><Badge text={r.ai_service||"Unknown"} color="#0052e0"/>},
         {label:"Messages",render:r=>r.message_count??0,right:true},
-        {label:"Highest severity",render:r=>{const s=sessionSeverity(r);return s?<SeverityBadge sev={s}/>:<span className="aihub_text_muted">—</span>;}},
+        {label:"Highest Severity",render:r=>{const s=sessionSeverity(r);return s?<SeverityBadge sev={s}/>:<span className="aihub_text_muted">—</span>;}},
         {label:"",render:()=><span className="aihub_view_btn"><Eye size={13}/> Replay</span>,right:true},
       ]} rows={filtered} empty={rows.length?"No sessions match these filters.":"No AI sessions captured yet."}/>
     </div>
@@ -2470,7 +2539,7 @@ function CopilotReadinessView() {
           there is genuinely nothing to show; if a previous scan exists it is kept
           (it is real data and still useful) and labelled as historical instead. */}
       {oauthKeys.length === 0 && !scan && (
-        <Empty icon={<Shield size={32} />} title="No Microsoft 365 tenant connected"
+        <Empty icon={<Shield size={32} />} title="No Microsoft 365 Tenant Connected"
           msg="Connect your Microsoft tenant in Agent Governance → Setup to run the Copilot Readiness Assessment." />
       )}
       {oauthKeys.length === 0 && scan && (
@@ -2512,10 +2581,10 @@ function CopilotReadinessView() {
 
         {/* Summary cards */}
         <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
-          <StatCard icon={<span>📂</span>} label="SharePoint" value={scan.summary.sharepoint} hint="Overshared sites" color="#2563eb" />
-          <StatCard icon={<span>☁️</span>} label="OneDrive" value={scan.summary.onedrive} hint="Org-wide shares" color="#8b5cf6" />
-          <StatCard icon={<span>💬</span>} label="Teams" value={scan.summary.teams} hint="Public teams" color="#22c55e" />
-          <StatCard icon={<span>📧</span>} label="Exchange" value={scan.summary.exchange} hint="Delegate access" color="#f59e0b" />
+          <StatCard icon={<span>📂</span>} label="SharePoint" value={scan.summary.sharepoint} hint="Overshared Sites" color="#2563eb" />
+          <StatCard icon={<span>☁️</span>} label="OneDrive" value={scan.summary.onedrive} hint="Org-Wide Shares" color="#8b5cf6" />
+          <StatCard icon={<span>💬</span>} label="Teams" value={scan.summary.teams} hint="Public Teams" color="#22c55e" />
+          <StatCard icon={<span>📧</span>} label="Exchange" value={scan.summary.exchange} hint="Delegate Access" color="#f59e0b" />
         </div>
 
         {/* Severity breakdown */}
@@ -2813,7 +2882,7 @@ function ModelRoutingView() {
           <div>
             <div className="aihub_card" style={{marginBottom:16}}>
               <h4 style={{margin:"0 0 12px",fontSize:14.2,fontWeight:700}}>By Rule</h4>
-              <BarChart data={(analytics?.by_rule||[]).map(r=>({label:r.name||"unknown",count:r.count}))} lk="label" vk="count"/>
+              <BarChart data={(analytics?.by_rule||[]).map(r=>({label:r.name||"Unknown",count:r.count}))} lk="label" vk="count"/>
             </div>
             <div className="aihub_card">
               <h4 style={{margin:"0 0 12px",fontSize:14.2,fontWeight:700}}>By Complexity</h4>
@@ -2930,7 +2999,7 @@ function ModelRoutingView() {
       <div className="aihub_card">
         <DataTable columns={[
           {label:"Name",render:r=><div className="aihub_text_primary">{r.name}</div>},
-          {label:"Provider",render:r=><Badge text={r.provider} color="#6366f1"/>},
+          {label:"Provider",render:r=><Badge text={slugLabel(r.provider)} color="#6366f1"/>},
           {label:"Host",render:r=><Mono>{r.host||"(default)"}</Mono>},
           {label:"Models",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:3}}>{(r.models||[]).map(m=><Tag key={m} text={m}/>)}</div>},
           {label:"Region",render:r=>r.region||"—"},
@@ -2949,7 +3018,7 @@ function ModelRoutingView() {
           {label:"Routed To",render:r=><Badge text={r.routed_model||"—"} color="#0052e0"/>},
           {label:"Rule",render:r=><div className="aihub_text_muted">{r.rule_name||"—"}</div>},
           {label:"Sensitivity",render:r=>r.sensitivity?<SeverityBadge sev={r.sensitivity}/>:<span className="aihub_text_muted">—</span>},
-          {label:"Complexity",render:r=>r.complexity?<Badge text={r.complexity} color={r.complexity==="simple"?"#22c55e":r.complexity==="complex"?"#ef4444":"#f59e0b"}/>:<span className="aihub_text_muted">—</span>},
+          {label:"Complexity",render:r=>r.complexity?<Badge text={capitalizeWord(r.complexity)} color={r.complexity==="simple"?"#22c55e":r.complexity==="complex"?"#ef4444":"#f59e0b"}/>:<span className="aihub_text_muted">—</span>},
           {label:"Tokens",render:r=>r.prompt_tokens_est?fmtTokens(r.prompt_tokens_est):"—",right:true},
         ]} rows={routingLog||[]} empty="No routing events yet. Routing decisions will appear here once rules are active and AI requests flow through the proxy."/>
       </div>
@@ -3110,13 +3179,13 @@ function RiskScoreView() {
             {label:"Employee",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
               <ChevronRight size={13} style={{color:"#9ca3af",flexShrink:0,transition:"transform .15s",transform:selected===r.id?"rotate(90deg)":"none"}}/>
               <div>
-                <div className="aihub_text_primary">{r.display_name}</div>
+                <div className="aihub_text_primary">{splitConcatenatedName(r.display_name)}</div>
                 <div className="aihub_text_muted">{r.email||r.hostname||"—"}</div>
               </div>
             </div>},
             {label:"Score",render:r=><RiskLevelBadge level={r.risk_level} score={r.risk_score}/>},
             {label:"",render:r=><div style={{minWidth:120}}><ScoreBar score={r.risk_score}/></div>},
-            {label:"Sources",render:r=><div style={{display:"flex",gap:3,flexWrap:"wrap"}}>{(r.sources||[]).map(s=><Tag key={s} text={s}/>)}</div>},
+            {label:"Sources",render:r=><div style={{display:"flex",gap:3,flexWrap:"wrap"}}>{(r.sources||[]).map(s=><Tag key={s} text={slugLabel(s)}/>)}</div>},
             {label:"Computed",render:r=>relTime(r.risk_computed_at)},
           ]}
           rows={realScores}
@@ -3212,12 +3281,52 @@ const REGISTRY_API = "/api/v1/registry";
 // routes that the browser extension and the desktop enforcer already poll.
 const LIFECYCLE_API = "/api/lifecycle";
 
+// ── Guardrail policy vocabularies (ai_platforms.surface / .capture_mode) ─────
+//
+// The two fields that decide WHICH enforcer owns a host and HOW HARD it enforces.
+// Both lists mirror the server's allow-lists in server/src/routes/ai-platforms.js
+// (VALID_SURFACE / VALID_CAPTURE_MODE); a value outside them is rejected with a
+// 400, so the two must stay in sync.
+//
+// Until the row control below existed, nothing in the admin UI ever wrote
+// `surface`: every row sat on the server's "browser" default, which meant the
+// desktop agent's Outlook and OneDrive/SharePoint guardrails could not be turned
+// on for a host from anywhere in the product. That is the gap these close.
+const PLATFORM_SURFACES = [
+  { value:"browser", label:"Browser",       hint:"Enforced by the browser extension only." },
+  { value:"desktop", label:"Desktop",       hint:"Enforced by the desktop agent — required for the Outlook and OneDrive/SharePoint guardrails." },
+  { value:"cli",     label:"CLI",           hint:"Enforced by the CLI wrapper only." },
+  { value:"all",     label:"All Surfaces",  hint:"Enforced everywhere — browser extension, desktop agent and CLI wrapper." },
+];
+const CAPTURE_MODES = [
+  { value:"observe",        label:"Observe",        hint:"Record the activity and block nothing." },
+  { value:"block_critical", label:"Block Critical", hint:"Refuse the send when a critical finding is detected; everything else is recorded." },
+  { value:"hold",           label:"Hold",           hint:"Queue the send for admin approval instead of letting it through." },
+];
+function surfaceOptionHint(v) { return (PLATFORM_SURFACES.find(s=>s.value===v)||{}).hint||""; }
+function surfaceLabel(v) { return (PLATFORM_SURFACES.find(s=>s.value===v)||{}).label||slugLabel(v); }
+function captureModeHint(v)   { return (CAPTURE_MODES.find(m=>m.value===v)||{}).hint||""; }
+// Shared heading style for the blocks inside an expanded inventory row. A plain
+// object rather than a component so the closures inside AIRegistryView can use
+// the same heading as RegistryRowDetail without a second `({children})`
+// signature (which react/prop-types flags on this file's config).
+const DETAIL_H_STYLE = {fontSize:12.7,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:6};
+
 const STATUS_COLORS = { approved: "#22c55e", blocked: "#ef4444", unknown: "#f59e0b" };
 const CATEGORY_ICONS = {
   'desktop-app': '💻', 'ide-assistant': '🧩', 'web-service': '🌐', 'autonomous-agent': '🤖',
   'chat-agent': '💬', 'mcp-server': '🔌', 'local-model': '🏠', 'ml-platform': '☁️',
   'automation': '⚙️', 'embedded-agent': '📎', 'marketplace-app': '🏪', 'agent-config': '📁', 'unknown': '❓',
 };
+
+// Category values are hyphenated slugs ("mcp-server", "ide-assistant") — display
+// them word-cased with known abbreviations fully capitalized (MCP, IDE, ML) rather
+// than printing the raw slug verbatim.
+const CATEGORY_ACRONYMS = new Set(['mcp', 'ide', 'ml', 'ai', 'sdk', 'api', 'llm']);
+function categoryLabel(cat) {
+  if (!cat) return cat;
+  return cat.split('-').map(w => CATEGORY_ACRONYMS.has(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
 
 // Where an inventory row came from. "Catalog" is the known-services list merged in
 // from /ai-platforms — a service we know exists and can block, but which nothing in
@@ -3354,6 +3463,18 @@ function AIRegistryView() {
   const [selected,setSelected]=useState(null);
   const [showAdd,setShowAdd]=useState(false);
 
+  // ── Guardrail policy (ai_platforms.surface / .capture_mode) ───────────────
+  // The live platform rows behind the catalog half of this table. loadAll
+  // already fetches them to cross-reference statuses; they are kept in state
+  // because `surface` and `capture_mode` are fields on the PLATFORM row, not on
+  // the registry row, so the expansion has to read and write them from here.
+  // Seeded to [] rather than null: unlike the monitoring lists, a missing
+  // platform row makes the control absent, never wrongly OFF, so there is no
+  // unknown state to distinguish.
+  const [platforms,setPlatforms]=useState([]);
+  const [policyPendingHosts,setPolicyPendingHosts]=useState(()=>new Set());
+  const [policyErrs,setPolicyErrs]=useState({});   // host → message
+
   // ── DLP monitoring (independent of the allow/block decision) ──────────────
   // The registry build does not read `blocked_agents` at all — it aggregates
   // discovered_agents, findings, sanctions, dlp_events and ai_platforms — so
@@ -3428,6 +3549,10 @@ function AIRegistryView() {
       setGovernedIds(govErr?null:new Set(gov.map(g=>String(g.agent_id)).filter(Boolean)));
       setBlockedAgentIds(blkErr?null:new Set(blk.map(b=>String(b.agent_id)).filter(Boolean)));
       setGovernedErr(govErr||blkErr);
+      // Kept whole, not just merged into rows: the guardrail controls in the row
+      // expansion write to these by host and read the surface/capture_mode the
+      // registry row does not carry.
+      setPlatforms(Array.isArray(plats)?plats:[]);
       // Merge the platform catalog in, skipping anything the registry already
       // covers. Dedup on product name AND host: the registry keys platform rows by
       // host but names them by product, so matching on one alone double-lists a
@@ -3590,6 +3715,108 @@ function AIRegistryView() {
     }
   };
 
+  // ── Guardrail policy for one host ─────────────────────────────────────────
+  const platformByHost=useMemo(()=>new Map(platforms.map(p=>[p.host,p])),[platforms]);
+
+  // The ai_platforms row an inventory row's policy belongs to, or null.
+  //
+  // Deliberately conservative. Catalog rows carry their own `host`, so those are
+  // exact. A registry row may match several platform hosts at once (a Copilot
+  // Studio agent's matched_hosts spans the whole Microsoft suite), and picking
+  // one of them would silently rewrite the wrong host's enforcement policy —
+  // a governance control must not guess which row it is editing. Ambiguous rows
+  // get no control, which reads as "set this on the platform itself".
+  const platformFor=(row)=>{
+    if(!row) return null;
+    if(row.host) return platformByHost.get(row.host)||null;
+    if(row.platform&&platformByHost.has(row.platform)) return platformByHost.get(row.platform);
+    const hits=(row.matched_hosts||[]).filter(h=>platformByHost.has(h));
+    return hits.length===1?platformByHost.get(hits[0]):null;
+  };
+
+  // PATCH one policy field on a platform row. Not folded into setRowStatus:
+  // that one also targets /registry/:id/status for non-catalog rows and mirrors
+  // decisions into the agent blocklist, whereas this only ever writes the two
+  // enforcement fields on ai_platforms and never touches governed/blocked.
+  const setPlatformPolicy=async(plat,patch)=>{
+    const host=plat.host;
+    setPolicyPendingHosts(prev=>new Set(prev).add(host));
+    setPolicyErrs(prev=>{ const next={...prev}; delete next[host]; return next; });
+    try{
+      const res=await fetch(`${API}/ai-platforms/${encodeURIComponent(host)}`,{
+        method:"PATCH",headers:{"content-type":"application/json"},
+        body:JSON.stringify(patch),
+      });
+      const out=await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(out.error||`Request failed (${res.status})`);
+      // Re-seeded from the row the server returns, not from the value posted.
+      // The server validates both fields against its own allow-lists and
+      // normalizes a null to its default, so its answer is the state of record —
+      // and a select left showing a value the server rejected would be a lie
+      // about what the endpoints are enforcing.
+      setPlatforms(prev=>prev.map(p=>p.host===host?{...p,...out}:p));
+    } catch(e){
+      setPolicyErrs(prev=>({...prev,[host]:e?.message||"Update failed"}));
+    } finally {
+      setPolicyPendingHosts(prev=>{ const next=new Set(prev); next.delete(host); return next; });
+    }
+  };
+
+  // The guardrail block for one row. A closure, like renderDlpMonitor, so it
+  // reads exactly the platform list the rest of this view was built from.
+  const renderPlatformPolicy=(row)=>{
+    const plat=platformFor(row);
+    if(!plat) return null;
+    const pending=policyPendingHosts.has(plat.host);
+    const rowErr=policyErrs[plat.host];
+    // Missing means browser on the server side too (POST and PATCH both default
+    // it), so the select shows browser rather than an empty option that would
+    // only ever mean "row predates this control".
+    const surface=plat.surface||"browser";
+    const mode=plat.capture_mode||"observe";
+    const browserServed=surface==="browser"||surface==="all";
+    return (<div style={{marginBottom:14}}>
+      <div style={DETAIL_H_STYLE}>Guardrail policy</div>
+      <div style={{display:"flex",gap:16,flexWrap:"wrap",alignItems:"flex-end"}}>
+        <label className="aihub_filter_group">
+          <span className="aihub_filter_label">Enforcement Surface</span>
+          <select className="aihub_select" value={surface} disabled={pending}
+            aria-label={`Enforcement surface for ${plat.host}`}
+            onChange={ev=>setPlatformPolicy(plat,{surface:ev.target.value})}>
+            {PLATFORM_SURFACES.map(s=><option key={s.value} value={s.value}>{s.label}</option>)}
+          </select>
+        </label>
+        <label className="aihub_filter_group">
+          <span className="aihub_filter_label">Capture Mode</span>
+          <select className="aihub_select" value={mode} disabled={pending}
+            aria-label={`Capture mode for ${plat.host}`}
+            onChange={ev=>setPlatformPolicy(plat,{capture_mode:ev.target.value})}>
+            {CAPTURE_MODES.map(m=><option key={m.value} value={m.value}>{m.label}</option>)}
+          </select>
+        </label>
+        {pending
+          ? <RefreshCw size={13} className="aihub_spin" style={{color:"#6b7280",marginBottom:9}}/>
+          : null}
+      </div>
+      <div className="aihub_text_muted" style={{fontSize:12.2,marginTop:6,maxWidth:660}}>
+        Applies to <Mono>{plat.host}</Mono>. {surfaceOptionHint(surface)} {captureModeHint(mode)}
+        {" "}Endpoints pick the change up on their next sync.
+        {/* Stated because it is the one non-obvious consequence: the extension
+            polls /ai-platforms?surface=browser, which the server answers with
+            browser + all only. A desktop- or CLI-only host drops off that list. */}
+        {!browserServed&&<> The browser extension only receives hosts on the
+          <Mono> browser</Mono> or <Mono>all</Mono> surfaces, so it will stop enforcing this one.</>}
+        {/* The desktop agent arms an egress surface off `governed` and only reads
+            capture_mode from governed rows, so on an ungoverned row the mode is
+            stored and ignored. Said here rather than letting an admin set "hold"
+            and believe a mail send is being held. */}
+        {!plat.governed&&<> This row is not governed, so the capture mode is saved
+          but not applied — endpoints only read it from governed rows.</>}
+      </div>
+      {rowErr&&<div className="aihub_error" style={{marginTop:8}}><AlertTriangle size={14}/> {rowErr}</div>}
+    </div>);
+  };
+
   // Blocked per the agent blocklist — see the note on blockedAgentIds for why
   // the row's displayed status is not used for this.
   const isRowBlocked=(row)=>!!blockedAgentIds?.has(String(row.id));
@@ -3619,7 +3846,12 @@ function AIRegistryView() {
         : on
           ? "Stop scanning prompts to this agent"
           : "Scan prompts to this agent for sensitive data, without blocking it";
-    return (<div>
+    // Carries its own heading (rather than being wrapped in one by
+    // RegistryRowDetail) because the expansion now holds two optional blocks and
+    // either can be absent — a caller-supplied heading would leave an empty
+    // "Sensitive-data monitoring" label on every host row that has no agent.
+    return (<div style={{marginBottom:14}}>
+      <div style={DETAIL_H_STYLE}>Sensitive-data monitoring</div>
       <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
         <button type="button" role="switch" aria-checked={on} disabled={disabled} title={why}
           aria-label={`Monitor prompts to ${row.name||"this agent"} for sensitive data`}
@@ -3663,6 +3895,18 @@ function AIRegistryView() {
       </div>}
       {rowErr&&<div className="aihub_error" style={{marginTop:8}}><AlertTriangle size={14}/> {rowErr}</div>}
     </div>);
+  };
+
+  // Both optional governance blocks for one row, or null when the row has
+  // neither — so the expansion never renders an empty wrapper. Host rows get
+  // guardrail policy, individual agents get monitoring, and a row that is both
+  // gets both, in that order: which enforcer owns the host is read before what
+  // that enforcer does with a prompt.
+  const renderRowGovernance=(row)=>{
+    const policy=renderPlatformPolicy(row);
+    const monitor=renderDlpMonitor(row);
+    if(!policy&&!monitor) return null;
+    return (<>{policy}{monitor}</>);
   };
 
   const updateStatus=async(id,status,productName,matchedHosts)=>{
@@ -3711,7 +3955,7 @@ function AIRegistryView() {
       return <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(4, 1fr)"}}>
         <StatCard icon={<Monitor size={18}/>} label="AI Systems" value={pool.length} hint={hideInactive?`+${inactiveCount} inactive`:`${activeCount} active`} color="#0052e0" onClick={()=>setHideInactive(!hideInactive)}/>
         <StatCard icon={<Shield size={18}/>} label="Allowed" value={pool.filter(i=>i.status==='approved').length} color="#22c55e" onClick={()=>setFilterStatus(filterStatus==='approved'?'':'approved')}/>
-        <StatCard icon={<AlertTriangle size={18}/>} label="Unreviewed" value={pool.filter(i=>i.status==='unknown'||i.status==='restricted').length} hint="Need decision" color="#f59e0b" onClick={()=>setFilterStatus(filterStatus==='unknown'?'':'unknown')}/>
+        <StatCard icon={<AlertTriangle size={18}/>} label="Unreviewed" value={pool.filter(i=>i.status==='unknown'||i.status==='restricted').length} hint="Need Decision" color="#f59e0b" onClick={()=>setFilterStatus(filterStatus==='unknown'?'':'unknown')}/>
         <StatCard icon={<AlertTriangle size={18}/>} label="Blocked" value={pool.filter(i=>i.status==='blocked').length} color="#ef4444" onClick={()=>setFilterStatus(filterStatus==='blocked'?'':'blocked')}/>
       </div>;
     })()}
@@ -3734,7 +3978,7 @@ function AIRegistryView() {
       </select>
       <select value={filterCategory} onChange={e=>setFilterCategory(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.2}}>
         <option value="">All Categories</option>
-        {categories.map(c=><option key={c} value={c}>{c}</option>)}
+        {categories.map(c=><option key={c} value={c}>{categoryLabel(c)}</option>)}
       </select>
       <select value={filterRisk} onChange={e=>setFilterRisk(e.target.value)} style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.2}}>
         <option value="">All Risk Levels</option>
@@ -3742,7 +3986,7 @@ function AIRegistryView() {
         <option value="medium">Medium</option>
         <option value="high">High</option>
         <option value="critical">Critical</option>
-        <option value="not_assessed">Not yet assessed</option>
+        <option value="not_assessed">Not Yet Assessed</option>
       </select>
       {/* "Show unused" checkbox and the results count both removed. The AI Systems
           stat card above still toggles hideInactive and shows the row count, so this
@@ -3766,7 +4010,7 @@ function AIRegistryView() {
           </div>},
           {label:"Risk",render:r=><span style={{whiteSpace:"nowrap"}}><RiskLevelBadge level={r.risk_level} score={r.risk_score}/></span>},
           {label:"Owner",render:r=><div style={{whiteSpace:"nowrap"}}>
-            <div style={{fontSize:13.2}}>{r.owner||"—"}</div>
+            <div style={{fontSize:13.2}}>{splitConcatenatedName(r.owner)||"—"}</div>
             {r.is_orphaned&&<span style={{fontSize:11.7,color:"#ef4444",fontWeight:600}}>⚠ Orphaned</span>}
           </div>},
           {label:"Activity",render:r=><div style={{textAlign:"right",whiteSpace:"nowrap"}}>
@@ -3778,7 +4022,7 @@ function AIRegistryView() {
         onRow={r=>setSelected(selected===r.id?null:r.id)}
         isExpanded={r=>selected===r.id}
         renderExpanded={r=><RegistryRowDetail row={r} onStatus={s=>setRowStatus(r,s)} pending={pendingIds.has(r.id)}>
-          {renderDlpMonitor(r)}
+          {renderRowGovernance(r)}
         </RegistryRowDetail>}
         empty="No AI systems found matching your filters."
         paginate={25}
@@ -3809,6 +4053,13 @@ function AIRegistryView() {
  * added platform starts by recording activity, not blocking it. Blocking is a
  * separate, deliberate click on the row afterwards, so adding a domain to the
  * inventory can never accidentally cut off a tool the business depends on.
+ *
+ * `surface` IS collected, unlike category and governance_note, because it decides
+ * which endpoint ever sees the row: the extension polls `?surface=browser`, which
+ * the server answers with browser + all only. A desktop-only host — Outlook,
+ * OneDrive/SharePoint — added on the browser default would sit in the catalog
+ * being enforced by nothing. It still defaults to browser, so the common case is
+ * one fewer decision; capture_mode stays off this form for the reason above.
  */
 function AddPlatformForm({ onDone }) {
   // Category and governance_note are deliberately NOT collected here. Neither
@@ -3819,6 +4070,7 @@ function AddPlatformForm({ onDone }) {
   const [host,setHost]=useState("");
   const [product,setProduct]=useState("");
   const [vendor,setVendor]=useState("");
+  const [surface,setSurface]=useState("browser");
   const [busy,setBusy]=useState(false);
   const [err,setErr]=useState(null);
   const [ok,setOk]=useState(null);
@@ -3838,15 +4090,15 @@ function AddPlatformForm({ onDone }) {
           host:normalized,
           product:product.trim()||normalized,
           vendor:vendor.trim()||null,
-          surface:"browser",
+          surface,
           governed:1,
           added_by:"admin",
         }),
       });
       const body=await res.json().catch(()=>({}));
       if(!res.ok) throw new Error(body.error||`Request failed (${res.status})`);
-      setOk(`${normalized} added — endpoints will pick it up on their next sync.`);
-      setHost(""); setProduct(""); setVendor("");
+      setOk(`${normalized} added on the ${surface} surface — endpoints will pick it up on their next sync.`);
+      setHost(""); setProduct(""); setVendor(""); setSurface("browser");
       onDone?.();
     } catch(e){ setErr(e.message); }
     finally { setBusy(false); }
@@ -3856,7 +4108,7 @@ function AddPlatformForm({ onDone }) {
   const lbl={fontSize:12.7,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:4,display:"block"};
 
   return (<div className="aihub_card" style={{marginBottom:16,borderLeft:"3px solid #0044cc"}}>
-    <SectionHeader title="Add an AI platform" hint="Enter the domain. Everything under it — every subdomain and every agent hosted there — is governed by this one entry."/>
+    <SectionHeader title="Add an AI Platform" hint="Enter the domain. Everything under it — every subdomain and every agent hosted there — is governed by this one entry."/>
 
     {err && <div className="aihub_error" style={{marginBottom:12}}><AlertTriangle size={14}/> {err}</div>}
     {ok && <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,padding:"8px 12px",borderRadius:6,
@@ -3882,6 +4134,14 @@ function AddPlatformForm({ onDone }) {
         <label style={lbl}>Vendor</label>
         <input style={field} placeholder="Optional" value={vendor} onChange={e=>setVendor(e.target.value)}/>
       </div>
+      <div>
+        <label style={lbl}>Enforcement surface</label>
+        <select style={{...field,background:"#fff",cursor:"pointer"}} aria-label="Enforcement surface"
+                value={surface} onChange={e=>setSurface(e.target.value)}>
+          {PLATFORM_SURFACES.map(s=><option key={s.value} value={s.value}>{s.label}</option>)}
+        </select>
+        <div style={{fontSize:12.2,color:"#6b7280",marginTop:4}}>{surfaceOptionHint(surface)}</div>
+      </div>
     </div>
 
     <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
@@ -3890,7 +4150,8 @@ function AddPlatformForm({ onDone }) {
       </button>
       <span className="aihub_text_muted" style={{fontSize:12.7}}>
         Starts in <strong>observe</strong> mode — usage is recorded, nothing is blocked.
-        Block it afterwards from its row. Endpoints sync within a few minutes.
+        Block it, or change its surface and capture mode, afterwards from its row.
+        Endpoints sync within a few minutes.
       </span>
     </div>
   </div>);
@@ -3907,7 +4168,7 @@ function AddPlatformForm({ onDone }) {
  */
 function RegistryRowDetail({ row, onStatus, pending, children }) {
   const cell=(label,value)=>value?<div><span style={{color:"#9ca3af"}}>{label}:</span> <span style={{fontWeight:600}}>{value}</span></div>:null;
-  const H=({children})=><div style={{fontSize:12.7,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:6}}>{children}</div>;
+  const H=({children})=><div style={DETAIL_H_STYLE}>{children}</div>;
   return (<div style={{padding:"16px 20px",borderTop:"1px solid #e5e7eb"}}>
     {row.description&&<div style={{fontSize:13.2,color:"#374151",marginBottom:12}}>{row.description}</div>}
 
@@ -3916,29 +4177,30 @@ function RegistryRowDetail({ row, onStatus, pending, children }) {
       <RegistryToggle status={row.status} onChange={onStatus} pending={pending}/>
     </div>
 
-    {/* The SECOND, independent governance decision for an individual agent:
-        scan its prompts for sensitive data without blocking it. Supplied as
-        children by the caller rather than built here, so it reads exactly the
-        same /governed-agents state as the row badge in the table above.
-        Immediately under Decision because the two are read together and are the
-        easiest pair in this product to confuse — Decision refuses the agent,
-        this one lets it run and watches what is typed into it. Null for any row
-        that is not an individual agent (see canDlpMonitor), which is why this is
-        conditional rather than an always-present empty section. */}
-    {children&&<div style={{marginBottom:14}}>
-      <H>Sensitive-data monitoring</H>
-      {children}
-    </div>}
+    {/* The other governance decisions for this row, supplied as children by the
+        caller rather than built here so they read exactly the same live state as
+        the badges in the table above — /governed-agents for monitoring, the
+        ai_platforms list for guardrail policy.
+        Immediately under Decision because they are read together and are the
+        easiest set in this product to confuse: Decision refuses the system,
+        Guardrail policy says which endpoint enforces the host and how hard, and
+        Sensitive-data monitoring lets a named agent run while watching what is
+        typed into it. Each block brings its own heading and each is optional
+        (a host row has no agent to monitor; a discovered agent has no host
+        policy), so the caller returns null when a row has neither — an
+        always-present section with nothing in it would read as a missing
+        control rather than an inapplicable one. */}
+    {children&&<div>{children}</div>}
 
     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:8,marginBottom:14,fontSize:13.2}}>
-      {cell("Category",row.category)}
-      {cell("Lifecycle",row.lifecycle)}
-      {cell("Owner",row.owner)}
-      {cell("Owner email",row.owner_email)}
+      {cell("Category",categoryLabel(row.category))}
+      {cell("Lifecycle",capitalizeWord(row.lifecycle))}
+      {cell("Owner",splitConcatenatedName(row.owner))}
+      {cell("Owner Email",row.owner_email)}
       {cell("Model",row.model)}
       {cell("Source",row.source_detail||row.source)}
-      {cell("First seen",row.first_seen?relTime(row.first_seen):null)}
-      {cell("Last active",row.last_active?relTime(row.last_active):null)}
+      {cell("First Seen",row.first_seen?relTime(row.first_seen):null)}
+      {cell("Last Active",row.last_active?relTime(row.last_active):null)}
       {cell("Machines",row.machine_count)}
       {row.is_orphaned&&<div style={{gridColumn:"1/-1",color:"#ef4444",fontWeight:600}}>⚠ Owner account is disabled — this system is orphaned</div>}
     </div>
@@ -3980,7 +4242,7 @@ function RegistryRowDetail({ row, onStatus, pending, children }) {
 
     {row.data_access?.length>0&&<div style={{marginBottom:14}}>
       <H>Data access</H>
-      <div style={{display:"flex",flexWrap:"wrap",gap:4}}>{row.data_access.map((d,i)=><Tag key={i} text={d} color="#ef4444"/>)}</div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:4}}>{row.data_access.map((d,i)=><Tag key={i} text={slugLabel(d)} color="#ef4444"/>)}</div>
     </div>}
 
     {row.permissions?.length>0&&<div style={{marginBottom:14}}>
@@ -4186,8 +4448,8 @@ function AccessRequestsView() {
 
     {/* Summary */}
     <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(3, 1fr)"}}>
-      <StatCard icon={<Clock size={18}/>} label="Pending" value={pending.length} hint="Awaiting your review" color="#f59e0b"/>
-      <StatCard icon={<Shield size={18}/>} label="Active Exceptions" value={(exceptions||[]).length} hint="Temporary access granted" color="#22c55e"/>
+      <StatCard icon={<Clock size={18}/>} label="Pending" value={pending.length} hint="Awaiting Your Review" color="#f59e0b"/>
+      <StatCard icon={<Shield size={18}/>} label="Active Exceptions" value={(exceptions||[]).length} hint="Temporary Access Granted" color="#22c55e"/>
       <StatCard icon={<Activity size={18}/>} label="Total Requests" value={requests.length} color="#0052e0"/>
     </div>
 
@@ -4314,7 +4576,7 @@ function AccessRequestsView() {
           <div style={{marginTop:3,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>{surfaceBadge(r)}{scopeBadge(r)}{surfaceDetail(r)}</div></>},
         {label:"Employee",render:r=><UserCell row={r}/>},
         {label:"Reason",render:r=><div style={{fontSize:12,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.reason||"—"}</div>},
-        {label:"Status",render:r=><Badge text={r.status} color={r.status==="approved"?"#22c55e":r.status==="rejected"?"#ef4444":r.status==="revoked"?"#f59e0b":"#9ca3af"}/>},
+        {label:"Status",render:r=><Badge text={capitalizeWord(r.status)} color={r.status==="approved"?"#22c55e":r.status==="rejected"?"#ef4444":r.status==="revoked"?"#f59e0b":"#9ca3af"}/>},
         {label:"Reviewed",render:r=>r.reviewed_at?relTime(r.reviewed_at):"—"},
         {label:"Expires",render:r=>r.expires_at?new Date(r.expires_at).toLocaleDateString():"—"},
         {label:"Note",render:r=><div className="aihub_text_muted" style={{fontSize:12.7}}>{r.review_note||"—"}</div>},
@@ -4345,6 +4607,14 @@ function AccessRequestsView() {
 // which is explicitly not the approach this project took. Nothing is carried over.
 
 const SDK_LANGS = ["javascript", "typescript", "python", "java", "go", "other"];
+// Language identifiers are stored lowercase (they're compared/filtered on), but
+// displayed with their conventional capitalization — plain capitalize-first
+// would wrongly give "Javascript"/"Typescript" instead of "JavaScript"/"TypeScript".
+const LANGUAGE_LABELS = { javascript: "JavaScript", typescript: "TypeScript", python: "Python", java: "Java", go: "Go", other: "Other" };
+function languageLabel(lang) {
+  if (!lang) return lang;
+  return LANGUAGE_LABELS[lang] || (lang.charAt(0).toUpperCase() + lang.slice(1));
+}
 
 // The SDK in a developer's app talks to the API server directly — it does not go
 // through this dashboard's /api dev proxy. connect-ui is served on :3000 in both
@@ -4612,7 +4882,7 @@ await tracer.flush();`;
 
     {/* ── Create form ─────────────────────────────────────────────────────── */}
     {showForm&&(<form className="aihub_card" onSubmit={create}>
-      <SectionHeader title="New SDK project" hint="One project per app. The secret key is generated here and shown exactly once."/>
+      <SectionHeader title="New SDK Project" hint="One project per app. The secret key is generated here and shown exactly once."/>
       <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:12}}>
         <label style={{display:"block"}}>
           <span style={{fontSize:12.7,fontWeight:600,color:"#374151"}}>Name <span style={{color:"#ef4444"}}>*</span></span>
@@ -4623,7 +4893,7 @@ await tracer.flush();`;
           <span style={{fontSize:12.7,fontWeight:600,color:"#374151"}}>Language</span>
           <select value={lang} onChange={e=>setLang(e.target.value)}
             style={{width:"100%",marginTop:4,padding:"7px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:13.7,boxSizing:"border-box",background:"#fff"}}>
-            {SDK_LANGS.map(l=><option key={l} value={l}>{l}</option>)}
+            {SDK_LANGS.map(l=><option key={l} value={l}>{languageLabel(l)}</option>)}
           </select>
         </label>
       </div>
@@ -4647,19 +4917,19 @@ await tracer.flush();`;
 
     {rows!==null&&(<>
       {!authFail&&rows.length>0&&(<div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(3,1fr)"}}>
-        <StatCard icon={<Server size={18}/>} label="Active projects" value={live.length} hint={`${rows.length-live.length} revoked`} color="#0052e0"/>
-        <StatCard icon={<Activity size={18}/>} label="Traces reported" value={totTraces} hint="lifetime, all projects" color="#8b5cf6"/>
-        <StatCard icon={<DollarSign size={18}/>} label="Reported cost" value={fmtUsd(totCost)} hint="as reported by the SDKs" color="#22c55e"/>
+        <StatCard icon={<Server size={18}/>} label="Active Projects" value={live.length} hint={`${rows.length-live.length} revoked`} color="#0052e0"/>
+        <StatCard icon={<Activity size={18}/>} label="Traces Reported" value={totTraces} hint="Lifetime, All Projects" color="#8b5cf6"/>
+        <StatCard icon={<DollarSign size={18}/>} label="Reported Cost" value={fmtUsd(totCost)} hint="As Reported by the SDKs" color="#22c55e"/>
       </div>)}
 
       <div className="aihub_card">
         <DataTable columns={[
           {label:"Project",render:p=>(<><div className="aihub_text_primary">{p.name||"—"}</div>{p.description&&<div className="aihub_text_muted" style={{fontSize:12.7}}>{p.description}</div>}</>)},
-          {label:"Public key",render:p=><Mono>{p.public_key||"—"}</Mono>},
-          {label:"Language",render:p=>p.language?<Tag text={p.language}/>:<span className="aihub_text_muted">—</span>},
-          {label:"Status",render:p=><Badge text={p.status||"unknown"} color={p.status==="active"?"#22c55e":p.status==="revoked"?"#ef4444":"#9ca3af"}/>},
+          {label:"Public Key",render:p=><Mono>{p.public_key||"—"}</Mono>},
+          {label:"Language",render:p=>p.language?<Tag text={languageLabel(p.language)}/>:<span className="aihub_text_muted">—</span>},
+          {label:"Status",render:p=><Badge text={capitalizeWord(p.status)||"Unknown"} color={p.status==="active"?"#22c55e":p.status==="revoked"?"#ef4444":"#9ca3af"}/>},
           {label:"Created",render:p=>relTime(p.created_at)},
-          {label:"Last report",render:p=>p.last_event_at?relTime(p.last_event_at):<span className="aihub_text_muted">never</span>},
+          {label:"Last Report",render:p=>p.last_event_at?relTime(p.last_event_at):<span className="aihub_text_muted">Never</span>},
           {label:"Traces",render:p=>(Number(p.total_traces)||0).toLocaleString(),right:true},
           {label:"Observations",render:p=>(Number(p.total_observations)||0).toLocaleString(),right:true},
           {label:"Cost",render:p=>fmtUsd(p.total_cost_usd),right:true},
@@ -4677,7 +4947,7 @@ await tracer.flush();`;
         developer does, in order, and steps 3–4 fill themselves in with the real
         keys the moment a project exists (placeholders before that). */}
     <div className="aihub_card">
-      <SectionHeader title="How a developer connects" hint="Six steps, in order — hand them to whoever owns the app. Steps 3 and 4 fill in with the real keys as soon as you create a project."/>
+      <SectionHeader title="How a Developer Connects" hint="Six steps, in order — hand them to whoever owns the app. Steps 3 and 4 fill in with the real keys as soon as you create a project."/>
 
       <ol role="list" style={{listStyle:"none",margin:"4px 0 0",padding:0,display:"flex",flexDirection:"column",gap:20}}>
 
@@ -4844,7 +5114,7 @@ function SdkTracesView() {
           project id and this view works on its own.
         </p>
       </div>):projects.length===0?(
-        <Empty icon={<Server size={28} strokeWidth={1.5}/>} title="No SDK projects yet"
+        <Empty icon={<Server size={28} strokeWidth={1.5}/>} title="No SDK Projects Yet"
           msg="Create one on the Projects tab first — traces are always scoped to a project."/>
       ):(<div>
         <div style={{fontSize:13.2,fontWeight:600,color:"#374151",marginBottom:6}}>Project</div>
@@ -4854,12 +5124,12 @@ function SdkTracesView() {
           {projects.map(p=><option key={p.id} value={p.id}>{p.name}{p.status==="revoked"?" (revoked)":""}</option>)}
         </select>
         {selected&&<span style={{marginLeft:10}}><Badge text={selected.status||"unknown"} color={selected.status==="active"?"#22c55e":"#ef4444"}/></span>}
-        {selected&&selected.capture_content===false&&<span style={{marginLeft:6}}><Badge text="content masked" color="#6b7280"/></span>}
+        {selected&&selected.capture_content===false&&<span style={{marginLeft:6}}><Badge text="Content Masked" color="#6b7280"/></span>}
       </div>)}
     </div>
 
     {!projectId&&projects!==null&&(projAuthFail||projects.length>0)&&(
-      <div className="aihub_card"><Empty icon={<Activity size={28} strokeWidth={1.5}/>} title="Pick a project"
+      <div className="aihub_card"><Empty icon={<Activity size={28} strokeWidth={1.5}/>} title="Pick a Project"
         msg="Choose a project above to see the traces its app has reported."/></div>
     )}
 
@@ -4867,7 +5137,7 @@ function SdkTracesView() {
     {projectId&&!err&&rows===null&&<Loading/>}
 
     {projectId&&rows!==null&&rows.length===0&&(
-      <div className="aihub_card"><Empty icon={<Activity size={28} strokeWidth={1.5}/>} title="No traces yet"
+      <div className="aihub_card"><Empty icon={<Activity size={28} strokeWidth={1.5}/>} title="No Traces Yet"
         msg="Once a connected app sends data, it'll show up here. The Projects tab has the keys and the three setup steps."/></div>
     )}
 
@@ -4992,10 +5262,10 @@ function SdkTracesView() {
 // Windows the API already accepts via ?days=N. "" means no filter — the endpoint
 // then reports period_days: null and counts everything ever recorded.
 const CLAUDE_PERIODS = [
-  { value: "7",  label: "Last 7 days" },
-  { value: "30", label: "Last 30 days" },
-  { value: "90", label: "Last 3 months" },
-  { value: "",   label: "All time" },
+  { value: "7",  label: "Last 7 Days" },
+  { value: "30", label: "Last 30 Days" },
+  { value: "90", label: "Last 3 Months" },
+  { value: "",   label: "All Time" },
 ];
 
 // Must match CLAUDE_CODE_SURFACE in server/src/lib/claude-clients.js. Claude Code
@@ -5050,7 +5320,7 @@ function ClaudeUsageView() {
     <SectionHeader title="Claude Usage" action={periodPicker}/>
 
     <div className="aihub_stat_grid">
-      <StatCard icon={<MessageSquare size={18}/>} label="Claude prompts" value={(t.prompts||0).toLocaleString()} hint="all surfaces" color="#8b5cf6"/>
+      <StatCard icon={<MessageSquare size={18}/>} label="Claude Prompts" value={(t.prompts||0).toLocaleString()} hint="All Surfaces" color="#8b5cf6"/>
       {/* "Estimated", not "Measured", for the money.
           The token counts really are measured — Claude Code reports them. The dollar
           figure is not: it prices those tokens at pay-as-you-go API rates, and on a
@@ -5058,24 +5328,24 @@ function ClaudeUsageView() {
           is what this usage WOULD have cost on the API, which is a useful number, but
           calling it measured cost stated it as money spent. */}
       <StatCard icon={<Activity size={18}/>} label="Tokens" value={fmtTokens(t.measured_tokens)} hint={`${(t.measured_requests||0).toLocaleString()} Claude Code requests · includes cached context re-read each turn`} color="#0052e0"/>
-      <StatCard icon={<Wrench size={18}/>} label="Estimated cost" value={fmtUsd(t.measured_cost_usd)} hint="at API list rates — Team seats are not billed per token" color="#22c55e"/>
-      <StatCard icon={<Clock size={18}/>} label="Est. tokens" value={fmtTokens(t.estimated_tokens)} hint={`≈${fmtUsd(t.estimated_cost_usd)} · browser & desktop, prompt text only`} color="#f59e0b"/>
+      <StatCard icon={<Wrench size={18}/>} label="Estimated Cost" value={fmtUsd(t.measured_cost_usd)} hint="At API List Rates — Team Seats Are Not Billed per Token" color="#22c55e"/>
+      <StatCard icon={<Clock size={18}/>} label="Est. Tokens" value={fmtTokens(t.estimated_tokens)} hint={`≈${fmtUsd(t.estimated_cost_usd)} · browser & desktop, prompt text only`} color="#f59e0b"/>
       {/* The seat-reclamation number. Idle is the one worth reading, so it leads the
           hint — "3 used Claude, 11 did not" is the decision, and the table below
           lists the eleven by name. Counts everyone TRACKED, not everyone licensed:
           the server only knows a person once the tracker or extension enrols. */}
-      <StatCard icon={<User size={18}/>} label="Seats tracked" value={(t.enrolled_users||0).toLocaleString()}
+      <StatCard icon={<User size={18}/>} label="Seats Tracked" value={(t.enrolled_users||0).toLocaleString()}
                 hint={`${(t.idle_users||0).toLocaleString()} with no usage this period · ${(t.active_users||0).toLocaleString()} active`} color="#ef4444"/>
     </div>
 
     {!(t.prompts>0) && (
       <div className="aihub_card" style={{marginBottom:14}}>
-        <Empty icon={<MessageSquare size={32} strokeWidth={1.5}/>} title="No Claude prompts recorded yet" msg="Run the Claude Usage Tracker (.exe) on a machine and send a prompt. Enrolled machines are still listed below at zero — that is what an unused seat looks like."/>
+        <Empty icon={<MessageSquare size={32} strokeWidth={1.5}/>} title="No Claude Prompts Recorded Yet" msg="Run the Claude Usage Tracker (.exe) on a machine and send a prompt. Enrolled machines are still listed below at zero — that is what an unused seat looks like."/>
       </div>
     )}
 
     <>
-      <SectionHeader title="By system"/>
+      <SectionHeader title="By System"/>
       <div className="aihub_card" style={{marginBottom:18}}>
         <DataTable columns={[
           // Email deliberately not shown.
@@ -5088,14 +5358,14 @@ function ClaudeUsageView() {
           // presenting it as the person's address attributes one colleague's usage
           // to another. Machine and OS user are what the tracker actually observes,
           // so those are what is shown. The field is untouched in the API.
-          {label:"User",render:r=><div className="aihub_text_primary">{r.user||r.label}</div>},
+          {label:"User",render:r=><div className="aihub_text_primary">{splitConcatenatedName(r.user)||r.label}</div>},
           {label:"Desktop",render:r=>(r.by_surface?.["Claude Desktop"]||0),right:true},
           {label:"Browser",render:r=>(r.by_surface?.["Claude (browser)"]||0),right:true},
           // Reads the new key first, the pre-rename one second. The API emits both
           // for one release, and this way the column keeps working whichever the
           // server it is talking to happens to send.
-          {label:"Code CLI/ext",render:r=>(r.by_surface?.[CLAUDE_CODE_SURFACE]??r.by_surface?.["Claude Code (CLI)"]??0),right:true},
-          {label:"Total prompts",render:r=><strong>{(r.prompts||0).toLocaleString()}</strong>,right:true},
+          {label:"Code CLI/Ext",render:r=>(r.by_surface?.[CLAUDE_CODE_SURFACE]??r.by_surface?.["Claude Code (CLI)"]??0),right:true},
+          {label:"Total Prompts",render:r=><strong>{(r.prompts||0).toLocaleString()}</strong>,right:true},
           // Both cost fields, summed — not measured_cost_usd alone.
           //
           // Reading only the measured figure meant a browser-only person showed "—"
@@ -5107,7 +5377,7 @@ function ClaudeUsageView() {
           // inferred. That distinction lived in the column label, and the label is
           // now "Estimated cost" for both — on a Team plan neither is money spent,
           // both are API-rate estimates — so summing no longer overstates confidence.
-          {label:"Estimated cost",render:r=>{
+          {label:"Estimated Cost",render:r=>{
             const total=(r.measured_cost_usd||0)+(r.estimated_cost_usd||0);
             return total>0?fmtUsd(total):<span className="aihub_text_muted">—</span>;
           },right:true},
@@ -5115,7 +5385,7 @@ function ClaudeUsageView() {
           // machine". Both show 0 prompts, and only the first is evidence for
           // reclaiming a seat — the second means the tracker is not running, so
           // the zero says nothing about whether the person uses Claude.
-          {label:"Last seen",render:r=>r.last_seen
+          {label:"Last Seen",render:r=>r.last_seen
             ? <span className={r.active?undefined:"aihub_text_muted"}>{relTime(r.last_seen)}</span>
             : <span className="aihub_text_muted">—</span>},
         ]} rows={data.systems||[]}
@@ -5140,7 +5410,7 @@ function ClaudeUsageView() {
           IDE extension?", which is a share, not a count. */}
       {selected?.clients?.length>0 && (
         <div className="aihub_card" style={{marginBottom:14}}>
-          <SectionHeader title="By client"/>
+          <SectionHeader title="By Client"/>
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
             {selected.clients.map(c=>{
               const pct=selected.prompts?Math.round((c.prompts/selected.prompts)*100):0;
@@ -5168,7 +5438,7 @@ function ClaudeUsageView() {
             count, and the table below carries the per-user tokens and cost. */}
         <SectionHeader title={`${selected.surface} — usage by user`}/>
         <DataTable columns={[
-          {label:"User",render:r=><><div className="aihub_text_primary">{r.label||r.user||r.hostname||"—"}</div>{!r.attributed&&<div className="aihub_text_muted">unattributed</div>}</>},
+          {label:"User",render:r=><><div className="aihub_text_primary">{r.label||splitConcatenatedName(r.user)||r.hostname||"—"}</div>{!r.attributed&&<div className="aihub_text_muted">unattributed</div>}</>},
           // Per-person client mix, so "the team uses the extension" can be checked
           // against who actually does. Rendered as "VS Code 41 · Terminal 12"
           // rather than one winner, because people genuinely split across both.
@@ -5211,9 +5481,9 @@ function AIUsageView() {
   return (
     <div>
       <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
-        <StatCard icon={<MessageSquare size={18} />} label="Total Prompts" value={totals.prompts || 0} hint="Across all AI tools" color="#2563eb" />
-        <StatCard icon={<Activity size={18} />} label="Est. Tokens" value={fmtTokens(totals.est_total_tokens)} hint="Estimated usage" color="#8b5cf6" />
-        <StatCard icon={<Shield size={18} />} label="Est. Cost" value={fmtUsd(totals.est_cost_usd)} hint="Estimated spend" color="#f59e0b" />
+        <StatCard icon={<MessageSquare size={18} />} label="Total Prompts" value={totals.prompts || 0} hint="Across All AI Tools" color="#2563eb" />
+        <StatCard icon={<Activity size={18} />} label="Est. Tokens" value={fmtTokens(totals.est_total_tokens)} hint="Estimated Usage" color="#8b5cf6" />
+        <StatCard icon={<Shield size={18} />} label="Est. Cost" value={fmtUsd(totals.est_cost_usd)} hint="Estimated Spend" color="#f59e0b" />
         <StatCard icon={<Server size={18} />} label="AI Platforms" value={platforms.length} hint="Active" color="#22c55e" />
       </div>
 
@@ -5246,7 +5516,7 @@ function AIUsageView() {
               columns={[
                 // breakdown rows carry label / user / hostname — `identity` is not
                 // one of them. Prefer the human label the server already resolved.
-                { label: "User", render: r => <span style={{ fontSize:13.2 }}>{r.label || r.user || r.hostname || "Unknown"}</span> },
+                { label: "User", render: r => <span style={{ fontSize:13.2 }}>{r.label || splitConcatenatedName(r.user) || r.hostname || "Unknown"}</span> },
                 { label: "Prompts", key: "prompts", right: true },
                 { label: "Est. Tokens", render: r => fmtTokens(r.est_total_tokens), right: true },
                 { label: "Est. Cost", render: r => fmtUsd(r.est_cost_usd), right: true },
@@ -5709,7 +5979,7 @@ function IntegrationsView() {
       {label:"Time",render:r=>relTime(r.timestamp)},
       {label:"Webhook",render:r=><div className="aihub_text_primary">{r.webhook_name||"—"}</div>},
       {label:"Trigger",render:r=><Tag text={TL[r.trigger]||r.trigger}/>},
-      {label:"Status",render:r=><Badge text={r.status} color={r.status==='delivered'?"#22c55e":r.status==='failed'?"#f59e0b":"#ef4444"}/>},
+      {label:"Status",render:r=><Badge text={capitalizeWord(r.status)} color={r.status==='delivered'?"#22c55e":r.status==='failed'?"#f59e0b":"#ef4444"}/>},
       {label:"HTTP",render:r=>r.http_status||"—"},
       {label:"Error",render:r=><div className="aihub_text_muted" style={{fontSize:12.7,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis"}}>{r.error||"—"}</div>},
     ]} rows={deliveryLog||[]} empty="No webhook deliveries yet."/></div>)}
@@ -5786,8 +6056,8 @@ function PolicyPacksView() {
     <div className="aihub_stat_grid">
       <StatCard icon={<Shield size={18}/>} label="Frameworks" value={list.length} color="#0052e0"/>
       <StatCard icon={<Wrench size={18}/>} label="Deployed" value={deployedCount} hint={`of ${list.length}`} color="#22c55e"/>
-      <StatCard icon={<FileText size={18}/>} label="Total rules" value={totalRules} hint="across all packs" color="#8b5cf6"/>
-      <StatCard icon={<Activity size={18}/>} label="Live enforced rules" value={liveRules} hint="evaluated automatically" color="#f59e0b"/>
+      <StatCard icon={<FileText size={18}/>} label="Total Rules" value={totalRules} hint="Across All Packs" color="#8b5cf6"/>
+      <StatCard icon={<Activity size={18}/>} label="Live Enforced Rules" value={liveRules} hint="Evaluated Automatically" color="#f59e0b"/>
     </div>
 
     <SectionHeader title="Frameworks"/>
@@ -5856,7 +6126,7 @@ function PolicyPacksView() {
               <div className="aihub_text_muted">{r.citation}</div>
             </>},
             {label:"Type",render:r=><span style={{color:ENFORCE_META[r.enforcement].color,fontWeight:600,fontSize:12.7}}>{ENFORCE_META[r.enforcement].label}</span>},
-            {label:"Severity",render:r=><Badge text={r.severity} color={{critical:"#dc2626",high:"#ea580c",medium:"#d97706",low:"#65a30d"}[r.severity]||"#9ca3af"}/>},
+            {label:"Severity",render:r=><Badge text={capitalizeWord(r.severity)} color={{critical:"#dc2626",high:"#ea580c",medium:"#d97706",low:"#65a30d"}[r.severity]||"#9ca3af"}/>},
             {label:"State",render:r=>{
               if(r.enforcement==="agent") return <span style={{fontSize:12.7,color:r.enabled?"#16a34a":"#9ca3af"}}>{r.enabled?"active":"disabled"}</span>;
               if(r.enforcement==="dlp") return r.coverage_verified
@@ -5997,36 +6267,36 @@ function PackSimulation({ pack, onClose }) {
       </div>
 
       <div className="aihub_stat_grid">
-        <StatCard icon={<AlertTriangle size={18}/>} label="Would be blocked" value={(result.would_block_total||0).toLocaleString()} hint={`of ${(result.events_in_scope||0).toLocaleString()} in scope`} color="#b91c1c"/>
-        <StatCard icon={<MessageSquare size={18}/>} label="People impacted" value={result.unique_users_impacted} color="#8b5cf6"/>
-        <StatCard icon={<Activity size={18}/>} label="Interruptions / person / day" value={result.productivity.blocks_per_user_per_day} hint={`${result.productivity.impact_level} impact`} color={impactColor[result.productivity.impact_level]||"#f59e0b"}/>
-        <StatCard icon={<Wrench size={18}/>} label="vs enforcement today" value={result.comparison.delta_percent!=null?`${result.comparison.delta_percent>0?"+":""}${result.comparison.delta_percent}%`:"—"} hint={`now ${result.comparison.current_enforcement_events}`} color="#0052e0"/>
+        <StatCard icon={<AlertTriangle size={18}/>} label="Would Be Blocked" value={(result.would_block_total||0).toLocaleString()} hint={`of ${(result.events_in_scope||0).toLocaleString()} in scope`} color="#b91c1c"/>
+        <StatCard icon={<MessageSquare size={18}/>} label="People Impacted" value={result.unique_users_impacted} color="#8b5cf6"/>
+        <StatCard icon={<Activity size={18}/>} label="Interruptions / Person / Day" value={result.productivity.blocks_per_user_per_day} hint={`${result.productivity.impact_level} impact`} color={impactColor[result.productivity.impact_level]||"#f59e0b"}/>
+        <StatCard icon={<Wrench size={18}/>} label="Vs Enforcement Today" value={result.comparison.delta_percent!=null?`${result.comparison.delta_percent>0?"+":""}${result.comparison.delta_percent}%`:"—"} hint={`now ${result.comparison.current_enforcement_events}`} color="#0052e0"/>
       </div>
 
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:14}}>
         <div style={SIM_PANEL}>
-          <SectionHeader title="By AI tool"/>
-          <DataTable columns={[{label:"Tool",key:"service"},{label:"Would block",key:"blocks",right:true}]}
+          <SectionHeader title="By AI Tool"/>
+          <DataTable columns={[{label:"Tool",key:"service"},{label:"Would Block",key:"blocks",right:true}]}
                      rows={result.by_service} empty="Nothing would be blocked."/>
         </div>
         <div style={SIM_PANEL}>
-          <SectionHeader title="By data category"/>
-          <DataTable columns={[{label:"Category",key:"category"},{label:"Would block",key:"blocks",right:true}]}
+          <SectionHeader title="By Data Category"/>
+          <DataTable columns={[{label:"Category",key:"category"},{label:"Would Block",key:"blocks",right:true}]}
                      rows={result.by_category} empty="Nothing would be blocked."/>
         </div>
       </div>
 
       <div style={{...SIM_PANEL,marginBottom:14}}>
-        <SectionHeader title="Highest impact people" hint={result.productivity.summary}/>
+        <SectionHeader title="Highest Impact People" hint={result.productivity.summary}/>
         <DataTable columns={[
-          {label:"Person",render:r=><><div className="aihub_text_primary">{r.user}</div>{!r.attributed&&<div className="aihub_text_muted">unattributed install, not a confirmed person</div>}</>},
-          {label:"Would block",key:"blocks",right:true},
-          {label:"Per day",key:"per_day",right:true},
+          {label:"Person",render:r=><><div className="aihub_text_primary">{splitConcatenatedName(r.user)}</div>{!r.attributed&&<div className="aihub_text_muted">unattributed install, not a confirmed person</div>}</>},
+          {label:"Would Block",key:"blocks",right:true},
+          {label:"Per Day",key:"per_day",right:true},
         ]} rows={result.top_users} empty="Nobody would be affected."/>
       </div>
 
       {!!result.samples?.length && <div style={{...SIM_PANEL,marginBottom:14}}>
-        <SectionHeader title="Example prompts that would have been blocked" hint="Detected secrets and identifiers are masked before display — the excerpt shows the context, never the sensitive value."/>
+        <SectionHeader title="Example Prompts That Would Have Been Blocked" hint="Detected secrets and identifiers are masked before display — the excerpt shows the context, never the sensitive value."/>
         <DataTable columns={[
           {label:"When",render:r=>relTime(r.occurred_at)},
           {label:"Tool",key:"ai_service"},
@@ -6113,10 +6383,10 @@ function EuAiActView() {
     {err && <div className="aihub_error" style={{marginBottom:12}}><AlertTriangle size={14}/> {err}</div>}
 
     <div className="aihub_stat_grid">
-      <StatCard icon={<FileText size={18}/>} label="Systems classified" value={s.total_assessed} color="#0052e0"/>
-      <StatCard icon={<AlertTriangle size={18}/>} label="Prohibited in use" value={s.prohibited_in_use} hint={s.prohibited_in_use?"must not be deployed":"none"} color={s.prohibited_in_use?"#b91c1c":"#16a34a"}/>
-      <StatCard icon={<Shield size={18}/>} label="High risk" value={s.by_tier.high} hint="full obligations" color="#c2410c"/>
-      <StatCard icon={<Clock size={18}/>} label="FRIAs complete" value={`${s.fria_complete}/${s.fria_required}`} hint="Article 27" color="#8b5cf6"/>
+      <StatCard icon={<FileText size={18}/>} label="Systems Classified" value={s.total_assessed} color="#0052e0"/>
+      <StatCard icon={<AlertTriangle size={18}/>} label="Prohibited in Use" value={s.prohibited_in_use} hint={s.prohibited_in_use?"Must Not Be Deployed":"None"} color={s.prohibited_in_use?"#b91c1c":"#16a34a"}/>
+      <StatCard icon={<Shield size={18}/>} label="High Risk" value={s.by_tier.high} hint="Full Obligations" color="#c2410c"/>
+      <StatCard icon={<Clock size={18}/>} label="FRIAs Complete" value={`${s.fria_complete}/${s.fria_required}`} hint="Article 27" color="#8b5cf6"/>
     </div>
 
     <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
@@ -6128,10 +6398,10 @@ function EuAiActView() {
     </div>
 
     {mode==="portfolio" && <div className="aihub_card">
-      <SectionHeader title="Assessed AI systems"/>
+      <SectionHeader title="Assessed AI Systems"/>
       <DataTable columns={[
-        {label:"System",render:r=><><div className="aihub_text_primary">{r.system_name}</div><div className="aihub_text_muted">{r.assessed_by}</div></>},
-        {label:"Risk tier",render:r=><Badge text={r.final_tier} color={TIER_COLOR[r.final_tier]||"#6b7280"}/>},
+        {label:"System",render:r=><><div className="aihub_text_primary">{r.system_name}</div><div className="aihub_text_muted">{splitConcatenatedName(r.assessed_by)}</div></>},
+        {label:"Risk Tier",render:r=><Badge text={capitalizeWord(r.final_tier)} color={TIER_COLOR[r.final_tier]||"#6b7280"}/>},
         {label:"Basis",render:r=>r.overridden
           ? <span style={{fontSize:12.7,color:"#b45309"}}>overridden from {r.proposed_tier}</span>
           : <span style={{fontSize:12.7}}>{(r.proposed_reasons||[]).map(x=>x.citation).join(", ")||"no triggers"}</span>},
@@ -6147,7 +6417,7 @@ function EuAiActView() {
     </div>}
 
     {mode==="wizard" && <div className="aihub_card">
-      <SectionHeader title="Risk tier classification"
+      <SectionHeader title="Risk Tier Classification"
         hint="Answer only what applies. Prohibited practices take precedence over everything else — the Act's bans are absolute, so a later answer cannot soften them."
         action={<button className="aihub_filter_btn" onClick={()=>setMode("portfolio")}><X size={13}/> Cancel</button>}/>
 
@@ -6339,10 +6609,10 @@ function ServerMonitorView() {
   return (
     <div>
       <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
-        <StatCard icon={<Activity size={18} />} label="Total Calls" value={stats?.total_calls || 0} hint="All time" color="#3b82f6" />
-        <StatCard icon={<Clock size={18} />} label="Last 24h" value={stats?.calls_last_24h || 0} hint="Recent calls" color="#8b5cf6" />
+        <StatCard icon={<Activity size={18} />} label="Total Calls" value={stats?.total_calls || 0} hint="All Time" color="#3b82f6" />
+        <StatCard icon={<Clock size={18} />} label="Last 24h" value={stats?.calls_last_24h || 0} hint="Recent Calls" color="#8b5cf6" />
         <StatCard icon={<Server size={18} />} label="Servers" value={stats?.connected_servers || 0} hint="Connected" color="#22c55e" />
-        <StatCard icon={<Shield size={18} />} label="Total Cost" value={fmtUsd(stats?.total_cost_usd)} hint="Recalculated live" color="#f59e0b" />
+        <StatCard icon={<Shield size={18} />} label="Total Cost" value={fmtUsd(stats?.total_cost_usd)} hint="Recalculated Live" color="#f59e0b" />
       </div>
 
       <div style={{ display: "flex", gap: 2, marginBottom: 16, borderBottom: "1px solid #e5e7eb", paddingBottom: 0 }}>
@@ -6358,7 +6628,7 @@ function ServerMonitorView() {
         <div>
           <SectionHeader title="Servers" hint="Click a server to see governed agents and their traces" />
           {servers.length === 0 ? (
-            <Empty icon={<Server size={24} />} title="No servers connected" msg="Install the server monitor to start capturing AI agent traces." />
+            <Empty icon={<Server size={24} />} title="No Servers Connected" msg="Install the server monitor to start capturing AI agent traces." />
           ) : (
             <div style={{ display: "grid", gap: 10 }}>
               {servers.map(srv => {
@@ -6395,7 +6665,7 @@ function ServerMonitorView() {
           {(() => {
             const srvGoverned = governed.filter(g => g.machine_id === selectedServer.machine_id);
             if (srvGoverned.length === 0) {
-              return <Empty icon={<Shield size={24} />} title="No governed agents" msg="Run 'sudo cloudfuze-monitor govern' on this server to start tracking Docker containers." />;
+              return <Empty icon={<Shield size={24} />} title="No Governed Agents" msg="Run 'sudo cloudfuze-monitor govern' on this server to start tracking Docker containers." />;
             }
             return (
               <div style={{ display: "grid", gap: 10 }}>
@@ -6663,12 +6933,12 @@ function ServerMonitorView() {
           <SectionHeader title="Connected Servers" hint="Servers running the CloudFuze server monitor" />
           <DataTable columns={[
             { label: "Server", render: r => <Mono>{r.display_name || r.machine_id}</Mono> },
-            { label: "Status", render: r => <Badge text={r.status} color={r.status === "active" ? "#22c55e" : "#9ca3af"} /> },
+            { label: "Status", render: r => <Badge text={capitalizeWord(r.status)} color={r.status === "active" ? "#22c55e" : "#9ca3af"} /> },
             { label: "Last Seen", render: r => relTime(r.last_seen) },
             { label: "Calls", key: "total_calls", right: true },
             { label: "Cost", render: r => fmtUsd(r.total_cost_usd), right: true },
             { label: "Users", render: r => (r.users || []).join(", ") || "\u2014" },
-            { label: "Providers", render: r => <div>{(r.providers || []).map(p => <Tag key={p} text={p} />)}</div> },
+            { label: "Providers", render: r => <div>{(r.providers || []).map(p => <Tag key={p} text={slugLabel(p)} />)}</div> },
           ]} rows={servers} empty="No servers connected yet. Go to Setup tab to install." />
         </div>
       )}
