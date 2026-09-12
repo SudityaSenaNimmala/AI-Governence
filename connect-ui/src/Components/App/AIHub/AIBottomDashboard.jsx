@@ -261,10 +261,10 @@ const AIBottomDashboard = () => {
                     >
                         <div style={{ display: "flex", alignItems: "flex-start", gap: "10px" }}>
                             <div>
-                                <p style={{ fontWeight: 600, color: "#0f172a", margin: 0, fontSize: "15px" }}>
+                                <p style={{ fontWeight: 600, color: "#0f172a", margin: 0, fontSize: "16.7px" }}>
                                     Tool Usage Distribution
                                 </p>
-                                <p className="cf_new_dashboard_pannel_info" style={{ margin: "4px 0 0", fontSize: "12px" }}>
+                                <p className="cf_new_dashboard_pannel_info" style={{ margin: "4px 0 0", fontSize: "13.4px" }}>
                                     Share of interactions by tool.
                                 </p>
                             </div>
@@ -293,7 +293,7 @@ const AIBottomDashboard = () => {
                                     justifyContent: "center",
                                     minHeight: "300px",
                                     color: "#64748b",
-                                    fontSize: "14px",
+                                    fontSize: "15.6px",
                                 }}
                             >
                                 Loading tool usage data...
@@ -336,10 +336,10 @@ const AIBottomDashboard = () => {
                                 <CheckCircle size={18} strokeWidth={2} color="#0062ff" />
                             </div>
                             <div>
-                                <p style={{ fontWeight: 600, color: "#0f172a", margin: 0, fontSize: "15px" }}>
+                                <p style={{ fontWeight: 600, color: "#0f172a", margin: 0, fontSize: "16.7px" }}>
                                     AI Quality Score (SAR)
                                 </p>
-                                <p style={{ margin: "4px 0 0", fontSize: "12px", color: "#64748b" }}>
+                                <p style={{ margin: "4px 0 0", fontSize: "13.4px", color: "#64748b" }}>
                                     Suggestion Acceptance Rate - How often users accept AI suggestions
                                 </p>
                             </div>
@@ -350,13 +350,13 @@ const AIBottomDashboard = () => {
                         {sarChartData.length > 0 ? (
                             <>
                                 <div style={{ display: "flex", alignItems: "baseline", gap: "12px", marginBottom: "16px" }}>
-                                    <span style={{ fontSize: "32px", fontWeight: 700, color: "#0f172a" }}>
+                                    <span style={{ fontSize: "35.7px", fontWeight: 700, color: "#0f172a" }}>
                                         {currentSAR != null ? `${currentSAR}%` : "—"}
                                     </span>
                                     {momChange != null && momChange !== 0 && (
                                         <span
                                             style={{
-                                                fontSize: "14px",
+                                                fontSize: "15.6px",
                                                 fontWeight: 500,
                                                 color: momChange >= 0 ? "#16a34a" : "#dc2626",
                                                 display: "flex",
@@ -369,7 +369,7 @@ const AIBottomDashboard = () => {
                                     )}
                                 </div>
 
-                                <p style={{ fontSize: "13px", fontWeight: 600, color: "#334155", margin: "0 0 8px 0" }}>
+                                <p style={{ fontSize: "14.5px", fontWeight: 600, color: "#334155", margin: "0 0 8px 0" }}>
                                     Acceptance rate this month
                                 </p>
                                 <AcceptanceRateAreaChart
@@ -393,8 +393,8 @@ const AIBottomDashboard = () => {
                                 >
                                     {sarChartData.map((point, i) => (
                                         <div key={i} style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
-                                            <span style={{ fontSize: "12px", color: "#64748b" }}>{point.name}</span>
-                                            <span style={{ fontSize: "15px", fontWeight: 700, color: "#334155" }}>
+                                            <span style={{ fontSize: "13.4px", color: "#64748b" }}>{point.name}</span>
+                                            <span style={{ fontSize: "16.7px", fontWeight: 700, color: "#334155" }}>
                                                 {Number(point.sar).toFixed(1)}%
                                             </span>
                                         </div>
@@ -409,7 +409,7 @@ const AIBottomDashboard = () => {
                                     justifyContent: "center",
                                     minHeight: "300px",
                                     color: "#64748b",
-                                    fontSize: "14px",
+                                    fontSize: "15.6px",
                                 }}
                             >
                                 Loading SAR trend...
@@ -439,10 +439,10 @@ const AIBottomDashboard = () => {
                     >
                         <div style={{ display: "flex", alignItems: "flex-start", gap: "10px" }}>
                             <div>
-                                <p style={{ fontWeight: 600, color: "#0f172a", margin: 0, fontSize: "15px" }}>
+                                <p style={{ fontWeight: 600, color: "#0f172a", margin: 0, fontSize: "16.7px" }}>
                                     Adoption by Department
                                 </p>
-                                <p style={{ margin: "4px 0 0", fontSize: "12px", color: "#64748b" }}>
+                                <p style={{ margin: "4px 0 0", fontSize: "13.4px", color: "#64748b" }}>
                                     Active users by department
                                 </p>
                             </div>
@@ -470,7 +470,7 @@ const AIBottomDashboard = () => {
                                     justifyContent: "center",
                                     minHeight: "300px",
                                     color: "#64748b",
-                                    fontSize: "14px",
+                                    fontSize: "15.6px",
                                 }}
                             >
                                 Loading department data...
@@ -505,10 +505,10 @@ const AIBottomDashboard = () => {
                     >
                         <div style={{ display: "flex", alignItems: "flex-start", gap: "10px" }}>
                             <div>
-                                <p style={{ fontWeight: 600, color: "#0f172a", margin: 0, fontSize: "15px" }}>
+                                <p style={{ fontWeight: 600, color: "#0f172a", margin: 0, fontSize: "16.7px" }}>
                                     Tool Usage Distribution
                                 </p>
-                                <p className="cf_new_dashboard_pannel_info" style={{ margin: "4px 0 0", fontSize: "12px" }}>
+                                <p className="cf_new_dashboard_pannel_info" style={{ margin: "4px 0 0", fontSize: "13.4px" }}>
                                     Share of interactions by tool.
                                 </p>
                             </div>
@@ -566,10 +566,10 @@ const AIBottomDashboard = () => {
                                 <TrendingUp size={18} strokeWidth={2} color="#16a34a" />
                             </div>
                             <div>
-                                <p style={{ fontWeight: 600, color: "#0f172a", margin: 0, fontSize: "15px" }}>
+                                <p style={{ fontWeight: 600, color: "#0f172a", margin: 0, fontSize: "16.7px" }}>
                                     Cost Per Value (CPV) Efficiency Trend
                                 </p>
-                                <p style={{ margin: "4px 0 0", fontSize: "12px", color: "#64748b" }}>
+                                <p style={{ margin: "4px 0 0", fontSize: "13.4px", color: "#64748b" }}>
                                     7-month trend with target benchmark
                                 </p>
                             </div>
@@ -595,10 +595,10 @@ const AIBottomDashboard = () => {
                                             backgroundColor: "#f1f5f9",
                                         }}
                                     >
-                                        <div style={{ fontSize: "12px", color: "#64748b", marginBottom: "4px" }}>
+                                        <div style={{ fontSize: "13.4px", color: "#64748b", marginBottom: "4px" }}>
                                             Current CPV
                                         </div>
-                                        <div style={{ fontSize: "18px", fontWeight: 700, color: "#16a34a" }}>
+                                        <div style={{ fontSize: "20.1px", fontWeight: 700, color: "#16a34a" }}>
                                             ${currentCPV != null ? currentCPV.toFixed(2) : "—"}
                                         </div>
                                     </div>
@@ -611,10 +611,10 @@ const AIBottomDashboard = () => {
                                             backgroundColor: "#f1f5f9",
                                         }}
                                     >
-                                        <div style={{ fontSize: "12px", color: "#64748b", marginBottom: "4px" }}>
+                                        <div style={{ fontSize: "13.4px", color: "#64748b", marginBottom: "4px" }}>
                                             Target CPV
                                         </div>
-                                        <div style={{ fontSize: "18px", fontWeight: 700, color: "#0f172a" }}>
+                                        <div style={{ fontSize: "20.1px", fontWeight: 700, color: "#0f172a" }}>
                                             ${targetCPV != null ? targetCPV.toFixed(2) : "—"}
                                         </div>
                                     </div>
@@ -627,12 +627,12 @@ const AIBottomDashboard = () => {
                                             backgroundColor: "rgba(22, 163, 74, 0.08)",
                                         }}
                                     >
-                                        <div style={{ fontSize: "12px", color: "#64748b", marginBottom: "4px" }}>
+                                        <div style={{ fontSize: "13.4px", color: "#64748b", marginBottom: "4px" }}>
                                             MoM Change
                                         </div>
                                         <div
                                             style={{
-                                                fontSize: "18px",
+                                                fontSize: "20.1px",
                                                 fontWeight: 700,
                                                 color: cpvMomChange != null && cpvMomChange < 0 ? "#16a34a" : "#0f172a",
                                             }}
@@ -657,7 +657,7 @@ const AIBottomDashboard = () => {
                                     justifyContent: "center",
                                     minHeight: "280px",
                                     color: "#64748b",
-                                    fontSize: "14px",
+                                    fontSize: "15.6px",
                                 }}
                             >
                                 Loading CPV trend...
@@ -704,10 +704,10 @@ const AIBottomDashboard = () => {
                                 <Activity size={18} strokeWidth={2} color="#7c3aed" />
                             </div>
                             <div>
-                                <p style={{ fontWeight: 600, color: "#0f172a", margin: 0, fontSize: "15px" }}>
+                                <p style={{ fontWeight: 600, color: "#0f172a", margin: 0, fontSize: "16.7px" }}>
                                     Daily Usage Pattern with Quality Metrics
                                 </p>
-                                <p style={{ margin: "4px 0 0", fontSize: "12px", color: "#64748b" }}>
+                                <p style={{ margin: "4px 0 0", fontSize: "13.4px", color: "#64748b" }}>
                                     Daily interactions with acceptance rate and handoff indicators
                                 </p>
                             </div>
@@ -728,7 +728,7 @@ const AIBottomDashboard = () => {
                                     justifyContent: "center",
                                     minHeight: "280px",
                                     color: "#64748b",
-                                    fontSize: "14px",
+                                    fontSize: "15.6px",
                                 }}
                             >
                                 Loading daily usage pattern...
@@ -756,7 +756,7 @@ const AIBottomDashboard = () => {
                         }}
                     >
                         <div>
-                            <p style={{ fontWeight: 700, color: "#001a6f", margin: 0, fontSize: "16px" }}>
+                            <p style={{ fontWeight: 700, color: "#001a6f", margin: 0, fontSize: "17.8px" }}>
                                 Usage Trend
                             </p>
                         </div>
@@ -777,7 +777,7 @@ const AIBottomDashboard = () => {
                                     justifyContent: "center",
                                     minHeight: "260px",
                                     color: "#64748b",
-                                    fontSize: "14px",
+                                    fontSize: "15.6px",
                                 }}
                             >
                                 Loading usage trend...
@@ -809,7 +809,7 @@ const AIBottomDashboard = () => {
                         }}
                     >
                         <div>
-                            <p style={{ fontWeight: 700, color: "#001a6f", margin: 0, fontSize: "16px" }}>
+                            <p style={{ fontWeight: 700, color: "#001a6f", margin: 0, fontSize: "17.8px" }}>
                                 Usage Trend
                             </p>
                         </div>
@@ -830,7 +830,7 @@ const AIBottomDashboard = () => {
                                     justifyContent: "center",
                                     minHeight: "260px",
                                     color: "#64748b",
-                                    fontSize: "14px",
+                                    fontSize: "15.6px",
                                 }}
                             >
                                 Loading usage trend...
