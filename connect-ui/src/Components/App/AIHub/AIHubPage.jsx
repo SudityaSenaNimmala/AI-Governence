@@ -12,7 +12,7 @@ import {
   Search, RefreshCw, Activity, FileText, MessageSquare, Eye, Trash2, Plus, X,
   History, ArrowLeft, Bot, User, ShieldAlert, Film, PlayCircle, MonitorPlay,
   Maximize2, Minimize2, Copy, Check, DollarSign, ExternalLink, Download, Boxes,
-  ChevronDown,
+  ChevronDown, Info,
 } from "lucide-react";
 // ── DEMO MODE (remove to revert) ────────────────────────────────────────────
 import { cacheStats, cacheClear, warmCache } from "./aiHubDemoCache";
@@ -327,6 +327,33 @@ function SectionHeader({ title, hint, action }) {
 function Badge({ text, color="#6b7280" }) {
   return <span className="aihub_badge" style={{background:color+"12",color,borderColor:color+"25"}}>{text}</span>;
 }
+// A first-time viewer has no way to discover a bare `title=` tooltip — nothing
+// signals there's an explanation to hover for, and it's inert on touch. This
+// puts a small, visible (i) next to a label; click (or hover, for desktop
+// muscle memory) reveals the explanation, and a document-click listener closes
+// it so only one is ever open. Use on column headers / stat labels whose
+// meaning or calculation isn't obvious from the value alone.
+// `align="right"` grows the popover leftward from the icon instead of rightward
+// — needed for a column sitting at the right edge of the table (e.g. a
+// right-aligned numeric column), where growing rightward pushes it past the
+// table's own scrollable width and forces a sideways scroll to read it.
+function InfoHint({ text, align="left" }) {
+  const [open,setOpen]=useState(false);
+  const ref=useRef(null);
+  useEffect(()=>{
+    if(!open) return;
+    const onDoc=e=>{ if(ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown",onDoc);
+    return ()=>document.removeEventListener("mousedown",onDoc);
+  },[open]);
+  return (<span ref={ref} className="aihub_info_hint">
+    <button type="button" aria-label="What does this mean?" title={text}
+      className="aihub_info_hint_btn" onClick={e=>{e.stopPropagation();setOpen(o=>!o);}}>
+      <Info size={12}/>
+    </button>
+    {open && <span role="tooltip" className={`aihub_info_hint_pop${align==="right"?" aihub_info_hint_pop_right":""}`}>{text}</span>}
+  </span>);
+}
 // Internal one-word enum values (not external identifiers) — safe to display
 // Title Cased regardless of how they're cased in the data.
 function capitalizeWord(w) { return typeof w==="string" && w ? w.charAt(0).toUpperCase()+w.slice(1).toLowerCase() : w; }
@@ -380,7 +407,7 @@ function DataTable({ columns, rows, empty, onRow, renderExpanded, isExpanded, pa
   }
 
   return (<div>
-    <div className="aihub_table_wrap"><table className="aihub_table"><thead><tr>{columns.map((c,i)=><th key={i} style={c.right?{textAlign:"right"}:undefined}>{c.label}</th>)}</tr></thead><tbody>{(!visibleRows.length)?<tr><td colSpan={columns.length} className="aihub_table_empty">{empty||"No data"}</td></tr>:visibleRows.map((r,i)=>{
+    <div className="aihub_table_wrap"><table className="aihub_table"><thead><tr>{columns.map((c,i)=><th key={i} style={c.right?{textAlign:"right"}:undefined}>{c.label}{c.hint&&<InfoHint text={c.hint} align={c.right?"right":"left"}/>}</th>)}</tr></thead><tbody>{(!visibleRows.length)?<tr><td colSpan={columns.length} className="aihub_table_empty">{empty||"No data"}</td></tr>:visibleRows.map((r,i)=>{
     const open=isExpanded?.(r);
     return (<Fragment key={rowKey(r,i)}>
       <tr onClick={()=>onRow?.(r)} style={{cursor:onRow?"pointer":"default",background:open?"rgba(0,82,224,0.04)":undefined}}>
@@ -938,11 +965,11 @@ function MachinesView() {
     <SectionHeader title="Enrolled Systems" hint={`${filtered.length} of ${rows.length} systems`} action={<div className="aihub_search_box"><Search size={14}/><input placeholder="Search hostname, user, OS..." value={q} onChange={e=>setQ(e.target.value)}/></div>}/>
     <div className="aihub_card">
       <DataTable columns={[
-        {label:"System",render:r=><><div className="aihub_text_primary">{r.hostname||r.id?.slice(0,12)}</div><div className="aihub_text_muted">{splitConcatenatedName(r.user)}</div></>},
-        {label:"Platform",render:r=><Badge text={platLabel[r.platform]||slugLabel(r.platform)} color={platTone[r.platform]||"#6b7280"}/>},
-        {label:"Findings",key:"findings_count",right:true},
-        {label:"Tools",key:"unique_tools",right:true},
-        {label:"Last Scan",render:r=>relTime(r.last_scan_at)},
+        {label:"System",hint:"The enrolled endpoint's hostname and the OS user account observed on it.",render:r=><><div className="aihub_text_primary">{r.hostname||r.id?.slice(0,12)}</div><div className="aihub_text_muted">{splitConcatenatedName(r.user)}</div></>},
+        {label:"Platform",hint:"Operating system the endpoint agent runs on.",render:r=><Badge text={platLabel[r.platform]||slugLabel(r.platform)} color={platTone[r.platform]||"#6b7280"}/>},
+        {label:"Findings",hint:"Total scan detections logged on this machine — every piece of evidence the endpoint scanner recorded, not deduplicated by tool.",key:"findings_count",right:true},
+        {label:"Tools",hint:"Distinct AI tools detected on this machine, counted once each no matter how many findings they produced.",key:"unique_tools",right:true},
+        {label:"Last Scan",hint:"When this machine last completed a scan and reported its findings to the server.",render:r=>relTime(r.last_scan_at)},
       ]} rows={filtered}/>
     </div>
   </div>);
@@ -968,10 +995,10 @@ function ToolsView() {
     </div>
     <div className="aihub_card">
       <DataTable columns={[
-        {label:"Product",render:r=><><div className="aihub_text_primary">{r.product||r.tool_key}</div><div className="aihub_text_muted">{r.vendor||"Unknown"}</div></>},
-        {label:"Evidence",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.evidence_types||[]).slice(0,4).map((t,i)=><Tag key={i} text={slugLabel(t)}/>)}{(r.evidence_types||[]).length>4&&<Tag text={`+${r.evidence_types.length-4}`} color="#9ca3af"/>}</div>},
-        {label:"Systems",key:"machines",right:true},
-        {label:"Status",render:r=><SanctionBadge status={r.sanction}/>},
+        {label:"Product",hint:"The AI tool or product name, with its vendor underneath.",render:r=><><div className="aihub_text_primary">{r.product||r.tool_key}</div><div className="aihub_text_muted">{r.vendor||"Unknown"}</div></>},
+        {label:"Evidence",hint:"How this tool was detected — process, file, browser activity, etc. More than one tag means more than one detection method caught it.",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.evidence_types||[]).slice(0,4).map((t,i)=><Tag key={i} text={slugLabel(t)}/>)}{(r.evidence_types||[]).length>4&&<Tag text={`+${r.evidence_types.length-4}`} color="#9ca3af"/>}</div>},
+        {label:"Systems",hint:"Number of distinct machines where this tool was detected.",key:"machines",right:true},
+        {label:"Status",hint:"Admin sanction decision for this tool — Approved, Restricted, Blocked, or Unknown (not yet reviewed).",render:r=><SanctionBadge status={r.sanction}/>},
       ]} rows={filtered}/>
     </div>
   </div>);
@@ -1035,8 +1062,8 @@ function AgentsView() {
   const visibleCount=(showSection("mcp")?mcpRows.length:0)+Object.keys(catMap).reduce((n,c)=>n+(showSection(c)?catRows(c).length:0),0);
   const totalHint=n=>filterUser?`of ${n} total`:undefined;
 
-  const machineCol={label:"System",render:r=><Mono>{(r.machine_id||"").slice(0,10)}</Mono>};
-  const userCol={label:"User",render:renderUser};
+  const machineCol={label:"System",hint:"The enrolled machine this project or MCP server was found on, identified by its machine id.",render:r=><Mono>{(r.machine_id||"").slice(0,10)}</Mono>};
+  const userCol={label:"User",hint:"The OS user this row's machine resolves to. \"Unknown\" means the machine wasn't found in the enrolled-machines list.",render:renderUser};
 
   return (<div>
     <SectionHeader title="Agents & MCP" hint="AI agent projects and the MCP servers they can reach, across all machines."
@@ -1063,11 +1090,11 @@ function AgentsView() {
       <DataTable columns={[
         userCol,
         machineCol,
-        {label:"Client",render:r=>slugLabel(r.payload?.client)||"—"},
-        {label:"Server",render:r=><span className="aihub_text_primary">{slugLabel(r.payload?.serverName)||"—"}</span>},
-        {label:"Scopes",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.payload?.scopes||[]).map((s,i)=><Tag key={i} text={slugLabel(s)}/>)}</div>},
-        {label:"Command",render:r=><Mono>{[r.payload?.command,...(r.payload?.args||[])].filter(Boolean).join(" ").slice(0,60)}</Mono>},
-        {label:"Config File",render:r=>r.payload?.configPath?<Mono title={r.payload.configPath}>{r.payload.configPath}</Mono>:<span className="aihub_text_muted">—</span>},
+        {label:"Client",hint:"Which AI app or agent framework is configured to connect to this MCP server.",render:r=>slugLabel(r.payload?.client)||"—"},
+        {label:"Server",hint:"The MCP server's own name, as declared in the client's config file.",render:r=><span className="aihub_text_primary">{slugLabel(r.payload?.serverName)||"—"}</span>},
+        {label:"Scopes",hint:"The kind of access this MCP server provides (e.g. filesystem, database, source control), inferred by the endpoint scanner from its known server type — not a live, verified permission grant.",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.payload?.scopes||[]).map((s,i)=><Tag key={i} text={slugLabel(s)}/>)}</div>},
+        {label:"Command",hint:"The literal shell command (and arguments) the client uses to launch this MCP server process.",render:r=><Mono>{[r.payload?.command,...(r.payload?.args||[])].filter(Boolean).join(" ").slice(0,60)}</Mono>},
+        {label:"Config File",hint:"Path to the config file where this MCP server is registered for the client.",render:r=>r.payload?.configPath?<Mono title={r.payload.configPath}>{r.payload.configPath}</Mono>:<span className="aihub_text_muted">—</span>},
       ]} rows={mcpRows} empty={filterUser?`No MCP servers for ${splitConcatenatedName(filterUser)}`:"No MCP servers found"}/>
     </div>}
 
@@ -1077,10 +1104,10 @@ function AgentsView() {
         <SectionHeader title={cfg.title} hint={cfg.hint}/>
         <DataTable columns={[
           userCol,
-          {label:"Path",render:r=><Mono>{r.payload?.path||"—"}</Mono>},
-          {label:"Language",render:r=>languageLabel(r.payload?.language)||"—"},
-          {label:"Frameworks",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.payload?.frameworks||[]).map((f,i)=><Tag key={i} text={f} color={cfg.color}/>)}</div>},
-          {label:"Modified",render:r=>relTime(r.payload?.lastModified)},
+          {label:"Path",hint:"Where this project lives on disk on the enrolled machine.",render:r=><Mono>{r.payload?.path||"—"}</Mono>},
+          {label:"Language",hint:"The project's primary programming language, as detected by the scanner.",render:r=>languageLabel(r.payload?.language)||"—"},
+          {label:"Frameworks",hint:"Agent or AI frameworks/libraries the scanner found referenced in this project.",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.payload?.frameworks||[]).map((f,i)=><Tag key={i} text={f} color={cfg.color}/>)}</div>},
+          {label:"Modified",hint:"When the scanner last saw this project's files change.",render:r=>relTime(r.payload?.lastModified)},
         ]} rows={catRows(cat)} empty={filterUser?`No ${cfg.title.toLowerCase()} for ${splitConcatenatedName(filterUser)}`:`No ${cfg.title.toLowerCase()} found`}/>
       </div>
     ))}
@@ -1118,24 +1145,24 @@ function ServerAgentsView() {
       <StatCard icon={<Server size={18}/>} label="Distinct Systems" value={summary.totals.distinct_machines||0} color="#f59e0b"/>
     </div>
     <div className="aihub_two_col">
-      <div className="aihub_card"><SectionHeader title="Cost by User"/><DataTable columns={[{label:"User",render:r=>splitConcatenatedName(r.user)},{label:"Calls",key:"calls",right:true},{label:"Cost",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byUser||[]}/></div>
-      <div className="aihub_card"><SectionHeader title="Cost by Model"/><DataTable columns={[{label:"Model",render:r=><Mono>{r.model}</Mono>},{label:"Calls",key:"calls",right:true},{label:"Cost",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byModel||[]}/></div>
+      <div className="aihub_card"><SectionHeader title="Cost by User"/><DataTable columns={[{label:"User",hint:"The OS user account whose processes made these LLM API calls.",render:r=>splitConcatenatedName(r.user)},{label:"Calls",hint:"Number of LLM API calls this row accounts for.",key:"calls",right:true},{label:"Cost",hint:"Total spend for these calls, at the provider's list price.",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byUser||[]}/></div>
+      <div className="aihub_card"><SectionHeader title="Cost by Model"/><DataTable columns={[{label:"Model",hint:"The specific LLM model called (e.g. gpt-4o, claude-sonnet-5).",render:r=><Mono>{r.model}</Mono>},{label:"Calls",hint:"Number of LLM API calls this row accounts for.",key:"calls",right:true},{label:"Cost",hint:"Total spend for these calls, at the provider's list price.",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byModel||[]}/></div>
     </div>
     <div className="aihub_two_col">
-      <div className="aihub_card"><SectionHeader title="Trigger Source"/><DataTable columns={[{label:"Source",render:r=><Badge text={slugLabel(r.trigger)} color={triggerTone[r.trigger]||"#9ca3af"}/>},{label:"Calls",key:"calls",right:true},{label:"Cost",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byTrigger||[]}/></div>
-      <div className="aihub_card"><SectionHeader title="By Provider"/><DataTable columns={[{label:"Provider",render:r=><Badge text={slugLabel(r.provider)} color={providerTone[r.provider]||"#9ca3af"}/>},{label:"Calls",key:"calls",right:true},{label:"Cost",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byProvider||[]}/></div>
+      <div className="aihub_card"><SectionHeader title="Trigger Source"/><DataTable columns={[{label:"Source",hint:"How the process that made this call was started — an interactive shell, a scheduled cron job, a systemd service, an SSH session, CI pipeline, a container, or a login shell.",render:r=><Badge text={slugLabel(r.trigger)} color={triggerTone[r.trigger]||"#9ca3af"}/>},{label:"Calls",hint:"Number of LLM API calls this row accounts for.",key:"calls",right:true},{label:"Cost",hint:"Total spend for these calls, at the provider's list price.",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byTrigger||[]}/></div>
+      <div className="aihub_card"><SectionHeader title="By Provider"/><DataTable columns={[{label:"Provider",hint:"The LLM API vendor this call was made to (e.g. OpenAI, Anthropic, Google, Azure OpenAI, AWS Bedrock).",render:r=><Badge text={slugLabel(r.provider)} color={providerTone[r.provider]||"#9ca3af"}/>},{label:"Calls",hint:"Number of LLM API calls this row accounts for.",key:"calls",right:true},{label:"Cost",hint:"Total spend for these calls, at the provider's list price.",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byProvider||[]}/></div>
     </div>
     <div className="aihub_card">
       <SectionHeader title="Recent Calls"/>
       <DataTable columns={[
-        {label:"When",render:r=>relTime(r.occurred_at)},
-        {label:"User",render:r=>splitConcatenatedName(r.user)||"—"},
-        {label:"Trigger",render:r=><Badge text={slugLabel(r.trigger)} color={triggerTone[r.trigger]||"#9ca3af"}/>},
-        {label:"Agent",render:r=><Mono>{(r.cmdline||"").slice(0,60)}</Mono>},
-        {label:"Provider",render:r=><Badge text={slugLabel(r.provider)} color={providerTone[r.provider]||"#9ca3af"}/>},
-        {label:"Model",render:r=><Mono>{r.model||"—"}</Mono>},
-        {label:"Tokens",render:r=>fmtTokens(r.total_tokens),right:true},
-        {label:"Cost",render:r=>fmtUsd(r.estimated_cost_usd),right:true},
+        {label:"When",hint:"When this API call was intercepted by the server monitor.",render:r=>relTime(r.occurred_at)},
+        {label:"User",hint:"The OS user account whose process made this call.",render:r=>splitConcatenatedName(r.user)||"—"},
+        {label:"Trigger",hint:"How the process that made this call was started — an interactive shell, a scheduled cron job, a systemd service, an SSH session, CI pipeline, a container, or a login shell.",render:r=><Badge text={slugLabel(r.trigger)} color={triggerTone[r.trigger]||"#9ca3af"}/>},
+        {label:"Agent",hint:"The command line of the process that made this call, truncated.",render:r=><Mono>{(r.cmdline||"").slice(0,60)}</Mono>},
+        {label:"Provider",hint:"The LLM API vendor this call was made to (e.g. OpenAI, Anthropic, Google, Azure OpenAI, AWS Bedrock).",render:r=><Badge text={slugLabel(r.provider)} color={providerTone[r.provider]||"#9ca3af"}/>},
+        {label:"Model",hint:"The specific LLM model called (e.g. gpt-4o, claude-sonnet-5).",render:r=><Mono>{r.model||"—"}</Mono>},
+        {label:"Tokens",hint:"Total tokens (input + output) reported for this call.",render:r=>fmtTokens(r.total_tokens),right:true},
+        {label:"Cost",hint:"Estimated cost of this call at the provider's list price.",render:r=>fmtUsd(r.estimated_cost_usd),right:true},
       ]} rows={calls||[]}/>
     </div>
   </div>);
@@ -1243,10 +1270,10 @@ function DLPView() {
       {/* Server-side rollup from /dlp/summary, which aggregates in Mongo. */}
       <SectionHeader title="Activity by AI Service"/>
       <DataTable columns={[
-        {label:"Service",key:"ai_service"},
-        {label:"Prompts",key:"prompts",right:true},
-        {label:"File Uploads",key:"file_uploads",right:true},
-        {label:"Systems",key:"machines",right:true},
+        {label:"Service",hint:"The AI service these events were sent to.",key:"ai_service"},
+        {label:"Prompts",hint:"High/critical-severity prompts sent to this service.",key:"prompts",right:true},
+        {label:"File Uploads",hint:"High/critical-severity files uploaded to this service.",key:"file_uploads",right:true},
+        {label:"Systems",hint:"Distinct machines that used this service.",key:"machines",right:true},
       ]} rows={summary.byService||[]}/>
     </div>}
 
@@ -1260,12 +1287,12 @@ function DLPView() {
         isExpanded={r=>openRows.has(r.id)}
         renderExpanded={r=><GroupDetail row={r} onView={setPreview}/>}
         columns={[
-        {label:"Time",render:r=><><div>{relTime(r.occurred_at)}</div><GroupToggle row={r} open={openRows.has(r.id)} onToggle={()=>toggleRow(r.id)}/></>},
-        {label:"User",render:r=><UserCell row={r}/>},
-        {label:"Service",render:r=><ServiceCell row={r}/>},
-        {label:"Source",render:r=><Badge text={(r.source||"").replace(/_/g," ")} color={sourceTone[r.source]||"#9ca3af"}/>},
-        {label:"Pattern",render:r=><Mono>{groupPattern(r)}</Mono>},
-        {label:"Severity",render:r=><SeverityBadge sev={worstSev(groupMembers(r))}/>},
+        {label:"Time",hint:"When this prompt was captured. Expand the row to see every event folded into this one user action.",render:r=><><div>{relTime(r.occurred_at)}</div><GroupToggle row={r} open={openRows.has(r.id)} onToggle={()=>toggleRow(r.id)}/></>},
+        {label:"User",hint:"The employee this event is attributed to, resolved from the machine/session that captured it.",render:r=><UserCell row={r}/>},
+        {label:"Service",hint:"Which AI service this prompt or upload was sent to.",render:r=><ServiceCell row={r}/>},
+        {label:"Source",hint:"Which capture mechanism recorded this — the browser extension, the desktop hook, or the OS-level monitor.",render:r=><Badge text={(r.source||"").replace(/_/g," ")} color={sourceTone[r.source]||"#9ca3af"}/>},
+        {label:"Pattern",hint:"The DLP rule that matched this content — e.g. SSN, API key, credit card number — from the pattern-scan engine, not a description of the whole prompt.",render:r=><Mono>{groupPattern(r)}</Mono>},
+        {label:"Severity",hint:"The highest DLP severity found among the events folded into this row (low, medium, high, critical).",render:r=><SeverityBadge sev={worstSev(groupMembers(r))}/>},
         {label:"",render:r=>{const c=contentMember(r); return <ViewBtn has={!!c} onClick={()=>setPreview(c)}/>;},right:true},
       ]} rows={promptGroups} empty="No prompt events matching this filter." paginate={25}/>
     </div>}
@@ -1273,12 +1300,12 @@ function DLPView() {
     {section==="files"&&<div className="aihub_card">
       <SectionHeader title="File Uploads" hint="High & Critical Severity Only"/>
       <DataTable onRow={r=>{ if(r.has_content) setPreview(r); }} columns={[
-        {label:"Time",render:r=>relTime(r.occurred_at)},
-        {label:"User",render:r=><UserCell row={r}/>},
-        {label:"Service",render:r=><ServiceCell row={r}/>},
-        {label:"Filename",render:r=><Mono>{r.metadata?.filename||"—"}</Mono>},
-        {label:"Class",render:r=><Tag text={r.file_class||"—"}/>},
-        {label:"Severity",render:r=><SeverityBadge sev={r.severity||r.highest_severity}/>},
+        {label:"Time",hint:"When this file upload was captured.",render:r=>relTime(r.occurred_at)},
+        {label:"User",hint:"The employee this event is attributed to, resolved from the machine/session that captured it.",render:r=><UserCell row={r}/>},
+        {label:"Service",hint:"Which AI service this prompt or upload was sent to.",render:r=><ServiceCell row={r}/>},
+        {label:"Filename",hint:"The uploaded file's name, as captured at upload time.",render:r=><Mono>{r.metadata?.filename||"—"}</Mono>},
+        {label:"File Type",hint:"The kind of file detected — document, image, spreadsheet, etc.",render:r=><Tag text={r.file_class||"—"}/>},
+        {label:"Severity",hint:"The DLP severity assigned to this upload's content (low, medium, high, critical).",render:r=><SeverityBadge sev={r.severity||r.highest_severity}/>},
         {label:"",render:r=><ViewBtn has={r.has_content} onClick={()=>setPreview(r)} label="Open"/>,right:true},
       ]} rows={fileRows} empty="No file upload events matching this filter." paginate={25}/>
     </div>}
@@ -1329,22 +1356,22 @@ function PlatformsView() {
     <SectionHeader title="AI Platforms Registry" action={<div className="aihub_search_box"><Search size={14}/><input placeholder="Filter by host, vendor, product..." value={q} onChange={e=>setQ(e.target.value)}/></div>}/>
     <div className="aihub_card">
       <DataTable columns={[
-        {label:"Host",render:r=><Mono>{r.host}</Mono>},
-        {label:"Vendor",render:r=>r.vendor||"—"},
-        {label:"Product",render:r=>r.product||"—"},
-        {label:"Category",render:r=>r.category?<Badge text={categoryLabel(r.category)} color="#6366f1"/>:<span className="aihub_text_muted">—</span>},
-        {label:"Sandbox",render:r=>r.sandbox?<Badge text={slugLabel(r.sandbox)}/>:<span className="aihub_text_muted">—</span>},
-        {label:"Surface",render:r=>r.surface?<Badge text={surfaceLabel(r.surface)} color={surfaceC[r.surface]||"#9ca3af"}/>:<span className="aihub_text_muted">—</span>},
-        {label:"Governed",render:r=><Badge text={r.governed?"on":"off"} color={r.governed?"#22c55e":"#9ca3af"}/>,right:true},
-        {label:"Access",render:r=>(
+        {label:"Host",hint:"The domain this registry row governs — every prompt to this host is subject to the row's Surface/Capture/Access settings.",render:r=><Mono>{r.host}</Mono>},
+        {label:"Vendor",hint:"The company behind this AI platform.",render:r=>r.vendor||"—"},
+        {label:"Product",hint:"The specific product or service at this host.",render:r=>r.product||"—"},
+        {label:"Category",hint:"What kind of AI platform this is — chat frontend, IDE assistant, autonomous agent, API platform, etc.",render:r=>r.category?<Badge text={categoryLabel(r.category)} color="#6366f1"/>:<span className="aihub_text_muted">—</span>},
+        {label:"Sandbox",hint:"Where the tool actually executes: local runs on the user's own machine, remote runs in the vendor's cloud sandbox (code and data leave the endpoint), mixed is both.",render:r=>r.sandbox?<Badge text={slugLabel(r.sandbox)}/>:<span className="aihub_text_muted">—</span>},
+        {label:"Surface",hint:"Which channel this platform's policy (block, capture mode) is enforced on. Moving a host off 'browser'/'all' drops it from the list the browser extension polls.",render:r=>r.surface?<Badge text={surfaceLabel(r.surface)} color={surfaceC[r.surface]||"#9ca3af"}/>:<span className="aihub_text_muted">—</span>},
+        {label:"Governed",hint:"Whether this host is actively enrolled for policy enforcement. 'off' means it's cataloged but its Surface/Capture settings aren't applied to any endpoint yet.",render:r=><Badge text={r.governed?"on":"off"} color={r.governed?"#22c55e":"#9ca3af"}/>,right:true},
+        {label:"Access",hint:"Click to toggle whether the browser extension allows or blocks prompts to this host.",render:r=>(
           <button onClick={()=>toggleBlocked(r)} disabled={busy===r.host} title={r.blocked?"Click to allow":"Click to block (users can't send prompts)"}
             style={{cursor:busy===r.host?"default":"pointer",padding:"3px 10px",borderRadius:6,fontSize:14.7,fontWeight:600,fontFamily:"inherit",
               border:`1px solid ${r.blocked?"#fca5a5":"#bbf7d0"}`,background:r.blocked?"#fef2f2":"#f0fdf4",color:r.blocked?"#dc2626":"#16a34a",opacity:busy===r.host?0.6:1}}>
             {busy===r.host?"…":r.blocked?"Blocked":"Allowed"}
           </button>
         )},
-        {label:"Source",render:r=><Badge text={r.source||"—"}/>},
-        {label:"Updated",render:r=>relTime(r.updated_at)},
+        {label:"Source",hint:"How this host entered the registry: an admin added it by hand, or the LLM classifier discovered it from observed traffic.",render:r=><Badge text={r.source||"—"}/>},
+        {label:"Updated",hint:"When this row's settings were last changed.",render:r=>relTime(r.updated_at)},
       ]} rows={filtered}/>
     </div>
   </div>);
@@ -2875,9 +2902,9 @@ function ModelRoutingView() {
           <div className="aihub_card">
             <h4 style={{margin:"0 0 12px",fontSize:15.8,fontWeight:700}}>Model Swaps</h4>
             {(analytics?.by_model||[]).length?<DataTable columns={[
-              {label:"Original Model",render:r=><Mono>{r.from||"—"}</Mono>},
-              {label:"Routed To",render:r=><Badge text={r.to||"—"} color="#0052e0"/>},
-              {label:"Count",key:"count",right:true},
+              {label:"Original Model",hint:"The model the request originally asked for, before a routing rule swapped it.",render:r=><Mono>{r.from||"—"}</Mono>},
+              {label:"Routed To",hint:"The model a rule actually sent the request to instead.",render:r=><Badge text={r.to||"—"} color="#0052e0"/>},
+              {label:"Count",hint:"How many requests were swapped along this exact from→to pair.",key:"count",right:true},
             ]} rows={analytics.by_model}/>:<div className="aihub_text_muted" style={{padding:16}}>No data yet</div>}
           </div>
           <div>
@@ -2911,9 +2938,9 @@ function ModelRoutingView() {
       </div>
       <div className="aihub_card">
         <DataTable columns={[
-          {label:"Priority",render:r=><span style={{fontWeight:700,color:"#6b7280"}}>{r.priority}</span>},
-          {label:"Rule Name",render:r=><div><div className="aihub_text_primary">{r.name}</div></div>},
-          {label:"Conditions",render:r=>{
+          {label:"Priority",hint:"Rules are evaluated in ascending order — lower number runs first. The first matching rule wins; later rules are skipped for that request.",render:r=><span style={{fontWeight:700,color:"#6b7280"}}>{r.priority}</span>},
+          {label:"Rule Name",hint:"This rule's display name, set when it was created.",render:r=><div><div className="aihub_text_primary">{r.name}</div></div>},
+          {label:"Conditions",hint:"What has to be true about the request for this rule to fire — sensitivity, complexity, provider, model, or token-count thresholds. All listed conditions must match.",render:r=>{
             const c=r.conditions||{};
             const tags=[];
             if(c.sensitivity) tags.push(...(Array.isArray(c.sensitivity)?c.sensitivity:[c.sensitivity]).map(s=>"sensitivity:"+s));
@@ -2924,9 +2951,9 @@ function ModelRoutingView() {
             if(c.prompt_tokens_lt!=null) tags.push("tokens<"+c.prompt_tokens_lt);
             return <div style={{display:"flex",flexWrap:"wrap",gap:3}}>{tags.map(t=><Tag key={t} text={t}/>)}</div>;
           }},
-          {label:"Route To",render:r=><Badge text={r.action?.model||"—"} color="#0052e0"/>},
-          {label:"Status",render:r=><Badge text={r.enabled?"Active":"Disabled"} color={r.enabled?"#22c55e":"#9ca3af"}/>},
-          {label:"Actions",render:r=><div style={{display:"flex",gap:6}}>
+          {label:"Route To",hint:"The model this rule sends a matching request to instead of the one it originally asked for.",render:r=><Badge text={r.action?.model||"—"} color="#0052e0"/>},
+          {label:"Status",hint:"Disabled rules are skipped entirely — they never match, even if their conditions would otherwise fire.",render:r=><Badge text={r.enabled?"Active":"Disabled"} color={r.enabled?"#22c55e":"#9ca3af"}/>},
+          {label:"Actions",hint:"Edit this rule's conditions, enable/disable it without deleting it, or delete it permanently.",render:r=><div style={{display:"flex",gap:6}}>
             <button onClick={()=>{setEditRule(r);setShowRuleForm(true);}} style={{background:"none",border:"none",cursor:"pointer",color:"#0052e0",fontSize:14.7,fontWeight:600}}>Edit</button>
             <button onClick={()=>toggleRule(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#f59e0b",fontSize:14.7,fontWeight:600}}>{r.enabled?"Disable":"Enable"}</button>
             <button onClick={()=>deleteRule(r.id)} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",fontSize:14.7,fontWeight:600}}>Delete</button>
@@ -2999,12 +3026,12 @@ function ModelRoutingView() {
 
       <div className="aihub_card">
         <DataTable columns={[
-          {label:"Name",render:r=><div className="aihub_text_primary">{r.name}</div>},
-          {label:"Provider",render:r=><Badge text={slugLabel(r.provider)} color="#6366f1"/>},
-          {label:"Host",render:r=><Mono>{r.host||"(default)"}</Mono>},
-          {label:"Models",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:3}}>{(r.models||[]).map(m=><Tag key={m} text={m}/>)}</div>},
-          {label:"Region",render:r=>r.region||"—"},
-          {label:"Status",render:r=><Badge text={r.enabled?"Active":"Disabled"} color={r.enabled?"#22c55e":"#9ca3af"}/>},
+          {label:"Name",hint:"This registered endpoint's display name.",render:r=><div className="aihub_text_primary">{r.name}</div>},
+          {label:"Provider",hint:"Which LLM provider this endpoint belongs to.",render:r=><Badge text={slugLabel(r.provider)} color="#6366f1"/>},
+          {label:"Host",hint:"The endpoint's hostname a routing rule sends requests to. \"(default)\" uses the provider's standard API host.",render:r=><Mono>{r.host||"(default)"}</Mono>},
+          {label:"Models",hint:"Which models are available to route to on this endpoint.",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:3}}>{(r.models||[]).map(m=><Tag key={m} text={m}/>)}</div>},
+          {label:"Region",hint:"Where this endpoint is hosted, for data-residency rules.",render:r=>r.region||"—"},
+          {label:"Status",hint:"Disabled endpoints can't be routed to, even by a rule that names them.",render:r=><Badge text={r.enabled?"Active":"Disabled"} color={r.enabled?"#22c55e":"#9ca3af"}/>},
           {label:"",render:r=><button onClick={()=>deleteEndpoint(r.id)} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444"}}><Trash2 size={14}/></button>},
         ]} rows={endpoints||[]} empty="No endpoints registered. Add a private endpoint for sensitive data routing."/>
       </div>
@@ -3014,13 +3041,13 @@ function ModelRoutingView() {
     {tab==="log"&&(<div>
       <div className="aihub_card">
         <DataTable columns={[
-          {label:"Time",render:r=>relTime(r.timestamp)},
-          {label:"Original Model",render:r=><Mono>{r.original_model||"—"}</Mono>},
-          {label:"Routed To",render:r=><Badge text={r.routed_model||"—"} color="#0052e0"/>},
-          {label:"Rule",render:r=><div className="aihub_text_muted">{r.rule_name||"—"}</div>},
-          {label:"Sensitivity",render:r=>r.sensitivity?<SeverityBadge sev={r.sensitivity}/>:<span className="aihub_text_muted">—</span>},
-          {label:"Complexity",render:r=>r.complexity?<Badge text={capitalizeWord(r.complexity)} color={r.complexity==="simple"?"#22c55e":r.complexity==="complex"?"#ef4444":"#f59e0b"}/>:<span className="aihub_text_muted">—</span>},
-          {label:"Tokens",render:r=>r.prompt_tokens_est?fmtTokens(r.prompt_tokens_est):"—",right:true},
+          {label:"Time",hint:"When this routing decision was made.",render:r=>relTime(r.timestamp)},
+          {label:"Original Model",hint:"The model the request originally asked for.",render:r=><Mono>{r.original_model||"—"}</Mono>},
+          {label:"Routed To",hint:"The model the request was actually sent to instead.",render:r=><Badge text={r.routed_model||"—"} color="#0052e0"/>},
+          {label:"Rule",hint:"Which routing rule matched and made this decision.",render:r=><div className="aihub_text_muted">{r.rule_name||"—"}</div>},
+          {label:"Sensitivity",hint:"The DLP sensitivity detected in this prompt, if any — one of the conditions rules can match on.",render:r=>r.sensitivity?<SeverityBadge sev={r.sensitivity}/>:<span className="aihub_text_muted">—</span>},
+          {label:"Complexity",hint:"Estimated task complexity (simple/moderate/complex), based mainly on prompt length — one of the conditions rules can match on.",render:r=>r.complexity?<Badge text={capitalizeWord(r.complexity)} color={r.complexity==="simple"?"#22c55e":r.complexity==="complex"?"#ef4444":"#f59e0b"}/>:<span className="aihub_text_muted">—</span>},
+          {label:"Tokens",hint:"Estimated prompt token count at the time of routing.",render:r=>r.prompt_tokens_est?fmtTokens(r.prompt_tokens_est):"—",right:true},
         ]} rows={routingLog||[]} empty="No routing events yet. Routing decisions will appear here once rules are active and AI requests flow through the proxy."/>
       </div>
     </div>)}
@@ -3177,17 +3204,17 @@ function RiskScoreView() {
         <h4 style={{margin:"0 0 12px",fontSize:15.8,fontWeight:700}}>Employees by Risk</h4>
         <DataTable
           columns={[
-            {label:"Employee",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
+            {label:"Employee",hint:"Click a row to expand its score breakdown and recent events.",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
               <ChevronRight size={13} style={{color:"#9ca3af",flexShrink:0,transition:"transform .15s",transform:selected===r.id?"rotate(90deg)":"none"}}/>
               <div>
                 <div className="aihub_text_primary">{splitConcatenatedName(r.display_name)}</div>
                 <div className="aihub_text_muted">{r.email||r.hostname||"—"}</div>
               </div>
             </div>},
-            {label:"Score",render:r=><RiskLevelBadge level={r.risk_level} score={r.risk_score}/>},
+            {label:"Score",hint:"A 0–100 score built from DLP violations, overridden blocks, shadow AI tool use, data sensitivity, and usage-volume anomalies. Low 0–30, Medium 31–60, High/Critical 61–100.",render:r=><RiskLevelBadge level={r.risk_level} score={r.risk_score}/>},
             {label:"",render:r=><div style={{minWidth:120}}><ScoreBar score={r.risk_score}/></div>},
-            {label:"Sources",render:r=><div style={{display:"flex",gap:3,flexWrap:"wrap"}}>{(r.sources||[]).map(s=><Tag key={s} text={slugLabel(s)}/>)}</div>},
-            {label:"Computed",render:r=>relTime(r.risk_computed_at)},
+            {label:"Sources",hint:"Which data feeds contributed to this employee's score — DLP events, tool usage, violation history.",render:r=><div style={{display:"flex",gap:3,flexWrap:"wrap"}}>{(r.sources||[]).map(s=><Tag key={s} text={slugLabel(s)}/>)}</div>},
+            {label:"Computed",hint:"When this score was last calculated. Click 'Compute Scores' above to refresh it.",render:r=>relTime(r.risk_computed_at)},
           ]}
           rows={realScores}
           onRow={r=>toggleRow(r.id)}
@@ -3955,9 +3982,9 @@ function AIRegistryView() {
       const pool=hideInactive?allItems.filter(r=>(r.activity?.total||0)>0):allItems;
       return <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(4, 1fr)"}}>
         <StatCard icon={<Monitor size={18}/>} label="AI Systems" value={pool.length} hint={hideInactive?`+${inactiveCount} inactive`:`${activeCount} active`} color="#0052e0" onClick={()=>setHideInactive(!hideInactive)}/>
-        <StatCard icon={<Shield size={18}/>} label="Allowed" value={pool.filter(i=>i.status==='approved').length} color="#22c55e" onClick={()=>setFilterStatus(filterStatus==='approved'?'':'approved')}/>
+        <StatCard icon={<Shield size={18}/>} label="Allowed" value={pool.filter(i=>i.status==='approved').length} hint="Admin-approved" color="#22c55e" onClick={()=>setFilterStatus(filterStatus==='approved'?'':'approved')}/>
         <StatCard icon={<AlertTriangle size={18}/>} label="Unreviewed" value={pool.filter(i=>i.status==='unknown'||i.status==='restricted').length} hint="Need Decision" color="#f59e0b" onClick={()=>setFilterStatus(filterStatus==='unknown'?'':'unknown')}/>
-        <StatCard icon={<AlertTriangle size={18}/>} label="Blocked" value={pool.filter(i=>i.status==='blocked').length} color="#ef4444" onClick={()=>setFilterStatus(filterStatus==='blocked'?'':'blocked')}/>
+        <StatCard icon={<AlertTriangle size={18}/>} label="Blocked" value={pool.filter(i=>i.status==='blocked').length} hint="Admin-blocked" color="#ef4444" onClick={()=>setFilterStatus(filterStatus==='blocked'?'':'blocked')}/>
       </div>;
     })()}
 
@@ -3998,23 +4025,23 @@ function AIRegistryView() {
     <div className="aihub_card" style={{overflow:"auto"}}>
       <DataTable
         columns={[
-          {label:"AI System",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
+          {label:"AI System",hint:"Every AI tool discovered — an agent found on an endpoint, an app calling an LLM API, or a known service from the catalog. Click a row to expand its detail.",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
             <ChevronRight size={13} style={{color:"#9ca3af",flexShrink:0,transition:"transform .15s",transform:selected===r.id?"rotate(90deg)":"none"}}/>
             <div>
               <div className="aihub_text_primary">{r.name}</div>
               <div className="aihub_text_muted">{r.vendor||""}{r.platform?" · "+r.platform:""}</div>
             </div>
           </div>},
-          {label:"Status",render:r=><div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-start"}}>
+          {label:"Status",hint:"Whether an admin has made a decision on this AI system. ‘Unreviewed’ means it was discovered but nobody has approved, restricted or blocked it yet.",render:r=><div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-start"}}>
             <RegistryStatusBadge status={r.status}/>
             {isMonitored(r)&&<DlpMonitorBadge/>}
           </div>},
-          {label:"Risk",render:r=><span style={{whiteSpace:"nowrap"}}><RiskLevelBadge level={r.risk_level} score={r.risk_score}/></span>},
-          {label:"Owner",render:r=><div style={{whiteSpace:"nowrap"}}>
+          {label:"Risk",hint:"A 0–100 score from actual usage: sensitive content sent, enforcement blocks, and overridden blocks push it up. Low 0–30, Medium 31–60, High 61–80, Critical 81–100. ‘Not assessed’ means no usage has been captured yet.",render:r=><span style={{whiteSpace:"nowrap"}}><RiskLevelBadge level={r.risk_level} score={r.risk_score}/></span>},
+          {label:"Owner",hint:"The person who registered this app in your identity provider (e.g. Azure AD). Endpoint-discovered tools like ChatGPT or Claude aren’t registered apps, so they show — here — that’s expected, not missing data.",render:r=><div style={{whiteSpace:"nowrap"}}>
             <div style={{fontSize:14.7}}>{splitConcatenatedName(r.owner)||"—"}</div>
             {r.is_orphaned&&<span style={{fontSize:13,color:"#ef4444",fontWeight:600}}>⚠ Orphaned</span>}
           </div>},
-          {label:"Events",render:r=><div style={{textAlign:"right",whiteSpace:"nowrap"}}
+          {label:"Events",hint:"Total DLP events captured for this tool across every prompt, file upload and enforcement action (block, redaction or override) — a lifetime running count, not a per-session one.",render:r=><div style={{textAlign:"right",whiteSpace:"nowrap"}}
               title="Total captured DLP events for this tool — prompts, file uploads, and enforcement actions (blocks, redactions, overrides) combined.">
             <div style={{fontSize:15.2,fontWeight:600}}>{r.activity?.total?.toLocaleString()||0} events</div>
             <div className="aihub_text_muted">{r.activity?.last_active?relTime(r.activity.last_active):"never"}</div>
@@ -4546,20 +4573,20 @@ function AccessRequestsView() {
     {/* Active Exceptions Tab */}
     {tab==="active"&&(<div className="aihub_card">
       <DataTable columns={[
-        {label:"Tool",render:r=><><div className="aihub_text_primary">{primaryToolLabel(r)}</div>{hostAppLine(r)}
+        {label:"Tool",hint:"The AI tool this exception grants temporary access to.",render:r=><><div className="aihub_text_primary">{primaryToolLabel(r)}</div>{hostAppLine(r)}
           <div style={{marginTop:3}}>{scopeBadge(r)}</div></>},
         // An exception that lifts one agent and one that lifts a whole app are the
         // same row shape, so the difference has to be a column. Host-scoped rows —
         // including every row that predates agent-scoped blocking — carry no
         // agent_name and render this table's em-dash, titled so the dash is not
         // read as "unknown".
-        {label:"Agent",render:r=>agentLabelOf(r)
+        {label:"Agent",hint:"Which agent inside the tool this exception covers. A dash means the whole app was unblocked, not just one agent.",render:r=>agentLabelOf(r)
           ?<div className="aihub_text_primary" style={{fontSize:14.7}}>{agentLabelOf(r)}</div>
           :<span className="aihub_text_muted" title="Whole app — every agent inside it">—</span>},
-        {label:"Employee",render:r=><UserCell row={r}/>},
-        {label:"System",render:r=><Mono>{r.machine_id?.slice(0,12)}</Mono>},
-        {label:"Granted",render:r=>relTime(r.granted_at)},
-        {label:"Expires",render:r=>{
+        {label:"Employee",hint:"Who requested this access exception.",render:r=><UserCell row={r}/>},
+        {label:"System",hint:"The machine this exception applies to.",render:r=><Mono>{r.machine_id?.slice(0,12)}</Mono>},
+        {label:"Granted",hint:"When an admin approved this exception.",render:r=>relTime(r.granted_at)},
+        {label:"Expires",hint:"When this temporary access automatically expires and the tool is blocked again.",render:r=>{
           const d=new Date(r.expires_at);
           const ms=d-Date.now();
           if(ms<=0) return <Badge text="Expired" color="#ef4444"/>;
@@ -4574,14 +4601,14 @@ function AccessRequestsView() {
     {/* History Tab */}
     {tab==="history"&&(<div className="aihub_card">
       <DataTable columns={[
-        {label:"Tool",render:r=><><div className="aihub_text_primary">{primaryToolLabel(r)}</div>{hostAppLine(r)}
+        {label:"Tool",hint:"The AI tool this request asked for access to.",render:r=><><div className="aihub_text_primary">{primaryToolLabel(r)}</div>{hostAppLine(r)}
           <div style={{marginTop:3,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>{surfaceBadge(r)}{scopeBadge(r)}{surfaceDetail(r)}</div></>},
-        {label:"Employee",render:r=><UserCell row={r}/>},
-        {label:"Reason",render:r=><div style={{fontSize:13.4,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.reason||"—"}</div>},
-        {label:"Status",render:r=><Badge text={capitalizeWord(r.status)} color={r.status==="approved"?"#22c55e":r.status==="rejected"?"#ef4444":r.status==="revoked"?"#f59e0b":"#9ca3af"}/>},
-        {label:"Reviewed",render:r=>r.reviewed_at?relTime(r.reviewed_at):"—"},
-        {label:"Expires",render:r=>r.expires_at?new Date(r.expires_at).toLocaleDateString():"—"},
-        {label:"Note",render:r=><div className="aihub_text_muted" style={{fontSize:14.1}}>{r.review_note||"—"}</div>},
+        {label:"Employee",hint:"Who submitted this request.",render:r=><UserCell row={r}/>},
+        {label:"Reason",hint:"The justification the employee gave when requesting access.",render:r=><div style={{fontSize:13.4,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.reason||"—"}</div>},
+        {label:"Status",hint:"How this request was resolved — approved, rejected, or revoked after being granted.",render:r=><Badge text={capitalizeWord(r.status)} color={r.status==="approved"?"#22c55e":r.status==="rejected"?"#ef4444":r.status==="revoked"?"#f59e0b":"#9ca3af"}/>},
+        {label:"Reviewed",hint:"When an admin acted on this request.",render:r=>r.reviewed_at?relTime(r.reviewed_at):"—"},
+        {label:"Expires",hint:"The expiry date set when this request was approved, if any.",render:r=>r.expires_at?new Date(r.expires_at).toLocaleDateString():"—"},
+        {label:"Note",hint:"Any note the admin left when approving, rejecting, or revoking this request.",render:r=><div className="aihub_text_muted" style={{fontSize:14.1}}>{r.review_note||"—"}</div>},
       ]} rows={history} empty="No request history yet."/>
     </div>)}
   </div>);
@@ -4926,15 +4953,15 @@ await tracer.flush();`;
 
       <div className="aihub_card">
         <DataTable columns={[
-          {label:"Project",render:p=>(<><div className="aihub_text_primary">{p.name||"—"}</div>{p.description&&<div className="aihub_text_muted" style={{fontSize:14.1}}>{p.description}</div>}</>)},
-          {label:"Public Key",render:p=><Mono>{p.public_key||"—"}</Mono>},
-          {label:"Language",render:p=>p.language?<Tag text={languageLabel(p.language)}/>:<span className="aihub_text_muted">—</span>},
-          {label:"Status",render:p=><Badge text={capitalizeWord(p.status)||"Unknown"} color={p.status==="active"?"#22c55e":p.status==="revoked"?"#ef4444":"#9ca3af"}/>},
-          {label:"Created",render:p=>relTime(p.created_at)},
-          {label:"Last Report",render:p=>p.last_event_at?relTime(p.last_event_at):<span className="aihub_text_muted">Never</span>},
-          {label:"Traces",render:p=>(Number(p.total_traces)||0).toLocaleString(),right:true},
-          {label:"Observations",render:p=>(Number(p.total_observations)||0).toLocaleString(),right:true},
-          {label:"Cost",render:p=>fmtUsd(p.total_cost_usd),right:true},
+          {label:"Project",hint:"One project per connected app, with its optional description.",render:p=>(<><div className="aihub_text_primary">{p.name||"—"}</div>{p.description&&<div className="aihub_text_muted" style={{fontSize:14.1}}>{p.description}</div>}</>)},
+          {label:"Public Key",hint:"The non-secret identifier this app uses to report its activity — safe to display, unlike the secret key.",render:p=><Mono>{p.public_key||"—"}</Mono>},
+          {label:"Language",hint:"The language the connected app is written in, set when the project was created.",render:p=>p.language?<Tag text={languageLabel(p.language)}/>:<span className="aihub_text_muted">—</span>},
+          {label:"Status",hint:"Revoked projects' keys stop working immediately; traces already recorded are kept.",render:p=><Badge text={capitalizeWord(p.status)||"Unknown"} color={p.status==="active"?"#22c55e":p.status==="revoked"?"#ef4444":"#9ca3af"}/>},
+          {label:"Created",hint:"When this project's credentials were generated.",render:p=>relTime(p.created_at)},
+          {label:"Last Report",hint:"When this project's app last reported a trace.",render:p=>p.last_event_at?relTime(p.last_event_at):<span className="aihub_text_muted">Never</span>},
+          {label:"Traces",hint:"One trace per top-level operation the app reported (e.g. one user request end-to-end).",render:p=>(Number(p.total_traces)||0).toLocaleString(),right:true},
+          {label:"Observations",hint:"One observation per step inside a trace — e.g. one model call. A single trace can contain many observations.",render:p=>(Number(p.total_observations)||0).toLocaleString(),right:true},
+          {label:"Cost",hint:"Total cost across all traces this project has reported, as reported by the app's own SDK.",render:p=>fmtUsd(p.total_cost_usd),right:true},
           {label:"",render:p=>p.status==="active"
             ?<button type="button" onClick={()=>revoke(p)} disabled={revoking===p.id}
                style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 12px",borderRadius:6,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",fontSize:14.1,fontWeight:600,fontFamily:"inherit",cursor:revoking===p.id?"default":"pointer"}}>
@@ -5149,14 +5176,14 @@ function SdkTracesView() {
         onRow={openTrace}
         isExpanded={r=>r.id===openId}
         columns={[
-          {label:"Trace",render:r=>(<><div className="aihub_text_primary">{r.name||"—"}</div><div className="aihub_text_muted" style={{fontSize:14.1}}>{r.environment||"default"}</div></>)},
-          {label:"When",render:r=>relTime(r.timestamp)},
-          {label:"User",render:r=>r.user_id?<Mono>{r.user_id}</Mono>:<span className="aihub_text_muted">—</span>},
-          {label:"Steps",render:r=>`${Number(r.observation_count)||0} (${Number(r.generation_count)||0} gen)`,right:true},
-          {label:"Tokens",render:r=>fmtTokens(r.total_tokens),right:true},
-          {label:"Cost",render:r=><span>{fmtUsd(r.total_cost_usd)}{r.cost_estimated?<span className="aihub_text_muted" style={{fontSize:13}}> (est.)</span>:null}</span>,right:true},
-          {label:"Latency",render:r=>r.latency_ms==null?"—":`${Math.round(r.latency_ms)}ms`,right:true},
-          {label:"Level",render:r=>levelBadge(r.level)},
+          {label:"Trace",hint:"One top-level operation the connected app reported. Click a row to see its steps.",render:r=>(<><div className="aihub_text_primary">{r.name||"—"}</div><div className="aihub_text_muted" style={{fontSize:14.1}}>{r.environment||"default"}</div></>)},
+          {label:"When",hint:"When this trace was reported.",render:r=>relTime(r.timestamp)},
+          {label:"User",hint:"The end-user id the connected app attached to this trace, if it sent one.",render:r=>r.user_id?<Mono>{r.user_id}</Mono>:<span className="aihub_text_muted">—</span>},
+          {label:"Steps",hint:"Total observations reported inside this trace, with how many of those were model-generation calls in parentheses.",render:r=>`${Number(r.observation_count)||0} (${Number(r.generation_count)||0} gen)`,right:true},
+          {label:"Tokens",hint:"Total tokens across every step in this trace.",render:r=>fmtTokens(r.total_tokens),right:true},
+          {label:"Cost",hint:"Total cost across every step in this trace. \"(est.)\" means the app didn't report an exact figure and this is calculated from token counts.",render:r=><span>{fmtUsd(r.total_cost_usd)}{r.cost_estimated?<span className="aihub_text_muted" style={{fontSize:13}}> (est.)</span>:null}</span>,right:true},
+          {label:"Latency",hint:"How long this trace took end to end, as reported by the app.",render:r=>r.latency_ms==null?"—":`${Math.round(r.latency_ms)}ms`,right:true},
+          {label:"Level",hint:"Severity the connected app itself reported for this trace (its own SDK log level) — not a DLP severity judgement.",render:r=>levelBadge(r.level)},
         ]}
         rows={rows}
         renderExpanded={r=>{
@@ -5278,8 +5305,8 @@ const CLAUDE_CODE_SURFACE = "Claude Code (CLI/extension)";
 function ClaudeUsageView() {
   const [data,setData]=useState(null),[e,setE]=useState(null),[sel,setSel]=useState(null);
   // Defaults to 30 days rather than all time. Without a window the totals are
-  // cumulative since tracking began but nothing on screen said so, so a four-figure
-  // measured cost read as this month's spend.
+  // cumulative since tracking began but nothing on screen said so, so a
+  // four-figure token count read as this month's usage.
   const [days,setDays]=useState("30");
   // Always sources=all — the browser extension is counted, not excluded.
   //
@@ -5323,15 +5350,8 @@ function ClaudeUsageView() {
 
     <div className="aihub_stat_grid">
       <StatCard icon={<MessageSquare size={18}/>} label="Claude Prompts" value={(t.prompts||0).toLocaleString()} hint="All Surfaces" color="#8b5cf6"/>
-      {/* "Estimated", not "Measured", for the money.
-          The token counts really are measured — Claude Code reports them. The dollar
-          figure is not: it prices those tokens at pay-as-you-go API rates, and on a
-          Team or Max plan seats are flat-rate and nothing is billed per token. So it
-          is what this usage WOULD have cost on the API, which is a useful number, but
-          calling it measured cost stated it as money spent. */}
       <StatCard icon={<Activity size={18}/>} label="Tokens" value={fmtTokens(t.measured_tokens)} hint={`${(t.measured_requests||0).toLocaleString()} Claude Code requests · includes cached context re-read each turn`} color="#0052e0"/>
-      <StatCard icon={<Wrench size={18}/>} label="Estimated Cost" value={fmtUsd(t.measured_cost_usd)} hint="At API List Rates — Team Seats Are Not Billed per Token" color="#22c55e"/>
-      <StatCard icon={<Clock size={18}/>} label="Est. Tokens" value={fmtTokens(t.estimated_tokens)} hint={`≈${fmtUsd(t.estimated_cost_usd)} · browser & desktop, prompt text only`} color="#f59e0b"/>
+      <StatCard icon={<Clock size={18}/>} label="Est. Tokens" value={fmtTokens(t.estimated_tokens)} hint="Browser & Desktop, Prompt Text Only" color="#f59e0b"/>
       {/* The seat-reclamation number. Idle is the one worth reading, so it leads the
           hint — "3 used Claude, 11 did not" is the decision, and the table below
           lists the eleven by name. Counts everyone TRACKED, not everyone licensed:
@@ -5368,21 +5388,6 @@ function ClaudeUsageView() {
           // server it is talking to happens to send.
           {label:"Code CLI/Ext",render:r=>(r.by_surface?.[CLAUDE_CODE_SURFACE]??r.by_surface?.["Claude Code (CLI)"]??0),right:true},
           {label:"Total Prompts",render:r=><strong>{(r.prompts||0).toLocaleString()}</strong>,right:true},
-          // Both cost fields, summed — not measured_cost_usd alone.
-          //
-          // Reading only the measured figure meant a browser-only person showed "—"
-          // while holding a real estimated_cost_usd: Suditya had 39 prompts and
-          // $0.0153, displayed as a dash. On a licence-reclamation screen a dash
-          // reads as "no usage", which is the opposite of true.
-          //
-          // The two were originally kept apart because one is measured and one is
-          // inferred. That distinction lived in the column label, and the label is
-          // now "Estimated cost" for both — on a Team plan neither is money spent,
-          // both are API-rate estimates — so summing no longer overstates confidence.
-          {label:"Estimated Cost",render:r=>{
-            const total=(r.measured_cost_usd||0)+(r.estimated_cost_usd||0);
-            return total>0?fmtUsd(total):<span className="aihub_text_muted">—</span>;
-          },right:true},
           // Separates "installed and idle" from "we stopped hearing from this
           // machine". Both show 0 prompts, and only the first is evidence for
           // reclaiming a seat — the second means the tracker is not running, so
@@ -5400,7 +5405,6 @@ function ClaudeUsageView() {
           <button key={s.surface} className={`aihub_filter_btn ${sel===s.surface?"active":""}`} onClick={()=>setSel(s.surface)}
                   style={s.prompts?undefined:{opacity:0.62}}>
             {s.surface} · {(s.prompts||0).toLocaleString()} prompts
-            {s.measured_tokens>0 && <> · {fmtUsd(s.measured_cost_usd)}</>}
           </button>
         ))}
       </div>
@@ -5437,7 +5441,7 @@ function ClaudeUsageView() {
 
       {selected && <div className="aihub_card">
         {/* Sub-line removed. The surface buttons above already carry the prompt
-            count, and the table below carries the per-user tokens and cost. */}
+            count, and the table below carries the per-user tokens. */}
         <SectionHeader title={`${selected.surface} — usage by user`}/>
         <DataTable columns={[
           {label:"User",render:r=><><div className="aihub_text_primary">{r.label||splitConcatenatedName(r.user)||r.hostname||"—"}</div>{!r.attributed&&<div className="aihub_text_muted">unattributed</div>}</>},
@@ -5451,10 +5455,9 @@ function ClaudeUsageView() {
           )}]:[]),
           {label:"Prompts",key:"prompts",right:true},
           {label:"Tokens",render:r=>fmtTokens(r.tokens),right:true},
-          {label:"Cost",render:r=>fmtUsd(r.cost_usd),right:true},
-          // Basis and Model columns removed. Line comments, not {/* … */} — inside a
-          // JS array the braced form is an empty object literal, which renders as a
-          // blank extra column.
+          // Cost, Basis and Model columns removed. Line comments, not {/* … */} —
+          // inside a JS array the braced form is an empty object literal, which
+          // renders as a blank extra column.
           //
           // Basis said measured/estimated per row; the note under the table already
           // explains which surfaces are which, and every browser and desktop row was
@@ -6065,15 +6068,15 @@ function PolicyPacksView() {
     <SectionHeader title="Frameworks"/>
     <div className="aihub_card" style={{marginBottom:18}}>
       <DataTable columns={[
-        {label:"Framework",render:p=><><div className="aihub_text_primary">{p.framework}</div><div className="aihub_text_muted">{p.name}</div></>},
-        {label:"Rules",render:p=>p.ruleCount,right:true},
-        {label:"Enforced",render:p=><span style={{color:ENFORCE_META.agent.color,fontWeight:600}}>{p.enforceable}</span>,right:true},
-        {label:"Monitored",render:p=><span style={{color:ENFORCE_META.dlp.color,fontWeight:600}}>{p.monitored}</span>,right:true},
-        {label:"Attestations",render:p=><span style={{color:ENFORCE_META.attestation.color,fontWeight:600}}>{p.attestations}</span>,right:true},
-        {label:"Status",render:p=>p.deployed
+        {label:"Framework",hint:"The compliance framework this pack implements (e.g. GDPR, HIPAA, SOC 2).",render:p=><><div className="aihub_text_primary">{p.framework}</div><div className="aihub_text_muted">{p.name}</div></>},
+        {label:"Rules",hint:"Total rules in this pack, across all three enforcement types (Enforced + Monitored + Attestations).",render:p=>p.ruleCount,right:true},
+        {label:"Enforced",hint:ENFORCE_META.agent.hint,render:p=><span style={{color:ENFORCE_META.agent.color,fontWeight:600}}>{p.enforceable}</span>,right:true},
+        {label:"Monitored",hint:ENFORCE_META.dlp.hint,render:p=><span style={{color:ENFORCE_META.dlp.color,fontWeight:600}}>{p.monitored}</span>,right:true},
+        {label:"Attestations",hint:ENFORCE_META.attestation.hint,render:p=><span style={{color:ENFORCE_META.attestation.color,fontWeight:600}}>{p.attestations}</span>,right:true},
+        {label:"Status",hint:"Deploying a pack creates real policies in the policy engine. 'update available' means a newer version of this pack exists to review and accept.",render:p=>p.deployed
           ? <span style={{color:"#16a34a",fontWeight:600,fontSize:14.1}}>deployed v{p.deployed_version}{p.update_available&&" · update available"}</span>
           : <span className="aihub_text_muted" style={{fontSize:14.1}}>not deployed</span>},
-        {label:"Actions",render:p=><div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
+        {label:"Actions",hint:"Review the pack's rules, simulate what it would have blocked before deploying, or deploy/undeploy it.",render:p=><div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
           <button className="aihub_filter_btn" disabled={busy} onClick={()=>openPack(p.id)}>Review</button>
           <button className="aihub_filter_btn" disabled={busy||p.monitored===0}
                   title={p.monitored===0
@@ -6123,13 +6126,13 @@ function PolicyPacksView() {
           </div>
 
           <DataTable columns={[
-            {label:"Rule",render:r=><>
+            {label:"Rule",hint:"The control's title, with the framework citation it comes from underneath.",render:r=><>
               <div className="aihub_text_primary">{r.title}</div>
               <div className="aihub_text_muted">{r.citation}</div>
             </>},
-            {label:"Type",render:r=><span style={{color:ENFORCE_META[r.enforcement].color,fontWeight:600,fontSize:14.1}}>{ENFORCE_META[r.enforcement].label}</span>},
-            {label:"Severity",render:r=><Badge text={capitalizeWord(r.severity)} color={{critical:"#dc2626",high:"#ea580c",medium:"#d97706",low:"#65a30d"}[r.severity]||"#9ca3af"}/>},
-            {label:"State",render:r=>{
+            {label:"Type",hint:"How this rule is enforced — see the legend above (Enforced/Monitored/Attestation).",render:r=><span style={{color:ENFORCE_META[r.enforcement].color,fontWeight:600,fontSize:14.1}}>{ENFORCE_META[r.enforcement].label}</span>},
+            {label:"Severity",hint:"How serious a violation of this rule is considered.",render:r=><Badge text={capitalizeWord(r.severity)} color={{critical:"#dc2626",high:"#ea580c",medium:"#d97706",low:"#65a30d"}[r.severity]||"#9ca3af"}/>},
+            {label:"State",hint:"Current status: enabled/disabled for Enforced rules, whether matching patterns have actually been observed for Monitored rules, or whether an owner has attested to the control for Attestation rules.",render:r=>{
               if(r.enforcement==="agent") return <span style={{fontSize:14.1,color:r.enabled?"#16a34a":"#9ca3af"}}>{r.enabled?"active":"disabled"}</span>;
               if(r.enforcement==="dlp") return r.coverage_verified
                 ? <span style={{fontSize:14.1,color:"#16a34a"}}>patterns seen</span>
@@ -6402,16 +6405,16 @@ function EuAiActView() {
     {mode==="portfolio" && <div className="aihub_card">
       <SectionHeader title="Assessed AI Systems"/>
       <DataTable columns={[
-        {label:"System",render:r=><><div className="aihub_text_primary">{r.system_name}</div><div className="aihub_text_muted">{splitConcatenatedName(r.assessed_by)}</div></>},
-        {label:"Risk Tier",render:r=><Badge text={capitalizeWord(r.final_tier)} color={TIER_COLOR[r.final_tier]||"#6b7280"}/>},
-        {label:"Basis",render:r=>r.overridden
+        {label:"System",hint:"The AI system that was classified, and which compliance officer assessed it.",render:r=><><div className="aihub_text_primary">{r.system_name}</div><div className="aihub_text_muted">{splitConcatenatedName(r.assessed_by)}</div></>},
+        {label:"Risk Tier",hint:"The EU AI Act's four risk classes: Prohibited, High, Limited, or Minimal. Prohibited systems must not be deployed; High carries the Act's full obligations.",render:r=><Badge text={capitalizeWord(r.final_tier)} color={TIER_COLOR[r.final_tier]||"#6b7280"}/>},
+        {label:"Basis",hint:"Why this tier was assigned — the questionnaire's triggered citations, or the tier the wizard proposed if the officer overrode it.",render:r=>r.overridden
           ? <span style={{fontSize:14.1,color:"#b45309"}}>overridden from {r.proposed_tier}</span>
           : <span style={{fontSize:14.1}}>{(r.proposed_reasons||[]).map(x=>x.citation).join(", ")||"no triggers"}</span>},
-        {label:"FRIA",render:r=>!r.fria_required
+        {label:"FRIA",hint:"Fundamental Rights Impact Assessment — required by Article 27 for certain high-risk systems. Shows sections answered out of the total.",render:r=>!r.fria_required
           ? <span className="aihub_text_muted" style={{fontSize:14.1}}>not required</span>
           : <span style={{fontSize:14.1,color:r.fria_completeness?.complete?"#16a34a":"#b45309"}}>
               {r.fria_completeness?.answered||0}/{r.fria_completeness?.total||10} sections</span>},
-        {label:"Actions",render:r=><div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
+        {label:"Actions",hint:"Complete the required FRIA questionnaire, or delete this system's assessment.",render:r=><div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
           {r.fria_required && <button className="aihub_action_btn warn" onClick={()=>{setFriaFor(r);setFriaAns(r.fria_answers||{});setMode("fria");}}>FRIA</button>}
           <button className="aihub_action_btn danger" onClick={()=>del(r.system_id)}><Trash2 size={12}/></button>
         </div>,right:true},

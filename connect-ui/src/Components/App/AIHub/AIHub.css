@@ -146,6 +146,62 @@
   text-align: left;
 }
 
+/* ── Info hint (the (i) next to a column header / label whose meaning or
+   calculation isn't obvious from the value alone) ────────────────────────── */
+.aihub_info_hint {
+  position: relative;
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.aihub_info_hint_btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  margin-left: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--ah-text-muted);
+  cursor: pointer;
+  border-radius: 50%;
+}
+
+.aihub_info_hint_btn:hover,
+.aihub_info_hint_btn:focus-visible {
+  color: var(--ah-accent);
+  outline: none;
+}
+
+.aihub_info_hint_pop {
+  position: absolute;
+  z-index: 20;
+  top: 100%;
+  left: 0;
+  margin-top: 6px;
+  width: 240px;
+  max-width: 60vw;
+  padding: 8px 10px;
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface-raised);
+  border: 1px solid var(--ah-border);
+  box-shadow: var(--ah-shadow-sm);
+  font-size: 12.6px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: normal;
+  line-height: 1.45;
+  color: var(--ah-text-secondary);
+}
+
+.aihub_info_hint_pop_right {
+  left: auto;
+  right: 0;
+}
+
 /* ── Section headers ───────────────────────────────────────────────────────────── */
 .aihub_section_header {
   display: flex;
