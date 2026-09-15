@@ -12,7 +12,7 @@ import {
   Search, RefreshCw, Activity, FileText, MessageSquare, Eye, Trash2, Plus, X,
   History, ArrowLeft, Bot, User, ShieldAlert, Film, PlayCircle, MonitorPlay,
   Maximize2, Minimize2, Copy, Check, DollarSign, ExternalLink, Download, Boxes,
-  ChevronDown, Info,
+  ChevronDown, Info, Sparkles,
 } from "lucide-react";
 // ── DEMO MODE (remove to revert) ────────────────────────────────────────────
 import { cacheStats, cacheClear, warmCache } from "./aiHubDemoCache";
@@ -34,6 +34,21 @@ function relTime(d) {
   if (ms < 3600000) return `${Math.floor(ms/60000)}m ago`;
   if (ms < 86400000) return `${Math.floor(ms/3600000)}h ago`;
   return `${Math.floor(ms/86400000)}d ago`;
+}
+// Date + time, not just a relative "9d ago" — a reviewer looking into a specific
+// upload needs the actual moment it happened, not how long ago that was.
+function absTime(d) {
+  if (!d) return null;
+  const dt = new Date(d);
+  return `${dt.toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"})}, ${dt.toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"})}`;
+}
+function DateTimeCell({ d }) {
+  if (!d) return <span className="aihub_text_muted">—</span>;
+  const dt = new Date(d);
+  return (<>
+    <div className="aihub_text_primary" style={{whiteSpace:"nowrap"}}>{dt.toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"})}</div>
+    <div className="aihub_text_muted" style={{whiteSpace:"nowrap"}}>{dt.toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"})}</div>
+  </>);
 }
 // Test/low-volume traces routinely cost a fraction of a cent — toFixed(2) alone
 // rounds every one of those down to "$0.00", which reads as "no cost" even
@@ -324,6 +339,31 @@ function StatCard({ icon, label, value, hint, color="#0052e0", onClick }) {
 function SectionHeader({ title, hint, action }) {
   return (<div className="aihub_section_header"><div><h3 className="aihub_section_title">{title}</h3>{hint&&<p className="aihub_section_subtitle">{hint}</p>}</div>{action}</div>);
 }
+// A dismissible callout — icon, headline, description, an optional primary
+// action, and a "don't show this again" link. Dismissal is remembered per
+// banner id via localStorage, so closing it stays closed across visits.
+function TipBanner({ id, title, children, actionLabel, onAction }) {
+  const storageKey = `aihub_tip_dismissed_${id}`;
+  const [dismissed, setDismissed] = useState(() => {
+    try { return localStorage.getItem(storageKey) === "1"; } catch (e) { void e; return false; }
+  });
+  if (dismissed) return null;
+  const dismiss = () => {
+    try { localStorage.setItem(storageKey, "1"); } catch (e) { void e; }
+    setDismissed(true);
+  };
+  return (<div className="aihub_tip_banner">
+    <Sparkles size={16} className="aihub_tip_banner_icon"/>
+    <div className="aihub_tip_banner_body">
+      <div className="aihub_tip_banner_title">{title}</div>
+      {children && <div className="aihub_tip_banner_desc">{children}</div>}
+      <div className="aihub_tip_banner_actions">
+        {actionLabel && <button type="button" className="aihub_tip_banner_btn" onClick={onAction}>{actionLabel}</button>}
+        <button type="button" className="aihub_tip_banner_dismiss" onClick={dismiss}>Don’t show this again</button>
+      </div>
+    </div>
+  </div>);
+}
 function Badge({ text, color="#6b7280" }) {
   return <span className="aihub_badge" style={{background:color+"12",color,borderColor:color+"25"}}>{text}</span>;
 }
@@ -347,7 +387,7 @@ function InfoHint({ text, align="left" }) {
     return ()=>document.removeEventListener("mousedown",onDoc);
   },[open]);
   return (<span ref={ref} className="aihub_info_hint">
-    <button type="button" aria-label="What does this mean?" title={text}
+    <button type="button" aria-label="What does this mean?"
       className="aihub_info_hint_btn" onClick={e=>{e.stopPropagation();setOpen(o=>!o);}}>
       <Info size={12}/>
     </button>
@@ -407,11 +447,11 @@ function DataTable({ columns, rows, empty, onRow, renderExpanded, isExpanded, pa
   }
 
   return (<div>
-    <div className="aihub_table_wrap"><table className="aihub_table"><thead><tr>{columns.map((c,i)=><th key={i} style={c.right?{textAlign:"right"}:undefined}>{c.label}{c.hint&&<InfoHint text={c.hint} align={c.right?"right":"left"}/>}</th>)}</tr></thead><tbody>{(!visibleRows.length)?<tr><td colSpan={columns.length} className="aihub_table_empty">{empty||"No data"}</td></tr>:visibleRows.map((r,i)=>{
+    <div className="aihub_table_wrap"><table className="aihub_table"><thead><tr>{columns.map((c,i)=><th key={i} style={{...(c.right?{textAlign:"right"}:null),...(c.width?{width:c.width}:null)}}>{c.label}{c.hint&&<InfoHint text={c.hint} align={c.right?"right":"left"}/>}</th>)}</tr></thead><tbody>{(!visibleRows.length)?<tr><td colSpan={columns.length} className="aihub_table_empty">{empty||"No data"}</td></tr>:visibleRows.map((r,i)=>{
     const open=isExpanded?.(r);
     return (<Fragment key={rowKey(r,i)}>
       <tr onClick={()=>onRow?.(r)} style={{cursor:onRow?"pointer":"default",background:open?"rgba(0,82,224,0.04)":undefined}}>
-        {columns.map((c,j)=><td key={j} style={c.right?{textAlign:"right"}:undefined}>{c.render?c.render(r):r[c.key]??"—"}</td>)}
+        {columns.map((c,j)=><td key={j} style={{...(c.right?{textAlign:"right"}:null),...(c.width?{width:c.width}:null)}}>{c.render?c.render(r):r[c.key]??"—"}</td>)}
       </tr>
       {open&&renderExpanded&&<tr className="aihub_expanded_row"><td colSpan={columns.length} style={{padding:0,background:"#f5f6f8"}}>{renderExpanded(r)}</td></tr>}
     </Fragment>);
@@ -434,9 +474,81 @@ function DataTable({ columns, rows, empty, onRow, renderExpanded, isExpanded, pa
     </div>}
   </div>);
 }
+// `d.color`, if present, overrides the default gradient fill with a solid
+// color per row — used for severity/status breakdowns where the color IS
+// the meaning (critical vs low), not just decoration. Omit it (as the
+// existing Model Routing usage does) and every bar keeps the shared gradient.
 function BarChart({ data, lk, vk, max=8 }) {
   const items=(data||[]).slice(0,max); const mx=Math.max(1,...items.map(d=>d[vk]||0));
-  return (<div className="aihub_bar_chart">{items.map((d,i)=>(<div key={i} className="aihub_bar_row"><div className="aihub_bar_label">{(d[lk]||"").replace(/_/g," ")}</div><div className="aihub_bar_track"><div className="aihub_bar_fill" style={{width:`${(d[vk]/mx)*100}%`}}/></div><div className="aihub_bar_value">{d[vk]?.toLocaleString()}</div></div>))}</div>);
+  return (<div className="aihub_bar_chart">{items.map((d,i)=>(<div key={i} className="aihub_bar_row"><div className="aihub_bar_label">{(d[lk]||"").replace(/_/g," ")}</div><div className="aihub_bar_track"><div className="aihub_bar_fill" style={{width:`${(d[vk]/mx)*100}%`,...(d.color?{background:d.color}:null)}}/></div><div className="aihub_bar_value">{d[vk]?.toLocaleString()}</div></div>))}</div>);
+}
+
+/**
+ * Single-series line chart. Auto-scales to the data's own range by default
+ * (same convention BarChart uses) — pass `min`/`max` explicitly only when the
+ * value has a real fixed scale of its own (e.g. a 0-100 score), where
+ * auto-scaling would zoom a small swing into looking like the full range
+ * moved. Points are spaced evenly by index, not by elapsed time, so sparse or
+ * irregularly-gapped history (e.g. a metric that only updates when someone
+ * takes an action) reads as an honest trend line rather than fabricating
+ * density between long gaps. `dotColor(point)` is optional — pass it to
+ * color each point by its own band (e.g. risk level) instead of one flat
+ * line color.
+ */
+function LineChart({ points, min, max, color="#0052e0", dotColor, height=180, unit, breakdown }) {
+  const w=600, h=height, padL=8, padR=8, padT=10, padB=24;
+  const n=points.length;
+  const lo=min??0;
+  const hi=max??Math.max(1,...points.map(p=>p.value))*1.1;
+  const x=i=>n<=1?(padL+w-padR)/2:padL+(i/(n-1))*(w-padL-padR);
+  const y=v=>{const t=Math.max(0,Math.min(1,(v-lo)/(hi-lo))); return padT+(1-t)*(h-padT-padB);};
+  const path=points.map((p,i)=>`${i===0?"M":"L"}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(" ");
+  // Thin the x-axis labels to ~6 evenly spaced ticks so dense series (e.g. 30
+  // daily points) don't render one label per point and overlap into mush.
+  const labelEvery=Math.max(1,Math.ceil(n/6));
+  const svgRef=useRef(null);
+  const [hover,setHover]=useState(null); // index of the nearest point, or null
+  const onMove=e=>{
+    if(!svgRef.current||n===0) return;
+    const rect=svgRef.current.getBoundingClientRect();
+    const relX=(e.clientX-rect.left)/rect.width*w;
+    let idx=0,best=Infinity;
+    points.forEach((p,i)=>{const d=Math.abs(x(i)-relX); if(d<best){best=d;idx=i;}});
+    setHover(idx);
+  };
+  const hp=hover!=null?points[hover]:null;
+  return (<div style={{position:"relative"}}>
+    <svg ref={svgRef} width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img"
+      aria-label={points.map(p=>`${p.label}: ${p.value}`).join(", ")}
+      onMouseMove={onMove} onMouseLeave={()=>setHover(null)}>
+      {[0,0.25,0.5,0.75,1].map(t=><line key={t} x1={padL} x2={w-padR} y1={padT+t*(h-padT-padB)} y2={padT+t*(h-padT-padB)} stroke="var(--ah-border-light)"/>)}
+      {n>0 && <path d={path} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round"/>}
+      {hover!=null && <line x1={x(hover)} x2={x(hover)} y1={padT} y2={h-padB} stroke="var(--ah-text-faint)" strokeWidth="1" strokeDasharray="3 3"/>}
+      {points.map((p,i)=>(<g key={i}>
+        <circle cx={x(i)} cy={y(p.value)} r={hover===i?4:2.5} fill={dotColor?dotColor(p):color}/>
+        {(i%labelEvery===0||i===n-1)&&<text x={x(i)} y={h-6} textAnchor="middle" fontSize="10.5" fill="var(--ah-text-faint)">{p.label}</text>}
+      </g>))}
+    </svg>
+    {hp&&<div style={{
+        position:"absolute",left:`${(x(hover)/w)*100}%`,top:`${(y(hp.value)/h)*100}%`,
+        // Centering on the point (-50%) clips off the container's edge for the
+        // first/last few points — anchor to the point's own side there instead,
+        // so the box grows inward (right-anchored near the left edge, and vice
+        // versa) rather than spilling out of the chart.
+        transform:`translate(${hover<n*0.15?"0%":hover>n*0.85?"-100%":"-50%"},-125%)`,background:"var(--ah-surface)",color:"var(--ah-text)",
+        border:"1px solid var(--ah-border)",borderRadius:8,padding:"6px 10px",
+        fontSize:13.5,fontWeight:700,boxShadow:"var(--ah-shadow-sm)",pointerEvents:"none",
+        whiteSpace:"nowrap",zIndex:2,
+      }}>
+      {hp.value.toLocaleString()}{unit?` ${unit}`:""}
+      <div style={{fontSize:11.5,fontWeight:500,color:"var(--ah-text-muted)",marginTop:2}}>{hp.label}</div>
+      {breakdown&&<div style={{marginTop:4,paddingTop:4,borderTop:"1px solid var(--ah-border-light)",display:"flex",flexDirection:"column",gap:1}}>
+        {breakdown(hp).map(b=><div key={b.label} style={{fontSize:11.5,fontWeight:500,color:"var(--ah-text-muted)",display:"flex",justifyContent:"space-between",gap:10}}>
+          <span>{b.label}</span><span style={{color:"var(--ah-text)",fontWeight:700}}>{b.value.toLocaleString()}</span>
+        </div>)}
+      </div>}
+    </div>}
+  </div>);
 }
 
 // View button — opens the captured prompt/file content for one DLP event.
@@ -497,7 +609,7 @@ function ContentDrawer({ eventId, meta, onClose }) {
             <div className="aihub_drawer_title">{title}</div>
             {/* The person leads the line: the first question about a flagged
                 prompt is whose it was, and the drawer is where an admin lands. */}
-            <div className="aihub_drawer_sub">{[meta?.user||meta?.hostname,service,meta?.event_kind,meta?.occurred_at&&relTime(meta.occurred_at)].filter(Boolean).join(" · ")}</div>
+            <div className="aihub_drawer_sub">{[meta?.user||meta?.hostname,service,meta?.event_kind,meta?.occurred_at&&absTime(meta.occurred_at)].filter(Boolean).join(" · ")}</div>
             <div style={{display:"flex",gap:6,marginTop:8,flexWrap:"wrap"}}>
               {meta?.source && <Badge text={(meta.source||"").replace(/_/g," ")}/>}
               {sev && <SeverityBadge sev={sev}/>}
@@ -570,6 +682,7 @@ const OV_ROUTE={
   access:"/AIHub/AccessRequests",
   cost:"/AIHub/AgentGovernance?tab=cost",
   policies:"/AIHub/PoliciesRisk?tab=policies",
+  risk:"/AIHub/PoliciesRisk?tab=risk",
 };
 // Same hex values as SanctionBadge / SeverityBadge / RiskBadge above — one status
 // colour per meaning across the whole screen.
@@ -592,7 +705,7 @@ function ClickCard({ title, hint, onClick, children }) {
 // Hand-rolled SVG donut, matching the hand-rolled BarChart above rather than pulling
 // a chart library into this file. The ring is dash-segments of a single circle, so the
 // centre is a plain cutout — no number or text inside it by design.
-function Donut({ segments, label, size=190, thickness=38 }) {
+function Donut({ segments, label, size=140, thickness=30 }) {
   const total=segments.reduce((s,x)=>s+x.value,0);
   const r=(size-thickness)/2, c=2*Math.PI*r;
   const [tip,setTip]=useState(null); // {label,value,pct,color,x,y}
@@ -651,7 +764,7 @@ function DonutCard({ title, hint, segments, onClick, unavailable }) {
       <div><span className="aihub_shimmer_block" style={{width:64,height:28,borderRadius:6}}/></div>
       <div className="aihub_chart_total_label">Total</div>
       <div className="aihub_donut_wrap">
-        <div style={{width:190,height:190,borderRadius:"50%",background:"#f3f4f6"}}/>
+        <div style={{width:140,height:140,borderRadius:"50%",background:"#f3f4f6"}}/>
         <ul className="aihub_legend">
           {segments.map(s=><li key={s.key}><span className="aihub_legend_dot" style={{background:"#e2e5ea"}}/><span className="aihub_shimmer_block" style={{width:70,height:14,borderRadius:4}}/></li>)}
         </ul>
@@ -676,7 +789,7 @@ function ToggleDonutCard({ views, onClick, unavailable }) {
   const total=v.segments.reduce((s,x)=>s+x.value,0);
   return (<ClickCard title={v.title} hint={v.hint} onClick={onClick}>
     {/* Toggle pills */}
-    <div style={{display:"flex",gap:4,marginBottom:14}}>
+    <div style={{display:"flex",gap:4,marginBottom:10}}>
       {views.map((vw,i)=>(
         <button key={vw.key} onClick={e=>{e.stopPropagation();setActive(i);}}
           style={{padding:"4px 12px",borderRadius:20,border:"1px solid "+(i===active?"#0052e0":"#e2e5ea"),
@@ -690,7 +803,7 @@ function ToggleDonutCard({ views, onClick, unavailable }) {
       <div><span className="aihub_shimmer_block" style={{width:64,height:28,borderRadius:6}}/></div>
       <div className="aihub_chart_total_label">Total</div>
       <div className="aihub_donut_wrap">
-        <div style={{width:190,height:190,borderRadius:"50%",background:"#f3f4f6"}}/>
+        <div style={{width:140,height:140,borderRadius:"50%",background:"#f3f4f6"}}/>
         <ul className="aihub_legend">
           {v.segments.map(s=><li key={s.key}><span className="aihub_legend_dot" style={{background:"#e2e5ea"}}/><span className="aihub_shimmer_block" style={{width:70,height:14,borderRadius:4}}/></li>)}
         </ul>
@@ -774,20 +887,25 @@ function SpendCard({ onClick }) {
 function OverviewView() {
   const nav=useNavigate();
   const [d,setD]=useState(null),[e,setE]=useState(null);
-  const [reg,setReg]=useState(null),[dlp,setDlp]=useState(null),[mcp,setMcp]=useState(null);
+  const [reg,setReg]=useState(null),[mcp,setMcp]=useState(null);
   const [proj,setProj]=useState(null),[reqs,setReqs]=useState(null),[hiEv,setHiEv]=useState(null);
   const [toolsCount,setToolsCount]=useState(null);
   const [toolsStatus,setToolsStatus]=useState({}); // {approved:N, restricted:N, blocked:N, unknown:N}
   const [toolsRisk,setToolsRisk]=useState({}); // {critical:N, high:N, medium:N, low:N, not_assessed:N}
-  const [dlpCount,setDlpCount]=useState(null);
+  const [riskSummary,setRiskSummary]=useState(null);
+  const [dlpTrend,setDlpTrend]=useState(null);
   const [warn,setWarn]=useState([]);
+  const [asOf,setAsOf]=useState(null);
   useEffect(()=>{
     const soft=(p,label,setter,fallback)=>p.then(setter).catch(()=>{setter(fallback);setWarn(w=>w.includes(label)?w:[...w,label]);});
-    apiFetch("/overview").then(setD).catch(x=>setE(x.message));
+    apiFetch("/overview").then(x=>{setD(x);setAsOf(new Date());}).catch(x=>setE(x.message));
     soft(apiFetch("/registry/summary"),"AI systems registry",setReg,false);
-    soft(apiFetch("/dlp/summary"),"prompt & DLP activity",setDlp,false);
     soft(apiFetch("/findings?type=mcp_server&latestOnly=true&limit=500"),"MCP servers",setMcp,false);
     soft(apiFetch("/findings?type=agent_project&latestOnly=true&limit=500"),"agent projects",setProj,false);
+    // A genuinely new axis for this tile — everything else in the KPI strip
+    // is about WHAT tools exist and how risky they are; this is about WHO.
+    // Same endpoint Risk Scores' own summary cards read.
+    soft(apiFetch("/risk-scores/summary"),"employee risk scores",setRiskSummary,false);
     // adminJson, not apiFetch: /access-requests is behind requireAdminAuth, so
     // apiFetch's credential-less GET now 401s and this tile would read "0
     // pending" forever. soft() still handles the no-token build — the count
@@ -795,12 +913,11 @@ function OverviewView() {
     // token the number is real again.
     soft(adminJson("/access-requests"),"access requests",setReqs,false);
     soft(apiFetch("/dlp?severity=critical,high&limit=1"),"recent detections",setHiEv,false);
-    // Exact same count DLPView shows: fetch actual events + files, count high/critical
-    Promise.all([apiFetch("/dlp?limit=5000").catch(()=>[]),apiFetch("/dlp/files?limit=5000").catch(()=>[])]).then(([ev,f])=>{
-      const prompts=(ev||[]).filter(e=>e.event_kind!=="file_upload");
-      const files=f||[];
-      setDlpCount(prompts.filter(e=>isHiCrit(e.secret_class||e.highest_severity)).length+files.filter(e=>isHiCrit(e.severity||e.highest_severity)).length);
-    }).catch(()=>{});
+    // Real per-day counts, zero-filled server-side — replaces the old lifetime
+    // total (which needed pulling up to 10,000 raw events/files client-side
+    // just to produce one number) with the same severity definition, bucketed
+    // by day instead of summed.
+    soft(apiFetch("/dlp/trend?days=30"),"DLP event trend",setDlpTrend,false);
     // Exact same merge the Inventory page does: registry + deduped platform catalog
     Promise.all([apiFetch("/registry"),apiFetch("/ai-platforms").catch(()=>[])]).then(([regList,plats])=>{
       const seen=new Set();
@@ -840,7 +957,6 @@ function OverviewView() {
   if(!d) return <Loading/>;
 
   const byStatus=toolsStatus, byRisk=toolsRisk;
-  const sev={}; ((dlp&&dlp.bySeverity)||[]).forEach(s=>{sev[s.severity]=(sev[s.severity]||0)+(s.events||0)});
   // Same bucketing AgentsView uses: payload.primaryCategory, defaulting to ai_app.
   const cats={ai_agent:0,ai_coding_agent:0,ai_app:0};
   (Array.isArray(proj)?proj:[]).forEach(f=>{const c=f.payload?.primaryCategory||"ai_app"; if(cats[c]!=null) cats[c]+=1;});
@@ -849,6 +965,17 @@ function OverviewView() {
   const pending=(Array.isArray(reqs)?reqs:[]).filter(r=>r.status==="pending").length;
   const ev=Array.isArray(hiEv)?hiEv[0]:null;
   const noAutonomy=mcp===false&&proj===false;   // both endpoints failed — 0 would be a lie
+  // Same 0-30/31-60/61+ banding Risk Scores' own "Average Score" tile uses —
+  // not a second copy of the thresholds, just read here too.
+  const avgRisk=riskSummary?.average_score;
+  const riskBand=avgRisk==null?null:avgRisk<=30?"low":avgRisk<=60?"medium":"high";
+  const riskHiCrit=riskSummary?(riskSummary.distribution?.high||0)+(riskSummary.distribution?.critical||0):0;
+  const dlpPoints=(dlpTrend||[]).map(r=>({
+    label:new Date(r.date+"T00:00:00").toLocaleDateString(undefined,{month:"short",day:"numeric"}),
+    value:r.events,
+    prompts:r.prompts||0,
+    file_uploads:r.file_uploads||0,
+  }));
 
   const sanctionSegs=[
     {key:"approved",label:"Allowed",value:byStatus.approved||0,color:SANCTION_TONE.approved},
@@ -891,7 +1018,8 @@ function OverviewView() {
   ];
 
   return (<div>
-    <SectionHeader title="Overview" hint="Every AI tool, agent and activity across your organization — click any card to see the full detail."/>
+    <SectionHeader title="Overview" hint="Every AI tool, agent and activity across your organization — click any card to see the full detail."
+      action={asOf&&<span className="aihub_text_muted" style={{fontSize:13}}>Data as of {relTime(asOf)}</span>}/>
 
     {warn.length>0 && <div className="aihub_ov_warn"><AlertTriangle size={14}/> Could not load {warn.join(", ")}. Those panels may be incomplete.</div>}
 
@@ -901,7 +1029,9 @@ function OverviewView() {
       <StatCard icon={<Wrench size={18}/>} label="AI Tools & Systems"
                 value={toolsCount!=null?toolsCount:"…"}
                 hint="In the AI Registry" color="#8b5cf6" onClick={()=>nav("/AIHub/Inventory?tab=systems&showAll=1")}/>
-      <StatCard icon={<ShieldAlert size={18}/>} label="DLP Events" value={dlpCount!=null?dlpCount:"…"} hint="High/Critical Flagged" color="#ef4444" onClick={()=>nav(OV_ROUTE.dlp)}/>
+      <StatCard icon={<User size={18}/>} label="Risk Score" value={avgRisk!=null?avgRisk:"…"}
+                hint={riskBand==null?"Not Computed Yet":riskHiCrit>0?`${riskHiCrit} High/Critical Employee${riskHiCrit===1?"":"s"}`:"Average Score · Low Risk"}
+                color={riskBand?RISK_TONE[riskBand]:"#9ca3af"} onClick={()=>nav(OV_ROUTE.risk)}/>
       <StatCard icon={<Bot size={18}/>} label="Autonomy" value={noAutonomy?"—":autonomy} hint={noAutonomy?"Counts Unavailable":"Agents & MCP Servers"} color="#f59e0b" onClick={()=>nav(OV_ROUTE.agents)}/>
     </div>
 
@@ -919,6 +1049,15 @@ function OverviewView() {
         <ChevronRight size={14}/>
       </button>
     </div>
+
+    {/* DLP Events Over Time — real, zero-filled daily counts from
+        /dlp/trend, same high/critical severity definition the old lifetime
+        tile used, just bucketed by day instead of summed to one number. */}
+    {dlpPoints.length>0&&
+      <ClickCard title="DLP Events Over Time" hint="High/critical prompts & uploads flagged per day, last 30 days." onClick={()=>nav(OV_ROUTE.dlp)}>
+        <LineChart points={dlpPoints} color="#0052e0" unit="high/critical events"
+          breakdown={p=>[{label:"Prompts",value:p.prompts},{label:"File uploads",value:p.file_uploads}]}/>
+      </ClickCard>}
 
     {/* 3. Six equal insight cards */}
     <div className="aihub_ov_grid">
@@ -948,6 +1087,7 @@ function OverviewView() {
         </div>
       </div>
     </div>
+
   </div>);
 }
 
@@ -1210,7 +1350,14 @@ function DLPView() {
   const [openRows,setOpenRows]=useState(()=>new Set()); // grouped rows expanded to show their members
   const toggleRow=id=>setOpenRows(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;});
   useEffect(()=>{
-    Promise.all([apiFetch("/dlp/summary").catch(()=>null),apiFetch("/dlp?limit=5000").catch(()=>[]),apiFetch("/dlp/files?limit=5000").catch(()=>[])]).then(([s,ev,f])=>{setS(s);setEv(ev);setF(f)}).catch(x=>setE(x.message));
+    // This whole page is high/critical-only (see the hint below) — fetch that
+    // slice server-side instead of pulling the most recent N raw events of any
+    // severity and filtering client-side. That used to cap at whatever high/
+    // critical rows happened to fall inside the last 2000 raw events, which on
+    // a busy instance is dominated by low-severity noise and silently drops
+    // real high/critical events (and everything derived from them below) that
+    // are older than that window.
+    Promise.all([apiFetch("/dlp/summary").catch(()=>null),apiFetch("/dlp?severity=high,critical&limit=2000").catch(()=>[]),apiFetch("/dlp/files?limit=5000").catch(()=>[])]).then(([s,ev,f])=>{setS(s);setEv(ev);setF(f)}).catch(x=>setE(x.message));
   },[]);
   if(e) return <Err msg={e}/>; if(!events) return <Loading/>;
 
@@ -1219,7 +1366,12 @@ function DLPView() {
   // describes exactly the population the selector names, with no card counting a
   // channel the table underneath it excludes.
   const inKind=ev=>!kind||eventSurfaceKind(ev)===kind;
-  const allPrompts=(events||[]).filter(ev=>ev.event_kind!=="file_upload").filter(inKind);
+  // Prompt content only — dlp_events also holds policy-engine actions
+  // (enforcement_block/redact/override/decision), which are deliberately
+  // excluded here so every count and table on this page is just prompts and
+  // file uploads, and "High / Critical" always equals the sum of those two.
+  const PROMPT_KINDS=new Set(["prompt_paste","prompt_submit","prompt_typed"]);
+  const allPrompts=(events||[]).filter(ev=>PROMPT_KINDS.has(ev.event_kind)).filter(inKind);
   const allFiles=(files||[]).filter(inKind);
   const highCrit=allPrompts.filter(ev=>isHiCrit(ev.secret_class||ev.highest_severity)).length + allFiles.filter(f=>isHiCrit(f.severity||f.highest_severity)).length;
   const serviceCount=(summary?.byService||[]).length;
@@ -1287,11 +1439,11 @@ function DLPView() {
         isExpanded={r=>openRows.has(r.id)}
         renderExpanded={r=><GroupDetail row={r} onView={setPreview}/>}
         columns={[
-        {label:"Time",hint:"When this prompt was captured. Expand the row to see every event folded into this one user action.",render:r=><><div>{relTime(r.occurred_at)}</div><GroupToggle row={r} open={openRows.has(r.id)} onToggle={()=>toggleRow(r.id)}/></>},
+        {label:"Date & Time",hint:"When this prompt was captured. Expand the row to see every event folded into this one user action.",render:r=><><DateTimeCell d={r.occurred_at}/><GroupToggle row={r} open={openRows.has(r.id)} onToggle={()=>toggleRow(r.id)}/></>},
         {label:"User",hint:"The employee this event is attributed to, resolved from the machine/session that captured it.",render:r=><UserCell row={r}/>},
         {label:"Service",hint:"Which AI service this prompt or upload was sent to.",render:r=><ServiceCell row={r}/>},
         {label:"Source",hint:"Which capture mechanism recorded this — the browser extension, the desktop hook, or the OS-level monitor.",render:r=><Badge text={(r.source||"").replace(/_/g," ")} color={sourceTone[r.source]||"#9ca3af"}/>},
-        {label:"Pattern",hint:"The DLP rule that matched this content — e.g. SSN, API key, credit card number — from the pattern-scan engine, not a description of the whole prompt.",render:r=><Mono>{groupPattern(r)}</Mono>},
+        {label:"Data Type",hint:"The kind of sensitive data detected in this content — e.g. SSN, API key, credit card number — from the pattern-scan engine, not a description of the whole prompt.",render:r=><Mono>{groupPattern(r)}</Mono>},
         {label:"Severity",hint:"The highest DLP severity found among the events folded into this row (low, medium, high, critical).",render:r=><SeverityBadge sev={worstSev(groupMembers(r))}/>},
         {label:"",render:r=>{const c=contentMember(r); return <ViewBtn has={!!c} onClick={()=>setPreview(c)}/>;},right:true},
       ]} rows={promptGroups} empty="No prompt events matching this filter." paginate={25}/>
@@ -1300,13 +1452,13 @@ function DLPView() {
     {section==="files"&&<div className="aihub_card">
       <SectionHeader title="File Uploads" hint="High & Critical Severity Only"/>
       <DataTable onRow={r=>{ if(r.has_content) setPreview(r); }} columns={[
-        {label:"Time",hint:"When this file upload was captured.",render:r=>relTime(r.occurred_at)},
+        {label:"Date & Time",hint:"When this file upload was captured.",render:r=><DateTimeCell d={r.occurred_at}/>},
         {label:"User",hint:"The employee this event is attributed to, resolved from the machine/session that captured it.",render:r=><UserCell row={r}/>},
         {label:"Service",hint:"Which AI service this prompt or upload was sent to.",render:r=><ServiceCell row={r}/>},
         {label:"Filename",hint:"The uploaded file's name, as captured at upload time.",render:r=><Mono>{r.metadata?.filename||"—"}</Mono>},
         {label:"File Type",hint:"The kind of file detected — document, image, spreadsheet, etc.",render:r=><Tag text={r.file_class||"—"}/>},
         {label:"Severity",hint:"The DLP severity assigned to this upload's content (low, medium, high, critical).",render:r=><SeverityBadge sev={r.severity||r.highest_severity}/>},
-        {label:"",render:r=><ViewBtn has={r.has_content} onClick={()=>setPreview(r)} label="Open"/>,right:true},
+        {label:"",render:r=><ViewBtn has={r.has_content} onClick={()=>setPreview(r)}/>,right:true},
       ]} rows={fileRows} empty="No file upload events matching this filter." paginate={25}/>
     </div>}
 
@@ -3968,7 +4120,7 @@ function AIRegistryView() {
 
   return (<div>
     <SectionHeader
-      title="AI & Agent Registry"
+      title="AI Applications"
       hint="Every AI system across your organization — discovered agents, endpoint-scanned tools, and the known-services catalog."
       action={<button className="aihub_action_btn" onClick={()=>setShowAdd(v=>!v)}>
         {showAdd ? <><X size={13}/> Cancel</> : <><Plus size={13}/> Add AI platform</>}
@@ -3976,6 +4128,12 @@ function AIRegistryView() {
     />
 
     {showAdd && <AddPlatformForm onDone={()=>{setShowAdd(false);loadAll();}}/>}
+
+    <TipBanner id="ai_systems_intro" title="Know what's really running before you decide what to block."
+      actionLabel="Review unreviewed systems" onAction={()=>setFilterStatus('unknown')}>
+      Every row here started as either a discovered agent, an endpoint-scanned tool, or a known-services
+      catalog entry — click Unreviewed below to see what still needs an Allow/Restrict/Block decision.
+    </TipBanner>
 
     {/* Summary Cards — count from visible pool (respects hide-inactive toggle) */}
     {(()=>{
@@ -4025,24 +4183,31 @@ function AIRegistryView() {
     <div className="aihub_card" style={{overflow:"auto"}}>
       <DataTable
         columns={[
-          {label:"AI System",hint:"Every AI tool discovered — an agent found on an endpoint, an app calling an LLM API, or a known service from the catalog. Click a row to expand its detail.",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
+          {label:filterType==="tool"?"AI Tools":filterType==="agent"?"AI Agents":"AI Tool / Agent",width:"38%",
+            hint:filterType==="tool"?"Every AI tool discovered — an app calling an LLM API, an endpoint-scanned service, or a known service from the catalog. Click a row to expand its detail."
+              :filterType==="agent"?"Every AI agent discovered — an autonomous agent, IDE coding assistant, or MCP server found on an endpoint. Click a row to expand its detail."
+              :"Every AI tool and agent discovered across your organization — apps calling an LLM API, endpoint-scanned services, autonomous agents and MCP servers, and the known-services catalog. Click a row to expand its detail.",
+            render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
             <ChevronRight size={13} style={{color:"#9ca3af",flexShrink:0,transition:"transform .15s",transform:selected===r.id?"rotate(90deg)":"none"}}/>
             <div>
               <div className="aihub_text_primary">{r.name}</div>
               <div className="aihub_text_muted">{r.vendor||""}{r.platform?" · "+r.platform:""}</div>
             </div>
           </div>},
-          {label:"Status",hint:"Whether an admin has made a decision on this AI system. ‘Unreviewed’ means it was discovered but nobody has approved, restricted or blocked it yet.",render:r=><div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-start"}}>
+          {label:"Status",width:"14%",hint:"Whether an admin has made a decision on this AI system. ‘Unreviewed’ means it was discovered but nobody has approved, restricted or blocked it yet.",render:r=><div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-start"}}>
             <RegistryStatusBadge status={r.status}/>
             {isMonitored(r)&&<DlpMonitorBadge/>}
           </div>},
-          {label:"Risk",hint:"A 0–100 score from actual usage: sensitive content sent, enforcement blocks, and overridden blocks push it up. Low 0–30, Medium 31–60, High 61–80, Critical 81–100. ‘Not assessed’ means no usage has been captured yet.",render:r=><span style={{whiteSpace:"nowrap"}}><RiskLevelBadge level={r.risk_level} score={r.risk_score}/></span>},
-          {label:"Owner",hint:"The person who registered this app in your identity provider (e.g. Azure AD). Endpoint-discovered tools like ChatGPT or Claude aren’t registered apps, so they show — here — that’s expected, not missing data.",render:r=><div style={{whiteSpace:"nowrap"}}>
+          {label:"Risk",width:"14%",hint:"A 0–100 score from actual usage: sensitive content sent, enforcement blocks, and overridden blocks push it up. Low 0–30, Medium 31–60, High 61–80, Critical 81–100. ‘Not assessed’ means no usage has been captured yet.",render:r=><span style={{whiteSpace:"nowrap"}}><RiskLevelBadge level={r.risk_level} score={r.risk_score}/></span>},
+          // Owner is an identity-provider registration field (Azure AD, etc.) —
+          // only agent-framework/MCP entries in this registry ever have one.
+          // Endpoint-discovered tools (ChatGPT, Claude...) never do, so the
+          // column is dead weight in the "AI Tools" filtered view.
+          ...(filterType!=="tool"?[{label:"Owner",width:"14%",hint:"The person who registered this app in your identity provider (e.g. Azure AD). Endpoint-discovered tools like ChatGPT or Claude aren’t registered apps, so they show — here — that’s expected, not missing data.",render:r=><div style={{whiteSpace:"nowrap"}}>
             <div style={{fontSize:14.7}}>{splitConcatenatedName(r.owner)||"—"}</div>
             {r.is_orphaned&&<span style={{fontSize:13,color:"#ef4444",fontWeight:600}}>⚠ Orphaned</span>}
-          </div>},
-          {label:"Events",hint:"Total DLP events captured for this tool across every prompt, file upload and enforcement action (block, redaction or override) — a lifetime running count, not a per-session one.",render:r=><div style={{textAlign:"right",whiteSpace:"nowrap"}}
-              title="Total captured DLP events for this tool — prompts, file uploads, and enforcement actions (blocks, redactions, overrides) combined.">
+          </div>}]:[]),
+          {label:"Events",width:"20%",hint:"Total DLP events captured for this tool across every prompt, file upload and enforcement action (block, redaction or override) — a lifetime running count, not a per-session one.",render:r=><div style={{textAlign:"right",whiteSpace:"nowrap"}}>
             <div style={{fontSize:15.2,fontWeight:600}}>{r.activity?.total?.toLocaleString()||0} events</div>
             <div className="aihub_text_muted">{r.activity?.last_active?relTime(r.activity.last_active):"never"}</div>
           </div>,right:true},
@@ -7541,7 +7706,7 @@ const TAB_GROUPS_RAW = {
   Inventory: {
     title: "Inventory",
     tabs: [
-      { slug: "systems", label: "AI Systems",   component: AIRegistryView, feat: "ai_systems" },
+      { slug: "systems", label: "AI Applications",   component: AIRegistryView, feat: "ai_systems" },
       { slug: "agents",  label: "Agents & MCP", component: AgentsView,     feat: "agents_mcp" },
     ],
   },

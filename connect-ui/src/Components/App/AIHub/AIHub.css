@@ -226,6 +226,66 @@
   margin: 3px 0 0;
 }
 
+/* ── Tip banner (dismissible callout) — our existing blue accent, tinted,
+   not a new color introduced for this ───────────────────────────────────── */
+.aihub_tip_banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  margin-bottom: 20px;
+  background: var(--ah-accent-soft);
+  border: 1px solid var(--ah-accent-glow);
+  border-radius: var(--ah-radius-md);
+}
+.aihub_tip_banner_icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--ah-accent);
+}
+.aihub_tip_banner_body { flex: 1; min-width: 0; }
+.aihub_tip_banner_title {
+  font-size: 15.2px;
+  font-weight: 700;
+  color: var(--ah-accent-hover);
+}
+.aihub_tip_banner_desc {
+  font-size: 14.1px;
+  color: var(--ah-text-secondary);
+  margin-top: 3px;
+  line-height: 1.5;
+}
+.aihub_tip_banner_actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 10px;
+}
+.aihub_tip_banner_btn {
+  padding: 6px 16px;
+  border: none;
+  border-radius: var(--ah-radius-pill);
+  background: var(--ah-accent);
+  color: #fff;
+  font-size: 14.1px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+.aihub_tip_banner_btn:hover { background: var(--ah-accent-hover); }
+.aihub_tip_banner_dismiss {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 14.1px;
+  font-weight: 500;
+  color: var(--ah-text-muted);
+  cursor: pointer;
+  font-family: inherit;
+  text-decoration: underline;
+}
+.aihub_tip_banner_dismiss:hover { color: var(--ah-text); }
+
 /* ── Cards ──────────────────────────────────────────────────────────────────────── */
 .aihub_card {
   background: var(--ah-surface);
@@ -299,6 +359,11 @@
   padding: 10px 14px;
   color: var(--ah-text-secondary);
   border-bottom: 1px solid var(--ah-border-light);
+  /* The app shell (.cf_main_content_place_main) sets text-align: justify —
+     harmless for prose, but it stretches a wrapped two-line cell (e.g. a date
+     that wraps after the day number) with a huge gap to fill the line width.
+     Table cells are never justified prose, so opt back out here. */
+  text-align: left;
 }
 
 .aihub_table tbody tr:last-child td {
@@ -1046,7 +1111,7 @@
 }
 .aihub_ov_grid > * {
   min-width: 0;
-  min-height: 240px;
+  min-height: 190px;
 }
 .aihub_ov_main, .aihub_ov_side { min-width: 0; }
 @media (max-width: 1100px) {
@@ -1148,7 +1213,7 @@
   color: var(--ah-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  margin-bottom: 12px;
+  margin-bottom: 8px;
   font-weight: 600;
 }
 .aihub_donut_wrap {
@@ -1156,7 +1221,7 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 16px;
+  gap: 10px;
   flex: 1;
 }
 .aihub_donut {
@@ -1171,7 +1236,7 @@
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 6px;
   min-width: 0;
   width: 100%;
 }

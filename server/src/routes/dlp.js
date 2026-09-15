@@ -457,6 +457,48 @@ export function mountDlp(app, db) {
     });
   }));
 
+  // High/critical events per day, zero-filled — bucketed by day instead of
+  // summed to a lifetime total. occurred_at is stored as an ISO string, not a
+  // BSON date, hence $substrBytes rather than $dateToString.
+  // Scoped to prompt + file-upload content events only — dlp_events also holds
+  // policy-engine actions (enforcement_block/redact/override/decision) recorded
+  // as their own rows, which this trend deliberately excludes so `events`
+  // always equals `prompts + file_uploads`, nothing hidden in the total.
+  // Severity lives in secret_class for EVERY event_kind here, file_upload
+  // included — there is no separate `severity` field on these documents (verified
+  // against real data: branching on event_kind and reading `severity` for
+  // file_upload silently zeroed out every file-upload day, since that field
+  // doesn't exist on the stored rows). /dlp's own severity filter and
+  // /dlp/files' output mapping (`severity: r.secret_class`) already agree on
+  // secret_class as canonical — match that instead of inventing a second field.
+  app.get('/api/v1/dlp/trend', a(async (req, res) => {
+    const days = Math.min(180, Math.max(1, Number(req.query.days) || 30));
+    const rows = await db.collection('dlp_events').aggregate([
+      { $match: { event_kind: { $in: ['prompt_paste', 'prompt_submit', 'prompt_typed', 'file_upload'] } } },
+      { $addFields: {
+          _sev: { $ifNull: ['$secret_class', '$highest_severity'] },
+          _day: { $substrBytes: ['$occurred_at', 0, 10] },
+        } },
+      { $match: { _sev: { $in: ['critical', 'high'] } } },
+      { $group: {
+          _id: '$_day',
+          file_uploads: { $sum: { $cond: [{ $eq: ['$event_kind', 'file_upload'] }, 1, 0] } },
+          prompts: { $sum: { $cond: [{ $in: ['$event_kind', ['prompt_paste', 'prompt_submit', 'prompt_typed']] }, 1, 0] } },
+        } },
+    ]).toArray();
+    const byDay = new Map(rows.map((r) => [r._id, r]));
+    const end = new Date(); end.setUTCHours(0, 0, 0, 0);
+    const out = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(end); d.setUTCDate(d.getUTCDate() - i);
+      const key = d.toISOString().slice(0, 10);
+      const r = byDay.get(key);
+      const prompts = r?.prompts || 0, file_uploads = r?.file_uploads || 0;
+      out.push({ date: key, events: prompts + file_uploads, prompts, file_uploads });
+    }
+    res.json(out);
+  }));
+
   // File uploads — filtered view of dlp_events, enriched with registry platform info
   app.get('/api/v1/dlp/files', a(async (req, res) => {
     const [rows, platforms] = await Promise.all([
@@ -491,6 +533,7 @@ export function mountDlp(app, db) {
         machine_id: r.machine_id,
         user: r.user,
         hostname: r.hostname,
+        employee_name: r.employee_name,
         occurred_at: r.occurred_at,
         ai_service: r.ai_service,
         file_class: r.pattern_matched,
@@ -511,7 +554,15 @@ export function mountDlp(app, db) {
 //   'system'    — our own governance bookkeeping (blocks, redactions, decisions)
 // Anything unrecognized is 'system' rather than a guess: a replay view showing
 // an unknown event as a user turn would be worse than showing it as metadata.
-const USER_KINDS = new Set(['prompt_submit', 'prompt_paste', 'prompt_typed', 'file_upload']);
+// 'egress_body' is the body of an email captured at its send, from the desktop
+// agent's egress path. It is a USER turn for the same reason prompt_typed is:
+// the human put that content in front of a system that carried it out of the
+// company. Nothing else about it needs a server change — the enforcement/metadata
+// allowlist below already carries its matches, length_bucket and severity, and
+// content_text goes to dlp_content exactly like every other captured body (and,
+// like every other one, is NOT in lib/cef.js's SIEM allowlist, so the message
+// body never reaches syslog).
+const USER_KINDS = new Set(['prompt_submit', 'prompt_paste', 'prompt_typed', 'file_upload', 'egress_body']);
 const ASSISTANT_KINDS = new Set(['ai_response']);
 
 function roleForKind(kind) {

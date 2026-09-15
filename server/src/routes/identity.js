@@ -135,25 +135,41 @@ export async function resolveProfiles(db, allMachines) {
     const hostname = agent.hostname.toLowerCase().trim();
     const user = (agent.user || '').trim();
     const resolveKey = `agent:${hostname}:${user.toLowerCase()}`;
-    const displayName = humanizeName(user);
+    // Some enrolment paths land a full address in `user` instead of an OS
+    // username — humanizeName only splits on '.', '_', '-', so it mangled
+    // "pravallika.punumalli@cloudfuze.com" into "Pravallika Punumalli@Cloudfuze
+    // Com" rather than treating it as the email it is.
+    const userIsEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(user);
+    const displayName = userIsEmail ? nameFromEmail(user) : humanizeName(user);
 
     const existing = await profiles.findOne({ resolve_key: resolveKey });
 
     if (existing) {
       const merged = [...new Set([...(existing.machine_ids || []), agent.id])];
-      await profiles.updateOne({ id: existing.id }, { $set: {
+      const updates = {
         machine_ids: merged,
         updated_at: new Date(),
         last_seen: new Date(),
         platform: agent.platform,
-      }});
+      };
+      // Heal a profile minted before this function knew `user` could be an
+      // email — same unspaced-name repair as the extension-linking branch.
+      // looksBroken also catches a name that still leaks '@' (humanizeName
+      // ran on the raw address before this fix existed, e.g. "Pravallika
+      // Punumalli@Cloudfuze Com" — it has a space, but the wrong one).
+      if (userIsEmail) {
+        if (!existing.email) updates.email = user.toLowerCase();
+        const looksBroken = existing.display_name && (!/\s/.test(existing.display_name) || existing.display_name.includes('@'));
+        if (looksBroken) updates.display_name = displayName;
+      }
+      await profiles.updateOne({ id: existing.id }, { $set: updates });
       updated++;
     } else {
       await profiles.insertOne({
         id: crypto.randomUUID(),
         resolve_key: resolveKey,
         display_name: displayName,
-        email: null,
+        email: userIsEmail ? user.toLowerCase() : null,
         os_user: user,
         hostname: agent.hostname,
         platform: agent.platform,
@@ -228,6 +244,19 @@ export async function resolveProfiles(db, allMachines) {
       const sources = [...new Set([...(matched.sources || []), 'extension'])];
       const updates = { machine_ids: merged, sources, updated_at: new Date() };
       if (email && !matched.email) updates.email = email;
+      // Heal a display_name that was minted from a raw OS username before any
+      // email was on file. humanizeName can only split on a camelCase boundary
+      // ("SudityaNimmala" → "Suditya Nimmala"); a username like
+      // "pravallikapunumalli" has none, so it stayed one unspaced word forever
+      // even after a real "firstname.lastname@…" email arrived here. Only
+      // overwrite a name that still looks unsplit — never a name that already
+      // has a space, which may be admin-edited.
+      const bestEmail = email || matched.email;
+      const looksBroken = matched.display_name && (!/\s/.test(matched.display_name) || matched.display_name.includes('@'));
+      if (bestEmail && looksBroken) {
+        const better = nameFromEmail(bestEmail);
+        if (better) updates.display_name = better;
+      }
       await profiles.updateOne({ id: matched.id }, { $set: updates });
       updated++;
       continue;
@@ -243,7 +272,7 @@ export async function resolveProfiles(db, allMachines) {
       // only then the anonymous placeholder. The placeholder is a last resort, not
       // a default — it should appear only when nothing at all was reported.
       const displayName = email
-        ? email.split('@')[0].replace(/[._-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+        ? nameFromEmail(email)
         : (extUser ? humanizeName(extUser)
           : 'Browser User (' + ext.id.slice(0, 8) + ')');
       await profiles.insertOne({
@@ -268,6 +297,15 @@ export async function resolveProfiles(db, allMachines) {
   }
 
   return { created, updated, skipped, total_profiles: created + updated };
+}
+
+// "pravallika.punumalli@cloudfuze.com" → "Pravallika Punumalli". The reliable
+// name source: unlike an OS username, a corporate email's local part is
+// delimited (dot/underscore/hyphen), so this never has to guess a boundary.
+function nameFromEmail(email) {
+  const local = String(email || '').split('@')[0];
+  if (!local) return null;
+  return local.replace(/[._-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase()).trim() || null;
 }
 
 // "SudityaNimmala" → "Suditya Nimmala"
