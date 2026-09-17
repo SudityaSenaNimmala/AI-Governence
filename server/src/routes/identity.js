@@ -104,6 +104,22 @@ export function mountIdentity(app, db) {
     );
     res.json(profile || null);
   }));
+
+  // ── Delete a duplicate/orphaned profile ──
+  // Two enrollment paths can mint separate profiles for the same real person
+  // (e.g. one agent reports an OS username, another reports a full email in
+  // that same field) — link each machine onto the profile that should keep
+  // it, then delete whichever one is left empty. Refuses to delete a profile
+  // that still owns a machine, so this can't silently drop someone's history.
+  app.delete('/api/v1/identity/profiles/:id', a(async (req, res) => {
+    const profile = await profiles().findOne({ id: req.params.id }, { projection: { _id: 0 } });
+    if (!profile) return res.status(404).json({ error: 'profile not found' });
+    if ((profile.machine_ids || []).length > 0) {
+      return res.status(409).json({ error: 'profile still has linked machines — unlink or relink them first' });
+    }
+    await profiles().deleteOne({ id: req.params.id });
+    res.json({ ok: true });
+  }));
 }
 
 // ── Resolution Engine ─────────────────────────────────────────────────
