@@ -627,59 +627,69 @@ code {
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
 
-/* ═══ Block dialog (Tokenize & Send) ═══ */
+/* ═══ Block dialog — matches browser extension's clean light theme ═══ */
 .block-dialog {
-  width: 420px; max-width: 90vw;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 24px;
+  width: min(440px, 92vw);
+  background: #ffffff;
+  border-radius: 14px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.12), 0 2px 12px rgba(0,0,0,0.06);
+  padding: 28px 28px 22px;
   text-align: center;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  color: #0f172a;
+  animation: cfai-pop-in 0.18s cubic-bezier(.18,.89,.32,1.28);
 }
-.block-dialog-icon { font-size: 32px; margin-bottom: 8px; }
-.block-dialog h3 { margin: 0 0 8px; font-size: 16px; color: var(--text); }
-.block-dialog p { margin: 0 0 14px; font-size: 12.5px; color: var(--text-muted); line-height: 1.5; }
+@keyframes cfai-pop-in { from { transform: scale(0.92); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.block-dialog-icon {
+  width: 56px; height: 56px; margin: 0 auto 14px;
+  display: flex; align-items: center; justify-content: center;
+  background: #fee2e2; color: #b91c1c; border-radius: 50%;
+  font-size: 28px; line-height: 1;
+}
+.block-dialog h3 { margin: 0 0 6px; font-size: 18px; font-weight: 600; color: #0f172a; }
+.block-dialog p { margin: 0 0 14px; font-size: 13.5px; color: #475569; line-height: 1.5; }
 .block-dialog .pattern-chip {
-  display: inline-block; padding: 3px 10px; border-radius: 999px;
-  background: var(--danger-bg); color: var(--danger); font-size: 11.5px; font-weight: 600;
-  margin-bottom: 14px;
+  display: inline-block; padding: 4px 10px; border-radius: 999px;
+  background: rgba(239,68,68,0.1); color: #dc2626; font-size: 12px; font-weight: 600;
+  margin-bottom: 16px;
 }
 .block-dialog .preview-box {
-  background: var(--success-bg); border: 1px solid var(--success);
-  border-radius: var(--radius-sm); padding: 10px 12px; margin-bottom: 14px;
+  background: #f0fdf4; border: 1px solid #bbf7d0;
+  border-radius: 8px; padding: 10px 12px; margin-bottom: 14px;
   text-align: left;
 }
 .block-dialog .preview-label {
   font-size: 10.5px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase;
-  color: var(--success); margin-bottom: 4px;
+  color: #059669; margin-bottom: 4px;
 }
-.block-dialog .preview-text { font-size: 12.5px; color: var(--text); font-family: monospace; word-break: break-word; }
-.block-dialog .actions { display: flex; gap: 8px; justify-content: center; margin-top: 4px; }
+.block-dialog .preview-text { font-size: 12.5px; color: #1e293b; font-family: monospace; word-break: break-word; }
+.block-dialog .actions { display: flex; gap: 10px; justify-content: center; margin-top: 4px; flex-wrap: wrap; }
 .block-dialog button {
-  padding: 9px 18px; border-radius: var(--radius-sm); font-size: 12.5px; font-weight: 600;
-  cursor: pointer; border: 1px solid var(--border);
+  padding: 9px 22px; border-radius: 8px; font-size: 13.5px; font-weight: 600;
+  cursor: pointer; border: 0; transition: background 0.12s, transform 0.05s;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.10);
 }
-.block-dialog .btn-tokenize { background: var(--success); color: #0f1117; border: none; }
-.block-dialog .btn-tokenize:hover { filter: brightness(1.08); }
+.block-dialog button:active { transform: translateY(1px); }
+.block-dialog .btn-tokenize { background: #059669; color: #fff; }
+.block-dialog .btn-tokenize:hover { background: #047857; }
 .block-dialog .btn-tokenize:disabled { opacity: 0.6; cursor: default; }
-.block-dialog .btn-dismiss { background: transparent; color: var(--text-muted); }
-.block-dialog .btn-dismiss:hover { background: var(--bg-hover); }
-.block-dialog .footnote { margin-top: 12px; font-size: 10.5px; color: var(--text-dim); }
+.block-dialog .btn-dismiss { background: #4f46e5; color: #fff; box-shadow: none; }
+.block-dialog .btn-dismiss:hover { background: #4338ca; }
+.block-dialog .btn-request { background: #0044cc; color: #fff; }
+.block-dialog .btn-request:hover { background: #0033aa; }
+.block-dialog .footnote { margin-top: 14px; font-size: 11.5px; color: #94a3b8; }
 
-/* ═══ Request Access dialog (desktop platform block) ═══ */
-/* Reuses the .block-dialog shell; only the reason field is new. */
-.block-dialog .ar-note { color: var(--warning); }
+/* ═══ Request Access dialog ═══ */
+.block-dialog .ar-note { color: #d97706; }
 .block-dialog .ar-field { text-align: left; margin-bottom: 14px; }
 .block-dialog .ar-label {
   display: block; font-size: 10.5px; font-weight: 700; letter-spacing: 0.4px;
-  text-transform: uppercase; color: var(--text-dim); margin-bottom: 6px;
+  text-transform: uppercase; color: #64748b; margin-bottom: 6px;
 }
 .block-dialog .ar-textarea {
   width: 100%; height: 92px; resize: none;
-  background: var(--bg); color: var(--text);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: #f8fafc; color: #0f172a;
+  border: 1px solid #e2e8f0; border-radius: 8px;
   padding: 8px 10px; font-size: 12.5px; font-family: inherit; line-height: 1.45;
 }
-.block-dialog .ar-textarea:focus { outline: none; border-color: var(--primary); }
-.block-dialog .ar-counter { margin-top: 4px; font-size: 10.5px; color: var(--text-dim); text-align: right; }
+.block-dialog .ar-textarea:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.15); }
+.block-dialog .ar-counter { margin-top: 4px; font-size: 10.5px; color: #94a3b8; text-align: right; }

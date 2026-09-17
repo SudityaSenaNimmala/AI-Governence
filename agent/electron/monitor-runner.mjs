@@ -48,6 +48,12 @@ if (!enforcerEnabled) {
   log.info('Keystroke enforcer disabled in settings — passive DLP watchers only.');
 }
 
+// Start identity beacon so the browser extension can detect this machine
+import { startIdentityBeacon } from '../src/identity-beacon.js';
+import { getMachineId } from '../src/util/machine.js';
+const machineId = creds.machineId || await getMachineId();
+startIdentityBeacon({ machineId, log: log.child('beacon') });
+
 const monitor = new OsMonitor({
   serverUrl: creds.serverUrl,
   token: creds.token,
@@ -62,6 +68,15 @@ const monitor = new OsMonitor({
 });
 monitor.start();
 log.info('Monitor running. Ctrl+C to stop.');
+
+// Auto-updater — checks for new agent source code every hour, applies silently.
+// Only updates the agent source (resources/agent/), not the Electron shell.
+import { startAutoUpdater } from '../src/auto-updater.js';
+const updater = startAutoUpdater({
+  serverUrl: creds.serverUrl,
+  token: creds.token,
+  log: log.child('updater'),
+});
 
 // Control channel from Electron main (ultimately the block dialog's Tokenize
 // button). The only accepted message is {cmd:"tokenize", block_id} — relayed

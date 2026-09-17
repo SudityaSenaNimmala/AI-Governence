@@ -1,8 +1,7 @@
-// Tokenize & Send popup — a dedicated, non-activating window (see
-// showBlockDialogWindow() in main.js for why it's separate from the main app
-// window). Only ever receives {app, patterns, block_id, rewritable, preview,
-// why_not, reason, filename} — no prompt content beyond the already-masked
-// preview, and for an attachment block, only the FILENAME, never its content.
+// Tokenize & Send popup — shown when the enforcer blocks a send/paste
+// containing sensitive data. Uses pointerdown events (not click) because
+// the window is focusable:false and click events can be unreliable on
+// WS_EX_NOACTIVATE windows.
 
 function escapeHtml(str) {
   const div = document.createElement('div');
@@ -12,6 +11,11 @@ function escapeHtml(str) {
 
 const $root = document.getElementById('dialog-root');
 let currentBlockId = null;
+let autoCloseTimer = null;
+
+function dismiss() {
+  window.api.dismissDialog();
+}
 
 function render(ev) {
   currentBlockId = ev.block_id || null;
@@ -34,11 +38,6 @@ function render(ev) {
        </div>`
     : '';
 
-  // Honest framing, matching the design decision behind this feature: this
-  // stops the MESSAGE from sending. It does NOT promise the file's bytes
-  // never reached the app's vendor — several chat apps upload an attached
-  // file to their backend the instant it's attached, well before Send. Never
-  // word this as "upload blocked" or "file never left your machine."
   const hint = ev.rewritable
     ? 'Tokenize &amp; Send replaces each detected value with a fixed label before sending. The original values are never sent, and cannot be recovered from the label.'
     : isAttachment
@@ -58,30 +57,39 @@ function render(ev) {
     <div class="actions">${actionsHtml}</div>
     <div class="footnote">This event was reported to the security team.</div>`;
 
+  // Use pointerdown — fires earlier than click and works reliably on
+  // non-focusable (WS_EX_NOACTIVATE) windows where click can be swallowed.
   const tokenizeBtn = document.getElementById('btn-tokenize');
   if (tokenizeBtn) {
-    tokenizeBtn.addEventListener('click', async () => {
+    tokenizeBtn.addEventListener('pointerdown', async (e) => {
+      e.preventDefault();
       tokenizeBtn.disabled = true;
       tokenizeBtn.textContent = 'Masking…';
+      // Wait 300ms for the mouse button to fully release — the enforcer's
+      // mouse hook aborts any in-progress rewrite on a real LBUTTONUP, and
+      // the UP from this click arrives after the rewrite starts.
+      await new Promise(r => setTimeout(r, 300));
       const result = await window.api.tokenizeBlock(ev.block_id);
       if (!result?.sent) {
         tokenizeBtn.disabled = false;
         tokenizeBtn.textContent = 'Tokenize & Send';
       }
-      // On real success the main process closes this window itself (it's
-      // the one that knows the rewrite actually landed) — see 'rewrite-result'
-      // below for the failure/timeout paths, which stay open.
     });
   }
-  const dismissBtn = document.getElementById('btn-dismiss');
-  if (dismissBtn) dismissBtn.addEventListener('click', () => window.close());
+  document.getElementById('btn-dismiss')?.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    dismiss();
+  });
+
+  if (autoCloseTimer) clearTimeout(autoCloseTimer);
+  autoCloseTimer = setTimeout(dismiss, 16000);
 }
 
 window.api.onBlockDialog((ev) => render(ev));
 
 window.api.onRewriteResult((ev) => {
-  if (ev.block_id !== currentBlockId) return;  // stale/unrelated result
-  if (ev.result === 'ok') return;  // main process closes the window on success
+  if (ev.block_id !== currentBlockId) return;
+  if (ev.result === 'ok') { dismiss(); return; }
   const tokenizeBtn = document.getElementById('btn-tokenize');
   if (tokenizeBtn) {
     tokenizeBtn.disabled = false;
@@ -93,8 +101,3 @@ window.api.onRewriteResult((ev) => {
     footnote.style.color = 'var(--danger)';
   }
 });
-
-// A 15s-old dialog is answering an offer that has already expired on the
-// enforcer side (see REWRITE_TTL) — closing it here avoids a stale "Tokenize
-// & Send" that would just silently no-op if clicked.
-setTimeout(() => window.close(), 16000);

@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // Tokenize & Send dialog
   tokenizeBlock: (blockId) => ipcRenderer.invoke('tokenize-block', blockId),
+  dismissDialog: () => ipcRenderer.send('dismiss-dialog'),
 
   // Request Access dialog (shown when an AI app is blocked outright).
   // The reason text goes straight into the POST body in the main process — it is

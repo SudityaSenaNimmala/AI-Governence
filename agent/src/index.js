@@ -189,6 +189,26 @@ async function main() {
       log: log.child('blocked-agents-sync'),
     });
 
+    // Stdin control channel — accepts JSON commands (e.g. tokenize from WPF dialog)
+    if (process.stdin.readable) {
+      let stdinBuf = '';
+      process.stdin.setEncoding('utf8');
+      process.stdin.on('data', (chunk) => {
+        stdinBuf += chunk;
+        let idx;
+        while ((idx = stdinBuf.indexOf('\n')) >= 0) {
+          const line = stdinBuf.slice(0, idx).trim();
+          stdinBuf = stdinBuf.slice(idx + 1);
+          if (!line) continue;
+          try {
+            const msg = JSON.parse(line);
+            if (msg.cmd === 'tokenize' && msg.block_id) monitor.tokenize(msg.block_id);
+          } catch {}
+        }
+      });
+      process.stdin.on('error', () => {});
+    }
+
     // Auto-updater — checks for updates every hour, applies silently
     const { startAutoUpdater } = await import('./auto-updater.js');
     const updater = startAutoUpdater({

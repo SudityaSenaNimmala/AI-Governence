@@ -151,6 +151,41 @@ async function applyUpdate({ serverUrl, token, serverVersion, log }) {
   if (existsSync(pkgFrom)) {
     copyFileSync(pkgFrom, join(agentRoot, 'package.json'));
   }
+  // Copy electron renderer/preload files — these live outside app.asar in
+  // resources/electron/ so they can be auto-updated without rebuilding.
+  const elFrom = join(sourceDir, 'electron');
+  if (existsSync(elFrom)) {
+    // In Electron packaged context, agentRoot is resources/agent/, so
+    // resources/electron/ is one level up then into electron/.
+    const elTo = join(agentRoot, '..', 'electron');
+    const rendererFrom = join(elFrom, 'renderer');
+    const preloadFrom = join(elFrom, 'preload.js');
+    if (existsSync(rendererFrom)) {
+      mkdirSync(join(elTo, 'renderer'), { recursive: true });
+      cpSync(rendererFrom, join(elTo, 'renderer'), { recursive: true, force: true });
+      log?.info?.('auto-updater: renderer files updated');
+    }
+    if (existsSync(preloadFrom)) {
+      mkdirSync(elTo, { recursive: true });
+      copyFileSync(preloadFrom, join(elTo, 'preload.js'));
+      log?.info?.('auto-updater: preload updated');
+    }
+    // monitor-runner.mjs
+    const mrFrom = join(elFrom, 'monitor-runner.mjs');
+    if (existsSync(mrFrom)) {
+      const mrTo = join(agentRoot, 'electron', 'monitor-runner.mjs');
+      mkdirSync(dirname(mrTo), { recursive: true });
+      copyFileSync(mrFrom, mrTo);
+      log?.info?.('auto-updater: monitor-runner.mjs updated');
+    }
+  }
+
+  // Save version IMMEDIATELY after files are copied — before npm install or
+  // restart, which can fail in the Electron packaged context (no npm, no VBS).
+  // Without this, a failed restart causes the next hourly check to re-download
+  // and re-extract the same update forever.
+  saveCurrentVersion(serverVersion);
+  log?.info?.(`auto-updater: version saved (${serverVersion})`);
 
   // Run npm install silently (in case dependencies changed)
   try {
@@ -186,8 +221,7 @@ async function applyUpdate({ serverUrl, token, serverVersion, log }) {
     log?.info?.('auto-updater: regenerated start-agent.vbs with conhost --headless');
   }
 
-  // Save new version
-  saveCurrentVersion(serverVersion);
+  // (version already saved above, right after file copy)
 
   // Restart via the (newly regenerated) VBS
   const node = process.execPath;
@@ -202,12 +236,10 @@ async function applyUpdate({ serverUrl, token, serverVersion, log }) {
     } catch {}
   }
 
-  log?.info?.('auto-updater: restarting agent silently');
-  if (process.platform === 'win32') {
-    const vbsPath = join(agentRoot, 'start-agent.vbs');
-    spawn('wscript.exe', [vbsPath], { detached: true, stdio: 'ignore' }).unref();
-  } else {
-    spawn(node, args, { cwd: agentRoot, detached: true, stdio: 'ignore' }).unref();
-  }
-  setTimeout(() => process.exit(0), 2000);
+  // In the Electron context, main.js catches exit code 0 and restarts the
+  // monitor-runner automatically. Spawning a bare index.js via VBS creates
+  // orphan processes that run alongside the Electron-managed monitor. Just
+  // exit cleanly and let the parent handle the restart.
+  log?.info?.('auto-updater: exiting for restart (parent will respawn)');
+  setTimeout(() => process.exit(0), 1000);
 }

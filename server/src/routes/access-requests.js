@@ -569,28 +569,55 @@ export function mountAccessRequests(app, db) {
       agent_name: request.agent_name,
     });
 
-    await exceptions().updateOne(
-      // keyMatch, not a bare agent_key: a host-wide approval must still land on
-      // the exception row an earlier build created for that host, which has no
-      // agent_key field at all.
-      { machine_id: request.machine_id, tool_host: request.tool_host, agent_key: keyMatch(agent_key) },
-      { $set: {
-        machine_id: request.machine_id,
-        tool_host: request.tool_host,
-        tool_name: request.tool_name,
-        request_id: request.id,
-        scope,
-        agent_id: request.agent_id ?? null,
-        agent_name: request.agent_name ?? null,
-        agent_key,
-        granted_at: new Date(),
-        expires_at: expiryDate,
-        active: true,
-      }},
-      { upsert: true },
+    // Create access exception for all ACTIVE machine_ids on the same physical
+    // machine. A user might have a desktop agent (machineId from OS) and a
+    // browser extension (its own machineId). Approving access on one surface
+    // must unlock all surfaces on the same device.
+    //
+    // Only consider machines seen in the last 30 days — stale browser extension
+    // installs (reinstalls, old profiles) pile up in the machines collection and
+    // would otherwise create dozens of exceptions per approval.
+    const requestingMachine = await db.collection('machines').findOne(
+      { id: request.machine_id },
+      { projection: { hostname: 1 } }
     );
+    let allMachineIds = [request.machine_id];
+    if (requestingMachine?.hostname) {
+      const baseHostname = requestingMachine.hostname.replace(/-browser-extension$/, '');
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+      const siblings = await db.collection('machines').find({
+        hostname: { $regex: new RegExp('^' + baseHostname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+        last_seen: { $gt: thirtyDaysAgo },
+      }, { projection: { id: 1 } }).toArray();
+      const siblingIds = siblings.map(m => m.id).filter(Boolean);
+      if (siblingIds.length > 0) allMachineIds = [...new Set([...allMachineIds, ...siblingIds])];
+    }
 
-    res.json({ ok: true, expires_at: expiryDate, scope });
+    // Create exception for each machine_id (desktop + all browser extensions)
+    for (const mid of allMachineIds) {
+      await exceptions().updateOne(
+        // keyMatch, not a bare agent_key: a host-wide approval must still land on
+        // the exception row an earlier build created for that host, which has no
+        // agent_key field at all.
+        { machine_id: mid, tool_host: request.tool_host, agent_key: keyMatch(agent_key) },
+        { $set: {
+          machine_id: mid,
+          tool_host: request.tool_host,
+          tool_name: request.tool_name,
+          request_id: request.id,
+          scope,
+          agent_id: request.agent_id ?? null,
+          agent_name: request.agent_name ?? null,
+          agent_key,
+          granted_at: new Date(),
+          expires_at: expiryDate,
+          active: true,
+        }},
+        { upsert: true },
+      );
+    }
+
+    res.json({ ok: true, expires_at: expiryDate, scope, surfaces: allMachineIds.length });
   }));
 
   // ── Reject request ──
@@ -710,21 +737,31 @@ export function mountAccessRequests(app, db) {
       .project({ _id: 0 })
       .toArray();
 
-    // An exception stores only the MACHINE it was granted to, so the person has
-    // to come from the request that created it (where the extension stamped the
-    // detected user), with the enrolment record as the fallback. Without this
-    // the admin's "who currently has access" list showed nothing but a
-    // truncated device hash.
-    const reqIds = [...new Set(rows.map((r) => r.request_id).filter(Boolean))];
+    // Group by request_id so one approval = one row in the admin dashboard,
+    // regardless of how many sibling machine_ids (desktop + browser extensions)
+    // got an exception. The frontend's revoke uses request_id, which already
+    // deactivates all siblings via updateMany.
+    const grouped = new Map();
+    for (const r of rows) {
+      const key = r.request_id || r.machine_id; // fallback for legacy rows without request_id
+      if (!grouped.has(key)) {
+        grouped.set(key, { ...r, surfaces: 1 });
+      } else {
+        grouped.get(key).surfaces += 1;
+      }
+    }
+    const dedupedRows = [...grouped.values()];
+
+    const reqIds = [...new Set(dedupedRows.map((r) => r.request_id).filter(Boolean))];
     const srcReqs = reqIds.length
       ? await requests().find({ id: { $in: reqIds } })
           .project({ _id: 0, id: 1, user: 1, hostname: 1 })
           .toArray()
       : [];
     const reqById = new Map(srcReqs.map((r) => [r.id, r]));
-    const idents = await identityByMachine(db, rows.map((r) => r.machine_id));
+    const idents = await identityByMachine(db, dedupedRows.map((r) => r.machine_id));
 
-    res.json(rows.map((r) => {
+    res.json(dedupedRows.map((r) => {
       const src = reqById.get(r.request_id);
       const ident = idents.get(r.machine_id);
       return {
@@ -750,7 +787,10 @@ export function mountAccessRequests(app, db) {
   // with the open approve route, laundering the audit trail of a grant.
 
   app.delete('/api/v1/access-exceptions/:id', requireReviewAuth, a(async (req, res) => {
-    await exceptions().updateOne(
+    // Approve creates one exception per sibling machine_id (desktop + browser
+    // extensions on the same host). Revoke must deactivate ALL of them — they
+    // share the same request_id.
+    const result = await exceptions().updateMany(
       { request_id: req.params.id },
       { $set: { active: false } },
     );
@@ -758,6 +798,6 @@ export function mountAccessRequests(app, db) {
       { id: req.params.id },
       { $set: { status: 'revoked', reviewed_at: new Date() } },
     );
-    res.json({ ok: true });
+    res.json({ ok: true, revoked: result.modifiedCount });
   }));
 }

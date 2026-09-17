@@ -4749,6 +4749,7 @@ function AccessRequestsView() {
           ?<div className="aihub_text_primary" style={{fontSize:14.7}}>{agentLabelOf(r)}</div>
           :<span className="aihub_text_muted" title="Whole app — every agent inside it">—</span>},
         {label:"Employee",hint:"Who requested this access exception.",render:r=><UserCell row={r}/>},
+        {label:"Surfaces",render:r=><span title={r.machine_id}>{r.surfaces||1} {(r.surfaces||1)===1?"device":"devices"}</span>},
         {label:"System",hint:"The machine this exception applies to.",render:r=><Mono>{r.machine_id?.slice(0,12)}</Mono>},
         {label:"Granted",hint:"When an admin approved this exception.",render:r=>relTime(r.granted_at)},
         {label:"Expires",hint:"When this temporary access automatically expires and the tool is blocked again.",render:r=>{
@@ -7342,7 +7343,7 @@ function InstallationsView() {
         </div>
 
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
-          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=windows','CloudFuze-Desktop-Agent-windows.zip','windows')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='windows'?"#6b7280":"#0052e0",color:"#fff",fontSize:14.7,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='windows'?0.5:1}}>{downloading==='windows'?'⏳ Preparing...':'⬇ Windows'}</button>
+          <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/desktop-app','CloudFuze-Desktop-Agent.zip','windows')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='windows'?"#6b7280":"#0052e0",color:"#fff",fontSize:14.7,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='windows'?0.5:1}}>{downloading==='windows'?'⏳ Preparing...':'⬇ Windows'}</button>
           <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=macos','CloudFuze-Desktop-Agent-macos.zip','macos')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='macos'?"#6b7280":"#1e293b",color:"#fff",fontSize:14.7,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='macos'?0.5:1}}>{downloading==='macos'?'⏳ Preparing...':'⬇ macOS'}</button>
           <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/agent-installer?platform=linux','CloudFuze-Desktop-Agent-linux.zip','linux')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,padding:"9px 0",borderRadius:8,background:downloading==='linux'?"#6b7280":"#1e293b",color:"#fff",fontSize:14.7,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",opacity:downloading&&downloading!=='linux'?0.5:1}}>{downloading==='linux'?'⏳ Preparing...':'⬇ Linux'}</button>
         </div>

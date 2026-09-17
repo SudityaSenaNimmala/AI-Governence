@@ -71,21 +71,27 @@ export function mountInstallations(app, db) {
       return res.json({ version: _agentVersionCache.hash });
     }
 
-    // Hash all agent source files to create a version fingerprint
+    // Hash all agent source files to create a version fingerprint.
+    // Includes electron/renderer/ and electron/preload.js so UI changes
+    // (outside app.asar) are also detected by the auto-updater.
     const hash = crypto.createHash('sha256');
-    const SKIP = new Set(['node_modules', 'tests', '.git', 'package-lock.json', 'build', 'electron', 'browser-extension', 'launcher.cjs', 'start-agent.vbs', 'start-agent.cmd', 'start-agent.ps1']);
-    function walkHash(dir) {
+    const SKIP = new Set(['node_modules', 'tests', '.git', 'package-lock.json', 'build', 'browser-extension', 'launcher.cjs', 'start-agent.vbs', 'start-agent.cmd', 'start-agent.ps1']);
+    // Inside the electron/ dir, only hash renderer/ and preload.js (not main.js,
+    // package.json, etc. which live in app.asar and can't be auto-updated).
+    const ELECTRON_INCLUDE = new Set(['renderer', 'preload.js', 'monitor-runner.mjs']);
+    function walkHash(dir, isElectron) {
       for (const entry of readdirSync(dir).sort()) {
         if (SKIP.has(entry)) continue;
+        if (isElectron && !ELECTRON_INCLUDE.has(entry)) continue;
         const full = join(dir, entry);
         const stat = statSync(full);
-        if (stat.isDirectory()) walkHash(full);
+        if (stat.isDirectory()) walkHash(full, entry === 'electron');
         else if (stat.size < 2 * 1024 * 1024) {
           hash.update(readFileSync(full));
         }
       }
     }
-    walkHash(agentDir);
+    walkHash(agentDir, false);
     const version = hash.digest('hex').slice(0, 16);
     _agentVersionCache = { hash: version, computedAt: Date.now() };
     res.json({ version });
@@ -398,6 +404,55 @@ export function mountInstallations(app, db) {
     res.send(zip);
   }));
 
+  // ── Electron Desktop App download ──
+  // Serves the pre-built Electron app as a zip with install.bat.
+  // The app includes all UI (banner, popups, dialogs) built-in.
+  app.get('/api/v1/installations/desktop-app', a(async (req, res) => {
+    const serverUrl = apiServerUrl(req);
+    const electronDist = join(__dirname, '..', '..', '..', 'agent', 'build', 'electron-dist');
+    const winUnpacked = join(electronDist, 'win-unpacked');
+
+    if (!existsSync(winUnpacked)) {
+      return res.status(500).json({ error: 'Electron desktop app not built. Run npm run dist:win in agent/electron/' });
+    }
+
+    // Bake server URL and enroll secret into settings for auto-enrollment
+    const configDir = join(winUnpacked, 'resources');
+    const bakedConfig = JSON.stringify({
+      serverUrl,
+      enrollSecret: ENROLL_SECRET,
+      preConfigured: true,
+    });
+    writeFileSync(join(configDir, 'cfai-config.json'), bakedConfig, 'utf8');
+
+    // Build zip
+    const files = [];
+    // Add install.bat from the dist directory
+    const installBat = join(electronDist, 'install.bat');
+    if (existsSync(installBat)) {
+      files.push({ name: 'install.bat', data: readFileSync(installBat) });
+    }
+    // Walk win-unpacked/
+    const SKIP_EL = new Set(['.git', 'node_modules']);
+    function walkEl(dir, prefix) {
+      for (const entry of readdirSync(dir)) {
+        if (SKIP_EL.has(entry)) continue;
+        const full = join(dir, entry);
+        const stat = statSync(full);
+        if (stat.isDirectory()) walkEl(full, prefix + entry + '/');
+        else if (stat.size < 200 * 1024 * 1024) { // skip files > 200MB
+          files.push({ name: 'win-unpacked/' + prefix + entry, data: readFileSync(full) });
+        }
+      }
+    }
+    walkEl(winUnpacked, '');
+
+    const zip = createZip(files);
+    res.setHeader('content-type', 'application/zip');
+    res.setHeader('content-disposition', 'attachment; filename="CloudFuze-Desktop-Agent.zip"');
+    res.send(zip);
+  }));
+
   app.get('/api/v1/installations/agent-installer', a(async (req, res) => {
     const platform = req.query.platform || 'windows';
     const serverUrl = apiServerUrl(req);
@@ -627,21 +682,25 @@ pause >nul
     // Add baked credentials
     files.push({ name: 'cloudfuze-config.json', data: Buffer.from(agentConfig, 'utf8') });
 
-    // Add agent source (skip heavy/unnecessary dirs)
-    const SKIP = new Set(['node_modules', 'tests', '.git', 'package-lock.json', 'build', 'electron', 'browser-extension', 'launcher.cjs', 'start-agent.vbs', 'start-agent.cmd', 'start-agent.ps1']);
-    function walk(dir, prefix) {
+    // Add agent source (skip heavy/unnecessary dirs).
+    // Includes electron/renderer/ and electron/preload.js so the auto-updater
+    // can patch UI files without rebuilding the entire Electron app.
+    const SKIP = new Set(['node_modules', 'tests', '.git', 'package-lock.json', 'build', 'browser-extension', 'launcher.cjs', 'start-agent.vbs', 'start-agent.cmd', 'start-agent.ps1']);
+    const ELECTRON_INCLUDE = new Set(['renderer', 'preload.js', 'monitor-runner.mjs']);
+    function walk(dir, prefix, isElectron) {
       for (const entry of readdirSync(dir)) {
         if (SKIP.has(entry)) continue;
+        if (isElectron && !ELECTRON_INCLUDE.has(entry)) continue;
         const full = join(dir, entry);
         const rel = prefix ? prefix + '/' + entry : entry;
         const stat = statSync(full);
-        if (stat.isDirectory()) walk(full, rel);
+        if (stat.isDirectory()) walk(full, rel, entry === 'electron');
         else if (stat.size < 2 * 1024 * 1024) {
           files.push({ name: 'agent/' + rel, data: readFileSync(full) });
         }
       }
     }
-    walk(agentDir, '');
+    walk(agentDir, '', false);
 
     // Bundle browser-extension files the agent reads at runtime.
     // These live outside agent/ in the repo but are needed by the installed agent.

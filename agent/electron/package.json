@@ -31,31 +31,42 @@
     "extraResources": [
       {
         "from": "../src",
-        "to": "agent-src",
+        "to": "agent/src",
         "filter": ["**/*", "!**/node_modules/**"]
+      },
+      {
+        "from": "../node_modules",
+        "to": "agent/node_modules"
+      },
+      {
+        "from": "../package.json",
+        "to": "agent/package.json"
+      },
+      {
+        "from": "monitor-runner.mjs",
+        "to": "agent/electron/monitor-runner.mjs"
       },
       {
         "from": "../../browser-extension",
         "to": "browser-extension",
         "filter": ["**/*", "!**/node_modules/**"]
+      },
+      {
+        "from": "preload.js",
+        "to": "electron/preload.js"
+      },
+      {
+        "from": "renderer",
+        "to": "electron/renderer",
+        "filter": ["**/*"]
       }
     ],
     "win": {
-      "target": "nsis",
-      "icon": "assets/icon.ico",
+      "target": [
+        { "target": "dir", "arch": ["x64"] }
+      ],
+      "icon": "assets/icon.png",
       "requestedExecutionLevel": "asInvoker"
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "installerIcon": "assets/icon.ico",
-      "uninstallerIcon": "assets/icon.ico",
-      "installerHeaderIcon": "assets/icon.ico",
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "CloudFuze AI Governance",
-      "include": "installer.nsh"
     },
     "mac": {
       "target": "dmg",

@@ -70,6 +70,10 @@ export class ToastService {
   }
 
   start() {
+    // Toasts disabled — they steal focus from the AI app and disarm the
+    // enforcer's keystroke block. All user feedback goes through Electron UI.
+    this.log?.info('toast: disabled (focus-steal prevention)');
+    return;
     if (process.platform !== 'win32') return;
     if (this.child) return;
 
@@ -184,13 +188,10 @@ export class ToastService {
   }
 
   show({ title, message }) {
-    if (process.platform !== 'win32') return;
-    const cmd = { cmd: 'show', title, message };
-    if (!this.ready) {
-      this.queueBeforeReady.push(cmd);
-      return;
-    }
-    this.#write(cmd);
+    // Toasts disabled — the Electron UI (banner, block dialog, access request
+    // popup) handles all user-facing feedback. Windows notification center
+    // toasts were noisy and redundant.
+    return;
   }
 
   // Replace the system clipboard with the given text. Used by the OS monitor's

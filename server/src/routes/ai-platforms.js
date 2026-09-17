@@ -153,6 +153,28 @@ export function mountAiPlatforms(app, db) {
       { host },
       { $set: setObj },
     );
+
+    // Propagate block/unblock to ALL sibling hosts of the same tool.
+    // If api.anthropic.com is blocked, claude.ai must also be blocked —
+    // they're the same tool and the dashboard shows them as one entry.
+    if ('blocked' in patch) {
+      const siblings = await db.collection('agent_registry')
+        .find({ matched_hosts: host })
+        .project({ matched_hosts: 1 })
+        .toArray();
+      const allHosts = new Set();
+      for (const s of siblings) {
+        for (const h of (s.matched_hosts || [])) allHosts.add(h);
+      }
+      allHosts.delete(host); // already updated above
+      if (allHosts.size > 0) {
+        await db.collection('ai_platforms').updateMany(
+          { host: { $in: [...allHosts] } },
+          { $set: { blocked: patch.blocked, updated_at: new Date() } },
+        );
+      }
+    }
+
     const row = await db.collection('ai_platforms').findOne({ host });
     if (!row) return res.status(404).json({ error: 'not found' });
     res.json(rowToJson(row));

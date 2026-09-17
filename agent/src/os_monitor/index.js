@@ -11,7 +11,14 @@
 //     2. fire a native Windows toast if severity is high/critical (notify)
 
 import { EventEmitter } from 'node:events';
+import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { homedir } from 'node:os';
+import { spawn as cpSpawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createPoller } from './poller-factory.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 import { createNotifier } from './notify-factory.js';
 import {
   watcherProcessNames,
@@ -22,6 +29,9 @@ import {
   hostsForPlatform,
   identifyAiPanel,
   hostForPanel,
+  filterBlockedAgents,
+  synthesizePlatformBlocks,
+  normalizeAgentRows,
 } from './ai-processes.js';
 import { scan, lengthBucket, BLOCK_PATTERNS, getBlockPatterns, isTextReadable, isBinaryParseable, isImage, isArchive } from './classifier.js';
 import { PolicySync } from './policy-sync.js';
@@ -192,6 +202,7 @@ export class OsMonitor extends EventEmitter {
     // Same enrolment machine JWT either way — see #submitAccessRequest.
     this.serverUrl = String(serverUrl || '').replace(/\/$/, '');
     this.token = token || null;
+    this._blockedAgentsInterval = null;
     this.poller = createPoller({ log });
     this.reporter = new Reporter({ serverUrl, token, log });
     this.toast = createNotifier({ log });
@@ -1501,16 +1512,12 @@ export class OsMonitor extends EventEmitter {
         // not necessarily the upload — several chat apps upload an attached
         // file to the vendor's backend the instant it's attached, well
         // before Send. Never imply the bytes never left the machine.
-        this.toast.show(isPlatform ? {
-          // The old copy here read "Send blocked: prompt contains Blocked
-          // agent: Claude … Override (logged): Ctrl+Alt+Enter" — wrong on all
-          // three counts: the prompt contains nothing, "Blocked agent" is not
-          // a pattern name, and that override no longer applies to a platform
-          // block. Say what is actually true and where the remedy is.
-          title: `${ai.product} is blocked`,
-          message: `Your organization has blocked ${agentName} on this device — nothing can be sent here.\n` +
-            `Need it? Ask for temporary access in the CloudFuze window that just opened.`,
-        } : isAttachment ? {
+        // Platform blocks: NO toast — clicking the toast X steals focus and
+        // disarms the enforcer, letting the next keystroke through. The banner
+        // already tells the user the app is blocked.
+        if (isPlatform) {
+          // skip toast for platform blocks
+        } else this.toast.show(isAttachment ? {
           title: `${ai.product} - attachment blocked`,
           message: `Send blocked: "${ev.filename}" contains ${ev.patterns}\n` +
             `Remove the attachment to send. If the app already uploaded it on attach, this only stops it from being used in the conversation.` +
@@ -1550,13 +1557,7 @@ export class OsMonitor extends EventEmitter {
         tool_name: isPlatform ? ai.product : '',
         tool_vendor: isPlatform ? (ai.vendor || '') : '',
         process_name: ev.process || '',
-        // Which AI panel inside the IDE, when the block came from one. A catalog
-        // id only — never a file path, workspace name or window title.
         panel: ev.panel || '',
-        // SCOPE of the block: 'app' = the whole process is disallowed, 'panel' =
-        // one AI surface inside an IDE is. Straight from the enforcer's
-        // _blockedByPanel. Not the same question as `panel` above, which is
-        // attribution and can carry a panel id for an app-scoped block.
         block_scope: ev.block_scope || '',
       })));
 
@@ -1626,14 +1627,10 @@ export class OsMonitor extends EventEmitter {
       this.#console.log('@@CFAI-BLOCKSTATE ' + JSON.stringify(this.#ui('blockstate', {
         active,
         scope: ev.scope || '',
-        // Display name for the bar. The admin-typed agent name first (the same
-        // value the Request Access modal titles itself with), then the catalog
-        // product name for the process, so the copy never reads "ai_platform".
         name: active ? (ev.agent || ai?.product || '') : '',
         agent_id: active ? (ev.agent_id || '') : '',
         process_name: active ? (ev.process || '') : '',
         pid: Number(ev.pid) || 0,
-        // Used ONLY to pick which monitor the bar belongs on — see main.js.
         win_x: Number(ev.win_x) || 0,
         win_y: Number(ev.win_y) || 0,
         win_w: Number(ev.win_w) || 0,
@@ -1641,10 +1638,6 @@ export class OsMonitor extends EventEmitter {
       })));
     });
 
-    // Panic hotkey. The helper's own bar state already includes !Disarmed(), so
-    // its next tick clears the bar by itself — this is belt and braces for the
-    // case where that tick never arrives (helper wedged, stdout stalled), on the
-    // same presentation-only channel and with the same no-reporting rule.
     this.enforcer.on('disarmed', () => {
       // The one relay site that does not pass its payload through #ui() inline:
       // the literal `JSON.stringify({ active: false })` is itself pinned, so the
@@ -1841,6 +1834,19 @@ export class OsMonitor extends EventEmitter {
     // within a poll of startup.
     this.featureSync.start();
 
+    // ── Blocked agents + access request sync (10s interval) ──────────────
+    // Same logic as electron/monitor-runner.mjs — syncs blocked agents,
+    // platform blocks, and access exceptions to blocked-agents.json, and
+    // flushes any offline access-request queue.
+    const tick = () => { this._refreshBlockedAgents(); this._flushPendingAccessRequest(); };
+    tick(); // immediate first sync
+    this._blockedAgentsInterval = setInterval(tick, 10_000);
+
+    // Kill any orphaned banner processes from a previous agent run
+    this._hideBannerProc();
+    // Spawn ui-helper for instant access request popups (WPF pre-loaded)
+    this._ensureUiHelper();
+
     if (process.platform === 'win32') {
       this.log?.info(
         'os_monitor: started (clipboard text + files + dialogs + drag-drop chips + typed prompts' +
@@ -1957,11 +1963,246 @@ export class OsMonitor extends EventEmitter {
     }
   }
 
+  // ── WPF UI windows (banner, block dialog, access request) ──────────────
+  // On Windows, spawn PowerShell WPF scripts to show native-looking UI that
+  // matches the Electron app's block overlay, tokenize dialog, and access
+  // request form. On other platforms, the console.log relay is the only path
+  // (the Electron app handles it there).
+
+  // ── Simple spawn-on-demand UI ──
+  // Spawn a fresh PowerShell for each UI window. Kill it to hide.
+  // Uses ShellExecute for desktop access from headless context.
+  // Accepts ~3-5s delay on first show in exchange for 100% reliability.
+  _spawnUi(script, inputData) {
+    if (process.platform !== 'win32') return null;
+    try {
+      const scriptPath = join(__dirname, script);
+      const tmpDir = join(homedir(), '.cloudfuze-aigov');
+      mkdirSync(tmpDir, { recursive: true });
+      const inputFile = join(tmpDir, `ui-${Date.now()}.json`);
+      const vbsFile = join(tmpDir, `ui-${Date.now()}.vbs`);
+      writeFileSync(inputFile, JSON.stringify(inputData), 'utf8');
+      const vbs = `CreateObject("Shell.Application").ShellExecute "powershell.exe", "-NoProfile -Sta -ExecutionPolicy Bypass -WindowStyle Hidden -File ""${scriptPath}"" ""${inputFile}""", "", "open", 0`;
+      writeFileSync(vbsFile, vbs, 'utf8');
+      cpSpawn('wscript.exe', [vbsFile], { stdio: 'ignore', detached: true }).unref();
+      setTimeout(() => { try { rmSync(vbsFile, { force: true }); } catch {} }, 5000);
+      // Return the input file path as a handle — PS1 writes its PID there after reading
+      return inputFile;
+    } catch {
+      return null;
+    }
+  }
+
+  _showBanner(data) {
+    if (this._bannerName === data.name) return;
+    // After hide, suppress for 15s while enforcer catches up
+    if (this._bannerHideAt && Date.now() - this._bannerHideAt < 15000) return;
+    this._hideBannerProc(); // kill old banner if any
+    this._bannerName = data.name;
+    this._bannerHideAt = 0;
+    this._spawnUi('block-banner.ps1', data);
+    // Start the persistent UI helper for instant popups
+    this._ensureUiHelper();
+  }
+
+  _ensureUiHelper() {
+    if (this._uiHelperAlive) return;
+    if (process.platform !== 'win32') return;
+    try {
+      const tmpDir = join(homedir(), '.cloudfuze-aigov');
+      mkdirSync(tmpDir, { recursive: true });
+      // Kill old helper
+      const pidFile = join(tmpDir, 'ui-helper.pid');
+      try {
+        if (existsSync(pidFile)) {
+          const oldPid = parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
+          if (oldPid > 0) try { process.kill(oldPid); } catch {}
+        }
+      } catch {}
+      // Clear IPC files
+      writeFileSync(join(tmpDir, 'ui-cmd.jsonl'), '', 'utf8');
+      writeFileSync(join(tmpDir, 'ui-rsp.jsonl'), '', 'utf8');
+      // Spawn via ShellExecute for desktop access
+      const scriptPath = join(__dirname, 'ui-helper.ps1');
+      const vbsFile = join(tmpDir, `ui-helper-${Date.now()}.vbs`);
+      const vbs = `CreateObject("Shell.Application").ShellExecute "powershell.exe", "-NoProfile -Sta -ExecutionPolicy Bypass -WindowStyle Hidden -File ""${scriptPath}"" ""${tmpDir}""", "", "open", 0`;
+      writeFileSync(vbsFile, vbs, 'utf8');
+      cpSpawn('wscript.exe', [vbsFile], { stdio: 'ignore', detached: true }).unref();
+      setTimeout(() => { try { rmSync(vbsFile, { force: true }); } catch {} }, 5000);
+      this._uiHelperAlive = true;
+      this._uiCmdFile = join(tmpDir, 'ui-cmd.jsonl');
+    } catch {}
+  }
+
+  _sendToUiHelper(cmd) {
+    try {
+      this._ensureUiHelper();
+      if (this._uiCmdFile) {
+        const { appendFileSync: appendFS } = require('fs');
+        appendFS(this._uiCmdFile, JSON.stringify(cmd) + '\n', 'utf8');
+      }
+    } catch {}
+  }
+
+  _hideBanner() {
+    this._bannerName = null;
+    this._bannerHideAt = Date.now();
+    this._hideBannerProc();
+    // DO NOT kill ui-helper here — it handles popups independently
+  }
+
+  _hideBannerProc() {
+    // Kill ALL powershell processes that have block-banner.ps1 in their command line
+    try {
+      cpSpawn('powershell.exe', ['-NoProfile', '-Command',
+        "Get-WmiObject Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { $_.CommandLine -like '*block-banner.ps1*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+      ], { stdio: 'ignore', windowsHide: true });
+    } catch {}
+  }
+
+  _showBlockDialog(data) {
+    this._spawnUi('block-dialog.ps1', data);
+  }
+
+  _showAccessRequest(data) {
+    this._spawnUi('access-request.ps1', data);
+  }
+
+  async _handleAccessRequestStatus(ps, toolHost) {
+    const serverUrl = String(this.serverUrl || '').replace(/\/+$/, '');
+    try {
+      const res = await fetch(`${serverUrl}/api/v1/access-requests?tool_host=${encodeURIComponent(toolHost)}&status=pending`, {
+        headers: { authorization: `Bearer ${this.token}` },
+      });
+      if (res.ok) {
+        const rows = await res.json();
+        const pending = Array.isArray(rows) && rows.length > 0;
+        const response = pending
+          ? { pending: true, requested_at: rows[0].requested_at || rows[0].created_at }
+          : { pending: false };
+        try { ps.stdin.write(JSON.stringify(response) + '\n'); } catch {}
+      } else {
+        try { ps.stdin.write(JSON.stringify({ pending: false }) + '\n'); } catch {}
+      }
+    } catch {
+      try { ps.stdin.write(JSON.stringify({ pending: false }) + '\n'); } catch {}
+    }
+  }
+
+  async _handleAccessRequestSubmit(ps, msg) {
+    const serverUrl = String(this.serverUrl || '').replace(/\/+$/, '');
+    try {
+      const res = await fetch(`${serverUrl}/api/v1/access-requests`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` },
+        body: JSON.stringify({
+          tool_host: msg.tool_host, tool_name: msg.tool_name,
+          tool_vendor: msg.tool_vendor, reason: msg.reason || '',
+        }),
+      });
+      if (res.status < 500) {
+        try { ps.stdin.write(JSON.stringify({ submitted: true }) + '\n'); } catch {}
+      } else {
+        // Queue offline
+        const pendingPath = join(homedir(), '.cloudfuze-aigov', 'pending-access-request.json');
+        writeFileSync(pendingPath, JSON.stringify({ ...msg, queued_at: new Date().toISOString() }));
+        try { ps.stdin.write(JSON.stringify({ submitted: false, queued: true }) + '\n'); } catch {}
+      }
+    } catch {
+      const pendingPath = join(homedir(), '.cloudfuze-aigov', 'pending-access-request.json');
+      writeFileSync(pendingPath, JSON.stringify({ ...msg, queued_at: new Date().toISOString() }));
+      try { ps.stdin.write(JSON.stringify({ submitted: false, queued: true }) + '\n'); } catch {}
+    }
+  }
+
+  // ── Blocked agents + platform blocks → blocked-agents.json ─────────────
+  // Ported from electron/monitor-runner.mjs so the bare Node.js agent path
+  // (install.bat / VBS auto-start) gets the same enforcement as Electron.
+  async _refreshBlockedAgents() {
+    const serverUrl = String(this.serverUrl || '').replace(/\/+$/, '');
+    if (!serverUrl) return;
+    const headers = this.token ? { authorization: `Bearer ${this.token}` } : {};
+
+    // Fetch access exceptions (fail → null → keep previous file)
+    let exceptions = null;
+    try {
+      const r = await fetch(`${serverUrl}/api/v1/access-exceptions/mine`, { headers });
+      if (r.ok) { const rows = await r.json(); if (Array.isArray(rows)) exceptions = rows; }
+    } catch {}
+
+    // Fetch ai_platforms (fail → null → keep previous file)
+    let platforms = null;
+    try {
+      const r = await fetch(`${serverUrl}/api/v1/ai-platforms`, { headers });
+      if (r.ok) { const rows = await r.json(); if (Array.isArray(rows)) platforms = rows; }
+    } catch {}
+
+    try {
+      const r = await fetch(`${serverUrl}/api/lifecycle/blocked-agents`);
+      if (!r.ok) return;
+      const agentRows = await r.json();
+      if (platforms === null) return; // fail closed
+      const list = normalizeAgentRows(Array.isArray(agentRows) ? agentRows : [], this.log)
+        .concat(synthesizePlatformBlocks(platforms));
+      const effective = exceptions === null ? list : filterBlockedAgents(list, exceptions, this.log);
+      const blockedPath = join(homedir(), '.cloudfuze-aigov', 'blocked-agents.json');
+      mkdirSync(join(homedir(), '.cloudfuze-aigov'), { recursive: true });
+      writeFileSync(blockedPath, JSON.stringify(effective), 'utf8');
+      const lifted = list.length - effective.length;
+      this.log?.info?.(`blocked-agents: synced ${effective.length} blocked agent(s)` + (lifted > 0 ? ` (${lifted} lifted by access exception)` : ''));
+      // Compare with previous sync — if any entry was removed, hide the banner.
+      // Name matching is unreliable (display name vs process name vs agent name).
+      const curSet = new Set(effective.map(r => (r.process_name || r.agent_name || '').toLowerCase()).filter(Boolean));
+      if (this._prevBlockedSet) {
+        const removed = [...this._prevBlockedSet].filter(n => !curSet.has(n));
+        if (removed.length > 0 && this._bannerName) {
+          this.log?.info?.(`blocked-agents: ${removed.join(', ')} unblocked — hiding banner`);
+          this._hideBanner();
+        }
+        const added = [...curSet].filter(n => !this._prevBlockedSet.has(n));
+        if (added.length > 0) {
+          this._bannerHideAt = 0; // clear suppression — new block detected
+        }
+      }
+      this._prevBlockedSet = curSet;
+    } catch (err) {
+      this.log?.warn?.(`blocked-agents: sync failed — ${err.message}`);
+    }
+  }
+
+  // ── Offline access-request queue flush ────────────────────────────────────
+  async _flushPendingAccessRequest() {
+    const pendingPath = join(homedir(), '.cloudfuze-aigov', 'pending-access-request.json');
+    if (!existsSync(pendingPath)) return;
+    let payload;
+    try { payload = JSON.parse(readFileSync(pendingPath, 'utf8')); } catch { rmSync(pendingPath, { force: true }); return; }
+    const queuedAt = Date.parse(payload?.queued_at || '');
+    if (Number.isFinite(queuedAt) && Date.now() - queuedAt > 24 * 3600 * 1000) {
+      rmSync(pendingPath, { force: true });
+      return;
+    }
+    const { queued_at, ...body } = payload || {};
+    const serverUrl = String(this.serverUrl || '').replace(/\/+$/, '');
+    try {
+      const res = await fetch(`${serverUrl}/api/v1/access-requests`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` },
+        body: JSON.stringify(body),
+      });
+      if (res.status < 500) {
+        rmSync(pendingPath, { force: true });
+        this.log?.info?.(`access-request: queued request submitted (${res.status})`);
+      }
+    } catch {}
+  }
+
   stop() {
     // FIRST, before anything else is torn down: a FeatureSync poll already
     // awaiting its fetch will still fire onChange after this returns, and
     // #applyFeatures no-ops on this flag rather than restarting the hook.
     this.isRunning = false;
+    if (this._blockedAgentsInterval) { clearInterval(this._blockedAgentsInterval); this._blockedAgentsInterval = null; }
+    try { this._hideBannerProc(); } catch {}
     this.#stopAttachHoldRefresh();
     this.featureSync.stop();
     this.poller.stop();

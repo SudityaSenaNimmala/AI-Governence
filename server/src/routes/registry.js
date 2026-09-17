@@ -352,6 +352,35 @@ export function mountRegistry(app, db) {
       });
     }
 
+    // Merge endpoint-scan entries that share the same vendor AND overlapping hosts.
+    // E.g. "Claude" and "Claude Code" both resolve to [api.anthropic.com, claude.ai]
+    // — they're the same product, one blocking decision.
+    const scanKeys = [...registry.keys()].filter(k => k.startsWith('scan:'));
+    for (let i = 0; i < scanKeys.length; i++) {
+      const a = registry.get(scanKeys[i]);
+      if (!a) continue;
+      for (let j = i + 1; j < scanKeys.length; j++) {
+        const b = registry.get(scanKeys[j]);
+        if (!b) continue;
+        if (a.vendor && b.vendor && a.vendor === b.vendor) {
+          const aHosts = new Set(a.matched_hosts || []);
+          const overlap = (b.matched_hosts || []).some(h => aHosts.has(h));
+          if (overlap) {
+            // Merge b into a: combine activity, union hosts, keep the shorter name
+            a.activity.total += b.activity?.total || 0;
+            a.matched_hosts = [...new Set([...(a.matched_hosts || []), ...(b.matched_hosts || [])])];
+            if (b.last_active > a.last_active) a.last_active = b.last_active;
+            if (a.activity.last_active == null || (b.activity?.last_active && b.activity.last_active > a.activity.last_active)) {
+              a.activity.last_active = b.activity.last_active;
+            }
+            // Keep the shorter/simpler name (e.g. "Claude" over "Claude Code")
+            if (b.name && a.name && b.name.length < a.name.length) a.name = b.name;
+            registry.delete(scanKeys[j]);
+          }
+        }
+      }
+    }
+
     // Source C: AI Platforms — ONLY those with actual DLP activity
     // (skip the 100+ seeded platforms that nobody used)
     for (const plat of platforms) {

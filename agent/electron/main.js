@@ -13,10 +13,16 @@ const { spawn, execSync } = require('child_process');
 const isDev = !app.isPackaged;
 const AGENT_SRC = isDev
   ? path.join(__dirname, '..', 'src')
-  : path.join(process.resourcesPath, 'agent-src');
+  : path.join(process.resourcesPath, 'agent', 'src');
 const BROWSER_EXT_DIR = isDev
   ? path.join(__dirname, '..', '..', 'browser-extension')
   : path.join(process.resourcesPath, 'browser-extension');
+const RENDERER_DIR = isDev
+  ? path.join(__dirname, 'renderer')
+  : path.join(process.resourcesPath, 'electron', 'renderer');
+const PRELOAD_PATH = isDev
+  ? path.join(__dirname, 'preload.js')
+  : path.join(process.resourcesPath, 'electron', 'preload.js');
 const CRED_DIR = path.join(os.homedir(), '.cloudfuze-aigov');
 const CRED_PATH = path.join(CRED_DIR, 'credentials.json');
 const SETTINGS_PATH = path.join(CRED_DIR, 'electron-settings.json');
@@ -118,10 +124,16 @@ function startMonitor() {
     return;
   }
 
+  // Clear stale monitor lock from previous crash
+  const lockFile = path.join(CRED_DIR, 'monitor.lock');
+  try { if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile); } catch {}
+
   // Use the lightweight monitor runner that starts the OsMonitor directly,
   // bypassing the full machine scan. The agent CLI's --monitor requires a
   // scan + server upload to succeed first, so it fails when the server is down.
-  const monitorRunner = path.join(__dirname, 'monitor-runner.mjs');
+  const monitorRunner = isDev
+    ? path.join(__dirname, 'monitor-runner.mjs')
+    : path.join(process.resourcesPath, 'agent', 'electron', 'monitor-runner.mjs');
   if (!fs.existsSync(monitorRunner)) {
     sendToRenderer('monitor-error', `Monitor runner not found at ${monitorRunner}`);
     return;
@@ -134,8 +146,9 @@ function startMonitor() {
   // than imported. 'false' is the only value that disables the enforcer.
   // Model routing has no setting at all — it is always on whenever the
   // enforcer itself runs, same as the rest of its keystroke-level behavior.
+  const monitorCwd = isDev ? path.join(__dirname, '..') : path.join(process.resourcesPath, 'agent');
   monitorProcess = spawn('node', [monitorRunner], {
-    cwd: path.join(__dirname, '..'),  // agent/ dir so relative imports work
+    cwd: monitorCwd,
     env: {
       ...process.env,
       NODE_NO_WARNINGS: '1',
@@ -169,11 +182,17 @@ function startMonitor() {
   monitorProcess.on('exit', (code) => {
     monitorProcess = null;
     isMonitoring = false;
-    // Nothing is enforcing any more, so nothing may still be claiming to. See
-    // destroyBlockBanner().
     destroyBlockBanner();
     sendToRenderer('monitor-status', { running: false, exitCode: code });
     updateTrayMenu();
+    // Auto-restart after clean exit (code 0 = auto-updater applied new code)
+    if (code === 0) {
+      console.log('Monitor exited cleanly (auto-update?) — restarting in 3s...');
+      setTimeout(() => {
+        const creds = loadCredentials();
+        if (creds?.token) startMonitor();
+      }, 3000);
+    }
   });
 
   monitorProcess.on('error', (err) => {
@@ -296,11 +315,11 @@ function renderBlockBanner() {
       hasShadow: false,
       backgroundColor: '#00000000',
       webPreferences: {
-        preload: path.join(__dirname, 'preload.js'),
+        preload: PRELOAD_PATH,
         contextIsolation: true,
       },
     });
-    bannerWindow.loadFile(path.join(__dirname, 'renderer', 'block-banner.html'));
+    bannerWindow.loadFile(path.join(RENDERER_DIR, 'block-banner.html'));
     bannerWindow.webContents.once('did-finish-load', send);
     bannerWindow.on('closed', () => { bannerWindow = null; bannerVisible = false; });
     // The native equivalent of the extension bar's pointer-events:none. It is a
@@ -369,11 +388,22 @@ function repositionBlockBanner() {
 // exactly the permanently-stuck "Masking…" button this replaces.
 // focusable:false + showInactive() is what keeps the AI app itself focused
 // the whole time the popup is visible.
+let _lastDialogBlockId = null;
+let _dialogDismissedAt = 0;
+
 function showBlockDialogWindow(data) {
+  // Skip if the popup is already visible — the user pressing Enter while
+  // looking at the popup fires another block event, which re-renders the
+  // content and kills the button mid-click. Also skip if just dismissed
+  // (1s cooldown prevents dismiss→block→re-show race).
+  if (dialogWindow && !dialogWindow.isDestroyed() && dialogWindow.isVisible()) return;
+  if (Date.now() - _dialogDismissedAt < 1000) return;
+  _lastDialogBlockId = data.block_id || null;
+
   const send = () => { if (dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.webContents.send('block-dialog', data); };
   if (!dialogWindow || dialogWindow.isDestroyed()) {
     const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
-    const w = 440, h = 480;
+    const w = 540, h = 620;
     dialogWindow = new BrowserWindow({
       width: w,
       height: h,
@@ -385,19 +415,22 @@ function showBlockDialogWindow(data) {
       skipTaskbar: true,
       focusable: false,
       show: false,
-      backgroundColor: '#1c1f2e',
+      transparent: true,
+      backgroundColor: '#00000000',
       webPreferences: {
-        preload: path.join(__dirname, 'preload.js'),
+        preload: PRELOAD_PATH,
         contextIsolation: true,
       },
     });
-    dialogWindow.loadFile(path.join(__dirname, 'renderer', 'block-dialog.html'));
-    dialogWindow.webContents.once('did-finish-load', send);
+    dialogWindow.loadFile(path.join(RENDERER_DIR, 'block-dialog.html'));
+    dialogWindow.webContents.once('did-finish-load', () => { send(); dialogWindow.showInactive(); });
     dialogWindow.on('closed', () => { dialogWindow = null; });
   } else {
     send();
+    // Only call showInactive if the window is hidden — avoids blink on
+    // already-visible windows.
+    if (!dialogWindow.isVisible()) dialogWindow.showInactive();
   }
-  dialogWindow.showInactive();
 }
 
 // The Request Access dialog, shown when the org has blocked this AI app
@@ -433,11 +466,12 @@ function showAccessRequestWindow(data) {
   // Reset when the bar clears (focus left the blocked app) or when tool_host
   // changes — see hideBlockBanner().
   const host = data?.tool_host || null;
-  if (bannerVisible
-      && platformModalShownForHost === host
-      && (!accessWindow || accessWindow.isDestroyed())) {
-    return;
-  }
+  // Temporarily disabled suppression for debugging
+  // if (bannerVisible
+  //     && platformModalShownForHost === host
+  //     && (!accessWindow || accessWindow.isDestroyed())) {
+  //   return;
+  // }
   platformModalShownForHost = host;
   const send = () => { if (accessWindow && !accessWindow.isDestroyed()) accessWindow.webContents.send('access-request-dialog', data); };
   // A blocked app keeps emitting blocks — every swallowed Enter and every
@@ -452,7 +486,7 @@ function showAccessRequestWindow(data) {
   accessWindowHost = data?.tool_host || null;
   if (!accessWindow || accessWindow.isDestroyed()) {
     const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
-    const w = 460, h = 520;
+    const w = 540, h = 620;
     accessWindow = new BrowserWindow({
       width: w,
       height: h,
@@ -463,13 +497,14 @@ function showAccessRequestWindow(data) {
       alwaysOnTop: true,
       skipTaskbar: true,
       show: false,
-      backgroundColor: '#1c1f2e',
+      transparent: true,
+      backgroundColor: '#00000000',
       webPreferences: {
-        preload: path.join(__dirname, 'preload.js'),
+        preload: PRELOAD_PATH,
         contextIsolation: true,
       },
     });
-    accessWindow.loadFile(path.join(__dirname, 'renderer', 'access-request.html'));
+    accessWindow.loadFile(path.join(RENDERER_DIR, 'access-request.html'));
     accessWindow.webContents.once('did-finish-load', send);
     accessWindow.on('closed', () => { accessWindow = null; accessWindowHost = null; });
   } else {
@@ -506,6 +541,7 @@ function parseMonitorLine(line) {
   if (line.startsWith('@@CFAI-BLOCK ')) {
     try {
       const parsed = JSON.parse(line.slice('@@CFAI-BLOCK '.length));
+      console.log('[cfai-main] @@CFAI-BLOCK received, platform_block:', parsed.platform_block, 'rewritable:', parsed.rewritable);
       // Only show the center dialog when it has something ACTIONABLE to
       // offer — the "Tokenize & Send" button, which requires rewritable:true.
       // A non-rewritable block's dialog is just "Got it" restating what the
@@ -533,7 +569,7 @@ function parseMonitorLine(line) {
     try {
       const parsed = JSON.parse(line.slice('@@CFAI-REWRITE '.length));
       if (dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.webContents.send('rewrite-result', parsed);
-      if (parsed.result === 'ok' && dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.close();
+      if (parsed.result === 'ok' && dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.hide();
     }
     catch { /* malformed — drop */ }
     return;
@@ -744,14 +780,14 @@ function createMainWindow() {
     icon: getWindowIcon(),
     show: false,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
     },
   });
 
-  mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  mainWindow.loadFile(path.join(RENDERER_DIR, 'index.html'));
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
@@ -880,6 +916,12 @@ function setupIPC() {
     } catch (err) {
       return { sent: false, error: err.message };
     }
+  });
+
+  ipcMain.on('dismiss-dialog', () => {
+    _dialogDismissedAt = Date.now();
+    _lastDialogBlockId = null;
+    if (dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.hide();
   });
 
   // ── Request Access (desktop platform block) ────────────────────────────────
@@ -1061,13 +1103,22 @@ if (!gotLock) {
       createMainWindow();
     }
 
-    // Auto-start monitoring if configured
+    // Auto-enroll + auto-start monitoring
     const settings = loadSettings();
-    if (settings.startMonitorOnLaunch) {
-      const creds = loadCredentials();
-      if (creds?.token) {
-        startMonitor();
-      }
+    let creds = loadCredentials();
+    if (!creds?.token && settings.serverUrl && settings.enrollSecret) {
+      (async () => {
+        try {
+          const result = await enrollWithServer(settings.serverUrl, settings.enrollSecret);
+          if (result?.success) {
+            console.log('Auto-enrolled successfully');
+            creds = loadCredentials();
+            if (settings.startMonitorOnLaunch && creds?.token) startMonitor();
+          }
+        } catch (e) { console.log('Auto-enroll failed:', e.message); }
+      })();
+    } else if (settings.startMonitorOnLaunch && creds?.token) {
+      startMonitor();
     }
   });
 

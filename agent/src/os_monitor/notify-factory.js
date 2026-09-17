@@ -13,8 +13,11 @@ import { MacNotifier } from './notify-mac.js';
 import { LinuxNotifier } from './notify-linux.js';
 
 export function createNotifier({ log }) {
+  // Windows: toasts disabled — the Electron UI (banner, block dialog, access
+  // request popup) handles all user-facing feedback. The ToastService is still
+  // needed for scrubClipboard(), so callers that need THAT import it directly.
   switch (process.platform) {
-    case 'win32':  return new ToastService({ log });
+    case 'win32':  return new NoopNotifier();
     case 'darwin': return new MacNotifier({ log });
     case 'linux':  return new LinuxNotifier({ log });
     default:
@@ -24,6 +27,6 @@ export function createNotifier({ log }) {
 }
 
 class NoopNotifier {
-  start() {} stop() {} show() {}
+  start() {} stop() {} show() {} scrubClipboard() {}
   showRequestDialog() { return Promise.resolve({ action: 'unavailable', reason: '' }); }
 }
