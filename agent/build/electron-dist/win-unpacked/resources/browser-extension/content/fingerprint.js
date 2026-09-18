@@ -1,0 +1,578 @@
+// AI page fingerprinter — runs on every page.
+//
+// Cheap DOM + network heuristic that decides whether the page looks like an
+// AI tool. If "definitely not AI", does nothing (zero cost). If "definitely
+// AI" or "ambiguous", sends metadata to the service-worker which asks the
+// server's classifier ("/api/v1/classify-host"). The classifier verdict
+// becomes the policy across the whole fleet.
+//
+// PRIVACY: this file is the chokepoint where metadata about the page leaves
+// the user's machine. Send NOTHING except whitelisted fields below — no
+// prompt text, no response text, no input values, no DOM body content. If
+// you add a new signal, route it through the explicit signal-builder
+// helpers, not raw DOM scrapes.
+//
+// PERFORMANCE: runs at document_idle (manifest setting). The initial check
+// is O(few DOM queries). A MutationObserver watches for chat-like UIs being
+// rendered after page load (SPAs). Both are debounced so we ask the
+// classifier at most ONCE per page.
+
+(function () {
+  'use strict';
+
+  // Guard: don't re-run in iframes (parent handles classification for the URL).
+  if (window.top !== window) return;
+  // Guard: skip non-http(s) schemes — extension pages, chrome://, etc.
+  if (!/^https?:$/.test(location.protocol)) return;
+
+  const host = location.hostname;
+  const FINGERPRINTED_KEY = `__cfai_fingerprinted__${host}`;
+  // Per-tab guard so we don't ping the server repeatedly on SPA navigation.
+  if (window[FINGERPRINTED_KEY]) return;
+
+  // -----------------------------------------------------------------
+  // KNOWN_SAAS_WITH_AI — fallback list used only if chrome.storage hasn't
+  // been populated yet (first install, service worker never refreshed).
+  //
+  // The CANONICAL list now lives server-side in the ai_platforms table
+  // and is fetched by the service worker into chrome.storage.local under
+  // 'cfai.platforms'. We consult storage FIRST; this hardcoded fallback
+  // is just the first-run safety net.
+  //
+  // To add/remove platforms, use the dashboard at #/ai-platforms — DO NOT
+  // edit this list. New deploys still need it for the brief window before
+  // the first registry refresh completes.
+  // -----------------------------------------------------------------
+  const FALLBACK_SAAS_WITH_AI = [
+    // Microsoft 365 Copilot (Word/Excel/PowerPoint/Outlook online)
+    { host: 'office.com',            vendor: 'Microsoft',  product: 'Microsoft 365 Copilot', category: 'ide-assistant' },
+    { host: 'office365.com',         vendor: 'Microsoft',  product: 'Microsoft 365 Copilot', category: 'ide-assistant' },
+    { host: 'outlook.office.com',    vendor: 'Microsoft',  product: 'Outlook Copilot',       category: 'chat-frontend' },
+    { host: 'outlook.office365.com', vendor: 'Microsoft',  product: 'Outlook Copilot',       category: 'chat-frontend' },
+    { host: 'outlook.live.com',      vendor: 'Microsoft',  product: 'Outlook Copilot',       category: 'chat-frontend' },
+    { host: 'sharepoint.com',        vendor: 'Microsoft',  product: 'SharePoint Copilot',    category: 'ide-assistant' },
+    { host: 'teams.microsoft.com',   vendor: 'Microsoft',  product: 'Teams Copilot',         category: 'chat-frontend' },
+    // Google
+    { host: 'mail.google.com',       vendor: 'Google',     product: 'Gemini in Gmail',       category: 'chat-frontend' },
+    { host: 'docs.google.com',       vendor: 'Google',     product: 'Gemini in Docs',        category: 'ide-assistant' },
+    { host: 'meet.google.com',       vendor: 'Google',     product: 'Gemini in Meet',        category: 'chat-frontend' },
+    // Productivity SaaS with first-class AI features
+    { host: 'slack.com',             vendor: 'Slack',      product: 'Slack AI',              category: 'chat-frontend' },
+    { host: 'notion.so',             vendor: 'Notion',     product: 'Notion AI',             category: 'ide-assistant' },
+    { host: 'notion.site',           vendor: 'Notion',     product: 'Notion AI',             category: 'ide-assistant' },
+    { host: 'linear.app',            vendor: 'Linear',     product: 'Linear AI',             category: 'ide-assistant' },
+    { host: 'atlassian.net',         vendor: 'Atlassian',  product: 'Atlassian Intelligence', category: 'ide-assistant' },
+    { host: 'atlassian.com',         vendor: 'Atlassian',  product: 'Atlassian Intelligence', category: 'ide-assistant' },
+    { host: 'asana.com',             vendor: 'Asana',      product: 'Asana AI',              category: 'ide-assistant' },
+    { host: 'monday.com',            vendor: 'monday.com', product: 'monday AI',             category: 'ide-assistant' },
+    { host: 'clickup.com',           vendor: 'ClickUp',    product: 'ClickUp Brain',         category: 'ide-assistant' },
+    { host: 'app.clickup.com',       vendor: 'ClickUp',    product: 'ClickUp Brain',         category: 'ide-assistant' },
+    { host: 'canva.com',             vendor: 'Canva',      product: 'Magic Studio',          category: 'ide-assistant' },
+    { host: 'figma.com',             vendor: 'Figma',      product: 'Figma AI',              category: 'ide-assistant' },
+    { host: 'miro.com',              vendor: 'Miro',       product: 'Miro AI',               category: 'ide-assistant' },
+    // Code hosting with embedded AI
+    { host: 'github.com',            vendor: 'GitHub',     product: 'GitHub Copilot Chat',   category: 'ide-assistant' },
+    { host: 'gitlab.com',            vendor: 'GitLab',     product: 'GitLab Duo',            category: 'ide-assistant' },
+    // CRM with embedded AI
+    { host: 'lightning.force.com',   vendor: 'Salesforce', product: 'Einstein / Agentforce', category: 'ide-assistant' },
+    { host: 'salesforce.com',        vendor: 'Salesforce', product: 'Einstein / Agentforce', category: 'ide-assistant' },
+    { host: 'hubspot.com',           vendor: 'HubSpot',    product: 'HubSpot AI',            category: 'ide-assistant' },
+  ];
+
+  // Cached registry (loaded async on script start). Until the async load
+  // completes we fall back to FALLBACK_SAAS_WITH_AI so first-run users
+  // aren't ungoverned on the most common SaaS apps.
+  let _platformsCache = null;
+
+  async function loadPlatforms() {
+    try {
+      const obj = await chrome.storage.local.get(['cfai.platforms']);
+      const fromServer = obj['cfai.platforms'];
+      if (Array.isArray(fromServer) && fromServer.length > 0) {
+        _platformsCache = fromServer;
+        return;
+      }
+    } catch { /* extension context lost — fall through to fallback */ }
+    _platformsCache = FALLBACK_SAAS_WITH_AI;
+  }
+
+  function matchesKnownSaas(h) {
+    if (!h) return null;
+    const lh = h.toLowerCase();
+    // Until the cache loads, use the hardcoded list directly. After load,
+    // the cache may be either the server list OR the fallback (same shape).
+    const list = _platformsCache || FALLBACK_SAAS_WITH_AI;
+    for (const entry of list) {
+      if (!entry?.host) continue;
+      if (lh === entry.host || lh.endsWith('.' + entry.host)) return entry;
+    }
+    return null;
+  }
+
+  // -----------------------------------------------------------------
+  // AI-affordance click detector — for SaaS apps we haven't allowlisted,
+  // catch the moment a user activates an AI feature (clicks "Ask AI",
+  // sparkle button, "Help me write", etc.). On click, force-inject the
+  // DLP stack so the next paste/send is governed.
+  //
+  // Conservative thresholds: a click on a generic "Generate" button
+  // alone does NOT trigger — we require either a strong phrase or a
+  // verb + AI-context combination.
+  // -----------------------------------------------------------------
+  const STRONG_AI_PHRASE = new RegExp(
+    [
+      'ask ai\\b',
+      'ask copilot\\b',
+      'ask gemini\\b',
+      'ai assistant\\b',
+      'ai chat\\b',
+      'ai mode\\b',
+      'ai suggest',
+      'ai write\\b',
+      'ai prompt\\b',
+      'ai response\\b',
+      'help me (write|draft|reply|respond|compose|brainstorm)',
+      'summarize with ai\\b',
+      'rewrite with ai\\b',
+      'improve with ai\\b',
+      'draft with ai\\b',
+      'explain with ai\\b',
+      'use ai\\b',
+      'with ai\\b',
+      'open copilot\\b',
+      'copilot chat\\b',
+      'duet ai\\b',
+      'gitlab duo\\b',
+      'einstein\\b',
+      'gemini\\b',
+    ].join('|'),
+    'i',
+  );
+  const AI_DATA_HINT     = /(^|[-_])(ai|copilot|assistant|gemini|einstein|llm|gpt|claude)([-_]|$)/i;
+  const AI_VERB          = /\b(generate|write|draft|reply|respond|compose|summarize|improve|rewrite|suggest|fix|explain|brainstorm|magic)\b/i;
+  const SPARKLE          = /✨|sparkle|stars/i;   // ✨ U+2728
+
+  function isAiAffordance(el) {
+    let cur = el;
+    for (let i = 0; i < 4 && cur && cur.nodeType === 1; i++) {
+      const text  = (cur.textContent || '').slice(0, 200);
+      const aria  = (cur.getAttribute?.('aria-label') || '') + ' ' + (cur.getAttribute?.('title') || '');
+      const cls   = (cur.className && typeof cur.className === 'string') ? cur.className : '';
+      const data  = serializeDataset(cur);
+
+      // 1) Strong phrase anywhere in text/aria → ai
+      if (STRONG_AI_PHRASE.test(text + ' ' + aria + ' ' + cls)) return { reason: 'phrase', label: trim80(text || aria) };
+
+      // 2) AI data hint + verb in text → ai
+      if (AI_DATA_HINT.test(data) && AI_VERB.test(text + ' ' + aria)) return { reason: 'data+verb', label: trim80(text || aria) };
+
+      // 3) Sparkle (icon class or ✨) + verb → ai
+      if ((SPARKLE.test(cls) || SPARKLE.test(text)) && AI_VERB.test(text + ' ' + aria)) return { reason: 'sparkle+verb', label: trim80(text || aria) };
+
+      cur = cur.parentElement;
+    }
+    return null;
+  }
+
+  function serializeDataset(el) {
+    try {
+      const ds = el.dataset || {};
+      return Object.entries(ds).map(([k, v]) => `${k}=${v}`).join(' ');
+    } catch { return ''; }
+  }
+
+  function trim80(s) { return (s || '').replace(/\s+/g, ' ').trim().slice(0, 80); }
+
+  // -----------------------------------------------------------------
+  // Run order:
+  //   1. If host is in KNOWN_SAAS_WITH_AI → force-inject immediately.
+  //   2. Always install affordance click listener (catches the SaaS
+  //      tools we don't have on the allowlist).
+  //   3. If neither of the above shortcut paths fired by document_idle,
+  //      run the DOM heuristic + LLM classifier (the original flow).
+  // -----------------------------------------------------------------
+  // Load the server-driven registry first, THEN decide whether this host
+  // is on the SaaS allowlist. loadPlatforms typically returns in <10ms (a
+  // chrome.storage.local read), well before check()'s 800ms scheduler.
+  loadPlatforms().then(() => {
+    const saasMatch = matchesKnownSaas(host);
+    if (saasMatch && !window[FINGERPRINTED_KEY]) {
+      window[FINGERPRINTED_KEY] = 'saas-allowlist';
+      forceKnown({ ...saasMatch, source: 'allowlist' });
+    }
+  });
+
+  installAffordanceListener();
+
+  // Run the initial check shortly after idle so SPA frameworks have time to render.
+  scheduleCheck(800);
+
+  // Watch for late-loading chat UIs (e.g., Lovable's editor that mounts after auth).
+  // Debounced MutationObserver: if the page suddenly grows a chat input or send
+  // button later, re-evaluate (max once per page thanks to FINGERPRINTED_KEY).
+  let mutTimer = null;
+  const mo = new MutationObserver(() => {
+    if (window[FINGERPRINTED_KEY]) { mo.disconnect(); return; }
+    clearTimeout(mutTimer);
+    mutTimer = setTimeout(check, 600);
+  });
+  try { mo.observe(document.documentElement || document.body, { childList: true, subtree: true }); } catch {}
+
+  function scheduleCheck(delay) {
+    setTimeout(check, delay);
+  }
+
+  function check() {
+    if (window[FINGERPRINTED_KEY]) return;
+    const signals = buildSignals();
+    const verdict = preDecide(signals);
+    if (verdict === 'not-ai') {
+      // Strong negative — cache locally for this tab so we stop watching.
+      window[FINGERPRINTED_KEY] = 'local:not-ai';
+      try { mo.disconnect(); } catch {}
+      return;
+    }
+    if (verdict === 'ai' || verdict === 'ambiguous') {
+      window[FINGERPRINTED_KEY] = 'pending';
+      classify(signals);
+    }
+  }
+
+  // Build the metadata signals bundle. ONLY whitelisted fields. Never include
+  // raw text content from inputs or messages — those are prompt content.
+  function buildSignals() {
+    const inputs   = document.querySelectorAll('textarea, [contenteditable="true"], [contenteditable=""]');
+    const buttons  = document.querySelectorAll('button, [role="button"]');
+    const sendBtn  = Array.from(buttons).some((b) => {
+      const t = (b.textContent || '').trim().toLowerCase();
+      return /^(send|submit|generate|run|ask|chat|reply)\b/i.test(t) ||
+             /aria-label/i.test(b.outerHTML.slice(0, 200)) && /send|submit|generate/i.test(b.outerHTML.slice(0, 200));
+    });
+    const hasChatInput =
+      // Multi-line input that takes prose, not a single <input>
+      Array.from(inputs).some((el) => {
+        if (el.tagName === 'TEXTAREA') return true;
+        // contenteditable div with a placeholder hint
+        const ph = el.getAttribute('placeholder') || el.getAttribute('data-placeholder') || el.getAttribute('aria-label') || '';
+        return /message|ask|prompt|chat/i.test(ph);
+      });
+    const hasStreamingMarker =
+      // Common attributes on streaming response containers across AI apps
+      !!document.querySelector(
+        '[data-message-role],[data-role="assistant"],[data-streaming],[data-streaming-text],.streaming-text,[aria-live="polite"]:not(:empty)'
+      );
+    const pageTitle = (document.title || '').slice(0, 200);
+    const metaDesc  = document.querySelector('meta[name="description"]')?.getAttribute('content')?.slice(0, 200) || '';
+
+    return {
+      page_title:        pageTitle,
+      meta_description:  metaDesc,
+      has_chat_input:    !!hasChatInput,
+      has_send_button:   !!sendBtn,
+      has_streaming_text: !!hasStreamingMarker,
+      // request_body_shape + detected_wire_format come from the proxy side,
+      // not the page DOM — they'd require fetch instrumentation, defer.
+    };
+  }
+
+  // Pre-decide locally — if we're certain it's not AI, skip the server call.
+  function preDecide(s) {
+    const positiveScore = (s.has_chat_input ? 1 : 0) + (s.has_send_button ? 1 : 0) + (s.has_streaming_text ? 1 : 0);
+    // Title check — many AI apps put "AI", "chat", "assistant" in the title
+    const titleHint = /\b(ai|chat|assistant|copilot|gpt|llm|claude|gemini|agent)\b/i.test(s.page_title);
+
+    if (positiveScore === 0 && !titleHint) return 'not-ai';      // obviously not (login pages, articles, etc.)
+    if (positiveScore >= 2 || (positiveScore >= 1 && titleHint)) return 'ambiguous'; // ask classifier
+    return 'ambiguous';   // single weak signal — let classifier decide
+  }
+
+  // Force-mark this host as a known AI tool — used by the SaaS allowlist
+  // and the affordance click detector. Skips the LLM entirely.
+  function forceKnown({ vendor, product, category, source, label } = {}) {
+    chrome.runtime.sendMessage(
+      {
+        __cfai_kind: 'knownAiTool',
+        host,
+        vendor: vendor || null,
+        product: product || null,
+        category: category || null,
+        sandbox: 'remote',           // SaaS AI features run server-side
+        source: source || 'allowlist',
+        reason: label ? `${source}: "${label}"` : source,
+      },
+      (resp) => {
+        if (chrome.runtime.lastError || !resp?.ok) {
+          // Worker died or unenrolled — silently drop. Next user action that
+          // re-enters will retry.
+          return;
+        }
+        const v = resp.verdict;
+        if (v?.should_govern) announceGovernance(v);
+      },
+    );
+  }
+
+  function installAffordanceListener() {
+    // One-shot per page — once an affordance fires, we trust the page is
+    // AI for the rest of the session. Saves redundant injection requests.
+    let fired = false;
+    document.addEventListener('click', (ev) => {
+      if (fired) return;
+      const match = isAiAffordance(ev.target);
+      if (!match) return;
+      fired = true;
+      forceKnown({ vendor: host, product: host, category: 'ide-assistant', source: 'affordance', label: match.label });
+    }, true);   // capture phase — fires before React's synthetic handlers stop propagation
+  }
+
+  function classify(signals) {
+    chrome.runtime.sendMessage(
+      { __cfai_kind: 'classifyHost', host, signals },
+      (resp) => {
+        if (chrome.runtime.lastError) {
+          // Service worker probably terminated; will retry on next visit.
+          window[FINGERPRINTED_KEY] = null;
+          return;
+        }
+        if (!resp || !resp.ok || !resp.verdict) {
+          window[FINGERPRINTED_KEY] = null;
+          return;
+        }
+        const v = resp.verdict;
+        window[FINGERPRINTED_KEY] = v.should_govern ? 'govern' : (v.is_ai ? 'is-ai-low-conf' : 'not-ai');
+
+        if (v.should_govern) {
+          // The host's verdict says govern it. The existing per-site content
+          // scripts (content.js) handle capture; this fingerprinter is the
+          // discovery + classification layer only. Annotate the page so the
+          // user knows it's being governed (small banner — invisible if the
+          // existing content script already handles this site).
+          announceGovernance(v);
+        }
+      },
+    );
+  }
+
+  // ── When to tell the user they are governed ───────────────────────────────
+  //
+  // The banner used to appear the moment the HOST verdict said govern. On a
+  // dedicated AI site that is right. On a SaaS app where AI is one panel it was
+  // wrong and alarming: opening your Gmail inbox popped "governed by CloudFuze"
+  // while you read ordinary mail, implying the mail itself was being watched.
+  //
+  // The notice now follows exactly the rule capture follows (lib/ai-surfaces.js):
+  // on an embedded-AI host it appears only when an AI panel is actually open. It
+  // has to be REACTIVE, because a side panel is opened minutes after page load —
+  // announcing at load time and never again would mean the notice was either
+  // premature or absent.
+  //
+  // The two must agree in both directions. A notice with no capture is a false
+  // alarm; capture with no notice is worse. Both read the same selectors, served
+  // from the same module.
+  const EMBEDDED = 'embedded_ai';
+
+  // THE SAME BUILT-IN FLOOR content.js CARRIES, and for the same reason: the
+  // guarantee must not depend on a network call succeeding.
+  //
+  // The first version of this gate read surface_scope from the SERVER VERDICT
+  // only. Against a server that predates the field — or one that is unreachable,
+  // or a cached verdict from before the upgrade — `surface_scope` is undefined,
+  // the embedded test is false, and the notice announced on Gmail immediately.
+  // That is fail-OPEN on the exact case the gate exists for.
+  //
+  // Kept in step with content.js's EMBEDDED_AI_FLOOR by
+  // tests/governance-notice.test.mjs, which compares the two lists and fails if
+  // they drift. Duplication across two independently-injected content scripts is
+  // the price of neither of them depending on the other's load order.
+  // Generic AI-panel selectors, used for every app whose embedded assistant we
+  // have not named specifically. Keyed on words vendors actually put on an AI
+  // surface — never a bare "ai" token, which also matches "mail".
+  //
+  // These are conservative on purpose. The gate fails closed: if none of them
+  // match, that host captures nothing and shows no notice, which is a reportable
+  // gap rather than a silent over-collection. Correct one from the dashboard
+  // (/api/v1/ai-surfaces) rather than shipping a new extension.
+  const GENERIC_AI_PANEL = [
+    '[aria-label*="Copilot" i]', '[aria-label*="Assistant" i]', '[aria-label*="Ask AI" i]',
+    '[class*="copilot" i]', '[class*="assistant" i]', '[data-testid*="assistant" i]',
+  ];
+
+  const EMBEDDED_AI_FLOOR = {
+    // ── Google ──
+    'mail.google.com': ['[aria-label*="Gemini" i]', '[data-gemini]', 'dialog[aria-label*="Gemini" i]'],
+    'docs.google.com': ['[aria-label*="Gemini" i]', '[aria-label*="Help me write" i]'],
+    'meet.google.com': ['[aria-label*="Gemini" i]', '[aria-label*="take notes" i]'],
+    // ── Microsoft. A Copilot Studio agent is published across all of these. ──
+    'teams.microsoft.com':        ['[aria-label*="Copilot" i]', '[data-tid*="copilot" i]'],
+    'cloud.microsoft':            ['[aria-label*="Copilot" i]', '[class*="copilot" i]', '[data-tid*="copilot" i]'],
+    'sharepoint.com':             ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'outlook.office.com':         ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'outlook.office365.com':      ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'outlook.live.com':           ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'office.com':                 GENERIC_AI_PANEL,
+    'office365.com':              GENERIC_AI_PANEL,
+    'crm.dynamics.com':           ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    'copilotstudio.microsoft.com':['[aria-label*="Copilot" i]', '[class*="copilot" i]', '[aria-label*="Test your agent" i]'],
+    'powerapps.com':              ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
+    // ── Code hosting ──
+    'github.com': ['[data-testid*="copilot" i]', '#copilot-chat', '[aria-label*="Copilot" i]', 'copilot-chat'],
+    'gitlab.com': ['[aria-label*="Duo" i]', '[class*="duo-chat" i]', '[data-testid*="duo" i]'],
+    // ── CRM / support desks ──
+    'hubspot.com':      ['[data-test-id*="copilot" i]', '[class*="copilot" i]', '[aria-label*="Breeze" i]'],
+    'hs-scripts.com':   ['[data-test-id*="copilot" i]', '[class*="copilot" i]', '[aria-label*="Breeze" i]'],
+    'salesforce.com':   ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'force.com':        ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'salesforceliveagent.com':   ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'salesforce-experience.com': ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'salesforce-sites.com':      ['[aria-label*="Einstein" i]', '[aria-label*="Agentforce" i]'],
+    'zendesk.com':      ['[data-test-id*="copilot" i]', '[data-test-id*="generative" i]', '[class*="ai-agent" i]'],
+    'zopim.com':        ['[data-test-id*="copilot" i]', '[data-test-id*="generative" i]', '[class*="ai-agent" i]'],
+    'intercom.com':     ['[class*="fin-" i]', '[class*="intercom-ai" i]'],
+    'intercom.io':      ['[class*="fin-" i]', '[class*="intercom-ai" i]'],
+    'drift.com':        GENERIC_AI_PANEL,
+    'driftt.com':       GENERIC_AI_PANEL,
+    'livechatinc.com':  GENERIC_AI_PANEL,
+    'crisp.chat':       ['[class*="magic" i]', ...GENERIC_AI_PANEL],
+    'tawk.to':          GENERIC_AI_PANEL,
+    // ── Productivity / collaboration with an AI panel ──
+    'slack.com':     ['[aria-label*="Slack AI" i]', '[data-qa*="ai_" i]', ...GENERIC_AI_PANEL],
+    'notion.so':     ['[class*="notion-ai" i]', '[aria-label*="Notion AI" i]', ...GENERIC_AI_PANEL],
+    'notion.site':   ['[class*="notion-ai" i]', '[aria-label*="Notion AI" i]', ...GENERIC_AI_PANEL],
+    'linear.app':    GENERIC_AI_PANEL,
+    'atlassian.net': ['[data-testid*="ai-" i]', '[aria-label*="Atlassian Intelligence" i]', ...GENERIC_AI_PANEL],
+    'atlassian.com': ['[data-testid*="ai-" i]', '[aria-label*="Atlassian Intelligence" i]', ...GENERIC_AI_PANEL],
+    'asana.com':     GENERIC_AI_PANEL,
+    'monday.com':    GENERIC_AI_PANEL,
+    'clickup.com':   ['[aria-label*="Brain" i]', ...GENERIC_AI_PANEL],
+    'canva.com':     ['[aria-label*="Magic" i]', ...GENERIC_AI_PANEL],
+    'figma.com':     GENERIC_AI_PANEL,
+    'miro.com':      GENERIC_AI_PANEL,
+  };
+
+  /** Floor selectors for a host — exact or dot-suffix, longest key wins. */
+  function floorSelectorsForHost(host) {
+    const h = String(host || '').toLowerCase();
+    let best = null, bestLen = 0;
+    for (const [key, sels] of Object.entries(EMBEDDED_AI_FLOOR)) {
+      if ((h === key || h.endsWith('.' + key)) && key.length > bestLen) {
+        best = sels; bestLen = key.length;
+      }
+    }
+    return best;
+  }
+
+  // What a prompt is typed into — and the test for "is this the AI PANEL, or just
+  // the button that opens it". Gmail keeps a Gemini launcher in its toolbar
+  // permanently, and that button's aria-label contains "Gemini", so a name-only
+  // match fired on the bare inbox and the banner appeared with no panel open.
+  // Requiring a composer is not a size heuristic: it is the thing being governed.
+  const COMPOSER_SEL = 'textarea, [contenteditable]:not([contenteditable="false"]), [role="textbox"]';
+
+  // The launcher itself — Gmail's toolbar Gemini button, an "Ask Copilot" link, a
+  // menu trigger. Rejected first: it carries the AI's name but nothing can be
+  // typed into it.
+  const LAUNCHER_SEL = 'button, [role="button"], a, [aria-haspopup]';
+
+  function hasComposer(el) {
+    try {
+      if (el.matches && el.matches(LAUNCHER_SEL)) return false;
+      if (el.matches && el.matches(COMPOSER_SEL)) return true;
+      return !!(el.querySelector && el.querySelector(COMPOSER_SEL));
+    } catch (e) { return false; }
+  }
+
+  function panelsVisible(selectors) {
+    for (const sel of selectors) {
+      let found;
+      try { found = document.querySelectorAll(sel); } catch (e) { continue; }
+      for (const el of found) {
+        // A collapsed side panel is still in the DOM; it is not open.
+        if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) continue;
+        if (!hasComposer(el)) continue;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function announceGovernance(v) {
+    const host = (typeof window !== 'undefined' && window.location) ? window.location.hostname : '';
+    const floor = floorSelectorsForHost(host);
+
+    // EMBEDDED IF EITHER SOURCE SAYS SO. The verdict is authoritative when it
+    // carries the field; the floor decides when it does not, which is what keeps
+    // an old, cached or unreachable server from re-enabling the load-time banner.
+    const isEmbedded = v.surface_scope === EMBEDDED || !!floor;
+
+    // Whole-site AI product: unchanged, announce immediately.
+    if (!isEmbedded) { showGovernanceBanner(v); return; }
+
+    // Server selectors preferred — they can be corrected without a release — with
+    // the floor behind them.
+    const selectors = (Array.isArray(v.panel_selectors) && v.panel_selectors.length)
+      ? v.panel_selectors
+      : (floor || []);
+
+    // Scoped host, but we do not know what its AI panel looks like. Stay silent:
+    // capture is gated by the same unknown, so there is nothing to announce.
+    if (selectors.length === 0) return;
+
+    // The banner copy needs to know it is scoped even when the server did not say so.
+    if (!v.surface_scope) v.surface_scope = EMBEDDED;
+
+    if (panelsVisible(selectors)) { showGovernanceBanner(v); return; }
+
+    // Wait for the panel to open. Debounced, because a mail app mutates its DOM
+    // constantly and this observer would otherwise run a selector sweep on every
+    // keystroke. Disconnects as soon as it fires — the banner is once per page.
+    let timer = null;
+    let done = false;
+    const obs = new MutationObserver(() => {
+      if (done || timer) return;
+      timer = setTimeout(() => {
+        timer = null;
+        if (done) return;
+        if (panelsVisible(selectors)) {
+          done = true;
+          obs.disconnect();
+          showGovernanceBanner(v);
+        }
+      }, 400);
+    });
+    try {
+      obs.observe(document.documentElement, { childList: true, subtree: true });
+    } catch (e) {
+      // Nothing to observe (detached document) — no notice, and no capture either.
+    }
+  }
+
+  function showGovernanceBanner(v) {
+    // Skip if existing content script has already annotated this page.
+    if (document.querySelector('[data-cfai-banner]')) return;
+    const div = document.createElement('div');
+    div.setAttribute('data-cfai-banner', '1');
+    div.style.cssText =
+      'position:fixed;bottom:12px;right:12px;z-index:2147483647;' +
+      'background:#0f172a;color:#e2e8f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;' +
+      'padding:8px 12px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.25);' +
+      'border:1px solid #1e293b;max-width:320px;';
+    // NAME THE AI, NOT THE HOST. On an embedded-AI host the vendor is the host's
+    // vendor — "Google" on Gmail — so the old label read as though Google Mail
+    // itself were governed. surface_product names the actual feature ("Gemini in
+    // Gmail"), which is both accurate and far less alarming.
+    const label = v.surface_product || v.vendor || 'AI tool';
+    const subject = `<strong>${escapeHtml(label)}</strong>`;
+    // Scope is the sentence that stops this reading as blanket surveillance.
+    const scopeNote = v.surface_scope === EMBEDDED
+      ? '<div style="opacity:.7;margin-top:4px;font-size:11px">Only your AI prompts here are governed — the rest of this app is not.</div>'
+      : '';
+    const note = v.governance_note ? `<div style="opacity:.7;margin-top:4px;font-size:11px">${escapeHtml(v.governance_note)}</div>` : '';
+    div.innerHTML = `<div>🛡 ${subject} — governed by CloudFuze</div>${scopeNote}${note}`;
+    document.documentElement.appendChild(div);
+    setTimeout(() => { try { div.remove(); } catch {} }, 6000);
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+})();

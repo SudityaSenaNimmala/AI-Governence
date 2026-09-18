@@ -1,0 +1,47 @@
+directories:
+  output: ../build/electron-dist
+  buildResources: build
+appId: com.cloudfuze.ai-governance
+productName: CloudFuze AI Governance
+copyright: Copyright © 2026 CloudFuze
+files:
+  - filter:
+      - main.js
+      - preload.js
+      - renderer/**/*
+      - assets/**/*
+extraResources:
+  - from: ../src
+    to: agent-src
+    filter:
+      - '**/*'
+      - '!**/node_modules/**'
+  - from: ../../browser-extension
+    to: browser-extension
+    filter:
+      - '**/*'
+      - '!**/node_modules/**'
+win:
+  target: nsis
+  icon: assets/icon.ico
+  requestedExecutionLevel: asInvoker
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  installerIcon: assets/icon.ico
+  uninstallerIcon: assets/icon.ico
+  installerHeaderIcon: assets/icon.ico
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: CloudFuze AI Governance
+  include: installer.nsh
+mac:
+  target: dmg
+  icon: assets/icon.icns
+  category: public.app-category.utilities
+linux:
+  target: AppImage
+  icon: assets
+  category: Utility
+electronVersion: 33.4.11

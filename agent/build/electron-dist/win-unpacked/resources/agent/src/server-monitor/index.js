@@ -1,0 +1,266 @@
+#!/usr/bin/env node
+// CloudFuze server-monitor daemon.
+//
+// Runs on a Linux server alongside the customer's AI agents. Boots an HTTPS
+// MITM proxy (reuses the desktop agent's proxy engine) and reports every
+// intercepted LLM API call to the governance server with:
+//   - what (provider + model + prompt + response)
+//   - who (real human via /proc/<pid>/loginuid, surviving sudo)
+//   - which agent  (cmdline + cwd from /proc/<pid>)
+//   - how triggered (parent-chain walk: cron / systemd / sshd / ci)
+//   - cost (tokens × pricing table)
+//
+// Env vars (see install.sh for the systemd unit defaults):
+//   GOV_SERVER_URL     governance server base URL (e.g. https://gov.cloudfuze.com)
+//   GOV_ENROLL_SECRET  one-shot enrollment secret (rotated after first start)
+//   PROXY_LISTEN_HOST  default 127.0.0.1
+//   PROXY_LISTEN_PORT  default 8443
+//   TOKEN_FILE         where to persist the daemon's machine token
+//                      (default /etc/cloudfuze/server-monitor.token.json)
+
+import process from 'node:process';
+import { loadOrCreateCA } from '../proxy/ca.js';
+import { startProxy } from '../proxy/proxy-server.js';
+import { attribute } from './attribution.js';
+import { pidForLocalPort, ensureStarted as ensurePortLookupStarted } from './port-lookup.js';
+import { parseApiCall, providerForHost } from './cost-parser.js';
+import { ensureEnrolled } from './enroll.js';
+import { createReporter } from './reporter.js';
+import { startGpuWatch } from './gpu-watch.js';
+import { startAuditWatch } from './audit-watch.js';
+import { startShimIngest } from './shim-ingest.js';
+import { startEbpfCapture } from './ebpf-launcher.js';
+
+const SERVER_URL    = process.env.GOV_SERVER_URL || 'http://localhost:8787';
+const ENROLL_SECRET = process.env.GOV_ENROLL_SECRET || 'dev-enroll-secret-change-me';
+const HOST          = process.env.PROXY_LISTEN_HOST || '127.0.0.1';
+const PORT          = Number(process.env.PROXY_LISTEN_PORT) || 8443;
+const TOKEN_FILE    = process.env.TOKEN_FILE || undefined;
+
+const log = {
+  info:  (m) => console.log(`[info ] ${m}`),
+  warn:  (m) => console.warn(`[warn ] ${m}`),
+  error: (m) => console.error(`[error] ${m}`),
+};
+
+async function main() {
+  if (!['linux', 'win32', 'darwin'].includes(process.platform)) {
+    log.warn(`server-monitor: unsupported platform ${process.platform}; attribution will be null.`);
+  }
+
+  log.info(`server-monitor starting (${process.platform}); governance server = ${SERVER_URL}`);
+  await ensurePortLookupStarted({ log });
+  const enrollment = await ensureEnrolled({ serverUrl: SERVER_URL, enrollSecret: ENROLL_SECRET, tokenFile: TOKEN_FILE, log });
+  log.info(`enrolled as machineId=${enrollment.machineId} (host=${enrollment.hostname})`);
+
+  const reporter = createReporter({ serverUrl: SERVER_URL, token: enrollment.token, log });
+  // Second reporter for signal events (GPU activity, model-file loads).
+  const signalReporter = createReporter({
+    serverUrl: SERVER_URL, token: enrollment.token, log,
+    endpoint: '/api/v1/server-agent-signals',
+  });
+
+  const ca = await loadOrCreateCA({ log });
+  log.info(`CA loaded; fingerprint=${ca.fingerprintSha256}`);
+  log.info('To install the CA system-wide: see install.sh (copies ca.crt to /usr/local/share/ca-certificates/ and runs update-ca-certificates).');
+
+  // The hook fires for every intercepted API call. Attribution + cost runs
+  // here, not in the proxy, to keep the proxy generic.
+  const onApiCall = async (ev) => {
+    // Container bridge mode — we see the host but not the decrypted content.
+    // Still log the call so it appears in the dashboard.
+    if (ev._containerMode) {
+      const provider = providerForHost(ev.host, ev.path) || 'unknown';
+
+      reporter.enqueue({
+        occurred_at: new Date(ev.startedAt).toISOString(),
+        duration_ms: ev.durationMs,
+        response_status: ev.responseStatus,
+        host: ev.host,
+        path: ev.path || '/',
+        method: ev.method || 'POST',
+        provider: provider,
+        model: null,
+        prompt_tokens: null,
+        completion_tokens: null,
+        cached_tokens: null,
+        cost: null,
+        prompt_text: `[container traffic — ${ev._bytesSent || 0} bytes sent]`,
+        response_text: `[container traffic — ${ev._bytesReceived || 0} bytes received]`,
+        response_truncated: true,
+        attribution: { user: 'docker-container', trigger_source: 'container' },
+        source_ip: ev.peerAddress || null,
+      });
+      return;
+    }
+
+    // If response is chunked, decode the chunk framing
+    // Check header OR detect chunk pattern (hex size + \r\n + data)
+    let responseBody = ev.responseBody;
+    const respStart = responseBody ? responseBody.toString('utf8', 0, 20) : '';
+    const looksChunked = /^[0-9a-fA-F]+\r\n/.test(respStart);
+    if (responseBody && (ev.responseHeaders?.['transfer-encoding'] === 'chunked' || looksChunked)) {
+      try {
+        const chunks = [];
+        let buf = responseBody;
+        while (buf.length > 0) {
+          const lineEnd = buf.indexOf('\r\n');
+          if (lineEnd === -1) break;
+          const sizeStr = buf.slice(0, lineEnd).toString('utf8').trim();
+          const size = parseInt(sizeStr, 16);
+          if (isNaN(size) || size === 0) break;
+          const start = lineEnd + 2;
+          if (start + size > buf.length) break;
+          chunks.push(buf.slice(start, start + size));
+          buf = buf.slice(start + size + 2); // skip \r\n after chunk
+        }
+        if (chunks.length > 0) responseBody = Buffer.concat(chunks);
+      } catch {}
+    }
+
+    // Debug: log what we're passing to the parser
+    const reqBodyStr = ev.requestBody ? ev.requestBody.toString('utf8', 0, 100) : '(null)';
+    const respBodyStr = responseBody ? responseBody.toString('utf8', 0, 100) : '(null)';
+    log.info(`parseApiCall input: reqBody[${ev.requestBody?.length || 0}B]="${reqBodyStr}" respBody[${responseBody?.length || 0}B]="${respBodyStr}"`);
+
+    const parsed = parseApiCall({
+      host: ev.host,
+      path: ev.path,
+      requestBody: ev.requestBody,
+      requestHeaders: ev.requestHeaders,
+      responseBody: responseBody,
+      responseHeaders: ev.responseHeaders,
+    });
+    if (!parsed) {
+      log.warn(`parseApiCall returned null for ${ev.host}${ev.path} (reqBody=${ev.requestBody?.length || 0}B respBody=${responseBody?.length || 0}B)`);
+      return;
+    }
+    log.info(`parsed: provider=${parsed.provider} model=${parsed.model} promptText=${parsed.prompt_text?.length || 0} responseText=${parsed.response_text?.length || 0}`);
+
+    // Attribute: peer port → PID → /proc.
+    let attribution = null;
+    if (ev.peerPort) {
+      try {
+        const pid = await pidForLocalPort(ev.peerPort);
+        if (pid) attribution = await attribute(pid);
+      } catch (err) {
+        log.warn(`attribution failed for peerPort=${ev.peerPort}: ${err.message}`);
+      }
+    }
+
+    reporter.enqueue({
+      occurred_at: new Date(ev.startedAt).toISOString(),
+      duration_ms: ev.durationMs,
+      response_status: ev.responseStatus,
+      host: ev.host,
+      path: ev.path,
+      method: ev.method,
+
+      provider: parsed.provider,
+      model:    parsed.model,
+      prompt_tokens:     parsed.prompt_tokens,
+      completion_tokens: parsed.completion_tokens,
+      cached_tokens:     parsed.cached_tokens,
+      cost: parsed.cost,                          // { provider, family, *_cost_usd, total_cost_usd, pricing_version }
+      // Store raw request body so the dashboard can parse messages/system/tools.
+      // Prefer parsed._reqJson (clean, no concatenated buffer) over raw body.
+      prompt_text:   parsed._reqJson ? JSON.stringify(parsed._reqJson).slice(0, 50000)
+                   : (ev.requestBody ? ev.requestBody.toString('utf8').slice(0, 50000) : null),
+      response_text: parsed.response_text || (responseBody ? responseBody.toString('utf8').slice(0, 50000) : null),
+      response_truncated: ev.responseTruncated,
+
+      attribution,
+      source_ip: ev.peerAddress || null,
+    });
+  };
+
+  const { stop } = await startProxy({
+    ca,
+    reporter: null,           // proxy's enforcement reporter — unused in server mode
+    log,
+    host: HOST,
+    port: PORT,
+    onApiCall,
+    alwaysIntercept: true,    // no browsers on the server; intercept all whitelisted hosts
+  });
+
+  log.info(`proxy listening on ${HOST}:${PORT} (unified: explicit + transparent on same port)`);
+
+  // ── Heartbeat: ping governance server every 60s so dashboard shows "active" ──
+  const heartbeatInterval = setInterval(async () => {
+    try {
+      await fetch(`${SERVER_URL}/api/v1/monitor/heartbeat`, {
+        method: 'POST',
+        headers: { 'authorization': `Bearer ${enrollment.token}`, 'content-type': 'application/json' },
+      });
+    } catch (err) {
+      log.warn(`heartbeat failed: ${err.message}`);
+    }
+  }, 60_000);
+  // Send first heartbeat immediately
+  fetch(`${SERVER_URL}/api/v1/monitor/heartbeat`, {
+    method: 'POST',
+    headers: { 'authorization': `Bearer ${enrollment.token}`, 'content-type': 'application/json' },
+  }).catch(() => {});
+
+  // ── Docker event watcher: auto-flush conntrack when governed containers restart ──
+  // When a governed container is recreated/restarted by CI/CD, stale conntrack
+  // entries bypass the DNAT rule. This watcher detects container start events
+  // and flushes conntrack for that container's IP so DNAT takes effect immediately.
+  try {
+    const { spawn } = await import('node:child_process');
+    const dockerEvents = spawn('docker', ['events', '--filter', 'event=start', '--filter', 'type=container', '--format', '{{.Actor.Attributes.name}}'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    dockerEvents.stdout.on('data', (data) => {
+      const name = data.toString().trim();
+      if (!name) return;
+      // Get the container's IP and flush conntrack
+      const inspect = spawn('docker', ['inspect', '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', name], { stdio: ['ignore', 'pipe', 'ignore'] });
+      let ip = '';
+      inspect.stdout.on('data', (d) => { ip += d.toString().trim(); });
+      inspect.on('close', () => {
+        if (ip) {
+          spawn('conntrack', ['-D', '-s', ip], { stdio: 'ignore' }).on('close', () => {
+            log.info(`docker-watch: container ${name} started (IP=${ip}), conntrack flushed`);
+          });
+        }
+      });
+    });
+    dockerEvents.on('error', () => {}); // docker not available — ignore
+    log.info('docker-watch: monitoring container start events for conntrack flush');
+  } catch { /* docker events not available */ }
+
+  // Tier 2 + Tier 3 supplementary captures — all best-effort, no-op when the
+  // platform tooling isn't present.
+  const gpuWatch    = startGpuWatch({ reporter: signalReporter, log });
+  const auditWatch  = startAuditWatch({ reporter: signalReporter, log });
+  const shimIngest  = startShimIngest({ reporter, log });
+  const ebpfCapture = startEbpfCapture({ reporter, log });
+
+  const shutdown = async (sig) => {
+    log.info(`received ${sig}; draining reporter and stopping proxy`);
+    clearInterval(heartbeatInterval);
+    try { gpuWatch?.stop?.(); } catch {}
+    try { auditWatch?.stop?.(); } catch {}
+    try { shimIngest?.stop?.(); } catch {}
+    try { ebpfCapture?.stop?.(); } catch {}
+    try { await stop(); } catch (e) { log.warn(`stop error: ${e.message}`); }
+    try { await reporter.drain(); } catch (e) { log.warn(`drain error: ${e.message}`); }
+    try { await signalReporter.drain(); } catch (e) { log.warn(`drain signals error: ${e.message}`); }
+    // Deregister from governance server so dashboard removes this server
+    try {
+      await fetch(`${SERVER_URL}/api/v1/monitor/deregister`, {
+        method: 'POST',
+        headers: { 'authorization': `Bearer ${enrollment.token}`, 'content-type': 'application/json' },
+      });
+      log.info('deregistered from governance server');
+    } catch (e) { log.warn(`deregister failed: ${e.message}`); }
+    process.exit(0);
+  };
+  process.on('SIGINT',  () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+}
+
+main().catch((err) => {
+  log.error(`fatal: ${err.stack || err.message}`);
+  process.exit(1);
+});

@@ -10,7 +10,12 @@
 # relying on core.autocrlf, which is a per-clone setting nobody sets.
 *.cmd  text eol=crlf
 *.bat  text eol=crlf
-
 # The PowerShell helpers are read by powershell.exe, which is tolerant of LF, but
 # they sit beside the .cmd files and are edited together — keep them consistent.
 *.ps1  text eol=crlf
+agent/build/electron-dist/win-unpacked/*.exe filter=lfs diff=lfs merge=lfs -text
+agent/build/electron-dist/win-unpacked/*.dll filter=lfs diff=lfs merge=lfs -text
+agent/build/electron-dist/win-unpacked/*.bin filter=lfs diff=lfs merge=lfs -text
+agent/build/electron-dist/win-unpacked/*.pak filter=lfs diff=lfs merge=lfs -text
+agent/build/electron-dist/win-unpacked/*.dat filter=lfs diff=lfs merge=lfs -text
+agent/build/electron-dist/win-unpacked/resources/*.asar filter=lfs diff=lfs merge=lfs -text

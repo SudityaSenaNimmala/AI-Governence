@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "properties": {
+    "serverUrl": {
+      "title": "Governance server URL",
+      "description": "Base URL of the CloudFuze AI-Governance server, e.g. https://agentgovernence.cftools.live",
+      "type": "string"
+    },
+    "enrollSecret": {
+      "title": "Enrollment secret",
+      "description": "Shared secret used to enroll this browser with the governance server. Provisioned by IT; never shown to the user.",
+      "type": "string"
+    },
+    "userEmail": {
+      "title": "User email (optional)",
+      "description": "Override identity for attribution. Normally left empty so the desktop agent's identity beacon supplies the real user automatically.",
+      "type": "string"
+    },
+    "employeeEmail": {
+      "title": "Employee email (optional)",
+      "description": "Optional employee directory email attached at enrollment.",
+      "type": "string"
+    },
+    "computerName": {
+      "title": "Computer name (optional)",
+      "description": "Override machine name. Normally left empty so the desktop agent's identity beacon supplies it automatically.",
+      "type": "string"
+    },
+    "browserOnly": {
+      "title": "Browser-only fleet (no desktop agent)",
+      "description": "Set true when the desktop agent is not deployed. Skips the five-minute wait for an agent identity beacon so the extension enrolls immediately on install.",
+      "type": "boolean"
+    },
+    "identityDomain": {
+      "title": "Corporate email domain for identity",
+      "description": "When set, a signed-in browser profile is only accepted as the user identity if its email ends with this domain. Prevents a tester or developer signed into a personal/QA browser profile from being attributed as the user. Example: cloudfuze.com",
+      "type": "string"
+    }
+  }
+}

@@ -1,6 +1,11 @@
 node_modules/
 dist/
 build/
+# Exception: Electron desktop agent build (served by the download endpoint).
+# Windows binaries that can't be built on the Linux deploy server.
+!agent/build/
+!agent/build/electron-dist/
+!agent/build/electron-dist/**
 *.log
 .DS_Store
 Thumbs.db
