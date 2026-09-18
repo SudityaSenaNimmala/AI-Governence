@@ -388,20 +388,17 @@ function repositionBlockBanner() {
 // exactly the permanently-stuck "Masking…" button this replaces.
 // focusable:false + showInactive() is what keeps the AI app itself focused
 // the whole time the popup is visible.
-let _lastDialogBlockId = null;
-let _dialogDismissedAt = 0;
+let _dialogCreating = false;
 
 function showBlockDialogWindow(data) {
-  // Skip if the popup is already visible — the user pressing Enter while
-  // looking at the popup fires another block event, which re-renders the
-  // content and kills the button mid-click. Also skip if just dismissed
-  // (1s cooldown prevents dismiss→block→re-show race).
+  // Skip if already visible or being created — prevents blink from
+  // duplicate block events and re-render killing buttons mid-click.
+  if (_dialogCreating) return;
   if (dialogWindow && !dialogWindow.isDestroyed() && dialogWindow.isVisible()) return;
-  if (Date.now() - _dialogDismissedAt < 1000) return;
-  _lastDialogBlockId = data.block_id || null;
 
   const send = () => { if (dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.webContents.send('block-dialog', data); };
   if (!dialogWindow || dialogWindow.isDestroyed()) {
+    _dialogCreating = true;
     const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
     const w = 540, h = 620;
     dialogWindow = new BrowserWindow({
@@ -423,12 +420,10 @@ function showBlockDialogWindow(data) {
       },
     });
     dialogWindow.loadFile(path.join(RENDERER_DIR, 'block-dialog.html'));
-    dialogWindow.webContents.once('did-finish-load', () => { send(); dialogWindow.showInactive(); });
-    dialogWindow.on('closed', () => { dialogWindow = null; });
+    dialogWindow.webContents.once('did-finish-load', () => { send(); dialogWindow.showInactive(); _dialogCreating = false; });
+    dialogWindow.on('closed', () => { dialogWindow = null; _dialogCreating = false; });
   } else {
     send();
-    // Only call showInactive if the window is hidden — avoids blink on
-    // already-visible windows.
     if (!dialogWindow.isVisible()) dialogWindow.showInactive();
   }
 }
@@ -919,8 +914,6 @@ function setupIPC() {
   });
 
   ipcMain.on('dismiss-dialog', () => {
-    _dialogDismissedAt = Date.now();
-    _lastDialogBlockId = null;
     if (dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.hide();
   });
 

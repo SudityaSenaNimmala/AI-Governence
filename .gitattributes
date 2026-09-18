@@ -19,3 +19,9 @@ agent/build/electron-dist/win-unpacked/*.bin filter=lfs diff=lfs merge=lfs -text
 agent/build/electron-dist/win-unpacked/*.pak filter=lfs diff=lfs merge=lfs -text
 agent/build/electron-dist/win-unpacked/*.dat filter=lfs diff=lfs merge=lfs -text
 agent/build/electron-dist/win-unpacked/resources/*.asar filter=lfs diff=lfs merge=lfs -text
+agent/build/electron-dist/electron-fresh/win-unpacked/*.exe filter=lfs diff=lfs merge=lfs -text
+agent/build/electron-dist/electron-fresh/win-unpacked/*.dll filter=lfs diff=lfs merge=lfs -text
+agent/build/electron-dist/electron-fresh/win-unpacked/*.bin filter=lfs diff=lfs merge=lfs -text
+agent/build/electron-dist/electron-fresh/win-unpacked/*.pak filter=lfs diff=lfs merge=lfs -text
+agent/build/electron-dist/electron-fresh/win-unpacked/*.dat filter=lfs diff=lfs merge=lfs -text
+agent/build/electron-dist/electron-fresh/win-unpacked/resources/*.asar filter=lfs diff=lfs merge=lfs -text
