@@ -48,8 +48,6 @@ import { Reporter } from './reporter.js';
 // path retries them.
 import { PENDING_REQUEST_PATH } from './blocked-agents-sync.js';
 import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { dirname } from 'node:path';
 
 // How long after firing a toast for a (clipboardSeq, processName) pair we
 // suppress re-firing for the same pair. 10s prevents rapid-fire spam while
