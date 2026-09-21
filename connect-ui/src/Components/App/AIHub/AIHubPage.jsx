@@ -7739,14 +7739,6 @@ const TAB_GROUPS_RAW = {
       { slug: "risk", label: "Risk Scores", component: RiskScoreView, feat: "risk_scores" },
     ],
   },
-  SDK: {
-    title: "SDK",
-    hint: "Credentials for apps that report their AI activity here, and what they've reported.",
-    tabs: [
-      { slug: "projects", label: "Projects", component: SdkProjectsView, feat: "sdk" },
-      { slug: "traces",   label: "Traces",   component: SdkTracesView,   feat: "sdk" },
-    ],
-  },
   Setup: {
     title: "Setup",
     hint: "Wiring and one-off assessments. Configure once, then rarely visit.",
