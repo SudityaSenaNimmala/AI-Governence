@@ -688,16 +688,21 @@ const OV_ROUTE={
 // colour per meaning across the whole screen.
 const SANCTION_TONE={approved:"#22c55e",restricted:"#f59e0b",blocked:"#ef4444",unknown:"#9ca3af"};
 const RISK_TONE={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e",not_assessed:"#9ca3af"};
+const DLP_RANGES=[
+  {days:7,label:"Last 7 days",hint:"last 7 days"},
+  {days:30,label:"Last 1 month",hint:"last 30 days"},
+  {days:90,label:"Last 3 months",hint:"last 3 months"},
+];
 const SEV_TONE={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e"};
 const AUTONOMY_TONE={ai_app:"#0052e0",mcp:"#8b5cf6",ai_coding_agent:"#f59e0b",ai_agent:"#ef4444"};
 const VENDOR_LABEL={microsoft:"Azure OpenAI",google:"Vertex AI",openai:"OpenAI",claude:"Anthropic",gemini:"Gemini Enterprise"};
 
 /** Card that behaves like a link. role/tabIndex/keydown so it is reachable without a mouse. */
-function ClickCard({ title, hint, onClick, children }) {
+function ClickCard({ title, hint, action, onClick, children }) {
   return (<div className="aihub_card aihub_card_click" role="button" tabIndex={0}
                style={{display:"flex",flexDirection:"column",height:"100%",boxSizing:"border-box"}}
                onClick={onClick} onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();onClick();}}}>
-    <SectionHeader title={title} hint={hint}/>
+    <SectionHeader title={title} hint={hint} action={action}/>
     {children}
   </div>);
 }
@@ -894,6 +899,8 @@ function OverviewView() {
   const [toolsRisk,setToolsRisk]=useState({}); // {critical:N, high:N, medium:N, low:N, not_assessed:N}
   const [riskSummary,setRiskSummary]=useState(null);
   const [dlpTrend,setDlpTrend]=useState(null);
+  // Window for the DLP Events Over Time chart; /dlp/trend clamps to [1,180].
+  const [dlpDays,setDlpDays]=useState(30);
   const [warn,setWarn]=useState([]);
   const [asOf,setAsOf]=useState(null);
   useEffect(()=>{
@@ -917,7 +924,6 @@ function OverviewView() {
     // total (which needed pulling up to 10,000 raw events/files client-side
     // just to produce one number) with the same severity definition, bucketed
     // by day instead of summed.
-    soft(apiFetch("/dlp/trend?days=30"),"DLP event trend",setDlpTrend,false);
     // Exact same merge the Inventory page does: registry + deduped platform catalog
     Promise.all([apiFetch("/registry"),apiFetch("/ai-platforms").catch(()=>[])]).then(([regList,plats])=>{
       const seen=new Set();
@@ -953,6 +959,16 @@ function OverviewView() {
       setToolsRisk(rk);
     }).catch(()=>{});
   },[]);
+  // Separate from the page load above so changing the range refetches only the
+  // trend. The previous series stays on screen until the new one arrives, and a
+  // response from an earlier selection that lands late is dropped.
+  useEffect(()=>{
+    let live=true;
+    apiFetch(`/dlp/trend?days=${dlpDays}`)
+      .then(v=>{if(live) setDlpTrend(v);})
+      .catch(()=>{if(!live) return; setDlpTrend(false); setWarn(w=>w.includes("DLP event trend")?w:[...w,"DLP event trend"]);});
+    return ()=>{live=false;};
+  },[dlpDays]);
   if(e) return <Err msg={e}/>;
   if(!d) return <Loading/>;
 
@@ -1054,7 +1070,16 @@ function OverviewView() {
         /dlp/trend, same high/critical severity definition the old lifetime
         tile used, just bucketed by day instead of summed to one number. */}
     {dlpPoints.length>0&&
-      <ClickCard title="DLP Events Over Time" hint="High/critical prompts & uploads flagged per day, last 30 days." onClick={()=>nav(OV_ROUTE.dlp)}>
+      <ClickCard title="DLP Events Over Time"
+        hint={`High/critical prompts & uploads flagged per day, ${DLP_RANGES.find(r=>r.days===dlpDays)?.hint}.`}
+        action={
+          // stopPropagation on both: the card itself navigates on click/Enter/Space.
+          <select className="aihub_select" aria-label="DLP events date range" value={dlpDays}
+            onClick={e=>e.stopPropagation()} onKeyDown={e=>e.stopPropagation()}
+            onChange={e=>setDlpDays(Number(e.target.value))}>
+            {DLP_RANGES.map(r=><option key={r.days} value={r.days}>{r.label}</option>)}
+          </select>}
+        onClick={()=>nav(OV_ROUTE.dlp)}>
         <LineChart points={dlpPoints} color="#0052e0" unit="high/critical events"
           breakdown={p=>[{label:"Prompts",value:p.prompts},{label:"File uploads",value:p.file_uploads}]}/>
       </ClickCard>}
