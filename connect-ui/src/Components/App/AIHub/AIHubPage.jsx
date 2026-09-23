@@ -18,11 +18,18 @@ import {
 import { cacheStats, cacheClear, warmCache } from "./aiHubDemoCache";
 // ── END DEMO MODE ───────────────────────────────────────────────────────────
 import { sanitizeReplayEvents } from "./replaySanitize";
+import { aliasResponse } from "./demoIdentity";
 import { createReplayHost, applyReplayIframeCsp } from "./rrwebHost";
 import "./AIHub.css";
 
 const API = "/api/v1";
 async function apiFetch(path) {
+  const r = await fetch(`${API}${path}`);
+  if (!r.ok) throw new Error(`${r.status}`);
+  return aliasResponse(path, await r.json(), rawJson);
+}
+// Un-aliased GET, for demoIdentity's own machine lookup.
+async function rawJson(path) {
   const r = await fetch(`${API}${path}`);
   if (!r.ok) throw new Error(`${r.status}`);
   return r.json();
@@ -272,7 +279,9 @@ function splitConcatenatedName(name) {
 function UserCell({ row }) {
   const name = splitConcatenatedName(row?.employee_name || row?.user || null);
   const host = row?.hostname || null;
-  if (name) return (<><div className="aihub_text_primary">{name}</div>{host && host !== name && <div className="aihub_text_muted">{host}</div>}</>);
+  // Name only — the hostname is a fallback for rows with no resolved user, not
+  // a second line under every name.
+  if (name) return <div className="aihub_text_primary">{name}</div>;
   if (host) return <div className="aihub_text_primary">{host}</div>;
   const mid = row?.machine_id;
   return mid ? <Mono>{String(mid).slice(0,10)}</Mono> : <span className="aihub_text_muted">—</span>;
@@ -1213,7 +1222,7 @@ function AgentsView() {
   const renderUser=r=>{
     const m=machineById.get(r.machine_id);
     const label=splitConcatenatedName(m?.user)||m?.hostname;
-    if(label) return <><div className="aihub_text_primary">{label}</div>{m?.user&&m?.hostname&&<div className="aihub_text_muted">{m.hostname}</div>}</>;
+    if(label) return <div className="aihub_text_primary">{label}</div>;
     // Unresolved: name the bucket, then the raw id so the row is still traceable.
     return <><div className="aihub_text_muted">{UNKNOWN_USER}</div><Mono>{(r.machine_id||"").slice(0,10)||"—"}</Mono></>;
   };
@@ -1695,7 +1704,7 @@ export function adminToken(){ return import.meta.env.VITE_ADMIN_TOKEN||""; }
 
 async function adminFetch(path, init) {
   const token=adminToken();
-  return fetch(`${API}${path}`, {
+  const r = await fetch(`${API}${path}`, {
     ...init,
     credentials:"same-origin",
     headers:{
@@ -1703,6 +1712,12 @@ async function adminFetch(path, init) {
       ...(init?.headers||{}),
     },
   });
+  // Callers read the body with r.json(); alias it there, GETs only.
+  if (r.ok && (!init?.method || init.method === "GET")) {
+    const json = r.json.bind(r);
+    r.json = async () => aliasResponse(path, await json(), rawJson);
+  }
+  return r;
 }
 
 // apiFetch's throw-on-!ok contract, with the admin credential attached. For
@@ -2628,7 +2643,7 @@ function SessionListView({ onOpen, machines }) {
       <SectionHeader title="Sessions" hint={`${filtered.length} of ${rows.length} sessions`}/>
       <DataTable onRow={r=>onOpen(r)} columns={[
         {label:"When",render:r=>relTime(r.last_activity_at||r.started_at)},
-        {label:"System / User",render:r=><><div className="aihub_text_primary">{machineLabel(machines,r.machine_id)}</div><div className="aihub_text_muted">{r.machine_id}</div></>},
+        {label:"System / User",render:r=><div className="aihub_text_primary">{splitConcatenatedName(machines?.[r.machine_id]?.user)||machineLabel(machines,r.machine_id)}</div>},
         {label:"AI Service",render:r=><Badge text={r.ai_service||"Unknown"} color="#0052e0"/>},
         {label:"Messages",render:r=>r.message_count??0,right:true},
         {label:"Highest Severity",render:r=>{const s=sessionSeverity(r);return s?<SeverityBadge sev={s}/>:<span className="aihub_text_muted">—</span>;}},
@@ -3388,10 +3403,7 @@ function RiskScoreView() {
           columns={[
             {label:"Employee",hint:"Click a row to expand its score breakdown and recent events.",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
               <ChevronRight size={13} style={{color:"#9ca3af",flexShrink:0,transition:"transform .15s",transform:selected===r.id?"rotate(90deg)":"none"}}/>
-              <div>
-                <div className="aihub_text_primary">{splitConcatenatedName(r.display_name)}</div>
-                <div className="aihub_text_muted">{r.email||r.hostname||"—"}</div>
-              </div>
+              <div className="aihub_text_primary">{splitConcatenatedName(r.display_name)||r.email||r.hostname||"—"}</div>
             </div>},
             {label:"Score",hint:"A 0–100 score built from DLP violations, overridden blocks, shadow AI tool use, data sensitivity, and usage-volume anomalies. Low 0–30, Medium 31–60, High/Critical 61–100.",render:r=><RiskLevelBadge level={r.risk_level} score={r.risk_score}/>},
             {label:"",render:r=><div style={{minWidth:120}}><ScoreBar score={r.risk_score}/></div>},
