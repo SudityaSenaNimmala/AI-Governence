@@ -520,13 +520,18 @@ function LineChart({ points, min, max, color="#0052e0", dotColor, height=180, un
   return (<div style={{position:"relative"}}>
     <svg ref={svgRef} width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img"
       aria-label={points.map(p=>`${p.label}: ${p.value}`).join(", ")}
+      style={{overflow:"visible"}}
       onMouseMove={onMove} onMouseLeave={()=>setHover(null)}>
       {[0,0.25,0.5,0.75,1].map(t=><line key={t} x1={padL} x2={w-padR} y1={padT+t*(h-padT-padB)} y2={padT+t*(h-padT-padB)} stroke="var(--ah-border-light)"/>)}
       {n>0 && <path d={path} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round"/>}
       {hover!=null && <line x1={x(hover)} x2={x(hover)} y1={padT} y2={h-padB} stroke="var(--ah-text-faint)" strokeWidth="1" strokeDasharray="3 3"/>}
       {points.map((p,i)=>(<g key={i}>
         <circle cx={x(i)} cy={y(p.value)} r={hover===i?4:2.5} fill={dotColor?dotColor(p):color}/>
-        {(i%labelEvery===0||i===n-1)&&<text x={x(i)} y={h-6} textAnchor="middle" fontSize="10.5" fill="var(--ah-text-faint)">{p.label}</text>}
+        {/* Always centered on the point (textAnchor="middle") so the label sits
+            exactly below its own dot, even at the first/last point — the SVG's
+            overflow:visible above is what lets that centered text bleed past
+            the viewBox edge instead of being clipped. */}
+        {(i%labelEvery===0||i===n-1)&&<text x={x(i)} y={h-6} textAnchor="middle" fontSize="9" fontWeight="600" fill="#1a1a1a">{p.label}</text>}
       </g>))}
     </svg>
     {hp&&<div style={{
