@@ -6753,6 +6753,9 @@ function ServerMonitorView() {
 
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  // Feedback for the auto-triage self-test buttons (Setup tab). Only ever set
+  // by those buttons; unused in an ordinary build, where they do not render.
+  const [triageSelftestNote, setTriageSelftestNote] = useState("");
 
   const fetchAgentCalls = () => {
     if (!selectedAgent) { setAgentCalls([]); return; }
@@ -7158,6 +7161,61 @@ function ServerMonitorView() {
 
       {tab === "setup" && (
         <div>
+
+          {/* ── Pipeline self-test ───────────────────────────────────────────
+              A button that FAILS ON PURPOSE, so the auto-triage pipeline can be
+              demonstrated end to end on a real browser error: click -> captured
+              -> fingerprinted -> bundled -> diagnosed -> PR.
+
+              WHY A DEDICATED BUTTON RATHER THAN A PLANTED BUG. Breaking a real
+              control to make a demo means shipping a broken feature to whoever
+              uses it next, and in this product a quietly broken control is the
+              failure mode that is hardest to notice. This one does nothing
+              except fail, and says so.
+
+              Rendered only when VITE_TRIAGE_SELFTEST=1 is set at BUILD time, so
+              an ordinary build does not contain it at all. */}
+          {import.meta.env.VITE_TRIAGE_SELFTEST === "1" && (
+            <div style={{ background: "#fffbeb", border: "1px solid #fcd34d", borderRadius: 10, padding: 16, marginBottom: 16 }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: "#92400e", marginBottom: 4 }}>
+                Auto-triage self-test
+              </div>
+              <div style={{ fontSize: 12, color: "#78350f", marginBottom: 12 }}>
+                These buttons fail on purpose. Each one produces a real browser error that is
+                captured, deduplicated and queued for triage. Nothing else is affected.
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button
+                  onClick={() => {
+                    // A TypeError in an EVENT HANDLER: the commonest real UI bug
+                    // and the one React's error boundary cannot see, because the
+                    // boundary only fires during render.
+                    const config = undefined;
+                    setTriageSelftestNote("Clicked \u2014 nothing happened. Check the triage queue.");
+                    console.log(config.retention.days);
+                  }}
+                  style={{ padding: "7px 12px", border: "1px solid #d97706", background: "#fff", color: "#92400e", borderRadius: 6, cursor: "pointer", fontSize: 12 }}
+                >
+                  Export report
+                </button>
+                <button
+                  onClick={async () => {
+                    // An UNAWAITED REJECTION: the button appears to work, and the
+                    // failure surfaces a tick later with nothing on screen.
+                    setTriageSelftestNote("Started \u2014 no error shown, but one was reported.");
+                    Promise.reject(new Error("report export failed: upstream returned 502 for tenant report"));
+                  }}
+                  style={{ padding: "7px 12px", border: "1px solid #d97706", background: "#fff", color: "#92400e", borderRadius: 6, cursor: "pointer", fontSize: 12 }}
+                >
+                  Sync now
+                </button>
+              </div>
+              {triageSelftestNote && (
+                <div style={{ marginTop: 10, fontSize: 12, color: "#92400e" }}>{triageSelftestNote}</div>
+              )}
+            </div>
+          )}
+
           <SectionHeader title="Install Server Monitor" hint="Monitor all AI agent activity on any Linux/macOS server. Detects and governs every AI API call automatically." />
           <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 24 }}>
 

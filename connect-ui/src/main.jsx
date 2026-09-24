@@ -1,3 +1,9 @@
+import { installGlobalErrorReporting } from './lib/reportClientError.js';
+// Catches the two failures React's error boundary never sees: an error in an
+// event handler, and a rejected promise nobody awaited. Those are exactly the
+// "I clicked it and nothing happened" cases -- the boundary only fires during
+// render, so without this a broken button is invisible to everything.
+installGlobalErrorReporting();
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "./index.css";

@@ -40,3 +40,12 @@ browser-extension/cfai-config.json
 # anyone sign a package that every managed machine accepts as ours.
 *.pem
 crx-signing-key*
+
+# Auto-triage context bundles. Generated from live error rows: masked, but
+# still production error text plus source excerpts, and regenerable on demand.
+# Nothing here belongs in the repo.
+.triage/
+
+# Local backup of a production connection string. Must never be committed.
+server/.env.bak-prod-db
+*.bak-prod-db
