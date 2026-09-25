@@ -251,29 +251,6 @@ export function buildModelRouterConfig() {
   };
 }
 
-// ── Server routing rules ────────────────────────────────────────────────────
-// Cached locally by the routing rules sync (see index.js). The enforcer reads
-// them at spawn time via CFAI_MODEL_ROUTER_CONFIG, and the sync restarts the
-// enforcer when they change — same lifecycle as DLP block patterns.
-const ROUTING_RULES_PATH = join(homedir(), '.cloudfuze-aigov', 'routing-rules.json');
-
-/** Read cached server rules. Returns [] if file missing or malformed. */
-export function loadCachedRoutingRules() {
-  try {
-    if (!existsSync(ROUTING_RULES_PATH)) return [];
-    const raw = JSON.parse(readFileSync(ROUTING_RULES_PATH, 'utf8'));
-    return Array.isArray(raw) ? raw.filter(r => r.enabled !== false) : [];
-  } catch { return []; }
-}
-
-/** Save server rules to disk. Called by the routing rules sync. */
-export function saveCachedRoutingRules(rules) {
-  try {
-    mkdirSync(dirname(ROUTING_RULES_PATH), { recursive: true });
-    writeFileSync(ROUTING_RULES_PATH, JSON.stringify(rules), 'utf8');
-  } catch {}
-}
-
 // Exposed for the parity test — reading complexity.js's source path directly
 // keeps that test independent of this module's internal extraction helpers.
 export const _paths = { COMPLEXITY_JS_PATH, CONTENT_JS_PATH };

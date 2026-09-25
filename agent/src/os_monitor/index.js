@@ -48,7 +48,6 @@ import { Reporter } from './reporter.js';
 // that drains it. Owned by blocked-agents-sync.js — one path files these, one
 // path retries them.
 import { PENDING_REQUEST_PATH } from './blocked-agents-sync.js';
-import { saveCachedRoutingRules } from './model-router-config.js';
 import { createHash } from 'node:crypto';
 
 // How long after firing a toast for a (clipboardSeq, processName) pair we
