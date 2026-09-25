@@ -18,11 +18,18 @@ import {
 import { cacheStats, cacheClear, warmCache } from "./aiHubDemoCache";
 // ── END DEMO MODE ───────────────────────────────────────────────────────────
 import { sanitizeReplayEvents } from "./replaySanitize";
+import { aliasResponse } from "./demoIdentity";
 import { createReplayHost, applyReplayIframeCsp } from "./rrwebHost";
 import "./AIHub.css";
 
 const API = "/api/v1";
 async function apiFetch(path) {
+  const r = await fetch(`${API}${path}`);
+  if (!r.ok) throw new Error(`${r.status}`);
+  return aliasResponse(path, await r.json(), rawJson);
+}
+// Un-aliased GET, for demoIdentity's own machine lookup.
+async function rawJson(path) {
   const r = await fetch(`${API}${path}`);
   if (!r.ok) throw new Error(`${r.status}`);
   return r.json();
@@ -272,7 +279,9 @@ function splitConcatenatedName(name) {
 function UserCell({ row }) {
   const name = splitConcatenatedName(row?.employee_name || row?.user || null);
   const host = row?.hostname || null;
-  if (name) return (<><div className="aihub_text_primary">{name}</div>{host && host !== name && <div className="aihub_text_muted">{host}</div>}</>);
+  // Name only — the hostname is a fallback for rows with no resolved user, not
+  // a second line under every name.
+  if (name) return <div className="aihub_text_primary">{name}</div>;
   if (host) return <div className="aihub_text_primary">{host}</div>;
   const mid = row?.machine_id;
   return mid ? <Mono>{String(mid).slice(0,10)}</Mono> : <span className="aihub_text_muted">—</span>;
@@ -520,13 +529,18 @@ function LineChart({ points, min, max, color="#0052e0", dotColor, height=180, un
   return (<div style={{position:"relative"}}>
     <svg ref={svgRef} width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img"
       aria-label={points.map(p=>`${p.label}: ${p.value}`).join(", ")}
+      style={{overflow:"visible"}}
       onMouseMove={onMove} onMouseLeave={()=>setHover(null)}>
       {[0,0.25,0.5,0.75,1].map(t=><line key={t} x1={padL} x2={w-padR} y1={padT+t*(h-padT-padB)} y2={padT+t*(h-padT-padB)} stroke="var(--ah-border-light)"/>)}
       {n>0 && <path d={path} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round"/>}
       {hover!=null && <line x1={x(hover)} x2={x(hover)} y1={padT} y2={h-padB} stroke="var(--ah-text-faint)" strokeWidth="1" strokeDasharray="3 3"/>}
       {points.map((p,i)=>(<g key={i}>
         <circle cx={x(i)} cy={y(p.value)} r={hover===i?4:2.5} fill={dotColor?dotColor(p):color}/>
-        {(i%labelEvery===0||i===n-1)&&<text x={x(i)} y={h-6} textAnchor="middle" fontSize="10.5" fill="var(--ah-text-faint)">{p.label}</text>}
+        {/* Always centered on the point (textAnchor="middle") so the label sits
+            exactly below its own dot, even at the first/last point — the SVG's
+            overflow:visible above is what lets that centered text bleed past
+            the viewBox edge instead of being clipped. */}
+        {(i%labelEvery===0||i===n-1)&&<text x={x(i)} y={h-6} textAnchor="middle" fontSize="9" fontWeight="600" fill="#1a1a1a">{p.label}</text>}
       </g>))}
     </svg>
     {hp&&<div style={{
@@ -688,16 +702,21 @@ const OV_ROUTE={
 // colour per meaning across the whole screen.
 const SANCTION_TONE={approved:"#22c55e",restricted:"#f59e0b",blocked:"#ef4444",unknown:"#9ca3af"};
 const RISK_TONE={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e",not_assessed:"#9ca3af"};
+const DLP_RANGES=[
+  {days:7,label:"Last 7 days",hint:"last 7 days"},
+  {days:30,label:"Last 1 month",hint:"last 30 days"},
+  {days:90,label:"Last 3 months",hint:"last 3 months"},
+];
 const SEV_TONE={critical:"#ef4444",high:"#f59e0b",medium:"#3b82f6",low:"#22c55e"};
 const AUTONOMY_TONE={ai_app:"#0052e0",mcp:"#8b5cf6",ai_coding_agent:"#f59e0b",ai_agent:"#ef4444"};
 const VENDOR_LABEL={microsoft:"Azure OpenAI",google:"Vertex AI",openai:"OpenAI",claude:"Anthropic",gemini:"Gemini Enterprise"};
 
 /** Card that behaves like a link. role/tabIndex/keydown so it is reachable without a mouse. */
-function ClickCard({ title, hint, onClick, children }) {
+function ClickCard({ title, hint, action, onClick, children }) {
   return (<div className="aihub_card aihub_card_click" role="button" tabIndex={0}
                style={{display:"flex",flexDirection:"column",height:"100%",boxSizing:"border-box"}}
                onClick={onClick} onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();onClick();}}}>
-    <SectionHeader title={title} hint={hint}/>
+    <SectionHeader title={title} hint={hint} action={action}/>
     {children}
   </div>);
 }
@@ -894,6 +913,8 @@ function OverviewView() {
   const [toolsRisk,setToolsRisk]=useState({}); // {critical:N, high:N, medium:N, low:N, not_assessed:N}
   const [riskSummary,setRiskSummary]=useState(null);
   const [dlpTrend,setDlpTrend]=useState(null);
+  // Window for the DLP Events Over Time chart; /dlp/trend clamps to [1,180].
+  const [dlpDays,setDlpDays]=useState(30);
   const [warn,setWarn]=useState([]);
   const [asOf,setAsOf]=useState(null);
   useEffect(()=>{
@@ -917,7 +938,6 @@ function OverviewView() {
     // total (which needed pulling up to 10,000 raw events/files client-side
     // just to produce one number) with the same severity definition, bucketed
     // by day instead of summed.
-    soft(apiFetch("/dlp/trend?days=30"),"DLP event trend",setDlpTrend,false);
     // Exact same merge the Inventory page does: registry + deduped platform catalog
     Promise.all([apiFetch("/registry"),apiFetch("/ai-platforms").catch(()=>[])]).then(([regList,plats])=>{
       const seen=new Set();
@@ -953,6 +973,16 @@ function OverviewView() {
       setToolsRisk(rk);
     }).catch(()=>{});
   },[]);
+  // Separate from the page load above so changing the range refetches only the
+  // trend. The previous series stays on screen until the new one arrives, and a
+  // response from an earlier selection that lands late is dropped.
+  useEffect(()=>{
+    let live=true;
+    apiFetch(`/dlp/trend?days=${dlpDays}`)
+      .then(v=>{if(live) setDlpTrend(v);})
+      .catch(()=>{if(!live) return; setDlpTrend(false); setWarn(w=>w.includes("DLP event trend")?w:[...w,"DLP event trend"]);});
+    return ()=>{live=false;};
+  },[dlpDays]);
   if(e) return <Err msg={e}/>;
   if(!d) return <Loading/>;
 
@@ -1054,7 +1084,16 @@ function OverviewView() {
         /dlp/trend, same high/critical severity definition the old lifetime
         tile used, just bucketed by day instead of summed to one number. */}
     {dlpPoints.length>0&&
-      <ClickCard title="DLP Events Over Time" hint="High/critical prompts & uploads flagged per day, last 30 days." onClick={()=>nav(OV_ROUTE.dlp)}>
+      <ClickCard title="DLP Events Over Time"
+        hint={`High/critical prompts & uploads flagged per day, ${DLP_RANGES.find(r=>r.days===dlpDays)?.hint}.`}
+        action={
+          // stopPropagation on both: the card itself navigates on click/Enter/Space.
+          <select className="aihub_select" aria-label="DLP events date range" value={dlpDays}
+            onClick={e=>e.stopPropagation()} onKeyDown={e=>e.stopPropagation()}
+            onChange={e=>setDlpDays(Number(e.target.value))}>
+            {DLP_RANGES.map(r=><option key={r.days} value={r.days}>{r.label}</option>)}
+          </select>}
+        onClick={()=>nav(OV_ROUTE.dlp)}>
         <LineChart points={dlpPoints} color="#0052e0" unit="high/critical events"
           breakdown={p=>[{label:"Prompts",value:p.prompts},{label:"File uploads",value:p.file_uploads}]}/>
       </ClickCard>}
@@ -1183,7 +1222,7 @@ function AgentsView() {
   const renderUser=r=>{
     const m=machineById.get(r.machine_id);
     const label=splitConcatenatedName(m?.user)||m?.hostname;
-    if(label) return <><div className="aihub_text_primary">{label}</div>{m?.user&&m?.hostname&&<div className="aihub_text_muted">{m.hostname}</div>}</>;
+    if(label) return <div className="aihub_text_primary">{label}</div>;
     // Unresolved: name the bucket, then the raw id so the row is still traceable.
     return <><div className="aihub_text_muted">{UNKNOWN_USER}</div><Mono>{(r.machine_id||"").slice(0,10)||"—"}</Mono></>;
   };
@@ -1665,7 +1704,7 @@ export function adminToken(){ return import.meta.env.VITE_ADMIN_TOKEN||""; }
 
 async function adminFetch(path, init) {
   const token=adminToken();
-  return fetch(`${API}${path}`, {
+  const r = await fetch(`${API}${path}`, {
     ...init,
     credentials:"same-origin",
     headers:{
@@ -1673,6 +1712,12 @@ async function adminFetch(path, init) {
       ...(init?.headers||{}),
     },
   });
+  // Callers read the body with r.json(); alias it there, GETs only.
+  if (r.ok && (!init?.method || init.method === "GET")) {
+    const json = r.json.bind(r);
+    r.json = async () => aliasResponse(path, await json(), rawJson);
+  }
+  return r;
 }
 
 // apiFetch's throw-on-!ok contract, with the admin credential attached. For
@@ -2598,7 +2643,7 @@ function SessionListView({ onOpen, machines }) {
       <SectionHeader title="Sessions" hint={`${filtered.length} of ${rows.length} sessions`}/>
       <DataTable onRow={r=>onOpen(r)} columns={[
         {label:"When",render:r=>relTime(r.last_activity_at||r.started_at)},
-        {label:"System / User",render:r=><><div className="aihub_text_primary">{machineLabel(machines,r.machine_id)}</div><div className="aihub_text_muted">{r.machine_id}</div></>},
+        {label:"System / User",render:r=><div className="aihub_text_primary">{splitConcatenatedName(machines?.[r.machine_id]?.user)||machineLabel(machines,r.machine_id)}</div>},
         {label:"AI Service",render:r=><Badge text={r.ai_service||"Unknown"} color="#0052e0"/>},
         {label:"Messages",render:r=>r.message_count??0,right:true},
         {label:"Highest Severity",render:r=>{const s=sessionSeverity(r);return s?<SeverityBadge sev={s}/>:<span className="aihub_text_muted">—</span>;}},
@@ -3358,10 +3403,7 @@ function RiskScoreView() {
           columns={[
             {label:"Employee",hint:"Click a row to expand its score breakdown and recent events.",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
               <ChevronRight size={13} style={{color:"#9ca3af",flexShrink:0,transition:"transform .15s",transform:selected===r.id?"rotate(90deg)":"none"}}/>
-              <div>
-                <div className="aihub_text_primary">{splitConcatenatedName(r.display_name)}</div>
-                <div className="aihub_text_muted">{r.email||r.hostname||"—"}</div>
-              </div>
+              <div className="aihub_text_primary">{splitConcatenatedName(r.display_name)||r.email||r.hostname||"—"}</div>
             </div>},
             {label:"Score",hint:"A 0–100 score built from DLP violations, overridden blocks, shadow AI tool use, data sensitivity, and usage-volume anomalies. Low 0–30, Medium 31–60, High/Critical 61–100.",render:r=><RiskLevelBadge level={r.risk_level} score={r.risk_score}/>},
             {label:"",render:r=><div style={{minWidth:120}}><ScoreBar score={r.risk_score}/></div>},
@@ -6711,6 +6753,9 @@ function ServerMonitorView() {
 
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  // Feedback for the auto-triage self-test buttons (Setup tab). Only ever set
+  // by those buttons; unused in an ordinary build, where they do not render.
+  const [triageSelftestNote, setTriageSelftestNote] = useState("");
 
   const fetchAgentCalls = () => {
     if (!selectedAgent) { setAgentCalls([]); return; }
@@ -7116,6 +7161,61 @@ function ServerMonitorView() {
 
       {tab === "setup" && (
         <div>
+
+          {/* ── Pipeline self-test ───────────────────────────────────────────
+              A button that FAILS ON PURPOSE, so the auto-triage pipeline can be
+              demonstrated end to end on a real browser error: click -> captured
+              -> fingerprinted -> bundled -> diagnosed -> PR.
+
+              WHY A DEDICATED BUTTON RATHER THAN A PLANTED BUG. Breaking a real
+              control to make a demo means shipping a broken feature to whoever
+              uses it next, and in this product a quietly broken control is the
+              failure mode that is hardest to notice. This one does nothing
+              except fail, and says so.
+
+              Rendered only when VITE_TRIAGE_SELFTEST=1 is set at BUILD time, so
+              an ordinary build does not contain it at all. */}
+          {import.meta.env.VITE_TRIAGE_SELFTEST === "1" && (
+            <div style={{ background: "#fffbeb", border: "1px solid #fcd34d", borderRadius: 10, padding: 16, marginBottom: 16 }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: "#92400e", marginBottom: 4 }}>
+                Auto-triage self-test
+              </div>
+              <div style={{ fontSize: 12, color: "#78350f", marginBottom: 12 }}>
+                These buttons fail on purpose. Each one produces a real browser error that is
+                captured, deduplicated and queued for triage. Nothing else is affected.
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button
+                  onClick={() => {
+                    // A TypeError in an EVENT HANDLER: the commonest real UI bug
+                    // and the one React's error boundary cannot see, because the
+                    // boundary only fires during render.
+                    const config = undefined;
+                    setTriageSelftestNote("Clicked \u2014 nothing happened. Check the triage queue.");
+                    console.log(config.retention.days);
+                  }}
+                  style={{ padding: "7px 12px", border: "1px solid #d97706", background: "#fff", color: "#92400e", borderRadius: 6, cursor: "pointer", fontSize: 12 }}
+                >
+                  Export report
+                </button>
+                <button
+                  onClick={async () => {
+                    // An UNAWAITED REJECTION: the button appears to work, and the
+                    // failure surfaces a tick later with nothing on screen.
+                    setTriageSelftestNote("Started \u2014 no error shown, but one was reported.");
+                    Promise.reject(new Error("report export failed: upstream returned 502 for tenant report"));
+                  }}
+                  style={{ padding: "7px 12px", border: "1px solid #d97706", background: "#fff", color: "#92400e", borderRadius: 6, cursor: "pointer", fontSize: 12 }}
+                >
+                  Sync now
+                </button>
+              </div>
+              {triageSelftestNote && (
+                <div style={{ marginTop: 10, fontSize: 12, color: "#92400e" }}>{triageSelftestNote}</div>
+              )}
+            </div>
+          )}
+
           <SectionHeader title="Install Server Monitor" hint="Monitor all AI agent activity on any Linux/macOS server. Detects and governs every AI API call automatically." />
           <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 24 }}>
 
@@ -7737,14 +7837,6 @@ const TAB_GROUPS_RAW = {
         return <AgentGovernanceProvider><PoliciesTab/></AgentGovernanceProvider>;
       } },
       { slug: "risk", label: "Risk Scores", component: RiskScoreView, feat: "risk_scores" },
-    ],
-  },
-  SDK: {
-    title: "SDK",
-    hint: "Credentials for apps that report their AI activity here, and what they've reported.",
-    tabs: [
-      { slug: "projects", label: "Projects", component: SdkProjectsView, feat: "sdk" },
-      { slug: "traces",   label: "Traces",   component: SdkTracesView,   feat: "sdk" },
     ],
   },
   Setup: {

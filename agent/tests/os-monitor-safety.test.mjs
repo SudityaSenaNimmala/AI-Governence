@@ -835,7 +835,7 @@ test('the Request Access window is focusable, and showBlockDialogWindow stays no
   assert.ok(access.length > 0, 'expected a showAccessRequestWindow function');
   assert.equal(/focusable: false/.test(access), false, 'the reason textarea cannot be typed into without focus');
   assert.match(access, /accessWindow\.focus\(\)/);
-  assert.match(access, /renderer', 'access-request\.html'/);
+  assert.match(access, /RENDERER_DIR, 'access-request\.html'/);
 });
 
 test('enforcer-win.ps1: keystrokes are only captured while an AI app is REALLY foreground', async () => {
@@ -2689,7 +2689,7 @@ test('the banner window is non-focusable, click-through and never docked to the 
   assert.match(section, /setAlwaysOnTop\(true, 'screen-saver'\)/);
   assert.match(section, /skipTaskbar: true/);
   assert.match(section, /frame: false/);
-  assert.match(section, /renderer', 'block-banner\.html'/);
+  assert.match(section, /RENDERER_DIR, 'block-banner\.html'/);
   // Anchored to the display's workArea so a top-docked taskbar is not covered by
   // something the user can neither move nor click through.
   assert.match(section, /screen\.getDisplayNearestPoint/);

@@ -210,7 +210,7 @@ test('the longer window still fits the rewrite time budget it was reasoned again
   // all. The 16s is read from that file rather than restated here.
   const c = await one('post_send_constants');
   const dialog = await readFile(join(AGENT_DIR, 'electron', 'renderer', 'block-dialog.js'), 'utf8');
-  const m = dialog.match(/setTimeout\(\(\) => window\.close\(\), (\d+)\)/);
+  const m = dialog.match(/setTimeout\(dismiss, (\d+)\)/);
   assert.ok(m, "expected block-dialog.js's self-close timeout");
   const dialogMs = Number(m[1]);
   assert.equal(dialogMs, 16000);

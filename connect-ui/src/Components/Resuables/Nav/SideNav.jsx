@@ -158,14 +158,15 @@ const SideNav = (props) => {
       icon: <Bot size={18} />,
       title: "AI Hub",
       link: "#",
-      // Seven entries, each a question rather than a table. The sub-screens they
+      // Six entries, each a question rather than a table. The sub-screens they
       // absorbed are tabs inside them (see TAB_GROUPS in AIHubPage.jsx) and every
       // former URL still resolves via the redirects in App.jsx.
       //
       // Not listed, reachable by URL only, unchanged from before: Tools Catalog,
       // Server Agents, AI Usage, Server Monitor. Policy Simulator now runs per pack
       // from inside Policy Packs; EU AI Act returns as a Policies & Risk tab once
-      // its intake is seeded from the discovered agent registry.
+      // its intake is seeded from the discovered agent registry. SDK was removed
+      // from the nav (still reachable by URL, see App.jsx).
       children: [
         { icon: <LayoutDashboard size={16} />, title: "Overview", link: "/AIHub/Overview", feat: "overview" },
         { icon: <Database size={16} />, title: "Inventory", link: "/AIHub/Inventory", feat: ["ai_systems", "agents_mcp"] },
@@ -173,7 +174,6 @@ const SideNav = (props) => {
         { icon: <ShieldCheck size={16} />, title: "Policies & Risk", link: "/AIHub/PoliciesRisk", feat: ["policies", "risk_scores"] },
         { icon: <Inbox size={16} />, title: "Access Requests", link: "/AIHub/AccessRequests", feat: "access_requests" },
         { icon: agentGovernanceIcon, title: "Agent Governance", link: "/AIHub/AgentGovernance", feat: "agent_governance" },
-        { icon: <Boxes size={16} />, title: "SDK", link: "/AIHub/SDK", feat: "sdk" },
         { icon: <Unplug size={16} />, title: "Setup", link: "/AIHub/Setup", feat: ["installations", "integrations", "server_monitor"] },
       ].filter(item => {
         // Hide items where ALL sub-features are hidden

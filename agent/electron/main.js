@@ -457,12 +457,11 @@ function showAccessRequestWindow(data) {
   // Reset when the bar clears (focus left the blocked app) or when tool_host
   // changes — see hideBlockBanner().
   const host = data?.tool_host || null;
-  // Temporarily disabled suppression for debugging
-  // if (bannerVisible
-  //     && platformModalShownForHost === host
-  //     && (!accessWindow || accessWindow.isDestroyed())) {
-  //   return;
-  // }
+  if (bannerVisible
+      && platformModalShownForHost === host
+      && (!accessWindow || accessWindow.isDestroyed())) {
+    return;
+  }
   platformModalShownForHost = host;
   const send = () => { if (accessWindow && !accessWindow.isDestroyed()) accessWindow.webContents.send('access-request-dialog', data); };
   // A blocked app keeps emitting blocks — every swallowed Enter and every

@@ -42,6 +42,10 @@ import { mountOtel } from './routes/otel.js';
 import { mountSignals } from './routes/signals.js';
 import { mountApprovals } from './routes/approvals.js';
 import { mountSiem } from './routes/siem.js';
+import { mountErrors } from './routes/errors.js';
+import { mountClientErrors } from './routes/client-errors.js';
+import { mountTriageSelftest } from './routes/triage-selftest.js';
+import { mountErrorCapture } from './lib/error-capture.js';
 import { seedAiPlatforms } from './seed-platforms.js';
 import { seedDefaultRoutingRules } from './seed-routing.js';
 import { JWT_SECRET, ENROLL_SECRET, ADMIN_TOKEN, adminAuthIsOpen, reviewAuthIsOpen } from './auth.js';
@@ -147,14 +151,23 @@ mountOtel(app, db);
 mountSignals(app, db);
 mountApprovals(app, db);
 mountSiem(app, db);
+mountErrors(app, db);
+mountClientErrors(app, db);
+// Deliberate failures for proving the triage pipeline end to end on the live
+// server. Mounts NOTHING unless TRIAGE_SELFTEST=1, and returns false when off.
+mountTriageSelftest(app);
 
 // ── Agent Governance routes (multi-platform discovery, policies, alerts, cost, etc.) ──
 app.use(governanceRouter);
 
-app.use((err, req, res, next) => {
-  console.error('Server error:', err);
-  res.status(500).json({ error: err.message });
-});
+// Structured error capture. Replaces the console-only handler that used to sit
+// here: an error on the live server now becomes a deduplicated, MASKED row in
+// `server_errors` that the triage pipeline can read, instead of a line in a
+// container log nobody tails. The response shape is unchanged.
+//
+// Mounted LAST, after every route, because an Express error handler only sees
+// what the middleware above it threw.
+mountErrorCapture(app, db);
 
 // Replay retention. A Mongo TTL index would delete the run document (the audit
 // tombstone) and leave its chunk documents orphaned, so retention has to be an
