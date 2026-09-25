@@ -938,8 +938,6 @@ function setupIPC() {
   });
 
   ipcMain.on('dismiss-dialog', () => {
-    _dialogDismissedAt = Date.now();
-    _lastDialogBlockId = null;
     if (dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.destroy();
     dialogWindow = null;
   });

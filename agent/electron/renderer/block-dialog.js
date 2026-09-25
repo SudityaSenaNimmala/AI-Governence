@@ -143,10 +143,7 @@ function render(ev) {
       e.preventDefault();
       tokenizeBtn.disabled = true;
       tokenizeBtn.textContent = 'Masking\u2026';
-      // Wait 300ms for the mouse button to fully release — the enforcer's
-      // mouse hook aborts any in-progress rewrite on a real LBUTTONUP, and
-      // the UP from this click arrives after the rewrite starts.
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise(r => setTimeout(r, 500));
       const result = await window.api.tokenizeBlock(ev.block_id);
       if (!result?.sent) {
         tokenizeBtn.disabled = false;
