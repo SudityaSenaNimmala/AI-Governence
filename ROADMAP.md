@@ -24,6 +24,18 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   non-dev deployment). Add a startup warning if it's still using a random
   value.
 
+- [ ] **`ADMIN_TOKEN` defaults to a hardcoded literal (`'dev-admin-token'`) with no override**
+  `server/src/auth.js:39` — when `ADMIN_TOKEN` isn't set in `.env`, `requireAdminAuth`
+  accepts this well-known string from source as a valid admin credential. Confirmed
+  exploitable while debugging the M365 feature: a subagent used it to authenticate
+  and write directly to the live database. Fine for local dev; must not reach
+  production. Fix: refuse to start (or hard-fail every admin route) if
+  `ADMIN_TOKEN` is unset and `NODE_ENV`/an equivalent isn't `development`, same
+  spirit as the `JWT_SECRET` fix above. Related to, but distinct from, the
+  "real admin session/login for connect-ui" item further down — that one is
+  about the frontend having no login flow; this one is about the server
+  accepting a public default when no token is configured at all.
+
 - [ ] **MSI installer for the agent**
   Today: install = `git clone` + `npm install`. Not customer-shippable. Need a
   signed MSI that drops the agent, installs the CA, and registers the Windows
@@ -49,6 +61,77 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   echoes back a secret or PII from context, it's stored with `matches: []`
   and never raises severity. Reuse the existing pattern-scan engine on
   `ai_response` content the same way it already runs on prompts.
+
+- [ ] **Per-process attach-hold isolation (Outlook can silently clear a Teams/Copilot send-hold)**
+  The desktop agent's attach-hold mechanism (`#armAttachHold`/`this.attachHolds`
+  in `os_monitor/index.js`) has one shared slot bound to a single process. Once
+  the new Outlook egress surface's `capture_mode:'hold'` is actually enabled for
+  a real deployment, attaching any scannable file in Outlook while a Teams/
+  Copilot hold is active for a different sensitive file clears that hold —
+  silently unblocking a send the org meant to keep blocked. Must be fixed
+  before `capture_mode:'hold'` is used in production for any egress surface.
+
+- [ ] **Legal/HR review of employee disclosure before compose-body capture or OneDrive observation is armed**
+  The new Outlook egress surface can capture full email body text, and the new
+  OneDrive/SharePoint sync-root watcher observes files landing in a user's
+  synced folders — both currently ship inert (`verified:false`), but
+  `docs/EMPLOYEE_DISCLOSURE.md` and the README's own claims currently tell
+  employees message content is not collected. That documentation needs
+  legal/HR sign-off and an update before either capability is armed on a real
+  fleet, independent of the technical live-probe pass.
+
+- [x] **Require authentication on `POST /api/lifecycle/block` and `/unblock`**
+  Both routes are now gated with `requireAdminAuth`, alongside `PUT
+  /api/v1/registry/:id/status` and `PATCH /api/v1/ai-platforms/:host` (found
+  to have the same exposure while auditing the M365 per-agent blocking
+  feature). `GET /api/lifecycle/blocked-agents` stays public on purpose (the
+  extension polls it without a token). connect-ui's write call sites were
+  updated to send the admin credential so the dashboard's Block/Approve
+  buttons keep working.
+
+- [ ] **`POST /api/lifecycle/dlp-monitor` has the same untyped `agent_id` and is still unauthenticated**
+  Same class of bug as the block/unblock routes just fixed: `agent_id` is
+  checked only for truthiness before flowing into a Mongo filter (NoSQL
+  injection risk — a crafted object can match/overwrite an unrelated row),
+  and the route has no auth middleware. Its helper lives in
+  `server/src/governance/dlp-monitor.ts`. Found auditing the M365 per-agent
+  blocking feature; not fixed there because that file was mid-edit by other
+  in-progress work at the time.
+
+- [ ] **`POST` and `DELETE /api/v1/ai-platforms` are still unauthenticated**
+  Only `PATCH /api/v1/ai-platforms/:host` was gated when the sibling write
+  routes were fixed. `DELETE` removes a governed/blocked host outright — a
+  block-lifting action by another name — with no auth check today.
+
+- [ ] **An agent blocked before the registry→`blocked_agents` mirror existed has no enforcement row, and the UI can't self-heal it**
+  Hit live while testing the M365 feature: "IT Help Desk Agent" shows
+  `status:"blocked"` in AI Systems (from `sanctions`), but never got a
+  `blocked_agents` row — `GET /api/lifecycle/blocked-agents` doesn't list it
+  and the desktop agent's local `blocked-agents.json` confirms it's absent,
+  so the agent is fully usable despite the UI. Root cause: the row's blocked
+  status predates the mirror-write logic in `PUT /api/v1/registry/:id/status`
+  (`server/src/routes/registry.js`), which only fires on a write that carries
+  `category`/`source`/`platform`. `RegistryToggle`
+  (`connect-ui/AIHubPage.jsx:4073`) is a binary switch — when status is
+  already `"blocked"`, clicking it sends `'approved'` (the opposite state),
+  so there is no "reconfirm current status" action to trigger the mirror
+  write without first un-blocking. Workaround: toggle to Allowed, then back
+  to Blocked. Needs either a server-side reconciliation job (find
+  `sanctions.status:'blocked'` / agent rows with no matching `blocked_agents`
+  row and backfill them) or a UI "re-apply" action that resends the current
+  status. Related to, but distinct from, the `platform:null` backfill item
+  below — that one has a row with bad data; this one has no row at all.
+
+- [ ] **Browser extension feature flags are read from a page-writable DOM attribute**
+  `content.js` publishes flag state to `document.documentElement`'s
+  `data-cfai-features` attribute and then reads it back on every check,
+  preferring it over the extension's own cached copy — but `documentElement`
+  is shared with the page's main world, so any script on any visited page can
+  overwrite it (e.g. `setAttribute('data-cfai-features','{"dlp":{"status":
+  "disabled"}}')`) and silently disable DLP scanning, guardrails, or other
+  flags for that tab. Found auditing the M365 per-agent blocking feature; the
+  fix is to stop trusting that attribute as an input and read flags only from
+  the extension's own `chrome.storage.local`-backed cache.
 
 ---
 
@@ -204,6 +287,41 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   receive a file through any of these three paths even though typed prompts are correctly
   stopped.
 
+- [ ] **Wire egress_surface/origin/recipient_domains/body_truncated into DLP storage**
+  The new Outlook/OneDrive egress feature computes these fields on every event
+  (`os_monitor/index.js`), but `server/src/routes/dlp.js`'s metadata builders
+  drop all four at ingestion — neither the file-upload branch nor the generic
+  branch has a key for them. `origin` (local-write vs. ambiguous) and
+  `recipient_domains` (did a flagged attachment leave the tenant, to where) are
+  described in the code as the main governance value of those records, and
+  neither reaches storage today.
+
+- [ ] **Backfill existing `platform:null` blocked-agent rows**
+  Both `PUT /api/v1/registry/:id/status` and `POST /lifecycle/block` now derive
+  a missing `platform` from `discovered_agents` at write time (fixed while
+  building Microsoft-workspace agent blocking), but historical rows written
+  before that fix are only marked `unenforceable` on read — they stay
+  unenforced everywhere until an admin happens to re-block them. A one-shot
+  migration (derive from `discovered_agents`, leave genuinely underivable rows
+  marked) would close the gap without touching the annotate-never-drop rule.
+
+- [ ] **Server-wide DNS resolver override affects more than MongoDB**
+  `server/src/db/mongodb.js` calls `dns.setServers(['8.8.8.8','1.1.1.1'])` at
+  module scope, which replaces the resolver for the entire Node process — not
+  just the Mongo driver's SRV lookup. That means SIEM forwarding and
+  customer-configured webhook destinations also resolve against Google/
+  Cloudflare instead of the customer's own (possibly split-horizon/internal)
+  DNS, leaking internal hostnames to third-party resolvers and bypassing any
+  DNS-based egress control on the customer's network. Fix: use a
+  driver-scoped `Resolver` instance for the Mongo lookup only, or make the
+  override opt-in via env var, defaulting to system DNS.
+
+- [ ] **Attribute M365 Copilot agents on DLP events when the org has only governed (not blocked) rows**
+  The desktop enforcer reads the open agent's name only when a blocked agent-scoped row exists for the platform, so orgs with only governed rows get `agent_src: "none"` on block/redact events.
+
+- [ ] **"Copy masked text" fallback in the CLI Tokenize popup (`toast-helper.ps1`)**
+  Phase 0 added the fallback to the Electron block dialog only; a failed rewrite from the CLI popup still leaves the user with no masked text to paste.
+
 ---
 
 ## P2 — enterprise distribution
@@ -347,6 +465,35 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   indication of this today; surfacing it at block time (or in the inventory)
   would save an admin from assuming a block is enforcing when it isn't.
 
+- [ ] **`data_egress` DLP filter/badge has no producer**
+  connect-ui's DLP events view (`AIHubPage.jsx`) added an "Event kind" filter
+  and a "Data egress captured" counter keyed on `metadata.surface_kind ===
+  'data_egress'`, but nothing in the agent or server ever sets `surface_kind`
+  on an event — the filter/counter permanently reads "0 of N", and once
+  Outlook/OneDrive events do arrive they'll be mislabelled "AI service" instead
+  of filtered out. Needs a real producer (e.g. derived server-side from
+  `source === 'os_monitor_egress'`) before this control is meaningful.
+
+- [x] **Surface the `orphaned` and `unenforceable` block markers in AI Hub**
+  Done as part of the M365 per-agent blocking feature: AI Hub now shows a
+  per-row enforcement-coverage badge (browser/desktop, from
+  `unenforceable`/`unenforceable_reason` plus a hand-curated
+  platform→surface map) and an "⚠ Possibly re-published" marker for
+  `orphaned` rows (suppressed for manually-added blocks, which can never
+  appear in a tenant scan by construction).
+
+- [ ] **Desktop agent's `ui-helper` launcher can race its own cleanup**
+  `agent/src/os_monitor/index.js`'s `_ensureUiHelper()` writes a temporary
+  `.vbs` file to `~/.cloudfuze-aigov/`, spawns `wscript.exe` on it, then
+  deletes the `.vbs` unconditionally after a fixed 5-second timeout. If
+  `wscript.exe` is slow to actually start (e.g. under heavy system load), the
+  file can be deleted before it's read, producing a visible Windows Script
+  Host "Can not find script file" error dialog on the employee's desktop.
+  Harmless (no data touched) but looks broken/unprofessional on a deployed
+  governance agent. Fix: wait for `wscript.exe` to actually launch (or use a
+  longer/adaptive delay, or delete on the helper's own exit) instead of a
+  fixed timer race.
+
 ---
 
 ## P3 — coverage expansion
@@ -433,3 +580,33 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   - [x] CLI: `--proxy`, `--proxy-port`, `--proxy --uninstall`
   - [x] Smoke tests: CA verify (`scripts/proxy-ca-smoke.mjs`), full E2E round-trip (`scripts/proxy-roundtrip-smoke.mjs`)
 - [x] Tested live against Claude Desktop + Store ChatGPT + Chrome
+
+## Done — 2026-09-22
+
+- [x] **Per-agent blocking extended to Microsoft 365 Copilot agents**
+  Copilot Studio agents, personal/declarative agents, SharePoint-embedded
+  agents, Teams apps, and ISV-store agents are now blockable by name across
+  Teams, Word, Excel, PowerPoint, OneNote, Outlook web, SharePoint, and
+  microsoft365.com, on both the browser extension and the Windows desktop
+  agent — matching how blocking already worked for Claude/ChatGPT. AI Hub
+  now shows, per blocked agent, which surface(s) actually enforce it
+  (`unenforceable`/`unenforceable_reason` from the server, rendered as a
+  Browser/Desktop coverage badge), and admins can manually block an agent
+  the tenant scan never found. The Word/Excel/PowerPoint/OneNote Copilot
+  pane's agent-identification and the browser's panel-scoped DOM
+  agent-label reader both ship inert (`enforce:false`/an unregistered
+  feature flag) pending a live verification pass against a real M365
+  tenant; Outlook desktop is deferred (conflicts with an existing
+  egress/panel-surface safety invariant). Security review of this feature
+  also found and fixed: unauthenticated writes on
+  `POST /api/lifecycle/block`/`/unblock`, `PUT /api/v1/registry/:id/status`,
+  and `PATCH /api/v1/ai-platforms/:host` (now admin-auth-gated); an untyped
+  `agent_id` NoSQL-injection risk on the same routes; an XSS via an
+  unescaped blocked-agent name in the extension's toast; an over-broad
+  substring name-match that the widened host list would otherwise have
+  turned into a false-positive risk; and a live-data-observed access-exception
+  regression where the browser extension's `subtractAccessExceptions` reused
+  the widened block-lookup host list to decide whether an approval applies,
+  so a grant on one host could silently lift a block on ten others (fixed by
+  giving exceptions their own narrower, desktop-derived host map —
+  `PLATFORM_EXCEPTION_HOST_PATTERNS` in `browser-extension/lib/blocked-agents.js`).

@@ -2,7 +2,12 @@ import { useState, useEffect, useRef } from "react";
 import { Search, ChevronDown, ChevronUp, Cloud, Brain, Cpu, Server, Globe, Lock, AlertTriangle, RefreshCw, Bot, Layers, Key, Zap, MessageSquare, Sparkles, FolderOpen, Clock, Upload, ExternalLink, Ban, RotateCcw, Trash2, X } from "lucide-react";
 import { useGovernance, getScopedAgents, SCOPE_LABELS } from "../AgentGovernanceContext";
 import { useAgentAuth } from "../AgentGovernanceContext";
-import { agentGovernanceApi } from "../AgentGovernanceActions/AgentGovernanceActions";
+import { agentGovernanceApi, hasAdminCredential, ADMIN_CREDENTIAL_HINT } from "../AgentGovernanceActions/AgentGovernanceActions";
+// ── DEMO MODE (remove to revert) ────────────────────────────────────────────
+// Block/unblock of a FABRICATED demo agent never leaves the browser (see
+// agDemoResponse), so it needs no admin credential and stays clickable in a demo.
+import { AG_DEMO, isFabricatedId } from "../agentGovernanceDemoData";
+// ── END DEMO MODE ───────────────────────────────────────────────────────────
 import { Section } from "../common/Section";
 import { StatCard } from "../common/StatCard";
 import { Badge, riskColor, riskLabel, statusColor, statusLabel } from "../common/Badge";
@@ -1668,20 +1673,30 @@ function AgentTableView() {
                                 <Ban size={11} /> Archive
                               </button>
                             )}
-                            <button
-                              onClick={(e) => { e.stopPropagation(); handleBlockToggle(a); }}
-                              title={blockedAgents.has(a.id) ? "Unblock this agent" : "Block this agent via extension & monitor"}
-                              style={{
-                                display: "inline-flex", alignItems: "center", gap: 4,
-                                padding: "4px 10px", borderRadius: 6,
-                                border: blockedAgents.has(a.id) ? "1px solid #22c55e44" : "1px solid #ef444444",
-                                background: blockedAgents.has(a.id) ? "#f0fdf4" : "#fef2f2",
-                                color: blockedAgents.has(a.id) ? "#16a34a" : "#dc2626",
-                                fontSize: 11, fontWeight: 600, cursor: "pointer",
-                              }}
-                            >
-                              {blockedAgents.has(a.id) ? <><RotateCcw size={11} /> Unblock</> : <><Lock size={11} /> Block</>}
-                            </button>
+                            {(() => {
+                              // /lifecycle/block|unblock are requireAdminAuth: with no
+                              // credential in this build the button is inert and says why.
+                              const noCred = !hasAdminCredential() && !(AG_DEMO && isFabricatedId(a.id));
+                              return (<>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleBlockToggle(a); }}
+                                  disabled={noCred}
+                                  title={noCred ? ADMIN_CREDENTIAL_HINT : blockedAgents.has(a.id) ? "Unblock this agent" : "Block this agent via extension & monitor"}
+                                  style={{
+                                    display: "inline-flex", alignItems: "center", gap: 4,
+                                    padding: "4px 10px", borderRadius: 6,
+                                    border: blockedAgents.has(a.id) ? "1px solid #22c55e44" : "1px solid #ef444444",
+                                    background: blockedAgents.has(a.id) ? "#f0fdf4" : "#fef2f2",
+                                    color: blockedAgents.has(a.id) ? "#16a34a" : "#dc2626",
+                                    fontSize: 11, fontWeight: 600, cursor: noCred ? "not-allowed" : "pointer",
+                                    opacity: noCred ? 0.5 : 1,
+                                  }}
+                                >
+                                  {blockedAgents.has(a.id) ? <><RotateCcw size={11} /> Unblock</> : <><Lock size={11} /> Block</>}
+                                </button>
+                                {noCred && <span role="note" style={{ fontSize: 10, color: "var(--ag-text-secondary, #4b5563)", maxWidth: 160, lineHeight: 1.3 }}>{ADMIN_CREDENTIAL_HINT}</span>}
+                              </>);
+                            })()}
                             <ApprovalDropdown
                               agentId={a.id}
                               agentName={a.name}

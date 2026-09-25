@@ -20,6 +20,9 @@ import crypto from 'node:crypto';
 import { a } from '../util.js';
 import { fireWebhooks } from './webhooks.js';
 import { scoreToLevel } from '../lib/risk-scale.js';
+import {
+  RESPONSE_BUDGET_MS, raceWithFallback, applyBudgetHeaders, registerResponseWarmer,
+} from '../lib/response-budget.js';
 
 const WINDOW_DAYS = 90;
 const WEIGHTS = {
@@ -41,6 +44,9 @@ const WEIGHTS = {
  * needs it to keep such a name from outranking a real detected username.
  */
 export const UNIDENTIFIED_NAME = /^Browser User/;
+
+const SCORES_ROUTE = 'risk-scores';
+const SUMMARY_ROUTE = 'risk-scores.summary';
 
 export function mountRiskScore(app, db) {
   const scores    = () => db.collection('risk_scores');
@@ -121,68 +127,65 @@ export function mountRiskScore(app, db) {
   }));
 
   // ── Get all current scores (from profiles) ──
+  //
+  // BUDGETED, at last. The incident in the comment above — 384 serialized round
+  // trips, ~18s, past nginx's 120s proxy_read_timeout, a 504 for the caller and
+  // a box too busy to answer anything else — was fixed by batching the COMPUTE
+  // path, and no safety net was ever added to the read paths. Both of these
+  // reads are now bounded like every other AI Hub tab read: over budget, they
+  // serve the last real answer with X-Response-Stale and its capture time.
 
   app.get('/api/v1/risk-scores', a(async (req, res) => {
-    const allProfiles = await profiles().find({ risk_score: { $ne: null } })
-      .sort({ risk_score: -1 })
-      .project({ _id: 0, id: 1, display_name: 1, email: 1, hostname: 1, department: 1,
-        risk_score: 1, risk_level: 1, risk_factors: 1, risk_computed_at: 1, sources: 1 })
-      .toArray();
-
-    // Tag each row as identified or not, using the SAME rule the summary applies.
-    //
-    // This endpoint returned every scored profile while /summary silently excluded
-    // "Browser User (hash)" ones, so the same screen reported 18 people in the table
-    // and 3 in the header. Both numbers were defensible in isolation and impossible
-    // to reconcile on screen. The filter stays out of this endpoint — dropping rows
-    // here would hide real people whose extension has not yet been matched to an
-    // account — but the flag lets the caller group them and the two counts add up.
-    res.json(allProfiles.map(p => ({ ...p, is_identified: !UNIDENTIFIED_NAME.test(p.display_name || '') })));
+    const result = await raceWithFallback({
+      route: SCORES_ROUTE, params: null, budgetMs: RESPONSE_BUDGET_MS,
+      live: () => fetchScores(db),
+    });
+    if (result.failed) throw result.error;
+    applyBudgetHeaders(res, result);
+    res.json(result.value);
   }));
 
   // ── Summary stats (MUST be before /:profileId to avoid Express param conflict) ──
 
   app.get('/api/v1/risk-scores/summary', a(async (req, res) => {
-    const allProfiles = await profiles().find({
-      risk_score: { $ne: null },
-      display_name: { $not: UNIDENTIFIED_NAME },
-    }).project({ _id: 0, risk_score: 1, risk_level: 1 }).toArray();
-    const total = allProfiles.length;
-
-    // Scored, but not attributable to a named person. Counted separately rather
-    // than dropped: excluding them from the average is right (an unnamed row cannot
-    // be actioned), but omitting them entirely is what made the header disagree
-    // with the table below it. GET /api/v1/risk-scores returns these with
-    // is_identified: false, so total_employees + unidentified equals its row count.
-    const unidentified = await profiles().countDocuments({
-      risk_score: { $ne: null },
-      display_name: UNIDENTIFIED_NAME,
+    const result = await raceWithFallback({
+      route: SUMMARY_ROUTE, params: null, budgetMs: RESPONSE_BUDGET_MS,
+      live: () => fetchScoresSummary(db),
     });
-    const avgScore = total ? Math.round(allProfiles.reduce((s, p) => s + p.risk_score, 0) / total) : 0;
-    const distribution = { low: 0, medium: 0, high: 0, critical: 0 };
-    for (const p of allProfiles) distribution[p.risk_level] = (distribution[p.risk_level] || 0) + 1;
+    if (result.failed) throw result.error;
+    applyBudgetHeaders(res, result);
+    res.json(result.value);
+  }));
 
-    // Report the unmeasured population instead of quietly dropping it.
-    //
-    // The risk_score:{$ne:null} filter above correctly keeps unassessed people out
-    // of the average — but on its own it makes them invisible, so an org where
-    // most staff have no endpoint agent shows a small, healthy-looking cohort and
-    // no hint that the coverage is thin. "We measured 4 of 40 people" is a
-    // materially different statement from "we measured 4 people", and the second
-    // one is what this endpoint used to imply.
-    const notAssessed = await profiles().countDocuments({
-      $or: [{ risk_score: null }, { risk_score: { $exists: false } }],
-      display_name: { $not: /^Browser User/ },
-    });
+  registerResponseWarmer(SCORES_ROUTE, () => raceWithFallback({
+    route: SCORES_ROUTE, params: null, budgetMs: RESPONSE_BUDGET_MS, live: () => fetchScores(db),
+  }));
+  registerResponseWarmer(SUMMARY_ROUTE, () => raceWithFallback({
+    route: SUMMARY_ROUTE, params: null, budgetMs: RESPONSE_BUDGET_MS, live: () => fetchScoresSummary(db),
+  }));
 
-    res.json({
-      total_employees: total,
-      average_score: avgScore,
-      distribution,
-      unidentified,
-      not_assessed: notAssessed,
-      coverage_percent: (total + notAssessed) ? Math.round((total / (total + notAssessed)) * 100) : 0,
-    });
+  // ── Score trend — average score per day, across identified employees ──
+  // (also before /:profileId, same Express param-conflict reason as /summary)
+  //
+  // risk_scores already carries one row per employee per compute run, so this
+  // is a real aggregation over real history — not a synthesized rollup. Each
+  // row already carries the display_name it was scored under, so the same
+  // UNIDENTIFIED_NAME exclusion /summary uses applies directly here with no
+  // join back to employee_profiles. Sparse by construction: a day only
+  // appears if "Compute Scores" actually ran that day.
+  app.get('/api/v1/risk-scores/trend', a(async (req, res) => {
+    const days = Math.min(365, Math.max(1, Number(req.query.days) || 90));
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const rows = await scores().aggregate([
+      { $match: { computed_at: { $gte: since }, display_name: { $not: UNIDENTIFIED_NAME } } },
+      { $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$computed_at' } },
+          avg_score: { $avg: '$score' },
+          employees: { $sum: 1 },
+        } },
+      { $sort: { _id: 1 } },
+    ]).toArray();
+    res.json(rows.map(r => ({ date: r._id, avg_score: Math.round(r.avg_score), employees: r.employees })));
   }));
 
   // ── Get single employee score with history ──
@@ -209,6 +212,80 @@ export function mountRiskScore(app, db) {
 
     res.json({ profile, history, recent_events: recentEvents });
   }));
+}
+
+// The work behind GET /api/v1/risk-scores, pulled out of the handler so the
+// route can race it against the budget and the boot warmer can run the same
+// read — one definition, so a warmed body can never differ from a served one.
+async function fetchScores(db) {
+  const allProfiles = await db.collection('employee_profiles').find({ risk_score: { $ne: null } })
+    .sort({ risk_score: -1 })
+    .project({ _id: 0, id: 1, display_name: 1, email: 1, hostname: 1, department: 1,
+      risk_score: 1, risk_level: 1, risk_factors: 1, risk_computed_at: 1, sources: 1 })
+    .toArray();
+
+  // Tag each row as identified or not, using the SAME rule the summary applies.
+  //
+  // This endpoint returned every scored profile while /summary silently excluded
+  // "Browser User (hash)" ones, so the same screen reported 18 people in the table
+  // and 3 in the header. Both numbers were defensible in isolation and impossible
+  // to reconcile on screen. The filter stays out of this endpoint — dropping rows
+  // here would hide real people whose extension has not yet been matched to an
+  // account — but the flag lets the caller group them and the two counts add up.
+  return allProfiles.map(p => ({ ...p, is_identified: !UNIDENTIFIED_NAME.test(p.display_name || '') }));
+}
+
+// The work behind GET /api/v1/risk-scores/summary.
+//
+// ALL THREE READS IN PARALLEL. They were awaited one after another — a find()
+// and two countDocuments() over the same collection, none of them feeding
+// another — on the endpoint whose own history is a serialized-round-trip
+// incident. Same treatment as /api/v1/overview and /api/v1/machines.
+async function fetchScoresSummary(db) {
+  const profiles = () => db.collection('employee_profiles');
+  const [allProfiles, unidentified, notAssessed] = await Promise.all([
+    profiles().find({
+      risk_score: { $ne: null },
+      display_name: { $not: UNIDENTIFIED_NAME },
+    }).project({ _id: 0, risk_score: 1, risk_level: 1 }).toArray(),
+
+    // Scored, but not attributable to a named person. Counted separately rather
+    // than dropped: excluding them from the average is right (an unnamed row cannot
+    // be actioned), but omitting them entirely is what made the header disagree
+    // with the table below it. GET /api/v1/risk-scores returns these with
+    // is_identified: false, so total_employees + unidentified equals its row count.
+    profiles().countDocuments({
+      risk_score: { $ne: null },
+      display_name: UNIDENTIFIED_NAME,
+    }),
+
+    // Report the unmeasured population instead of quietly dropping it.
+    //
+    // The risk_score:{$ne:null} filter above correctly keeps unassessed people out
+    // of the average — but on its own it makes them invisible, so an org where
+    // most staff have no endpoint agent shows a small, healthy-looking cohort and
+    // no hint that the coverage is thin. "We measured 4 of 40 people" is a
+    // materially different statement from "we measured 4 people", and the second
+    // one is what this endpoint used to imply.
+    profiles().countDocuments({
+      $or: [{ risk_score: null }, { risk_score: { $exists: false } }],
+      display_name: { $not: /^Browser User/ },
+    }),
+  ]);
+
+  const total = allProfiles.length;
+  const avgScore = total ? Math.round(allProfiles.reduce((s, p) => s + p.risk_score, 0) / total) : 0;
+  const distribution = { low: 0, medium: 0, high: 0, critical: 0 };
+  for (const p of allProfiles) distribution[p.risk_level] = (distribution[p.risk_level] || 0) + 1;
+
+  return {
+    total_employees: total,
+    average_score: avgScore,
+    distribution,
+    unidentified,
+    not_assessed: notAssessed,
+    coverage_percent: (total + notAssessed) ? Math.round((total / (total + notAssessed)) * 100) : 0,
+  };
 }
 
 function windowStart() {

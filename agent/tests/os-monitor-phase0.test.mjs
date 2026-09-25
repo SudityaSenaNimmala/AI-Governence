@@ -278,7 +278,8 @@ test('stop() clears the lifecycle flag before it tears anything down', async () 
   assert.ok(flagIdx > 0, 'expected stop() to clear the lifecycle flag');
   assert.ok(flagIdx < firstTeardown, 'the flag must be cleared FIRST');
   // …and #applyFeatures must actually honour it.
-  const apply = src.slice(src.indexOf('#applyFeatures(features, changed) {'));
+  // (The signature gained a { fromFleet } option on 2026-09-24 — anchored on the name.)
+  const apply = src.slice(src.indexOf('  #applyFeatures(features, changed'));
   assert.match(apply.slice(0, 700), /if \(!this\.isRunning\) return;/);
 });
 

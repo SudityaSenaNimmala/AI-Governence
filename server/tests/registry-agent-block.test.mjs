@@ -20,9 +20,29 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
+import { readFile } from 'node:fs/promises';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 
 import { mountRegistry } from '../src/routes/registry.js';
+import { isUnenforceableBlock } from '../src/lib/agent-platform.js';
 import { createFakeDb } from './helpers/fake-db.mjs';
+import { adminJsonHeaders } from './helpers/admin-auth.mjs';
+
+const SERVER_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+// POINT THE SNAPSHOT AT A TEMP FILE. A successful live build now REWRITES
+// data/registry-snapshot.json (routes/registry.js — the snapshot is kept current
+// instead of ageing from the day it was captured), and this file's readStatus()
+// helper issues a real GET /api/v1/registry. Left on the default path, a
+// one-agent fixture would overwrite the curated 260-system capture that is the
+// Inventory tab's fallback. Set before any mountRegistry() call, which is when
+// the path is read.
+process.env.REGISTRY_SNAPSHOT_PATH = join(
+  mkdtempSync(join(tmpdir(), 'cfai-registry-agent-block-')), 'registry-snapshot.json',
+);
 
 async function withServer(seed, fn) {
   const db = createFakeDb();
@@ -42,7 +62,7 @@ async function withServer(seed, fn) {
       async setStatus(id, body) {
         const res = await fetch(`${base}/api/v1/registry/${encodeURIComponent(id)}/status`, {
           method: 'PUT',
-          headers: { 'content-type': 'application/json' },
+          headers: adminJsonHeaders(),
           body: JSON.stringify(body),
         });
         const json = await res.json();
@@ -56,9 +76,14 @@ async function withServer(seed, fn) {
 }
 
 const AGENT_ID = '124794af-3b8f-f111-b8da-0022480b1f83';
+// `platform` is part of the fixture because it is part of the record: every real
+// discovered agent carries one, and the server now DERIVES the blocklist row's
+// platform from this document when the caller omits it (see the platform-derivation
+// section at the bottom of this file). A fixture without it would be testing the
+// one shape the write path is no longer allowed to produce silently.
 const seedAgent = async (db) => {
   await db.collection('discovered_agents').insertOne({
-    id: AGENT_ID, name: 'Enterprise Agent', lifecycleStatus: 'active',
+    id: AGENT_ID, name: 'Enterprise Agent', platform: 'copilot_studio', lifecycleStatus: 'active',
   });
 };
 const blockedRows = (db) => db._rows('blocked_agents').filter((r) => r.blocked === true);
@@ -217,7 +242,7 @@ test('a block persists when botId differs from the row id', async () => {
 
     const res = await fetch(`${base}/api/v1/registry/${encodeURIComponent(before.id)}/status`, {
       method: 'PUT',
-      headers: { 'content-type': 'application/json' },
+      headers: adminJsonHeaders(),
       body: JSON.stringify({ status: 'blocked', product_name: 'Enterprise Agent', category: 'autonomous-agent' }),
     });
     assert.equal(res.status, 200);
@@ -235,7 +260,7 @@ test('the decision round-trips back to approved', async () => {
     const row = await readStatus(base, 'Enterprise Agent');
     const put = (status) => fetch(`${base}/api/v1/registry/${encodeURIComponent(row.id)}/status`, {
       method: 'PUT',
-      headers: { 'content-type': 'application/json' },
+      headers: adminJsonHeaders(),
       body: JSON.stringify({ status, product_name: 'Enterprise Agent', category: 'autonomous-agent' }),
     });
 
@@ -256,7 +281,7 @@ test('enforced reports the agent blocklist, not just platform hosts', async () =
     const row = await readStatus(base, 'Enterprise Agent');
     const res = await fetch(`${base}/api/v1/registry/${encodeURIComponent(row.id)}/status`, {
       method: 'PUT',
-      headers: { 'content-type': 'application/json' },
+      headers: adminJsonHeaders(),
       body: JSON.stringify({ status: 'blocked', product_name: 'Enterprise Agent', category: 'autonomous-agent' }),
     });
     const body = await res.json();
@@ -332,6 +357,168 @@ test('the mirrored row carries the real platform, not null', async () => {
     assert.equal(row.platform, 'copilot_studio',
       'platform came through as null — this row cannot be matched by PLATFORM_PROCS on either enforcement surface');
   });
+});
+
+// The dashboard's PUT does not send one, so it has to be DERIVED rather than
+// stored as null — from the same discovered_agents document this request already
+// matched for the lifecycle update, never guessed from anything else.
+test('the platform is derived from discovered_agents when the body omits it', async () => {
+  await withServer(seedAgent, async ({ db, setStatus }) => {
+    const body = await setStatus(AGENT_ID, {
+      status: 'blocked', product_name: 'Enterprise Agent', category: 'autonomous-agent',
+      // no `platform` — exactly what the dashboard sends
+    });
+    assert.equal(blockedRows(db)[0].platform, 'copilot_studio',
+      'the row was stored with platform:null and enforces on neither surface');
+    assert.equal(body.enforced, true);
+    assert.equal('reason' in body, false, 'a derivable platform must not report a reason');
+  });
+});
+
+test('a platform sent explicitly still wins over the derived one', async () => {
+  await withServer(async (db) => {
+    await db.collection('discovered_agents').insertOne({
+      id: AGENT_ID, name: 'Enterprise Agent', platform: 'copilot_studio', lifecycleStatus: 'active',
+    });
+  }, async ({ db, setStatus }) => {
+    await setStatus(AGENT_ID, {
+      status: 'blocked', product_name: 'Enterprise Agent', category: 'autonomous-agent',
+      platform: 'personal_agent',
+    });
+    assert.equal(blockedRows(db)[0].platform, 'personal_agent',
+      'the caller was overruled by discovery');
+  });
+});
+
+test('derivation matches on botId and appId too, not just id', async () => {
+  // The registry exposes `agent.id || key`, and for a Copilot Studio agent the
+  // botId legitimately differs — the derivation must use the SAME filter the
+  // lifecycle update used, or it resolves a different document (or none).
+  for (const key of ['botId', 'appId', 'name']) {
+    await withServer(async (db) => {
+      await db.collection('discovered_agents').insertOne({
+        id: 'some-other-id', [key]: 'lookup-key', name: key === 'name' ? 'lookup-key' : 'Enterprise Agent',
+        platform: 'teams_chat_agent', lifecycleStatus: 'active',
+      });
+    }, async ({ db, setStatus }) => {
+      await setStatus('lookup-key', { status: 'blocked', product_name: 'Enterprise Agent', category: 'autonomous-agent' });
+      assert.equal(blockedRows(db)[0].platform, 'teams_chat_agent', `derivation missed a match on ${key}`);
+    });
+  }
+});
+
+// ── When it genuinely cannot be derived: say so, do not lose the block ───────
+
+test('an underivable platform reports enforced:false with a reason, not a false success', async () => {
+  await withServer(null, async ({ db, setStatus }) => {
+    const body = await setStatus('orphan-agent-id', {
+      status: 'blocked', product_name: 'Ghost Agent', category: 'autonomous-agent',
+    });
+    assert.equal(body.enforced, false,
+      'an inert row (platform:null) was reported as enforced — the exact false positive this fixes');
+    assert.equal(body.reason, 'no_platform');
+    assert.deepEqual(body.enforced_via, [], 'nothing enforced, so nothing to name');
+    // …and the admin's decision is still on record, which is the half that must
+    // not regress: refusing the write would silently drop the block.
+    const [row] = blockedRows(db);
+    assert.equal(row.agent_name, 'Ghost Agent');
+    assert.equal(row.platform, null);
+  });
+});
+
+test('a discovered agent with no platform of its own is treated the same way', async () => {
+  // A matching document that simply has no platform field is as underivable as no
+  // document at all — and an empty/whitespace platform must not pass either, since
+  // the enforcer drops exactly those rows at parse time.
+  for (const platform of [undefined, null, '', '   ']) {
+    await withServer(async (db) => {
+      await db.collection('discovered_agents').insertOne({ id: AGENT_ID, name: 'Enterprise Agent', platform });
+    }, async ({ setStatus }) => {
+      const body = await setStatus(AGENT_ID, {
+        status: 'blocked', product_name: 'Enterprise Agent', category: 'autonomous-agent',
+      });
+      assert.equal(body.enforced, false, `platform ${JSON.stringify(platform)} was accepted as enforceable`);
+      assert.equal(body.reason, 'no_platform');
+    });
+  }
+});
+
+test('unblocking never reports no_platform — a lifted block needs no platform', async () => {
+  await withServer(null, async ({ setStatus }) => {
+    const body = await setStatus('orphan-agent-id', { status: 'approved', product_name: 'Ghost Agent', category: 'autonomous-agent' });
+    assert.equal(body.enforced, true);
+    assert.equal('reason' in body, false);
+  });
+});
+
+// ── The read path marks the row instead of dropping it ──────────────────────
+//
+// GET /api/lifecycle/blocked-agents lives on the governance router, which resolves
+// its Mongo handle through getDb() at request time and so cannot be mounted against
+// the in-memory fake. Same convention as agent-scope.test.mjs: the marker's logic is
+// covered behaviourally through the shared helper, the route's use of it by pinning
+// its source — including the one change that must never be made here, filtering.
+
+// The tests below pin lifecycle.ts's SOURCE, which cannot tell a working route
+// from one that no longer parses — `const reason = ...` shadowing the `reason`
+// already destructured from the request body matched every regex here and still
+// crashed the whole governance router at import. One real import closes that hole.
+test('the governance lifecycle route still loads', async () => {
+  const mod = await import('../src/governance/routes/lifecycle.ts');
+  assert.equal(typeof mod.default, 'function', 'lifecycle.ts no longer exports a router');
+});
+
+test('isUnenforceableBlock marks exactly the rows no surface can enforce', () => {
+  for (const platform of [undefined, null, '', '  ', 0, false, {}]) {
+    assert.equal(isUnenforceableBlock({ agent_id: 'x', platform }), true, JSON.stringify(platform) ?? 'undefined');
+  }
+  for (const platform of ['copilot_studio', 'personal_agent', ' teams_chat_agent ']) {
+    assert.equal(isUnenforceableBlock({ agent_id: 'x', platform }), false, platform);
+  }
+});
+
+test('GET /lifecycle/blocked-agents ANNOTATES a platform-less row and never omits it', async () => {
+  const src = await readFile(join(SERVER_DIR, 'src', 'governance', 'routes', 'lifecycle.ts'), 'utf8');
+  const route = src.slice(src.indexOf('router.get("/blocked-agents"'), src.indexOf('router.post("/dlp-monitor"'));
+  assert.ok(route.length > 0, 'expected a GET /blocked-agents body');
+  // The marker rides the same map as `orphaned` — annotate, never drop. It is now
+  // derived from unenforceableReason() (lib/agent-platforms.js), which widened it
+  // to cover a row whose platform is set but unknown to every surface; the boolean
+  // itself is unchanged for the clients already reading it.
+  assert.match(route, /unenforceable: unenforceableReasonForRow !== null,/);
+  assert.match(route, /unenforceable_reason: unenforceableReasonForRow,/);
+  assert.match(route, /orphaned: !known\.has\(String\(b\.agent_id\)\),/);
+  // Still the unfiltered list: the selection is `blocked: true` and nothing else,
+  // and no post-filter narrows it. Dropping a platform-less row here would make
+  // the payload agree with what is enforced by silently discarding the block.
+  assert.match(route, /\.find\(\{ blocked: true \}\)/);
+  assert.equal(/list\.filter\(/.test(route), false, 'the blocked list must never be filtered');
+  // One definition of the predicate, shared with the write path in the same file.
+  assert.match(src, /import \{ derivePlatform, normalizePlatform \} from "\.\.\/\.\.\/lib\/agent-platform\.js";/);
+  assert.match(src, /import \{ unenforceableReason \} from "\.\.\/\.\.\/lib\/agent-platforms\.js";/);
+});
+
+test('POST /lifecycle/block derives the platform the same way the registry route does', async () => {
+  const src = await readFile(join(SERVER_DIR, 'src', 'governance', 'routes', 'lifecycle.ts'), 'utf8');
+  const route = src.slice(src.indexOf('router.post("/block"'), src.indexOf('router.post("/unblock"'));
+  assert.ok(route.length > 0, 'expected a POST /block body');
+  // Derived through the shared helper, and the RESOLVED value is what gets stored —
+  // `platform: platform || null` straight off the body is the bug.
+  assert.match(route, /const resolvedPlatform = normalizePlatform\(platform\)\s*\?\?\s*await derivePlatform\(db, \{/);
+  assert.match(route, /platform: resolvedPlatform,/);
+  assert.equal(/platform: platform \|\| null/.test(route), false,
+    'the raw body value is stored again — a null platform enforces on neither surface');
+  // Honest response, same stance as the registry route — and the reason string now
+  // comes from the shared helper, so a row reported 'unknown_platform' on write
+  // reads back as 'unknown_platform' too rather than as a silent success.
+  assert.match(route, /const enforcementReason = unenforceableReason\(resolvedPlatform\);/);
+  assert.match(route, /\.\.\.\(enforcementReason \? \{ enforced: false, reason: enforcementReason \} : \{\}\),/);
+  // The write itself is never conditional on enforceability.
+  assert.ok(
+    route.indexOf('const enforcementReason = unenforceableReason(resolvedPlatform);')
+      > route.indexOf('collection("blocked_agents").updateOne'),
+    'the block is computed before it is stored — an unenforceable platform must never gate the write',
+  );
 });
 
 test('a sanction already stored under the legacy key is still honoured', async () => {

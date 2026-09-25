@@ -541,11 +541,37 @@ test('enforcer-win.ps1: attach_hold ORs into both the Enter and mouse-click bloc
   assert.ok(holdGate.length > 0, 'expected an AttachHoldActive body');
   assert.match(holdGate, /if \(!_attachHoldActive\) return false;/);
   assert.match(holdGate, /return string\.Equals\(owner, _app \?\? "", StringComparison\.OrdinalIgnoreCase\);/);
-  // Every keystroke-decision read goes through the accessor. The only places the
-  // raw flag may still be touched are its declaration, the stdin command, the
-  // TTL sweep and the accessor itself.
+  // Every keystroke-decision read goes through a PROCESS-BINDING accessor. The
+  // only places the raw flag may still be touched are its declaration, the stdin
+  // command, the TTL sweep, AttachHoldActive itself — and EgressHoldArmed, which
+  // is the SECOND binding accessor, added for the egress (mail client) send
+  // chord.
+  //
+  // WHY THAT SITE IS ALLOWED, and why it is not a loosening of the rule. The rule
+  // is "no keystroke decision may read the raw flag WITHOUT binding it to a
+  // process", because a hold armed in one app used to swallow the next Enter in
+  // whatever app the user alt-tabbed to. EgressHoldArmed binds it — more
+  // strictly than AttachHoldActive does, since an UNBOUND hold satisfies that one
+  // and is refused by this one. What it cannot do is DELEGATE to AttachHoldActive:
+  // that accessor compares against `_app`, which ApplyForegroundTick assigns only
+  // on a tick that established an AI surface, so it is structurally false for
+  // every mail client and calling it would have shipped a dead code path. The
+  // binding is asserted below rather than taken on trust.
   const rawReads = (psCodeOnly(src).match(/_attachHoldActive/g) || []).length;
-  assert.equal(rawReads, 6, `_attachHoldActive gained a raw reference (${rawReads}) — it must be read through AttachHoldActive()`);
+  assert.equal(rawReads, 7, `_attachHoldActive gained a raw reference (${rawReads}) — it must be read through a process-binding accessor (AttachHoldActive / EgressHoldArmed)`);
+  const egressGate = src.slice(src.indexOf('static bool EgressHoldArmed(string proc)'), src.indexOf('// Which AGENT_SURFACES entry hosts this process name'));
+  assert.ok(egressGate.length > 0, 'expected an EgressHoldArmed body');
+  assert.match(egressGate, /if \(!_attachHoldActive\) return false;/);
+  // BOUND to the process this decision is about, case-insensitively…
+  assert.match(egressGate, /return string\.Equals\(owner, name, StringComparison\.OrdinalIgnoreCase\);/);
+  // …and STRICTER than AttachHoldActive: an unbound hold is refused here. "Some
+  // app somewhere has a sensitive file attached" must never kill the send chord
+  // in a mail client.
+  assert.match(egressGate, /if \(owner\.Length == 0\) return false;/);
+  // The panic hotkey still wins, and the TTL is re-checked inline rather than
+  // trusting the poll thread's sweep — this is a keystroke decision.
+  assert.match(egressGate, /if \(Disarmed\(\)\) return false;/);
+  assert.match(egressGate, /if \(DateTime\.UtcNow\.Ticks >= _attachHoldExpiresAt\) return false;/);
   const enterPred = src.slice(src.indexOf('static bool EnterBlockActive('), src.indexOf('static string ActivePatterns()'));
   assert.match(enterPred, /return attachHold \|\| TypedBlockFresh\(\) \|\| uiaBlock \|\| clipBlock \|\| cooldown;/);
   assert.match(enterPred, /if \(_fgIsBlocked && \(_blockedByElement \|\| PanelEnforceOk\(\)\)\) return true;/);
@@ -852,7 +878,7 @@ test('enforcer-win.ps1: keystrokes are only captured while an AI app is REALLY f
   // PanelEnforceOk() joined this gate when IDE panels landed: a detection-only
   // panel must not accumulate keystrokes either. The sticky/now split it exists
   // for is unchanged.
-  assert.match(src, /static bool FgIsAiNow\(\) \{ return _fgIsAi && _fgLeftAiTicks == 0 && PanelEnforceOk\(\); \}/);
+  assert.match(src, /static bool FgIsAiNow\(\) \{ return _fgIsAi && _fgLeftAiTicks == 0 && PanelEnforceOk\(\) && _fgContentOk; \}/);
   assert.match(src, /if \(FgIsAiNow\(\)\)\s*\r?\n\s*\{\s*\r?\n\s*char c = MapKey\(vk, shift, caps\);/);
   assert.match(src, /if \(FgIsAiNow\(\)\) \{ TypedBackspace\(\);/);
   // The Enter decision must NOT have been narrowed to FgIsAiNow — that would
@@ -1390,10 +1416,10 @@ test('enforcer-win.ps1: PanelUiaOk gates the Enter decision and Tokenize & Send,
   // typing at a DLP-monitored agent. `&& !_fgDlpGoverned` is the whole of the
   // widening, and _fgDlpGoverned is false on every non-host-app tick, on every
   // ungoverned Teams tick, and on every BLOCKED tick.
-  assert.match(src, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| \(_hostAppProcs\.Contains\(_app\) && !_fgDlpGoverned\) \|\| Disarmed\(\)\)/);
+  assert.match(src, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| \(_hostAppProcs\.Contains\(_app\) && !_fgDlpGoverned\) \|\| !_fgContentOk \|\| Disarmed\(\)\)/);
   // …and the UIA read itself is gated, so the PII patterns never run over the
   // user's source code on the poll loop in the first place.
-  assert.match(src, /if \(!_fgIsAi \|\| !PanelUiaOk\(\)\) \{ _blockUia = false; _uiaPatterns = ""; return; \}/);
+  assert.match(src, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| !_fgContentOk\) \{ _blockUia = false; _uiaPatterns = ""; return; \}/);
 });
 
 test('enforcer-win.ps1: model routing still excludes IDE and HOST-APP processes ENTIRELY (not panel-scoped)', async () => {
@@ -1410,23 +1436,36 @@ test('enforcer-win.ps1: model routing still excludes IDE and HOST-APP processes 
   assert.equal(/PanelUiaOk|_fgIsPanel/.test(routing), false, 'model routing must not become panel-aware');
 });
 
-test('enforcer-win.ps1: send-rect detection skips IDE processes instead of walking their UIA tree', async () => {
-  // Attempt 1 there is FindAll(TreeScope.Descendants) over the whole foreground
-  // window — a real performance hazard against a VS Code tree, on the same poll
-  // thread that guards the DLP scan. Attempt 2's bottom-right heuristic is
-  // meaningless in an IDE (status bar / terminal, not a send button).
+test('enforcer-win.ps1: send-rect detection skips IDE/host-app processes for the WHOLE-WINDOW search, except a bounded panel-scoped one', async () => {
+  // Attempt 1 (the whole-window search below) is FindAll(TreeScope.Descendants)
+  // over the whole foreground window — a real performance hazard against a VS
+  // Code tree, on the same poll thread that guards the DLP scan. Attempt 2's
+  // bottom-right heuristic is meaningless in an IDE (status bar / terminal, not
+  // a send button) and just as wrong in Teams, where which composer that
+  // corner belongs to depends on which conversation is open.
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
   const fn = src.slice(src.indexOf('static void UpdateSendRect()'), src.indexOf('static void UpdateUia()'));
   assert.ok(fn.length > 0, 'expected an UpdateSendRect body');
-  // A HOST APP is skipped too: attempt 2's "the bottom-right corner is the send
-  // button" heuristic is just as wrong in Teams, where which composer that
-  // corner belongs to depends on which conversation is open — so a cached rect
-  // would swallow an ordinary click in an ordinary chat.
-  const skip = fn.indexOf('if (_ideProcs.Contains(_app) || _hostAppProcs.Contains(_app)) { _hasRect = false; return; }');
-  const search = fn.indexOf('win.FindAll(TreeScope.Descendants');
-  assert.ok(skip >= 0, 'expected an IDE + host-app skip in UpdateSendRect');
-  assert.ok(search >= 0, 'expected the UIA descendant search to still exist for chat apps');
-  assert.ok(skip < search, 'the skip must come BEFORE the expensive search');
+  const ideHostBranch = fn.indexOf('if (_ideProcs.Contains(_app) || _hostAppProcs.Contains(_app))');
+  const wholeWindowSearch = fn.indexOf('win.FindAll(TreeScope.Descendants');
+  assert.ok(ideHostBranch >= 0, 'expected an IDE + host-app branch in UpdateSendRect');
+  assert.ok(wholeWindowSearch >= 0, 'expected the whole-window UIA descendant search to still exist for chat apps');
+  assert.ok(ideHostBranch < wholeWindowSearch, 'the IDE/host-app branch must come BEFORE the expensive whole-window search');
+  // Added 2026-09-21, after a live test proved a send-button click on the
+  // Office Copilot pane went through unblocked: inside that same branch, a
+  // BOUNDED, panel-scoped search — gated on a focused, ENFORCING panel, never
+  // on a bare IDE/host-app process — widens one ancestor at a time and stops
+  // at the first match, so it never becomes the whole-window cost the branch
+  // exists to avoid.
+  const ideHostBlock = fn.slice(ideHostBranch);
+  assert.match(ideHostBlock, /if \(_fgIsPanel && !string\.IsNullOrEmpty\(_fgPanelId\) && PanelUiaOk\(\)\)/);
+  const panelSearch = ideHostBlock.indexOf('container.FindAll(TreeScope.Descendants');
+  const depthLoop = ideHostBlock.indexOf('for (int depth = 0; depth < 8');
+  assert.ok(panelSearch >= 0, 'expected a panel-scoped descendant search');
+  assert.ok(depthLoop >= 0 && depthLoop < panelSearch, 'the ancestor widening must be bounded and precede the search it bounds');
+  // The branch must still fall through to _hasRect=false for every case the
+  // panel search doesn't return early on (no panel focused, or nothing found).
+  assert.match(ideHostBlock, /_hasRect = false; return;/);
 });
 
 test('enforcer-win.ps1: a panel-keyed platform block matches the focused panel and honours enforce', async () => {
@@ -1481,7 +1520,7 @@ test('enforcer-win.ps1: a platform block established in an IDE panel is latched,
   const agentArmIdx = check.indexOf('ArmPanelBlockLatch("agent:');
   const surfaceIdx = check.indexOf('AgentSurface surface = EnforcingAgentSurface(_app);');
   assert.ok(surfaceIdx >= 0 && surfaceIdx < agentArmIdx, 'the agent arm must sit behind EnforcingAgentSurface');
-  assert.match(check, /if \(_fgAgentOutcome == AgentReadOutcome\.Named\r?\n\s*&& AgentNameMatches\(_fgAgentName, agent\["agent_name"\]\)\)/);
+  assert.match(check, /if \(_fgAgentOutcome == AgentReadOutcome\.Named\r?\n\s*&& AgentNameMatchesAny\(_fgAgentName, agent\)\)/);
   // …and both arm only on a tick whose focused-element read really succeeded,
   // reusing the existing sticky signal rather than inventing a second counter.
   // Arming inside the sticky window would stack the two grace periods.
@@ -1527,7 +1566,27 @@ test('enforcer-win.ps1: the platform-block latch is bounded, pid-scoped, and yie
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
   const held = src.slice(src.indexOf('static bool PanelBlockLatchHeld()'), src.indexOf('static void CheckFgBlocked()'));
   assert.ok(held.length > 0, 'expected a PanelBlockLatchHeld body');
-  assert.match(held, /if \(\(DateTime\.UtcNow\.Ticks - armed\) > PANEL_BLOCK_LATCH_TTL\) return false;/);
+  // Still bounded, but by ONE OF TWO bounds now: an agent latch expires much
+  // sooner than a panel one. A blocked agent's latch used to survive for the
+  // full ten seconds after the user left that agent, and because NotComposer
+  // deliberately holds the latch, ordinary clicking in the rest of the app kept
+  // it alive — an agent-scoped block behaving like an app-scoped one. Reported
+  // live 2026-09-23 in Microsoft 365 Copilot.
+  assert.match(held, /long ttl = AgentBlockLatched\(\) \? AGENT_BLOCK_LATCH_TTL : PANEL_BLOCK_LATCH_TTL;/);
+  assert.match(held, /if \(\(DateTime\.UtcNow\.Ticks - armed\) > ttl\) return false;/);
+  // The bound may only ever get SHORTER for an agent, never longer: this latch
+  // is a safety ceiling on how long a stale read can keep Enter swallowed, and
+  // the agent case is the one that spills onto a general-purpose app.
+  const secondsOf = (name) => {
+    const m = src.match(new RegExp(name + '\\s*=\\s*TimeSpan\\.FromSeconds\\((\\d+)\\)\\.Ticks'));
+    assert.ok(m, `${name} must be declared in seconds`);
+    return Number(m[1]);
+  };
+  const agentTtl = secondsOf('AGENT_BLOCK_LATCH_TTL');
+  const panelTtl = secondsOf('PANEL_BLOCK_LATCH_TTL');
+  assert.ok(agentTtl > 0, 'an agent latch must still exist — it covers a transient read failure');
+  assert.ok(agentTtl <= panelTtl,
+    `an agent latch may never outlive a panel one (agent ${agentTtl}s, panel ${panelTtl}s)`);
   assert.match(held, /if \(_fgPid != _panelBlockPid\) return false;/);
   // The hook thread calls this, so it must not write poll-thread state.
   assert.equal(/ClearPanelBlockLatch\(\)|_panelBlockLatch = |_panelBlockLatchTicks = /.test(held), false,
@@ -1544,10 +1603,13 @@ test('enforcer-win.ps1: the platform-block latch is bounded, pid-scoped, and yie
   // is the cursor_composer fix; see the FocusCouldHaveMoved test below.
   const fg = src.slice(src.indexOf('static void UpdateForeground()'), src.indexOf('static void UpdateSendRect()'));
   assert.ok(fg.length > 0, 'expected an UpdateForeground body');
-  // The IDE read keeps `allowChildProcess: false` — VS Code and Cursor were
-  // verified live with the exact-pid rule, and widening a code editor's read is
-  // a separate decision with its own false-positive surface.
-  assert.match(fg, /if \(isIde\) hit = ReadFocusedPanel\(proc, pid, out panelRid, out panelReadable, false\);/);
+  // The IDE read's `allowChildProcess` is data-driven, not a hardcoded `false`:
+  // VS Code and Cursor were verified live with the exact-pid rule (their
+  // composers run IN the IDE's own process), but Word/Excel/PowerPoint/OneNote
+  // are ALSO `isIde` and host their Copilot pane in a child msedgewebview2.exe,
+  // so they need the same widening a host app gets — via _idePanelChildProcs,
+  // fed from ai-processes.js's panelChildProcess, not a second hardcoded `true`.
+  assert.match(fg, /if \(isIde\) hit = ReadFocusedPanel\(proc, pid, out panelRid, out panelReadable, _idePanelChildProcs\.Contains\(proc\)\);/);
   assert.match(fg, /else if \(panelReadable\)\r?\n\s*\{[\s\S]{0,2600}?if \(FocusCouldHaveMoved\(\)\) ClearPanelBlockLatch\(\);/);
   // …and a real app switch drops it on the very next poll tick.
   assert.match(fg, /if \(_panelBlockLatch && pid != _panelBlockPid\) ClearPanelBlockLatch\(\);/);
@@ -1576,15 +1638,19 @@ test('enforcer-win.ps1: a focused element from another process is a read FAILURE
   const read = src.slice(src.indexOf('static PanelSig ReadFocusedPanel('), src.indexOf('static bool PanelEnforceOk()'));
   assert.match(read, /static PanelSig ReadFocusedPanel\(string proc, uint fgPid, out string runtimeIdKey, out bool readable, bool allowChildProcess\)/);
   // The DEFAULT stays exact-pid. `allowChildProcess` widens it to one
-  // generation, and it is passed `true` from exactly one place — the host-app
-  // read, whose composer really does live in a child WebView2 process (measured
-  // via Win32_Process ParentProcessId on ms-teams.exe). Every IDE call site
-  // passes `false`.
+  // generation. It is passed the UNCONDITIONAL literal `true` from exactly one
+  // place — the host-app read, whose composer really does live in a child
+  // WebView2 process (measured via Win32_Process ParentProcessId on
+  // ms-teams.exe) — and from a second, DATA-DRIVEN place for the isIde branch
+  // (_idePanelChildProcs.Contains(proc)), which resolves to `true` only for
+  // Word/Excel/PowerPoint/OneNote and to `false` for Code/Cursor.
   assert.match(read, /if \(allowChildProcess\) \{ if \(!ElementPidBelongsToForeground\(el\.Current\.ProcessId, fgPid\)\) return null; \}/);
   assert.match(read, /else if \(el\.Current\.ProcessId != \(int\)fgPid\) return null;/);
   const code = codeOnly(src);
   assert.equal((code.match(/ReadFocusedPanel\(proc, pid, out panelRid, out panelReadable, true\)/g) || []).length, 1,
-    'exactly one call site may widen the panel read to a child process');
+    'exactly one call site may unconditionally widen the panel read to a child process');
+  assert.equal((code.match(/ReadFocusedPanel\(proc, pid, out panelRid, out panelReadable, _idePanelChildProcs\.Contains\(proc\)\)/g) || []).length, 1,
+    'exactly one call site may conditionally widen the IDE panel read to a child process');
   // The ownership check must come BEFORE any property is trusted, or a
   // background window's element could still set `readable`.
   const ownIdx = read.indexOf('el.Current.ProcessId');
@@ -1762,7 +1828,7 @@ test('enforcer-win.ps1: the platform-block latch does NOT widen capture or conte
   // bad read. Only the already-established platform block is latched.
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
   // Unchanged, character for character — same assertion as the capture test above.
-  assert.match(src, /static bool FgIsAiNow\(\) \{ return _fgIsAi && _fgLeftAiTicks == 0 && PanelEnforceOk\(\); \}/);
+  assert.match(src, /static bool FgIsAiNow\(\) \{ return _fgIsAi && _fgLeftAiTicks == 0 && PanelEnforceOk\(\) && _fgContentOk; \}/);
   assert.match(src, /return _fgIsPanel && _fgPanelEnforce && _fgLeftAiTicks == 0;/);
   for (const [name, from, to] of [
     ['FgIsAiNow', 'static bool FgIsAiNow()', 'static bool TypedBlockFresh()'],
@@ -1780,7 +1846,7 @@ test('enforcer-win.ps1: the platform-block latch does NOT widen capture or conte
   const enforce = src.slice(src.indexOf('static bool PanelEnforceOk()'), src.indexOf('static bool PanelUiaOk()'));
   assert.match(enforce, /if \(!_fgIsPanel\) return true;/);
   // Capture and clipboard/UIA gates keep asking _fgIsAi / FgIsAiNow, not the latch.
-  assert.match(src, /if \(!_fgIsAi \|\| !PanelUiaOk\(\)\) \{ _blockUia = false; _uiaPatterns = ""; return; \}/);
+  assert.match(src, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| !_fgContentOk\) \{ _blockUia = false; _uiaPatterns = ""; return; \}/);
   assert.match(src, /if \(!_fgIsAi\) \{ _blockPaste = false; return; \}/);
   const hook = src.slice(src.indexOf('static IntPtr HookCallback('), src.indexOf('// Scans the typed buffer'));
   // Comment lines stripped — the count is about real call sites, and the gate
@@ -1802,7 +1868,7 @@ test('enforcer-win.ps1: the enforce gate is applied on BOTH the capture and the 
   // block-decision sides the gate now covers every CONTENT signal, with a
   // platform block armed by an enforcing panel checked ahead of it — see
   // _blockedByElement and the "can never CANCEL" test below.
-  assert.match(src, /static bool FgIsAiNow\(\) \{ return _fgIsAi && _fgLeftAiTicks == 0 && PanelEnforceOk\(\); \}/);
+  assert.match(src, /static bool FgIsAiNow\(\) \{ return _fgIsAi && _fgLeftAiTicks == 0 && PanelEnforceOk\(\) && _fgContentOk; \}/);
   const enterPred = src.slice(src.indexOf('static bool EnterBlockActive('), src.indexOf('static string ActivePatterns()'));
   assert.match(enterPred, /if \(!PanelEnforceOk\(\)\) return false;/);
   const forMouse = src.slice(src.indexOf('static bool BlockActiveForMouse()'), src.indexOf('// The Enter-decision predicate'));
@@ -1888,10 +1954,15 @@ test('enforcer-win.ps1: the ONLY window-title read is the gated agent read, and 
   // …and it reuses the foreground HWND the tick already has: no second
   // GetForegroundWindow(), so it can never read a different window than the one
   // every other decision on this tick was made about.
-  // `panelId` was added 2026-09-04 and is DATA, not a gate: the Copilot-tab
-  // heading cache needs it as part of its pane key, because both Teams routes
-  // can now present the same title kind in the same window. See _copilotCachePane.
-  assert.match(read, /static AgentReadOutcome ReadFocusedAgentName\(AgentSurface surface, uint fgPid, IntPtr fgHwnd, string panelId, out string agentName\)/);
+  // The focused PANEL travels down with it. It arrived 2026-09-04 as a bare
+  // `string panelId` — DATA, not a gate: the Copilot-tab heading cache needs it
+  // as part of its pane key, because both Teams routes can present the same
+  // title kind in the same window (see _copilotCachePane). It became the whole
+  // `PanelSig` on 2026-09-21, when the Chat-list badge route was added: that
+  // route's config and its own two flags live ON the panel, and for it the panel
+  // match IS the gate. Neither use widens what this function may READ — it is
+  // still one title, in one gated place, compared and dropped.
+  assert.match(read, /static AgentReadOutcome ReadFocusedAgentName\(AgentSurface surface, uint fgPid, IntPtr fgHwnd, PanelSig panel, out string agentName\)/);
   assert.equal(/GetForegroundWindow\(\)/.test(read), false, 'the title read must reuse the tick\'s HWND');
 
   // 3. THE PII RULE: the title never reaches an emitter. Not the raw title, not
@@ -1935,7 +2006,11 @@ test('enforcer.js passes the IDE process and panel payloads, built from the cata
   assert.match(src, /CFAI_AI_PANELS:\s*JSON\.stringify\(buildAiPanelConfig\(\)\)/);
   // Third payload: the agent-surface catalog, for agent_scope:'agent' rows.
   assert.match(src, /CFAI_AGENT_SURFACES:\s*JSON\.stringify\(buildAgentSurfaceConfig\(\)\)/);
-  assert.match(src, /import \{ buildIdeProcessConfig, buildAiPanelConfig, buildAgentSurfaceConfig \} from '\.\/ai-processes\.js';/);
+  // Fourth payload: the egress catalog (Outlook send-chord holds). All four
+  // builders come through ONE import statement, so this pin is what forces a new
+  // payload to be declared here as well as wired above.
+  assert.match(src, /CFAI_EGRESS_SURFACES:\s*JSON\.stringify\(buildEgressSurfaceConfig\(this\.log\)\)/);
+  assert.match(src, /import \{\s*buildIdeProcessConfig, buildAiPanelConfig, buildAgentSurfaceConfig, buildEgressSurfaceConfig,\s*\} from '\.\/ai-processes\.js';/);
   // The IDE names must NOT have been folded into CFAI_AI_PROCESSES, which is
   // what the clipboard/attachment/file-dialog watchers key on.
   assert.match(src, /CFAI_AI_PROCESSES: this\.aiProcessNames\.join\(','\)/);
@@ -2343,8 +2418,11 @@ test('prompt-watcher.ps1 emits the matched panel id, and index.js attributes on 
   // in an IDE can carry a file path or a workspace name.
   assert.equal(/ClassName|ProgrammaticName|\$cls/.test(emit), false, 'panel detection reads must not be emitted');
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  // The handler delegates to ONE shared reporter, which resolves panel-first.
   const handler = src.slice(src.indexOf("this.promptWatcher.on('prompt_text'"));
-  assert.match(handler.slice(0, 600), /const ai = identifyEventAi\(ev\);/);
+  assert.match(handler.slice(0, 200), /this\.#reportPromptText\(ev, \{ fromEnforcer: false \}\)/);
+  const reporter = src.slice(src.indexOf('#reportPromptText(ev, { fromEnforcer }) {'));
+  assert.match(reporter.slice(0, 800), /const ai = identifyEventAi\(ev\);/);
   const { identifyAiPanel } = await import('../src/os_monitor/ai-processes.js');
   assert.deepEqual(identifyAiPanel('cursor_composer'), { product: 'Cursor', vendor: 'Anysphere' });
 });
@@ -2354,7 +2432,9 @@ test('index.js resolves a panel event panel-first, so a process:"Code" prompt is
   // null for it and the `if (!ai) return` guard would silently discard every
   // prompt sent from a VS Code AI panel.
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
-  assert.match(src, /function identifyEventAi\(ev\) \{\s*\r?\n\s*return \(ev\?\.panel \? identifyAiPanel\(ev\.panel\) : null\) \|\| identifyAiProcess\(ev\?\.process\);/);
+  // Panel first — WITH the process, so a pane hosted by several apps is named
+  // per host (office_copilot_pane → "Word Copilot" / "Excel Copilot" …).
+  assert.match(src, /function identifyEventAi\(ev\) \{[\s\S]{0,300}?return \(ev\?\.panel \? identifyAiPanel\(ev\.panel, ev\.process\) : null\) \|\| identifyAiProcess\(ev\?\.process\);/);
   for (const handler of ['prompt', 'block', 'override']) {
     const h = src.slice(src.indexOf(`this.enforcer.on('${handler}'`));
     assert.match(h.slice(0, 400), /identifyEventAi\(ev\)/, `the '${handler}' handler must resolve panel-first`);
@@ -2913,28 +2993,50 @@ test('a HOST-APP surface can never fall back to a whole-app block', async () => 
   // being verified, because an UNVERIFIED host-app surface must produce no block
   // either. That is the opposite of what an unverified chat-app surface does.
   assert.match(check, /bool hostApp = _hostAppProcs\.Contains\(_app\);/);
+  // The SECOND host-app kind: a panel-hosted one (Word/Excel/PowerPoint/OneNote,
+  // via office_copilot_pane_agent's `panelHosted`). It is barred from the two
+  // PROCESS-WIDE arms exactly as Teams is — "cannot tell which Copilot agent is
+  // open in Word" must never become "nobody in the org may use Word" — while
+  // staying eligible for the ELEMENT-scoped panel arm, which is where the
+  // live-verified office_copilot_pane block actually lives.
+  assert.match(check, /bool wholeAppBarred = hostApp \|\| _panelHostAppProcs\.Contains\(_app\);/);
   // All THREE coarse arms are guarded. Each one is a route to a whole-app block.
-  assert.match(check, /if \(!narrowed && !hostApp\) \{/);
-  assert.match(check, /if \(!hostApp && string\.Equals\(agent\["process_name"\], _app, StringComparison\.OrdinalIgnoreCase\)\)/);
+  assert.match(check, /if \(!narrowed && !wholeAppBarred\) \{/);
+  assert.match(check, /if \(!wholeAppBarred && string\.Equals\(agent\["process_name"\], _app, StringComparison\.OrdinalIgnoreCase\)\)/);
   assert.match(check, /if \(!hostApp && string\.Equals\(agent\["panel"\], _fgPanelId, StringComparison\.OrdinalIgnoreCase\)\)/);
   // …and the guard really does cover every arm site: each `_fgIsBlocked = true;`
-  // other than the agent-scoped narrowing sits behind a `!hostApp` term.
+  // other than the agent-scoped narrowing sits behind a host-app term. Both
+  // spellings are accepted, and the term is what matters — a whole-app arm with
+  // no guard at all is the failure this catches.
   const armSegments = check.split('_fgIsBlocked = true;').slice(0, -1);
   assert.equal(armSegments.length, 4, 'expected four arm sites');
   for (const [i, seg] of armSegments.entries()) {
     if (i === 0) continue;   // the agent-scoped narrowing — element-scoped by construction
-    assert.match(seg.slice(-800), /!hostApp/, `arm site ${i} has no host-app guard`);
+    assert.match(seg.slice(-800), /!hostApp|!wholeAppBarred/, `arm site ${i} has no host-app guard`);
   }
-  // The set itself is derived from the catalog, in one place, and empty by
+  // Both sets are derived from the catalog, in one place each, and empty by
   // default — so a malformed payload means "no process is a host app", i.e.
   // exactly the behaviour this file had before host apps existed.
   assert.match(src, /static HashSet<string> _hostAppProcs = new HashSet<string>\(StringComparer\.OrdinalIgnoreCase\);/);
+  assert.match(src, /static HashSet<string> _panelHostAppProcs = new HashSet<string>\(StringComparer\.OrdinalIgnoreCase\);/);
   const code = codeOnly(src);
   assert.equal((code.match(/_hostAppProcs = hostApps;/g) || []).length, 1, 'exactly one place may write the host-app set');
   assert.equal((code.match(/^\s*_hostAppProcs = /gm) || []).length, 1, 'no second assignment site may exist');
+  assert.equal((code.match(/^\s*_panelHostAppProcs = /gm) || []).length, 1, 'no second assignment site may exist');
+  // A process lands in ONE set or the other, never both: the two differ in what
+  // they switch off BESIDES the whole-app block, and a process in both would
+  // silently retire the element-scoped machinery the Office pane was verified
+  // using (its panel-keyed block, Tokenize & Send, the send-button hunt).
   const load = src.slice(src.indexOf('static void LoadAgentSurfaces(string json)'), src.indexOf('static AgentSurface MatchAgentSurface(string proc)'));
-  assert.match(load, /if \(hostApp\) \{ foreach \(string p in procs\) hostApps\.Add\(p\); \}/);
-  assert.match(load, /_hostAppProcs = hostApps;\s*\r?\n\s*_agentSurfaces = surfaces;\s*\r?\n\s*\}/);
+  assert.match(load, /if \(hostApp\) \{ foreach \(string p in procs\) \{ if \(panelHosted\) panelHostApps\.Add\(p\); else hostApps\.Add\(p\); \} \}/);
+  assert.match(load, /bool panelHosted = JsBool\(d, "panelHosted"\);/);
+  assert.match(load, /_hostAppProcs = hostApps;\s*\r?\n\s*_panelHostAppProcs = panelHostApps;\s*\r?\n\s*_agentSurfaces = surfaces;\s*\r?\n\s*\}/);
+  // The panel-hosted set is read in exactly ONE place — the whole-app bar above.
+  // Every other host-app exclusion (PanelEnforceOk, PanelUiaOk, UpdateSendRect,
+  // UpdateModelRouting, UpdatePendingRewrite) must keep reading _hostAppProcs
+  // alone, or Office loses behaviour that passed a live pass on 2026-09-21.
+  assert.equal((code.match(/_panelHostAppProcs\.Contains\(/g) || []).length, 1,
+    'the panel-hosted set may only bar a whole-app block');
 });
 
 // ── GOVERNED FOR DLP ONLY: the third state, and its one safety property ─────
@@ -2957,7 +3059,20 @@ test('THE SAFETY PROPERTY: a DLP-governed tick can never contribute to a block',
   const tick = src.slice(src.indexOf('static void ApplyForegroundTick('), src.indexOf('// When a block is active, locate the send button'));
   assert.ok(tick.length > 0, 'expected an ApplyForegroundTick body');
   assert.match(tick, /bool blockGoverned = hostSurfaceOk\r?\n\s*&& agentOutcome == AgentReadOutcome\.Named\r?\n\s*&& BlockedListHasMatchingAgentRow\(proc, agentName\);/);
-  assert.match(tick, /dlpGoverned = !blockGoverned && hostSurfaceOk\r?\n\s*&& \(PanelDlpMatchesOnPanelAlone\(hit\)\r?\n\s*\|\| \(agentOutcome == AgentReadOutcome\.Named\r?\n\s*&& GovernedListHasMatchingAgentRow\(proc, agentName\)\)\);/);
+  // Two EVIDENCE routes (panel-alone; the Teams 1:1 agent-chat evidence), which
+  // need no governed row but do need the fleet dlp flag OR a policy row, and
+  // the NAME route, which still needs a governed row. Pinned verbatim.
+  // Security review 2026-09-24 (H3): ONLY the fleet dlp flag licenses the
+  // evidence routes; a policy row keeps only the name route.
+  assert.match(tick, /bool evidenceOk = _evidenceDlpOn;/);
+  assert.equal(/hostPolicyArmed/.test(codeOnly(tick)), false, 'a policy row must not license an evidence route');
+  // A "@thread.v2" header refuses every Chat-list route, block included.
+  assert.match(tick, /if \(chatIsGroup\) blockGoverned = false;/);
+  assert.match(tick, /dlpGoverned = !blockGoverned && hostSurfaceOk && !chatIsGroup/);
+  // The upload licence is the evidence verdict, never the Named route.
+  assert.match(tick, /fgAgentChatEvidence = dlpGoverned && evidenceOk && agentChatEvidence;/);
+  assert.match(tick, /bool agentChatEvidence = _tickAgentChatEvidence && hit != null\r?\n\s*&& string\.Equals\(hit\.AiEvidence, "teams_chat", StringComparison\.Ordinal\);/);
+  assert.match(tick, /dlpGoverned = !blockGoverned && hostSurfaceOk && !chatIsGroup\r?\n\s*&& \(\(evidenceOk && \(PanelDlpMatchesOnPanelAlone\(hit\) \|\| agentChatEvidence\)\)\r?\n\s*\|\| \(agentOutcome == AgentReadOutcome\.Named\r?\n\s*&& GovernedListHasMatchingAgentRow\(proc, agentName\)\)\);/);
   // The block half is EXACTLY the pre-existing rule: a Named read plus a
   // matching row in the BLOCKED list. The governed list is not part of it.
   const blockLine = tick.slice(tick.indexOf('bool blockGoverned ='), tick.indexOf('dlpGoverned = !blockGoverned'));
@@ -2972,7 +3087,7 @@ test('THE SAFETY PROPERTY: a DLP-governed tick can never contribute to a block',
   assert.equal(uses, 3, `_fgDlpGoverned gained a reference (${uses}) — every use must be re-reviewed`);
   assert.match(code, /static volatile bool _fgDlpGoverned = false;/);
   assert.match(code, /_fgDlpGoverned = dlpGoverned;/);
-  assert.match(code, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| \(_hostAppProcs\.Contains\(_app\) && !_fgDlpGoverned\) \|\| Disarmed\(\)\)/);
+  assert.match(code, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| \(_hostAppProcs\.Contains\(_app\) && !_fgDlpGoverned\) \|\| !_fgContentOk \|\| Disarmed\(\)\)/);
 
   // 3. NO BLOCK-DECISION CODE MENTIONS IT — or the governed list, or the
   //    governed privacy-gate set. CheckFgBlocked is the only place a block is
@@ -3016,7 +3131,7 @@ test('THE SAFETY PROPERTY: a DLP-governed tick can never contribute to a block',
   assert.match(match, /if \(!string\.Equals\(agent\["agent_scope"\], "agent", StringComparison\.OrdinalIgnoreCase\)\) continue;/);
   // Same matching semantics as the blocked list — no second convention.
   assert.match(match, /if \(!PLATFORM_PROCS\.TryGetValue\(agent\["platform"\], out procs\)\) continue;/);
-  assert.match(match, /if \(AgentNameMatches\(agentName, agent\["agent_name"\]\)\) return true;/);
+  assert.match(match, /if \(AgentNameMatchesAny\(agentName, agent\)\) return true;/);
   // The gate set is written in exactly one place, like _agentScopedProcs.
   assert.equal((code.match(/_dlpScopedProcs = procs;/g) || []).length, 1, 'exactly one place may write the DLP gate set');
   // A SEPARATE file, never merged with the blocked one: one wrong parse of a
@@ -3043,21 +3158,85 @@ test('the Copilot tab\'s panel-alone DLP rule is CATALOG DATA, not a special cas
   const load = src.slice(src.indexOf('static void LoadAiPanels(string json)'), src.indexOf('// CFAI_AGENT_SURFACES'));
   assert.match(load, /DlpMatch = string\.Equals\(JsStr\(d, "dlpMatch"\), "panel", StringComparison\.OrdinalIgnoreCase\) \? "panel" : "agent",/);
 
-  // The catalog side: exactly ONE entry may carry the panel-alone rule, and it
-  // is the composer with no non-AI use at all. Every other entry — above all
-  // teams_composer, which is shared by every DM and channel post in Teams —
-  // must require a named row.
+  // The catalog side: only a composer with NO non-AI use at all may carry the
+  // panel-alone rule. Every other entry — above all teams_composer, which is
+  // shared by every DM and channel post in Teams — must require a named row.
+  //
+  // office_copilot_pane joined this list (it was previously excluded here for
+  // want of an end-to-end live pass). Its 2026-09-18 collision check is what
+  // qualified dlpMatch: the matched token appears on the Copilot pane's
+  // composer and on nothing else in Word — not the document body, not the
+  // "Search document" box, not a comment card — so a match there is
+  // necessarily a conversation with the assistant. dlpMatch is a question
+  // about the composer's NATURE and is gated SEPARATELY from `enforce` (does
+  // this surface get to swallow a keystroke) — the two happened to flip on
+  // different dates here (dlpMatch 2026-09-18, enforce 2026-09-21) precisely
+  // because they are independent gates, not a coupled pair.
   const { AI_PANELS, buildAiPanelConfig } = await import('../src/os_monitor/ai-processes.js');
   const panelAlone = AI_PANELS.filter((p2) => p2.dlpMatch === 'panel').map((p2) => p2.id);
-  assert.deepEqual(panelAlone, ['teams_copilot_composer'],
-    'only Teams\' embedded Copilot tab may be DLP-governed by panel match alone');
+  // outlook_copilot_pane (2026-09-24): the Copilot pane inside Outlook, the
+  // same Fluent-AI composer — no mail compose body carries its class token.
+  assert.deepEqual(panelAlone, ['teams_copilot_composer', 'office_copilot_pane', 'outlook_copilot_pane'],
+    'only a composer with no non-AI use may be DLP-governed by panel match alone');
   assert.equal(AI_PANELS.find((p2) => p2.id === 'teams_composer').dlpMatch, 'agent');
+  // The Office pane's own end-to-end pass (2026-09-21) cleared enforce too, so
+  // it now DOES arm a block through the panel-alone rule — same as Teams'.
+  assert.equal(AI_PANELS.find((p2) => p2.id === 'office_copilot_pane').enforce, true);
+  assert.equal(AI_PANELS.find((p2) => p2.id === 'office_copilot_pane').verified, true);
   // …and the field survives the handoff for every entry, resolved to one of the
   // two words so the C# default and the JS default cannot drift.
   for (const entry of buildAiPanelConfig()) {
     assert.ok(['agent', 'panel'].includes(entry.dlpMatch), `${entry.id}.dlpMatch must be resolved`);
     const source = AI_PANELS.find((p2) => p2.id === entry.id);
     assert.equal(entry.dlpMatch, source.dlpMatch === 'panel' ? 'panel' : 'agent', `${entry.id}.dlpMatch`);
+  }
+});
+
+test('PanelSig.SoleAgent is read ONLY for block attribution — no blocking decision may read it', async () => {
+  // The field was shipped inert so the JS→C# transport was real ahead of any
+  // logic. Its one consumer now is ATTRIBUTION (ResolveBlockAgent): naming the
+  // product an audit record is about when no policy row names one. Acting on it
+  // for BLOCKING — treating a panel match as identifying a specific named agent
+  // with no UIA name read — still changes live enforcement behaviour and is
+  // still separate, later, human-supervised work.
+  const src = await enforcerSrc();
+  const code = codeOnly(src);
+  // Parsed exactly like the other string fields, in the one loader.
+  const load = src.slice(src.indexOf('static void LoadAiPanels(string json)'), src.indexOf('// CFAI_AGENT_SURFACES'));
+  assert.match(load, /SoleAgent = JsStr\(d, "soleAgent"\),/);
+  assert.match(src, /public string SoleAgent;/);
+  // The declaration, the parse, and the two reads inside ResolveBlockAgent —
+  // nothing else. A fifth mention is a new consumer and must be re-reviewed.
+  assert.equal((code.match(/SoleAgent/g) || []).length, 4,
+    'SoleAgent gained a reader — its only permitted one is ResolveBlockAgent');
+  const resolver = codeOnly(src.slice(src.indexOf('static string ResolveBlockAgent('), src.indexOf('static PanelSig PanelById(')));
+  assert.equal((resolver.match(/SoleAgent/g) || []).length, 2, 'both reads live in ResolveBlockAgent');
+  // The resolver decides nothing and emits nothing: its answer is stored once
+  // per tick and quoted by EmitBlock.
+  assert.equal(/Emit\(|EmitBlock\(|Console\.Out|_fgIsBlocked|_blockScope/.test(resolver), false,
+    'ResolveBlockAgent must emit nothing and touch no block state');
+  assert.equal((code.match(/ResolveBlockAgent\(/g) || []).length, 2, 'declared once, called once (ApplyForegroundTick)');
+  // Stated per-decision-site as well, so a rename of the field cannot slip past
+  // the count above: none of the functions that decide a block or DLP governance
+  // may mention it.
+  for (const [name, from, to] of [
+    ['CheckFgBlocked', 'static void CheckFgBlocked()', 'static void ClearFgBlocked()'],
+    ['PanelDlpMatchesOnPanelAlone', 'static bool PanelDlpMatchesOnPanelAlone(', '// Does the CURRENT blocklist hold'],
+    ['MatchPanelSignature', 'static PanelSig MatchPanelSignature(', '// ONE property read'],
+  ]) {
+    const fn = src.slice(src.indexOf(from), src.indexOf(to));
+    assert.ok(fn.length > 0, `expected a ${name} body`);
+    assert.equal(codeOnly(fn).includes('SoleAgent'), false, `${name} must not read SoleAgent`);
+  }
+  // The catalog side of the same claim: the field only ever appears next to
+  // dlpMatch:'panel' (the invariant test lives in ai-panels.test.mjs), and it
+  // survives the env-var handoff for every entry.
+  const { AI_PANELS, buildAiPanelConfig } = await import('../src/os_monitor/ai-processes.js');
+  for (const entry of buildAiPanelConfig()) {
+    const source = AI_PANELS.find((p2) => p2.id === entry.id);
+    assert.equal(typeof entry.soleAgent, 'string', `${entry.id}.soleAgent must be a string`);
+    assert.equal(entry.soleAgent, source.soleAgent || '', `${entry.id}.soleAgent`);
+    if (entry.soleAgent) assert.equal(entry.dlpMatch, 'panel', `${entry.id} soleAgent without dlpMatch:'panel'`);
   }
 });
 
@@ -3229,38 +3408,51 @@ test('enforcer-win.ps1: the WebView2 pid rule accepts a DIRECT child and nothing
   const code = codeOnly(src);
   assert.equal((code.match(/CreateToolhelp32Snapshot\(TH32CS_SNAPPROCESS/g) || []).length, 1,
     'exactly one snapshot site');
-  assert.equal((code.match(/ElementPidBelongsToForeground\(/g) || []).length, 4,
-    'the rule is declared once and called three times — the agent read, the host-app panel '
-    + 'read, and the Copilot-tab heading search. Every call site must go through THIS rule; '
-    + 'a new one that rolls its own pid check is what this count exists to catch');
-  // The third call site: the background heading search for Teams' Copilot tab.
-  // It starts from AutomationElement.FocusedElement like the other two, so it
-  // needs the identical ownership rule — the same GLOBAL-read hazard, and the
-  // same WebView2 child process.
-  const search = src.slice(
-    src.indexOf('static void SearchCopilotHeadingsBackground('),
-    src.indexOf('static void CollectCopilotHeadings('),
-  );
-  assert.ok(search.length > 0, 'expected a SearchCopilotHeadingsBackground body');
-  assert.match(search, /if \(ElementPidBelongsToForeground\(el\.Current\.ProcessId, fgPid\)\)/);
-  assert.ok(search.indexOf('ElementPidBelongsToForeground(') < search.indexOf('GetParent('),
-    'the ownership check must precede any tree walk');
+  assert.equal((code.match(/ElementPidBelongsToForeground\(/g) || []).length, 9,
+    'the rule is declared once and called eight times — the agent read, the host-app panel read, '
+    + 'the Copilot-tab heading search, the Chat-list badge search, the Teams agent-chat pane reader, '
+    + 'the matched-composer check in UpdateUia, and the Office WebView2Holder resolver\'s two '
+    + 'direct-child checks (2026-09-24). Legacy wording follows: '
+    + 'read, the Copilot-tab heading search, and the Chat-list badge search. Every call site '
+    + 'must go through THIS rule; a new one that rolls its own pid check is what this count '
+    + 'exists to catch');
+  // The third and fourth call sites: the two background pane searches (Teams'
+  // Copilot tab, and the Chat-list badge route added 2026-09-21). Both start
+  // from AutomationElement.FocusedElement like the other two, so both need the
+  // identical ownership rule — the same GLOBAL-read hazard, and the same
+  // WebView2 child process.
+  for (const [from, to] of [
+    ['static void SearchCopilotHeadingsBackground(', 'static void CollectCopilotHeadings('],
+    ['static void SearchAiBadgeHeadingsBackground(', 'static void CollectAiBadgeHeadings('],
+  ]) {
+    const search = src.slice(src.indexOf(from), src.indexOf(to));
+    assert.ok(search.length > 0, `expected a body for ${from}`);
+    assert.match(search, /if \(ElementPidBelongsToForeground\(el\.Current\.ProcessId, fgPid\)\)/);
+    assert.ok(search.indexOf('ElementPidBelongsToForeground(') < search.indexOf('GetParent('),
+      'the ownership check must precede any tree walk');
+  }
   // The PANEL read's DEFAULT stays exact-pid: VS Code and Cursor were verified
   // live with it, and widening a code editor's read is a separate decision with
-  // its own false-positive surface. The one-generation rule is reachable there
-  // only via `allowChildProcess`, which only the HOST-APP call site passes —
-  // ms-teams.exe hosts its composer in a child msedgewebview2.exe, confirmed
-  // live via Win32_Process ParentProcessId, exactly as M365Copilot does.
+  // its own false-positive surface. The one-generation rule is reachable via
+  // `allowChildProcess`, passed unconditionally `true` by the HOST-APP call site
+  // — ms-teams.exe hosts its composer in a child msedgewebview2.exe, confirmed
+  // live via Win32_Process ParentProcessId, exactly as M365Copilot does — and
+  // conditionally by the IDE call site, for the SAME reason on Word/Excel/
+  // PowerPoint/OneNote specifically (see _idePanelChildProcs).
   const panelRead = src.slice(src.indexOf('static PanelSig ReadFocusedPanel('), src.indexOf('static bool PanelEnforceOk()'));
   assert.ok(panelRead.length > 0, 'expected a ReadFocusedPanel body');
   assert.match(panelRead, /if \(allowChildProcess\) \{ if \(!ElementPidBelongsToForeground\(el\.Current\.ProcessId, fgPid\)\) return null; \}/);
   assert.match(panelRead, /else if \(el\.Current\.ProcessId != \(int\)fgPid\) return null;/);
   assert.equal(/GetParentProcessId/.test(panelRead), false,
     'the panel read must go through the shared rule, never its own parent lookup');
-  // Every IDE call site still passes false.
+  // The IDE call site's widening is scoped to Office alone via the data-driven
+  // set, not a second unconditional `true`.
   const fg = src.slice(src.indexOf('static void UpdateForeground()'), src.indexOf('static void ApplyForegroundTick('));
-  assert.match(fg, /if \(isIde\) hit = ReadFocusedPanel\(proc, pid, out panelRid, out panelReadable, false\);/);
-  assert.match(fg, /else if \(hostAppArmed\) hit = ReadFocusedPanel\(proc, pid, out panelRid, out panelReadable, true\);/);
+  assert.match(fg, /if \(isIde\) hit = ReadFocusedPanel\(proc, pid, out panelRid, out panelReadable, _idePanelChildProcs\.Contains\(proc\)\);/);
+  // The host-app read: on the policy arm OR the AI-evidence arm (2026-09-24),
+  // both of which require the verified+enforcing host surface.
+  assert.match(fg, /else if \(hostAppArmed \|\| hostEvidenceArmed\) hit = ReadFocusedPanel\(proc, pid, out panelRid, out panelReadable, true\);/);
+  assert.match(fg, /bool hostEvidenceArmed = !isIde && proc != null && _hostAppProcs\.Contains\(proc\)\r?\n\s*&& _evidenceDlpOn && EnforcingAgentSurface\(proc\) != null;/);
 });
 
 test('enforcer-win.ps1: the agent name read out of another app is never emitted or logged', async () => {
@@ -3277,7 +3469,7 @@ test('enforcer-win.ps1: the agent name read out of another app is never emitted 
   assert.equal(uses, 3, `_fgAgentName gained a reference (${uses}) — every use must be re-reviewed for PII`);
   assert.match(code, /static volatile string _fgAgentName = "";/);
   assert.match(code, /_fgAgentName = agentName \?\? "";/);
-  assert.match(code, /AgentNameMatches\(_fgAgentName, agent\["agent_name"\]\)/);
+  assert.match(code, /AgentNameMatchesAny\(_fgAgentName, agent\)/);
   // And it appears in no emitter at all.
   for (const [name, from, to] of [
     ['Emit', 'static void Emit(string kind', 'static string Esc(string s)'],
@@ -3311,7 +3503,7 @@ test('enforcer-win.ps1: the Copilot-tab fallback is INERT unless BOTH of its own
   const src = await enforcerSrc();
   const armed = src.slice(
     src.indexOf('static bool FallbackReadArmed(AgentSurface surface, string kind)'),
-    src.indexOf('// The title-mode read, in two stages.'),
+    src.indexOf('// The SAME question for the PANEL-scoped route'),
   );
   assert.ok(armed.length > 0, 'expected a FallbackReadArmed body');
   assert.match(armed, /if \(!\(surface\.FallbackVerified && surface\.FallbackEnforce\)\) return false;/);
@@ -3336,9 +3528,15 @@ test('enforcer-win.ps1: the Copilot-tab fallback is INERT unless BOTH of its own
   // name a conversation.
   assert.match(stage, /AgentReadOutcome outcome = ExtractAgentName\(surface, "", title, out agentName\);/);
   assert.match(stage, /if \(outcome != AgentReadOutcome\.NotComposer\) return outcome;/);
-  assert.match(stage, /if \(!FallbackReadArmed\(surface, kind\)\) return outcome;/);
+  assert.match(stage, /if \(FallbackReadArmed\(surface, kind\)\)/);
   assert.ok(stage.indexOf('FallbackReadArmed(') < stage.indexOf('GetCachedCopilotHeadings('),
     'nothing may be searched before the gate is decided');
+  // Stage B no longer RETURNS unconditionally — since 2026-09-21 it falls
+  // through to the Chat-list badge route (stage C) when it produced no evidence
+  // of its own. Behaviour-preserving for this route: an authoritative
+  // Named/Generic still returns straight out, so stage C can never contradict a
+  // heading that DID name an agent.
+  assert.match(stage, /AgentReadOutcome fb = ExtractAgentNameFromHeading\(surface, classes, names, out agentName\);\r?\n\s*if \(fb != AgentReadOutcome\.NotComposer\) return fb;/);
   // Exactly one caller of the search-and-cache entry point, and it is behind that
   // gate. A second call site would be a way around it.
   const code = codeOnly(src);
@@ -3361,7 +3559,7 @@ test('enforcer-win.ps1: the Copilot-tab walk reads ClassName FIRST and never kee
   const src = await enforcerSrc();
   const collect = src.slice(
     src.indexOf('static void CollectCopilotHeadings('),
-    src.indexOf('// ── Model routing'),
+    src.indexOf('// ── Chat-list badge fallback'),
   );
   assert.ok(collect.length > 0, 'expected a CollectCopilotHeadings body');
   // ClassName is read first, unconditionally; the class decision is made from it
@@ -3395,13 +3593,24 @@ test('enforcer-win.ps1: nothing read off a Copilot-tab heading may ever be emitt
   const src = await enforcerSrc();
   const section = src.slice(
     src.indexOf('// ── Copilot-tab heading fallback: background search + cache ──'),
-    src.indexOf('// ── Model routing'),
+    src.indexOf('// ── Chat-list badge fallback'),
   );
   assert.ok(section.length > 0, 'expected the Copilot-tab fallback section');
+  // The SECOND pane-reading section, added 2026-09-21, is held to exactly the
+  // same rule — it reads strictly more sensitive nodes (unclassed Text, whose
+  // Name in a Chromium tree IS the message body), so an emitter there would be
+  // worse, not merely equivalent.
+  const badgeSection = src.slice(
+    src.indexOf('// ── Chat-list badge fallback'),
+    src.indexOf('// ── Model routing'),
+  );
+  assert.ok(badgeSection.length > 0, 'expected the Chat-list badge fallback section');
   // codeOnly, because the comments in this section deliberately NAME the thing
   // the code must not do — the explanation must not trip the test it explains.
-  assert.equal(/Emit\(|EmitBlock\(|EmitBlockState\(|EmitRewrite\(|EmitRoute\(|Console\.Out|Console\.Error/.test(codeOnly(section)), false,
-    'the Copilot-tab fallback must emit nothing at all');
+  for (const [label, body] of [['Copilot-tab', section], ['Chat-list badge', badgeSection]]) {
+    assert.equal(/Emit\(|EmitBlock\(|EmitBlockState\(|EmitRewrite\(|EmitRoute\(|Console\.Out|Console\.Error/.test(codeOnly(body)), false,
+      `the ${label} fallback must emit nothing at all`);
+  }
   // The pure extractor likewise.
   const extract = src.slice(
     src.indexOf('static AgentReadOutcome ExtractAgentNameFromHeading('),
@@ -3447,7 +3656,7 @@ test('enforcer-win.ps1: the Copilot-tab search runs OFF the poll thread and is t
   const src = await enforcerSrc();
   const section = src.slice(
     src.indexOf('// ── Copilot-tab heading fallback: background search + cache ──'),
-    src.indexOf('// ── Model routing'),
+    src.indexOf('// ── Chat-list badge fallback'),
   );
   // A manual TreeWalker, never a filtered FindAll. codeOnly, because the section
   // header explains WHY FindAll is wrong here and must not trip its own check.
@@ -3492,15 +3701,18 @@ test('enforcer-win.ps1: the heading cache is keyed per PANE, not per title kind'
   // ONE definition of the pane key, so the cache read, the search key and the
   // cache write cannot drift apart.
   assert.match(code, /static string PaneKeyOf\(string kind, string panelId\)/);
-  assert.equal((code.match(/PaneKeyOf\(/g) || []).length, 2,
-    'declared once, called once — the single stage-B call site');
+  assert.equal((code.match(/PaneKeyOf\(/g) || []).length, 3,
+    'declared once, called twice — the stage-B and stage-C cache call sites, '
+    + 'which share ONE definition of "which pane are we looking at" precisely so '
+    + 'the two routes can never disagree about it');
   assert.match(code, /GetCachedCopilotHeadings\(surface, fgHwnd, PaneKeyOf\(kind, panelId\), out classes, out names\)/);
+  assert.match(code, /GetCachedAiBadgeHeadings\(panel, fgHwnd, PaneKeyOf\(kind, panelId\), out bClasses, out bNames\)/);
   // The kind alone must no longer be a cache key anywhere.
   assert.equal(/_copilotCacheKind|_copilotSearchKind/.test(code), false,
     'the kind-only cache key is what the 2026-09-04 title collision broke');
   const section = src.slice(
     src.indexOf('// ── Copilot-tab heading fallback: background search + cache ──'),
-    src.indexOf('// ── Model routing'),
+    src.indexOf('// ── Chat-list badge fallback'),
   );
   assert.match(section, /string\.Equals\(_copilotCachePane \?\? "", paneKey \?\? "", StringComparison\.OrdinalIgnoreCase\)/);
   assert.match(section, /\|\| !string\.Equals\(_copilotSearchPane \?\? "", paneKey \?\? "", StringComparison\.OrdinalIgnoreCase\);/);
@@ -3509,15 +3721,20 @@ test('enforcer-win.ps1: the heading cache is keyed per PANE, not per title kind'
   // empty runs carried over into a re-titled Chat-list conversation and delayed
   // the block there by up to the 5s backoff.
   assert.match(section, /if \(newPane\) _copilotEmptyRuns = 0;/);
-  // The panel id reaches the read as DATA, not as a gate — the gate stays the
-  // title's kind, so a DM or a renamed group chat can still never be walked.
+  // The focused panel reaches the read as DATA for stage B — the Copilot-tab
+  // gate stays the title's KIND, so a DM or a renamed group chat can still
+  // never be walked by that route. (Stage C, added 2026-09-21, does gate on the
+  // panel; that is its own route with its own flags and its own test below, and
+  // it does not change anything stage B does.)
   const fg = src.slice(src.indexOf('static void UpdateForeground()'), src.indexOf('static void ApplyForegroundTick('));
-  assert.match(fg, /ReadFocusedAgentName\(surface, pid, fg, hit != null \? hit\.Id : "", out agentName\)/);
+  assert.match(fg, /ReadFocusedAgentName\(surface, pid, fg, hit, out agentName\)/);
   const stage = src.slice(
     src.indexOf('static AgentReadOutcome ReadTitleModeAgentName('),
     src.indexOf('// The poll thread\'s half: read the cache, never wait on a search.'),
   );
-  assert.equal(/if \(panelId/.test(stage), false, 'the panel id must not become a second gate');
+  assert.equal(/if \(panelId/.test(stage), false, 'the panel id must not become a second gate for stage B');
+  assert.ok(stage.indexOf('FallbackReadArmed(') < stage.indexOf('PanelFallbackArmed('),
+    'stage B is attempted before stage C — the Copilot-tab route keeps precedence on its own title kind');
 });
 
 test('enforcer-win.ps1: the ancestor search is depth-agnostic and shares ONE node budget', async () => {
@@ -3543,7 +3760,7 @@ test('enforcer-win.ps1: the ancestor search is depth-agnostic and shares ONE nod
   assert.match(search, /int visited = 0;/);
   const collect = src.slice(
     src.indexOf('static void CollectCopilotHeadings('),
-    src.indexOf('// ── Model routing'),
+    src.indexOf('// ── Chat-list badge fallback'),
   );
   assert.match(collect, /List<string> names, ref int visited\)/);
   assert.equal(/int visited = 0;/.test(collect), false,
@@ -3565,7 +3782,7 @@ test('enforcer-win.ps1: the Copilot-tab route leaves the primary title path unto
   // The read site hands off to the two-stage reader, which begins with the
   // unchanged primary parse. No new outcome value, no new consumer.
   const read = src.slice(src.indexOf('static AgentReadOutcome ReadFocusedAgentName('), src.indexOf('static readonly char[] CLASS_TOKEN_SEP'));
-  assert.match(read, /return ReadTitleModeAgentName\(surface, fgHwnd, title, panelId, out agentName\);/);
+  assert.match(read, /return ReadTitleModeAgentName\(surface, fgHwnd, title, panel, out agentName\);/);
   assert.match(code, /enum AgentReadOutcome \{ Unreadable = 0, NotComposer = 1, Generic = 2, Named = 3 \}/);
   // …and the poll-thread read really is still one property read and no tree walk:
   // every walk lives in the background section, which is outside this slice.
@@ -3593,6 +3810,189 @@ test('enforcer-win.ps1: the Copilot-tab route leaves the primary title path unto
   assert.match(load, /string landingInfix = JsStr\(fb, "landingInfix"\);/);
 });
 
+// ── The THIRD Teams signal: the Chat-list "AI generated" badge route ───────
+//
+// Added 2026-09-21, after the Chat-list route's window title was measured live
+// stuck on the generic "Copilot | <tenant> | <email> | Microsoft Teams" with a
+// real agent conversation open and focused — which left every Chat-list agent
+// conversation ungoverned. It reads strictly MORE sensitive nodes than the
+// Copilot-tab route does (an unclassed Text, which in a Chromium tree is the
+// shape a message BODY has), so its privacy rule has to be stronger, and it is
+// the rule these tests pin.
+
+test('enforcer-win.ps1: the Chat-list badge route is INERT unless BOTH of its own flags are true', async () => {
+  const src = await enforcerSrc();
+  const armed = src.slice(
+    src.indexOf('static bool PanelFallbackArmed(PanelSig panel)'),
+    src.indexOf('// The title-mode read, in three stages.'),
+  );
+  assert.ok(armed.length > 0, 'expected a PanelFallbackArmed body');
+  assert.match(armed, /if \(!\(panel\.FallbackVerified && panel\.FallbackEnforce\)\) return false;/);
+  // The mode opt-in, so a panel with no fallback block — which is every panel
+  // but teams_composer — can never reach any of this even if the flags were
+  // somehow set.
+  assert.match(armed, /if \(!string\.Equals\(panel\.FallbackMode, "message_heading", StringComparison\.OrdinalIgnoreCase\)\) return false;/);
+  // A class filter is REQUIRED. Without one the reader would be pointed at
+  // arbitrary text nodes, which is the single thing the 2026-09 measurement
+  // pass explicitly rejected.
+  assert.match(armed, /return \(panel\.FallbackHeadingClass \?\? ""\)\.Length > 0;/);
+  // No kind gate here, deliberately: the title is the broken signal, so gating
+  // on it would gate the fix on the defect.
+  assert.equal(/TitleKinds|PaneKinds|kind/.test(codeOnly(armed)), false,
+    'this route must not gate on the title, which is the thing that is broken');
+
+  // The gate is the first thing the stage-C branch does, before any search.
+  const stage = src.slice(
+    src.indexOf('static AgentReadOutcome ReadTitleModeAgentName('),
+    src.indexOf('// The poll thread\'s half: read the cache, never wait on a search.'),
+  );
+  assert.match(stage, /if \(PanelFallbackArmed\(panel\)\)/);
+  assert.ok(stage.indexOf('PanelFallbackArmed(') < stage.indexOf('GetCachedAiBadgeHeadings('),
+    'nothing may be searched before the gate is decided');
+  // Exactly one caller of the search-and-cache entry point, and it is behind
+  // that gate. A second call site would be a way around it.
+  const code = codeOnly(src);
+  assert.equal((code.match(/GetCachedAiBadgeHeadings\(/g) || []).length, 2,
+    'declared once, called once — only the gated stage-C branch may reach the cache');
+  assert.equal((code.match(/PanelFallbackArmed\(/g) || []).length, 2,
+    'declared once, called once — both flags are read in ONE place');
+  // Reached only from NO EVIDENCE, so it can add coverage and can never
+  // override a title (or a Copilot-tab heading) that DID name a conversation.
+  assert.match(stage, /if \(outcome != AgentReadOutcome\.NotComposer\) return outcome;/);
+  assert.ok(stage.indexOf('if (outcome != AgentReadOutcome.NotComposer) return outcome;') < stage.indexOf('PanelFallbackArmed('));
+
+  // And the route is RETIRED from the catalog (2026-09-24): no panel declares a
+  // fallbackRead at all, so PanelFallbackArmed's mode opt-in is false for every
+  // shipped panel and the whole path above is unreachable in production. The
+  // Chat-list agent route is the AI-evidence check instead (aiEvidence).
+  const { AI_PANELS, buildAiPanelConfig } = await import('../src/os_monitor/ai-processes.js');
+  assert.deepEqual(AI_PANELS.filter((p) => p.fallbackRead).map((p) => p.id), []);
+  assert.equal(buildAiPanelConfig().some((e) => 'fallbackRead' in e), false);
+});
+
+test('enforcer-win.ps1: the badge walk reads NO Name until a badge has paired with it', async () => {
+  // THE privacy rule of this route, and it is stricter than the Copilot-tab
+  // one because the candidate here is an UNCLASSED Text — exactly the shape an
+  // ordinary message body has. Three phases, and the ORDER is the rule:
+  // walk (no Name read at all) → pair → read Name only for what paired.
+  const src = await enforcerSrc();
+  const collect = src.slice(
+    src.indexOf('static void CollectAiBadgeHeadings('),
+    src.indexOf('// The TOP edge of an element\'s bounding rectangle'),
+  );
+  assert.ok(collect.length > 0, 'expected a CollectAiBadgeHeadings body');
+  // The walk reads ClassName / ControlType / AutomationId / BoundingRectangle.
+  // The ONLY Name read must come AFTER the pairing.
+  const nameIdx = collect.indexOf('nm = textEls[t].Current.Name');
+  const pairIdx = collect.indexOf('PairAiBadgeHeadings(');
+  assert.ok(nameIdx >= 0, 'expected exactly one Name read');
+  assert.ok(pairIdx >= 0 && pairIdx < nameIdx, 'the pairing must be decided before any Name is read');
+  assert.equal((codeOnly(collect).match(/\.Current\.Name/g) || []).length, 1,
+    'exactly one place may read a Name at all');
+  assert.equal((codeOnly(collect).match(/names\.Add\(/g) || []).length, 1,
+    'exactly one place may keep a Name');
+  // Candidate texts are held as ELEMENTS plus a Y, never as strings, so an
+  // unpaired message body's text never exists as a value in this function.
+  assert.match(collect, /var textEls = new List<AutomationElement>\(\);/);
+  assert.match(collect, /var textYs = new List<double>\(\);/);
+  // NO BADGE → return before anything is read or kept. This is the ordinary
+  // human-conversation case: a DM, a channel, a group chat.
+  assert.match(collect, /if \(badgeYs\.Count == 0\) return;/);
+  assert.ok(collect.indexOf('if (badgeYs.Count == 0) return;') < nameIdx,
+    'a transcript with no badge must bail out before any Name is read');
+  // The structural filters on a candidate read no content.
+  assert.match(collect, /isText = \(el\.Current\.ControlType == ControlType\.Text\);/);
+  assert.match(collect, /aid = el\.Current\.AutomationId \?\? "";/);
+  // Bounded three independent ways, like the other walk.
+  assert.match(collect, /if \(cur\.Value > AIBADGE_WALK_MAX_DEPTH\) continue;/);
+  assert.match(collect, /if \(\+\+visited > AIBADGE_WALK_MAX_NODES\) break;/);
+  assert.match(collect, /textYs\.Count < AIBADGE_MAX_TEXTS/);
+  assert.match(src, /const int AIBADGE_WALK_MAX_DEPTH = 30;/);
+  // A manual TreeWalker, never a filtered FindAll — the same measured lesson.
+  const section = src.slice(
+    src.indexOf('// ── Chat-list badge fallback'),
+    src.indexOf('// ── Model routing'),
+  );
+  assert.match(section, /TreeWalker\.ControlViewWalker/);
+  assert.equal(/FindAll\(|PropertyCondition|OrCondition/.test(codeOnly(section)), false,
+    'a property-filtered FindAll is measured unreliable against this app');
+  // Off the poll thread, with the same guard/interval/backoff/TTL shape.
+  assert.match(section, /var t = new Thread\(\(\) => SearchAiBadgeHeadingsBackground\(panel, fg, paneKey\)\);/);
+  assert.match(section, /t\.SetApartmentState\(ApartmentState\.STA\);/);
+  assert.match(section, /finally \{ _badgeSearchInProgress = false; \}/);
+  assert.match(src, /static readonly long AIBADGE_CACHE_TTL = TimeSpan\.FromSeconds\(5\)\.Ticks;/);
+  assert.match(section, /if \(names\.Count > 0\)\r?\n\s*\{\r?\n\s*_badgeCacheClasses = classes\.ToArray\(\);/);
+});
+
+test('enforcer-win.ps1: the badge pairing is PURE, per-badge, and drops an unpaired text', async () => {
+  // The pairing IS the safety property of this route — a bare unclassed Text
+  // was measured and rejected in 2026-09 as "a coincidence waiting to happen",
+  // and the badge is the distinguishing attribute that judgement found missing.
+  // So it lives in its own pure function, with no UIA and no state, and the
+  // offline harness drives the REAL one with the REAL measured coordinates.
+  const src = await enforcerSrc();
+  const fn = src.slice(
+    src.indexOf('static int[] PairAiBadgeHeadings(double[] badgeYs, double[] textYs)'),
+    src.indexOf('// The poll thread\'s half: read the cache, never wait on a search. A'),
+  );
+  assert.ok(fn.length > 0, 'expected a PairAiBadgeHeadings body');
+  // Keyed BY BADGE: one entry per badge, so an unpaired text is not reachable
+  // from the result at all.
+  assert.match(fn, /var map = new int\[badgeYs\.Length\];/);
+  assert.match(fn, /if \(delta > AIBADGE_ROW_TOLERANCE_PX\) continue;/);
+  assert.match(fn, /if \(best < 0 \|\| delta < bestDelta\) \{ best = t; bestDelta = delta; \}/);
+  assert.match(fn, /map\[b\] = best;/);
+  // Pure: no UIA, no fields, no I/O.
+  assert.equal(/AutomationElement|\.Current\.|_badge|Emit\(|Console\./.test(codeOnly(fn)), false,
+    'the pairing must stay pure — the harness drives it directly');
+  // The tolerance is the measurement plus headroom, not a guess that grew.
+  assert.match(src, /const double AIBADGE_ROW_TOLERANCE_PX = 5\.0;/);
+  // "No rectangle" must mean "cannot pair", never "pairs at Y=0" — which would
+  // pair every unpositioned node with every other one.
+  const top = src.slice(
+    src.indexOf('static bool TryElementTop(AutomationElement el, out double top)'),
+    src.indexOf('// ── Model routing'),
+  );
+  assert.ok(top.length > 0, 'expected a TryElementTop body');
+  assert.match(top, /if \(r\.IsEmpty\) return false;/);
+  assert.match(top, /catch \{ return false; \}/);
+});
+
+test('enforcer-win.ps1: the PANEL fallback parse is its own, and is dropped when malformed', async () => {
+  // Deliberately NOT LoadAgentSurfaces' validation, and the differences are the
+  // reason it is a separate parse: no paneKinds (the title is the broken
+  // signal), no landingInfix (this route has none), and an EMPTY headingSuffix
+  // is legal (the paired Text's Name is the bare agent name already). The class
+  // filter stays required on both paths.
+  const src = await enforcerSrc();
+  const load = src.slice(
+    src.indexOf('static void LoadAiPanels(string json)'),
+    src.indexOf('static void LoadAgentSurfaces(string json)'),
+  );
+  assert.ok(load.length > 0, 'expected a LoadAiPanels body');
+  assert.match(load, /if \(string\.Equals\(mode, "message_heading", StringComparison\.OrdinalIgnoreCase\)\r?\n\s*&& headingClass\.Length > 0\)/);
+  assert.match(load, /pfbMode = "message_heading";/);
+  // The suffix is read VERBATIM and never normalized — an empty one is the
+  // configuration, and NormalizeAgentName would be meaningless on a delimiter.
+  assert.match(load, /string pfbHeadingClass = "", pfbHeadingSuffix = "";/);
+  assert.match(load, /string headingSuffix = JsStr\(fb, "headingSuffix"\);/);
+  // The panel parse must not acquire the surface parse's fields by copy-paste.
+  const parse = load.slice(load.indexOf('object rawPanelFallback;'), load.indexOf('panels.Add(new PanelSig'));
+  assert.ok(parse.length > 0, 'expected the nested panel-fallback parse');
+  assert.equal(/paneKinds|landingInfix/.test(codeOnly(parse)), false,
+    'the panel route has neither field — importing them would import the gate that defeats it');
+  // Absent is the normal case and must cost nothing: every field stays
+  // empty/false and the route cannot exist on that panel.
+  assert.match(load, /string pfbMode = "";/);
+  assert.match(load, /bool pfbEnforce = false, pfbVerified = false;/);
+  // The two entry points share ONE decision — there is exactly one copy of
+  // "what do these candidates mean" on this side of the port.
+  const code = codeOnly(src);
+  assert.equal((code.match(/ExtractAgentNameFromHeadingCore\(/g) || []).length, 3,
+    'declared once, called twice — the surface entry point and the panel one');
+  assert.match(code, /static AgentReadOutcome ExtractAgentNameFromPanelHeading\(PanelSig panel, string\[\] headingClasses, string\[\] headingNames, out string agentName\)/);
+});
+
 test('enforcer-win.ps1: the extra accessibility read happens ONLY when an agent-scoped policy needs it', async () => {
   // PRIVACY GATE. Reading another app's accessibility tree to learn which agent
   // someone has open is justified only by a policy that needs the answer. Three
@@ -3602,10 +4002,13 @@ test('enforcer-win.ps1: the extra accessibility read happens ONLY when an agent-
   const fg = src.slice(src.indexOf('static void UpdateForeground()'), src.indexOf('// Everything UpdateForeground does once the focused-element read is in.'));
   assert.ok(fg.length > 0, 'expected an UpdateForeground body');
   assert.match(fg, /if \(\(!isIde && proc != null && _aiProcs != null && _aiProcs\.Contains\(proc\)\r?\n\s*&& _agentScopedProcs\.Contains\(proc\)\) \|\| hostAppArmed\)/);
-  // `hit.Id` is handed down purely as part of the heading cache's pane key (see
-  // _copilotCachePane), never as a gate — all gating on `hit` happens once, in
-  // ApplyForegroundTick, which this same file pins separately.
-  assert.match(fg, /if \(surface != null\) agentOutcome = ReadFocusedAgentName\(surface, pid, fg, hit != null \? hit\.Id : "", out agentName\);/);
+  // `hit` is handed down for two things and neither widens what may be READ:
+  // the Copilot-tab route uses only its id, as part of that route's pane cache
+  // key (see _copilotCachePane); the Chat-list badge route reads its own config
+  // and its own two flags off it. All gating on `hit` for BLOCK and DLP
+  // decisions still happens once, in ApplyForegroundTick, which this same file
+  // pins separately.
+  assert.match(fg, /if \(surface != null\) agentOutcome = ReadFocusedAgentName\(surface, pid, fg, hit, out agentName\);/);
   // A HOST APP reaches the read through hostAppArmed instead of _aiProcs — it is
   // deliberately absent from that set — and hostAppArmed is the STRICTER of the
   // two gates: it additionally requires the surface to have passed its live
@@ -4062,7 +4465,7 @@ test('govstate carries the ADMIN-TYPED agent identity, never a name read out of 
   // No new matching semantics — the existing pair, exactly as both list checks
   // already use them.
   assert.match(rowFn, /if \(!PLATFORM_PROCS\.TryGetValue\(agent\["platform"\], out procs\)\) continue;/);
-  assert.match(rowFn, /if \(!AgentNameMatches\(agentName, agent\["agent_name"\]\)\) continue;/);
+  assert.match(rowFn, /if \(!AgentNameMatchesAny\(agentName, agent\)\) continue;/);
   assert.match(rowFn, /if \(!string\.Equals\(agent\["agent_scope"\], "agent", StringComparison\.OrdinalIgnoreCase\)\) continue;/);
   // Read-only: it decides nothing and writes no field.
   assert.equal(/^\s*_\w+ =(?!=)/m.test(codeOnly(rowFn)), false, 'the row lookup must assign to no static field');
@@ -4354,4 +4757,535 @@ test('an in-flight stdin write to a dead helper cannot crash the agent', async (
     assert.match(src, /this\.child\.stdin\.on\('error', \(err\) => \{/, `${file} must handle stdin errors`);
     assert.match(src, /stdin write failed/, `${file} must log rather than throw`);
   }
+  // sync-watcher.js is exempt BY CONSTRUCTION rather than by remembering to add
+  // the handler: it takes no commands at all, so it spawns with stdin:'ignore'
+  // and there is no stream to raise EPIPE on. Asserted so the exemption stays
+  // true if that watcher ever grows a command channel.
+  const sync = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'sync-watcher.js'), 'utf8');
+  assert.match(sync, /stdio: \['ignore', 'pipe', 'pipe'\]/, 'the sync watcher must have no stdin at all');
+  assert.equal(/child\.stdin/.test(sync), false, 'the sync watcher must never write to a child stdin');
+});
+
+// ── EGRESS surfaces: the JS catalog and the C# loader in lockstep ────────────
+//
+// Same discipline PLATFORM_PROCS and NEWLINE_KEYS_DEFAULT are kept under, and it
+// matters more here than for either of those. enforcer-win.ps1 is a standalone
+// process that cannot import ESM, so the chord ALLOWLIST is restated in C# — and
+// the thing the two sides must agree on is which keystroke means "send an
+// email". If they drift toward the JS side being stricter, a hand-edited env var
+// arms a chord nobody reviewed; if they drift the other way, the hold never
+// fires. The C# copy exists because that side must not trust a payload it did
+// not build.
+
+test('EGRESS_SEND_CHORDS agrees with the allowlist inside enforcer-win.ps1', async () => {
+  const src = await enforcerSrc();
+  const block = src.slice(src.indexOf('static readonly HashSet<string> EGRESS_SEND_CHORDS'));
+  const body = block.slice(0, block.indexOf(';'));
+  assert.ok(body.length > 0, 'could not find the C# EGRESS_SEND_CHORDS allowlist');
+  const fromPs1 = (body.match(/"([a-z_]+)"/g) || []).map((s) => s.replace(/"/g, ''));
+  const { EGRESS_SEND_CHORDS } = await import('../src/os_monitor/ai-processes.js');
+  assert.deepEqual(fromPs1, [...EGRESS_SEND_CHORDS],
+    'the .ps1 chord allowlist has drifted from EGRESS_SEND_CHORDS');
+  // Neither side may contain a bare-Enter spelling — the invariant both copies
+  // exist to protect. In a compose body plain Enter inserts a NEWLINE.
+  for (const chord of fromPs1) {
+    assert.equal(['enter', 'return', 'vk_return', 'newline'].includes(chord), false,
+      `${chord} is a bare-Enter spelling and must never be a send chord`);
+  }
+  // And the chord MATCHER cannot be satisfied by an unmodified Enter even if the
+  // table somehow held one: every branch requires a modifier.
+  const matcher = src.slice(
+    src.indexOf('static bool MatchesEgressChord(string proc, int vk, bool ctrl, bool alt, bool shift)'),
+    src.indexOf('// Is an egress send hold in force'),
+  );
+  assert.ok(matcher.length > 0, 'expected a MatchesEgressChord body');
+  assert.match(matcher, /if \(vk == VK_RETURN && ctrl && !alt && !shift && chords\.Contains\("ctrl_enter"\)\) return true;/);
+  assert.match(matcher, /if \(vk == VK_S && alt && !ctrl && !shift && chords\.Contains\("alt_s"\)\) return true;/);
+  // Every `return true` in the matcher is guarded by a modifier. A branch that
+  // returned true on vk alone would be the catastrophic case.
+  for (const line of matcher.split(/\r?\n/)) {
+    if (!/return true;/.test(line) || line.trim().startsWith('//')) continue;
+    assert.match(line, /(ctrl|alt|shift)/, `an unmodified keypress can satisfy: ${line.trim()}`);
+  }
+});
+
+test('EGRESS_SURFACES process names agree with what LoadEgressSurfaces will be handed', async () => {
+  // The payload is DATA from ai-processes.js and the .ps1 owns only the
+  // comparison, so there is no second copy of the process names to drift — but
+  // the LOADER's requirements are a second contract, and an entry that satisfies
+  // the JS builder while failing the C# parser would ship as a silent no-op.
+  const { buildEgressSurfaceConfig } = await import('../src/os_monitor/ai-processes.js');
+  const config = buildEgressSurfaceConfig(null);
+  assert.ok(config.length > 0, 'the egress catalog is empty');
+  for (const entry of config) {
+    // LoadEgressSurfaces drops an entry with no id, no procs or an unusable
+    // chord list — the three `continue`s in its loop.
+    assert.ok(entry.id, 'an entry with no id is dropped by the C# loader');
+    assert.ok(entry.procs.length > 0, `${entry.id}: an entry with no procs can never match`);
+    assert.ok(entry.sendKeys.length > 0, `${entry.id}: an entry with no chord is dropped`);
+    // The payload survives the JSON round trip it actually makes to reach the
+    // helper — the nested signature objects are the first structured values on
+    // this channel.
+    assert.deepEqual(JSON.parse(JSON.stringify(entry)), entry);
+  }
+  // The loader assigns all four collections at the END, so a payload that throws
+  // part-way cannot half-arm a mail client's send chord.
+  const src = await enforcerSrc();
+  const loader = src.slice(src.indexOf('static void LoadEgressSurfaces(string json)'), src.indexOf('// Re-read ~/.cloudfuze-aigov/egress-surfaces.json'));
+  assert.ok(loader.length > 0, 'expected a LoadEgressSurfaces body');
+  const firstAssign = Math.min(
+    ...['_egressProcs =', '_egressSendKeys =', '_egressIdByProc =', '_egressHoldProcs =']
+      .map((s) => loader.indexOf(s))
+      .filter((i) => i >= 0),
+  );
+  assert.ok(firstAssign > 0, 'expected the four assignments');
+  const loop = loader.slice(0, firstAssign);
+  assert.equal(/_egressProcs\s*\.|_egressSendKeys\s*\[|_egressIdByProc\s*\[/.test(loop), false,
+    'the loader must build locals and assign only at the end');
+  // ONLY a verified AND enforcing surface contributes a chord set, so an
+  // unverified one is recognised and arms nothing.
+  assert.match(loader, /bool armable = JsBool\(d, "verified"\) && JsBool\(d, "enforce"\);/);
+  assert.match(loader, /if \(armable\) sendKeys\[name\] = chords;/);
+  // The chord list is validated ALL-OR-NOTHING: one bad value drops the entry.
+  assert.match(loader, /if \(!EGRESS_SEND_CHORDS\.Contains\(key\)\) \{ chordsOk = false; break; \}/);
+  assert.match(loader, /if \(!chordsOk \|\| chords\.Count == 0\) continue;/);
+});
+
+test('no egress process can ever set _fgIsAi — a mail client is never a scanned surface', async () => {
+  // THE invariant. _fgIsAi is the flag every capture path in enforcer-win.ps1
+  // hangs off: the typed-keystroke buffer (FgIsAiNow), the UIA composer read
+  // (PanelUiaOk), the clipboard scan, the send-rect hunt, model routing and the
+  // Tier B pin. An egress process reaching it would turn a mail client into a
+  // fully scanned surface — every email typed, read and pasted.
+  const src = await enforcerSrc();
+  const code = codeOnly(src);
+
+  // 1. _fgIsAi is written in exactly the places it always was, and NONE of them
+  //    is reachable from the egress state. The only `true` assignment sits
+  //    inside ApplyForegroundTick's `if (isAi)` branch.
+  assert.equal((code.match(/_fgIsAi\s*=\s*true;/g) || []).length, 1,
+    '_fgIsAi gained a second `= true` site');
+  const tick = src.slice(src.indexOf('static void ApplyForegroundTick('), src.indexOf('static void UpdateSendRect()'));
+  assert.ok(tick.length > 0, 'expected an ApplyForegroundTick body');
+  assert.match(tick, /if \(isAi\)\s*\r?\n\s*\{\s*\r?\n\s*_fgIsAi = true;/);
+
+  // 2. `isAi` itself can only be set by the three PRE-EXISTING branches — an IDE
+  //    with a matched panel, a host app inside a governed conversation, or a
+  //    process in _aiProcs. An egress process satisfies none of the three, and
+  //    (asserted in ai-processes.test.mjs) is structurally absent from _aiProcs
+  //    because it never reaches watcherProcessNames().
+  const tickCode = codeOnly(tick);
+  const isAiSites = (tickCode.match(/\bisAi = true;/g) || []).length;
+  assert.equal(isAiSites, 4, `isAi gained an assignment site (${isAiSites})`);
+  // …and NONE of them mentions the egress state.
+  for (const forbidden of ['_egressProcs', '_egressSendKeys', '_egressHoldProcs', '_egressIdByProc', 'EgressHoldArmed', 'MatchesEgressChord']) {
+    assert.equal(tickCode.includes(forbidden), false,
+      `ApplyForegroundTick must not consult ${forbidden} — the foreground decision is not an egress decision`);
+  }
+  // The ONE thing it does for the egress feature is mirror the foreground
+  // process name, which decides nothing.
+  assert.match(tick, /_fgProcAny = proc \?\? "";/);
+
+  // 3. _fgProcAny is READ by exactly one function, so it cannot leak an egress
+  //    process into a path that expects _app.
+  //    Five references in total: the declaration, ApplyForegroundTick's write,
+  //    and the three inside the hook's egress branch (the two gate calls and the
+  //    StripExe for the block event's attribution).
+  const readers = (code.match(/_fgProcAny/g) || []).length;
+  assert.equal(readers, 5,
+    `_fgProcAny gained a reference (${readers}) — declaration, the tick write, and the egress branch only`);
+  assert.equal(assignsTo(code.replace(/_fgProcAny = proc \?\? "";/, '').replace(/static volatile string _fgProcAny = "";/, ''), '_fgProcAny'), false,
+    'nothing but ApplyForegroundTick may write _fgProcAny');
+
+  // 4. The egress state is read ONLY by the two egress functions and the hook's
+  //    own sibling branch — never by a block decision, a capture gate or an
+  //    emitter that describes an AI surface.
+  for (const [name, from, to] of [
+    ['CheckFgBlocked', 'static void CheckFgBlocked()', 'static void UpdateBannerState()'],
+    ['EnterBlockActive', 'static bool EnterBlockActive(', 'static string ActivePatterns()'],
+    ['BlockActiveForMouse', 'static bool BlockActiveForMouse()', '// The Enter-decision predicate'],
+    ['AttachHoldActive', 'static bool AttachHoldActive()', 'static bool BlockActiveForSend('],
+    ['UpdateUia', 'static void UpdateUia()', 'static void UpdatePaste()'],
+    ['EmitBlock', 'static void EmitBlock(string app', 'static void EmitRewrite('],
+  ]) {
+    const body = codeOnly(src.slice(src.indexOf(from), src.indexOf(to)));
+    assert.ok(body.length > 0, `expected a ${name} body`);
+    for (const forbidden of ['_egress', 'EgressHold', 'MatchesEgress', '_fgProcAny']) {
+      assert.equal(body.includes(forbidden), false, `${name} must not consult the egress state (${forbidden})`);
+    }
+  }
+
+  // 5. The hook's egress branch is a SIBLING of the AI branch, at the same
+  //    nesting level and BEFORE it, so nothing about the AI branch's condition
+  //    or body changed. Its own condition requires both gates.
+  const hook = src.slice(src.indexOf('static IntPtr HookCallback('), src.indexOf('static void Rescan()'));
+  const egressIdx = hook.indexOf('if (EgressHoldArmed(_fgProcAny) && MatchesEgressChord(_fgProcAny, vk, ctrl, alt, shift))');
+  const aiIdx = hook.indexOf('if (_fgIsAi || PanelBlockLatchHeld())');
+  assert.ok(egressIdx > 0, 'expected the egress sibling branch in the hook');
+  assert.ok(aiIdx > 0, 'the AI branch must still be there');
+  assert.ok(egressIdx < aiIdx, 'the egress branch must sit BEFORE the AI branch, not inside it');
+  // Same indentation = same nesting level. Nested-inside would be deeper.
+  const indentOf = (i) => hook.slice(hook.lastIndexOf('\n', i) + 1, i).length;
+  assert.equal(indentOf(egressIdx), indentOf(aiIdx),
+    'the egress branch must be at the SAME nesting level as the AI branch');
+  // It swallows with the same return convention, and there is NO override hotkey
+  // — "send this attachment anyway" is not a coherent affordance, exactly as the
+  // attachment hold already declines one.
+  const egressBranch = hook.slice(egressIdx, aiIdx);
+  assert.match(egressBranch, /return \(IntPtr\)1;/);
+  assert.equal(/Emit\("override"/.test(egressBranch), false, 'an egress hold must offer no override');
+  assert.equal(/OfferAccessRequest/.test(egressBranch), false,
+    'an egress block is not "the org disallowed this app" — there is nothing to request access to');
+});
+
+test('the egress policy read is on the poll thread, and never on the keyboard hook', async () => {
+  // The house rule: no file I/O and no regex on the hook thread. UpdateEgressPolicy
+  // reads a file, so it must live where UpdateBlockedAgents does.
+  const src = await enforcerSrc();
+  const poll = src.slice(src.indexOf('static void PollLoop('), src.indexOf('// Deadman switch.'));
+  assert.match(poll, /UpdateModelRouting\(\); UpdateEgressPolicy\(\);/,
+    'UpdateEgressPolicy must run on the poll tick');
+  const hook = codeOnly(src.slice(src.indexOf('static IntPtr HookCallback('), src.indexOf('static void Rescan()')));
+  assert.equal(hook.includes('UpdateEgressPolicy'), false, 'the hook thread must not read a policy file');
+  assert.equal(/ReadAllText|File\.Exists/.test(hook), false, 'the hook thread must do no file I/O');
+  // Self-throttled to the same 10s interval the blocked list uses, so it is one
+  // comparison on the other 66 ticks.
+  const fn = src.slice(src.indexOf('static void UpdateEgressPolicy()'), src.indexOf('// Does the pressed key + modifier state match'));
+  assert.ok(fn.length > 0, 'expected an UpdateEgressPolicy body');
+  assert.match(fn, /if \(now - _lastEgressCheck < BLOCKED_CHECK_INTERVAL\) return;/);
+  // A MISSING or UNREADABLE file means the hold set is EMPTY — nothing swallowed.
+  assert.match(fn, /if \(string\.IsNullOrEmpty\(_egressPolicyFile\) \|\| !System\.IO\.File\.Exists\(_egressPolicyFile\)\)/);
+  assert.match(fn, /catch \{ hold = new HashSet<string>\(StringComparer\.OrdinalIgnoreCase\); \}/);
+  // capture_mode 'hold' is the ONLY value that arms it.
+  assert.match(fn, /if \(!string\.Equals\(mode, "hold", StringComparison\.OrdinalIgnoreCase\)\) continue;/);
+  // The surface id is mapped back to PROCESSES through the CATALOG, never
+  // through the policy file — otherwise a tampered file could name any process.
+  assert.match(fn, /foreach \(var kv in _egressIdByProc\)/);
+  assert.match(fn, /if \(!_egressSendKeys\.ContainsKey\(kv\.Key\)\) continue;/);
+  assert.equal(/ExtractJsonString\(row, "procs"\)/.test(fn), false,
+    'the policy file must not be trusted to name processes');
+
+  // REGRESSION: egress-surfaces.json is an OBJECT — {"surfaces":[...],
+  // "sync_roots":[...]} — not a bare array like blocked-agents.json /
+  // governed-agents.json. SplitJsonArray finds depth-0 '{' spans, so feeding it
+  // the raw file text would brace-balance the WHOLE object into one "row",
+  // and ExtractJsonString's unscoped first-match would then only ever read the
+  // FIRST surface's capture_mode/id anywhere in the file — silently starving
+  // every other surface (outlook_new included) of ever entering the hold set.
+  // Must go through the same JavaScriptSerializer LoadEgressSurfaces (100
+  // lines up) already uses to parse this exact shape, keyed on "surfaces".
+  assert.equal(/SplitJsonArray\(json\)/.test(fn), false,
+    'UpdateEgressPolicy must not parse the OBJECT-shaped policy file as a bare array');
+  assert.match(fn, /var payload = \(Dictionary<string, object>\)serializer\.DeserializeObject\(json\);/);
+  assert.match(fn, /payload\.TryGetValue\("surfaces", out rawSurfaces\)/);
+  assert.match(fn, /foreach \(var item in \(IEnumerable\)rawSurfaces\)/);
+  // JsStr, not ExtractJsonString, once the shape is a real Dictionary.
+  assert.match(fn, /string mode = JsStr\(d, "capture_mode"\);/);
+  assert.match(fn, /string id = JsStr\(d, "id"\);/);
+});
+
+test('the egress block line carries no window title, recipient or message body', async () => {
+  // STRICTER than any other emitter in this file, and for a reason the others do
+  // not have: an Outlook window title is the message SUBJECT plus, in a reply,
+  // the recipient's display name. Both are content and neither is what the
+  // record is about.
+  const src = await enforcerSrc();
+  const fn = src.slice(src.indexOf('static void EmitEgressBlock('), src.indexOf('static void EmitBlock(string app'));
+  assert.ok(fn.length > 0, 'expected an EmitEgressBlock body');
+  const body = codeOnly(fn);
+  for (const forbidden of ['GetWindowText', 'title', 'Title', 'recipient', 'Recipient', 'subject', 'Subject', '_pendingPreview', '_pendingOriginalFull']) {
+    assert.equal(body.includes(forbidden), false, `EmitEgressBlock must not carry ${forbidden}`);
+  }
+  // What it DOES carry: a process name, a catalog id, the pattern NAMES and the
+  // filename the hold is about.
+  assert.match(fn, /"kind\\":\\"egress_block/);
+  assert.match(fn, /Esc\(patterns\)/);
+  assert.match(fn, /Esc\(filename\)/);
+  // NEVER rewritable, and no field for it: Tokenize & Send masks text and cannot
+  // detach a file.
+  assert.equal(/rewritable/.test(fn), false, 'an egress block must not be offered as rewritable');
+});
+
+// ── Block ATTRIBUTION: provenance of the agent fields on the block line ──────
+//
+// EmitBlock now carries agent / agent_id / agent_src on every block. The PII
+// rule is the govstate rule: those values may come ONLY from an agent-scoped
+// policy row (admin-typed name, server-issued id) or our own catalog soleAgent.
+// A name read out of another app's accessibility tree or window may be used as
+// a LOOKUP KEY and must never itself be emitted. Behavioural coverage lives in
+// enforcer-panel-block.test.mjs (attr_* scenarios); these pin the code paths.
+
+test('block attribution: EmitBlock quotes only the per-tick BlockAttr or the armed blocked row', async () => {
+  const src = await enforcerSrc();
+  const emit = codeOnly(src.slice(src.indexOf('static void EmitBlock(string app'), src.indexOf('static void EmitRewrite(')));
+  assert.match(emit, /BlockAttr attr = _fgAttr \?\? BLOCK_ATTR_NONE;/);
+  assert.match(emit, /string attrAgent = attr\.Agent, attrAgentId = attr\.AgentId, attrSrc = attr\.Src;/);
+  // An agent-scoped platform block names its own armed row — the same pair the
+  // Request Access identity already carries.
+  assert.match(emit, /if \(platformBlock && BlockScope\(\) == "agent"\)\s*\{ attrAgent = _blockedAgentName \?\? ""; attrAgentId = _blockedAgentId \?\? ""; attrSrc = "row"; \}/);
+  assert.ok(emit.includes('",\\"agent\\":\\"" + Esc(attrAgent) + "\\""'), 'agent is emitted from attrAgent');
+  assert.ok(emit.includes('",\\"agent_id\\":\\"" + Esc(attrAgentId) + "\\""'), 'agent_id is emitted from attrAgentId');
+  assert.ok(emit.includes('",\\"agent_src\\":\\"" + Esc(attrSrc) + "\\""'), 'agent_src is emitted from attrSrc');
+  // `surface` is a catalog id, never a read.
+  assert.match(emit, /AgentSurface attrSurface = MatchAgentSurface\(app\);/);
+  assert.ok(emit.includes('",\\"surface\\":\\"" + Esc(attrSurface.Id) + "\\""'), 'surface is the catalog id');
+  // Nothing read off the other app may be reachable from here.
+  for (const forbidden of ['_fgAgentName', '_fgAgentOutcome', 'agentName', 'GetWindowText', '.Current.Name',
+    '_copilotCache', 'ReadFocusedAgentName', 'ExtractAgentName', 'GovernedRowIdentity']) {
+    assert.equal(emit.includes(forbidden), false, `EmitBlock must not reach ${forbidden}`);
+  }
+});
+
+test('block attribution: the READ name is only ever a lookup key, never an output', async () => {
+  const src = await enforcerSrc();
+  const resolver = codeOnly(src.slice(src.indexOf('static string ResolveBlockAgent('), src.indexOf('static PanelSig PanelById(')));
+  assert.ok(resolver.length > 0, 'expected a ResolveBlockAgent body');
+  // The admissible sources, and only these, are ever assigned to `agent`.
+  const assigns = [...resolver.matchAll(/\bagent = ([^;]+);/g)].map((m) => m[1].trim());
+  assert.deepEqual(assigns.sort(), ['""', 'hostGovAgent ?? ""', 'panel.SoleAgent', 'rowName'].sort(),
+    `unexpected source for the emitted agent name: ${JSON.stringify(assigns)}`);
+  assert.equal(/agent = readName|agentId = readName/.test(resolver), false);
+  // readName is the parameter, the Named guard, and the two row lookups.
+  assert.equal((resolver.match(/readName/g) || []).length, 4,
+    'the parameter, the Named guard, and the two GovernedRowIdentity lookups — nothing else');
+  assert.match(resolver, /GovernedRowIdentity\(true, proc, readName, out rowName, out rowId\);/);
+  assert.match(resolver, /GovernedRowIdentity\(false, proc, readName, out rowName, out rowId\);/);
+  // Only a Named outcome can be looked up at all.
+  assert.match(resolver, /if \(outcome == AgentReadOutcome\.Named && !string\.IsNullOrEmpty\(readName\)\)/);
+  // …and GovernedRowIdentity itself still returns only the row's own fields.
+  const rowFn = src.slice(src.indexOf('static void GovernedRowIdentity('), src.indexOf('// Arm the platform-block latch'));
+  assert.match(rowFn, /rowName = agent\["agent_name"\] \?\? "";/);
+  assert.match(rowFn, /rowId = agent\["agent_id"\] \?\? "";/);
+});
+
+test('block attribution: _fgAttr is written every tick by ApplyForegroundTick and read only by EmitBlock', async () => {
+  const src = await enforcerSrc();
+  const code = codeOnly(src);
+  // Declaration, the two tick writes, EmitBlock's read and EmitEvidencePrompt's
+  // read (the typed-prompt record for the AI-evidence routes, 2026-09-24).
+  assert.equal((code.match(/_fgAttr\b/g) || []).length, 5, '_fgAttr gained a reference — re-review for PII');
+  const evEmit = codeOnly(src.slice(src.indexOf('static void EmitEvidencePrompt('), src.indexOf('// Recomputes the pinned rewrite candidate')));
+  assert.match(evEmit, /BlockAttr attr = _fgAttr \?\? BLOCK_ATTR_NONE;/);
+  const tick = codeOnly(src.slice(src.indexOf('static void ApplyForegroundTick('), src.indexOf('// When a block is active, locate the send button')));
+  assert.match(tick, /_fgAttr = new BlockAttr\(attrAgent, attrAgentId, attrSrc\);/);
+  assert.match(tick, /else _fgAttr = BLOCK_ATTR_NONE;/);
+  // Resolved from THIS tick's panel (catalog lookup) and host-app row identity.
+  assert.match(tick, /ResolveBlockAgent\(proc, isPanel \? PanelById\(panelId\) : null, agentOutcome, agentName,\s*hostGovAgent, hostGovAgentId, out attrAgent, out attrAgentId\);/);
+  // One immutable object behind one volatile reference — never torn on the hook thread.
+  assert.match(code, /static volatile BlockAttr _fgAttr = BLOCK_ATTR_NONE;/);
+  assert.match(code, /public readonly string Agent, AgentId, Src;/);
+  // No DECISION site reads it.
+  for (const [name, from, to] of [
+    ['CheckFgBlocked', 'static void CheckFgBlocked()', 'static string BlockScope()'],
+    ['EnterBlockActive', 'static bool EnterBlockActive(', 'static string ActivePatterns()'],
+    ['PanelDlpMatchesOnPanelAlone', 'static bool PanelDlpMatchesOnPanelAlone(', '// Does the CURRENT blocklist hold'],
+    ['UpdatePendingRewrite', 'static void UpdatePendingRewrite()', 'static string _pastePatternsValue'],
+  ]) {
+    const body = codeOnly(src.slice(src.indexOf(from), src.indexOf(to)));
+    assert.ok(body.length > 0, `expected a ${name} body`);
+    for (const forbidden of ['_fgAttr', 'ResolveBlockAgent', 'SoleAgent']) {
+      assert.equal(body.includes(forbidden), false, `${name} must not consult ${forbidden}`);
+    }
+  }
+});
+
+test('copy-masked fallback: the reason set is mirrored in main.js and block-dialog.js, and every reason is real', async () => {
+  const src = await enforcerSrc();
+  const main = await readFile(join(AGENT_DIR, 'electron', 'main.js'), 'utf8');
+  const dialog = await readFile(join(AGENT_DIR, 'electron', 'renderer', 'block-dialog.js'), 'utf8');
+  const setOf = (text, name) => {
+    const m = text.match(new RegExp(`const ${name} = new Set\\(\\[([^\\]]*)\\]\\);`));
+    assert.ok(m, `expected ${name}`);
+    return [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]).sort();
+  };
+  const mainSet = setOf(main, 'REWRITE_COPYABLE_REASONS');
+  const dialogSet = setOf(dialog, 'COPYABLE_REASONS');
+  assert.deepEqual(mainSet, [
+    'content_changed_before_send', 'element_changed_before_send', 'element_changed_mid_write',
+    'focus_changed_before_send', 'interrupted_before_send', 'interrupted_mid_write', 'verify_mismatch',
+  ]);
+  assert.deepEqual(dialogSet, mainSet, 'the renderer and the main-process gate must agree');
+  for (const reason of mainSet) {
+    assert.match(src, new RegExp(`EmitRewrite\\(blockId, "(aborted|failed)", "${reason}"\\)`),
+      `${reason} is not a reason RunRewriteCore actually emits`);
+  }
+  // The "_before_write" aborts left the composer untouched: they are REAL
+  // reasons, and they must NOT unlock the copy fallback — the normal retry is
+  // the answer there.
+  for (const reason of ['element_changed_before_write', 'interrupted_before_write']) {
+    assert.match(src, new RegExp(`EmitRewrite\\(blockId, "aborted", "${reason}"\\)`), `${reason} must be emitted`);
+    assert.equal(mainSet.includes(reason), false, `${reason} must not unlock the copy fallback`);
+    assert.match(dialog, new RegExp(`${reason}: '`), `${reason} needs its own retry text`);
+  }
+  // Every copyable reason has its OWN message, so "clear it" is never said
+  // about a composer that holds the finished masked text.
+  const textBlock = dialog.slice(dialog.indexOf('const COPY_FALLBACK_TEXT = {'), dialog.indexOf('};', dialog.indexOf('const COPY_FALLBACK_TEXT = {')));
+  const textKeys = [...textBlock.matchAll(/^\s*([a-z_]+): /gm)].map((m) => m[1]).sort();
+  assert.deepEqual(textKeys, mainSet, 'every copyable reason needs its own message');
+  for (const reason of mainSet.filter((r) => r.endsWith('_before_send'))) {
+    const line = textBlock.split(/\r?\n/).find((l) => l.trimStart().startsWith(`${reason}:`));
+    assert.equal(/Clear it|PARTLY_CHANGED/.test(line), false, `${reason}: the composer holds the finished masked text — do not tell the user to clear it`);
+  }
+});
+
+test('copy-masked fallback: only the MASKED preview can reach the clipboard, and only for a copyable failure', async () => {
+  const main = await readFile(join(AGENT_DIR, 'electron', 'main.js'), 'utf8');
+  const preload = await readFile(join(AGENT_DIR, 'electron', 'preload.js'), 'utf8');
+  const dialog = await readFile(join(AGENT_DIR, 'electron', 'renderer', 'block-dialog.js'), 'utf8');
+  // The renderer passes a block_id — never text.
+  assert.match(preload, /copyMaskedText: \(blockId\) => ipcRenderer\.invoke\('copy-masked-text', blockId\),/);
+  assert.match(dialog, /window\.api\.copyMaskedText\(ev\.block_id\)/);
+  // The async handler cannot throw an unhandled rejection: the await is inside
+  // a try, with a catch that reports "Could not copy".
+  assert.match(dialog, /try \{\s*const res = await window\.api\.copyMaskedText\(ev\.block_id\);[\s\S]*?\} catch \{\s*copyBtn\.textContent = 'Could not copy';\s*\}/);
+  // The main process writes exactly one string to the clipboard, anywhere: its
+  // own copy of the block's MASKED preview, captured from a REWRITABLE block.
+  const writes = [...main.matchAll(/clipboard\.write\w*\(([^)]*)\)/g)].map((m) => m[1]);
+  assert.deepEqual(writes, ['_lastDialogMasked'], 'the only clipboard write must be the stored masked preview');
+  assert.ok(main.includes("_lastDialogMasked = data.rewritable && typeof data.preview === 'string' ? data.preview : '';"));
+  // Refused unless THIS block's rewrite failed with a copyable reason.
+  const handler = main.slice(main.indexOf("ipcMain.handle('copy-masked-text'"), main.indexOf("ipcMain.on('dismiss-dialog'"));
+  assert.ok(handler.includes('if (!blockId || blockId !== _copyableBlockId || blockId !== _lastDialogBlockId || !_lastDialogMasked)'));
+  assert.match(main, /REWRITE_COPYABLE_REASONS\.has\(parsed\.reason\) && _lastDialogMasked\) \{\s*_copyableBlockId = parsed\.block_id;/);
+  // Never logged, and nothing is retyped on the user's behalf from here.
+  assert.equal(/console\.\w+\([^)]*_lastDialogMasked/.test(main), false);
+  assert.equal(/tokenize/i.test(handler), false, 'the copy fallback must never trigger another rewrite');
+});
+
+// ── M365 agent routes (2026-09-24): the privacy pins ─────────────────────────
+//
+// Behavioural coverage: enforcer-m365-routes.test.mjs. These pin the code paths
+// that make the evidence routes safe to run with NO governed row.
+
+test('Teams agent-chat evidence reads AutomationId and ClassName ONLY — never a Name, never a title', async () => {
+  const src = await enforcerSrc();
+  const section = codeOnly(src.slice(src.indexOf('// ── Teams 1:1 AGENT-CHAT evidence'), src.indexOf('// ── Chat-list badge fallback: background search + cache')));
+  assert.ok(section.length > 0, 'expected the evidence section');
+  for (const forbidden of ['.Current.Name', 'GetWindowText', 'ValuePattern', 'TextPattern', 'ReadText(', 'Emit(', 'Console.Out', '_fgAgentName']) {
+    assert.equal(section.includes(forbidden), false, `the evidence section must not touch ${forbidden}`);
+  }
+  assert.match(section, /\.Current\.AutomationId/);
+  assert.match(section, /\.Current\.ClassName/);
+  // The same ownership rule every read uses, and the element must still be the
+  // composer the poll thread asked about.
+  assert.match(section, /snap\.Owned = ElementPidBelongsToForeground\(el\.Current\.ProcessId, fgPid\);/);
+  // The snapshot must still describe the composer the poll thread asked about.
+  assert.match(section, /string\.Equals\(snap\.FocusedRid, composerRid, StringComparison\.Ordinal\)\s*&& string\.Equals\(snap\.FocusedAid, composerAid, StringComparison\.Ordinal\)/);
+  // THE STRICT RULE (H2/M2): one header, 1:1, >=1 message, EVERY message's ts
+  // has a matching positive-feedback button, EVERY button starts with threadId.
+  assert.match(section, /if \(headers\.Count > 1\)/);
+  assert.match(section, /if \(kind != TeamsChatKind\.OneToOne\) return false;/);
+  assert.match(section, /if \(capHit\) return false;/);
+  assert.match(section, /if \(messages == null \|\| messages\.Count == 0\) return false;/);
+  assert.match(section, /if \(string\.IsNullOrEmpty\(f\) \|\| !f\.StartsWith\(prefix, StringComparison\.Ordinal\)\) return false;/);
+  assert.match(section, /if \(!positive\.Contains\(prefix \+ ts \+ TEAMS_POSITIVE_FEEDBACK_SUFFIX\)\) return false;/);
+  // The disclaimer is not required, and the human badge class is never read.
+  assert.equal(/fai-AiGeneratedDisclaimer"/.test(section), false);
+  assert.equal(/decorationIcon|badge-/i.test(section), false);
+  // Fail closed: a throw publishes no verdict; a superseded search is discarded.
+  assert.match(section, /catch \{ result = null; \}/);
+  assert.match(section, /if \(gen == _teamsEvGen\)/);
+  // M1: one immutable object behind one volatile reference; key has the
+  // composer AutomationId; stamped at search START; no title.
+  assert.match(section, /static volatile TeamsEvidence _teamsEv = null;/);
+  assert.match(section, /public readonly string Key, ThreadId;/);
+  assert.match(section, /return fg\.ToInt64\(\)\.ToString\(\) \+ "\|" \+ \(composerRid \?\? ""\) \+ "\|" \+ \(composerAid \?\? ""\);/);
+  assert.match(section, /new Thread\(\(\) => SearchTeamsEvidenceBackground\(fg, key, composerRid, composerAid, gen, now\)\)/);
+  // L5: watchdog + keep-last-good.
+  assert.match(section, /if \(_teamsEvSearchInProgress && \(now - _teamsEvSearchStartTicks\) > TEAMS_EV_SEARCH_WATCHDOG\)/);
+  assert.match(section, /bool stale = ev == null \|\| \(now - ev\.StartedTicks\) > TEAMS_EV_CACHE_TTL;/);
+  // Not applicable (hit null / another panel) clears the published verdict.
+  assert.match(section, /else _teamsEv = null;/);
+});
+
+test('the evidence arm needs the fleet dlp flag and the verified surface, and never licenses the title read', async () => {
+  const src = await enforcerSrc();
+  const code = codeOnly(src);
+  const fg = src.slice(src.indexOf('static void UpdateForeground()'), src.indexOf('static void ApplyForegroundTick('));
+  // The title / agent-name read stays behind hostAppArmed (a policy row) only.
+  assert.match(fg, /&& _agentScopedProcs\.Contains\(proc\)\) \|\| hostAppArmed\)/);
+  assert.equal(/\|\| hostEvidenceArmed\)\s*\{\s*AgentSurface surface = MatchAgentSurface/.test(fg), false);
+  // _evidenceDlpOn: the declaration, the stdin write (x2), the evidence arm, the
+  // evidenceOk term, the pane content gate and the prompt route — it can only
+  // NARROW back to row-gated behaviour.
+  assert.equal((code.match(/_evidenceDlpOn/g) || []).length, 7, '_evidenceDlpOn gained a reference — re-review');
+  // L3: OFF unless the fleet value says "true".
+  assert.match(code, /static volatile bool _evidenceDlpOn =\s*string\.Equals\(Environment\.GetEnvironmentVariable\("CFAI_EVIDENCE_DLP"\), "true", StringComparison\.OrdinalIgnoreCase\);/);
+  // No block decision reads the evidence state.
+  for (const [name, from, to] of [
+    ['CheckFgBlocked', 'static void CheckFgBlocked()', 'static string BlockScope()'],
+    ['EnterBlockActive', 'static bool EnterBlockActive(', 'static string ActivePatterns()'],
+  ]) {
+    const body = codeOnly(src.slice(src.indexOf(from), src.indexOf(to)));
+    for (const forbidden of ['_evidenceDlpOn', '_tickAgentChatEvidence', 'agentChatEvidence', 'TeamsAgentChatEvidence', 'AiEvidence']) {
+      assert.equal(body.includes(forbidden), false, `${name} must not consult ${forbidden}`);
+    }
+  }
+});
+
+test('ReadFocusedPanel reads the element Name ONLY for a process whose panels match on a Name', async () => {
+  const src = await enforcerSrc();
+  const fn = src.slice(src.indexOf('static PanelSig ReadFocusedPanel('), src.indexOf('// Is the CURRENT foreground surface allowed to enforce at all?'));
+  assert.match(fn, /if \(PanelUsesNameRule\(proc\)\) \{ try \{ name = el\.Current\.Name \?\? ""; \} catch \{ \} \}/);
+  assert.equal((codeOnly(fn).match(/\.Current\.Name/g) || []).length, 1);
+  // The catalog side: no Teams / Office / Outlook panel has a Name rule, so the
+  // Name of a focused element in those apps is never read.
+  const { AI_PANELS } = await import('../src/os_monitor/ai-processes.js');
+  const HOSTS = ['ms-teams', 'WINWORD', 'EXCEL', 'POWERPNT', 'ONENOTE', 'ONENOTEIM', 'OUTLOOK', 'olk'];
+  for (const p of AI_PANELS.filter((x) => x.procs.some((pr) => HOSTS.includes(pr)))) {
+    assert.equal(p.nameEquals ?? '', '', `${p.id} must not match on a Name`);
+    assert.equal(p.namePrefix ?? '', '', `${p.id} must not match on a Name`);
+  }
+});
+
+test('the evidence-prompt emitter is narrow: sensitive only, evidence routes only, the matched element only, no title', async () => {
+  const src = await enforcerSrc();
+  const uia = codeOnly(src.slice(src.indexOf('static void UpdateUia()'), src.indexOf('// ── The typed-prompt record for the AI-EVIDENCE routes')));
+  assert.match(uia, /if \(hits\.Length > 0\) MaybeEmitEvidencePrompt\(text, hits\);/);
+  const sec = codeOnly(src.slice(src.indexOf('static bool EvidencePromptRoute()'), src.indexOf('// Recomputes the pinned rewrite candidate')));
+  // Route: a focused, enforcing panel RIGHT NOW, host-app or dlpMatch panel.
+  assert.match(sec, /if \(!_evidenceDlpOn \|\| !_fgContentOk\) return false;/);
+  assert.match(sec, /if \(!_fgIsAi \|\| !_fgIsPanel \|\| string\.IsNullOrEmpty\(_fgPanelId\) \|\| !PanelUiaOk\(\)\) return false;/);
+  assert.match(sec, /if \(string\.Equals\(p\.DlpMatch, "panel", StringComparison\.Ordinal\)\) return true;/);
+  // H1: the Chat-list composer uploads only on THIS tick's evidence verdict.
+  assert.match(sec, /return _hostAppProcs\.Contains\(_app\) && _fgAgentChatEvidence\s*&& string\.Equals\(p\.AiEvidence, "teams_chat", StringComparison\.Ordinal\);/);
+  assert.equal(/_hostAppProcs\.Contains\(_app\)\) return true;/.test(sec), false, 'a host-app panel alone must not license the upload');
+  // L1: UpdateUia reads only the element this tick matched.
+  assert.match(uia, /if \(el != null && \(!_fgIsPanel \|\| FocusedIsMatchedComposer\(el\)\)\) text = ReadText\(el\);/);
+  const matched = codeOnly(src.slice(src.indexOf('static bool FocusedIsMatchedComposer('), src.indexOf('// ── The typed-prompt record for the AI-EVIDENCE routes')));
+  assert.match(matched, /return string\.Equals\(rid, ownerRid, StringComparison\.Ordinal\) && ElementPidBelongsToForeground\(elPid, _fgPid\);/);
+  assert.match(sec, /if \(string\.Equals\(sig, _lastEvidencePromptSig, StringComparison\.Ordinal\)\) return;/);
+  // The line: the handed text, catalog ids, the BlockAttr — nothing read off
+  // another app's window or accessibility Name.
+  const emit = sec.slice(sec.indexOf('static void EmitEvidencePrompt('));
+  const keys = [...emit.matchAll(/\\"([a-z_]+)\\":/g)].map((m) => m[1]).sort();
+  assert.deepEqual(keys, ['agent', 'agent_id', 'agent_src', 'cause', 'kind', 'len', 'panel', 'process', 'surface', 'text'].sort());
+  for (const forbidden of ['GetWindowText', 'title', 'Title', '.Current.Name', '_fgAgentName', '_fgAgentOutcome', '_pendingOriginalFull', 'heading']) {
+    assert.equal(sec.includes(forbidden), false, `the evidence-prompt path must not reach ${forbidden}`);
+  }
+  assert.match(emit, /",\\"text\\":\\"" \+ Esc\(text\) \+ "\\""/);
+});
+
+test('the Teams pane-reader seam: ONE production value, read in ONE place', async () => {
+  // The harness swaps the snapshot source to drive the real cache path offline;
+  // in production it must only ever be the live reader, and nothing else may
+  // assign it.
+  const code = codeOnly(await enforcerSrc());
+  assert.match(code, /static TeamsPaneReader _teamsPaneReader = ReadTeamsPaneLive;/);
+  assert.equal((code.match(/_teamsPaneReader/g) || []).length, 2, 'declaration + the one call in the background search');
+  assert.match(code, /TeamsPaneSnapshot snap = _teamsPaneReader\(fg\);/);
+});
+
+test('the per-tick Teams evidence fields are set ONLY by ComputeTickTeamsEvidence, which UpdateForeground calls', async () => {
+  const src = await enforcerSrc();
+  const code = codeOnly(src);
+  for (const field of ['_tickAgentChatEvidence', '_tickChatIsGroup']) {
+    const writes = (code.match(new RegExp(`\\b${field} = `, 'g')) || []).length;
+    assert.equal(writes, 2, `${field}: the declaration plus exactly one writer`);
+  }
+  const fn = codeOnly(src.slice(src.indexOf('static void ComputeTickTeamsEvidence('), src.indexOf('// ── Chat-list badge fallback: background search + cache')));
+  assert.match(fn, /_tickAgentChatEvidence = ev != null && ev\.Agent;/);
+  assert.match(fn, /_tickChatIsGroup = ev != null && ev\.Kind == TeamsChatKind\.GroupOrChannel;/);
+  const fg = src.slice(src.indexOf('static void UpdateForeground()'), src.indexOf('static void ApplyForegroundTick('));
+  assert.match(fg, /ComputeTickTeamsEvidence\(fg, hostAppArmed \|\| hostEvidenceArmed, hit, panelRid, _tickComposerAid\);/);
 });

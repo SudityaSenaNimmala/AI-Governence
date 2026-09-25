@@ -138,6 +138,13 @@ export class FileDialogWatcher extends EventEmitter {
       case 'file_dialog_pick':
         this.emit('file_dialog_pick', ev);
         break;
+      // An EGRESS surface's attach dialog. A SEPARATE event name for the same
+      // reason AttachmentWatcher gives its egress kinds one: index.js's
+      // file_dialog_pick handler is the AI/host-app eligibility chain, and a
+      // mail client satisfies none of it.
+      case 'egress_file_dialog_pick':
+        this.emit('egress_file_dialog_pick', ev);
+        break;
       case 'heartbeat':
         // First one only — see AttachmentWatcher's copy. `ready` proves the
         // process started; only a heartbeat proves the dialog scan is running,

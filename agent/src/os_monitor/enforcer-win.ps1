@@ -147,6 +147,15 @@ $mrConfigJson = if ($modelRouterEnabled -and $env:CFAI_MODEL_ROUTER_CONFIG) { $e
 $ideProcsJson = if ($env:CFAI_IDE_PROCESSES) { $env:CFAI_IDE_PROCESSES } else { '' }
 $aiPanelsJson = if ($env:CFAI_AI_PANELS)     { $env:CFAI_AI_PANELS }     else { '' }
 $agentSurfacesJson = if ($env:CFAI_AGENT_SURFACES) { $env:CFAI_AGENT_SURFACES } else { '' }
+# Egress surfaces (a mail client's send chord). Same unparsed pass-through as the
+# three payloads above. Empty (env unset) means no egress support at all — the
+# right default for a by-hand debugging run of this script, and it leaves every
+# pre-existing code path untouched.
+#
+# This is the CATALOG only. Whether a surface is armed, and with which
+# capture_mode, comes from ~/.cloudfuze-aigov/egress-surfaces.json on a 10s
+# cadence — see UpdateEgressPolicy.
+$egressSurfacesJson = if ($env:CFAI_EGRESS_SURFACES) { $env:CFAI_EGRESS_SURFACES } else { '' }
 
 $source = @'
 using System;
@@ -208,6 +217,15 @@ public static class CfaiEnforcer
     static extern int GetWindowTextLength(IntPtr hWnd);
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+    // For the Office WebView2 pane resolver (ResolveEffectiveFocus): enumerate
+    // TOP-LEVEL windows and read their CLASS NAME only — never a window title.
+    delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")]
+    static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+    [DllImport("user32.dll")]
+    static extern bool IsWindowVisible(IntPtr hWnd);
     const int WINDOW_TITLE_MAX = 1024;
 
     // For ReadFocusedAgentName's parent-process check: a WebView2-hosted app
@@ -343,6 +361,9 @@ public static class CfaiEnforcer
     const int VK_ESCAPE = 0x1B;
     const int VK_DELETE = 0x2E;
     const int VK_A = 0x41;
+    // Alt+S is a mail client's ribbon Send accelerator — see MatchesEgressChord.
+    // Read by that function and by nothing else; no existing decision consults it.
+    const int VK_S = 0x53;
     const int VK_T = 0x54;
     const int VK_V = 0x56;
     const int VK_F1 = 0x70;
@@ -431,7 +452,11 @@ public static class CfaiEnforcer
     // one. So the tail is ~0.9s by default and ~2.2s at the ceiling: 9s of
     // writing lands at ~12.6s in the default case and ~13.8s in the worst case,
     // both inside REWRITE_TTL (15s) and inside the dialog's own 16s timeout
-    // (~3.4s / ~2.2s of margin respectively).
+    // (~3.4s / ~2.2s of margin respectively). The focused-element pin checks
+    // (see FocusStillPinned) add two reads OUTSIDE the write — before Ctrl+A and
+    // before Enter, REWRITE_FOCUS_PIN_READ_MS each, ~30ms, twice that if both
+    // retry — which that margin absorbs; the ones INSIDE the write are charged
+    // by EstimateWriteMs against this budget like any other write cost.
     //
     // NOT RAISED to buy a bigger cap, deliberately. It could go to ~11s on this
     // arithmetic, which would buy ~120 more characters and spend the entire
@@ -459,6 +484,15 @@ public static class CfaiEnforcer
     // out inside the usable budget, rounded down to a whole chunk because whole
     // chunks are what the loop actually types.
     //   (9000 * 4/5) / 370 = 19 chunks  ->  19 * 24 = 456 characters.
+    // The focused-element pin reads the write loop makes (see FocusStillPinned)
+    // are NOT in this derivation — they are charged by EstimateWriteMs instead,
+    // at REWRITE_FOCUS_PIN_READ_MS each: one per segment plus one per
+    // REWRITE_FOCUS_PIN_EVERY_CHUNKS-th chunk. For a single 456-character line
+    // that is 1 + (19-1)/4 = 5 reads = 75ms, so the cap still types in
+    // 19*370 + 75 = 7105ms <= 7200ms usable (asserted from the compiled
+    // EstimateWriteMs by agent/tests/enforcer-rewrite-focus-pin.test.mjs). The
+    // headroom is 95ms; raising the pin cadence or the per-read charge past it
+    // would make the cap itself untypeable, and that test fails first.
     // This is a coarse pre-filter with a second job: it bounds the cost of
     // running every pattern over the text at all, before any masking happens.
     // The ACCURATE gate is EstimateWriteMs/WriteFitsBudget below, which is
@@ -554,6 +588,30 @@ public static class CfaiEnforcer
     // the hook consults it, so a governed-only tick cannot swallow a keystroke
     // through it even if a future change forgot the host-app guards.
     static volatile bool _fgDlpGoverned = false;
+    // THIS tick's Teams 1:1 agent-chat evidence (TeamsAgentChatEvidence), set by
+    // UpdateForeground on EVERY tick immediately before ApplyForegroundTick and
+    // read only by ApplyForegroundTick's host-app DLP decision. A field rather
+    // than a parameter so the offline harness drives it exactly like every
+    // other per-tick input it sets. Never a block input.
+    static volatile bool _tickAgentChatEvidence = false;
+    // THIS tick's "the open Teams conversation's header is @thread.v2" — a
+    // group, channel or meeting chat. Every Teams Chat-list route refuses on it,
+    // the title/Named and block routes included (ApplyForegroundTick).
+    static volatile bool _tickChatIsGroup = false;
+    // The matched composer's AutomationId ("new-message-<guid>" for Teams),
+    // read by ReadFocusedPanel ONLY on a panel match, for the evidence cache key.
+    static string _tickComposerAid = "";
+    // The AI-evidence verdict that governed THIS tick (a Teams 1:1 agent chat),
+    // as ApplyForegroundTick decided it. Read by EvidencePromptRoute: the
+    // typed-prompt upload for a Teams Chat-list tick requires THIS, never the
+    // title/Named route.
+    static volatile bool _fgAgentChatEvidence = false;
+    // May CONTENT (typed buffer, UIA text, clipboard paste, Tier B, the prompt
+    // upload) be taken from this tick's surface? False only for a dlpMatch
+    // 'panel' Copilot pane (Office / Outlook) while the fleet dlp flag is off
+    // (_evidenceDlpOn). Blocking by a panel ROW is unaffected — PanelEnforceOk
+    // is untouched. Assigned every tick by ApplyForegroundTick.
+    static volatile bool _fgContentOk = true;
     // Composite identity of "whose keystrokes are in the typed buffer":
     // pid + panel id (or "none") + the focused element's RuntimeId. Moving
     // between two panels, or between a panel and the editor, INSIDE one process
@@ -650,6 +708,65 @@ public static class CfaiEnforcer
     static string _governedAgentFile = "";
     static List<Dictionary<string, string>> _governedList = new List<Dictionary<string, string>>();
 
+    // ── EGRESS surfaces (a mail client's send chord) ─────────────────────────
+    //
+    // A FOURTH catalog, and the ONLY one here that describes a NON-AI app. See
+    // EGRESS_SURFACES in ai-processes.js for why it must not join any of the
+    // other three: an egress surface is a general-purpose mail client, strictly
+    // worse than the Teams host-app case because it has no "an agent
+    // conversation is open" state to scope anything with.
+    //
+    // WHAT THIS STATE CAN DO, exhaustively: swallow ONE keyboard chord (the
+    // message-send accelerator) while an attachment hold armed for that same
+    // process is in force. That is all. It arms no content scan, buffers no
+    // keystroke, reads no UIA element and never sets _fgIsAi — which is asserted
+    // directly in agent/tests/os-monitor-safety.test.mjs, because _fgIsAi is the
+    // flag every capture path in this file hangs off and an egress process
+    // reaching it would turn a mail client into a scanned surface.
+    //
+    // THE CHORD INVARIANT. _egressSendKeys never contains bare Enter, in any
+    // spelling. In a compose body plain Enter inserts a NEWLINE — swallowing it
+    // would not block a send, it would make writing an email impossible, in a
+    // mail client, with no visible cause. The JS side refuses such an entry at
+    // build time (normalizeEgressSendKeys) and LoadEgressSurfaces below refuses
+    // it again here, because this side must not trust a payload it did not build.
+    //
+    // _egressProcs      — every egress process the CATALOG knows, armed or not.
+    //                     Used only to recognise one, never as permission.
+    // _egressSendKeys   — proc -> chord names, for surfaces that are VERIFIED and
+    //                     ENFORCING. A surface that has not passed a live probe
+    //                     contributes nothing here, so it can swallow nothing.
+    // _egressHoldProcs  — the intersection of the above with POLICY: the admin's
+    //                     ai_platforms capture_mode for that surface must be
+    //                     'hold'. 'observe' and 'block_critical' both leave the
+    //                     send alone. Rebuilt by UpdateEgressPolicy from
+    //                     ~/.cloudfuze-aigov/egress-surfaces.json on the same 10s
+    //                     cadence the blocked list uses, so an admin's toggle
+    //                     lands without a respawn.
+    // _egressIdByProc   — the catalog id, for attribution on the block event.
+    static HashSet<string> _egressProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    static Dictionary<string, HashSet<string>> _egressSendKeys = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+    static HashSet<string> _egressHoldProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    static Dictionary<string, string> _egressIdByProc = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    static string _egressPolicyFile = "";
+    static long _lastEgressCheck = 0;
+
+    // The FOREGROUND PROCESS NAME, whatever it is — AI, host app, egress or a
+    // text editor.
+    //
+    // WHY IT EXISTS SEPARATELY FROM _app. _app is assigned ONLY on a tick that
+    // established an AI surface (see ApplyForegroundTick's `if (isAi)` branch),
+    // which is correct and must stay that way: it is the field every block
+    // decision in this file is attributed to, and a mail client must never
+    // appear in it. But the egress chord decision needs to know "is OUTLOOK the
+    // foreground right now", and asking would otherwise mean a Process lookup on
+    // the keyboard-hook thread — which this file does not do, for any reason.
+    //
+    // Written on EVERY tick by ApplyForegroundTick, read only by
+    // EgressHoldArmed. Nothing else consults it, so it cannot leak an egress
+    // process into a path that expects _app.
+    static volatile string _fgProcAny = "";
+
     // ── Request Access offer ──────────────────────────────────────────────────
     // The moment a platform/agent/panel block actually swallows a send is the
     // ONLY moment this process offers the ephemeral Request Access dialog — the
@@ -725,6 +842,22 @@ public static class CfaiEnforcer
     static volatile string _fgHostGovAgent = "";
     static volatile string _fgHostGovAgentId = "";
 
+    // This tick's BLOCK ATTRIBUTION — see ResolveBlockAgent. Assigned on EVERY
+    // tick by ApplyForegroundTick (so it can never outlive the tick that earned
+    // it) and read only by EmitBlock. Admin-typed row values or our own catalog
+    // SoleAgent — never a name read off another app.
+    //
+    // ONE immutable object behind one volatile reference, not three volatile
+    // strings: EmitBlock runs on the hook thread, and three separate writes
+    // could be read torn (one tick's name next to another tick's id).
+    sealed class BlockAttr
+    {
+        public readonly string Agent, AgentId, Src;
+        public BlockAttr(string agent, string agentId, string src) { Agent = agent ?? ""; AgentId = agentId ?? ""; Src = src ?? "none"; }
+    }
+    static readonly BlockAttr BLOCK_ATTR_NONE = new BlockAttr("", "", "none");
+    static volatile BlockAttr _fgAttr = BLOCK_ATTR_NONE;
+
     // ── Platform-block latch for IDE-hosted panels ───────────────────────────
     // Fixes a real, reproduced race (2 of 3 Enters blocked, the third sent).
     //
@@ -785,6 +918,44 @@ public static class CfaiEnforcer
     static volatile string _elementBlockKey = "";
     static long _panelBlockLatchTicks = 0;
     static readonly long PANEL_BLOCK_LATCH_TTL = TimeSpan.FromSeconds(10).Ticks;
+
+    // AGENT latches expire far sooner than PANEL latches, and the asymmetry is
+    // the point.
+    //
+    // REPORTED LIVE 2026-09-23, Microsoft 365 Copilot: with one agent blocked,
+    // the user left that agent for an ORDINARY Copilot chat and could not send
+    // there either; it "works after sometime". Measured at the same moment, the
+    // composer read "Message Copilot" — Generic, no agent open — while blocks
+    // were still firing attributed to the blocked agent. The ten-second latch
+    // was the "sometime".
+    //
+    // WHY IT HELD AT ALL. The latch retires on a Generic or Named composer read,
+    // but NotComposer deliberately does not (see the agent-evidence guard in
+    // CheckFgBlocked, and tests/enforcer-panel-block.test.mjs). NotComposer is
+    // the ORDINARY outcome for a chat app: any click on the transcript, a button,
+    // or a view transition produces it. So after leaving the agent, normal use
+    // kept the latch alive for its whole TTL, and every Enter in that window was
+    // swallowed under the blocked agent's name. That is an agent-scoped block
+    // behaving like an app-scoped one, which is the exact thing per-agent
+    // blocking exists to avoid.
+    //
+    // WHY SHORTENING IS SAFE, AND NOT A WEAKENING. The TTL is a SAFETY BOUND, not
+    // the protection itself — its stated job is "a host whose focused-element
+    // reads never recover must not be able to leave Enter swallowed forever", so
+    // a shorter bound is strictly safer in that direction. The protection that
+    // matters is unchanged: to SEND at the blocked agent the caret must be in the
+    // composer, and that read is Named, which re-arms the latch on that very tick
+    // (CheckFgBlocked calls ArmPanelBlockLatch again). A user sitting in the
+    // blocked agent therefore stays blocked no matter how long they wait — the
+    // latch is re-earned continuously from live evidence. What the window covers
+    // is only a TRANSIENT read failure while the caret is already in the
+    // composer, and two seconds is comfortably longer than the poll interval that
+    // has to recover.
+    //
+    // PANEL latches are untouched at ten seconds: an IDE panel's reads fail for
+    // longer and more often (the Cursor case this latch was built for), and a
+    // panel block is already element-scoped so it never spills onto the app.
+    static readonly long AGENT_BLOCK_LATCH_TTL = TimeSpan.FromSeconds(2).Ticks;
 
     // ── Could keyboard focus actually have MOVED? ────────────────────────────
     // The second half of the same story, and what the Cursor composer needed.
@@ -872,9 +1043,20 @@ public static class CfaiEnforcer
     // lets an agent-scoped row cover the Teams process at all, and it can never
     // produce a whole-app block — CheckFgBlocked excludes a host app from all
     // three coarse arms.
+    // The OFFICE names (WINWORD/EXCEL/POWERPNT/ONENOTE/ONENOTEIM) are the same
+    // kind of membership for the same reason: they carry a HostApp agent surface
+    // (office_copilot_pane_agent, `panelHosted`), so CheckFgBlocked bars them
+    // from both WHOLE-APP arms and a row landing on Word produces no block at
+    // all rather than disabling the company's word processor.
     static readonly Dictionary<string, HashSet<string>> PLATFORM_PROCS = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase) {
-        { "copilot_studio",    new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Copilot", "M365Copilot", "ms-teams" } },
-        { "personal_agent",    new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Copilot", "M365Copilot", "ms-teams" } },
+        // KNOWN GAP: "Copilot" (the CONSUMER app) has no AgentSurface and is not a
+        // host app, so an agent-scoped row cannot narrow there and the whole-app
+        // fallback is not barred — blocking ONE agent disables the entire Copilot
+        // application. See the PLATFORM_PROCS comment in ai-processes.js for why
+        // this is not simply deleted yet.
+        { "copilot_studio",    new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Copilot", "M365Copilot", "ms-teams", "WINWORD", "EXCEL", "POWERPNT", "ONENOTE", "ONENOTEIM" } },
+        { "personal_agent",    new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Copilot", "M365Copilot", "ms-teams", "WINWORD", "EXCEL", "POWERPNT", "ONENOTE", "ONENOTEIM" } },
+        { "sharepoint_embedded", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "M365Copilot", "WINWORD", "EXCEL", "POWERPNT", "ONENOTE", "ONENOTEIM" } },
         { "teams_chat_agent",  new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ms-teams" } },
         { "openai_assistant",  new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ChatGPT" } },
         { "custom_gpt",        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ChatGPT" } },
@@ -986,6 +1168,14 @@ public static class CfaiEnforcer
     // _aiProcs. The mechanism stays here — a future entry can set
     // panelFallback:true again if a whole-app safety net is ever wanted.
     static HashSet<string> _ideFallbackProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    // IDE processes whose panel composer is rendered by a CHILD msedgewebview2.exe
+    // process rather than the IDE's own — see ai-processes.js's panelChildProcess
+    // note (WINWORD/EXCEL/POWERPNT/ONENOTE/ONENOTEIM host the Microsoft 365
+    // Copilot pane exactly this way). Empty for Code/Cursor, whose composers both
+    // run IN the IDE's own process, so the default exact-pid rule stays correct
+    // for them. This is what ReadFocusedPanel's `allowChildProcess` argument
+    // reads for the isIde branch, in place of a hardcoded `false`.
+    static HashSet<string> _idePanelChildProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
     class PanelSig
     {
@@ -1008,6 +1198,27 @@ public static class CfaiEnforcer
         // NEVER consulted by any block decision — see CheckFgBlocked, which bars
         // a host app from all three coarse arms whatever this says.
         public string DlpMatch;
+        // WHICH AI-EVIDENCE CHECK proves an agent conversation on a composer
+        // that is otherwise shared with human conversations (dlpMatch "agent").
+        // "" (every panel but one) = none; "teams_chat" = the Teams 1:1
+        // agent-chat check (TeamsAgentChatEvidence: a chat-header thread id
+        // ending "@unq.gbl.spaces" AND a Copilot feedback / "AI generated"
+        // marker in the pane). Data from ai-processes.js's `aiEvidence`.
+        public string AiEvidence;
+        // The ONE AI product this composer can ever be talking to, or "" when
+        // the entry makes no such claim. Data from ai-processes.js's
+        // `soleAgent`, which may only appear alongside dlpMatch:"panel" (that
+        // invariant is enforced on the JS side, by agent/tests).
+        //
+        // ATTRIBUTION ONLY, NEVER A DECISION. Exactly one reader:
+        // ResolveBlockAgent, which may quote it as the agent an audit record
+        // is about when no policy row names one. Nothing that DECIDES reads it
+        // — not CheckFgBlocked, not PanelDlpMatchesOnPanelAlone, not any of the
+        // agent-surface reads. Treating a panel match as identifying a named
+        // agent for BLOCKING purposes (without a UIA name read) changes live
+        // enforcement behaviour and is separate, later, human-supervised work.
+        // agent/tests/os-monitor-safety.test.mjs pins the single reader.
+        public string SoleAgent;
         // Which key combination inserts a LINE BREAK here without submitting.
         // Read only by Tier B's rewrite; see NewlineKeysFor/ResolveNewlineKeys.
         public string NewlineKeys;
@@ -1019,6 +1230,44 @@ public static class CfaiEnforcer
         // lives in a WebView2 child process, so the composer clearing has to
         // cross a Chromium accessibility hop before UIA can see it.
         public int PostSendVerifyMs;
+        // ── The PANEL-SCOPED agent-name fallback (`fallbackRead` in
+        //    ai-processes.js's AI_PANELS) ────────────────────────────────────
+        // A SECOND home for the mechanism AgentSurface already carries, and
+        // the reason there are two: an agent surface is matched per PROCESS
+        // (first match wins), so ms-teams can only ever reach teams_desktop —
+        // but Teams has TWO composers whose window titles are now BOTH stuck
+        // on the generic "Copilot | <tenant> | …" shape, and the focused PANEL
+        // is the only thing left that tells them apart (measured: no shared
+        // class token; the heading cache is already keyed on it, see
+        // _copilotCachePane). Hanging the Chat-list route's signal off the
+        // panel is therefore not a style choice; it is the only place it can
+        // be keyed from. See the teams_composer entry in ai-processes.js for
+        // the live measurement this exists for.
+        //
+        // FallbackMode is the opt-in: anything but "message_heading" —
+        // including the empty string every panel without this block gets —
+        // means NO FALLBACK EXISTS on this panel and nothing below is ever
+        // consulted. Every IDE panel and both other Teams composers are
+        // completely unaffected by these fields existing.
+        //
+        // FallbackHeadingSuffix MAY BE EMPTY here, unlike on AgentSurface:
+        // this route's candidate Name is the bare agent name already (the
+        // collector pairs an "AI generated" badge with the sender-name Text
+        // beside it), so there is nothing to strip. There is no landing infix
+        // and no pane-kind gate at all — the gate is the panel match plus the
+        // badge pairing, because the TITLE, which a pane-kind gate reads, is
+        // the thing that is broken here.
+        //
+        // Its OWN Enforce/Verified pair, separate from the panel's. The panel
+        // itself is live-verified and enforcing as a composer SIGNATURE; this
+        // READING route has had no end-to-end pass and ships false/false,
+        // which keeps it completely inert — no walk, no thread, no cache.
+        public string FallbackMode;
+        public string FallbackHeadingClass;
+        public string FallbackHeadingSuffix;
+        public HashSet<string> FallbackGenericNames;
+        public bool FallbackEnforce;
+        public bool FallbackVerified;
     }
     static List<PanelSig> _panels = new List<PanelSig>();
 
@@ -1056,6 +1305,19 @@ public static class CfaiEnforcer
         // app"; for a company's communications client it must mean "block
         // nothing".
         public bool HostApp;
+        // A HOST APP whose AI surface is an AI_PANELS PANEL inside a document
+        // editor (Word/Excel/PowerPoint/OneNote — office_copilot_pane_agent).
+        // Only meaningful alongside HostApp, and it SPLITS what that flag means:
+        //   HostApp && !PanelHosted (Teams)  → _hostAppProcs. The app is
+        //     AI-relevant only inside one governed conversation, so every
+        //     element-scoped mechanism is switched off for it as well.
+        //   HostApp && PanelHosted (Office)  → _panelHostAppProcs. Barred from
+        //     the WHOLE-APP block arms in CheckFgBlocked — the fail-OPEN
+        //     property, identical to Teams' — and otherwise left exactly as it
+        //     is, because the panel that hosts the AI here is already
+        //     live-verified and enforcing (office_copilot_pane, 2026-09-21) and
+        //     its panel-keyed block and Tokenize & Send must keep working.
+        public bool PanelHosted;
         public bool Enforce;
         public bool Verified;
         // ── The nested SECOND UI ROUTE (`fallbackRead` in ai-processes.js) ──
@@ -1091,6 +1353,16 @@ public static class CfaiEnforcer
         public HashSet<string> FallbackGenericNames;
         public bool FallbackEnforce;
         public bool FallbackVerified;
+        // Tier B's two per-surface write facts, the same pair PanelSig carries
+        // (see PanelSig.NewlineKeys / PanelSig.PostSendVerifyMs), for a chat
+        // app that has an agent surface but no AI_PANELS row — M365Copilot is
+        // the case that needed it: its composer is WebView2-hosted, so a real
+        // mask-and-send was reported "not_submitted" off the 200ms default
+        // read. Read ONLY by NewlineKeysFor / PostSendVerifyMsFor, and only
+        // when the focus is not a panel (a matched panel always wins). Neither
+        // is an input to any block, narrowing or governance decision.
+        public string NewlineKeys;
+        public int PostSendVerifyMs;
     }
     static List<AgentSurface> _agentSurfaces = new List<AgentSurface>();
 
@@ -1109,6 +1381,26 @@ public static class CfaiEnforcer
     // surface at all, and only for the exact tick an agent the org has a policy
     // about is provably open.
     static HashSet<string> _hostAppProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    // The process names covered by a PANEL-HOSTED HostApp surface — Word, Excel,
+    // PowerPoint and OneNote, via office_copilot_pane_agent's `panelHosted`.
+    // Same derivation, same rebuild discipline and the same empty-by-default
+    // fail direction as _hostAppProcs, and DELIBERATELY A SECOND SET rather than
+    // more members in that one.
+    //
+    // Read in exactly ONE place: CheckFgBlocked, where it bars a whole-app block
+    // for these processes precisely as a host app is barred. That is the
+    // fail-OPEN property this set exists for — "we cannot tell which Copilot
+    // agent is open in Word" must never become "nobody in the org may use Word".
+    //
+    // What it deliberately does NOT do is everything else _hostAppProcs does.
+    // These processes are ALSO _ideProcs with a live-verified, enforcing panel
+    // (office_copilot_pane, 2026-09-21), so PanelEnforceOk, PanelUiaOk,
+    // UpdateSendRect, UpdateModelRouting and UpdatePendingRewrite must keep
+    // treating them exactly as they do today; folding them into _hostAppProcs
+    // would silently retire that panel's own panel-keyed block and its
+    // Tokenize & Send path, neither of which is what this change is about.
+    static HashSet<string> _panelHostAppProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
     // What one ReadFocusedAgentName() call established. Getting this taxonomy
     // right IS the reliability of the feature:
@@ -1209,7 +1501,29 @@ public static class CfaiEnforcer
     static volatile bool _rewriteInProgress = false;
     static volatile bool _rewriteAbort = false;
 
-    public static void Start(string[] aiProcs, string[] patNames, string[] patSources, string[] patSevs, string[] patLabels, bool[] patIgnoreCase, string heartbeatFile, bool modelRouterEnabled, string modelRouterConfigJson, string ideProcsJson, string aiPanelsJson, string agentSurfacesJson)
+    // ── The fleet `dlp` flag, for the AI-EVIDENCE routes ─────────────────────
+    //
+    // "Scan every agent chat the way ChatGPT/Claude desktop are scanned": on a
+    // route whose OWN UI proves the user is typing at an AI — Teams' Copilot tab
+    // (a composer with no non-AI use), a Teams 1:1 chat that carries Copilot
+    // feedback / "AI generated" markers (see TeamsAgentChatEvidence), the
+    // Office / Outlook Copilot panes — Tier A scanning and Tier B Tokenize &
+    // Send apply whenever this is on, with NO governed-agents row and no Teams
+    // policy row required. Title-only routes (a conversation NAME with no AI
+    // evidence) are untouched and stay row-gated: a renamed human chat must
+    // never be scanned.
+    //
+    // Set at spawn from CFAI_EVIDENCE_DLP (enforcer.js passes the fleet value it
+    // last saw, or the persisted last-known one) and live over stdin
+    // ({"cmd":"evidence_dlp","state":"on"|"off"}).
+    // Defaults OFF — security review 2026-09-24 (L3): these routes read and
+    // upload content in general-purpose apps with no policy row, so "we have not
+    // heard from the fleet yet" must mean OFF, not on. Only the literal "true"
+    // turns it on. Turning it off never disables a row-driven block or scan.
+    static volatile bool _evidenceDlpOn =
+        string.Equals(Environment.GetEnvironmentVariable("CFAI_EVIDENCE_DLP"), "true", StringComparison.OrdinalIgnoreCase);
+
+    public static void Start(string[] aiProcs, string[] patNames, string[] patSources, string[] patSevs, string[] patLabels, bool[] patIgnoreCase, string heartbeatFile, bool modelRouterEnabled, string modelRouterConfigJson, string ideProcsJson, string aiPanelsJson, string agentSurfacesJson, string egressSurfacesJson)
     {
         try { SetProcessDPIAware(); } catch { }   // align UIA rect with hook screen coords
         _startTicks = DateTime.UtcNow.Ticks;
@@ -1223,6 +1537,13 @@ public static class CfaiEnforcer
         _governedAgentFile = System.IO.Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".cloudfuze-aigov", "governed-agents.json");
+        // The POLICY half of the egress feature. A THIRD file, for the same
+        // reason the two above are separate: one wrong parse of a merged file
+        // could arm a mail client's send chord off an agent policy, or disarm an
+        // agent block off a mail policy.
+        _egressPolicyFile = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".cloudfuze-aigov", "egress-surfaces.json");
         _aiProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var p in aiProcs) { if (!string.IsNullOrEmpty(p)) _aiProcs.Add(p.Replace(".exe", "")); }
         _patInfos = new List<PatInfo>();
@@ -1280,6 +1601,16 @@ public static class CfaiEnforcer
         {
             try { LoadAgentSurfaces(agentSurfacesJson); }
             catch (Exception ex) { Emit("error", "", "", "agent_surfaces_load_failed", -1, -1, ex.GetType().Name); }
+        }
+        // Egress surfaces — same "a bad payload must never take the helper down"
+        // rule. A load failure leaves every egress collection empty, which means
+        // no send chord in a mail client is ever swallowed. Fail OPEN, and that
+        // is the correct direction here: the cost is a missed hold on one email,
+        // where the closed failure would be a person unable to send email at all.
+        if (!string.IsNullOrEmpty(egressSurfacesJson))
+        {
+            try { LoadEgressSurfaces(egressSurfacesJson); }
+            catch (Exception ex) { Emit("error", "", "", "egress_surfaces_load_failed", -1, -1, ex.GetType().Name); }
         }
         // The poll thread MUST be STA: UI Automation's FocusedElement read
         // returns null from an MTA thread for Chromium/Electron apps (Claude,
@@ -1352,6 +1683,7 @@ public static class CfaiEnforcer
         var raw = (object[])serializer.DeserializeObject(json);
         var procs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var fallback = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var childProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var item in raw)
         {
             var d = (Dictionary<string, object>)item;
@@ -1359,9 +1691,11 @@ public static class CfaiEnforcer
             if (name.Length == 0) continue;
             procs.Add(name);
             if (JsBool(d, "panelFallback")) fallback.Add(name);
+            if (JsBool(d, "panelChildProcess")) childProcs.Add(name);
         }
         _ideProcs = procs;
         _ideFallbackProcs = fallback;
+        _idePanelChildProcs = childProcs;
     }
 
     static void LoadAiPanels(string json)
@@ -1386,6 +1720,72 @@ public static class CfaiEnforcer
                 }
             }
             if (procs.Count == 0) continue;   // a signature with no host process can never match
+            // ── The nested PANEL-SCOPED fallback block, when one is declared ─
+            //
+            // ABSENT is the normal case and must cost nothing: every field
+            // stays empty/false, PanelFallbackArmed() is false, and not one
+            // line of that path can run. Only teams_composer's payload carries
+            // this key today, so every other panel behaves byte-for-byte as it
+            // always has.
+            //
+            // MALFORMED / PARTIAL is DROPPED ENTIRELY rather than partially
+            // applied — the same "build locals, assign only at the end"
+            // discipline LoadAgentSurfaces' copy uses, and the same fail
+            // direction: a half-configured route that can read a name from one
+            // signal but not the other is exactly what silently half-works.
+            //
+            // THE VALIDATION IS DELIBERATELY NOT LoadAgentSurfaces' VALIDATION,
+            // and the differences are the whole point of this being a separate
+            // parse rather than a shared one:
+            //   * paneKinds   — not required, and not even read. That gate asks
+            //                   the TITLE which Teams view is open, and on this
+            //                   route the title is the broken signal. What
+            //                   gates here instead is the panel match plus the
+            //                   badge pairing in the collector.
+            //   * headingSuffix — MAY BE EMPTY. The paired Text's Name is the
+            //                   bare agent name already; there is nothing to
+            //                   strip. (On the surface path an empty suffix
+            //                   really would mean a half-configured entry,
+            //                   which is why that side still rejects it.)
+            //   * landingInfix — not part of this route at all.
+            // headingClass remains REQUIRED on both paths, and for the same
+            // reason: it is the only filter between the reader and an arbitrary
+            // text node.
+            //
+            // The heading class is NOT normalized — it is a CSS class token
+            // compared by ClassRuleMatches, not a display name.
+            string pfbMode = "";
+            string pfbHeadingClass = "", pfbHeadingSuffix = "";
+            var pfbGenerics = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            bool pfbEnforce = false, pfbVerified = false;
+            object rawPanelFallback;
+            if (d.TryGetValue("fallbackRead", out rawPanelFallback) && rawPanelFallback is Dictionary<string, object>)
+            {
+                var fb = (Dictionary<string, object>)rawPanelFallback;
+                string mode = JsStr(fb, "mode");
+                string headingClass = JsStr(fb, "headingClass");
+                string headingSuffix = JsStr(fb, "headingSuffix");
+                var fbGen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                object rawFbGenerics;
+                if (fb.TryGetValue("genericNames", out rawFbGenerics) && rawFbGenerics != null)
+                {
+                    foreach (var x in (IEnumerable)rawFbGenerics)
+                    {
+                        string g = NormalizeAgentName(Convert.ToString(x));
+                        if (g.Length > 0) fbGen.Add(g);
+                    }
+                }
+                if (string.Equals(mode, "message_heading", StringComparison.OrdinalIgnoreCase)
+                    && headingClass.Length > 0)
+                {
+                    pfbMode = "message_heading";
+                    pfbHeadingClass = headingClass;
+                    pfbHeadingSuffix = headingSuffix;
+                    pfbGenerics = fbGen;
+                    pfbEnforce = JsBool(fb, "enforce");
+                    pfbVerified = JsBool(fb, "verified");
+                }
+            }
             panels.Add(new PanelSig
             {
                 Id = id,
@@ -1401,6 +1801,16 @@ public static class CfaiEnforcer
                 // older build (or a malformed entry) can never widen DLP
                 // governance by accident.
                 DlpMatch = string.Equals(JsStr(d, "dlpMatch"), "panel", StringComparison.OrdinalIgnoreCase) ? "panel" : "agent",
+                // Only the one literal this file implements; anything else —
+                // absent, a typo, an evidence kind from a newer build — is ""
+                // (no evidence route), the fail-closed direction.
+                AiEvidence = string.Equals(JsStr(d, "aiEvidence"), "teams_chat", StringComparison.OrdinalIgnoreCase) ? "teams_chat" : "",
+                // Read exactly like the other string fields above, and — unlike
+                // DlpMatch — with no normalisation of any kind: there is nothing
+                // to default to, and this side must not invent a product name
+                // the catalog did not write down. Absent arrives as "".
+                // Attribution-only; see the field declaration.
+                SoleAgent = JsStr(d, "soleAgent"),
                 // Absent means the default combo; a value this side does not
                 // recognise is kept VERBATIM so ResolveNewlineKeys can refuse it
                 // rather than fall back to a combo the app might treat as send.
@@ -1414,6 +1824,12 @@ public static class CfaiEnforcer
                 // dialog waiting for its answer.
                 PostSendVerifyMs = JsIntClamped(d, "postSendVerifyMs",
                     REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MAX_MS),
+                FallbackMode = pfbMode,
+                FallbackHeadingClass = pfbHeadingClass,
+                FallbackHeadingSuffix = pfbHeadingSuffix,
+                FallbackGenericNames = pfbGenerics,
+                FallbackEnforce = pfbEnforce,
+                FallbackVerified = pfbVerified,
             });
         }
         _panels = panels;
@@ -1429,6 +1845,7 @@ public static class CfaiEnforcer
         var raw = (object[])serializer.DeserializeObject(json);
         var surfaces = new List<AgentSurface>();
         var hostApps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var panelHostApps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var item in raw)
         {
             var d = (Dictionary<string, object>)item;
@@ -1501,8 +1918,14 @@ public static class CfaiEnforcer
                     if (g.Length > 0) generics.Add(g);
                 }
             }
+            // A host app's processes go into ONE of two sets, never both — see
+            // AgentSurface.PanelHosted and _panelHostAppProcs. Both sets bar a
+            // whole-app block in CheckFgBlocked; only _hostAppProcs also
+            // switches off the element-scoped mechanisms, which would be wrong
+            // for a process whose AI surface IS an already-enforcing panel.
             bool hostApp = JsBool(d, "hostApp");
-            if (hostApp) { foreach (string p in procs) hostApps.Add(p); }
+            bool panelHosted = JsBool(d, "panelHosted");
+            if (hostApp) { foreach (string p in procs) { if (panelHosted) panelHostApps.Add(p); else hostApps.Add(p); } }
             // ── The nested SECOND-ROUTE block, when the entry declares one ──
             //
             // ABSENT is the normal case and must cost nothing: every field stays
@@ -1590,6 +2013,7 @@ public static class CfaiEnforcer
                 TitleSuffix = titleSuffix,
                 TitleKinds = titleKinds,
                 HostApp = hostApp,
+                PanelHosted = panelHosted,
                 Enforce = JsBool(d, "enforce"),
                 Verified = JsBool(d, "verified"),
                 FallbackMode = fbMode,
@@ -1600,14 +2024,267 @@ public static class CfaiEnforcer
                 FallbackGenericNames = fbGenerics,
                 FallbackEnforce = fbEnforce,
                 FallbackVerified = fbVerified,
+                // Same parse and the SAME clamp LoadAiPanels applies to a
+                // panel's copy: this side does not trust an env var it did not
+                // build, so an entry can only ever lengthen the confirmation
+                // window, never shorten it below the default read and never
+                // past the ceiling the rewrite's time budget was reasoned
+                // against. Absent means the default.
+                NewlineKeys = JsStr(d, "newlineKeys"),
+                PostSendVerifyMs = JsIntClamped(d, "postSendVerifyMs",
+                    REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MAX_MS),
             });
         }
-        // The HostApp process set travels with the surfaces it is derived from,
-        // and is assigned in the same "only at the very end" style: a throw
-        // anywhere above leaves BOTH untouched, so a malformed payload can
-        // never half-arm a host app.
+        // The HostApp process sets travel with the surfaces they are derived
+        // from, and are assigned in the same "only at the very end" style: a
+        // throw anywhere above leaves ALL THREE untouched, so a malformed
+        // payload can never half-arm a host app.
         _hostAppProcs = hostApps;
+        _panelHostAppProcs = panelHostApps;
         _agentSurfaces = surfaces;
+    }
+
+    // ── CFAI_EGRESS_SURFACES → the egress state ──────────────────────────────
+    //
+    // Same try/catch shape as LoadAgentSurfaces (the caller catches, so a
+    // malformed payload cannot take the helper down) and the same "build locals,
+    // assign only at the very end" discipline — which here means a failure
+    // anywhere leaves ALL FOUR collections untouched, so a malformed payload can
+    // never half-arm a mail client's send chord.
+    //
+    // FAIL DIRECTION: a load failure leaves the collections EMPTY, i.e. no egress
+    // chord is ever swallowed. That is fail-OPEN for the send and it is the right
+    // direction for this surface specifically: the cost of the open failure is a
+    // missed hold on one email, while the cost of the closed failure is a person
+    // unable to send email at all with no explanation.
+    //
+    // THE CHORD ALLOWLIST IS RESTATED HERE, deliberately, rather than trusted
+    // from the payload. This side must not trust an env var it did not build: a
+    // hand-edited CFAI_EGRESS_SURFACES naming "enter" would otherwise swallow
+    // every newline in a compose body. The JS twin is EGRESS_SEND_CHORDS in
+    // ai-processes.js and agent/tests/os-monitor-safety.test.mjs holds the two in
+    // lockstep — the same discipline PLATFORM_PROCS and NEWLINE_KEYS_DEFAULT are
+    // kept under.
+    static readonly HashSet<string> EGRESS_SEND_CHORDS = new HashSet<string>(
+        new string[] { "ctrl_enter", "alt_s" }, StringComparer.OrdinalIgnoreCase);
+
+    static void LoadEgressSurfaces(string json)
+    {
+        var serializer = new JavaScriptSerializer();
+        var raw = (object[])serializer.DeserializeObject(json);
+        var procs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var sendKeys = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        var idByProc = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in raw)
+        {
+            var d = (Dictionary<string, object>)item;
+            string id = JsStr(d, "id");
+            if (id.Length == 0) continue;
+            var names = new List<string>();
+            object rawProcs;
+            if (d.TryGetValue("procs", out rawProcs) && rawProcs != null)
+            {
+                foreach (var p in (IEnumerable)rawProcs)
+                {
+                    string name = Convert.ToString(p);
+                    if (!string.IsNullOrEmpty(name)) names.Add(StripExe(name).Trim());
+                }
+            }
+            if (names.Count == 0) continue;   // a surface with no process can never match
+
+            // The chords, validated ALL-OR-NOTHING. One unrecognised value drops
+            // the whole entry rather than arming it with a chord set nobody
+            // authored — the same rule normalizeEgressSendKeys applies on the JS
+            // side, and the same reason: a partially-applied chord list is
+            // exactly the kind of thing that silently half-works.
+            var chords = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            bool chordsOk = true;
+            object rawKeys;
+            if (d.TryGetValue("sendKeys", out rawKeys) && rawKeys != null)
+            {
+                foreach (var k in (IEnumerable)rawKeys)
+                {
+                    string key = (Convert.ToString(k) ?? "").Trim();
+                    if (key.Length == 0) { chordsOk = false; break; }
+                    if (!EGRESS_SEND_CHORDS.Contains(key)) { chordsOk = false; break; }
+                    chords.Add(key.ToLowerInvariant());
+                }
+            }
+            if (!chordsOk || chords.Count == 0) continue;
+
+            bool armable = JsBool(d, "verified") && JsBool(d, "enforce");
+            foreach (string name in names)
+            {
+                if (name.Length == 0) continue;
+                procs.Add(name);
+                idByProc[name] = id;
+                // ONLY a live-probed, enforcing surface contributes a chord set.
+                // An unverified one is recognised (so it can be told apart from an
+                // AI app) and arms nothing whatsoever.
+                if (armable) sendKeys[name] = chords;
+            }
+        }
+        // Assigned together, at the very end. _egressHoldProcs is NOT set here —
+        // it is policy, not catalog, and UpdateEgressPolicy owns it. It is
+        // CLEARED, though: a reload that dropped a surface must not leave that
+        // surface's process sitting in the hold set until the next policy tick.
+        _egressProcs = procs;
+        _egressSendKeys = sendKeys;
+        _egressIdByProc = idByProc;
+        _egressHoldProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    // Re-read ~/.cloudfuze-aigov/egress-surfaces.json and rebuild
+    // _egressHoldProcs. Called from the poll loop on the SAME 10s cadence
+    // UpdateBlockedAgents uses (and gated by its own timestamp, so it is one
+    // cheap comparison on every other tick).
+    //
+    // THREE conditions for a process to enter the hold set, all required:
+    //   1. the catalog contributed a chord set for it — i.e. its surface is
+    //      VERIFIED and ENFORCING (see LoadEgressSurfaces);
+    //   2. the policy file names the surface at all — i.e. an admin holds a
+    //      governed ai_platforms row for its host (see synthesizeEgressSurfaces);
+    //   3. that row's capture_mode is 'hold'. 'observe' and 'block_critical' are
+    //      the other two values and NEITHER swallows a send: 'observe' is
+    //      report-only by definition, and 'block_critical' is about prompt
+    //      content, which an attachment hold is not.
+    //
+    // MISSING or UNREADABLE FILE = the hold set is EMPTY, i.e. nothing is
+    // swallowed. Same convention (and same fail-open direction) the rest of this
+    // block follows.
+    static void UpdateEgressPolicy()
+    {
+        long now = DateTime.UtcNow.Ticks;
+        if (now - _lastEgressCheck < BLOCKED_CHECK_INTERVAL) return;
+        _lastEgressCheck = now;
+        var hold = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            // Nothing in the catalog can ever hold, so there is nothing to read.
+            if (_egressSendKeys.Count == 0) { _egressHoldProcs = hold; return; }
+            if (string.IsNullOrEmpty(_egressPolicyFile) || !System.IO.File.Exists(_egressPolicyFile))
+            {
+                _egressHoldProcs = hold;
+                return;
+            }
+            string json = System.IO.File.ReadAllText(_egressPolicyFile);
+            if (string.IsNullOrEmpty(json)) { _egressHoldProcs = hold; return; }
+            // NOT SplitJsonArray/ExtractJsonString — those parse a BARE ARRAY
+            // (what blocked-agents.json and governed-agents.json are), and this
+            // file is an OBJECT: {"surfaces":[...],"sync_roots":[...]}. Feeding
+            // the whole object to SplitJsonArray yields exactly ONE "row" — the
+            // entire file, brace-balanced from the outermost { to the outermost
+            // } — so ExtractJsonString's unscoped first-match would only ever
+            // find the FIRST surface's capture_mode/id anywhere in the file,
+            // silently starving every other surface (outlook_new included) of
+            // ever entering the hold set. Same JavaScriptSerializer this file's
+            // LoadEgressSurfaces already uses to parse this exact shape.
+            var serializer = new JavaScriptSerializer();
+            var payload = (Dictionary<string, object>)serializer.DeserializeObject(json);
+            object rawSurfaces;
+            if (payload == null || !payload.TryGetValue("surfaces", out rawSurfaces) || rawSurfaces == null)
+            {
+                _egressHoldProcs = hold;
+                return;
+            }
+            foreach (var item in (IEnumerable)rawSurfaces)
+            {
+                var d = item as Dictionary<string, object>;
+                if (d == null) continue;
+                string mode = JsStr(d, "capture_mode");
+                if (!string.Equals(mode, "hold", StringComparison.OrdinalIgnoreCase)) continue;
+                string id = JsStr(d, "id");
+                if (id.Length == 0) continue;
+                // Map the armed surface id back to its processes through the
+                // CATALOG, never through the file: the file's own `procs` list
+                // would let a tampered policy file name any process at all.
+                foreach (var kv in _egressIdByProc)
+                {
+                    if (!string.Equals(kv.Value, id, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!_egressSendKeys.ContainsKey(kv.Key)) continue;   // not verified+enforcing
+                    hold.Add(kv.Key);
+                }
+            }
+        }
+        catch { hold = new HashSet<string>(StringComparer.OrdinalIgnoreCase); }
+        _egressHoldProcs = hold;
+    }
+
+    // Does the pressed key + modifier state match one of this process's declared
+    // send chords?
+    //
+    // PURE — reads its four parameters and the chord table, writes nothing — so
+    // the offline harness in agent/tests can assert the real decision rather than
+    // a copy of it, exactly as EnterBlockActive is factored out for.
+    //
+    // BARE ENTER CAN NEVER MATCH. `ctrl_enter` requires ctrl AND NOT alt, and
+    // there is no chord in the allowlist that matches VK_RETURN with no modifier
+    // at all — so even a chord table that somehow contained a bare-Enter entry
+    // could not be satisfied by this function. Two independent lines of defence
+    // for the one mistake that would make a mail client unusable.
+    static bool MatchesEgressChord(string proc, int vk, bool ctrl, bool alt, bool shift)
+    {
+        if (string.IsNullOrEmpty(proc)) return false;
+        HashSet<string> chords;
+        if (!_egressSendKeys.TryGetValue(StripExe(proc).Trim(), out chords)) return false;
+        if (chords == null || chords.Count == 0) return false;
+        // Ctrl+Enter — Outlook's send accelerator. Shift is not part of it:
+        // Ctrl+Shift+Enter is a different (and in some builds unmapped) chord and
+        // must not be swallowed on the strength of a Ctrl+Enter policy.
+        if (vk == VK_RETURN && ctrl && !alt && !shift && chords.Contains("ctrl_enter")) return true;
+        // Alt+S — the ribbon's Send accelerator.
+        if (vk == VK_S && alt && !ctrl && !shift && chords.Contains("alt_s")) return true;
+        return false;
+    }
+
+    // Is an egress send hold in force for the foreground app right now?
+    //
+    // FOUR conditions, and every one is a gate:
+    //   * the FOREGROUND process is in _egressHoldProcs — which already means
+    //     verified AND enforcing AND capture_mode 'hold' AND a governed policy
+    //     row. _fgProcAny is read rather than _app because _app is only ever an
+    //     AI surface, by design (see _fgProcAny).
+    //   * an attachment hold is actually in force AND BOUND TO THIS PROCESS. The
+    //     hold is what makes this a governance decision rather than a blanket
+    //     "you may not send email": index.js arms it only for a file whose scan
+    //     came back high/critical.
+    //   * the panic hotkey has not disarmed everything.
+    //
+    // ── WHY NOT AttachHoldActive() ITSELF ───────────────────────────────────
+    //
+    // Because it cannot answer this question, and finding that out is a real
+    // finding rather than a preference. AttachHoldActive() compares
+    // _attachHoldProcess against _app — and _app is assigned ONLY on a tick that
+    // established an AI surface. A mail client never does, so _app is never
+    // "OUTLOOK" and AttachHoldActive() is structurally false for every egress
+    // hold that will ever be armed. Calling it here would have shipped a code
+    // path that can never fire.
+    //
+    // So the binding is re-stated against the process this decision is actually
+    // about, and AttachHoldActive() is left BYTE-FOR-BYTE UNCHANGED — every
+    // existing caller (the Enter path, the mouse path, ActivePatterns) keeps the
+    // exact answer it has today.
+    //
+    // It is also STRICTER than AttachHoldActive() in one way, on purpose: an
+    // UNBOUND hold (empty _attachHoldProcess) returns true there and false here.
+    // "Some app somewhere has a sensitive file attached" must never be enough to
+    // kill the send chord in a mail client.
+    //
+    // The TTL is re-checked inline rather than relying on CheckAttachHoldExpiry's
+    // sweep: that runs on the poll thread up to 150ms behind, and this is a
+    // keystroke decision.
+    static bool EgressHoldArmed(string proc)
+    {
+        if (Disarmed()) return false;
+        if (string.IsNullOrEmpty(proc)) return false;
+        if (_egressHoldProcs.Count == 0) return false;
+        string name = StripExe(proc).Trim();
+        if (!_egressHoldProcs.Contains(name)) return false;
+        if (!_attachHoldActive) return false;
+        if (DateTime.UtcNow.Ticks >= _attachHoldExpiresAt) return false;
+        string owner = StripExe(_attachHoldProcess ?? "").Trim();
+        if (owner.Length == 0) return false;   // unbound — never enough here
+        return string.Equals(owner, name, StringComparison.OrdinalIgnoreCase);
     }
 
     // Which AGENT_SURFACES entry hosts this process name, or null.
@@ -1906,10 +2583,57 @@ public static class CfaiEnforcer
         if (surface == null) return AgentReadOutcome.NotComposer;
         if (!string.Equals(surface.FallbackMode, "message_heading", StringComparison.OrdinalIgnoreCase))
             return AgentReadOutcome.NotComposer;
+        return ExtractAgentNameFromHeadingCore(
+            surface.FallbackHeadingClass ?? "",
+            surface.FallbackHeadingSuffix ?? "",
+            surface.FallbackLandingInfix ?? "",
+            surface.FallbackGenericNames,
+            headingClasses, headingNames, out agentName);
+    }
+
+    // The same reader, driven by a PANEL's fallback block instead of a
+    // surface's — Teams' Chat-list badge route (see the teams_composer entry in
+    // ai-processes.js and the PanelSig.FallbackMode field note above).
+    //
+    // A SECOND ENTRY POINT, not a second implementation: both funnel into
+    // ExtractAgentNameFromHeadingCore below, so there is exactly one copy of
+    // "what do these candidates mean" on this side of the port, just as there is
+    // exactly one (extractAgentNameFromHeading) on the JS side. The only
+    // difference between the two callers is DATA — which class token identifies
+    // a candidate, whether its Name carries a suffix to strip, and which labels
+    // count as generic. This route passes no landing infix: it has none.
+    static AgentReadOutcome ExtractAgentNameFromPanelHeading(PanelSig panel, string[] headingClasses, string[] headingNames, out string agentName)
+    {
+        agentName = "";
+        if (panel == null) return AgentReadOutcome.NotComposer;
+        if (!string.Equals(panel.FallbackMode, "message_heading", StringComparison.OrdinalIgnoreCase))
+            return AgentReadOutcome.NotComposer;
+        return ExtractAgentNameFromHeadingCore(
+            panel.FallbackHeadingClass ?? "",
+            panel.FallbackHeadingSuffix ?? "",
+            "",
+            panel.FallbackGenericNames,
+            headingClasses, headingNames, out agentName);
+    }
+
+    // The shared decision, with the config passed in rather than read off a
+    // catalog object. PURE, and the single place the three-outcome contract is
+    // decided for every heading-style read.
+    //
+    // `suffix` MAY BE EMPTY, meaning "the candidate's Name is the bare agent
+    // name already" — the Chat-list badge route, where the collector has paired
+    // an "AI generated" badge with the sender-name Text beside it. `infix` may
+    // be empty too (that route has no landing heading). `headingClass` may NOT:
+    // it is the only filter standing between this reader and an arbitrary text
+    // node, and an empty one disables the class loop entirely, as it always has.
+    static AgentReadOutcome ExtractAgentNameFromHeadingCore(string headingClass, string suffix, string infix,
+        HashSet<string> generics, string[] headingClasses, string[] headingNames, out string agentName)
+    {
+        agentName = "";
         if (headingNames == null || headingNames.Length == 0) return AgentReadOutcome.NotComposer;
-        string headingClass = surface.FallbackHeadingClass ?? "";
-        string suffix = surface.FallbackHeadingSuffix ?? "";
-        string infix = surface.FallbackLandingInfix ?? "";
+        headingClass = headingClass ?? "";
+        suffix = suffix ?? "";
+        infix = infix ?? "";
 
         string found = "";
         bool conflict = false;
@@ -1920,16 +2644,30 @@ public static class CfaiEnforcer
         // Token matching via the existing ClassRuleMatches — a web-hosted
         // element's ClassName is the DOM class ATTRIBUTE and carries build hashes
         // alongside the semantic token.
-        if (headingClass.Length > 0 && suffix.Length > 0)
+        //
+        // AN EMPTY `suffix` IS A SUPPORTED CASE (added 2026-09-21 for the
+        // Chat-list badge route): the candidate's Name is the bare agent name,
+        // so it is offered as-is. The CLASS check above is untouched and is
+        // still what makes a candidate a candidate — the guard is on
+        // headingClass, never on the suffix.
+        if (headingClass.Length > 0)
         {
             for (int i = 0; i < headingNames.Length; i++)
             {
                 string cls = (headingClasses != null && i < headingClasses.Length) ? (headingClasses[i] ?? "") : "";
                 if (cls.Length == 0 || !ClassRuleMatches(cls, headingClass, false)) continue;
                 string nm = NormalizeAgentName(headingNames[i]);
-                if (nm.Length <= suffix.Length) continue;
-                if (!nm.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) continue;
-                string cand = NormalizeAgentName(nm.Substring(0, nm.Length - suffix.Length));
+                string cand;
+                if (suffix.Length == 0)
+                {
+                    cand = nm;
+                }
+                else
+                {
+                    if (nm.Length <= suffix.Length) continue;
+                    if (!nm.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) continue;
+                    cand = NormalizeAgentName(nm.Substring(0, nm.Length - suffix.Length));
+                }
                 if (cand.Length == 0) continue;
                 if (found.Length == 0) found = cand;
                 else if (!string.Equals(found, cand, StringComparison.OrdinalIgnoreCase)) conflict = true;
@@ -1960,7 +2698,7 @@ public static class CfaiEnforcer
         // Same ordering as every other reader here: the Generic filter runs
         // BEFORE any matching, so an agent literally named "Copilot" (or a
         // heading that says "You said:") can never be matched through this route.
-        if (surface.FallbackGenericNames != null && surface.FallbackGenericNames.Contains(found))
+        if (generics != null && generics.Contains(found))
             return AgentReadOutcome.Generic;
         agentName = found;
         return AgentReadOutcome.Named;
@@ -1980,6 +2718,44 @@ public static class CfaiEnforcer
         return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
     }
 
+    // Same question as AgentNameMatches, widened to every name the row's own
+    // `agent_aliases` field carries, not just its primary `agent_name`.
+    //
+    // WHY THIS EXISTS: the row is admin-facing identity (one name an admin was
+    // shown at block time), but the same real agent can legitimately surface
+    // under a different name depending on where it's read from — a Copilot
+    // Studio bot's Dataverse display name need not equal its Teams app-catalog
+    // name or its Copilot-tab heading. One stored name gives the enforcer
+    // exactly one chance to recognise it; `agent_aliases` (server-derived, see
+    // lookupAgentIdentity in dlp-monitor.ts) is every name currently known for
+    // it, so a mismatch in ONE naming source doesn't cost the whole block.
+    //
+    // `|`-delimited scalar, not nested JSON — this file's parser has no array
+    // support (see ExtractJsonString / SplitJsonArray) and a single malformed
+    // value derails the WHOLE file's parse, not just its own row. Missing key
+    // reads as "" (ExtractJsonString's own no-match return), which yields zero
+    // aliases and falls through to the primary-name check exactly as a row
+    // written before this field existed always has.
+    //
+    // No ambiguity handling: if two DIFFERENT blocked/governed rows' alias sets
+    // overlap, whichever the caller's list-scan reaches first decides the
+    // match. That is unchanged from before this field existed (rows have always
+    // been scanned in order) and is fail-closed for a block either way — SOME
+    // row matches and the block still fires — it only affects which row's
+    // identity a caller like GovernedRowIdentity reports for the audit event.
+    static bool AgentNameMatchesAny(string extracted, Dictionary<string, string> agent)
+    {
+        string primary;
+        if (agent.TryGetValue("agent_name", out primary) && AgentNameMatches(extracted, primary)) return true;
+        string aliases;
+        if (!agent.TryGetValue("agent_aliases", out aliases) || string.IsNullOrEmpty(aliases)) return false;
+        foreach (string alias in aliases.Split('|'))
+        {
+            if (AgentNameMatches(extracted, alias)) return true;
+        }
+        return false;
+    }
+
     // A SINGLE property read of the currently-focused element, turned into which
     // named agent is open. Same single-read discipline as ReadFocusedPanel — no
     // tree walk, ever — and the same non-negotiable pid check, for the same
@@ -1993,12 +2769,17 @@ public static class CfaiEnforcer
     // — no second GetForegroundWindow() call — and is used only by the
     // window-title mode below.
     //
-    // `panelId` is the panel THIS tick's panel read already matched (or "" for
-    // none). It is not a gate and it is not evidence — the only thing it does is
-    // key the Copilot-tab heading cache, which needs it now that both Teams
-    // routes can present the same title kind in the same window. See
-    // _copilotCachePane.
-    static AgentReadOutcome ReadFocusedAgentName(AgentSurface surface, uint fgPid, IntPtr fgHwnd, string panelId, out string agentName)
+    // `panel` is the panel THIS tick's panel read already matched (or null for
+    // none), threaded down whole rather than as a bare id since 2026-09-21. Two
+    // consumers, and they use it for opposite purposes — see
+    // ReadTitleModeAgentName:
+    //   * the Copilot-tab fallback reads only its ID, only as part of the pane
+    //     cache key (needed since both Teams routes can present the same title
+    //     kind in the same window — see _copilotCachePane). Not a gate, not
+    //     evidence.
+    //   * the Chat-list badge fallback reads its own nested fallback config and
+    //     its own two flags off it, and the panel match IS that route's gate.
+    static AgentReadOutcome ReadFocusedAgentName(AgentSurface surface, uint fgPid, IntPtr fgHwnd, PanelSig panel, out string agentName)
     {
         agentName = "";
         if (surface == null) return AgentReadOutcome.Unreadable;
@@ -2037,7 +2818,7 @@ public static class CfaiEnforcer
             // behind that route's own two-flag gate, consults the cached pane
             // headings. With the route unconfigured or unarmed — which is how it
             // ships — it is exactly the ExtractAgentName call this line was.
-            return ReadTitleModeAgentName(surface, fgHwnd, title, panelId, out agentName);
+            return ReadTitleModeAgentName(surface, fgHwnd, title, panel, out agentName);
         }
         AutomationElement el;
         try { el = AutomationElement.FocusedElement; } catch { return AgentReadOutcome.Unreadable; }
@@ -2175,13 +2956,241 @@ public static class CfaiEnforcer
     // hosts its real UI in a child msedgewebview2.exe, confirmed live via
     // Win32_Process ParentProcessId, exactly as M365Copilot does — so with the
     // exact rule its composer could never be matched at all.
+    // -- The Office / Outlook WebView2 pane: resolving the EFFECTIVE focus ----
+    //
+    // THE DEFECT (measured live 2026-09-24, read-only UIA, Word Office16): with
+    // the caret in Word's Copilot box, AutomationElement.FocusedElement returns
+    // WINWORD's OWN Pane, class "WebView2Holder" (FrameworkId Win32, pid =
+    // WINWORD; ancestors OsfAxControl > NetUIOcxControl > NetUInetpane > NUIPane
+    // > MsoWorkPane "Copilot"). It never descends into the WebView2, so the
+    // office_copilot_pane signature (Edit, fai-EditorInput__input) could never
+    // match and the pane was not scanned at all -- the prompt was sent as typed.
+    //
+    // WHERE THE COMPOSER IS: the msedgewebview2.exe browser process is a DIRECT
+    // CHILD of WINWORD, and owns a TOP-LEVEL Chrome_WidgetWin_1 window;
+    // AutomationElement.FromHandle(that window) finds exactly one Edit with
+    // HasKeyboardFocus=true -- class fai-EditorInput__input, AutomationId
+    // m365-chat-editor-target-element, pid = that child.
+    //
+    // THE RULE, and the privacy boundary: resolution happens ONLY when the
+    // focused element is a Pane of class WebView2Holder, owned BY the
+    // foreground process, and that process is a panelChildProcess host
+    // (WINWORD / EXCEL / POWERPNT / ONENOTE / OUTLOOK / olk). Only webview
+    // windows of that host's DIRECT child processes are consulted, and only an
+    // Edit that HAS KEYBOARD FOCUS is returned -- i.e. the element the user is
+    // actually typing in. No other webview is ever searched, nothing but
+    // ControlType / HasKeyboardFocus is used to find it, and a holder with no
+    // focused Edit resolves to NOTHING (no panel) -- fail closed.
+    //
+    // ONE resolver, used everywhere the panel's focused element is consulted:
+    // the panel match (ReadFocusedPanel), UpdateUia, UpdatePendingRewrite (the
+    // Tier B pin), and the rewrite's LiveRewriteIo (PinFocused /
+    // FocusedRuntimeId, so FocusStillPinned and every read of the pinned
+    // element agree with the pin).
+    internal sealed class FocusProps
+    {
+        public string ControlType = "", Name = "", ClassName = "", AutomationId = "", Rid = "";
+        public int Pid = -1;
+        public object Element;   // the AutomationElement, when there is one
+    }
+
+    static FocusProps PropsOf(AutomationElement el, bool readName)
+    {
+        if (el == null) return null;
+        var f = new FocusProps { Element = el };
+        try
+        {
+            string pn = el.Current.ControlType.ProgrammaticName ?? "";
+            int dot = pn.LastIndexOf('.');
+            f.ControlType = (dot >= 0) ? pn.Substring(dot + 1) : pn;
+        }
+        catch { }
+        if (readName) { try { f.Name = el.Current.Name ?? ""; } catch { } }
+        try { f.ClassName = el.Current.ClassName ?? ""; } catch { }
+        try { f.AutomationId = el.Current.AutomationId ?? ""; } catch { }
+        try { f.Pid = el.Current.ProcessId; } catch { }
+        try
+        {
+            int[] r = el.GetRuntimeId();
+            if (r != null) f.Rid = string.Join(".", Array.ConvertAll(r, delegate(int i) { return i.ToString(); }));
+        }
+        catch { }
+        return f;
+    }
+
+    // Is this focused element the host's own WebView2Holder, i.e. should the
+    // EFFECTIVE focus be looked up inside the host's webview? Pure.
+    static bool IsWebView2Holder(FocusProps f, uint hostPid, string proc)
+    {
+        if (f == null || proc == null) return false;
+        if (!string.Equals(f.ControlType, "Pane", StringComparison.Ordinal)) return false;
+        if (!string.Equals(f.ClassName, "WebView2Holder", StringComparison.Ordinal)) return false;
+        if (f.Pid != (int)hostPid) return false;
+        return _idePanelChildProcs.Contains(StripExe(proc).Trim());
+    }
+
+    // WHERE the focused webview Edit comes from. The live finder is the only
+    // production value; the offline harness substitutes a scripted one.
+    internal delegate FocusProps WebViewFocusFinder(uint hostPid);
+    static WebViewFocusFinder _webViewFocusFinder = FindFocusedWebViewEditLive;
+
+    // The effective focused element for the panel read. Not a holder: the
+    // element itself, unchanged. A holder: the host's focused webview Edit --
+    // which must be an Edit, owned by a DIRECT CHILD of the host -- or null.
+    static FocusProps ResolveEffectiveFocus(FocusProps focused, uint hostPid, string proc)
+    {
+        if (!IsWebView2Holder(focused, hostPid, proc)) return focused;
+        FocusProps found = null;
+        try { found = _webViewFocusFinder(hostPid); } catch { found = null; }
+        if (found == null) return null;
+        if (!string.Equals(found.ControlType, "Edit", StringComparison.Ordinal)) return null;
+        if (found.Pid <= 0 || found.Pid == (int)hostPid) return null;
+        if (!ElementPidBelongsToForeground(found.Pid, hostPid)) return null;
+        return found;
+    }
+
+    // ReadFocusedPanel's use of the resolver: the element unchanged when it is
+    // not the host's WebView2Holder; otherwise the focused webview Edit, or null.
+    static AutomationElement ResolveHolderElement(AutomationElement el, uint hostPid, string proc)
+    {
+        FocusProps f = PropsOf(el, false);
+        if (!IsWebView2Holder(f, hostPid, proc)) return el;
+        FocusProps r = ResolveEffectiveFocus(f, hostPid, proc);
+        return r == null ? null : r.Element as AutomationElement;
+    }
+
+    // The effective focused ELEMENT for this tick's surface, for every reader
+    // outside ReadFocusedPanel (UpdateUia, UpdatePendingRewrite, the rewrite).
+    // Resolves through a holder only while the host is STILL the foreground
+    // process.
+    static AutomationElement EffectiveFocusedElement()
+    {
+        AutomationElement el = null;
+        try { el = AutomationElement.FocusedElement; } catch { return null; }
+        if (el == null) return null;
+        uint host = _fgPid;
+        string proc = _app;
+        FocusProps f = PropsOf(el, false);
+        if (!IsWebView2Holder(f, host, proc)) return el;
+        uint fgPid = 0;
+        try { GetWindowThreadProcessId(GetForegroundWindow(), out fgPid); } catch { }
+        if (fgPid != host) return null;
+        FocusProps r = ResolveEffectiveFocus(f, host, proc);
+        return r == null ? null : r.Element as AutomationElement;
+    }
+
+    // -- the live finder: cached windows, cached element --------------------
+    sealed class WebViewCache
+    {
+        public readonly uint HostPid; public readonly IntPtr[] Hwnds; public readonly long Ticks;
+        public WebViewCache(uint hostPid, IntPtr[] hwnds, long ticks) { HostPid = hostPid; Hwnds = hwnds; Ticks = ticks; }
+    }
+    static volatile WebViewCache _webViewWindows = null;
+    static volatile AutomationElement _webViewLastEdit = null;
+    static long _webViewLastSearchTicks = 0;
+    static readonly long WEBVIEW_WINDOWS_TTL = TimeSpan.FromSeconds(5).Ticks;
+    static readonly long WEBVIEW_SEARCH_MIN_INTERVAL = TimeSpan.FromMilliseconds(500).Ticks;
+
+    // TOP-LEVEL Chrome_WidgetWin_1 windows owned by a DIRECT child of the host.
+    // Class name and pid only. Cached WEBVIEW_WINDOWS_TTL per host.
+    static IntPtr[] HostWebViewWindows(uint hostPid)
+    {
+        long now = DateTime.UtcNow.Ticks;
+        WebViewCache c = _webViewWindows;
+        if (c != null && c.HostPid == hostPid && (now - c.Ticks) < WEBVIEW_WINDOWS_TTL) return c.Hwnds;
+        var byPid = new Dictionary<uint, List<IntPtr>>();
+        var cls = new StringBuilder(64);
+        try
+        {
+            EnumWindows(delegate(IntPtr h, IntPtr lp)
+            {
+                cls.Length = 0;
+                if (GetClassName(h, cls, cls.Capacity) <= 0) return true;
+                if (!string.Equals(cls.ToString(), "Chrome_WidgetWin_1", StringComparison.Ordinal)) return true;
+                if (!IsWindowVisible(h)) return true;
+                uint pid = 0; GetWindowThreadProcessId(h, out pid);
+                if (pid == 0 || pid == hostPid) return true;
+                List<IntPtr> list;
+                if (!byPid.TryGetValue(pid, out list)) { list = new List<IntPtr>(); byPid[pid] = list; }
+                list.Add(h);
+                return true;
+            }, IntPtr.Zero);
+        }
+        catch { }
+        var hwnds = new List<IntPtr>();
+        foreach (var kv in byPid)
+            if (GetParentProcessId((int)kv.Key) == (int)hostPid) hwnds.AddRange(kv.Value);
+        var arr = hwnds.ToArray();
+        _webViewWindows = new WebViewCache(hostPid, arr, now);
+        return arr;
+    }
+
+    static FocusProps FindFocusedWebViewEditLive(uint hostPid)
+    {
+        // The element found last time, if it STILL has keyboard focus and still
+        // belongs to a direct child of this host: one property read per tick.
+        AutomationElement last = _webViewLastEdit;
+        if (last != null)
+        {
+            try
+            {
+                if (last.Current.HasKeyboardFocus && ElementPidBelongsToForeground(last.Current.ProcessId, hostPid)
+                    && last.Current.ProcessId != (int)hostPid)
+                    return PropsOf(last, false);
+            }
+            catch { }
+            _webViewLastEdit = null;
+        }
+        long now = DateTime.UtcNow.Ticks;
+        if ((now - _webViewLastSearchTicks) < WEBVIEW_SEARCH_MIN_INTERVAL) return null;
+        _webViewLastSearchTicks = now;
+        var cond = new AndCondition(
+            new PropertyCondition(AutomationElement.HasKeyboardFocusProperty, true),
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
+        foreach (IntPtr h in HostWebViewWindows(hostPid))
+        {
+            try
+            {
+                AutomationElement root = AutomationElement.FromHandle(h);
+                if (root == null) continue;
+                AutomationElement edit = root.FindFirst(TreeScope.Descendants, cond);
+                if (edit == null) continue;
+                _webViewLastEdit = edit;
+                return PropsOf(edit, false);
+            }
+            catch { }
+        }
+        return null;
+    }
+
+    // Does ANY panel hosted by this process match on the element's Name? Catalog
+    // lookup only. See the Name read in ReadFocusedPanel.
+    static bool PanelUsesNameRule(string proc)
+    {
+        var panels = _panels;
+        if (panels == null || proc == null) return false;
+        string name = StripExe(proc).Trim();
+        foreach (var p in panels)
+        {
+            if (p.Procs == null || !p.Procs.Contains(name)) continue;
+            if (!string.IsNullOrEmpty(p.NameEquals) || !string.IsNullOrEmpty(p.NamePrefix)) return true;
+        }
+        return false;
+    }
+
     static PanelSig ReadFocusedPanel(string proc, uint fgPid, out string runtimeIdKey, out bool readable, bool allowChildProcess)
     {
         runtimeIdKey = "";
+        _tickComposerAid = "";
         readable = false;
         if (_panels == null || _panels.Count == 0) return null;
         AutomationElement el;
         try { el = AutomationElement.FocusedElement; } catch { return null; }
+        if (el == null) return null;
+        // An Office / Outlook host reporting its own WebView2Holder as focused:
+        // the composer is inside the webview -- see ResolveEffectiveFocus. A
+        // holder with no focused Edit is NO panel (fail closed).
+        el = ResolveHolderElement(el, fgPid, proc);
         if (el == null) return null;
 
         // AutomationElement.FocusedElement is a GLOBAL read, and it is NOT
@@ -2221,7 +3230,15 @@ public static class CfaiEnforcer
             ctName = (dot >= 0) ? pn.Substring(dot + 1) : pn;
         }
         catch { }
-        try { name = el.Current.Name ?? ""; } catch { }
+        // The element's NAME is read ONLY when some panel for this process
+        // actually matches on a Name (claude_code / vscode_chat in an IDE). The
+        // host-app and Office/Outlook panels match on ClassName alone, and in
+        // those apps the focused element can be a message or document element
+        // whose Name IS its text — so there it is never read at all. That is
+        // what keeps the evidence arm (a Teams read with no policy row, see
+        // hostEvidenceArmed) from ever pulling a colleague's message text into
+        // this process.
+        if (PanelUsesNameRule(proc)) { try { name = el.Current.Name ?? ""; } catch { } }
         try { cls = el.Current.ClassName ?? ""; } catch { }
 
         // Mirrors MatchPanelSignature's own preconditions exactly — it bails on
@@ -2232,6 +3249,9 @@ public static class CfaiEnforcer
 
         PanelSig hit = MatchPanelSignature(proc, ctName, name, cls);
         if (hit == null) return null;
+        // The MATCHED composer's AutomationId — an element id, not content — for
+        // the Teams evidence cache key. Read only after a panel match.
+        try { _tickComposerAid = el.Current.AutomationId ?? ""; } catch { }
         try
         {
             int[] rid = el.GetRuntimeId();
@@ -2453,7 +3473,38 @@ public static class CfaiEnforcer
         return surface.FallbackPaneKinds.Contains(kind);
     }
 
-    // The title-mode read, in two stages.
+    // The SAME question for the PANEL-scoped route (Teams' Chat list): is this
+    // panel's fallback configured and past its OWN two-flag gate?
+    //
+    // NO KIND ARGUMENT, and its absence is the design rather than an omission.
+    // FallbackReadArmed above gates on what the TITLE says the open view is;
+    // this route exists precisely because that title is stuck on the generic
+    // "Copilot | <tenant> | …" shape whatever is open, so gating on it would
+    // gate the fix on the defect. Three things gate this route instead, and
+    // together they are stronger than a kind check:
+    //   * the caret is in THIS panel — the focused ELEMENT matched
+    //     teams_composer's CKEditor signature. A Teams window in the foreground
+    //     is never evidence; only the element is.
+    //   * the org already holds an agent-scoped policy for this process — the
+    //     upstream privacy gate in UpdateForeground, unchanged.
+    //   * the badge pairing exists in the pane — enforced in
+    //     CollectAiBadgeHeadings, which never even READS a text node's Name
+    //     unless an "AI generated" badge already paired with it. A 1:1 DM, a
+    //     channel post and a human group chat all reach here and all yield
+    //     nothing, because none of them has such a badge.
+    //
+    // Mirrors FallbackReadArmed's discipline otherwise: both flags, read in ONE
+    // place, so no call site can forget one. With them false — how this route
+    // ships — no walk, no thread and no cache write happen at all.
+    static bool PanelFallbackArmed(PanelSig panel)
+    {
+        if (panel == null) return false;
+        if (!string.Equals(panel.FallbackMode, "message_heading", StringComparison.OrdinalIgnoreCase)) return false;
+        if (!(panel.FallbackVerified && panel.FallbackEnforce)) return false;
+        return (panel.FallbackHeadingClass ?? "").Length > 0;
+    }
+
+    // The title-mode read, in three stages.
     //
     // STAGE A is the primary title parse, byte-for-byte what this used to be.
     // Anything AUTHORITATIVE (Named/Generic) returns immediately; the fallback is
@@ -2479,19 +3530,61 @@ public static class CfaiEnforcer
     // human conversation's transcript under the walk, which is exactly what the
     // host-app design exists to prevent.
     //
-    // `panelId` is the focused panel's id (or "" when nothing matched) and is
-    // used ONLY as part of the pane cache key — see _copilotCachePane. It is
-    // deliberately not a gate: the gate is the kind, and adding a panel-id
-    // condition here would silently narrow the route rather than key its cache.
-    static AgentReadOutcome ReadTitleModeAgentName(AgentSurface surface, IntPtr fgHwnd, string title, string panelId, out string agentName)
+    // STAGE C is the CHAT-LIST badge fallback, added 2026-09-21, and it is the
+    // answer to a defect Stage B cannot reach. Measured live that day: on
+    // MSTeams 26225.1806.5074.1452 the Chat-list route's title is ALSO stuck on
+    // "Copilot | <tenant> | <email> | Microsoft Teams" with an agent
+    // conversation open and focused, so Stage A reads no evidence — and Stage B,
+    // though its kind gate does fire on that title, finds nothing, because the
+    // Chat-list transcript ships none of the fai-CopilotMessage__accessibleHeading
+    // elements that route keys on. The result was that every Chat-list agent
+    // conversation was silently ungoverned. The harness scenario
+    // `chatlist_retitled_no_headings` pinned that exact gap before this existed.
+    //
+    // Its signal is the "AI generated" badge paired with the sender-name Text
+    // beside it, and its config lives on the PANEL — see the teams_composer
+    // entry in ai-processes.js and the PanelSig.FallbackMode note. Reached ONLY
+    // from no evidence, like Stage B, so it can add coverage and can never
+    // override a title (or a Copilot-tab heading) that did name a conversation.
+    //
+    // `panel` is the panel THIS tick's panel read matched, or null. Stage B uses
+    // only its ID, and only as part of the pane cache key — see
+    // _copilotCachePane; for Stage B it is deliberately not a gate. For Stage C
+    // it IS the gate, in both senses: the panel match is what says the caret is
+    // in the Chat-list composer, and the panel is where that route's config and
+    // its own two flags live.
+    static AgentReadOutcome ReadTitleModeAgentName(AgentSurface surface, IntPtr fgHwnd, string title, PanelSig panel, out string agentName)
     {
+        string panelId = panel != null ? panel.Id : "";
         AgentReadOutcome outcome = ExtractAgentName(surface, "", title, out agentName);
         if (outcome != AgentReadOutcome.NotComposer) return outcome;
         string kind = TitleKindOf(surface, title);
-        if (!FallbackReadArmed(surface, kind)) return outcome;
-        string[] classes, names;
-        if (!GetCachedCopilotHeadings(surface, fgHwnd, PaneKeyOf(kind, panelId), out classes, out names)) return outcome;
-        return ExtractAgentNameFromHeading(surface, classes, names, out agentName);
+        if (FallbackReadArmed(surface, kind))
+        {
+            string[] classes, names;
+            if (GetCachedCopilotHeadings(surface, fgHwnd, PaneKeyOf(kind, panelId), out classes, out names))
+            {
+                // NOTE the changed shape: this used to `return` unconditionally.
+                // It now falls through to Stage C when Stage B produced no
+                // evidence of its own, which is behaviour-preserving (NotComposer
+                // either way when Stage C is unarmed or finds nothing) and is
+                // what lets the two routes coexist in one window.
+                AgentReadOutcome fb = ExtractAgentNameFromHeading(surface, classes, names, out agentName);
+                if (fb != AgentReadOutcome.NotComposer) return fb;
+            }
+        }
+        if (PanelFallbackArmed(panel))
+        {
+            string[] bClasses, bNames;
+            if (GetCachedAiBadgeHeadings(panel, fgHwnd, PaneKeyOf(kind, panelId), out bClasses, out bNames))
+                return ExtractAgentNameFromPanelHeading(panel, bClasses, bNames, out agentName);
+        }
+        // Restated rather than relied upon: every reader above already clears
+        // its out-parameter before returning NotComposer, and a name that
+        // survived a no-evidence outcome would be a stale Named waiting to
+        // happen in the one place this file must never produce one.
+        agentName = "";
+        return AgentReadOutcome.NotComposer;
     }
 
     // The poll thread's half: read the cache, never wait on a search.
@@ -2739,6 +3832,757 @@ public static class CfaiEnforcer
             }
         }
         catch { }
+    }
+
+    // ── Teams 1:1 AGENT-CHAT evidence (the Chat-list route) ─────────────────
+    //
+    // THE PROBLEM. Teams' Chat-list composer is ONE element for every
+    // conversation — measured live 2026-09-24 (MSTeams 26225.1806.5074.1452):
+    // Edit, AutomationId "new-message-<guid>", class token ck-editor__editable,
+    // identical in a human group chat and in the 1:1 chat with a Copilot Studio
+    // agent. So the composer alone never proves AI, and the window title is not
+    // reliable either (measured stuck on a generic "Copilot | …" shape, and a
+    // human group chat can be RENAMED to look like an agent).
+    //
+    // THE EVIDENCE, measured the same day, same machine, read-only UIA:
+    //   * the conversation header is a Group, AutomationId "chat-header-<threadId>".
+    //     Human group chat: "…@thread.v2" (groups, channels and meeting chats
+    //     share it). The 1:1 with the IT Help Desk Agent: "…@unq.gbl.spaces". A
+    //     human DM is ALSO a 1:1, so the suffix is only a candidate.
+    //   * incoming messages: class token fui-ChatMessage__body, AutomationId
+    //     "message-body-<ts>";
+    //   * in the agent 1:1, EVERY incoming reply was followed by BOTH feedback
+    //     Buttons (class token fai-FeedbackButtons__positiveFeedbackButton /
+    //     __negativeFeedbackButton, AutomationId "<threadId>-<ts>-positive-feedback"
+    //     / "-negative-feedback"). Most, not all, also carried the
+    //     fai-AiGeneratedDisclaimer Image — so the disclaimer is NOT required.
+    //   * a human group chat carries Images "badge-<ts>" (fui-ChatMessage__decorationIcon,
+    //     "<person> mentioned you") — not a marker; nothing here reads it.
+    //
+    // THE RULE (TeamsAgentChatVerdict), deliberately strict — security review
+    // 2026-09-24 (H2/M2): a human 1:1 that merely CONTAINS one Copilot /
+    // agent reply (a forwarded card, a bot in a DM) has unmarked human messages
+    // around it, and "any marker" would have scanned that colleague chat. So:
+    //   1. EXACTLY ONE chat-header-* in scope, ending "@unq.gbl.spaces";
+    //   2. at least one incoming message;
+    //   3. EVERY incoming message's <ts> has a matching positive-feedback button
+    //      "<threadId>-<ts>-positive-feedback" — one unmarked message is false;
+    //   4. EVERY feedback button's AutomationId starts with the header's
+    //      threadId + "-" — a button from another thread is false.
+    // Anything else — no header, two headers, "@thread.v2", a walk that hit its
+    // cap, a focus change mid-search, a throw — is NOT an agent chat (fail
+    // CLOSED). A "@thread.v2" header is additionally reported as GroupOrChannel,
+    // which every Teams Chat-list route refuses outright (ApplyForegroundTick),
+    // the title/Named and block routes included.
+    //
+    // PRIVACY. The walk reads AutomationId and ClassName ONLY — never Name, never
+    // Value, never text — so no message body is read. The thread id is a local
+    // classification input and part of the published verdict's identity; it is
+    // never emitted. Runs off the poll thread; the poll thread only reads the
+    // published verdict and never waits.
+    const string TEAMS_PANE_AID = "message-pane-layout-a11y";
+    const string TEAMS_HEADER_AID_PREFIX = "chat-header-";
+    const string TEAMS_COMPOSER_AID_PREFIX = "new-message-";
+    const string TEAMS_MESSAGE_AID_PREFIX = "message-body-";
+    const string TEAMS_POSITIVE_FEEDBACK_SUFFIX = "-positive-feedback";
+    const string TEAMS_ONE_TO_ONE_SUFFIX = "@unq.gbl.spaces";
+    const string TEAMS_GROUP_SUFFIX = "@thread.v2";
+    const int TEAMS_EV_PARENT_HOPS = 20;
+    const int TEAMS_EV_MAX_NODES = 2500;
+    // A verdict is re-checked after this, but KEPT while the re-check runs (same
+    // key): only a key change or a completed, failed re-check clears it.
+    static readonly long TEAMS_EV_CACHE_TTL = TimeSpan.FromSeconds(3).Ticks;
+    // …and never served at all past this age, however re-checks are going.
+    static readonly long TEAMS_EV_MAX_AGE = TimeSpan.FromSeconds(10).Ticks;
+    static readonly long TEAMS_EV_SEARCH_MIN_INTERVAL = TimeSpan.FromSeconds(1).Ticks;
+    // WATCHDOG: a search still running after this is abandoned — its result is
+    // discarded by generation — so a hung UIA walk cannot silently disable the
+    // route by holding the in-progress flag forever.
+    static readonly long TEAMS_EV_SEARCH_WATCHDOG = TimeSpan.FromSeconds(3).Ticks;
+
+    // What a conversation's header set says about it.
+    internal enum TeamsChatKind { NoHeader = 0, GroupOrChannel = 1, OneToOne = 2, Other = 3, Ambiguous = 4 }
+
+    static TeamsChatKind ClassifyChatHeaderAid(string aid)
+    {
+        if (string.IsNullOrEmpty(aid) || !aid.StartsWith(TEAMS_HEADER_AID_PREFIX, StringComparison.Ordinal)) return TeamsChatKind.NoHeader;
+        string thread = aid.Substring(TEAMS_HEADER_AID_PREFIX.Length).Trim();
+        if (thread.Length == 0) return TeamsChatKind.NoHeader;
+        if (thread.EndsWith(TEAMS_GROUP_SUFFIX, StringComparison.OrdinalIgnoreCase)) return TeamsChatKind.GroupOrChannel;
+        if (thread.EndsWith(TEAMS_ONE_TO_ONE_SUFFIX, StringComparison.OrdinalIgnoreCase)) return TeamsChatKind.OneToOne;
+        return TeamsChatKind.Other;
+    }
+
+    static bool ClassHasToken(string cls, string token, bool prefix)
+    {
+        if (string.IsNullOrEmpty(cls)) return false;
+        foreach (string tok in cls.Split(CLASS_TOKEN_SEP, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (prefix ? tok.StartsWith(token, StringComparison.Ordinal) : string.Equals(tok, token, StringComparison.Ordinal)) return true;
+        }
+        return false;
+    }
+
+    // What one walk of the pane collected. AutomationIds only — see PRIVACY.
+    internal sealed class TeamsPaneSnapshot
+    {
+        public bool Owned;           // the focused element belongs to the foreground (or its direct child)
+        public string FocusedRid = "";
+        public string FocusedAid = "";
+        public bool PaneFound;
+        public List<string> HeaderAids = new List<string>();
+        public List<string> MessageAids = new List<string>();
+        public List<string> FeedbackAids = new List<string>();
+        public bool CapHit;
+    }
+
+    // The pure collector, over an ABSTRACT tree (the harness drives it with
+    // synthetic nodes): pre-order, root excluded, at most `maxNodes`.
+    static void CollectTeamsPane(object root, Func<object, object> firstChild, Func<object, object> nextSibling,
+        Func<object, string> aidOf, Func<object, string> classOf, int maxNodes, TeamsPaneSnapshot snap)
+    {
+        if (root == null || snap == null) return;
+        int seen = 0;
+        var stack = new Stack<object>();
+        object child = firstChild(root);
+        if (child != null) stack.Push(child);
+        while (stack.Count > 0 && seen < maxNodes)
+        {
+            object node = stack.Pop();
+            seen++;
+            string aid = aidOf(node) ?? "";
+            if (aid.StartsWith(TEAMS_HEADER_AID_PREFIX, StringComparison.Ordinal)) snap.HeaderAids.Add(aid);
+            else if (aid.Length > 0)
+            {
+                string cls = classOf(node) ?? "";
+                if (aid.StartsWith(TEAMS_MESSAGE_AID_PREFIX, StringComparison.Ordinal) && ClassHasToken(cls, "fui-ChatMessage__body", false))
+                    snap.MessageAids.Add(aid);
+                else if (ClassHasToken(cls, "fai-FeedbackButtons__", true))
+                    snap.FeedbackAids.Add(aid);
+            }
+            object sib = nextSibling(node);
+            if (sib != null) stack.Push(sib);
+            object kid = firstChild(node);
+            if (kid != null) stack.Push(kid);
+        }
+        if (stack.Count > 0) snap.CapHit = true;
+    }
+
+    // THE DECISION, pure — see THE RULE above. `kind` / `threadId` are reported
+    // even when the verdict is false, so a "@thread.v2" header can be refused.
+    static bool TeamsAgentChatVerdict(IList<string> headers, IList<string> messages, IList<string> feedback, bool capHit,
+        out string threadId, out TeamsChatKind kind)
+    {
+        threadId = ""; kind = TeamsChatKind.NoHeader;
+        if (headers == null || headers.Count == 0) return false;
+        if (headers.Count > 1)
+        {
+            // Two conversations in scope is not a conversation. Still reported
+            // as a group if either is one, so the refusal is conservative.
+            kind = TeamsChatKind.Ambiguous;
+            foreach (string h in headers) if (ClassifyChatHeaderAid(h) == TeamsChatKind.GroupOrChannel) kind = TeamsChatKind.GroupOrChannel;
+            return false;
+        }
+        kind = ClassifyChatHeaderAid(headers[0]);
+        if (kind == TeamsChatKind.NoHeader) return false;
+        threadId = headers[0].Substring(TEAMS_HEADER_AID_PREFIX.Length).Trim();
+        if (kind != TeamsChatKind.OneToOne) return false;
+        if (capHit) return false;
+        if (messages == null || messages.Count == 0) return false;
+        string prefix = threadId + "-";
+        var positive = new HashSet<string>(StringComparer.Ordinal);
+        if (feedback != null)
+        {
+            foreach (string f in feedback)
+            {
+                if (string.IsNullOrEmpty(f) || !f.StartsWith(prefix, StringComparison.Ordinal)) return false;
+                if (f.EndsWith(TEAMS_POSITIVE_FEEDBACK_SUFFIX, StringComparison.Ordinal)) positive.Add(f);
+            }
+        }
+        foreach (string m in messages)
+        {
+            if (string.IsNullOrEmpty(m) || !m.StartsWith(TEAMS_MESSAGE_AID_PREFIX, StringComparison.Ordinal)) return false;
+            string ts = m.Substring(TEAMS_MESSAGE_AID_PREFIX.Length);
+            if (ts.Length == 0) return false;
+            if (!positive.Contains(prefix + ts + TEAMS_POSITIVE_FEEDBACK_SUFFIX)) return false;
+        }
+        return true;
+    }
+
+    // One published verdict — IMMUTABLE, behind one volatile reference, so the
+    // poll thread can never read a torn (key from one search, verdict from
+    // another) pair. StartedTicks is stamped when the search STARTED, so a slow
+    // walk cannot make an old reading look fresh.
+    internal sealed class TeamsEvidence
+    {
+        public readonly string Key, ThreadId;
+        public readonly TeamsChatKind Kind;
+        public readonly bool Agent;
+        public readonly long StartedTicks;
+        public TeamsEvidence(string key, string threadId, TeamsChatKind kind, bool agent, long startedTicks)
+        { Key = key ?? ""; ThreadId = threadId ?? ""; Kind = kind; Agent = agent; StartedTicks = startedTicks; }
+    }
+    static volatile TeamsEvidence _teamsEv = null;
+    static volatile bool _teamsEvSearchInProgress = false;
+    static volatile int _teamsEvGen = 0;
+    static long _teamsEvSearchStartTicks = 0;
+    static string _teamsEvSearchKey = null;
+
+    // WHERE a snapshot comes from. The live reader below is the only production
+    // value; the offline harness swaps in a scripted one, which is what lets it
+    // exercise the REAL cache / TTL / watchdog / background-thread path.
+    internal delegate TeamsPaneSnapshot TeamsPaneReader(IntPtr fg);
+    static TeamsPaneReader _teamsPaneReader = ReadTeamsPaneLive;
+
+    // The cache key: window, composer runtime id AND composer AutomationId
+    // ("new-message-<guid>", per conversation). The header's threadId is part
+    // of the published verdict and re-verified by every re-check. Deliberately
+    // no window title: the gated agent read is the ONLY title read in this file.
+    static string TeamsEvidenceKey(IntPtr fg, string composerRid, string composerAid)
+    {
+        return fg.ToInt64().ToString() + "|" + (composerRid ?? "") + "|" + (composerAid ?? "");
+    }
+
+    // The poll thread's half: the verdict published for THIS key, or null.
+    // Never waits. A different key clears the published verdict at once.
+    static TeamsEvidence TeamsEvidenceFor(IntPtr fg, string composerRid, string composerAid)
+    {
+        if (fg == IntPtr.Zero || string.IsNullOrEmpty(composerRid)
+            || string.IsNullOrEmpty(composerAid) || !composerAid.StartsWith(TEAMS_COMPOSER_AID_PREFIX, StringComparison.Ordinal))
+        { _teamsEv = null; return null; }
+        string key = TeamsEvidenceKey(fg, composerRid, composerAid);
+        long now = DateTime.UtcNow.Ticks;
+        TeamsEvidence ev = _teamsEv;
+        if (ev != null && !string.Equals(ev.Key, key, StringComparison.Ordinal)) { _teamsEv = null; ev = null; }
+        if (ev != null && (now - ev.StartedTicks) > TEAMS_EV_MAX_AGE) { _teamsEv = null; ev = null; }
+        if (_teamsEvSearchInProgress && (now - _teamsEvSearchStartTicks) > TEAMS_EV_SEARCH_WATCHDOG)
+        {
+            _teamsEvGen++;                     // the hung search's result is now discarded
+            _teamsEvSearchInProgress = false;
+        }
+        bool newKey = !string.Equals(_teamsEvSearchKey, key, StringComparison.Ordinal);
+        bool stale = ev == null || (now - ev.StartedTicks) > TEAMS_EV_CACHE_TTL;
+        if (!_teamsEvSearchInProgress && stale
+            && (newKey || (now - _teamsEvSearchStartTicks) > TEAMS_EV_SEARCH_MIN_INTERVAL))
+        {
+            int gen = ++_teamsEvGen;
+            _teamsEvSearchKey = key;
+            _teamsEvSearchStartTicks = now;
+            _teamsEvSearchInProgress = true;
+            var t = new Thread(() => SearchTeamsEvidenceBackground(fg, key, composerRid, composerAid, gen, now));
+            t.IsBackground = true;
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+        }
+        return ev;
+    }
+
+    static void SearchTeamsEvidenceBackground(IntPtr fg, string key, string composerRid, string composerAid, int gen, long started)
+    {
+        TeamsEvidence result = null;
+        try
+        {
+            TeamsPaneSnapshot snap = _teamsPaneReader(fg);
+            // Still the composer the poll thread asked about, owned by the
+            // foreground: otherwise this reading describes something else.
+            if (snap != null && snap.Owned && snap.PaneFound
+                && string.Equals(snap.FocusedRid, composerRid, StringComparison.Ordinal)
+                && string.Equals(snap.FocusedAid, composerAid, StringComparison.Ordinal))
+            {
+                string threadId; TeamsChatKind kind;
+                bool agent = TeamsAgentChatVerdict(snap.HeaderAids, snap.MessageAids, snap.FeedbackAids, snap.CapHit, out threadId, out kind);
+                result = new TeamsEvidence(key, threadId, kind, agent, started);
+            }
+        }
+        catch { result = null; }
+        finally
+        {
+            // Superseded (the watchdog gave up on it, or a newer search began):
+            // discard. Otherwise publish — a null or a false verdict is a
+            // FAILED re-check and clears whatever was there.
+            if (gen == _teamsEvGen)
+            {
+                _teamsEv = result;
+                _teamsEvSearchInProgress = false;
+            }
+        }
+    }
+
+    // The LIVE snapshot: focused element (ownership + identity), then up to the
+    // message pane, then ONE capped walk of the pane's parent. AutomationId and
+    // ClassName reads only.
+    static TeamsPaneSnapshot ReadTeamsPaneLive(IntPtr fg)
+    {
+        var snap = new TeamsPaneSnapshot();
+        AutomationElement el = AutomationElement.FocusedElement;
+        if (el == null) return snap;
+        uint fgPid = 0;
+        GetWindowThreadProcessId(fg, out fgPid);
+        snap.Owned = ElementPidBelongsToForeground(el.Current.ProcessId, fgPid);
+        if (!snap.Owned) return snap;
+        try
+        {
+            int[] r = el.GetRuntimeId();
+            if (r != null) snap.FocusedRid = string.Join(".", Array.ConvertAll(r, delegate(int i) { return i.ToString(); }));
+        }
+        catch { }
+        try { snap.FocusedAid = el.Current.AutomationId ?? ""; } catch { }
+        var walker = TreeWalker.ControlViewWalker;
+        AutomationElement pane = null, cur = el;
+        for (int i = 0; i < TEAMS_EV_PARENT_HOPS && pane == null; i++)
+        {
+            cur = walker.GetParent(cur);
+            if (cur == null) break;
+            string aid = "";
+            try { aid = cur.Current.AutomationId ?? ""; } catch { }
+            if (string.Equals(aid, TEAMS_PANE_AID, StringComparison.Ordinal)) pane = cur;
+        }
+        if (pane == null) return snap;
+        snap.PaneFound = true;
+        AutomationElement scope = null;
+        try { scope = walker.GetParent(pane); } catch { }
+        if (scope == null) scope = pane;
+        CollectTeamsPane(scope,
+            n => walker.GetFirstChild((AutomationElement)n),
+            n => walker.GetNextSibling((AutomationElement)n),
+            n => { try { return ((AutomationElement)n).Current.AutomationId ?? ""; } catch { return ""; } },
+            n => { try { return ((AutomationElement)n).Current.ClassName ?? ""; } catch { return ""; } },
+            TEAMS_EV_MAX_NODES, snap);
+        return snap;
+    }
+
+    // THIS tick's Teams Chat-list evidence, computed by UpdateForeground (and by
+    // the harness, through this same method) and handed to ApplyForegroundTick
+    // via two per-tick fields. `armed` is hostAppArmed || hostEvidenceArmed. Not
+    // applicable (no matched enforcing teams_chat panel) CLEARS the published
+    // verdict, so focus leaving the composer never leaves one behind.
+    static void ComputeTickTeamsEvidence(IntPtr fg, bool armed, PanelSig hit, string composerRid, string composerAid)
+    {
+        bool applies = armed && hit != null && hit.Enforce
+            && string.Equals(hit.AiEvidence, "teams_chat", StringComparison.Ordinal);
+        TeamsEvidence ev = null;
+        if (applies) ev = TeamsEvidenceFor(fg, composerRid, composerAid);
+        else _teamsEv = null;
+        _tickAgentChatEvidence = ev != null && ev.Agent;
+        _tickChatIsGroup = ev != null && ev.Kind == TeamsChatKind.GroupOrChannel;
+    }
+
+    // ── Chat-list badge fallback: background search + cache ──────────────────
+    //
+    // WHAT THIS IS FOR. Teams' CHAT-LIST route (the ordinary conversation list,
+    // not the embedded Copilot tab) identifies the open conversation by WINDOW
+    // TITLE. Measured live 2026-09-21 on MSTeams 26225.1806.5074.1452 (MSIX),
+    // twice, by two independent methods, with the "IT Help Desk Agent" Copilot
+    // Studio conversation open and focused: the title reads
+    // "Copilot | filefuze | erik@filefuze.co | Microsoft Teams" and never names
+    // the conversation. So the title read returns no evidence, no governed or
+    // blocked row can ever match, and every Chat-list agent conversation was
+    // silently ungoverned — a real SSN typed into a DLP-monitored agent went
+    // through unscanned. The Copilot-tab collector above cannot cover it: its
+    // kind gate does fire on that title, but the Chat-list transcript ships no
+    // fai-CopilotMessage__accessibleHeading elements at all, so it finds nothing
+    // (the harness pins that as `chatlist_retitled_no_headings`).
+    //
+    // THE SIGNAL, measured the same day by direct UIA inspection of that
+    // conversation with 15 messages in it — full verbatim detail lives on the
+    // teams_composer entry in ai-processes.js, which is the catalog:
+    //   * every AI message carries an Image whose ClassName holds the token
+    //     `fai-AiGeneratedDisclaimer` and whose Name is "AI generated". The
+    //     CLASS TOKEN is matched (ClassRuleMatches, the same convention every
+    //     other class rule in this file uses); the NAME is deliberately not,
+    //     because "AI generated" is user-visible English and therefore
+    //     localized, and keying on it would break every non-English tenant.
+    //   * beside each badge, same row, a ControlType.Text whose Name is the
+    //     BARE sender name, with an EMPTY ClassName and an EMPTY AutomationId.
+    //     Y agreed within 1px across all 15 messages (badge Y=61, Text Y=62).
+    //
+    // WHY IT LOOKS LIKE THE COPILOT-TAB COLLECTOR. Because it is the same
+    // problem with a different signal, and this file has now solved it twice:
+    // an expensive UIA search that cannot run on the 150ms poll thread.
+    // Background STA thread, reentrancy guard, minimum interval, empty-run
+    // backoff, TTL'd cache, and a poll thread that only ever reads whatever is
+    // cached and NEVER waits. Deliberately the same shape, deliberately its OWN
+    // cache statics: both routes can be live in the same window on the same
+    // tick, and sharing one cache would let each cancel the other's search.
+    //
+    // A MANUAL TreeWalker, NOT FindAll, for the two measured reasons recorded on
+    // the Copilot-tab collector above (a full filtered FindAll against this very
+    // WebView2-hosted app was measured finding NOTHING while a plain walk found
+    // the target). That lesson is reused, not relearned.
+    //
+    // ── THE PRIVACY RULE, and why this route needs a STRONGER one ───────────
+    // In a Chromium accessibility tree an ordinary message body's Name IS the
+    // message text, and this route's candidate is an UNCLASSED Text node — the
+    // exact shape a message body has. Reading every unclassed Text's Name to
+    // find the sender name would be a real widening, and it is not what
+    // CollectAiBadgeHeadings does:
+    //
+    //   * the walk reads ClassName / ControlType / AutomationId /
+    //     BoundingRectangle — never Name — for every node it visits;
+    //   * candidate Text nodes are held as ELEMENTS plus their Y, with no Name
+    //     read at all;
+    //   * a Name is read ONLY after the walk, and ONLY for a Text that PAIRED
+    //     with an "AI generated" badge within tolerance.
+    // So in a 1:1 DM, a channel or a human group chat — none of which has such
+    // a badge anywhere — not one message body's Name is ever read, let alone
+    // cached. That is the same "enforced in code, not by convention" standard
+    // the Copilot-tab collector holds itself to, adapted to a signal that needs
+    // it more.
+    //
+    // WHAT THE PAIRING IS FOR (the safety property, not an optimisation). An
+    // earlier pass explicitly rejected a bare unclassed Text as a match target
+    // — "a text node with no distinguishing attribute is not a match target, it
+    // is a coincidence waiting to happen" — and was right to. The badge IS the
+    // distinguishing attribute that pass found missing: it cannot appear beside
+    // a human colleague's message. A Text with no badge within tolerance is
+    // never offered, never named, never read.
+    const int AIBADGE_PANE_PARENT_HOPS = 6;
+    const int AIBADGE_WALK_MAX_DEPTH = 30;
+    const int AIBADGE_WALK_MAX_NODES = 4000;
+    // The transcript accumulates, so both collections are capped. The text cap
+    // is the larger of the two because every row contributes candidates
+    // (sender name, timestamp, …) while only AI rows contribute badges.
+    const int AIBADGE_MAX_BADGES = 32;
+    const int AIBADGE_MAX_TEXTS = 256;
+    // Vertical tolerance for "these two are on the same message row", in device
+    // pixels. Measured 1px apart (badge Y=61, paired Text Y=62) across 15
+    // messages; 5 is that measurement with room for a DPI scale factor or a
+    // half-pixel layout rounding, and is still far smaller than a message row's
+    // height, so it cannot reach the row above or below.
+    const double AIBADGE_ROW_TOLERANCE_PX = 5.0;
+    // A sender name is short. A message body is not. This is a second, cheap
+    // bound on what a paired Name can be — it is NOT the safety property (the
+    // badge pairing is), just a refusal to carry an implausible value forward.
+    const int AIBADGE_MAX_NAME_LEN = 96;
+    static readonly long AIBADGE_SEARCH_MIN_INTERVAL = TimeSpan.FromSeconds(1).Ticks;
+    static readonly long AIBADGE_SEARCH_BACKOFF_INTERVAL = TimeSpan.FromSeconds(5).Ticks;
+    const int AIBADGE_EMPTY_RUNS_BEFORE_BACKOFF = 3;
+    // The fail-OPEN bound, for the identical reason the Copilot-tab cache has
+    // one: switching conversations inside the Chat list changes neither the
+    // window handle nor — now that the title is stuck — the pane key, so the
+    // TTL is the only thing that stops a stale "the governed agent is open"
+    // from outliving the evidence for it.
+    static readonly long AIBADGE_CACHE_TTL = TimeSpan.FromSeconds(5).Ticks;
+
+    static volatile bool _badgeSearchInProgress = false;
+    static IntPtr _badgeCacheHwnd = IntPtr.Zero;
+    static string _badgeCachePane = "";
+    static string[] _badgeCacheClasses = null;
+    static string[] _badgeCacheNames = null;
+    static long _badgeCacheTicks = 0;
+    static IntPtr _badgeSearchHwnd = IntPtr.Zero;
+    static string _badgeSearchPane = "";
+    static long _badgeLastSearchTicks = 0;
+    static int _badgeEmptyRuns = 0;
+
+    // WHICH Text goes with WHICH badge. PURE — no UIA, no I/O, no state — so the
+    // offline harness can drive the real pairing with the real measured
+    // coordinates instead of re-implementing it in PowerShell, exactly as it
+    // already drives the real ExtractAgentNameFromHeading.
+    //
+    // Returns one entry per badge: the index into `textYs` of the NEAREST text
+    // within AIBADGE_ROW_TOLERANCE_PX, or -1 for "no text on this badge's row".
+    //
+    // NEAREST, and exactly one, rather than "every text within tolerance". A
+    // message row can hold more than one Text (the sender name, and plausibly a
+    // timestamp), and offering all of them would hand the extractor candidates
+    // that disagree — which its contract, correctly, calls no evidence. So the
+    // ambiguity is resolved HERE, by proximity, where there is a measurement to
+    // resolve it with. The residual risk is stated plainly rather than hidden:
+    // if a sibling Text ever sits closer to the badge than the sender name does,
+    // this yields that sibling's text, which matches no policy row, and the tick
+    // is simply ungoverned — the same fail-OPEN direction as finding nothing.
+    // It can never name a DIFFERENT agent, because the value is compared
+    // whole-string against the admin's own list.
+    //
+    // A badge with no text on its row yields -1 and contributes nothing. That is
+    // the safety property: unpaired text is never reachable from here at all,
+    // since the mapping is keyed BY BADGE.
+    static int[] PairAiBadgeHeadings(double[] badgeYs, double[] textYs)
+    {
+        if (badgeYs == null) return new int[0];
+        var map = new int[badgeYs.Length];
+        for (int b = 0; b < badgeYs.Length; b++)
+        {
+            int best = -1;
+            double bestDelta = 0;
+            if (textYs != null)
+            {
+                for (int t = 0; t < textYs.Length; t++)
+                {
+                    double delta = badgeYs[b] - textYs[t];
+                    if (delta < 0) delta = -delta;
+                    if (delta > AIBADGE_ROW_TOLERANCE_PX) continue;
+                    if (best < 0 || delta < bestDelta) { best = t; bestDelta = delta; }
+                }
+            }
+            map[b] = best;
+        }
+        return map;
+    }
+
+    // The poll thread's half: read the cache, never wait on a search. A
+    // structural copy of GetCachedCopilotHeadings — same key discipline (a
+    // different window handle or pane key is a different pane and searches AT
+    // ONCE), same TTL drop (fail-OPEN, which is what a host app requires), same
+    // empty-run backoff so an idle transcript cannot spin.
+    static bool GetCachedAiBadgeHeadings(PanelSig panel, IntPtr fg, string paneKey, out string[] classes, out string[] names)
+    {
+        classes = null;
+        names = null;
+        if (fg == IntPtr.Zero) return false;
+        long now = DateTime.UtcNow.Ticks;
+        if (_badgeCacheNames != null
+            && _badgeCacheHwnd == fg
+            && string.Equals(_badgeCachePane ?? "", paneKey ?? "", StringComparison.OrdinalIgnoreCase)
+            && (now - _badgeCacheTicks) <= AIBADGE_CACHE_TTL)
+        {
+            classes = _badgeCacheClasses;
+            names = _badgeCacheNames;
+        }
+        else
+        {
+            _badgeCacheClasses = null;
+            _badgeCacheNames = null;
+            _badgeCacheHwnd = IntPtr.Zero;
+            _badgeCachePane = "";
+            _badgeCacheTicks = 0;
+        }
+        bool newPane = _badgeSearchHwnd != fg
+            || !string.Equals(_badgeSearchPane ?? "", paneKey ?? "", StringComparison.OrdinalIgnoreCase);
+        if (newPane) _badgeEmptyRuns = 0;
+        long interval = (_badgeEmptyRuns >= AIBADGE_EMPTY_RUNS_BEFORE_BACKOFF)
+            ? AIBADGE_SEARCH_BACKOFF_INTERVAL : AIBADGE_SEARCH_MIN_INTERVAL;
+        if (!_badgeSearchInProgress && (newPane || (now - _badgeLastSearchTicks) > interval))
+        {
+            _badgeSearchHwnd = fg;
+            _badgeSearchPane = paneKey ?? "";
+            _badgeLastSearchTicks = now;
+            _badgeSearchInProgress = true;
+            var t = new Thread(() => SearchAiBadgeHeadingsBackground(panel, fg, paneKey));
+            t.IsBackground = true;
+            t.SetApartmentState(ApartmentState.STA);   // UIA requires STA, same as the poll thread
+            t.Start();
+        }
+        return names != null && names.Length > 0;
+    }
+
+    // Runs on its OWN background STA thread, never the poll thread.
+    //
+    // Same two strategies, in the same order and for the same reasons, as
+    // SearchCopilotHeadingsBackground: an ancestor search from the focused
+    // composer that collects at EVERY hop nearest-first (depth-agnostic — it
+    // finds the nearest ancestor that actually contains the transcript, whatever
+    // route put focus where it is), then a window-rooted depth-capped walk when
+    // that found nothing. One shared node budget across the ancestor hops, so
+    // walking several ancestors costs no more in total than one walk.
+    //
+    // A wrong root is harmless here for a stronger reason than it is there: this
+    // collector keeps nothing at all unless an "AI generated" badge PAIRED with
+    // a text on its row, so an unhelpful subtree yields nothing and, crucially,
+    // has no Name read off any node in it.
+    static void SearchAiBadgeHeadingsBackground(PanelSig panel, IntPtr fg, string paneKey)
+    {
+        try
+        {
+            var classes = new List<string>();
+            var names = new List<string>();
+
+            int visited = 0;
+            try
+            {
+                AutomationElement el = AutomationElement.FocusedElement;
+                if (el != null)
+                {
+                    uint fgPid = 0;
+                    GetWindowThreadProcessId(fg, out fgPid);
+                    // The SAME non-negotiable ownership rule every other read in
+                    // this file applies, with the same one-generation allowance:
+                    // FocusedElement is a GLOBAL read, and Teams hosts its UI in
+                    // a CHILD WebView2 process.
+                    if (ElementPidBelongsToForeground(el.Current.ProcessId, fgPid))
+                    {
+                        var up = TreeWalker.ControlViewWalker;
+                        AutomationElement cur = el;
+                        for (int i = 0; i < AIBADGE_PANE_PARENT_HOPS && names.Count == 0; i++)
+                        {
+                            cur = up.GetParent(cur);
+                            if (cur == null) break;
+                            CollectAiBadgeHeadings(panel, cur, classes, names, ref visited);
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            if (names.Count == 0)
+            {
+                AutomationElement win = null;
+                try { win = AutomationElement.FromHandle(fg); } catch { }
+                if (win != null)
+                {
+                    classes.Clear();
+                    names.Clear();
+                    int winVisited = 0;
+                    CollectAiBadgeHeadings(panel, win, classes, names, ref winVisited);
+                }
+            }
+
+            // Assigned only at the END, and only on a search that actually found
+            // something — the same "never half-apply a result" discipline. A
+            // search that found nothing leaves the previous cache and its TTL
+            // exactly as they were and counts toward the backoff.
+            if (names.Count > 0)
+            {
+                _badgeCacheClasses = classes.ToArray();
+                _badgeCacheNames = names.ToArray();
+                _badgeCacheHwnd = fg;
+                _badgeCachePane = paneKey ?? "";
+                _badgeCacheTicks = DateTime.UtcNow.Ticks;
+                _badgeEmptyRuns = 0;
+            }
+            else if (_badgeEmptyRuns < AIBADGE_EMPTY_RUNS_BEFORE_BACKOFF)
+            {
+                _badgeEmptyRuns++;
+            }
+        }
+        catch { }
+        finally { _badgeSearchInProgress = false; }
+    }
+
+    // A depth- and node-capped TreeWalker walk that collects BADGE/TEXT PAIRS.
+    //
+    // THREE PHASES, and the order of them is the privacy rule (see the section
+    // header):
+    //   1. WALK. For every node, read ClassName, and — only when the class did
+    //      not already identify a badge — ControlType and AutomationId. Never
+    //      Name. Badges are kept as (ClassName, Y); candidate Texts are kept as
+    //      (element, Y) with NO Name read.
+    //   2. PAIR. PairAiBadgeHeadings, the pure function, decides which text goes
+    //      with which badge by vertical proximity.
+    //   3. NAME. Read Name ONLY for a text that paired. Everything else goes out
+    //      of scope unread.
+    // A transcript with no "AI generated" badge in it therefore has no message
+    // body's Name read at all — which is the ordinary human-conversation case
+    // this whole host-app design exists to protect.
+    //
+    // WHY THE ROOT IS NOT REQUIRED TO BE THE "Message List" GROUP. That Group
+    // (Name literally "Message List", inside Group
+    // AutomationId="message-pane-layout-a11y") is where the signal was measured,
+    // and the ancestor search above lands inside or just above it in practice.
+    // Requiring it by NAME would make this route depend on a user-visible,
+    // LOCALIZED string in exactly the way the badge's "AI generated" Name was
+    // rejected for — and it would buy nothing, because the badge pairing already
+    // bounds what can be collected from any root at all.
+    //
+    // `visited` is passed by REFERENCE so a caller that walks several roots
+    // spends ONE node budget across all of them; the cap would stop bounding
+    // anything if walking N roots meant N times the cap.
+    static void CollectAiBadgeHeadings(PanelSig panel, AutomationElement root, List<string> classes, List<string> names, ref int visited)
+    {
+        if (panel == null || root == null) return;
+        string headingClass = panel.FallbackHeadingClass ?? "";
+        if (headingClass.Length == 0) return;
+        try
+        {
+            var badgeClasses = new List<string>();
+            var badgeYs = new List<double>();
+            var textEls = new List<AutomationElement>();
+            var textYs = new List<double>();
+
+            var walker = TreeWalker.ControlViewWalker;
+            var stack = new Stack<KeyValuePair<AutomationElement, int>>();
+            stack.Push(new KeyValuePair<AutomationElement, int>(root, 0));
+            while (stack.Count > 0)
+            {
+                var cur = stack.Pop();
+                if (cur.Value > AIBADGE_WALK_MAX_DEPTH) continue;
+                if (++visited > AIBADGE_WALK_MAX_NODES) break;
+                AutomationElement el = cur.Key;
+                string cls = "";
+                try { cls = el.Current.ClassName ?? ""; } catch { }
+                bool isBadge = cls.Length > 0 && ClassRuleMatches(cls, headingClass, false);
+                if (isBadge)
+                {
+                    if (badgeYs.Count < AIBADGE_MAX_BADGES)
+                    {
+                        double y;
+                        if (TryElementTop(el, out y)) { badgeClasses.Add(cls); badgeYs.Add(y); }
+                    }
+                }
+                else if (cls.Length == 0 && textYs.Count < AIBADGE_MAX_TEXTS)
+                {
+                    // An EMPTY ClassName and an EMPTY AutomationId are both
+                    // measured properties of the sender-name node, and both are
+                    // cheap structural filters that read no content. Nothing
+                    // here reads Name — that happens after the pairing, and only
+                    // for a text a badge claimed.
+                    bool isText = false;
+                    try { isText = (el.Current.ControlType == ControlType.Text); } catch { }
+                    if (isText)
+                    {
+                        string aid = "";
+                        try { aid = el.Current.AutomationId ?? ""; } catch { }
+                        if (aid.Length == 0)
+                        {
+                            double y;
+                            if (TryElementTop(el, out y)) { textEls.Add(el); textYs.Add(y); }
+                        }
+                    }
+                }
+                try
+                {
+                    AutomationElement child = walker.GetFirstChild(el);
+                    while (child != null)
+                    {
+                        stack.Push(new KeyValuePair<AutomationElement, int>(child, cur.Value + 1));
+                        child = walker.GetNextSibling(child);
+                    }
+                }
+                catch { }
+            }
+
+            if (badgeYs.Count == 0) return;   // no badge → nothing is read, nothing is kept
+
+            int[] map = PairAiBadgeHeadings(badgeYs.ToArray(), textYs.ToArray());
+            for (int b = 0; b < map.Length; b++)
+            {
+                if (names.Count >= AIBADGE_MAX_BADGES) break;
+                int t = map[b];
+                if (t < 0 || t >= textEls.Count) continue;
+                string nm = "";
+                try { nm = textEls[t].Current.Name ?? ""; } catch { }
+                nm = nm.Trim();
+                if (nm.Length == 0 || nm.Length > AIBADGE_MAX_NAME_LEN) continue;
+                // The BADGE's ClassName travels with the TEXT's Name — a
+                // synthesized candidate, which is exactly what the pure
+                // extractor's { className, name } contract describes. It
+                // re-checks the class itself, so the class rule is applied
+                // twice and the extractor needs no knowledge of the pairing.
+                classes.Add(badgeClasses[b]);
+                names.Add(nm);
+            }
+        }
+        catch { }
+    }
+
+    // The TOP edge of an element's bounding rectangle, or false when UIA cannot
+    // give one (an offscreen or freshly-destroyed node answers with an empty
+    // rect). Its own helper because "no rectangle" must mean "cannot pair",
+    // never "pairs at Y=0" — which would pair every unpositioned node with
+    // every other one.
+    static bool TryElementTop(AutomationElement el, out double top)
+    {
+        top = 0;
+        try
+        {
+            System.Windows.Rect r = el.Current.BoundingRectangle;
+            if (r.IsEmpty) return false;
+            if (double.IsNaN(r.Top) || double.IsInfinity(r.Top)) return false;
+            top = r.Top;
+            return true;
+        }
+        catch { return false; }
     }
 
     // ── Model routing (Smart Model Router, desktop) ──────────────────────────
@@ -3811,6 +5655,10 @@ public static class CfaiEnforcer
     //       hold armed for an attachment in one window can no longer swallow the
     //       next Enter in an unrelated one — see _attachHoldProcess. Still no
     //       free text: a filename, pattern NAMES, a process name and a number.
+    //
+    //   {"cmd":"evidence_dlp","state":"on"|"off"}
+    //       The fleet `dlp` flag for the AI-evidence routes — see
+    //       _evidenceDlpOn. A bare on/off.
     static void StdinLoop()
     {
         string line;
@@ -3862,6 +5710,15 @@ public static class CfaiEnforcer
                             _attachHoldActive = false;
                             _attachHoldFilename = ""; _attachHoldPatterns = ""; _attachHoldProcess = "";
                         }
+                    }
+                    else if (cmd == "evidence_dlp")
+                    {
+                        // A bare on/off — see _evidenceDlpOn. Anything but the
+                        // two literals is ignored, so a malformed line cannot
+                        // flip the state.
+                        string state = ExtractJsonString(line, "state");
+                        if (state == "on") _evidenceDlpOn = true;
+                        else if (state == "off") _evidenceDlpOn = false;
                     }
                 }
                 catch { }
@@ -3941,7 +5798,10 @@ public static class CfaiEnforcer
     // detection-only panel must not even accumulate keystrokes into the scan
     // buffer, or "no enforcement" would still mean "scanned, and blocked via
     // TypedBlockFresh a moment later".
-    static bool FgIsAiNow() { return _fgIsAi && _fgLeftAiTicks == 0 && PanelEnforceOk(); }
+    // _fgContentOk: a dlpMatch 'panel' Copilot pane with the fleet dlp flag off
+    // buffers nothing (the capture half only — PanelEnforceOk, which also gates
+    // panel-ROW blocks, is untouched).
+    static bool FgIsAiNow() { return _fgIsAi && _fgLeftAiTicks == 0 && PanelEnforceOk() && _fgContentOk; }
 
     static bool TypedBlockFresh()
     {
@@ -4040,7 +5900,15 @@ public static class CfaiEnforcer
                 // write mid-way nearly every time, leaving the composer
                 // blanked (Ctrl+A+Delete already ran, the retype never
                 // finished). Actual clicks elsewhere still abort correctly.
-                if ((_rewriteInProgress || _routeInProgress) && msg != WM_MOUSEMOVE)
+                //
+                // Nor a button RELEASE (2026-09-24): the dialog waits 300ms after
+                // pointerdown before asking for the rewrite, so the UP of THAT
+                // click normally lands first — but a click held a little longer
+                // (or a touchpad tap-and-hold) released it after the rewrite had
+                // started and aborted it with the composer untouched and the
+                // block still standing. A NEW action by the user is a button
+                // DOWN, which still aborts.
+                if ((_rewriteInProgress || _routeInProgress) && msg != WM_MOUSEMOVE && !IsMouseButtonUp(msg))
                 {
                     uint mflags = (uint)Marshal.ReadInt32(lParam, 12);   // MSLLHOOKSTRUCT.flags
                     if ((mflags & LLMHF_INJECTED) == 0)
@@ -4203,6 +6071,69 @@ public static class CfaiEnforcer
                         _lastBlockFiredTicks = 0;   // drop any armed cooldown too
                         Emit("enforcement_disarmed", _app, "", "panic_hotkey", -1, DISARM_SECONDS);
                         return CallNextHookEx(_hook, nCode, wParam, lParam);
+                    }
+
+                    // ── EGRESS send-chord hold (a mail client) ──────────────
+                    //
+                    // A SIBLING of the block below, at the SAME nesting level and
+                    // deliberately NOT inside it. That block's condition
+                    // (_fgIsAi || PanelBlockLatchHeld()) is false for every mail
+                    // client — an egress surface can never set _fgIsAi, which
+                    // agent/tests/os-monitor-safety.test.mjs asserts directly —
+                    // so nesting here would be unreachable, and widening that
+                    // condition would drag a mail client into every content
+                    // path underneath it: the typed buffer, the UIA read, the
+                    // clipboard scan. None of those may ever see an email.
+                    //
+                    // Placed BEFORE it so the chord decision is made and
+                    // returned on its own terms. Nothing about the existing
+                    // block's condition, body or ordering is changed; an AI app
+                    // reaches it exactly as before, because EgressHoldArmed is
+                    // false for anything not in _egressHoldProcs.
+                    //
+                    // WHAT IT TAKES TO GET HERE: a live-probed + enforcing
+                    // catalog entry, a governed ai_platforms row with
+                    // capture_mode 'hold', an attachment hold armed and BOUND to
+                    // this same process (i.e. a file whose scan came back
+                    // high/critical), the panic hotkey not engaged, and the
+                    // pressed chord matching that surface's declared send keys.
+                    // As shipped today every entry is verified:false, so
+                    // _egressHoldProcs is empty and this branch cannot fire.
+                    //
+                    // NO OVERRIDE HOTKEY, on purpose. Ctrl+Alt+Enter means "send
+                    // this prompt text anyway, logged", which is not a coherent
+                    // thing to say about an attachment — you cannot send the
+                    // message "anyway" without also sending the file. This is
+                    // the same choice the attachment hold already makes a few
+                    // lines below (`!attachHold` on the override condition), and
+                    // the remedy is the same: detach the file. The panic hotkey
+                    // still disarms everything, via Disarmed() inside
+                    // EgressHoldArmed.
+                    //
+                    // IT WRITES NO SHARED BLOCK STATE, and that is load-bearing
+                    // rather than an omission. _lastBlockFiredTicks /
+                    // _lastBlockPatterns are the AI path's 30s BLOCK_COOLDOWN,
+                    // and they are read — with no process binding of any kind —
+                    // by EnterBlockActive and BlockActiveForMouse, i.e. by the AI
+                    // branch below. Arming them here (which an earlier revision
+                    // did, copied from that branch) meant a swallowed Ctrl+Enter
+                    // in Outlook left a 30-second window in which the very next
+                    // Enter in ANY AI app was swallowed too — on a prompt with
+                    // nothing wrong with it, reported under the EMAIL
+                    // ATTACHMENT's pattern names via the `cooldown ?
+                    // _lastBlockPatterns` arm of that branch's `pats` chain.
+                    // Nothing on the egress path reads either field (the hold is
+                    // kept alive by index.js's refresh ticker, and every chord
+                    // press is decided independently by EgressHoldArmed), so the
+                    // writes bought nothing and cost cross-surface isolation.
+                    // agent/tests/os-monitor-egress-qa.test.mjs pins this.
+                    if (EgressHoldArmed(_fgProcAny) && MatchesEgressChord(_fgProcAny, vk, ctrl, alt, shift))
+                    {
+                        string egressProc = StripExe(_fgProcAny ?? "").Trim();
+                        string egressId = "";
+                        _egressIdByProc.TryGetValue(egressProc, out egressId);
+                        EmitEgressBlock(egressProc, egressId ?? "", _attachHoldPatterns, _attachHoldFilename);
+                        return (IntPtr)1;   // swallow — same return convention as the block below
                     }
 
                     // PanelBlockLatchHeld() is ORed in, not folded into _fgIsAi,
@@ -4456,7 +6387,12 @@ public static class CfaiEnforcer
             // UpdateGovState sits immediately after UpdateBannerState and for the
             // same reason: both observe the block decision UpdateBlockedAgents
             // just made, and both emit at most one line per real transition.
-            try { UpdateForeground(); UpdateBlockedAgents(); UpdateBannerState(); UpdateGovState(); UpdatePaste(); UpdateUia(); UpdateSendRect(); UpdatePendingRewrite(); CheckHeartbeat(); CheckAttachHoldExpiry(); UpdateModelRouting(); }
+            // UpdateEgressPolicy is LAST and self-throttled to the same 10s
+            // interval UpdateBlockedAgents uses, so on 66 of every 67 ticks it is
+            // one comparison and a return. It observes and decides nothing about
+            // any existing block: all it does is rebuild _egressHoldProcs, which
+            // is read by exactly one function (EgressHoldArmed).
+            try { UpdateForeground(); UpdateBlockedAgents(); UpdateBannerState(); UpdateGovState(); UpdatePaste(); UpdateUia(); UpdateSendRect(); UpdatePendingRewrite(); CheckHeartbeat(); CheckAttachHoldExpiry(); UpdateModelRouting(); UpdateEgressPolicy(); }
             catch { }
             // The 150ms cadence above is unchanged; inside it we look at the
             // typed-buffer dirty flag every 30ms so the verdict trails the last
@@ -4587,6 +6523,14 @@ public static class CfaiEnforcer
                     // maps to. Absent / 'platform' / anything else means today's
                     // whole-process behaviour, unchanged — see CheckFgBlocked.
                     d["agent_scope"] = ExtractJsonString(item, "agent_scope");
+                    // Other names this same agent is known by (a Copilot Studio
+                    // bot's Dataverse name vs. its Teams app-catalog name, etc.)
+                    // — see AgentNameMatchesAny. `|`-delimited, never nested JSON:
+                    // this parser has no array support and one bad value derails
+                    // the whole file, so the server ships aliases as one scalar.
+                    // Absent on rows written before this field existed, same as
+                    // every other field here.
+                    d["agent_aliases"] = ExtractJsonString(item, "agent_aliases");
                     if (!string.IsNullOrEmpty(d["platform"])) list.Add(d);
                 }
             }
@@ -4655,6 +6599,9 @@ public static class CfaiEnforcer
                     // is the whole-app capture this feature exists to prevent —
                     // so such a row governs nothing at all.
                     d["agent_scope"] = ExtractJsonString(item, "agent_scope");
+                    // Same alias field as the blocked list — see the comment
+                    // there. AgentNameMatchesAny is the one place that reads it.
+                    d["agent_aliases"] = ExtractJsonString(item, "agent_aliases");
                     if (!string.IsNullOrEmpty(d["platform"])) list.Add(d);
                 }
             }
@@ -4707,7 +6654,7 @@ public static class CfaiEnforcer
             HashSet<string> procs;
             if (!PLATFORM_PROCS.TryGetValue(agent["platform"], out procs)) continue;
             if (procs == null || !procs.Contains(name)) continue;
-            if (AgentNameMatches(agentName, agent["agent_name"])) return true;
+            if (AgentNameMatchesAny(agentName, agent)) return true;
         }
         return false;
     }
@@ -4750,13 +6697,14 @@ public static class CfaiEnforcer
             HashSet<string> procs;
             if (!PLATFORM_PROCS.TryGetValue(agent["platform"], out procs)) continue;
             if (procs == null || !procs.Contains(name)) continue;
-            if (AgentNameMatches(agentName, agent["agent_name"])) return true;
+            if (AgentNameMatchesAny(agentName, agent)) return true;
         }
         return false;
     }
 
     // The ADMIN-TYPED identity of the policy row that covers this agent inside
-    // this process, for the govstate event and for nothing else.
+    // this process, for the govstate event and for block ATTRIBUTION
+    // (ResolveBlockAgent) — both of which only quote it, and nothing else.
     //
     // `blocked` selects which list to consult and mirrors ApplyForegroundTick's
     // own precedence — a blocked conversation is decided first, so its row is
@@ -4790,7 +6738,7 @@ public static class CfaiEnforcer
             HashSet<string> procs;
             if (!PLATFORM_PROCS.TryGetValue(agent["platform"], out procs)) continue;
             if (procs == null || !procs.Contains(name)) continue;
-            if (!AgentNameMatches(agentName, agent["agent_name"])) continue;
+            if (!AgentNameMatchesAny(agentName, agent)) continue;
             rowName = agent["agent_name"] ?? "";
             rowId = agent["agent_id"] ?? "";
             return;
@@ -4840,6 +6788,72 @@ public static class CfaiEnforcer
         _panelBlockLatchTicks = 0;
     }
 
+    // ── WHICH AGENT a block is about: attribution, never a decision ─────────
+    //
+    // Answers "which agent does this content-pattern block (and the Tier B
+    // redact that may follow it) belong to", for the enforcement_block /
+    // enforcement_redact audit records. Returns the SOURCE of the answer:
+    //   "row"  — an agent-scoped BLOCKED or GOVERNED policy row names it. The
+    //            values returned are that ROW's agent_name / agent_id, i.e.
+    //            what an administrator typed into the dashboard.
+    //   "sole" — no row, but the focused composer is a catalog panel whose
+    //            entry declares the ONE AI product it can ever talk to
+    //            (PanelSig.SoleAgent — ai-processes.js's `soleAgent`). Our own
+    //            catalog string, with no id.
+    //   "none" — neither. Both outs are "", and the record says nothing about
+    //            an agent rather than guessing one.
+    //
+    // THE PII RULE, identical to govstate's: `readName` — a string read out of
+    // ANOTHER app's accessibility tree or window — is only ever the LOOKUP KEY.
+    // It can come back out of this function only as the matching row's own
+    // value, never as itself; when no row matches it is dropped. This function
+    // emits nothing, writes no field, and is consulted by no block, narrowing
+    // or DLP-governance decision — ApplyForegroundTick stores its answer for
+    // EmitBlock to quote, and that is its only reader.
+    //
+    // Precedence mirrors the tick's own: a host app's row identity (already
+    // resolved by GovernedRowIdentity, blocked list first) wins; then a Named
+    // read that equals a row, blocked list first; then the catalog SoleAgent.
+    static string ResolveBlockAgent(string proc, PanelSig panel, AgentReadOutcome outcome, string readName,
+        string hostGovAgent, string hostGovAgentId, out string agent, out string agentId)
+    {
+        agent = ""; agentId = "";
+        if (!string.IsNullOrEmpty(hostGovAgent) || !string.IsNullOrEmpty(hostGovAgentId))
+        {
+            agent = hostGovAgent ?? ""; agentId = hostGovAgentId ?? "";
+            return "row";
+        }
+        if (outcome == AgentReadOutcome.Named && !string.IsNullOrEmpty(readName))
+        {
+            string rowName, rowId;
+            GovernedRowIdentity(true, proc, readName, out rowName, out rowId);
+            if (rowName.Length == 0 && rowId.Length == 0)
+                GovernedRowIdentity(false, proc, readName, out rowName, out rowId);
+            if (rowName.Length > 0 || rowId.Length > 0)
+            {
+                agent = rowName; agentId = rowId;
+                return "row";
+            }
+        }
+        if (panel != null && !string.IsNullOrEmpty(panel.SoleAgent))
+        {
+            agent = panel.SoleAgent;
+            return "sole";
+        }
+        return "none";
+    }
+
+    // The catalog entry for a panel id, or null. Catalog lookup only.
+    static PanelSig PanelById(string id)
+    {
+        if (string.IsNullOrEmpty(id)) return null;
+        var panels = _panels;
+        if (panels == null) return null;
+        foreach (var p in panels)
+            if (string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase)) return p;
+        return null;
+    }
+
     // Is a previously-established IDE-panel platform block still in force?
     //
     // Pure and side-effect free on purpose: the keyboard hook thread calls this
@@ -4863,8 +6877,11 @@ public static class CfaiEnforcer
         long armed = _panelBlockLatchTicks;
         if (armed == 0) return false;
         // Bounded: a host whose focused-element reads never recover must not be
-        // able to leave Enter swallowed forever.
-        if ((DateTime.UtcNow.Ticks - armed) > PANEL_BLOCK_LATCH_TTL) return false;
+        // able to leave Enter swallowed forever. An AGENT latch uses the much
+        // shorter bound — see AGENT_BLOCK_LATCH_TTL for the live report that
+        // forced the split and why it is not a weakening.
+        long ttl = AgentBlockLatched() ? AGENT_BLOCK_LATCH_TTL : PANEL_BLOCK_LATCH_TTL;
+        if ((DateTime.UtcNow.Ticks - armed) > ttl) return false;
         // Same host process still in the foreground. _fgPid is refreshed on
         // every poll tick regardless of AI state (unlike _app, which is sticky
         // by design), so a genuine app switch drops the latch on the next tick.
@@ -4909,6 +6926,20 @@ public static class CfaiEnforcer
         // surface does. tests/enforcer-panel-block.test.mjs asserts exactly that
         // — it is the single most important behavioural test of this feature.
         bool hostApp = _hostAppProcs.Contains(_app);
+        // The SAME fail-open rule for a PANEL-HOSTED host app — Word, Excel,
+        // PowerPoint, OneNote (see _panelHostAppProcs). "We cannot tell which
+        // Copilot agent is open in Word" must produce no block at all; the
+        // alternative is disabling the company's word processor because one
+        // agent inside it is blocked, which is the Teams incident with a bigger
+        // blast radius.
+        //
+        // It is a SEPARATE term from `hostApp` and not folded into that set on
+        // purpose: these processes keep their existing ELEMENT-scoped treatment.
+        // The panel arm below stays reachable for them, because
+        // office_copilot_pane carries a host of its own and an Inventory block on
+        // m365.cloud.microsoft legitimately synthesizes a panel-keyed row for it
+        // — live-verified 2026-09-21. Only the two PROCESS-WIDE arms are barred.
+        bool wholeAppBarred = hostApp || _panelHostAppProcs.Contains(_app);
         foreach (var agent in _blockedList) {
             HashSet<string> procs;
             if (PLATFORM_PROCS.TryGetValue(agent["platform"], out procs)) {
@@ -4937,7 +6968,7 @@ public static class CfaiEnforcer
                             // agent open") and the two no-evidence outcomes must
                             // never manufacture a block for a named agent.
                             if (_fgAgentOutcome == AgentReadOutcome.Named
-                                && AgentNameMatches(_fgAgentName, agent["agent_name"])) {
+                                && AgentNameMatchesAny(_fgAgentName, agent)) {
                                 _fgIsBlocked = true;
                                 _blockedByElement = true;   // see _blockedByElement
                                 _blockScope = "agent";
@@ -4960,7 +6991,7 @@ public static class CfaiEnforcer
                     // the next row), because another row may still cover this
                     // foreground some other way. Same reasoning as the
                     // detection-only panel fall-through below.
-                    if (!narrowed && !hostApp) {
+                    if (!narrowed && !wholeAppBarred) {
                         _fgIsBlocked = true;
                         _blockedByElement = false;   // process-keyed — see _blockedByElement
                         _blockScope = "app";
@@ -4978,12 +7009,15 @@ public static class CfaiEnforcer
             // lookup above so first-match-wins ordering across the file is
             // unchanged — a per-agent row earlier in the array still wins.
             if (!string.IsNullOrEmpty(agent["process_name"])) {
-                // …and never for a host app. ai-processes.js's processesForHost
-                // already refuses to synthesize such a row, so this should be
-                // unreachable; it is stated anyway because "unreachable" here
-                // depends on a rule in a different file, and the failure mode is
-                // swallowing Enter across a company's whole chat client.
-                if (!hostApp && string.Equals(agent["process_name"], _app, StringComparison.OrdinalIgnoreCase)) {
+                // …and never for a host app, panel-hosted or not.
+                // ai-processes.js's processesForHost already refuses to
+                // synthesize such a row (and no Office process is in
+                // AI_PROCESSES at all, so none can be derived for one), so this
+                // should be unreachable; it is stated anyway because
+                // "unreachable" here depends on a rule in a different file, and
+                // the failure mode is swallowing Enter across a company's whole
+                // chat client — or across every Word document in the company.
+                if (!wholeAppBarred && string.Equals(agent["process_name"], _app, StringComparison.OrdinalIgnoreCase)) {
                     _fgIsBlocked = true;
                     _blockedByElement = false;   // process-keyed — see _blockedByElement
                     _blockScope = "app";
@@ -5009,6 +7043,18 @@ public static class CfaiEnforcer
                 // Teams conversation, which is "disable all of Teams" reached by
                 // a different route. panelForHost() cannot produce such a row;
                 // this makes sure nothing else can either.
+                //
+                // `hostApp`, NOT `wholeAppBarred`, and the difference is
+                // deliberate. A PANEL-HOSTED host app (Word/Excel/PowerPoint/
+                // OneNote) is barred from the two PROCESS-WIDE arms above but
+                // stays eligible here, because office_copilot_pane carries a
+                // host of its OWN (m365.cloud.microsoft — the pane's product,
+                // not a different app's), panelForHost() resolves it, and the
+                // row that synthesizes is scoped to that one composer ELEMENT.
+                // It was live-verified end to end on 2026-09-21; routing it
+                // through the host-app exclusion would silently switch it off.
+                // A Teams composer is the opposite case in every one of those
+                // respects, which is why one flag cannot serve both.
                 if (!hostApp && string.Equals(agent["panel"], _fgPanelId, StringComparison.OrdinalIgnoreCase)) {
                     // A detection-only panel (AI_PANELS enforce:false) never
                     // blocks, even with a matching row present. This is the same
@@ -5455,6 +7501,18 @@ public static class CfaiEnforcer
         bool hostAppArmed = !isIde && proc != null && _hostAppProcs.Contains(proc)
             && (_agentScopedProcs.Contains(proc) || _dlpScopedProcs.Contains(proc))
             && EnforcingAgentSurface(proc) != null;
+        // The AI-EVIDENCE arm for a host app: the SAME verified+enforcing surface
+        // gate, but WITHOUT a policy row — the fleet `dlp` flag instead (see
+        // _evidenceDlpOn). It licenses exactly two things and nothing else:
+        //   * the focused-element PANEL read (control type + ClassName only for
+        //     Teams — its panels have no Name rule, so ReadFocusedPanel does not
+        //     read the element's Name; see PanelUsesNameRule);
+        //   * for a panel that declares an aiEvidence check, that check
+        //     (TeamsAgentChatEvidence — AutomationId/ClassName walks only).
+        // It does NOT license the title / agent-name read, which stays behind
+        // hostAppArmed: naming an agent is only needed to match a ROW.
+        bool hostEvidenceArmed = !isIde && proc != null && _hostAppProcs.Contains(proc)
+            && _evidenceDlpOn && EnforcingAgentSurface(proc) != null;
         string panelRid = "";
         bool panelReadable = false;
         PanelSig hit = null;
@@ -5466,8 +7524,22 @@ public static class CfaiEnforcer
         // one Teams window holds every conversation the user has open, so only
         // the focused ELEMENT can say the composer is what has focus — and the
         // composer lives in a child WebView2 process, hence allowChildProcess.
-        if (isIde) hit = ReadFocusedPanel(proc, pid, out panelRid, out panelReadable, false);
-        else if (hostAppArmed) hit = ReadFocusedPanel(proc, pid, out panelRid, out panelReadable, true);
+        //
+        // The isIde branch's own allowChildProcess is NOT hardcoded false: Word/
+        // Excel/PowerPoint/OneNote are also `isIde` (see _ideProcs) but ALSO host
+        // their Copilot pane in a child msedgewebview2.exe, exactly like Teams —
+        // _idePanelChildProcs (from ai-processes.js's panelChildProcess) is what
+        // tells this read to widen for exactly those processes and no others,
+        // leaving Code/Cursor on the stricter exact-pid rule they were verified
+        // live under.
+        if (isIde) hit = ReadFocusedPanel(proc, pid, out panelRid, out panelReadable, _idePanelChildProcs.Contains(proc));
+        else if (hostAppArmed || hostEvidenceArmed) hit = ReadFocusedPanel(proc, pid, out panelRid, out panelReadable, true);
+
+        // The Teams 1:1 AGENT-CHAT evidence, only for a matched ENFORCING panel
+        // that declares the check, and only on the evidence arm. Cached / off
+        // the poll thread — see TeamsAgentChatEvidence. Handed to
+        // ApplyForegroundTick through a per-tick field, assigned on EVERY tick.
+        ComputeTickTeamsEvidence(fg, hostAppArmed || hostEvidenceArmed, hit, panelRid, _tickComposerAid);
 
         // The SECOND (and only other) UIA call, for "which named agent is open".
         //
@@ -5493,11 +7565,20 @@ public static class CfaiEnforcer
             && _agentScopedProcs.Contains(proc)) || hostAppArmed)
         {
             AgentSurface surface = MatchAgentSurface(proc);
-            // `hit` comes from the panel read above, on this same tick. It is
-            // handed down ONLY as part of the Copilot-tab heading cache's pane
-            // key — see _copilotCachePane — never as a gate or as evidence; the
-            // gating on `hit` happens once, in ApplyForegroundTick.
-            if (surface != null) agentOutcome = ReadFocusedAgentName(surface, pid, fg, hit != null ? hit.Id : "", out agentName);
+            // `hit` comes from the panel read above, on this same tick. The
+            // Copilot-tab fallback takes ONLY its id, and only as part of that
+            // route's pane cache key — see _copilotCachePane — never as a gate
+            // or as evidence; the gating on `hit` for BLOCK and DLP decisions
+            // still happens once, in ApplyForegroundTick.
+            //
+            // The Chat-list badge fallback (2026-09-21) reads its config and
+            // its own two flags off the SAME object, and for that route the
+            // panel match is the gate — which is why the whole PanelSig is
+            // threaded down now instead of a bare id string. It cannot widen
+            // anything ApplyForegroundTick decides: what comes back is still
+            // just an AgentReadOutcome + name, and a Named outcome still has to
+            // match a real blocked/governed row there to mean anything.
+            if (surface != null) agentOutcome = ReadFocusedAgentName(surface, pid, fg, hit, out agentName);
         }
         ApplyForegroundTick(pid, proc, isIde, hit, panelRid, panelReadable, agentOutcome, agentName);
     }
@@ -5513,12 +7594,23 @@ public static class CfaiEnforcer
     static void ApplyForegroundTick(uint pid, string proc, bool isIde, PanelSig hit, string panelRid, bool panelReadable, AgentReadOutcome agentOutcome, string agentName)
     {
         _fgPid = pid;
+        // ADDITIVE, and the only line this method gained for the egress feature.
+        // It mirrors this tick's foreground process name unconditionally, so the
+        // keyboard hook can answer "is a mail client in front of the user right
+        // now" without a Process lookup on the hook thread. It reads nothing,
+        // decides nothing and is consulted by exactly one function
+        // (EgressHoldArmed) — every branch below and every field it writes are
+        // untouched, and _app in particular is still assigned ONLY on an AI tick.
+        // See _fgProcAny.
+        _fgProcAny = proc ?? "";
 
         bool isAi = false, isPanel = false, panelEnforce = false;
         // "This tick is DLP-governed and NOT blocked" — see _fgDlpGoverned.
         // Declared with the other per-tick locals so EVERY branch leaves it
         // false and only the host-app branch can ever set it.
         bool dlpGoverned = false;
+        // See _fgAgentChatEvidence; set only by the host-app branch below.
+        bool fgAgentChatEvidence = false;
         // "This HOST-APP tick is governed, by EITHER policy" — the union that
         // arms Teams file scanning. Declared with the other per-tick locals for
         // the same reason: every branch leaves it false, and only the host-app
@@ -5666,6 +7758,15 @@ public static class CfaiEnforcer
             bool blockGoverned = hostSurfaceOk
                 && agentOutcome == AgentReadOutcome.Named
                 && BlockedListHasMatchingAgentRow(proc, agentName);
+            // A GROUP / CHANNEL / MEETING conversation ("@thread.v2" header, from
+            // THIS tick's evidence read) is refused by EVERY Chat-list route, the
+            // title/Named ones included: a human group chat can be RENAMED to
+            // match a blocked or governed agent's name, and the header is what
+            // the rename cannot change. Only for the shared Chat-list composer
+            // (aiEvidence 'teams_chat'); an unknown header refuses nothing.
+            bool chatIsGroup = _tickChatIsGroup && hit != null
+                && string.Equals(hit.AiEvidence, "teams_chat", StringComparison.Ordinal);
+            if (chatIsGroup) blockGoverned = false;
             // The DLP-only state. Two routes into it, and they differ in exactly
             // one thing — whether the agent has to be NAMED:
             //
@@ -5688,11 +7789,30 @@ public static class CfaiEnforcer
             //     upstream still applies — hostAppArmed requires the org to hold
             //     SOME agent policy for Teams before anything here is read.
             //
+            //   the Chat-list 1:1 AGENT chat (aiEvidence 'teams_chat') — the
+            //     composer is the shared CKEditor, but the pane itself PROVES an
+            //     agent (TeamsAgentChatVerdict: one "@unq.gbl.spaces" header and a
+            //     matching positive-feedback button for EVERY incoming message).
+            //     No name, no row.
+            //
+            // The two EVIDENCE routes (panel-alone and agent-chat evidence) need
+            // NO governed row: parity with ChatGPT/Claude desktop. They are
+            // licensed by the fleet `dlp` flag (_evidenceDlpOn) and by NOTHING
+            // else — a policy row does not license them (security review
+            // 2026-09-24, H3); rows keep only the NAME route below, which is
+            // unchanged: a title with no AI evidence still needs a governed row.
+            //
             // !blockGoverned is what makes blocked take precedence; see above.
-            dlpGoverned = !blockGoverned && hostSurfaceOk
-                && (PanelDlpMatchesOnPanelAlone(hit)
+            bool evidenceOk = _evidenceDlpOn;
+            bool agentChatEvidence = _tickAgentChatEvidence && hit != null
+                && string.Equals(hit.AiEvidence, "teams_chat", StringComparison.Ordinal);
+            dlpGoverned = !blockGoverned && hostSurfaceOk && !chatIsGroup
+                && ((evidenceOk && (PanelDlpMatchesOnPanelAlone(hit) || agentChatEvidence))
                     || (agentOutcome == AgentReadOutcome.Named
                         && GovernedListHasMatchingAgentRow(proc, agentName)));
+            // The upload licence: THIS tick was governed BY the agent-chat
+            // evidence — never by the title/Named route.
+            fgAgentChatEvidence = dlpGoverned && evidenceOk && agentChatEvidence;
             if (blockGoverned || dlpGoverned)
             {
                 // Identical surface state for both. isAi/isPanel are what make
@@ -5780,6 +7900,14 @@ public static class CfaiEnforcer
         // outlive the tick that earned it and leak a Tier B offer into the sticky
         // window, where the state is second-hand by definition.
         _fgDlpGoverned = dlpGoverned;
+        _fgAgentChatEvidence = fgAgentChatEvidence;
+        // Content from a dlpMatch 'panel' Copilot pane in an Office / Outlook app
+        // (an IDE-hosted panel, not a host app — the host-app branch already
+        // gates its evidence on _evidenceDlpOn) needs the fleet dlp flag.
+        {
+            PanelSig contentPanel = (isAi && isPanel && !(proc != null && _hostAppProcs.Contains(proc))) ? PanelById(panelId) : null;
+            _fgContentOk = !(contentPanel != null && string.Equals(contentPanel.DlpMatch, "panel", StringComparison.Ordinal) && !_evidenceDlpOn);
+        }
         // Same rule, same reason, for the file-scanning arm signal: assigned on
         // every branch, so a tick that stopped being governed cannot leave Teams'
         // file watchers armed. UpdateGovState adds the first-hand guard on top.
@@ -5787,6 +7915,18 @@ public static class CfaiEnforcer
         _fgHostGovPanel = hostGovPanel;
         _fgHostGovAgent = hostGovAgent;
         _fgHostGovAgentId = hostGovAgentId;
+        // Block attribution, same every-branch rule: an AI tick resolves it from
+        // this tick's own row identity / read / panel; every other tick (the
+        // sticky window included) says "none" rather than carry a stale answer.
+        // Read only by EmitBlock — see ResolveBlockAgent.
+        if (isAi)
+        {
+            string attrAgent, attrAgentId;
+            string attrSrc = ResolveBlockAgent(proc, isPanel ? PanelById(panelId) : null, agentOutcome, agentName,
+                hostGovAgent, hostGovAgentId, out attrAgent, out attrAgentId);
+            _fgAttr = new BlockAttr(attrAgent, attrAgentId, attrSrc);
+        }
+        else _fgAttr = BLOCK_ATTR_NONE;
 
         if (isAi)
         {
@@ -5860,7 +8000,77 @@ public static class CfaiEnforcer
         // there: which composer that corner belongs to depends on which
         // conversation is open, and caching a rect across a conversation switch
         // would swallow an ordinary click in an ordinary chat.
-        if (_ideProcs.Contains(_app) || _hostAppProcs.Contains(_app)) { _hasRect = false; return; }
+        //
+        // BOUNDED EXCEPTION, added after a live test proved the gap real: when
+        // a focused, ENFORCING panel drives the block (office_copilot_pane,
+        // teams_copilot_composer — composers with no non-AI use, per their own
+        // dlpMatch:'panel' claim), search for a send button within just THAT
+        // PANEL's own ancestor chain, never the whole foreground window. This
+        // sidesteps both objections above: cost, because a composer's own
+        // container (a text box, a mic icon, a send arrow) is small regardless
+        // of how large the host document/chat tree is — the search widens one
+        // ancestor at a time and stops the moment it finds a match, so a huge
+        // document never gets walked; and meaning, because "the send button is
+        // somewhere inside THIS panel" is true of every one of these composers
+        // the same way "bottom-right of the window" is true of a standalone
+        // chat app, and is NEVER attempted for a plain DM/channel/document
+        // click since PanelUiaOk() is false there. Confirmed live 2026-09-18:
+        // without this, a block correctly swallowed Enter in Word's Copilot
+        // pane but a mouse click on its send arrow went through unblocked.
+        if (_ideProcs.Contains(_app) || _hostAppProcs.Contains(_app))
+        {
+            if (_fgIsPanel && !string.IsNullOrEmpty(_fgPanelId) && PanelUiaOk())
+            {
+                try
+                {
+                    AutomationElement panelEl = EffectiveFocusedElement();
+                    if (panelEl != null)
+                    {
+                        var cond = new OrCondition(
+                            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
+                            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Custom)
+                        );
+                        var walker = TreeWalker.RawViewWalker;
+                        AutomationElement container = panelEl;
+                        // Widen one ancestor at a time (bounded, same 8-level
+                        // convention ReadFocusedPanel's ancestor walk uses) and
+                        // stop at the first level whose descendants contain a
+                        // send-labelled control — the smallest container that
+                        // actually holds one, not the biggest available.
+                        for (int depth = 0; depth < 8 && container != null; depth++)
+                        {
+                            AutomationElementCollection btns = null;
+                            try { btns = container.FindAll(TreeScope.Descendants, cond); } catch { btns = null; }
+                            if (btns != null)
+                            {
+                                foreach (AutomationElement b in btns)
+                                {
+                                    string name = "", aid = "", help = "";
+                                    try { name = b.Current.Name ?? ""; } catch { }
+                                    try { aid = b.Current.AutomationId ?? ""; } catch { }
+                                    try { help = b.Current.HelpText ?? ""; } catch { }
+                                    string hay = (name + " " + aid + " " + help).ToLowerInvariant();
+                                    if (hay.Contains("send") || hay.Contains("submit"))
+                                    {
+                                        System.Windows.Rect r = b.Current.BoundingRectangle;
+                                        if (!r.IsEmpty && r.Width > 0 && r.Height > 0)
+                                        {
+                                            _rx = (int)r.Left; _ry = (int)r.Top;
+                                            _rw = (int)r.Width; _rh = (int)r.Height;
+                                            _hasRect = true;
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            try { container = walker.GetParent(container); } catch { container = null; }
+                        }
+                    }
+                }
+                catch { /* fall through to no-rect below */ }
+            }
+            _hasRect = false; return;
+        }
         try
         {
             IntPtr fg = GetForegroundWindow();
@@ -5936,17 +8146,136 @@ public static class CfaiEnforcer
         // sending anywhere. Gating at the read means _blockUia is never even
         // computed from it, rather than being computed and then filtered out at
         // each consumer — one of which (BlockActiveForMouse) does not filter.
-        if (!_fgIsAi || !PanelUiaOk()) { _blockUia = false; _uiaPatterns = ""; return; }
+        // _fgContentOk: a dlpMatch 'panel' Copilot pane with the fleet dlp flag
+        // off takes no content at all (see the field).
+        if (!_fgIsAi || !PanelUiaOk() || !_fgContentOk) { _blockUia = false; _uiaPatterns = ""; return; }
         string text = null;
         try
         {
-            AutomationElement el = AutomationElement.FocusedElement;
-            if (el != null) text = ReadText(el);
+            AutomationElement el = EffectiveFocusedElement();
+            // PANEL surfaces: scan (and arm) ONLY the element this tick matched —
+            // same runtime id as _fgOwnerKey, owned by the foreground process or
+            // its direct child. FocusedElement is a global read, and focus that
+            // moved between the panel read and this one (a colleague's message,
+            // a document paragraph) must never be scanned as the composer.
+            if (el != null && (!_fgIsPanel || FocusedIsMatchedComposer(el))) text = ReadText(el);
         }
         catch { }
         string hits = (text != null) ? ScanNames(text) : "";
         _uiaPatterns = hits;
         _blockUia = hits.Length > 0;
+        if (hits.Length > 0) MaybeEmitEvidencePrompt(text, hits);
+        else _lastEvidencePromptSig = "";
+    }
+
+    // Is this element the composer THIS tick matched? Runtime id equal to the
+    // one recorded in _fgOwnerKey (pid|panel|rid), and owned by the foreground.
+    static bool FocusedIsMatchedComposer(AutomationElement el)
+    {
+        if (el == null) return false;
+        string ownerKey = _fgOwnerKey ?? "";
+        int lastBar = ownerKey.LastIndexOf('|');
+        string ownerRid = lastBar >= 0 ? ownerKey.Substring(lastBar + 1) : "";
+        if (ownerRid.Length == 0) return false;
+        string rid = "";
+        int elPid = -1;
+        try
+        {
+            int[] r = el.GetRuntimeId();
+            if (r != null) rid = string.Join(".", Array.ConvertAll(r, delegate(int i) { return i.ToString(); }));
+            elPid = el.Current.ProcessId;
+        }
+        catch { return false; }
+        return string.Equals(rid, ownerRid, StringComparison.Ordinal) && ElementPidBelongsToForeground(elPid, _fgPid);
+    }
+
+    // ── The typed-prompt record for the AI-EVIDENCE routes ───────────────────
+    //
+    // WHY THE ENFORCER EMITS IT. ChatGPT/Claude desktop get their `prompt_typed`
+    // record from prompt-watcher.ps1, which reads only AI_PROCESSES apps. The
+    // Teams agent chat, the Teams Copilot tab and the Office / Outlook Copilot
+    // panes live inside general-purpose apps that must NEVER be in that watcher
+    // list (every DM, email and document would be read). The only component
+    // that can prove "the caret is in an AI composer right now" for them is
+    // THIS one — the panel match, the Teams agent-chat evidence, the governed /
+    // dlpGoverned decision — so the record is produced here, behind exactly the
+    // gate that already decides scanning, Tier A blocking and Tier B.
+    //
+    // A deliberate, reviewed widening of this channel's contract, and narrow:
+    //   * ONLY on a sensitive composer: UpdateUia already found an active
+    //     pattern in it (the same "only record sensitive prompts" rule the
+    //     watcher path applies in index.js). Clean text never leaves.
+    //   * ONLY with the fleet dlp flag on (_evidenceDlpOn), and ONLY on an
+    //     evidence route (EvidencePromptRoute): a focused, enforcing panel
+    //     RIGHT NOW (PanelUiaOk) that is EITHER a panel whose catalog entry is
+    //     dlpMatch "panel" (no non-AI use: the Teams Copilot tab, the Office /
+    //     Outlook panes) OR the Teams Chat-list composer on a tick governed BY
+    //     THIS TICK'S agent-chat evidence verdict (_fgAgentChatEvidence). A
+    //     Chat-list tick governed only by the title/Named route never uploads
+    //     — a named conversation is not evidence the thing is an AI (a renamed
+    //     human group chat can carry any name), and a "@thread.v2" header
+    //     refuses every Chat-list route outright. Never a human chat, an email
+    //     body or a document body; never a plain chat app (the watcher already
+    //     covers those — no double record).
+    //   * ONLY from the element this tick matched: UpdateUia reads the text only
+    //     after FocusedIsMatchedComposer (runtime id + owning pid), so focus that
+    //     moved between the panel read and this read cannot put another
+    //     element's text on the wire.
+    //   * ONCE per (surface, element, pattern set): a new pattern appearing
+    //     re-fires, continued typing does not; a clean composer resets it.
+    //   * The same content class as the ChatGPT/Claude record: the composer
+    //     text, capped at PROMPT_TEXT_MAX (the watcher's own cap). No window title
+    //     (Teams titles carry colleague names), no UI-read agent name — agent
+    //     attribution is the admin-typed / catalog BlockAttr, as on EmitBlock.
+    const int PROMPT_TEXT_MAX = 16000;   // prompt-watcher.ps1's own $MaxChars
+    static string _lastEvidencePromptSig = "";
+
+    static bool EvidencePromptRoute()
+    {
+        if (!_evidenceDlpOn || !_fgContentOk) return false;
+        if (!_fgIsAi || !_fgIsPanel || string.IsNullOrEmpty(_fgPanelId) || !PanelUiaOk()) return false;
+        PanelSig p = PanelById(_fgPanelId);
+        if (p == null) return false;
+        if (string.Equals(p.DlpMatch, "panel", StringComparison.Ordinal)) return true;
+        // The shared Teams Chat-list composer: only on a tick governed by the
+        // agent-chat EVIDENCE verdict.
+        return _hostAppProcs.Contains(_app) && _fgAgentChatEvidence
+            && string.Equals(p.AiEvidence, "teams_chat", StringComparison.Ordinal);
+    }
+
+    static void MaybeEmitEvidencePrompt(string text, string hits)
+    {
+        // Reached only from UpdateUia, whose text came from the element this
+        // tick matched (FocusedIsMatchedComposer) — for every route here is a
+        // panel route.
+        if (!EvidencePromptRoute() || string.IsNullOrEmpty(text)) return;
+        string ownerKey = _fgOwnerKey ?? "";
+        string sig = ownerKey + "|" + hits;
+        if (string.Equals(sig, _lastEvidencePromptSig, StringComparison.Ordinal)) return;
+        _lastEvidencePromptSig = sig;
+        EmitEvidencePrompt(_app, _fgPanelId, text.Length > PROMPT_TEXT_MAX ? text.Substring(0, PROMPT_TEXT_MAX) : text,
+            (DateTime.UtcNow.Ticks - _lastPasteTicks) < PASTE_WINDOW ? "paste" : "typed");
+    }
+
+    // The line itself. Reads the composer text it is HANDED, our catalog ids
+    // and the per-tick BlockAttr — nothing read off a window title or another
+    // app's accessibility Name.
+    static void EmitEvidencePrompt(string app, string panelId, string text, string cause)
+    {
+        BlockAttr attr = _fgAttr ?? BLOCK_ATTR_NONE;
+        AgentSurface surface = MatchAgentSurface(app);
+        string json = "{\"kind\":\"prompt_text\""
+            + ",\"process\":\"" + Esc(app ?? "") + "\""
+            + ",\"panel\":\"" + Esc(panelId ?? "") + "\""
+            + ",\"cause\":\"" + Esc(cause) + "\""
+            + ",\"text\":\"" + Esc(text) + "\""
+            + ",\"len\":" + text.Length
+            + ",\"agent\":\"" + Esc(attr.Agent) + "\""
+            + ",\"agent_id\":\"" + Esc(attr.AgentId) + "\""
+            + ",\"agent_src\":\"" + Esc(attr.Src) + "\""
+            + (surface != null ? ",\"surface\":\"" + Esc(surface.Id) + "\"" : "")
+            + "}";
+        lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }
 
     // Recomputes the pinned rewrite candidate from the ACTUAL composer text
@@ -6005,7 +8334,7 @@ public static class CfaiEnforcer
         //
         // THE PANIC HOTKEY STILL CLEARS OUTRIGHT. Disarmed() is the one term
         // here that means "stop touching the keyboard", so it may not freeze.
-        if (!_fgIsAi || !PanelUiaOk() || (_hostAppProcs.Contains(_app) && !_fgDlpGoverned) || Disarmed())
+        if (!_fgIsAi || !PanelUiaOk() || (_hostAppProcs.Contains(_app) && !_fgDlpGoverned) || !_fgContentOk || Disarmed())
         {
             lock (_pendingLock)
             {
@@ -6016,7 +8345,7 @@ public static class CfaiEnforcer
             return;
         }
         AutomationElement el;
-        try { el = AutomationElement.FocusedElement; } catch { el = null; }
+        try { el = EffectiveFocusedElement(); } catch { el = null; }
         if (el == null)
         {
             // A transient UIA read failure, not a confirmed content change —
@@ -6052,6 +8381,12 @@ public static class CfaiEnforcer
         int[] rid = null;
         try { rid = el.GetRuntimeId(); } catch { }
         IntPtr fg = GetForegroundWindow();
+        // RICH CONTENT: a composer holding a mention pill, an image, a table or
+        // a list would lose it to Ctrl+A + plain retype — see
+        // ComposerHasRichContent. Walked only for a candidate that would
+        // otherwise be offered, OUTSIDE the pin lock (it is UIA work), and
+        // cached per (element, prompt) so a steady composer is walked once.
+        bool rich = mask.Ok && rid != null && ComposerHasRichContentCached(el, rid, text);
         lock (_pendingLock)
         {
             _pendingReadLen = text.Length;
@@ -6067,7 +8402,7 @@ public static class CfaiEnforcer
             // multi-line text — fail closed, and reported with its own reason
             // rather than a silent refusal. Single-line text is unaffected.
             bool newlineOk = !HasLineBreak(mask.Masked) || CanInsertNewline();
-            if (mask.Ok && rid != null && newlineOk)
+            if (mask.Ok && rid != null && newlineOk && !rich)
             {
                 // Reuse the existing block_id when the underlying text hasn't
                 // actually changed, instead of always minting a fresh one.
@@ -6126,6 +8461,7 @@ public static class CfaiEnforcer
                 _pendingFrozen = false;
                 _pendingWhyNot = !mask.Ok ? mask.Reason
                                : rid == null ? "no_runtime_id"
+                               : rich ? "rich_content"
                                : "multiline_no_newline_key";
                 _pendingBlockId = "";
             }
@@ -6163,6 +8499,7 @@ public static class CfaiEnforcer
     static void UpdatePaste()
     {
         if (!_fgIsAi) { _blockPaste = false; return; }
+        if (!_fgContentOk) { _blockPaste = false; return; }
         string clip = ReadClipboard();
         string hits = (clip != null) ? ScanNames(clip) : "";
         _pastePatternsValue = hits;
@@ -6178,6 +8515,24 @@ public static class CfaiEnforcer
     // type one extra newline key the user never typed, and would put a
     // difference into the read-back comparison. Trim ONLY a trailing
     // terminator, never an embedded one — the real line structure is content.
+    //
+    // INVISIBLE FORMAT CHARACTERS ARE STRIPPED (StripInvisible) before anything
+    // else sees the text — the root cause of Tokenize & Send not sending in
+    // Teams and M365 Copilot, measured live 2026-09-24 by read-only UIA:
+    //   * Teams' CKEditor composer value carried CKEditor's INLINE FILLER —
+    //     U+2060 WORD JOINER x7 — which CKEditor inserts and moves as the caret
+    //     and selection change;
+    //   * M365 Copilot's composer (ValuePattern empty, so TextPattern) returns
+    //     U+FFFC OBJECT REPLACEMENT CHARACTER, e.g. for an "empty" composer.
+    // NormalizeWs only collapsed whitespace, so a pinned original and a later
+    // read of the SAME prompt compared unequal (the rewrite aborted
+    // "text_changed" before Ctrl+A, the composer untouched and still blocked),
+    // the read-back verify failed ("verify_mismatch"), and the invisible
+    // characters were copied into the masked candidate and TYPED back into the
+    // composer. Stripping them here fixes every consumer at once — the offer,
+    // the pin, the pre-flight, the verify, the pre-Enter check, the post-send
+    // check, the UIA scan (a secret split by zero-width characters now matches)
+    // and the prompt record. An all-invisible read is an EMPTY read.
     static string ReadText(AutomationElement el)
     {
         try
@@ -6185,8 +8540,8 @@ public static class CfaiEnforcer
             object vp;
             if (el.TryGetCurrentPattern(ValuePattern.Pattern, out vp))
             {
-                string v = ((ValuePattern)vp).Current.Value;
-                if (!string.IsNullOrEmpty(v)) return v.TrimEnd('\r', '\n');
+                string v = StripInvisible(((ValuePattern)vp).Current.Value);
+                if (!string.IsNullOrEmpty(v)) { v = v.TrimEnd('\r', '\n'); if (v.Length > 0) return v; }
             }
         }
         catch { }
@@ -6195,12 +8550,32 @@ public static class CfaiEnforcer
             object tp;
             if (el.TryGetCurrentPattern(TextPattern.Pattern, out tp))
             {
-                string t = ((TextPattern)tp).DocumentRange.GetText(16000);
-                if (!string.IsNullOrEmpty(t)) return t.TrimEnd('\r', '\n');
+                string t = StripInvisible(((TextPattern)tp).DocumentRange.GetText(16000));
+                if (!string.IsNullOrEmpty(t)) { t = t.TrimEnd('\r', '\n'); if (t.Length > 0) return t; }
             }
         }
         catch { }
         return null;
+    }
+
+    // Zero-width / format characters an editor inserts for its own bookkeeping,
+    // never part of what the user typed: ZWSP, ZWNJ, ZWJ, WORD JOINER (CKEditor's
+    // inline filler), BOM / ZWNBSP, SOFT HYPHEN, and OBJECT REPLACEMENT
+    // (U+FFFC, an embedded-object placeholder). Removed, not replaced.
+    static string StripInvisible(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        StringBuilder sb = null;
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            int cp = c;
+            bool invisible = cp == 0x200B || cp == 0x200C || cp == 0x200D || cp == 0x2060
+                || cp == 0xFEFF || cp == 0x00AD || cp == 0xFFFC;
+            if (invisible) { if (sb == null) { sb = new StringBuilder(s.Length); sb.Append(s, 0, i); } }
+            else if (sb != null) sb.Append(c);
+        }
+        return sb == null ? s : sb.ToString();
     }
 
     static string ReadClipboard()
@@ -6494,6 +8869,40 @@ public static class CfaiEnforcer
     // Extended "block" event carrying the Tier B rewrite offer, if any. Reads
     // the pending state the poll thread already prepared — no new UIA/regex
     // work happens here, this runs on the hook/mouse thread.
+    // ── The EGRESS block line ────────────────────────────────────────────────
+    //
+    // A SEPARATE emitter from EmitBlock, not a `reason` on it, and the reason is
+    // that EmitBlock is entangled with state that has no meaning here: it reads
+    // the Tier B rewrite pin, PanelField()/PlatformBlockPanelField(), _fgIsBlocked
+    // and the blocked-row identity — every one of which describes an AI surface.
+    // Reusing it would mean either teaching it a fourth shape or letting an email
+    // block inherit an AI app's panel id and platform fields. So this emits its
+    // own kind and EmitBlock is left byte-for-byte unchanged.
+    //
+    // NEVER REWRITABLE, and there is no field for it: Tokenize & Send masks TEXT
+    // and cannot detach a file, exactly as the attachment hold already declines
+    // in EmitBlock. There is likewise no Request Access identity here — an egress
+    // block is not "the org disallowed this app", it is "this one file is
+    // sensitive", and the remedy is to remove the attachment.
+    //
+    // WHAT MAY NEVER TRAVEL ON THIS LINE, and the reason it is stricter here than
+    // on any other event from this file: a WINDOW TITLE (an Outlook title is the
+    // message SUBJECT plus the recipient — content, and a third party's identity),
+    // a recipient address, and the message body. What travels is a process name, a
+    // catalog id, the pattern NAMES the scan produced, and the filename the hold
+    // is about.
+    static void EmitEgressBlock(string proc, string surfaceId, string patterns, string filename)
+    {
+        string json = "{\"kind\":\"egress_block\""
+            + ",\"reason\":\"attachment\""
+            + (proc.Length > 0 ? ",\"process\":\"" + Esc(proc) + "\"" : "")
+            + ",\"surface\":\"" + Esc(surfaceId ?? "") + "\""
+            + ((patterns ?? "").Length > 0 ? ",\"patterns\":\"" + Esc(patterns) + "\"" : "")
+            + ((filename ?? "").Length > 0 ? ",\"filename\":\"" + Esc(filename) + "\"" : "")
+            + "}";
+        lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
+    }
+
     static void EmitBlock(string app, string patterns, string reason)
     {
         string blockId, preview, whyNot;
@@ -6531,6 +8940,24 @@ public static class CfaiEnforcer
         // app, not this one sentence.
         bool platformBlock = _fgIsBlocked && reason != "attachment";
         if (platformBlock) { rewritable = false; blockId = ""; }
+        // WHICH AGENT this block is about, for EVERY kind of block — a content-
+        // pattern block included, which before this carried no agent at all.
+        // Two admissible sources only, both resolved on the poll thread by
+        // ResolveBlockAgent: an agent-scoped policy ROW (its admin-typed name and
+        // server-issued id) or the focused panel's catalog SoleAgent. An
+        // agent-scoped PLATFORM block names its own armed row, the same pair the
+        // platform group below already carries. agent_src says which one it was
+        // ("row" | "sole" | "none"), so a consumer never has to guess whether an
+        // empty name means "no agent" or "could not tell".
+        BlockAttr attr = _fgAttr ?? BLOCK_ATTR_NONE;
+        string attrAgent = attr.Agent, attrAgentId = attr.AgentId, attrSrc = attr.Src;
+        if (platformBlock && BlockScope() == "agent")
+        { attrAgent = _blockedAgentName ?? ""; attrAgentId = _blockedAgentId ?? ""; attrSrc = "row"; }
+        // Our own catalog id for the agent surface hosting this process, when
+        // there is one (m365_copilot, teams_desktop, ...). A catalog constant,
+        // not a read — index.js prefers `panel` over it for the record's
+        // `surface` field.
+        AgentSurface attrSurface = MatchAgentSurface(app);
         string json = "{\"kind\":\"block\""
             + ",\"reason\":\"" + Esc(reason) + "\""
             + (app.Length > 0 ? ",\"process\":\"" + Esc(app) + "\"" : "")
@@ -6558,6 +8985,10 @@ public static class CfaiEnforcer
                  + ",\"blocked_platform\":\"" + Esc(_blockedPlatform) + "\""
                  + ",\"blocked_agent\":\"" + Esc(_blockedAgentName) + "\""
                  + ",\"blocked_agent_id\":\"" + Esc(_blockedAgentId) + "\"" : "")
+            + ",\"agent\":\"" + Esc(attrAgent) + "\""
+            + ",\"agent_id\":\"" + Esc(attrAgentId) + "\""
+            + ",\"agent_src\":\"" + Esc(attrSrc) + "\""
+            + (attrSurface != null ? ",\"surface\":\"" + Esc(attrSurface.Id) + "\"" : "")
             + "}";
         lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }
@@ -6680,7 +9111,10 @@ public static class CfaiEnforcer
     static string NormalizeWs(string s)
     {
         if (s == null) return "";
-        return Regex.Replace(s.Trim(), "\\s+", " ");
+        // Invisible editor characters are not content — see ReadText. Stripped
+        // here as well, so every comparison holds even for a read that did not
+        // come through ReadText.
+        return Regex.Replace(StripInvisible(s).Trim(), "\\s+", " ");
     }
 
     // ── Line breaks in a masked rewrite ──────────────────────────────────────
@@ -6723,6 +9157,15 @@ public static class CfaiEnforcer
                     return string.IsNullOrEmpty(p.NewlineKeys) ? NEWLINE_KEYS_DEFAULT : p.NewlineKeys;
                 }
             }
+        }
+        // Not a panel: the chat app's AGENT SURFACE entry, when it has one — the
+        // same catalog fact for a surface with no AI_PANELS row (see
+        // AgentSurface.NewlineKeys). Only when focus is NOT a panel, so a
+        // matched panel keeps winning exactly as before.
+        if (!_fgIsPanel)
+        {
+            AgentSurface s = MatchAgentSurface(_app);
+            if (s != null && !string.IsNullOrEmpty(s.NewlineKeys)) return s.NewlineKeys;
         }
         return NEWLINE_KEYS_DEFAULT;
     }
@@ -6795,11 +9238,18 @@ public static class CfaiEnforcer
         int ms = 0;
         for (int i = 0; i < segments.Count; i++)
         {
+            // The focused-element pin check before every segment (see
+            // FocusStillPinned — pin check (b) in RunRewriteCore).
+            ms += REWRITE_FOCUS_PIN_READ_MS;
             // The newline combination between two segments.
             if (i > 0) ms += 3 * REWRITE_KEY_DELAY_MS + REWRITE_CHUNK_DELAY_MS;
             int len = segments[i].Length;
             ms += len * REWRITE_CHAR_DELAY_MS;
-            ms += ((len + REWRITE_CHUNK - 1) / REWRITE_CHUNK) * REWRITE_CHUNK_DELAY_MS;
+            int chunks = (len + REWRITE_CHUNK - 1) / REWRITE_CHUNK;
+            ms += chunks * REWRITE_CHUNK_DELAY_MS;
+            // …and the in-segment pin check before every
+            // REWRITE_FOCUS_PIN_EVERY_CHUNKS-th chunk after the first.
+            if (chunks > 1) ms += ((chunks - 1) / REWRITE_FOCUS_PIN_EVERY_CHUNKS) * REWRITE_FOCUS_PIN_READ_MS;
         }
         return ms;
     }
@@ -6831,11 +9281,34 @@ public static class CfaiEnforcer
                 foreach (var p in panels)
                 {
                     if (!string.Equals(p.Id, _fgPanelId, StringComparison.OrdinalIgnoreCase)) continue;
-                    return p.PostSendVerifyMs < REWRITE_POST_SEND_MS ? REWRITE_POST_SEND_MS : p.PostSendVerifyMs;
+                    return ClampPostSendMs(p.PostSendVerifyMs);
                 }
             }
         }
+        // Not a panel: the chat app's AGENT SURFACE entry — see
+        // AgentSurface.PostSendVerifyMs. M365Copilot has no AI_PANELS row, so
+        // before this fallback its catalog value reached nothing and a real
+        // mask-and-send there was reported "not_submitted" (and its
+        // enforcement_redact never recorded). Already clamped by
+        // LoadAgentSurfaces; bounded again here, same belt-and-braces as the
+        // panel branch above.
+        if (!_fgIsPanel)
+        {
+            AgentSurface s = MatchAgentSurface(_app);
+            if (s != null) return ClampPostSendMs(s.PostSendVerifyMs);
+        }
         return REWRITE_POST_SEND_MS;
+    }
+
+    // Both ends, for both catalogs. The loaders already clamp; this is the
+    // belt-and-braces copy at the read site, so a window the rewrite's time
+    // budget was not reasoned against can never reach the post-send loop —
+    // whichever catalog it came from, and whatever wrote the field.
+    static int ClampPostSendMs(int ms)
+    {
+        if (ms < REWRITE_POST_SEND_MS) return REWRITE_POST_SEND_MS;
+        if (ms > REWRITE_POST_SEND_MAX_MS) return REWRITE_POST_SEND_MAX_MS;
+        return ms;
     }
 
     // `editedText` is the user's OWN replacement, typed into the Tokenize
@@ -6910,251 +9383,551 @@ public static class CfaiEnforcer
         t.Start();
     }
 
+    // ── The rewrite's side effects, behind ONE seam ──────────────────────────
+    //
+    // Every call RunRewriteCore makes that touches the outside world — the
+    // foreground window, the focused UIA element, the physical key state, a
+    // synthesized keystroke, a sleep — goes through this interface and nothing
+    // else. Two implementations exist:
+    //   * LiveRewriteIo, below: the real calls, exactly the ones RunRewrite made
+    //     inline before the seam existed. The ONLY implementation this file
+    //     ever constructs.
+    //   * a scripted fake in agent/tests/helpers/rewrite-focus-pin-harness.ps1,
+    //     which records what WOULD have been typed. That is what lets the focus
+    //     pin be tested behaviourally — "focus moved during the modifier wait,
+    //     so Ctrl+A was never sent" — without a test ever synthesizing a real
+    //     keystroke into whatever window has focus on the machine running it.
+    //
+    // agent/tests pins that RunRewriteCore makes no direct SendInput /
+    // SendKey* / SendUnicodeChunk / Thread.Sleep / GetForegroundWindow /
+    // AutomationElement call, so the fake really does see everything.
+    internal interface IRewriteIo
+    {
+        IntPtr ForegroundWindow();
+        // Read AutomationElement.FocusedElement and PIN it for every later read.
+        // False when there is no focused element at all. `runtimeId` is its
+        // runtime id, or null when that could not be read.
+        bool PinFocused(out int[] runtimeId);
+        // A FRESH read of AutomationElement.FocusedElement's runtime id, right
+        // now — not the pinned element's. null when unreadable.
+        int[] FocusedRuntimeId();
+        // ReadText of the PINNED element.
+        string ReadPinned();
+        // Bounded rich-content walk of the PINNED element — see
+        // ComposerHasRichContent. True when it holds a node a plain retype
+        // would drop (or the walk could not be completed).
+        bool PinnedHasRichContent();
+        // Ctrl / Alt / Shift / Enter physically held right now.
+        bool KeysHeld();
+        void KeyCombo(int vkMod, int vkKey);
+        void KeyPress(int vk);
+        void TypeChunk(string chunk);
+        void Sleep(int ms);
+    }
+
+    sealed class LiveRewriteIo : IRewriteIo
+    {
+        AutomationElement _el;
+        public IntPtr ForegroundWindow() { return GetForegroundWindow(); }
+        public bool PinFocused(out int[] runtimeId)
+        {
+            runtimeId = null;
+            try { _el = EffectiveFocusedElement(); } catch { _el = null; }
+            if (_el == null) return false;
+            try { runtimeId = _el.GetRuntimeId(); } catch { }
+            return true;
+        }
+        public int[] FocusedRuntimeId()
+        {
+            try
+            {
+                var f = EffectiveFocusedElement();
+                return f == null ? null : f.GetRuntimeId();
+            }
+            catch { return null; }
+        }
+        public string ReadPinned() { try { return _el == null ? null : ReadText(_el); } catch { return null; } }
+        public bool PinnedHasRichContent() { return _el == null || ComposerHasRichContent(_el); }
+        public bool KeysHeld() { return Down(VK_CONTROL) || Down(VK_MENU) || Down(VK_SHIFT) || Down(VK_RETURN); }
+        public void KeyCombo(int vkMod, int vkKey) { SendKeyCombo(vkMod, vkKey); }
+        public void KeyPress(int vk) { SendKeyPress(vk); }
+        public void TypeChunk(string chunk) { SendUnicodeChunk(chunk); }
+        public void Sleep(int ms) { Thread.Sleep(ms); }
+    }
+
+    // ── The FOCUSED-ELEMENT PIN, re-checked while writing ────────────────────
+    //
+    // THE GAP THIS CLOSES. The pre-flight compared the focused element's runtime
+    // id to the pinned one ONCE, and then waited up to 2.5s for the user's
+    // fingers to leave the confirm chord before Ctrl+A / Delete / retype. Only
+    // the WINDOW was re-checked after that. Focus can move to a different
+    // element inside the SAME window in that time — a search box, a second
+    // composer, the transcript — and Ctrl+A + Delete would then have wiped
+    // whatever that element held and typed the masked prompt into it.
+    //
+    // So the pin is re-read (a FRESH AutomationElement.FocusedElement, compared
+    // by runtime id) at three points, and after a mismatch not one more key is
+    // sent — in particular never Ctrl+A, Delete or Enter. Each point has its
+    // own reason, because each leaves the composer in a different state and
+    // the dialog tells the user something different (block-dialog.js):
+    //   (a) immediately before Ctrl+A, i.e. after the modifier wait —
+    //       aborted "element_changed_before_write": nothing typed, composer
+    //       untouched, a plain retry is the right answer;
+    //   (b) before every line segment, and before every
+    //       REWRITE_FOCUS_PIN_EVERY_CHUNKS-th chunk within a segment —
+    //       aborted "element_changed_mid_write": the composer may hold a
+    //       PARTIAL masked text;
+    //   (c) immediately before the final Enter — failed
+    //       "element_changed_before_send": the full masked text is in the
+    //       composer, verified, unsent.
+    //
+    // UNREADABLE IS A MISMATCH. A null read is retried once (a single UIA
+    // hiccup is common); a second null is treated as "not provably the same
+    // element", which is the fail-closed direction — the cost is an aborted
+    // rewrite the user can retry, against typing into an element we cannot
+    // identify.
+    //
+    // THE COST IS BUDGETED. Each read is a cross-process UIA call, estimated
+    // at 5-15ms in the design review and charged at the TOP of that range
+    // (REWRITE_FOCUS_PIN_READ_MS) by EstimateWriteMs for every (b) read the
+    // write loop will make — so an offered rewrite still finishes inside the
+    // write budget, and the (a)/(c) reads sit in the ~2s of margin the 16s
+    // dialog window already has (see REWRITE_WRITE_BUDGET_MS). The retry is
+    // not charged: it only happens on a failed read, and the 25% slow-clock
+    // margin absorbs it.
+    const int REWRITE_FOCUS_PIN_READ_MS = 15;
+    const int REWRITE_FOCUS_PIN_EVERY_CHUNKS = 4;
+
+    static bool FocusStillPinned(IRewriteIo io, int[] pinnedRid)
+    {
+        int[] cur = io.FocusedRuntimeId();
+        if (cur == null) cur = io.FocusedRuntimeId();
+        return RuntimeIdEquals(cur, pinnedRid);
+    }
+
+    // WM_LBUTTONUP / WM_RBUTTONUP / WM_MBUTTONUP / WM_XBUTTONUP: a release, not a
+    // new action -- see the mouse hook's rewrite-abort rule.
+    static bool IsMouseButtonUp(int msg)
+    {
+        return msg == 0x0202 || msg == 0x0205 || msg == 0x0208 || msg == 0x020C;
+    }
+
     static void RunRewrite(string blockId, string original, string masked, int[] pinnedRid, IntPtr pinnedHwnd, uint pinnedPid)
     {
         try
         {
-            // Pre-flight: everything pinned at block time must still hold.
-            if (GetForegroundWindow() != pinnedHwnd) { EmitRewrite(blockId, "aborted", "focus_changed"); return; }
-            AutomationElement el;
-            try { el = AutomationElement.FocusedElement; } catch { el = null; }
-            if (el == null) { EmitRewrite(blockId, "aborted", "no_focused_element"); return; }
-            int[] curRid = null;
-            try { curRid = el.GetRuntimeId(); } catch { }
-            if (!RuntimeIdEquals(curRid, pinnedRid)) { EmitRewrite(blockId, "aborted", "element_changed"); return; }
-            string curText = null;
-            try { curText = ReadText(el); } catch { }
-            if (NormalizeWs(curText) != NormalizeWs(original)) { EmitRewrite(blockId, "aborted", "text_changed"); return; }
-
-            // Multi-line pre-flight, and it happens BEFORE Ctrl+A/Delete so a
-            // refusal costs nothing: the composer is untouched and the block is
-            // still armed. UpdatePendingRewrite already refuses to pin such a
-            // candidate, so this is the second, independent statement of the
-            // same rule — the write path must never be able to type a line
-            // break it cannot type safely, whatever the pin says.
-            int nlMod = 0, nlKey = 0;
-            bool multiline = HasLineBreak(masked);
-            if (multiline && !ResolveNewlineKeys(NewlineKeysFor(), out nlMod, out nlKey))
-            { EmitRewrite(blockId, "aborted", "no_newline_key"); return; }
-
-            // How long the post-send confirmation at the very end of this method
-            // may keep re-reading the composer, for THIS surface. Captured HERE,
-            // in the pre-flight, for the same reason the newline combination is:
-            // both are read off the panel state the poll thread maintains, and
-            // that thread keeps sampling while we clear and retype the composer.
-            // One read of it, pinned, so the window cannot change underneath the
-            // confirmation it governs.
-            int postSendMs = PostSendVerifyMsFor();
-
-            // The user may still be holding Ctrl+Alt (from the confirm
-            // hotkey) or Enter (from the block itself) — wait briefly for a
-            // clean keyboard state before synthesizing anything.
-            long waitStart = DateTime.UtcNow.Ticks;
-            while (Down(VK_CONTROL) || Down(VK_MENU) || Down(VK_SHIFT) || Down(VK_RETURN))
-            {
-                // A real 3-key combo can plausibly stay physically held for
-                // over half a second — 500ms was too tight and aborted valid
-                // presses. 2.5s is still well inside the 15s pin TTL.
-                if ((DateTime.UtcNow.Ticks - waitStart) > TimeSpan.FromMilliseconds(2500).Ticks)
-                { EmitRewrite(blockId, "aborted", "modifiers_stuck"); return; }
-                Thread.Sleep(20);
-            }
-
-            SendKeyCombo(VK_CONTROL, VK_A);
-            Thread.Sleep(30);
-            SendKeyPress(VK_DELETE);
-            Thread.Sleep(30);
-
-            // The write. One segment per line, with the surface's newline
-            // combination between segments instead of a typed '\n' — see
-            // SplitMaskedLines and NewlineKeysFor.
-            //
-            // Single-line text takes exactly the path it always did: one segment,
-            // the same chunk loop, the same per-chunk abort/budget/foreground
-            // re-check, no key combination sent at all.
-            //
-            // BUDGET. The newline combinations ARE accounted for, and not by
-            // hand: EstimateWriteMs models this exact loop — every character's
-            // pace, every chunk's settle, and 3*REWRITE_KEY_DELAY_MS +
-            // REWRITE_CHUNK_DELAY_MS (25ms) for every break — and
-            // ComputeMaskCandidate refuses to offer a rewrite whose estimate
-            // does not fit REWRITE_USABLE_BUDGET_MS. A break is the EXPENSIVE
-            // character (25ms vs ~15.4ms), so the estimate is what decides, not
-            // the coarse character cap.
-            // The check below therefore should not fire for an offered rewrite
-            // at all; it stays as the runtime backstop it always was, for a
-            // machine slower than the margin allows for. When it does fire the
-            // outcome is unchanged: abort, block still armed, nothing sent.
-            long budgetEnd = DateTime.UtcNow.Ticks + REWRITE_WRITE_BUDGET;
-            var segments = SplitMaskedLines(masked);
-            for (int seg = 0; seg < segments.Count; seg++)
-            {
-                if (seg > 0)
-                {
-                    // Same three abort conditions as a chunk, checked before the
-                    // combination as well as before each chunk: a line break is
-                    // input into the target app just as much as a character is.
-                    if (_rewriteAbort || DateTime.UtcNow.Ticks > budgetEnd || GetForegroundWindow() != pinnedHwnd)
-                    { EmitRewrite(blockId, "aborted", "interrupted_mid_write"); return; }
-                    SendKeyCombo(nlMod, nlKey);
-                    Thread.Sleep(REWRITE_CHUNK_DELAY_MS);
-                }
-                string line = segments[seg];
-                for (int i = 0; i < line.Length; i += REWRITE_CHUNK)
-                {
-                    if (_rewriteAbort || DateTime.UtcNow.Ticks > budgetEnd || GetForegroundWindow() != pinnedHwnd)
-                    { EmitRewrite(blockId, "aborted", "interrupted_mid_write"); return; }
-                    int len = Math.Min(REWRITE_CHUNK, line.Length - i);
-                    SendUnicodeChunk(line.Substring(i, len));
-                    Thread.Sleep(REWRITE_CHUNK_DELAY_MS);
-                }
-            }
-
-            // Verify by positive identification, not absence: the read-back
-            // must come from the SAME element and match the masked text
-            // exactly, AND a full rescan of it must find nothing. A failed or
-            // empty read can never be mistaken for success here.
-            //
-            // Polled rather than a single fixed-delay read: confirmed live
-            // that a one-shot read at +60ms can catch the composer mid-write
-            // (missing its last couple of characters) even though the write
-            // completes correctly a moment later — that raced false negative
-            // left a perfectly good rewrite reported as "failed". Polling up
-            // to 400ms only ever helps a genuinely successful write catch up;
-            // a truly wrong result stays wrong for the whole window and is
-            // still reported as failed.
-            // Read-before-sleep, not sleep-before-read: by the time the last
-            // chunk's own 10ms settle has passed, the composer has usually
-            // already caught up, so checking immediately closes the dialog
-            // that much sooner in the common case. The 400ms deadline and
-            // polling behavior for the slow case are unchanged.
-            string after = null;
-            bool matches = false, clean = false;
-            long verifyDeadline = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(400).Ticks;
-            do
-            {
-                try { after = ReadText(el); } catch { }
-                matches = NormalizeWs(after) == NormalizeWs(masked);
-                clean = string.IsNullOrEmpty(ScanNames(after ?? ""));
-                if (matches && clean) break;
-                Thread.Sleep(40);
-            } while (DateTime.UtcNow.Ticks < verifyDeadline);
-            if (!matches || !clean) { EmitRewrite(blockId, "failed", "verify_mismatch"); return; }
-
-            // Verified clean — the composer holds exactly the masked text we
-            // confirmed by reading it back, nothing else. Auto-send (explicit
-            // user decision, not the original default): only ever fires after
-            // that positive verification, never on an unverified write.
-            //
-            // Settle delay before Enter. Many chat composers (confirmed live
-            // against Claude Desktop) update their own "is there something to
-            // send" state asynchronously after the last keystroke — sending
-            // Enter immediately after the verify read can arrive before that
-            // internal state has caught up to the text we just confirmed is
-            // there, so the app never treats it as a submit. 150ms was
-            // sometimes not enough (confirmed live: masked text left sitting
-            // in the composer, unsent, while this method still reported
-            // "ok"); 300ms leaves more margin.
-            Thread.Sleep(300);
-
-            // Pin check closest to the actual send — if focus moved during
-            // verify or the settle delay, do not send Enter into whatever is
-            // there now.
-            if (GetForegroundWindow() != pinnedHwnd) { EmitRewrite(blockId, "failed", "focus_changed_before_send"); return; }
-
-            // Release the block state BEFORE sending Enter — our own
-            // synthetic Enter passes back through this same keyboard hook
-            // (WH_KEYBOARD_LL sees all input, including our own), so if the
-            // block were still armed at that moment the hook would swallow
-            // its own auto-send. Preserve the usage/attribution length
-            // telemetry that clearing the buffer would otherwise lose.
-            //
-            // _blockUia also has to be cleared here, not just the typed-buffer
-            // state: it's set independently by UpdateUia() on the poll thread,
-            // which samples the focused element's text on its own ~150ms
-            // cadence with no knowledge of our Ctrl+A/Delete/retype sequence.
-            // If a poll tick lands mid-sequence — after Ctrl+A+Delete cleared
-            // the field but before the masked text was fully retyped, or on
-            // the still-unmasked original — it latches _blockUia=true and
-            // nothing else in this method resets it, so our own auto-send
-            // Enter gets swallowed by the same hook as a fresh block.
-            // _blockPaste/_lastPasteTicks are a THIRD independent latch,
-            // separate from both the typed buffer and _blockUia: if the
-            // original secret was pasted (common for API/access keys, unlike
-            // a hand-typed SSN) rather than typed, clipBlock stays true for a
-            // full 5s window (PASTE_WINDOW) regardless of what the composer
-            // now holds. Confirmed live: this is why the SSN case (typed)
-            // auto-sent fine while an AWS key case (pasted) kept swallowing
-            // our own Enter and re-blocking on the verified-clean masked
-            // text. We've already independently confirmed via UIA that the
-            // composer holds exactly the masked, clean text, which
-            // supersedes the stale clipboard signal this window exists to
-            // catch — safe to clear it here.
-            Emit("prompt", _app, "", "send", masked.Length);
-            TypedClear(); _blockTyped = false; _typedPatterns = ""; _lastBlockFiredTicks = 0;
-            _blockUia = false; _uiaPatterns = "";
-            _blockPaste = false; _lastPasteTicks = 0;
-            lock (_pendingLock) { _pendingBlockId = ""; _pendingRewritable = false; }
-
-            SendKeyPress(VK_RETURN);
-
-            // Verify the send actually landed, not just that we pressed the
-            // key. Confirmed live: the Enter can silently fail to register —
-            // composer left showing exactly the masked text, unsent — while
-            // this method still went on to report "ok" and the dialog closed
-            // having told the user their prompt was sent when it was not.
-            // That is the worst failure mode available here, worse than
-            // reporting a false failure. A real send clears the composer; if
-            // it still holds precisely what we just typed after a beat,
-            // treat that as not sent rather than assume success.
-            //
-            // POLLED, not a single read — this was the last one-shot read left
-            // in the rewrite flow and it was producing false failures. The first
-            // read is still at +REWRITE_POST_SEND_MS, which is all a native
-            // composer ever needed; after that it re-reads every
-            // REWRITE_POST_SEND_POLL_MS until this surface's own window closes
-            // (REWRITE_POST_SEND_MS by default, so a surface with no catalog
-            // value takes exactly one read and behaves as it always did).
-            //
-            // Confirmed live against Microsoft Teams: the masked message was in
-            // the conversation and this check still said "not_submitted", which
-            // cost the enforcement_redact audit event for a real governed send
-            // (index.js's 'rewrite' handler returns early on any non-"ok"
-            // result). Teams renders its composers in a WebView2 child process,
-            // so the cleared composer has to cross a Chromium accessibility
-            // serialization before UIA reports it — see REWRITE_POST_SEND_MS.
-            //
-            // Waiting longer cannot turn a genuine failure into a success: text
-            // that was never submitted stays in the composer for the whole
-            // window and still reports "not_submitted". The loop exits the
-            // instant the composer no longer holds the masked text, so the
-            // common case costs nothing extra.
-            Thread.Sleep(REWRITE_POST_SEND_MS);
-            long postSendDeadline = DateTime.UtcNow.Ticks
-                + TimeSpan.FromMilliseconds(postSendMs - REWRITE_POST_SEND_MS).Ticks;
-            string postSend = null;
-            try { postSend = ReadText(el); } catch { }
-            bool stillThere = NormalizeWs(postSend) == NormalizeWs(masked);
-            while (stillThere && DateTime.UtcNow.Ticks < postSendDeadline)
-            {
-                Thread.Sleep(REWRITE_POST_SEND_POLL_MS);
-                postSend = null;
-                try { postSend = ReadText(el); } catch { }
-                stillThere = NormalizeWs(postSend) == NormalizeWs(masked);
-            }
-            if (stillThere) { EmitRewrite(blockId, "failed", "not_submitted"); return; }
-
-            // The ONE call that carries content, and only after: the read-back
-            // proved the composer held exactly this masked text, a full rescan of
-            // it found no active pattern, and the post-send read proved it
-            // actually left the composer. `masked` — never `original`.
-            EmitRewrite(blockId, "ok", "sent", masked);
+            RunRewriteCore(new LiveRewriteIo(), blockId, original, masked, pinnedRid, pinnedHwnd);
         }
         catch (Exception ex)
         {
             try { EmitRewrite(blockId, "failed", "exception:" + ex.GetType().Name); } catch { }
         }
         finally { _rewriteInProgress = false; }
+    }
+
+    static void RunRewriteCore(IRewriteIo io, string blockId, string original, string masked, int[] pinnedRid, IntPtr pinnedHwnd)
+    {
+        // Pre-flight: everything pinned at block time must still hold.
+        if (io.ForegroundWindow() != pinnedHwnd) { EmitRewrite(blockId, "aborted", "focus_changed"); return; }
+        int[] curRid;
+        if (!io.PinFocused(out curRid)) { EmitRewrite(blockId, "aborted", "no_focused_element"); return; }
+        if (!RuntimeIdEquals(curRid, pinnedRid)) { EmitRewrite(blockId, "aborted", "element_changed"); return; }
+        string curText = io.ReadPinned();
+        if (NormalizeWs(curText) != NormalizeWs(original)) { EmitRewrite(blockId, "aborted", "text_changed"); return; }
+
+        // RICH CONTENT, re-checked here as well as at offer time (see
+        // UpdatePendingRewrite). A composer that gained a mention pill, an
+        // image or a table between the offer and the click would have it
+        // silently dropped by Ctrl+A + plain retype, so this refuses BEFORE
+        // anything is cleared — the composer is untouched and the block is
+        // still armed.
+        if (io.PinnedHasRichContent()) { EmitRewrite(blockId, "aborted", "rich_content"); return; }
+
+        // Multi-line pre-flight, and it happens BEFORE Ctrl+A/Delete so a
+        // refusal costs nothing: the composer is untouched and the block is
+        // still armed. UpdatePendingRewrite already refuses to pin such a
+        // candidate, so this is the second, independent statement of the
+        // same rule — the write path must never be able to type a line
+        // break it cannot type safely, whatever the pin says.
+        int nlMod = 0, nlKey = 0;
+        bool multiline = HasLineBreak(masked);
+        if (multiline && !ResolveNewlineKeys(NewlineKeysFor(), out nlMod, out nlKey))
+        { EmitRewrite(blockId, "aborted", "no_newline_key"); return; }
+
+        // How long the post-send confirmation at the very end of this method
+        // may keep re-reading the composer, for THIS surface. Captured HERE,
+        // in the pre-flight, for the same reason the newline combination is:
+        // both are read off the panel state the poll thread maintains, and
+        // that thread keeps sampling while we clear and retype the composer.
+        // One read of it, pinned, so the window cannot change underneath the
+        // confirmation it governs.
+        int postSendMs = PostSendVerifyMsFor();
+
+        // The user may still be holding Ctrl+Alt (from the confirm
+        // hotkey) or Enter (from the block itself) — wait briefly for a
+        // clean keyboard state before synthesizing anything.
+        long waitStart = DateTime.UtcNow.Ticks;
+        while (io.KeysHeld())
+        {
+            // A real 3-key combo can plausibly stay physically held for
+            // over half a second — 500ms was too tight and aborted valid
+            // presses. 2.5s is still well inside the 15s pin TTL.
+            if ((DateTime.UtcNow.Ticks - waitStart) > TimeSpan.FromMilliseconds(2500).Ticks)
+            { EmitRewrite(blockId, "aborted", "modifiers_stuck"); return; }
+            io.Sleep(20);
+        }
+
+        // PIN CHECK (a): the modifier wait above can last 2.5s, and focus is
+        // free to move inside the window during it. Nothing has been typed
+        // yet, so a refusal here costs the user nothing but a retry — which
+        // is why these reasons are "before_write": the composer is untouched
+        // and the dialog's normal retry stays the right answer (no copy
+        // fallback, see REWRITE_COPYABLE_REASONS in main.js).
+        //
+        // _rewriteAbort FIRST: a real keystroke or click during the wait
+        // means the user is doing something, and until this check existed
+        // the first sign of it was the write loop's own abort — AFTER
+        // Ctrl+A + Delete had already cleared the composer. Checking it here
+        // cannot abort any rewrite that would not already have been aborted
+        // (the flag is sticky and the loop's first chunk reads it); it only
+        // moves that abort in front of the destructive step.
+        if (_rewriteAbort) { EmitRewrite(blockId, "aborted", "interrupted_before_write"); return; }
+        if (io.ForegroundWindow() != pinnedHwnd) { EmitRewrite(blockId, "aborted", "focus_changed"); return; }
+        if (!FocusStillPinned(io, pinnedRid)) { EmitRewrite(blockId, "aborted", "element_changed_before_write"); return; }
+
+        io.KeyCombo(VK_CONTROL, VK_A);
+        io.Sleep(30);
+        io.KeyPress(VK_DELETE);
+        io.Sleep(30);
+
+        // The write. One segment per line, with the surface's newline
+        // combination between segments instead of a typed '\n' — see
+        // SplitMaskedLines and NewlineKeysFor.
+        //
+        // Single-line text takes exactly the path it always did: one segment,
+        // the same chunk loop, the same per-chunk abort/budget/foreground
+        // re-check, no key combination sent at all.
+        //
+        // BUDGET. The newline combinations ARE accounted for, and not by
+        // hand: EstimateWriteMs models this exact loop — every character's
+        // pace, every chunk's settle, 3*REWRITE_KEY_DELAY_MS +
+        // REWRITE_CHUNK_DELAY_MS (25ms) for every break, and one
+        // REWRITE_FOCUS_PIN_READ_MS for every pin check (b) below — and
+        // ComputeMaskCandidate refuses to offer a rewrite whose estimate
+        // does not fit REWRITE_USABLE_BUDGET_MS. A break is the EXPENSIVE
+        // character (25ms vs ~15.4ms), so the estimate is what decides, not
+        // the coarse character cap.
+        // The check below therefore should not fire for an offered rewrite
+        // at all; it stays as the runtime backstop it always was, for a
+        // machine slower than the margin allows for. When it does fire the
+        // outcome is unchanged: abort, block still armed, nothing sent.
+        long budgetEnd = DateTime.UtcNow.Ticks + REWRITE_WRITE_BUDGET;
+        var segments = SplitMaskedLines(masked);
+        for (int seg = 0; seg < segments.Count; seg++)
+        {
+            // PIN CHECK (b), per segment — before the newline combination
+            // as well as before the segment's first character, because a
+            // line break is input into the target element just as much as
+            // a character is.
+            if (!FocusStillPinned(io, pinnedRid)) { EmitRewrite(blockId, "aborted", "element_changed_mid_write"); return; }
+            if (seg > 0)
+            {
+                // Same three abort conditions as a chunk, checked before the
+                // combination as well as before each chunk: a line break is
+                // input into the target app just as much as a character is.
+                if (_rewriteAbort || DateTime.UtcNow.Ticks > budgetEnd || io.ForegroundWindow() != pinnedHwnd)
+                { EmitRewrite(blockId, "aborted", "interrupted_mid_write"); return; }
+                io.KeyCombo(nlMod, nlKey);
+                io.Sleep(REWRITE_CHUNK_DELAY_MS);
+            }
+            string line = segments[seg];
+            for (int i = 0; i < line.Length; i += REWRITE_CHUNK)
+            {
+                if (_rewriteAbort || DateTime.UtcNow.Ticks > budgetEnd || io.ForegroundWindow() != pinnedHwnd)
+                { EmitRewrite(blockId, "aborted", "interrupted_mid_write"); return; }
+                // PIN CHECK (b), every REWRITE_FOCUS_PIN_EVERY_CHUNKS-th
+                // chunk after the first (the first is covered by the
+                // per-segment check just above). EstimateWriteMs charges
+                // exactly this schedule.
+                int chunkIdx = i / REWRITE_CHUNK;
+                if (chunkIdx > 0 && chunkIdx % REWRITE_FOCUS_PIN_EVERY_CHUNKS == 0 && !FocusStillPinned(io, pinnedRid))
+                { EmitRewrite(blockId, "aborted", "element_changed_mid_write"); return; }
+                int len = Math.Min(REWRITE_CHUNK, line.Length - i);
+                io.TypeChunk(line.Substring(i, len));
+                io.Sleep(REWRITE_CHUNK_DELAY_MS);
+            }
+        }
+
+        // Verify by positive identification, not absence: the read-back
+        // must come from the SAME element and match the masked text
+        // exactly, AND a full rescan of it must find nothing. A failed or
+        // empty read can never be mistaken for success here.
+        //
+        // Polled rather than a single fixed-delay read: confirmed live
+        // that a one-shot read at +60ms can catch the composer mid-write
+        // (missing its last couple of characters) even though the write
+        // completes correctly a moment later — that raced false negative
+        // left a perfectly good rewrite reported as "failed". Polling up
+        // to 400ms only ever helps a genuinely successful write catch up;
+        // a truly wrong result stays wrong for the whole window and is
+        // still reported as failed.
+        // Read-before-sleep, not sleep-before-read: by the time the last
+        // chunk's own 10ms settle has passed, the composer has usually
+        // already caught up, so checking immediately closes the dialog
+        // that much sooner in the common case. The 400ms deadline and
+        // polling behavior for the slow case are unchanged.
+        string after = null;
+        bool matches = false, clean = false;
+        long verifyDeadline = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(400).Ticks;
+        do
+        {
+            after = io.ReadPinned();
+            matches = NormalizeWs(after) == NormalizeWs(masked);
+            clean = string.IsNullOrEmpty(ScanNames(after ?? ""));
+            if (matches && clean) break;
+            io.Sleep(40);
+        } while (DateTime.UtcNow.Ticks < verifyDeadline);
+        if (!matches || !clean) { EmitRewrite(blockId, "failed", "verify_mismatch"); return; }
+
+        // Verified clean — the composer holds exactly the masked text we
+        // confirmed by reading it back, nothing else. Auto-send (explicit
+        // user decision, not the original default): only ever fires after
+        // that positive verification, never on an unverified write.
+        //
+        // Settle delay before Enter. Many chat composers (confirmed live
+        // against Claude Desktop) update their own "is there something to
+        // send" state asynchronously after the last keystroke — sending
+        // Enter immediately after the verify read can arrive before that
+        // internal state has caught up to the text we just confirmed is
+        // there, so the app never treats it as a submit. 150ms was
+        // sometimes not enough (confirmed live: masked text left sitting
+        // in the composer, unsent, while this method still reported
+        // "ok"); 300ms leaves more margin.
+        io.Sleep(300);
+
+        // Pin check closest to the actual send — if focus moved during
+        // verify or the settle delay, do not send Enter into whatever is
+        // there now.
+        if (io.ForegroundWindow() != pinnedHwnd) { EmitRewrite(blockId, "failed", "focus_changed_before_send"); return; }
+        // PIN CHECK (c): the same question for the ELEMENT. An Enter sent
+        // into a different element of the same window submits whatever
+        // that element holds. "failed", like focus_changed_before_send: the
+        // write completed and verified, only the send did not happen — the
+        // masked text is sitting in the composer, unsent.
+        if (!FocusStillPinned(io, pinnedRid)) { EmitRewrite(blockId, "failed", "element_changed_before_send"); return; }
+
+        // Release the block state BEFORE sending Enter — our own
+        // synthetic Enter passes back through this same keyboard hook
+        // (WH_KEYBOARD_LL sees all input, including our own), so if the
+        // block were still armed at that moment the hook would swallow
+        // its own auto-send. Preserve the usage/attribution length
+        // telemetry that clearing the buffer would otherwise lose.
+        //
+        // _blockUia also has to be cleared here, not just the typed-buffer
+        // state: it's set independently by UpdateUia() on the poll thread,
+        // which samples the focused element's text on its own ~150ms
+        // cadence with no knowledge of our Ctrl+A/Delete/retype sequence.
+        // If a poll tick lands mid-sequence — after Ctrl+A+Delete cleared
+        // the field but before the masked text was fully retyped, or on
+        // the still-unmasked original — it latches _blockUia=true and
+        // nothing else in this method resets it, so our own auto-send
+        // Enter gets swallowed by the same hook as a fresh block.
+        // _blockPaste/_lastPasteTicks are a THIRD independent latch,
+        // separate from both the typed buffer and _blockUia: if the
+        // original secret was pasted (common for API/access keys, unlike
+        // a hand-typed SSN) rather than typed, clipBlock stays true for a
+        // full 5s window (PASTE_WINDOW) regardless of what the composer
+        // now holds. Confirmed live: this is why the SSN case (typed)
+        // auto-sent fine while an AWS key case (pasted) kept swallowing
+        // our own Enter and re-blocking on the verified-clean masked
+        // text. We've already independently confirmed via UIA that the
+        // composer holds exactly the masked, clean text, which
+        // supersedes the stale clipboard signal this window exists to
+        // catch — safe to clear it here.
+        TypedClear(); _blockTyped = false; _typedPatterns = ""; _lastBlockFiredTicks = 0;
+        _blockUia = false; _uiaPatterns = "";
+        _blockPaste = false; _lastPasteTicks = 0;
+        lock (_pendingLock) { _pendingBlockId = ""; _pendingRewritable = false; }
+
+        // ── THE LAST GATE, closest to the Enter ──────────────────────────
+        // The verify above ran BEFORE the 300ms settle and the two pin
+        // checks, and the latches that would have caught a sensitive paste
+        // were cleared just above. A paste (or a script's input) landing in
+        // that window used to be sent by OUR Enter and then audited as a
+        // clean redact of the masked text. So, after the latch clear and
+        // with nothing in between but the Enter itself:
+        //   * a real keystroke / click since the rewrite started
+        //     (_rewriteAbort, set by the hooks) refuses the send;
+        //   * the composer is read ONE more time and must still hold exactly
+        //     the masked text, and rescan clean.
+        // Either failure is "failed": the write was fine, the send was not
+        // made. The UIA latch is RE-ARMED from that final read, so if what
+        // is in the composer now is sensitive, the user's own next Enter is
+        // blocked straight away rather than on the poll thread's next tick.
+        // The residual window is the microseconds between this read and the
+        // key event; it cannot be closed from outside the target app.
+        if (_rewriteAbort) { EmitRewrite(blockId, "failed", "interrupted_before_send"); return; }
+        string finalRead = io.ReadPinned();
+        string finalHits = ScanNames(finalRead ?? "");
+        if (NormalizeWs(finalRead) != NormalizeWs(masked) || !string.IsNullOrEmpty(finalHits))
+        {
+            _uiaPatterns = finalHits; _blockUia = finalHits.Length > 0;
+            EmitRewrite(blockId, "failed", "content_changed_before_send");
+            return;
+        }
+
+        // Only now is a send actually about to happen, so only now is it
+        // counted (length only, the masked text's).
+        Emit("prompt", _app, "", "send", masked.Length);
+        io.KeyPress(VK_RETURN);
+
+        // Verify the send actually landed, not just that we pressed the
+        // key. Confirmed live: the Enter can silently fail to register —
+        // composer left showing exactly the masked text, unsent — while
+        // this method still went on to report "ok" and the dialog closed
+        // having told the user their prompt was sent when it was not.
+        // That is the worst failure mode available here, worse than
+        // reporting a false failure. A real send clears the composer; if
+        // it still holds precisely what we just typed after a beat,
+        // treat that as not sent rather than assume success.
+        //
+        // POLLED, not a single read — this was the last one-shot read left
+        // in the rewrite flow and it was producing false failures. The first
+        // read is still at +REWRITE_POST_SEND_MS, which is all a native
+        // composer ever needed; after that it re-reads every
+        // REWRITE_POST_SEND_POLL_MS until this surface's own window closes
+        // (REWRITE_POST_SEND_MS by default, so a surface with no catalog
+        // value takes exactly one read and behaves as it always did).
+        //
+        // Confirmed live against Microsoft Teams: the masked message was in
+        // the conversation and this check still said "not_submitted", which
+        // cost the enforcement_redact audit event for a real governed send
+        // (index.js's 'rewrite' handler returns early on any non-"ok"
+        // result). Teams renders its composers in a WebView2 child process,
+        // so the cleared composer has to cross a Chromium accessibility
+        // serialization before UIA reports it — see REWRITE_POST_SEND_MS.
+        //
+        // Waiting longer cannot turn a genuine failure into a success: text
+        // that was never submitted stays in the composer for the whole
+        // window and still reports "not_submitted". The loop exits the
+        // instant the composer no longer holds the masked text, so the
+        // common case costs nothing extra.
+        io.Sleep(REWRITE_POST_SEND_MS);
+        long postSendDeadline = DateTime.UtcNow.Ticks
+            + TimeSpan.FromMilliseconds(postSendMs - REWRITE_POST_SEND_MS).Ticks;
+        string postSend = io.ReadPinned();
+        bool stillThere = NormalizeWs(postSend) == NormalizeWs(masked);
+        while (stillThere && DateTime.UtcNow.Ticks < postSendDeadline)
+        {
+            io.Sleep(REWRITE_POST_SEND_POLL_MS);
+            postSend = io.ReadPinned();
+            stillThere = NormalizeWs(postSend) == NormalizeWs(masked);
+        }
+        if (stillThere) { EmitRewrite(blockId, "failed", "not_submitted"); return; }
+
+        // The ONE call that carries content, and only after: the read-back
+        // proved the composer held exactly this masked text, a full rescan of
+        // it found no active pattern, and the post-send read proved it
+        // actually left the composer. `masked` — never `original`.
+        EmitRewrite(blockId, "ok", "sent", masked);
+    }
+
+    // ── Rich content in the composer ─────────────────────────────────────────
+    //
+    // Tier B's write is Ctrl+A, Delete, then a PLAIN-TEXT retype. That is
+    // lossless for a plain composer and silently destructive for a rich one: a
+    // mention pill ("@Alex" as a person chip), an inline image, a table, a code
+    // block's list structure — all of it is replaced by text, and the read-back
+    // verification cannot see the loss because the TEXT still matches. So an
+    // offer is refused, with why_not "rich_content", when the composer's UIA
+    // subtree holds any of the control types those render as.
+    //
+    // BOUNDED: at most RICH_WALK_MAX_NODES descendants are visited (the root
+    // itself is not counted and not classified — it is the composer). A plain
+    // composer has a handful of nodes. FAIL CLOSED at both edges: a walk that
+    // THROWS is treated as rich, and so is a walk that reaches the cap with
+    // nodes still unvisited — "we did not look at all of it" is not "it is
+    // plain". The cost is an offer the user did not get (a very long,
+    // many-paragraph composer), against a silent loss of content they had.
+    //
+    // What is read: control TYPES only. No Name, no Value, no text of any
+    // node — this walk classifies structure and never sees content.
+    const int RICH_WALK_MAX_NODES = 50;
+
+    static bool IsRichControlTypeId(int id)
+    {
+        return id == ControlType.Hyperlink.Id || id == ControlType.Image.Id
+            || id == ControlType.Table.Id || id == ControlType.List.Id;
+    }
+
+    // The walk itself, over an ABSTRACT tree so its bound and its verdict can be
+    // tested without a live UIA tree: `firstChild` / `nextSibling` return null
+    // at the end, `controlTypeId` classifies one node. Pre-order, iterative (no
+    // recursion depth to worry about), visits at most `maxNodes` descendants.
+    // Returns true on the first rich node, AND when the cap is reached with
+    // descendants left unvisited (no verdict = rich); `visited` reports how
+    // many descendants were classified.
+    static bool SubtreeHasRichContent(object root, Func<object, object> firstChild, Func<object, object> nextSibling,
+        Func<object, int> controlTypeId, int maxNodes, out int visited)
+    {
+        visited = 0;
+        if (root == null) return false;
+        var stack = new Stack<object>();
+        object child = firstChild(root);
+        if (child != null) stack.Push(child);
+        while (stack.Count > 0 && visited < maxNodes)
+        {
+            object node = stack.Pop();
+            visited++;
+            if (IsRichControlTypeId(controlTypeId(node))) return true;
+            // Sibling pushed first so the child is visited next (pre-order).
+            object sib = nextSibling(node);
+            if (sib != null) stack.Push(sib);
+            object kid = firstChild(node);
+            if (kid != null) stack.Push(kid);
+        }
+        // Anything still on the stack is a real, unvisited descendant (only
+        // non-null nodes are ever pushed): the cap was hit with no verdict.
+        return stack.Count > 0;
+    }
+
+    // The live walk. THROWS on a UIA failure — the two callers decide what a
+    // throw means (both: rich, i.e. fail closed).
+    static bool WalkComposerRich(AutomationElement el)
+    {
+        var walker = TreeWalker.ControlViewWalker;
+        int visited;
+        return SubtreeHasRichContent(el,
+            n => walker.GetFirstChild((AutomationElement)n),
+            n => walker.GetNextSibling((AutomationElement)n),
+            n => { var ct = ((AutomationElement)n).Current.ControlType; return ct == null ? 0 : ct.Id; },
+            RICH_WALK_MAX_NODES, out visited);
+    }
+
+    static bool ComposerHasRichContent(AutomationElement el)
+    {
+        if (el == null) return true;
+        try { return WalkComposerRich(el); }
+        catch { return true; }
+    }
+
+    // Offer-time cache, poll thread only. The walk runs once per distinct
+    // (element, prompt) pair rather than every ~150ms tick: a composer only
+    // gains a pill or an image by its content changing, and the content is part
+    // of the key. A throw is not cached (ComposerHasRichContent returns true
+    // for it) — the key is cleared so the next tick walks again.
+    static string _richCacheKey = null;
+    static bool _richCacheVal = false;
+    static bool ComposerHasRichContentCached(AutomationElement el, int[] rid, string text)
+    {
+        string key = (rid == null ? "" : string.Join(".", rid)) + "|" + NormalizeWs(text);
+        if (_richCacheKey != null && string.Equals(_richCacheKey, key, StringComparison.Ordinal)) return _richCacheVal;
+        bool threw = false, rich;
+        try { rich = WalkComposerRich(el); }
+        catch { rich = true; threw = true; }
+        _richCacheKey = threw ? null : key;
+        _richCacheVal = rich;
+        return rich;
     }
 
     // SendInput's return value is the count of events it actually accepted —
@@ -7237,7 +10010,7 @@ Add-Type -TypeDefinition $source -ReferencedAssemblies @(
     'System.Web.Extensions'
 ) -ErrorAction Stop
 
-[CfaiEnforcer]::Start(($aiProcs -split ','), $patNames.ToArray(), $patSources.ToArray(), $patSevs.ToArray(), $patLabels.ToArray(), [bool[]]($patIgnoreCase.ToArray()), $hbPath, $modelRouterEnabled, $mrConfigJson, $ideProcsJson, $aiPanelsJson, $agentSurfacesJson)
+[CfaiEnforcer]::Start(($aiProcs -split ','), $patNames.ToArray(), $patSources.ToArray(), $patSevs.ToArray(), $patLabels.ToArray(), [bool[]]($patIgnoreCase.ToArray()), $hbPath, $modelRouterEnabled, $mrConfigJson, $ideProcsJson, $aiPanelsJson, $agentSurfacesJson, $egressSurfacesJson)
 
 # Keep the process alive — the C# background threads (poll + message pump) do
 # the work and write events to stdout. Node reads them.

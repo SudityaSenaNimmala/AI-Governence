@@ -23,6 +23,11 @@ export const HELPER_SCRIPTS = [
   'toast-helper.ps1',
   'file-dialog-watcher.ps1',
   'attachment-watcher.ps1',
+  // The cloud-sync-root watcher. An orphan of it holds live FileSystemWatcher
+  // subscriptions on the user's OneDrive folders with nobody left to consume its
+  // output — observation with no governance behind it, which is exactly the
+  // state this feature's policy gate exists to make impossible.
+  'sync-watcher.ps1',
   'enforcer-win.ps1',
 ];
 

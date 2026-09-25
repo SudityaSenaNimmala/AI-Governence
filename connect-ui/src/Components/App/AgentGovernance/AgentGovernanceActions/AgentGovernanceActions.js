@@ -7,6 +7,49 @@ const BASE = "/api";
 import { agDemoResponse } from "../agentGovernanceDemoData";
 // ── END DEMO MODE ───────────────────────────────────────────────────────────
 
+// ── ADMIN CREDENTIAL ────────────────────────────────────────────────────────
+// POST /lifecycle/block and POST /lifecycle/unblock are behind requireAdminAuth
+// on the server: they write the blocklist BOTH enforcers act on, so an
+// unauthenticated caller could block — or lift the block on — any AI system in
+// the org. Everything else on this router is unauthenticated and stays that way.
+//
+// Same optional, BUILD-TIME VITE_ADMIN_TOKEN seam AIHubPage's adminFetch uses
+// (see its AUTH SEAM comment for why there is no runtime entry point and no
+// default): with nothing set no Authorization header is sent, the server answers
+// 401, and `request` below surfaces that as a thrown error the caller already
+// handles — the same state every other admin-gated panel in this dashboard is in
+// until admin OAuth lands. `credentials` is included so the day the server issues
+// a session cookie, this needs no change.
+//
+// hasAdminCredential() is THE single answer to "can this build even attempt an
+// admin write?" — true only when VITE_ADMIN_TOKEN is a non-empty string.
+// Production builds set VITE_ADMIN_TOKEN='' (deploy.yml), so there every admin
+// write would 401; the admin controls in AI Hub and Agent Governance render
+// disabled with ADMIN_CREDENTIAL_HINT instead of letting each click fail. It
+// lives here rather than in AIHubPage.jsx because the Agent Governance tabs
+// need it too and AIHubPage already imports this module (the reverse import
+// would be circular). It is a UI affordance only: the server's requireAdminAuth
+// is the real gate, and each caller still shows a 401 if one comes back (an
+// ADMIN_AUTH_OPEN deployment, or a wrong token).
+export function hasAdminCredential() {
+  const token = import.meta.env.VITE_ADMIN_TOKEN;
+  return typeof token === "string" && token.length > 0;
+}
+
+export const ADMIN_CREDENTIAL_HINT = "Admin login required — this action needs an admin credential";
+
+function adminInit(options) {
+  const token = import.meta.env.VITE_ADMIN_TOKEN || "";
+  return {
+    ...options,
+    credentials: "same-origin",
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : null),
+      ...(options?.headers || {}),
+    },
+  };
+}
+
 async function request(path, options, timeoutMs = 60000) {
   // ── DEMO MODE (remove to revert) ──────────────────────────────────────────
   const demo = agDemoResponse(path, options);
@@ -17,9 +60,14 @@ async function request(path, options, timeoutMs = 60000) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${BASE}${path}`, {
-      headers: { "Content-Type": "application/json" },
       signal: controller.signal,
       ...options,
+      // MERGED, not replaced. `...options` used to clobber this whole object, so
+      // the moment a caller passed any header of its own — as the two admin-gated
+      // writes below now do — the JSON content-type vanished and express.json()
+      // silently parsed nothing, turning a valid block into "agent_id is
+      // required". Callers can still override the content-type by naming it.
+      headers: { "Content-Type": "application/json", ...(options?.headers || {}) },
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
@@ -94,18 +142,19 @@ export const agentGovernanceApi = {
     });
   },
 
+  // The two admin-gated writes on this router — see adminInit above.
   async blockAgent(data) {
-    return request("/lifecycle/block", {
+    return request("/lifecycle/block", adminInit({
       method: "POST",
       body: JSON.stringify(data),
-    });
+    }));
   },
 
   async unblockAgent(data) {
-    return request("/lifecycle/unblock", {
+    return request("/lifecycle/unblock", adminInit({
       method: "POST",
       body: JSON.stringify(data),
-    });
+    }));
   },
 
   async getBlockedAgents() {

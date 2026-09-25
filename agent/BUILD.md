@@ -47,6 +47,48 @@ xcrun notarytool submit build/darwin-arm64/ai-gov-agent --keychain-profile aigov
 GPG-sign the `.deb` / `.rpm` produced by the distro packaging step
 (not yet implemented — see TODO in `installer/linux/`).
 
+## Electron desktop app (Windows)
+
+A separate build from the SEA binary above — this is the full Electron app
+(banner/popup/dialog UI, system tray) that `server/src/routes/installations.js`'s
+`/api/v1/installations/desktop-app` route serves. It reads a **pre-built**
+snapshot at `agent/build/electron-dist/win-unpacked/` rather than building live,
+so that snapshot has to be regenerated and re-committed (it's tracked via Git
+LFS) whenever `agent/src/` or `browser-extension/` changes and someone needs
+the desktop-app download to reflect it — the production server is Linux and
+cannot run `electron-builder` for a Windows target itself.
+
+```powershell
+cd agent/electron
+npm run dist:win
+```
+Output: `agent/build/electron-dist/win-unpacked/`.
+
+### One-time Windows prerequisite: symbolic-link privilege
+
+The first time this runs on a given machine/account, it fails partway through
+with:
+```
+ERROR: Cannot create symbolic link : A required privilege is not held by the client.
+```
+`electron-builder` downloads a bundled toolset (`winCodeSign`) that contains
+macOS `.dylib` files stored as symlinks, and extracting those requires a
+privilege a standard Windows account doesn't have by default — this happens
+even for a Windows-only (`--win`) build, and is unrelated to code-signing
+actually being configured (signing is skipped either way with no cert
+configured). Fix with either:
+- **Enable Developer Mode** (Settings → Privacy & security → For developers →
+  Developer Mode). One-time per machine; every future build on that account
+  just works afterward.
+- Run the build from an **elevated** (Administrator) terminal instead, if you'd
+  rather not change that setting.
+
+### `assets/icon.png` must be at least 256×256
+
+`electron-builder` needs at least a 256×256 source image to generate the
+Windows `.ico`; a smaller one fails the build with
+`image ... must be at least 256x256` before it gets anywhere near packaging.
+
 ## CI build matrix (sketch — GitHub Actions)
 
 ```yaml

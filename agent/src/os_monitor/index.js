@@ -12,7 +12,7 @@
 
 import { EventEmitter } from 'node:events';
 import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn as cpSpawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -32,6 +32,7 @@ import {
   filterBlockedAgents,
   synthesizePlatformBlocks,
   normalizeAgentRows,
+  identifyEgressSurface,
 } from './ai-processes.js';
 import { scan, lengthBucket, BLOCK_PATTERNS, getBlockPatterns, isTextReadable, isBinaryParseable, isImage, isArchive } from './classifier.js';
 import { PolicySync } from './policy-sync.js';
@@ -40,6 +41,7 @@ import { buildFileUploadEvent } from './file-handler.js';
 import { FileDialogWatcher } from './file-dialog-watcher.js';
 import { AttachmentWatcher } from './attachment-watcher.js';
 import { PromptWatcher } from './prompt-watcher.js';
+import { SyncWatcher } from './sync-watcher.js';
 import { Enforcer } from './enforcer.js';
 import { spawnEnforcerWatchdog } from './enforcer-watchdog.js';
 import { saveCachedRoutingRules } from './model-router-config.js';
@@ -47,8 +49,7 @@ import { Reporter } from './reporter.js';
 // The single-slot offline queue for a Request Access submission, and the poller
 // that drains it. Owned by blocked-agents-sync.js — one path files these, one
 // path retries them.
-import { PENDING_REQUEST_PATH } from './blocked-agents-sync.js';
-import { saveCachedRoutingRules } from './model-router-config.js';
+import { PENDING_REQUEST_PATH, EGRESS_PATH } from './blocked-agents-sync.js';
 import { createHash } from 'node:crypto';
 
 // How long after firing a toast for a (clipboardSeq, processName) pair we
@@ -71,6 +72,17 @@ const REWRITE_CONTEXT_TTL_MS = 60_000;
 // CfaiRequestDialog.ReasonMax in toast-helper.ps1), and this is the belt-and-
 // braces cap on the value that actually leaves the machine.
 const REASON_MAX = 500;
+
+// How often index.js re-reads ~/.cloudfuze-aigov/egress-surfaces.json to decide
+// whether the cloud-sync-root watcher may run at all.
+//
+// Matched to blocked-agents-sync.js's own 10s write cadence, so an admin turning
+// the policy OFF stops the filesystem observation within about one interval of
+// the sync noticing. The other direction (turning it on) is equally fast, but the
+// off direction is the one this number is chosen for: while a policy is
+// withdrawn, continuing to watch someone's Documents folder is observation with
+// no governance behind it.
+const EGRESS_POLICY_POLL_MS = 10_000;
 
 // "Which agent is this block/request about", folded to a comparison key the
 // same way the server folds it (agentKeyFor + normalizeAgentName in
@@ -101,7 +113,49 @@ function agentMatchKey({ block_scope, agent_id, agent_name }) {
 // every pure chat app, and an IDE in its whole-app fallback mode (Cursor with no
 // panel focused), where process:"Cursor" is the correct identity.
 function identifyEventAi(ev) {
-  return (ev?.panel ? identifyAiPanel(ev.panel) : null) || identifyAiProcess(ev?.process);
+  // The PROCESS rides along so a pane hosted by several apps is named per host
+  // ("Word Copilot", "Excel Copilot" — see office_copilot_pane.productByProc).
+  return (ev?.panel ? identifyAiPanel(ev.panel, ev.process) : null) || identifyAiProcess(ev?.process);
+}
+
+// WHICH AGENT an enforcer 'block' event is about, as the four audit-record keys
+// the server's enforcement-metadata allowlist maps: agent_name, agent_id,
+// agent_scope, surface. Shared by the enforcement_block record and the rewrite
+// pin, so enforcement_redact carries byte-identical values.
+//
+// PROVENANCE IS THE WHOLE POINT. enforcer-win.ps1 fills `agent` / `agent_id`
+// from exactly two sources and says which one on `agent_src`:
+//   'row'  — an agent-scoped blocked/governed POLICY ROW: the name an admin
+//            typed and the id the server issued. → agent_scope 'agent'.
+//   'sole' — our own catalog's soleAgent for the focused panel (no id).
+//            → agent_scope 'panel', the same enum govstate uses for
+//            "the composer signature alone identifies it".
+//   anything else — no attribution, and NO agent key is emitted at all.
+// A name read off another app's window or accessibility tree never reaches the
+// event (the .ps1 only ever returns the row's value for it), and this function
+// does not re-derive, guess or fall back to one: an unknown agent_src means the
+// agent fields are omitted, never filled from `ai.product`.
+//
+// `surface` is OUR catalog id — the panel id when the block came from an IDE /
+// host-app panel, else the agent-surface id (m365_copilot, …). Never a title.
+//
+// Keys whose value is unknown are OMITTED rather than sent empty, so a record
+// can tell "no agent dimension" from "an agent with an empty name". Never
+// logged — see the 'block' handler's log line.
+function blockAgentAttribution(ev) {
+  const out = {};
+  const src = String(ev?.agent_src ?? '');
+  const scope = src === 'row' ? 'agent' : src === 'sole' ? 'panel' : '';
+  const name = String(ev?.agent ?? '').trim();
+  const id = String(ev?.agent_id ?? '').trim();
+  if (scope && (name || id)) {
+    if (name) out.agent_name = name;
+    if (id) out.agent_id = id;
+    out.agent_scope = scope;
+  }
+  const surface = String(ev?.panel || ev?.surface || '').trim();
+  if (surface) out.surface = surface;
+  return out;
 }
 
 // The access-exception key for a platform/agent/panel block event. Most
@@ -173,7 +227,7 @@ export class OsMonitor extends EventEmitter {
   // host widens its own watcher to cover every AI process instead and tells this
   // one to stand down. Everything else here — the enforcer, clipboard, dialogs,
   // attachments, policy and feature sync — still runs.
-  constructor({ serverUrl, token, log, enforcerEnabled = true, skipPromptWatcher = false, legacyStdout = false }) {
+  constructor({ serverUrl, token, log, enforcerEnabled = true, skipPromptWatcher = false, legacyStdout = false, fleetStatePath = null }) {
     super();
     this.log = log;
     // The LOCAL setting. Written once, here, and never again — #applyFeatures
@@ -186,6 +240,10 @@ export class OsMonitor extends EventEmitter {
     // setting.
     this.enforcerEnabled = this.localEnforcerEnabled;
     this.skipPromptWatcher = skipPromptWatcher === true;
+    // Where the last REAL fleet `dlp` value is remembered across restarts, so
+    // the enforcer's AI-evidence routes start in the admin's last-known state
+    // rather than on (security review L3). Overridable for tests.
+    this.fleetStatePath = fleetStatePath || join(homedir(), '.cloudfuze-aigov', 'fleet-evidence-dlp.json');
     this.legacyStdout = legacyStdout === true;
     this.#console = this.legacyStdout ? console : { log() {} };
     // Lifecycle flag, distinct from the per-feature `this.running` map below:
@@ -249,6 +307,39 @@ export class OsMonitor extends EventEmitter {
     this.dialogWatcher = new FileDialogWatcher({ log, aiProcessNames: aiProcNames, onRespawn: reArm });
     this.attachmentWatcher = new AttachmentWatcher({ log, aiProcessNames: aiProcNames, onRespawn: reArm });
     this.promptWatcher = new PromptWatcher({ log, aiProcessNames: aiProcNames });
+    // ── The cloud-sync-root watcher (OneDrive / SharePoint) ──────────────────
+    //
+    // Deliberately given NO process list: it watches a FILESYSTEM location, not
+    // an app, and it is the only watcher here whose subject is not something the
+    // user did in a window. Constructed with an EMPTY armed-root set, so it does
+    // nothing at all until #syncEgressPolicy reads a governed policy off disk —
+    // which is the state of every machine whose admin governs no cloud-sync host.
+    //
+    // The re-arm hook is a SEPARATE one from `reArm` above, because the thing
+    // that has to be re-stated is different: for the two UIA watchers it is the
+    // host_arm command for a governed Teams conversation, and for this one it is
+    // the sync-root policy, which lives in the dead child's env.
+    this.syncWatcher = new SyncWatcher({
+      log,
+      armedRoots: [],
+      onRespawn: (watcher) => {
+        if (this.egressSyncRoots.length > 0) {
+          watcher.armedRoots = this.egressSyncRoots;
+        }
+      },
+    });
+    // The `sync_roots` entries from egress-surfaces.json, i.e. the POLICY answer
+    // to "may this machine's synced folders be observed at all". Empty until a
+    // poll says otherwise, and re-emptied the moment an admin withdraws the
+    // policy — see #syncEgressPolicy.
+    this.egressSyncRoots = [];
+    // Surface id -> capture_mode, from the SAME policy tick as egressSyncRoots.
+    // Only 'hold' can ever swallow a send chord (see captureModeFor in
+    // ai-processes.js) — 'observe' and 'block_critical' both leave it alone.
+    // #reportEgressFile reads this so its toast never claims a hold that the
+    // enforcer will not actually arm.
+    this.egressCaptureModeById = new Map();
+    this.egressPolicyTimer = null;
     // Keystroke send-blocker — actually prevents the send (swallows Enter /
     // Ctrl+V) when the focused AI prompt or clipboard holds a blocked pattern.
     this.enforcer = new Enforcer({
@@ -517,6 +608,228 @@ export class OsMonitor extends EventEmitter {
     return fileEvent;
   }
 
+  // ── May this machine's synced folders be observed at all? ─────────────────
+  //
+  // Reads ~/.cloudfuze-aigov/egress-surfaces.json — written only by
+  // blocked-agents-sync.js, and only ever carrying a sync root when an admin
+  // holds a GOVERNED ai_platforms row for a cloud-sync host — and pushes the
+  // answer at the sync watcher, which spawns nothing while it is empty.
+  //
+  // A MISSING OR UNREADABLE FILE MEANS NO POLICY, i.e. an empty root set and no
+  // observation. That is the correct fail direction and it is the opposite of the
+  // convention the sync layer uses for the same file: over THERE, "I could not
+  // reach the server" must leave the last known policy in force, because
+  // rewriting the file could silently unblock something. Over HERE the question
+  // is "may I open a handle on the user's Documents folder", and the answer to
+  // that on no evidence is no. The file itself is the durable state; this side
+  // never invents one.
+  #syncEgressPolicy() {
+    let roots = [];
+    let captureModeById = new Map();
+    try {
+      if (existsSync(EGRESS_PATH)) {
+        const payload = JSON.parse(readFileSync(EGRESS_PATH, 'utf8'));
+        const list = Array.isArray(payload?.sync_roots) ? payload.sync_roots : [];
+        // VERIFIED AND ENFORCING, both, exactly as every other two-flag surface
+        // in this product: a sync root that has not had a live pass is inert even
+        // when an admin governs its host. As shipped both flags are false, so
+        // this filter empties the list and no filesystem observation happens at
+        // all until a human flips them.
+        roots = list.filter((r) => r && r.verified === true && r.enforce === true);
+        // Same two-flag filter, for the mail-surface capture_mode this toast
+        // reads below — an unverified surface's capture_mode is not policy yet.
+        const surfaces = Array.isArray(payload?.surfaces) ? payload.surfaces : [];
+        captureModeById = new Map(
+          surfaces
+            .filter((s) => s && s.id && s.verified === true && s.enforce === true)
+            .map((s) => [String(s.id), String(s.capture_mode || 'observe')]),
+        );
+      }
+    } catch (err) {
+      // Unreadable or half-written (the sync rewrites it every 10s). No policy
+      // this pass; the next one gets a complete file.
+      roots = [];
+      captureModeById = new Map();
+    }
+    this.egressCaptureModeById = captureModeById;
+    const changed = JSON.stringify(roots.map((r) => r.id).sort())
+      !== JSON.stringify(this.egressSyncRoots.map((r) => r.id).sort());
+    this.egressSyncRoots = roots;
+    if (!changed) return;
+    // setArmedRoots decides for itself whether that means start, restart or
+    // stop — see SyncWatcher. Only reached on a real change, so a healthy
+    // FileSystemWatcher is never torn down by a poll that found nothing new.
+    this.syncWatcher.setArmedRoots(roots);
+    if (roots.length > 0 && this.running.dlp) {
+      this.syncWatcher.stopRequested = false;
+      this.syncWatcher.start();
+    }
+  }
+
+  // ── The shared reporting tail for an egress FILE event ────────────────────
+  //
+  // The three egress file routes (an Outlook compose chip, an Outlook attach
+  // dialog, a file appearing in a sync root) differ only in how they NOTICED the
+  // file. Everything after that — build the event, dedupe it, enqueue it, toast
+  // it — is identical, and writing it once is what keeps the three from drifting
+  // apart on the one thing that matters: what the toast is allowed to claim.
+  //
+  // `hold` is what separates the mail routes from the sync route. For a mail
+  // attachment there is a send chord to swallow, so a high/critical scan arms an
+  // attachment hold. For a sync root there is NOTHING to hold — the file is
+  // already in a folder that uploads itself, and this feature explicitly does not
+  // move, rename or quarantine anything (a confirmed decision) — so the sync
+  // route passes hold:false and the toast says so plainly.
+  //
+  // buildFileUploadEvent, #armAttachHold and #releaseAttachHold are all reused
+  // UNCHANGED: this is a new call site, not a new mechanism.
+  //
+  // NOTE ON FAIL-OPEN, which is achieved here by OMISSION and is the point:
+  // there is no `unverified`/`failClosed` term anywhere in this method. The
+  // attachment_appeared handler's fail-closed rule is scoped to
+  // `inGovernedConversation` (`!!governed || hostChip`), and both of those terms
+  // are about a HOST-APP agent conversation — a condition an egress surface can
+  // never satisfy, since it is not a host app and no govstate ever names it. So
+  // an unscannable or unverifiable file attached to an email is REPORTED and
+  // never HELD, automatically, with no exclusion to maintain. Escalating on "we
+  // could not read it" in a mail client would mean blocking legacy .doc files and
+  // password-protected archives from being emailed at all, which nobody asked
+  // for. agent/tests/os-monitor-egress.test.mjs asserts it.
+  async #reportEgressFile({ path, filename, via, surfaceId, processName, origin = null, hold = true }) {
+    const ident = identifyEgressSurface(surfaceId) || { product: processName || surfaceId, vendor: null };
+    // PROVISIONAL hold, armed BEFORE the scan for any extension the classifier
+    // can actually read — the same race against a fast send chord the AI path
+    // arms one for, and the same "don't hold what we cannot explain" exclusion
+    // for media and unknown types.
+    // `hold` says this came from a route CAPABLE of holding (mail, not sync) —
+    // it is NOT the policy answer. Only capture_mode:'hold' is: that is the one
+    // value captureModeFor() (ai-processes.js) ever lets the enforcer's
+    // _egressHoldProcs actually swallow a send chord for, and this toast must
+    // never claim more protection than that. Read from the SAME policy tick
+    // that arms the sync watcher (#syncEgressPolicy), keyed on this surface.
+    const reallyHeld = hold && this.egressCaptureModeById.get(surfaceId) === 'hold';
+    const scannable = reallyHeld && (
+      isTextReadable(filename) || isBinaryParseable(filename) || isImage(filename) || isArchive(filename)
+    );
+    if (scannable) {
+      this.#armAttachHold(filename, { patterns: '', ttlMs: 3000, processName });
+    }
+    try {
+      const fileEvent = await buildFileUploadEvent({
+        path,
+        via,
+        service: ident.product,
+        vendor: ident.vendor,
+        processName,
+        // ALWAYS EMPTY, and this is the strictest instance of the host-app rule
+        // rather than an inherited one: an Outlook window title is the message
+        // SUBJECT LINE, plus the recipient's display name in a reply. Both are
+        // content and neither is what this record is about.
+        windowTitle: '',
+        log: this.log,
+      });
+      if (!fileEvent) {
+        if (scannable) this.#releaseAttachHold(filename);
+        return;
+      }
+      // Which egress surface, and — for a sync root — which DIRECTION we believe
+      // the file was moving. `origin` is only ever 'local_new' or 'unknown' here:
+      // sync-watcher.ps1 drops a 'sync_down' classification outright rather than
+      // reporting a download as an upload.
+      fileEvent.egress_surface = surfaceId || '';
+      if (origin) fileEvent.origin = origin;
+
+      const cs = fileEvent.content_scan;
+      const severity = fileEvent.severity;
+      // NO fail-closed term. See the long note above this method.
+      const shouldHold = reallyHeld && (severity === 'high' || severity === 'critical');
+      if (shouldHold) {
+        const patternNames = (cs?.matches || []).map((m) => m.pattern).join(',') || fileEvent.file_class;
+        this.#armAttachHold(filename, {
+          patterns: patternNames, severity, ttlMs: 60_000, processName,
+        });
+      } else if (scannable) {
+        this.#releaseAttachHold(filename);
+      }
+
+      const dedupKey = `egress|${path}|${surfaceId}`;
+      const lastFired = this.firedAt.get(dedupKey) ?? 0;
+      if (Date.now() - lastFired < FIRE_DEDUP_TTL_MS) {
+        this.log?.info(`os_monitor: suppressed duplicate egress file fire (${fileEvent.filename})`);
+        return;
+      }
+      this.firedAt.set(dedupKey, Date.now());
+      this.reporter.enqueue(fileEvent);
+      const matchCount = cs?.matchCount || 0;
+      this.log?.info(
+        `os_monitor: egress ${via} → ${ident.product} — ${fileEvent.filename} `
+        + `[${fileEvent.file_class}, severity=${fileEvent.severity}${origin ? ', origin=' + origin : ''}`
+        + `${cs?.scanned ? `, scanned, ${matchCount} match(es)` : ''}]`
+      );
+
+      const hasContentMatches = matchCount > 0;
+      const risky = fileEvent.severity === 'high' || fileEvent.severity === 'critical';
+      if (!hasContentMatches && !risky) return;
+      const patternList = hasContentMatches
+        ? cs.matches.map((m) => m.pattern + (m.count > 1 ? '×' + m.count : '')).join(', ')
+        : fileEvent.file_class;
+      const contains = hasContentMatches ? 'Contains: ' + patternList : 'File class: ' + patternList;
+      if (reallyHeld) {
+        // ── Outlook attachment: what is and is NOT covered ──────────────────
+        //
+        // Both caveats are stated because both are real, and the copy rules in
+        // this file forbid claiming a block that is narrower than it sounds:
+        //   * the MOUSE. UpdateSendRect never caches a rectangle for an egress
+        //     process (it returns early for anything that is not an AI surface),
+        //     so the mouse hook has no rectangle to swallow a click in. Clicking
+        //     Send is NOT covered.
+        //   * Ctrl+Enter-to-send is a USER PREFERENCE ("Send immediately when
+        //     connected" / the Ctrl+Enter accelerator) that some people turn off.
+        //     On such a machine the chord we swallow is not the chord they use.
+        // So the honest instruction is "remove the attachment", and the hold is
+        // described as what it is: a partial brake, not a seal.
+        this.toast.show({
+          title: `${ident.product} - ${fileEvent.severity.toUpperCase()} attachment`,
+          message: `${fileEvent.filename}\n${contains}\n`
+            + 'Ctrl+Enter and Alt+S are held. Clicking the Send button with the mouse is NOT covered, '
+            + 'and Ctrl+Enter-to-send is a setting some users have switched off — so remove the '
+            + 'attachment to be sure.\nReported to CloudFuze AI Governance.',
+        });
+        return;
+      }
+      if (hold) {
+        // MAIL route, but capture_mode is 'observe' or 'block_critical' — the
+        // enforcer will not arm _egressHoldProcs for this surface, so nothing
+        // is actually held. Same honesty rule as the OneDrive copy below: never
+        // claim a chord is swallowed when it is not.
+        this.toast.show({
+          title: `${ident.product} - ${fileEvent.severity.toUpperCase()} attachment`,
+          message: `${fileEvent.filename}\n${contains}\n`
+            + 'This was DETECTED AND REPORTED only — the send was not held, and clicking Send is not '
+            + 'covered.\nReported to CloudFuze AI Governance.',
+        });
+        return;
+      }
+      // ── OneDrive / SharePoint: DETECTED, not stopped ───────────────────────
+      //
+      // This copy must not imply anything happened to the file, because nothing
+      // did and nothing will: observe-and-report only is a confirmed decision,
+      // there is no quarantine and no move anywhere in this feature. The file is
+      // in a folder that syncs, so by the time this toast is on screen it may
+      // well already be in the cloud. Saying "blocked", "held", "quarantined" or
+      // "moved" here would each be false.
+      this.toast.show({
+        title: `${ident.product} - ${fileEvent.severity.toUpperCase()} file detected`,
+        message: `${fileEvent.filename}\n${contains}\n`
+          + 'This was DETECTED AND REPORTED only — nothing was blocked, moved or removed, and the file '
+          + 'may already have synced to the cloud.\nReported to CloudFuze AI Governance.',
+      });
+    } catch (err) {
+      if (scannable) this.#releaseAttachHold(filename);
+      this.log?.warn(`os_monitor: egress file event build failed: ${err?.message || err}`);
+    }
+  }
+
   #hostGovernedFor(processName) {
     if (!processName || !isHostAppProcess(processName)) return null;
     const g = this.hostGoverned;
@@ -543,10 +856,93 @@ export class OsMonitor extends EventEmitter {
   // be attributed to a different block's patterns.
   //
   // NO CONTENT, EVER. Only the fields the 'block' handler already enqueues: a
-  // pattern-NAME list with severities and counts, a product identity and a
-  // process name. The composer text, the `preview` masked substring and the
+  // pattern-NAME list with severities and counts, a product identity, a
+  // process name, and the block's agent attribution (admin-typed row values /
+  // our own catalog ids — see blockAgentAttribution()). The composer text, the `preview` masked substring and the
   // masked prompt are all absent by construction — the masked prompt travels on
   // the rewrite event itself and is read there, at the one site that reports it.
+  // One sensitive typed (or, for an evidence route, pasted) prompt → one
+  // prompt_typed / prompt_paste record. Shared by the prompt watcher and the
+  // enforcer's evidence routes so the two can never drift apart on what is sent.
+  //
+  // For an ENFORCER event (a Teams agent route or an Office / Outlook pane):
+  //   * NO window_title. A Teams title carries a colleague's name and two
+  //     addresses; an Outlook title is a mail subject. The enforcer does not
+  //     send one, and nothing here derives one.
+  //   * agent attribution — agent_name / agent_id / agent_scope / surface — by
+  //     the same row / sole / none rules as enforcement_block
+  //     (blockAgentAttribution), never a UI-read name.
+  //   * kind prompt_paste when the enforcer saw a paste gesture within its paste
+  //     window (cause:"paste"), else prompt_typed. Either way content_text is
+  //     the composer text, the same data class the watcher sends.
+  #reportPromptText(ev, { fromEnforcer }) {
+    // Panel-first, same as the enforcer handlers: the watcher now only reads an
+    // IDE's focused element when it matched an AI panel signature, and it says
+    // which one — so a prompt typed into Claude Code inside Cursor is
+    // attributed to Claude Code, not to the host editor.
+    const ai = identifyEventAi(ev);
+    if (!ai) return;
+
+    const { matches, highestSeverity } = scan(ev.text);
+    if (matches.length === 0) return;  // only record sensitive prompts
+
+    // Dedup on the SET of matched patterns (not the full text): as the user
+    // keeps typing, the text changes every poll but the secret is the same,
+    // so we'd otherwise re-fire constantly. Re-warn only when a new pattern
+    // appears or after the TTL lapses. Shares the gate with the clipboard
+    // path so a paste isn't reported twice (once as paste, once as typed).
+    const sig = matches.map((m) => m.pattern).sort().join(',');
+    if (!this.#shouldFire(`${ev.process}|${sig}`)) return;
+
+    const pasted = fromEnforcer && ev.cause === 'paste';
+    this.reporter.enqueue({
+      kind: pasted ? 'prompt_paste' : 'prompt_typed',
+      source: 'os_monitor_uia',
+      service: ai.product,
+      vendor: ai.vendor,
+      process_name: ev.process,
+      // Only the watcher's own events carry a title; see the note above.
+      ...(fromEnforcer ? {} : { window_title: ev.title }),
+      content_length: ev.len,
+      length_bucket: lengthBucket(ev.len),
+      matches,
+      highest_severity: highestSeverity,
+      content_text: ev.text,
+      ...(fromEnforcer ? blockAgentAttribution(ev) : {}),
+    });
+    // Product and pattern names only — no agent, no text.
+    this.log?.info(
+      `os_monitor: ${pasted ? 'pasted' : 'typed'} into ${ai.product} — ${matches.length} pattern(s), ` +
+      `severity=${highestSeverity} [${matches.map((m) => m.pattern).join(', ')}]`
+    );
+
+    if (highestSeverity === 'critical' || highestSeverity === 'high') {
+      const patterns = matches.map((m) => m.pattern + (m.count > 1 ? '×' + m.count : '')).join(', ');
+      this.toast.show({
+        title: `${ai.product} - ${highestSeverity.toUpperCase()}`,
+        message: `Sensitive content ${pasted ? 'pasted' : 'typed'} into the prompt: ${patterns}\nReported to CloudFuze AI Governance.`,
+      });
+    }
+  }
+
+  // The persisted last-known fleet `dlp` value: true / false, or false when
+  // there is no readable record. Never throws.
+  #lastKnownFleetEvidenceDlp() {
+    try {
+      const v = JSON.parse(readFileSync(this.fleetStatePath, 'utf8'));
+      return v?.dlp === true;
+    } catch { return false; }
+  }
+
+  #persistFleetEvidenceDlp(on) {
+    try {
+      mkdirSync(dirname(this.fleetStatePath), { recursive: true });
+      writeFileSync(this.fleetStatePath, JSON.stringify({ dlp: on === true, at: new Date().toISOString() }), 'utf8');
+    } catch (err) {
+      this.log?.warn(`os_monitor: could not persist the fleet dlp flag — ${err?.message || err}`);
+    }
+  }
+
   #pinRewriteContext(payload) {
     this.rewriteContext = { ...payload, pinnedAt: Date.now() };
   }
@@ -1378,55 +1774,233 @@ export class OsMonitor extends EventEmitter {
       );
     });
 
+    // ── EGRESS: a file attached to an email ──────────────────────────────────
+    //
+    // Its OWN handler, sharing no condition with the AI/host-app attachment
+    // handler above — which is left byte-for-byte untouched. The events cannot
+    // even reach that handler: attachment-watcher.ps1 emits a different kind for
+    // an egress chip, and the watcher wrapper dispatches it under a different
+    // name.
+    //
+    // There is NO eligibility test here beyond "the event exists", and that is
+    // correct rather than lax: the helper only ever produced this event because
+    // ~/.cloudfuze-aigov/egress-surfaces.json armed the process (which requires a
+    // governed ai_platforms row) AND the compose pane resolved as a scoped root.
+    // Both gates are upstream, in the process that did the reading, so a
+    // duplicate test here would only be a second thing to keep in step. What IS
+    // re-tested is the surface itself: an event naming a surface this catalog
+    // does not carry is dropped.
+    this.attachmentWatcher.on('egress_attachment_appeared', async (ev) => {
+      if (!identifyEgressSurface(ev.surface)) return;
+      if (!ev.path) {
+        // A filename-shaped string in the compose pane that resolves to no file
+        // on disk. Nothing to scan, and arming a hold on a file we cannot read
+        // would be an unexplained dead send chord in a mail client — strictly
+        // worse than the miss. Same reasoning as the AI path's !ev.path case.
+        this.log?.info(`egress: "${ev.filename}" appeared in a compose window but was not found on disk`);
+        return;
+      }
+      await this.#reportEgressFile({
+        path: ev.path,
+        filename: ev.filename,
+        via: 'email_attachment_chip',
+        surfaceId: ev.surface,
+        processName: ev.process,
+        hold: true,
+      });
+    });
+
+    // The attachment was removed from the draft — release its hold. PER FILE,
+    // through the same map the AI path uses: removing one attachment must not
+    // unblock a send another, still-attached, flagged file is holding.
+    this.attachmentWatcher.on('egress_attachment_disappeared', (ev) => {
+      if (!this.#releaseAttachHold(ev.filename)) return;
+      this.log?.info(
+        `os_monitor: egress attachment "${ev.filename}" removed — `
+        + (this.attachHolds.size === 0 ? 'send hold released' : `hold still active for ${this.attachHolds.size} other file(s)`)
+      );
+    });
+
+    // ── EGRESS: a file picked in a mail client's Attach dialog ───────────────
+    //
+    // The more reliable of the two mail attachment routes, and the one that needs
+    // no live-probed signature at all: a file picker only ever opens because the
+    // user deliberately clicked Attach, so there is no "is this the compose
+    // window or the reading pane" question to answer. Separate handler from
+    // file_dialog_pick for the same reason as above.
+    this.dialogWatcher.on('egress_file_dialog_pick', async (ev) => {
+      if (!identifyEgressSurface(ev.surface)) return;
+      if (!ev.path) return;
+      await this.#reportEgressFile({
+        path: ev.path,
+        filename: basename(ev.path),
+        via: 'email_attach_dialog',
+        surfaceId: ev.surface,
+        processName: ev.process,
+        hold: true,
+      });
+    });
+
+    // ── EGRESS: a file appearing in a OneDrive / SharePoint sync root ────────
+    //
+    // OBSERVE AND REPORT ONLY — hold:false, and there is no code anywhere in this
+    // feature that moves, renames or quarantines the file. That is a confirmed
+    // product decision, and the toast copy states it plainly rather than implying
+    // an intervention that did not happen.
+    //
+    // `origin` is the direction heuristic, and the helper has ALREADY dropped
+    // every file it classified `sync_down`: reporting a download as an upload
+    // would be a false governance record naming this user as the person who sent
+    // a file they never touched. What arrives here is 'local_new' or 'unknown',
+    // and the label travels onto the record so the dashboard can weigh a
+    // confident local write differently from an ambiguous one.
+    this.syncWatcher.on('sync_file', async (ev) => {
+      // Defence in depth on the surface too, matching the two attachment routes
+      // above: an event naming a root this catalog does not carry is dropped
+      // rather than reported under an invented identity.
+      if (!identifyEgressSurface(ev.root_id)) return;
+      // Defence in depth: the helper does not emit sync_down, and if some future
+      // build ever did, this side refuses it too rather than trusting the sender.
+      //
+      // NORMALIZED BEFORE COMPARING, because a case-sensitive === against one
+      // spelling is not defence in depth at all: the whole premise of this line
+      // is that the sender might not be the helper we shipped, and 'Sync_Down'
+      // from such a sender would have sailed straight through a `=== 'sync_down'`
+      // test and been filed as an upload — the exact false record the check
+      // exists to prevent.
+      const origin = String(ev.origin ?? '').trim().toLowerCase();
+      if (origin === 'sync_down') return;
+      if (!ev.path) return;
+      await this.#reportEgressFile({
+        path: ev.path,
+        filename: basename(ev.path),
+        via: 'cloud_sync_root',
+        surfaceId: ev.root_id,
+        // No process: nothing was in the foreground when this happened, and
+        // inventing one would be a claim about who did it.
+        processName: '',
+        // CLAMPED to the two labels #reportEgressFile's own contract promises.
+        // Anything else lands on 'unknown' rather than travelling onto a
+        // governance record as an uninterpretable string: 'unknown' is already
+        // the honest answer for "we could not establish the direction", and a
+        // dashboard filtering on origin must not have to know every spelling a
+        // future helper might invent.
+        origin: (origin === 'local_new' || origin === 'unknown') ? origin : 'unknown',
+        hold: false,
+      });
+    });
+
+    // A COVERAGE GAP, recorded rather than swallowed. The FileSystemWatcher's
+    // buffer overflowed (or our own per-minute ceiling engaged), so files really
+    // did appear in a watched folder without being observed. This is reported as
+    // its own event precisely because the honest thing a governance product can
+    // say about a window it did not see is "I did not see it".
+    this.syncWatcher.on('overflow', (ev) => {
+      const ident = identifyEgressSurface(ev.root_id) || { product: 'OneDrive / SharePoint', vendor: 'Microsoft' };
+      this.reporter.enqueue({
+        kind: 'coverage_gap',
+        source: 'os_monitor_egress',
+        service: ident.product,
+        vendor: ident.vendor,
+        via: 'cloud_sync_root',
+        reason: String(ev.reason || 'unknown'),
+      });
+    });
+
+    // ── EGRESS: the body of an email, captured ONCE at its send ──────────────
+    //
+    // Not a prompt, and deliberately not routed through the prompt_text handler:
+    // that one resolves an AI product identity, which a mail client has none of.
+    //
+    // prompt-watcher.ps1 guarantees the ONCE: it holds the body between ticks and
+    // emits only at the send transition (the body going non-empty → empty, or the
+    // compose window closing while it still had text). Emitting per poll tick —
+    // the naive shape — would produce roughly a hundred growing-prefix copies of
+    // every email, each carrying its full text.
+    this.promptWatcher.on('egress_body', (ev) => {
+      const ident = identifyEgressSurface(ev.surface);
+      if (!ident) return;
+      const text = typeof ev.text === 'string' ? ev.text : '';
+      if (!text) return;
+      const { matches, highestSeverity } = scan(text);
+      // Only sensitive bodies are recorded — the same policy every other capture
+      // path here follows. An ordinary email is never stored.
+      if (matches.length === 0) return;
+      const sig = matches.map((m) => m.pattern).sort().join(',');
+      if (!this.#shouldFire(`egress|${ev.surface}|${sig}`)) return;
+
+      // DOMAINS ONLY. prompt-watcher.ps1 reduces the recipient field to bare
+      // @domain tokens in the same expression that reads it, so a full address
+      // has no parameter it could arrive through — and this side re-checks the
+      // shape rather than trusting it, dropping anything that still looks like
+      // an address. There is no subject-line field on this event, by construction.
+      const recipientDomains = (Array.isArray(ev.recipient_domains) ? ev.recipient_domains : [])
+        .map((d) => String(d || '').trim().toLowerCase())
+        .filter((d) => /^@[a-z0-9.-]+\.[a-z]{2,}$/.test(d))
+        .slice(0, 8);
+
+      this.reporter.enqueue({
+        kind: 'egress_body',
+        source: 'os_monitor_egress',
+        via: 'outlook_compose',
+        service: ident.product,
+        vendor: ident.vendor,
+        process_name: ev.process || '',
+        egress_surface: ev.surface,
+        // ALWAYS EMPTY, exactly like every host-app file event: an Outlook
+        // window title is the message subject plus, in a reply, the recipient's
+        // display name.
+        window_title: '',
+        content_length: Number(ev.len) || text.length,
+        length_bucket: lengthBucket(Number(ev.len) || text.length),
+        // Set when the read hit prompt-watcher.ps1's $MaxChars (16000, unchanged
+        // — deliberately not raised for email), so a prefix is never presented
+        // as the whole message.
+        body_truncated: ev.truncated === true,
+        matches,
+        highest_severity: highestSeverity,
+        recipient_domains: recipientDomains,
+        content_text: text,
+      });
+      this.log?.info(
+        `os_monitor: egress body sent from ${ident.product} — ${matches.length} pattern(s), `
+        + `severity=${highestSeverity} [${matches.map((m) => m.pattern).join(', ')}]`
+        // The DOMAIN is loggable; a recipient is not, and no path here has one.
+        + (recipientDomains.length ? ` to ${recipientDomains.join(', ')}` : '')
+      );
+      if (highestSeverity !== 'critical' && highestSeverity !== 'high') return;
+      const patterns = matches.map((m) => m.pattern + (m.count > 1 ? '×' + m.count : '')).join(', ');
+      this.toast.show({
+        title: `${ident.product} - ${highestSeverity.toUpperCase()}`,
+        // DETECTED, not stopped. The body capture fires at the send transition,
+        // i.e. the message has already gone. Nothing here blocked anything.
+        message: `Sensitive content in an email that was just sent: ${patterns}\n`
+          + 'This was detected and reported — the message was not blocked.\nReported to CloudFuze AI Governance.',
+      });
+    });
+
     // UIA typed-prompt watcher — reads what the user TYPES into an AI app's
     // prompt box (Claude Desktop, ChatGPT Desktop, etc.) and scans it. This is
     // the only coverage for typed (not pasted) secrets in vendor-sealed apps:
     // they pin TLS (proxy blind) and enforce ASAR integrity (no DOM hook).
     // Detect + notify + report only — UIA can't block another app's send.
-    this.promptWatcher.on('prompt_text', (ev) => {
-      // Panel-first, same as the enforcer handlers: the watcher now only reads an
-      // IDE's focused element when it matched an AI panel signature, and it says
-      // which one — so a prompt typed into Claude Code inside Cursor is
-      // attributed to Claude Code, not to the host editor.
-      const ai = identifyEventAi(ev);
-      if (!ai) return;
+    this.promptWatcher.on('prompt_text', (ev) => this.#reportPromptText(ev, { fromEnforcer: false }));
 
-      const { matches, highestSeverity } = scan(ev.text);
-      if (matches.length === 0) return;  // only record sensitive prompts
-
-      // Dedup on the SET of matched patterns (not the full text): as the user
-      // keeps typing, the text changes every poll but the secret is the same,
-      // so we'd otherwise re-fire constantly. Re-warn only when a new pattern
-      // appears or after the TTL lapses. Shares the gate with the clipboard
-      // path so a paste isn't reported twice (once as paste, once as typed).
-      const sig = matches.map((m) => m.pattern).sort().join(',');
-      if (!this.#shouldFire(`${ev.process}|${sig}`)) return;
-
-      this.reporter.enqueue({
-        kind: 'prompt_typed',
-        source: 'os_monitor_uia',
-        service: ai.product,
-        vendor: ai.vendor,
-        process_name: ev.process,
-        window_title: ev.title,
-        content_length: ev.len,
-        length_bucket: lengthBucket(ev.len),
-        matches,
-        highest_severity: highestSeverity,
-        content_text: ev.text,
-      });
-      this.log?.info(
-        `os_monitor: typed into ${ai.product} — ${matches.length} pattern(s), ` +
-        `severity=${highestSeverity} [${matches.map((m) => m.pattern).join(', ')}]`
-      );
-
-      if (highestSeverity === 'critical' || highestSeverity === 'high') {
-        const patterns = matches.map((m) => m.pattern + (m.count > 1 ? '×' + m.count : '')).join(', ');
-        this.toast.show({
-          title: `${ai.product} - ${highestSeverity.toUpperCase()}`,
-          message: `Sensitive content typed into the prompt: ${patterns}\nReported to CloudFuze AI Governance.`,
-        });
-      }
+    // The SAME record for the AI-EVIDENCE routes — the Teams agent 1:1 chat and
+    // Copilot tab, and the Word / Excel / PowerPoint / OneNote / Outlook Copilot
+    // panes — which the prompt watcher cannot see (those apps are, and must
+    // stay, out of its process list: every DM, email and document would be
+    // read). enforcer-win.ps1 emits it behind exactly the gate that decides
+    // scanning and blocking there (EmitEvidencePrompt), and only for a composer
+    // that already holds an active pattern. Reported by the one shared method,
+    // so the content fields are identical to ChatGPT/Claude desktop's.
+    //
+    // Gated on BOTH fleet flags the prompt-watcher path lives under: dlp (the
+    // evidence routes) AND clipboard_monitor (typed-prompt capture itself —
+    // the watcher is stopped when it is off). Either off: nothing is uploaded.
+    this.enforcer.on('prompt_text', (ev) => {
+      if (!this.running.dlp || !this.running.clipboard_monitor) return;
+      this.#reportPromptText(ev, { fromEnforcer: true });
     });
 
     // Benign Enter-sends the enforcer lets through — captured from the SAME
@@ -1481,6 +2055,10 @@ export class OsMonitor extends EventEmitter {
       // reason: 'send' (Enter) | 'paste' (Ctrl+V) | 'click' (send button) | 'attachment' (sensitive file attached).
       const reason = isPlatform ? 'platform' : isAttachment ? 'file_upload' : ev.reason === 'paste' ? 'prompt_paste' : 'prompt_submit';
       const how = isPlatform ? 'blocked platform' : isAttachment ? `attachment "${ev.filename}"` : ev.reason === 'paste' ? 'paste' : ev.reason === 'click' ? 'send-button click' : 'send';
+      // Which agent this block is about — admin-typed row values or our own
+      // catalog ids only; see blockAgentAttribution(). Computed once so the
+      // record and the rewrite pin below carry the SAME object's values.
+      const agentAttr = blockAgentAttribution(ev);
       this.reporter.enqueue({
         kind: 'enforcement_block',
         blocked_for: reason,
@@ -1491,15 +2069,33 @@ export class OsMonitor extends EventEmitter {
         service: ai.product,
         vendor: ai.vendor,
         process_name: ev.process,
-        // NOTE: the blocked platform id / agent id / tool_host are deliberately
-        // NOT sent here. POST /api/v1/dlp maps enforcement metadata from an
-        // explicit allowlist (see its metadata block), so extra keys would be
-        // silently dropped — which reads as "we recorded it" when nothing was
-        // recorded. They travel on the @@CFAI-BLOCK line below, which is where
-        // they are actually consumed, and reach the server on the access request
-        // itself. blocked_for/mechanism already carry "this was a platform block".
+        // NOTE: the blocked PLATFORM id and tool_host are deliberately NOT sent
+        // here. POST /api/v1/dlp maps enforcement metadata from an explicit
+        // allowlist (see its metadata block), so extra keys would be silently
+        // dropped — which reads as "we recorded it" when nothing was recorded.
+        // They travel on the @@CFAI-BLOCK line below, which is where they are
+        // actually consumed, and reach the server on the access request itself.
+        // blocked_for/mechanism already carry "this was a platform block".
         matches,
         highest_severity: highestSeverity,
+        // agent_name / agent_id / agent_scope / surface — the four keys the
+        // server's enforcement-metadata allowlist maps for agent attribution.
+        // Present only when known; see blockAgentAttribution().
+        ...agentAttr,
+        // THE PAIRING KEY, in the browser extension's exact shape
+        // (content.js emitEnforcement): snake_case `client_event_id` on the
+        // block, which POST /api/v1/dlp stores as metadata.correlation_id, and
+        // `decision_for: <same id>` on the enforcement_redact below, stored as
+        // metadata.decision_for. The id is the enforcer's block_id — the same
+        // value the rewrite answers with — so a redact pairs with its block
+        // exactly instead of by time and service.
+        //
+        // NOT the Reporter's camelCase `clientEventId`: that is the server's
+        // dedupe/upsert key, and a block and its outcome sharing it would make
+        // the outcome overwrite the block (see dlp.js's correlation_id note).
+        // Omitted when there is no block_id (a non-rewritable block, which can
+        // never have a redact to pair with).
+        client_event_id: ev.block_id || undefined,
       });
       // Everything the enforcement_redact record will need if the user takes the
       // Tokenize & Send offer this block just made. Pinned only when the block
@@ -1514,6 +2110,9 @@ export class OsMonitor extends EventEmitter {
           process_name: ev.process,
           matches,
           highest_severity: highestSeverity,
+          // Same object's values as the record above, so the redact pairs with
+          // its block on agent too. Identity only — never content.
+          ...agentAttr,
         });
       }
       this.log?.info(`os_monitor: BLOCKED ${how} into ${ai.product} — [${ev.patterns}]`);
@@ -1598,6 +2197,54 @@ export class OsMonitor extends EventEmitter {
           this.log?.warn(`tokenize: offer failed — ${err?.message || err}`);
         });
       }
+    });
+
+    // ── EGRESS: the send chord in a mail client was swallowed ────────────────
+    //
+    // A SEPARATE handler from 'block', and the 'block' handler is untouched. That
+    // one resolves an AI product identity, a Request Access tool_host and a Tier
+    // B rewrite offer — none of which exists here: a mail client is in no AI
+    // catalog, an egress block is not "the org disallowed this app" (so there is
+    // nothing to request access to), and Tokenize & Send masks text and cannot
+    // detach a file.
+    //
+    // The remedy is one thing and the toast says only that thing: remove the
+    // attachment. There is deliberately no override hotkey — see the block in
+    // enforcer-win.ps1 for why "send this attachment anyway" is not a coherent
+    // affordance.
+    this.enforcer.on('egressblock', (ev) => {
+      const ident = identifyEgressSurface(ev.surface) || { product: ev.process, vendor: null };
+      const patterns = String(ev.patterns || '').split(',').filter(Boolean);
+      this.reporter.enqueue({
+        kind: 'enforcement_block',
+        blocked_for: 'file_upload',
+        mechanism: 'attachment_hold',
+        blocked_by: 'egress_send_chord',
+        filename: ev.filename || undefined,
+        source: 'os_monitor_egress',
+        service: ident.product,
+        vendor: ident.vendor,
+        process_name: ev.process || '',
+        matches: patterns.map((p) => ({ pattern: p, severity: 'high', count: 1 })),
+        highest_severity: 'high',
+      });
+      this.log?.info(`os_monitor: BLOCKED email send chord in ${ident.product} — [${ev.patterns}]`);
+      if (!this.#shouldFire(`egress-enf|${ev.process}|${ev.patterns}|${ev.filename || ''}`)) return;
+      this.toast.show({
+        title: `${ident.product} - send held`,
+        // HONEST FRAMING, and every clause of it is load-bearing:
+        //   * the mouse Send button is NOT covered — UpdateSendRect caches no
+        //     rectangle for a non-AI surface, so the mouse hook has nothing to
+        //     swallow a click in;
+        //   * Ctrl+Enter-to-send is a user PREFERENCE some people switch off, so
+        //     on their machine the chord being held is not the one they use;
+        //   * the file may already be uploaded — a draft with an attachment is
+        //     autosaved to the mailbox, so this holds the SEND, not the upload.
+        message: `"${ev.filename}" contains ${ev.patterns}\n`
+          + 'Ctrl+Enter and Alt+S are held. Clicking Send with the mouse is NOT covered, and '
+          + 'Ctrl+Enter-to-send is a setting some users have switched off — remove the attachment to be sure.\n'
+          + 'If the draft was already autosaved to your mailbox, this only stops the message being sent.',
+      });
     });
 
     // ── Request Access, at the moment of the block ────────────────────────────
@@ -1756,6 +2403,12 @@ export class OsMonitor extends EventEmitter {
           process_name: ctx.process_name,
           matches: ctx.matches,
           highest_severity: ctx.highest_severity,
+          // The block's agent attribution, verbatim off the pin — each key only
+          // when the block had it (see blockAgentAttribution()).
+          ...(ctx.agent_name !== undefined ? { agent_name: ctx.agent_name } : {}),
+          ...(ctx.agent_id !== undefined ? { agent_id: ctx.agent_id } : {}),
+          ...(ctx.agent_scope !== undefined ? { agent_scope: ctx.agent_scope } : {}),
+          ...(ctx.surface !== undefined ? { surface: ctx.surface } : {}),
         } : {}),
         // Length OF THE MASKED TEXT — the text this record actually carries and
         // the text that was actually sent. (The browser side reports the
@@ -1838,6 +2491,7 @@ export class OsMonitor extends EventEmitter {
     this.#applyFeatures(
       { clipboard_monitor: true, dlp: true, agent_enforcer: true },
       ['clipboard_monitor', 'dlp', 'agent_enforcer'],
+      { fromFleet: false },
     );
     // Then let the fleet setting take over. It reports every flag as changed on
     // its first successful fetch, so anything the admin has turned off stops
@@ -1864,6 +2518,28 @@ export class OsMonitor extends EventEmitter {
     this._hideBannerProc();
     // Spawn ui-helper for instant access request popups (WPF pre-loaded)
     this._ensureUiHelper();
+
+    // ── The cloud-sync policy poll ───────────────────────────────────────────
+    //
+    // Started AFTER #applyFeatures, so the first pass sees the real
+    // this.running.dlp rather than deciding against a half-initialised monitor.
+    //
+    // It runs even when no policy exists, and that is the cheap case by design:
+    // a missing egress-surfaces.json is one existsSync per 10s and the watcher
+    // stays unspawned. What it buys is the WITHDRAWAL path — an admin turning the
+    // policy off stops filesystem observation within one interval, instead of at
+    // the next agent restart.
+    if (process.platform === 'win32') {
+      this.#syncEgressPolicy();
+      this.egressPolicyTimer = setInterval(() => {
+        // Guarded on isRunning as well as cleared in stop(): the interval is
+        // unref'd, but a tick that lands between stop() clearing state and the
+        // process exiting must not re-spawn a watcher on a torn-down monitor.
+        if (!this.isRunning) return;
+        this.#syncEgressPolicy();
+      }, EGRESS_POLICY_POLL_MS);
+      this.egressPolicyTimer.unref?.();
+    }
 
     if (process.platform === 'win32') {
       this.log?.info(
@@ -1912,7 +2588,7 @@ export class OsMonitor extends EventEmitter {
    * down and reinstall a working keyboard hook every poll — expensive, and a
    * window in which sends are not blocked.
    */
-  #applyFeatures(features, changed) {
+  #applyFeatures(features, changed, { fromFleet = true } = {}) {
     // A FeatureSync poll already in flight when stop() ran still resolves and
     // still calls onChange — its stop() clears the interval, it cannot abort the
     // pending fetch. Without this guard that late callback would start the
@@ -1937,9 +2613,31 @@ export class OsMonitor extends EventEmitter {
     // files on their way into an AI app.
     if (changed.includes('dlp')) {
       const on = want('dlp');
+      // The SAME fleet flag licenses the enforcer's AI-evidence routes (agent
+      // chats / Copilot panes scanned with no governed row). Pushed on every
+      // change, before the file-watcher toggle below, and remembered by the
+      // Enforcer so a respawn starts in the same state.
+      //
+      // NOT the pre-fetch "everything on" default (security review L3): until
+      // FeatureSync has actually answered, the evidence routes use the
+      // persisted last-known FLEET value, and OFF when there is none.
+      if (fromFleet) {
+        this.enforcer?.setEvidenceDlp?.(on);
+        this.#persistFleetEvidenceDlp(on);
+      } else {
+        this.enforcer?.setEvidenceDlp?.(this.#lastKnownFleetEvidenceDlp());
+      }
       if (on !== this.running.dlp) {
         if (on) { this.dialogWatcher.start(); this.attachmentWatcher.start(); }
         else    { this.dialogWatcher.stop();  this.attachmentWatcher.stop(); }
+        // The cloud-sync-root watcher rides the SAME fleet flag: it is file DLP,
+        // in the same sense the two watchers above are. Two independent gates
+        // compose as AND — the fleet flag AND a governed sync-root policy — and
+        // start() refuses on its own when the policy set is empty, so turning
+        // `dlp` on can never begin observing a machine whose admin has governed
+        // no cloud-sync host. Turning it OFF stops the observation immediately.
+        if (on) { this.syncWatcher.stopRequested = false; this.syncWatcher.start(); }
+        else    { this.syncWatcher.stop(); }
         this.running.dlp = on;
         this.log?.info(`os_monitor: file DLP watchers ${on ? 'ON' : 'OFF'} (fleet setting)`);
       }
@@ -1988,11 +2686,20 @@ export class OsMonitor extends EventEmitter {
   // (the Electron app handles it there).
 
   // ── Simple spawn-on-demand UI ──
+  // Under the Node test runner (NODE_TEST_CONTEXT is set for every file
+  // `node --test` runs) no desktop UI process is ever launched: tests redirect
+  // HOME to a temp dir that is deleted on exit, so a late-starting wscript.exe
+  // pops a "Can not find script file" error box, or a real hidden ui-helper.ps1
+  // is left running. CFAI_DISABLE_UI_SPAWN=1 does the same outside the runner.
+  _uiSpawnDisabled() {
+    return !!process.env.NODE_TEST_CONTEXT || process.env.CFAI_DISABLE_UI_SPAWN === '1';
+  }
+
   // Spawn a fresh PowerShell for each UI window. Kill it to hide.
   // Uses ShellExecute for desktop access from headless context.
   // Accepts ~3-5s delay on first show in exchange for 100% reliability.
   _spawnUi(script, inputData) {
-    if (process.platform !== 'win32') return null;
+    if (process.platform !== 'win32' || this._uiSpawnDisabled()) return null;
     try {
       const scriptPath = join(__dirname, script);
       const tmpDir = join(homedir(), '.cloudfuze-aigov');
@@ -2025,7 +2732,7 @@ export class OsMonitor extends EventEmitter {
 
   _ensureUiHelper() {
     if (this._uiHelperAlive) return;
-    if (process.platform !== 'win32') return;
+    if (process.platform !== 'win32' || this._uiSpawnDisabled()) return;
     try {
       const tmpDir = join(homedir(), '.cloudfuze-aigov');
       mkdirSync(tmpDir, { recursive: true });
@@ -2071,6 +2778,7 @@ export class OsMonitor extends EventEmitter {
 
   _hideBannerProc() {
     // Kill ALL powershell processes that have block-banner.ps1 in their command line
+    if (this._uiSpawnDisabled()) return;
     try {
       cpSpawn('powershell.exe', ['-NoProfile', '-Command',
         "Get-WmiObject Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { $_.CommandLine -like '*block-banner.ps1*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
@@ -2255,10 +2963,18 @@ export class OsMonitor extends EventEmitter {
     if (this._routingRulesTimer) { clearInterval(this._routingRulesTimer); this._routingRulesTimer = null; }
     try { this._hideBannerProc(); } catch {}
     this.#stopAttachHoldRefresh();
+    if (this.egressPolicyTimer) {
+      clearInterval(this.egressPolicyTimer);
+      this.egressPolicyTimer = null;
+    }
     this.featureSync.stop();
     this.poller.stop();
     this.dialogWatcher.stop();
     this.attachmentWatcher.stop();
+    // Before the enforcer, with the other file watchers: an orphaned
+    // FileSystemWatcher on someone's OneDrive folder is observation with nothing
+    // left to govern with it.
+    this.syncWatcher.stop();
     if (!this.skipPromptWatcher) this.promptWatcher.stop();
     // Order matters: stop the enforcer (kills the helper, clears the pid +
     // heartbeat files) BEFORE reaping the watchdog, so the watchdog has

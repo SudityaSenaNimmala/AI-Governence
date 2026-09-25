@@ -5,6 +5,7 @@ import './env.js';
 import express from 'express';
 import cors from 'cors';
 import { openDb, applyInitialSchema, ensureAnalyticsIndexes } from './db.js';
+import { warmResponseStore } from './lib/response-budget.js';
 import { mountReports } from './routes/reports.js';
 import { mountQueries } from './routes/queries.js';
 import { mountSanctions } from './routes/sanctions.js';
@@ -215,4 +216,14 @@ app.listen(PORT, () => {
     console.log(`[dev] ENROLL_SECRET: ${ENROLL_SECRET}`);
     console.log(`[dev] ADMIN_TOKEN: ${ADMIN_TOKEN}\n`);
   }
+
+  // Warm the shared response store, once, after the port is open. Same contract
+  // as ensureAnalyticsIndexes above: off the request path, failures logged and
+  // swallowed, never fatal, never blocking startup — none of it is required for
+  // correctness, it only decides whether the FIRST request after a restart has
+  // a real fallback to serve or has to wait a cold query out. deploy.yml
+  // restarts the whole container, so that is every deploy.
+  warmResponseStore(db).catch((err) => {
+    console.warn(`[response-budget] warming failed: ${err.message} (reads still work, just cold)`);
+  });
 });

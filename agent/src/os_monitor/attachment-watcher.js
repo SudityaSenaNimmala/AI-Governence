@@ -151,6 +151,22 @@ export class AttachmentWatcher extends EventEmitter {
       case 'attachment_disappeared':
         this.emit('attachment_disappeared', ev);
         break;
+      // ── EGRESS (a mail client's compose window) ───────────────────────────
+      //
+      // SEPARATE event names, not folded into the two above, and that is the
+      // point: index.js's existing attachment handler carries the whole
+      // AI/host-app eligibility chain (isAttachmentWatcherEligible, the
+      // host_armed latch, the governed-conversation fail-closed rule), none of
+      // which describes a mail client. Reusing the name would push an egress
+      // event through that chain, where it would be dropped by
+      // identifyAiProcess() returning null for a mail process — silently, and
+      // for the wrong reason. A distinct name gets a distinct handler.
+      case 'egress_attachment_appeared':
+        this.emit('egress_attachment_appeared', ev);
+        break;
+      case 'egress_attachment_disappeared':
+        this.emit('egress_attachment_disappeared', ev);
+        break;
       case 'heartbeat':
         // The FIRST one is logged, once, and nothing after it. `ready` only
         // proves the process started — a helper wedged before its first poll (as

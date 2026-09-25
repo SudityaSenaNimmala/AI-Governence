@@ -375,3 +375,174 @@ test('the rewrite handler reads exactly one content field, and it is the masked 
   assert.equal(/this\.log[^\n]*masked/.test(code), false,
     'the masked prompt must not reach a log line');
 });
+
+// ── Agent attribution on enforcement_block / enforcement_redact ──────────────
+//
+// The enforcer's block line now says WHICH agent a block is about — agent /
+// agent_id plus agent_src ('row' | 'sole' | 'none') — and index.js maps that to
+// the four metadata keys the server allowlists: agent_name, agent_id,
+// agent_scope, surface. Both records carry identical values (the redact takes
+// them off the rewrite pin), and no log line ever carries the agent.
+
+/** makeMonitor, with every log line captured. */
+function makeLoggingMonitor() {
+  const lines = [];
+  const log = {
+    info: (m) => lines.push(String(m)), warn: (m) => lines.push(String(m)),
+    error: (m) => lines.push(String(m)), debug: (m) => lines.push(String(m)),
+  };
+  log.child = () => log;
+  const reported = [];
+  const monitor = new OsMonitor({ serverUrl: '', token: '', log, enforcerEnabled: false });
+  monitor.poller = inertWatcher();
+  monitor.dialogWatcher = inertWatcher();
+  monitor.attachmentWatcher = inertWatcher();
+  monitor.promptWatcher = inertWatcher();
+  monitor.enforcer = Object.assign(new EventEmitter(), {
+    start() {}, stop() {}, attachHold() {}, updateBlockPatterns() {}, tokenize() {},
+  });
+  monitor.toast = { start() {}, stop() {}, show() {} };
+  monitor.reporter = { start() {}, stop() {}, enqueue: (e) => reported.push(e) };
+  monitor.policySync.start = () => {};
+  monitor.featureSync.start = () => {};
+  monitor.start();
+  return { monitor, reported, lines };
+}
+
+function blockThenRewrite(block, rewrite = { ...REWRITE_OK, block_id: block.block_id }) {
+  const h = makeLoggingMonitor();
+  try {
+    h.monitor.enforcer.emit('block', block);
+    if (rewrite) h.monitor.enforcer.emit('rewrite', rewrite);
+  } finally { h.monitor.stop(); }
+  return {
+    ...h,
+    block: h.reported.find((e) => e.kind === 'enforcement_block'),
+    redact: h.reported.find((e) => e.kind === 'enforcement_redact'),
+  };
+}
+
+const ROW_BLOCK = {
+  kind: 'block', reason: 'send', process: 'M365Copilot', patterns: 'ssn', block_id: 'b-row',
+  rewritable: true, preview: 'my ssn is [SSN]',
+  agent: 'HR Helper', agent_id: 'ag-gov-4', agent_src: 'row', surface: 'm365_copilot',
+};
+
+test('a content block attributed to a policy ROW reports agent_name / agent_id / agent_scope / surface', () => {
+  const { block, redact } = blockThenRewrite(ROW_BLOCK);
+  assert.ok(block, 'expected an enforcement_block record');
+  assert.equal(block.agent_name, 'HR Helper');
+  assert.equal(block.agent_id, 'ag-gov-4');
+  assert.equal(block.agent_scope, 'agent');
+  assert.equal(block.surface, 'm365_copilot');
+  // …and the redact that follows carries byte-identical values, off the pin.
+  assert.ok(redact, 'expected an enforcement_redact record');
+  for (const k of ['agent_name', 'agent_id', 'agent_scope', 'surface']) {
+    assert.equal(redact[k], block[k], `enforcement_redact.${k} must match the block`);
+  }
+});
+
+test('a catalog soleAgent is reported with agent_scope "panel", no id, and the PANEL as the surface', () => {
+  const { block, redact } = blockThenRewrite({
+    kind: 'block', reason: 'send', process: 'WINWORD', panel: 'office_copilot_pane', patterns: 'ssn',
+    block_id: 'b-sole', rewritable: true, preview: '[SSN]',
+    agent: 'Microsoft 365 Copilot', agent_id: '', agent_src: 'sole', surface: 'office_copilot_pane_agent',
+  });
+  assert.equal(block.agent_name, 'Microsoft 365 Copilot');
+  assert.equal('agent_id' in block, false, 'an empty id is omitted, not sent empty');
+  assert.equal(block.agent_scope, 'panel');
+  assert.equal(block.surface, 'office_copilot_pane', 'the panel id wins over the agent-surface id');
+  assert.equal(redact.agent_name, 'Microsoft 365 Copilot');
+  assert.equal(redact.agent_scope, 'panel');
+  assert.equal(redact.surface, 'office_copilot_pane');
+});
+
+test('no attribution — or an unknown / missing agent_src — reports NO agent field at all', () => {
+  for (const extra of [
+    { agent: '', agent_id: '', agent_src: 'none' },
+    // An older helper that sends no attribution fields at all.
+    {},
+    // A value only a READ could have produced, with no provenance claim: never trusted.
+    { agent: 'Secret Project Bot', agent_id: 'x-1' },
+    { agent: 'Secret Project Bot', agent_id: 'x-1', agent_src: 'ui_read' },
+  ]) {
+    const { block, redact } = blockThenRewrite({ ...BLOCK, block_id: 'b-none', ...extra });
+    for (const e of [block, redact]) {
+      for (const k of ['agent_name', 'agent_id', 'agent_scope']) {
+        assert.equal(k in e, false, `${e.kind} must not carry ${k} for ${JSON.stringify(extra)}`);
+      }
+      assert.equal(JSON.stringify(e).includes('Secret Project Bot'), false);
+    }
+  }
+});
+
+test('the attribution never falls back to the product name', () => {
+  // `service` is the product ("Microsoft 365 Copilot"); agent_name is only ever
+  // what the enforcer attributed. Inventing one from the product would be a
+  // claim nobody made.
+  const { block } = blockThenRewrite({ ...BLOCK, process: 'M365Copilot', agent_src: 'none' }, null);
+  assert.equal('agent_name' in block, false);
+  assert.ok(block.service, 'the product identity is still reported as service');
+});
+
+test('log lines stay agent-free — neither the name nor the id is ever logged', () => {
+  const { lines, block, redact } = blockThenRewrite(ROW_BLOCK);
+  assert.ok(block && redact);
+  assert.ok(lines.some((l) => l.includes('BLOCKED')), 'expected the block log line');
+  assert.ok(lines.some((l) => l.includes('TOKENIZED + sent')), 'expected the redact log line');
+  for (const l of lines) {
+    for (const forbidden of ['HR Helper', 'ag-gov-4', 'agent_name', 'agent_scope']) {
+      assert.equal(l.includes(forbidden), false, `a log line carried ${forbidden}: ${l}`);
+    }
+  }
+});
+
+test('the four attribution keys are exactly the server contract, and the pin gains only those', () => {
+  const h = makeLoggingMonitor();
+  try {
+    h.monitor.enforcer.emit('block', ROW_BLOCK);
+    const ctx = h.monitor.rewriteContext;
+    assert.deepEqual(Object.keys(ctx).sort(), [
+      'agent_id', 'agent_name', 'agent_scope', 'block_id', 'highest_severity', 'matches', 'pinnedAt',
+      'process_name', 'service', 'surface', 'vendor',
+    ]);
+    const serialized = JSON.stringify(ctx);
+    for (const forbidden of [ROW_BLOCK.preview, 'ssn is']) {
+      assert.equal(serialized.includes(forbidden), false, `the pin must not hold ${forbidden}`);
+    }
+  } finally { h.monitor.stop(); }
+  const block = h.reported.find((e) => e.kind === 'enforcement_block');
+  const agentKeys = Object.keys(block).filter((k) => /agent|surface/.test(k)).sort();
+  assert.deepEqual(agentKeys, ['agent_id', 'agent_name', 'agent_scope', 'surface']);
+});
+
+// ── Exact block ↔ redact correlation ─────────────────────────────────────────
+//
+// Same shape as the browser extension (content.js emitEnforcement /
+// tokenizeAndSend): the BLOCK carries snake_case `client_event_id`, which POST
+// /api/v1/dlp stores as metadata.correlation_id; the OUTCOME carries
+// `decision_for: <that id>`, stored as metadata.decision_for. Desktop blocks
+// used to carry no client_event_id, so correlation_id was always null.
+
+test('enforcement_block carries client_event_id = block_id, and the redact references it via decision_for', () => {
+  const { block, redact } = blockThenRewrite(ROW_BLOCK);
+  assert.equal(block.client_event_id, 'b-row');
+  assert.equal(redact.decision_for, 'b-row');
+  assert.equal(redact.decision_for, block.client_event_id, 'the two ends of the pairing must match exactly');
+  // NOT the Reporter's camelCase dedupe key, which the server upserts on: a
+  // block and its outcome sharing it would overwrite each other.
+  assert.equal('clientEventId' in block, false);
+  assert.equal('client_event_id' in redact, false, 'the outcome references the block; it does not reuse its id');
+});
+
+test('a block with no block_id (not rewritable) carries no client_event_id at all', () => {
+  const { block } = blockThenRewrite({ ...BLOCK, block_id: '', rewritable: false, preview: '' }, null);
+  assert.equal('client_event_id' in block ? block.client_event_id : undefined, undefined);
+  assert.equal(JSON.parse(JSON.stringify(block)).client_event_id, undefined, 'omitted on the wire, not sent empty');
+});
+
+test('the server maps these exact field names into metadata', async () => {
+  const route = await readFile(join(AGENT_DIR, '..', 'server', 'src', 'routes', 'dlp.js'), 'utf8');
+  assert.ok(route.includes('correlation_id: e.client_event_id ?? null'), 'dlp.js maps client_event_id → correlation_id');
+  assert.ok(route.includes('decision_for:   e.decision_for ?? null'), 'dlp.js maps decision_for');
+});

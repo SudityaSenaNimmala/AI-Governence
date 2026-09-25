@@ -8,7 +8,12 @@ import {
   DollarSign, Cpu, BarChart3, Info,
 } from "lucide-react";
 import { useAgentAuth, useGovernance } from "../AgentGovernanceContext";
-import { agentGovernanceApi } from "../AgentGovernanceActions/AgentGovernanceActions";
+import { agentGovernanceApi, hasAdminCredential, ADMIN_CREDENTIAL_HINT } from "../AgentGovernanceActions/AgentGovernanceActions";
+// ── DEMO MODE (remove to revert) ────────────────────────────────────────────
+// Block/unblock of a FABRICATED demo agent never leaves the browser (see
+// agDemoResponse), so it needs no admin credential and stays clickable in a demo.
+import { AG_DEMO, isFabricatedId } from "../agentGovernanceDemoData";
+// ── END DEMO MODE ───────────────────────────────────────────────────────────
 import { Section } from "../common/Section";
 import { Badge } from "../common/Badge";
 import { complianceToRisk, scoreToLevel } from "../common/riskScale";
@@ -1687,21 +1692,29 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                               return <span style={{ fontSize: 10, fontWeight: 600, color: fb.ok ? "#16a34a" : "#dc2626" }}>{fb.msg}</span>;
                             }
                             const isBlocked = blockedAgents.has(agentId);
+                            // /lifecycle/block|unblock are requireAdminAuth: with no
+                            // credential in this build the button is inert and says why.
+                            const noCred = !hasAdminCredential() && !(AG_DEMO && isFabricatedId(agentId));
                             return (
-                              <button
-                                onClick={() => handleBlockToggle(agent)}
-                                title={isBlocked ? "Unblock this agent" : "Block this agent for all users"}
-                                style={{
-                                  display: "inline-flex", alignItems: "center", gap: 4,
-                                  padding: "4px 10px", borderRadius: 6, fontSize: 11, fontWeight: 600,
-                                  cursor: "pointer", fontFamily: "inherit",
-                                  border: isBlocked ? "1px solid #22c55e44" : "1px solid #ef444444",
-                                  background: isBlocked ? "#f0fdf4" : "#fef2f2",
-                                  color: isBlocked ? "#16a34a" : "#dc2626",
-                                }}
-                              >
-                                <Lock size={11} /> {isBlocked ? "Unblock" : "Block"}
-                              </button>
+                              <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-start", gap: 3 }}>
+                                <button
+                                  onClick={() => handleBlockToggle(agent)}
+                                  disabled={noCred}
+                                  title={noCred ? ADMIN_CREDENTIAL_HINT : isBlocked ? "Unblock this agent" : "Block this agent for all users"}
+                                  style={{
+                                    display: "inline-flex", alignItems: "center", gap: 4,
+                                    padding: "4px 10px", borderRadius: 6, fontSize: 11, fontWeight: 600,
+                                    cursor: noCred ? "not-allowed" : "pointer", fontFamily: "inherit",
+                                    opacity: noCred ? 0.5 : 1,
+                                    border: isBlocked ? "1px solid #22c55e44" : "1px solid #ef444444",
+                                    background: isBlocked ? "#f0fdf4" : "#fef2f2",
+                                    color: isBlocked ? "#16a34a" : "#dc2626",
+                                  }}
+                                >
+                                  <Lock size={11} /> {isBlocked ? "Unblock" : "Block"}
+                                </button>
+                                {noCred && <span role="note" style={{ fontSize: 10, color: "var(--ag-text-secondary, #4b5563)", maxWidth: 160, lineHeight: 1.3 }}>{ADMIN_CREDENTIAL_HINT}</span>}
+                              </span>
                             );
                           })()}
                         </td>

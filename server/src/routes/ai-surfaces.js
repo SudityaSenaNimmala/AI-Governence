@@ -30,6 +30,11 @@ export function mountAiSurfaces(app) {
         Object.entries(EMBEDDED_AI_SURFACES).map(([k, v]) => [k, {
           product: v.product,
           selectors: v.selectors,
+          // Present only on the hosts that define it (the M365 surfaces), same as
+          // the single-host answer above — the field is optional on purpose, and a
+          // client must read "absent" as "no agent-label read on this host" rather
+          // than as an empty result.
+          ...(v.agentLabelSelectors ? { agentLabelSelectors: v.agentLabelSelectors } : {}),
         }]),
       ),
     });

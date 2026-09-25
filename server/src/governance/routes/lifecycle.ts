@@ -5,10 +5,67 @@ import { DataverseClient } from "../services/dataverseClient.js";
 import { getDb } from "../db.js";
 import { decrypt } from "../crypto.js";
 import { normalizeAgentScope } from "../agent-scope.js";
-import { normalizeDlpMonitor, setDlpMonitor, listGovernedAgents } from "../dlp-monitor.js";
+import { normalizeDlpMonitor, setDlpMonitor, listGovernedAgents, lookupAgentIdentity, aliasesFor } from "../dlp-monitor.js";
+import { derivePlatform, normalizePlatform } from "../../lib/agent-platform.js";
+// `unenforceableReason` SUPERSEDES agent-platform.js's isUnenforceableBlock at
+// both call sites below: it answers the same "no platform" question and one more
+// ("platform set, but no surface knows it"). Imported from the one place that
+// owns the enforceable set so the read path and the write path cannot disagree
+// about which stored rows actually do something.
+import { unenforceableReason } from "../../lib/agent-platforms.js";
+// The SAME admin credential the SDK, replay, conversation and feature-settings
+// routes already use — one admin auth mechanism in the product, not two. Applied
+// below to /block, /unblock and /dlp-monitor only; the GETs on this router stay public because
+// the browser extension and the desktop agent poll them with no token at all.
+import { requireAdminAuth } from "../../auth.js";
 import type { GoogleServiceAccountKey } from "../services/googleWorkspaceClient.js";
 
 const router = Router();
+
+// ── Request-body type checking for the blocklist writes ─────────────────────
+//
+// THE HOLE THIS CLOSES. `agent_id` was checked for TRUTHINESS only, and
+// express.json() hands back whatever JSON shape the client sent — including an
+// object. A body of `{"agent_id": {"$ne": null}}` passed `if (!agent_id)` and went
+// straight into `updateOne({ agent_id }, …, { upsert: true })`, where Mongo reads
+// it as a QUERY OPERATOR rather than a value: the filter matches the first row
+// whose agent_id is not null and the $set overwrites an UNRELATED agent's block
+// row — silently repointing or lifting a decision the admin never touched. The
+// same value also builds the `$or` handed to derivePlatform().
+//
+// So every field that reaches a Mongo filter or a stored row is type-checked as a
+// string first. The optional ones may still be omitted or sent as null — the write
+// path already normalises those to null — what is refused is a value of the wrong
+// TYPE, which no legitimate caller sends.
+const OPTIONAL_STRING_FIELDS = ["agent_name", "platform", "reason", "oauth_key_id"] as const;
+
+/**
+ * The name of the first badly-typed field, or null when the body is acceptable.
+ *
+ * EXPORTED FOR TESTS. The rest of this router cannot be mounted against the
+ * in-memory fake (it resolves its Mongo handle through getDb() at request time),
+ * so its behaviour is normally pinned by reading this file's source — which
+ * cannot tell a working check from a broken one. This one function is pure, so
+ * exporting it buys a real behavioural test of the injection it refuses.
+ */
+export function badBlockField(body: any): string | null {
+  // Required, and non-empty after trimming — preserving the old `if (!agent_id)`
+  // rejection of "" while adding the type it always assumed.
+  if (typeof body?.agent_id !== "string" || body.agent_id.trim().length === 0) return "agent_id";
+  for (const field of OPTIONAL_STRING_FIELDS) {
+    const value = body[field];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== "string") return field;
+  }
+  return null;
+}
+
+/** The 400 body for a badly-typed field, worded the same way on both routes. */
+function badFieldError(field: string): { error: string } {
+  return field === "agent_id"
+    ? { error: "agent_id is required and must be a string" }
+    : { error: `${field} must be a string when present` };
+}
 
 // ── Google service account token helper ──────────────────────────────────────
 
@@ -432,11 +489,18 @@ router.delete("/clear-token-cache", async (_req, res) => {
 // Stores a blocklist in MongoDB. The browser extension and OS monitor poll
 // GET /api/blocked-agents to enforce blocks at runtime.
 
-router.post("/block", async (req, res) => {
+// ADMIN-GATED. This route writes the list BOTH enforcers act on, so an open
+// version let anyone who could reach the API block — or, via /unblock, lift —
+// any agent in the org. The GETs below stay public by design.
+router.post("/block", requireAdminAuth, async (req, res) => {
   try {
     const { agent_id, agent_name, platform, reason, oauth_key_id, agent_scope } = req.body;
-    if (!agent_id) {
-      res.status(400).json({ error: "agent_id is required" });
+    // Type-checked BEFORE any of these values reaches a Mongo filter, a stored
+    // field, or derivePlatform() — see badBlockField at the top of this file for
+    // the injection it exists to stop.
+    const badField = badBlockField(req.body);
+    if (badField) {
+      res.status(400).json(badFieldError(badField));
       return;
     }
     // How wide the block is — see ../agent-scope.ts. Optional and defaulting to
@@ -449,13 +513,21 @@ router.post("/block", async (req, res) => {
       return;
     }
     const db = getDb();
+    // Same platform derivation as PUT /api/v1/registry/:id/status, through the
+    // same helper, so the two write paths cannot disagree about it. A row stored
+    // with platform:null is enforceable on NEITHER surface (the desktop enforcer
+    // drops it at parse time, the extension cannot map it to a host), so the value
+    // is taken off the discovered_agents document for this agent when the caller
+    // omits it. See ../../lib/agent-platform.js.
+    const resolvedPlatform = normalizePlatform(platform)
+      ?? await derivePlatform(db, { $or: [{ id: agent_id }, { agent_key: agent_id }, { botId: agent_id }, { appId: agent_id }] });
     await db.collection("blocked_agents").updateOne(
       { agent_id },
       {
         $set: {
           agent_id,
           agent_name: agent_name || null,
-          platform: platform || null,
+          platform: resolvedPlatform,
           reason: reason || "Blocked by admin",
           // Provenance, so a block can be attributed to the connection it came
           // from. Rows written before this have none, which is why the read path
@@ -469,17 +541,57 @@ router.post("/block", async (req, res) => {
       },
       { upsert: true },
     );
-    res.json({ ok: true, agent_id, status: "blocked" });
+    // The block is stored either way — dropping it would lift a decision an admin
+    // deliberately made — but a row that enforces nowhere is reported as such
+    // rather than handed a plain success. Mirrors the registry route's
+    // `enforced:false` + `reason`, and the `unenforceable` / `unenforceable_reason`
+    // markers GET /blocked-agents puts on the same row.
+    //
+    // THREE ways a stored row enforces nowhere by name, and they are different
+    // facts:
+    //   no_platform            — nothing to key on. The original case.
+    //   unknown_platform       — a platform IS set, but neither the extension's
+    //                            host map nor the desktop enforcer's process map
+    //                            knows it (see ../../lib/agent-platforms.js).
+    //                            Previously came back as a plain success and
+    //                            looked identical to a working block.
+    //   product_level_platform — the platform names a PRODUCT (m365_copilot,
+    //                            teams_desktop) rather than a per-agent-matchable
+    //                            value. That product IS blocked, by the separate
+    //                            whole-product ai_platforms host cascade — this
+    //                            name-matched row just is not what does it.
+    //
+    // All three are INFORMATIONAL and handled identically; none is a harder
+    // failure than the others, and NONE refuses the write. The row above is already committed at this point,
+    // on purpose: an admin's decision outranks our ability to act on it, and a
+    // platform we cannot enforce today may be enforceable after the next endpoint
+    // update — at which point the stored row starts working with no re-entry.
+    // Named for what it is, not `reason` — `reason` in this scope is the ADMIN'S
+    // free-text justification off the request body, already stored on the row above.
+    const enforcementReason = unenforceableReason(resolvedPlatform);
+    res.json({
+      ok: true,
+      agent_id,
+      status: "blocked",
+      ...(enforcementReason ? { enforced: false, reason: enforcementReason } : {}),
+    });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Block failed" });
   }
 });
 
-router.post("/unblock", async (req, res) => {
+// ADMIN-GATED for the same reason as /block, and arguably more urgently: this one
+// LIFTS a governance decision, and an unauthenticated caller able to lift a block
+// is an unauthenticated caller able to re-enable any AI tool in the org.
+router.post("/unblock", requireAdminAuth, async (req, res) => {
   try {
     const { agent_id } = req.body;
-    if (!agent_id) {
-      res.status(400).json({ error: "agent_id is required" });
+    // IDENTICAL shape to /block's filter, so it gets the identical check: the
+    // `{"$ne": null}` body that repointed a block through /block would, here, have
+    // matched an unrelated row and set blocked:false on it — lifting someone
+    // else's block. `agent_id` is the only field this route reads.
+    if (typeof agent_id !== "string" || agent_id.trim().length === 0) {
+      res.status(400).json(badFieldError("agent_id"));
       return;
     }
     const db = getDb();
@@ -518,22 +630,64 @@ router.get("/blocked-agents", async (_req, res) => {
     // ones, so a block on an agent from a Google connection removed in June sat in
     // the UI forever with nothing to indicate it was unmanageable. Marked, not
     // deleted; clearing one stays an explicit admin action via /unblock.
-    const ids = list.map(b => b.agent_id).filter(Boolean);
-    const known = new Set<string>();
-    if (ids.length > 0) {
-      const rows = await db.collection("discovered_agents")
-        .find({ $or: [{ id: { $in: ids } }, { agent_key: { $in: ids } }] })
-        .project({ _id: 0, id: 1, agent_key: 1 })
-        .toArray();
-      for (const r of rows) {
-        if (r.id) known.add(String(r.id));
-        if (r.agent_key) known.add(String(r.agent_key));
-      }
-    }
+    //
+    // `agent_aliases` rides the same lookup: see lookupAgentIdentity's comment for
+    // why one stored name isn't enough for the desktop enforcer to match against.
+    const { known, namesById } = await lookupAgentIdentity(db, list.map(b => b.agent_id));
 
-    res.json(list.map(b => ({ ...b, orphaned: !known.has(String(b.agent_id)) })));
+    // `unenforceable` rides the same annotate-never-drop rule as `orphaned`, for a
+    // different failure: the row exists and is real, but no surface can act on it,
+    // so it shows as Blocked in AI Systems while stopping nothing.
+    //
+    // THREE causes, now told apart by `unenforceable_reason` instead of collapsed
+    // into one boolean (see ../../lib/agent-platforms.js for the shared definition
+    // and the curated enforceable set):
+    //
+    //   'no_platform'      — no `platform` at all. Both consumers key on that
+    //                        field: the desktop enforcer drops a platform-less row
+    //                        at parse time, the extension cannot map it to a host.
+    //                        Both write paths derive the platform now, so this
+    //                        should only be rows written before that fix.
+    //   'unknown_platform' — a platform IS set, but it is not one any surface
+    //                        knows. Previously reported as enforceable, which is
+    //                        the gap this widening closes: an admin blocking, say,
+    //                        a `power_automate` or `aws_bedrock` agent got a row
+    //                        that looked indistinguishable from a working block.
+    //   'product_level_platform' — the platform names a PRODUCT (m365_copilot,
+    //                        teams_desktop), which the whole-product ai_platforms
+    //                        host cascade does block; this per-agent, name-matched
+    //                        row is simply not the thing doing it.
+    //
+    // ADDITIVE ONLY. `unenforceable` stays a boolean and keeps its meaning for the
+    // clients already reading it — it just becomes true for more rows — and no row
+    // is dropped. Filtering here would be the one unforgivable change: it would
+    // make the payload agree with what is actually enforced by silently discarding
+    // the admin's decision. Marked, never migrated or deleted.
+    res.json(list.map(b => {
+      const unenforceableReasonForRow = unenforceableReason(b.platform);
+      return {
+        ...b,
+        orphaned: !known.has(String(b.agent_id)),
+        unenforceable: unenforceableReasonForRow !== null,
+        unenforceable_reason: unenforceableReasonForRow,
+        agent_aliases: aliasesFor(b.agent_id, b.agent_name, namesById),
+      };
+    }));
   } catch (err) {
-    res.json([]);
+    // Must never resolve as an empty success list. This route's whole point is
+    // "which agents are currently blocked", and its two consumers — the desktop
+    // enforcer
+    // (blocked-agents-sync.js) and the browser extension — both treat an empty
+    // array as an authoritative "nothing is blocked" and write it straight into
+    // their local enforcement file. A DB hiccup here would therefore have
+    // silently unblocked every agent in the company, indistinguishable from an
+    // admin genuinely clearing every block. A real error status is what lets
+    // the consumers' OWN existing fail-closed check do its job: the desktop
+    // sync already does `if (!res.ok) return null` and leaves its file
+    // untouched on exactly this signal (see blocked-agents-sync.js's
+    // `refreshBlockedAgents` and its "FAIL CLOSED on either source failing"
+    // comment) — it just never had a real failure status to catch here before.
+    res.status(500).json({ error: err instanceof Error ? err.message : "Could not read blocked-agents" });
   }
 });
 
@@ -543,11 +697,23 @@ router.get("/blocked-agents", async (_req, res) => {
 // it. The write shape, the filter and the projection all live there so they have
 // one definition and can be tested without a Mongo connection.
 
-router.post("/dlp-monitor", async (req, res) => {
+//
+// ADMIN-GATED, like /block and /unblock: this flag changes what the desktop agent
+// and the browser extension enforce for every user of the named agent, so an open
+// write let anyone who could reach the API start or stop DLP monitoring of it.
+// GET /governed-agents below stays public — the enforcers poll it with no token.
+router.post("/dlp-monitor", requireAdminAuth, async (req, res) => {
   try {
     const { agent_id, agent_name, platform, reason, oauth_key_id, agent_scope, dlp_monitor } = req.body;
-    if (!agent_id) {
-      res.status(400).json({ error: "agent_id is required" });
+    // Type-checked with the SAME helper /block uses, BEFORE agent_id reaches the
+    // Mongo filter in the shared write helper. The old `if (!agent_id)` let
+    // `{"agent_id": {"$ne": null}}` through, which Mongo reads as a query operator
+    // and which would then toggle monitoring on an unrelated agent's row. The
+    // optional identity fields are held to the same "string when present" rule,
+    // because they land in the stored row's $set.
+    const badField = badBlockField(req.body);
+    if (badField) {
+      res.status(400).json(badFieldError(badField));
       return;
     }
     // Explicit boolean, no default — an empty body must not start (or stop)

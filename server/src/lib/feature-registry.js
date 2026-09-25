@@ -38,6 +38,30 @@ export const FEATURE_REGISTRY = [
   F('access_requests', 'Access Requests — the request-access gate', ['dashboard', 'extension'], FEATURE_GROUPS.ENFORCE),
   F('model_routing', 'Model Routing — routing enforcement', ['dashboard', 'extension'], FEATURE_GROUPS.ENFORCE),
   F('session_replay', 'Session Replay — recording', ['dashboard', 'extension'], FEATURE_GROUPS.ENFORCE),
+  // NEW KEY, and the one that extends per-agent blocking to the BROWSER M365
+  // surfaces (Teams web, m365.cloud.microsoft, SharePoint, Office web, Outlook
+  // web). Without it the extension can only recognise a blocked agent when the
+  // PAGE HEADER names it, and on those hosts the header never does — the title
+  // stays "Chat | Microsoft 365 Copilot" whichever agent is loaded, so an
+  // agent-scoped block simply did not fire in the browser there. The reader
+  // takes the name from inside the resolved Copilot panel instead, which is the
+  // same place the desktop enforcer reads it from.
+  //
+  // WHY IT IS SAFE TO DEFAULT ON. The reader FAILS CLOSED in the strict sense:
+  // no label found is not a reason to block anything, so a selector that matches
+  // nothing leaves today's behaviour exactly as it was. It is panel-scoped (never
+  // document-scoped), caps a label at 120 chars, and nothing it reads leaves the
+  // page. The worst a wrong selector can do is match the wrong name INSIDE an
+  // open AI panel — bounded, and visible immediately to anyone testing.
+  //
+  // WHAT IS STILL UNVERIFIED. Two of the four served selectors
+  // (.fai-CopilotMessage__accessibleHeading, .fai-AiGeneratedDisclaimer) were
+  // measured live on the Teams desktop client, which renders the same Fluent DOM
+  // as Teams web, so they are grounded. The other two ([aria-selected][role=
+  // option] and [role=combobox][aria-expanded]) are still a hypothesis about the
+  // agent picker. Selectors are served from the server (lib/ai-surfaces.js), so
+  // correcting a wrong one is a config change, not an extension release.
+  F('m365_agent_label_reader', 'M365 per-agent blocking in the browser — read the open agent from the Copilot panel', ['dashboard', 'extension'], FEATURE_GROUPS.ENFORCE),
 
   // ── Desktop agent ─────────────────────────────────────────────────────────
   F('clipboard_monitor', 'Clipboard Monitor — prompt monitoring', ['dashboard', 'agent'], FEATURE_GROUPS.ENDPOINT),

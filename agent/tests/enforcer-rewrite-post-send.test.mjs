@@ -182,6 +182,43 @@ test('the post-send window is per-surface CATALOG DATA, and only Teams asks for 
   assert.equal(panels.get('fixture_middle').ms, 700);
 });
 
+test('M365Copilot — an agent surface with no panel row — gets its catalog 1500ms post-send window', { skip: !win }, async () => {
+  // THE LIVE BUG (2026-09-21): a real Tokenize & Send in M365Copilot delivered
+  // the masked message and was still reported not_submitted, because the
+  // surface's postSendVerifyMs was never serialized and PostSendVerifyMsFor only
+  // looked at panels. So the enforcement_redact audit event was lost.
+  const c = await one('post_send_constants');
+  const rows = new Map((await cases('post_send_for_surface')).map((r) => [r.variant, r]));
+  for (const r of rows.values()) {
+    assert.equal(r.loaded, true, `${r.variant}: LoadAgentSurfaces rejected the payload`);
+    assert.equal(r.available, true);
+  }
+  assert.equal(rows.get('m365_copilot_chat').ms, 1500,
+    'M365Copilot must get its catalog window, not the 200ms default');
+  const clearedAt = 600;
+  assert.equal(readTimes(rows.get('m365_copilot_chat').ms, c).some((t) => t >= clearedAt), true,
+    'a composer that clears at +600ms must now be SEEN to have cleared');
+  // A matched PANEL still wins — the fallback only applies off-panel.
+  assert.equal(rows.get('m365_process_but_panel').ms, c.first_read_ms);
+  // The same clamp as a panel's copy, and the default for a surface that
+  // states nothing / an app with no surface at all.
+  assert.equal(rows.get('surface_huge_clamped').ms, c.max_ms);
+  assert.equal(rows.get('surface_absent_default').ms, c.first_read_ms);
+  assert.equal(rows.get('no_surface_chat_app').ms, c.first_read_ms);
+  // The newline combination resolves through the same fallback.
+  assert.equal(rows.get('m365_copilot_chat').newline, 'shift_enter');
+});
+
+test('the READ site clamps a panel window on BOTH bounds, whatever the field holds', { skip: !win }, async () => {
+  const c = await one('post_send_constants');
+  const rows = new Map((await cases('post_send_read_site')).map((r) => [r.variant, r]));
+  for (const r of rows.values()) assert.equal(r.available, true, 'ClampPostSendMs is missing');
+  // Pre-fix the panel branch clamped only the lower bound, so 99999 went
+  // straight to the post-send loop and outlived the dialog.
+  assert.equal(rows.get('panel_field_huge').ms, c.max_ms);
+  assert.equal(rows.get('panel_field_negative').ms, c.first_read_ms);
+});
+
 test('the catalog value is CLAMPED on the way in, so no payload can break the time budget', { skip: !win }, async () => {
   const c = await one('post_send_constants');
   const clamped = byKey(await cases('post_send_clamp'), 'panel');
@@ -221,8 +258,16 @@ test('the longer window still fits the rewrite time budget it was reasoned again
   const clearComposerMs = 80;     // Ctrl+A + Delete
   const verifyPollMs = 400;       // the read-back poll
   const settleMs = 300;           // the pre-Enter settle
+  // The focused-element pin reads OUTSIDE the write (before Ctrl+A and before
+  // Enter), each retried once at worst. The ones inside the write are charged
+  // by EstimateWriteMs against write_budget_ms. Read from the source, not
+  // restated.
+  const enf = await readFile(ENFORCER, 'utf8');
+  const pinReadMs = Number((enf.match(/const int REWRITE_FOCUS_PIN_READ_MS = (\d+);/) || [])[1]);
+  assert.ok(pinReadMs > 0, 'expected REWRITE_FOCUS_PIN_READ_MS');
+  const outsidePinReadsMs = 2 * 2 * pinReadMs;
   const worstTail = verifyPollMs + settleMs + c.max_ms + c.poll_ms;
-  const worstTotal = modifiersWaitMs + clearComposerMs + c.write_budget_ms + worstTail;
+  const worstTotal = modifiersWaitMs + clearComposerMs + outsidePinReadsMs + c.write_budget_ms + worstTail;
   assert.ok(worstTotal < dialogMs,
     `the worst-case rewrite (${worstTotal}ms) must report before the dialog closes (${dialogMs}ms)`);
   // …and inside the 15s pin TTL the same arithmetic quotes.
@@ -252,23 +297,26 @@ test('the post-send check POLLS, and the one-shot read is gone', async () => {
   const src = await readFile(ENFORCER, 'utf8');
   const fn = src.slice(src.indexOf('static void RunRewrite('), src.indexOf('// SendInput\'s return value is the count'));
   assert.ok(fn.length > 0, 'expected a RunRewrite body');
-  const tail = fn.slice(fn.indexOf('SendKeyPress(VK_RETURN);'));
+  // The write path's side effects go through the IRewriteIo seam (see
+  // enforcer-rewrite-focus-pin.test.mjs), so the Enter / sleeps / reads are
+  // io.* calls. The assertions are the same ones, against those names.
+  const tail = fn.slice(fn.indexOf('io.KeyPress(VK_RETURN);'));
   assert.ok(tail.length > 0, 'expected the post-send tail');
 
   // THE REGRESSION GUARD. The literal that was the whole bug: a fixed 200ms
   // sleep followed by exactly one read, with no way for a slower composer to
   // catch up. No naked millisecond literal may reappear in this tail — the
   // budget arithmetic cannot see one.
-  assert.equal(/Thread\.Sleep\(\d+\)/.test(tail), false,
+  assert.equal(/(Thread|io)\.Sleep\(\d+\)/.test(tail), false,
     'the post-send tail must not sleep on a literal — it is what made this a one-shot read');
-  assert.match(tail, /Thread\.Sleep\(REWRITE_POST_SEND_MS\);/);
-  assert.match(tail, /Thread\.Sleep\(REWRITE_POST_SEND_POLL_MS\);/);
+  assert.match(tail, /io\.Sleep\(REWRITE_POST_SEND_MS\);/);
+  assert.match(tail, /io\.Sleep\(REWRITE_POST_SEND_POLL_MS\);/);
 
   // The loop: bounded by a deadline derived from THIS SURFACE's window, re-reads
   // the same pinned element, and exits the moment the text is gone.
   assert.match(tail, /long postSendDeadline = DateTime\.UtcNow\.Ticks\s*\r?\n?\s*\+ TimeSpan\.FromMilliseconds\(postSendMs - REWRITE_POST_SEND_MS\)\.Ticks;/);
   assert.match(tail, /while \(stillThere && DateTime\.UtcNow\.Ticks < postSendDeadline\)/);
-  assert.equal((tail.match(/postSend = ReadText\(el\);/g) || []).length, 2,
+  assert.equal((tail.match(/postSend = io\.ReadPinned\(\);/g) || []).length, 2,
     'the first read plus the re-read inside the loop');
   // The VERDICT is unchanged, and is still reached from the same comparison —
   // waiting longer changed when we look, never what counts as sent.
@@ -283,7 +331,7 @@ test('the post-send check POLLS, and the one-shot read is gone', async () => {
   // _fgPanelId while we clear and retype the composer.
   const pinIdx = fn.indexOf('int postSendMs = PostSendVerifyMsFor();');
   assert.ok(pinIdx > 0, 'expected the post-send window to be pinned in the pre-flight');
-  assert.ok(pinIdx < fn.indexOf('SendKeyCombo(VK_CONTROL, VK_A)'),
+  assert.ok(pinIdx < fn.indexOf('io.KeyCombo(VK_CONTROL, VK_A)'),
     'the window must be resolved before Ctrl+A clears the composer');
   assert.equal((fn.match(/PostSendVerifyMsFor\(\)/g) || []).length, 1,
     'it must be read exactly once, not re-resolved at the read site');
@@ -299,9 +347,23 @@ test('the post-send window resolves from the panel catalog, the same way the new
   assert.match(fn, /if \(_fgIsPanel && !string\.IsNullOrEmpty\(_fgPanelId\)\)/);
   assert.match(fn, /string\.Equals\(p\.Id, _fgPanelId, StringComparison\.OrdinalIgnoreCase\)/);
   assert.match(fn, /return REWRITE_POST_SEND_MS;/);
-  // Belt and braces on the lower bound, so the read site can never be handed a
-  // window shorter than the read every surface used to get.
-  assert.match(fn, /p\.PostSendVerifyMs < REWRITE_POST_SEND_MS \? REWRITE_POST_SEND_MS : p\.PostSendVerifyMs/);
+  // Belt and braces on BOTH bounds, at the read site, for BOTH catalogs — one
+  // clamp function, so the panel branch cannot again be bounded on only one
+  // side (it used to clamp the lower bound alone).
+  assert.match(fn, /return ClampPostSendMs\(p\.PostSendVerifyMs\);/);
+  // The AGENT-SURFACE fallback, for a chat app with no AI_PANELS row
+  // (M365Copilot): only when focus is NOT a panel, so a matched panel still
+  // wins.
+  assert.match(fn, /if \(!_fgIsPanel\)\s*\{\s*AgentSurface s = MatchAgentSurface\(_app\);/);
+  assert.ok(fn.indexOf('MatchAgentSurface(_app)') > fn.indexOf('ClampPostSendMs(p.PostSendVerifyMs)'),
+    'the panel branch must be consulted first');
+  assert.match(fn, /if \(s != null\) return ClampPostSendMs\(s\.PostSendVerifyMs\);/);
+  const clamp = src.slice(src.indexOf('static int ClampPostSendMs(int ms)'), src.indexOf('static void StartRewrite('));
+  assert.match(clamp, /if \(ms < REWRITE_POST_SEND_MS\) return REWRITE_POST_SEND_MS;/);
+  assert.match(clamp, /if \(ms > REWRITE_POST_SEND_MAX_MS\) return REWRITE_POST_SEND_MAX_MS;/);
+  // …and LoadAgentSurfaces applies the SAME load-time clamp LoadAiPanels does.
+  const loadSurfaces = src.slice(src.indexOf('static void LoadAgentSurfaces(string json)'), src.indexOf('static AgentSurface MatchAgentSurface(string proc)'));
+  assert.match(loadSurfaces, /PostSendVerifyMs = JsIntClamped\(d, "postSendVerifyMs",\s*\r?\n?\s*REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MAX_MS\),/);
   // The load path clamps too — the C# side must not trust an env var it did not
   // build, even though buildAiPanelConfig already clamped.
   assert.match(src, /PostSendVerifyMs = JsIntClamped\(d, "postSendVerifyMs",\s*\r?\n?\s*REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MAX_MS\),/);
@@ -338,9 +400,19 @@ test('the post-send default and ceiling are catalog data, mirrored in exactly on
     assert.equal(entry.postSendVerifyMs, MAX_POST_SEND_VERIFY_MS,
       `${id} must state its post-send confirmation window`);
   }
-  // No other entry asks for more than the default, so nothing else changed.
+  // The Office Copilot pane states it too, and for the same measured reason
+  // rather than by imitation: that pane is WebView2-hosted exactly as Teams'
+  // composers are, so it sits behind the same Chromium accessibility hop. The
+  // entry now ships enforce:true (live-verified 2026-09-21), so this value is
+  // actually load-bearing for Tier B there, not just correct-for-later.
+  assert.equal(AI_PANELS.find((p) => p.id === 'office_copilot_pane')?.postSendVerifyMs, MAX_POST_SEND_VERIFY_MS);
+  // No other entry asks for more than the default, so nothing else changed. The
+  // three that do are named explicitly rather than pattern-matched, so a new
+  // surface cannot acquire a longer wait by being named after one of them.
+  // outlook_copilot_pane (2026-09-24): the same WebView2-hosted Fluent composer.
+  const LONGER_WINDOW = ['teams_composer', 'teams_copilot_composer', 'office_copilot_pane', 'outlook_copilot_pane'];
   for (const entry of AI_PANELS) {
-    if (entry.id.startsWith('teams_')) continue;
+    if (LONGER_WINDOW.includes(entry.id)) continue;
     assert.equal(entry.postSendVerifyMs, undefined,
       `${entry.id} must not have acquired a longer post-send window`);
   }

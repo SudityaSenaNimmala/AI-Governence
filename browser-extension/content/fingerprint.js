@@ -411,6 +411,10 @@
     'outlook.live.com':           ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
     'office.com':                 GENERIC_AI_PANEL,
     'office365.com':              GENERIC_AI_PANEL,
+    // microsoft365.com is office.com's successor portal and now an injected
+    // host, so it needs a scope decision like every other one: capture is
+    // restricted to the Copilot panel, never the whole Office app.
+    'microsoft365.com':           ['[data-tid*="copilot" i]', ...GENERIC_AI_PANEL],
     'crm.dynamics.com':           ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
     'copilotstudio.microsoft.com':['[aria-label*="Copilot" i]', '[class*="copilot" i]', '[aria-label*="Test your agent" i]'],
     'powerapps.com':              ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],

@@ -1296,13 +1296,18 @@ test('REGRESSION 2026-09-04: a human Teams conversation is STILL never walked or
     assert.equal(r.dlpGoverned, false, `tick ${r.tick}`);
   }
 
-  // THE HONEST LIMIT of this route, pinned so it cannot be mistaken for
+  // THE HONEST LIMIT of THIS route, pinned so it cannot be mistaken for
   // coverage. When Teams serves the Copilot-shaped title AND the pane yields no
-  // heading the extractor recognises, there is no signal left anywhere: the
-  // outcome is no evidence and, for a host app, that correctly fails OPEN. If
-  // this state is ever observed live on the Chat-list route, the thing to
-  // re-measure is the heading CLASS that route renders — nothing here should be
-  // loosened to compensate.
+  // fai-CopilotMessage heading, this route has no signal left: the outcome is
+  // no evidence and, for a host app, that correctly fails OPEN.
+  //
+  // IT WAS ALSO A PREDICTION, and on 2026-09-21 it came true — this state is
+  // now the NORMAL one for every Chat-list agent conversation on MSTeams
+  // 26225.1806.5074.1452. What this comment said to do about it is exactly what
+  // was done: nothing here was loosened, and a SIGNAL the Chat-list route
+  // actually renders was measured and added instead. See the "THIRD SIGNAL"
+  // tests below. These ticks still pass unchanged because that new route is
+  // gated on its own flags, which the fixture here leaves off.
   const none = await scenario('chatlist_retitled_no_headings');
   assert.equal(none.length, 3);
   for (const r of none) {
@@ -1310,6 +1315,233 @@ test('REGRESSION 2026-09-04: a human Teams conversation is STILL never walked or
     assert.equal(r.agentOutcome, 'NotComposer', `tick ${r.tick}: …and found no evidence`);
     assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
     assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+  }
+});
+
+// ── THE THIRD SIGNAL: the Chat-list "AI generated" badge route ──────────────
+//
+// THE DEFECT. Measured live 2026-09-21 on MSTeams 26225.1806.5074.1452 (MSIX),
+// twice, by two independent methods (raw Win32 GetWindowText and a UIA
+// parent-walk to the top-level Window), with the "IT Help Desk Agent" Copilot
+// Studio conversation open and FOCUSED from the Chat list: the window title
+// reads "Copilot | filefuze | erik@filefuze.co | Microsoft Teams" and never
+// names the conversation. So the Chat-list route's only identity signal is
+// gone, no governed or blocked row can match, and the product owner's report
+// follows directly — an SSN typed into a DLP-MONITORED agent sent through with
+// no scan at all.
+//
+// THE SIGNAL. Also measured that day, by direct UIA inspection, 15 messages in
+// the transcript: every AI message carries an Image whose ClassName holds the
+// token `fai-AiGeneratedDisclaimer`, and beside it on the same row sits a
+// ControlType.Text whose Name is the bare sender name (empty ClassName, empty
+// AutomationId), Y within 1px of the badge across all 15.
+//
+// THE PAIRING IS THE SAFETY PROPERTY, not an optimisation, and it is what these
+// tests exist to hold. A bare unclassed Text on its own was explicitly measured
+// and rejected in 2026-09 as "a coincidence waiting to happen"; the badge is
+// the distinguishing attribute that judgement found missing, because it cannot
+// appear beside a human colleague's message.
+
+test('THIRD SIGNAL: the Chat-list badge route is inert until its own two flags are true', { skip: !win }, async () => {
+  // The SHIPPED shape. The Chat-list composer is fully armed as a SIGNATURE and
+  // teams_desktop is armed too, so this is emphatically not "nothing is on":
+  // the blocked agent's conversation is open, its composer focused and matched,
+  // the title broken exactly as measured, and the badge pairing sitting right
+  // there. The route's own pair is false/false, so PanelFallbackArmed refuses
+  // before any walk, thread or cache write happens.
+  const rows = await scenario('badge_route_is_inert');
+  assert.equal(rows.length, 5);
+  for (const r of rows) {
+    assert.equal(r.searchAttempted, false, `tick ${r.tick}: no pane walk may even be attempted`);
+    assert.equal(r.agentOutcome, 'NotComposer', `tick ${r.tick}: the broken title names nothing`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.fgIsAi, false, `tick ${r.tick}: Teams must not become an AI surface`);
+    assert.equal(r.govActive, false, `tick ${r.tick}`);
+    // The composer IS still matched — detection and this reading route are
+    // separate gates, exactly as they are everywhere else here.
+    assert.equal(r.matched, 'teams_composer', `tick ${r.tick}`);
+  }
+});
+
+test('THIRD SIGNAL: the badge pairing recovers a BLOCKED agent the broken title lost', { skip: !win }, async () => {
+  // THE FIX, against the exact live condition. Identical to the inert scenario
+  // above in every respect but the route's own two flags — which is what proves
+  // the block comes from this route and not from something else in the tick.
+  const rows = await scenario('badge_blocked_agent');
+  assert.equal(rows.length, 10);
+  for (const r of rows) {
+    assert.equal(r.searchAttempted, true, `tick ${r.tick}`);
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    // Through the CHAT-LIST composer, not the Copilot tab's.
+    assert.equal(r.matched, 'teams_composer', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}`);
+    assert.equal(r.blockedByElement, true, `tick ${r.tick}`);
+    // The SAME latch key every other Teams route uses: a third way to reach one
+    // outcome, not a third state machine. Nothing downstream changed.
+    assert.equal(r.latchKey, 'agent:teams_desktop', `tick ${r.tick}`);
+    // The name in the block comes from the admin-typed ROW, never from the pane.
+    assert.equal(r.blockedAgent, 'IT Help Desk Agent', `tick ${r.tick}`);
+  }
+  // Badges ACCUMULATE down a transcript exactly as Copilot-tab headings do, and
+  // two that agree are one confirmed answer.
+  const two = await scenario('badge_two_messages');
+  assert.equal(two.length, 5);
+  for (const r of two) {
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'agent', `tick ${r.tick}`);
+  }
+});
+
+test('THIRD SIGNAL: THE INVARIANT — an ordinary human Teams chat is never read or blocked', { skip: !win }, async () => {
+  // The single property that must never break. Everything is armed, the title
+  // is broken in the identical way, the SAME CKEditor composer is focused (one
+  // element serves every Teams conversation), and the transcript is full of
+  // Text nodes whose Names are the actual messages people typed — with NOT ONE
+  // "AI generated" badge. No evidence, no block, no DLP governance, no capture,
+  // no file-scanning arm.
+  const rows = await scenario('badge_human_dm_untouched');
+  assert.equal(rows.length, 5);
+  for (const r of rows) {
+    assert.equal(r.agentOutcome, 'NotComposer', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.contentBlock, false, `tick ${r.tick}: not even a content match may stop a human chat`);
+    assert.equal(r.dlpGoverned, false, `tick ${r.tick}`);
+    assert.equal(r.fgIsAi, false, `tick ${r.tick}`);
+    assert.equal(r.govActive, false, `tick ${r.tick}`);
+    assert.equal(r.tierBReached, false, `tick ${r.tick}`);
+  }
+
+  // The second half of the same property, and the one the 2026-09 pass was
+  // right to worry about: a bare name Text with NO badge on its row. The
+  // blocked agent's EXACT name is sitting in this transcript — and the only
+  // badge is 438px away, a different message row entirely — so the real
+  // PairAiBadgeHeadings must drop it and offer nothing.
+  const unpaired = await scenario('badge_unpaired_text_ignored');
+  assert.equal(unpaired.length, 5);
+  for (const r of unpaired) {
+    assert.equal(r.searchAttempted, true, `tick ${r.tick}: the walk DID run`);
+    assert.equal(r.agentOutcome, 'NotComposer', `tick ${r.tick}: …and the unpaired name was not evidence`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.dlpGoverned, false, `tick ${r.tick}`);
+  }
+});
+
+test('THIRD SIGNAL: ambiguity and generic labels fail OPEN, never into a block', { skip: !win }, async () => {
+  // Two badges whose paired names disagree — a mixed or re-rendered transcript.
+  // One of them names the very agent an admin blocked, and it still must not
+  // block: for a company's communications client "cannot tell" can never mean
+  // "block anyway".
+  const rows = await scenario('badge_disagree_no_evidence');
+  assert.equal(rows.length, 3);
+  for (const r of rows) {
+    assert.equal(r.searchAttempted, true, `tick ${r.tick}: the walk DID run`);
+    assert.equal(r.agentOutcome, 'NotComposer', `tick ${r.tick}: …and produced no evidence`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.latchKey, '', `tick ${r.tick}`);
+  }
+  // A paired name that is a GENERIC label is AUTHORITATIVE "no specific agent",
+  // and the Generic filter runs BEFORE any match — so an agent literally called
+  // "Copilot" can never be matched through this route either.
+  const generic = await scenario('badge_generic_name');
+  assert.equal(generic.length, 3);
+  for (const r of generic) {
+    assert.equal(r.agentOutcome, 'Generic', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+  }
+  // The route widens COVERAGE, never POLICY: an agent nobody has a policy about
+  // is authoritatively named and then left completely alone.
+  const unpoliced = await scenario('badge_unpoliced_agent');
+  assert.equal(unpoliced.length, 3);
+  for (const r of unpoliced) {
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    assert.equal(r.fgIsAi, false, `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.dlpGoverned, false, `tick ${r.tick}`);
+  }
+});
+
+test('THIRD SIGNAL: THE REPORTED BUG — a DLP-monitored Chat-list agent is finally governed', { skip: !win }, async () => {
+  // The product owner's exact case, end to end: the agent has DLP Monitor on in
+  // AI Hub, nothing is on the blocked list, and its Chat-list conversation is
+  // open under the broken title. Before this route that tick was completely
+  // ungoverned — an SSN went through with no scan. Now:
+  //   * dlpGoverned true and fgIsBlocked FALSE — governed is not blocked, and
+  //     the pair is never true/true;
+  //   * a plain Enter still goes through (enterBlocked false);
+  //   * a CONTENT match now DOES stop the send (contentBlock true) and Tier B
+  //     (Tokenize & Send) is offered.
+  const rows = await scenario('badge_governed_dlp_only');
+  assert.equal(rows.length, 10);
+  for (const r of rows) {
+    assert.equal(r.searchAttempted, true, `tick ${r.tick}`);
+    assert.equal(r.agentOutcome, 'Named', `tick ${r.tick}`);
+    assert.equal(r.matched, 'teams_composer', `tick ${r.tick}`);
+    assert.equal(r.dlpGoverned, true, `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}: DLP monitoring never swallows a plain send`);
+    assert.equal(r.contentBlock, true, `tick ${r.tick}: a sensitive prompt IS stopped now`);
+    assert.equal(r.tierBReached, true, `tick ${r.tick}`);
+    assert.equal(r.govActive, true, `tick ${r.tick}`);
+  }
+  // Byte-for-byte the outcome the already-passing Chat-list scenario produces
+  // when the title DOES work — same columns, same values, reached by the new
+  // read path instead. That equivalence is the actual claim of this change.
+  const viaTitle = await scenario('teams_governed_dlp_only');
+  for (const key of ['dlpGoverned', 'fgIsBlocked', 'enterBlocked', 'contentBlock', 'tierBReached', 'govActive', 'matched', 'agentOutcome']) {
+    assert.deepEqual(rows.map((r) => r[key]), viaTitle.map((r) => r[key]), key);
+  }
+});
+
+test('THIRD SIGNAL: the panel match is the gate, and a healthy title still wins', { skip: !win }, async () => {
+  // Focus on the TRANSCRIPT, not the composer. The panel match IS this route's
+  // gate — there is no pane-kind gate, because the title is the broken signal —
+  // so no walk may even be attempted here. Asserted structurally, via the real
+  // PanelFallbackArmed.
+  const notComposer = await scenario('badge_not_composer_focused');
+  assert.equal(notComposer.length, 3);
+  for (const r of notComposer) {
+    assert.equal(r.searchAttempted, false, `tick ${r.tick}`);
+    assert.equal(r.matched, '', `tick ${r.tick}`);
+    assert.equal(r.fgIsAi, false, `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+  }
+
+  // ADDITIVE, never a replacement. Tick 0 and 2 carry a WORKING Chat-list title:
+  // the primary parse names the agent and no walk is attempted at all. Tick 1 is
+  // the broken title and the badge route recovers the same answer. The block
+  // holds across all three with no ungoverned tick in between.
+  const flap = await scenario('badge_healthy_title_wins');
+  assert.equal(flap.length, 3);
+  assert.deepEqual(flap.map((r) => r.searchAttempted), [false, true, false]);
+  assert.deepEqual(flap.map((r) => r.agentOutcome), ['Named', 'Named', 'Named']);
+  assert.deepEqual(flap.map((r) => r.fgIsBlocked), [true, true, true]);
+  assert.deepEqual(flap.map((r) => r.enterBlocked), [true, true, true]);
+
+  // Leaving for a colleague DM releases on the very tick — no badge means no
+  // evidence, and for a host app an ambiguous tick must release, not hold.
+  const release = await scenario('badge_release_to_dm');
+  assert.equal(release.length, 3);
+  assert.deepEqual(release.map((r) => r.agentOutcome), ['Named', 'NotComposer', 'NotComposer']);
+  assert.deepEqual(release.map((r) => r.fgIsBlocked), [true, false, false]);
+  assert.deepEqual(release.map((r) => r.enterBlocked), [true, false, false]);
+
+  // And the upstream PRIVACY GATE is untouched: with no Teams policy on either
+  // list, nothing is read, nothing is walked, and the outcome never leaves
+  // Unreadable — even with the route fully armed and the pairing present.
+  const noPolicy = await scenario('badge_no_policy_no_read');
+  assert.equal(noPolicy.length, 3);
+  for (const r of noPolicy) {
+    assert.equal(r.agentOutcome, 'Unreadable', `tick ${r.tick}`);
+    assert.equal(r.searchAttempted, false, `tick ${r.tick}`);
+    assert.equal(r.matched, '', `tick ${r.tick}`);
+    assert.equal(r.fgIsAi, false, `tick ${r.tick}`);
   }
 });
 
@@ -1742,6 +1974,105 @@ test('govstate: a chat app and an IDE panel never arm it — host apps only', as
   }
 });
 
+// ── OFFICE: a per-agent block must never disable Word ───────────────────────
+//
+// The same inversion as Teams, in the application where getting it wrong is
+// worst. Word, Excel, PowerPoint and OneNote host the Microsoft 365 Copilot side
+// pane, and PLATFORM_PROCS now maps copilot_studio / personal_agent /
+// sharepoint_embedded onto their process names — which is what an agent-scoped
+// row needs before it can ever be narrowed to one agent inside the pane, and
+// which simultaneously puts those processes within reach of CheckFgBlocked's
+// whole-app arm. office_copilot_pane_agent's `hostApp: true` is the only thing
+// standing between the two, and it is keyed on the PROCESS rather than on the
+// surface being verified precisely so it holds while the surface ships inert.
+
+test('THE INVERSION, in Office: an unverified host-app surface produces NO BLOCK, never a whole-app one', { skip: !win }, async () => {
+  // THE most important test of this phase.
+  //
+  // Everything is in place for the old behaviour to fire: a real agent-scoped
+  // row, on a platform whose process set now covers WINWORD, with the blocked
+  // agent's own name sitting in the pane's composer label. The surface cannot
+  // narrow to it (no live pass yet), and for a CHAT app that means a whole-app
+  // block — see `agent_unverified_surface_whole_app`. Here it must mean nothing
+  // at all, because a whole-app block on WINWORD is "nobody in the company may
+  // type in Word because one Copilot agent is blocked".
+  const rows = await scenario('office_unverified_never_whole_app');
+  assert.equal(rows.length, 4);
+  for (const r of rows) {
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}: Word must NEVER be blocked whole`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}: Enter in Word must never be swallowed by this`);
+    assert.equal(r.blockedAgent, '', `tick ${r.tick}: nothing may be attributed`);
+    assert.equal(r.latchKey, '', `tick ${r.tick}: nothing may be armed`);
+    // Unreadable proves NO AGENT READ HAPPENED — not that one failed. An
+    // unverified surface must not even look at the composer's name.
+    assert.equal(r.agentOutcome, 'Unreadable', `tick ${r.tick}: no agent read may occur at all`);
+  }
+  // The pane itself is still DETECTED throughout — the panel entry is
+  // live-verified and enforcing, and this change must not have disturbed it.
+  assert.equal(rows[0].matched, 'office_copilot_pane', 'the pane must still be identified');
+  assert.equal(rows[0].fgIsPanel, true);
+  assert.equal(rows[3].matched, '', 'the document body matches no panel');
+});
+
+test('…and the same holds in Excel, PowerPoint and both OneNote builds', { skip: !win }, async () => {
+  // Those three inherit coverage by PROCESS NAME rather than by their own live
+  // measurement, so the guard has to be asserted per name and not assumed.
+  const rows = await scenario('office_unverified_never_whole_app_all_hosts');
+  assert.equal(rows.length, 4);
+  for (const r of rows) {
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+  }
+});
+
+test('a PLATFORM-scoped row against Office blocks nothing either', { skip: !win }, async () => {
+  // An absent agent_scope is the pre-existing "block the whole platform" shape.
+  // The coarse arm is guarded on the PROCESS being host-app-marked, not on the
+  // surface being verified, so this produces nothing for the same reason.
+  const rows = await scenario('office_platform_row_never_blocks');
+  assert.equal(rows.length, 3);
+  for (const r of rows) {
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'app', `tick ${r.tick}: 'app' is only the no-block default here`);
+  }
+});
+
+test('REGRESSION GUARD: the panel-keyed Office block still fires — host-app marking must not switch it off', { skip: !win }, async () => {
+  // The other half, and the reason the Office processes are marked
+  // `panelHosted` rather than simply added to _hostAppProcs.
+  //
+  // An Inventory block on m365.cloud.microsoft synthesizes a PANEL-keyed row for
+  // this pane (panelForHost resolves it — the pane's host is its own product's,
+  // unlike either Teams composer), and that row was driven end-to-end through a
+  // real server-side block against a real licensed Word install on 2026-09-21.
+  // It is element-scoped by construction, so the whole-app fail-open above must
+  // not reach it. If this test fails, blocking Microsoft 365 Copilot in Inventory
+  // silently stopped applying inside Office.
+  const rows = await scenario('office_panel_row_still_blocks');
+  assert.equal(rows.length, 3);
+  for (const r of rows) {
+    assert.equal(r.matched, 'office_copilot_pane', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, true, `tick ${r.tick}: the panel-keyed row must still block`);
+    assert.equal(r.enterBlocked, true, `tick ${r.tick}`);
+    assert.equal(r.blockScope, 'panel', `tick ${r.tick}`);
+    assert.equal(r.blockedByElement, true, `tick ${r.tick}: element-scoped, never process-wide`);
+  }
+});
+
+test('…and that panel block never reaches the document body', { skip: !win }, async () => {
+  // The property the panel keying exists for: the caret in the document, the
+  // same blocked row loaded, and nothing swallowed. Driven from a cold start so
+  // no latch can be carrying a block across.
+  const rows = await scenario('office_panel_row_spares_document');
+  assert.equal(rows.length, 2);
+  for (const r of rows) {
+    assert.equal(r.matched, '', `tick ${r.tick}`);
+    assert.equal(r.fgIsBlocked, false, `tick ${r.tick}: typing in a document must never be blocked`);
+    assert.equal(r.enterBlocked, false, `tick ${r.tick}`);
+  }
+});
+
 test('govstate PII: the payload is a bool, a scope, a panel id, admin names, a process and a pid — nothing else', async () => {
   if (!win) return;
   // Asserted against the REAL emitter's output. This event's whole job is to arm
@@ -1785,5 +2116,94 @@ test('govstate PII: the payload is a bool, a scope, a panel id, admin names, a p
     assert.ok(['teams_composer', 'teams_copilot_composer'].includes(ev.panel), `unexpected panel ${ev.panel}`);
     assert.ok(known.has(ev.agent), `govstate carried an agent name no policy row supplied: ${JSON.stringify(ev.agent)}`);
     assert.ok(ev.pid > 0);
+  }
+});
+
+// ═══ Block ATTRIBUTION: which agent a block line names ══════════════════════
+//
+// The {"kind":"block"} line now carries agent / agent_id / agent_src for EVERY
+// block, a content-pattern block included. The two admissible sources are an
+// agent-scoped policy ROW (admin-typed name, server-issued id) and a panel's
+// catalog soleAgent; a name read off another app's accessibility tree or window
+// may only ever come back as the matching row's own value. These read the REAL
+// EmitBlock output, captured by the harness (see CaptureBlock).
+
+async function attrLine(name) {
+  const rows = await scenario(name);
+  const obs = rows.find((r) => r.attr === true);
+  assert.ok(obs, `harness produced no captured block line for '${name}'`);
+  assert.ok(obs.line.startsWith('{"kind":"block"'), `not a block line: ${obs.line}`);
+  return { raw: obs.line, ev: JSON.parse(obs.line) };
+}
+
+test('attribution: a content block in a GOVERNED M365 agent names the ROW, never the read string', { skip: !win }, async () => {
+  const { raw, ev } = await attrLine('attr_m365_governed_row');
+  assert.equal(ev.platform_block, undefined, 'this is a content-pattern block, not a platform block');
+  assert.equal(ev.agent_src, 'row');
+  // The admin's spelling and the server's id — the composer said "hr   HELPER".
+  assert.equal(ev.agent, 'HR Helper');
+  assert.equal(ev.agent_id, 'ag-gov-4');
+  assert.equal(ev.surface, 'm365_copilot', 'our own catalog id');
+  for (const forbidden of ['hr   HELPER', 'hr HELPER', 'HELPER', 'Message ']) {
+    assert.equal(raw.includes(forbidden), false, `the UI-read name leaked onto the block line (${forbidden}): ${raw}`);
+  }
+});
+
+test('attribution: an agent NO row names is attributed to nothing, and its read name never leaves', { skip: !win }, async () => {
+  const { raw, ev } = await attrLine('attr_m365_unknown_agent');
+  assert.equal(ev.agent_src, 'none');
+  assert.equal(ev.agent, '');
+  assert.equal(ev.agent_id, '');
+  assert.equal(raw.includes('Secret Project Bot'), false, `a UI-read agent name reached the block line: ${raw}`);
+});
+
+test('attribution: an agent-scoped PLATFORM block names its own armed row', { skip: !win }, async () => {
+  const { ev } = await attrLine('attr_m365_blocked_agent');
+  assert.equal(ev.platform_block, true);
+  assert.equal(ev.block_scope, 'agent');
+  assert.equal(ev.agent_src, 'row');
+  assert.equal(ev.agent, 'AI Learning Advisor');
+  assert.equal(ev.agent_id, 'agent-advisor');
+  // …and the pre-existing Request Access identity is untouched.
+  assert.equal(ev.blocked_agent, 'AI Learning Advisor');
+  assert.equal(ev.blocked_agent_id, 'agent-advisor');
+});
+
+test('attribution: a panel with a catalog soleAgent is attributed to it, with no id', { skip: !win }, async () => {
+  const { ev } = await attrLine('attr_office_sole');
+  assert.equal(ev.agent_src, 'sole');
+  assert.equal(ev.agent, 'Microsoft 365 Copilot');
+  assert.equal(ev.agent_id, '', 'a catalog string has no server-issued id');
+  assert.equal(ev.panel, 'office_copilot_pane');
+});
+
+test('attribution: a governed Teams conversation names the row, and the window title never leaves', { skip: !win }, async () => {
+  const { raw, ev } = await attrLine('attr_teams_governed_row');
+  assert.equal(ev.agent_src, 'row');
+  assert.equal(ev.agent, 'Expenses Helper');
+  assert.equal(ev.agent_id, 'ag-gov-1');
+  assert.equal(ev.panel, 'teams_composer');
+  for (const forbidden of ['Chat |', 'filefuze', '@', 'Microsoft Teams', 'Type a message', 'ck-editor']) {
+    assert.equal(raw.includes(forbidden), false, `the block line carried ${JSON.stringify(forbidden)}: ${raw}`);
+  }
+});
+
+test('attribution: nothing to attribute means "none", and a stale answer never survives the sticky window', { skip: !win }, async () => {
+  const ide = (await attrLine('attr_ide_none')).ev;
+  assert.equal(ide.agent_src, 'none');
+  assert.equal(ide.agent, '');
+  // The previous tick resolved "sole"; focus then left the AI app. A block
+  // fired now must not borrow that answer.
+  const sticky = (await attrLine('attr_sticky_none')).ev;
+  assert.equal(sticky.agent_src, 'none');
+  assert.equal(sticky.agent, '');
+});
+
+test('attribution: every captured block line uses only the three documented agent_src values', { skip: !win }, async () => {
+  for (const name of ['attr_m365_governed_row', 'attr_m365_unknown_agent', 'attr_m365_blocked_agent',
+    'attr_office_sole', 'attr_teams_governed_row', 'attr_ide_none', 'attr_sticky_none']) {
+    const { ev } = await attrLine(name);
+    assert.ok(['row', 'sole', 'none'].includes(ev.agent_src), `${name}: agent_src ${ev.agent_src}`);
+    if (ev.agent_src === 'none') assert.deepEqual([ev.agent, ev.agent_id], ['', ''], name);
   }
 });

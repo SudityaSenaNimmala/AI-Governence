@@ -141,6 +141,55 @@ $ms = WindowFor $false 'teams_composer'
 Out-Obj @{ case = 'post_send_for_panel'; panel = '(id_without_panel_flag)'
            available = [bool]($null -ne $ms); ms = $ms }
 
+# ── B2: an AGENT-SURFACE chat app with no AI_PANELS row ────────────────────
+# M365Copilot has no panel entry, so before the agent-surface fallback its
+# catalog postSendVerifyMs reached nothing and it got the 200ms default — the
+# live bug where a delivered mask-and-send was reported not_submitted. The
+# payload is buildAgentSurfaceConfig()'s shape (m365_copilot carrying its real
+# 1500), plus fixtures pinning the same clamp the panel copy gets.
+$SURFACES = @(
+  '{"id":"m365_copilot","procs":["M365Copilot"],"controlType":"Edit","composerNamePrefixes":["Message "],"genericNames":["Copilot"],"read":"composer_name","titleSeparator":"","titleSuffix":"","titleKinds":[],"hostApp":false,"panelHosted":false,"enforce":true,"verified":true,"newlineKeys":"shift_enter","postSendVerifyMs":1500}'
+  '{"id":"fixture_surface_huge","procs":["FixtureHuge"],"controlType":"Edit","composerNamePrefixes":["Message "],"genericNames":[],"read":"composer_name","titleSeparator":"","titleSuffix":"","titleKinds":[],"hostApp":false,"panelHosted":false,"enforce":false,"verified":false,"newlineKeys":"shift_enter","postSendVerifyMs":30000}'
+  '{"id":"fixture_surface_absent","procs":["FixtureAbsent"],"controlType":"Edit","composerNamePrefixes":["Message "],"genericNames":[],"read":"composer_name","titleSeparator":"","titleSuffix":"","titleKinds":[],"hostApp":false,"panelHosted":false,"enforce":false,"verified":false}'
+) -join ','
+$surfacesLoaded = $true
+try { Call 'LoadAgentSurfaces' @('[' + $SURFACES + ']') | Out-Null } catch { $surfacesLoaded = $false }
+foreach ($c in @(
+  @{ name = 'm365_copilot_chat';      app = 'M365Copilot';   isPanel = $false; panelId = '' }
+  # A matched PANEL still wins over the agent surface — the fallback only
+  # applies when focus is not a panel.
+  @{ name = 'm365_process_but_panel'; app = 'M365Copilot';   isPanel = $true;  panelId = 'claude_code' }
+  @{ name = 'surface_huge_clamped';   app = 'FixtureHuge';   isPanel = $false; panelId = '' }
+  @{ name = 'surface_absent_default'; app = 'FixtureAbsent'; isPanel = $false; panelId = '' }
+  @{ name = 'no_surface_chat_app';    app = 'Claude';        isPanel = $false; panelId = '' }
+)) {
+  SetF '_app' $c.app
+  $ms = WindowFor $c.isPanel $c.panelId
+  $nl = $null
+  if (HasMethod 'NewlineKeysFor') { $nl = [string](Call 'NewlineKeysFor') }
+  Out-Obj @{ case = 'post_send_for_surface'; variant = $c.name; loaded = $surfacesLoaded
+             available = [bool]($null -ne $ms); ms = $ms; newline = $nl }
+}
+SetF '_app' ''
+SetF '_fgIsPanel' $false
+SetF '_fgPanelId' ''
+
+# ── B3: the READ-SITE clamp, on both bounds, for a PANEL ───────────────────
+# The loaders already clamp, so this bypasses them: the loaded entry's field is
+# overwritten by reflection with values no loader would let through, and the
+# resolver must still hand the post-send loop a window inside the budget.
+$readSiteAvailable = HasMethod 'ClampPostSendMs'
+foreach ($c in @(@{ name = 'panel_field_huge'; v = 99999 }, @{ name = 'panel_field_negative'; v = -1 })) {
+  $target = $null
+  foreach ($p in (GetF '_panels')) { if ([string]$PANELSIG_T.GetField('Id', $IFLAGS).GetValue($p) -eq 'fixture_middle') { $target = $p } }
+  $PANELSIG_T.GetField('PostSendVerifyMs', $IFLAGS).SetValue($target, [int]$c.v)
+  $ms = WindowFor $true 'fixture_middle'
+  Out-Obj @{ case = 'post_send_read_site'; variant = $c.name; available = $readSiteAvailable; ms = $ms }
+}
+$PANELSIG_T.GetField('PostSendVerifyMs', $IFLAGS).SetValue($target, 700)
+SetF '_fgIsPanel' $false
+SetF '_fgPanelId' ''
+
 # ── C: "does the composer STILL hold the masked text" ───────────────────────
 # The one comparison the confirmation makes, run for real against the reads a
 # composer returns. A cleared composer must NOT look like a failed send, and a

@@ -10,6 +10,8 @@
 //   DELETE /api/v1/ai-platforms/:host       admin: remove
 
 import { a } from '../util.js';
+import { requireAdminAuth } from '../auth.js';
+import { MICROSOFT_WORKSPACE_COPILOT_HOSTS, applyMicrosoftWorkspaceCopilotCascade } from '../lib/ai-surfaces.js';
 
 const VALID_CATEGORY = new Set([
   'chat-frontend', 'ide-assistant', 'autonomous-agent', 'api-platform', 'local-runtime',
@@ -140,7 +142,14 @@ export function mountAiPlatforms(app, db) {
     res.status(201).json(rowToJson(row));
   }));
 
-  app.patch('/api/v1/ai-platforms/:host', a(async (req, res) => {
+  // ADMIN-GATED. `blocked` on this route reaches the SAME Microsoft 365 Copilot
+  // host cascade that PUT /api/v1/registry/:id/status does (see the comment on
+  // that call below), so leaving it open would have made gating only the other
+  // route theatre — an unauthenticated PATCH on office.com could block or unblock
+  // all ten Microsoft hosts for the org. The two GETs above stay public: the
+  // browser extension polls `?surface=browser` with no credential, and gating
+  // them would silently stop all enforcement.
+  app.patch('/api/v1/ai-platforms/:host', requireAdminAuth, a(async (req, res) => {
     const host = normalizeHost(req.params.host);
     if (!host) return res.status(400).json({ error: 'bad host' });
     const patch = pickPatch(req.body);
@@ -177,6 +186,31 @@ export function mountAiPlatforms(app, db) {
 
     const row = await db.collection('ai_platforms').findOne({ host });
     if (!row) return res.status(404).json({ error: 'not found' });
+
+    // The Microsoft 365 Copilot product toggle covers its web surfaces here
+    // TOO — see applyMicrosoftWorkspaceCopilotCascade's own comment. A real
+    // admin can reach this exact product from this host-keyed catalog page
+    // (toggling `office.com` or `m365.cloud.microsoft` directly) just as
+    // easily as from the Inventory list that calls registry.js's status
+    // route, and the two must not disagree about what one toggle covers.
+    // The `agent_registry.matched_hosts` propagation above is a DIFFERENT,
+    // narrower mechanism (siblings of a discovered agent) and does not reach
+    // this product — it has no discovered agent of its own, which is the
+    // whole reason this cascade exists rather than relying on that path.
+    //
+    // Gated on HOST MEMBERSHIP in the curated list, not on `row.product` —
+    // found live 2026-09-21: the seed data for `m365.cloud.microsoft` itself
+    // (the exact host office_copilot_pane's `host` field points to) carries
+    // `product: "Microsoft Copilot"`, missing "365", the same inconsistency
+    // sharepoint.com/outlook.office.com have BY DESIGN for their own product
+    // names. A product-string match would have silently never cascaded from
+    // the single most relevant host in the whole set. The curated list is
+    // already the reviewed, unambiguous signal (see its own comment in
+    // lib/ai-surfaces.js) — this route doesn't need a second one.
+    if ('blocked' in patch && MICROSOFT_WORKSPACE_COPILOT_HOSTS.includes(host)) {
+      await applyMicrosoftWorkspaceCopilotCascade(db, !!patch.blocked);
+    }
+
     res.json(rowToJson(row));
   }));
 

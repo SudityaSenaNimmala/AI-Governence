@@ -6,6 +6,7 @@ import {
   CLAUDE_CODE_SURFACE, CLAUDE_CODE_SURFACE_LEGACY,
   classifyClient, clientSortKey, UNKNOWN_CLIENT,
 } from '../lib/claude-clients.js';
+import { RESPONSE_BUDGET_MS, isQueryTimeoutError } from '../lib/response-budget.js';
 
 // Claude-only usage: prompts per user across every Claude surface, with REAL
 // tokens and cost where we have them and clearly-flagged estimates where we
@@ -124,7 +125,23 @@ const num = (field) => ({ $convert: { input: field, to: 'double', onError: 0, on
 // an error the UI can render, not a request that hangs until the browser gives
 // up: a spinner that never resolves is indistinguishable from a broken page, and
 // it is what this tab showed in production.
-const READ_BUDGET_MS = Number(process.env.CLAUDE_USAGE_BUDGET_MS || 20_000);
+//
+// THE ONE DELIBERATE EXCEPTION to the race-and-fall-back-to-stale shape every
+// other AI Hub read route now uses (lib/response-budget.js). This route drives
+// real cost and seat-reclamation decisions, and this file's own rule is never to
+// mix measured and estimated figures — a stale dollar figure served as current
+// is a materially worse failure here than a stale registry or DLP count, because
+// someone acts on it. Two further reasons:
+//   * maxTimeMS ABORTS the aggregation. A race would leave the losing query
+//     running on the cluster (and, for these two, running in Node's event loop
+//     when it lands), which is the very thing that left the whole server
+//     unresponsive after a few visits to this tab.
+//   * there is a correct answer to "we could not measure this in time" — say so
+//     — and the frontend can render it. There is no correct way to present a
+//     stale cost as a current one.
+// The number is the shared budget now, so this route cannot drift away from the
+// org-wide one; CLAUDE_USAGE_BUDGET_MS stays as its per-route override.
+const READ_BUDGET_MS = Number(process.env.CLAUDE_USAGE_BUDGET_MS || RESPONSE_BUDGET_MS);
 
 function estimate(prompts, totalChars, rate) {
   const inputTokens = totalChars > 0
@@ -353,46 +370,69 @@ export function mountClaudeUsage(app, db) {
     // gives the same answer from a few dozen documents instead of tens of thousands.
     const promptQuery = { event_kind: { $in: PROMPT_KINDS }, source: { $in: sources } };
     if (since) promptQuery.occurred_at = { $gte: since };
-    const events = (await db.collection('dlp_events').aggregate([
-      { $match: promptQuery },
-      {
-        // `terminal` joins the group key so the per-client split costs no extra
-        // read. It is a TOP-LEVEL field for exactly this reason: the value also
-        // lives inside metadata_json, but $group cannot reach into a JSON string
-        // without a per-document parse, which is what the move to $group removed.
-        $group: {
-          _id: {
-            ai_service: '$ai_service', source: '$source',
-            machine_id: '$machine_id', terminal: '$terminal',
-          },
-          prompts: { $sum: 1 },
-          chars: { $sum: num('$content_length') },
-        },
-      },
-    ], { maxTimeMS: READ_BUDGET_MS }).toArray())
-      .map((g) => ({ ...g._id, prompts: g.prompts, chars: g.chars }));
 
-    const usageQuery = { source: { $in: sources } };
-    if (since) usageQuery.occurred_at = { $gte: since };
-    const usageRows = (await db.collection('ai_token_usage').aggregate([
-      { $match: usageQuery },
-      {
-        $group: {
-          _id: {
-            ai_service: '$ai_service', source: '$source', machine_id: '$machine_id',
-            user_email: '$user_email', model: '$model',
+    // A STRUCTURED 503, NOT A BARE 500 CARRYING A DRIVER MESSAGE.
+    //
+    // When maxTimeMS aborts one of these aggregations the driver throws, and
+    // that used to reach the client as 500 { error: "<raw mongo text>" } —
+    // which the Claude Usage tab could only render as the literal word "500".
+    // The shape below is deliberately small and machine-readable so the tab can
+    // say "we could not measure this within Ns, retry" and mean it:
+    //
+    //   503 { "error": "budget_exceeded", "budget_ms": 5000 }
+    //
+    // 503 rather than 504: the server is temporarily unable to produce the
+    // answer and a retry is the right response. Anything that is NOT a timeout
+    // still propagates as before — a genuine bug must not be labelled a budget
+    // problem.
+    let events;
+    let usageRows;
+    try {
+      events = (await db.collection('dlp_events').aggregate([
+        { $match: promptQuery },
+        {
+          // `terminal` joins the group key so the per-client split costs no extra
+          // read. It is a TOP-LEVEL field for exactly this reason: the value also
+          // lives inside metadata_json, but $group cannot reach into a JSON string
+          // without a per-document parse, which is what the move to $group removed.
+          $group: {
+            _id: {
+              ai_service: '$ai_service', source: '$source',
+              machine_id: '$machine_id', terminal: '$terminal',
+            },
+            prompts: { $sum: 1 },
+            chars: { $sum: num('$content_length') },
           },
-          requests: { $sum: 1 },
-          input_tokens: { $sum: num('$input_tokens') },
-          output_tokens: { $sum: num('$output_tokens') },
-          cache_read_tokens: { $sum: num('$cache_read_tokens') },
-          cache_creation_tokens: { $sum: num('$cache_creation_tokens') },
-          total_tokens: { $sum: num('$total_tokens') },
-          cost_usd: { $sum: num('$cost_usd') },
         },
-      },
-    ], { maxTimeMS: READ_BUDGET_MS }).toArray())
-      .map(({ _id, ...sums }) => ({ ..._id, ...sums }));
+      ], { maxTimeMS: READ_BUDGET_MS }).toArray())
+        .map((g) => ({ ...g._id, prompts: g.prompts, chars: g.chars }));
+
+      const usageQuery = { source: { $in: sources } };
+      if (since) usageQuery.occurred_at = { $gte: since };
+      usageRows = (await db.collection('ai_token_usage').aggregate([
+        { $match: usageQuery },
+        {
+          $group: {
+            _id: {
+              ai_service: '$ai_service', source: '$source', machine_id: '$machine_id',
+              user_email: '$user_email', model: '$model',
+            },
+            requests: { $sum: 1 },
+            input_tokens: { $sum: num('$input_tokens') },
+            output_tokens: { $sum: num('$output_tokens') },
+            cache_read_tokens: { $sum: num('$cache_read_tokens') },
+            cache_creation_tokens: { $sum: num('$cache_creation_tokens') },
+            total_tokens: { $sum: num('$total_tokens') },
+            cost_usd: { $sum: num('$cost_usd') },
+          },
+        },
+      ], { maxTimeMS: READ_BUDGET_MS }).toArray())
+        .map(({ _id, ...sums }) => ({ ..._id, ...sums }));
+    } catch (err) {
+      if (!isQueryTimeoutError(err)) throw err;
+      console.warn(`[claude-usage] read exceeded ${READ_BUDGET_MS}ms — aborted, no estimate substituted`);
+      return res.status(503).json({ error: 'budget_exceeded', budget_ms: READ_BUDGET_MS });
+    }
 
     // surface -> { users: Map<key, row> }
     const surfaces = new Map();

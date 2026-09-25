@@ -396,6 +396,17 @@
   color: var(--ah-text-muted);
 }
 
+/* Inline note beside an admin write control rendered disabled because this
+   build carries no admin credential (see hasAdminCredential). Muted, like the
+   other helper text, so it reads as "why this is inert", not as an error. */
+.aihub_admin_hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.6px;
+  color: var(--ah-text-muted);
+}
+
 .aihub_text_mono {
   font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 14.7px;
@@ -723,6 +734,11 @@
   transition: all var(--ah-transition-fast);
 }
 .aihub_select:hover { border-color: #d0d5dd; }
+/* Same treatment as .aihub_action_btn:disabled (pending save, or no admin credential). */
+.aihub_select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 .aihub_select:focus-visible {
   outline: none;
   border-color: var(--ah-accent);
@@ -1406,4 +1422,33 @@
   color: var(--ah-text-muted);
   font-variant-numeric: tabular-nums;
   user-select: all;
+}
+
+/* Screen-reader-only text. Used where a badge conveys its state with a symbol
+   (e.g. "Browser ✓ · Desktop ✗" on a blocked agent): the symbols carry the
+   meaning visually and this carries the same meaning in words, so the state is
+   never symbol-only. Not display:none — that would remove it from the
+   accessibility tree, which is the opposite of the point. */
+.aihub_sr_only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* "Agent: <name>" sub-line under the service on a DLP event row. The name is
+   whatever the enforcer saw on the page and can be long, so it is clamped to
+   one line with an ellipsis (the full name is in the title tooltip) rather than
+   widening the Service column. */
+.aihub_dlp_agent_line {
+  font-size: 12.3px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

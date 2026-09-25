@@ -15,6 +15,7 @@
 // the real server is worse than no stub.
 
 function matchesValue(actual, expected) {
+  if (expected instanceof RegExp) return typeof actual === 'string' && expected.test(actual);
   if (expected && typeof expected === 'object' && !Array.isArray(expected) && !(expected instanceof Date)) {
     const ops = Object.keys(expected);
     if (ops.some((k) => k.startsWith('$'))) {
@@ -30,6 +31,19 @@ function matchesValue(actual, expected) {
           case '$lt':     if (!(cmp(actual, operand) < 0)) return false; break;
           case '$lte':    if (!(cmp(actual, operand) <= 0)) return false; break;
           case '$exists': if ((actual !== undefined) !== operand) return false; break;
+          // Field-level negation, as in { hostname: { $not: /browser-extension/i } }
+          // — the "real desktop agents only" filter on /api/v1/overview and the
+          // "named people only" filter the risk-score summary applies. Mongo
+          // negates the whole inner predicate, INCLUDING its own "a missing field
+          // does not match a regex" rule, so an absent field passes a $not regex.
+          case '$not':    if (matchesValue(actual, operand)) return false; break;
+          case '$regex': {
+            const rx = operand instanceof RegExp ? operand : new RegExp(operand, expected.$options ?? '');
+            if (!(typeof actual === 'string' && rx.test(actual))) return false;
+            break;
+          }
+          // Consumed by the $regex branch above, not a predicate of its own.
+          case '$options': break;
           default: throw new Error(`fake-db: unsupported query operator ${op}`);
         }
       }
@@ -193,6 +207,50 @@ function applyExprOperator(op, arg, doc) {
         : [arg.if, arg.then, arg.else];
       return resolve(ifExpr, doc) ? resolve(thenExpr, doc) : resolve(elseExpr, doc);
     }
+    // Day bucketing, as the routing analytics and risk-score trend rollups use
+    // it. Only the format tokens this codebase actually writes are understood and
+    // anything else throws: a silently mis-formatted bucket key would make a trend
+    // look empty rather than wrong, which is the failure this file refuses.
+    case '$dateToString': {
+      const value = resolve(arg.date, doc);
+      if (value === null || value === undefined) {
+        return 'onNull' in arg ? resolve(arg.onNull, doc) : null;
+      }
+      const d = value instanceof Date ? value : new Date(value);
+      if (Number.isNaN(d.getTime())) throw new Error('fake-db: $dateToString got an unparseable date');
+      const pad = (n, w = 2) => String(n).padStart(w, '0');
+      const parts = {
+        '%Y': pad(d.getUTCFullYear(), 4), '%m': pad(d.getUTCMonth() + 1), '%d': pad(d.getUTCDate()),
+        '%H': pad(d.getUTCHours()), '%M': pad(d.getUTCMinutes()), '%S': pad(d.getUTCSeconds()),
+      };
+      const format = String(arg.format ?? '%Y-%m-%d');
+      return format.replace(/%./g, (token) => {
+        if (!(token in parts)) throw new Error(`fake-db: unsupported $dateToString token ${token}`);
+        return parts[token];
+      });
+    }
+    // Byte-offset substring, as the DLP trend uses it to bucket an ISO-string
+    // occurred_at by day ($dateToString cannot: the field is a string, not a
+    // BSON date). Operates on UTF-8 BYTES like Mongo, not UTF-16 code units, so
+    // a non-ASCII value cannot silently disagree with production.
+    case '$substrBytes': {
+      const [strExpr, startExpr, lenExpr] = arg;
+      const v = resolve(strExpr, doc);
+      if (v === null || v === undefined) return '';
+      const buf = Buffer.from(String(v), 'utf8');
+      const start = Number(resolve(startExpr, doc)) || 0;
+      const len = Number(resolve(lenExpr, doc)) || 0;
+      return buf.subarray(start, start + len).toString('utf8');
+    }
+    // Array length. Mongo errors on a non-array; a missing field here would
+    // most often mean a $group's $addToSet produced nothing, so treat
+    // absent as empty rather than throwing.
+    case '$size': {
+      const v = resolve(arg, doc);
+      if (v === null || v === undefined) return 0;
+      if (!Array.isArray(v)) throw new Error('fake-db: $size needs an array');
+      return v.length;
+    }
     case '$eq':  return eq(resolve(arg[0], doc), resolve(arg[1], doc));
     case '$ne':  return !eq(resolve(arg[0], doc), resolve(arg[1], doc));
     case '$gt':  return cmp(resolve(arg[0], doc), resolve(arg[1], doc)) > 0;
@@ -216,7 +274,12 @@ function applyExprOperator(op, arg, doc) {
   }
 }
 
-function runPipeline(docs, pipeline) {
+// `lookupDocs` resolves a collection name to its document array, so the one
+// cross-collection stage this codebase uses ($lookup, the findings→sanctions
+// left join behind /api/v1/overview and /api/v1/shadow) can be modelled. It is
+// optional: a pipeline that never looks up never needs it, and a pipeline that
+// does gets a clear error rather than an empty join.
+function runPipeline(docs, pipeline, lookupDocs = null) {
   let rows = docs.map((d) => ({ ...d }));
 
   for (const stage of pipeline) {
@@ -224,6 +287,59 @@ function runPipeline(docs, pipeline) {
     const spec = stage[op];
 
     switch (op) {
+      // Left join on equality, Mongo's localField/foreignField form. Always
+      // produces an ARRAY in `as` (empty when nothing matched), which is what
+      // makes the $unwind + preserveNullAndEmptyArrays idiom below behave like
+      // a left join rather than an inner one.
+      case '$lookup': {
+        if (!lookupDocs) throw new Error('fake-db: $lookup needs a collection resolver');
+        const unsupported = Object.keys(spec).filter((k) => !['from', 'localField', 'foreignField', 'as'].includes(k));
+        if (unsupported.length) {
+          throw new Error(`fake-db: unsupported $lookup option ${unsupported.join(', ')}`);
+        }
+        const foreign = lookupDocs(spec.from);
+        rows = rows.map((d) => ({
+          ...d,
+          [spec.as]: foreign
+            .filter((f) => eq(getPath(f, spec.foreignField), getPath(d, spec.localField)))
+            .map((f) => ({ ...f })),
+        }));
+        break;
+      }
+
+      case '$unwind': {
+        const path = typeof spec === 'string' ? spec : spec.path;
+        const preserve = typeof spec === 'string' ? false : !!spec.preserveNullAndEmptyArrays;
+        if (typeof path !== 'string' || !path.startsWith('$')) {
+          throw new Error('fake-db: $unwind needs a $-prefixed field path');
+        }
+        const field = path.slice(1);
+        if (field.includes('.')) throw new Error('fake-db: $unwind only supports top-level fields');
+        const out = [];
+        for (const d of rows) {
+          const v = d[field];
+          const list = Array.isArray(v) ? v : (v === undefined || v === null ? [] : [v]);
+          if (list.length === 0) {
+            // Mongo DROPS the document unless asked to keep it, and when it keeps
+            // it the field is absent rather than an empty array.
+            if (preserve) { const copy = { ...d }; delete copy[field]; out.push(copy); }
+            continue;
+          }
+          for (const item of list) out.push({ ...d, [field]: item });
+        }
+        rows = out;
+        break;
+      }
+
+      case '$addFields':
+      case '$set':
+        rows = rows.map((d) => {
+          const out = { ...d };
+          for (const [field, expr] of Object.entries(spec)) out[field] = resolve(expr, d);
+          return out;
+        });
+        break;
+
       case '$match':
         rows = rows.filter((d) => matches(d, spec));
         break;
@@ -267,6 +383,16 @@ function runPipeline(docs, pipeline) {
               case '$max':
                 out[field] = _docs.reduce((m, d) => (m === undefined || cmp(resolve(arg, d), m) > 0 ? resolve(arg, d) : m), undefined);
                 break;
+              // Positional accumulators. Mongo defines them against the order
+              // the documents REACH the $group, which is why the pipelines using
+              // them ($sort then $group, e.g. "the newest scan per machine") put
+              // a $sort immediately before — runPipeline preserves that order.
+              case '$first':
+                out[field] = _docs.length ? resolve(arg, _docs[0]) : null;
+                break;
+              case '$last':
+                out[field] = _docs.length ? resolve(arg, _docs[_docs.length - 1]) : null;
+                break;
               default:
                 throw new Error(`fake-db: unsupported accumulator ${accOp}`);
             }
@@ -285,8 +411,11 @@ function runPipeline(docs, pipeline) {
               if (field in d) out[field] = d[field];
             } else if (typeof rule === 'string' && rule.startsWith('$')) {
               out[field] = resolve(rule, d);
-            } else if (rule && typeof rule === 'object' && '$size' in rule) {
-              out[field] = (resolve(rule.$size, d) ?? []).length;
+            } else if (rule && typeof rule === 'object' && Object.keys(rule).some((k) => k.startsWith('$'))) {
+              // Any expression the shared resolver understands, e.g. the
+              // { $ifNull: ['$sanction_doc.status', 'unknown'] } that turns a
+              // left-joined-but-absent sanction into 'unknown'.
+              out[field] = resolve(rule, d);
             } else {
               throw new Error(`fake-db: unsupported $project rule for '${field}'`);
             }
@@ -337,11 +466,12 @@ function indexName(spec) {
 }
 
 class FakeCollection {
-  constructor(docs, uniqueIndexes, indexSpecs, onDrop = () => {}) {
+  constructor(docs, uniqueIndexes, indexSpecs, onDrop = () => {}, lookupDocs = null) {
     this.docs = docs;
     this.uniqueIndexes = uniqueIndexes;
     this.indexSpecs = indexSpecs;
     this.onDrop = onDrop;
+    this.lookupDocs = lookupDocs;
   }
 
   assertUnique(doc, ignore = null) {
@@ -523,8 +653,9 @@ class FakeCollection {
 
   aggregate(pipeline = []) {
     const docs = this.docs;
+    const lookupDocs = this.lookupDocs;
     return {
-      async toArray() { return runPipeline(docs, pipeline); },
+      async toArray() { return runPipeline(docs, pipeline, lookupDocs); },
     };
   }
 
@@ -574,6 +705,7 @@ export function createFakeDb() {
       return new FakeCollection(
         store.get(name), indexes.get(name), indexSpecs.get(name),
         () => { store.delete(name); indexes.delete(name); indexSpecs.delete(name); },
+        (from) => store.get(from) ?? [],
       );
     },
     // Only the { nameOnly: true } shape any caller in this repo uses.

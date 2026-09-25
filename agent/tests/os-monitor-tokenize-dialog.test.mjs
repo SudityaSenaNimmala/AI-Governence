@@ -969,7 +969,7 @@ test('enforcer-win.ps1: a FROZEN pin is held but never offered', async () => {
   const pending = src.slice(src.indexOf('static void UpdatePendingRewrite()'), src.indexOf('static void HoldPendingRewrite('));
   assert.ok(pending.length > 0, 'expected an UpdatePendingRewrite body');
   // The exclusion CONDITION is unchanged — only what it does changed.
-  assert.match(pending, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| \(_hostAppProcs\.Contains\(_app\) && !_fgDlpGoverned\) \|\| Disarmed\(\)\)/);
+  assert.match(pending, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| \(_hostAppProcs\.Contains\(_app\) && !_fgDlpGoverned\) \|\| !_fgContentOk \|\| Disarmed\(\)\)/);
   assert.match(pending, /if \(!_pendingRewritable \|\| Disarmed\(\) \|\| DateTime\.UtcNow\.Ticks > _pendingExpiresAt\)\s*\r?\n\s*\{ _pendingRewritable = false; _pendingBlockId = ""; _pendingFrozen = false; \}\s*\r?\n\s*else _pendingFrozen = true;/);
   // THE PANIC HOTKEY STILL CLEARS OUTRIGHT — it is the one term that means
   // "stop touching the keyboard", so it may not freeze.

@@ -142,6 +142,88 @@ test('GET /ai-surfaces?host= answers for one host', async () => {
   });
 });
 
+// ── agentLabelSelectors: WHICH named agent is open, not where the panel is ──
+//
+// A per-agent M365 block names one agent inside someone else's app. The panel
+// selectors above cannot enforce that — they answer "where is the AI on this
+// page", and acting on them would disable Copilot for the whole host. These
+// selectors are the browser-side equivalent of the desktop enforcer's composer
+// accessible-name read.
+//
+// THE SET IS AN UNVERIFIED HYPOTHESIS, and its one consumer — content.js's panel
+// agent-label reader — sits behind a feature flag that ships off. What is pinned
+// here is therefore the TRANSPORT — that it reaches a client at all, on the hosts
+// it was authored for and nowhere else — because that is what makes correcting a
+// wrong guess a server config change instead of an extension release.
+
+const M365_AGENT_HOSTS = [
+  'teams.microsoft.com', 'cloud.microsoft', 'copilotstudio.microsoft.com',
+  'outlook.office.com', 'outlook.office365.com', 'outlook.live.com',
+  'office.com', 'office365.com', 'microsoft365.com',
+  // `sharepoint_embedded` agents are consumed on <tenant>.sharepoint.com, which
+  // this key covers by dot-suffix. It was missed when the other eight were
+  // authored, leaving one of the four platforms this feature adds with no
+  // browser-side agent-label read at all.
+  'sharepoint.com',
+];
+
+test('the M365 surfaces carry agent-label selectors and other hosts do not', () => {
+  for (const host of M365_AGENT_HOSTS) {
+    const sel = EMBEDDED_AI_SURFACES[host]?.agentLabelSelectors;
+    assert.ok(Array.isArray(sel) && sel.length > 0, `${host} has no agentLabelSelectors`);
+  }
+  // Absent, not empty, everywhere else: a consumer must be able to tell "this host
+  // has no agent-label read" from "the read found nothing".
+  for (const [host, entry] of Object.entries(EMBEDDED_AI_SURFACES)) {
+    if (M365_AGENT_HOSTS.includes(host)) continue;
+    assert.equal('agentLabelSelectors' in entry, false,
+      `${host} is not an M365 agent surface but defines agentLabelSelectors`);
+  }
+});
+
+test('m365.cloud.microsoft resolves to the cloud.microsoft entry and inherits them', () => {
+  // The hosts where Copilot Studio and personal agents are actually consumed are
+  // subdomains; a second key for them would drift from the extension floor.
+  const s = surfaceFor('m365.cloud.microsoft');
+  assert.equal(s.matched, 'cloud.microsoft');
+  assert.ok(s.agentLabelSelectors.length > 0, 'the surface agents are consumed on carries no agent-label read');
+  // A tenant SharePoint host resolves the same way, and now carries the read too —
+  // `sharepoint_embedded` agents live there and nowhere else.
+  assert.ok(
+    surfaceFor('acme.sharepoint.com').agentLabelSelectors?.length > 0,
+    'a tenant SharePoint host carries no agent-label read, so sharepoint_embedded resolves nowhere in the browser',
+  );
+  // …while a host that is genuinely not an M365 agent surface still omits the
+  // field entirely, which is what tells "no read here" from "the read found nothing".
+  assert.equal(surfaceFor('app.hubspot.com').agentLabelSelectors, undefined);
+});
+
+test('a returned agentLabelSelectors array cannot mutate the catalog', () => {
+  const s = surfaceFor('teams.microsoft.com');
+  s.agentLabelSelectors.push('[data-evil]');
+  assert.equal(
+    surfaceFor('teams.microsoft.com').agentLabelSelectors.includes('[data-evil]'), false,
+    'a caller mutated the served selector set for every later request',
+  );
+});
+
+test('GET /ai-surfaces carries agentLabelSelectors in both shapes', async () => {
+  await withServer(async (get) => {
+    const one = await get('/api/v1/ai-surfaces?host=teams.microsoft.com');
+    assert.ok(one.agentLabelSelectors.length > 0, 'the single-host answer drops the field');
+
+    const map = await get('/api/v1/ai-surfaces');
+    for (const host of M365_AGENT_HOSTS) {
+      assert.ok(map.embedded[host].agentLabelSelectors?.length > 0, `${host} lost the field in the cached map`);
+    }
+    // Purely additive — the field every existing client reads is untouched.
+    assert.ok(map.embedded['teams.microsoft.com'].selectors.length > 0);
+    assert.equal('agentLabelSelectors' in map.embedded['mail.google.com'], false);
+    const claude = await get('/api/v1/ai-surfaces?host=claude.ai');
+    assert.equal('agentLabelSelectors' in claude, false);
+  });
+});
+
 // ── Server map ↔ extension floor parity ─────────────────────────────────────
 //
 // WHY THIS IS PINNED. GET /api/v1/ai-surfaces is the authoritative map, and the

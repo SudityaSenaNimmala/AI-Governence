@@ -5,10 +5,88 @@ import { emitWebhook } from './webhooks.js';
 import { siemForward } from '../lib/siem-forward.js';
 import { attachMachineIdentity, machineIdentity } from '../lib/machine-identity.js';
 import { lookupSessionClients } from '../lib/claude-sessions.js';
+import {
+  RESPONSE_BUDGET_MS, raceWithFallback, applyBudgetHeaders, dlpResponseStore,
+  registerResponseWarmer,
+} from '../lib/response-budget.js';
 
 // Hard cap on per-event content size. Anything bigger gets stored truncated
 // with a `truncated=1` flag so the dashboard can warn the admin.
 const MAX_CONTENT_BYTES = 25 * 1024 * 1024;   // 25 MB
+
+// How long a fetched page counts as CURRENT for GET /api/v1/dlp — see the
+// comment at its call site. This is a separate knob from the response budget and
+// deliberately stays at its original 20s: the TTL decides when it is worth
+// asking the database again, the budget decides how long to wait for the answer
+// once asked. Conflating them would either re-run a 2000-row fetch on every tab
+// switch or serve a 20s-old page as though it were live.
+const DLP_LIST_CACHE_TTL_MS = 20_000;
+
+// Every read route below shares ONE bounded, in-memory store and ONE budget
+// (lib/response-budget.js). What used to be two Maps and a 9s literal here is
+// now the same mechanism /registry and the other AI Hub tabs use, which is what
+// makes "how long may a tab take" a single number.
+//
+// THE STORE FOR THESE ROUTES IS MEMORY-ONLY BY CONSTRUCTION, not by convention.
+// These responses carry dlp_events METADATA — severity, pattern names,
+// machine/user identity, and a filename on file-upload rows. server/data is a
+// mounted Docker volume with no retention policy attached to it, so a
+// disk-backed cache here would quietly create a second, unmanaged copy of that
+// metadata. dlpResponseStore is the shared in-memory store and the helper
+// brand-checks it, so a file-backed store cannot be passed here even by mistake.
+// (Raw prompt/response text is not in scope: it lives in dlp_content and is
+// never part of these responses. Verified for metadata_json.matches[] too —
+// every emitter, browser and desktop, maps it to { pattern, class, severity,
+// count }, so it carries pattern NAMES and never the matched text.)
+const DLP_LIST_ROUTE    = 'dlp.list';
+const DLP_SUMMARY_ROUTE = 'dlp.summary';
+const DLP_TREND_ROUTE   = 'dlp.trend';
+const DLP_FILES_ROUTE   = 'dlp.files';
+
+// One clamp for every list route here and in routes/queries.js: a page size is
+// at least 1, at most 2000, and a non-numeric value falls back to the route's
+// own default instead of becoming NaN.
+function clampLimit(value, fallback) {
+  return Math.min(Math.max(Number(value) || fallback, 1), 2000);
+}
+
+// The actual work behind GET /api/v1/dlp, pulled out so the route can race it
+// against a budget instead of just awaiting it — see the call site.
+async function fetchDlpList(db, filter, lim) {
+  const [rows, platforms] = await Promise.all([
+    db.collection('dlp_events')
+      .find(filter)
+      .sort({ occurred_at: -1 })
+      .limit(lim)
+      .project({ _id: 0 })
+      .toArray(),
+    db.collection('ai_platforms')
+      .find({})
+      .limit(2000)
+      .project({ _id: 0, host: 1, vendor: 1, product: 1, category: 1, sandbox: 1, governance_note: 1 })
+      .toArray(),
+  ]);
+
+  const eventIds = rows.map((r) => r.id);
+  const contentDocs = await db.collection('dlp_content')
+    .find({ event_id: { $in: eventIds } })
+    .project({ _id: 0, event_id: 1 })
+    .toArray();
+  const hasContentSet = new Set(contentDocs.map((c) => c.event_id));
+
+  await attachMachineIdentity(db, rows);
+
+  const platformMap = buildPlatformMap(platforms);
+  return rows.map((r) => {
+    const meta = safeJson(r.metadata_json);
+    return {
+      ...r,
+      metadata:    meta,
+      has_content: hasContentSet.has(r.id),
+      platform:    lookupPlatform(meta?.tab_host, platformMap),
+    };
+  });
+}
 
 export function mountDlp(app, db) {
   // Ingest — auth required, body { events: [...] }
@@ -170,9 +248,10 @@ export function mountDlp(app, db) {
             // many agents — without this a file event only says "Teams", not
             // which conversation. Absent (undefined, not null) for every
             // dedicated-AI-app file event, which has no agent dimension.
-            agent_name: e.agent_name ?? undefined,
-            agent_id: e.agent_id ?? undefined,
-            agent_scope: e.agent_scope ?? undefined,
+            // Validated by the SAME agentMetaFields() the enforcement branch
+            // uses (string-only, control/bidi/zero-width stripped, trimmed,
+            // capped), so the two branches cannot disagree about what is stored.
+            ...agentMetaFields(e),
           } : isAiResponse ? {
             // How the reply was decoded on the client, and whether the page-side
             // buffer had to cut it short. No content here — the text itself goes
@@ -237,6 +316,14 @@ export function mountDlp(app, db) {
               blocked_by: e.blocked_by,
               mechanism:      e.mechanism ?? null,
               reason:         e.reason ?? null,
+              // WHICH AGENT the enforcement was about, for a host-app surface
+              // (e.g. Microsoft Teams) where one app hosts many agents — the
+              // same dimension the isFileUpload branch already keeps. Client-
+              // supplied, so each is type-checked and capped by agentMetaFields()
+              // and dropped (key omitted, not null) when absent or malformed:
+              // an older-shape event simply carries none of these keys.
+              // NOT forwarded to SIEM — lib/cef.js keeps its own allowlist.
+              ...agentMetaFields(e),
             } : {}),
           },
         ),
@@ -366,49 +453,122 @@ export function mountDlp(app, db) {
 
     // Cap the page size: an unbounded Number(limit) let one request pull the whole
     // collection, and NaN from a non-numeric value silently became "no limit".
-    const lim = Math.min(Math.max(Number(limit) || 500, 1), 2000);
+    const lim = clampLimit(limit, 500);
 
-    const [rows, platforms] = await Promise.all([
-      db.collection('dlp_events')
-        .find(filter)
-        .sort({ occurred_at: -1 })
-        .limit(lim)
-        .project({ _id: 0 })
-        .toArray(),
-      db.collection('ai_platforms')
-        .find({})
-        .limit(2000)
-        .project({ _id: 0, host: 1, vendor: 1, product: 1, category: 1, sandbox: 1, governance_note: 1 })
-        .toArray(),
-    ]);
-
-    // Check which events have content
-    const eventIds = rows.map((r) => r.id);
-    const contentDocs = await db.collection('dlp_content')
-      .find({ event_id: { $in: eventIds } })
-      .project({ _id: 0, event_id: 1 })
-      .toArray();
-    const hasContentSet = new Set(contentDocs.map((c) => c.event_id));
-
-    // Resolve the person for events that predate per-event user stamping.
-    await attachMachineIdentity(db, rows);
-
-    const platformMap = buildPlatformMap(platforms);
-    res.json(rows.map((r) => {
-      const meta = safeJson(r.metadata_json);
-      return {
-        ...r,
-        metadata:    meta,
-        has_content: hasContentSet.has(r.id),
-        platform:    lookupPlatform(meta?.tab_host, platformMap),
-      };
-    }));
+    // Budget-then-fallback, keyed on the filters. Fetching up to 2000 full
+    // events measures at ~7-8ms PER DOCUMENT on this database (linear, verified
+    // — 50 rows in 0.8s, 2000 in ~15s), not a fixed per-request cost, so nothing
+    // server-side shrinks it further; what a person actually feels is switching
+    // back to Prompts & DLP a few times in a row, which is a cache-hit problem
+    // rather than a query-plan one.
+    //
+    // THE KEY IS BUILT BY THE HELPER, from the route name plus these filters in
+    // a sorted, deterministic form. That is the one correctness-critical part of
+    // this route: two different severity/service/machine views must never
+    // collide, because serving one filter's events under another's is an admin
+    // reading the wrong data with nothing on screen to say so.
+    const result = await raceWithFallback({
+      route: DLP_LIST_ROUTE,
+      params: { filter, lim },
+      budgetMs: RESPONSE_BUDGET_MS,
+      freshMs: DLP_LIST_CACHE_TTL_MS,
+      store: dlpResponseStore,
+      live: () => fetchDlpList(db, filter, lim),
+    });
+    // A failed fetch with nothing to fall back on stays a 500 through the async
+    // wrapper, exactly as before the budget existed.
+    if (result.failed) throw result.error;
+    applyBudgetHeaders(res, result);
+    res.json(result.value);
   }));
 
-  // Summary — counts by service, by severity, broken down by event_kind
+  // Summary — counts by service, by severity, broken down by event_kind.
+  //
+  // Four unbounded aggregations over the whole of dlp_events, which had no cap
+  // of any kind: on a large collection this route alone could outlast the
+  // Prompts & DLP tab's patience. Now budgeted like every other tab read, with
+  // the last real summary as the fallback.
   app.get('/api/v1/dlp/summary', a(async (req, res) => {
-    // Run all four queries in parallel instead of sequentially
-    const [byService, bySeverity, byKind, recentCritical] = await Promise.all([
+    const result = await raceWithFallback({
+      route: DLP_SUMMARY_ROUTE,
+      params: null,
+      budgetMs: RESPONSE_BUDGET_MS,
+      store: dlpResponseStore,
+      live: () => fetchDlpSummary(db),
+    });
+    if (result.failed) throw result.error;
+    applyBudgetHeaders(res, result);
+    res.json(result.value);
+  }));
+
+  // High/critical events per day, zero-filled — bucketed by day instead of
+  // summed to a lifetime total. One full-collection aggregation, previously
+  // uncapped; see fetchDlpTrend for the bucketing rules.
+  app.get('/api/v1/dlp/trend', a(async (req, res) => {
+    const days = Math.min(180, Math.max(1, Number(req.query.days) || 30));
+    const result = await raceWithFallback({
+      route: DLP_TREND_ROUTE,
+      params: { days },
+      budgetMs: RESPONSE_BUDGET_MS,
+      store: dlpResponseStore,
+      live: () => fetchDlpTrend(db, days),
+    });
+    if (result.failed) throw result.error;
+    applyBudgetHeaders(res, result);
+    res.json(result.value);
+  }));
+
+  // File uploads — filtered view of dlp_events, enriched with registry platform
+  // info.
+  //
+  // THE CLIENT'S OWN ?limit= IS HONOURED NOW. This route hard-capped at 500 and
+  // ignored the parameter entirely, so the dashboard asking for 5000 got 500
+  // rows with nothing to say why — indistinguishable from "there are only 500
+  // file events". It is clamped to the same [1, 2000] as /api/v1/dlp and
+  // /api/v1/findings rather than being unbounded, since an unbounded page size
+  // is the other half of the same bug.
+  app.get('/api/v1/dlp/files', a(async (req, res) => {
+    const lim = clampLimit(req.query.limit, 500);
+    const result = await raceWithFallback({
+      route: DLP_FILES_ROUTE,
+      params: { lim },
+      budgetMs: RESPONSE_BUDGET_MS,
+      store: dlpResponseStore,
+      live: () => fetchDlpFiles(db, lim),
+    });
+    if (result.failed) throw result.error;
+    applyBudgetHeaders(res, result);
+    res.json(result.value);
+  }));
+
+  // Warm each of these reads once after boot with its default parameters, so the
+  // first request after a deploy has a real fallback instead of being the one
+  // request that has to wait a cold query out.
+  registerResponseWarmer(DLP_LIST_ROUTE, () => raceWithFallback({
+    route: DLP_LIST_ROUTE, params: { filter: {}, lim: 500 }, budgetMs: RESPONSE_BUDGET_MS,
+    freshMs: DLP_LIST_CACHE_TTL_MS, store: dlpResponseStore, live: () => fetchDlpList(db, {}, 500),
+  }));
+  registerResponseWarmer(DLP_SUMMARY_ROUTE, () => raceWithFallback({
+    route: DLP_SUMMARY_ROUTE, params: null, budgetMs: RESPONSE_BUDGET_MS,
+    store: dlpResponseStore, live: () => fetchDlpSummary(db),
+  }));
+  registerResponseWarmer(DLP_TREND_ROUTE, () => raceWithFallback({
+    route: DLP_TREND_ROUTE, params: { days: 30 }, budgetMs: RESPONSE_BUDGET_MS,
+    store: dlpResponseStore, live: () => fetchDlpTrend(db, 30),
+  }));
+  registerResponseWarmer(DLP_FILES_ROUTE, () => raceWithFallback({
+    route: DLP_FILES_ROUTE, params: { lim: 500 }, budgetMs: RESPONSE_BUDGET_MS,
+    store: dlpResponseStore, live: () => fetchDlpFiles(db, 500),
+  }));
+}
+
+// The work behind GET /api/v1/dlp/summary, pulled out of the handler so the
+// route can race it against the budget and the boot warmer can run the same
+// read — one definition, so a warmed body can never differ in shape from a
+// served one.
+async function fetchDlpSummary(db) {
+  // Run all four queries in parallel instead of sequentially
+  const [byService, bySeverity, byKind, recentCritical] = await Promise.all([
       db.collection('dlp_events').aggregate([
         {
           $group: {
@@ -446,20 +606,22 @@ export function mountDlp(app, db) {
         .limit(25)
         .project({ _id: 0, id: 1, occurred_at: 1, ai_service: 1, pattern_matched: 1, event_kind: 1, machine_id: 1, user: 1, hostname: 1, metadata_json: 1 })
         .toArray(),
-    ]);
-    await attachMachineIdentity(db, recentCritical);
+  ]);
+  await attachMachineIdentity(db, recentCritical);
 
-    res.json({
-      byService,
-      bySeverity,
-      byKind,
-      recentCritical: recentCritical.map((r) => ({ ...r, metadata: safeJson(r.metadata_json) })),
-    });
-  }));
+  return {
+    byService,
+    bySeverity,
+    byKind,
+    recentCritical: recentCritical.map((r) => ({ ...r, metadata: safeJson(r.metadata_json) })),
+  };
+}
 
-  // High/critical events per day, zero-filled — bucketed by day instead of
-  // summed to a lifetime total. occurred_at is stored as an ISO string, not a
-  // BSON date, hence $substrBytes rather than $dateToString.
+// The work behind GET /api/v1/dlp/trend, pulled out for the same reason as the
+// summary above.
+//
+// occurred_at is stored as an ISO string, not a
+// BSON date, hence $substrBytes rather than $dateToString.
   // Scoped to prompt + file-upload content events only — dlp_events also holds
   // policy-engine actions (enforcement_block/redact/override/decision) recorded
   // as their own rows, which this trend deliberately excludes so `events`
@@ -470,82 +632,81 @@ export function mountDlp(app, db) {
   // file_upload silently zeroed out every file-upload day, since that field
   // doesn't exist on the stored rows). /dlp's own severity filter and
   // /dlp/files' output mapping (`severity: r.secret_class`) already agree on
-  // secret_class as canonical — match that instead of inventing a second field.
-  app.get('/api/v1/dlp/trend', a(async (req, res) => {
-    const days = Math.min(180, Math.max(1, Number(req.query.days) || 30));
-    const rows = await db.collection('dlp_events').aggregate([
-      { $match: { event_kind: { $in: ['prompt_paste', 'prompt_submit', 'prompt_typed', 'file_upload'] } } },
-      { $addFields: {
-          _sev: { $ifNull: ['$secret_class', '$highest_severity'] },
-          _day: { $substrBytes: ['$occurred_at', 0, 10] },
-        } },
-      { $match: { _sev: { $in: ['critical', 'high'] } } },
-      { $group: {
-          _id: '$_day',
-          file_uploads: { $sum: { $cond: [{ $eq: ['$event_kind', 'file_upload'] }, 1, 0] } },
-          prompts: { $sum: { $cond: [{ $in: ['$event_kind', ['prompt_paste', 'prompt_submit', 'prompt_typed']] }, 1, 0] } },
-        } },
-    ]).toArray();
-    const byDay = new Map(rows.map((r) => [r._id, r]));
-    const end = new Date(); end.setUTCHours(0, 0, 0, 0);
-    const out = [];
-    for (let i = days - 1; i >= 0; i--) {
-      const d = new Date(end); d.setUTCDate(d.getUTCDate() - i);
-      const key = d.toISOString().slice(0, 10);
-      const r = byDay.get(key);
-      const prompts = r?.prompts || 0, file_uploads = r?.file_uploads || 0;
-      out.push({ date: key, events: prompts + file_uploads, prompts, file_uploads });
-    }
-    res.json(out);
-  }));
+// secret_class as canonical — match that instead of inventing a second field.
+async function fetchDlpTrend(db, days) {
+  const rows = await db.collection('dlp_events').aggregate([
+    { $match: { event_kind: { $in: ['prompt_paste', 'prompt_submit', 'prompt_typed', 'file_upload'] } } },
+    { $addFields: {
+        _sev: { $ifNull: ['$secret_class', '$highest_severity'] },
+        _day: { $substrBytes: ['$occurred_at', 0, 10] },
+      } },
+    { $match: { _sev: { $in: ['critical', 'high'] } } },
+    { $group: {
+        _id: '$_day',
+        file_uploads: { $sum: { $cond: [{ $eq: ['$event_kind', 'file_upload'] }, 1, 0] } },
+        prompts: { $sum: { $cond: [{ $in: ['$event_kind', ['prompt_paste', 'prompt_submit', 'prompt_typed']] }, 1, 0] } },
+      } },
+  ]).toArray();
+  const byDay = new Map(rows.map((r) => [r._id, r]));
+  const end = new Date(); end.setUTCHours(0, 0, 0, 0);
+  const out = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(end); d.setUTCDate(d.getUTCDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    const r = byDay.get(key);
+    const prompts = r?.prompts || 0, file_uploads = r?.file_uploads || 0;
+    out.push({ date: key, events: prompts + file_uploads, prompts, file_uploads });
+  }
+  return out;
+}
 
-  // File uploads — filtered view of dlp_events, enriched with registry platform info
-  app.get('/api/v1/dlp/files', a(async (req, res) => {
-    const [rows, platforms] = await Promise.all([
-      db.collection('dlp_events')
-        .find({ event_kind: 'file_upload' })
-        .sort({ occurred_at: -1 })
-        .limit(500)
-        .project({ _id: 0 })
-        .toArray(),
-      db.collection('ai_platforms')
-        .find({})
-        .limit(2000)
-        .project({ _id: 0, host: 1, vendor: 1, product: 1, category: 1, sandbox: 1, governance_note: 1 })
-        .toArray(),
-    ]);
+// The work behind GET /api/v1/dlp/files. `lim` is the caller's own page size,
+// already clamped by the route.
+async function fetchDlpFiles(db, lim) {
+  const [rows, platforms] = await Promise.all([
+    db.collection('dlp_events')
+      .find({ event_kind: 'file_upload' })
+      .sort({ occurred_at: -1 })
+      .limit(lim)
+      .project({ _id: 0 })
+      .toArray(),
+    db.collection('ai_platforms')
+      .find({})
+      .limit(2000)
+      .project({ _id: 0, host: 1, vendor: 1, product: 1, category: 1, sandbox: 1, governance_note: 1 })
+      .toArray(),
+  ]);
 
-    // Check which events have content
-    const eventIds = rows.map((r) => r.id);
-    const contentDocs = await db.collection('dlp_content')
-      .find({ event_id: { $in: eventIds } })
-      .project({ _id: 0, event_id: 1 })
-      .toArray();
-    const hasContentSet = new Set(contentDocs.map((c) => c.event_id));
+  // Check which events have content
+  const eventIds = rows.map((r) => r.id);
+  const contentDocs = await db.collection('dlp_content')
+    .find({ event_id: { $in: eventIds } })
+    .project({ _id: 0, event_id: 1 })
+    .toArray();
+  const hasContentSet = new Set(contentDocs.map((c) => c.event_id));
 
-    await attachMachineIdentity(db, rows);
+  await attachMachineIdentity(db, rows);
 
-    const platformMap = buildPlatformMap(platforms);
-    res.json(rows.map((r) => {
-      const meta = safeJson(r.metadata_json);
-      return {
-        id: r.id,
-        machine_id: r.machine_id,
-        user: r.user,
-        hostname: r.hostname,
-        employee_name: r.employee_name,
-        occurred_at: r.occurred_at,
-        ai_service: r.ai_service,
-        file_class: r.pattern_matched,
-        severity: r.secret_class,
-        size: r.content_length,
-        metadata_json: r.metadata_json,
-        metadata:    meta,
-        has_content: hasContentSet.has(r.id),
-        platform:    lookupPlatform(meta?.tab_host, platformMap),
-      };
-    }));
-  }));
+  const platformMap = buildPlatformMap(platforms);
+  return rows.map((r) => {
+    const meta = safeJson(r.metadata_json);
+    return {
+      id: r.id,
+      machine_id: r.machine_id,
+      user: r.user,
+      hostname: r.hostname,
+      employee_name: r.employee_name,
+      occurred_at: r.occurred_at,
+      ai_service: r.ai_service,
+      file_class: r.pattern_matched,
+      severity: r.secret_class,
+      size: r.content_length,
+      metadata_json: r.metadata_json,
+      metadata:    meta,
+      has_content: hasContentSet.has(r.id),
+      platform:    lookupPlatform(meta?.tab_host, platformMap),
+    };
+  });
 }
 
 // Which side of the conversation an event kind belongs to.
@@ -842,6 +1003,34 @@ export function normalizeExternalConvId(value) {
   const s = value.trim();
   if (!s || s.length > 200) return null;
   return s;
+}
+
+// Agent context on enforcement_* events: the four client-supplied keys that say
+// which agent (and on which surface) a block/redact was about. Each must be a
+// string, non-empty after trimming, and at most AGENT_META_MAX chars — anything
+// else is DROPPED (key omitted) rather than coerced or truncated, so an object,
+// an array or an oversized blob sent by a client never lands in metadata_json.
+// Same stance as normalizeExternalConvId above. Stored in metadata_json only —
+// no column, no migration, and not in lib/cef.js's SIEM allowlist.
+export const AGENT_META_KEYS = ['agent_name', 'agent_id', 'agent_scope', 'surface'];
+const AGENT_META_MAX = 200;
+// Stripped BEFORE trim/length check: C0/DEL/C1 controls, zero-width and LRM/RLM
+// marks, bidi embeddings/overrides and isolates, and the BOM. These are invisible
+// in the dashboard, so left in they let a client make one agent name render as
+// another (bidi override) or look identical to a different stored value
+// (zero-width) — a spoofing vector on an audit field.
+const AGENT_META_STRIP_RE = /[\u0000-\u001F\u007F-\u009F​-‏‪-‮⁦-⁩﻿]/g;
+
+export function agentMetaFields(e) {
+  const out = {};
+  for (const key of AGENT_META_KEYS) {
+    const value = e?.[key];
+    if (typeof value !== 'string') continue;
+    const s = value.replace(AGENT_META_STRIP_RE, '').trim();
+    if (!s || s.length > AGENT_META_MAX) continue;
+    out[key] = s;
+  }
+  return out;
 }
 
 function encodeFilename(name) {
