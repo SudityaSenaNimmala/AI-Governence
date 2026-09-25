@@ -394,12 +394,16 @@ function repositionBlockBanner() {
 // the whole time the popup is visible.
 let _dialogCreating = false;
 let _dialogLastShownAt = 0;
+let _dialogDismissedAt = 0;
+let _lastDialogBlockId = null;
 
 function showBlockDialogWindow(data) {
+  // Guard: skip if a create is already in flight, or recently dismissed
   if (_dialogCreating) return;
-  if (dialogWindow && !dialogWindow.isDestroyed() && dialogWindow.isVisible()) return;
+  if (Date.now() - _dialogDismissedAt < 1000) return;
+  _lastDialogBlockId = data.block_id || null;
 
-  // Destroy old window if it exists — always create fresh to avoid
+  // Destroy old window on every call — create fresh each time to avoid
   // flashing stale content from the previous block.
   if (dialogWindow && !dialogWindow.isDestroyed()) { dialogWindow.destroy(); dialogWindow = null; }
 
@@ -821,6 +825,15 @@ function updateTrayMenu() {
       checked: modelRoutingEnabled,
       click: (menuItem) => { toggleModelRouting(menuItem.checked); },
     },
+    { type: 'separator' },
+    {
+      label: 'Quit',
+      click: () => {
+        app.isQuitting = true;
+        stopMonitor();
+        app.quit();
+      },
+    },
   ]);
   tray.setContextMenu(menu);
 }
@@ -925,6 +938,8 @@ function setupIPC() {
   });
 
   ipcMain.on('dismiss-dialog', () => {
+    _dialogDismissedAt = Date.now();
+    _lastDialogBlockId = null;
     if (dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.destroy();
     dialogWindow = null;
   });

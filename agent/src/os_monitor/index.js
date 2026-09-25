@@ -48,6 +48,7 @@ import { Reporter } from './reporter.js';
 // that drains it. Owned by blocked-agents-sync.js — one path files these, one
 // path retries them.
 import { PENDING_REQUEST_PATH } from './blocked-agents-sync.js';
+import { saveCachedRoutingRules } from './model-router-config.js';
 import { createHash } from 'node:crypto';
 
 // How long after firing a toast for a (clipboardSeq, processName) pair we
@@ -1850,6 +1851,14 @@ export class OsMonitor extends EventEmitter {
     const tick = () => { this._refreshBlockedAgents(); this._flushPendingAccessRequest(); };
     tick(); // immediate first sync
     this._blockedAgentsInterval = setInterval(tick, 10_000);
+
+    // ── Routing rules sync (60s interval, 5s first check) ─────────────────
+    // Fetches server-defined routing rules and caches them locally so the
+    // enforcer can apply them even when the server is unreachable.
+    this._routingRulesTimer = setTimeout(() => {
+      this.#refreshRoutingRules();
+      this._routingRulesInterval = setInterval(() => this.#refreshRoutingRules(), 60_000);
+    }, 5_000);
 
     // Kill any orphaned banner processes from a previous agent run
     this._hideBannerProc();

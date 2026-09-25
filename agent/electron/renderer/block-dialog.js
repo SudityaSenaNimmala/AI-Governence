@@ -8,22 +8,44 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-// Guardrail pattern prefixes — same classification as browser extension
-const GUARDRAIL_PREFIXES = ['injection-', 'jailbreak-', 'toxicity-', 'bias-'];
-function isGuardrail(name) { return GUARDRAIL_PREFIXES.some(p => name.startsWith(p)); }
+// ── Guardrail detection ───────────────────────────────────────────────────────
+// The enforcer reports pattern NAMES — DLP patterns are admin-defined labels
+// like "SSN", "Credit Card"; guardrail patterns are the built-in safety rules
+// the model-router and prompt-scanner enforce. Distinguishing them lets the
+// dialog show a contextual explanation instead of a generic "sensitive data"
+// message.
+const GUARDRAIL_PREFIXES = [
+  'prompt_injection', 'jailbreak', 'harmful_content', 'violence',
+  'hate_speech', 'sexual_content', 'self_harm', 'illegal_activity',
+  'guardrail', 'safety', 'toxicity', 'bias',
+];
 
-// Human-readable category labels for guardrail chips
+function isGuardrail(patternName) {
+  const lower = (patternName || '').toLowerCase().replace(/[\s-]+/g, '_');
+  return GUARDRAIL_PREFIXES.some(prefix => lower.startsWith(prefix) || lower === prefix);
+}
+
 const CATEGORY_LABELS = {
-  'injection': 'Prompt Injection',
-  'jailbreak': 'Jailbreak Attempt',
-  'toxicity': 'Harmful Content',
-  'bias': 'Bias / Discrimination',
+  prompt_injection: 'Prompt Injection',
+  jailbreak: 'Jailbreak Attempt',
+  harmful_content: 'Harmful Content',
+  violence: 'Violence',
+  hate_speech: 'Hate Speech',
+  sexual_content: 'Sexual Content',
+  self_harm: 'Self-Harm',
+  illegal_activity: 'Illegal Activity',
+  guardrail: 'Safety Guardrail',
+  safety: 'Safety Guardrail',
+  toxicity: 'Toxicity',
+  bias: 'Bias',
 };
-function categoryFor(name) {
+
+function categoryFor(patternName) {
+  const lower = (patternName || '').toLowerCase().replace(/[\s-]+/g, '_');
   for (const [prefix, label] of Object.entries(CATEGORY_LABELS)) {
-    if (name.startsWith(prefix)) return label;
+    if (lower.startsWith(prefix)) return label;
   }
-  return name;
+  return patternName || 'Safety Guardrail';
 }
 
 const $root = document.getElementById('dialog-root');
@@ -120,8 +142,11 @@ function render(ev) {
     tokenizeBtn.addEventListener('pointerdown', async (e) => {
       e.preventDefault();
       tokenizeBtn.disabled = true;
-      tokenizeBtn.textContent = 'Masking…';
-      await new Promise(r => setTimeout(r, 500));
+      tokenizeBtn.textContent = 'Masking\u2026';
+      // Wait 300ms for the mouse button to fully release — the enforcer's
+      // mouse hook aborts any in-progress rewrite on a real LBUTTONUP, and
+      // the UP from this click arrives after the rewrite starts.
+      await new Promise(r => setTimeout(r, 300));
       const result = await window.api.tokenizeBlock(ev.block_id);
       if (!result?.sent) {
         tokenizeBtn.disabled = false;
@@ -143,7 +168,7 @@ window.api.onBlockDialog((ev) => render(ev));
 
 window.api.onRewriteResult((ev) => {
   if (ev.block_id !== currentBlockId) return;
-  if (ev.result === 'ok' || ev.reason === 'not_submitted') { dismiss(); return; }
+  if (ev.result === 'ok' || ev.result === 'not_submitted') { dismiss(); return; }
   const tokenizeBtn = document.getElementById('btn-tokenize');
   if (tokenizeBtn) {
     tokenizeBtn.disabled = false;
@@ -151,7 +176,7 @@ window.api.onRewriteResult((ev) => {
   }
   const footnote = document.querySelector('.footnote');
   if (footnote) {
-    footnote.textContent = `Could not confirm the prompt was masked (${ev.reason || ev.result}) — nothing was sent. Edit it manually instead.`;
+    footnote.textContent = `Could not confirm the prompt was masked (${ev.reason || ev.result}) \u2014 nothing was sent. Edit it manually instead.`;
     footnote.style.color = 'var(--danger)';
   }
 });

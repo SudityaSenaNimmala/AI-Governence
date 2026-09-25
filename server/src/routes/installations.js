@@ -750,6 +750,31 @@ pause >nul
     res.setHeader('Content-Disposition', `attachment; filename="CloudFuze-Desktop-Agent-${platform}.${ext[platform] || 'zip'}"`);
     res.send(zipBuffer);
   }));
+
+  // ── Machine preferences ─────────────────────────────────────────────────────
+  // Per-machine preferences stored in the machines table. The desktop agent
+  // reads these on startup and periodically to stay in sync with the
+  // dashboard's per-device settings (e.g. model routing toggle).
+
+  app.get('/api/v1/machines/me/preferences', requireMachineAuth, a(async (req, res) => {
+    const machineId = req.machine?.machineId || req.machine?.machine_id;
+    if (!machineId) return res.status(401).json({ error: 'Machine not identified' });
+    const row = db.prepare('SELECT preferences FROM machines WHERE machine_id = ?').get(machineId);
+    if (!row) return res.json({});
+    try {
+      return res.json(JSON.parse(row.preferences || '{}'));
+    } catch {
+      return res.json({});
+    }
+  }));
+
+  app.put('/api/v1/machines/me/preferences', requireMachineAuth, a(async (req, res) => {
+    const machineId = req.machine?.machineId || req.machine?.machine_id;
+    if (!machineId) return res.status(401).json({ error: 'Machine not identified' });
+    const prefs = req.body || {};
+    db.prepare('UPDATE machines SET preferences = ? WHERE machine_id = ?').run(JSON.stringify(prefs), machineId);
+    res.json({ ok: true });
+  }));
 }
 
 // The ZIP writer this used to define inline now lives in ../lib/zip.js — the same

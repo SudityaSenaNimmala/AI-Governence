@@ -185,6 +185,33 @@ const TIER_UI_NAMES = {
   google: { 3: 'Pro', 2: 'Thinking', 1: 'Flash' },
 };
 
+// ── Server-side routing rules cache ──────────────────────────────────────────
+// The server may define routing rules that override the built-in complexity-
+// based logic. These are fetched periodically by index.js and cached locally
+// so the enforcer can apply them even when the server is unreachable.
+const ROUTING_RULES_PATH = join(homedir(), '.cloudfuze-aigov', 'routing-rules.json');
+
+export function loadCachedRoutingRules() {
+  try {
+    if (!existsSync(ROUTING_RULES_PATH)) return [];
+    const raw = readFileSync(ROUTING_RULES_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveCachedRoutingRules(rules) {
+  try {
+    const dir = join(homedir(), '.cloudfuze-aigov');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(ROUTING_RULES_PATH, JSON.stringify(rules, null, 2), 'utf8');
+  } catch {
+    // Non-fatal — the enforcer falls back to built-in logic
+  }
+}
+
 /**
  * Assemble the full CFAI_MODEL_ROUTER_CONFIG payload. Reads both source
  * files fresh on every call (cheap, and correctness — never staleness —

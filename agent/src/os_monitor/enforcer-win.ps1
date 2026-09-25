@@ -2818,6 +2818,13 @@ public static class CfaiEnforcer
         return o;
     }
 
+    static List<string> MrStringList(object arrList)
+    {
+        var o = new List<string>();
+        if (arrList != null) foreach (var x in (IEnumerable)arrList) o.Add((string)x);
+        return o;
+    }
+
     // Mirrors complexity.js's compileCategory(): one alternation regex per
     // category (longest term first — alternation is first-match-wins, so
     // "trade-offs" must be offered before "trade-off"), exact terms in a
