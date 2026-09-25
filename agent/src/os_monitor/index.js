@@ -42,6 +42,7 @@ import { AttachmentWatcher } from './attachment-watcher.js';
 import { PromptWatcher } from './prompt-watcher.js';
 import { Enforcer } from './enforcer.js';
 import { spawnEnforcerWatchdog } from './enforcer-watchdog.js';
+import { saveCachedRoutingRules } from './model-router-config.js';
 import { Reporter } from './reporter.js';
 // The single-slot offline queue for a Request Access submission, and the poller
 // that drains it. Owned by blocked-agents-sync.js — one path files these, one
@@ -276,6 +277,16 @@ export class OsMonitor extends EventEmitter {
         this.enforcer.updateBlockPatterns(blockPatterns);
       },
     });
+    // ── Routing rules sync ────────────────────────────────────────────────────
+    // Fetches admin-configured model routing rules from the same endpoint the
+    // browser extension uses (/api/v1/routing/rules). When rules change the
+    // enforcer is restarted so the C# ComputeRoute() picks up the new config.
+    this._routingRulesHash = '';
+    this._routingRulesTimer = setInterval(() => this.#refreshRoutingRules(), 60_000);
+    this._routingRulesTimer.unref?.();
+    // First fetch 5s after start (let enforcer settle first).
+    setTimeout(() => this.#refreshRoutingRules(), 5000);
+
     // Fleet-wide feature switches, thrown from the dashboard's Settings page.
     //
     // WHAT THIS REPLACES. The keystroke enforcer used to be controlled ONLY by
@@ -2194,12 +2205,45 @@ export class OsMonitor extends EventEmitter {
     } catch {}
   }
 
+  // ── Routing rules sync ──────────────────────────────────────────────────────
+  // Mirrors the browser extension's service-worker refreshRoutingRules():
+  // fetch /api/v1/routing/rules every 60s, cache to disk, restart the enforcer
+  // when rules change so the C# ComputeRoute() picks up server overrides.
+  async #refreshRoutingRules() {
+    if (!this.serverUrl) return;
+    try {
+      const res = await fetch(`${this.serverUrl}/api/v1/routing/rules`, {
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) return;
+      const rules = await res.json();
+      if (!Array.isArray(rules)) return;
+      // Only enabled rules, sorted by priority (lower = higher priority).
+      const active = rules.filter(r => r.enabled !== false).sort((a, b) => (a.priority || 50) - (b.priority || 50));
+      const hash = JSON.stringify(active);
+      if (hash === this._routingRulesHash) return; // no change
+      this._routingRulesHash = hash;
+      saveCachedRoutingRules(active);
+      this.log?.info?.(`routing-rules: synced ${active.length} rule(s) — restarting enforcer`);
+      // Restart enforcer to pick up new CFAI_MODEL_ROUTER_CONFIG (which
+      // includes serverRules from the cached file). Same pattern as
+      // policySync's onChange → updateBlockPatterns.
+      if (this.enforcerEnabled && this.enforcer) {
+        const blockPatterns = getBlockPatterns();
+        this.enforcer.updateBlockPatterns(blockPatterns);
+      }
+    } catch (err) {
+      this.log?.warn?.(`routing-rules: fetch failed (${err?.message}) — keeping cached rules`);
+    }
+  }
+
   stop() {
     // FIRST, before anything else is torn down: a FeatureSync poll already
     // awaiting its fetch will still fire onChange after this returns, and
     // #applyFeatures no-ops on this flag rather than restarting the hook.
     this.isRunning = false;
     if (this._blockedAgentsInterval) { clearInterval(this._blockedAgentsInterval); this._blockedAgentsInterval = null; }
+    if (this._routingRulesTimer) { clearInterval(this._routingRulesTimer); this._routingRulesTimer = null; }
     try { this._hideBannerProc(); } catch {}
     this.#stopAttachHoldRefresh();
     this.featureSync.stop();

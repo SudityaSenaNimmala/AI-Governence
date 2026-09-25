@@ -86,12 +86,10 @@ export class Enforcer extends EventEmitter {
           CFAI_AI_PROCESSES: this.aiProcessNames.join(','),
           CFAI_BLOCK_PATTERNS: JSON.stringify(this.blockPatterns || []),
           CFAI_ENFORCER_HEARTBEAT: ENFORCER_HEARTBEAT_PATH,
-          // Model routing has no on/off switch of its own — it runs whenever
-          // the enforcer does, same as the rest of its keystroke-level
-          // behavior. CFAI_MODEL_ROUTER_ENABLED still travels as its own env
-          // var (rather than being folded into the enforcer flag) because
-          // the C# side treats it as an independent gate internally.
-          CFAI_MODEL_ROUTER_ENABLED: 'true',
+          // Per-machine toggle: the parent (main.js) sets this based on the
+          // user's preference stored in the server DB. Defaults to 'true' if
+          // the env var is not set (e.g., bare agent mode without Electron).
+          CFAI_MODEL_ROUTER_ENABLED: process.env.CFAI_MODEL_ROUTER_ENABLED || 'true',
           CFAI_MODEL_ROUTER_CONFIG: JSON.stringify(buildModelRouterConfig()),
           // IDE-hosted AI panels (Claude Code / Copilot Chat in VS Code,
           // Cursor's own composer). Two payloads, same JSON-over-env-var

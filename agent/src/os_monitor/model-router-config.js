@@ -22,9 +22,10 @@
 // object-literal SLICE of their source (via `new Function`), never the whole
 // file, and never anything containing document/chrome/fetch calls.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 
 /* global __CFAI_MODEL_ROUTER_CONFIG__ */
 // BAKED AT BUILD TIME for the packaged binary.
@@ -216,7 +217,34 @@ export function buildModelRouterConfig() {
     thresholds,
     tierKeywordRules: TIER_KEYWORD_RULES,
     tierUiNames: TIER_UI_NAMES,
+    // Server-managed routing rules — same format as /api/v1/routing/rules.
+    // Checked by the enforcer's ComputeRoute() before the built-in logic,
+    // so admin overrides take precedence. Empty when no rules configured.
+    serverRules: loadCachedRoutingRules(),
   };
+}
+
+// ── Server routing rules ────────────────────────────────────────────────────
+// Cached locally by the routing rules sync (see index.js). The enforcer reads
+// them at spawn time via CFAI_MODEL_ROUTER_CONFIG, and the sync restarts the
+// enforcer when they change — same lifecycle as DLP block patterns.
+const ROUTING_RULES_PATH = join(homedir(), '.cloudfuze-aigov', 'routing-rules.json');
+
+/** Read cached server rules. Returns [] if file missing or malformed. */
+export function loadCachedRoutingRules() {
+  try {
+    if (!existsSync(ROUTING_RULES_PATH)) return [];
+    const raw = JSON.parse(readFileSync(ROUTING_RULES_PATH, 'utf8'));
+    return Array.isArray(raw) ? raw.filter(r => r.enabled !== false) : [];
+  } catch { return []; }
+}
+
+/** Save server rules to disk. Called by the routing rules sync. */
+export function saveCachedRoutingRules(rules) {
+  try {
+    mkdirSync(dirname(ROUTING_RULES_PATH), { recursive: true });
+    writeFileSync(ROUTING_RULES_PATH, JSON.stringify(rules), 'utf8');
+  } catch {}
 }
 
 // Exposed for the parity test — reading complexity.js's source path directly

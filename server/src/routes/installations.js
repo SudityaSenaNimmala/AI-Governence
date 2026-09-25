@@ -6,7 +6,7 @@
 
 import { a } from '../util.js';
 import { createZip } from '../lib/zip.js';
-import { ENROLL_SECRET } from '../auth.js';
+import { ENROLL_SECRET, requireMachineAuth } from '../auth.js';
 import crypto from 'node:crypto';
 import { readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSync, cpSync, rmSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
@@ -43,6 +43,36 @@ function apiServerUrl(req) {
 }
 
 export function mountInstallations(app, db) {
+
+  // ── Per-machine preferences ──────────────────────────────────────────────────
+  // Stored on the machine document in MongoDB. Survives reinstalls because the
+  // machine_id is derived from OS hardware, not the installation. The desktop
+  // agent fetches these on startup and applies them (e.g., model routing toggle).
+
+  app.get('/api/v1/machines/me/preferences', requireMachineAuth, a(async (req, res) => {
+    const machine = await db.collection('machines').findOne(
+      { id: req.machine.id },
+      { projection: { _id: 0, preferences: 1 } },
+    );
+    // Default: model routing ON for new machines.
+    const prefs = machine?.preferences || {};
+    res.json({ model_routing_enabled: prefs.model_routing_enabled !== false });
+  }));
+
+  app.put('/api/v1/machines/me/preferences', requireMachineAuth, a(async (req, res) => {
+    const body = req.body ?? {};
+    const update = {};
+    if (body.model_routing_enabled !== undefined) {
+      update['preferences.model_routing_enabled'] = !!body.model_routing_enabled;
+    }
+    if (Object.keys(update).length === 0) return res.status(400).json({ error: 'no preferences to update' });
+    await db.collection('machines').updateOne(
+      { id: req.machine.id },
+      { $set: update },
+      { upsert: false },
+    );
+    res.json({ ok: true });
+  }));
 
   // ── Installation info (what to show in the UI) ──
 

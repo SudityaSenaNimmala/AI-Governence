@@ -70,6 +70,8 @@ let accessWindow = null;  // the FOCUSABLE Request Access dialog — see showAcc
 let bannerWindow = null;  // the click-through "this app is blocked" bar — see showBlockBanner()
 let monitorProcess = null;  // child_process running the OsMonitor
 let isMonitoring = false;
+let modelRoutingEnabled = true;  // per-machine toggle, synced with server DB
+let _intentionalRestart = false; // suppress auto-restart during toggle
 let recentAlerts = [];      // last 100 DLP events for the dashboard
 const MAX_ALERTS = 100;
 
@@ -153,7 +155,7 @@ function startMonitor() {
       ...process.env,
       NODE_NO_WARNINGS: '1',
       CFAI_ENFORCER_ENABLED: settings.monitorEnforcer === false ? 'false' : 'true',
-      CFAI_MODEL_ROUTER_ENABLED: 'true',
+      CFAI_MODEL_ROUTER_ENABLED: modelRoutingEnabled ? 'true' : 'false',
     },
     // stdin is 'pipe' (not 'ignore') so the Tokenize dialog can send
     // {cmd:"tokenize", block_id} down through monitor-runner.mjs to the
@@ -185,8 +187,10 @@ function startMonitor() {
     destroyBlockBanner();
     sendToRenderer('monitor-status', { running: false, exitCode: code });
     updateTrayMenu();
-    // Auto-restart after clean exit (code 0 = auto-updater applied new code)
-    if (code === 0) {
+    // Auto-restart after clean exit (code 0 = auto-updater applied new code).
+    // Skip if we're intentionally restarting (e.g., model routing toggle) —
+    // the caller handles the restart with updated env vars.
+    if (code === 0 && !_intentionalRestart) {
       console.log('Monitor exited cleanly (auto-update?) — restarting in 3s...');
       setTimeout(() => {
         const creds = loadCredentials();
@@ -389,43 +393,35 @@ function repositionBlockBanner() {
 // focusable:false + showInactive() is what keeps the AI app itself focused
 // the whole time the popup is visible.
 let _dialogCreating = false;
+let _dialogLastShownAt = 0;
 
 function showBlockDialogWindow(data) {
-  // Skip if already visible or being created — prevents blink from
-  // duplicate block events and re-render killing buttons mid-click.
   if (_dialogCreating) return;
   if (dialogWindow && !dialogWindow.isDestroyed() && dialogWindow.isVisible()) return;
 
-  const send = () => { if (dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.webContents.send('block-dialog', data); };
-  if (!dialogWindow || dialogWindow.isDestroyed()) {
-    _dialogCreating = true;
-    const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
-    const w = 540, h = 620;
-    dialogWindow = new BrowserWindow({
-      width: w,
-      height: h,
-      x: Math.round((sw - w) / 2),
-      y: Math.round((sh - h) / 2),
-      frame: false,
-      resizable: false,
-      alwaysOnTop: true,
-      skipTaskbar: true,
-      focusable: false,
-      show: false,
-      transparent: true,
-      backgroundColor: '#00000000',
-      webPreferences: {
-        preload: PRELOAD_PATH,
-        contextIsolation: true,
-      },
-    });
-    dialogWindow.loadFile(path.join(RENDERER_DIR, 'block-dialog.html'));
-    dialogWindow.webContents.once('did-finish-load', () => { send(); dialogWindow.showInactive(); _dialogCreating = false; });
-    dialogWindow.on('closed', () => { dialogWindow = null; _dialogCreating = false; });
-  } else {
-    send();
-    if (!dialogWindow.isVisible()) dialogWindow.showInactive();
-  }
+  // Destroy old window if it exists — always create fresh to avoid
+  // flashing stale content from the previous block.
+  if (dialogWindow && !dialogWindow.isDestroyed()) { dialogWindow.destroy(); dialogWindow = null; }
+
+  _dialogCreating = true;
+  const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+  const w = 540, h = data.rewritable ? 627 : 560;
+  dialogWindow = new BrowserWindow({
+    width: w, height: h,
+    x: Math.round((sw - w) / 2), y: Math.round((sh - h) / 2),
+    frame: false, resizable: false, alwaysOnTop: true, skipTaskbar: true,
+    focusable: false, show: false, transparent: true, backgroundColor: '#00000000',
+    webPreferences: { preload: PRELOAD_PATH, contextIsolation: true },
+  });
+  dialogWindow.loadFile(path.join(RENDERER_DIR, 'block-dialog.html'));
+  dialogWindow.webContents.once('did-finish-load', () => {
+    if (dialogWindow && !dialogWindow.isDestroyed()) {
+      dialogWindow.webContents.send('block-dialog', data);
+      dialogWindow.showInactive();
+    }
+    _dialogCreating = false;
+  });
+  dialogWindow.on('closed', () => { dialogWindow = null; _dialogCreating = false; });
 }
 
 // The Request Access dialog, shown when the org has blocked this AI app
@@ -555,7 +551,7 @@ function parseMonitorLine(line) {
       // gets its own focusable dialog. (Before this, such a block showed a
       // toast and nothing else — there was no way to act on it at all.)
       if (parsed.platform_block) { showAccessRequestWindow(parsed); return; }
-      if (parsed.rewritable) showBlockDialogWindow(parsed);
+      showBlockDialogWindow(parsed);
     }
     catch { /* malformed — drop, nothing else can be done with it */ }
     return;
@@ -806,56 +802,72 @@ function createTray() {
   const icon = getTrayIcon();
 
   tray = new Tray(icon);
-  tray.setToolTip('CloudFuze AI Governance');
+  tray.setToolTip('CloudFuze AI Governance\nRight click for options');
   updateTrayMenu();
-
-  tray.on('double-click', () => {
-    createMainWindow();
-  });
 }
 
 function updateTrayMenu() {
   if (!tray) return;
+  const creds = loadCredentials();
+  const enrolled = !!(creds?.token);
   const menu = Menu.buildFromTemplate([
-    {
-      label: 'Open Dashboard',
-      click: () => createMainWindow(),
-    },
+    { label: 'CloudFuze AI Governance', enabled: false },
+    { type: 'separator' },
+    { label: `Status: ${isMonitoring ? 'Running' : 'Stopped'}`, enabled: false },
+    { label: `Enrolled: ${enrolled ? 'Yes' : 'No'}`, enabled: false },
     { type: 'separator' },
     {
-      label: isMonitoring ? 'Stop Monitoring' : 'Start Monitoring',
-      click: () => {
-        if (isMonitoring) {
-          stopMonitor();
-        } else {
-          startMonitor();
-        }
-      },
-    },
-    {
-      label: `Status: ${isMonitoring ? 'Running' : 'Stopped'}`,
-      enabled: false,
-    },
-    { type: 'separator' },
-    {
-      label: 'Open Governance Dashboard',
-      click: () => {
-        const creds = loadCredentials();
-        const base = creds?.serverUrl || 'https://cfagentgovernence.cloudfuzehost.com';
-        shell.openExternal(`${base}/CloudFuze`);
-      },
-    },
-    { type: 'separator' },
-    {
-      label: 'Quit',
-      click: () => {
-        app.isQuitting = true;
-        stopMonitor();
-        app.quit();
-      },
+      label: 'Smart Model Routing',
+      type: 'checkbox',
+      checked: modelRoutingEnabled,
+      click: (menuItem) => { toggleModelRouting(menuItem.checked); },
     },
   ]);
   tray.setContextMenu(menu);
+}
+
+// ── Per-machine model routing toggle ──────────────────────────────────────────
+// Persisted in the server DB (machines.preferences.model_routing_enabled) so it
+// survives reinstalls. The machine_id is OS-derived, not installation-derived.
+
+async function fetchModelRoutingPreference() {
+  const creds = loadCredentials();
+  if (!creds?.token || !creds?.serverUrl) return;
+  try {
+    const res = await fetch(`${creds.serverUrl}/api/v1/machines/me/preferences`, {
+      headers: { authorization: `Bearer ${creds.token}` },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return;
+    const prefs = await res.json();
+    modelRoutingEnabled = prefs.model_routing_enabled !== false;
+    updateTrayMenu();
+  } catch {}
+}
+
+async function toggleModelRouting(enabled) {
+  modelRoutingEnabled = enabled;
+  // Don't call updateTrayMenu() here — it rebuilds the menu and closes it.
+  // The checkbox updates visually on its own.
+  // Persist to server DB
+  const creds = loadCredentials();
+  if (creds?.token && creds?.serverUrl) {
+    try {
+      await fetch(`${creds.serverUrl}/api/v1/machines/me/preferences`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${creds.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model_routing_enabled: enabled }),
+        signal: AbortSignal.timeout(10000),
+      });
+    } catch {}
+  }
+  // Restart the monitor so the enforcer picks up the new CFAI_MODEL_ROUTER_ENABLED.
+  // Set _intentionalRestart to suppress the exit handler's auto-restart.
+  if (monitorProcess) {
+    _intentionalRestart = true;
+    stopMonitor();
+    setTimeout(() => { _intentionalRestart = false; startMonitor(); }, 2000);
+  }
 }
 
 // ── IPC handlers ───────────────────────────────────────────────────────────────
@@ -914,7 +926,8 @@ function setupIPC() {
   });
 
   ipcMain.on('dismiss-dialog', () => {
-    if (dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.hide();
+    if (dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.destroy();
+    dialogWindow = null;
   });
 
   // ── Request Access (desktop platform block) ────────────────────────────────
@@ -1076,7 +1089,7 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    createMainWindow();
+    // No UI — the agent runs silently in the tray.
   });
 
   app.whenReady().then(() => {
@@ -1091,10 +1104,8 @@ if (!gotLock) {
     screen.on('display-added', repositionBlockBanner);
     screen.on('display-metrics-changed', repositionBlockBanner);
 
-    const startHidden = process.argv.includes('--hidden');
-    if (!startHidden) {
-      createMainWindow();
-    }
+    // No UI window — the agent always runs silently in the tray.
+    // The main window is never shown to the user.
 
     // Auto-enroll + auto-start monitoring
     const settings = loadSettings();
@@ -1106,12 +1117,16 @@ if (!gotLock) {
           if (result?.success) {
             console.log('Auto-enrolled successfully');
             creds = loadCredentials();
+            // Fetch per-machine preferences BEFORE starting the monitor,
+            // so the enforcer launches with the correct routing toggle.
+            await fetchModelRoutingPreference();
             if (settings.startMonitorOnLaunch && creds?.token) startMonitor();
           }
         } catch (e) { console.log('Auto-enroll failed:', e.message); }
       })();
     } else if (settings.startMonitorOnLaunch && creds?.token) {
-      startMonitor();
+      // Fetch per-machine preferences, then start monitor.
+      fetchModelRoutingPreference().catch(() => {}).finally(() => startMonitor());
     }
   });
 
@@ -1130,6 +1145,6 @@ if (!gotLock) {
   });
 
   app.on('activate', () => {
-    createMainWindow();
+    // No UI window — the agent runs silently in the tray.
   });
 }

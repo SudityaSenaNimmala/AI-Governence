@@ -2771,8 +2771,18 @@ public static class CfaiEnforcer
     class MrModelInfo { public string Provider; public string Tier; }
     class CategoryScore { public int Sum; public bool Strong; public bool Hit; }
     class RouteDecision { public string ToTier; public string ToLabel; }
+    class ServerRoutingRule
+    {
+        public string Name;
+        public int Priority;
+        public List<string> Providers;    // null = any
+        public List<string> Complexities; // null = any
+        public string UiName;             // what to click in the dropdown
+        public string Model;              // optional: API model name
+    }
 
     static volatile bool _modelRouterEnabled = false;
+    static List<ServerRoutingRule> _mrServerRules = new List<ServerRoutingRule>();
     static List<LexCategory> _mrPositive = new List<LexCategory>();
     static LexCategory _mrSimpleTask, _mrSimplicityRequest, _mrTrivialIntent;
     static HashSet<string> _mrTrivialTokens = new HashSet<string>(StringComparer.Ordinal);
@@ -2947,6 +2957,43 @@ public static class CfaiEnforcer
             tierUiNames[providerKv.Key] = perTier;
         }
         _mrTierUiNames = tierUiNames;
+
+        // Server-managed routing rules — same format as /api/v1/routing/rules.
+        // When present, ComputeRoute() checks these BEFORE the built-in logic,
+        // so admin overrides take precedence.
+        var serverRules = new List<ServerRoutingRule>();
+        if (root.ContainsKey("serverRules") && root["serverRules"] != null)
+        {
+            foreach (var raw in (IEnumerable)root["serverRules"])
+            {
+                var ruleDict = (Dictionary<string, object>)raw;
+                var sr = new ServerRoutingRule();
+                sr.Name = ruleDict.ContainsKey("name") ? (string)ruleDict["name"] : "";
+                sr.Priority = ruleDict.ContainsKey("priority") ? Convert.ToInt32(ruleDict["priority"]) : 50;
+                if (ruleDict.ContainsKey("conditions") && ruleDict["conditions"] != null)
+                {
+                    var cond = (Dictionary<string, object>)ruleDict["conditions"];
+                    sr.Providers = MrStringList(cond, "provider");
+                    sr.Complexities = MrStringList(cond, "complexity");
+                }
+                if (ruleDict.ContainsKey("action") && ruleDict["action"] != null)
+                {
+                    var act = (Dictionary<string, object>)ruleDict["action"];
+                    sr.UiName = act.ContainsKey("ui_name") ? (string)act["ui_name"] : null;
+                    sr.Model = act.ContainsKey("model") ? (string)act["model"] : null;
+                }
+                serverRules.Add(sr);
+            }
+        }
+        _mrServerRules = serverRules;
+    }
+
+    static List<string> MrStringList(Dictionary<string, object> dict, string key)
+    {
+        if (!dict.ContainsKey(key) || dict[key] == null) return null;
+        var result = new List<string>();
+        foreach (var item in (IEnumerable)dict[key]) result.Add(((string)item).ToLowerInvariant());
+        return result.Count > 0 ? result : null;
     }
 
     // Mirrors complexity.js's scoreCategory(): match the alternation, resolve
@@ -3101,6 +3148,20 @@ public static class CfaiEnforcer
     static RouteDecision ComputeRoute(MrModelInfo current, string complexity)
     {
         if (_mrCeilingTier == null) { _mrCeilingProvider = current.Provider; _mrCeilingTier = current.Tier; }
+
+        // ── Server rules first (admin overrides) ──────────────────────────
+        // Same matching logic as the browser extension's serverRuleFor():
+        // first enabled rule whose provider + complexity conditions match wins.
+        foreach (var sr in _mrServerRules)
+        {
+            if (sr.Providers != null && !sr.Providers.Contains(current.Provider.ToLowerInvariant())) continue;
+            if (sr.Complexities != null && !sr.Complexities.Contains(complexity)) continue;
+            // Matched. The rule specifies a UI label to click.
+            if (!string.IsNullOrEmpty(sr.UiName))
+                return new RouteDecision { ToTier = "server_rule", ToLabel = sr.UiName };
+        }
+
+        // ── Built-in routing table (fallback) ─────────────────────────────
         string ceilingTier = (_mrCeilingProvider == current.Provider) ? _mrCeilingTier : "standard";
         int ceilingNum = MrTierNum(ceilingTier);
         int currentNum = MrTierNum(current.Tier);
@@ -3482,6 +3543,11 @@ public static class CfaiEnforcer
         ClearPendingRoute();
 
         if (GetForegroundWindow() != pinnedHwnd) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_focus_changed"); return; }
+
+        // After a failed picker interaction, focus may be on the picker
+        // button instead of the composer. Just report the failure and let
+        // the user press Enter again — the next attempt will find the
+        // composer focused (picker closed naturally) and route or send.
         AutomationElement el;
         try { el = AutomationElement.FocusedElement; } catch { el = null; }
         if (el == null) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_no_element"); return; }
@@ -5152,6 +5218,11 @@ public static class CfaiEnforcer
         _blockedPlatform = "";
         _blockedAgentName = "";
         _blockedAgentId = "";
+        // Clear the 30s cooldown so an unblocked tool can send immediately.
+        // Without this, Enter stays swallowed for up to 30s after unblock
+        // with no popup (platform blocks don't show the DLP dialog).
+        _lastBlockFiredTicks = 0;
+        _lastBlockPatterns = "";
     }
 
     static string ExtractJsonString(string json, string key)

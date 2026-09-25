@@ -647,10 +647,13 @@ code {
 }
 .block-dialog h3 { margin: 0 0 6px; font-size: 18px; font-weight: 600; color: #0f172a; }
 .block-dialog p { margin: 0 0 14px; font-size: 13.5px; color: #475569; line-height: 1.5; }
+.block-dialog .pattern-chips { margin-bottom: 16px; display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
 .block-dialog .pattern-chip {
   display: inline-block; padding: 4px 10px; border-radius: 999px;
   background: rgba(239,68,68,0.1); color: #dc2626; font-size: 12px; font-weight: 600;
-  margin-bottom: 16px;
+}
+.block-dialog .guardrail-chip {
+  background: rgba(124,58,237,0.1); color: #7c3aed;
 }
 .block-dialog .preview-box {
   background: #f0fdf4; border: 1px solid #bbf7d0;
