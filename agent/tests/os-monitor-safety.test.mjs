@@ -342,15 +342,17 @@ test('turning the enforcer off also clears enforcerEnabled, so a policy poll can
 // other keystroke-level behavior. These tests just confirm the wiring always
 // enables it rather than gating it behind something that could be missed.
 
-test('Electron main.js always enables model routing in the monitor child env', async () => {
+test('Electron main.js passes the per-machine model-routing toggle to the monitor child env', async () => {
+  // Model routing became a per-machine toggle (stored server-side): the child
+  // env carries the user's choice instead of a hardcoded 'true'.
   const src = await readFile(join(AGENT_DIR, 'electron', 'main.js'), 'utf8');
-  assert.match(src, /CFAI_MODEL_ROUTER_ENABLED:\s*'true'/);
-  assert.equal(/monitorModelRouter/.test(src), false, 'no setting should gate this any more');
+  assert.match(src, /CFAI_MODEL_ROUTER_ENABLED:\s*modelRoutingEnabled \? 'true' : 'false'/);
 });
 
 test('Enforcer always sends CFAI_MODEL_ROUTER_ENABLED and CFAI_MODEL_ROUTER_CONFIG', async () => {
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer.js'), 'utf8');
-  assert.match(src, /CFAI_MODEL_ROUTER_ENABLED:\s*'true'/);
+  // Inherits the parent's per-machine toggle; defaults on for bare agent mode.
+  assert.match(src, /CFAI_MODEL_ROUTER_ENABLED:\s*process\.env\.CFAI_MODEL_ROUTER_ENABLED \|\| 'true'/);
   assert.match(src, /CFAI_MODEL_ROUTER_CONFIG:\s*JSON\.stringify\(buildModelRouterConfig\(\)\)/);
   assert.equal(/modelRouterEnabled/.test(src), false, 'no per-instance flag should gate this any more');
 });
@@ -813,7 +815,10 @@ test('block-dialog.js never offers Tokenize & Send copy for an attachment block,
   assert.match(src, /does not undo an upload that already happened/);
 });
 
-test('main.js only shows the center dialog when the block is actually rewritable — never a bare "Got it" duplicate of the toast', async () => {
+test('main.js opens exactly one center dialog per non-platform block (guardrail popups)', async () => {
+  // Superseded 2026-09-25 by the guardrail-popups change: every non-platform
+  // block now gets the center dialog (rewritable ones offer Tokenize & Send,
+  // the rest explain the block). History of the old rule kept below.
   // Confirmed live TWICE: once for an attachment block, once for an
   // ordinary non-maskable guardrail/prompt-injection block — both fired the
   // toast (from index.js's enforcer.on('block') handler) AND this center
@@ -823,7 +828,7 @@ test('main.js only shows the center dialog when the block is actually rewritable
   // so it covers every non-maskable block, not just attachments.
   const src = await readFile(join(AGENT_DIR, 'electron', 'main.js'), 'utf8');
   const blockHandler = src.slice(src.indexOf("line.startsWith('@@CFAI-BLOCK '"), src.indexOf("line.startsWith('@@CFAI-REWRITE '"));
-  assert.match(blockHandler, /if \(parsed\.rewritable\) showBlockDialogWindow\(parsed\);/);
+  assert.match(blockHandler, /\n\s*showBlockDialogWindow\(parsed\);/);
   // …and nothing else may open that dialog from this path.
   const opens = blockHandler.match(/showBlockDialogWindow\(/g) || [];
   assert.equal(opens.length, 1);
@@ -839,7 +844,7 @@ test('main.js routes a platform block to the FOCUSABLE Request Access dialog, no
   const src = await readFile(join(AGENT_DIR, 'electron', 'main.js'), 'utf8');
   const blockHandler = src.slice(src.indexOf("line.startsWith('@@CFAI-BLOCK '"), src.indexOf("line.startsWith('@@CFAI-REWRITE '"));
   const platformIdx = blockHandler.indexOf('if (parsed.platform_block)');
-  const rewritableIdx = blockHandler.indexOf('if (parsed.rewritable)');
+  const rewritableIdx = blockHandler.indexOf('showBlockDialogWindow(parsed)');
   assert.ok(platformIdx >= 0, 'expected a platform_block branch');
   assert.ok(platformIdx < rewritableIdx, 'the platform-block branch must come first');
   assert.match(blockHandler, /if \(parsed\.platform_block\) \{ showAccessRequestWindow\(parsed\); return; \}/);

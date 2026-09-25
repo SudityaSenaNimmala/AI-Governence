@@ -807,7 +807,7 @@ test('the Electron path still opens its own dialog off @@CFAI-BLOCK', async () =
   // This is a NEW trigger for the CLI agent, not a replacement. Anyone still
   // running Electron must see exactly what they saw before.
   const main = await readFile(join(AGENT_DIR, 'electron', 'main.js'), 'utf8');
-  assert.match(main, /if \(parsed\.rewritable\) showBlockDialogWindow\(parsed\);/);
+  assert.match(main, /\n\s*showBlockDialogWindow\(parsed\);/);
   assert.match(main, /cmd: 'tokenize', block_id: blockId/);
   // …and the CLI path reaches the same command through the same wrapper, so
   // there is one mechanism with two triggers rather than two mechanisms.
