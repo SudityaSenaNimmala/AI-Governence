@@ -22,7 +22,13 @@ import {
   clearEnforcerState,
 } from './enforcer-watchdog.js';
 import { buildModelRouterConfig } from './model-router-config.js';
-import { buildIdeProcessConfig, buildAiPanelConfig, buildAgentSurfaceConfig } from './ai-processes.js';
+// One import statement for the four catalog payload builders. The names are
+// pinned byte-for-byte by agent/tests/os-monitor-safety.test.mjs as the payload
+// contract, so a builder added here has to be added there too — which is the
+// point of the pin.
+import {
+  buildIdeProcessConfig, buildAiPanelConfig, buildAgentSurfaceConfig, buildEgressSurfaceConfig,
+} from './ai-processes.js';
 
 // Resolved through helperScript() rather than import.meta.url: this module is
 // bundled to CommonJS for the packaged binary, where import.meta does not exist
@@ -47,6 +53,13 @@ export class Enforcer extends EventEmitter {
     // policy-driven restarts, respawn-after-exit — can bring it up behind the
     // user's back.
     this.enabled = enabled !== false;
+    // The fleet `dlp` flag as last seen, for the helper's AI-EVIDENCE routes
+    // (Teams agent chat / Copilot tab, Office & Outlook Copilot panes): see
+    // _evidenceDlpOn in enforcer-win.ps1. OFF until told otherwise (security
+    // review L3): index.js pushes the persisted last-known fleet value at start
+    // and every real FeatureSync result after. Passed at spawn so a respawned
+    // helper starts in the right state, and pushed live on change.
+    this.evidenceDlp = false;
     this.child = null;
     this.buffer = '';
     this.stopRequested = false;
@@ -90,6 +103,8 @@ export class Enforcer extends EventEmitter {
           // user's preference stored in the server DB. Defaults to 'true' if
           // the env var is not set (e.g., bare agent mode without Electron).
           CFAI_MODEL_ROUTER_ENABLED: process.env.CFAI_MODEL_ROUTER_ENABLED || 'true',
+          // The fleet `dlp` flag for the AI-evidence routes — see setEvidenceDlp().
+          CFAI_EVIDENCE_DLP: this.evidenceDlp ? 'true' : 'false',
           CFAI_MODEL_ROUTER_CONFIG: JSON.stringify(buildModelRouterConfig()),
           // IDE-hosted AI panels (Claude Code / Copilot Chat in VS Code,
           // Cursor's own composer). Two payloads, same JSON-over-env-var
@@ -109,6 +124,26 @@ export class Enforcer extends EventEmitter {
           // every FUTURE surface ships both false until a human runs its own
           // live pass and flips them. See AGENT_SURFACES in ai-processes.js.
           CFAI_AGENT_SURFACES: JSON.stringify(buildAgentSurfaceConfig()),
+          // Egress surfaces — "which non-AI app is data leaving through", for
+          // the send-chord hold on a mail client. FOURTH payload, same
+          // mechanism, and deliberately a FOURTH catalog for a stronger reason
+          // than the other three: it neither widens which processes are watched
+          // (CFAI_AI_PROCESSES) nor which elements are scanned
+          // (CFAI_AI_PANELS/CFAI_AGENT_SURFACES), and an EGRESS_SURFACES member
+          // is structurally barred from all of them (asserted in
+          // agent/tests/ai-processes.test.mjs).
+          //
+          // This carries the CATALOG only. Whether a surface is actually armed
+          // — and with which capture_mode — is POLICY, and reaches the helper
+          // through ~/.cloudfuze-aigov/egress-surfaces.json on the same 10s
+          // cadence as the blocked/governed lists, so an admin's toggle takes
+          // effect without a respawn. See LoadEgressSurfaces / UpdateEgressPolicy
+          // in enforcer-win.ps1.
+          //
+          // Every entry ships enforce:false, verified:false, so as delivered
+          // today this payload arms nothing at all — it exercises the whole
+          // bridge and waits for a human live-probe pass.
+          CFAI_EGRESS_SURFACES: JSON.stringify(buildEgressSurfaceConfig(this.log)),
         },
       }
     );
@@ -255,6 +290,26 @@ export class Enforcer extends EventEmitter {
    * one, or change the window/element/text a pin was computed from. See
    * HoldPendingRewrite in enforcer-win.ps1.
    */
+  /**
+   * The fleet `dlp` flag, for the AI-EVIDENCE routes only. On: prompts typed
+   * into an agent chat / Copilot pane whose own UI proves it is an AI are
+   * scanned, blocked and offered Tokenize & Send with no governed-agents row
+   * (parity with ChatGPT/Claude desktop). Off: those routes fall back to the
+   * pre-existing, row-gated behaviour. A bare on/off on the wire; remembered
+   * so a respawn starts in the same state.
+   */
+  setEvidenceDlp(on) {
+    this.evidenceDlp = on === true;
+    if (!this.child?.stdin || this.child.stdin.destroyed) return false;
+    try {
+      this.child.stdin.write(JSON.stringify({ cmd: 'evidence_dlp', state: this.evidenceDlp ? 'on' : 'off' }) + '\n');
+      return true;
+    } catch (err) {
+      this.log?.warn(`enforcer: evidence_dlp command failed — ${err?.message || err}`);
+      return false;
+    }
+  }
+
   tokenizeEditHold(blockId, on) {
     if (!this.child?.stdin || this.child.stdin.destroyed) return false;
     try {
@@ -305,7 +360,13 @@ export class Enforcer extends EventEmitter {
       if (!line) continue;
       let ev;
       try { ev = JSON.parse(line); }
-      catch { this.log?.warn('enforcer: non-JSON: ' + line.slice(0, 120)); continue; }
+      catch {
+        // NEVER echo a line that may be a (malformed) prompt_text record: it
+        // carries composer text. A fixed string instead (security review L4).
+        if (line.startsWith('{"kind":"prompt_text"')) this.log?.warn('enforcer: malformed prompt_text line dropped');
+        else this.log?.warn('enforcer: non-JSON: ' + line.slice(0, 120));
+        continue;
+      }
       this.#dispatch(ev);
     }
   }
@@ -321,6 +382,13 @@ export class Enforcer extends EventEmitter {
         break;
       case 'prompt':
         this.emit('prompt', ev);
+        break;
+      case 'prompt_text':
+        // A SENSITIVE prompt typed into an AI-evidence route (see
+        // EmitEvidencePrompt in enforcer-win.ps1). It carries the composer text,
+        // so it is forwarded untouched and NEVER logged here — index.js reports
+        // it exactly like the prompt-watcher's prompt_text.
+        this.emit('prompt_text', ev);
         break;
       case 'override':
         this.emit('override', ev);
@@ -377,6 +445,15 @@ export class Enforcer extends EventEmitter {
         // opportunity. index.js owns everything that happens next (the pending
         // pre-check, the dialog, the authenticated POST).
         this.emit('requestaccessoffer', ev);
+        break;
+      case 'egress_block':
+        // The send chord in a mail client was swallowed because an attachment
+        // hold armed for that same app was in force. A SEPARATE kind from
+        // 'block' because index.js's block handler resolves an AI product
+        // identity and a Request Access host, neither of which a mail client
+        // has. Deliberately NOT logged here: the block is recorded by the
+        // handler, and the filename on it is content-adjacent.
+        this.emit('egressblock', ev);
         break;
       case 'enforcement_disarmed':
         // Panic hotkey (Ctrl+Alt+Shift+F12) — all blocking off for ev.seconds,

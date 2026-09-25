@@ -25,7 +25,9 @@ import path from 'node:path';
 
 import {
   PLATFORM_HOST_PATTERNS,
+  PLATFORM_EXCEPTION_HOST_PATTERNS,
   platformMatchesHost,
+  exceptionHostMatchesPlatform,
   normalizeAgentName,
   agentIdentityMatches,
   isAgentScopedRow,
@@ -61,6 +63,67 @@ test('an UNKNOWN platform matches no host — "no exception can apply", never "u
 
 test('host matching is case-insensitive and tolerates whitespace', () => {
   assert.equal(platformMatchesHost(' Copilot_Studio ', ' TEAMS.microsoft.COM '), true);
+});
+
+// ── the NARROWER exception-only host map ────────────────────────────────────
+//
+// PLATFORM_HOST_PATTERNS (block lookup) went from ~0-2 hosts to the full
+// Microsoft suite for personal_agent/sharepoint_embedded/teams_app/isv_store.
+// Reusing that same wide list to decide whether an access exception applies
+// meant an approval granted on ONE host lifted a block on ten unrelated ones.
+// exceptionHostMatchesPlatform() is deliberately narrower — mirrors the
+// desktop enforcer's own (already-reviewed) hostsForPlatform() reach.
+
+test('the exception map is narrower than the block-lookup map for every M365 agent platform', () => {
+  for (const platform of Object.keys(PLATFORM_EXCEPTION_HOST_PATTERNS)) {
+    const wide = PLATFORM_HOST_PATTERNS[platform] ?? [];
+    const narrow = PLATFORM_EXCEPTION_HOST_PATTERNS[platform];
+    assert.ok(narrow.length <= wide.length, `${platform}: exception map is not narrower`);
+  }
+});
+
+test('a SharePoint-embedded or Teams-app block is NOT liftable by an office.com host-wide grant', () => {
+  // This is the exact live scenario found while auditing the widening: a
+  // host-scoped grant on www.office.com must not clear agents that only
+  // reach office.com through the wide BLOCK-lookup list, not the narrow
+  // desktop-derived exception one.
+  assert.equal(exceptionHostMatchesPlatform('sharepoint_embedded', 'www.office.com'), false);
+  assert.equal(exceptionHostMatchesPlatform('teams_app', 'www.office.com'), false);
+  assert.equal(exceptionHostMatchesPlatform('isv_store', 'www.office.com'), false);
+  // ...but the platform IS still reachable there for BLOCKING purposes — the
+  // widening itself is correct and untouched.
+  assert.equal(platformMatchesHost('sharepoint_embedded', 'www.office.com'), true);
+});
+
+test('sharepoint_embedded is only exception-liftable at m365.cloud.microsoft, matching desktop', () => {
+  assert.equal(exceptionHostMatchesPlatform('sharepoint_embedded', 'm365.cloud.microsoft'), true);
+  for (const host of ['teams.microsoft.com', 'acme.sharepoint.com', 'outlook.office.com', 'copilot.microsoft.com']) {
+    assert.equal(exceptionHostMatchesPlatform('sharepoint_embedded', host), false, host);
+  }
+});
+
+test('teams_app and isv_store cannot be exception-lifted anywhere — no desktop process maps to them yet', () => {
+  for (const platform of ['teams_app', 'isv_store']) {
+    for (const host of ['teams.microsoft.com', 'm365.cloud.microsoft', 'www.office.com', 'copilot.microsoft.com']) {
+      assert.equal(exceptionHostMatchesPlatform(platform, host), false, `${platform} / ${host}`);
+    }
+  }
+});
+
+test('personal_agent and copilot_studio share the same narrow exception hosts as desktop (Copilot, M365Copilot, ms-teams)', () => {
+  for (const platform of ['personal_agent', 'copilot_studio']) {
+    for (const host of ['copilot.microsoft.com', 'm365.cloud.microsoft', 'teams.microsoft.com']) {
+      assert.equal(exceptionHostMatchesPlatform(platform, host), true, `${platform} / ${host}`);
+    }
+    assert.equal(exceptionHostMatchesPlatform(platform, 'acme.sharepoint.com'), false);
+  }
+});
+
+test('a platform outside the narrow map falls through to the normal wide check, unchanged', () => {
+  for (const host of ['gemini.google.com', 'aistudio.google.com']) {
+    assert.equal(exceptionHostMatchesPlatform('gemini', host), platformMatchesHost('gemini', host));
+  }
+  assert.equal(exceptionHostMatchesPlatform('claude_ai_project', 'claude.ai'), true);
 });
 
 // ── the host map may not drift from content.js ──────────────────────────────
@@ -224,4 +287,18 @@ test('no exceptions changes nothing, and the input is never mutated', () => {
 test('a non-array list degrades to an empty list rather than throwing', () => {
   assert.deepEqual(subtractAccessExceptions(null, [{ tool_host: 'x' }]), []);
   assert.deepEqual(subtractAccessExceptions(undefined, []), []);
+});
+
+// ── regression: the live scenario found auditing the widening ──────────────
+
+test('REGRESSION: a host-scoped grant on www.office.com no longer clears unrelated M365 agents', () => {
+  const spAgent = { agent_id: 'agt-E', agent_name: 'SharePoint FAQ Bot', platform: 'sharepoint_embedded', agent_scope: 'agent' };
+  const teamsAppRow = { agent_id: 'agt-F', agent_name: 'Some Teams App', platform: 'teams_app', agent_scope: 'agent' };
+  const out = subtractAccessExceptions([spAgent, teamsAppRow], [
+    { tool_host: 'www.office.com', scope: 'host' },
+  ]);
+  // Before this fix, both were cleared because their BLOCK-lookup host list
+  // (post-widening) includes office.com. Now, neither is — the grant was for
+  // office.com, and neither agent is exception-reachable there.
+  assert.deepEqual(out.map((r) => r.agent_id), ['agt-E', 'agt-F']);
 });

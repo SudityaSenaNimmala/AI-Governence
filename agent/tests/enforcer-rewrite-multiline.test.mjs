@@ -194,6 +194,14 @@ test('EstimateWriteMs models the write loop exactly, breaks included', { skip: !
   // The model, recomputed HERE from the constants read out of the compiled
   // enforcer. Two independent implementations of the same arithmetic: if the C#
   // one drifts (or the loop stops matching it), these disagree.
+  // The focused-element pin check is part of the loop now: one read before
+  // every segment, plus one before every Nth chunk after a segment's first.
+  assert.equal(c.focus_pin_read_ms, 15, 'each pin read is charged at the top of the 5-15ms estimate');
+  assert.equal(c.focus_pin_every_chunks, 4);
+  const pinReads = (len) => {
+    const chunks = Math.ceil(len / c.chunk);
+    return 1 + (chunks > 1 ? Math.floor((chunks - 1) / c.focus_pin_every_chunks) : 0);
+  };
   const expect = (s) => {
     const segments = s.split(/\r\n|\n|\r/);
     let ms = 0;
@@ -201,6 +209,7 @@ test('EstimateWriteMs models the write loop exactly, breaks included', { skip: !
       if (i > 0) ms += 3 * c.key_delay_ms + c.chunk_delay_ms;
       ms += seg.length * c.char_delay_ms;
       ms += Math.ceil(seg.length / c.chunk) * c.chunk_delay_ms;
+      ms += pinReads(seg.length) * c.focus_pin_read_ms;
     });
     return ms;
   };
@@ -220,13 +229,15 @@ test('EstimateWriteMs models the write loop exactly, breaks included', { skip: !
     assert.equal(rows.get(name).estimate_ms, expect(value), `${name}: the model must match`);
   }
   // The terms, spelled out so a wrong one is obvious rather than merely unequal:
-  assert.equal(rows.get('exactly_one_chunk').estimate_ms, 370, '24 chars = one whole chunk');
-  assert.equal(rows.get('one_chunk_plus_1').estimate_ms, 395, 'the 25th char starts a second chunk settle');
+  // (+15 on each: the one pin read before the segment.)
+  assert.equal(rows.get('exactly_one_chunk').estimate_ms, 370 + 15, '24 chars = one whole chunk + one pin read');
+  assert.equal(rows.get('one_chunk_plus_1').estimate_ms, 395 + 15, 'the 25th char starts a second chunk settle');
   // A LINE BREAK IS THE EXPENSIVE CHARACTER: 25ms (3 key pauses + the settle)
-  // against ~15.4ms for a typed one. This is why a pure character cap cannot
-  // answer the question and the estimate exists.
+  // against ~15.4ms for a typed one — plus, now, the pin read before the new
+  // segment. This is why a pure character cap cannot answer the question and
+  // the estimate exists.
   assert.equal(rows.get('one_break').estimate_ms - rows.get('one_char').estimate_ms * 2 + 0,
-    3 * c.key_delay_ms + c.chunk_delay_ms - 0, 'a break costs one combo plus one settle');
+    3 * c.key_delay_ms + c.chunk_delay_ms - 0, 'a break costs one combo plus one settle (the pin read is per segment)');
   // CRLF is ONE break, not two — same estimate as a bare \n with the same text.
   assert.equal(rows.get('crlf_one_break').estimate_ms, rows.get('one_break').estimate_ms);
 
@@ -280,19 +291,24 @@ test('the write loop SLEEPS on the same constants the estimate charges for', asy
   assert.equal((combo.match(/Thread\.Sleep\(REWRITE_KEY_DELAY_MS\)/g) || []).length, 4,
     'SendKeyPress (1) + SendKeyCombo (3) — the three the estimate charges per break');
   const fn = src.slice(src.indexOf('static void RunRewrite('), src.indexOf('// SendInput\'s return value is the count'));
-  assert.equal((fn.match(/Thread\.Sleep\(REWRITE_CHUNK_DELAY_MS\)/g) || []).length, 2,
+  assert.equal((fn.match(/io\.Sleep\(REWRITE_CHUNK_DELAY_MS\)/g) || []).length, 2,
     'the per-chunk settle and the post-newline settle');
   // No naked millisecond literal may reappear in the paced write path.
   const writeLoop = fn.slice(fn.indexOf('var segments = SplitMaskedLines(masked);'), fn.indexOf('// Verify by positive identification'));
   assert.ok(writeLoop.length > 0, 'expected the write loop');
-  assert.equal(/Thread\.Sleep\(\d+\)/.test(writeLoop), false,
+  assert.equal(/(Thread|io)\.Sleep\(\d+\)/.test(writeLoop), false,
     'the write loop must not sleep on a literal — the estimate could not see it');
   // The estimate is built from the constants, and is the thing the admission
   // check consults.
   const est = src.slice(src.indexOf('static int EstimateWriteMs('), src.indexOf('static bool WriteFitsBudget('));
   assert.match(est, /if \(i > 0\) ms \+= 3 \* REWRITE_KEY_DELAY_MS \+ REWRITE_CHUNK_DELAY_MS;/);
   assert.match(est, /ms \+= len \* REWRITE_CHAR_DELAY_MS;/);
-  assert.match(est, /ms \+= \(\(len \+ REWRITE_CHUNK - 1\) \/ REWRITE_CHUNK\) \* REWRITE_CHUNK_DELAY_MS;/);
+  assert.match(est, /int chunks = \(len \+ REWRITE_CHUNK - 1\) \/ REWRITE_CHUNK;/);
+  assert.match(est, /ms \+= chunks \* REWRITE_CHUNK_DELAY_MS;/);
+  // The focused-element pin reads the loop makes: one per segment, one per
+  // REWRITE_FOCUS_PIN_EVERY_CHUNKS-th chunk after the first.
+  assert.match(est, /ms \+= REWRITE_FOCUS_PIN_READ_MS;/);
+  assert.match(est, /if \(chunks > 1\) ms \+= \(\(chunks - 1\) \/ REWRITE_FOCUS_PIN_EVERY_CHUNKS\) \* REWRITE_FOCUS_PIN_READ_MS;/);
   assert.equal(/\d{2,}/.test(codeOnlyLines(est)), false, 'the estimate must contain no magic numbers');
   assert.match(src, /static bool WriteFitsBudget\(string masked\)\r?\n\s*\{\r?\n\s*return EstimateWriteMs\(masked\) <= REWRITE_USABLE_BUDGET_MS;/);
   assert.match(src, /if \(!WriteFitsBudget\(masked\)\) \{ result\.Reason = "too_long_to_write"; return result; \}/);
@@ -462,24 +478,24 @@ test('RunRewrite types SEGMENTS and sends the newline COMBINATION, never a liter
   // The write loop is over SEGMENTS, and the only thing typed as text is a
   // segment (which SplitMaskedLines guarantees carries no terminator).
   assert.match(fn, /var segments = SplitMaskedLines\(masked\);/);
-  assert.match(fn, /SendUnicodeChunk\(line\.Substring\(i, len\)\);/);
-  assert.equal(/SendUnicodeChunk\(masked/.test(fn), false,
+  assert.match(fn, /io\.TypeChunk\(line\.Substring\(i, len\)\);/);
+  assert.equal(/(SendUnicodeChunk|TypeChunk)\(masked/.test(fn), false,
     'the whole masked string must never be typed in one piece — a newline in it would submit the message');
   // The break between segments is a KEY COMBINATION resolved from the catalog,
   // sent only between segments (seg > 0), never before the first one.
   assert.match(fn, /if \(seg > 0\)/);
-  assert.match(fn, /SendKeyCombo\(nlMod, nlKey\);/);
+  assert.match(fn, /io\.KeyCombo\(nlMod, nlKey\);/);
   // …and the combination is resolved BEFORE anything is typed or cleared, so a
   // refusal costs nothing: the composer is untouched and the block stays armed.
   const resolveIdx = fn.indexOf('ResolveNewlineKeys(NewlineKeysFor()');
   assert.ok(resolveIdx > 0, 'expected the multi-line pre-flight');
   assert.match(fn.slice(resolveIdx, resolveIdx + 300), /EmitRewrite\(blockId, "aborted", "no_newline_key"\); return;/);
-  assert.ok(resolveIdx < fn.indexOf('SendKeyCombo(VK_CONTROL, VK_A)'),
+  assert.ok(resolveIdx < fn.indexOf('io.KeyCombo(VK_CONTROL, VK_A)'),
     'the newline combination must be resolved before Ctrl+A clears the composer');
   // The per-chunk abort/budget/foreground re-check still guards every write,
   // and now guards the key combination too — a line break is input to the target
   // app just as much as a character is.
-  assert.equal((fn.match(/_rewriteAbort \|\| DateTime\.UtcNow\.Ticks > budgetEnd \|\| GetForegroundWindow\(\) != pinnedHwnd/g) || []).length, 2,
+  assert.equal((fn.match(/_rewriteAbort \|\| DateTime\.UtcNow\.Ticks > budgetEnd \|\| io\.ForegroundWindow\(\) != pinnedHwnd/g) || []).length, 2,
     'both the segment break and the chunk loop must re-check');
   // The verify/send tail is untouched: read back, rescan, settle, re-pin, send,
   // confirm the composer cleared.
@@ -511,7 +527,10 @@ test('ComputeMaskCandidate no longer rejects multi-line text, and the gate moved
   // never even pinned for a surface that cannot type a line break.
   const pending = src.slice(src.indexOf('static void UpdatePendingRewrite()'), src.indexOf('static string _pastePatternsValue'));
   assert.match(pending, /bool newlineOk = !HasLineBreak\(mask\.Masked\) \|\| CanInsertNewline\(\);/);
-  assert.match(pending, /if \(mask\.Ok && rid != null && newlineOk\)/);
+  // (…and, since the rich-content refusal, a composer holding a mention pill /
+  // image / table / list is never pinned either — see enforcer-rewrite-focus-pin.)
+  assert.match(pending, /if \(mask\.Ok && rid != null && newlineOk && !rich\)/);
+  assert.match(pending, /: rich \? "rich_content"/);
   assert.match(pending, /: "multiline_no_newline_key";/);
 });
 

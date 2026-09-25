@@ -313,6 +313,46 @@
     return f.status === 'enabled';
   }
 
+  // ── OPT-IN flags ───────────────────────────────────────────────────────────
+  // isFeatureOn() above answers "has an admin switched this shipped control
+  // OFF?", so an unknown key reads as ENABLED. That default is deliberate there
+  // and must not change: a governance product that stops enforcing DLP because a
+  // flag did not arrive is worse than one that over-enforces.
+  //
+  // A control that has never been verified against the surface it reads is the
+  // exact opposite case. It must be OFF until someone turns it on, because
+  // "unknown" means "no one has looked at this yet", not "the admin left it
+  // alone". isOptInFeatureOn() therefore requires the key to be present AND
+  // enabled; absent, malformed, or a server the extension cannot reach all mean
+  // off. Use it only for a control whose failure mode is a WRONG enforcement
+  // action rather than a missing one.
+  //
+  // THE FALL-THROUGH IS THE SAME AS isFeatureOn'S, AND FOR THE SAME REASON. The
+  // page-DOM attribute is a snapshot pushed at injection time; _cfaiFeatures is
+  // the live cache the service worker refreshes. Returning out of the `raw`
+  // branch on a key the snapshot does not MENTION answered "off" from the older
+  // of the two sources while a fresher one sat one line below — a flag an admin
+  // had just switched on read as off until the next navigation. Only a key that
+  // is PRESENT is authoritative; absent means "this source has nothing to say",
+  // so keep looking. The default with nothing found anywhere is still off —
+  // that is what makes this opt-in, and it is unchanged.
+  function isOptInFeatureOn(key) {
+    try {
+      const raw = document.documentElement.getAttribute('data-cfai-features');
+      if (raw) { const f = JSON.parse(raw); if (f[key]) return f[key].status === 'enabled'; }
+    } catch {}
+    const f = _cfaiFeatures[key];
+    return !!f && f.status === 'enabled';
+  }
+
+  // The M365 panel agent-label reader (see the region further down). Ships OFF:
+  // the selectors it depends on are an unverified hypothesis about Microsoft's
+  // DOM, so nothing may act on them until a live tenant pass confirms them. The
+  // key is deliberately NOT in server/src/lib/feature-registry.js yet — every
+  // entry there is `default: true`, which would switch this on fleet-wide the
+  // moment it was added.
+  const FEATURE_M365_AGENT_LABEL_READER = 'm365_agent_label_reader';
+
   function applyFeatures(feats) {
     if (!feats || typeof feats !== 'object' || !Object.keys(feats).length) return;
     _cfaiFeatures = feats;
@@ -671,6 +711,10 @@
     'outlook.live.com':           ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
     'office.com':                 GENERIC_AI_PANEL,
     'office365.com':              GENERIC_AI_PANEL,
+    // microsoft365.com is office.com's successor portal and now an injected
+    // host, so it needs a scope decision like every other one: capture is
+    // restricted to the Copilot panel, never the whole Office app.
+    'microsoft365.com':           ['[data-tid*="copilot" i]', ...GENERIC_AI_PANEL],
     'crm.dynamics.com':           ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
     'copilotstudio.microsoft.com':['[aria-label*="Copilot" i]', '[class*="copilot" i]', '[aria-label*="Test your agent" i]'],
     'powerapps.com':              ['[aria-label*="Copilot" i]', '[class*="copilot" i]'],
@@ -744,6 +788,38 @@
       }
     }
     return best;   // null => whole_site
+  }
+
+  /**
+   * Which selectors, if any, name the AGENT open inside a panel on this host.
+   *
+   * A DIFFERENT QUESTION from surfaceSelectorsForHost() above, which answers
+   * "where is the AI panel". This one answers "which named agent is loaded in
+   * it" — the read a per-AGENT block needs and a host-level match cannot give,
+   * because blocking one Copilot Studio agent by host would disable Teams,
+   * Outlook and M365 Copilot chat for the whole org.
+   *
+   * SERVED ONLY — THERE IS NO BUILT-IN FLOOR HERE, and that asymmetry with
+   * surfaceSelectorsForHost() is the point. The floor exists for the capture
+   * selectors because a PRIVACY guarantee must not depend on a network call.
+   * These selectors are a hypothesis about Microsoft's DOM that no one has
+   * verified against a live tenant (see M365_AGENT_LABEL in
+   * server/src/lib/ai-surfaces.js), and a hypothesis compiled into the extension
+   * is a hypothesis that needs a release to correct. Absent ⇒ no agent-label
+   * read on this host ⇒ the behaviour that exists today.
+   */
+  function agentLabelSelectorsForHost(host) {
+    if (!_syncedSurfaces) return null;
+    const h = String(host || '').toLowerCase();
+    let best = null, bestLen = 0;
+    for (const [key, v] of Object.entries(_syncedSurfaces)) {
+      const sels = v && !Array.isArray(v) ? v.agentLabelSelectors : null;
+      if (!Array.isArray(sels) || !sels.length) continue;
+      if ((h === key || h.endsWith('.' + key)) && key.length > bestLen) {
+        best = sels; bestLen = key.length;
+      }
+    }
+    return best;
   }
 
   const _panelSelectors = surfaceSelectorsForHost(
@@ -4107,6 +4183,25 @@
   // END ENFORCEMENT ============================================
 
   // ---- UI: subtle in-page toast ----
+  //
+  // EVERY INTERPOLATED VALUE IS UNTRUSTED. `pattern` used to be a pattern NAME
+  // from content/patterns.js — a fixed set of strings we wrote — so this template
+  // interpolated it raw. showBlockedAgentPopup() now routes through here with
+  // `pattern: 'Blocked agent: ' + agent.agent_name`, and an agent name is free
+  // text an admin typed into AI Hub (and, for a discovered agent, a name that
+  // originated in a tenant's own directory). That is a stored-XSS sink in every
+  // page the extension is injected into, which is all of them. `title` has the
+  // same exposure the moment a caller builds one from data.
+  //
+  // The block modal beside this (showCfaiPopup) has always used escapeHtml() on
+  // exactly these fields; this is the same treatment, and the severity is pinned
+  // to the four values the stylesheet actually defines so a crafted severity
+  // cannot break out of the class attribute either.
+  const TAG_SEVERITIES = new Set(['critical', 'high', 'moderate', 'low']);
+  const tagSeverity = (s) => (TAG_SEVERITIES.has(String(s ?? '').toLowerCase())
+    ? String(s).toLowerCase()
+    : 'low');
+
   function showWarning(matches, title = 'Sensitive data detected') {
     const existing = document.querySelector('.cfai-toast');
     if (existing) existing.remove();
@@ -4115,8 +4210,8 @@
     toast.className = 'cfai-toast';
     toast.innerHTML = `
       <button class="cfai-toast-close" aria-label="Close">&times;</button>
-      <div class="cfai-toast-title">${title}</div>
-      <div class="cfai-toast-body">${matches.map((m) => `<span class="cfai-tag cfai-${m.severity}">${m.pattern}</span>`).join(' ')}</div>
+      <div class="cfai-toast-title">${escapeHtml(title)}</div>
+      <div class="cfai-toast-body">${(matches || []).map((m) => `<span class="cfai-tag cfai-${tagSeverity(m.severity)}">${escapeHtml(m.pattern)}</span>`).join(' ')}</div>
       <div class="cfai-toast-footer">CloudFuze AI Governance · This event was reported to the security team.</div>
     `;
     document.body.appendChild(toast);
@@ -4398,8 +4493,21 @@
     // matched_hosts (that's where it was discovered), but this list used
     // to stop at copilot.microsoft/m365.cloud.microsoft/powerva.ms, so a
     // blocked agent published into Teams or Outlook went unenforced there.
+    //
+    // The same is true of every other Microsoft 365 Copilot agent type. A
+    // personal (declarative) agent used to be looked for only on
+    // copilot.microsoft and m365.cloud.microsoft, so opening it from Teams,
+    // Outlook, SharePoint or Office escaped the block entirely; and
+    // sharepoint_embedded, teams_app and isv_store — platforms the server
+    // already emits — were absent from this map, which means a block on them
+    // enforced on no host at all. All four carry copilot_studio's host list.
+    // Keep in lockstep with lib/blocked-agents.js; the sync test fails the
+    // build on drift.
     copilot_studio:     [/copilot\.microsoft/, /m365\.cloud\.microsoft/, /powerva\.ms/, /copilotstudio/, /teams\.microsoft/, /outlook\.office/, /outlook\.live/, /sharepoint\.com/, /(^|\.)office\.com/, /office365\.com/, /microsoft365\.com/],
-    personal_agent:     [/copilot\.microsoft/, /m365\.cloud\.microsoft/],
+    personal_agent:     [/copilot\.microsoft/, /m365\.cloud\.microsoft/, /powerva\.ms/, /copilotstudio/, /teams\.microsoft/, /outlook\.office/, /outlook\.live/, /sharepoint\.com/, /(^|\.)office\.com/, /office365\.com/, /microsoft365\.com/],
+    sharepoint_embedded:[/copilot\.microsoft/, /m365\.cloud\.microsoft/, /powerva\.ms/, /copilotstudio/, /teams\.microsoft/, /outlook\.office/, /outlook\.live/, /sharepoint\.com/, /(^|\.)office\.com/, /office365\.com/, /microsoft365\.com/],
+    teams_app:          [/copilot\.microsoft/, /m365\.cloud\.microsoft/, /powerva\.ms/, /copilotstudio/, /teams\.microsoft/, /outlook\.office/, /outlook\.live/, /sharepoint\.com/, /(^|\.)office\.com/, /office365\.com/, /microsoft365\.com/],
+    isv_store:          [/copilot\.microsoft/, /m365\.cloud\.microsoft/, /powerva\.ms/, /copilotstudio/, /teams\.microsoft/, /outlook\.office/, /outlook\.live/, /sharepoint\.com/, /(^|\.)office\.com/, /office365\.com/, /microsoft365\.com/],
     teams_chat_agent:   [/teams\.microsoft/],
     openai_assistant:   [/chatgpt\.com/, /chat\.openai\.com/],
     custom_gpt:         [/chatgpt\.com/, /chat\.openai\.com/],
@@ -4424,8 +4532,15 @@
 
   function applyBlockedList(list) {
     _blockedList = list || [];
-    // Also forward to fetch-blocker for platforms that DO use fetch (ChatGPT, Claude)
-    window.postMessage({ type: 'cfai-blocked-agents', blocked: list }, '*');
+    // NO postMessage TO THE PAGE. A window.postMessage of this list used to sit
+    // here, commented as forwarding it to content/fetch-blocker.js "for
+    // platforms that DO use fetch". fetch-blocker.js has never had a listener
+    // for it — it registers no window message handler at all, and its own header
+    // says agent blocking is handled by the content script at the DOM level and
+    // NOT there. So the only thing the call did was broadcast the org's blocked-
+    // agent names, agent ids and platforms into the page's main world, readable
+    // by the site's own scripts and anything else running on the page. Dead code
+    // and a policy-data leak in one line; enforcement never depended on it.
     // Start DOM-level enforcement
     if (!_blockCheckInterval && _blockedList.length > 0) {
       enforceBlockedAgent();
@@ -4462,21 +4577,213 @@
     return parts.join(' ').toLowerCase();
   }
 
+  // ── panel agent-label reader ──────────────────────────────────────────────
+  // WHICH NAMED AGENT IS OPEN IN THIS PANEL — a second, independent answer to
+  // the question getHeaderAgentText() already answers from document.title and
+  // the top bar.
+  //
+  // WHY A SECOND SIGNAL. In Microsoft 365 the header does not change when a user
+  // switches agents inside the Copilot pane: the title stays "Microsoft Teams"
+  // or "Chat | Microsoft 365 Copilot" whichever agent is loaded, so the header
+  // read cannot see a Copilot Studio / declarative agent at all on those hosts.
+  // The name is rendered inside the pane instead — the same place the desktop
+  // enforcer reads it from through the composer's accessible name.
+  //
+  // FOUR HARD CONSTRAINTS, in the order they matter:
+  //
+  //  1. PANEL-SCOPED, NEVER DOCUMENT-SCOPED. Every query here runs against the
+  //     panel element aiPanels() already resolved. A document-wide scan would
+  //     read an agent name out of a sidebar list, a suggestion chip or chat
+  //     history and block a user who never opened that agent. Nothing in this
+  //     region touches `document`.
+  //
+  //  2. FAIL CLOSED, AND CLOSED MEANS "NO EVIDENCE". No label found is not a
+  //     reason to block anything — not the panel, not the app. It returns null
+  //     and the caller behaves exactly as it did before this region existed.
+  //     A wrong name can never be manufactured from a selector that matched
+  //     nothing, which is what makes it safe to ship an unverified selector set.
+  //
+  //  3. NOTHING READ HERE LEAVES THE PAGE. Identical guarantee to
+  //     getHeaderAgentText() (see showBlockedAgentPopup's header comment): the
+  //     text is compared against the org's blocked-agent names in this closure
+  //     and dropped. It is never emitted, logged, stored or attached to a
+  //     request. A governance product that uploaded whatever string it scraped
+  //     out of a customer's Copilot pane would be indefensible.
+  //
+  //  4. NOT ON THE 500ms PATH. enforceBlockedAgent() runs twice a second. The
+  //     result is cached per panel ELEMENT and invalidated by a MutationObserver
+  //     scoped to that one element, so the selector scan costs one pass per
+  //     panel per DOM change, not one per tick. The cache is a WeakMap: an SPA
+  //     that swaps the pane out drops the entry with it.
+  //
+  // The whole region is additionally gated on an OPT-IN flag that is OFF until
+  // someone verifies the selectors against a real tenant — see
+  // FEATURE_M365_AGENT_LABEL_READER above.
+
+  // A display name, not a paragraph. Two of the served selectors can match a
+  // disclaimer or a combobox wrapping the whole conversation, so anything longer
+  // than a plausible agent name is discarded rather than substring-matched —
+  // long prose is where an accidental match would come from.
+  const AGENT_LABEL_MAX_LEN = 120;
+
+  const _agentLabelCache = new WeakMap();      // panel element → { label }
+  const _agentLabelObserved = new WeakMap();   // panel element → MutationObserver
+
+  // Drop this panel's cached read the moment anything inside it changes. Scoped
+  // to the panel, never to `document`: a document-wide observer on a Teams tab
+  // fires on every incoming message in every chat.
+  function watchPanelForAgentLabel(panelEl) {
+    if (_agentLabelObserved.has(panelEl)) return true;
+    if (typeof MutationObserver !== 'function') return false;
+    let obs;
+    try {
+      obs = new MutationObserver(() => { _agentLabelCache.delete(panelEl); });
+      obs.observe(panelEl, {
+        childList: true, subtree: true, characterData: true,
+        attributes: true, attributeFilter: ['aria-selected', 'aria-expanded', 'class'],
+      });
+    } catch (e) { return false; }
+    _agentLabelObserved.set(panelEl, obs);
+    return true;
+  }
+
+  /**
+   * The open agent's display name inside ONE resolved AI panel.
+   *
+   * @param {Element} panelEl  a panel from aiPanels(), never document
+   * @param {string[]} [sels]  agentLabelSelectorsForHost() for this host
+   * @returns {string|null}    the label, or null — never a guess, never a fallback
+   */
+  function getPanelAgentLabel(panelEl, sels) {
+    if (!panelEl || typeof panelEl.querySelectorAll !== 'function') return null;
+    if (!isOptInFeatureOn(FEATURE_M365_AGENT_LABEL_READER)) return null;
+
+    const selectors = sels || agentLabelSelectorsForHost(location.hostname);
+    if (!Array.isArray(selectors) || !selectors.length) return null;
+
+    const cached = _agentLabelCache.get(panelEl);
+    if (cached) return cached.label;
+
+    let label = null;
+    for (const sel of selectors) {
+      let found;
+      try { found = panelEl.querySelectorAll(sel); } catch (e) { continue; }
+      for (const node of found) {
+        const text = String((node && node.textContent) || '').trim();
+        if (text.length >= 2 && text.length <= AGENT_LABEL_MAX_LEN) { label = text; break; }
+      }
+      if (label) break;   // selectors are ordered most- to least-specific
+    }
+
+    // Only cache a read we can invalidate. With no usable observer the entry
+    // would outlive the agent it described, and a stale name is the one way this
+    // reader could block the wrong thing.
+    if (watchPanelForAgentLabel(panelEl)) _agentLabelCache.set(panelEl, { label });
+    return label;
+  }
+
+  /**
+   * Lower-cased agent labels readable in the panels that are open RIGHT NOW.
+   * Empty when the flag is off, when the host serves no label selectors, when no
+   * panel is open, or when nothing matched — all four are "no evidence".
+   */
+  function openPanelAgentLabels() {
+    if (!isOptInFeatureOn(FEATURE_M365_AGENT_LABEL_READER)) return [];
+    const selectors = agentLabelSelectorsForHost(location.hostname);
+    if (!Array.isArray(selectors) || !selectors.length) return [];
+    const out = [];
+    for (const panel of aiPanels()) {
+      const label = getPanelAgentLabel(panel, selectors);
+      if (label) out.push(label.toLowerCase());
+    }
+    return out;
+  }
+  // ── end panel agent-label reader ──────────────────────────────────────────
+
+  // ── blocked-agent name match ──────────────────────────────────────────────
+  //
+  // WHAT COUNTS AS "THIS AGENT IS ON SCREEN". The test used to be
+  // `headerText.includes(name)` with a 2-character floor — a plain substring
+  // against getHeaderAgentText(), which is document.title plus every breadcrumb
+  // / header / top-bar element on the page.
+  //
+  // That was survivable while this path only ran on two dedicated Copilot chat
+  // hosts. It is not survivable now that PLATFORM_TO_HOSTS publishes these rows
+  // to the whole Microsoft suite — SharePoint, Word/Excel/PowerPoint on the web,
+  // Outlook, Teams — where the breadcrumb and the tab title are USER-AUTHORED
+  // document names. Under a substring test a row named "Chat" matched
+  // "Q3 Chatter Report.docx", and "HR" matched "CHRIST Hospital Onboarding".
+  // Blocking the composer of the document a user is writing, because its
+  // filename contains three of the letters an admin typed, is the worst failure
+  // this feature has.
+  //
+  // Two changes, both deliberately blunt:
+  //   • The name must appear as a whole token/phrase — bounded by something
+  //     other than a letter or digit on each side. "chat" no longer matches
+  //     "chatter"; "chat - notes" still matches "chat - notes | teams".
+  //   • The floor rises from 2 to 4 characters. A 2-3 character name cannot be
+  //     matched against page furniture with any confidence, word boundary or
+  //     not, so it is not matched at all here. Such a row still enforces
+  //     wherever identity comes from something better than scraped text.
+  //
+  // Both directions of this are a judgement call with a cost: a too-generic name
+  // now under-blocks. That is the correct side to err on — a missed block is
+  // visible in the AI Hub report, while a false block silently breaks a
+  // customer's Word document.
+  const AGENT_NAME_MIN_LEN = 4;
+
+  // Compiled once per name. _blockedList is small and stable, and this runs on a
+  // 500ms interval against every open panel.
+  const _agentNameRx = new Map();
+  function agentNameRegex(name) {
+    let rx = _agentNameRx.get(name);
+    if (!rx) {
+      const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      rx = new RegExp('(^|[^a-z0-9])' + escaped + '([^a-z0-9]|$)', 'i');
+      _agentNameRx.set(name, rx);
+    }
+    return rx;
+  }
+
+  /** Does `text` name this agent as a distinct token/phrase? Both sides are
+   *  already lower-cased by their callers; the 'i' flag is belt and braces. */
+  function agentNameMatchesText(name, text) {
+    if (!name || name.length < AGENT_NAME_MIN_LEN) return false;
+    if (!text) return false;
+    return agentNameRegex(name).test(text);
+  }
+  // ── end blocked-agent name match ──────────────────────────────────────────
+
   function isBlockedAgentActive() {
     if (!_blockedList.length) return null;
     const host = location.hostname;
     const headerText = getHeaderAgentText();
 
+    // The panel read is computed AT MOST ONCE per call, and only if some blocked
+    // row's platform actually maps to this host — the `continue` below is the
+    // short-circuit. On a host no blocked agent is published to, this closure is
+    // never invoked and no label selector ever runs.
+    let _panelLabels = null;
+    const panelLabels = () => (_panelLabels || (_panelLabels = openPanelAgentLabels()));
+
     for (const agent of _blockedList) {
       const hostPatterns = PLATFORM_TO_HOSTS[agent.platform] || [];
       if (!hostPatterns.some(rx => rx.test(host))) continue;
 
-      const name = (agent.agent_name || '').toLowerCase();
-      if (!name || name.length < 2) continue;
+      const name = (agent.agent_name || '').trim().toLowerCase();
+      if (!name || name.length < AGENT_NAME_MIN_LEN) continue;
 
-      // Exact full name match only — no partial matching.
-      // "gemini agent 1" must NOT match "gemini agent".
-      if (headerText.includes(name)) return agent;
+      // Whole-token match only — see the region above for why a substring test
+      // cannot be used against text scraped from a page of user-authored titles.
+      if (agentNameMatchesText(name, headerText)) return agent;
+
+      // SECOND SIGNAL, OR'd — never a replacement. On M365 the header does not
+      // name the agent open inside the Copilot pane, so the header read alone
+      // cannot enforce a per-agent block there. Same matching rule as above,
+      // applied to text read from inside the resolved panel only. An empty
+      // result is "no evidence" and blocks nothing: this branch can only ever
+      // ADD a match the header already would have been trusted to make.
+      if (panelLabels().some((label) => agentNameMatchesText(name, label))) return agent;
     }
     return null;
   }
@@ -4561,11 +4868,49 @@
   // rather than asserting on source text. Keep the region free of any dependency
   // beyond the five injected there.)
 
+  // ── blocked-agent enforcement scope ───────────────────────────────────────
+  // WHAT GETS BLOCKED, AND NOTHING MORE.
+  //
+  // A blocked AGENT is one bot published into a host app. On a shared host —
+  // teams.microsoft.com, cloud.microsoft, sharepoint.com, outlook.*, office.com —
+  // that app is also where the employee does the rest of their job. This region
+  // used to disable EVERY textarea/contenteditable/[role=textbox] on the page and
+  // arm a document-level Enter trap with no scoping check at all, so blocking a
+  // single Copilot Studio agent took out every Teams DM and channel composer on
+  // the tab. Reported as the browser twin of the "whole app is blocked" class of
+  // bug the desktop enforcer (agent/src/os_monitor/) is built to avoid.
+  //
+  // THE GATE IS THE SAME ONE EVERY OTHER PATH USES: captureAllowed(el), from the
+  // AI-surface scope region above. On a whole_site host (chatgpt.com, claude.ai,
+  // cursor.com — the site IS the AI product) it returns true unconditionally, so
+  // behaviour there is byte-for-byte what it was. On an embedded-AI host it is
+  // true only for elements inside a visible AI panel that has a composer, and
+  // false for all of them when no panel is open — the same fail-closed direction
+  // as showPlatformBanner()'s IS_EMBEDDED_AI bail-out and tryBlock()'s two-sided
+  // captureAllowed() check, which is the working precedent this mirrors.
+  //
+  // Not in scope here: WHICH agent is blocked (isBlockedAgentActive / the name
+  // matching it does). Only WHERE a block may land.
   function enforceBlockedAgent() {
     const blocked = isBlockedAgentActive();
     const inputs = document.querySelectorAll(
       'textarea, [contenteditable="true"], [role="textbox"], [class*="textbox"]'
     );
+
+    // Undo whatever we did to an element. Used by both branches: the block can
+    // stop applying to an element either because no agent is active any more, or
+    // because the panel it lived in closed and it is now ordinary page UI. The
+    // second case used to be unreachable — nothing was ever skipped — and without
+    // it a composer disabled while a panel was open would stay at
+    // pointer-events:none forever once the panel went away.
+    const restore = (el) => {
+      if (!el.dataset.cfaiBlocked) return;
+      el.style.pointerEvents = el.dataset.cfaiOrigPointerEvents || '';
+      el.style.opacity = '';
+      el.removeAttribute('aria-disabled');
+      delete el.dataset.cfaiBlocked;
+      delete el.dataset.cfaiOrigPointerEvents;
+    };
 
     if (blocked) {
       // Disable all input fields
@@ -4577,6 +4922,10 @@
         // into, half a second after offering it. Shadow DOM hides the modal from
         // querySelectorAll; the fallback needs this guard.
         if (el.closest(MODAL_HOST_SELECTOR + ', .cfai-toast')) return;
+        // NEVER THE HOST APP'S OWN COMPOSERS. See the region header: on Teams
+        // this is the difference between "this one agent is blocked" and "you
+        // cannot type in any chat". No-op on a whole_site host.
+        if (!captureAllowed(el)) { restore(el); return; }
         if (!el.dataset.cfaiBlocked) {
           el.dataset.cfaiBlocked = '1';
           el.dataset.cfaiOrigPointerEvents = el.style.pointerEvents || '';
@@ -4600,6 +4949,12 @@
             // Our own modal owns its keystrokes — Enter in the reason box, or on
             // the Submit/Got it buttons, is not a send attempt at this agent.
             if (isCfaiOwnUiEvent(e)) return;
+            // Enter in a Teams DM is not a send at the blocked agent. This
+            // listener is on `document` at capture phase, so without this line
+            // it swallows every Enter in the tab for as long as the agent is
+            // deemed active. e.target is what the user actually pressed the key
+            // in — the same thing tryBlock() insists on.
+            if (!captureAllowed(e.target)) return;
             const activeBlocked = isBlockedAgentActive();
             if (activeBlocked) {
               e.preventDefault();
@@ -4616,6 +4971,11 @@
           // Clicks on our own modal (Request Access, Submit, Cancel, Got it) are
           // not send attempts and must not be cancelled here.
           if (isCfaiOwnUiEvent(e)) return;
+          // Same gate as the Enter hook, and BEFORE the composer-proximity test
+          // below: that test is a fuzzy class-substring match ("composer",
+          // "prompt", …) which the host app's own send buttons match too, so on
+          // Teams it cancelled the Send button of an ordinary chat.
+          if (!captureAllowed(e.target)) return;
           const activeBlocked = isBlockedAgentActive();
           if (!activeBlocked) return;
 
@@ -4641,18 +5001,16 @@
         }, true); // capture phase
       }
     } else {
-      // Restore inputs when not on a blocked agent
-      inputs.forEach(el => {
-        if (el.dataset.cfaiBlocked) {
-          el.style.pointerEvents = el.dataset.cfaiOrigPointerEvents || '';
-          el.style.opacity = '';
-          el.removeAttribute('aria-disabled');
-          delete el.dataset.cfaiBlocked;
-          delete el.dataset.cfaiOrigPointerEvents;
-        }
-      });
+      // Restore inputs when not on a blocked agent. NOT scope-gated, on purpose:
+      // undoing our own mutation must never be conditional on a panel still
+      // being resolvable, or a page left mid-block would stay disabled.
+      inputs.forEach(restore);
     }
   }
+  // ── end blocked-agent enforcement scope ───────────────────────────────────
+  // (A test seam, like the sentinels above it: tests/load-blocked-agent-scope.mjs
+  // slices this exact region out of the shipped file and drives it with stubs.
+  // Keep it free of any dependency beyond the seven injected there.)
 
   // Load blocked list from cache IMMEDIATELY (no postMessage delay)
   try {

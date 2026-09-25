@@ -6,6 +6,15 @@
 // installations (2026-08); the values below are those observed values verbatim,
 // so this file is what pins them against an accidental edit. See
 // ai-processes.js's AI_PANELS comment for the provenance of each one.
+//
+// ONE entry is an exception to "observed verbatim": vscode_chat's signature
+// was INFERRED, not measured, and is flagged where it is tested. It ships
+// enforce:false. office_copilot_pane (the Microsoft 365 Copilot side pane in
+// Word/Excel/PowerPoint/OneNote) WAS a second exception — an outright
+// placeholder — until the 2026-09-18 live probe against Word measured its
+// signature, and a second pass on 2026-09-21 (a real server-side block
+// through a real packaged build) cleared it to enforce; see its own section
+// below for both.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -22,11 +31,15 @@ import {
   identifyAiPanel,
   hostForPanel,
   panelForHost,
+  panelsForHost,
   buildAiPanelConfig,
   buildIdeProcessConfig,
   synthesizePlatformBlocks,
   processForHost,
+  processesForHost,
   filterBlockedAgents,
+  watcherProcessNames,
+  PLATFORM_PROCS,
   PLATFORM_BLOCK_SENTINEL,
 } from '../src/os_monitor/ai-processes.js';
 
@@ -204,6 +217,13 @@ test('Copilot Chat ships enforce:false and the matcher does not treat that as "d
   //                            measured live in 2026-09, and the route's own
   //                            end-to-end pass ran 2026-09-02, so it enforces
   //                            now and has left this list too.
+  // office_copilot_pane passed through this list on the same terms as both
+  // Teams composers and has now left it too: its signature moved from an
+  // outright placeholder to a measured, collision-checked one (2026-09-18),
+  // and its own end-to-end pass (a real server-side block, through a real
+  // packaged build) ran 2026-09-21 — so vscode_chat is once again the ONLY
+  // entry here, and for the original reason: its signature was never even
+  // measured, only inferred.
   assert.deepEqual(AI_PANELS.filter((p) => !p.enforce).map((p) => p.id), ['vscode_chat']);
 });
 
@@ -243,6 +263,235 @@ test('teams_copilot_composer is a SECOND, different Teams composer — verified 
   assert.deepEqual(
     synthesizePlatformBlocks([{ host: 'teams.microsoft.com', product: 'Microsoft Teams', vendor: 'Microsoft', blocked: true }]),
     [],
+  );
+});
+
+// ── The Microsoft 365 Copilot pane inside Word/Excel/PowerPoint/OneNote ──────
+//
+// LIVE-PROBED 2026-09-18 against a real licensed Word desktop install, via
+// read-only UIA (no synthesized input). Only WINWORD was reached by the probe;
+// Excel/PowerPoint/OneNote are covered by `procs` on the strength of this being
+// the SAME Fluent chat editor teams_copilot_composer already measured, not by a
+// separate measurement in each app. The observed ClassName is the identical
+// string teams_copilot_composer pins ("fai-EditorInput__input r18fti29
+// r18aquq2 ___10kbave f1pha7fy f1immsc2 f1mk8lai") — same component, different
+// host app — and the AutomationId ("m365-chat-editor-target-element") is also
+// identical, though nothing here reads it (no AutomationId rule exists in this
+// schema; see that entry's own note).
+//
+// The COLLISION CHECK this section exists to prove: run against the same Word
+// window in the same probing session —
+//   * the document body:   ControlType.Document, ClassName '_WwG';
+//   * Find / "Tell me" (Word unifies both into one "Search document" box):
+//                           ControlType.Edit, Name 'Search document',
+//                           ClassName 'NetUITextbox' — a native Win32 control;
+//   * the New Comment box: ControlType.Edit, Name '@mention or comment',
+//                           ClassName '' (native), AutomationId
+//                           'cardEditor_1_<guid>'.
+// None carries the "fai-EditorInput__input" token, so `classEquals` cannot
+// match any of them. Excel's formula bar / in-cell editor, PowerPoint's
+// slide-notes field and OneNote's page canvas were NOT probed directly — they
+// are native/Win32 surfaces in those hosts, not instances of this Fluent
+// WebView2 component, on the same cross-app-reuse argument as the composer
+// signature itself — and their fixtures below stay plausible stand-ins.
+const OFFICE_PANE_CLASS = 'fai-EditorInput__input r18fti29 r18aquq2 ___10kbave f1pha7fy f1immsc2 f1mk8lai';
+const OFFICE_PANE_PROCS = ['WINWORD', 'EXCEL', 'POWERPNT', 'ONENOTE', 'ONENOTEIM'];
+
+test('the Office Copilot pane matches in every one of its five host processes', () => {
+  const entry = AI_PANELS.find((p) => p.id === 'office_copilot_pane');
+  assert.ok(entry, 'the office_copilot_pane panel is missing');
+  // ONE entry, not four: the pane is one implementation hosted by several
+  // processes, exactly like claude_code across Code/Cursor.
+  assert.deepEqual(entry.procs, OFFICE_PANE_PROCS);
+  assert.equal(entry.classEquals, 'fai-EditorInput__input');
+  for (const process of OFFICE_PANE_PROCS) {
+    const focused = {
+      process,
+      controlType: 'Edit',
+      name: "Describe what you'd like to edit",
+      className: OFFICE_PANE_CLASS,
+    };
+    assert.equal(matchPanelSignature(focused)?.id, 'office_copilot_pane', process);
+    // …and the same tolerance every other entry gets: case and .exe on the
+    // process name, padding on the Name.
+    assert.equal(matchPanelSignature({ ...focused, process: `${process.toLowerCase()}.exe` })?.id, 'office_copilot_pane');
+    assert.equal(matchPanelSignature({ ...focused, name: `  ${focused.name}  ` })?.id, 'office_copilot_pane');
+    // The Name is not consulted at all — the class alone decides, exactly as
+    // teams_copilot_composer's generic "Message Copilot" Name is unused.
+    assert.equal(matchPanelSignature({ ...focused, name: '' })?.id, 'office_copilot_pane');
+  }
+  // The signature is Office-only: the same element shape in an unrelated process
+  // is not it, and no OTHER panel's signature reaches into these processes.
+  assert.equal(matchPanelSignature({ process: 'notepad', controlType: 'Edit', name: '', className: OFFICE_PANE_CLASS }), null);
+  assert.equal(matchPanelSignature({ ...CLAUDE_CODE, process: 'WINWORD' }), null);
+  assert.equal(matchPanelSignature({ ...CURSOR_COMPOSER, process: 'EXCEL' }), null);
+  assert.equal(matchPanelSignature({ ...TEAMS_COMPOSER, process: 'ONENOTE' }), null);
+  // …and the reverse: this signature's class does not leak into ms-teams, where
+  // teams_copilot_composer alone must win.
+  assert.equal(matchPanelSignature({ process: 'ms-teams', controlType: 'Edit', name: '', className: OFFICE_PANE_CLASS })?.id, 'teams_copilot_composer');
+});
+
+test('the Office Copilot pane is LIVE-VERIFIED and ENFORCING after its 2026-09-21 end-to-end pass', () => {
+  const entry = AI_PANELS.find((p) => p.id === 'office_copilot_pane');
+  // The signature was measured and collision-checked on 2026-09-18; the
+  // end-to-end pass every OTHER enforce:true entry in this catalog required —
+  // a real send in this pane, through a real server-side block and a real
+  // packaged build — ran 2026-09-21 and cleared both flags.
+  assert.equal(entry.enforce, true, 'the 2026-09-21 end-to-end pass cleared this to enforce');
+  assert.equal(entry.verified, true);
+  // The placeholder is gone; only the ClassName rule is declared (no Name rule
+  // — the composer's Name was observed but is not a reliable signal on its own,
+  // same reasoning as teams_copilot_composer).
+  assert.equal(entry.nameEquals, undefined);
+  assert.equal(entry.namePrefix, undefined);
+  assert.equal(entry.classEquals, 'fai-EditorInput__input');
+  assert.equal(entry.classPrefix, undefined);
+  assert.equal(matchPanelSignature({
+    process: 'WINWORD', controlType: 'Edit', name: '', className: OFFICE_PANE_CLASS,
+  })?.id, 'office_copilot_pane');
+  // `dlpMatch: 'panel'` — a question about the composer's NATURE (does a match
+  // on this element alone prove the user is talking to an AI?), settled by the
+  // 2026-09-18 signature measurement and its collision check independently of
+  // `enforce` (does this surface get to swallow a keystroke?, settled by the
+  // 2026-09-21 pass). teams_copilot_composer flipped both in one pass; that
+  // was its history, not a coupling between the fields.
+  assert.equal(entry.dlpMatch, 'panel');
+  assert.equal(buildAiPanelConfig().find((e) => e.id === 'office_copilot_pane').dlpMatch, 'panel');
+  assert.equal(buildAiPanelConfig().find((e) => e.id === 'office_copilot_pane').enforce, true);
+});
+
+test('the document/spreadsheet/slide/notebook surface itself never matches the Copilot pane', () => {
+  // THE false positive that matters: matching any of these would swallow Enter
+  // in ordinary editing — a new paragraph in Word, committing a cell in Excel,
+  // a new bullet on a slide, a new line on a OneNote page.
+  //
+  // The three WINWORD fixtures are the MEASURED collision-check values (see the
+  // section note above); Excel/PowerPoint/OneNote stay plausible stand-ins.
+  const NOT_THE_PANE = [
+    // Word: the document body — measured.
+    { process: 'WINWORD',  controlType: 'Document', name: 'Q3 Board Memo.docx', className: '_WwG' },
+    // Word: Find / "Tell me", unified into the "Search document" box — measured.
+    { process: 'WINWORD',  controlType: 'Edit',     name: 'Search document', className: 'NetUITextbox' },
+    // Word: the New Comment box — measured.
+    { process: 'WINWORD',  controlType: 'Edit',     name: '@mention or comment', className: '' },
+    // Excel: the formula bar and the in-cell editor.
+    { process: 'EXCEL',    controlType: 'Edit',     name: 'Formula Bar', className: 'EXCEL7' },
+    { process: 'EXCEL',    controlType: 'Edit',     name: 'B7', className: 'EXCEL6' },
+    { process: 'EXCEL',    controlType: 'Custom',   name: 'Payroll 2026.xlsx', className: 'EXCEL7' },
+    // PowerPoint: the slide canvas and the speaker-notes field.
+    { process: 'POWERPNT', controlType: 'Custom',   name: 'Slide 4', className: 'mdiClass' },
+    { process: 'POWERPNT', controlType: 'Edit',     name: 'Click to add notes', className: '' },
+    // OneNote, both variants: the page canvas and the page title.
+    { process: 'ONENOTE',  controlType: 'Document', name: 'Meeting notes', className: 'OneNote::Canvas' },
+    { process: 'ONENOTE',  controlType: 'Edit',     name: 'Page title', className: '' },
+    { process: 'ONENOTEIM', controlType: 'Document', name: 'Untitled page', className: '' },
+    // An empty / whitespace ClassName can never satisfy the token rule.
+    { process: 'WINWORD',  controlType: 'Edit',     name: '', className: '' },
+    { process: 'EXCEL',    controlType: 'Edit',     name: '', className: '   ' },
+  ];
+  for (const focused of NOT_THE_PANE) {
+    assert.equal(matchPanelSignature(focused), null,
+      `${focused.process}/${focused.controlType}/"${focused.name}" must not match any panel`);
+  }
+  // Token matching, not substring: a class that merely contains the token as
+  // part of a longer, unrelated word is not the composer.
+  assert.equal(matchPanelSignature({
+    process: 'WINWORD', controlType: 'Edit', name: '', className: 'xx-fai-EditorInput__input-wrapper',
+  }), null);
+});
+
+test('office_copilot_pane carries m365.cloud.microsoft — blocking that host reaches the pane too', () => {
+  // A DELIBERATE INVERSION of what this test used to pin (host:null, and
+  // "blocking m365.cloud.microsoft cannot disable Copilot in Word"). The old
+  // argument was that the toggle would be blocking "a completely different app",
+  // the standalone Microsoft 365 Copilot desktop client.
+  //
+  // It is not a different app relative to this pane. m365.cloud.microsoft is
+  // THIS PANE'S OWN PRODUCT'S host — the pane IS Microsoft 365 Copilot, rendered
+  // inside an Office host app — so cascading the block is the intent, not a side
+  // effect. Under the old null an admin who blocked the host got a half-enforced
+  // answer: the standalone client blocked, the identical assistant still one
+  // Ribbon button away inside Word.
+  const entry = AI_PANELS.find((p) => p.id === 'office_copilot_pane');
+  assert.equal(entry.host, 'm365.cloud.microsoft');
+  assert.equal(hostForPanel('office_copilot_pane'), 'm365.cloud.microsoft');
+  assert.equal(panelForHost('m365.cloud.microsoft'), 'office_copilot_pane');
+  // Case and padding are cosmetic here, as everywhere else in this lookup.
+  assert.equal(panelForHost('M365.CLOUD.MICROSOFT'), 'office_copilot_pane');
+  assert.equal(panelForHost('  m365.cloud.microsoft '), 'office_copilot_pane');
+  // No OTHER host reaches the pane — the cascade is from its own product's host
+  // only, not from Microsoft hosts at large. teams.microsoft.com in particular
+  // must not: that is the comms client's host, and Teams' own two composers keep
+  // host:null for that separate, still-valid reason.
+  for (const host of ['copilot.microsoft.com', 'teams.microsoft.com', 'office.com', 'microsoft365.com']) {
+    assert.notEqual(panelForHost(host), 'office_copilot_pane', host);
+  }
+  // Identity resolution still works, which is what an event from the pane needs.
+  assert.deepEqual(identifyAiPanel('office_copilot_pane'), { product: 'Microsoft 365 Copilot', vendor: 'Microsoft' });
+});
+
+test('blocking m365.cloud.microsoft emits a PANEL row for the Office pane — and no Office process row', () => {
+  // THE safety property of the host reversal above, and the reason it is not
+  // "disable all of Word": the synthesised row is PANEL-keyed, scoped to the one
+  // composer element, never process_name-keyed. process_name matching in
+  // enforcer-win.ps1 is process-WIDE — a WINWORD row would swallow Enter in
+  // every paragraph of every document.
+  const rows = synthesizePlatformBlocks([
+    { host: 'm365.cloud.microsoft', product: 'Microsoft Copilot', vendor: 'Microsoft', blocked: true },
+  ]);
+  // The standalone app's process row (unchanged) PLUS one panel row per pane of
+  // this product — the Office pane and (since 2026-09-24) the Outlook pane.
+  assert.deepEqual(rows.map((r) => r.process_name || `panel:${r.panel}`),
+    ['m365copilot', 'panel:office_copilot_pane', 'panel:outlook_copilot_pane']);
+  const panelRow = rows.find((r) => r.panel === 'office_copilot_pane');
+  assert.deepEqual(panelRow, {
+    platform: PLATFORM_BLOCK_SENTINEL,
+    panel: 'office_copilot_pane',
+    agent_name: 'Microsoft Copilot',
+    agent_id: '',
+    host: 'm365.cloud.microsoft',
+    reason: 'Blocked by organization policy',
+  });
+  assert.equal('process_name' in panelRow, false, 'a panel row must never carry process_name');
+  // …and NO row names an Office process, in any shape.
+  const OFFICE = ['winword', 'excel', 'powerpnt', 'onenote', 'onenoteim', 'outlook', 'olk'];
+  for (const row of rows) {
+    const proc = String(row.process_name || '').toLowerCase();
+    assert.equal(OFFICE.includes(proc), false, `a process row for ${proc} would disable the whole Office app`);
+  }
+});
+
+test('processesForHost(m365.cloud.microsoft) stays exactly [m365copilot] — no Office process ever', () => {
+  // The single assertion that keeps the host reversal from becoming a whole-app
+  // Word/Excel/PowerPoint/OneNote block. It holds structurally, not by a special
+  // case: no Office process name is in AI_PROCESSES at all (they live only in
+  // IDE_PROCESSES, deliberately — see that catalog's note), and processesForHost
+  // reads AI_PROCESSES alone.
+  assert.deepEqual(processesForHost('m365.cloud.microsoft'), ['m365copilot']);
+  assert.deepEqual(processesForHost('M365.CLOUD.MICROSOFT'), ['m365copilot']);
+  for (const name of ['WINWORD', 'EXCEL', 'POWERPNT', 'ONENOTE', 'ONENOTEIM']) {
+    assert.equal(processesForHost('m365.cloud.microsoft').some((p) => p.toLowerCase() === name.toLowerCase()),
+      false, `${name} must never be a blockable process for this host`);
+  }
+  // Stated at the single-value helper too, which other call sites use.
+  assert.equal(processForHost('m365.cloud.microsoft'), 'm365copilot');
+});
+
+test('an approved exception for m365.cloud.microsoft lifts the Office pane block as well', () => {
+  // One approval, every surface of the same product — the point of keying access
+  // exceptions on the host. Without this the admin could approve the request and
+  // the pane would stay dead inside Word with nothing left to approve.
+  const list = synthesizePlatformBlocks([
+    { host: 'm365.cloud.microsoft', product: 'Microsoft Copilot', blocked: true },
+    { host: 'claude.ai', product: 'Claude', blocked: true },
+  ]);
+  assert.equal(list.length, 5);  // m365 process + Office & Outlook panels + claude process + claude panel
+  const kept = filterBlockedAgents(list, [{ tool_host: 'M365.CLOUD.MICROSOFT' }]);
+  assert.deepEqual(kept.map((r) => r.process_name || `panel:${r.panel}`), ['claude', 'panel:claude_code']);
+  // …and the reverse: an approval for an unrelated host leaves both m365 rows.
+  assert.deepEqual(
+    filterBlockedAgents(list, [{ tool_host: 'claude.ai' }]).map((r) => r.process_name || `panel:${r.panel}`),
+    ['m365copilot', 'panel:office_copilot_pane', 'panel:outlook_copilot_pane'],
   );
 });
 
@@ -302,9 +551,16 @@ test('identifyAiPanel / hostForPanel / panelForHost round-trip for all three pan
   for (const panel of AI_PANELS) {
     // A host-less panel is deliberately unreachable from a host — see below.
     if (!panel.host) continue;
-    assert.equal(panelForHost(panel.host), panel.id, `${panel.host} → ${panel.id}`);
-    assert.equal(hostForPanel(panelForHost(panel.host)), panel.host);
+    // One host can have SEVERAL panels (m365.cloud.microsoft → the Office and
+    // the Outlook panes): every panel is reachable through panelsForHost, and
+    // panelForHost stays the first of them for its existing callers.
+    assert.ok(panelsForHost(panel.host).includes(panel.id), `${panel.host} → ${panel.id}`);
+    assert.equal(panelForHost(panel.host), panelsForHost(panel.host)[0]);
+    assert.equal(hostForPanel(panel.id), panel.host);
   }
+  assert.deepEqual(panelsForHost('m365.cloud.microsoft'), ['office_copilot_pane', 'outlook_copilot_pane']);
+  assert.deepEqual(panelsForHost('teams.microsoft.com'), []);
+  assert.deepEqual(panelsForHost(''), []);
 });
 
 test('teams_composer carries NO host, so an Inventory toggle can never block all of Teams', () => {
@@ -410,10 +666,38 @@ test('a panelFallback IDE must also be in AI_PROCESSES, or it silently means no 
   // re-enabling a fallback for ANY IDE safe, since the moment someone sets
   // panelFallback:true on an entry with no AI_PROCESSES name to fall back to,
   // this fails instead of silently shipping zero coverage.
+  //
+  // The five Office entries make that invariant load-bearing rather than
+  // theoretical: none of them is in AI_PROCESSES (by design — see the IDE_PROCESSES
+  // comment), so setting panelFallback:true on one would mean "scan the typed
+  // buffer process-wide in Word", i.e. every keystroke of ordinary document
+  // editing. The loop above now fails on that instead of shipping it.
   assert.deepEqual(buildIdeProcessConfig(), [
-    { name: 'code', panelFallback: false },
-    { name: 'cursor', panelFallback: false },
+    { name: 'code', panelFallback: false, panelChildProcess: false },
+    { name: 'cursor', panelFallback: false, panelChildProcess: false },
+    { name: 'winword', panelFallback: false, panelChildProcess: true },
+    { name: 'excel', panelFallback: false, panelChildProcess: true },
+    { name: 'powerpnt', panelFallback: false, panelChildProcess: true },
+    { name: 'onenote', panelFallback: false, panelChildProcess: true },
+    { name: 'onenoteim', panelFallback: false, panelChildProcess: true },
+    // Outlook, for its Copilot pane only (2026-09-24). A mail client: the same
+    // two flags, and no AI_PROCESSES / watcher membership anywhere.
+    { name: 'outlook', panelFallback: false, panelChildProcess: true },
+    { name: 'olk', panelFallback: false, panelChildProcess: true },
   ]);
+  // …and stated per-entry as well, so a future addition to this catalog cannot
+  // pass by being absent from the list above.
+  for (const entry of buildIdeProcessConfig()) {
+    assert.equal(entry.panelFallback, false, `${entry.name} must not carry a whole-app fallback`);
+  }
+  // The Office hosts specifically: an Enter swallowed in a spreadsheet cell or a
+  // Word document is the worst false positive this feature could produce, and
+  // panelFallback:false is the single flag standing between the catalog and it.
+  for (const name of ['winword', 'excel', 'powerpnt', 'onenote', 'onenoteim', 'outlook', 'olk']) {
+    const entry = buildIdeProcessConfig().find((e) => e.name === name);
+    assert.ok(entry, `${name} is missing from the IDE catalog`);
+    assert.equal(entry.panelFallback, false, `${name} MUST be panel-scoped only`);
+  }
 });
 
 test('the enforcer env payload is built from the catalog, not restated', () => {
@@ -425,8 +709,9 @@ test('the enforcer env payload is built from the catalog, not restated', () => {
     assert.equal(entry.enforce, source.enforce, 'the C# side needs the real enforce flag');
     assert.deepEqual(entry.procs, source.procs);
     // Absent match fields travel as '' rather than undefined, so the C# side
-    // never has to distinguish missing from empty.
-    for (const key of ['nameEquals', 'namePrefix', 'classEquals', 'classPrefix']) {
+    // never has to distinguish missing from empty. `soleAgent` follows the same
+    // convention — see its own test below.
+    for (const key of ['nameEquals', 'namePrefix', 'classEquals', 'classPrefix', 'soleAgent']) {
       assert.equal(typeof entry[key], 'string', `${entry.id}.${key} must be a string`);
     }
   }
@@ -437,6 +722,202 @@ test('the enforcer env payload is built from the catalog, not restated', () => {
   for (const entry of config) {
     assert.equal('product' in entry, false);
     assert.equal('host' in entry, false);
+  }
+});
+
+// ── `soleAgent`: the one AI product a composer can ever be talking to ────────
+
+test('soleAgent may only be declared alongside dlpMatch:"panel"', () => {
+  // THE INVARIANT. Both fields make the same underlying claim from two
+  // directions — "this composer has no non-AI use" — so one without the other is
+  // a half-made claim. A soleAgent on a strict-'agent' entry would name the only
+  // possible agent while the catalog simultaneously insisted a named
+  // governed-/blocked-agents row is needed to know which agent is open; a
+  // dlpMatch:'panel' entry with no soleAgent is the lesser (and allowed) case,
+  // since not every no-non-AI-use composer has a single product behind it.
+  for (const panel of AI_PANELS) {
+    if (panel.soleAgent === undefined) continue;
+    assert.equal(typeof panel.soleAgent, 'string', `${panel.id}.soleAgent must be a string`);
+    assert.ok(panel.soleAgent.trim().length > 0, `${panel.id}.soleAgent must not be blank`);
+    assert.equal(panel.dlpMatch, 'panel',
+      `${panel.id} declares soleAgent without dlpMatch:'panel' — that is a half-made claim`);
+  }
+  // Today: the two Microsoft 365 Copilot composers, and only those. Both are the
+  // same product surfaced inside a different host app (Teams' embedded Copilot
+  // tab; the Office side pane).
+  assert.deepEqual(
+    AI_PANELS.filter((p) => p.soleAgent).map((p) => [p.id, p.soleAgent]),
+    [
+      ['teams_copilot_composer', 'Microsoft 365 Copilot'],
+      ['office_copilot_pane', 'Microsoft 365 Copilot'],
+      ['outlook_copilot_pane', 'Microsoft 365 Copilot'],
+    ],
+  );
+});
+
+// ── `fallbackRead`: the Chat-list badge route's config, on the PANEL ────────
+
+test('NO panel declares a fallbackRead any more — the Chat-list badge route is retired', () => {
+  // Retired 2026-09-24. The "AI generated badge paired with a sender name"
+  // fallback on teams_composer shipped false/false and never armed; it was
+  // replaced by the AI-EVIDENCE check (aiEvidence:'teams_chat'), because a live
+  // probe showed a human group chat carrying "badge-<ts>" Images named
+  // "<person> mentioned you" — a "badge" heuristic one release away from
+  // reading a colleague chat. See the teams_composer entry.
+  assert.deepEqual(AI_PANELS.filter((p) => p.fallbackRead).map((p) => p.id), []);
+  for (const entry of buildAiPanelConfig()) {
+    assert.equal('fallbackRead' in entry, false, `${entry.id} must not carry a fallbackRead key`);
+  }
+  const config = buildAiPanelConfig();
+  assert.deepEqual(JSON.parse(JSON.stringify(config)), config);
+});
+
+test('teams_composer carries the AI-EVIDENCE check, and it is the ONLY panel that does', () => {
+  // The composer is shared by every Teams conversation (dlpMatch 'agent'), so a
+  // panel match never governs it by itself; the pane's own evidence can.
+  const teams = AI_PANELS.find((p) => p.id === 'teams_composer');
+  assert.equal(teams.aiEvidence, 'teams_chat');
+  assert.equal(teams.dlpMatch, 'agent', 'the evidence route must not relax the panel-alone rule');
+  assert.deepEqual(AI_PANELS.filter((p) => p.aiEvidence).map((p) => p.id), ['teams_composer']);
+  // It travels, resolved: only the one literal the enforcer implements, '' elsewhere.
+  for (const entry of buildAiPanelConfig()) {
+    assert.equal(entry.aiEvidence, entry.id === 'teams_composer' ? 'teams_chat' : '', entry.id);
+  }
+});
+
+test('the panel fallback route cannot be armed without BOTH of its own flags', () => {
+  // The two-flag discipline, stated as data rather than trusted to a reviewer.
+  // Every panel fallback in the catalog must either be fully inert (both false)
+  // or carry a recorded live pass (both true) — never enforce-without-verified,
+  // which is the shape that ships an unproven route armed.
+  for (const panel of AI_PANELS) {
+    const fb = panel.fallbackRead;
+    if (!fb) continue;
+    assert.equal(typeof fb.enforce, 'boolean', `${panel.id}.fallbackRead.enforce`);
+    assert.equal(typeof fb.verified, 'boolean', `${panel.id}.fallbackRead.verified`);
+    if (fb.enforce) {
+      assert.equal(fb.verified, true,
+        `${panel.id} enforces a fallback route it has not recorded a live pass for`);
+    }
+    // A route with no class filter would be a reader pointed at arbitrary text
+    // nodes — the one thing the 2026-09 measurement pass explicitly rejected.
+    assert.equal(typeof fb.headingClass, 'string', `${panel.id}.fallbackRead.headingClass`);
+    assert.ok(fb.headingClass.trim().length > 0,
+      `${panel.id}.fallbackRead needs a class filter — a bare text node is not a match target`);
+    assert.equal(fb.mode, 'message_heading', `${panel.id}.fallbackRead.mode`);
+  }
+});
+
+test('teams_composer never carries soleAgent — it is the opposite of a sole agent', () => {
+  // ONE element serves every conversation in Teams' Chat-list route: a DM, a
+  // channel post, a group chat and an agent chat all focus the same shape. There
+  // is no single agent behind it, which is also why it keeps dlpMatch:'agent'.
+  // Naming a sole agent here would assert the exact thing that is false about it.
+  const teams = AI_PANELS.find((p) => p.id === 'teams_composer');
+  assert.ok(teams, 'the teams_composer panel is missing');
+  assert.equal(teams.soleAgent, undefined);
+  assert.equal(teams.dlpMatch, 'agent');
+  assert.equal(buildAiPanelConfig().find((e) => e.id === 'teams_composer').soleAgent, '');
+  // The IDE composers are absent for a different reason: they are not host-app
+  // surfaces and have no agent-identity question to answer at all.
+  for (const id of ['claude_code', 'cursor_composer', 'vscode_chat']) {
+    assert.equal(AI_PANELS.find((p) => p.id === id).soleAgent, undefined, id);
+    assert.equal(buildAiPanelConfig().find((e) => e.id === id).soleAgent, '');
+  }
+});
+
+test('soleAgent travels to the C# side VERBATIM, and is consumed only for block attribution', async () => {
+  // The transport is real — that is the point of shipping the field ahead of any
+  // logic. Absent travels as '' (same convention as the match fields), a present
+  // value travels byte-for-byte with no defaulting: this side must not invent a
+  // product name the catalog did not write down.
+  const config = buildAiPanelConfig();
+  for (const entry of config) {
+    const source = AI_PANELS.find((p) => p.id === entry.id);
+    assert.equal(entry.soleAgent, source.soleAgent || '', `${entry.id}.soleAgent`);
+  }
+  assert.equal(config.find((e) => e.id === 'office_copilot_pane').soleAgent, 'Microsoft 365 Copilot');
+  assert.equal(config.find((e) => e.id === 'teams_copilot_composer').soleAgent, 'Microsoft 365 Copilot');
+  // The C# mirror parses it exactly like the other string fields…
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  assert.match(src, /public string SoleAgent;/);
+  assert.match(src, /SoleAgent = JsStr\(d, "soleAgent"\),/);
+  // …and reads it in exactly ONE function: ResolveBlockAgent, which may quote it
+  // as the product a block/redact AUDIT RECORD is about (agent_src "sole"). Four
+  // mentions in the CODE — the declaration, the parse, and that function's two
+  // reads — so no blocking or DLP decision can be consulting it. The logic that
+  // would (identifying a named agent from a panel match alone, for BLOCKING)
+  // changes live enforcement behaviour and is separate, later,
+  // human-supervised work; os-monitor-safety.test.mjs pins the decision sites.
+  //
+  // Comment lines are stripped first: comments in this repo deliberately name
+  // the thing the code must not do, so counting them would trip the very test
+  // they explain.
+  const code = src.split(/\r?\n/).filter((l) => !/^\s*(\/\/|#)/.test(l)).join('\n');
+  assert.equal((code.match(/SoleAgent/g) || []).length, 4,
+    'SoleAgent gained a reader — its only permitted one is ResolveBlockAgent');
+  const resolver = src.slice(src.indexOf('static string ResolveBlockAgent('), src.indexOf('static PanelSig PanelById('));
+  assert.equal((resolver.split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join('\n').match(/SoleAgent/g) || []).length, 2);
+});
+
+// ── D-4: the Office process names stay OUT of every other catalog ────────────
+
+test('Office process names never reach AI_PROCESSES or the watchers, and never a whole-app block', () => {
+  // The privacy/false-positive floor under the whole Office-pane feature, and the
+  // reason the host reversal above is safe.
+  //
+  // THE ABSOLUTE HALF, unchanged: AI_PROCESSES / watcherProcessNames() would turn
+  // on clipboard scanning, attachment-chip diffing and prompt-text reading across
+  // the whole app — every .docx a user opens reported as an AI file upload and
+  // every document keystroke buffered. There is no marking that makes that
+  // acceptable, so these names must never appear there at all.
+  //
+  // THE CONDITIONAL HALF, and it changed deliberately when per-agent blocking was
+  // extended to the pane. PLATFORM_PROCS and AGENT_SURFACES membership used to be
+  // forbidden outright, because each one WAS a route to a whole-app block:
+  //   PLATFORM_PROCS — an agent-scoped row matched the process WIDE, swallowing
+  //     Enter in ordinary editing;
+  //   AGENT_SURFACES — a surface that could not narrow fell back to blocking the
+  //     whole app, for a process whose entire surface minus one pane is the
+  //     user's own document.
+  // Both are now REQUIRED memberships — an agent-scoped row has to be able to
+  // cover the process before it can ever be narrowed to one agent inside the pane
+  // — and the whole-app outcome is barred by a different mechanism instead:
+  // `hostApp: true` on the covering AGENT_SURFACES entry, which CheckFgBlocked
+  // reads off the PROCESS and not off the surface being verified. So the
+  // invariant is restated rather than dropped: every Office name in either
+  // catalog must be covered by a host-app surface. The behavioural proof that
+  // this really produces no block lives in tests/enforcer-panel-block.test.mjs
+  // ('THE INVERSION, in Office').
+  const OFFICE = ['winword', 'excel', 'powerpnt', 'onenote', 'onenoteim'];
+  const literal = (e) => e.match.source.replace(/^\^/, '').replace(/\$$/, '').replace(/[\\/]i?$/, '').toLowerCase();
+
+  const aiNames = AI_PROCESSES.map(literal);
+  const watchers = watcherProcessNames().map((n) => n.toLowerCase());
+  assert.ok(watchers.length > 0, 'expected a non-empty watcher list to check against');
+  const platformProcs = Object.values(PLATFORM_PROCS).flat().map((p) => String(p).toLowerCase());
+
+  for (const name of OFFICE) {
+    assert.equal(aiNames.includes(name), false, `${name} in AI_PROCESSES turns on the passive watchers app-wide`);
+    assert.equal(watchers.includes(name), false, `${name} reached watcherProcessNames()`);
+    // Where the name IS allowed now, the host-app marking has to be there too.
+    const surfaces = AGENT_SURFACES.filter((s) => s.procs.some((p) => String(p).toLowerCase() === name));
+    if (platformProcs.includes(name) || surfaces.length > 0) {
+      assert.equal(surfaces.length > 0, true,
+        `${name} is in PLATFORM_PROCS with no AGENT_SURFACES entry to bar the whole-app arm`);
+      for (const surface of surfaces) {
+        assert.equal(surface.hostApp, true,
+          `${surface.id} covers ${name} without hostApp — an agent row would disable the whole app`);
+        assert.equal(surface.panelHosted, true,
+          `${surface.id} covers ${name} without panelHosted — the pane's own panel block would be switched off`);
+      }
+    }
+  }
+  // …and the IDE catalog is where they still live as panel HOSTS, so this test
+  // cannot pass by the names having been removed from the product altogether.
+  const ideNames = IDE_PROCESSES.map(literal);
+  for (const name of OFFICE) {
+    assert.ok(ideNames.includes(name), `${name} must still be an IDE_PROCESSES panel host`);
   }
 });
 
@@ -532,4 +1013,73 @@ test('panel rows go through the same .ps1-unsafe-character scrubbing', () => {
     assert.equal(/["\\{}\u0000-\u001f\u007f]/.test(value), false, `unsafe char survived in ${value}`);
   }
   assert.equal(JSON.stringify(row).includes('\\'), false);
+});
+
+// ── M365 agent routes (2026-09-24): per-app names, verification record, Outlook ─
+
+test('the Office pane names each host app for the Prompts tab, and falls back to its product', () => {
+  const cases = [
+    ['WINWORD', 'Word Copilot'], ['winword.exe', 'Word Copilot'], ['EXCEL', 'Excel Copilot'],
+    ['POWERPNT', 'PowerPoint Copilot'], ['ONENOTE', 'OneNote Copilot'], ['ONENOTEIM', 'OneNote Copilot'],
+  ];
+  for (const [proc, product] of cases) {
+    assert.deepEqual(identifyAiPanel('office_copilot_pane', proc), { product, vendor: 'Microsoft' }, proc);
+  }
+  // No process, or one the entry does not list → the panel's own product.
+  assert.deepEqual(identifyAiPanel('office_copilot_pane'), { product: 'Microsoft 365 Copilot', vendor: 'Microsoft' });
+  assert.deepEqual(identifyAiPanel('office_copilot_pane', 'notepad'), { product: 'Microsoft 365 Copilot', vendor: 'Microsoft' });
+  // Every host the pane covers has a name.
+  const office = AI_PANELS.find((p) => p.id === 'office_copilot_pane');
+  assert.deepEqual(Object.keys(office.productByProc).sort(), [...office.procs].sort());
+  // The Teams routes and the Outlook pane.
+  assert.equal(identifyAiPanel('teams_composer', 'ms-teams').product, 'Microsoft Teams (agent)');
+  assert.equal(identifyAiPanel('teams_copilot_composer', 'ms-teams').product, 'Microsoft Copilot (Teams)');
+  assert.equal(identifyAiPanel('outlook_copilot_pane', 'OUTLOOK').product, 'Outlook Copilot');
+  assert.equal(identifyAiPanel('outlook_copilot_pane', 'olk').product, 'Outlook Copilot');
+});
+
+test('verification is recorded PER HOST: only Word earned it; Excel / PowerPoint / OneNote enforce unverified', () => {
+  const office = AI_PANELS.find((p) => p.id === 'office_copilot_pane');
+  assert.equal(office.enforce, true);
+  assert.deepEqual(office.verifiedProcs, ['WINWORD']);
+  for (const proc of ['EXCEL', 'POWERPNT', 'ONENOTE']) {
+    assert.ok(office.procs.includes(proc), `${proc} must be covered`);
+    assert.equal(office.verifiedProcs.includes(proc), false, `${proc} has had no live pass`);
+  }
+  for (const proc of office.verifiedProcs) assert.ok(office.procs.includes(proc));
+});
+
+test('the Outlook Copilot pane ships ENFORCING but UNVERIFIED, on the Fluent-AI class token only', () => {
+  const o = AI_PANELS.find((p) => p.id === 'outlook_copilot_pane');
+  assert.ok(o);
+  assert.equal(o.enforce, true);
+  assert.equal(o.verified, false, 'unprobed on a live Outlook — the catalog must say so');
+  assert.deepEqual(o.procs, ['OUTLOOK', 'olk']);
+  assert.equal(o.classEquals, 'fai-EditorInput__input');
+  assert.equal(o.dlpMatch, 'panel');
+  assert.equal(o.newlineKeys, 'shift_enter');
+  assert.equal(o.postSendVerifyMs, 1500);
+  assert.equal(o.host, 'm365.cloud.microsoft', 'the pane\'s own product host — NOT outlook.office.com');
+  assert.equal(o.nameEquals, undefined);
+  assert.equal(o.namePrefix, undefined);
+});
+
+test('collision fixtures: generic Office / Outlook editing classes never match a pane', () => {
+  const NATIVE = [
+    ['EXCEL', 'Edit', 'EXCEL<'], ['EXCEL', 'Edit', 'EXCEL6'], ['EXCEL', 'DataItem', 'EXCEL7'],
+    ['POWERPNT', 'Document', 'mdiClass'], ['POWERPNT', 'Edit', 'NetUITextbox'],
+    ['ONENOTE', 'Document', 'NetUIHWND'], ['ONENOTE', 'Edit', 'NetUITextbox'],
+    ['WINWORD', 'Document', '_WwG'], ['WINWORD', 'Edit', 'NetUITextbox'],
+    ['OUTLOOK', 'Document', '_WwG'], ['OUTLOOK', 'Edit', 'RichEdit20WPT'], ['OUTLOOK', 'Edit', 'NetUITextbox'],
+    ['olk', 'Edit', 'ms-rte-Editor elementToProof'], ['olk', 'Edit', 'fui-Input__input'],
+  ];
+  for (const [proc, controlType, className] of NATIVE) {
+    for (const name of ['', 'Message body', 'Formula Bar', 'Search']) {
+      assert.equal(matchPanelSignature({ process: proc, controlType, name, className }), null, `${proc} ${className} "${name}"`);
+    }
+  }
+  // …while the Fluent-AI composer matches in every host.
+  for (const proc of ['WINWORD', 'EXCEL', 'POWERPNT', 'ONENOTE', 'OUTLOOK', 'olk']) {
+    assert.ok(matchPanelSignature({ process: proc, controlType: 'Edit', name: '', className: 'fai-EditorInput__input r18fti29' }), proc);
+  }
 });

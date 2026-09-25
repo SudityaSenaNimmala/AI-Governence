@@ -117,6 +117,13 @@ export interface SetDlpMonitorInput {
  */
 export async function setDlpMonitor(db: DbLike, input: SetDlpMonitorInput) {
   const { agent_id, dlp_monitor } = input;
+  // Defence in depth behind the route's badBlockField check: agent_id goes
+  // straight into a Mongo filter below, so a non-string (e.g. `{ $ne: null }`)
+  // would be read as a query operator and match an unrelated row. Refuse it here
+  // too, so no caller that skips the route-level check can reach the write.
+  if (typeof agent_id !== "string" || agent_id.trim().length === 0) {
+    throw new TypeError("setDlpMonitor: agent_id must be a non-empty string");
+  }
   const now = new Date();
 
   if (!dlp_monitor) {
@@ -154,6 +161,57 @@ export async function setDlpMonitor(db: DbLike, input: SetDlpMonitorInput) {
 }
 
 /**
+ * One `discovered_agents` lookup, shared by GET /blocked-agents and
+ * listGovernedAgents, since both need exactly the same two facts about the
+ * same rows: is this agent_id still known, and what name(s) does the current
+ * inventory have for it.
+ *
+ * ALIASES, NOT A RENAME. `agent_name` on a `blocked_agents` row is whatever an
+ * admin was shown at block time — a Copilot Studio bot's Dataverse display
+ * name, a Teams app-catalog name, or a Copilot-tab heading can legitimately
+ * differ from each other and from that stored name. The desktop agent can
+ * only read ONE of those strings off the surface it happens to be watching,
+ * so a single stored name gives it exactly one chance to match. `agent_aliases`
+ * is every name this feature currently knows about for that agent, so the
+ * enforcer can match against any of them — never a substitute for `agent_name`,
+ * which stays the admin-facing field of record.
+ *
+ * Server-derived only: built here from `discovered_agents`, never accepted
+ * from a request body, so nothing lets a caller inject a match key.
+ *
+ * `|` is reserved downstream as the field's transport delimiter (see
+ * blocked-agents-sync.js), so it is stripped from each alias here rather than
+ * left for the agent to fail on.
+ */
+export async function lookupAgentIdentity(db: DbLike, agentIds: string[]) {
+  const known = new Set<string>();
+  const namesById = new Map<string, string>();
+  const ids = agentIds.filter(Boolean);
+  if (ids.length > 0) {
+    const rows = await db.collection("discovered_agents")
+      .find({ $or: [{ id: { $in: ids } }, { agent_key: { $in: ids } }] })
+      .project({ _id: 0, id: 1, agent_key: 1, name: 1 })
+      .toArray();
+    for (const r of rows) {
+      if (r.id) known.add(String(r.id));
+      if (r.agent_key) known.add(String(r.agent_key));
+      const name = typeof r.name === "string" ? r.name.trim() : "";
+      if (!name) continue;
+      if (r.id) namesById.set(String(r.id), name);
+      if (r.agent_key) namesById.set(String(r.agent_key), name);
+    }
+  }
+  return { known, namesById };
+}
+
+export function aliasesFor(agentId: unknown, storedName: unknown, namesById: Map<string, string>): string {
+  const values = [storedName, namesById.get(String(agentId))]
+    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    .map((v) => v.trim().replace(/\|/g, ""));
+  return [...new Set(values)].join("|");
+}
+
+/**
  * The agents to DLP-monitor. Shaped like GET /blocked-agents' payload, including
  * its `orphaned` marker: a governed agent whose row no longer appears in any scan
  * is FLAGGED, never dropped, because silently removing it would lift a governance
@@ -165,20 +223,13 @@ export async function listGovernedAgents(db: DbLike) {
     .project(GOVERNED_AGENTS_PROJECTION)
     .toArray();
 
-  const ids = list.map((a: any) => a.agent_id).filter(Boolean);
-  const known = new Set<string>();
-  if (ids.length > 0) {
-    const rows = await db.collection("discovered_agents")
-      .find({ $or: [{ id: { $in: ids } }, { agent_key: { $in: ids } }] })
-      .project({ _id: 0, id: 1, agent_key: 1 })
-      .toArray();
-    for (const r of rows) {
-      if (r.id) known.add(String(r.id));
-      if (r.agent_key) known.add(String(r.agent_key));
-    }
-  }
+  const { known, namesById } = await lookupAgentIdentity(db, list.map((a: any) => a.agent_id));
 
-  return list.map((a: any) => ({ ...a, orphaned: !known.has(String(a.agent_id)) }));
+  return list.map((a: any) => ({
+    ...a,
+    orphaned: !known.has(String(a.agent_id)),
+    agent_aliases: aliasesFor(a.agent_id, a.agent_name, namesById),
+  }));
 }
 
 // Re-exported so a caller validating a dlp-monitor request has one import, and so

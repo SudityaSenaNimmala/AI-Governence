@@ -15,6 +15,12 @@
 # Runs as a separate STA helper alongside win-poller.ps1. Output schema:
 #   {"kind":"ready"}
 #   {"kind":"file_dialog_pick","process":"ChatGPT","pid":1234,"path":"C:\\Users\\foo\\bar.csv"}
+#   {"kind":"egress_file_dialog_pick","surface":"outlook_classic","process":"OUTLOOK","pid":1234,"path":"C:\\...\\payroll.xlsx"}
+#       An EGRESS surface's attach dialog (a mail client). A SEPARATE kind with
+#       its own emit branch, so an egress pick can never be reported as an AI
+#       file upload and never carries host_armed. Only ever produced when
+#       ~/.cloudfuze-aigov/egress-surfaces.json arms the owning process — see
+#       $EgressProcs.
 #   {"kind":"heartbeat","tick":N}
 #   {"kind":"error","message":"..."}
 #
@@ -96,6 +102,97 @@ $ArmedHostProcs = New-Object 'System.Collections.Generic.HashSet[string]' -Argum
 # file" pickers, which is not what the org asked to govern.
 $HostDisarmedAt = @{}
 $HOST_ARM_GRACE_MS = 5000
+
+# ── EGRESS surfaces (Outlook attach) ────────────────────────────────────────
+#
+# A THIRD set, separate from $AiProcesses and $ArmedHostProcs — see the long note
+# on $EgressProcs in attachment-watcher.ps1 for why a mail client cannot be
+# scoped the way Teams is.
+#
+# THIS watcher is the SIMPLE half of the egress attachment story, and the reason
+# it needs almost no new code: an attach dialog is an attach dialog. There is no
+# "is this the compose window or the reading pane" question to answer, because a
+# file picker only ever opens when the user deliberately clicked Attach. The two
+# ownership shapes are already handled by Resolve-GovernedProcess unchanged:
+#   * classic Outlook — the #32770 belongs to OUTLOOK.exe directly, found on the
+#     very first seed with no walk at all;
+#   * new Outlook (olk.exe) — a WebView2 shell, so the picker is shown from
+#     Chromium's browser process and the #32770 belongs to msedgewebview2.exe.
+#     That is EXACTLY the case the existing owner+parent walk was written for
+#     (M365Copilot, Teams), reused with no change to $PROC_WALK_MAX, no new seed
+#     and no new hop.
+#
+# Armed only by policy: the set is empty unless ~/.cloudfuze-aigov/egress-
+# surfaces.json names the process, which happens only when an admin holds a
+# governed ai_platforms row for its host. No policy row means no dialog owned by
+# a mail client is ever tracked, read or reported.
+#
+# No grace window here, unlike $HostDisarmedAt: an egress process is armed by a
+# POLICY FILE, not by a focus-sensitive govstate, so its arm state does not
+# flicker when the picker steals focus and there is nothing to grace over.
+$EgressProcs = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @([System.StringComparer]::OrdinalIgnoreCase)
+$EgressIdByProc = @{}
+
+$EgressPath = if ($env:CFAI_EGRESS_PATH) { $env:CFAI_EGRESS_PATH } else {
+    Join-Path $env:USERPROFILE '.cloudfuze-aigov\egress-surfaces.json'
+}
+# 25 * 400ms is ~10s, matching blocked-agents-sync.js's own cadence.
+$EgressReloadTicks = 25
+
+# FAIL CLOSED on every failure mode (missing file, unreadable JSON, no surfaces
+# key) by leaving both locals EMPTY — nothing armed. Locals are built fresh and
+# assigned only at the end, so a payload that throws part-way through can never
+# leave a process armed under another surface's id.
+function Load-EgressSurfaces {
+    $procs = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @([System.StringComparer]::OrdinalIgnoreCase)
+    $ids = @{}
+    try {
+        if (Test-Path -LiteralPath $script:EgressPath -PathType Leaf) {
+            $raw = Get-Content -LiteralPath $script:EgressPath -Raw -ErrorAction Stop
+            if ($raw) {
+                $cfg = $raw | ConvertFrom-Json
+                foreach ($s in @($cfg.surfaces)) {
+                    if (-not $s -or -not $s.id) { continue }
+                    # THE arming gate. A governed ai_platforms row is policy, not
+                    # a live-probe result — the catalog entry itself must ALSO
+                    # claim to be verified and enforcing, exactly like
+                    # enforcer-win.ps1's LoadEgressSurfaces (JsBool(d,"verified")
+                    # && JsBool(d,"enforce")) and index.js's sync-root gate. Every
+                    # shipped entry carries both false, so nothing here arms
+                    # until a human live-probes it and flips them.
+                    if (($s.verified -isnot [bool]) -or ($s.verified -ne $true) -or ($s.enforce -isnot [bool]) -or ($s.enforce -ne $true)) { continue }
+                    # Only a surface that says it is detected through a FILE
+                    # DIALOG. A future surface detected some other way must not
+                    # silently gain picker coverage it was never probed for.
+                    if (([string]$s.detect) -ne 'file_dialog') { continue }
+                    foreach ($p in @($s.procs)) {
+                        $name = (([string]$p) -replace '\.exe$','').Trim()
+                        if (-not $name) { continue }
+                        $null = $procs.Add($name)
+                        $ids[$name.ToLowerInvariant()] = [string]$s.id
+                    }
+                }
+            }
+        }
+    } catch {
+        $procs = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @([System.StringComparer]::OrdinalIgnoreCase)
+        $ids = @{}
+    }
+    $script:EgressProcs = $procs
+    $script:EgressIdByProc = $ids
+}
+
+# The egress surface id this process belongs to, or '' — the additive third
+# answer Resolve-GovernedProcess can give.
+function Get-EgressSurfaceId([string]$name) {
+    if (-not $name) { return '' }
+    if ($EgressProcs.Count -eq 0) { return '' }
+    $base = $name -replace '\.exe$',''
+    if (-not $EgressProcs.Contains($base)) { return '' }
+    $id = $EgressIdByProc[$base.ToLowerInvariant()]
+    if ($id) { return [string]$id }
+    return ''
+}
 
 # How often the poll loop says it is alive. Tick 1 always, then every Nth.
 # Overridable so a test can prove liveness in seconds instead of the 30s the
@@ -251,6 +348,25 @@ function Resolve-GovernedProcess([int64]$hwnd, [int]$procId) {
             if (-not $name) { break }
             if (Is-AiProcess $name) { return @{ Name = $name; Pid = $cur; Catalog = $true } }
             if (Is-HostArmedForNewDialog $name) { return @{ Name = $name; Pid = $cur; Catalog = $false } }
+            # ── The one ADDITIVE check: an EGRESS surface (Outlook) ──────────
+            #
+            # Checked LAST of the three, so neither existing answer can change:
+            # a process that is an AI app or an armed host app has already
+            # returned above, and an egress process is by construction neither
+            # (EGRESS_SURFACES membership is mutually exclusive with
+            # AI_PROCESSES — asserted in agent/tests/ai-processes.test.mjs).
+            #
+            # `Egress` is a THIRD field rather than a reinterpretation of
+            # `Catalog`: Catalog:$false already means "an armed host app" and is
+            # what the existing emit puts on host_armed. An egress dialog takes
+            # its own emit path entirely (see the closed-dialog loop) and never
+            # touches host_armed.
+            #
+            # No new walk logic for new Outlook's WebView2 picker: it arrives
+            # here as msedgewebview2 on hop 0 and as olk on hop 1, through the
+            # very same parent chain M365Copilot and Teams already use.
+            $egress = Get-EgressSurfaceId $name
+            if ($egress) { return @{ Name = $name; Pid = $cur; Catalog = $false; Egress = $egress } }
             $cur = Get-ParentProcessId $cur
         }
     }
@@ -415,8 +531,12 @@ function Looks-LikePath([string]$s) {
     return ($s -match '^[A-Za-z]:\\' -or $s -match '^\\\\')
 }
 
-# Signal ready
-Emit-Json @{ kind = 'ready'; pid = $PID; ai_processes = $AiProcesses }
+# Load the egress policy before `ready`, so the count on that line is real.
+Load-EgressSurfaces
+
+# egress_count only — never the ids or the process names. See the same choice in
+# attachment-watcher.ps1's ready line.
+Emit-Json @{ kind = 'ready'; pid = $PID; ai_processes = $AiProcesses; egress_count = $EgressProcs.Count }
 
 # Track open dialogs we've already seen so we emit at most once per dialog,
 # at the moment it closes. Key: hwnd (int64). Value: hashtable with last
@@ -450,6 +570,12 @@ while ($true) {
             Emit-Json @{ t = (Get-Date).ToUniversalTime().ToString('o'); kind = 'error'; message = 'bad stdin command' }
         }
     }
+    # Re-read the egress policy on roughly the same 10s cadence the sync writes
+    # it. Outside the main try so a policy read can never be reported as a
+    # dialog-scan error; Load-EgressSurfaces swallows its own failures into
+    # "nothing armed", which is the safe state.
+    if ($tick % $EgressReloadTicks -eq 0) { Load-EgressSurfaces }
+
     try {
         # PID reuse would otherwise let a stale parent edge survive forever. See
         # $ParentPidCache.
@@ -485,6 +611,13 @@ while ($true) {
                         # emit below. False for every ordinary AI app, whose
                         # coverage does not depend on arming at all.
                         hostArmed = (-not $owner.Catalog)
+                        # WHICH egress surface this dialog belongs to, or ''.
+                        # Latched at first sighting for the same reason
+                        # hostArmed is, and read only by the egress emit branch
+                        # below — which short-circuits before the AI/host-app
+                        # emit, so hostArmed is never consulted for an egress
+                        # dialog and the existing line above is unchanged.
+                        egress = if ($owner.ContainsKey('Egress')) { [string]$owner.Egress } else { '' }
                     }
                     $Tracked[$hwnd] = $entry
                 }
@@ -504,6 +637,34 @@ while ($true) {
         $closedHwnds = @($Tracked.Keys | Where-Object { -not $currentHwnds.Contains($_) })
         foreach ($h in $closedHwnds) {
             $entry = $Tracked[$h]
+            # ── EGRESS dialogs take their own emit path and stop here ─────────
+            #
+            # Placed BEFORE the AI/host-app emit rather than folded into it, so
+            # that path stays byte-for-byte what it was: an egress pick can never
+            # be reported as an AI file upload, and it never carries host_armed
+            # (which would be a false claim — no govstate armed it; a policy file
+            # did). The Node side has a separate handler for this kind.
+            if ($entry.egress) {
+                foreach ($n in $entry.names) {
+                    $resolved = Resolve-DialogPath $entry.folder $n
+                    if ($resolved) {
+                        Emit-Json @{
+                            t       = (Get-Date).ToUniversalTime().ToString('o')
+                            kind    = 'egress_file_dialog_pick'
+                            surface = [string]$entry.egress
+                            process = $entry.process
+                            pid     = $entry.pid
+                            # The DIALOG's own window Name ('Attach File'), which
+                            # is chrome. Never a mail window title — a message
+                            # subject line is content and must not travel.
+                            title   = $entry.title
+                            path    = $resolved
+                        }
+                    }
+                }
+                $Tracked.Remove($h)
+                continue
+            }
             foreach ($n in $entry.names) {
                 # The field holds a bare, extension-hidden basename far more often
                 # than a path, so the old `if (Looks-LikePath $n)` gate is now

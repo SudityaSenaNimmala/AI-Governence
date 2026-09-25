@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld('api', {
   tokenizeBlock: (blockId) => ipcRenderer.invoke('tokenize-block', blockId),
   dismissDialog: () => ipcRenderer.send('dismiss-dialog'),
   resizeDialog: (height) => ipcRenderer.send('resize-dialog', height),
+  // "Copy masked text" fallback after a Tokenize & Send that could not finish.
+  // Takes a block_id ONLY — the main process copies its own stored MASKED
+  // preview for that block, so no text (and never the original) crosses here.
+  copyMaskedText: (blockId) => ipcRenderer.invoke('copy-masked-text', blockId),
 
   // Request Access dialog (shown when an AI app is blocked outright).
   // The reason text goes straight into the POST body in the main process — it is

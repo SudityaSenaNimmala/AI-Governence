@@ -124,8 +124,12 @@ export const AI_PROCESSES = [
   // Microsoft Copilot standalone — Store-distributed, pins TLS. Scrub.
   { match: /^copilot$/i,         product: 'Microsoft Copilot', vendor: 'Microsoft',  host: 'copilot.microsoft.com',     useAttachmentWatcher: true,  unhookableSandbox: true  },
 
-  // Microsoft 365 Copilot — M365 app variant, same behavior.
-  { match: /^m365copilot$/i,     product: 'Microsoft Copilot', vendor: 'Microsoft',  host: 'm365.cloud.microsoft',      useAttachmentWatcher: true,  unhookableSandbox: true  },
+  // Microsoft 365 Copilot — M365 app variant, same behavior. Product is
+  // "Microsoft 365 Copilot" (2026-09-24, the Prompts-tab service name the user
+  // asked for) — the SAME product string the Office / Outlook panes'
+  // soleAgent and the office_copilot_pane entry already use, so the one
+  // assistant reads as one service wherever it is reached from.
+  { match: /^m365copilot$/i,     product: 'Microsoft 365 Copilot', vendor: 'Microsoft', host: 'm365.cloud.microsoft',  useAttachmentWatcher: true,  unhookableSandbox: true  },
 
   // Perplexity Comet — browser-style desktop, mostly bridges. Comet doesn't
   // pin our CA in observed traffic. Skip scrub.
@@ -182,9 +186,88 @@ export const AI_PROCESSES = [
 // UpdateForeground's `_ideFallbackProcs.Contains(proc) && _aiProcs.Contains(proc)`
 // branch already exists to support it, and Cursor's continued AI_PROCESSES
 // membership below is what that branch would use.
+//
+// ── The Office apps are in this catalog for ONE reason: they HOST a panel ────
+//
+// Word / Excel / PowerPoint / OneNote are not AI apps and not editors of code,
+// but they host the Microsoft 365 Copilot side pane exactly the way VS Code
+// hosts Claude Code: one composer element inside an application whose entire
+// remaining surface is the user's own document. So they belong HERE and nowhere
+// else — deliberately NOT in AI_PROCESSES (see the note above: that array drives
+// the clipboard poller and the attachment / file-dialog / prompt-text watchers,
+// and an Office name there would report every .docx a user opens as an AI file
+// upload).
+//
+// `panelFallback: false` IS MANDATORY on every one of them, and it is not a
+// stylistic default. In an IDE the flag means "scan the reconstructed typed
+// buffer process-wide when no panel matched"; for Word/Excel/PowerPoint/OneNote
+// that would mean scanning ordinary document, spreadsheet, slide and notebook
+// editing and swallowing Enter in it — the single worst false positive this
+// product could ship. The invariant test in agent/tests/ai-panels.test.mjs
+// pins it, and the fallback branch in enforcer-win.ps1 additionally requires an
+// AI_PROCESSES entry to fall back TO, which none of these has by design.
+//
+// `panelChildProcess: true`, and ONLY on these four/five entries, for a reason
+// that is not optional: the Microsoft 365 Copilot pane these apps host is
+// rendered by a CHILD msedgewebview2.exe process, not by WINWORD.exe/EXCEL.exe
+// itself — confirmed live 2026-09-18 (the pane composer's own UIA ProcessId
+// resolved to a `msedgewebview2` process while GetForegroundWindow's process
+// stayed WINWORD). enforcer-win.ps1's ReadFocusedPanel has an exact-pid rule by
+// default (`allowChildProcess: false`), which is correct for Code/Cursor —
+// Claude Code and Cursor's composer both run IN the IDE's own process — but
+// would make office_copilot_pane's signature UNMATCHABLE forever if left off
+// here: the read would compare the composer element's real (child-process) pid
+// against the Office app's (parent-process) pid, never find a match, and
+// silently fail closed on every tick. This flag is what tells ApplyForegroundTick
+// to widen the pid rule to "this process OR a direct child of it" — the exact
+// mechanism already proven live for new Teams' own child-WebView2 composer (see
+// teams_desktop's hostAppArmed branch) — WITHOUT pulling in any of that branch's
+// agent-blocking machinery, which stays deliberately out of scope for Office
+// (DLP prompt scanning only — see office_copilot_pane's own dlpMatch note).
+// agent/tests/ai-panels.test.mjs and os-monitor-safety.test.mjs both pin this.
 export const IDE_PROCESSES = [
   { match: /^code$/i,   product: 'Visual Studio Code', vendor: 'Microsoft', panelFallback: false },
   { match: /^cursor$/i, product: 'Cursor',             vendor: 'Anysphere', panelFallback: false },
+  // Process names CONFIRMED 2026-09-24 on a real Office16 install: WINWORD was
+  // live-probed (2026-09-18), and EXCEL.EXE, POWERPNT.EXE and ONENOTE.EXE are
+  // present in C:\Program Files\Microsoft Office\root\Office16 (process names
+  // EXCEL, POWERPNT, ONENOTE). The Store OneNote name below is still a guess.
+  { match: /^winword$/i,  product: 'Microsoft Word',       vendor: 'Microsoft', panelFallback: false, panelChildProcess: true },
+  { match: /^excel$/i,    product: 'Microsoft Excel',      vendor: 'Microsoft', panelFallback: false, panelChildProcess: true },
+  { match: /^powerpnt$/i, product: 'Microsoft PowerPoint', vendor: 'Microsoft', panelFallback: false, panelChildProcess: true },
+  // TODO(live-probe): OneNote ships in TWO variants and this catalog cannot tell
+  // from here which one a tenant actually runs — the classic desktop app
+  // (ONENOTE.EXE) or the Store/UWP app (historically ONENOTEIM.EXE, sometimes
+  // reported as ONENOTEM.EXE). BOTH names are listed defensively, exactly as
+  // ChatGPT / "ChatGPT Classic" are two separate AI_PROCESSES entries rather
+  // than one regex alternation: index.js turns each `match` into ONE literal
+  // process name for an exact-match HashSet downstream, so a variant needs its
+  // own entry. ONE of these, NEITHER, or BOTH may turn out to be real; the live
+  // probe decides, and an unused name costs nothing because a process nobody
+  // runs never comes to the foreground.
+  { match: /^onenote$/i,   product: 'Microsoft OneNote', vendor: 'Microsoft', panelFallback: false, panelChildProcess: true },
+  { match: /^onenoteim$/i, product: 'Microsoft OneNote', vendor: 'Microsoft', panelFallback: false, panelChildProcess: true },
+  // ── Microsoft Outlook (classic OUTLOOK and new "olk") — for its Copilot PANE
+  //    ONLY (outlook_copilot_pane below). Added 2026-09-24 at the user's
+  //    explicit request ("the user wants Outlook to work").
+  //
+  // A MAIL CLIENT is the strictest case this catalog has: every window in it is
+  // a human conversation. So the entries carry EXACTLY the two properties that
+  // make an Office app safe here and nothing else:
+  //   panelFallback:false — no panel match means NOTHING is scanned; the
+  //     compose body, the reading pane and every other Outlook element are
+  //     never an AI surface, whatever is typed in them;
+  //   panelChildProcess:true — the Copilot pane is Fluent-AI in a WebView2
+  //     child, like Word's, so the pid rule must allow a direct child.
+  // And by the invariant pinned in agent/tests/ai-processes.test.mjs a mail
+  // client may appear ONLY here and in a dlpMatch:'panel' class-token panel —
+  // never in AI_PROCESSES, PLATFORM_PROCS or any watcher list. It stays an
+  // EGRESS_SURFACES member for its compose / attach paths, which are a separate
+  // mechanism that this entry does not touch.
+  // TODO(live-probe): OUTLOOK / olk are the expected process names (the same
+  // TODO EGRESS_SURFACES carries); confirm with tasklist.
+  { match: /^outlook$/i, product: 'Microsoft Outlook',       vendor: 'Microsoft', panelFallback: false, panelChildProcess: true },
+  { match: /^olk$/i,     product: 'Microsoft Outlook (new)', vendor: 'Microsoft', panelFallback: false, panelChildProcess: true },
 ];
 
 // Signatures for the AI composer inside each IDE, matched against the focused
@@ -209,6 +292,20 @@ export const IDE_PROCESSES = [
 //                      classRuleMatches: a web-hosted element's UIA ClassName is
 //                      the DOM class attribute and can hold several, and this is
 //                      the only entry with no second signal to fall back on.
+//   office_copilot_pane — SIGNATURE measured and collision-checked live
+//                      2026-09-18 against Word only (ClassName token
+//                      "fai-EditorInput__input", the same Fluent chat editor
+//                      teams_copilot_composer already measured), replacing the
+//                      old placeholder Name prefix. LIVE-VERIFIED and
+//                      ENFORCING as of 2026-09-21, after an end-to-end pass
+//                      through a real server-side block and a real packaged
+//                      build (Enter swallowed, the send button swallowed —
+//                      the latter needed its own fix, see UpdateSendRect —
+//                      and Shift+Enter confirmed to insert a newline).
+//                      Excel/PowerPoint/OneNote inherit coverage by process
+//                      name, not by a separate measurement. See the entry
+//                      itself for the collision check against Find, comments
+//                      and the document body.
 //   vscode_chat      — NOT verified live (Copilot Chat was not installed during
 //                      probing); inferred from VS Code's generic Chat UI. Its
 //                      observed ClassName was "native-edit-context", which is a
@@ -240,6 +337,31 @@ export const IDE_PROCESSES = [
 // conversation in it is with an assistant). It NEVER widens BLOCKING — a block
 // still needs a named blocked-agents.json row, and enforcer-win.ps1's
 // CheckFgBlocked excludes a host app from all three coarse arms regardless.
+//
+// ── `soleAgent` — the ONE AI product this composer can ever be talking to ────
+//
+// Optional. When present it names the single agent/product reachable through
+// this composer element, for the surfaces where that question has exactly one
+// answer: the Office Copilot side pane and Teams' embedded Copilot tab are both
+// Microsoft 365 Copilot and nothing else.
+//
+// INVARIANT, enforced by agent/tests/ai-panels.test.mjs: `soleAgent` may only be
+// declared on an entry that ALSO declares `dlpMatch: 'panel'`. The two fields
+// make the same underlying claim from two directions — "this composer has no
+// non-AI use" — so one without the other is a half-made claim: a soleAgent on a
+// strict-'agent' entry would be naming the only possible agent while the catalog
+// simultaneously says a named row is needed to know which agent is open. It is
+// therefore ABSENT on teams_composer (one element serving every DM, channel post
+// and agent chat in Teams — the exact opposite of a sole agent), and on
+// claude_code / cursor_composer / vscode_chat, which are IDE composers, not host
+// apps, and have no agent-identity question to answer at all.
+//
+// CONSUMED FOR ATTRIBUTION ONLY. enforcer-win.ps1's ResolveBlockAgent may quote
+// it as the agent a block / redact / typed-prompt record is about when no policy
+// row names one (agent_src "sole"). It is read by NO decision on either side:
+// treating a panel match as identifying a specific named agent for BLOCKING,
+// without a UIA name read, changes live enforcement behaviour and is separate,
+// later, human-supervised work.
 //
 // ── `newlineKeys` — which key combination inserts a LINE BREAK in this
 //    composer without submitting the message ────────────────────────────────────
@@ -338,14 +460,17 @@ export const AI_PANELS = [
   // group chat, and a channel post all sent normally, and switching away from
   // the blocked agent and back correctly released then re-armed the block.
   {
-    id: 'teams_composer', product: 'Microsoft Teams', vendor: 'Microsoft', host: null,
+    id: 'teams_composer', product: 'Microsoft Teams (agent)', vendor: 'Microsoft', host: null,
     procs: ['ms-teams'], controlType: 'Edit',
     classEquals: 'ck-editor__editable',
     enforce: true, verified: true,
     // The STRICT default, stated explicitly on the one entry where getting it
     // wrong would capture a colleague conversation: this composer is shared by
-    // every Teams conversation, so DLP governance here requires the open
-    // conversation to be NAMED by a governed-agents.json row.
+    // every Teams conversation, so a panel match alone NEVER governs it. Two
+    // things can: the open conversation NAMED by a governed-agents.json row
+    // (the title route), or the pane's own AI EVIDENCE (aiEvidence below — a
+    // 1:1 header plus a Copilot feedback / "AI generated" marker), which needs
+    // no row at all.
     dlpMatch: 'agent',
     // Shift+Enter inserts a newline in the Teams composer; plain Enter sends.
     // Measured behaviour of the shipping client, and the reason Tier B cannot
@@ -358,6 +483,43 @@ export const AI_PANELS = [
     // mask-and-send that genuinely landed in the conversation was reported
     // "not_submitted" and its enforcement_redact audit event was lost.
     postSendVerifyMs: 1500,
+    // ── THE CHAT-LIST AGENT ROUTE: AI EVIDENCE, not a name (2026-09-24) ─────
+    //
+    // RETIRED: the "AI generated badge paired with a sender-name Text" fallback
+    // this entry carried from 2026-09-21 (fallbackRead / message_heading, which
+    // shipped false/false and never armed). Measured live 2026-09-24 (MSTeams
+    // 26225.1806.5074.1452) that a human GROUP chat carries Images with
+    // AutomationId "badge-<ts>", class fui-ChatMessage__decorationIcon, Name
+    // "<person> mentioned you" — so any "badge" heuristic broader than one exact
+    // class token was one Teams release away from reading a colleague chat. It
+    // is gone from the catalog; the C# route it fed is inert without it.
+    //
+    // REPLACED BY `aiEvidence: 'teams_chat'` — enforcer-win.ps1's
+    // TeamsAgentChatEvidence — which needs NO name and NO row. Evidence measured
+    // live 2026-09-24 on this machine, read-only UIA:
+    //   * the composer is IDENTICAL in human and agent chats: Edit, AutomationId
+    //     "new-message-<guid>", class ck-editor__editable. It never proves AI.
+    //   * the conversation header is a Group, AutomationId
+    //     "chat-header-<threadId>". Human group chat: "chat-header-19:<hex>
+    //     @thread.v2". The 1:1 with the IT Help Desk Agent (Copilot Studio):
+    //     "chat-header-19:<guid>_<guid>@unq.gbl.spaces". Rule: "@thread.v2"
+    //     (group / channel / meeting) is NEVER scanned; "@unq.gbl.spaces" is a
+    //     1:1 and is eligible ONLY with the marker below (a human DM is a 1:1 too).
+    //   * the AI MARKER: agent replies (Group class fui-ChatMessage__body, aid
+    //     "message-body-<ts>") are followed by Buttons whose class contains
+    //     fai-FeedbackButtons__positiveFeedbackButton / __negativeFeedbackButton
+    //     (aid "<threadId>-<ts>-positive-feedback") — present on EVERY agent
+    //     reply — and most carry an Image class fai-AiGeneratedDisclaimer
+    //     ("AI generated"). Neither appeared anywhere in the human group chat.
+    //     Only those two class TOKENS count; the Name is never read (localized,
+    //     and on a message element it is the message text).
+    //   * the window title in the agent chat read "Chat | IT Help Desk Agent |
+    //     <tenant> | <user> | Microsoft Teams" — its 2nd segment is still what
+    //     names the agent for per-agent ROW matching (teams_desktop), as a
+    //     UI-read name that is compared and dropped, never emitted.
+    // Fail CLOSED everywhere: no header, "@thread.v2", no marker, a walk that
+    // hit its cap, a throw — not an agent chat, not scanned.
+    aiEvidence: 'teams_chat',
   },
   // Microsoft Teams' OTHER composer: the one inside the embedded "Copilot" tab,
   // which is a DIFFERENT composer implementation from the Chat-list route's
@@ -401,7 +563,7 @@ export const AI_PANELS = [
   // its OWN enforce/verified pair — both pairs were flipped together after
   // this same pass.
   {
-    id: 'teams_copilot_composer', product: 'Microsoft Teams', vendor: 'Microsoft', host: null,
+    id: 'teams_copilot_composer', product: 'Microsoft Copilot (Teams)', vendor: 'Microsoft', host: null,
     procs: ['ms-teams'], controlType: 'Edit',
     classEquals: 'fai-EditorInput__input',
     enforce: true, verified: true,
@@ -417,6 +579,12 @@ export const AI_PANELS = [
     // block still requires a named blocked-agents.json row read through
     // teams_desktop, and CheckFgBlocked bars a host app from every coarse arm.
     dlpMatch: 'panel',
+    // The single AI product reachable through this composer — the embedded
+    // Copilot tab is Microsoft 365 Copilot surfaced inside Teams. Paired with
+    // dlpMatch:'panel' above; see the field's note at the top of AI_PANELS.
+    // Read by the enforcer for block/redact/prompt ATTRIBUTION only (agent_src
+    // "sole") — never by a block or governance decision.
+    soleAgent: 'Microsoft 365 Copilot',
     // Shift+Enter, same as the Chat-list composer (both are Teams message
     // composers where plain Enter sends).
     newlineKeys: 'shift_enter',
@@ -424,6 +592,244 @@ export const AI_PANELS = [
     // entry independently rather than inherited: this is a DIFFERENT editor
     // (Fluent's fai-EditorInput__input, not CKEditor), but it is rendered in the
     // same WebView2 child process, so it is behind the same accessibility hop.
+    postSendVerifyMs: 1500,
+  },
+  // The Microsoft 365 Copilot SIDE PANE inside the Office desktop apps — Word,
+  // Excel, PowerPoint and OneNote. ONE entry, not four, because it is one pane
+  // implementation hosted by several processes: the same reason claude_code
+  // carries procs:['Code','Cursor'] rather than two near-identical entries.
+  //
+  // LIVE-PROBED 2026-09-18 against a real licensed Word desktop install
+  // (WINWORD), read-only UIA, no synthesized input. Only Word was reached by
+  // the probe; Excel/PowerPoint/OneNote are covered by `procs` on the strength
+  // of this being the SAME Fluent pane implementation Microsoft ships across
+  // the Office family (the identical reasoning teams_copilot_composer already
+  // relies on for its own cross-surface claim), not by a separate measurement
+  // in each app.
+  //
+  //   ClassName    — starts with "fai-EditorInput__input", same semantic token
+  //                  as teams_copilot_composer above. Same Fluent chat editor
+  //                  component, different host app.
+  //   AutomationId — "m365-chat-editor-target-element", the identical stable id
+  //                  teams_copilot_composer measured. No AutomationId rule
+  //                  exists in this schema (see that entry's note); recorded
+  //                  here for the next person who goes looking, not consulted.
+  //   ControlType  — Edit, confirmed live (the WebView2 assumption held).
+  //
+  // COLLISION CHECK — the actual gate this entry could not pass before, run
+  // against the same Word window in the same session:
+  //   * Document body:            ControlType.Document, ClassName '_WwG'.
+  //   * Find / "Tell me" (unified into Word's "Search document" box):
+  //                                ControlType.Edit, Name 'Search document',
+  //                                ClassName 'NetUITextbox' — a native Win32
+  //                                control, no Fluent class token at all.
+  //   * New Comment box:           ControlType.Edit, Name '@mention or comment',
+  //                                ClassName '' (native), AutomationId
+  //                                'cardEditor_1_<guid>', living under a
+  //                                'Comments'/MsoWorkPane ancestor chain.
+  // None of these carry the "fai-EditorInput__input" token anywhere in their
+  // ClassName, so `classEquals` below cannot match any of them — the exact
+  // failure mode this comment block used to warn about is ruled out by
+  // measurement, not by assumption. The formula bar and in-cell editor
+  // (Excel), the slide-notes field (PowerPoint) and the notebook page canvas
+  // (OneNote) were NOT probed directly, on the strength of the same
+  // cross-app-reuse argument above: they are native/Win32 editing surfaces in
+  // those hosts, not instances of this Fluent WebView2 component.
+  //
+  // `host: 'm365.cloud.microsoft'` — a DELIBERATE REVERSAL of what this comment
+  // block used to say, recorded here rather than quietly deleted.
+  //
+  // THE OLD ARGUMENT was that host had to be null, for the same reason
+  // teams_composer and teams_copilot_composer carry null: with a host set, an
+  // admin toggling it in the Inventory UI makes synthesizePlatformBlocks() emit a
+  // panel-keyed row against THIS entry via panelForHost(), and that row disables
+  // the Copilot pane inside Word/Excel/PowerPoint/OneNote. The old block called
+  // that "a side effect of blocking a COMPLETELY DIFFERENT app" — the standalone
+  // Microsoft 365 Copilot desktop app, which AI_PROCESSES maps to that same host.
+  //
+  // THE FACT THAT CHANGES IT: m365.cloud.microsoft is not "a different app"
+  // relative to this pane. It is THIS PANE'S OWN PRODUCT'S host — the pane IS
+  // Microsoft 365 Copilot, rendered inside an Office host app, reached through the
+  // same tenant service under the same admin toggle. So an admin who blocks
+  // m365.cloud.microsoft has said "Microsoft 365 Copilot is not allowed here",
+  // and cascading that to this pane is the WHOLE POINT of this change, not an
+  // accident. Under the old null the same admin got a half-enforced answer: the
+  // standalone app blocked, the identical assistant still reachable one Ribbon
+  // button away inside Word.
+  //
+  // WHAT THE CASCADE DOES AND DOES NOT TOUCH. The synthesised row is PANEL-keyed
+  // (`panel: 'office_copilot_pane'`), which is scoped to this one composer
+  // ELEMENT. It is NOT a process_name row: processesForHost('m365.cloud.microsoft')
+  // still returns only ['m365copilot'], because no Office process name is in
+  // AI_PROCESSES at all (by design — see IDE_PROCESSES' note). That asymmetry is
+  // the safety property, and agent/tests/ai-panels.test.mjs pins it: blocking
+  // this host must never become "disable all of Word". An approved access
+  // exception for m365.cloud.microsoft lifts this panel row the same way it lifts
+  // the standalone app's row — one approval, both surfaces.
+  //
+  // TEAMS IS NOT ANALOGOUS AND MUST NOT BE "FIXED" TO MATCH. teams_composer and
+  // teams_copilot_composer keep `host: null` for a reason that is still valid and
+  // is NOT the reason above: teams.microsoft.com is the host of MICROSOFT TEAMS,
+  // a general-purpose comms client, and a panel row against either Teams composer
+  // would disable messaging in DMs, channels and meeting chat. There the host and
+  // the composer really do belong to different products. Here they do not.
+  //
+  // `enforce: true, verified: true` — LIVE-VERIFIED 2026-09-21 against a real
+  // licensed Word install, driven end-to-end through a REAL blocked-agents.json
+  // row synced from a REAL server-side block (PUT /api/v1/registry/office.com/
+  // status with product_name:'Microsoft 365 Copilot', exercising the BX-A
+  // curated-host fan-out for real, not a hand-written test fixture), running
+  // the actual packaged desktop app (not a scoped harness). Confirmed:
+  //   * Shift+Enter inserts a newline in the pane (direct observation).
+  //   * Plain Enter is swallowed while the pane is blocked, with the pane's
+  //     text preserved and a `block`/`request_access_offer` pair emitted.
+  //   * A mouse click on the pane's own send button is ALSO swallowed — this
+  //     was NOT true on the first pass (see UpdateSendRect's own note: IDE/
+  //     host-app processes skipped send-button tracking outright) and sending
+  //     via the send button went through unblocked; fixed by a bounded,
+  //     panel-scoped ancestor search added the same day, then reconfirmed live.
+  //   * The document body, "Search document" and a comment box all kept
+  //     sending normally while the pane's block was armed — checked against
+  //     the base Enter-swallow mechanism, BEFORE the send-button fix above.
+  //     That fix only ever runs its new search when the FOCUSED element is
+  //     this panel itself (`_fgIsPanel` gates it), so it has no code path
+  //     that touches these other elements — but the three of them have not
+  //     been independently re-clicked since that fix landed.
+  // NOT separately exercised in this pass: a high-severity DLP pattern match
+  // flagging the pane's typed text with NO platform block present (Tier A
+  // content detection on its own). The read path it depends on (UpdateUia's
+  // ValuePattern poll + the shared classifier) is the same generic mechanism
+  // already proven live on claude_code and both Teams composers, not new code
+  // introduced by this entry, which is why this pass — like every other entry
+  // in this catalog — treats the blocked-agent flow as the qualifying test
+  // rather than requiring a separate content-only pass.
+  //
+  // `dlpMatch: 'panel'` DID move ahead of that pass, deliberately, and the two
+  // are independent gates rather than one: dlpMatch answers "does a match on
+  // this element alone prove the user is talking to an AI" — a question about
+  // the composer's NATURE, already settled by the signature measurement — while
+  // enforce answers "may this surface swallow a keystroke", which needs a real
+  // send. teams_copilot_composer happened to flip both in one pass; that was its
+  // history, not a coupling. See the field's own note below.
+  //
+  // NOT IN SCOPE, stated so it is not mistaken for an oversight: attachment
+  // scanning for these four apps. This change covers the PANEL prompt path only
+  // — no clipboard, no file-dialog and no attachment-chip coverage is added, and
+  // none of these process names goes anywhere near AI_PROCESSES or
+  // watcherProcessNames(). Attachment coverage is separate, later work.
+  {
+    id: 'office_copilot_pane', product: 'Microsoft 365 Copilot', vendor: 'Microsoft',
+    // See the `host` block above: this is the pane's OWN product's host, not a
+    // different app's, so an Inventory block on it is meant to reach this pane.
+    host: 'm365.cloud.microsoft',
+    procs: ['WINWORD', 'EXCEL', 'POWERPNT', 'ONENOTE', 'ONENOTEIM'], controlType: 'Edit',
+    classEquals: 'fai-EditorInput__input',
+    enforce: true, verified: true,
+    // WHICH HOSTS the `verified: true` above was actually earned on. The flag is
+    // per ENTRY, and this entry spans five processes: only WINWORD had a live
+    // pass (probe 2026-09-18, end-to-end block 2026-09-21). EXCEL, POWERPNT and
+    // ONENOTE (process names confirmed on disk 2026-09-24) ENFORCE on the same
+    // signature but are recorded here as UNVERIFIED — the "enforcing but
+    // verified:false" treatment, stated per process because splitting the entry
+    // would break the one-panel-one-row host cascade. Why enforcing them is
+    // acceptable before a live pass: the class token is the Fluent-AI Copilot
+    // editor's own, the native editing surfaces in those apps (formula bar /
+    // cell editor EXCEL6, EXCEL<; slide notes and OneNote canvas; NetUITextbox
+    // search boxes; the _WwG-style document classes) carry no fai- token, and a
+    // miss is FAIL-OPEN (no scan), never a false block. The collision fixtures
+    // in agent/tests pin that those classes never match. Documentation / test
+    // data only — the enforcer does not read it.
+    verifiedProcs: ['WINWORD'],
+    // The Prompts-tab / audit service name, per HOST app: one pane, one
+    // product, but "Word Copilot" and "Excel Copilot" are what the user asked
+    // to see (2026-09-24). identifyAiPanel(panelId, process) reads it; an
+    // unlisted process falls back to `product`.
+    productByProc: {
+      WINWORD: 'Word Copilot', EXCEL: 'Excel Copilot', POWERPNT: 'PowerPoint Copilot',
+      ONENOTE: 'OneNote Copilot', ONENOTEIM: 'OneNote Copilot',
+    },
+    // DLP governance by PANEL MATCH ALONE, mirroring teams_copilot_composer's own
+    // `dlpMatch: 'panel'` and for the same reason, restated for this surface: the
+    // Copilot side pane has NO non-AI use. The measured signature matches exactly
+    // one element — the Fluent chat composer in the pane — and every focus event
+    // in it is necessarily a conversation with the assistant. There is no
+    // document body, no Find box, no comment card and no formula bar behind it
+    // (all four were collision-checked above and carry none of this token), so
+    // "the caret is in this element" already means "the user is typing at an AI".
+    // That makes a panel match sufficient evidence for DLP governance here in the
+    // same way it is for Teams' Copilot tab — unlike teams_composer, which is one
+    // element shared by every DM and channel post and therefore keeps the strict
+    // 'agent' rule.
+    //
+    // Scope of what this widens, exactly, same as on the Teams entry: prompt
+    // scanning and Tokenize-&-Send eligibility for this composer. It adds NO
+    // block BY ITSELF — a block still independently needs its own row (a
+    // blocked m365.cloud.microsoft host, via the panel-keyed row the cascade
+    // above synthesizes, or a future soleAgent-consuming rule); this field
+    // only says a panel match here is enough evidence to scan and offer
+    // Tokenize & Send.
+    dlpMatch: 'panel',
+    // The single AI product reachable through this composer. Paired with
+    // dlpMatch:'panel' above — see the field's note at the top of AI_PANELS; the
+    // two together assert "this composer has no non-AI use", and the invariant
+    // test in agent/tests/ai-panels.test.mjs rejects one without the other.
+    // Read by the enforcer for ATTRIBUTION only (ResolveBlockAgent, agent_src
+    // "sole") — never by a block or governance decision.
+    soleAgent: 'Microsoft 365 Copilot',
+    // Shift+Enter — CONFIRMED live 2026-09-21 by direct observation in the
+    // pane (it inserts a newline, does not send), matching what was inherited
+    // from teams_copilot_composer's identical Fluent composer.
+    newlineKeys: 'shift_enter',
+    // The longer post-send confirmation window, for the reason Teams needs it:
+    // this pane is rendered in a WebView2 child process, so "the composer is
+    // empty now" has to cross a Chromium accessibility serialization before UIA
+    // can report it, and a single 200ms read reported a landed send as
+    // "not_submitted" (losing its audit event) on exactly that shape of surface.
+    // NOT independently exercised by the 2026-09-21 pass — that pass's block
+    // was a platform block, which never reaches RunRewrite; still inherited
+    // from Teams on the strength of being the identical WebView2-hop reason.
+    postSendVerifyMs: 1500,
+  },
+  // The Microsoft 365 Copilot pane inside OUTLOOK (classic OUTLOOK and new
+  // olk). Added 2026-09-24 because the user explicitly wants Outlook covered:
+  // the same scan + block + Tokenize & Send the other Copilot panes get.
+  //
+  // ENFORCING BUT UNPROBED (enforce:true, verified:false), and why that is
+  // acceptable here specifically:
+  //   * nobody has run a live UIA probe of a real Outlook's Copilot pane yet.
+  //     The signature is the Fluent-AI chat editor's own class token,
+  //     fai-EditorInput__input — measured in Teams' Copilot tab, M365Copilot
+  //     and Word's Copilot pane — which is Copilot-only: no mail compose body,
+  //     reading pane, subject line or search box is built from it.
+  //   * the failure mode is FAIL-OPEN. If Outlook's pane turns out to use a
+  //     different class, nothing matches and nothing is scanned — Outlook
+  //     behaves exactly as before. It can never produce a false block in the
+  //     compose body, because nothing there carries the token, and
+  //     panelFallback:false means an unmatched Outlook element is never an AI
+  //     surface at all.
+  //   * the invariant test in agent/tests/ai-processes.test.mjs pins that this
+  //     signature cannot match any egress compose-body signature, and the
+  //     harness pins that a compose-body Enter is never swallowed.
+  //
+  // host: 'm365.cloud.microsoft' — the pane's OWN product's host, for the same
+  // reason office_copilot_pane carries it (see there): an Inventory block on
+  // Microsoft 365 Copilot is meant to reach every surface of it. It shares
+  // that host with office_copilot_pane, so synthesizePlatformBlocks emits a
+  // panel row for EACH (panelsForHost), and one access exception lifts both.
+  // NOT outlook.office.com: that is the mail client's host (EGRESS_SURFACES),
+  // and a panel row against it would read as "block Outlook".
+  {
+    id: 'outlook_copilot_pane', product: 'Outlook Copilot', vendor: 'Microsoft',
+    host: 'm365.cloud.microsoft',
+    procs: ['OUTLOOK', 'olk'], controlType: 'Edit',
+    classEquals: 'fai-EditorInput__input',
+    enforce: true, verified: false,
+    // No non-AI use: the pane is a conversation with the assistant and nothing
+    // else. Required (with soleAgent) by the mail-client invariant.
+    dlpMatch: 'panel',
+    soleAgent: 'Microsoft 365 Copilot',
+    newlineKeys: 'shift_enter',
+    // WebView2 child process, same accessibility hop as the other panes.
     postSendVerifyMs: 1500,
   },
 ];
@@ -530,6 +936,17 @@ export const AGENT_SURFACES = [
     genericNames: ['Copilot'],
     enforce: true,
     verified: true,
+    // LIVE-CONFIRMED BUG, found 2026-09-21: a real Tokenize & Send in this app
+    // (M365Copilot.exe, "Microsoft 365 Copilot") masked and genuinely delivered
+    // the message — visible in the transcript — but the block dialog reported
+    // "Could not confirm the prompt was masked (not_submitted)" anyway, because
+    // this entry had no postSendVerifyMs and fell back to the base 200ms read.
+    // Same WebView2-hosted-composer reason every other Microsoft app here
+    // already carries this for (teams_composer, teams_copilot_composer,
+    // office_copilot_pane): the composer clearing has to cross a Chromium
+    // accessibility-tree serialization before UIA can see it, and a single
+    // 200ms read is faster than that hop completes.
+    postSendVerifyMs: 1500,
   },
   // Microsoft Teams (new Teams, MSIX). A HOST APP surface — see AI_PROCESSES'
   // `hostApp` note — and the first entry here that reads the WINDOW TITLE.
@@ -656,6 +1073,16 @@ export const AGENT_SURFACES = [
     titleSeparator: ' | ',
     titleSuffix: 'Microsoft Teams',
     titleKinds: ['Chat'],
+    // FULL-FORM kinds: segment 1 names the conversation ONLY when the title has
+    // all five segments. Measured live 2026-09-24 (read-only, shape only): the
+    // IT Help Desk Agent 1:1 -- Chat-list CKEditor composer, "@unq.gbl.spaces"
+    // header -- titled itself "Copilot | <agent> | <tenant> | <account> |
+    // Microsoft Teams" when reached from the Copilot rail, so with 'Chat' alone
+    // the agent was never Named and its block never armed. The generic Copilot
+    // home stays "Copilot | <tenant> | <account> | Microsoft Teams" (four
+    // segments, tenant in segment 1), which is why 'Copilot' is NOT in
+    // titleKinds and why a four-segment Copilot title is still no evidence.
+    titleFullKinds: ['Copilot'],
     genericNames: ['Copilot', 'Chat', 'Microsoft Teams', 'Meeting chat'],
     hostApp: true,
     enforce: true, verified: true,
@@ -671,6 +1098,154 @@ export const AGENT_SURFACES = [
       // re-confirmed in the same pass that the Chat-list route, M365Copilot,
       // a DM, and a different/generic agent all still behaved correctly.
       enforce: true, verified: true,
+    },
+  },
+  // The Microsoft 365 Copilot SIDE PANE inside desktop Office (Word, Excel,
+  // PowerPoint, OneNote). The SECOND host-app surface, and the first one whose
+  // AI surface is an AI_PANELS PANEL rather than a whole window.
+  //
+  // WHAT IT ADDS. `office_copilot_pane` (AI_PANELS, above) already detects that
+  // the pane's composer has focus — measured live 2026-09-18, live-verified and
+  // enforcing 2026-09-21 — but it answers "is the user typing at Copilot", not
+  // "WHICH named agent is open in it". This entry answers the second question,
+  // off the same UIA anchor (ControlType Edit, the Fluent chat editor), so a
+  // `blocked_agents` row naming one agent can eventually be confined to that
+  // agent instead of disabling Copilot in Word for everybody.
+  //
+  // `read: 'composer_name'` — the M365Copilot mechanism, not the Teams one. The
+  // pane is the same Fluent composer the standalone Microsoft 365 Copilot app
+  // uses, whose UIA Name is "Message <agent>" / "Message Copilot"; the Office
+  // WINDOW TITLE is the document name ("Report.docx - Word") and says nothing
+  // about Copilot at all, so the title route is not merely unused here, it is
+  // unusable. Stated explicitly rather than left absent (which would mean the
+  // same thing) because this catalog now has two read modes and a silent
+  // default is the wrong shape for a third.
+  //
+  // NOT LIVE-PROBED. Unlike every other read signal in this file, the "Message
+  // <agent>" shape here is INFERRED from the standalone app's measured
+  // behaviour plus the shared composer implementation — nobody has yet opened a
+  // named agent in Word's pane and read the composer's Name. That is precisely
+  // what `enforce: false, verified: false` is for, and it is why this entry can
+  // be shipped at all: it is matched, unit-tested and completely inert.
+  //
+  // `hostApp: true` IS THE MOST IMPORTANT LINE IN THIS ENTRY, for the reason
+  // spelled out on teams_desktop: Word/Excel/PowerPoint/OneNote are the
+  // company's DOCUMENT EDITORS. "We cannot tell which agent is open" must never
+  // degrade into "block the whole app" here — that would be "blocking one
+  // Copilot agent stops everyone in the org using Word". The fail direction is
+  // OPEN: no block at all. enforcer-win.ps1's CheckFgBlocked is where that is
+  // enforced, and it is keyed on the PROCESS, not on this entry being verified,
+  // so it holds while both flags below are false as well.
+  //
+  // `panelHosted: true` — the SECOND half of the host-app marking, and the part
+  // teams_desktop does not need. A host app is normally a general-purpose app
+  // this catalog knows only through its agent surface, so enforcer-win.ps1
+  // treats every process in _hostAppProcs as "AI-relevant only inside one
+  // governed conversation" and switches off five element-scoped mechanisms for
+  // it (PanelEnforceOk, PanelUiaOk, UpdateSendRect, UpdateModelRouting,
+  // UpdatePendingRewrite). Office is NOT in that position: it is already
+  // modelled as an IDE_PROCESSES host with a live-verified, enforcing PANEL, and
+  // switching those mechanisms off would silently retire behaviour that passed a
+  // live pass on 2026-09-21 — the panel-keyed block synthesized from an
+  // m365.cloud.microsoft Inventory toggle, and Tokenize & Send inside the pane.
+  // So this flag says: bar this process from the WHOLE-APP block arms (the
+  // fail-open property above) and leave everything element-scoped exactly as it
+  // is. It maps to _panelHostAppProcs in the .ps1; _hostAppProcs keeps its
+  // existing membership and meaning.
+  //
+  // `fallbackRead` MIRRORS teams_desktop's Copilot-tab route — the heading
+  // "<Agent> said:" on the class `fai-CopilotMessage__accessibleHeading`, which
+  // is the same Fluent chat surface this pane renders. It ships INERT twice
+  // over: its own enforce/verified pair is false/false, AND enforcer-win.ps1's
+  // LoadAgentSurfaces currently DROPS a fallback block that carries no
+  // `paneKinds` and no `landingInfix` (both are Teams' title-derived gates and
+  // neither has a meaning on a composer-name surface). So flipping these two
+  // flags alone will NOT arm this route: the gate that decides "is the heading
+  // walk worth attempting at all" has to be designed for a panel-hosted surface
+  // first. Recorded here rather than left as a surprise for whoever runs the
+  // live pass.
+  //
+  // ALSO NOT WIRED YET, and for the same reason it is safe: no agent-name read
+  // happens for these processes at all today. UpdateForeground's agent read is
+  // gated on `!isIde` (chat apps) or `hostAppArmed` (which is also `!isIde`),
+  // and Office is `isIde`. So this entry is inert even against a hand-armed
+  // catalog, and the live pass that flips the flags needs that read path built
+  // first. See the report/design notes accompanying this change.
+  {
+    id: 'office_copilot_pane_agent',
+    procs: ['WINWORD', 'EXCEL', 'POWERPNT', 'ONENOTE', 'ONENOTEIM'],
+    controlType: 'Edit',
+    read: 'composer_name',
+    composerNamePrefixes: ['Message '],
+    // The names that mean NO SPECIFIC AGENT IS OPEN. 'Copilot' is what the
+    // standalone app was measured saying; 'Microsoft 365 Copilot' is the pane's
+    // own product name and the most likely second spelling in an Office host.
+    // Teams' other generics ('Chat', 'Microsoft Teams', 'Meeting chat') are
+    // deliberately NOT copied: they name Teams VIEWS, none of which exists in a
+    // Word side pane, and a generic list is not a place to keep strings that
+    // cannot occur. Erring toward MORE generics is the safe direction anyway —
+    // a generic read blocks nothing.
+    genericNames: ['Copilot', 'Microsoft 365 Copilot'],
+    hostApp: true,
+    panelHosted: true,
+    // STILL INERT — and the ONE thing needed to arm it is a 10-second live read.
+    //
+    // Probed read-only 2026-09-23 (Word pid 61812 / PowerPoint pid 58328) with
+    // the Copilot pane CLOSED. Useful negative result: the only Edit controls in
+    // a Word window are the search box, Font/Font Size, and the document body
+    // (Name "Page N content", AutomationId "Body"). None carries the "Message "
+    // prefix, so the document can never be mistaken for the pane's composer —
+    // the misfire that would matter most. What is still UNMEASURED is the pane's
+    // own composer Name, because the pane was not open.
+    //
+    // `verified` is a statement of FACT — "a human watched this read work on a
+    // real install" — not a policy switch. It must not be set from an inference,
+    // however well reasoned, or the flag stops meaning anything to the next
+    // person. Open the Copilot pane in Word and re-run the probe; if the composer
+    // reads "Message <Agent>", both flags can be set honestly in one edit.
+    enforce: false, verified: false,
+    fallbackRead: {
+      mode: 'message_heading',
+      headingClass: 'fai-CopilotMessage__accessibleHeading',
+      headingSuffix: ' said:',             // "<Agent> said:" -> everything before this suffix
+      genericNames: ['Copilot', 'Microsoft 365 Copilot', 'You'],
+      // Its own pair, false/false, for the same reason teams_desktop's route
+      // shipped that way: a route nobody has verified end-to-end must not
+      // inherit an armed flag from the entry it hangs off.
+      enforce: false, verified: false,
+    },
+    // ── THE PANE-HEADING READ — which agent is selected in the Copilot pane ──
+    //
+    // MEASURED LIVE 2026-09-24 ~16:40, read-only UIA, Word, inside the pane's
+    // WebView2 (Chrome_WidgetWin_1 owned by a msedgewebview2 child of WINWORD),
+    // with the blocked Copilot Studio agent "IT Help Desk Agent" selected:
+    //   * the composer (Edit, class fai-EditorInput__input, AutomationId
+    //     m365-chat-editor-target-element) is ALWAYS Named "Message Copilot" --
+    //     its placeholder -- so the composer_name read above can never name an
+    //     agent here. That is why the entry's own pair stays false/false.
+    //   * its parent is a Group with AutomationId "mainChat", whose children
+    //     include the New chat button, the Send button (class token
+    //     fai-SendButton, Name "Send") and the transcript, a Group with class
+    //     token fai-CopilotChat.
+    //   * every agent reply carries a Text with class token
+    //     fai-CopilotMessage__accessibleHeading whose Name is
+    //     "IT Help Desk Agent said:" -- the agent's name plus " said:".
+    // The LAST such heading in that transcript names the selected agent;
+    // "Copilot"/"Microsoft 365 Copilot" (or no heading at all -- a new chat)
+    // means no specific agent. Only that ONE heading's Name is read (everything
+    // else is AutomationId / ClassName), it is only ever a lookup key against a
+    // blocked/governed row, and it is never emitted, logged or stored.
+    //
+    // verifiedProcs is the ONLY switch, and it is per PROCESS: WINWORD is the
+    // one host this was measured in. Excel/PowerPoint/OneNote ship the same
+    // pane but have not been read; they stay inert until they are.
+    paneHeadingRead: {
+      containerAid: 'mainChat',
+      transcriptClass: 'fai-CopilotChat',
+      headingClass: 'fai-CopilotMessage__accessibleHeading',
+      headingSuffix: ' said:',
+      genericNames: ['Copilot', 'Microsoft 365 Copilot', 'You'],
+      verifiedProcs: ['WINWORD'],
     },
   },
 ];
@@ -925,6 +1500,19 @@ export function extractAgentNameFromTitle(surface, title) {
   // conversation name — which is exactly why 'Copilot' must never be added to
   // titleKinds, and why the Copilot tab needs the separate heading fallback).
   const kind = titleKindOf(surface, title).toLowerCase();
+  // FULL-FORM kinds (see teams_desktop.titleFullKinds): segment 1 is a name only
+  // in the five-segment form, and only a Named answer counts -- a generic or
+  // participant-list segment there is no evidence, never Generic.
+  for (const k of surface.titleFullKinds || []) {
+    if (normalizeAgentName(k).toLowerCase() !== kind) continue;
+    if (parts.length < 5) return AGENT_NAME_NOT_COMPOSER;
+    const fname = normalizeAgentName(parts[1]);
+    if (!fname || looksLikeParticipantList(fname)) return AGENT_NAME_NOT_COMPOSER;
+    for (const generic of surface.genericNames || []) {
+      if (normalizeAgentName(generic).toLowerCase() === fname.toLowerCase()) return AGENT_NAME_NOT_COMPOSER;
+    }
+    return fname;
+  }
   const kinds = surface.titleKinds || [];
   let kindOk = false;
   for (const k of kinds) if (normalizeAgentName(k).toLowerCase() === kind) { kindOk = true; break; }
@@ -956,9 +1544,27 @@ export function extractAgentNameFromTitle(surface, title) {
 // landing heading of a fresh conversation, or the accessible heading on each of
 // the agent's own messages.
 //
+// IT IS NOT ONLY THE COPILOT TAB'S ANY MORE (2026-09-21). The same contract now
+// also serves the CHAT-LIST route, whose window title turned out to be stuck on
+// the generic "Copilot | …" shape too — see teams_composer's fallbackRead block
+// in AI_PANELS. The two routes differ only in their DATA (which class token
+// identifies a candidate, and whether its Name carries a suffix to strip), which
+// is exactly what a config-driven reader is for; the decision logic below is
+// shared and unchanged.
+//
 // PURE and side-effect free, exactly like extractAgentNameFromTitle: it takes
 // candidates that have ALREADY been collected and does no walking, no reading
-// and no I/O of its own. `headings` is an array of { className, name } pairs.
+// and no I/O of its own. `headings` is an array of { className, name } pairs —
+// which the collector may SYNTHESIZE rather than read off one element: the
+// Chat-list route pairs an "AI generated" badge's className with the sender-name
+// Text beside it and hands the pair in here, and this function neither knows nor
+// needs to know that the two halves came from two elements.
+//
+// `headingSuffix` MAY BE EMPTY, meaning "the candidate's Name is already the
+// bare agent name". `headingClass` may not: it is the only filter standing
+// between this reader and an arbitrary text node, and the file's own earlier
+// measurement pass rejected a bare unclassed Text as a match target for exactly
+// that reason.
 // Same three-outcome contract, and it matters for the same reason — the caller
 // must be able to tell "no evidence" from the authoritative "no agent open":
 //   AGENT_NAME_NOT_COMPOSER — no evidence. Nothing matched, or the candidates
@@ -997,11 +1603,23 @@ export function extractAgentNameFromHeading(surface, headings) {
   // impossible to read a human's message as the agent's. Token matching is the
   // existing classRuleMatches — a web-hosted element's ClassName is the DOM class
   // ATTRIBUTE and carries build hashes alongside the semantic token.
-  if (headingClass && suffix) {
+  //
+  // AN EMPTY `headingSuffix` IS A SUPPORTED CASE, added 2026-09-21 for the
+  // Chat-list badge route (see teams_composer's own fallbackRead block). There
+  // the candidate's Name IS the bare agent name already — the collector paired
+  // an "AI generated" badge with the sender-name Text beside it, so there is no
+  // "<Agent> said:" decoration to strip. `headingClass` alone is the gate in
+  // that case, exactly as it is here, and it is the ONLY thing that makes a
+  // candidate a candidate: this loop still never looks at a heading whose class
+  // does not match. The guard is therefore on `headingClass` and not on the
+  // suffix; every pre-existing entry carries a non-empty suffix and takes the
+  // identical path it always did.
+  if (headingClass) {
     for (const heading of headings) {
       const cls = String(heading?.className ?? '').trim().toLowerCase();
       if (!cls || !classRuleMatches(cls, headingClass, false)) continue;
       const nm = normalizeAgentName(heading?.name);
+      if (!suffix) { offer(nm); continue; }
       if (nm.length <= suffix.length) continue;
       if (nm.slice(nm.length - suffix.length).toLowerCase() !== suffix.toLowerCase()) continue;
       offer(normalizeAgentName(nm.slice(0, nm.length - suffix.length)));
@@ -1051,6 +1669,23 @@ export function agentNameMatches(extracted, blockedName) {
   const b = normalizeAgentName(blockedName);
   if (!a || !b) return false;
   return a.toLowerCase() === b.toLowerCase();
+}
+
+// Same question, widened to every name a row's `agent_aliases` field carries —
+// the reference implementation enforcer-win.ps1's AgentNameMatchesAny ports to
+// C#. See that function's comment for why one stored name isn't always enough
+// (a Copilot Studio bot's Dataverse name need not equal its Teams app-catalog
+// name) and why an overlap between two different rows' aliases is left
+// unresolved rather than specially detected: whichever row a caller's scan
+// reaches first still fires a block correctly either way.
+//
+// `row.agent_aliases` is the `|`-delimited scalar normalizeAgentRows produces
+// — never re-split from anything else — so this stays a pure string check,
+// with no dependency on how the field got there.
+export function agentNameMatchesAny(extracted, row) {
+  if (agentNameMatches(extracted, row?.agent_name)) return true;
+  const aliases = String(row?.agent_aliases ?? '').split('|').map((a) => a.trim()).filter(Boolean);
+  return aliases.some((alias) => agentNameMatches(extracted, alias));
 }
 
 // The single source of truth for "is this focused element an AI panel".
@@ -1115,11 +1750,21 @@ export function matchPanelSignature(focused) {
 }
 
 // Mirrors identifyAiProcess, for a panel id reported on an enforcer event.
-export function identifyAiPanel(panelId) {
+export function identifyAiPanel(panelId, processName) {
   const id = String(panelId || '').trim();
   if (!id) return null;
   for (const panel of AI_PANELS) {
-    if (panel.id === id) return { product: panel.product, vendor: panel.vendor };
+    if (panel.id !== id) continue;
+    // A per-host-app product (office_copilot_pane: "Word Copilot", …), keyed
+    // on the bare process name, case-insensitively. Anything unlisted — or no
+    // process given — is the panel's own product, exactly as before.
+    const proc = String(processName || '').replace(/\.exe$/i, '').trim().toLowerCase();
+    if (proc && panel.productByProc) {
+      for (const [k, v] of Object.entries(panel.productByProc)) {
+        if (k.toLowerCase() === proc) return { product: v, vendor: panel.vendor };
+      }
+    }
+    return { product: panel.product, vendor: panel.vendor };
   }
   return null;
 }
@@ -1149,6 +1794,17 @@ export function panelForHost(host) {
     if (String(panel.host || '').trim().toLowerCase() === target) return panel.id;
   }
   return null;
+}
+
+// EVERY panel whose host is this one, in catalog order. panelForHost answers
+// "the" panel for a host and stays first-match for its existing callers; this
+// is what synthesizePlatformBlocks uses, because one product can now have
+// several panels (m365.cloud.microsoft → office_copilot_pane AND
+// outlook_copilot_pane), and an Inventory block on it must reach all of them.
+export function panelsForHost(host) {
+  const target = String(host || '').trim().toLowerCase();
+  if (!target) return [];
+  return AI_PANELS.filter((panel) => String(panel.host || '').trim().toLowerCase() === target).map((p) => p.id);
 }
 
 // Returns true if clipboard scrub is the ONLY block mechanism available
@@ -1238,9 +1894,55 @@ export function isHostAppProcess(processName) {
 // what lets an approved teams.microsoft.com exception lift such a row. It does
 // NOT make Teams an AI app: see AI_PROCESSES' `hostApp` note, and note that
 // enforcer-win.ps1 never produces a whole-app block for a host-app process.
+//
+// THE OFFICE NAMES ARE A HOST-APP MEMBERSHIP, exactly like 'ms-teams' above and
+// for the same reason, restated because the failure mode is worse here. A
+// Copilot Studio / personal / SharePoint agent is also reachable in the
+// Microsoft 365 Copilot SIDE PANE inside Word, Excel, PowerPoint and OneNote, so
+// an agent-scoped row has to be able to cover those processes at all before it
+// can ever be narrowed to one agent in them. It does NOT make Office blockable:
+// office_copilot_pane_agent carries `hostApp: true`, and enforcer-win.ps1 bars a
+// host-app process from every WHOLE-APP block arm — so until that surface passes
+// a live pass, a row landing on Word produces NOTHING rather than disabling the
+// company's word processor. That fail-OPEN direction is the whole point, and
+// agent/tests/enforcer-panel-block.test.mjs asserts it behaviourally.
+//
+// OUTLOOK IS DELIBERATELY ABSENT and must stay absent: it is an EGRESS_SURFACES
+// process (a mail client), and agent/tests/ai-processes.test.mjs fails the build
+// if any platform here names one.
 export const PLATFORM_PROCS = Object.freeze({
-  copilot_studio:    ['Copilot', 'M365Copilot', 'ms-teams'],
-  personal_agent:    ['Copilot', 'M365Copilot', 'ms-teams'],
+  // KNOWN GAP (2026-09-22, found in QA — NOT yet fixed, needs a product answer):
+  // 'Copilot' here is the CONSUMER Microsoft Copilot app. It has no
+  // AGENT_SURFACES entry, so EnforcingAgentSurface() returns null and an
+  // agent-scoped row can never narrow to one agent there; it is also not a host
+  // app, so the whole-app fallback arm in enforcer-win.ps1 is not barred for it.
+  // Net effect: blocking ONE Copilot Studio / personal agent disables the ENTIRE
+  // consumer Copilot application, which is the "whole app instead of one agent"
+  // outcome this feature exists to prevent.
+  //
+  // Removing 'Copilot' from these two lists fixes that, but only if a Copilot
+  // Studio / M365 personal agent is genuinely NOT reachable from the consumer
+  // client — a Microsoft product question nobody has answered here. If it IS
+  // reachable, removing it turns an over-block into a silent enforcement hole,
+  // which is the worse failure for a governance product. Decide, then either
+  // drop it from both lists (and the C# mirror) or give it an AGENT_SURFACES
+  // entry so it can narrow properly.
+  copilot_studio:    ['Copilot', 'M365Copilot', 'ms-teams', 'WINWORD', 'EXCEL', 'POWERPNT', 'ONENOTE', 'ONENOTEIM'],
+  personal_agent:    ['Copilot', 'M365Copilot', 'ms-teams', 'WINWORD', 'EXCEL', 'POWERPNT', 'ONENOTE', 'ONENOTEIM'],
+  // SharePoint-embedded agents. A NEW key: the server has written this platform
+  // id since the governance discovery work, but nothing on the desktop could map
+  // it to a process, so such a row enforced nothing anywhere.
+  //
+  // 'M365Copilot' is listed alongside the Office hosts on purpose, and is not
+  // decoration: hostsForPlatform() resolves a platform to its access-exception
+  // HOSTS through AI_PROCESSES, and no Office process is (or may be) in that
+  // catalog — a key naming only Office processes would therefore map to NO host,
+  // and an admin's approved m365.cloud.microsoft exception could never lift a
+  // SharePoint-agent block. The standalone Microsoft 365 Copilot app is also
+  // where a SharePoint agent genuinely appears. 'Copilot' (the consumer build)
+  // and 'ms-teams' are left out: neither reach has been established for this
+  // platform, and a guess here is a block nobody authored.
+  sharepoint_embedded: ['M365Copilot', 'WINWORD', 'EXCEL', 'POWERPNT', 'ONENOTE', 'ONENOTEIM'],
   teams_chat_agent:  ['ms-teams'],
   openai_assistant:  ['ChatGPT'],
   custom_gpt:        ['ChatGPT'],
@@ -1390,11 +2092,13 @@ export function watcherProcessNames() {
 // Neither payload ever widens which PROCESSES are watched — that stays
 // AI_PROCESSES' job, via CFAI_AI_PROCESSES.
 
-// The IDE process-name list, with each entry's whole-app fallback flag.
+// The IDE process-name list, with each entry's whole-app fallback flag and
+// its panel-child-process flag (see IDE_PROCESSES' panelChildProcess note).
 export function buildIdeProcessConfig() {
   return IDE_PROCESSES.map((entry) => ({
     name: processNameForEntry(entry),
     panelFallback: entry.panelFallback === true,
+    panelChildProcess: entry.panelChildProcess === true,
   })).filter((e) => e.name);
 }
 
@@ -1429,6 +2133,18 @@ export function buildAiPanelConfig() {
     // the agent-surface payload. Only 'panel' opts into panel-alone DLP
     // governance; every other value, including a typo, lands on the strict side.
     dlpMatch: panel.dlpMatch === 'panel' ? 'panel' : 'agent',
+    // The AI-evidence check for a shared composer — only the one literal the
+    // enforcer implements travels; anything else is '' (no evidence route).
+    aiEvidence: panel.aiEvidence === 'teams_chat' ? 'teams_chat' : '',
+    // The single AI product reachable through this composer, or '' when the
+    // entry makes no such claim — the same "absent travels as empty string"
+    // convention the match fields above use, so the C# side never has to
+    // distinguish missing from empty. Carried VERBATIM (no defaulting, no
+    // normalisation): the JS catalog is the only place this value is written
+    // down. Nothing on either side of the port reads it yet — see the field's
+    // note in the AI_PANELS header for why the consuming logic is deliberately
+    // not here.
+    soleAgent: panel.soleAgent || '',
     // The per-entry newline combo, resolved here so the C# side never has to
     // distinguish missing from empty. An unrecognised value travels VERBATIM
     // (not silently rewritten to the default): the enforcer must be able to tell
@@ -1444,6 +2160,34 @@ export function buildAiPanelConfig() {
     // typo from silently reverting a surface to the single read this field
     // exists to replace.
     postSendVerifyMs: clampPostSendVerifyMs(panel.postSendVerifyMs),
+    // The nested SECOND-SIGNAL block, present only on a panel that declares one
+    // (today: teams_composer's Chat-list badge route). OMITTED entirely
+    // otherwise, so every other panel's payload is byte-for-byte the one it has
+    // always shipped — LoadAiPanels treats an absent block as "no fallback
+    // configured" and leaves every field empty/false.
+    //
+    // Shaped exactly like buildAgentSurfaceConfig's copy, minus `paneKinds` and
+    // `landingInfix`, which this route does not have and must not be given a
+    // fake empty value for — the C# panel-side parser validates a different,
+    // smaller field set and an empty `paneKinds: []` would only invite the
+    // agent-surface validation to be copied across with it.
+    //
+    // Both flags travel for the same reason they do on the surface payload: the
+    // C# side reaches the fallback only when it is verified AND enforcing, so
+    // dropping either here would silently move the route to the wrong side of
+    // its own gate. `headingSuffix` is carried VERBATIM including the empty
+    // string — that emptiness is the route's actual configuration, not an
+    // absent field.
+    ...(panel.fallbackRead ? {
+      fallbackRead: {
+        mode: panel.fallbackRead.mode === 'message_heading' ? 'message_heading' : '',
+        headingClass: panel.fallbackRead.headingClass || '',
+        headingSuffix: panel.fallbackRead.headingSuffix || '',
+        genericNames: (panel.fallbackRead.genericNames || []).slice(),
+        enforce: panel.fallbackRead.enforce === true,
+        verified: panel.fallbackRead.verified === true,
+      },
+    } : {}),
   }));
 }
 
@@ -1471,9 +2215,29 @@ export function buildAgentSurfaceConfig() {
     titleSeparator: surface.titleSeparator || '',
     titleSuffix: surface.titleSuffix || '',
     titleKinds: (surface.titleKinds || []).slice(),
+    titleFullKinds: (surface.titleFullKinds || []).slice(),
     hostApp: surface.hostApp === true,
+    // The host-app SUB-KIND, and it travels for the same reason both flags do:
+    // the C# side sorts a host app's processes into one of two sets on this
+    // value, and dropping it would put Word/Excel/PowerPoint/OneNote into
+    // _hostAppProcs — which switches off five element-scoped mechanisms that the
+    // office_copilot_pane panel was live-verified USING (its panel-keyed block
+    // and Tokenize & Send inside the pane). See the entry's own note.
+    panelHosted: surface.panelHosted === true,
     enforce: surface.enforce === true,
     verified: surface.verified === true,
+    // Tier B's two per-surface write facts, resolved EXACTLY as
+    // buildAiPanelConfig resolves a panel's copy — same default, same clamp —
+    // for a chat app that has an agent surface but no AI_PANELS row. The
+    // enforcer reads them only when the focused composer is not a panel
+    // (NewlineKeysFor / PostSendVerifyMsFor), and re-clamps on load.
+    //
+    // postSendVerifyMs is the one that mattered: m365_copilot has carried 1500
+    // since the 2026-09-21 live bug, but it was never serialized here, so the
+    // enforcer still used the 200ms default read and a real, delivered
+    // mask-and-send was reported not_submitted — with no enforcement_redact.
+    newlineKeys: surface.newlineKeys === undefined ? DEFAULT_NEWLINE_KEYS : String(surface.newlineKeys),
+    postSendVerifyMs: clampPostSendVerifyMs(surface.postSendVerifyMs),
     // The nested SECOND-ROUTE block, present only on an entry that declares one.
     // OMITTED entirely otherwise, so m365_copilot's payload is byte-for-byte the
     // one it has always shipped — LoadAgentSurfaces treats an absent block as
@@ -1495,6 +2259,18 @@ export function buildAgentSurfaceConfig() {
         verified: surface.fallbackRead.verified === true,
       },
     } : {}),
+    // The Office pane-heading read, OMITTED unless declared (so every other
+    // payload is unchanged). verifiedProcs is what arms it, per process.
+    ...(surface.paneHeadingRead ? {
+      paneHeadingRead: {
+        containerAid: surface.paneHeadingRead.containerAid || '',
+        transcriptClass: surface.paneHeadingRead.transcriptClass || '',
+        headingClass: surface.paneHeadingRead.headingClass || '',
+        headingSuffix: surface.paneHeadingRead.headingSuffix || '',
+        genericNames: (surface.paneHeadingRead.genericNames || []).slice(),
+        verifiedProcs: (surface.paneHeadingRead.verifiedProcs || []).slice(),
+      },
+    } : {}),
   }));
 }
 
@@ -1511,6 +2287,15 @@ const PS1_FIELD_MAX = 200;
 function sanitizeForPs1(value) {
   return String(value ?? '').replace(PS1_UNSAFE_CHARS, '').trim().slice(0, PS1_FIELD_MAX);
 }
+
+// `agent_aliases` reserves `|` as its OWN delimiter on top of PS1_UNSAFE_CHARS
+// (which doesn't strip it — the enforcer's parser has no array support, so
+// this field travels as one delimited scalar rather than nested JSON). Capped
+// at a handful of names: the server derives this list from a real agent's
+// scan history, not from anything a caller supplies directly, but nothing
+// here should still be able to grow a request payload unboundedly from it.
+const AGENT_ALIAS_DELIMITER = '|';
+const MAX_AGENT_ALIASES = 8;
 
 // The `agent_scope` values the enforcer understands. Anything else — including
 // an absent field — means today's whole-process behaviour.
@@ -1540,6 +2325,15 @@ const AGENT_SCOPES = ['agent', 'platform'];
 //      comparison normalises whitespace on both sides so an ordinary doubled
 //      space is not mistaken for character loss, and a sanitised name under 2
 //      characters is treated as lost regardless.
+// Does ONE alias survive the transport intact — same char-loss test
+// normalizeAgentRows already applies to agent_name, just factored out so both
+// the primary name and every alias can be checked the same way.
+function survivesPs1Transport(rawValue) {
+  const raw = normalizeAgentName(rawValue);
+  const clean = normalizeAgentName(sanitizeForPs1(rawValue));
+  return clean.length >= 2 && clean === raw;
+}
+
 export function normalizeAgentRows(agentRows, logger) {
   if (!Array.isArray(agentRows)) return [];
   const out = [];
@@ -1547,19 +2341,39 @@ export function normalizeAgentRows(agentRows, logger) {
     if (!row || typeof row !== 'object') continue;
     const clean = {};
     for (const [key, value] of Object.entries(row)) {
+      if (key === 'agent_aliases') continue;   // handled separately below
       if (typeof value === 'string') clean[key] = sanitizeForPs1(value);
       else if (value === null || value === undefined || typeof value === 'boolean' || typeof value === 'number') clean[key] = value;
       else clean[key] = sanitizeForPs1(value);
     }
+
+    // Each alias is sanitised and length-capped INDIVIDUALLY, then rejoined —
+    // never the joined string as one 200-char field. Running the whole blob
+    // through sanitizeForPs1 would let one long or early alias truncate a
+    // later one mid-name, silently corrupting an alias that was otherwise
+    // fine rather than just dropping the one that's too long.
+    const rawAliases = String(row.agent_aliases ?? '').split(AGENT_ALIAS_DELIMITER).map((a) => a.trim()).filter(Boolean);
+    const survivingAliases = rawAliases.slice(0, MAX_AGENT_ALIASES)
+      .filter(survivesPs1Transport)
+      .map((a) => sanitizeForPs1(a));
+    // Omitted entirely when there is nothing to carry — a row with no aliases
+    // gets no invented field, same as every row written before this feature
+    // existed. tests/ai-processes.test.mjs's shape-equality tests assert this.
+    if (survivingAliases.length > 0) clean.agent_aliases = survivingAliases.join(AGENT_ALIAS_DELIMITER);
+
     const scope = String(row.agent_scope ?? '').trim().toLowerCase();
     clean.agent_scope = AGENT_SCOPES.includes(scope) ? scope : null;
     if (clean.agent_scope === 'agent') {
-      const rawName = normalizeAgentName(row.agent_name);
-      const cleanName = normalizeAgentName(clean.agent_name);
-      if (cleanName.length < 2 || cleanName !== rawName) {
+      // Downgrade only when NOTHING survived — the primary name AND every
+      // alias. A row with a mangled agent_name but one good alias still
+      // matches through agentNameMatchesAny, so downgrading it to a whole-app
+      // block would trade a working narrow block for an unnecessarily wide
+      // one.
+      const nameSurvived = survivesPs1Transport(row.agent_name);
+      if (!nameSurvived && survivingAliases.length === 0) {
         logger?.warn(
           `blocked-agents: agent-scoped row ${row.agent_id || '(no id)'} downgraded to platform scope — `
-          + 'its agent name cannot survive the enforcer transport intact',
+          + 'neither its agent name nor any alias can survive the enforcer transport intact',
         );
         clean.agent_scope = null;
       }
@@ -1623,8 +2437,10 @@ export function synthesizePlatformBlocks(platformRows) {
         reason: 'Blocked by organization policy',
       });
     }
-    const panel = panelForHost(row.host);
-    if (panel && !seen.has(`panel:${panel}`)) {
+    // One row per panel of this host (panelsForHost) — m365.cloud.microsoft
+    // reaches both the Office and the Outlook Copilot panes.
+    for (const panel of panelsForHost(row.host)) {
+      if (seen.has(`panel:${panel}`)) continue;
       seen.add(`panel:${panel}`);
       rows.push({
         platform: PLATFORM_BLOCK_SENTINEL,
@@ -1671,9 +2487,9 @@ export function normalizeGovernedRows(governedRows, logger) {
     const asked = String(rows[i].agent_scope ?? '').trim().toLowerCase();
     if (asked === 'agent' && normalized[i].agent_scope !== 'agent') {
       logger?.warn(
-        `governed-agents: agent-scoped row ${rows[i].agent_id || '(no id)'} dropped — its agent name cannot `
-        + 'survive the enforcer transport intact, and widening it to whole-app monitoring would capture more '
-        + 'than was asked for',
+        `governed-agents: agent-scoped row ${rows[i].agent_id || '(no id)'} dropped — neither its agent name `
+        + 'nor any alias can survive the enforcer transport intact, and widening it to whole-app monitoring '
+        + 'would capture more than was asked for',
       );
       continue;
     }
@@ -1848,4 +2664,463 @@ export function filterBlockedAgents(list, exceptions, logger) {
     }
     return true;
   });
+}
+
+// ── Egress surfaces: a NON-AI destination data leaves the company through ────
+//
+// A FOURTH catalog, and deliberately NOT a member of any of the other three.
+// AI_PROCESSES / IDE_PROCESSES / AI_PANELS / AGENT_SURFACES all answer some
+// version of "where is the user talking to a model". This one answers a
+// different question entirely: "which app is the user about to send company
+// data OUT of, to a human recipient or a cloud sync target".
+//
+// ── WHY IT MUST NOT JOIN THE OTHER CATALOGS ─────────────────────────────────
+//
+// Microsoft Outlook is a general-purpose mail client. It is a strictly WORSE
+// case than the Microsoft Teams host-app entry, because Teams at least has one
+// narrow, separately-provable "an agent conversation is open" state that scopes
+// what may be looked at. Outlook has no such state at all: every window is a
+// human conversation. So membership in this catalog unlocks NOTHING passive —
+// no clipboard scanning, no whole-window attachment-chip diffing, no
+// prompt-text reading, no keystroke buffering. Concretely, an EGRESS_SURFACES
+// member must NEVER appear in:
+//   * watcherProcessNames()  — the clipboard poller, the three UIA watchers and
+//                              CFAI_AI_PROCESSES for the keystroke enforcer
+//   * processForHost() / processesForHost() — an Inventory host toggle must
+//                              never synthesize a whole-app block row for a
+//                              mail client
+//   * PLATFORM_PROCS         — an agent-scoped block row must never reach it
+// agent/tests/ai-processes.test.mjs asserts all four, and
+// agent/tests/os-monitor-egress.test.mjs asserts the behavioural consequence.
+//
+// What it DOES unlock is exactly three narrow, individually-gated paths:
+//   1. the ATTACHMENT path — the file the user attached to the message they are
+//      composing, seen either through the app's own file picker (`detect:
+//      'file_dialog'`) or through a chip diff scoped to the COMPOSE window only
+//      (never the whole app window — Outlook's message list and reading pane are
+//      full of filename-shaped text that is not an upload);
+//   2. the BODY path — the text of the message being composed, read ONCE at the
+//      send transition (`captureOn: 'send'`), and only from an element that
+//      matches `bodySig`;
+//   3. the SEND-CHORD path — swallowing the keyboard chord that submits the
+//      message while a sensitive attachment is held.
+//
+// ── THE TWO-FLAG GATE, and why every entry here starts closed ───────────────
+//
+// Same `enforce` / `verified` discipline AI_PANELS and AGENT_SURFACES use, and
+// for the same reason: a signature nobody has probed live is a guess, and a
+// guess that swallows a keystroke in a mail client is a user unable to send
+// email. Every entry below ships enforce:false, verified:false and carries
+// `// TODO(live-probe):` on every field that is not measured. NOTHING here arms
+// until a human runs a read-only UIA probe against a real installation and
+// flips the flags on the evidence.
+//
+// ── FIELD REFERENCE ─────────────────────────────────────────────────────────
+//
+//   id           — stable catalog key; what an event is attributed to.
+//   procs        — process names (no .exe), matched case-insensitively. One
+//                  literal name per entry, not a regex alternation, because
+//                  every consumer downstream is an exact-match HashSet.
+//   host         — the canonical vendor host, i.e. the access-exception key,
+//                  exactly as AI_PROCESSES' `host` is.
+//   policyHosts  — the ai_platforms.host value(s) an admin governs this surface
+//                  through. A superset of `host` is allowed: one surface can be
+//                  armed by any of several policy rows. NO governed row for any
+//                  of these hosts means the surface is completely inert — see
+//                  synthesizeEgressSurfaces.
+//   detect       — how an attachment is seen. 'file_dialog' means the app's own
+//                  picker, which file-dialog-watcher.ps1's Resolve-GovernedProcess
+//                  already finds through its existing owner/parent walk (new
+//                  Outlook's picker is owned by msedgewebview2.exe, exactly like
+//                  Teams' and M365Copilot's, and needs no new walk logic).
+//   scopeWindow  — UIA signature of the COMPOSE WINDOW/PANE, in the same shape
+//                  AI_PANELS uses ({ controlType, nameEquals, namePrefix,
+//                  classEquals, classPrefix }). It is the ROOT the chip diff is
+//                  taken against. null means "cannot be resolved", and the chip
+//                  diff then reports NOTHING rather than falling back to the
+//                  whole window — a whole-window diff in Outlook would report
+//                  every received attachment the user scrolls past as an upload.
+//   bodySig      — UIA signature of the COMPOSE BODY element, same shape, matched
+//                  through the EXISTING Match-PanelSignature in
+//                  prompt-watcher.ps1. null means no body capture at all.
+//   sendKeys     — which chord(s) SUBMIT the message. Values must come from
+//                  EGRESS_SEND_CHORDS; see the hard invariant on that constant.
+//   captureBody  — 'full' | 'none'. 'none' disables path 2 outright.
+//   captureOn    — when the body is captured. 'send' is the only value: capture
+//                  happens ONCE, at the compose-window-closes / body-goes-empty
+//                  transition, never per poll tick.
+//   enforce      — may this surface ever swallow a keystroke?
+//   verified     — has a human probed it live?
+
+// The chords the enforcer knows how to recognise as "this submits the message",
+// and the ONLY values a `sendKeys` entry may name.
+//
+// ── THE HARD INVARIANT: NEVER BARE ENTER ────────────────────────────────────
+//
+// In an Outlook compose body, plain Enter inserts a NEWLINE. It does not send.
+// Swallowing it would not "block a send" — it would make the message body
+// impossible to write, in a mail client, with no visible cause. That failure is
+// categorically worse than the miss it would be preventing, so a catalog entry
+// naming bare Enter (in any spelling) or any value not in this list is REFUSED
+// AT LOAD: egressSurfaceForProcess, buildEgressSurfaceConfig and
+// synthesizeEgressSurfaces all drop it, so the surface arms nothing anywhere
+// rather than arming something dangerous. Tested in
+// agent/tests/ai-processes.test.mjs.
+//
+// Ctrl+Enter is Outlook's documented send accelerator and Alt+S its ribbon
+// accelerator. Note that Ctrl+Enter-to-send is a USER PREFERENCE some users turn
+// off, and neither chord covers a MOUSE CLICK on the Send button — both facts
+// are stated in the toast copy rather than glossed over. See index.js.
+export const EGRESS_SEND_CHORDS = Object.freeze(['ctrl_enter', 'alt_s']);
+
+// Spellings of "bare Enter" that a future catalog author might reach for. This
+// is NOT the gate — membership in EGRESS_SEND_CHORDS is — it exists so the
+// refusal can say WHY rather than just "unrecognised", because this is the one
+// mistake with a catastrophic failure mode.
+const EGRESS_BARE_ENTER_KEYS = Object.freeze(['enter', 'return', 'vk_return', 'newline', 'send']);
+
+export const EGRESS_SURFACES = [
+  {
+    id: 'outlook_classic',
+    // Display identity for the governance record and the toast. NOT an AI
+    // product — this is a mail client, and the record must say so plainly rather
+    // than borrowing an AI service name.
+    product: 'Microsoft Outlook',
+    vendor: 'Microsoft',
+    // TODO(live-probe): the Office desktop client's process name is expected to
+    // be OUTLOOK (OUTLOOK.EXE). Not probed on a real install by this change —
+    // confirm with `tasklist` before flipping `verified`.
+    procs: ['OUTLOOK'],
+    host: 'outlook.office.com',
+    policyHosts: ['outlook.office.com'],
+    // Classic Outlook's Attach File dialog is a plain #32770 owned by
+    // OUTLOOK.exe directly — the simplest case for
+    // file-dialog-watcher.ps1's Resolve-GovernedProcess, which finds it on the
+    // very first seed with no parent walk at all.
+    detect: 'file_dialog',
+    // TODO(live-probe): the compose-window signature. Until this is filled in
+    // from a real UIA probe the chip diff has no scoped root, so it reports
+    // NOTHING — which is the correct fail direction and the reason `verified`
+    // cannot be flipped before this field is measured.
+    scopeWindow: null,
+    // TODO(live-probe): the compose-body element signature, for
+    // Match-PanelSignature. null means no body capture.
+    bodySig: null,
+    // TODO(live-probe): the To/Cc recipient field's signature.
+    //
+    // DOMAIN ONLY, and the reason this is its own field rather than being read
+    // off whatever is nearby: "who this email is going to" must never be
+    // recorded. A recipient's full address is PII about a third party who is not
+    // the subject of this governance record at all. What has governance value is
+    // "an attachment matching a critical pattern left the tenant to @gmail.com",
+    // and that is a DOMAIN. prompt-watcher.ps1 reduces whatever this field reads
+    // to bare @domain tokens in the same expression that reads it — see
+    // Get-EgressRecipientDomains — so a full address exists only as a local
+    // inside that one function and is never emitted, logged or persisted. The
+    // SUBJECT LINE is not read at all, by any path.
+    recipientSig: null,
+    sendKeys: ['ctrl_enter', 'alt_s'],
+    captureBody: 'full',
+    captureOn: 'send',
+    enforce: false,
+    verified: false,
+  },
+  {
+    id: 'outlook_new',
+    product: 'Microsoft Outlook (new)',
+    vendor: 'Microsoft',
+    // TODO(live-probe): the new Outlook for Windows client runs as olk (olk.exe).
+    // Not probed on a real install by this change.
+    procs: ['olk'],
+    host: 'outlook.office.com',
+    policyHosts: ['outlook.office.com'],
+    // New Outlook is a WebView2 shell, so the picker behind its paperclip is an
+    // ordinary <input type=file> shown from Chromium's BROWSER process: the
+    // #32770 belongs to msedgewebview2.exe, not to olk.exe. That is EXACTLY the
+    // case Resolve-GovernedProcess's existing owner+parent walk was written for
+    // (M365Copilot / Teams), so it is reused completely unchanged — no new hop
+    // count, no new seed, no new logic.
+    detect: 'file_dialog',
+    // TODO(live-probe): compose-window signature.
+    scopeWindow: null,
+    // TODO(live-probe): compose-body signature.
+    bodySig: null,
+    // TODO(live-probe): the To/Cc recipient field's signature. DOMAIN ONLY — see
+    // the same field on outlook_classic for the full privacy contract, and
+    // Get-EgressRecipientDomains in prompt-watcher.ps1 for where it is enforced.
+    recipientSig: null,
+    sendKeys: ['ctrl_enter', 'alt_s'],
+    captureBody: 'full',
+    captureOn: 'send',
+    enforce: false,
+    verified: false,
+  },
+];
+
+// ── Cloud sync roots (OneDrive / SharePoint) ────────────────────────────────
+//
+// A separate list from EGRESS_SURFACES because it is not a PROCESS at all — it
+// is a FILESYSTEM location whose contents leave the machine by themselves. Same
+// two-flag gate, same policy gate: NO governed ai_platforms row for any of
+// `policyHosts` means no root is watched, no directory handle is opened and no
+// file is stat-ed. Verified by agent/tests/os-monitor-egress.test.mjs.
+//
+// OBSERVE / REPORT ONLY. There is deliberately no quarantine, no file move and
+// no release path anywhere in this feature — a governance product that silently
+// relocates a user's files is a data-loss incident waiting to happen, and the
+// decision to detect-and-report only was taken explicitly.
+export const EGRESS_SYNC_ROOTS = [
+  {
+    id: 'onedrive_sharepoint',
+    product: 'OneDrive / SharePoint',
+    vendor: 'Microsoft',
+    // The Inventory hosts an admin governs cloud sync through. sharepoint.com is
+    // listed bare because a tenant's real host is <tenant>.sharepoint.com and
+    // ai_platforms.host is already normalized server-side; matching is exact, so
+    // a tenant that wants its own host governed adds its own row.
+    policyHosts: ['onedrive.live.com', 'onedrive.com', 'sharepoint.com'],
+    host: 'onedrive.live.com',
+    enforce: false,
+    verified: false,
+  },
+];
+
+// Is this `sendKeys` list safe to load? Returns the normalized chord array, or
+// null when ANY member is unrecognised or is a bare-Enter spelling.
+//
+// All-or-nothing on purpose: silently dropping one bad chord out of a list would
+// arm a surface with a chord set nobody authored, which is precisely the class
+// of half-applied configuration the loaders here refuse everywhere else.
+export function normalizeEgressSendKeys(sendKeys, logger, surfaceId = '') {
+  if (!Array.isArray(sendKeys) || sendKeys.length === 0) {
+    logger?.warn(`egress-surfaces: ${surfaceId || '(no id)'} names no send chord — refusing to load it`);
+    return null;
+  }
+  const out = [];
+  for (const raw of sendKeys) {
+    const key = String(raw ?? '').trim().toLowerCase();
+    if (EGRESS_BARE_ENTER_KEYS.includes(key)) {
+      logger?.warn(
+        `egress-surfaces: ${surfaceId || '(no id)'} names "${key}" as a send chord — refused. Bare Enter `
+        + 'inserts a NEWLINE in a mail compose body; swallowing it would make composing email impossible.',
+      );
+      return null;
+    }
+    if (!EGRESS_SEND_CHORDS.includes(key)) {
+      logger?.warn(`egress-surfaces: ${surfaceId || '(no id)'} names unrecognised send chord "${key}" — refusing to load it`);
+      return null;
+    }
+    if (!out.includes(key)) out.push(key);
+  }
+  return out;
+}
+
+// Is this catalog entry loadable at all? Same all-or-nothing rule as above: an
+// entry that fails here is dropped by EVERY consumer, so it can never half-arm.
+function egressSurfaceLoadable(surface, logger) {
+  if (!surface || typeof surface !== 'object') return false;
+  if (!surface.id) return false;
+  if (!Array.isArray(surface.procs) || surface.procs.length === 0) return false;
+  return normalizeEgressSendKeys(surface.sendKeys, logger, surface.id) !== null;
+}
+
+// Which EGRESS_SURFACES entry owns this process name, or null. First match wins,
+// mirroring agentSurfaceForProcess exactly. An entry that fails validation is
+// invisible here too — see egressSurfaceLoadable.
+export function egressSurfaceForProcess(processName) {
+  const proc = String(processName ?? '').replace(/\.exe$/i, '').trim().toLowerCase();
+  if (!proc) return null;
+  for (const surface of EGRESS_SURFACES) {
+    if (!surface.procs.some((p) => String(p).toLowerCase() === proc)) continue;
+    if (!egressSurfaceLoadable(surface, null)) continue;
+    return surface;
+  }
+  return null;
+}
+
+// True when this process name is an egress surface. Mirrors isHostAppProcess'
+// role: identity resolution and capture permission are different questions, and
+// this one only answers "is this app in the egress catalog at all".
+export function isEgressProcess(processName) {
+  return egressSurfaceForProcess(processName) !== null;
+}
+
+// Mirrors identifyAiProcess/identifyAiPanel, for attribution on an egress event.
+// Searches BOTH egress catalogs — a sync-root event carries a root id, not a
+// process, and both need the same "what do I call this on the record" answer.
+export function identifyEgressSurface(surfaceId) {
+  const id = String(surfaceId || '').trim();
+  if (!id) return null;
+  for (const surface of EGRESS_SURFACES) {
+    if (surface.id === id) return { product: surface.product, vendor: surface.vendor, host: surface.host, id: surface.id };
+  }
+  for (const root of EGRESS_SYNC_ROOTS) {
+    if (root.id === id) return { product: root.product, vendor: root.vendor, host: root.host, id: root.id };
+  }
+  return null;
+}
+
+// A UIA signature, serialized in the SAME shape buildAiPanelConfig emits, so the
+// .ps1 side can hand it straight to the existing Match-PanelSignature and no new
+// comparison code exists anywhere. null in, null out.
+function egressSignature(sig) {
+  if (!sig || typeof sig !== 'object') return null;
+  const controlType = sanitizeForPs1(sig.controlType);
+  if (!controlType) return null;
+  const out = {
+    controlType,
+    nameEquals: sanitizeForPs1(sig.nameEquals || ''),
+    namePrefix: sanitizeForPs1(sig.namePrefix || ''),
+    classEquals: sanitizeForPs1(sig.classEquals || ''),
+    classPrefix: sanitizeForPs1(sig.classPrefix || ''),
+  };
+  // A signature with a control type and nothing else matches EVERY element of
+  // that type — in a mail client that is the whole window. Refuse it.
+  if (!out.nameEquals && !out.namePrefix && !out.classEquals && !out.classPrefix) return null;
+  return out;
+}
+
+// The egress catalog, for the CFAI_EGRESS_SURFACES env-var handoff — the same
+// JSON-over-env-var mechanism CFAI_AGENT_SURFACES uses, so the data lives here
+// and the comparison code lives in the .ps1.
+//
+// BOTH flags travel, for the identical reason they do on the agent-surface
+// payload: the C# side arms only on verified AND enforce, so dropping either
+// here would silently move a surface to the wrong side of its own gate.
+//
+// Every string goes through sanitizeForPs1 for the same reason the blocked-agent
+// rows do — enforcer-win.ps1's hand-rolled extractor derails on the WHOLE
+// payload for one stray quote, backslash or brace in one value.
+export function buildEgressSurfaceConfig(logger) {
+  const out = [];
+  for (const surface of EGRESS_SURFACES) {
+    const sendKeys = normalizeEgressSendKeys(surface.sendKeys, logger, surface.id);
+    if (sendKeys === null) continue;          // refused — see the invariant above
+    if (!Array.isArray(surface.procs) || surface.procs.length === 0) continue;
+    out.push({
+      id: sanitizeForPs1(surface.id),
+      procs: surface.procs.map((p) => sanitizeForPs1(p)).filter(Boolean),
+      host: sanitizeForPs1(surface.host || ''),
+      policyHosts: (surface.policyHosts || []).map((h) => sanitizeForPs1(h)).filter(Boolean),
+      detect: surface.detect === 'file_dialog' ? 'file_dialog' : '',
+      // Present-and-null rather than omitted, so the .ps1 side never has to tell
+      // "the field is missing" from "the probe has not happened yet" — both mean
+      // the same thing (no scoped root / no body capture) and both are stated the
+      // same way.
+      scopeWindow: egressSignature(surface.scopeWindow),
+      bodySig: egressSignature(surface.bodySig),
+      recipientSig: egressSignature(surface.recipientSig),
+      sendKeys,
+      captureBody: surface.captureBody === 'full' ? 'full' : 'none',
+      // 'send' is the only value, stated explicitly rather than shipped as "" so
+      // the JS default and the .ps1 default are the same word in the same place.
+      // Anything else lands on 'send' too: per-tick capture is not representable.
+      captureOn: 'send',
+      enforce: surface.enforce === true,
+      verified: surface.verified === true,
+    });
+  }
+  return out;
+}
+
+// Which hosts an ai_platforms row set actually GOVERNS for a DESKTOP egress
+// surface. Shared by the surface and sync-root arming below so the two can
+// never disagree about what "governed" means.
+//
+// `governed === true` exactly, matching synthesizePlatformBlocks' own
+// `blocked !== true` strictness: the server returns real booleans via rowToJson,
+// so anything else means something upstream changed and the safe answer is "not
+// governed".
+//
+// AND `surface` must be 'desktop' or 'all' — NOT just `governed`. Several
+// Microsoft hosts (outlook.office.com, sharepoint.com) are already governed on
+// every existing deployment, seeded at server startup for the pre-existing
+// browser Copilot-panel governance feature, with surface:'browser'. Reading
+// `governed` alone here would arm Outlook attachment/body capture and the
+// OneDrive watcher on every one of those deployments the moment a human
+// live-probes the catalog and flips its two flags — with no admin ever having
+// separately opted a single host into DESKTOP mail/file monitoring. The
+// `surface` selector connect-ui exposes on an ai_platforms row is that opt-in;
+// this is where it is actually enforced, not just displayed.
+function governedHostSet(platformRows) {
+  const hosts = new Set();
+  if (!Array.isArray(platformRows)) return hosts;
+  for (const row of platformRows) {
+    if (row?.governed !== true) continue;
+    const surface = String(row?.surface ?? '').trim().toLowerCase();
+    if (surface !== 'desktop' && surface !== 'all') continue;
+    const host = String(row.host ?? '').trim().toLowerCase();
+    if (host) hosts.add(host);
+  }
+  return hosts;
+}
+
+// The capture_mode an admin set on the row that armed a surface. 'hold' is the
+// only value that can ever swallow a keystroke; 'observe' and 'block_critical'
+// both leave the send alone. An unrecognised value lands on 'observe', which is
+// the weakest of the three — a mode this build does not understand must never
+// be read as licence to hold a mail send.
+function captureModeFor(platformRows, policyHosts) {
+  const wanted = (policyHosts || []).map((h) => String(h).trim().toLowerCase());
+  let mode = 'observe';
+  for (const row of Array.isArray(platformRows) ? platformRows : []) {
+    if (row?.governed !== true) continue;
+    const host = String(row.host ?? '').trim().toLowerCase();
+    if (!wanted.includes(host)) continue;
+    const m = String(row.capture_mode ?? '').trim().toLowerCase();
+    // Strongest mode across the matching rows wins: two policy rows arming one
+    // surface must not have their meaning decided by array order.
+    if (m === 'hold') return 'hold';
+    if (m === 'block_critical' && mode === 'observe') mode = 'block_critical';
+  }
+  return mode;
+}
+
+// GET /api/v1/ai-platforms rows → the POLICY-ARMED subset of the egress catalog.
+//
+// This is the whole gate. An egress surface (and a sync root) is armed ONLY when
+// a governed ai_platforms row exists for one of its policyHosts. No row means:
+//   * attachment-watcher.ps1 never adds the process to $EgressProcs, so no UIA
+//     read of a mail window happens at all;
+//   * file-dialog-watcher.ps1 never recognises its picker;
+//   * prompt-watcher.ps1 never reads a compose body;
+//   * sync-watcher.ps1 opens no FileSystemWatcher on any root;
+//   * enforcer-win.ps1 never puts the process in _egressHoldProcs.
+// i.e. the default for a machine whose admin has said nothing about email or
+// OneDrive is that this entire feature is inert. Tested behaviourally in
+// agent/tests/os-monitor-egress.test.mjs.
+//
+// Takes the ALREADY-FETCHED rows — it issues no request of its own, exactly as
+// synthesizePlatformBlocks does not, so the 10s tick still makes one
+// ai-platforms call in total.
+export function synthesizeEgressSurfaces(platformRows, logger) {
+  const governed = governedHostSet(platformRows);
+  const surfaces = [];
+  const syncRoots = [];
+  if (governed.size === 0) return { surfaces, sync_roots: syncRoots };
+
+  for (const entry of buildEgressSurfaceConfig(logger)) {
+    const armedBy = entry.policyHosts.find((h) => governed.has(String(h).toLowerCase()));
+    if (!armedBy) continue;
+    surfaces.push({
+      ...entry,
+      policy_host: armedBy,
+      capture_mode: captureModeFor(platformRows, entry.policyHosts),
+    });
+  }
+
+  for (const root of EGRESS_SYNC_ROOTS) {
+    const armedBy = (root.policyHosts || []).find((h) => governed.has(String(h).toLowerCase()));
+    if (!armedBy) continue;
+    syncRoots.push({
+      id: sanitizeForPs1(root.id),
+      host: sanitizeForPs1(root.host || ''),
+      policy_host: sanitizeForPs1(armedBy),
+      capture_mode: captureModeFor(platformRows, root.policyHosts),
+      enforce: root.enforce === true,
+      verified: root.verified === true,
+    });
+  }
+
+  return { surfaces, sync_roots: syncRoots };
 }

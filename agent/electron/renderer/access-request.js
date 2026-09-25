@@ -40,12 +40,26 @@ function relTime(value) {
 }
 
 function shell(bodyHtml) {
-  const name = current?.tool_name || current?.blocked_agent || current?.app || 'This AI app';
+  const app = current?.tool_name || current?.app || 'This AI app';
+  // An agent-scoped block (one agent inside a host app such as Microsoft 365
+  // Copilot or Teams) names the AGENT as what is blocked, with the host app as
+  // context — the host app itself is still allowed.
+  // block_scope 'agent' marks a per-agent row; for a whole-app block
+  // blocked_agent is just the product name again, and the app wording stays.
+  const agent = current?.blocked_agent || '';
+  if (agent && current?.block_scope === 'agent' && agent !== app) {
+    return `
+    <div class="block-dialog-icon">🚫</div>
+    <h3>${escapeHtml(agent)} is blocked</h3>
+    <p>Your organization has blocked this agent on this device. Nothing you send to it can go through.</p>
+    <div class="pattern-chip">in ${escapeHtml(app)}</div>
+    ${bodyHtml}`;
+  }
   return `
     <div class="block-dialog-icon">🚫</div>
-    <h3>${escapeHtml(name)} is blocked</h3>
+    <h3>${escapeHtml(app)} is blocked</h3>
     <p>Your organization has disallowed this AI app on this device. Nothing you type here can be sent.</p>
-    <div class="pattern-chip">${escapeHtml(current?.blocked_agent || name)}</div>
+    <div class="pattern-chip">${escapeHtml(app)}</div>
     ${bodyHtml}`;
 }
 

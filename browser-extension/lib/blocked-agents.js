@@ -5,22 +5,38 @@
 // --test` drive the exception-subtraction rule directly instead of asserting on
 // source text (see tests/blocked-agent-exceptions.test.mjs).
 //
-// WHY THE HOST MAP IS DUPLICATED. content/content.js has its own copy of the
-// platform → host map as the `PLATFORM_TO_HOSTS` literal mid-IIFE, because
+// WHY THE HOST MAP IS DUPLICATED. content/content.js has its own copy of
+// PLATFORM_HOST_PATTERNS as the `PLATFORM_TO_HOSTS` literal mid-IIFE, because
 // content scripts are classic scripts and this repo has no bundler — the same
 // reason lib/recording.js's header gives for content/replay.js existing. The two
-// copies MUST agree: content.js's decides which hosts a blocked agent is even
-// looked for on, and this one decides which blocked rows an approved host-scoped
-// exception lifts. A platform added to one and not the other either
-// under-enforces in the page or refuses to lift an approval in the worker.
+// copies MUST agree on which hosts a blocked agent is even looked for on.
 // tests/blocked-agent-exceptions.test.mjs asserts they are character-identical,
 // so drift fails the build rather than shipping.
+//
+// EXCEPTIONS ARE NOT DECIDED FROM THAT MAP. Which blocked rows an approved
+// exception lifts is decided by exceptionHostMatchesPlatform() below, against
+// the deliberately narrower PLATFORM_EXCEPTION_HOST_PATTERNS — see the comment
+// there for why reusing the wide lookup map for exceptions was a bug, not a
+// simplification. This half has no counterpart in content.js: exception
+// subtraction runs once, here, in the background worker, before the filtered
+// list is cached and broadcast — content.js only ever sees the result.
 
 // Regex SOURCES rather than literals, so the sync test above can compare them to
 // content.js's `/.../` literals character for character.
+// Every Microsoft 365 Copilot agent TYPE is reachable on the whole Microsoft
+// suite, not just the standalone Copilot chat surfaces. personal_agent
+// (declarative agents) used to list only copilot.microsoft and
+// m365.cloud.microsoft, so a blocked personal agent went unenforced the moment
+// the user opened it from Teams, Outlook, SharePoint or Office — and
+// sharepoint_embedded, teams_app and isv_store, which the server already emits
+// as platforms, mapped to NOTHING at all, so those blocks enforced nowhere in
+// the browser. All four now carry the same host list copilot_studio has.
 export const PLATFORM_HOST_PATTERNS = Object.freeze({
   copilot_studio:     ['copilot\\.microsoft', 'm365\\.cloud\\.microsoft', 'powerva\\.ms', 'copilotstudio', 'teams\\.microsoft', 'outlook\\.office', 'outlook\\.live', 'sharepoint\\.com', '(^|\\.)office\\.com', 'office365\\.com', 'microsoft365\\.com'],
-  personal_agent:     ['copilot\\.microsoft', 'm365\\.cloud\\.microsoft'],
+  personal_agent:     ['copilot\\.microsoft', 'm365\\.cloud\\.microsoft', 'powerva\\.ms', 'copilotstudio', 'teams\\.microsoft', 'outlook\\.office', 'outlook\\.live', 'sharepoint\\.com', '(^|\\.)office\\.com', 'office365\\.com', 'microsoft365\\.com'],
+  sharepoint_embedded:['copilot\\.microsoft', 'm365\\.cloud\\.microsoft', 'powerva\\.ms', 'copilotstudio', 'teams\\.microsoft', 'outlook\\.office', 'outlook\\.live', 'sharepoint\\.com', '(^|\\.)office\\.com', 'office365\\.com', 'microsoft365\\.com'],
+  teams_app:          ['copilot\\.microsoft', 'm365\\.cloud\\.microsoft', 'powerva\\.ms', 'copilotstudio', 'teams\\.microsoft', 'outlook\\.office', 'outlook\\.live', 'sharepoint\\.com', '(^|\\.)office\\.com', 'office365\\.com', 'microsoft365\\.com'],
+  isv_store:          ['copilot\\.microsoft', 'm365\\.cloud\\.microsoft', 'powerva\\.ms', 'copilotstudio', 'teams\\.microsoft', 'outlook\\.office', 'outlook\\.live', 'sharepoint\\.com', '(^|\\.)office\\.com', 'office365\\.com', 'microsoft365\\.com'],
   teams_chat_agent:   ['teams\\.microsoft'],
   openai_assistant:   ['chatgpt\\.com', 'chat\\.openai\\.com'],
   custom_gpt:         ['chatgpt\\.com', 'chat\\.openai\\.com'],
@@ -48,6 +64,45 @@ export function platformMatchesHost(platform, host) {
   const patterns = PLATFORM_HOST_PATTERNS[key];
   if (!patterns) return false;
   return patterns.some((source) => rx(source).test(h));
+}
+
+// Narrow, desktop-derived host set for the M365 agent-scoped platforms — used
+// ONLY to decide whether an access exception applies, never to decide whether
+// to look for a block. PLATFORM_HOST_PATTERNS above is deliberately wide (a
+// block must be looked for everywhere the platform is reachable), but reusing
+// that same wide list for exceptions meant an approval granted on ONE host
+// (e.g. an admin approving "IT Help Desk Agent" on m365.cloud.microsoft only,
+// having explicitly REJECTED it on teams.microsoft.com) silently lifted the
+// block on every other host the platform maps to — the admin's "no" on Teams
+// became unrepresentable. Mirrors hostsForPlatform() in
+// agent/src/os_monitor/ai-processes.js (PLATFORM_PROCS resolved through
+// AI_PROCESSES' `host` field: 'Copilot'→copilot.microsoft.com,
+// 'M365Copilot'→m365.cloud.microsoft, 'ms-teams'→teams.microsoft.com; Office
+// process names carry no host there, by design), so the browser's exception
+// blast-radius matches the already-reviewed desktop behaviour instead of the
+// wider block-lookup list. teams_app/isv_store have no PLATFORM_PROCS entry
+// at all, so — exactly like on desktop — no host can except them yet.
+export const PLATFORM_EXCEPTION_HOST_PATTERNS = Object.freeze({
+  copilot_studio:      ['copilot\\.microsoft', 'm365\\.cloud\\.microsoft', 'teams\\.microsoft'],
+  personal_agent:      ['copilot\\.microsoft', 'm365\\.cloud\\.microsoft', 'teams\\.microsoft'],
+  sharepoint_embedded: ['m365\\.cloud\\.microsoft'],
+  teams_app:           [],
+  isv_store:           [],
+  teams_chat_agent:    ['teams\\.microsoft'],
+});
+
+/** Same contract as platformMatchesHost(), but for deciding whether an access
+ *  exception applies. Narrower for the M365 agent platforms above (see the
+ *  comment there); every other platform falls through to the normal wide
+ *  check, unchanged from before this function existed. */
+export function exceptionHostMatchesPlatform(platform, host) {
+  const key = String(platform ?? '').trim().toLowerCase();
+  const h = String(host ?? '').trim().toLowerCase();
+  if (!key || !h) return false;
+  if (Object.prototype.hasOwnProperty.call(PLATFORM_EXCEPTION_HOST_PATTERNS, key)) {
+    return PLATFORM_EXCEPTION_HOST_PATTERNS[key].some((source) => rx(source).test(h));
+  }
+  return platformMatchesHost(key, h);
 }
 
 /** Agent display names are admin-typed free text, so they are compared
@@ -121,11 +176,11 @@ export function subtractAccessExceptions(list, exceptions) {
 
   return list.filter((row) => {
     for (const exc of hostWide) {
-      if (platformMatchesHost(row?.platform, exc.tool_host)) return false;
+      if (exceptionHostMatchesPlatform(row?.platform, exc.tool_host)) return false;
     }
     if (isAgentScopedRow(row)) {
       for (const exc of perAgent) {
-        if (!platformMatchesHost(row?.platform, exc.tool_host)) continue;
+        if (!exceptionHostMatchesPlatform(row?.platform, exc.tool_host)) continue;
         if (agentIdentityMatches(row, exc)) return false;
       }
     }

@@ -236,6 +236,14 @@ const PS1_HELPERS = [
   'win-poller.ps1',
   'file-dialog-watcher.ps1',
   'attachment-watcher.ps1',
+  // sync-watcher     files appearing in a OneDrive/SharePoint sync root, which
+  //                  leave the machine with no app involved at all. It also
+  //                  single-sources its extension gate from
+  //                  attachment-watcher.ps1 by reading that file out of
+  //                  $PSScriptRoot, so the two MUST be staged together — a
+  //                  build that shipped one without the other would leave the
+  //                  sync watcher reporting nothing, silently.
+  'sync-watcher.ps1',
   'enforcer-win.ps1',
   'toast-helper.ps1',
 ];

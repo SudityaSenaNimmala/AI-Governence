@@ -5,7 +5,7 @@ import TopNav from "../../Resuables/Nav/TopNav";
 import AgentGovernance from "../AgentGovernance/AgentGovernance";
 import { isFeatureEnabled, getMissingDeps, getFeatureDef } from "../../../featureFlags";
 import { AgentGovernanceProvider, useAgentAuth } from "../AgentGovernance/AgentGovernanceContext";
-import { agentGovernanceApi } from "../AgentGovernance/AgentGovernanceActions/AgentGovernanceActions";
+import { agentGovernanceApi, hasAdminCredential, ADMIN_CREDENTIAL_HINT } from "../AgentGovernance/AgentGovernanceActions/AgentGovernanceActions";
 import { PoliciesTab } from "../AgentGovernance/tabs/PoliciesTab";
 import {
   Monitor, Scan, AlertTriangle, Wrench, Server, Shield, Clock, ChevronRight,
@@ -23,16 +23,131 @@ import { createReplayHost, applyReplayIframeCsp } from "./rrwebHost";
 import "./AIHub.css";
 
 const API = "/api/v1";
-async function apiFetch(path) {
-  const r = await fetch(`${API}${path}`);
-  if (!r.ok) throw new Error(`${r.status}`);
-  return aliasResponse(path, await r.json(), rawJson);
+
+// ── Response budget / staleness ─────────────────────────────────────────────
+// Every converted GET route answers inside a fixed server-side budget: when the
+// live query would overrun it, the server serves its last cached read instead
+// and says so in the response headers.
+//
+//   X-Response-Stale: 1                 → this body is a cached snapshot
+//   X-Response-Captured-At: <ISO 8601>  → when that snapshot was taken
+//   X-Response-Budget: exceeded         → the budget ran out with nothing cached
+//                                         to fall back to (cold start, at most
+//                                         once per route per server process).
+//                                         The body is still a real live read,
+//                                         just a slow one — not stale.
+//
+// All three are absent on a normal fresh read. Nothing in this file could see
+// them before, because apiFetch resolved to r.json() and dropped the Response
+// object entirely — which is why registry.js has been setting X-Registry-Stale /
+// X-Registry-Captured-At all along with nothing on screen reflecting it. Those
+// two are read as aliases here so the registry's existing signal surfaces too.
+//
+// There is deliberately NO client-side timeout or AbortController. An abort
+// cannot produce data — it can only turn a slow tab into an error tab — and the
+// server-side budget is the only layer holding a fallback value.
+const STALE_HEADERS = ["X-Response-Stale", "X-Registry-Stale"];
+const CAPTURED_AT_HEADERS = ["X-Response-Captured-At", "X-Registry-Captured-At"];
+function readResponseMeta(res) {
+  const h = res?.headers;
+  if (!h) return { stale: false, capturedAt: null, budgetExceeded: false };
+  return {
+    stale: STALE_HEADERS.some(k => h.get(k) === "1"),
+    capturedAt: CAPTURED_AT_HEADERS.map(k => h.get(k)).find(Boolean) || null,
+    budgetExceeded: h.get("X-Response-Budget") === "exceeded",
+  };
+}
+
+// The one place a request is actually issued. Returns the parsed body AND the
+// Response, so a caller that needs the headers above can read them.
+//
+// A non-2xx still throws, and `message` is still the bare status code so every
+// existing `catch(x => setE(x.message))` call site behaves exactly as before —
+// but the body is read and attached first. /claude-usage answers a blown budget
+// with a structured 503 ({ error: "budget_exceeded", budget_ms }), and throwing
+// before ever touching the body (what this used to do) discarded that detail and
+// left the view rendering the literal string "503".
+async function apiRequest(path, opts, base = API) {
+  const r = await fetch(`${base}${path}`, opts);
+  if (!r.ok) {
+    let body = null;
+    try { body = await r.json(); } catch (e) { void e; body = null; }
+    const err = new Error(`${r.status}`);
+    err.status = r.status;
+    err.body = body;
+    throw err;
+  }
+  const data = await r.json();
+  const isGet = !opts?.method || opts.method === "GET";
+  return { data: isGet && base === API ? await aliasResponse(path, data, rawJson) : data, res: r };
 }
 // Un-aliased GET, for demoIdentity's own machine lookup.
 async function rawJson(path) {
   const r = await fetch(`${API}${path}`);
   if (!r.ok) throw new Error(`${r.status}`);
   return r.json();
+}
+// Unchanged contract — resolves to the parsed JSON body alone.
+async function apiFetch(path) {
+  const { data } = await apiRequest(path);
+  return data;
+}
+// Same request, staleness included: { data, stale, capturedAt, budgetExceeded }.
+async function apiFetchWithMeta(path) {
+  const { data, res } = await apiRequest(path);
+  return { data, ...readResponseMeta(res) };
+}
+// Hands the meta to a tab's collector and resolves to the payload alone, so an
+// apiFetchWithMeta promise can be passed to soft() (or dropped into a
+// Promise.all) exactly like an apiFetch one — no setter and no fallback sentinel
+// at any call site has to change to make staleness visible.
+function tapMeta(p, collect) {
+  return p.then(r => { collect(r); return r.data; });
+}
+// Fold several legs' meta into one note for the tab: stale if ANY leg was served
+// from cache, dated at the OLDEST of those snapshots — that is the point past
+// which something on screen is no longer guaranteed current. Returns null when
+// every leg was live, which is also what "render no note" means.
+function mergeStaleMeta(...metas) {
+  const cached = metas.filter(m => m?.stale);
+  if (cached.length) {
+    const times = cached.map(m => m.capturedAt).filter(Boolean).sort();
+    return { stale: true, capturedAt: times[0] || null };
+  }
+  // Not stale, but at least one leg's live query ran past its budget — this is
+  // real, fresh data, just slower than usual (the store had nothing to fall
+  // back to yet, e.g. right after a deploy). A different note than "stale":
+  // there is no captured-at time to show, because this IS the current read.
+  if (metas.some(m => m?.budgetExceeded)) return { stale: false, budgetExceeded: true, capturedAt: null };
+  return null;
+}
+// A single failed leg must not blank a whole tab. Lifted out of OverviewView,
+// where it was a local closure, so the other tabs can use this one instead of
+// each reinventing a per-leg catch: a bare Promise.all rejects as a whole the
+// moment ONE leg rejects, taking down the panels whose data arrived fine.
+//
+// `fallback` is the sentinel the view renders instead — this file uses `false`
+// for "this endpoint failed", which a view can tell apart from a real empty
+// result (0 would be a lie). `onWarn` is an optional setter for the list of
+// failed-leg labels behind the "could not load X" strip; omit it where the view
+// has nowhere to show one.
+function soft(p, label, setter, fallback, onWarn) {
+  return p.then(setter).catch(() => {
+    setter(fallback);
+    if (onWarn) onWarn(w => (w.includes(label) ? w : [...w, label]));
+  });
+}
+// A blown budget arrives as a structured 503 ({ error: "budget_exceeded",
+// budget_ms }) rather than a bare 500 with a raw driver message. Say what
+// happened and what to do about it; anything else stays generic on purpose —
+// server-side error text can carry query/connection internals and does not
+// belong on an admin's screen.
+function budgetErrorMessage(err, fallback) {
+  if (err?.body?.error === "budget_exceeded") {
+    const secs = Math.round((Number(err.body.budget_ms) || 0) / 1000);
+    return `This query is taking longer than usual${secs ? ` (over ${secs}s)` : ""} — try a narrower date range, or try again shortly.`;
+  }
+  return fallback;
 }
 function relTime(d) {
   if (!d) return "—";
@@ -251,15 +366,156 @@ function groupDlpEvents(rows) {
   }
 
   return evs.filter(e=>!claimed.has(e.id))
-    .map(e=>({ ...e, _children: children.get(e.id) || [], _exact: exact.has(e.id) }));
+    .map(e=>({ ...e, _children: children.get(e.id) || [], _exact: exact.has(e.id), _enforcement: [] }));
+}
+
+// ── Enforcement members ──────────────────────────────────────────────────────
+// enforcement_block / enforcement_redact events are what carry the agent
+// attribution (agent_name / agent_id / agent_scope), but the DLP table's rows
+// and every count on it are prompt-only by design. So these are attached to the
+// prompt row they belong to as MEMBERS ONLY, in a separate `_enforcement` list:
+//   * never a row of their own — one with no prompt to pair with is dropped
+//     from the table, exactly as it was before this existed;
+//   * never in `_children`, so groupMembers(), the "N actions from M events"
+//     hint, the cards, the severity column and the View button all still see
+//     exactly the prompt-only population they did before.
+// Pairing uses the same confidence rules as groupDlpEvents above:
+//   block  → prompt:  same machine + service, compatible pattern, within
+//                     PAIR_WINDOW_MS, nearest first, each prompt and block once.
+//   redact → block:   at most one redact per block.
+//                     WITH decision_for: EXACT only — decision_for === the
+//                     block's metadata.correlation_id, and only if that block was
+//                     attached. No match → the redact is dropped, never guessed.
+//                     The browser extension stamps both ends already, and the
+//                     desktop agent is being changed to stamp client_event_id =
+//                     block id on its enforcement_block (persisted as
+//                     metadata.correlation_id) and decision_for on its redacts,
+//                     so this exact path covers desktop events too.
+//                     WITHOUT decision_for (older events): the nearest PRECEDING
+//                     attached block on the same machine + service + pattern
+//                     within OUTCOME_WINDOW_MS; else a prompt under the
+//                     block→prompt rule.
+const ENFORCEMENT_MEMBER_KINDS = new Set(["enforcement_block","enforcement_redact"]);
+function attachEnforcement(groups, enforcementEvents) {
+  const out = (groups||[]).map(g => ({ ...g, _enforcement: [] }));
+  const enf = (enforcementEvents||[]).filter(e => e && ENFORCEMENT_MEMBER_KINDS.has(e.event_kind));
+  if (!enf.length || !out.length) return out;
+  const t = e => new Date(e.occurred_at).getTime();
+  const sameSite = (a, b) => a.machine_id === b.machine_id && a.ai_service === b.ai_service;
+
+  // Every prompt member, mapped back to the row it is displayed under.
+  const prompts = [];
+  for (const g of out) for (const m of groupMembers(g)) prompts.push({ m, g });
+  const promptTaken = new Set();
+  const attached = []; // { e, g } for every attached enforcement event
+  const pairToPrompt = (list) => {
+    const cands = [];
+    for (const e of list) for (const p of prompts) {
+      if (!sameSite(e, p.m) || !patternsCompatible(e.pattern_matched, p.m.pattern_matched)) continue;
+      const dt = Math.abs(t(e) - t(p.m));
+      if (dt <= PAIR_WINDOW_MS) cands.push({ dt, e, p });
+    }
+    cands.sort((x,y)=>x.dt-y.dt);
+    const used = new Set();
+    for (const { e, p } of cands) {
+      if (used.has(e.id) || promptTaken.has(p.m.id)) continue;
+      used.add(e.id); promptTaken.add(p.m.id);
+      p.g._enforcement.push(e); attached.push({ e, g: p.g });
+    }
+    return used;
+  };
+
+  pairToPrompt(enf.filter(e => e.event_kind === "enforcement_block"));
+
+  // Earliest first, so when two redacts claim one block the first answer wins.
+  const redacts = enf.filter(e => e.event_kind === "enforcement_redact").sort((a,b)=>t(a)-t(b));
+  const blockHasRedact = new Set(); // one redact per block, at most
+  const giveRedact = (r, a) => {
+    blockHasRedact.add(a.e.id);
+    a.g._enforcement.push(r); attached.push({ e: r, g: a.g });
+  };
+  const refOf = r => {
+    const v = r.metadata?.decision_for;
+    return typeof v === "string" && v ? v : null;
+  };
+
+  // EXACT pass first, so a fuzzy redact below can never take a block that a
+  // redact names by id. A redact WITH a ref is decided here and only here: it
+  // attaches to the block carrying that correlation_id if that block was itself
+  // attached and has no redact yet — otherwise it is dropped. Never guessed.
+  for (const r of redacts) {
+    const ref = refOf(r);
+    if (!ref) continue;
+    const a = attached.find(x => x.e.event_kind === "enforcement_block" && x.e.metadata?.correlation_id === ref);
+    if (a && !blockHasRedact.has(a.e.id)) giveRedact(r, a);
+  }
+
+  // FUZZY — only for redacts with no ref at all (events from clients that never
+  // stamped one): nearest PRECEDING attached block still without a redact, same
+  // machine + service + pattern, within OUTCOME_WINDOW_MS; failing that, a free
+  // prompt under the block→prompt rule.
+  const leftover = [];
+  for (const r of redacts) {
+    if (refOf(r)) continue;
+    let best = null;
+    for (const a of attached) {
+      if (a.e.event_kind !== "enforcement_block" || blockHasRedact.has(a.e.id) || !sameSite(r, a.e)) continue;
+      if (!patternsCompatible(r.pattern_matched, a.e.pattern_matched)) continue;
+      const dt = t(r) - t(a.e);
+      if (dt < 0 || dt > OUTCOME_WINDOW_MS) continue;
+      if (!best || dt < best.dt) best = { dt, a };
+    }
+    if (best) giveRedact(r, best.a); else leftover.push(r);
+  }
+  pairToPrompt(leftover);
+  return out;
 }
 // Prefer the resolved AI platform (e.g. "Gemini in Gmail" / Google) over the raw
 // request host (e.g. "mail.google.com"), which is what the OS monitor records.
 function ServiceCell({ row }) {
   const name = row.platform?.product || row.ai_service || "—";
   const vendor = row.platform?.vendor;
-  return (<><div className="aihub_text_primary">{name}</div>{vendor && <div className="aihub_text_muted">{vendor}</div>}</>);
+  const agent = groupAgentName(row);
+  return (<>
+    <div className="aihub_text_primary">{name}</div>
+    {vendor && <div className="aihub_text_muted">{vendor}</div>}
+    {agent && <div className="aihub_text_muted aihub_dlp_agent_line" title={agent}>Agent: {agent}</div>}
+  </>);
 }
+
+// WHICH governed/blocked agent an event was about. Enforcement events
+// (enforcement_block / enforcement_redact) and file uploads on a host-app
+// surface (Teams hosting many agents) carry `agent_name` / `agent_id` /
+// `agent_scope` / `surface` in their metadata; everything else — and every event
+// written before the attribution existed — carries none, and gets no agent line.
+//
+// Untrusted text: the name comes from whatever the enforcer or extension saw in
+// the page. It is only ever rendered as a React text node, never as HTML.
+function eventMetadata(ev) {
+  if (ev?.metadata && typeof ev.metadata === "object") return ev.metadata;
+  // The /dlp routes attach a parsed `metadata`, but tolerate a row that only has
+  // the stored string rather than silently dropping its attribution.
+  if (typeof ev?.metadata_json === "string") {
+    try { const m = JSON.parse(ev.metadata_json); return m && typeof m === "object" ? m : null; }
+    catch (err) { void err; return null; }
+  }
+  return null;
+}
+function eventAgentName(ev) {
+  const v = eventMetadata(ev)?.agent_name;
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return t ? t.slice(0, 200) : null;
+}
+// A folded row's agent: the first member that names one — prompt members first,
+// then the enforcement events attached by attachEnforcement(). A prompt and the
+// block it triggered are one action about one agent, so there is one to show.
+function groupAgentName(row) {
+  for (const e of [...groupMembers(row), ...enforcementMembers(row)]) { const n = eventAgentName(e); if (n) return n; }
+  return null;
+}
+// The enforcement events attachEnforcement() hung off a row — never counted.
+function enforcementMembers(row) { return row?._enforcement || []; }
 
 // WHO did it. Every activity row carries `user` (the OS username for the desktop
 // agent, the signed-in email for the browser extension) and `hostname`, resolved
@@ -292,25 +548,30 @@ function UserCell({ row }) {
 // members it opens are all near-simultaneous, so time is where a reader looks.
 function GroupToggle({ row, open, onToggle }) {
   const n = (row._children||[]).length;
-  if (!n) return null;
+  // Attached enforcement events are counted separately so the "N events" figure
+  // stays the prompt-only count it always was.
+  const k = enforcementMembers(row).length;
+  if (!n && !k) return null;
   return (
     <button onClick={e=>{e.stopPropagation();onToggle();}}
       style={{display:"inline-flex",alignItems:"center",gap:2,marginTop:3,padding:0,border:"none",background:"none",
         color:"#0044cc",fontSize:11.1,fontWeight:600,cursor:"pointer"}}>
-      {n+1} events {open ? <ChevronDown size={11}/> : <ChevronRight size={11}/>}
+      {n+1} {n ? "events" : "event"}{k ? ` · ${k} enforcement` : ""} {open ? <ChevronDown size={11}/> : <ChevronRight size={11}/>}
     </button>
   );
 }
 // The folded-away members, in the order they happened, so the sequence that
 // produced the outcome is legible: prompt → block → what the person chose.
 function GroupDetail({ row, onView }) {
-  const ms = [...groupMembers(row)].sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
+  // Enforcement members are shown here (they are what name the agent) but are
+  // not in groupMembers(), so no count on the page moves because of them.
+  const ms = [...groupMembers(row), ...enforcementMembers(row)].sort((a,b)=>new Date(a.occurred_at)-new Date(b.occurred_at));
   return (<div style={{padding:"10px 14px"}}>
     <div className="aihub_text_muted" style={{fontSize:12.3,fontWeight:600,marginBottom:6}}>
       {row._exact ? "Events correlated by id" : "Events grouped by time, machine and pattern"}
     </div>
     <table className="aihub_table" style={{fontSize:12.3}}><tbody>
-      {ms.map(e=>(<tr key={e.id}>
+      {ms.map(e=>{ const agent=eventAgentName(e); return (<tr key={e.id}>
         <td style={{whiteSpace:"nowrap"}}>{new Date(e.occurred_at).toLocaleTimeString()}</td>
         <td><Tag text={e.event_kind}/></td>
         <td>{e.metadata?.decision || e.metadata?.mechanism || e.metadata?.blocked_for
@@ -323,11 +584,13 @@ function GroupDetail({ row, onView }) {
               column so the folded-row layout above is untouched, and only
               rendered when a filename exists, so prompt-only blocks look
               exactly as they did. */}
-          {e.metadata?.filename && <> <Mono>{e.metadata.filename}</Mono></>}</td>
+          {e.metadata?.filename && <> <Mono>{e.metadata.filename}</Mono></>}
+          {/* Which agent this member was about — only when the event names one. */}
+          {agent && <div className="aihub_text_muted aihub_dlp_agent_line" title={agent}>Agent: {agent}</div>}</td>
         <td><Mono>{e.pattern_matched||"—"}</Mono></td>
         <td><SeverityBadge sev={sevOf(e)}/></td>
         <td style={{textAlign:"right"}}><ViewBtn has={e.has_content} onClick={()=>onView(e)}/></td>
-      </tr>))}
+      </tr>); })}
     </tbody></table>
   </div>);
 }
@@ -426,6 +689,32 @@ function Mono({ children }) { return <span className="aihub_text_mono">{children
 function Tag({ text, color="#6366f1" }) { return <span style={{display:"inline-block",padding:"2px 8px",borderRadius:6,fontSize:13,fontWeight:600,background:color+"12",color,marginRight:4,marginBottom:2,letterSpacing:"0.02em"}}>{text}</span>; }
 function Loading() { return <div className="aihub_loading"><RefreshCw size={18} className="aihub_spin"/> Loading...</div>; }
 function Err({msg}) { return <div className="aihub_error"><AlertTriangle size={14}/> {msg}</div>; }
+// The note for a tab whose data came back from the server's cache instead of a
+// live read. Deliberately quiet, and deliberately NOT an error: the figures are
+// real, they are just from the moment shown. So it reuses the same muted 13px
+// caption the Overview header already uses for "Data as of …" — the identical
+// statement, only about a snapshot — plus an InfoHint for the why, rather than a
+// banner, a colour or an icon of its own. Renders nothing when the data is live.
+function StaleNote({ meta }) {
+  if (meta?.stale) {
+    const when = absTime(meta.capturedAt);
+    return (<span className="aihub_text_muted" style={{fontSize:13,display:"inline-flex",alignItems:"center",whiteSpace:"nowrap"}}>
+      {when ? `Data as of ${when}` : "Showing cached data"}
+      <InfoHint align="right" text="The live query would have exceeded its response-time budget, so the server answered from its last cached read instead. These figures are real, just from the moment shown — reload shortly for a fresh read."/>
+    </span>);
+  }
+  if (meta?.budgetExceeded) {
+    // Live, current data — just slower than usual, typically because the
+    // server had nothing cached yet to fall back to (e.g. right after a
+    // deploy). Distinct from the stale case: there is no earlier snapshot
+    // moment to name, this IS the fresh read.
+    return (<span className="aihub_text_muted" style={{fontSize:13,display:"inline-flex",alignItems:"center",whiteSpace:"nowrap"}}>
+      Took longer than usual to load
+      <InfoHint align="right" text="This data is current — it just took longer than the normal response budget, typically a first read after a deploy with nothing cached yet. It will be fast again on the next load."/>
+    </span>);
+  }
+  return null;
+}
 function Empty({icon,title,msg}) { return <div className="aihub_empty">{icon}<h4>{title}</h4><p>{msg}</p></div>; }
 /**
  * @param {function} [renderExpanded] - (row) => node. When supplied together with
@@ -456,7 +745,7 @@ function DataTable({ columns, rows, empty, onRow, renderExpanded, isExpanded, pa
   }
 
   return (<div>
-    <div className="aihub_table_wrap"><table className="aihub_table"><thead><tr>{columns.map((c,i)=><th key={i} style={{...(c.right?{textAlign:"right"}:null),...(c.width?{width:c.width}:null)}}>{c.label}{c.hint&&<InfoHint text={c.hint} align={c.right?"right":"left"}/>}</th>)}</tr></thead><tbody>{(!visibleRows.length)?<tr><td colSpan={columns.length} className="aihub_table_empty">{empty||"No data"}</td></tr>:visibleRows.map((r,i)=>{
+    <div className="aihub_table_wrap"><table className="aihub_table"><thead><tr>{columns.map((c,i)=><th key={i} style={{...(c.right?{textAlign:"right"}:null),...(c.width?{width:c.width}:null)}}>{c.label}{c.hint&&<InfoHint text={c.hint} align={c.hintAlign||(c.right?"right":"left")}/>}</th>)}</tr></thead><tbody>{(!visibleRows.length)?<tr><td colSpan={columns.length} className="aihub_table_empty">{empty||"No data"}</td></tr>:visibleRows.map((r,i)=>{
     const open=isExpanded?.(r);
     return (<Fragment key={rowKey(r,i)}>
       <tr onClick={()=>onRow?.(r)} style={{cursor:onRow?"pointer":"default",background:open?"rgba(0,82,224,0.04)":undefined}}>
@@ -917,29 +1206,33 @@ function OverviewView() {
   const [dlpDays,setDlpDays]=useState(30);
   const [warn,setWarn]=useState([]);
   const [asOf,setAsOf]=useState(null);
+  // Null until some leg reports itself cached; see mergeStaleMeta.
+  const [staleMeta,setStaleMeta]=useState(null);
   useEffect(()=>{
-    const soft=(p,label,setter,fallback)=>p.then(setter).catch(()=>{setter(fallback);setWarn(w=>w.includes(label)?w:[...w,label]);});
-    apiFetch("/overview").then(x=>{setD(x);setAsOf(new Date());}).catch(x=>setE(x.message));
-    soft(apiFetch("/registry/summary"),"AI systems registry",setReg,false);
-    soft(apiFetch("/findings?type=mcp_server&latestOnly=true&limit=500"),"MCP servers",setMcp,false);
-    soft(apiFetch("/findings?type=agent_project&latestOnly=true&limit=500"),"agent projects",setProj,false);
+    // soft() now lives at module scope (the other tabs need it too) and takes the
+    // warning setter as its last argument instead of closing over it.
+    const addMeta=m=>setStaleMeta(prev=>mergeStaleMeta(prev,m));
+    tapMeta(apiFetchWithMeta("/overview"),addMeta).then(x=>{setD(x);setAsOf(new Date());}).catch(x=>setE(x.message));
+    soft(tapMeta(apiFetchWithMeta("/registry/summary"),addMeta),"AI systems registry",setReg,false,setWarn);
+    soft(apiFetch("/findings?type=mcp_server&latestOnly=true&limit=500"),"MCP servers",setMcp,false,setWarn);
+    soft(apiFetch("/findings?type=agent_project&latestOnly=true&limit=500"),"agent projects",setProj,false,setWarn);
     // A genuinely new axis for this tile — everything else in the KPI strip
     // is about WHAT tools exist and how risky they are; this is about WHO.
     // Same endpoint Risk Scores' own summary cards read.
-    soft(apiFetch("/risk-scores/summary"),"employee risk scores",setRiskSummary,false);
+    soft(tapMeta(apiFetchWithMeta("/risk-scores/summary"),addMeta),"employee risk scores",setRiskSummary,false,setWarn);
     // adminJson, not apiFetch: /access-requests is behind requireAdminAuth, so
     // apiFetch's credential-less GET now 401s and this tile would read "0
     // pending" forever. soft() still handles the no-token build — the count
     // falls back and the warning strip names "access requests" — but with a
     // token the number is real again.
-    soft(adminJson("/access-requests"),"access requests",setReqs,false);
-    soft(apiFetch("/dlp?severity=critical,high&limit=1"),"recent detections",setHiEv,false);
+    soft(adminJson("/access-requests"),"access requests",setReqs,false,setWarn);
+    soft(tapMeta(apiFetchWithMeta("/dlp?severity=critical,high&limit=1"),addMeta),"recent detections",setHiEv,false,setWarn);
     // Real per-day counts, zero-filled server-side — replaces the old lifetime
     // total (which needed pulling up to 10,000 raw events/files client-side
     // just to produce one number) with the same severity definition, bucketed
     // by day instead of summed.
     // Exact same merge the Inventory page does: registry + deduped platform catalog
-    Promise.all([apiFetch("/registry"),apiFetch("/ai-platforms").catch(()=>[])]).then(([regList,plats])=>{
+    Promise.all([tapMeta(apiFetchWithMeta("/registry"),addMeta),apiFetch("/ai-platforms").catch(()=>[])]).then(([regList,plats])=>{
       const seen=new Set();
       const allRows=[...(regList||[])];
       for(const r of allRows){if(r.name) seen.add(String(r.name).toLowerCase()); if(r.source_host) seen.add(String(r.source_host).toLowerCase());}
@@ -947,6 +1240,12 @@ function OverviewView() {
       const blockedHosts=new Set((Array.isArray(plats)?plats:[]).filter(p=>p.blocked).map(p=>p.host));
       const platByHost=new Map((Array.isArray(plats)?plats:[]).map(p=>[p.host,p]));
       for(const r of allRows){
+        // NEVER for an individual AGENT — see the identical guard on the
+        // Inventory merge for the full reasoning. A host-level block cannot stop
+        // a named agent, and agents share broad host lists, so without this one
+        // blocked host turned every agent into a "Blocked" row here and in the
+        // Blocked count on this page.
+        if(r.category==='autonomous-agent'||r.source==='governance') continue;
         const hosts=r.matched_hosts||[];
         let isBlocked=hosts.some(h=>blockedHosts.has(h));
         if(!isBlocked&&!hosts.length){
@@ -978,9 +1277,8 @@ function OverviewView() {
   // response from an earlier selection that lands late is dropped.
   useEffect(()=>{
     let live=true;
-    apiFetch(`/dlp/trend?days=${dlpDays}`)
-      .then(v=>{if(live) setDlpTrend(v);})
-      .catch(()=>{if(!live) return; setDlpTrend(false); setWarn(w=>w.includes("DLP event trend")?w:[...w,"DLP event trend"]);});
+    const addMeta=m=>setStaleMeta(prev=>mergeStaleMeta(prev,m));
+    soft(tapMeta(apiFetchWithMeta(`/dlp/trend?days=${dlpDays}`),addMeta),"DLP event trend",v=>{if(live) setDlpTrend(v);},false,setWarn);
     return ()=>{live=false;};
   },[dlpDays]);
   if(e) return <Err msg={e}/>;
@@ -1048,8 +1346,12 @@ function OverviewView() {
   ];
 
   return (<div>
+    {/* When a leg came from cache, the wall-clock "just now" would be a lie —
+        the snapshot's own capture time replaces it. */}
     <SectionHeader title="Overview" hint="Every AI tool, agent and activity across your organization — click any card to see the full detail."
-      action={asOf&&<span className="aihub_text_muted" style={{fontSize:13}}>Data as of {relTime(asOf)}</span>}/>
+      action={staleMeta?.stale
+        ? <StaleNote meta={staleMeta}/>
+        : asOf&&<span className="aihub_text_muted" style={{fontSize:13}}>Data as of {relTime(asOf)}</span>}/>
 
     {warn.length>0 && <div className="aihub_ov_warn"><AlertTriangle size={14}/> Could not load {warn.join(", ")}. Those panels may be incomplete.</div>}
 
@@ -1387,6 +1689,7 @@ function DLPView() {
   const [section,setSection]=useState(""); // "", "prompts", "files", "services"
   const [kind,setKind]=useState("");       // "" = both, else an EVENT_SURFACE_KINDS key
   const [openRows,setOpenRows]=useState(()=>new Set()); // grouped rows expanded to show their members
+  const [staleMeta,setStaleMeta]=useState(null);
   const toggleRow=id=>setOpenRows(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;});
   useEffect(()=>{
     // This whole page is high/critical-only (see the hint below) — fetch that
@@ -1396,7 +1699,17 @@ function DLPView() {
     // a busy instance is dominated by low-severity noise and silently drops
     // real high/critical events (and everything derived from them below) that
     // are older than that window.
-    Promise.all([apiFetch("/dlp/summary").catch(()=>null),apiFetch("/dlp?severity=high,critical&limit=2000").catch(()=>[]),apiFetch("/dlp/files?limit=5000").catch(()=>[])]).then(([s,ev,f])=>{setS(s);setEv(ev);setF(f)}).catch(x=>setE(x.message));
+    //
+    // All three legs carry their staleness meta to the header note: each can be
+    // served from cache independently, and the note dates itself at the oldest
+    // snapshot among them (mergeStaleMeta), so the timestamp is never newer than
+    // the oldest thing on screen. The per-leg .catch() fallbacks are unchanged.
+    const addMeta=m=>setStaleMeta(prev=>mergeStaleMeta(prev,m));
+    Promise.all([
+      tapMeta(apiFetchWithMeta("/dlp/summary"),addMeta).catch(()=>null),
+      tapMeta(apiFetchWithMeta("/dlp?severity=high,critical&limit=2000"),addMeta).catch(()=>[]),
+      tapMeta(apiFetchWithMeta("/dlp/files?limit=5000"),addMeta).catch(()=>[]),
+    ]).then(([s,ev,f])=>{setS(s);setEv(ev);setF(f)}).catch(x=>setE(x.message));
   },[]);
   if(e) return <Err msg={e}/>; if(!events) return <Loading/>;
 
@@ -1412,7 +1725,6 @@ function DLPView() {
   const PROMPT_KINDS=new Set(["prompt_paste","prompt_submit","prompt_typed"]);
   const allPrompts=(events||[]).filter(ev=>PROMPT_KINDS.has(ev.event_kind)).filter(inKind);
   const allFiles=(files||[]).filter(inKind);
-  const highCrit=allPrompts.filter(ev=>isHiCrit(ev.secret_class||ev.highest_severity)).length + allFiles.filter(f=>isHiCrit(f.severity||f.highest_severity)).length;
   const serviceCount=(summary?.byService||[]).length;
   const sourceTone={browser_extension:"#0052e0",desktop_hook:"#8b5cf6",os_monitor:"#f59e0b"};
   const toggle=k=>setSection(section===k?"":k);
@@ -1429,7 +1741,19 @@ function DLPView() {
   // Grouped AFTER the severity narrowing, so a row never folds in a member the
   // table excludes — the expanded members are always exactly the rows shown, and
   // the "N events" count never disagrees with the table.
-  const promptGroups=groupDlpEvents(promptRows);
+  // Block/redact events join as members ONLY (see attachEnforcement): they add
+  // the agent attribution and appear in the expanded detail, but no row, count
+  // or card below includes them — those all still derive from promptRows. Same
+  // kind scope as the prompts; no extra severity narrowing, because the fetch is
+  // already high/critical and a block's own severity field is not what makes it
+  // belong to a high/critical prompt.
+  const enforcementRows=(events||[]).filter(ev=>ENFORCEMENT_MEMBER_KINDS.has(ev.event_kind)).filter(inKind);
+  const promptGroups=attachEnforcement(groupDlpEvents(promptRows),enforcementRows);
+  const shownFileRows=fileRows;
+  // Grouping partitions promptRows, so summing members equals promptRows.length
+  // — the cards below always count what the tables show.
+  const shownPromptEvents=promptGroups.reduce((n,g)=>n+groupMembers(g).length,0);
+  const highCrit=shownPromptEvents+shownFileRows.length;
 
   return (<div>
     {/* The severity scope moves into the hint now that it is fixed — with no
@@ -1439,7 +1763,10 @@ function DLPView() {
         is governed, so an admin should not expect ordinary mail or tickets here.
         Without saying so, an empty table reads as a broken agent. */}
     <SectionHeader title="AI Activity (DLP)" hint="Prompts and file uploads captured by the OS monitor and browser extension. High and critical severity only. On apps where AI is one panel, only the AI panel is governed."
-      action={section?<button className="aihub_filter_btn" onClick={()=>setSection("")}>Clear selection</button>:null}/>
+      action={<span style={{display:"inline-flex",alignItems:"center",gap:10}}>
+        <StaleNote meta={staleMeta}/>
+        {section?<button className="aihub_filter_btn" onClick={()=>setSection("")}>Clear selection</button>:null}
+      </span>}/>
 
     {/* Event Kind filter (surface_kind-based split between AI-service traffic and
         desktop-guardrail data egress) is deliberately not rendered yet: nothing on
@@ -1452,8 +1779,8 @@ function DLPView() {
 
     <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(4,1fr)"}}>
       <StatCard icon={<AlertTriangle size={18}/>} label="High / Critical" value={highCrit} hint="Total Flagged" color="#ef4444"/>
-      <StatCard icon={<MessageSquare size={18}/>} label="Prompt Events" value={promptRows.length} hint="High & Critical" color="#0052e0" onClick={()=>toggle("prompts")}/>
-      <StatCard icon={<FileText size={18}/>} label="File Uploads" value={fileRows.length} hint="High & Critical" color="#f59e0b" onClick={()=>toggle("files")}/>
+      <StatCard icon={<MessageSquare size={18}/>} label="Prompt Events" value={shownPromptEvents} hint="High & Critical" color="#0052e0" onClick={()=>toggle("prompts")}/>
+      <StatCard icon={<FileText size={18}/>} label="File Uploads" value={shownFileRows.length} hint="High & Critical" color="#f59e0b" onClick={()=>toggle("files")}/>
       <StatCard icon={<Server size={18}/>} label="AI Services" value={serviceCount} hint="Breakdown" color="#8b5cf6" onClick={()=>toggle("services")}/>
     </div>
 
@@ -1473,7 +1800,7 @@ function DLPView() {
           triggered are one action. Both counts are stated so the difference from
           the "Prompt events" card above is visible rather than mysterious. */}
       <SectionHeader title="Sensitive Prompts"
-        hint={`${promptGroups.length} actions from ${promptRows.length} events · high & critical severity only`}/>
+        hint={`${promptGroups.length} actions from ${shownPromptEvents} events · high & critical severity only`}/>
       <DataTable onRow={r=>{ const c=contentMember(r); if(c) setPreview(c); }}
         isExpanded={r=>openRows.has(r.id)}
         renderExpanded={r=><GroupDetail row={r} onView={setPreview}/>}
@@ -1498,7 +1825,7 @@ function DLPView() {
         {label:"File Type",hint:"The kind of file detected — document, image, spreadsheet, etc.",render:r=><Tag text={r.file_class||"—"}/>},
         {label:"Severity",hint:"The DLP severity assigned to this upload's content (low, medium, high, critical).",render:r=><SeverityBadge sev={r.severity||r.highest_severity}/>},
         {label:"",render:r=><ViewBtn has={r.has_content} onClick={()=>setPreview(r)}/>,right:true},
-      ]} rows={fileRows} empty="No file upload events matching this filter." paginate={25}/>
+      ]} rows={shownFileRows} empty="No file upload events matching this filter." paginate={25}/>
     </div>}
 
     {preview && <ContentDrawer eventId={preview.id} meta={preview} onClose={()=>setPreview(null)}/>}
@@ -1514,10 +1841,16 @@ function PlatformsView() {
 
   // Admin toggle: allow ⇄ block a platform. A blocked platform is enforced by
   // the browser extension — users can't send any prompt to that host.
+  // The PATCH below is requireAdminAuth — with no credential in this build the
+  // Access buttons render disabled (status still shown) instead of 401-ing.
+  const noCred=!hasAdminCredential();
   async function toggleBlocked(r){
     const next=!r.blocked; setBusy(r.host);
     try{
-      const res=await fetch(`${API}/ai-platforms/${encodeURIComponent(r.host)}`,{method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({blocked:next})});
+      // PATCH is behind requireAdminAuth on the server (it can cascade a block
+      // across every Microsoft 365 Copilot host), so it carries the credential;
+      // the GET above stays open, same as the extension's own poll.
+      const res=await fetch(`${API}/ai-platforms/${encodeURIComponent(r.host)}`,adminInit({method:"PATCH",headers:{"content-type":"application/json"},body:JSON.stringify({blocked:next})}));
       if(!res.ok) throw new Error(`HTTP ${res.status}`);
       const updated=await res.json();
       setRows(prev=>prev.map(x=>x.host===r.host?{...x,blocked:updated.blocked}:x));
@@ -1554,10 +1887,10 @@ function PlatformsView() {
         {label:"Sandbox",hint:"Where the tool actually executes: local runs on the user's own machine, remote runs in the vendor's cloud sandbox (code and data leave the endpoint), mixed is both.",render:r=>r.sandbox?<Badge text={slugLabel(r.sandbox)}/>:<span className="aihub_text_muted">—</span>},
         {label:"Surface",hint:"Which channel this platform's policy (block, capture mode) is enforced on. Moving a host off 'browser'/'all' drops it from the list the browser extension polls.",render:r=>r.surface?<Badge text={surfaceLabel(r.surface)} color={surfaceC[r.surface]||"#9ca3af"}/>:<span className="aihub_text_muted">—</span>},
         {label:"Governed",hint:"Whether this host is actively enrolled for policy enforcement. 'off' means it's cataloged but its Surface/Capture settings aren't applied to any endpoint yet.",render:r=><Badge text={r.governed?"on":"off"} color={r.governed?"#22c55e":"#9ca3af"}/>,right:true},
-        {label:"Access",hint:"Click to toggle whether the browser extension allows or blocks prompts to this host.",render:r=>(
-          <button onClick={()=>toggleBlocked(r)} disabled={busy===r.host} title={r.blocked?"Click to allow":"Click to block (users can't send prompts)"}
-            style={{cursor:busy===r.host?"default":"pointer",padding:"3px 10px",borderRadius:6,fontSize:14.7,fontWeight:600,fontFamily:"inherit",
-              border:`1px solid ${r.blocked?"#fca5a5":"#bbf7d0"}`,background:r.blocked?"#fef2f2":"#f0fdf4",color:r.blocked?"#dc2626":"#16a34a",opacity:busy===r.host?0.6:1}}>
+        {label:"Access",hint:noCred?`${ADMIN_CREDENTIAL_HINT}. Shows whether the browser extension allows or blocks prompts to this host.`:"Click to toggle whether the browser extension allows or blocks prompts to this host.",render:r=>(
+          <button onClick={()=>toggleBlocked(r)} disabled={busy===r.host||noCred} title={noCred?ADMIN_CREDENTIAL_HINT:r.blocked?"Click to allow":"Click to block (users can't send prompts)"}
+            style={{cursor:noCred?"not-allowed":busy===r.host?"default":"pointer",padding:"3px 10px",borderRadius:6,fontSize:14.7,fontWeight:600,fontFamily:"inherit",
+              border:`1px solid ${r.blocked?"#fca5a5":"#bbf7d0"}`,background:r.blocked?"#fef2f2":"#f0fdf4",color:r.blocked?"#dc2626":"#16a34a",opacity:noCred?0.5:busy===r.host?0.6:1}}>
             {busy===r.host?"…":r.blocked?"Blocked":"Allowed"}
           </button>
         )},
@@ -1702,16 +2035,28 @@ const REPLAY_CONTROLS_H=88;
 // the server instead, and admin OAuth replaces both.
 export function adminToken(){ return import.meta.env.VITE_ADMIN_TOKEN||""; }
 
-async function adminFetch(path, init) {
+// The credential itself, as a fetch-init decorator.
+//
+// Split out of adminFetch because adminFetch builds its URL as `${API}${path}`
+// and the admin WRITES added to this seam do not live under `${API}`:
+// REGISTRY_API is /api/v1/registry and LIFECYCLE_API is /api/lifecycle. They
+// compose their own URL and take the credential this way, so there is still ONE
+// definition of what "the admin credential" means in this file rather than a
+// second header literal per call site.
+export function adminInit(init) {
   const token=adminToken();
-  const r = await fetch(`${API}${path}`, {
+  return {
     ...init,
     credentials:"same-origin",
     headers:{
       ...(token?{ Authorization:`Bearer ${token}` }:null),
       ...(init?.headers||{}),
     },
-  });
+  };
+}
+
+async function adminFetch(path, init) {
+  const r = await fetch(`${API}${path}`, adminInit(init));
   // Callers read the body with r.json(); alias it there, GETs only.
   if (r.ok && (!init?.method || init.method === "GET")) {
     const json = r.json.bind(r);
@@ -2876,13 +3221,18 @@ function CopilotReadinessView() {
 // Sub-tabs: Overview, Rules, Endpoints, Routing Log
 
 const ROUTING_API = "/api/v1/routing";
+// Same contract as before (parsed body, throws the bare status code on non-2xx),
+// now issued through apiRequest so this wrapper gets the response-body-on-error
+// and header plumbing instead of a second, diverging copy of it.
 async function routingFetch(path, opts) {
-  const r = await fetch(`${ROUTING_API}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...opts,
-  });
-  if (!r.ok) throw new Error(`${r.status}`);
-  return r.json();
+  const { data } = await apiRequest(path, { headers: { "Content-Type": "application/json" }, ...opts }, ROUTING_API);
+  return data;
+}
+// GET-only variant: { data, stale, capturedAt, budgetExceeded }, the routing
+// equivalent of apiFetchWithMeta. The writes keep using routingFetch.
+async function routingFetchWithMeta(path) {
+  const { data, res } = await apiRequest(path, { headers: { "Content-Type": "application/json" } }, ROUTING_API);
+  return { data, ...readResponseMeta(res) };
 }
 
 const SEVERITY_OPTIONS = ["critical","high","moderate","low"];
@@ -3027,17 +3377,32 @@ function ModelRoutingView() {
   const [analytics,setAnalytics]=useState(null);
   const [routingLog,setRoutingLog]=useState(null);
   const [err,setErr]=useState(null);
+  const [warn,setWarn]=useState([]);
+  const [staleMeta,setStaleMeta]=useState(null);
   const [showRuleForm,setShowRuleForm]=useState(false);
   const [editRule,setEditRule]=useState(null);
 
+  // Four independent legs. This was one bare Promise.all, so a single rejected
+  // leg — an analytics rollup that overran its budget, say — rejected the whole
+  // thing and rendered the tab as nothing but an error code, throwing away the
+  // rules and endpoints that had loaded perfectly well. Each leg is soft()ed
+  // now, with `false` as the "this endpoint failed" sentinel; the three
+  // secondary ones already render defensively (`analytics?.x||0`,
+  // `endpoints||[]`, `routingLog||[]`) so false degrades them to empty, and the
+  // strip below names what did not load instead of leaving that silent.
   const loadAll=()=>{
-    Promise.all([
-      routingFetch("/rules"),
-      routingFetch("/endpoints"),
-      routingFetch("/analytics"),
-      routingFetch("/log?limit=50"),
-    ]).then(([r,e,a,l])=>{ setRules(r); setEndpoints(e); setAnalytics(a); setRoutingLog(l); })
-      .catch(x=>setErr(x.message));
+    // loadAll runs again after every rule/endpoint write, so last run's
+    // failures and staleness must not survive into a successful refetch.
+    setErr(null); setWarn([]); setStaleMeta(null);
+    const addMeta=m=>setStaleMeta(prev=>mergeStaleMeta(prev,m));
+    // The rules table is what this tab IS, so its failure stays page-level —
+    // routed to `err` through soft()'s fallback rather than rendering an empty
+    // "No routing rules yet" table, which would read as "nothing is configured".
+    soft(tapMeta(routingFetchWithMeta("/rules"),addMeta),"routing rules",
+      r=>{ if(r===false) setErr("Could not load routing rules. Reload to try again."); else setRules(r); },false,setWarn);
+    soft(tapMeta(routingFetchWithMeta("/endpoints"),addMeta),"endpoints",setEndpoints,false,setWarn);
+    soft(tapMeta(routingFetchWithMeta("/analytics"),addMeta),"routing analytics",setAnalytics,false,setWarn);
+    soft(tapMeta(routingFetchWithMeta("/log?limit=50"),addMeta),"the routing log",setRoutingLog,false,setWarn);
   };
   useEffect(()=>{ loadAll(); },[]);
 
@@ -3066,7 +3431,10 @@ function ModelRoutingView() {
   ];
 
   return (<div>
-    <SectionHeader title="Intelligent Model Routing" hint="Automatically route AI requests to the optimal model based on cost, sensitivity, and complexity"/>
+    <SectionHeader title="Intelligent Model Routing" hint="Automatically route AI requests to the optimal model based on cost, sensitivity, and complexity"
+      action={<StaleNote meta={staleMeta}/>}/>
+
+    {warn.length>0 && <div className="aihub_ov_warn"><AlertTriangle size={14}/> Could not load {warn.join(", ")}. Those panels may be incomplete.</div>}
 
     {/* Stat Cards */}
     <div className="aihub_stat_grid">
@@ -3310,17 +3678,29 @@ function RiskScoreView() {
   const [scores,setScores]=useState(null);
   const [summary,setSummary]=useState(null);
   const [err,setErr]=useState(null);
+  const [warn,setWarn]=useState([]);
+  const [staleMeta,setStaleMeta]=useState(null);
   const [computing,setComputing]=useState(false);
   const [selected,setSelected]=useState(null);      // id of the open row, or null
   const [details,setDetails]=useState({});          // profileId → detail, cached
   const [loadingId,setLoadingId]=useState(null);
 
+  // Two independent legs. These were one bare Promise.all, which meant a failed
+  // /risk-scores/summary — five stat cards — took the whole employee table down
+  // with it and left the tab showing only a status code. soft() keeps each one's
+  // failure to its own panel: the summary cards are already rendered behind
+  // `{summary && …}`, so the `false` sentinel simply omits them.
   const loadAll=()=>{
-    Promise.all([
-      apiFetch("/risk-scores"),
-      apiFetch("/risk-scores/summary"),
-    ]).then(([s,sum])=>{ setScores(s); setSummary(sum); })
-      .catch(x=>setErr(x.message));
+    // loadAll runs again after "Compute Scores", so last run's failures and
+    // staleness must not survive into a successful refetch.
+    setErr(null); setWarn([]); setStaleMeta(null);
+    const addMeta=m=>setStaleMeta(prev=>mergeStaleMeta(prev,m));
+    // The score table is what this tab IS, so its failure stays page-level
+    // rather than rendering an empty table — "no employees are at risk" is a
+    // claim this screen must never make by accident.
+    soft(tapMeta(apiFetchWithMeta("/risk-scores"),addMeta),"employee risk scores",
+      s=>{ if(s===false) setErr("Could not load employee risk scores. Reload to try again."); else setScores(s); },false,setWarn);
+    soft(tapMeta(apiFetchWithMeta("/risk-scores/summary"),addMeta),"the summary cards",setSummary,false,setWarn);
   };
   useEffect(()=>{ loadAll(); },[]);
 
@@ -3374,10 +3754,15 @@ function RiskScoreView() {
 
   return (<div>
     <SectionHeader title="AI Risk Scores" hint="Per-employee AI safety score — 0 (safe) to 100 (critical)"
-      action={<button onClick={compute} disabled={computing} style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:15.2,fontWeight:600,opacity:computing?0.5:1}}>
-        <RefreshCw size={14} className={computing?"aihub_spin":""}/> {computing?"Computing...":"Compute Scores"}
-      </button>}
+      action={<span style={{display:"inline-flex",alignItems:"center",gap:10}}>
+        <StaleNote meta={staleMeta}/>
+        <button onClick={compute} disabled={computing} style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:15.2,fontWeight:600,opacity:computing?0.5:1}}>
+          <RefreshCw size={14} className={computing?"aihub_spin":""}/> {computing?"Computing...":"Compute Scores"}
+        </button>
+      </span>}
     />
+
+    {warn.length>0 && <div className="aihub_ov_warn"><AlertTriangle size={14}/> Could not load {warn.join(", ")}. Those panels may be incomplete.</div>}
 
     {/* Summary Cards */}
     {summary && <div className="aihub_stat_grid">
@@ -3401,14 +3786,14 @@ function RiskScoreView() {
         <h4 style={{margin:"0 0 12px",fontSize:15.8,fontWeight:700}}>Employees by Risk</h4>
         <DataTable
           columns={[
-            {label:"Employee",hint:"Click a row to expand its score breakdown and recent events.",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
+            {label:"Employee",hint:"The employee this risk score belongs to.",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
               <ChevronRight size={13} style={{color:"#9ca3af",flexShrink:0,transition:"transform .15s",transform:selected===r.id?"rotate(90deg)":"none"}}/>
               <div className="aihub_text_primary">{splitConcatenatedName(r.display_name)||r.email||r.hostname||"—"}</div>
             </div>},
             {label:"Score",hint:"A 0–100 score built from DLP violations, overridden blocks, shadow AI tool use, data sensitivity, and usage-volume anomalies. Low 0–30, Medium 31–60, High/Critical 61–100.",render:r=><RiskLevelBadge level={r.risk_level} score={r.risk_score}/>},
             {label:"",render:r=><div style={{minWidth:120}}><ScoreBar score={r.risk_score}/></div>},
             {label:"Sources",hint:"Which data feeds contributed to this employee's score — DLP events, tool usage, violation history.",render:r=><div style={{display:"flex",gap:3,flexWrap:"wrap"}}>{(r.sources||[]).map(s=><Tag key={s} text={slugLabel(s)}/>)}</div>},
-            {label:"Computed",hint:"When this score was last calculated. Click 'Compute Scores' above to refresh it.",render:r=>relTime(r.risk_computed_at)},
+            {label:"Computed",hintAlign:"right",hint:"When this score was last calculated. Click 'Compute Scores' above to refresh it.",render:r=>relTime(r.risk_computed_at)},
           ]}
           rows={realScores}
           onRow={r=>toggleRow(r.id)}
@@ -3612,10 +3997,303 @@ function DlpMonitorBadge() {
   </span>;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// WHERE A BLOCK ACTUALLY ENFORCES
+//
+// A blocked agent shows one "Blocked" pill today, and that pill says nothing
+// about whether ANY endpoint can act on the decision. The server now annotates
+// each /lifecycle/blocked-agents row with `unenforceable` + `unenforceable_reason`
+// (server/src/lib/agent-platforms.js), which answers "does any surface at all
+// know this platform" — a single boolean. This map answers the next question,
+// the one an admin actually asks: WHICH surface, browser or desktop?
+//
+// HAND-MAINTAINED, ON PURPOSE — same rationale as the server's own curated
+// constants (server/src/lib/ai-surfaces.js MICROSOFT_WORKSPACE_COPILOT_HOSTS and
+// server/src/lib/agent-platforms.js ENFORCEABLE_PLATFORMS). The two artifacts
+// this describes — the extension's host-pattern map and the desktop agent's
+// process/surface catalog — are SHIPPED, VERSIONED files on the endpoint, not
+// modules this SPA can import or read at runtime. Deriving from them is
+// impossible here and would be wrong anyway: widening what the console TELLS AN
+// ADMIN is enforced should be a code review, not a side effect of an endpoint
+// release that half the fleet has not installed yet.
+//
+// KEEPING IT HONEST IS A HUMAN JOB. When a platform gains (or loses) coverage,
+// update it here. Verified read-only against, on 2026-09-22:
+//   browser-extension/lib/blocked-agents.js   PLATFORM_HOST_PATTERNS
+//   agent/src/os_monitor/ai-processes.js      PLATFORM_PROCS, AGENT_SURFACES
+//                                             (an agent-scoped row narrows to one
+//                                             named agent ONLY through a surface
+//                                             whose enforce AND verified are true)
+//   agent/src/os_monitor/enforcer-win.ps1     its C# copy of PLATFORM_PROCS
+//
+// THREE STATES, not two, because two would make several rows a lie. "Partial" is
+// for a platform that genuinely enforces on that surface but not everywhere the
+// admin would assume — e.g. a Copilot Studio agent is stopped inside the M365
+// Copilot app and inside Teams, but the Word/Excel/PowerPoint Copilot pane ships
+// enforce:false/verified:false pending its own live pass, so a send made there
+// goes through. Collapsing that to ✓ overstates the block; collapsing it to ✗
+// tells an admin a working block is broken. Both are governance failures.
+const COVER_YES = "yes";
+const COVER_PARTIAL = "partial";
+const COVER_NO = "no";
+
+const AGENT_PLATFORM_ENFORCEMENT = Object.freeze({
+  // ── Microsoft 365 per-agent platforms ────────────────────────────────────
+  copilot_studio: {
+    label: "Copilot Studio agent", m365: true, perAgent: true,
+    browser: COVER_YES,
+    browserNote: "Host patterns cover the whole Microsoft suite; the named agent is matched from the page title/header. Real, but best-effort DOM matching.",
+    desktop: COVER_PARTIAL,
+    desktopNote: "Stopped in the Microsoft 365 Copilot app and in Teams (both live-verified). The Word/Excel/PowerPoint/OneNote Copilot pane is catalogued but not yet armed, so a send made there is not stopped.",
+  },
+  personal_agent: {
+    label: "Personal agent", m365: true, perAgent: true,
+    browser: COVER_YES,
+    browserNote: "Host patterns cover the whole Microsoft suite; the named agent is matched from the page title/header. Real, but best-effort DOM matching.",
+    desktop: COVER_PARTIAL,
+    desktopNote: "Stopped in the Microsoft 365 Copilot app and in Teams (both live-verified). The Office Copilot pane is catalogued but not yet armed.",
+  },
+  sharepoint_embedded: {
+    label: "SharePoint-embedded agent", m365: true, perAgent: true,
+    browser: COVER_YES,
+    browserNote: "Host patterns cover sharepoint.com and the rest of the Microsoft suite; the named agent is matched from the page title/header.",
+    desktop: COVER_PARTIAL,
+    desktopNote: "Stopped in the Microsoft 365 Copilot app only. The Office Copilot pane is catalogued but not yet armed, and neither the consumer Copilot build nor Teams is mapped for this platform.",
+  },
+  teams_chat_agent: {
+    label: "Teams chat agent", m365: true, perAgent: true,
+    browser: COVER_YES,
+    browserNote: "Matched on teams.microsoft.com, with the agent read from the conversation header.",
+    desktop: COVER_YES,
+    desktopNote: "Stopped in the Teams desktop client — the agent is read from the window title, live-verified 2026-08-30. Teams is never blocked as a whole app: if the open conversation cannot be identified, nothing is blocked.",
+  },
+  teams_app: {
+    label: "Teams app", m365: true, perAgent: true,
+    browser: COVER_YES,
+    browserNote: "Host patterns cover the Microsoft suite; the named agent is matched from the page title/header.",
+    desktop: COVER_NO,
+    desktopNote: "The desktop enforcer has no platform→process entry for teams_app, so a block stored under it matches no process on Windows.",
+  },
+  isv_store: {
+    label: "ISV store agent", m365: true, perAgent: true,
+    browser: COVER_YES,
+    browserNote: "Host patterns cover the Microsoft suite; the named agent is matched from the page title/header.",
+    desktop: COVER_NO,
+    desktopNote: "The desktop enforcer has no platform→process entry for isv_store, so a block stored under it matches no process on Windows.",
+  },
+
+  // ── Non-Microsoft platforms already enforceable today ─────────────────────
+  openai_assistant: {
+    label: "OpenAI assistant", m365: false, perAgent: true,
+    browser: COVER_YES, browserNote: "Matched on chatgpt.com / chat.openai.com.",
+    desktop: COVER_PARTIAL,
+    desktopNote: "The ChatGPT desktop app has no per-agent read, so the block falls back to the whole app rather than narrowing to this one assistant.",
+  },
+  custom_gpt: {
+    label: "Custom GPT", m365: false, perAgent: true,
+    browser: COVER_YES, browserNote: "Matched on chatgpt.com / chat.openai.com.",
+    desktop: COVER_PARTIAL,
+    desktopNote: "The ChatGPT desktop app has no per-agent read, so the block falls back to the whole app rather than narrowing to this one GPT.",
+  },
+  claude_ai_project: {
+    label: "Claude project", m365: false, perAgent: true,
+    browser: COVER_YES, browserNote: "Matched on claude.ai.",
+    desktop: COVER_PARTIAL,
+    desktopNote: "Claude Desktop has no per-agent read, so the block falls back to the whole app rather than narrowing to this one project.",
+  },
+  gemini: {
+    label: "Gemini", m365: false, perAgent: true,
+    browser: COVER_YES, browserNote: "Matched on gemini.google.com / aistudio.google.com.",
+    desktop: COVER_PARTIAL,
+    desktopNote: "The Gemini desktop app has no per-agent read, so the block falls back to the whole app.",
+  },
+  vertex_ai: {
+    label: "Vertex AI agent", m365: false, perAgent: true,
+    browser: COVER_YES, browserNote: "Matched on console.cloud.google.com.",
+    desktop: COVER_PARTIAL,
+    desktopNote: "Mapped to the Gemini desktop app, which has no per-agent read, so the block falls back to the whole app.",
+  },
+  gemini_enterprise: {
+    label: "Gemini Enterprise agent", m365: false, perAgent: true,
+    browser: COVER_YES, browserNote: "Matched on gemini.google.com and Discovery Engine hosts.",
+    desktop: COVER_NO,
+    desktopNote: "No platform→process entry on the desktop enforcer — browser only.",
+  },
+  azure_foundry: {
+    label: "Azure AI Foundry agent", m365: false, perAgent: true,
+    browser: COVER_YES, browserNote: "Matched on portal.azure.com / ai.azure.com.",
+    desktop: COVER_NO,
+    desktopNote: "No platform→process entry on the desktop enforcer — browser only.",
+  },
+
+  // ── Product-level ids, NOT per-agent block targets ────────────────────────
+  // The server counts these as enforceable (they name a product the endpoints do
+  // stop), but neither enforcer resolves them from a PER-AGENT blocklist row:
+  // the extension has no host pattern keyed on them and the desktop enforcer has
+  // no platform→process entry. They enforce through the host/platform block path
+  // instead. Listed rather than omitted so a row carrying one gets this
+  // explanation instead of the "not in the coverage map" fallback.
+  m365_copilot: {
+    label: "Microsoft 365 Copilot (product)", m365: true, perAgent: false,
+    browser: COVER_NO,
+    browserNote: "No host pattern is keyed on this id — block the host from the platform catalog instead.",
+    desktop: COVER_PARTIAL,
+    desktopNote: "The M365 Copilot app IS enforced on the desktop, but through a host/platform block, not through a per-agent row stored under this id.",
+  },
+  teams_desktop: {
+    label: "Microsoft Teams (product)", m365: true, perAgent: false,
+    browser: COVER_NO,
+    browserNote: "No host pattern is keyed on this id — block the host from the platform catalog instead.",
+    desktop: COVER_PARTIAL,
+    desktopNote: "The Teams client IS enforced on the desktop, but through a host/platform block, not through a per-agent row stored under this id.",
+  },
+});
+
+// Outlook is covered by NOTHING today, on any platform: the desktop enforcer
+// deliberately excludes the Outlook processes (a mail client is an egress
+// surface, and its own surfaces ship unarmed), and the browser side has never
+// had a verified agent read inside Outlook web. Said once, on every blocked row,
+// rather than per platform — it is a property of the app, not of the platform id.
+const OUTLOOK_COVERAGE_NOTE = "Outlook is not covered on any surface yet — an agent used from inside Outlook is not stopped there, whatever this row says.";
+
+// The platform choices offered when an admin blocks an agent BY NAME. Derived
+// from the map above rather than being a second list that can drift from it:
+// anything we cannot describe the coverage of has no business being offered as a
+// block target, and the product-level ids (perAgent:false) are excluded because
+// a per-agent row stored under one enforces nowhere.
+const BLOCKABLE_AGENT_PLATFORMS = Object.entries(AGENT_PLATFORM_ENFORCEMENT)
+  .filter(([,v])=>v.perAgent)
+  .map(([value,v])=>({ value, label:v.label, m365:v.m365 }));
+
+// How a coverage state renders. Symbol AND word — a bare ✓/✗ is unreadable to a
+// screen reader and ambiguous in a screenshot.
+const COVERAGE_STYLE = {
+  [COVER_YES]:     { sym:"✓", word:"enforced",     color:"#16a34a" },
+  [COVER_PARTIAL]: { sym:"~", word:"partial",      color:"#b45309" },
+  [COVER_NO]:      { sym:"✗", word:"not enforced", color:"#dc2626" },
+};
+
+/**
+ * What actually enforces one blocked-agent row.
+ *
+ * The server's `unenforceable` flag WINS when it is set: it is computed from the
+ * stored row by the same module both write paths use, so it is the authority on
+ * "nothing anywhere". The curated map only ever refines a row the server already
+ * considers enforceable.
+ *
+ * `known:false` is its own answer, deliberately NOT "not enforced": it means the
+ * server says this platform is enforceable and this console has no entry for it
+ * — a coverage map that has fallen behind. Rendering that as ✗/✗ would tell an
+ * admin a working block is dead.
+ */
+function agentBlockCoverage(block) {
+  const platform = String(block?.platform ?? "").trim().toLowerCase();
+  if (block?.unenforceable) {
+    const noPlatform = block.unenforceable_reason === "no_platform";
+    return {
+      known: true, browser: COVER_NO, desktop: COVER_NO, platform,
+      headline: noPlatform
+        ? "No enforcement anywhere — no platform on record for this block."
+        : "No enforcement anywhere — the platform on this block is not recognized by any enforcing surface.",
+      browserNote: noPlatform
+        ? "The extension keys on the platform to know which hosts to watch, and this row has none."
+        : "The extension has no host pattern for this platform.",
+      desktopNote: noPlatform
+        ? "The desktop enforcer drops a platform-less row when it parses the blocklist."
+        : "The desktop enforcer has no process mapping for this platform.",
+      detail: "The block is stored and stays stored — an admin decision is never dropped — but no endpoint can act on it until the agent is re-blocked under a platform a surface understands.",
+    };
+  }
+  const entry = AGENT_PLATFORM_ENFORCEMENT[platform];
+  if (!entry) {
+    return {
+      known: false, browser: null, desktop: null, platform,
+      headline: "Coverage unknown for this platform.",
+      detail: "The server reports this block as enforceable, but this console's coverage map has no entry for the platform — it is probably out of date. Treat the block as live and have someone update the map.",
+    };
+  }
+  return {
+    known: true, browser: entry.browser, desktop: entry.desktop, platform,
+    label: entry.label,
+    browserNote: entry.browserNote, desktopNote: entry.desktopNote,
+    headline: entry.browser === COVER_NO && entry.desktop === COVER_NO
+      ? "Stored, but nothing enforces this block today."
+      : null,
+  };
+}
+
+// Compact "Browser ✓ · Desktop ~" marker for the row. Lowercase helper rather
+// than a component, exactly like the row closures in AIRegistryView — it takes
+// data, not props, and is called directly.
+function renderCoverageBadge(block) {
+  const cov = agentBlockCoverage(block);
+  if (!cov.known) {
+    return <span title={cov.detail}
+      style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 8px",borderRadius:8,fontSize:13,
+              fontWeight:700,background:"#6b728014",color:"#4b5563",border:"1px solid #6b728030",whiteSpace:"nowrap"}}>
+      <Info size={11}/> Coverage unknown
+    </span>;
+  }
+  const b = COVERAGE_STYLE[cov.browser];
+  const d = COVERAGE_STYLE[cov.desktop];
+  const nowhere = cov.browser === COVER_NO && cov.desktop === COVER_NO;
+  const text = `Browser ${b.word}, desktop ${d.word}`;
+  return <span title={cov.headline ? `${text}. ${cov.headline}` : `${text}. Open the row for what each surface does and does not cover.`}
+    style={{display:"inline-flex",alignItems:"center",gap:5,padding:"2px 8px",borderRadius:8,fontSize:13,
+            fontWeight:700,whiteSpace:"nowrap",
+            background:nowhere?"#ef444414":"#f9fafb",color:"#4b5563",
+            border:"1px solid "+(nowhere?"#ef444430":"#e5e7eb")}}>
+    <Shield size={11} style={{color:nowhere?"#dc2626":"#6b7280"}}/>
+    <span aria-hidden="true">Browser <span style={{color:b.color}}>{b.sym}</span> · Desktop <span style={{color:d.color}}>{d.sym}</span></span>
+    <span className="aihub_sr_only">{text}</span>
+  </span>;
+}
+
+// Ids minted by the "Block an agent by name" form below, and only those.
+const isManualBlockId = (id) => String(id ?? "").startsWith("manual:");
+
+// Whether the "Possibly re-published" marker applies to a blocklist row at all.
+//
+// The server sets `orphaned` on any blocked_agents row whose agent_id is in no
+// current scan. For a `manual:<platform>:<slug>` id that is true BY
+// CONSTRUCTION and forever: the id is minted by this console, discovery has
+// never emitted it and never will, so every manual block came back flagged. The
+// marker's whole claim — "this used to be found and no longer is, so it was
+// probably re-published" — is false for a row that was never sourced from
+// discovery in the first place, so it is suppressed rather than shown wrongly on
+// 100% of manual blocks.
+const showsOrphanedMarker = (block) => !!block?.orphaned && !isManualBlockId(block?.agent_id);
+
+// The agent behind this block was not found by any current scan — most often it
+// was re-published under a new bot id, leaving this row blocking a name nothing
+// answers to any more. Amber, not red: the block is still real and still
+// enforced, it is the AGENT IDENTITY that is stale.
+function renderOrphanedBlockBadge() {
+  return <span title="This agent no longer appears in any tenant scan — it was most likely re-published under a new ID. The block still stands; it may simply no longer match anything."
+    style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 8px",borderRadius:8,fontSize:13,
+            fontWeight:700,background:"#f59e0b14",color:"#b45309",border:"1px solid #f59e0b30",whiteSpace:"nowrap"}}>
+    <AlertTriangle size={11}/> Possibly re-published
+  </span>;
+}
+
+// Inline "why is this greyed out" note for an admin write control that this
+// build cannot perform (no VITE_ADMIN_TOKEN — see hasAdminCredential). Rendered
+// next to the disabled control, with the same text on the control's tooltip.
+function AdminCredentialHint() {
+  return <span className="aihub_admin_hint" role="note"><Info size={13} aria-hidden="true"/> {ADMIN_CREDENTIAL_HINT}</span>;
+}
+
 function RegistryToggle({ status, onChange, pending }) {
   const isUnreviewed = status === 'unknown' || status === 'restricted';
   const isAllowed = status === 'approved';
   const isBlocked = status === 'blocked';
+  // Every branch behind onChange (ai-platforms PATCH, lifecycle block/unblock,
+  // registry status PUT) is requireAdminAuth on the server, so without a
+  // credential the whole decision control is inert rather than a 401 per click.
+  // The current status stays readable — only the write is disabled.
+  const noCred = !hasAdminCredential();
+  const inert = pending || noCred;
+  const credTitle = noCred ? ADMIN_CREDENTIAL_HINT : undefined;
 
   // Shown next to the control while a decision is saving — the toggle's own
   // `status` doesn't flip until the reload after the write completes, so
@@ -3624,26 +4302,30 @@ function RegistryToggle({ status, onChange, pending }) {
   const spinner = pending
     ? <RefreshCw size={13} className="aihub_spin" style={{color:"#6b7280"}}/>
     : null;
+  const hint = noCred ? <AdminCredentialHint/> : null;
 
   if (isUnreviewed) {
     // First time — show both options side by side
-    return (<div style={{display:"flex",alignItems:"center",gap:8}}>
-      <button disabled={pending} onClick={()=>onChange('approved')} style={{padding:"6px 16px",borderRadius:8,fontSize:14.7,fontWeight:600,border:"1px solid #22c55e40",background:"#22c55e14",color:"#22c55e",cursor:pending?"default":"pointer",opacity:pending?0.6:1}}>Allow</button>
+    return (<div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+      <button disabled={inert} title={credTitle} onClick={()=>onChange('approved')} style={{padding:"6px 16px",borderRadius:8,fontSize:14.7,fontWeight:600,border:"1px solid #22c55e40",background:"#22c55e14",color:"#22c55e",cursor:noCred?"not-allowed":pending?"default":"pointer",opacity:noCred?0.5:pending?0.6:1}}>Allow</button>
       <span style={{fontSize:14.1,color:"#f59e0b",fontWeight:600}}>Unreviewed</span>
-      <button disabled={pending} onClick={()=>onChange('blocked')} style={{padding:"6px 16px",borderRadius:8,fontSize:14.7,fontWeight:600,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:pending?"default":"pointer",opacity:pending?0.6:1}}>Block</button>
+      <button disabled={inert} title={credTitle} onClick={()=>onChange('blocked')} style={{padding:"6px 16px",borderRadius:8,fontSize:14.7,fontWeight:600,border:"1px solid #ef444440",background:"#ef444414",color:"#ef4444",cursor:noCred?"not-allowed":pending?"default":"pointer",opacity:noCred?0.5:pending?0.6:1}}>Block</button>
       {spinner}
+      {hint}
     </div>);
   }
 
   // After first decision — simple toggle between allowed and blocked
-  return (<div style={{display:"flex",alignItems:"center",gap:10}}>
+  return (<div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
     <span style={{fontSize:14.7,fontWeight:isAllowed?700:400,color:isAllowed?"#22c55e":"#9ca3af"}}>Allowed</span>
-    <div onClick={()=>{ if(!pending) onChange(isAllowed?'blocked':'approved'); }}
-      style={{width:44,height:24,borderRadius:12,background:isAllowed?"#22c55e":"#ef4444",cursor:pending?"default":"pointer",position:"relative",transition:"background 0.2s",opacity:pending?0.6:1}}>
+    <div onClick={()=>{ if(!inert) onChange(isAllowed?'blocked':'approved'); }}
+      title={credTitle}
+      style={{width:44,height:24,borderRadius:12,background:isAllowed?"#22c55e":"#ef4444",cursor:noCred?"not-allowed":pending?"default":"pointer",position:"relative",transition:"background 0.2s",opacity:noCred?0.5:pending?0.6:1}}>
       <div style={{width:18,height:18,borderRadius:9,background:"#fff",position:"absolute",top:3,left:isAllowed?3:23,transition:"left 0.2s",boxShadow:"0 1px 3px rgba(0,0,0,0.2)"}}/>
     </div>
     <span style={{fontSize:14.7,fontWeight:isBlocked?700:400,color:isBlocked?"#ef4444":"#9ca3af"}}>Blocked</span>
     {spinner}
+    {hint}
   </div>);
 }
 
@@ -3675,6 +4357,7 @@ function AIRegistryView() {
   const [allItems,setAllItems]=useState(null);
   const [summary,setSummary]=useState(null);
   const [err,setErr]=useState(null);
+  const [staleMeta,setStaleMeta]=useState(null);
   const [search,setSearch]=useState("");
   const [filterStatus,setFilterStatus]=useState("");
   const [filterType,setFilterType]=useState("");
@@ -3683,7 +4366,6 @@ function AIRegistryView() {
   const [pendingIds,setPendingIds]=useState(()=>new Set());
   const [hideInactive,setHideInactive]=useState(!sp.get("showAll"));
   const [selected,setSelected]=useState(null);
-  const [showAdd,setShowAdd]=useState(false);
 
   // ── Guardrail policy (ai_platforms.surface / .capture_mode) ───────────────
   // The live platform rows behind the catalog half of this table. loadAll
@@ -3737,7 +4419,17 @@ function AIRegistryView() {
   // control, not something this toggle introduced, and it is left alone here —
   // but where the two disagree, the helper text says so rather than leaving the
   // admin with a row badged Blocked next to a live monitoring switch.
-  const [blockedAgentIds,setBlockedAgentIds]=useState(null);
+  //
+  // A MAP (agent_id → the whole blocklist row), not a Set of ids, since the row
+  // carries the two annotations this view now renders: `unenforceable` /
+  // `unenforceable_reason` (which surface, if any, can act on the block) and
+  // `orphaned` (the agent is in no current scan — most often re-published under
+  // a new bot id). Both are additive markers the server puts on rows it never
+  // filters; keeping only the keys threw them away. `.has()` behaves identically,
+  // so every existing membership test reads the same.
+  //
+  // null, NOT an empty Map, while the state is unknown — same rule as governedIds.
+  const [blockedAgents,setBlockedAgents]=useState(null);
   const [governedErr,setGovernedErr]=useState(null);
   const [monitorPendingIds,setMonitorPendingIds]=useState(()=>new Set());
   const [monitorErrs,setMonitorErrs]=useState({});   // row id → message
@@ -3747,9 +4439,21 @@ function AIRegistryView() {
   // needs to know when the refreshed data has actually landed — e.g. clearing
   // a pending-decision spinner — can await it instead of just the write.
   const loadAll=()=>{
+    setStaleMeta(null);
+    const addMeta=m=>setStaleMeta(prev=>mergeStaleMeta(prev,m));
+    // Pulled OUT of the Promise.all below. It was one of the two legs here with
+    // no per-leg catch, and nothing in the merge reads it (setSummary is its
+    // only consumer), so letting it reject the whole thing blanked the entire
+    // inventory — platform catalog and monitoring lists included — over a panel
+    // no row depends on. soft() gives it the same `false` sentinel the other
+    // tabs use; there is no warning strip on this tab, hence no onWarn.
+    soft(tapMeta(apiFetchWithMeta("/registry/summary"),addMeta),"registry summary",setSummary,false);
     return Promise.all([
-      fetch(REGISTRY_API).then(r=>r.json()),
-      fetch(`${REGISTRY_API}/summary`).then(r=>r.json()),
+      // The other unprotected leg, and the one the whole table is built from.
+      // Also note the raw fetch it replaces never checked r.ok, so a 503 body
+      // ({ error, detail }) flowed straight into the row merge below and threw
+      // "reg is not iterable" instead of reporting the outage.
+      tapMeta(apiFetchWithMeta("/registry"),addMeta).catch(()=>false),
       fetch(`${API}/ai-platforms`).then(r=>r.json()).catch(()=>[]),
       // Folded into a sentinel rather than left to reject, so a governed-agents
       // outage cannot take the whole inventory down with it — but deliberately
@@ -3761,7 +4465,11 @@ function AIRegistryView() {
       fetch(`${LIFECYCLE_API}/blocked-agents`)
         .then(r=>r.ok?r.json():Promise.reject(new Error(`HTTP ${r.status}`)))
         .catch(e=>({__error:e?.message||"request failed"})),
-    ]).then(([reg,s,plats,gov,blk])=>{
+    ]).then(([reg,plats,gov,blk])=>{
+      // The registry list is the table this tab IS — every row below is built
+      // from it — so its failure is the page-level error rather than an empty
+      // "no AI systems" table, which on an inventory screen reads as a finding.
+      if(reg===false){ setErr("Could not load the AI systems registry. Reload to try again."); return; }
       // Both lists must land for the monitor control to be safe to operate: one
       // says whether monitoring is on, the other whether the agent is blocked,
       // and blocked wins. Either missing → the control renders inert rather
@@ -3769,7 +4477,8 @@ function AIRegistryView() {
       const govErr=Array.isArray(gov)?null:(gov?.__error||"request failed");
       const blkErr=Array.isArray(blk)?null:(blk?.__error||"request failed");
       setGovernedIds(govErr?null:new Set(gov.map(g=>String(g.agent_id)).filter(Boolean)));
-      setBlockedAgentIds(blkErr?null:new Set(blk.map(b=>String(b.agent_id)).filter(Boolean)));
+      const blockRows=blkErr?[]:blk.filter(b=>b&&b.agent_id!=null);
+      setBlockedAgents(blkErr?null:new Map(blockRows.map(b=>[String(b.agent_id),b])));
       setGovernedErr(govErr||blkErr);
       // Kept whole, not just merged into rows: the guardrail controls in the row
       // expansion write to these by host and read the surface/capture_mode the
@@ -3812,6 +4521,42 @@ function AIRegistryView() {
           _catalogOnly:true,      // drives the "no usage recorded" note
         });
       }
+      // Blocklist rows the registry has NO row for, merged in as rows of their
+      // own. Two ways one exists: an agent blocked BY NAME from the control
+      // below (a tenant scan never found it, or it was renamed), and an agent
+      // whose discovery row has since aged out of the registry.
+      //
+      // Without this they were invisible here — the block was stored, enforced,
+      // and unreviewable, with no row to carry its coverage badge and no way to
+      // lift it from this screen. A governance console must be able to show every
+      // decision it holds, including the ones it cannot attach to a discovered
+      // system.
+      const regIds=new Set(reg.map(r=>String(r.id)));
+      const blockOnly=[];
+      for(const b of blockRows){
+        const id=String(b.agent_id);
+        if(regIds.has(id)) continue;
+        blockOnly.push({
+          id,
+          name:b.agent_name||id,
+          vendor:null,
+          platform:b.platform||null,
+          // Treated as an agent, not a tool: every row here IS one named agent —
+          // that is what the blocklist keys on — so it belongs under the "AI
+          // Agents" filter and qualifies for the per-agent controls.
+          category:"autonomous-agent",
+          status:"blocked",
+          risk_score:null, risk_level:null, risk_factors:[],
+          owner:null,
+          source:"governance",
+          source_detail:"Agent blocklist",
+          description:b.reason||null,
+          first_seen:b.blocked_at||null,
+          last_active:null,
+          activity:{total:0,last_active:null},
+          _blocklistOnly:true,   // exempts the row from the hide-inactive filter
+        });
+      }
       // Cross-reference registry statuses with fresh ai_platforms data.
       // The registry may return stale snapshot data where everything is "allowed",
       // but ai_platforms is always live. If a platform is blocked there, override
@@ -3819,6 +4564,23 @@ function AIRegistryView() {
       const blockedHosts=new Set((Array.isArray(plats)?plats:[]).filter(p=>p.blocked).map(p=>p.host));
       const platByHost=new Map((Array.isArray(plats)?plats:[]).map(p=>[p.host,p]));
       for(const r of reg){
+        // NEVER for an individual AGENT. A host-level block cannot stop a named
+        // agent — that is the entire premise of the agent blocklist, and the
+        // reason POST /api/lifecycle/block exists alongside ai_platforms.
+        //
+        // Agents carry BROAD host lists: one Copilot Studio agent's
+        // matched_hosts spans the whole Microsoft suite plus openai.azure.com.
+        // So this cross-reference flipped EVERY agent to "Blocked" the moment
+        // any single one of those hosts was blocked. Observed live 2026-09-22:
+        // `openai.azure.com` was the only blocked host in ai_platforms, and it
+        // alone made 11 Copilot Studio agents read as Blocked in AI Hub while
+        // the server reported them approved, no blocked_agents row existed, and
+        // nothing on any endpoint enforced them. That is the worst failure this
+        // product can have — the console asserting a block that is not real.
+        //
+        // Same gate the server uses to tell an agent from a host-keyed row
+        // (`looksLikeAgent` in server/src/routes/registry.js).
+        if(r.category==='autonomous-agent'||r.source==='governance') continue;
         // Match by matched_hosts, or by name/host substring
         const hosts=r.matched_hosts||[];
         let isBlocked=hosts.some(h=>blockedHosts.has(h));
@@ -3832,7 +4594,7 @@ function AIRegistryView() {
         if(isBlocked && r.status!=='blocked') r.status='blocked';
         else if(!isBlocked && r.status==='blocked') r.status='approved';
       }
-      setAllItems([...reg,...extra]); setSummary(s);
+      setAllItems([...reg,...blockOnly,...extra]);   // summary is set by its own soft() leg above
     }).catch(x=>setErr(x.message));
   };
   // Called inside the effect rather than passed as the effect.
@@ -3859,12 +4621,41 @@ function AIRegistryView() {
     setPendingIds(prev=>new Set(prev).add(row.id));
     try{
       if(row._catalogOnly){
-        await fetch(`${API}/ai-platforms/${encodeURIComponent(row.host)}`,{
+        // All three branches of this function are admin-gated writes on the
+        // server now — see the AUTH SEAM comment on adminInit. Each keeps its own
+        // URL and body; only the credential is shared.
+        await fetch(`${API}/ai-platforms/${encodeURIComponent(row.host)}`,adminInit({
           method:"PATCH",headers:{"content-type":"application/json"},
           body:JSON.stringify({blocked:status==="blocked",governed:status==="approved"}),
+        }));
+      } else if(row._blocklistOnly){
+        // This row EXISTS only because a blocklist entry does — there is no
+        // registry document behind it — so its decision goes to the collection
+        // it came from. PUT /registry/:id/status would mint a sanction for an id
+        // the registry has never seen and leave two records of one decision.
+        const block=status==="blocked";
+        const res=await fetch(`${LIFECYCLE_API}/${block?"block":"unblock"}`,adminInit({
+          method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify(block
+            ? {agent_id:row.id,agent_name:row.name||null,platform:row.platform||null,agent_scope:"agent",
+               reason:"Re-blocked by admin from AI Systems"}
+            : {agent_id:row.id}),
+        }));
+        const out=await res.json().catch(()=>({}));
+        if(!res.ok) throw new Error(out.error||`Request failed (${res.status})`);
+        // Keep the local blocklist in step, so the coverage badge and the
+        // monitoring control stop describing a block that is no longer there.
+        setBlockedAgents(prev=>{
+          if(!prev) return prev;
+          const next=new Map(prev);
+          if(block) next.set(String(row.id),{agent_id:row.id,agent_name:row.name,platform:row.platform,
+            unenforceable:out.enforced===false,unenforceable_reason:out.enforced===false?(out.reason||null):null,
+            orphaned:next.get(String(row.id))?.orphaned??false});
+          else next.delete(String(row.id));
+          return next;
         });
       } else {
-        await fetch(`${REGISTRY_API}/${encodeURIComponent(row.id)}/status`,{
+        const res=await fetch(`${REGISTRY_API}/${encodeURIComponent(row.id)}/status`,adminInit({
           method:"PUT",headers:{"Content-Type":"application/json"},
           // category/source travel with the decision so the server can tell an
           // AGENT from a platform. A host-keyed block cannot stop a Copilot Studio
@@ -3881,6 +4672,42 @@ function AIRegistryView() {
           // this way produced a blocked_agents row with platform:null.
           body:JSON.stringify({status,product_name:row.name,matched_hosts:row.matched_hosts||[],
             category:row.category||null,source:row.source||null,platform:row.platform||null}),
+        }));
+        // Same three steps as the _blocklistOnly branch above, and for the same
+        // reasons — this is the button most admins actually click, and until now
+        // it did none of them. It never checked res.ok, so a 500 flipped the
+        // toggle to "Blocked" as if the write had landed; it never read the
+        // body, so the {enforced, reason} the route now returns was discarded;
+        // and it never touched blockedAgents, so the coverage badge and the
+        // "nothing enforces this block" warning stayed missing until a full
+        // page reload.
+        const out=await res.json().catch(()=>({}));
+        if(!res.ok) throw new Error(out.error||`Request failed (${res.status})`);
+        // Only rows the server actually mirrored into blocked_agents belong in
+        // this Map — a plain platform row is enforced by host and has no
+        // blocklist entry, and inventing one here would render a coverage badge
+        // for a record that does not exist. Two signals, because the route
+        // reports the mirror in two different ways: `enforced_via` names the
+        // agent blocklist when the stored row is enforceable, and `reason` is
+        // set ONLY by the agent mirror when it wrote a row nothing can act on —
+        // the case that most needs surfacing, and the one where `enforced_via`
+        // drops the mention.
+        const inert=!!out.reason;
+        const mirrored=inert||(Array.isArray(out.enforced_via)&&out.enforced_via.includes("agent_blocklist"));
+        setBlockedAgents(prev=>{
+          if(!prev) return prev;
+          if(status==="blocked"&&!mirrored) return prev;
+          const next=new Map(prev);
+          // platform is left as the row knows it: the server may DERIVE one this
+          // client never sent, and guessing null over it would badge a working
+          // block "nothing enforces". An unknown platform renders as "Coverage
+          // unknown", which is the honest answer here; the next load replaces
+          // this optimistic row with the server's own.
+          if(status==="blocked") next.set(String(row.id),{agent_id:row.id,agent_name:row.name,platform:row.platform,
+            unenforceable:inert,unenforceable_reason:inert?(out.reason||null):null,
+            orphaned:next.get(String(row.id))?.orphaned??false});
+          else next.delete(String(row.id));
+          return next;
         });
       }
       // Update local state immediately — don't reload from registry (it's slow
@@ -3914,10 +4741,12 @@ function AIRegistryView() {
         body.agent_scope="agent";
         body.reason="DLP monitoring enabled by admin from AI Systems";
       }
-      const res=await fetch(`${LIFECYCLE_API}/dlp-monitor`,{
+      // Admin-gated on the server (requireAdminAuth), same as /block and
+      // /unblock — the credential comes from the one adminInit seam above.
+      const res=await fetch(`${LIFECYCLE_API}/dlp-monitor`,adminInit({
         method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify(body),
-      });
+      }));
       const out=await res.json().catch(()=>({}));
       if(!res.ok) throw new Error(out.error||`Request failed (${res.status})`);
       // Turning monitoring OFF only ever relaxes an EXISTING row — it never
@@ -3965,10 +4794,13 @@ function AIRegistryView() {
     setPolicyPendingHosts(prev=>new Set(prev).add(host));
     setPolicyErrs(prev=>{ const next={...prev}; delete next[host]; return next; });
     try{
-      const res=await fetch(`${API}/ai-platforms/${encodeURIComponent(host)}`,{
+      // PATCH /ai-platforms/:host is requireAdminAuth, so it goes through the
+      // same adminInit credential seam as every other admin write in this file.
+      // (It used to be a bare fetch, which 401'd even when a token was set.)
+      const res=await fetch(`${API}/ai-platforms/${encodeURIComponent(host)}`,adminInit({
         method:"PATCH",headers:{"content-type":"application/json"},
         body:JSON.stringify(patch),
-      });
+      }));
       const out=await res.json().catch(()=>({}));
       if(!res.ok) throw new Error(out.error||`Request failed (${res.status})`);
       // Re-seeded from the row the server returns, not from the value posted.
@@ -3997,12 +4829,16 @@ function AIRegistryView() {
     const surface=plat.surface||"browser";
     const mode=plat.capture_mode||"observe";
     const browserServed=surface==="browser"||surface==="all";
+    // requireAdminAuth write: without a credential the selects still show the
+    // current policy but cannot change it, and say why.
+    const noCred=!hasAdminCredential();
+    const credTitle=noCred?ADMIN_CREDENTIAL_HINT:undefined;
     return (<div style={{marginBottom:14}}>
       <div style={DETAIL_H_STYLE}>Guardrail policy</div>
       <div style={{display:"flex",gap:16,flexWrap:"wrap",alignItems:"flex-end"}}>
         <label className="aihub_filter_group">
           <span className="aihub_filter_label">Enforcement Surface</span>
-          <select className="aihub_select" value={surface} disabled={pending}
+          <select className="aihub_select" value={surface} disabled={pending||noCred} title={credTitle}
             aria-label={`Enforcement surface for ${plat.host}`}
             onChange={ev=>setPlatformPolicy(plat,{surface:ev.target.value})}>
             {PLATFORM_SURFACES.map(s=><option key={s.value} value={s.value}>{s.label}</option>)}
@@ -4010,7 +4846,7 @@ function AIRegistryView() {
         </label>
         <label className="aihub_filter_group">
           <span className="aihub_filter_label">Capture Mode</span>
-          <select className="aihub_select" value={mode} disabled={pending}
+          <select className="aihub_select" value={mode} disabled={pending||noCred} title={credTitle}
             aria-label={`Capture mode for ${plat.host}`}
             onChange={ev=>setPlatformPolicy(plat,{capture_mode:ev.target.value})}>
             {CAPTURE_MODES.map(m=><option key={m.value} value={m.value}>{m.label}</option>)}
@@ -4019,6 +4855,7 @@ function AIRegistryView() {
         {pending
           ? <RefreshCw size={13} className="aihub_spin" style={{color:"#6b7280",marginBottom:9}}/>
           : null}
+        {noCred&&<span style={{marginBottom:9}}><AdminCredentialHint/></span>}
       </div>
       <div className="aihub_text_muted" style={{fontSize:13.6,marginTop:6,maxWidth:660}}>
         Applies to <Mono>{plat.host}</Mono>. {surfaceOptionHint(surface)} {captureModeHint(mode)}
@@ -4039,9 +4876,12 @@ function AIRegistryView() {
     </div>);
   };
 
-  // Blocked per the agent blocklist — see the note on blockedAgentIds for why
+  // Blocked per the agent blocklist — see the note on blockedAgents for why
   // the row's displayed status is not used for this.
-  const isRowBlocked=(row)=>!!blockedAgentIds?.has(String(row.id));
+  const isRowBlocked=(row)=>!!blockedAgents?.has(String(row.id));
+  // The blocklist ROW for an inventory row, or null. Carries the server's
+  // `unenforceable` / `unenforceable_reason` / `orphaned` annotations.
+  const blockFor=(row)=>blockedAgents?.get(String(row.id))||null;
 
   // Is this row monitored right now? Blocked rows answer false unconditionally:
   // blocked wins over monitoring, and /governed-agents excludes them anyway, so
@@ -4055,13 +4895,18 @@ function AIRegistryView() {
     if(!canDlpMonitor(row)) return null;
     const blocked=isRowBlocked(row);
     const pending=monitorPendingIds.has(row.id);
-    const unknown=governedIds===null||blockedAgentIds===null;
+    const unknown=governedIds===null||blockedAgents===null;
     const on=isMonitored(row);
     const rowErr=monitorErrs[row.id];
     // Inert, not hidden, when blocked: an admin looking for this setting should
     // find it and be told why it does nothing here, not find nothing at all.
-    const disabled=blocked||pending||unknown;
-    const why=blocked
+    // POST /lifecycle/dlp-monitor is requireAdminAuth: with no credential in
+    // this build the control is inert (and says why) instead of a 401 per click.
+    const noCred=!hasAdminCredential();
+    const disabled=blocked||pending||unknown||noCred;
+    const why=noCred
+      ? ADMIN_CREDENTIAL_HINT
+      : blocked
       ? "Already blocked — unblock this agent first if you want monitoring only."
       : unknown
         ? "Current monitoring state could not be loaded."
@@ -4095,6 +4940,7 @@ function AIRegistryView() {
           : <span style={{fontSize:14.1,fontWeight:700,color:on?"#4f46e5":"#9ca3af"}}>
               {unknown?"Unavailable":on?"On":"Off"}
             </span>}
+        {noCred&&<AdminCredentialHint/>}
       </div>
       <div className="aihub_text_muted" style={{fontSize:13.6,marginTop:6,maxWidth:660}}>
         {blocked
@@ -4119,20 +4965,85 @@ function AIRegistryView() {
     </div>);
   };
 
+  // WHERE THIS BLOCK ACTUALLY ENFORCES, for a row that is on the agent
+  // blocklist. Nothing for any other row: an allowed system has no enforcement
+  // to describe, and inventing a coverage section for it would read as a block.
+  //
+  // Only ever DESCRIBES — there is no control here. The remedy for a block that
+  // enforces nowhere is to re-block the agent under a platform some surface
+  // understands, which is the "Block an agent by name" form above, not a toggle
+  // that would silently rewrite a stored decision.
+  const renderEnforcementCoverage=(row)=>{
+    const block=blockFor(row);
+    if(!block) return null;
+    const cov=agentBlockCoverage(block);
+    const line=(label,state,note)=>{
+      const s=state?COVERAGE_STYLE[state]:null;
+      return (<div style={{display:"flex",gap:8,alignItems:"flex-start",marginBottom:4}}>
+        <span style={{minWidth:132,display:"inline-flex",alignItems:"center",gap:6,fontWeight:700,fontSize:14.1,
+                      color:s?s.color:"#4b5563"}}>
+          <span aria-hidden="true">{s?s.sym:"?"}</span>
+          {label} — {s?s.word:"unknown"}
+        </span>
+        <span className="aihub_text_muted" style={{fontSize:13.6,flex:1,minWidth:200}}>{note}</span>
+      </div>);
+    };
+    return (<div style={{marginBottom:14}}>
+      <div style={DETAIL_H_STYLE}>Enforcement coverage</div>
+      {cov.headline&&<div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,
+                                  fontSize:14.7,fontWeight:700,color:"#b91c1c"}}>
+        <AlertTriangle size={14}/> {cov.headline}
+      </div>}
+      {cov.known
+        ? <div style={{maxWidth:760}}>
+            {line("Browser",cov.browser,cov.browserNote)}
+            {line("Desktop",cov.desktop,cov.desktopNote)}
+          </div>
+        : <div className="aihub_text_muted" style={{fontSize:14.1,maxWidth:760}}>{cov.detail}</div>}
+      {cov.known&&cov.detail&&<div className="aihub_text_muted" style={{fontSize:13.6,marginTop:6,maxWidth:760}}>
+        {cov.detail}
+      </div>}
+      <div className="aihub_text_muted" style={{fontSize:13.6,marginTop:6,maxWidth:760}}>
+        {cov.platform
+          ? <>Blocked under platform <Mono>{cov.platform}</Mono>{cov.label?` (${cov.label})`:""}. </>
+          : <>This block carries no platform. </>}
+        {OUTLOOK_COVERAGE_NOTE}
+      </div>
+      {showsOrphanedMarker(block)&&<div style={{marginTop:8,fontSize:14.1,color:"#b45309",maxWidth:760}}>
+        <AlertTriangle size={13} style={{verticalAlign:"-2px"}}/> This agent is in no current tenant scan — it was
+        most likely re-published under a new ID. The block still stands and is still sent to every endpoint; it may
+        simply no longer match anything. Block the new ID if the agent is still in use.
+      </div>}
+      {row._blocklistOnly&&<div className="aihub_text_muted" style={{fontSize:13.6,marginTop:6,maxWidth:760}}>
+        This row exists because of the block itself — no scan has found a matching system — so there is no usage or
+        risk history to show for it.
+      </div>}
+    </div>);
+  };
+
   // Both optional governance blocks for one row, or null when the row has
   // neither — so the expansion never renders an empty wrapper. Host rows get
   // guardrail policy, individual agents get monitoring, and a row that is both
   // gets both, in that order: which enforcer owns the host is read before what
   // that enforcer does with a prompt.
+  //
+  // Coverage comes FIRST when present: "is this block doing anything at all" is
+  // read before either of the settings underneath it.
+  // Sensitive-data monitoring is NOT rendered here any more. It was the only
+  // control in this expansion that applied to agent rows alone, so it read as an
+  // inconsistency against every other row in the tab, which offers no such
+  // toggle. renderDlpMonitor()/setRowMonitor() are deliberately left in place
+  // (unrendered) rather than deleted: the server route they drive
+  // (POST /api/lifecycle/dlp-monitor) is untouched and still honours existing
+  // governed-agent rows, so restoring the control is a one-line change here.
   const renderRowGovernance=(row)=>{
     const policy=renderPlatformPolicy(row);
-    const monitor=renderDlpMonitor(row);
-    if(!policy&&!monitor) return null;
-    return (<>{policy}{monitor}</>);
+    if(!policy) return null;
+    return policy;
   };
 
   const updateStatus=async(id,status,productName,matchedHosts)=>{
-    await fetch(`${REGISTRY_API}/${encodeURIComponent(id)}/status`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status,product_name:productName,matched_hosts:matchedHosts||[]})});
+    await fetch(`${REGISTRY_API}/${encodeURIComponent(id)}/status`,adminInit({method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status,product_name:productName,matched_hosts:matchedHosts||[]})}));
     loadAll();
   };
 
@@ -4144,7 +5055,10 @@ function AIRegistryView() {
   const activeCount=allItems.filter(r=>(r.activity?.total||0)>0).length;
   const inactiveCount=allItems.length-activeCount;
   const items=allItems.filter(r=>{
-    if(hideInactive && (r.activity?.total||0)===0) return false;
+    // `_blocklistOnly` rows are exempt: they have no recorded usage BY
+    // DEFINITION (no scan ever found the agent), and hiding an admin's own
+    // stored block behind a usage filter would make it unreviewable.
+    if(hideInactive && !r._blocklistOnly && (r.activity?.total||0)===0) return false;
     if(filterStatus) {
       if(filterStatus==='unknown') { if(r.status!=='unknown'&&r.status!=='restricted') return false; }
       else if(r.status!==filterStatus) return false;
@@ -4164,12 +5078,7 @@ function AIRegistryView() {
     <SectionHeader
       title="AI Applications"
       hint="Every AI system across your organization — discovered agents, endpoint-scanned tools, and the known-services catalog."
-      action={<button className="aihub_action_btn" onClick={()=>setShowAdd(v=>!v)}>
-        {showAdd ? <><X size={13}/> Cancel</> : <><Plus size={13}/> Add AI platform</>}
-      </button>}
     />
-
-    {showAdd && <AddPlatformForm onDone={()=>{setShowAdd(false);loadAll();}}/>}
 
     <TipBanner id="ai_systems_intro" title="Know what's really running before you decide what to block."
       actionLabel="Review unreviewed systems" onAction={()=>setFilterStatus('unknown')}>
@@ -4225,7 +5134,7 @@ function AIRegistryView() {
     <div className="aihub_card" style={{overflow:"auto"}}>
       <DataTable
         columns={[
-          {label:filterType==="tool"?"AI Tools":filterType==="agent"?"AI Agents":"AI Tool / Agent",width:"38%",
+          {label:filterType==="tool"?"AI Tools":filterType==="agent"?"AI Agents":"AI Tool / Agent",width:filterType==="tool"?"40%":"32%",
             hint:filterType==="tool"?"Every AI tool discovered — an app calling an LLM API, an endpoint-scanned service, or a known service from the catalog. Click a row to expand its detail."
               :filterType==="agent"?"Every AI agent discovered — an autonomous agent, IDE coding assistant, or MCP server found on an endpoint. Click a row to expand its detail."
               :"Every AI tool and agent discovered across your organization — apps calling an LLM API, endpoint-scanned services, autonomous agents and MCP servers, and the known-services catalog. Click a row to expand its detail.",
@@ -4236,20 +5145,27 @@ function AIRegistryView() {
               <div className="aihub_text_muted">{r.vendor||""}{r.platform?" · "+r.platform:""}</div>
             </div>
           </div>},
-          {label:"Status",width:"14%",hint:"Whether an admin has made a decision on this AI system. ‘Unreviewed’ means it was discovered but nobody has approved, restricted or blocked it yet.",render:r=><div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-start"}}>
+          {label:"Status",width:filterType==="tool"?"20%":"17%",hint:"Whether an admin has made a decision on this AI system. ‘Unreviewed’ means it was discovered but nobody has approved, restricted or blocked it yet.",render:r=><div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-start"}}>
             <RegistryStatusBadge status={r.status}/>
             {isMonitored(r)&&<DlpMonitorBadge/>}
+            {/* The per-surface enforcement-coverage badge is NOT rendered here.
+                It appeared on the handful of rows that genuinely have an agent
+                blocklist row and on no others, which made those rows look
+                arbitrarily different from every other blocked row in the table.
+                renderCoverageBadge() is left defined so it can be restored. */}
+            {(()=>{ const blk=blockFor(r); if(!blk) return null;
+              return showsOrphanedMarker(blk)?renderOrphanedBlockBadge():null; })()}
           </div>},
-          {label:"Risk",width:"14%",hint:"A 0–100 score from actual usage: sensitive content sent, enforcement blocks, and overridden blocks push it up. Low 0–30, Medium 31–60, High 61–80, Critical 81–100. ‘Not assessed’ means no usage has been captured yet.",render:r=><span style={{whiteSpace:"nowrap"}}><RiskLevelBadge level={r.risk_level} score={r.risk_score}/></span>},
+          {label:"Risk",width:filterType==="tool"?"20%":"17%",hint:"A 0–100 score from actual usage: sensitive content sent, enforcement blocks, and overridden blocks push it up. Low 0–30, Medium 31–60, High 61–80, Critical 81–100. ‘Not assessed’ means no usage has been captured yet.",render:r=><span style={{whiteSpace:"nowrap"}}><RiskLevelBadge level={r.risk_level} score={r.risk_score}/></span>},
           // Owner is an identity-provider registration field (Azure AD, etc.) —
           // only agent-framework/MCP entries in this registry ever have one.
           // Endpoint-discovered tools (ChatGPT, Claude...) never do, so the
           // column is dead weight in the "AI Tools" filtered view.
-          ...(filterType!=="tool"?[{label:"Owner",width:"14%",hint:"The person who registered this app in your identity provider (e.g. Azure AD). Endpoint-discovered tools like ChatGPT or Claude aren’t registered apps, so they show — here — that’s expected, not missing data.",render:r=><div style={{whiteSpace:"nowrap"}}>
+          ...(filterType!=="tool"?[{label:"Owner",width:"17%",hint:"The person who registered this app in your identity provider (e.g. Azure AD). Endpoint-discovered tools like ChatGPT or Claude aren’t registered apps, so they show — here — that’s expected, not missing data.",render:r=><div style={{whiteSpace:"nowrap"}}>
             <div style={{fontSize:14.7}}>{splitConcatenatedName(r.owner)||"—"}</div>
             {r.is_orphaned&&<span style={{fontSize:13,color:"#ef4444",fontWeight:600}}>⚠ Orphaned</span>}
           </div>}]:[]),
-          {label:"Events",width:"20%",hint:"Total DLP events captured for this tool across every prompt, file upload and enforcement action (block, redaction or override) — a lifetime running count, not a per-session one.",render:r=><div style={{textAlign:"right",whiteSpace:"nowrap"}}>
+          {label:"Events",width:filterType==="tool"?"20%":"17%",hint:"Total DLP events captured for this tool across every prompt, file upload and enforcement action (block, redaction or override) — a lifetime running count, not a per-session one.",render:r=><div style={{textAlign:"right",whiteSpace:"nowrap"}}>
             <div style={{fontSize:15.2,fontWeight:600}}>{r.activity?.total?.toLocaleString()||0} events</div>
             <div className="aihub_text_muted">{r.activity?.last_active?relTime(r.activity.last_active):"never"}</div>
           </div>,right:true},
@@ -4394,6 +5310,189 @@ function AddPlatformForm({ onDone }) {
 }
 
 /**
+ * Block ONE NAMED AGENT that no scan found — or that was renamed.
+ *
+ * Every other block control in this product starts from a row a scan produced.
+ * That leaves a real gap: an agent nobody has discovered yet (a tenant the
+ * connector cannot see, an agent published minutes ago) and an agent that was
+ * renamed after it was discovered are both unblockable from this console, even
+ * though the admin knows exactly what they want stopped.
+ *
+ * No new endpoint. POST /api/lifecycle/block already accepts an arbitrary
+ * agent_id with an agent_name and an explicitly chosen platform, and it is the
+ * same route every other block control here writes through.
+ *
+ * WHY THE PLATFORM IS A REQUIRED, EXPLICIT CHOICE and not inferred. Both
+ * enforcers key on `platform`: the extension maps it to the hosts it watches,
+ * the desktop enforcer maps it to the processes it watches. A row stored without
+ * one is enforced NOWHERE — the server reports exactly that back
+ * (`enforced:false`, reason `no_platform`), and there is nothing to infer it from
+ * for an agent no scan has ever returned.
+ *
+ * WHAT ACTUALLY MATCHES AT RUNTIME is the NAME. The id minted below is stable and
+ * unique, but no endpoint has ever seen it, so both surfaces fall back to
+ * comparing the agent's display name — trimmed, whitespace-collapsed and
+ * case-insensitive on both sides. Said plainly in the form, because an admin who
+ * types an approximation will get a block that never fires.
+ */
+/**
+ * A short, stable, deterministic hash of an agent name.
+ *
+ * Used for ONE thing: keeping two different names from minting the same manual
+ * block id when neither has any ASCII alphanumerics to slug. Not a security
+ * primitive and deliberately not `crypto.subtle` — that API is async, and the id
+ * is computed synchronously during render so the form can show it and submit on
+ * Enter. Two FNV-1a-style passes with different constants, so the 12 hex chars
+ * come out of 64 bits of state rather than a truncated 32.
+ */
+function shortNameHash(value) {
+  const str = String(value ?? "");
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ (c + i), 0x85ebca6b) >>> 0;
+    h2 = ((h2 << 13) | (h2 >>> 19)) >>> 0;
+  }
+  return (h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0")).slice(0, 12);
+}
+
+function BlockAgentByNameForm({ onDone }) {
+  const [name,setName]=useState("");
+  const [platform,setPlatform]=useState("copilot_studio");
+  const [reason,setReason]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState(null);
+  const [result,setResult]=useState(null);
+  // POST /lifecycle/block is requireAdminAuth. Without a credential the form
+  // stays visible (so the admin knows it exists) but cannot submit.
+  const noCred=!hasAdminCredential();
+
+  const trimmed=name.trim().replace(/\s+/g," ");
+  const valid=trimmed.length>=2&&!!platform;
+
+  // Stable, namespaced id. `manual:` marks where the row came from, the platform
+  // keeps two identically-named agents on different platforms apart, and the
+  // slug makes re-blocking the same name UPDATE the same row instead of leaving
+  // a second one behind (POST /block upserts on agent_id).
+  //
+  // That same upsert is why the slug cannot be allowed to come out empty. A name
+  // with no ASCII alphanumerics at all — Japanese, Cyrillic, Arabic, an emoji —
+  // slugs to "", so EVERY such name on one platform shared the id
+  // `manual:copilot_studio:` and each new block silently overwrote the previous
+  // agent's, un-blocking it with no error shown. A single-character slug
+  // ("X 日本" → "x") collides nearly as freely, so both fall back to a short
+  // stable hash of the name instead.
+  //
+  // Near-duplicate ASCII slugs ("HR Bot" / "HR-Bot" / "HR.Bot!" → hr-bot) still
+  // collapse onto one id on purpose: that is the intended re-block behaviour.
+  const slug=trimmed.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"");
+  const agentId=`manual:${platform}:${slug.length>=2?slug:`h${shortNameHash(trimmed.toLowerCase())}`}`;
+
+  const cov=agentBlockCoverage({ platform, unenforceable:false });
+  const covLine=cov.known
+    ? `Browser ${COVERAGE_STYLE[cov.browser].word}, desktop ${COVERAGE_STYLE[cov.desktop].word}.`
+    : "Coverage for this platform is not described in this console.";
+
+  const submit=async()=>{
+    setBusy(true); setErr(null); setResult(null);
+    try{
+      // Admin-gated on the server (requireAdminAuth) — same credential seam as
+      // every other /lifecycle write in this file.
+      const res=await fetch(`${LIFECYCLE_API}/block`,adminInit({
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          agent_id:agentId,
+          agent_name:trimmed,
+          platform,
+          // 'agent', never platform-wide: this form names ONE agent, and a
+          // platform-scoped row here would block the whole host app it lives in.
+          agent_scope:"agent",
+          reason:reason.trim()||"Blocked by name by admin from AI Systems",
+        }),
+      }));
+      const out=await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(out.error||`Request failed (${res.status})`);
+      // The server answers `enforced:false` + a reason when the stored row can be
+      // acted on by nothing. Surfaced verbatim rather than being flattened into a
+      // green "Blocked" — that is the entire point of this screen's changes.
+      setResult({ name:trimmed, enforced:out.enforced!==false, reason:out.reason||null });
+      setName(""); setReason("");
+      onDone?.();
+    } catch(e){ setErr(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const field={padding:"7px 11px",fontSize:14.7,border:"1px solid #e5e7eb",borderRadius:6,fontFamily:"inherit",width:"100%",boxSizing:"border-box"};
+  const lbl={fontSize:14.1,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:".03em",marginBottom:4,display:"block"};
+  const m365=BLOCKABLE_AGENT_PLATFORMS.filter(p=>p.m365);
+  const others=BLOCKABLE_AGENT_PLATFORMS.filter(p=>!p.m365);
+
+  return (<div className="aihub_card" style={{marginBottom:16,borderLeft:"3px solid #dc2626"}}>
+    <SectionHeader title="Block an Agent by Name"
+      hint="For an agent no scan has found, or one that was renamed. Type the name exactly as it appears to the user and choose where it lives."/>
+
+    {err && <div className="aihub_error" style={{marginBottom:12}}><AlertTriangle size={14}/> {err}</div>}
+    {result && (result.enforced
+      ? <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,padding:"8px 12px",borderRadius:6,
+                     background:"#f0fdf4",border:"1px solid #bbf7d0",fontSize:14.7,color:"#166534"}}>
+          <Shield size={13}/> “{result.name}” is blocked. Endpoints pick it up on their next sync.
+        </div>
+      : <div style={{display:"flex",alignItems:"flex-start",gap:8,marginBottom:12,padding:"8px 12px",borderRadius:6,
+                     background:"#fef2f2",border:"1px solid #fca5a5",fontSize:14.7,color:"#991b1b"}}>
+          <AlertTriangle size={13} style={{marginTop:3,flexShrink:0}}/>
+          <span>“{result.name}” is stored as blocked, but <strong>nothing enforces it</strong>
+            {result.reason==="no_platform"?" — no platform was recorded on the row"
+              :result.reason==="unknown_platform"?" — no enforcing surface recognizes that platform":""}.
+            The decision is kept; re-block the agent under a platform an endpoint understands to make it take effect.
+          </span>
+        </div>)}
+
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:12,marginBottom:12}}>
+      <div>
+        <label style={lbl} htmlFor="aihub_block_agent_name">Agent name *</label>
+        <input id="aihub_block_agent_name" style={field} placeholder="IT Help Desk Agent"
+               value={name} onChange={e=>setName(e.target.value)}
+               onKeyDown={e=>{ if(e.key==="Enter"&&valid&&!busy&&!noCred) submit(); }}/>
+        {name&&!valid&&<div style={{fontSize:14.1,color:"#b91c1c",marginTop:4}}>Enter the agent’s display name.</div>}
+        {valid&&trimmed!==name&&<div style={{fontSize:14.1,color:"#6b7280",marginTop:4}}>Will be saved as “{trimmed}”.</div>}
+      </div>
+      <div>
+        <label style={lbl} htmlFor="aihub_block_agent_platform">Where it lives *</label>
+        <select id="aihub_block_agent_platform" style={{...field,background:"#fff",cursor:"pointer"}}
+                value={platform} onChange={e=>setPlatform(e.target.value)}>
+          <optgroup label="Microsoft 365">
+            {m365.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
+          </optgroup>
+          <optgroup label="Other platforms">
+            {others.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
+          </optgroup>
+        </select>
+        <div style={{fontSize:13.6,color:"#6b7280",marginTop:4}}>{covLine}</div>
+      </div>
+      <div>
+        <label style={lbl} htmlFor="aihub_block_agent_reason">Reason</label>
+        <input id="aihub_block_agent_reason" style={field} placeholder="Optional — shown in the audit trail"
+               value={reason} onChange={e=>setReason(e.target.value)}/>
+      </div>
+    </div>
+
+    <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+      <button className="aihub_action_btn" disabled={!valid||busy||noCred} onClick={submit}
+              title={noCred?ADMIN_CREDENTIAL_HINT:undefined}>
+        {busy?"Blocking…":"Block this agent"}
+      </button>
+      {noCred&&<AdminCredentialHint/>}
+      <span className="aihub_text_muted" style={{fontSize:14.1,maxWidth:620}}>
+        Matched by <strong>name</strong> on the endpoint — case and extra spaces are ignored, anything else is not,
+        so type it as the user sees it. Stored as <Mono>{valid?agentId:"manual:…"}</Mono>; blocking the same name
+        again updates that row rather than adding a second one. Only this agent is blocked — never the app it runs in.
+      </span>
+    </div>
+  </div>);
+}
+
+/**
  * The expanded body of one inventory row: what it is, how risky, and the one
  * decision a reviewer is here to make (allow / block).
  *
@@ -4418,14 +5517,15 @@ function RegistryRowDetail({ row, onStatus, pending, children }) {
         the badges in the table above — /governed-agents for monitoring, the
         ai_platforms list for guardrail policy.
         Immediately under Decision because they are read together and are the
-        easiest set in this product to confuse: Decision refuses the system,
-        Guardrail policy says which endpoint enforces the host and how hard, and
-        Sensitive-data monitoring lets a named agent run while watching what is
-        typed into it. Each block brings its own heading and each is optional
-        (a host row has no agent to monitor; a discovered agent has no host
-        policy), so the caller returns null when a row has neither — an
-        always-present section with nothing in it would read as a missing
-        control rather than an inapplicable one. */}
+        easiest set in this product to confuse: Decision refuses the system, and
+        Guardrail policy says which endpoint enforces the host and how hard.
+        Each block brings its own heading and each is optional (a discovered
+        agent has no host policy), so the caller returns null when a row has
+        neither — an always-present section with nothing in it would read as a
+        missing control rather than an inapplicable one.
+        Sensitive-data monitoring used to be a third block here and was removed:
+        it was the only agent-only control in this expansion and read as an
+        inconsistency against every other row in the tab. */}
     {children&&<div>{children}</div>}
 
     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:8,marginBottom:14,fontSize:14.7}}>
@@ -5526,9 +6626,19 @@ function ClaudeUsageView() {
   // left for a toggle to protect against.
   useEffect(()=>{
     setData(null); setE(null);
+    // No StaleNote on this tab: /claude-usage has no cached fallback by design —
+    // it either aggregates the window live or reports that it couldn't, so it
+    // never serves a snapshot and a staleness indicator here would be fiction.
+    //
+    // What it does do on a blown budget is answer a structured 503
+    // ({ error: "budget_exceeded", budget_ms }). apiRequest reads that body
+    // before throwing, so this renders what actually happened and what to do
+    // about it. It used to print the literal string "500" — x.message is the
+    // bare status code — and any other failure still falls back to a generic
+    // line rather than echoing server-side error text onto the screen.
     apiFetch(`/claude-usage?sources=all${days?`&days=${days}`:""}`)
       .then(d=>{ setData(d); if(d.surfaces?.length) setSel(s=>s||d.surfaces[0].surface); })
-      .catch(x=>setE(x.message));
+      .catch(x=>setE(budgetErrorMessage(x,"Could not load Claude usage for this period. Try again shortly, or pick a different period.")));
   },[days]);
 
   const periodPicker=(

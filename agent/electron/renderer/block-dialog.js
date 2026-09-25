@@ -163,9 +163,87 @@ function render(ev) {
 
 window.api.onBlockDialog((ev) => render(ev));
 
+// ── "Copy masked text": the fallback when the rewrite could not finish ──────
+//
+// For these outcomes the enforcer never pressed Enter, so nothing was sent, and
+// the composer is no longer simply the user's original prompt: it may hold part
+// of the masked text (mid_write / verify_mismatch), all of it unsent
+// (before_send), or something that changed under us (content_changed). The user
+// is left to finish by hand, so they get the MASKED text, which this dialog is
+// already showing, plus a button that puts it on the clipboard — and a message
+// that says what state the message box is actually in, because "clear it" is
+// wrong advice when it holds the finished masked text.
+//
+// Mirrors REWRITE_COPYABLE_REASONS in main.js, which is the gate that actually
+// matters: the copy itself happens in the main process, from its own stored
+// masked preview, and is refused for any other outcome. The two lists are held
+// in lockstep with each other and with the enforcer by os-monitor-safety.test.mjs.
+//
+// NOT here, deliberately: the "_before_write" aborts. Nothing was typed, the
+// composer is untouched and the block is still armed, so the normal retry
+// (below) is the right answer and a copy button would only confuse it.
+//
+// What this never does: put the ORIGINAL prompt anywhere (this renderer never
+// receives it), or retype anything on the user's behalf.
+const COPYABLE_REASONS = new Set(['verify_mismatch', 'interrupted_mid_write', 'element_changed_mid_write', 'focus_changed_before_send', 'element_changed_before_send', 'interrupted_before_send', 'content_changed_before_send']);
+const PARTLY_CHANGED = 'Nothing was sent, but the message box may now hold part of the masked text. Clear it, paste the masked text above and send it yourself.';
+const COPY_FALLBACK_TEXT = {
+  verify_mismatch: 'The message box did not end up holding exactly the masked text. ' + PARTLY_CHANGED,
+  interrupted_mid_write: 'Masking stopped part-way because you typed or clicked. ' + PARTLY_CHANGED,
+  element_changed_mid_write: 'Masking stopped part-way because focus moved to a different field. ' + PARTLY_CHANGED,
+  focus_changed_before_send: 'The masked text was written, but you switched to another window before it could be sent, so nothing was sent. It should still be in the message box — go back to it and send it, or paste it from here.',
+  element_changed_before_send: 'The masked text was written, but focus moved to a different field before it could be sent, so nothing was sent. It should still be in the message box — click back into it and send it, or paste it from here.',
+  interrupted_before_send: 'The masked text was written, but you typed or clicked before it could be sent, so nothing was sent. It should still be in the message box — check it and send it yourself, or paste it from here.',
+  content_changed_before_send: 'The message box changed after the masked text was written, so nothing was sent. Check what is in it now before sending — you can paste the masked text from here.',
+};
+// The "_before_write" aborts: nothing typed, block still armed — retry.
+const RETRY_TEXT = {
+  element_changed_before_write: 'Focus moved to a different field before masking started — nothing was typed or sent. Click back into the message box and try again.',
+  interrupted_before_write: 'You typed or clicked before masking started — nothing was typed or sent. Try again.',
+};
+// Longer than the offer's own 16s: copying and pasting takes the user longer
+// than clicking a button, and there is no pin left to expire.
+const COPY_FALLBACK_CLOSE_MS = 45000;
+
+function showCopyFallback(ev) {
+  const label = document.querySelector('.preview-label');
+  if (label) label.textContent = 'Masked text — copy it and paste it yourself';
+  const tokenizeBtn = document.getElementById('btn-tokenize');
+  if (tokenizeBtn) tokenizeBtn.remove();
+  const actions = document.querySelector('.actions');
+  if (actions && !document.getElementById('btn-copy-masked')) {
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'btn-tokenize';
+    copyBtn.id = 'btn-copy-masked';
+    copyBtn.textContent = 'Copy masked text';
+    copyBtn.addEventListener('pointerdown', async (e) => {
+      e.preventDefault();
+      // Only the block_id crosses to the main process — never text. Caught so
+      // a rejected IPC (main process gone, window torn down) can never become
+      // an unhandled rejection in the renderer.
+      try {
+        const res = await window.api.copyMaskedText(ev.block_id);
+        copyBtn.textContent = res?.copied ? 'Copied' : 'Could not copy';
+      } catch {
+        copyBtn.textContent = 'Could not copy';
+      }
+    });
+    actions.insertBefore(copyBtn, actions.firstChild);
+  }
+  const footnote = document.querySelector('.footnote');
+  if (footnote) {
+    footnote.textContent = COPY_FALLBACK_TEXT[ev.reason] || PARTLY_CHANGED;
+    footnote.style.color = 'var(--danger)';
+  }
+  if (autoCloseTimer) clearTimeout(autoCloseTimer);
+  autoCloseTimer = setTimeout(dismiss, COPY_FALLBACK_CLOSE_MS);
+}
+
 window.api.onRewriteResult((ev) => {
   if (ev.block_id !== currentBlockId) return;
   if (ev.result === 'ok' || ev.result === 'not_submitted') { dismiss(); return; }
+  if (COPYABLE_REASONS.has(ev.reason)) { showCopyFallback(ev); return; }
   const tokenizeBtn = document.getElementById('btn-tokenize');
   if (tokenizeBtn) {
     tokenizeBtn.disabled = false;
@@ -173,7 +251,8 @@ window.api.onRewriteResult((ev) => {
   }
   const footnote = document.querySelector('.footnote');
   if (footnote) {
-    footnote.textContent = `Could not confirm the prompt was masked (${ev.reason || ev.result}) \u2014 nothing was sent. Edit it manually instead.`;
+    footnote.textContent = RETRY_TEXT[ev.reason]
+      || `Could not confirm the prompt was masked (${ev.reason || ev.result}) — nothing was sent. Edit it manually instead.`;
     footnote.style.color = 'var(--danger)';
   }
 });

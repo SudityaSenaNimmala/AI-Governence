@@ -52,7 +52,11 @@ function Call([string]$n, [object[]]$a = @()) {
 }
 
 # ── real catalog payloads (byte-identical to what enforcer.js ships) ─────────
-$IDE_JSON    = '[{"name":"code","panelFallback":false},{"name":"cursor","panelFallback":false}]'
+# The Office hosts are IDE processes too (they host the Microsoft 365 Copilot
+# side pane the way VS Code hosts Claude Code) and carry panelChildProcess:true,
+# because that pane is rendered by a child msedgewebview2.exe. Byte-identical to
+# buildIdeProcessConfig()'s output for them.
+$IDE_JSON    = '[{"name":"code","panelFallback":false},{"name":"cursor","panelFallback":false},{"name":"winword","panelFallback":false,"panelChildProcess":true},{"name":"excel","panelFallback":false,"panelChildProcess":true},{"name":"powerpnt","panelFallback":false,"panelChildProcess":true},{"name":"onenote","panelFallback":false,"panelChildProcess":true},{"name":"onenoteim","panelFallback":false,"panelChildProcess":true}]'
 # The three IDE panels, byte-identical to buildAiPanelConfig()'s output, plus
 # teams_composer — which ships enforce:false, exactly as the catalog has it.
 # $PANELS_TEAMS_ARMED is the TEST-ONLY flip, paired with $SURFACES_TEAMS_ARMED
@@ -85,6 +89,31 @@ $PANELS_COPILOT_ARMED = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_ON + ',' + $TEAMS
 # Both armed, but the Copilot tab held at the strict 'agent' rule — the control
 # for the panel-alone DLP scenarios.
 $PANELS_COPILOT_STRICT = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_ON + ',' + $TEAMS_COPILOT_PANEL_STRICT + ']'
+# ── teams_composer's OWN nested fallbackRead: the Chat-list badge route ──────
+# Added 2026-09-21, for the defect where MSTeams 26225.1806.5074.1452 stopped
+# naming the open Chat-list conversation in the window title at all. Its config
+# lives on the PANEL (not on teams_desktop) because the panel is the only thing
+# that still separates Teams' two UI routes now that the title does not.
+#
+# It carries its OWN enforce/verified pair, exactly like teams_desktop's nested
+# block, and ships FALSE/FALSE pending an end-to-end live pass. $TEAMS_BADGE_OFF
+# is therefore the SHIPPED shape and the inertness fixture at once;
+# $TEAMS_BADGE_ON is the TEST-ONLY flip that drives the mechanism.
+#
+# NOTE `headingSuffix` is the EMPTY STRING and that is the real configuration,
+# not an absent field: the paired Text's Name is the bare agent name already,
+# with nothing to strip. There is no paneKinds and no landingInfix — see the
+# catalog entry for why gating this route on the title would gate the fix on the
+# defect.
+$TEAMS_BADGE_OFF = ',"fallbackRead":{"mode":"message_heading","headingClass":"fai-AiGeneratedDisclaimer","headingSuffix":"","genericNames":["Copilot","You"],"enforce":false,"verified":false}'
+$TEAMS_BADGE_ON  = ',"fallbackRead":{"mode":"message_heading","headingClass":"fai-AiGeneratedDisclaimer","headingSuffix":"","genericNames":["Copilot","You"],"enforce":true,"verified":true}'
+$TEAMS_PANEL_HEAD = '{"id":"teams_composer","procs":["ms-teams"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"ck-editor__editable","classPrefix":"","enforce":true,"dlpMatch":"agent","newlineKeys":"shift_enter"'
+# The Chat-list composer armed as a SIGNATURE with the badge route held inert —
+# i.e. the shipped catalog. Used to prove the route does nothing at all.
+$TEAMS_PANEL_BADGE_OFF = $TEAMS_PANEL_HEAD + $TEAMS_BADGE_OFF + '}'
+$TEAMS_PANEL_BADGE_ON  = $TEAMS_PANEL_HEAD + $TEAMS_BADGE_ON + '}'
+$PANELS_BADGE_OFF = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_BADGE_OFF + ',' + $TEAMS_COPILOT_PANEL_OFF + ']'
+$PANELS_BADGE_ON  = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_BADGE_ON + ',' + $TEAMS_COPILOT_PANEL_OFF + ']'
 # exactly synthesizePlatformBlocks([{ host: 'claude.ai', product: 'Claude', blocked: true }])
 $ROWS_CLAUDE = '[{"platform":"ai_platform","process_name":"claude","agent_name":"Claude","agent_id":"","host":"claude.ai","reason":"Blocked by organization policy"},{"platform":"ai_platform","panel":"claude_code","agent_name":"Claude","agent_id":"","host":"claude.ai","reason":"Blocked by organization policy"}]'
 # a detection-only panel with a row of its own — must still never block
@@ -94,6 +123,27 @@ $ROWS_VSCODE_CHAT = '[{"platform":"ai_platform","panel":"vscode_chat","agent_nam
 # process off a browser-inventory toggle would be a catastrophic false positive.
 $ROWS_CURSOR = '[{"platform":"ai_platform","panel":"cursor_composer","agent_name":"Cursor","agent_id":"","host":"cursor.com","reason":"Blocked by organization policy"}]'
 $ROWS_EMPTY = '[]'
+
+# ── The Microsoft 365 Copilot side pane inside desktop Office ────────────────
+# Byte-identical to buildAiPanelConfig()'s office_copilot_pane entry, which is
+# LIVE-VERIFIED and ENFORCING (2026-09-21) — so unlike every Teams fixture above
+# there is no *_OFF variant: detection and enforcement here are the shipped
+# state, and the scenarios below must run against it.
+$OFFICE_PANEL = '{"id":"office_copilot_pane","procs":["WINWORD","EXCEL","POWERPNT","ONENOTE","ONENOTEIM"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"fai-EditorInput__input","classPrefix":"","enforce":true,"dlpMatch":"panel","newlineKeys":"shift_enter"}'
+$PANELS_OFFICE = '[' + $IDE_PANELS + ',' + $TEAMS_PANEL_OFF + ',' + $TEAMS_COPILOT_PANEL_OFF + ',' + $OFFICE_PANEL + ']'
+# The agent-scoped row an admin's per-agent block produces. `personal_agent` now
+# maps to the Office processes in PLATFORM_PROCS, which is exactly what makes the
+# whole-app arm reachable for Word — and therefore what the host-app marking has
+# to stop.
+$ROWS_OFFICE_AGENT = '[{"platform":"personal_agent","agent_name":"Contract Analyzer","agent_id":"agent-contract","reason":"Blocked by admin","agent_scope":"agent"}]'
+# The same row with NO agent_scope: the pre-existing "block the whole platform"
+# shape, which against a host app must also produce nothing.
+$ROWS_OFFICE_PLATFORM = '[{"platform":"personal_agent","agent_name":"Microsoft 365 Copilot","agent_id":"agent-m365","reason":"Blocked by admin"}]'
+# exactly synthesizePlatformBlocks([{ host: 'm365.cloud.microsoft', … }]) — the
+# PANEL-keyed row the curated-host cascade produces for the pane. This one MUST
+# still block: it is element-scoped, it names the pane's own product's host, and
+# it passed a real end-to-end live pass on 2026-09-21.
+$ROWS_OFFICE_PANEL = '[{"platform":"ai_platform","panel":"office_copilot_pane","agent_name":"Microsoft 365 Copilot","agent_id":"","host":"m365.cloud.microsoft","reason":"Blocked by organization policy"}]'
 
 Call 'LoadIdeProcesses' @($IDE_JSON)
 Call 'LoadAiPanels'     @($PANELS_JSON)
@@ -149,7 +199,25 @@ $TEAMS_SURFACE_COPILOT_ON = $TEAMS_SURFACE_HEAD + '"enforce":true,"verified":tru
 $M365_SURFACE      = '{"id":"m365_copilot","procs":["M365Copilot"],"controlType":"Edit","composerNamePrefixes":["Message "],"genericNames":["Copilot"],"read":"composer_name","titleSeparator":"","titleSuffix":"","titleKinds":[],"hostApp":false,"enforce":true,"verified":true}'
 $COPILOT_SURFACE   = '{"id":"copilot_standalone","procs":["Copilot"],"controlType":"Edit","composerNamePrefixes":["Message "],"genericNames":["Copilot"],"read":"composer_name","titleSeparator":"","titleSuffix":"","titleKinds":[],"hostApp":false,"enforce":false,"verified":false}'
 
+# ── The Office pane's agent-identification surface ──────────────────────────
+# Byte-identical to buildAgentSurfaceConfig()'s office_copilot_pane_agent entry
+# AS SHIPPED: both flags false, because nobody has yet read a named agent off a
+# real Word pane. Unlike the Teams fixtures there is deliberately no *_ON
+# variant — the point of these scenarios is what an UNVERIFIED host-app surface
+# does, and the answer has to be "nothing, and no whole-app block either".
+#
+# TWO flags carry the safety here and they are not the same flag:
+#   hostApp     — barred from the whole-app block arms. Without it, an
+#                 agent-scoped row for a platform that maps to WINWORD disables
+#                 Copilot — and Enter — in Word for the whole org.
+#   panelHosted — keeps these processes OUT of _hostAppProcs, so the
+#                 live-verified office_copilot_pane panel keeps its own
+#                 element-scoped block. office_panel_row_still_blocks is what
+#                 pins that half.
+$OFFICE_SURFACE_OFF = '{"id":"office_copilot_pane_agent","procs":["WINWORD","EXCEL","POWERPNT","ONENOTE","ONENOTEIM"],"controlType":"Edit","composerNamePrefixes":["Message "],"genericNames":["Copilot","Microsoft 365 Copilot"],"read":"composer_name","titleSeparator":"","titleSuffix":"","titleKinds":[],"hostApp":true,"panelHosted":true,"enforce":false,"verified":false}'
+
 $SURFACES_SHIPPED = '[' + $M365_SURFACE + ',' + $TEAMS_SURFACE_OFF + ']'
+$SURFACES_OFFICE  = '[' + $M365_SURFACE + ',' + $TEAMS_SURFACE_OFF + ',' + $OFFICE_SURFACE_OFF + ']'
 $SURFACES_WITH_UNVERIFIED = '[' + $M365_SURFACE + ',' + $COPILOT_SURFACE + ',' + $TEAMS_SURFACE_OFF + ']'
 $SURFACES_TEAMS_ARMED = '[' + $M365_SURFACE + ',' + $TEAMS_SURFACE_ON + ']'
 $SURFACES_COPILOT_ARMED = '[' + $M365_SURFACE + ',' + $TEAMS_SURFACE_COPILOT_ON + ']'
@@ -163,6 +231,12 @@ function LoadPanels([string]$json) { Call 'LoadAiPanels' @($json) | Out-Null }
 $aiProcSet = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($p in @('M365Copilot', 'Copilot', 'ChatGPT', 'Claude', 'Gemini')) { $null = $aiProcSet.Add($p) }
 SetF '_aiProcs' $aiProcSet
+
+# The fleet `dlp` flag, which since 2026-09-24 is the ONLY licence for the
+# AI-evidence routes (the Copilot tab's panel-alone governance among them) and
+# defaults OFF in the helper until the fleet has answered. These scenarios model
+# a fleet with dlp ON; enforcer-m365-routes.test.mjs covers dlp off.
+SetF '_evidenceDlpOn' $true
 
 # Start() also builds _patInfos (the compiled pattern table). Left null it would
 # make any call into the masking path throw a NullReferenceException instead of
@@ -191,6 +265,11 @@ if (-not $M_EXTRACT) { throw 'no method ExtractAgentName' }
 # (FallbackReadArmed) that decides whether a walk may happen at all.
 $M_EXTRACT_HEADING = $T.GetMethod('ExtractAgentNameFromHeading', $FLAGS)
 if (-not $M_EXTRACT_HEADING) { throw 'no method ExtractAgentNameFromHeading' }
+# The THIRD Teams route's pure extractor (the Chat-list badge fallback, added
+# 2026-09-21). A second ENTRY POINT onto the same shared decision, driven off a
+# PANEL's fallback block instead of a surface's — see ExtractAgentNameFromPanelHeading.
+$M_EXTRACT_PANEL_HEADING = $T.GetMethod('ExtractAgentNameFromPanelHeading', $FLAGS)
+if (-not $M_EXTRACT_PANEL_HEADING) { throw 'no method ExtractAgentNameFromPanelHeading' }
 
 # ── MEASURED M365Copilot composer values ────────────────────────────────────
 # Captured live 2026-08 by a read-only UIA probe of a real Microsoft 365 Copilot
@@ -340,6 +419,56 @@ $HEAD_DISAGREE = @(
 $HEAD_USER_ONLY = @(
   ,@('fai-UserMessage__accessibleHeading r183b29h', 'You said:')
 )
+
+# ── MEASURED Microsoft Teams CHAT-LIST BADGE values (the third signal) ──────
+# Probed live 2026-09-21 by direct UIA inspection of the same install, with the
+# same agent, reached through the CHAT LIST, 15 messages in the transcript —
+# the conversation whose window title had stopped naming it.
+#
+# $BADGE_* entries are (ClassName, BoundingRectangle.Top) per "AI generated"
+# badge; $TXT_* entries are (Name, BoundingRectangle.Top) per candidate
+# unclassed Text. That is exactly the raw harvest CollectAiBadgeHeadings makes
+# before any decision, and it is ALL this harness supplies: the pairing and the
+# extraction are the real functions.
+#
+# The badge ClassName is verbatim, hashes and all, so the token matching is
+# exercised for real rather than against a cleaned-up string.
+$BADGE_CLASS = 'fai-AiGeneratedDisclaimer ___lv0h9d0 fk6fouc f13mqy1h figsok6 fwrc4pm ft85np5 fluwili f14t3ns0 f11d4kpn flu3bqm f1jl2yie fz5stix'
+# One AI message: the badge at Y=61 and the sender-name Text at Y=62, the exact
+# 1px offset measured.
+$BADGES_ONE = @( ,@($BADGE_CLASS, 61) )
+$TXT_ONE    = @( ,@('IT Help Desk Agent', 62) )
+# Two AI messages further down the same transcript. Badges accumulate exactly as
+# they do on the Copilot tab, and two that agree are one confirmed answer.
+$BADGES_TWO = @( @($BADGE_CLASS, 61), @($BADGE_CLASS, 233) )
+$TXT_TWO    = @( @('IT Help Desk Agent', 62), @('IT Help Desk Agent', 234) )
+# THE REGRESSION FIXTURE: an ordinary human conversation. Texts everywhere — in
+# a Chromium tree a message body's Name IS the message text — and NOT ONE
+# badge. Nothing may be read, nothing may be offered, nothing may be governed.
+$BADGES_NONE = $null
+$TXT_HUMAN_DM = @(
+  @('Sruthi Chimata', 62),
+  @('can you send me the Q3 numbers', 84),
+  @('Pravallika Punumalli', 140),
+  @('sure, one sec', 162)
+)
+# A bare name Text with NO badge anywhere near it — the coincidence the original
+# 2026-09 pass rejected a bare text node for. Here the badge is 400px away, i.e.
+# a completely different message row, so the pairing must drop it.
+$BADGES_FAR = @( ,@($BADGE_CLASS, 500) )
+$TXT_FAR    = @( ,@('IT Help Desk Agent', 62) )
+# A badge whose nearest text is a DIFFERENT, ungoverned agent's name — the
+# fallback widens coverage, never policy.
+$TXT_UNPOLICED = @( ,@('Expenses Helper', 62) )
+# A governed (DLP-monitored) agent's conversation, same geometry.
+$TXT_GOVERNED  = @( ,@('Expenses Helper', 62) )
+# Two badges whose paired names DISAGREE — a mixed or re-rendered transcript.
+# Must be no evidence, never a block.
+$BADGES_DISAGREE = @( @($BADGE_CLASS, 61), @($BADGE_CLASS, 233) )
+$TXT_DISAGREE    = @( @('IT Help Desk Agent', 62), @('Expenses Helper', 234) )
+# The badge is present but the paired Text names a GENERIC label. Authoritative
+# "no specific agent", not a match — the Generic filter runs before any match.
+$TXT_GENERIC = @( ,@('Copilot', 62) )
 
 # One agent-scoped row for the Teams agent. teams_chat_agent is the Teams-only
 # platform id; PLATFORM_PROCS maps it to ms-teams and to nothing else.
@@ -644,6 +773,109 @@ function TeamsCopilotTick([string]$scenario, [int]$n, $focus, [string]$title, $h
     }
   }
   $rid = if ($null -ne $hit) { '7.3311.4.9.31.90211' } else { '' }
+  Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $hit, $rid, $readable, $outcome, $agentName) | Out-Null
+  Call 'CheckFgBlocked' | Out-Null
+  RunGovState
+  Report $scenario $n $hit $readable $outcome $searchAttempted
+}
+
+# One poll tick on Teams' CHAT-LIST route with the window title BROKEN — the
+# 2026-09-21 defect, reproduced exactly: MSTeams 26225.1806.5074.1452 serves
+# "Copilot | <tenant> | <email> | Microsoft Teams" with a Copilot Studio agent
+# conversation open and focused from the Chat list, so the title names nothing
+# and the whole title-based read is blind.
+#
+# Everything that DECIDES is production code. This reproduces the same two
+# things TeamsTick does (the hostAppArmed gate and the two substituted reads),
+# plus exactly one more — the TREE WALK — and it substitutes LESS of that walk
+# than TeamsCopilotTick does, on purpose. What is substituted is only the raw
+# UIA harvest CollectAiBadgeHeadings performs before any decision:
+#   $badges — (ClassName, BoundingRectangle.Top) per "AI generated" badge;
+#   $texts  — (Name, BoundingRectangle.Top) per candidate unclassed Text.
+# The PAIRING is then done by the REAL PairAiBadgeHeadings — which is the entire
+# safety property of this route, so a test that faked it would be testing
+# nothing — and what the pairs MEAN is decided by the REAL
+# ExtractAgentNameFromPanelHeading. Whether a walk may be attempted at all is
+# decided by the REAL PanelFallbackArmed against the REAL focused-panel match.
+#
+# The only production line reproduced here rather than called is the 6-line
+# glue between the pairing and the extractor (build the two parallel arrays,
+# drop an empty or over-long Name) — and the length bound it applies is read out
+# of the C# constant, not restated.
+#
+# The reported `searchAttempted` is PanelFallbackArmed's real answer, which is
+# how a scenario can assert STRUCTURALLY that no walk is ever attempted (an
+# unverified route, or focus outside the Chat-list composer).
+function TeamsBadgeTick([string]$scenario, [int]$n, $focus, [string]$title, $badges, $texts,
+                        [uint32]$fgPid = $TEAMS_PID, [string]$proc = 'ms-teams', [int]$elPid = -1) {
+  $hit = $null
+  $readable = $false
+  $outcome = $OUT_UNREADABLE
+  $agentName = ''
+  $searchAttempted = $false
+  # hostAppArmed, verbatim — see TeamsTick's copy.
+  $armed = (HasProc '_hostAppProcs' $proc) `
+           -and ((HasProc '_agentScopedProcs' $proc) -or (HasProc '_dlpScopedProcs' $proc)) `
+           -and ($null -ne (Call 'EnforcingAgentSurface' @($proc)))
+  if ($armed) {
+    if ($null -ne $focus) {
+      $ownerPid = if ($elPid -lt 0) { [int]$fgPid } else { $elPid }
+      $owned = [bool](Call 'ElementPidBelongsToForeground' @([int]$ownerPid, [uint32]$fgPid))
+      if ($owned) {
+        $ct = $focus[0]; $nm = $focus[1]; $cls = $focus[2]
+        $readable = ($ct.Trim().Length -gt 0) -and (($nm.Trim().Length -gt 0) -or ($cls.Trim().Length -gt 0))
+        $hit = Call 'MatchPanelSignature' @($proc, $ct, $nm, $cls)
+      }
+    }
+    $surface = Call 'MatchAgentSurface' @($proc)
+    if ($null -ne $surface -and $null -ne $title -and $title.Trim().Length -gt 0) {
+      # STAGE A — the primary title parse, unchanged. With the broken title it
+      # lands in NotComposer; with a healthy one it names the conversation and
+      # the fallback is never reached at all.
+      $params = [object[]]@($surface, '', $title, $null)
+      $outcome = $M_EXTRACT.Invoke($null, $params)
+      $agentName = [string]$params[3]
+      if ("$outcome" -eq 'NotComposer') {
+        # STAGE C — the real gate on the focused PANEL, then the walk.
+        # (Stage B, the Copilot-tab heading route, is not driven here: these
+        # scenarios supply no fai-CopilotMessage headings, which is exactly what
+        # the live Chat-list transcript does not have either.)
+        $searchAttempted = [bool](Call 'PanelFallbackArmed' @($hit))
+        if ($searchAttempted -and $null -ne $badges) {
+          $bCount = $badges.Count
+          $bCls = [string[]]::new($bCount)
+          $bY = [double[]]::new($bCount)
+          for ($k = 0; $k -lt $bCount; $k++) { $bCls[$k] = [string]$badges[$k][0]; $bY[$k] = [double]$badges[$k][1] }
+          $tCount = if ($null -ne $texts) { $texts.Count } else { 0 }
+          $tNm = [string[]]::new($tCount)
+          $tY = [double[]]::new($tCount)
+          for ($k = 0; $k -lt $tCount; $k++) { $tNm[$k] = [string]$texts[$k][0]; $tY[$k] = [double]$texts[$k][1] }
+          # THE REAL PAIRING — one text per badge, nearest by Y within the real
+          # tolerance, or -1 for "nothing on this badge's row".
+          $map = Call 'PairAiBadgeHeadings' @([double[]]$bY, [double[]]$tY)
+          $maxLen = [int](GetF 'AIBADGE_MAX_NAME_LEN')
+          $pc = New-Object 'System.Collections.Generic.List[string]'
+          $pn = New-Object 'System.Collections.Generic.List[string]'
+          # $ti, not $t: PowerShell variable names are case-insensitive and $T
+          # is this harness's handle on the compiled type.
+          for ($k = 0; $k -lt $bCount; $k++) {
+            $ti = [int]$map[$k]
+            if ($ti -lt 0 -or $ti -ge $tCount) { continue }
+            $paired = $tNm[$ti].Trim()
+            if ($paired.Length -eq 0 -or $paired.Length -gt $maxLen) { continue }
+            $pc.Add($bCls[$k])
+            $pn.Add($paired)
+          }
+          if ($pn.Count -gt 0) {
+            $hp = [object[]]@($hit, [string[]]$pc.ToArray(), [string[]]$pn.ToArray(), $null)
+            $outcome = $M_EXTRACT_PANEL_HEADING.Invoke($null, $hp)
+            $agentName = [string]$hp[3]
+          }
+        }
+      }
+    }
+  }
+  $rid = if ($null -ne $hit) { '7.3311.4.9.31.90212' } else { '' }
   Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $hit, $rid, $readable, $outcome, $agentName) | Out-Null
   Call 'CheckFgBlocked' | Out-Null
   RunGovState
@@ -1924,6 +2156,187 @@ AgentTick 'm365_unaffected_by_host_apps' 2 $FOCUS_M365_ADVISOR
 AgentTick 'm365_unaffected_by_host_apps' 3 $FOCUS_M365_TRANSCRIPT
 AgentTick 'm365_unaffected_by_host_apps' 4 $null
 
+# ═══ THE THIRD SIGNAL: the CHAT-LIST "AI generated" badge route ═════════════
+#
+# WHAT CT8 ABOVE PINNED, AND WHAT THIS CLOSES. CT8 is the honest gap: the
+# Chat-list title stuck on the Copilot shape AND no Copilot-tab heading in the
+# pane leaves no signal anywhere, so the conversation is ungoverned. On
+# 2026-09-21 that stopped being an edge case and became the NORMAL state of
+# MSTeams 26225.1806.5074.1452 — measured live, twice, by two independent
+# methods, with a real Copilot Studio agent open and focused from the Chat list.
+# The product owner reproduced the consequence end to end: an SSN typed into a
+# DLP-MONITORED agent went through unscanned, with no scan at all.
+#
+# The signal that closes it is measured, not inferred: an "AI generated" badge
+# (ClassName token fai-AiGeneratedDisclaimer) paired with the bare sender-name
+# Text on the same row. The pairing is the safety property and is what these
+# scenarios exercise — see TeamsBadgeTick, which substitutes only the raw UIA
+# harvest and runs the real pairing and the real extractor.
+#
+# NOTE which surface payload these use: $SURFACES_TEAMS_ARMED, i.e. the
+# Copilot-tab fallback held OFF. This route is driven entirely by the PANEL, and
+# using the surface payload that cannot reach teams_desktop's own fallback is
+# what proves that.
+
+# ── BA: THE UNVERIFIED-ROUTE FIXTURE — completely inert ─────────────────────
+# The Chat-list composer fully armed as a SIGNATURE, the badge route held at
+# false/false — the SHIPPED shape. The blocked agent's own conversation is open,
+# its composer focused, the title broken, and the badge pairing sitting right
+# there — and nothing may happen, including no walk being attempted at all.
+LoadPanels $PANELS_BADGE_OFF
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_EMPTY
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 5; $i++) {
+  TeamsBadgeTick 'badge_route_is_inert' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $BADGES_ONE $TXT_ONE
+}
+
+# ═══ The mechanism, driven with the route's own pair flipped (TEST-ONLY) ════
+
+# ── BB: THE FIX — a blocked agent recovered from the badge pairing ──────────
+# Exactly the live condition: broken title, one AI message, badge at Y=61 and
+# the sender name at Y=62. Must block, and must keep blocking across a sitting.
+LoadPanels $PANELS_BADGE_ON
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_EMPTY
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 10; $i++) {
+  TeamsBadgeTick 'badge_blocked_agent' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $BADGES_ONE $TXT_ONE
+}
+
+# ── BB2: two AI messages further down — badges ACCUMULATE and must agree ────
+LoadPanels $PANELS_BADGE_ON
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_EMPTY
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 5; $i++) {
+  TeamsBadgeTick 'badge_two_messages' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $BADGES_TWO $TXT_TWO
+}
+
+# ── BC: THE INVARIANT THAT MUST NEVER BREAK — an ordinary human conversation ─
+# The SAME broken title, the SAME armed route, the SAME focused composer (one
+# CKEditor serves every Teams conversation), a transcript full of Text nodes
+# whose Names are the actual messages — and NOT ONE "AI generated" badge. This
+# must read as no evidence, block nothing, govern nothing and capture nothing.
+# A company's ordinary Teams chat is what the whole host-app design exists to
+# protect, and the badge pairing is the only thing standing there.
+LoadPanels $PANELS_BADGE_ON
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_EMPTY
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 5; $i++) {
+  TeamsBadgeTick 'badge_human_dm_untouched' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $BADGES_NONE $TXT_HUMAN_DM
+}
+
+# ── BC2: a bare name Text with NO badge on its row is NOT evidence ──────────
+# The coincidence the original pass rejected a bare text node for. The blocked
+# agent's exact name is sitting in the transcript at Y=62 — and the only badge
+# is 438px away, a completely different message row. The pairing must drop it.
+LoadPanels $PANELS_BADGE_ON
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_EMPTY
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 5; $i++) {
+  TeamsBadgeTick 'badge_unpaired_text_ignored' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $BADGES_FAR $TXT_FAR
+}
+
+# ── BD: DISAGREEING pairs are NO EVIDENCE, never a block ────────────────────
+LoadPanels $PANELS_BADGE_ON
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_EMPTY
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsBadgeTick 'badge_disagree_no_evidence' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $BADGES_DISAGREE $TXT_DISAGREE
+}
+
+# ── BD2: a GENERIC paired name is authoritative "not a specific agent" ──────
+LoadPanels $PANELS_BADGE_ON
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_EMPTY
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsBadgeTick 'badge_generic_name' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $BADGES_ONE $TXT_GENERIC
+}
+
+# ── BE: an agent NOBODY has a policy about — coverage widens, policy does not ─
+LoadPanels $PANELS_BADGE_ON
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_EMPTY
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsBadgeTick 'badge_unpoliced_agent' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $BADGES_ONE $TXT_UNPOLICED
+}
+
+# ── BF: THE PRODUCT-OWNER CASE — a DLP-MONITORED agent is finally governed ──
+# The exact report this whole change exists for: "IT Help Desk Agent" has DLP
+# Monitor on in AI Hub, an SSN is typed into its Chat-list conversation, and it
+# sent through unblocked with no scan. Governed, NOT blocked: dlpGoverned true,
+# fgIsBlocked false, a plain Enter still goes through, and a CONTENT match now
+# does stop the send and offer Tokenize & Send.
+LoadPanels $PANELS_BADGE_ON
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_TEAMS_AGENT
+LoadRows $ROWS_EMPTY
+ResetState
+for ($i = 0; $i -lt 10; $i++) {
+  TeamsBadgeTick 'badge_governed_dlp_only' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $BADGES_ONE $TXT_GOVERNED
+}
+
+# ── BG: the MESSAGE LIST focused, not the composer ──────────────────────────
+# The panel match IS this route's gate, so focus on the transcript must mean no
+# walk is even attempted — structurally, via the real PanelFallbackArmed.
+LoadPanels $PANELS_BADGE_ON
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_EMPTY
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsBadgeTick 'badge_not_composer_focused' $i $FOCUS_TEAMS_MESSAGE_LIST $TITLE_TEAMS_COPILOT $BADGES_ONE $TXT_ONE
+}
+
+# ── BH: a HEALTHY title still wins — the fallback is additive, never a swap ──
+# Tick 0 the working Chat-list title (the primary parse names the agent and no
+# walk is attempted at all), tick 1 the broken one (the badge route recovers the
+# same answer), tick 2 back again. No ungoverned tick in between.
+LoadPanels $PANELS_BADGE_ON
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_EMPTY
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsBadgeTick 'badge_healthy_title_wins' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT $BADGES_ONE $TXT_ONE
+TeamsBadgeTick 'badge_healthy_title_wins' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $BADGES_ONE $TXT_ONE
+TeamsBadgeTick 'badge_healthy_title_wins' 2 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_AGENT $BADGES_ONE $TXT_ONE
+
+# ── BI: leaving the conversation RELEASES the block ─────────────────────────
+# A DM with no badges after a blocked agent: the read is authoritative "not that
+# agent" and the latch must retire on that very tick.
+LoadPanels $PANELS_BADGE_ON
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_EMPTY
+LoadRows $ROWS_TEAMS_AGENT
+ResetState
+TeamsBadgeTick 'badge_release_to_dm' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $BADGES_ONE $TXT_ONE
+TeamsBadgeTick 'badge_release_to_dm' 1 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_DM $BADGES_NONE $TXT_HUMAN_DM
+TeamsBadgeTick 'badge_release_to_dm' 2 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_DM $BADGES_NONE $TXT_HUMAN_DM
+
+# ── BJ: PRIVACY GATE — no Teams policy at all means no read and no walk ─────
+LoadPanels $PANELS_BADGE_ON
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_CHATGPT
+LoadRows $ROWS_AGENT_CHATGPT
+ResetState
+for ($i = 0; $i -lt 3; $i++) {
+  TeamsBadgeTick 'badge_no_policy_no_read' $i $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_COPILOT $BADGES_ONE $TXT_ONE
+}
+
 # ═══ govstate: the FILE-SCANNING arm signal ═════════════════════════════════
 #
 # The Node side arms Microsoft Teams' three file-capture routes (drag-drop chip,
@@ -2100,6 +2513,172 @@ Tick 'govstate_ide_panel_never_arms' 0 $FOCUS_CLAUDE_COMPOSER
 Tick 'govstate_ide_panel_never_arms' 1 $FOCUS_CODE_EDITOR
 
 LoadGoverned $GOV_EMPTY
+
+# ═══ OFFICE: a per-agent block must never disable Word ══════════════════════
+#
+# The Microsoft 365 Copilot side pane inside Word/Excel/PowerPoint/OneNote. The
+# SECOND host-app surface, and the one with the largest blast radius in the
+# product: these processes are the company's DOCUMENT EDITORS, and the arms
+# being exercised here are the ones that swallow every Enter in the foreground
+# process.
+#
+# The setup is what makes the question real rather than theoretical:
+# PLATFORM_PROCS now maps personal_agent (and copilot_studio, and
+# sharepoint_embedded) to WINWORD, so CheckFgBlocked's whole-app arm genuinely
+# reaches Word for these rows. The ONLY thing between that arm and "nobody in
+# the org may type in Word" is office_copilot_pane_agent's hostApp marking.
+#
+# The pane composer's UIA shape is the one measured live 2026-09-18: a Fluent
+# chat editor whose ClassName carries the fai-EditorInput__input token among the
+# build-hash classes. The document body is the control it was collision-checked
+# against.
+$WINWORD_PID = [uint32]8020
+$FOCUS_OFFICE_PANE_GENERIC = @('Edit', 'Message Copilot', 'fai-EditorInput__input r18fti29 r18aquq2 ___10kbave f1pha7fy f1immsc2 f1mk8lai')
+# The blocked agent's own name, sitting in the composer label. An unverified
+# surface must read NOTHING off it — that is what "inert" means — and, far more
+# importantly, must not fall back to blocking the app it is sitting in.
+$FOCUS_OFFICE_PANE_AGENT = @('Edit', 'Message Contract Analyzer', 'fai-EditorInput__input r18fti29 r18aquq2 ___10kbave f1pha7fy f1immsc2 f1mk8lai')
+$FOCUS_WORD_DOCUMENT = @('Document', 'Q3 Contract Review.docx', '_WwG')
+
+# ── OA: THE MOST IMPORTANT TEST OF THIS PHASE ──────────────────────────────
+# An agent-scoped row whose platform reaches WINWORD, the blocked agent's name
+# visible in the pane, and a surface that cannot narrow to it because it has had
+# no live pass. For a CHAT app that combination is a whole-app block (the
+# fail-CLOSED default — the user loses an AI tool). Here it must be NO BLOCK AT
+# ALL: the alternative is that blocking one Copilot agent stops everyone in the
+# company using Word.
+LoadPanels $PANELS_OFFICE
+LoadSurfaces $SURFACES_OFFICE
+LoadRows $ROWS_OFFICE_AGENT
+ResetState
+Tick 'office_unverified_never_whole_app' 0 $FOCUS_OFFICE_PANE_GENERIC $WINWORD_PID 'WINWORD'
+Tick 'office_unverified_never_whole_app' 1 $FOCUS_OFFICE_PANE_AGENT   $WINWORD_PID 'WINWORD'
+Tick 'office_unverified_never_whole_app' 2 $null                      $WINWORD_PID 'WINWORD'
+Tick 'office_unverified_never_whole_app' 3 $FOCUS_WORD_DOCUMENT       $WINWORD_PID 'WINWORD'
+
+# ── OA2: …and the same holds in every other Office host ────────────────────
+# Excel/PowerPoint/OneNote inherit coverage by PROCESS NAME, not by their own
+# measurement, so the guard has to hold for each name in the catalog entry.
+LoadPanels $PANELS_OFFICE
+LoadSurfaces $SURFACES_OFFICE
+LoadRows $ROWS_OFFICE_AGENT
+foreach ($p in @('EXCEL', 'POWERPNT', 'ONENOTE', 'ONENOTEIM')) {
+  ResetState
+  Tick 'office_unverified_never_whole_app_all_hosts' 0 $FOCUS_OFFICE_PANE_AGENT $WINWORD_PID $p
+}
+
+# ── OB: a PLATFORM-scoped row against Office blocks nothing either ─────────
+# An absent agent_scope is the pre-existing row shape and means "block the whole
+# platform". Against a host app that is precisely the outcome the marking
+# prevents, and it is guarded on the PROCESS, not on the surface being verified.
+LoadPanels $PANELS_OFFICE
+LoadSurfaces $SURFACES_OFFICE
+LoadRows $ROWS_OFFICE_PLATFORM
+ResetState
+for ($i = 0; $i -lt 3; $i++) { Tick 'office_platform_row_never_blocks' $i $FOCUS_OFFICE_PANE_GENERIC $WINWORD_PID 'WINWORD' }
+
+# ── OC: the OTHER HALF — the panel-keyed row MUST still block ──────────────
+# The regression risk of this change, and the reason Office is marked
+# `panelHosted` instead of simply being added to _hostAppProcs. An Inventory
+# block on m365.cloud.microsoft synthesizes a PANEL-keyed row for this pane
+# (panelForHost resolves it, because the pane's host is its OWN product's), and
+# that row was driven end-to-end through a real server-side block on 2026-09-21.
+# It is element-scoped — it can only ever fire while the pane's composer itself
+# has focus — so the host-app fail-open must NOT reach it.
+LoadPanels $PANELS_OFFICE
+LoadSurfaces $SURFACES_OFFICE
+LoadRows $ROWS_OFFICE_PANEL
+ResetState
+for ($i = 0; $i -lt 3; $i++) { Tick 'office_panel_row_still_blocks' $i $FOCUS_OFFICE_PANE_GENERIC $WINWORD_PID 'WINWORD' }
+
+# ── OD: …and that panel block never reaches the DOCUMENT ───────────────────
+# The same row, with the caret in the document body instead of the pane. This is
+# the property the panel keying exists for, asserted from a cold start so no
+# latch can be carrying a block across.
+LoadPanels $PANELS_OFFICE
+LoadSurfaces $SURFACES_OFFICE
+LoadRows $ROWS_OFFICE_PANEL
+ResetState
+for ($i = 0; $i -lt 2; $i++) { Tick 'office_panel_row_spares_document' $i $FOCUS_WORD_DOCUMENT $WINWORD_PID 'WINWORD' }
+
+# ── AT: WHICH AGENT a block line names — attribution, run through the REAL ──
+#        ApplyForegroundTick → ResolveBlockAgent → EmitBlock chain.
+#
+# EmitBlock writes its {"kind":"block",…} line straight to Console.Out. It is
+# CAPTURED here (Console.SetOut to a StringWriter, restored in a finally) and
+# re-emitted wrapped in an observation, so the test reads the production
+# emitter's exact bytes — which is how "no UI-read name ever reaches the line"
+# is asserted against the real line and not a copy of it.
+function CaptureBlock([string]$scenario, [string]$app, [string]$patterns = 'ssn', [string]$reason = 'send') {
+  $orig = [Console]::Out
+  $sw = New-Object System.IO.StringWriter
+  [Console]::SetOut($sw)
+  try { Call 'EmitBlock' @($app, $patterns, $reason) | Out-Null }
+  finally { [Console]::SetOut($orig) }
+  Write-Output (@{ scenario = $scenario; attr = $true; line = $sw.ToString().Trim() } | ConvertTo-Json -Compress)
+}
+
+# AT-1: M365Copilot, a GOVERNED agent open, read with different case and
+# spacing than the admin typed it. The line must carry the ROW's spelling and
+# id, never the read string. (A blocked agent-scoped row for a DIFFERENT agent
+# is loaded too: that is the privacy gate that licenses the name read at all.)
+LoadPanels $PANELS_JSON
+LoadSurfaces $SURFACES_SHIPPED
+LoadRows $ROWS_AGENT
+LoadGoverned $GOV_M365_AGENT
+ResetState
+AgentTick 'attr_m365_governed_row' 0 @('Edit', 'Message hr   HELPER')
+CaptureBlock 'attr_m365_governed_row' 'M365Copilot'
+
+# AT-2: the same app, an agent NO row names. The read name is a string out of
+# another app's accessibility tree and must not reach the line at all.
+ResetState
+AgentTick 'attr_m365_unknown_agent' 0 @('Edit', 'Message Secret Project Bot')
+CaptureBlock 'attr_m365_unknown_agent' 'M365Copilot'
+
+# AT-3: the BLOCKED agent itself — an agent-scoped platform block, which names
+# its own armed row.
+ResetState
+AgentTick 'attr_m365_blocked_agent' 0 $FOCUS_M365_ADVISOR
+CaptureBlock 'attr_m365_blocked_agent' 'M365Copilot'
+LoadGoverned $GOV_EMPTY
+LoadRows $ROWS_EMPTY
+
+# AT-4: the Office Copilot pane, which declares a catalog soleAgent. No row
+# names anything, so the catalog's own string is the attribution (src "sole").
+$OFFICE_PANEL_SOLE = '{"id":"office_copilot_pane","procs":["WINWORD","EXCEL","POWERPNT","ONENOTE","ONENOTEIM"],"controlType":"Edit","nameEquals":"","namePrefix":"","classEquals":"fai-EditorInput__input","classPrefix":"","enforce":true,"dlpMatch":"panel","soleAgent":"Microsoft 365 Copilot","newlineKeys":"shift_enter"}'
+LoadPanels ('[' + $IDE_PANELS + ',' + $TEAMS_PANEL_OFF + ',' + $TEAMS_COPILOT_PANEL_OFF + ',' + $OFFICE_PANEL_SOLE + ']')
+LoadSurfaces $SURFACES_OFFICE
+ResetState
+Tick 'attr_office_sole' 0 $FOCUS_OFFICE_PANE_GENERIC $WINWORD_PID 'WINWORD'
+CaptureBlock 'attr_office_sole' 'WINWORD'
+
+# AT-5: a governed Teams Chat-list conversation — the host-app row identity.
+# The window title (which carries a tenant and an email address) must not
+# reach the line.
+LoadPanels $PANELS_TEAMS_ARMED
+LoadSurfaces $SURFACES_TEAMS_ARMED
+LoadGoverned $GOV_TEAMS_AGENT
+ResetState
+TeamsTick 'attr_teams_governed_row' 0 $FOCUS_TEAMS_COMPOSER $TITLE_TEAMS_GOV_AGENT
+CaptureBlock 'attr_teams_governed_row' 'ms-teams'
+LoadGoverned $GOV_EMPTY
+
+# AT-6: an IDE panel with no soleAgent and no row — attribution "none".
+LoadPanels $PANELS_JSON
+LoadSurfaces $SURFACES_SHIPPED
+ResetState
+Tick 'attr_ide_none' 0 $FOCUS_CLAUDE_COMPOSER
+CaptureBlock 'attr_ide_none' 'Code'
+
+# AT-7: focus left the AI app (the sticky window). Whatever the previous tick
+# resolved must not be carried into a block fired now.
+LoadPanels ('[' + $IDE_PANELS + ',' + $TEAMS_PANEL_OFF + ',' + $TEAMS_COPILOT_PANEL_OFF + ',' + $OFFICE_PANEL_SOLE + ']')
+LoadSurfaces $SURFACES_OFFICE
+ResetState
+Tick 'attr_sticky_none' 0 $FOCUS_OFFICE_PANE_GENERIC $WINWORD_PID 'WINWORD'
+Call 'ApplyForegroundTick' @([uint32]4242, 'explorer', $false, $null, '', $false, $OUT_UNREADABLE, '') | Out-Null
+CaptureBlock 'attr_sticky_none' 'WINWORD'
 
 # Leave the catalog exactly as it SHIPS, so nothing after this point could
 # accidentally observe a fixture-only payload.

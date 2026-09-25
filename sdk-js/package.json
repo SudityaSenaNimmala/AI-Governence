@@ -9,7 +9,8 @@
   },
   "files": [
     "src",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"
@@ -24,5 +25,18 @@
     "observability",
     "governance"
   ],
-  "license": "UNLICENSED"
+  "license": "MIT",
+  "author": "CloudFuze",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SudityaSenaNimmala/AI-Governence.git",
+    "directory": "sdk-js"
+  },
+  "homepage": "https://github.com/SudityaSenaNimmala/AI-Governence/tree/main/sdk-js#readme",
+  "bugs": {
+    "url": "https://github.com/SudityaSenaNimmala/AI-Governence/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

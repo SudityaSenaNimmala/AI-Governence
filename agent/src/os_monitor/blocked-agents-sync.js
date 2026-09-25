@@ -43,6 +43,7 @@ import {
   normalizeAgentRows,
   normalizeGovernedRows,
   filterGovernedAgents,
+  synthesizeEgressSurfaces,
 } from './ai-processes.js';
 
 const BLOCKED_PATH = join(homedir(), '.cloudfuze-aigov', 'blocked-agents.json');
@@ -52,6 +53,18 @@ const BLOCKED_PATH = join(homedir(), '.cloudfuze-aigov', 'blocked-agents.json');
 // tokenize". Merging them would make one wrong parse in the enforcer either
 // block a monitored agent or monitor a blocked one.
 const GOVERNED_PATH = join(homedir(), '.cloudfuze-aigov', 'governed-agents.json');
+// The THIRD file this module writes: the policy-armed egress surfaces (Outlook
+// compose/attach, the OneDrive/SharePoint sync roots).
+//
+// Its own file, for the same reason governed-agents.json is not folded into
+// blocked-agents.json: the three answer different questions and are parsed by
+// different consumers. This one is read by attachment-watcher.ps1,
+// file-dialog-watcher.ps1, prompt-watcher.ps1, sync-watcher.ps1 and
+// enforcer-win.ps1, and its ABSENCE is what makes the entire egress feature
+// inert on a machine whose admin has governed no email/sync host. Merging it
+// into either of the other two files would mean one bad parse could arm a mail
+// client off an agent policy, or disarm an agent block off a mail policy.
+const EGRESS_PATH = join(homedir(), '.cloudfuze-aigov', 'egress-surfaces.json');
 const PENDING_REQUEST_PATH = join(homedir(), '.cloudfuze-aigov', 'pending-access-request.json');
 // A queued request older than this is stale — the block it was about may well
 // have been lifted, or the user may have forgotten they ever asked. Filing it a
@@ -78,6 +91,22 @@ async function fetchMyExceptions(serverUrl, token, log) {
     return null;
   }
 }
+
+// ── The ai-platforms rows THIS tick fetched ─────────────────────────────────
+//
+// A module slot rather than a parameter, and that is a deliberate trade. Three
+// writers of ~/.cloudfuze-aigov now need the SAME Inventory payload, and the one
+// thing this module must not do is fetch it three times per 10s tick for every
+// machine in the fleet. Threading it through as a parameter would mean changing
+// refreshBlockedAgents' exported signature, which is the 3-argument shape the
+// tests drive one tick with, and changing the chain expression they pin.
+//
+// Written exactly once per tick, by refreshBlockedAgents, immediately after its
+// own fetch — and refreshEgressSurfaces is CHAINED after that call, never run
+// beside it, so the value it reads is always this tick's. null is the
+// fail-closed value and means "this tick could not establish the rows", which
+// makes the egress refresher leave its file completely alone.
+let lastPlatformRows = null;
 
 // GET /api/v1/ai-platforms — the admin Inventory rows. Fetched UNFILTERED: the
 // `surface` field is not usable as a filter here (no admin UI has ever set it,
@@ -116,6 +145,10 @@ async function refreshBlockedAgents(serverUrl, token, log) {
   // rather than briefly rewriting it without the exception applied.
   const exceptions = await fetchMyExceptions(serverUrl, token, log);
   const platforms = await fetchAiPlatforms(serverUrl, token, log);
+  // Publish this tick's Inventory rows for the egress refresher, which is
+  // chained after this call and must not issue a second fetch of its own. null
+  // travels through unchanged and is its fail-closed signal — see lastPlatformRows.
+  lastPlatformRows = platforms;
   try {
     const res = await fetch(`${serverUrl}/api/lifecycle/blocked-agents`);
     if (!res.ok) return null;
@@ -275,6 +308,56 @@ async function flushPendingAccessRequest(serverUrl, token, log) {
   }
 }
 
+// ── Egress surfaces (Outlook compose/attach, OneDrive/SharePoint sync) ──────
+//
+// Write ~/.cloudfuze-aigov/egress-surfaces.json — the POLICY-ARMED subset of the
+// egress catalog, on the same 10s tick as the other two files.
+//
+// It consumes `lastPlatformRows`, i.e. the /api/v1/ai-platforms payload
+// refreshBlockedAgents already fetched this tick. NO fetch of its own: three
+// writers, one request. See lastPlatformRows for why that is a module slot.
+//
+// SAME FAIL-CLOSED CONVENTION as every other refresher here, and it is the whole
+// safety property of this file:
+//
+//   * rows unknown (null) — the tick could not reach the server, so whether an
+//     admin governs Outlook or OneDrive is UNKNOWN. Leave the existing file
+//     completely untouched: a stale file keeps the last known policy in force
+//     for another 10s, while writing anything would either arm a mail client off
+//     a guess or silently disarm a surface the org asked for.
+//   * a write that throws — same answer, and it is logged with the reason.
+//
+// An EMPTY result ({surfaces:[],sync_roots:[]}) is a REAL answer, not a failure:
+// it means the rows were fetched and none of them governs an egress host, i.e.
+// the feature must be inert. That IS written, because the alternative is leaving
+// a surface armed after an admin turned its policy off.
+//
+// Returns the object written, or null when the file was left alone. Exported for
+// the tests only, exactly like the other two refreshers.
+async function refreshEgressSurfaces(serverUrl, token, log) {
+  const platforms = lastPlatformRows;
+  if (!Array.isArray(platforms)) {
+    log.warn('egress-surfaces: the Inventory rows are unknown this tick — leaving egress-surfaces.json as-is');
+    return null;
+  }
+  try {
+    const payload = synthesizeEgressSurfaces(platforms, log);
+    mkdirSync(join(homedir(), '.cloudfuze-aigov'), { recursive: true });
+    writeFileSync(EGRESS_PATH, JSON.stringify(payload), 'utf8');
+    // Counts and ids only. A capture_mode and a catalog id are policy, not
+    // content; no path, no filename and no recipient can reach this line.
+    log.info(
+      `egress-surfaces: synced ${payload.surfaces.length} egress surface(s)`
+      + ` and ${payload.sync_roots.length} sync root(s)`
+      + (payload.surfaces.length ? ` [${payload.surfaces.map((s) => s.id).join(', ')}]` : ''),
+    );
+    return payload;
+  } catch (err) {
+    log.warn(`egress-surfaces: sync failed — ${err.message}`);
+    return null;
+  }
+}
+
 // Poll every 10 seconds — matching enforcer-win.ps1's own BLOCKED_CHECK_INTERVAL,
 // so a block or an approval takes ~20s worst case to reach the keyboard hook
 // instead of ~40s. Four cheap GETs per machine per 10s; the queued-request
@@ -294,6 +377,14 @@ export function startBlockedAgentsSync({ serverUrl, token, log }) {
   const tick = () => {
     refreshBlockedAgents(serverUrl, token, log)
       .then((blocked) => refreshGovernedAgents(serverUrl, token, log, blocked))
+      // CHAINED third, not run beside the other two: it consumes the
+      // ai-platforms rows refreshBlockedAgents just fetched (see
+      // lastPlatformRows), so it must observe this tick's value rather than
+      // race the fetch that produces it. Its own failure is contained — it
+      // returns null and leaves its file alone rather than throwing into the
+      // chain, so a bad egress payload can never cost this tick its blocked or
+      // governed write.
+      .then(() => refreshEgressSurfaces(serverUrl, token, log))
       .catch((err) => log.warn(`blocked-agents: tick failed — ${err.message}`));
     flushPendingAccessRequest(serverUrl, token, log);
   };
@@ -310,8 +401,10 @@ export function startBlockedAgentsSync({ serverUrl, token, log }) {
 export {
   BLOCKED_PATH,
   GOVERNED_PATH,
+  EGRESS_PATH,
   PENDING_REQUEST_PATH,
   PENDING_REQUEST_TTL_MS,
   refreshBlockedAgents,
   refreshGovernedAgents,
+  refreshEgressSurfaces,
 };

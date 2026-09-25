@@ -140,6 +140,20 @@ Copilot prompts tenant-wide. Coverage equals installs — so an employee on an
 unmanaged personal device is not covered. The agent inventory needs no installs; only
 prompt protection does.
 
+**We can fully block a named Microsoft 365 Copilot agent — on managed machines, not
+through Microsoft.** Separately from the read-only discovery connection above, an
+admin can block a specific Copilot Studio agent, personal agent, SharePoint-embedded
+agent, Teams app or ISV-store agent from the CloudFuze console, and our browser
+extension and desktop software then stop that one agent from being opened — inside
+Teams, Word, Excel, PowerPoint, OneNote, Outlook web, SharePoint and the Microsoft 365
+portal — without touching anything else in Copilot. This is the same
+install-dependent, per-machine mechanism as prompt protection above, and the same
+mechanism we already use to block tools like Claude or ChatGPT — not a Microsoft API
+call, so it does not disable the agent inside Microsoft's own admin centres and has no
+effect on an unmanaged device. On desktop, this currently covers the Teams client and
+the Microsoft 365 Copilot app; blocking a specific agent inside the Word/Excel/
+PowerPoint/OneNote Copilot pane, and Outlook desktop, are still being rolled out.
+
 **Not every compliance rule can be automatic.**
 Of the 109 framework rules, roughly a third are checked automatically against your
 agents. Another group depends on endpoint detection. The remainder are controls

@@ -132,6 +132,16 @@ export class PromptWatcher extends EventEmitter {
         // Tracker mode only: {service, len, process, pid} — no prompt text.
         this.emit('prompt_submit', ev);
         break;
+      // The body of an email, captured once at its send transition. Forwarded
+      // WHOLE and untouched — this wrapper is a transport, and the event's shape
+      // is the .ps1's contract. Deliberately NOT logged: the body is content,
+      // and the record for it is the egress_body event index.js reports, not a
+      // log line. A separate event name from prompt_text on purpose: index.js's
+      // prompt_text handler resolves an AI product identity, which a mail client
+      // has none of.
+      case 'egress_body':
+        this.emit('egress_body', ev);
+        break;
       case 'heartbeat':
         break;
       case 'error':

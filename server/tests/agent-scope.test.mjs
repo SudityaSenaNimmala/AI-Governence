@@ -21,14 +21,27 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import { readFile } from 'node:fs/promises';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { normalizeAgentScope, AGENT_SCOPES } from '../src/governance/agent-scope.js';
 import { mountRegistry } from '../src/routes/registry.js';
 import { createFakeDb } from './helpers/fake-db.mjs';
+import { adminJsonHeaders } from './helpers/admin-auth.mjs';
 
 const SERVER_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+// POINT THE SNAPSHOT AT A TEMP FILE, before any mountRegistry() call — that is
+// when the path is read. A successful live registry build REWRITES the snapshot,
+// and this file's fixture is one agent; left on the default path it overwrites
+// data/registry-snapshot.json, the curated capture that is the Inventory tab's
+// fallback. Observed: a full `npm test` run left that file dirty in the working
+// tree. Same guard registry-agent-block.test.mjs already carries.
+process.env.REGISTRY_SNAPSHOT_PATH = join(
+  mkdtempSync(join(tmpdir(), 'cfai-agent-scope-')), 'registry-snapshot.json',
+);
 
 // ── The validator, which is what POST /api/lifecycle/block gates on ──────────
 
@@ -118,7 +131,7 @@ async function withServer(seed, fn) {
       async setStatus(id, body) {
         const res = await fetch(`${base}/api/v1/registry/${encodeURIComponent(id)}/status`, {
           method: 'PUT',
-          headers: { 'content-type': 'application/json' },
+          headers: adminJsonHeaders(),
           body: JSON.stringify(body),
         });
         const json = await res.json();

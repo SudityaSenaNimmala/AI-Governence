@@ -10,10 +10,22 @@
 // Each entry has: name, platform, owner, risk, status, data access, lifecycle, last active.
 
 import { a } from '../util.js';
+import { requireAdminAuth } from '../auth.js';
 import { fireWebhooks } from './webhooks.js';
 import { scoreToLevel, normalizeStoredRisk } from '../lib/risk-scale.js';
 import { assessToolRisk } from '../lib/tool-risk.js';
-import { readFileSync } from 'node:fs';
+import { isMicrosoftWorkspaceCopilotProduct, applyMicrosoftWorkspaceCopilotCascade } from '../lib/ai-surfaces.js';
+import { derivePlatform, normalizePlatform } from '../lib/agent-platform.js';
+// Imported under its REAL name, matching lifecycle.ts's import of the same
+// function, so `grep -rn "unenforceableReason("` finds every call site. The local
+// that holds the result is named `enforcementReason` for the same reason it is in
+// lifecycle.ts's POST /block: it is not the admin's free-text `reason`.
+import { unenforceableReason } from '../lib/agent-platforms.js';
+import {
+  RESPONSE_BUDGET_MS, raceWithFallback, applyBudgetHeaders, invalidateRoute,
+  peekFresh, peekLastKnownGood, registerResponseWarmer,
+} from '../lib/response-budget.js';
+import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -56,8 +68,28 @@ export function mountRegistry(app, db) {
   // Live data still wins whenever the database is healthy: the snapshot is only
   // reached on timeout or error, and `stale: true` in the response says which one
   // you are looking at rather than passing a snapshot off as current.
-  const SNAPSHOT_PATH = join(__dirname, '..', '..', 'data', 'registry-snapshot.json');
-  const BUILD_BUDGET_MS = Number(process.env.REGISTRY_BUILD_BUDGET_MS || 15000);
+  //
+  // KEPT FRESH AUTOMATICALLY. It used to be a static file baked into the image,
+  // so it aged from the day it was captured and a redeploy was the only thing
+  // that could ever move it. Every successful live build now rewrites it (see
+  // refreshSnapshotFile), which is what makes it a current capture rather than a
+  // historical one. Note for operators: docker-compose.yml mounts a named volume
+  // over server/data, so a newer snapshot shipped inside a new image does NOT
+  // replace the one already in that volume — the running server's own rewrites
+  // are what keep it current there.
+  const SNAPSHOT_PATH = process.env.REGISTRY_SNAPSHOT_PATH
+    || join(__dirname, '..', '..', 'data', 'registry-snapshot.json');
+  // Was 15000, then 5000. Measured live: on a slow/degraded connection to the
+  // database, the 5-collection build doesn't fail outright, it just runs past
+  // this budget every time — so 15s was never "the rare slow case," it was the
+  // guaranteed wait before the (perfectly good, real) snapshot fallback ever
+  // kicked in. Lower budget = same fallback, reached 3x faster.
+  //
+  // The number itself now comes from lib/response-budget.js, so this route can
+  // no longer drift away from the org-wide budget every other tab is held to.
+  // REGISTRY_BUILD_BUDGET_MS is kept as the per-route override for backward
+  // compatibility with any deployment config already setting it.
+  const BUILD_BUDGET_MS = Number(process.env.REGISTRY_BUILD_BUDGET_MS || RESPONSE_BUDGET_MS);
   // REGISTRY_SNAPSHOT_FIRST=1 answers from the snapshot without attempting the live
   // build at all, so the page paints with no wait.
   //
@@ -75,10 +107,12 @@ export function mountRegistry(app, db) {
   let _unhealthyUntil = 0;
   let _snapshot = null;
   // Short-lived cache for the live build — avoids re-running the 5-collection
-  // query on every tab switch or page refresh within 30 seconds.
-  let _liveCache = null;
-  let _liveCacheAt = 0;
-  const LIVE_CACHE_TTL_MS = 30_000;
+  // query on every tab switch or page refresh within 30 seconds. It lives in the
+  // shared response store now (lib/response-budget.js) rather than in two
+  // module-level variables here, which is also what makes it self-heal: see the
+  // discard-bug note in readRegistry below.
+  const LIVE_CACHE_TTL_MS = Number(process.env.REGISTRY_LIVE_CACHE_TTL_MS || 30_000);
+  const ROUTE = 'registry';
 
   function loadSnapshot() {
     if (_snapshot) return _snapshot;
@@ -90,38 +124,134 @@ export function mountRegistry(app, db) {
     return _snapshot;
   }
 
-  // Resolves to null rather than rejecting, so callers branch on the value instead
-  // of wrapping every call site in try/catch.
-  function buildRegistryWithBudget() {
-    // Serve from short-lived cache if fresh
-    if (_liveCache && Date.now() - _liveCacheAt < LIVE_CACHE_TTL_MS) return Promise.resolve(_liveCache);
-    const haveSnapshot = Boolean(loadSnapshot());
-    if (haveSnapshot && (SNAPSHOT_FIRST || Date.now() < _unhealthyUntil)) return Promise.resolve(null);
-    return new Promise((resolve) => {
-      let settled = false;
-      const fail = (why) => {
-        settled = true;
-        // Only trip the breaker when there is a snapshot to fall back to. Without
-        // one, tripping would turn a slow page into a 503 and lose the data that a
-        // patient caller would still have received.
-        if (haveSnapshot) _unhealthyUntil = Date.now() + UNHEALTHY_FOR_MS;
-        console.warn(`[registry] ${why} — serving snapshot, skipping live build for ${UNHEALTHY_FOR_MS / 1000}s`);
-        resolve(null);
+  // Keep data/registry-snapshot.json current.
+  //
+  // The snapshot is a REAL CURATED CAPTURE of this tenant's inventory, not a
+  // mere cache — that is why it is a file, why it carries its own precomputed
+  // summary, and why it survives a restart when the in-memory store does not.
+  // What it was not, before this, was current: it was written once by hand and
+  // then aged indefinitely, so the fallback got worse every day the database
+  // stayed healthy. Every successful build now replaces it, so the worst case
+  // after a restart is "as old as the last successful build" rather than "as old
+  // as the image".
+  //
+  // Written atomically (temp file + rename) because this same file is read at
+  // startup and on every fallback: a half-written snapshot would be unparseable
+  // and would silently degrade the fallback to a 503.
+  //
+  // NEVER writes an empty build over a non-empty capture. An empty result is
+  // legitimate on a fresh install, but overwriting 260 real systems with [] would
+  // throw away the entire fallback on the strength of one anomalous build.
+  function refreshSnapshotFile(rows) {
+    try {
+      if (!Array.isArray(rows)) return;
+      if (rows.length === 0) {
+        if (loadSnapshot()) console.warn('[registry] live build returned 0 systems — keeping the existing snapshot');
+        return;
+      }
+      const snapshot = {
+        captured_at: new Date().toISOString(),
+        systems: rows,
+        // Derived from the very rows in the same file, which is what keeps the
+        // "a count can never disagree with the rows it claims to be counting"
+        // property true of the fallback as well as the live path.
+        summary: summarize(rows),
       };
-      const timer = setTimeout(() => { if (!settled) fail(`live build exceeded ${BUILD_BUDGET_MS}ms`); }, BUILD_BUDGET_MS);
-      buildRegistry().then((r) => {
-        if (settled) return;
-        settled = true; clearTimeout(timer);
-        _unhealthyUntil = 0;   // healthy again
-        _liveCache = r; _liveCacheAt = Date.now();
-        resolve(r);
-      }).catch((e) => {
-        if (settled) return;
-        clearTimeout(timer);
-        fail(`live build failed: ${e?.message || e}`);
-      });
-    });
+      mkdirSync(dirname(SNAPSHOT_PATH), { recursive: true });
+      const tmp = `${SNAPSHOT_PATH}.tmp`;
+      writeFileSync(tmp, JSON.stringify(snapshot), 'utf8');
+      renameSync(tmp, SNAPSHOT_PATH);
+      _snapshot = snapshot;   // in-process copy stays in step with the file
+      console.log(`[registry] snapshot refreshed — ${rows.length} systems`);
+    } catch (err) {
+      // A failed refresh must never fail a request: the response is already
+      // correct without it, and the old snapshot is still a valid fallback.
+      console.warn(`[registry] snapshot refresh failed: ${err?.message || err}`);
+    }
   }
+
+  // ONE read path for both routes, resolving to a description of what was
+  // served rather than throwing — the convention this file already used ("so
+  // callers branch on the value instead of wrapping every call site in
+  // try/catch"), now shared with every other budgeted route via
+  // lib/response-budget.js.
+  //
+  //   { rows, stale, capturedAt, coldMiss, snapshot }
+  //   { unavailable: true }   nothing real exists to serve — the caller 503s
+  //
+  // THE DISCARD BUG THIS CONVERSION FIXES. The old version raced the build
+  // against the budget behind a `settled` flag, and once the budget had expired
+  // that flag made the build's eventual result get thrown away. On a degraded
+  // cluster — where the build runs past the budget EVERY time, which is the
+  // measured behaviour this budget exists for — the cache could therefore never
+  // be filled, so the page stayed pinned to the file snapshot until the database
+  // recovered and some request happened to land under budget by luck.
+  // raceWithFallback attaches the store write to the build promise itself, so a
+  // late build repopulates the store and the NEXT request is live and unstale.
+  async function readRegistry() {
+    const fresh = peekFresh({ route: ROUTE, freshMs: LIVE_CACHE_TTL_MS });
+    if (fresh) return { rows: fresh.value, stale: false, capturedAt: fresh.capturedAt, coldMiss: false };
+
+    // The live path is skipped entirely while the breaker is open or
+    // REGISTRY_SNAPSHOT_FIRST is set — but only if there is something real to
+    // answer with. Prefer this process's own last capture over the file: both
+    // are real and instant, and the in-memory one is newer.
+    if (SNAPSHOT_FIRST || Date.now() < _unhealthyUntil) {
+      const lastGood = peekLastKnownGood({ route: ROUTE });
+      if (lastGood) return { rows: lastGood.value, stale: true, capturedAt: lastGood.capturedAt, coldMiss: false };
+      const snap = loadSnapshot();
+      if (snap) return { rows: snap.systems, stale: true, capturedAt: snap.captured_at || null, coldMiss: false, snapshot: snap };
+    }
+
+    const haveSnapshot = Boolean(loadSnapshot());
+    const result = await raceWithFallback({
+      route: ROUTE,
+      params: null,
+      budgetMs: BUILD_BUDGET_MS,
+      freshMs: LIVE_CACHE_TTL_MS,
+      // THIS ROUTE HAS ITS OWN FALLBACK TIER. When a snapshot file exists, an
+      // over-budget build with an empty store must answer from that file rather
+      // than make the caller wait the build out — waiting is exactly the hang
+      // the snapshot was introduced to prevent. With NO snapshot there is
+      // nothing else to serve, so the generic cold-start rule applies and a
+      // patient caller gets real data instead of a 503.
+      awaitOnColdMiss: !haveSnapshot,
+      live: async () => {
+        const rows = await buildRegistry();
+        _unhealthyUntil = 0;              // healthy again — including on a LATE build
+        refreshSnapshotFile(rows);        // synchronous, and cheap next to the build
+        return rows;
+      },
+    });
+
+    if (!result.failed && !result.stale && !result.unresolved) {
+      return { rows: result.value, stale: false, capturedAt: result.capturedAt, coldMiss: result.coldMiss };
+    }
+
+    // Over budget or failed. Trip the breaker so the next 120s of requests are
+    // instant, and ONLY when there is something to fall back on: without one,
+    // tripping would turn a slow page into a 503 and lose the data that a
+    // patient caller would still have received.
+    const snap = loadSnapshot();
+    if (result.stale || snap) {
+      _unhealthyUntil = Date.now() + UNHEALTHY_FOR_MS;
+      console.warn(`[registry] live build ${result.failed ? 'failed' : `exceeded ${BUILD_BUDGET_MS}ms`} — serving last-known-good, skipping the live build for ${UNHEALTHY_FOR_MS / 1000}s`);
+    }
+    // A stale answer from the store is this tenant's own last real build, which
+    // is newer than the file, so it wins over the snapshot.
+    if (result.stale) {
+      return { rows: result.value, stale: true, capturedAt: result.capturedAt, coldMiss: false };
+    }
+    if (snap) {
+      return { rows: snap.systems, stale: true, capturedAt: snap.captured_at || null, coldMiss: false, snapshot: snap };
+    }
+    return { unavailable: true };
+  }
+
+  // Warm the store once after boot, so the first request after a deploy (which
+  // restarts the container, so this is every deploy) has a real fallback instead
+  // of being the one request that has to wait out a cold build.
+  registerResponseWarmer(ROUTE, () => readRegistry());
 
   async function buildRegistry() {
     // Run all 5 collection reads in parallel — was sequential, costing 15s+
@@ -452,22 +582,17 @@ export function mountRegistry(app, db) {
   app.get('/api/v1/registry', a(async (req, res) => {
     const { platform, status, risk_level, category, search } = req.query;
 
-    const live = await buildRegistryWithBudget();
-    let stale = false;
-    let results = live;
-    if (!results) {
-      const snap = loadSnapshot();
-      if (!snap) {
-        return res.status(503).json({
-          error: 'Registry is temporarily unavailable',
-          detail: 'The live build timed out and no snapshot is present on this server.',
-        });
-      }
-      results = snap.systems;
-      stale = true;
-      // Filters below still apply to snapshot rows — the shape is identical, so the
-      // page behaves the same whichever source it got.
+    const read = await readRegistry();
+    if (read.unavailable) {
+      return res.status(503).json({
+        error: 'Registry is temporarily unavailable',
+        detail: 'The live build timed out and no snapshot is present on this server.',
+      });
     }
+    // Filters below apply to snapshot and stale rows exactly as to live ones —
+    // the shape is identical, so the page behaves the same whichever source
+    // answered.
+    let results = read.rows;
 
     if (platform)   results = results.filter(r => r.platform === platform || r.source_detail === platform);
     if (status)      results = results.filter(r => r.status === status);
@@ -500,12 +625,17 @@ export function mountRegistry(app, db) {
       return (a.name || '').localeCompare(b.name || '');
     });
 
-    // Header, not a body field: this route returns a bare array and the UI iterates
-    // it directly, so wrapping it in an object to carry a flag would break every
-    // caller. A header says which source answered without changing the contract.
-    if (stale) {
+    // Headers, not body fields: this route returns a bare array and the UI
+    // iterates it directly, so wrapping it in an object to carry a flag would
+    // break every caller. A header says which source answered without changing
+    // the contract. This route made that call first; it is now the shared
+    // convention (X-Response-Stale / X-Response-Captured-At / X-Response-Budget,
+    // see lib/response-budget.js). The two X-Registry-* headers are kept as
+    // aliases so anything already reading them keeps working.
+    applyBudgetHeaders(res, read);
+    if (read.stale) {
       res.setHeader('X-Registry-Stale', '1');
-      res.setHeader('X-Registry-Captured-At', loadSnapshot()?.captured_at || '');
+      res.setHeader('X-Registry-Captured-At', read.capturedAt || '');
     }
     res.json(results);
   }));
@@ -524,54 +654,44 @@ export function mountRegistry(app, db) {
     // reported `unknown: 0` while the list held plenty of unknown rows.
     //
     // Deriving both from buildRegistry() makes disagreement impossible.
-    const live = await buildRegistryWithBudget();
-    if (!live) {
-      // The snapshot carries its own precomputed summary, derived from the very rows
-      // in the same file — so the fallback keeps the "cannot disagree" property that
-      // the comment above is about.
-      const snap = loadSnapshot();
-      if (!snap) {
-        return res.status(503).json({
-          error: 'Registry summary is temporarily unavailable',
-          detail: 'The live build timed out and no snapshot is present on this server.',
-        });
-      }
+    const read = await readRegistry();
+    if (read.unavailable) {
+      return res.status(503).json({
+        error: 'Registry summary is temporarily unavailable',
+        detail: 'The live build timed out and no snapshot is present on this server.',
+      });
+    }
+
+    applyBudgetHeaders(res, read);
+    if (read.stale) {
       res.setHeader('X-Registry-Stale', '1');
-      res.setHeader('X-Registry-Captured-At', snap.captured_at || '');
-      return res.json(snap.summary);
-    }
-    const rows = live;
-
-    const statusCounts = { approved: 0, restricted: 0, blocked: 0, unknown: 0 };
-    const bySource = { governance_agents: 0, endpoint_tools: 0, platform_services: 0 };
-    const riskCounts = { low: 0, medium: 0, high: 0, critical: 0, not_assessed: 0 };
-    const SOURCE_KEY = {
-      governance: 'governance_agents',
-      endpoint_scan: 'endpoint_tools',
-      platform_registry: 'platform_services',
-    };
-
-    let activeCount = 0;
-    for (const r of rows) {
-      statusCounts[r.status] = (statusCounts[r.status] || 0) + 1;
-      const key = SOURCE_KEY[r.source];
-      if (key) bySource[key] += 1;
-      riskCounts[r.risk_level || 'not_assessed'] = (riskCounts[r.risk_level || 'not_assessed'] || 0) + 1;
-      if ((r.activity?.total || 0) > 0) activeCount += 1;
+      res.setHeader('X-Registry-Captured-At', read.capturedAt || '');
     }
 
-    res.json({
-      total_ai_systems: rows.length,
-      active_ai_systems: activeCount,
-      by_source: bySource,
-      by_status: statusCounts,
-      by_risk: riskCounts,
-    });
+    // When the answer came from the FILE, serve the summary the file carries:
+    // it was derived from the very rows in the same file, so the fallback keeps
+    // the "cannot disagree" property this comment is about. (Snapshots written
+    // before this route shared summarize() carry a slightly smaller summary —
+    // no active_ai_systems — which is served as-is rather than being recomputed
+    // from rows that may have been filtered since.)
+    if (read.snapshot?.summary) return res.json(read.snapshot.summary);
+
+    res.json(summarize(read.rows));
   }));
 
   // ── Update status (allowed / blocked) — uses existing ai-platforms endpoint for enforcement ──
 
-  app.put('/api/v1/registry/:id/status', a(async (req, res) => {
+  // ADMIN-GATED, unlike every GET in this file. This route is the single widest
+  // write in the product: it flips sanctions, suspends discovered agents, writes
+  // `blocked_agents`, and — for the Microsoft 365 Copilot product — fans a block
+  // across ten Microsoft hosts (applyMicrosoftWorkspaceCopilotCascade). Left open,
+  // anyone who could reach the API could unblock every AI tool in the org, or
+  // block Teams, Outlook and SharePoint for everyone, with one unauthenticated
+  // PUT. The reads stay public on purpose (the extension and the desktop agent
+  // poll them with no token); only the writes are gated. Same middleware the SDK,
+  // replay, conversation and feature-settings routes already use, so there is one
+  // admin credential in the product, not two.
+  app.put('/api/v1/registry/:id/status', requireAdminAuth, a(async (req, res) => {
     const { status } = req.body ?? {};
     if (!['approved', 'blocked', 'unknown'].includes(status)) {
       return res.status(400).json({ error: 'status must be approved, blocked, or unknown' });
@@ -586,8 +706,13 @@ export function mountRegistry(app, db) {
     // optimistically and deliberately not re-reading, an admin's decision looked
     // like it had silently failed. Observed live: a PUT returning {"ok":true}
     // followed immediately by a read still reporting "approved".
-    _liveCache = null;
-    _liveCacheAt = 0;
+    //
+    // invalidateRoute() drops the entry's FRESHNESS, not the entry: the next
+    // read goes live (so it sees this decision), while the pre-block body
+    // survives only as an explicitly-labelled stale fallback for the case where
+    // that live read then times out. Deleting it outright would trade "briefly
+    // shows a stale row, and says so" for "shows nothing at all".
+    invalidateRoute(ROUTE);
 
     // Update sanctions collection (status tracking)
     await db.collection('sanctions').updateOne(
@@ -596,12 +721,17 @@ export function mountRegistry(app, db) {
       { upsert: true },
     );
 
+    // ONE definition of "which discovered agent is this request about", so the
+    // platform derivation further down cannot resolve a different document than
+    // the one whose lifecycle was just changed.
+    const agentMatch = { $or: [{ id: id }, { botId: id }, { appId: id }, { name: id }] };
+
     // Strategy 3: for governance agents — update lifecycle. Moved AHEAD of the
     // ai_platforms host-block below (was Strategy 2 first, in request order) so
     // `looksLikeAgent` is known BEFORE deciding whether to touch ai_platforms at
     // all — see the comment on that gate for why order matters here.
     const agentLifecycle = await db.collection('discovered_agents').updateMany(
-      { $or: [{ id: id }, { botId: id }, { appId: id }, { name: id }] },
+      agentMatch,
       { $set: { lifecycleStatus: isBlocked ? 'suspended' : 'active' } },
     );
 
@@ -682,22 +812,84 @@ export function mountRegistry(app, db) {
       }
     }
 
+    // ── The Microsoft 365 Copilot product toggle covers its web surfaces ───────
+    //
+    // The M365 Copilot product is consumed across a whole set of Microsoft hosts
+    // (Teams, Outlook, SharePoint, office.com, cloud.microsoft) and has no single
+    // host of its own, so a toggle that only patched hosts already sitting in
+    // ai_platforms enforced on whichever subset happened to be seeded. The curated
+    // list in lib/ai-surfaces.js is the product's definition of coverage — static
+    // and reviewed, NOT derived from any discovered agent's matched_hosts, which is
+    // the over-blocking bug described above.
+    //
+    // Scoped to this ONE product identity and nothing else: `!looksLikeAgent` keeps
+    // a named agent inside M365 Copilot on the narrow agent mechanism, and the
+    // product test is an exact name match, never a substring.
+    //
+    // `product_name` is what Inventory sends for every row; the ai_platforms
+    // lookup is only for a caller that knows the host but not the product.
+    let productIdentity = String(req.body.product_name || '').trim();
+    if (!productIdentity && !looksLikeAgent) {
+      const hostRow = await db.collection('ai_platforms').findOne({ host: id });
+      productIdentity = hostRow?.product || id;
+    }
+
+    let workspaceHostsEnforced = false;
+    if (!looksLikeAgent && isMicrosoftWorkspaceCopilotProduct(productIdentity)) {
+      // The cascade itself is SHARED — see applyMicrosoftWorkspaceCopilotCascade's
+      // own comment for why: PATCH /api/v1/ai-platforms/:host (the host-keyed
+      // catalog page) can toggle this exact product too, and a cascade that only
+      // fired from this route would leave that OTHER admin surface toggling just
+      // one host at a time with no way to reach the other nine.
+      await applyMicrosoftWorkspaceCopilotCascade(db, isBlocked);
+      workspaceHostsEnforced = true;
+    }
+
     // Strategy 4: MIRROR AN AGENT BLOCK INTO `blocked_agents`. Written to match
     // POST /api/lifecycle/block exactly, field for field, so the two paths
     // produce indistinguishable rows and /unblock still works on either.
     // Unblocking sets blocked:false rather than deleting, mirroring /unblock and
     // keeping the audit trail.
     let agentEnforced = false;
+    let enforcementReason = null;
     if (looksLikeAgent) {
       agentEnforced = true;
       const agentName = req.body.product_name || id;
       if (isBlocked) {
+        // DERIVE THE PLATFORM THE CALLER DID NOT SEND. The dashboard's PUT carries
+        // no `platform`, and a row stored with platform:null is inert on both
+        // surfaces — the enforcer drops it at parse time and the extension cannot
+        // map it to a host, so the agent showed "Blocked" and kept working. The
+        // value comes off the same discovered_agents document this request already
+        // matched (agentMatch), never guessed. See lib/agent-platform.js.
+        const platform = normalizePlatform(req.body.platform)
+          ?? await derivePlatform(db, agentMatch);
+        // Still written either way — refusing the write would lose a block an
+        // admin deliberately applied, which is the worse failure here. What must
+        // not happen is reporting it as enforced; GET /api/lifecycle/blocked-agents
+        // marks the row `unenforceable`/`unenforceable_reason` for the same reason,
+        // via the same function, so this path and that one never disagree.
+        //
+        // THREE values, all handled identically and none of them a hard failure —
+        // see ../lib/agent-platforms.js for the shared definition:
+        //   no_platform            nothing to key on.
+        //   unknown_platform       a platform is set, no surface knows it.
+        //   product_level_platform the platform names a PRODUCT (m365_copilot,
+        //                          teams_desktop), which IS blocked by the host
+        //                          cascade above — but not by this name-matched
+        //                          row, so this row alone enforces nothing.
+        // All three are reported, never refused, and never change what is stored.
+        const platformEnforcementReason = unenforceableReason(platform);
+        if (platformEnforcementReason) {
+          agentEnforced = false;
+          enforcementReason = platformEnforcementReason;
+        }
         await db.collection('blocked_agents').updateOne(
           { agent_id: id },
           { $set: {
             agent_id: id,
             agent_name: agentName,
-            platform: req.body.platform || null,
+            platform,
             reason: 'Blocked by admin from AI Systems',
             oauth_key_id: null,
             // Unconditionally 'agent' on THIS path, and only on this path. By
@@ -741,19 +933,61 @@ export function mountRegistry(app, db) {
     // blocked_agents — returned {"ok":true,"enforced":false}. That reads as "the
     // block did nothing", which is what sent this investigation down the wrong
     // path in the first place.
+    //
+    // …and it must not overstate them either: an agent row written without a
+    // platform enforces on neither surface, so it reports enforced:false with a
+    // `reason`, rather than the {ok:true, enforced:true} that made an inert block
+    // look like a working one.
     const platformEnforced = matched.matchedCount > 0 || matched.modifiedCount > 0;
+    const enforced = platformEnforced || agentEnforced || workspaceHostsEnforced;
     res.json({
       ok: true,
-      enforced: platformEnforced || agentEnforced,
+      enforced,
       enforced_via: [
         ...(platformEnforced ? ['platform_hosts'] : []),
+        ...(workspaceHostsEnforced ? ['m365_workspace_hosts'] : []),
         ...(agentEnforced ? ['agent_blocklist'] : []),
       ],
+      ...(enforcementReason ? { reason: enforcementReason } : {}),
     });
   }));
 }
 
 // Helpers
+
+// The registry summary, counted from the SAME rows the list route serves.
+//
+// Shared by GET /registry/summary and by the snapshot writer, so a snapshot's
+// precomputed summary is produced by exactly the code that would have counted
+// the live rows — the two can never drift into disagreeing about the same
+// inventory.
+function summarize(rows) {
+  const statusCounts = { approved: 0, restricted: 0, blocked: 0, unknown: 0 };
+  const bySource = { governance_agents: 0, endpoint_tools: 0, platform_services: 0 };
+  const riskCounts = { low: 0, medium: 0, high: 0, critical: 0, not_assessed: 0 };
+  const SOURCE_KEY = {
+    governance: 'governance_agents',
+    endpoint_scan: 'endpoint_tools',
+    platform_registry: 'platform_services',
+  };
+
+  let activeCount = 0;
+  for (const r of rows || []) {
+    statusCounts[r.status] = (statusCounts[r.status] || 0) + 1;
+    const key = SOURCE_KEY[r.source];
+    if (key) bySource[key] += 1;
+    riskCounts[r.risk_level || 'not_assessed'] = (riskCounts[r.risk_level || 'not_assessed'] || 0) + 1;
+    if ((r.activity?.total || 0) > 0) activeCount += 1;
+  }
+
+  return {
+    total_ai_systems: (rows || []).length,
+    active_ai_systems: activeCount,
+    by_source: bySource,
+    by_status: statusCounts,
+    by_risk: riskCounts,
+  };
+}
 
 function mapGovPlatform(platform) {
   const map = {

@@ -19,6 +19,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import { readFile } from 'node:fs/promises';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -31,9 +33,20 @@ import {
 } from '../src/governance/dlp-monitor.js';
 import { mountRegistry } from '../src/routes/registry.js';
 import { createFakeDb } from './helpers/fake-db.mjs';
+import { adminJsonHeaders } from './helpers/admin-auth.mjs';
 
 const SERVER_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const lifecycleSrc = () => readFile(join(SERVER_DIR, 'src', 'governance', 'routes', 'lifecycle.ts'), 'utf8');
+
+// POINT THE SNAPSHOT AT A TEMP FILE, before any mountRegistry() call — that is
+// when the path is read. A successful live registry build REWRITES the snapshot,
+// and this file's fixtures are a couple of agents; left on the default path they
+// overwrite data/registry-snapshot.json, the curated capture that is the
+// Inventory tab's fallback. Observed: a full `npm test` run left that file dirty
+// in the working tree. Same guard registry-agent-block.test.mjs already carries.
+process.env.REGISTRY_SNAPSHOT_PATH = join(
+  mkdtempSync(join(tmpdir(), 'cfai-dlp-monitor-')), 'registry-snapshot.json',
+);
 
 // ── The flag validator ───────────────────────────────────────────────────────
 
@@ -225,7 +238,7 @@ async function withRegistry(seed, fn) {
       async setStatus(id, body) {
         const res = await fetch(`${base}/api/v1/registry/${encodeURIComponent(id)}/status`, {
           method: 'PUT',
-          headers: { 'content-type': 'application/json' },
+          headers: adminJsonHeaders(),
           body: JSON.stringify(body),
         });
         const json = await res.json();
@@ -284,12 +297,15 @@ test('POST /lifecycle/dlp-monitor validates both flags before writing anything',
   // /block uses, never re-implemented here.
   assert.match(route, /const scope = normalizeAgentScope\(agent_scope\);/);
   assert.match(route, /if \(scope === undefined\) \{[\s\S]{0,240}?res\.status\(400\)/);
-  assert.match(route, /if \(!agent_id\) \{[\s\S]{0,160}?res\.status\(400\)/);
+  // agent_id is TYPE-checked (not merely truthiness-checked) through the same
+  // helper /block uses, so an object like {"$ne": null} never reaches the filter.
+  assert.match(route, /const badField = badBlockField\(req\.body\);[\s\S]{0,120}?res\.status\(400\)/);
+  assert.ok(route.indexOf('badBlockField(') < route.indexOf('setDlpMonitor('));
   // Validation happens BEFORE the write, so no bad row can be stored.
   assert.ok(route.indexOf('const monitor =') < route.indexOf('setDlpMonitor('));
   assert.ok(route.indexOf('const scope =') < route.indexOf('setDlpMonitor('));
   // The write shape is the shared helper's, not a second copy of it.
-  assert.match(src, /import \{ normalizeDlpMonitor, setDlpMonitor, listGovernedAgents \} from "\.\.\/dlp-monitor\.js";/);
+  assert.match(src, /import \{ normalizeDlpMonitor, setDlpMonitor, listGovernedAgents, lookupAgentIdentity, aliasesFor \} from "\.\.\/dlp-monitor\.js";/);
 });
 
 test('GET /lifecycle/governed-agents is public and delegates to the shared read model', async () => {
@@ -314,6 +330,25 @@ test('GET /lifecycle/blocked-agents is completely unchanged by any of this', asy
   // And it says nothing about dlp_monitor: a monitored agent is not a blocked
   // one, and this list is what the enforcer refuses traffic on.
   assert.equal(/dlp_monitor/.test(route), false);
+});
+
+test('GET /lifecycle/blocked-agents fails CLOSED, never returns res.json([]) on error', async () => {
+  const src = await lifecycleSrc();
+  const route = src.slice(src.indexOf('router.get("/blocked-agents"'), src.indexOf('router.post("/dlp-monitor"'));
+  const catchBlock = route.slice(route.lastIndexOf('} catch'));
+  // The bug this pins: an internal error (a DB hiccup, not "no agents are
+  // blocked") used to resolve as `res.json([])` — indistinguishable, to both
+  // unauthenticated consumers, from an admin genuinely clearing every block.
+  // The desktop enforcer (blocked-agents-sync.js) and the browser extension
+  // both write an empty list straight into their local enforcement state, so
+  // this was a transient DB error silently unblocking the whole company.
+  assert.equal(/res\.json\(\[\]\)/.test(catchBlock), false,
+    'a caught error here must never resolve as an empty, "successfully checked, nothing blocked" list');
+  // A real non-2xx status is what lets the consumers' OWN existing fail-closed
+  // check do its job: blocked-agents-sync.js already does
+  // `if (!res.ok) return null` and leaves its local file untouched on exactly
+  // this signal — it just never had a real failure status to catch before.
+  assert.match(catchBlock, /res\.status\(500\)/);
 });
 
 test('the block and unblock write paths never mention dlp_monitor', async () => {

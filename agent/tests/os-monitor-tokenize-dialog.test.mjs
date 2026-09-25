@@ -807,7 +807,7 @@ test('the Electron path still opens its own dialog off @@CFAI-BLOCK', async () =
   // This is a NEW trigger for the CLI agent, not a replacement. Anyone still
   // running Electron must see exactly what they saw before.
   const main = await readFile(join(AGENT_DIR, 'electron', 'main.js'), 'utf8');
-  assert.match(main, /if \(parsed\.rewritable\) showBlockDialogWindow\(parsed\);/);
+  assert.match(main, /\n\s*showBlockDialogWindow\(parsed\);/);
   assert.match(main, /cmd: 'tokenize', block_id: blockId/);
   // …and the CLI path reaches the same command through the same wrapper, so
   // there is one mechanism with two triggers rather than two mechanisms.
@@ -969,7 +969,7 @@ test('enforcer-win.ps1: a FROZEN pin is held but never offered', async () => {
   const pending = src.slice(src.indexOf('static void UpdatePendingRewrite()'), src.indexOf('static void HoldPendingRewrite('));
   assert.ok(pending.length > 0, 'expected an UpdatePendingRewrite body');
   // The exclusion CONDITION is unchanged — only what it does changed.
-  assert.match(pending, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| \(_hostAppProcs\.Contains\(_app\) && !_fgDlpGoverned\) \|\| Disarmed\(\)\)/);
+  assert.match(pending, /if \(!_fgIsAi \|\| !PanelUiaOk\(\) \|\| \(_hostAppProcs\.Contains\(_app\) && !_fgDlpGoverned\) \|\| !_fgContentOk \|\| Disarmed\(\)\)/);
   assert.match(pending, /if \(!_pendingRewritable \|\| Disarmed\(\) \|\| DateTime\.UtcNow\.Ticks > _pendingExpiresAt\)\s*\r?\n\s*\{ _pendingRewritable = false; _pendingBlockId = ""; _pendingFrozen = false; \}\s*\r?\n\s*else _pendingFrozen = true;/);
   // THE PANIC HOTKEY STILL CLEARS OUTRIGHT — it is the one term that means
   // "stop touching the keyboard", so it may not freeze.

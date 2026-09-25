@@ -41,7 +41,8 @@ function region() {
  * @param {object} fakeDocument   must implement querySelectorAll(selector)
  * @param {object} [synced]       the server map, as chrome.storage would hold it
  * @returns {{captureAllowed:Function, aiPanels:Function, IS_EMBEDDED_AI:boolean,
- *            surfaceSelectorsForHost:Function, EMBEDDED_AI_FLOOR:object}}
+ *            surfaceSelectorsForHost:Function, agentLabelSelectorsForHost:Function,
+ *            EMBEDDED_AI_FLOOR:object}}
  */
 export function loadSurfaceScope(host, fakeDocument, synced) {
   const chrome = {
@@ -56,7 +57,8 @@ export function loadSurfaceScope(host, fakeDocument, synced) {
   const quiet = { info() {}, warn() {}, log() {} };
 
   const body = region()
-    + '\n  return { captureAllowed, aiPanels, IS_EMBEDDED_AI, surfaceSelectorsForHost, EMBEDDED_AI_FLOOR };';
+    + '\n  return { captureAllowed, aiPanels, IS_EMBEDDED_AI, surfaceSelectorsForHost,'
+    + '\n           agentLabelSelectorsForHost, EMBEDDED_AI_FLOOR };';
   // eslint-disable-next-line no-new-func
   // content.js routes informational logging through clog(), which is defined
   // above this slice and gated on localStorage. Bind it to the quiet console so

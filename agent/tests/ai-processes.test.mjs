@@ -17,6 +17,7 @@ import {
   AI_PROCESSES,
   IDE_PROCESSES,
   PLATFORM_PROCS,
+  matchPanelSignature,
   isAttachmentWatcherEligible,
   shouldScrubClipboardFor,
   identifyAiProcess,
@@ -42,6 +43,16 @@ import {
   normalizeGovernedRows,
   filterGovernedAgents,
   buildAgentSurfaceConfig,
+  AI_PANELS,
+  panelForHost,
+  EGRESS_SURFACES,
+  EGRESS_SYNC_ROOTS,
+  EGRESS_SEND_CHORDS,
+  normalizeEgressSendKeys,
+  egressSurfaceForProcess,
+  isEgressProcess,
+  buildEgressSurfaceConfig,
+  synthesizeEgressSurfaces,
 } from '../src/os_monitor/ai-processes.js';
 
 const AGENT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -482,7 +493,16 @@ test('the AI and IDE catalogs stay separate, and Cursor dual membership is delib
   const ideNames = IDE_PROCESSES.map((e) =>
     e.match.source.replace(/^\^/, '').replace(/\$$/, '').replace(/[\\/]i?$/, '').toLowerCase(),
   );
-  assert.deepEqual(ideNames, ['code', 'cursor']);
+  // The Office hosts of the Microsoft 365 Copilot side pane live here and ONLY
+  // here, for the same reason VS Code does: an Office name in AI_PROCESSES would
+  // turn on clipboard scanning and attachment-chip watching across the whole app
+  // and report every document a user opens as an AI file upload.
+  assert.deepEqual(ideNames, ['code', 'cursor', 'winword', 'excel', 'powerpnt', 'onenote', 'onenoteim', 'outlook', 'olk']);
+  for (const name of ['winword', 'excel', 'powerpnt', 'onenote', 'onenoteim']) {
+    assert.equal(aiNames.includes(name), false, `"${name}" in AI_PROCESSES would turn on the passive watchers across an Office app`);
+    assert.equal(identifyAiProcess(name), null);
+    assert.equal(hostForProcess(name), null);
+  }
   // VS Code must NOT be in the AI catalog — that is what keeps the passive
   // watchers out of the editor entirely.
   assert.equal(aiNames.includes('code'), false, '"Code" in AI_PROCESSES would turn on clipboard/attachment watching across VS Code');
@@ -517,11 +537,15 @@ test('synthesizePlatformBlocks dedupes hosts that resolve to the same desktop ap
     { host: 'copilot.microsoft.com', product: 'Copilot',  blocked: true },
     { host: 'm365.cloud.microsoft',  product: 'M365',     blocked: true },
   ]);
-  // claude.ai also contributes its panel row; the two Copilot hosts have no
-  // panel. Process and panel keys are namespaced, so they can never collide.
+  // claude.ai also contributes its panel row, and so does m365.cloud.microsoft
+  // now that office_copilot_pane carries that host (the pane IS Microsoft 365
+  // Copilot inside an Office app — see ai-panels.test.mjs for the reasoning and
+  // for the safety property that no OFFICE PROCESS row is ever synthesized).
+  // copilot.microsoft.com is the standalone client only and has no panel.
+  // Process and panel keys are namespaced, so they can never collide.
   assert.deepEqual(
     rows.map((r) => r.process_name || 'panel:' + r.panel),
-    ['claude', 'panel:claude_code', 'copilot', 'm365copilot'],
+    ['claude', 'panel:claude_code', 'copilot', 'm365copilot', 'panel:office_copilot_pane', 'panel:outlook_copilot_pane'],
   );
   assert.equal(rows[0].agent_name, 'Claude', 'the FIRST row wins a dedup');
 });
@@ -636,7 +660,11 @@ test('the safety gate holds for every entry: nothing may enforce without being v
     // nothing to read a name FROM can never narrow anything, and would ship as a
     // silent no-op. Which fields those are depends on the read mode, and the
     // absence of `read` must keep meaning the original composer-name mode.
-    assert.ok(surface.read === undefined || surface.read === 'window_title',
+    // 'composer_name' is the ORIGINAL mode stated out loud (office_copilot_pane_agent
+    // does; m365_copilot leaves it absent and means the same thing). Both spellings
+    // are accepted here for exactly that reason — buildAgentSurfaceConfig and the C#
+    // both normalise anything that is not 'window_title' to 'composer_name'.
+    assert.ok(surface.read === undefined || surface.read === 'composer_name' || surface.read === 'window_title',
       `${surface.id}: unknown read mode '${surface.read}'`);
     if (surface.read === 'window_title') {
       assert.ok(surface.titleSeparator, `${surface.id} has no titleSeparator`);
@@ -670,13 +698,115 @@ test('teams_desktop ships VERIFIED and ENFORCING, reads the title, and never fal
   // would mean the user cannot message a colleague, so it must mean "block
   // nothing" instead.
   assert.equal(teams.hostApp, true);
-  // …and it is the ONLY host-app surface, so this stays a deliberate opt-in.
-  assert.deepEqual(AGENT_SURFACES.filter((s) => s.hostApp === true).map((s) => s.id), ['teams_desktop']);
+  // …and host-app status stays a deliberate, enumerated opt-in. The second entry
+  // is the Microsoft 365 Copilot pane inside desktop Office, where the same
+  // inversion applies with a bigger blast radius: "cannot tell which agent is
+  // open" must never become "nobody in the org may use Word".
+  assert.deepEqual(AGENT_SURFACES.filter((s) => s.hostApp === true).map((s) => s.id),
+    ['teams_desktop', 'office_copilot_pane_agent']);
+  // Teams is NOT panel-hosted and Office is: the flag that decides whether a host
+  // app also loses its element-scoped mechanisms (see _panelHostAppProcs in
+  // enforcer-win.ps1) is likewise enumerated, never inferred.
+  assert.equal(teams.panelHosted, undefined, 'teams_desktop is not panel-hosted');
+  assert.deepEqual(AGENT_SURFACES.filter((s) => s.panelHosted === true).map((s) => s.id),
+    ['office_copilot_pane_agent']);
   // m365_copilot is completely untouched by the new fields existing.
   const m365 = AGENT_SURFACES.find((s) => s.id === 'm365_copilot');
   assert.equal(m365.read, undefined, 'm365_copilot must not gain a read mode');
   assert.equal(m365.hostApp, undefined, 'm365_copilot must not become a host app');
   assert.equal(m365.titleSeparator, undefined);
+});
+
+test('office_copilot_pane_agent ships INERT, fails OPEN, and never turns Office into an AI app', () => {
+  const office = AGENT_SURFACES.find((s) => s.id === 'office_copilot_pane_agent');
+  assert.ok(office, 'the office_copilot_pane_agent surface is missing');
+
+  // THE SHIPPING STATE. Nothing here has been probed live in a real Office
+  // install: the "Message <agent>" composer Name is inferred from the standalone
+  // Microsoft 365 Copilot app plus the shared Fluent composer. Both flags false
+  // is what makes that safe to ship — matched, unit-tested, arming nothing.
+  assert.equal(office.enforce, false, 'a surface nobody has live-probed may not enforce');
+  assert.equal(office.verified, false);
+  assert.equal(office.fallbackRead.enforce, false, 'the second route ships inert too');
+  assert.equal(office.fallbackRead.verified, false);
+
+  // THE FAIL DIRECTION, and the single most important line in the entry. Word,
+  // Excel, PowerPoint and OneNote are the company's document editors: "cannot
+  // tell which Copilot agent is open" must mean NO BLOCK AT ALL, never a
+  // whole-app block. Asserted behaviourally against the real .ps1 in
+  // tests/enforcer-panel-block.test.mjs.
+  assert.equal(office.hostApp, true);
+  // …and the sub-kind that keeps it out of _hostAppProcs, so the live-verified
+  // office_copilot_pane panel keeps its panel-keyed block and its Tokenize &
+  // Send path. See enforcer-win.ps1's _panelHostAppProcs.
+  assert.equal(office.panelHosted, true);
+
+  // The read signal, and the reason it is the composer-name mode rather than
+  // Teams' window-title one: an Office window title is the DOCUMENT name.
+  assert.equal(office.read, 'composer_name');
+  assert.equal(office.titleSeparator, undefined);
+  assert.equal(office.controlType, 'Edit');
+  assert.deepEqual(office.composerNamePrefixes, ['Message ']);
+  assert.deepEqual(office.genericNames, ['Copilot', 'Microsoft 365 Copilot']);
+  assert.deepEqual(office.procs, ['WINWORD', 'EXCEL', 'POWERPNT', 'ONENOTE', 'ONENOTEIM']);
+
+  // It reuses the AI_PANELS pane entry's processes exactly — the same surface,
+  // asked a second question. A drift here would mean one of the two silently
+  // stops covering an app.
+  const pane = AI_PANELS.find((p) => p.id === 'office_copilot_pane');
+  assert.deepEqual(office.procs, pane.procs.filter((p) => office.procs.includes(p)),
+    'the agent-identification entry must track the pane entry it reads off');
+
+  // The pure read, on the inferred shape. Generic first, as everywhere else.
+  const focus = (name, process = 'WINWORD') => ({ process, controlType: 'Edit', name });
+  assert.equal(extractAgentName(focus('Message Contract Analyzer')), 'Contract Analyzer');
+  assert.equal(extractAgentName(focus('Message Copilot')), AGENT_NAME_GENERIC);
+  assert.equal(extractAgentName(focus('Message Microsoft 365 Copilot')), AGENT_NAME_GENERIC);
+  assert.equal(extractAgentName(focus('Search document')), AGENT_NAME_NOT_COMPOSER);
+  // The document body is a Document/Text control, never this composer's Edit.
+  assert.equal(extractAgentName({ process: 'WINWORD', controlType: 'Document', name: 'Message Contract Analyzer' }),
+    AGENT_NAME_NOT_COMPOSER);
+  for (const proc of ['EXCEL', 'POWERPNT', 'ONENOTE', 'ONENOTEIM']) {
+    assert.equal(extractAgentName(focus('Message Contract Analyzer', proc)), 'Contract Analyzer', proc);
+  }
+
+  // THE PRIVACY PROPERTY, restated for these five processes: an agent surface
+  // narrows an existing block, it never widens capture. No Office name may be in
+  // AI_PROCESSES or reach a passive watcher — that would report every document a
+  // user opens as an AI file upload.
+  const watchers = watcherProcessNames().map((n) => n.toLowerCase());
+  for (const proc of office.procs) {
+    assert.equal(watchers.includes(proc.toLowerCase()), false, `${proc} must never reach a passive watcher`);
+    assert.equal(identifyAiProcess(proc), null, `${proc} must not be an AI process`);
+    assert.equal(hostForProcess(proc), null, `${proc} must resolve to no blockable host`);
+    assert.deepEqual(processesForHost('m365.cloud.microsoft'), ['m365copilot'],
+      'the pane cascade stays panel-keyed — no Office process may become process-keyed');
+  }
+});
+
+test('PLATFORM_PROCS reaches the Office Copilot pane, and never the mail client', () => {
+  // Membership is what lets an agent-scoped row COVER the process at all; the
+  // hostApp marking above is what stops it becoming a whole-app block there.
+  for (const platform of ['copilot_studio', 'personal_agent', 'sharepoint_embedded']) {
+    for (const proc of ['WINWORD', 'EXCEL', 'POWERPNT', 'ONENOTE', 'ONENOTEIM']) {
+      assert.ok(PLATFORM_PROCS[platform].includes(proc), `${platform} must reach ${proc}`);
+    }
+    // Every platform still has to resolve to at least one access-exception HOST,
+    // or an admin's approved exception could never lift the block. Office
+    // processes are (correctly) not in AI_PROCESSES, so a key naming only Office
+    // would silently be un-liftable — which is why sharepoint_embedded also
+    // names the standalone app.
+    assert.ok(hostsForPlatform(platform).includes('m365.cloud.microsoft'), platform);
+  }
+  assert.deepEqual(PLATFORM_PROCS.sharepoint_embedded,
+    ['M365Copilot', 'WINWORD', 'EXCEL', 'POWERPNT', 'ONENOTE', 'ONENOTEIM']);
+  // OUTLOOK is an EGRESS surface. It must never appear here — the general rule is
+  // asserted over the whole map elsewhere in this file; this pins the one name
+  // this change was most likely to add by hand.
+  for (const procs of Object.values(PLATFORM_PROCS)) {
+    assert.equal(procs.map((p) => p.toLowerCase()).includes('outlook'), false,
+      'a mail client must never be reachable by an agent-scoped block');
+  }
 });
 
 test('agentSurfaceForProcess matches on the process name, case- and .exe-insensitively', () => {
@@ -781,9 +911,15 @@ test('buildAgentSurfaceConfig serialises the catalog without aliasing it', () =>
     titleSeparator: '',
     titleSuffix: '',
     titleKinds: [],
+    titleFullKinds: [],
     hostApp: false,
+    panelHosted: false,
     enforce: true,
     verified: true,
+    // Tier B's two per-surface write facts. m365_copilot's 1500 is its own
+    // catalog value (the 2026-09-21 live not_submitted bug), finally on the wire.
+    newlineKeys: 'shift_enter',
+    postSendVerifyMs: 1500,
   });
   // The m365_copilot payload carries NO fallbackRead key at all — the nested
   // block is omitted rather than shipped empty, so a surface that never declares
@@ -799,9 +935,16 @@ test('buildAgentSurfaceConfig serialises the catalog without aliasing it', () =>
     titleSeparator: ' | ',
     titleSuffix: 'Microsoft Teams',
     titleKinds: ['Chat'],
+    // Segment 1 names the agent only in the five-segment Copilot form (live 2026-09-24).
+    titleFullKinds: ['Copilot'],
     hostApp: true,
+    panelHosted: false,
     enforce: true,
     verified: true,
+    // No catalog value → the defaults, resolved here exactly as a panel's are.
+    // (Teams' composers carry their own 1500 on their AI_PANELS rows, which win.)
+    newlineKeys: 'shift_enter',
+    postSendVerifyMs: 200,
     // The SECOND UI ROUTE (the embedded Copilot tab), with its OWN two-flag gate
     // — now both true, after that route's own live pass on 2026-09-02. The C#
     // side reaches it only when both are true, so dropping either from the
@@ -817,6 +960,30 @@ test('buildAgentSurfaceConfig serialises the catalog without aliasing it', () =>
       verified: true,
     },
   });
+  // The Office pane surface, whose payload is what tells the C# side to put
+  // WINWORD/EXCEL/POWERPNT/ONENOTE/ONENOTEIM into _panelHostAppProcs rather than
+  // _hostAppProcs. Losing either flag from the payload would move it to the
+  // wrong side of a safety gate: hostApp:false would let a row blocking one
+  // agent disable Word outright, panelHosted:false would silently retire the
+  // live-verified office_copilot_pane panel's own block and rewrite paths.
+  const office = buildAgentSurfaceConfig().find((e) => e.id === 'office_copilot_pane_agent');
+  assert.equal(office.hostApp, true);
+  assert.equal(office.panelHosted, true);
+  assert.equal(office.enforce, false);
+  assert.equal(office.verified, false);
+  assert.equal(office.read, 'composer_name');
+  assert.deepEqual(office.procs, ['WINWORD', 'EXCEL', 'POWERPNT', 'ONENOTE', 'ONENOTEIM']);
+  assert.equal(office.fallbackRead.enforce, false);
+  assert.equal(office.fallbackRead.verified, false);
+  assert.equal(office.fallbackRead.headingClass, 'fai-CopilotMessage__accessibleHeading');
+  assert.equal(office.fallbackRead.headingSuffix, ' said:');
+  // Shipped with NO paneKinds and NO landingInfix, which is exactly why
+  // LoadAgentSurfaces drops the block: both are Teams' title-derived gates and
+  // neither has a meaning on a composer-name surface. Recorded here so nobody
+  // reads "flip the two flags" as enough to arm this route.
+  assert.deepEqual(office.fallbackRead.paneKinds, []);
+  assert.equal(office.fallbackRead.landingInfix, '');
+
   // Copies, so a consumer mutating the payload cannot reach back into the catalog.
   entry.procs.push('Notepad');
   entry.composerNamePrefixes.push('x');
@@ -834,6 +1001,32 @@ test('buildAgentSurfaceConfig serialises the catalog without aliasing it', () =>
   // the nested block is the first structured value on this channel.
   const config = buildAgentSurfaceConfig();
   assert.deepEqual(JSON.parse(JSON.stringify(config)), config);
+});
+
+test('buildAgentSurfaceConfig carries postSendVerifyMs (clamped) and newlineKeys for every surface', async () => {
+  // THE LIVE BUG (2026-09-21): m365_copilot has declared postSendVerifyMs:1500
+  // since its WebView2 composer was measured, but this function never put it on
+  // the wire — so the enforcer used the 200ms default, reported a delivered
+  // mask-and-send as not_submitted, and no enforcement_redact was recorded.
+  const { clampPostSendVerifyMs, DEFAULT_NEWLINE_KEYS, DEFAULT_POST_SEND_VERIFY_MS, MAX_POST_SEND_VERIFY_MS } =
+    await import('../src/os_monitor/ai-processes.js');
+  const config = buildAgentSurfaceConfig();
+  const m365 = config.find((e) => e.id === 'm365_copilot');
+  assert.equal(AGENT_SURFACES.find((s) => s.id === 'm365_copilot').postSendVerifyMs, 1500);
+  assert.equal(m365.postSendVerifyMs, 1500, 'm365_copilot must ship its catalog post-send window');
+  for (const entry of config) {
+    const src = AGENT_SURFACES.find((s) => s.id === entry.id);
+    assert.equal(typeof entry.postSendVerifyMs, 'number', `${entry.id}.postSendVerifyMs must be a number`);
+    // The SAME clamp buildAiPanelConfig applies — one rule for both catalogs.
+    assert.equal(entry.postSendVerifyMs, clampPostSendVerifyMs(src.postSendVerifyMs), entry.id);
+    assert.ok(entry.postSendVerifyMs >= DEFAULT_POST_SEND_VERIFY_MS && entry.postSendVerifyMs <= MAX_POST_SEND_VERIFY_MS);
+    assert.equal(entry.newlineKeys, src.newlineKeys === undefined ? DEFAULT_NEWLINE_KEYS : src.newlineKeys, entry.id);
+  }
+  // …and the C# side parses and re-clamps it exactly as it does a panel's copy.
+  const ps1 = await readFile(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
+  const load = ps1.slice(ps1.indexOf('static void LoadAgentSurfaces(string json)'), ps1.indexOf('static AgentSurface MatchAgentSurface(string proc)'));
+  assert.match(load, /PostSendVerifyMs = JsIntClamped\(d, "postSendVerifyMs",\s*\r?\n?\s*REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MAX_MS\),/);
+  assert.match(load, /NewlineKeys = JsStr\(d, "newlineKeys"\),/);
 });
 
 // ── Window-title agent reads (Microsoft Teams) ───────────────────────────────
@@ -1323,6 +1516,137 @@ test('extractAgentNameFromHeading never throws and refuses a surface with no fal
   }
 });
 
+// ── The EMPTY-SUFFIX case: the Chat-list badge route (live 2026-09-21) ──────
+//
+// extractAgentNameFromHeading used to require a NON-EMPTY headingSuffix before
+// it would look at a class-matched candidate at all. That was right while the
+// only caller was the Copilot tab, whose headings read "<Agent> said:". The
+// Chat-list badge route's candidate is different: its collector PAIRS an "AI
+// generated" badge (ClassName token fai-AiGeneratedDisclaimer) with the bare
+// sender-name Text beside it, so the Name it hands in IS the agent name and
+// there is nothing to strip.
+
+const BADGE_CLASS = 'fai-AiGeneratedDisclaimer ___lv0h9d0 fk6fouc f13mqy1h figsok6 fwrc4pm ft85np5 fluwili f14t3ns0 f11d4kpn flu3bqm f1jl2yie fz5stix';
+// The RETIRED Chat-list badge route (2026-09-24 — see the teams_composer entry)
+// no longer lives in the catalog. Its pure reader (extractAgentNameFromHeading's
+// empty-suffix support) still exists, so it is exercised against a FIXTURE of
+// the exact block that used to ship, rather than against the catalog.
+const TEAMS_COMPOSER = {
+  id: 'teams_composer_badge_fixture',
+  fallbackRead: {
+    mode: 'message_heading', headingClass: 'fai-AiGeneratedDisclaimer', headingSuffix: '',
+    genericNames: ['Copilot', 'You'], enforce: false, verified: false,
+  },
+};
+
+test('the Chat-list badge fallback is RETIRED from the catalog, replaced by the AI-evidence check', () => {
+  // Measured live 2026-09-24: a human group chat carries "badge-<ts>" Images
+  // (class fui-ChatMessage__decorationIcon, Name "<person> mentioned you"). A
+  // "badge" heuristic was one release away from reading a colleague chat, so
+  // the route is gone and teams_composer declares aiEvidence:'teams_chat'.
+  const catalog = AI_PANELS.find((p) => p.id === 'teams_composer');
+  assert.equal('fallbackRead' in catalog, false);
+  assert.equal(catalog.aiEvidence, 'teams_chat');
+  assert.deepEqual(AI_PANELS.filter((p) => p.fallbackRead).map((p) => p.id), []);
+});
+
+test('extractAgentNameFromHeading offers the BARE name when headingSuffix is empty', () => {
+  // The measured pair, verbatim: the badge's ClassName travels with the paired
+  // Text's Name, which is exactly what the collector synthesizes.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_COMPOSER, [{ className: BADGE_CLASS, name: 'IT Help Desk Agent' }]),
+    'IT Help Desk Agent',
+  );
+  // Whitespace is normalised on the way out, same as every other reader here.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_COMPOSER, [{ className: BADGE_CLASS, name: '  IT  Help Desk Agent ' }]),
+    'IT Help Desk Agent',
+  );
+  // Badges ACCUMULATE down a transcript; two that agree are one answer.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_COMPOSER, [
+      { className: BADGE_CLASS, name: 'IT Help Desk Agent' },
+      { className: BADGE_CLASS, name: 'IT Help Desk Agent' },
+    ]),
+    'IT Help Desk Agent',
+  );
+  // …and two that DISAGREE are no evidence, never a block — the contract is
+  // unchanged by the empty suffix.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_COMPOSER, [
+      { className: BADGE_CLASS, name: 'IT Help Desk Agent' },
+      { className: BADGE_CLASS, name: 'Expenses Helper' },
+    ]),
+    AGENT_NAME_NOT_COMPOSER,
+  );
+  // The CLASS is still the whole gate. An empty suffix loosens what a matched
+  // candidate's Name may look like; it loosens NOTHING about what counts as a
+  // candidate, which is the thing the 2026-09 pass was right to protect.
+  for (const cls of ['', 'fui-Text r1', 'x-fai-AiGeneratedDisclaimer']) {
+    assert.equal(
+      extractAgentNameFromHeading(TEAMS_COMPOSER, [{ className: cls, name: 'IT Help Desk Agent' }]),
+      AGENT_NAME_NOT_COMPOSER, `className ${JSON.stringify(cls)} must not be a candidate`,
+    );
+  }
+  // An empty or whitespace-only Name offers nothing.
+  for (const name of ['', '   ', null, undefined]) {
+    assert.equal(
+      extractAgentNameFromHeading(TEAMS_COMPOSER, [{ className: BADGE_CLASS, name }]),
+      AGENT_NAME_NOT_COMPOSER, JSON.stringify(name),
+    );
+  }
+  // The Generic filter still runs BEFORE any match.
+  for (const label of ['Copilot', 'You', 'copilot']) {
+    assert.equal(
+      extractAgentNameFromHeading(TEAMS_COMPOSER, [{ className: BADGE_CLASS, name: label }]),
+      AGENT_NAME_GENERIC, label,
+    );
+  }
+  // Never throws on garbage, same as the surface-driven path.
+  for (const bad of [null, undefined, [], [null], [{}], 'x', 0, {}]) {
+    assert.equal(extractAgentNameFromHeading(TEAMS_COMPOSER, bad), AGENT_NAME_NOT_COMPOSER, JSON.stringify(bad));
+  }
+});
+
+test('the empty-suffix change is INERT for every non-empty-suffix caller', () => {
+  // ZERO regression is the requirement, so the Copilot-tab route's own
+  // assertions are re-run here against the same catalog object the shipped
+  // reader uses. The suffix path must still strip, still require something
+  // before the suffix, and still refuse a Name that does not carry it.
+  assert.equal(TEAMS_SURFACE.fallbackRead.headingSuffix, ' said:', 'the other route keeps its suffix');
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [{ className: H_AGENT_MSG_CLASS, name: H_AGENT_MSG_NAME }]),
+    'IT Help Desk Agent',
+  );
+  // A class-matched heading whose Name lacks the suffix is STILL not offered —
+  // this is the exact assertion the relaxed guard could have broken, since the
+  // empty-suffix branch would happily have taken the whole string.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [{ className: H_AGENT_MSG_CLASS, name: 'IT Help Desk Agent' }]),
+    AGENT_NAME_NOT_COMPOSER,
+    'a bare name under a suffix-carrying route must not suddenly become evidence',
+  );
+  // …and a Name that is ONLY the suffix has nothing before it to offer.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [{ className: H_AGENT_MSG_CLASS, name: ' said:' }]),
+    AGENT_NAME_NOT_COMPOSER,
+  );
+  // The user's own heading still carries a different class and is still unread.
+  assert.equal(
+    extractAgentNameFromHeading(TEAMS_SURFACE, [{ className: H_USER_MSG_CLASS, name: H_USER_MSG_NAME }]),
+    AGENT_NAME_NOT_COMPOSER,
+  );
+});
+
+test('a badge-paired name still has to match a blocklist row whole', () => {
+  // Nothing about this route is special downstream: the recovered name goes
+  // through the same whole-string agentNameMatches every other read does.
+  const name = extractAgentNameFromHeading(TEAMS_COMPOSER, [{ className: BADGE_CLASS, name: 'IT Help Desk Agent' }]);
+  assert.equal(agentNameMatches(name, 'IT Help Desk Agent'), true);
+  assert.equal(agentNameMatches(name, 'Help Desk'), false);
+  assert.equal(agentNameMatches(extractAgentNameFromHeading(TEAMS_COMPOSER, []), 'IT Help Desk Agent'), false);
+});
+
 test('a name read off a Copilot-tab heading still has to match a blocklist row whole', () => {
   // The extracted name is not special: it goes through the same whole-string
   // agentNameMatches every other read does, so a row for "Advisor" cannot block
@@ -1567,4 +1891,394 @@ test('filterGovernedAgents is a no-op for an empty or malformed blocked list', (
     filterGovernedAgents([{ platform: 'personal_agent' }], [{ agent_id: 'ag-1', agent_name: 'Finance Bot' }]),
     [{ platform: 'personal_agent' }],
   );
+});
+
+// ── Egress surfaces: a NON-AI destination data leaves through ────────────────
+//
+// The FOURTH catalog (Microsoft Outlook's compose/attach paths, plus the
+// OneDrive/SharePoint sync roots). Everything below is about ONE property: that
+// membership here unlocks NOTHING the other three catalogs unlock. An egress
+// surface is a general-purpose mail client — a strictly worse case than the
+// Teams host-app entry, which at least has a provable "an agent conversation is
+// open" state to scope reads with. Outlook has none: every window in it is a
+// human conversation.
+
+test('EGRESS_SURFACES never reaches watcherProcessNames — the clipboard poller, the UIA watchers, the enforcer', () => {
+  // THE privacy property, and the reason it is asserted first. An egress process
+  // name in this list would turn on clipboard scanning, whole-window
+  // attachment-chip watching and prompt-text reading across a mail client — i.e.
+  // every email the user reads, every attachment a colleague sent them, and the
+  // window title, which is the message SUBJECT LINE.
+  const names = watcherProcessNames().map((n) => n.toLowerCase());
+  assert.ok(names.length > 0);
+  for (const surface of EGRESS_SURFACES) {
+    for (const proc of surface.procs) {
+      assert.equal(names.includes(String(proc).toLowerCase()), false,
+        `${proc} is an egress surface and must never reach a passive watcher`);
+    }
+  }
+  // Stated the other way round too, so a future AI_PROCESSES entry that happened
+  // to name a mail client is caught as well.
+  const egressProcs = EGRESS_SURFACES.flatMap((s) => s.procs.map((p) => String(p).toLowerCase()));
+  assert.deepEqual(names.filter((n) => egressProcs.includes(n)), []);
+});
+
+test('a MAIL CLIENT may reach the scanning catalogs ONLY through a dlpMatch:"panel" class-token panel', () => {
+  // NARROWED 2026-09-24 from a blanket "disjoint from IDE_PROCESSES and
+  // AI_PANELS": the user explicitly wants Outlook's Copilot pane covered. What
+  // must stay true is the reason the blanket rule existed — a mail client is
+  // never a WHOLE-APP AI surface and nothing in it but the Copilot composer is
+  // ever scanned:
+  const egressProcs = new Set(EGRESS_SURFACES.flatMap((s) => s.procs.map((p) => String(p).toLowerCase())));
+  const literal = (e) => e.match.source.replace(/^\^/, '').replace(/\$/, '').replace(/[\\/]i?$/, '').toLowerCase();
+  // 1. never AI_PROCESSES (whole-app treatment, clipboard, every watcher) and
+  //    never PLATFORM_PROCS (a process-wide block row).
+  for (const entry of AI_PROCESSES) {
+    assert.equal(egressProcs.has(literal(entry)), false, `${entry.product} is in BOTH AI_PROCESSES and EGRESS_SURFACES`);
+  }
+  for (const [platform, procs] of Object.entries(PLATFORM_PROCS)) {
+    for (const proc of procs) {
+      assert.equal(egressProcs.has(String(proc).toLowerCase()), false, `PLATFORM_PROCS.${platform} names the mail client ${proc}`);
+    }
+  }
+  // 2. an IDE_PROCESSES entry for a mail client must have NO whole-app fallback
+  //    and must host at least one panel (otherwise it would be dead config).
+  for (const entry of IDE_PROCESSES) {
+    if (!egressProcs.has(literal(entry))) continue;
+    assert.equal(entry.panelFallback, false, `${entry.product}: a mail client may never fall back to whole-app scanning`);
+    assert.ok(AI_PANELS.some((pl) => pl.procs.some((pr) => pr.toLowerCase() === literal(entry))),
+      `${entry.product} is an IDE entry with no panel to host`);
+  }
+  // 3. every panel naming a mail client is dlpMatch:'panel' (a composer with no
+  //    non-AI use) and matches by a CLASS TOKEN only — no Name rule, which in a
+  //    mail client could match a subject or body label.
+  const mailPanels = AI_PANELS.filter((pl) => pl.procs.some((pr) => egressProcs.has(pr.toLowerCase())));
+  assert.deepEqual(mailPanels.map((pl) => pl.id), ['outlook_copilot_pane']);
+  for (const panel of mailPanels) {
+    assert.equal(panel.dlpMatch, 'panel', `${panel.id}: a mail-client panel must be dlpMatch:'panel'`);
+    assert.ok(panel.classEquals || panel.classPrefix, `${panel.id}: a mail-client panel must key on a class token`);
+    assert.equal(panel.nameEquals, undefined, `${panel.id} must not match on a Name`);
+    assert.equal(panel.namePrefix, undefined, `${panel.id} must not match on a Name`);
+    // 4. …and its signature can never match an egress COMPOSE-BODY signature,
+    //    measured or future: the body sig's own class values must not satisfy
+    //    the panel's rule, and no body sig may name the panel's token.
+    for (const surface of EGRESS_SURFACES) {
+      const body = surface.bodySig;
+      if (!body) continue;
+      for (const cls of [body.classEquals, body.classPrefix].filter(Boolean)) {
+        assert.equal(matchPanelSignature({ process: surface.procs[0], controlType: body.controlType || 'Edit', name: '', className: cls })?.id === panel.id,
+          false, `${panel.id} would match ${surface.id}'s compose body`);
+      }
+    }
+  }
+  // Outlook's measured-elsewhere compose / reading surfaces (classic Word-based
+  // editor, WebView2 body, search box) never match the pane's signature.
+  for (const cls of ['_WwG', 'ms-rte-Editor', 'NetUITextbox', 'RichEdit20WPT', 'elementToProof', '']) {
+    for (const proc of ['OUTLOOK', 'olk']) {
+      assert.equal(matchPanelSignature({ process: proc, controlType: 'Edit', name: 'Message body', className: cls }), null,
+        `${proc} element with class ${JSON.stringify(cls)} must not match a panel`);
+      assert.equal(matchPanelSignature({ process: proc, controlType: 'Document', name: 'Message body', className: cls }), null);
+    }
+  }
+  // …while the pane's own Fluent composer does.
+  assert.equal(matchPanelSignature({ process: 'OUTLOOK', controlType: 'Edit', name: 'Message Copilot',
+    className: 'fai-EditorInput__input r18fti29 r18aquq2' })?.id, 'outlook_copilot_pane');
+  // …and identifyAiProcess must not resolve one, so the clipboard/focus handlers
+  // (which filter on it rather than on the watcher list) drop an egress process
+  // at their own `if (!ai) return` guard.
+  for (const proc of egressProcs) {
+    assert.equal(identifyAiProcess(proc), null, `identifyAiProcess resolved the egress process ${proc}`);
+    assert.equal(hostForProcess(proc), null, `hostForProcess resolved the egress process ${proc}`);
+  }
+});
+
+test('an Inventory host toggle can never synthesize a desktop block row for an egress surface', () => {
+  // processForHost / processesForHost are what turn an admin's `blocked` toggle
+  // into a process_name row, and such a row is matched process-WIDE by
+  // enforcer-win.ps1. One for a mail client would swallow Enter in every compose
+  // window and every reply in the company — i.e. "nobody may write email" —
+  // which is the same class of outcome the ms-teams host-app guard exists to
+  // prevent, only worse.
+  for (const surface of EGRESS_SURFACES) {
+    assert.equal(processForHost(surface.host), null, `${surface.host} must resolve to no blockable process`);
+    assert.deepEqual(processesForHost(surface.host), [], `${surface.host} must resolve to no blockable processes`);
+    assert.equal(panelForHost(surface.host), null, `${surface.host} must resolve to no blockable panel`);
+    assert.deepEqual(
+      synthesizePlatformBlocks([{ host: surface.host, product: surface.product, blocked: true }]),
+      [],
+      `an Inventory block on ${surface.host} must synthesize nothing`,
+    );
+  }
+  // The sync roots too — an admin blocking onedrive.live.com must not disable
+  // any desktop process either.
+  for (const root of EGRESS_SYNC_ROOTS) {
+    for (const host of root.policyHosts) {
+      assert.equal(processForHost(host), null);
+      assert.deepEqual(processesForHost(host), []);
+      assert.deepEqual(synthesizePlatformBlocks([{ host, product: root.product, blocked: true }]), []);
+    }
+  }
+});
+
+test('PLATFORM_PROCS names no egress process — an agent-scoped block can never reach a mail client', () => {
+  const egressProcs = new Set(EGRESS_SURFACES.flatMap((s) => s.procs.map((p) => String(p).toLowerCase())));
+  for (const [platform, procs] of Object.entries(PLATFORM_PROCS)) {
+    for (const proc of procs) {
+      assert.equal(egressProcs.has(String(proc).toLowerCase()), false,
+        `PLATFORM_PROCS.${platform} names the egress process ${proc}`);
+    }
+  }
+  // And no egress host is reachable as a platform host, so hostsForPlatform can
+  // never put a mail client on the access-exception chain either.
+  const egressHosts = new Set([
+    ...EGRESS_SURFACES.map((s) => s.host),
+    ...EGRESS_SYNC_ROOTS.flatMap((r) => r.policyHosts),
+  ].map((h) => String(h).toLowerCase()));
+  for (const platform of Object.keys(PLATFORM_PROCS)) {
+    for (const host of hostsForPlatform(platform)) {
+      assert.equal(egressHosts.has(host.toLowerCase()), false, `${platform} maps to the egress host ${host}`);
+    }
+  }
+});
+
+// ── The send-chord invariant ────────────────────────────────────────────────
+//
+// THE most dangerous mistake this catalog can contain, which is why it has its
+// own tests. In an Outlook compose body plain Enter inserts a NEWLINE — it does
+// not send. Swallowing it would not block a send; it would make writing an email
+// impossible, in a mail client, with no visible cause. That is categorically
+// worse than the miss it would be preventing.
+
+test('EGRESS_SEND_CHORDS is a closed enum and contains no bare-Enter spelling', () => {
+  assert.deepEqual([...EGRESS_SEND_CHORDS], ['ctrl_enter', 'alt_s']);
+  // Frozen, so no consumer can push a chord into it at runtime.
+  assert.throws(() => { EGRESS_SEND_CHORDS.push('enter'); });
+  for (const bare of ['enter', 'return', 'vk_return', 'newline', 'Enter', 'RETURN']) {
+    assert.equal(EGRESS_SEND_CHORDS.includes(bare.toLowerCase()), false,
+      `${bare} must never be a recognised send chord — bare Enter inserts a newline in a compose body`);
+  }
+  // Every chord in the enum names a MODIFIER. A value that could be satisfied by
+  // an unmodified keypress is what the invariant is really about.
+  for (const chord of EGRESS_SEND_CHORDS) {
+    assert.match(chord, /^(ctrl|alt|shift)_/, `${chord} names no modifier`);
+  }
+});
+
+test('normalizeEgressSendKeys refuses bare Enter, unrecognised chords, and half-valid lists', () => {
+  // The happy path first, so a refusal below cannot pass for the wrong reason.
+  assert.deepEqual(normalizeEgressSendKeys(['ctrl_enter', 'alt_s'], null, 'x'), ['ctrl_enter', 'alt_s']);
+  assert.deepEqual(normalizeEgressSendKeys(['CTRL_ENTER', ' alt_s '], null, 'x'), ['ctrl_enter', 'alt_s']);
+  assert.deepEqual(normalizeEgressSendKeys(['alt_s', 'alt_s'], null, 'x'), ['alt_s'], 'de-duplicated');
+
+  // BARE ENTER, in every spelling. null — not a filtered list — because dropping
+  // the bad chord and keeping the rest would arm the surface with a chord set
+  // nobody authored.
+  for (const bad of ['enter', 'Enter', 'ENTER', 'return', 'vk_return', 'newline', 'send']) {
+    assert.equal(normalizeEgressSendKeys([bad], null, 'x'), null, `${bad} must be refused`);
+    assert.equal(normalizeEgressSendKeys(['ctrl_enter', bad], null, 'x'), null,
+      `a list containing ${bad} must be refused WHOLE, not filtered`);
+  }
+  // Anything else unrecognised — including a plausible-looking typo.
+  for (const bad of ['ctrl+enter', 'ctrlenter', 'shift_enter', 'alt_send', 'ctrl_s', '']) {
+    assert.equal(normalizeEgressSendKeys([bad], null, 'x'), null, `${bad} must be refused`);
+  }
+  // A surface naming no chord at all can hold nothing, and must not load.
+  assert.equal(normalizeEgressSendKeys([], null, 'x'), null);
+  assert.equal(normalizeEgressSendKeys(null, null, 'x'), null);
+  assert.equal(normalizeEgressSendKeys(undefined, null, 'x'), null);
+  assert.equal(normalizeEgressSendKeys('ctrl_enter', null, 'x'), null, 'a bare string is not a chord list');
+  // The refusal is REPORTED, with the reason, rather than being silent.
+  const lines = [];
+  normalizeEgressSendKeys(['enter'], { warn: (m) => lines.push(String(m)) }, 'outlook_test');
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /outlook_test/);
+  assert.match(lines[0], /newline/i, 'the warning must say WHY bare Enter is refused');
+});
+
+test('a catalog entry with an unsafe sendKeys list is invisible to every consumer', () => {
+  // The refusal is not advisory: an entry that fails validation must not load
+  // anywhere, or it would be recognised as an egress surface (and therefore
+  // read) while arming nothing — the worst of both.
+  const bad = { id: 'bogus', procs: ['NOTEPAD'], sendKeys: ['enter'], host: 'x.example', policyHosts: ['x.example'] };
+  const original = EGRESS_SURFACES.slice();
+  EGRESS_SURFACES.push(bad);
+  try {
+    assert.equal(egressSurfaceForProcess('NOTEPAD'), null, 'egressSurfaceForProcess must not resolve it');
+    assert.equal(isEgressProcess('NOTEPAD'), false, 'isEgressProcess must not resolve it');
+    assert.equal(buildEgressSurfaceConfig(null).some((e) => e.id === 'bogus'), false,
+      'buildEgressSurfaceConfig must drop it');
+    const armed = synthesizeEgressSurfaces([{ host: 'x.example', governed: true, capture_mode: 'hold' }], null);
+    assert.equal(armed.surfaces.some((s) => s.id === 'bogus'), false,
+      'synthesizeEgressSurfaces must never arm it, even with a governed policy row');
+  } finally {
+    EGRESS_SURFACES.length = 0;
+    EGRESS_SURFACES.push(...original);
+  }
+});
+
+test('every egress entry ships with the two-flag gate CLOSED and its guesses marked', async () => {
+  for (const surface of [...EGRESS_SURFACES, ...EGRESS_SYNC_ROOTS]) {
+    assert.equal(typeof surface.enforce, 'boolean', `${surface.id} must state enforce explicitly`);
+    assert.equal(typeof surface.verified, 'boolean', `${surface.id} must state verified explicitly`);
+    // The same rule the other catalogs are held to: enforcing without a recorded
+    // live pass is a catalog author claiming a verification that never happened.
+    if (surface.enforce) assert.equal(surface.verified, true, `${surface.id} enforces without a live pass`);
+  }
+  // AS SHIPPED, both are false on every entry — nothing here arms in production
+  // until a human runs a read-only UIA probe and flips them. This assertion is
+  // meant to be UPDATED by that pass, together with the flags.
+  for (const surface of [...EGRESS_SURFACES, ...EGRESS_SYNC_ROOTS]) {
+    assert.equal(surface.verified, false, `${surface.id} claims a live probe — update this test with the evidence`);
+    assert.equal(surface.enforce, false, `${surface.id} claims enforcement — update this test with the evidence`);
+  }
+  // Every UI signature is still a TODO, and stated as null rather than guessed
+  // at. A null scopeWindow makes the chip diff report nothing; a null bodySig
+  // disables body capture; a null recipientSig means no recipient read at all.
+  for (const surface of EGRESS_SURFACES) {
+    assert.equal(surface.scopeWindow, null, `${surface.id}: scopeWindow was filled in — was it live-probed?`);
+    assert.equal(surface.bodySig, null, `${surface.id}: bodySig was filled in — was it live-probed?`);
+    assert.equal(surface.recipientSig, null, `${surface.id}: recipientSig was filled in — was it live-probed?`);
+  }
+  // …and the catalog says so in as many words, at the process names and the
+  // signatures, so a reader is never told a guess is a measurement.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'ai-processes.js'), 'utf8');
+  const block = src.slice(src.indexOf('export const EGRESS_SURFACES'), src.indexOf('export const EGRESS_SYNC_ROOTS'));
+  assert.ok(block.length > 0);
+  assert.ok((block.match(/TODO\(live-probe\)/g) || []).length >= 8,
+    'every guessed process name and signature must carry a TODO(live-probe) marker');
+});
+
+test('an egress signature with only a control type is refused — it would match the whole window', () => {
+  // A signature naming a ControlType and nothing else matches EVERY element of
+  // that type. In a mail client that is the reading pane, the message list and
+  // the search box; matching it would make the "scoped root" scoping meaningless.
+  const original = EGRESS_SURFACES.slice();
+  EGRESS_SURFACES.push({
+    id: 'too_broad', procs: ['NOTEPAD'], sendKeys: ['alt_s'],
+    host: 'x.example', policyHosts: ['x.example'],
+    scopeWindow: { controlType: 'Pane' },
+    bodySig: { controlType: 'Document', classEquals: 'ok' },
+    captureBody: 'full', detect: 'file_dialog',
+  });
+  try {
+    const entry = buildEgressSurfaceConfig(null).find((e) => e.id === 'too_broad');
+    assert.ok(entry, 'the entry itself is otherwise valid and should load');
+    assert.equal(entry.scopeWindow, null, 'a control-type-only signature must be dropped');
+    assert.deepEqual(entry.bodySig, {
+      controlType: 'Document', nameEquals: '', namePrefix: '', classEquals: 'ok', classPrefix: '',
+    }, 'a signature with a real rule survives');
+  } finally {
+    EGRESS_SURFACES.length = 0;
+    EGRESS_SURFACES.push(...original);
+  }
+});
+
+test('synthesizeEgressSurfaces arms NOTHING without a governed ai_platforms row', () => {
+  // THE policy gate, and the whole reason the feature is inert by default. Every
+  // downstream consumer reads the file this produces: no row means no process is
+  // watched, no compose body is read, no picker is recognised and no
+  // FileSystemWatcher is opened.
+  for (const rows of [
+    [],
+    null,
+    undefined,
+    [{ host: 'outlook.office.com' }],                                   // no governed field
+    [{ host: 'outlook.office.com', governed: false }],
+    [{ host: 'outlook.office.com', governed: 1 }],                       // truthy is NOT true
+    [{ host: 'outlook.office.com', blocked: true }],                     // blocked is a different question
+    [{ host: 'chatgpt.com', governed: true }],                           // a governed row for a DIFFERENT host
+    [{ host: 'outlook.office.com', governed: true, capture_mode: 'x' }].map((r) => ({ ...r, governed: 'yes' })),
+  ]) {
+    const out = synthesizeEgressSurfaces(rows, null);
+    assert.deepEqual(out.surfaces, [], `armed a surface for ${JSON.stringify(rows)}`);
+    assert.deepEqual(out.sync_roots, [], `armed a sync root for ${JSON.stringify(rows)}`);
+  }
+});
+
+test('synthesizeEgressSurfaces requires surface:desktop|all — governed alone is not consent to DESKTOP monitoring', () => {
+  // outlook.office.com and sharepoint.com are ALREADY governed, with
+  // surface:'browser', on every existing deployment — seeded at server startup
+  // for the pre-existing browser Copilot-panel feature (server/src/seed-
+  // platforms.js). If `governed` alone were enough here, the day a human
+  // live-probes the catalog and flips its two flags, EVERY deployment would
+  // start reading Outlook attachments and bodies with no admin having
+  // separately opted a host into desktop mail monitoring. `surface` is that
+  // separate opt-in, and this is where it must actually be enforced.
+  for (const surface of ['browser', 'cli', '', undefined, null, 'BROWSER']) {
+    const out = synthesizeEgressSurfaces([{ host: 'outlook.office.com', governed: true, capture_mode: 'hold', surface }], null);
+    assert.deepEqual(out.surfaces, [], `surface=${JSON.stringify(surface)} must not arm a desktop mail surface`);
+  }
+  for (const surface of ['browser', 'cli', '', undefined]) {
+    const out = synthesizeEgressSurfaces([{ host: 'onedrive.live.com', governed: true, capture_mode: 'observe', surface }], null);
+    assert.deepEqual(out.sync_roots, [], `surface=${JSON.stringify(surface)} must not arm the sync watcher`);
+  }
+  // 'desktop' and 'all' both count, and comparison is case/whitespace-insensitive
+  // — same normalization the .ps1 side already applies to every other field here.
+  for (const surface of ['desktop', 'all', 'DESKTOP', ' all ']) {
+    const out = synthesizeEgressSurfaces([{ host: 'outlook.office.com', governed: true, capture_mode: 'hold', surface }], null);
+    assert.ok(out.surfaces.length > 0, `surface=${JSON.stringify(surface)} should arm`);
+  }
+});
+
+test('synthesizeEgressSurfaces arms only the surfaces the governed+desktop hosts name, with their capture_mode', () => {
+  const mailOnly = synthesizeEgressSurfaces([
+    { host: 'outlook.office.com', governed: true, capture_mode: 'hold', surface: 'desktop' },
+  ], null);
+  assert.deepEqual(mailOnly.surfaces.map((s) => s.id), ['outlook_classic', 'outlook_new']);
+  assert.deepEqual(mailOnly.surfaces.map((s) => s.capture_mode), ['hold', 'hold']);
+  assert.deepEqual(mailOnly.surfaces.map((s) => s.policy_host), ['outlook.office.com', 'outlook.office.com']);
+  // A governed MAIL policy must not arm the cloud-sync watcher — they are
+  // different hosts and different decisions.
+  assert.deepEqual(mailOnly.sync_roots, [], 'a mail policy must not arm filesystem observation');
+
+  const syncOnly = synthesizeEgressSurfaces([
+    { host: 'onedrive.live.com', governed: true, capture_mode: 'observe', surface: 'all' },
+  ], null);
+  assert.deepEqual(syncOnly.surfaces, [], 'a sync policy must not arm a mail client');
+  assert.deepEqual(syncOnly.sync_roots.map((r) => r.id), ['onedrive_sharepoint']);
+  assert.equal(syncOnly.sync_roots[0].capture_mode, 'observe');
+  // The two-flag gate travels, so the consumer can refuse an unverified root.
+  assert.equal(syncOnly.sync_roots[0].verified, false);
+  assert.equal(syncOnly.sync_roots[0].enforce, false);
+
+  // capture_mode: 'hold' is the ONLY value that can ever swallow a keystroke, so
+  // an unrecognised one must land on the weakest of the three rather than being
+  // trusted.
+  for (const [mode, expected] of [
+    ['hold', 'hold'], ['block_critical', 'block_critical'], ['observe', 'observe'],
+    ['HOLD', 'hold'], ['', 'observe'], [null, 'observe'], ['something_new', 'observe'],
+  ]) {
+    const out = synthesizeEgressSurfaces([{ host: 'outlook.office.com', governed: true, capture_mode: mode, surface: 'desktop' }], null);
+    assert.equal(out.surfaces[0].capture_mode, expected, `capture_mode ${JSON.stringify(mode)}`);
+  }
+  // Two rows arming one surface: the STRONGEST mode wins, so array order cannot
+  // decide what a policy means.
+  const both = synthesizeEgressSurfaces([
+    { host: 'outlook.office.com', governed: true, capture_mode: 'observe', surface: 'desktop' },
+    { host: 'outlook.office.com', governed: true, capture_mode: 'hold', surface: 'desktop' },
+  ], null);
+  assert.equal(both.surfaces[0].capture_mode, 'hold');
+});
+
+test('buildEgressSurfaceConfig strips the characters that would break the .ps1 JSON parser', () => {
+  // Same discipline synthesizePlatformBlocks is held to, and for the same
+  // reason: enforcer-win.ps1 parses egress-surfaces.json with the hand-rolled
+  // extractor, where one stray quote, backslash or brace in one value derails
+  // the WHOLE payload rather than its own row.
+  const original = EGRESS_SURFACES.slice();
+  EGRESS_SURFACES.push({
+    id: 'ev"il\\ {id}', procs: ['NOTE"PAD'], sendKeys: ['alt_s'],
+    host: 'x"y', policyHosts: ['a{b}'],
+    scopeWindow: { controlType: 'Pane', classEquals: 'cls"{}' },
+  });
+  try {
+    const entry = buildEgressSurfaceConfig(null).find((e) => e.id === 'evil id');
+    assert.ok(entry, 'the sanitised id should be findable');
+    const flat = JSON.stringify(entry);
+    assert.equal(flat.includes('\\'), false, 'a round trip through the real serialiser must produce no escapes');
+    assert.equal(/["{}]/.test(entry.procs.join('') + entry.host + entry.policyHosts.join('')), false);
+  } finally {
+    EGRESS_SURFACES.length = 0;
+    EGRESS_SURFACES.push(...original);
+  }
 });

@@ -274,18 +274,38 @@ test('a Copilot panel on a Microsoft surface IS captured', () => {
   assert.equal(s.captureAllowed(teamsBox), false, 'the Teams message composer was governed');
 });
 
-// Agent blocking must work on every surface regardless of capture scope — it is
-// enforcement, not collection. If it were gated, adding these hosts as
-// embedded_ai would silently disable the very blocking they were added for.
-test('agent blocking is not gated by the capture scope', () => {
+// DELIBERATELY REVERSED. This used to assert the opposite — that
+// enforceBlockedAgent() must NOT mention captureAllowed, on the reasoning that
+// agent blocking "is enforcement, not collection" and gating it would silently
+// disable the blocking that adding Teams/Outlook as embedded_ai was meant to
+// deliver. The under-block that guarded against is real, but the inverse it
+// permitted turned out to be worse and shipped: with no gate, enforcement set
+// pointer-events:none on EVERY textarea/contenteditable/[role=textbox] in the
+// document and armed two document-level capture-phase handlers, so one blocked
+// Copilot Studio agent disabled every Teams DM and channel composer in the tab.
+//
+// The gate is now required in all three places a block can land, and the
+// residual under-block risk is bounded and visible instead: on an embedded-AI
+// host whose panel selector goes stale, aiPanels() comes back empty and the
+// agent block stops applying — a reportable gap fixable from
+// /api/v1/ai-surfaces without an extension release, which is the same
+// fail-closed contract the capture path already runs on. Whole_site hosts
+// (chatgpt.com, claude.ai, …) are unaffected: captureAllowed() short-circuits to
+// true there, so per-agent blocking on the dedicated AI sites is byte-identical.
+//
+// The behaviour on both sides of that line is tested for real — shipped region,
+// shipped gate, one fake DOM — in tests/blocked-agent-scope.test.mjs.
+test('agent blocking IS gated by the capture scope, in all three places', () => {
   const src = contentSource();
-  const start = src.indexOf('function enforceBlockedAgent');
-  assert.ok(start > 0, 'enforceBlockedAgent not found');
-  const body = src.slice(start, src.indexOf('\n  }', start));
-  assert.ok(!body.includes('captureAllowed'),
-    'enforceBlockedAgent now consults captureAllowed — blocking would stop working outside AI panels');
-  assert.ok(!body.includes('IS_EMBEDDED_AI'),
-    'enforceBlockedAgent now consults IS_EMBEDDED_AI — blocking would stop working on Teams/Outlook');
+  const start = src.indexOf('// ── blocked-agent enforcement scope ─');
+  const end = src.indexOf('// ── end blocked-agent enforcement scope ─');
+  assert.ok(start > 0 && end > start, 'the blocked-agent enforcement region was not found');
+  const body = src.slice(start, end);
+
+  assert.match(body, /if \(!captureAllowed\(el\)\)/,
+    'the element-disabling loop must skip elements outside the AI panel');
+  assert.equal((body.match(/captureAllowed\(e\.target\)/g) || []).length, 2,
+    'the keydown AND click capture handlers must each gate on e.target');
 });
 
 // ── A platform block must not disable the host app ──────────────────────────

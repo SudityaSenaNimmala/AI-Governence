@@ -18,6 +18,13 @@
 #   {"kind":"ready","ai_processes":[...]}
 #   {"kind":"attachment_appeared","process":"ChatGPT","filename":"foo.csv","path":"C:\\...\\foo.csv","host_armed":false}
 #   {"kind":"attachment_disappeared","process":"ChatGPT","filename":"foo.csv","host_armed":false}
+#   {"kind":"egress_attachment_appeared","surface":"outlook_classic","process":"OUTLOOK","filename":"payroll.xlsx","path":"C:\\...\\payroll.xlsx"}
+#   {"kind":"egress_attachment_disappeared","surface":"outlook_classic","process":"OUTLOOK","filename":"payroll.xlsx"}
+#       An EGRESS surface (a mail client's compose window) — a SEPARATE code path
+#       with its own state and its own emit kinds, so nothing about it can reach
+#       the AI/host-app path above. Only ever produced when
+#       ~/.cloudfuze-aigov/egress-surfaces.json arms the process AND the compose
+#       pane itself could be resolved as a scoped root. See $EgressProcs.
 #   {"kind":"heartbeat"}
 #   {"kind":"error","message":"..."}
 #
@@ -68,6 +75,90 @@ $AiProcesses = if ($env:CFAI_AI_PROCESSES) {
 # instant it stops. So the window in which Teams is watched at all is exactly the
 # window in which the org already asked for that conversation to be governed.
 $ArmedHostProcs = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @([System.StringComparer]::OrdinalIgnoreCase)
+
+# ── EGRESS surfaces (Outlook compose) ───────────────────────────────────────
+#
+# A THIRD, completely separate set from $AiProcesses and $ArmedHostProcs, and it
+# is separate for a stronger reason than either of those: an egress surface is a
+# MAIL CLIENT. It has no "an agent conversation is open" state to scope a read
+# with — every window in it is a human conversation — so the scoping cannot come
+# from the app at all. It comes from two things instead:
+#
+#   1. POLICY. A process only enters this set when
+#      ~/.cloudfuze-aigov/egress-surfaces.json names it, which happens only when
+#      an admin has a governed ai_platforms row for its host. No policy row means
+#      this set is EMPTY and not one UIA property of a mail window is ever read.
+#      See synthesizeEgressSurfaces in ai-processes.js.
+#   2. A SCOPED ROOT. Even when armed, the chip diff is NEVER taken against the
+#      app window. It is taken against the COMPOSE PANE only, resolved from the
+#      surface's `scopeWindow` signature. Outlook's message list and reading pane
+#      are full of filename-shaped text — subject lines, and the attachments of
+#      every message already RECEIVED — so a whole-window diff would report every
+#      received attachment the user scrolls past as an outbound upload. If the
+#      scoped root cannot be resolved on a tick, this watcher reports NOTHING
+#      that tick and takes no baseline. Missing an upload is recoverable; a
+#      governance record claiming a colleague's inbound attachment was an upload
+#      is not.
+#
+# $AiProcesses and $ArmedHostProcs are never modified by any of this, and
+# Is-AiProcess / Is-CatalogAiProcess never consult this set — so no egress
+# process can reach the existing AI or host-app code paths.
+$EgressProcs = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @([System.StringComparer]::OrdinalIgnoreCase)
+# proc (lower) -> @{ Id; Scope }, where Scope is the scopeWindow signature or $null.
+$EgressByProc = @{}
+
+# Where the policy file lives. Overridable so a test can point at a temp dir
+# instead of the real ~/.cloudfuze-aigov.
+$EgressPath = if ($env:CFAI_EGRESS_PATH) { $env:CFAI_EGRESS_PATH } else {
+    Join-Path $env:USERPROFILE '.cloudfuze-aigov\egress-surfaces.json'
+}
+
+# How often the policy file is re-read, in ticks. 12 * 800ms is ~10s, matching
+# blocked-agents-sync.js's own cadence, so an admin's toggle reaches this watcher
+# within about one sync interval of reaching disk.
+$EgressReloadTicks = 12
+
+# Read the policy file and rebuild the two egress locals.
+#
+# FAIL CLOSED on every failure mode — a missing file, unreadable JSON, a payload
+# with no `surfaces` key — by leaving BOTH locals EMPTY. Empty means "no egress
+# surface is armed", i.e. no mail window is looked at, which is the state a
+# machine with no egress policy is meant to be in anyway. Built into fresh locals
+# and assigned only at the very end, so a payload that throws half way through
+# cannot leave a process armed with someone else's scope.
+function Load-EgressSurfaces {
+    $procs = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @([System.StringComparer]::OrdinalIgnoreCase)
+    $byProc = @{}
+    try {
+        if (Test-Path -LiteralPath $script:EgressPath -PathType Leaf) {
+            $raw = Get-Content -LiteralPath $script:EgressPath -Raw -ErrorAction Stop
+            if ($raw) {
+                $cfg = $raw | ConvertFrom-Json
+                foreach ($s in @($cfg.surfaces)) {
+                    if (-not $s -or -not $s.id) { continue }
+                    # THE arming gate — see the identical check and comment in
+                    # file-dialog-watcher.ps1's Load-EgressSurfaces. A governed
+                    # ai_platforms row is policy, not a live-probe result.
+                    if (($s.verified -isnot [bool]) -or ($s.verified -ne $true) -or ($s.enforce -isnot [bool]) -or ($s.enforce -ne $true)) { continue }
+                    foreach ($p in @($s.procs)) {
+                        $name = (([string]$p) -replace '\.exe$','').Trim()
+                        if (-not $name) { continue }
+                        $null = $procs.Add($name)
+                        $byProc[$name.ToLowerInvariant()] = @{ Id = [string]$s.id; Scope = $s.scopeWindow }
+                    }
+                }
+            }
+        }
+    } catch {
+        # Deliberately silent about the reason at this level — the file is
+        # rewritten every 10s and a transient partial read is normal. The
+        # observable consequence (nothing armed) is the safe one.
+        $procs = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @([System.StringComparer]::OrdinalIgnoreCase)
+        $byProc = @{}
+    }
+    $script:EgressProcs = $procs
+    $script:EgressByProc = $byProc
+}
 
 # ── Non-blocking stdin ──────────────────────────────────────────────────────
 #
@@ -139,6 +230,14 @@ if ($env:CFAI_WATCHER_HEARTBEAT_TICKS) {
 }
 
 # Extensions we care about — same set the Node-side classifier scans.
+#
+# ITS FORMATTING IS LOAD-BEARING. sync-watcher.ps1 cannot share a variable with
+# this helper (each is its own process, and this file has a main loop so it
+# cannot be dot-sourced), so it EXTRACTS this assignment from this file by text:
+# one line, single quotes, nothing after the closing quote. Reflowing it, or
+# switching to double quotes, makes that extraction fail — and the sync watcher
+# then reports NOTHING (fail-closed, and visible only as ext_gate:false on its
+# ready line). Change the pattern freely; keep the shape.
 $FilenameRegex = '\.(?:env|csv|tsv|xlsx?|sql|sqlite|db|dump|bak|har|pdf|docx?|odt|rtf|pages|zip|7z|rar|tar|tar\.gz|tgz|json|ya?ml|toml|ini|conf|config|cfg|js|ts|tsx|jsx|mjs|cjs|py|rb|go|rs|java|cs|cpp|c|h|swift|kt|php|md|markdown|txt|log|html?|xml|pem|key|pfx|p12|jks|keystore|png|jpe?g|gif|webp|bmp|ico|svg)$'
 
 function Emit-Json($obj) {
@@ -166,6 +265,100 @@ function Is-AiProcess([string]$name) {
     # Microsoft Teams is still a flat no. See $ArmedHostProcs.
     if ($ArmedHostProcs.Contains($base)) { return $true }
     return $false
+}
+
+# ── The EGRESS foreground read ──────────────────────────────────────────────
+#
+# A SEPARATE function from Get-ForegroundAiWindow, not a widening of it. That one
+# is the AI/host-app path and is left byte-for-byte alone; nothing an egress
+# process does can reach it, because Is-AiProcess never consults $EgressProcs.
+#
+# Returns @{ Element; Process; Pid; Hwnd; Id; Scope } or $null.
+function Get-ForegroundEgressWindow {
+    if ($EgressProcs.Count -eq 0) { return $null }   # no policy → no read at all
+    $hwnd = [AttWatch.Win32]::GetForegroundWindow()
+    if ($hwnd -eq [System.IntPtr]::Zero) { return $null }
+    $procId = 0
+    [void][AttWatch.Win32]::GetWindowThreadProcessId($hwnd, [ref]$procId)
+    if ($procId -eq 0) { return $null }
+    $proc = $null
+    try { $proc = Get-Process -Id $procId -ErrorAction Stop } catch { return $null }
+    $base = ($proc.ProcessName -replace '\.exe$','')
+    if (-not $EgressProcs.Contains($base)) { return $null }
+    $entry = $EgressByProc[$base.ToLowerInvariant()]
+    if (-not $entry) { return $null }
+    try {
+        $el = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+        if (-not $el) { return $null }
+        return [pscustomobject]@{
+            Element = $el; Process = $proc.ProcessName; Pid = $procId; Hwnd = $hwnd
+            Id = [string]$entry.Id; Scope = $entry.Scope
+        }
+    } catch { return $null }
+}
+
+# Does an element match a scopeWindow signature? The SAME field set and the same
+# "any one stated field is enough" rule as ai-processes.js's matchPanelSignature
+# and enforcer-win.ps1's MatchPanelSignature — one comparison shape across the
+# whole product, expressed here over the two properties this watcher can read.
+#
+# An EMPTY read never satisfies a NON-EMPTY rule, so a pane whose Name failed to
+# read cannot prefix-match its way into being the compose window.
+function Test-EgressScopeSig($el, $sig) {
+    if (-not $sig) { return $false }
+    $ct = ''; $nm = ''; $cls = ''
+    try {
+        $pn = '' + $el.Current.ControlType.ProgrammaticName
+        $ct = $pn.Substring($pn.LastIndexOf('.') + 1)
+    } catch {}
+    try { $nm  = ('' + $el.Current.Name).Trim() } catch {}
+    try { $cls = ('' + $el.Current.ClassName).Trim() } catch {}
+    $want = ('' + $sig.controlType).Trim()
+    if (-not $want -or $ct -ine $want) { return $false }
+    if ($sig.nameEquals  -and $nm  -and ($nm  -ieq ('' + $sig.nameEquals)))  { return $true }
+    if ($sig.classEquals -and $cls -and ($cls -ieq ('' + $sig.classEquals))) { return $true }
+    if ($sig.namePrefix  -and $nm  -and $nm.StartsWith(('' + $sig.namePrefix),  'OrdinalIgnoreCase')) { return $true }
+    if ($sig.classPrefix -and $cls -and $cls.StartsWith(('' + $sig.classPrefix), 'OrdinalIgnoreCase')) { return $true }
+    return $false
+}
+
+# THE SCOPED ROOT. Find the compose pane inside the app window, or $null.
+#
+# $null is not a degraded mode — it is a full stop. The caller reports nothing and
+# takes no baseline on a tick where this returns $null, because the only
+# alternative (diff the whole window) would turn every filename-shaped string in
+# Outlook's message list and reading pane into a reported outbound upload. That
+# includes every attachment on every message the user has RECEIVED, which is both
+# a flood of false records and a disclosure of the user's inbox contents.
+#
+# It is $null by construction today: every EGRESS_SURFACES entry ships
+# scopeWindow:null pending a live UIA probe (see the TODO(live-probe) markers in
+# ai-processes.js), so this whole path is inert until a human measures the real
+# signature and fills it in.
+#
+# Bounded walk, same shape and same depth cap as Collect-FilenameLikeNames, and
+# the FIRST match wins — a compose pane is a single element.
+function Resolve-EgressScopeRoot($windowElement, $sig) {
+    if (-not $sig -or -not $windowElement) { return $null }
+    try {
+        $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+        $stack  = New-Object System.Collections.Generic.Stack[object]
+        $stack.Push(@{ El = $windowElement; Depth = 0 })
+        while ($stack.Count -gt 0) {
+            $cur = $stack.Pop()
+            if ($cur.Depth -gt 25) { continue }
+            $el = $cur.El
+            try { if (Test-EgressScopeSig $el $sig) { return $el } } catch {}
+            try {
+                $child = $walker.GetFirstChild($el)
+                while ($child) {
+                    $stack.Push(@{ El = $child; Depth = ($cur.Depth + 1) })
+                    $child = $walker.GetNextSibling($child)
+                }
+            } catch {}
+        }
+    } catch {}
+    return $null
 }
 
 function Get-ForegroundAiWindow {
@@ -407,7 +600,29 @@ function Resolve-AttachmentFile([string]$basename) {
     return [pscustomobject]@{ Path = $hit; Filename = [System.IO.Path]::GetFileName($hit) }
 }
 
-Emit-Json @{ kind = 'ready'; pid = $PID; ai_processes = $AiProcesses; search_dirs = $SearchDirs }
+# Load the egress policy once before `ready`, so the count on that line is the
+# real one rather than always zero.
+Load-EgressSurfaces
+
+# egress_count only — never the ids, the procs or the signatures. "How many
+# surfaces are armed" is operationally useful; WHICH mail client an individual
+# user's org governs is not something this line needs to carry.
+Emit-Json @{ kind = 'ready'; pid = $PID; ai_processes = $AiProcesses; search_dirs = $SearchDirs; egress_count = $EgressProcs.Count }
+
+# ── Per-compose-pane baseline for the EGRESS path ───────────────────────────
+#
+# A SEPARATE hashtable from $Seen, deliberately. $Seen and $SeenProc are the
+# AI/host-app baseline and are driven by Reset-Baseline / Sync-BaselineForArm,
+# which the just-fixed Teams attachment detection depends on precisely. Sharing
+# one table would make an egress tick able to seed, drop or shadow a Teams
+# baseline. Keyed on the app window handle; the value is the filename set the
+# SCOPED COMPOSE PANE showed last tick.
+$EgressSeen = @{}
+# Chip display name -> true on-disk filename, same role (and same reason) as
+# $ResolvedName on the AI path: the baseline must keep the display name so the
+# next tick's read compares like with like, while the events and the Node side's
+# hold map have to key on the real file.
+$EgressResolved = @{}
 
 # Per-process previously-seen set, so we only emit on NEW filenames.
 $Seen = @{}
@@ -536,6 +751,85 @@ while ($true) {
         if ($null -eq $cmdLine) { break }
         Apply-StdinCommand $cmdLine
     }
+    # ── Re-read the egress policy ───────────────────────────────────────────
+    # Outside the main try so a policy read can never be mistaken for a UIA
+    # error, and cheap: one Test-Path plus (at most) one small file read every
+    # ~10s. Load-EgressSurfaces swallows its own failures into "nothing armed".
+    if ($tick % $EgressReloadTicks -eq 0) { Load-EgressSurfaces }
+
+    # ── EGRESS: the compose-pane chip diff ──────────────────────────────────
+    #
+    # Its own try, its own state, and its own emit kinds — nothing below reaches
+    # the AI/host-app block that follows, and nothing in that block reaches here.
+    # An exception on this path must not cost the AI path its tick.
+    try {
+        $eg = Get-ForegroundEgressWindow
+        if ($eg) {
+            # THE SCOPED ROOT, and the fail-open rule that goes with it: no
+            # resolvable compose pane means report nothing and take NO baseline
+            # this tick. Taking one would be worse than useless — the next tick
+            # that DOES resolve a pane would diff it against a set collected
+            # from somewhere else.
+            $scopeRoot = Resolve-EgressScopeRoot $eg.Element $eg.Scope
+            if ($scopeRoot) {
+                $current = ConvertTo-NameSet (Collect-FilenameLikeNames $scopeRoot)
+                $key = 'egress|' + $eg.Hwnd
+                if (-not $EgressSeen.ContainsKey($key)) {
+                    # Seed silently, exactly as the AI path does on first sight of
+                    # a window: a compose window opened as a REPLY already carries
+                    # the original message's attachments as chips, and none of
+                    # those is something this user just attached.
+                    $EgressSeen[$key] = $current
+                } else {
+                    $prev = ConvertTo-NameSet $EgressSeen[$key]
+                    foreach ($name in $current) {
+                        if ($prev.Contains($name)) { continue }
+                        $resolved = Resolve-AttachmentFile $name
+                        if ($resolved) {
+                            $EgressResolved[$name] = $resolved.Filename
+                            Emit-Json @{
+                                t        = (Get-Date).ToUniversalTime().ToString('o')
+                                kind     = 'egress_attachment_appeared'
+                                surface  = $eg.Id
+                                process  = $eg.Process
+                                pid      = $eg.Pid
+                                filename = $resolved.Filename
+                                path     = $resolved.Path
+                            }
+                        } else {
+                            $EgressResolved.Remove($name)
+                            Emit-Json @{
+                                t        = (Get-Date).ToUniversalTime().ToString('o')
+                                kind     = 'egress_attachment_appeared'
+                                surface  = $eg.Id
+                                process  = $eg.Process
+                                pid      = $eg.Pid
+                                filename = $name
+                                path     = $null
+                            }
+                        }
+                    }
+                    foreach ($name in $prev) {
+                        if ($current.Contains($name)) { continue }
+                        $releaseName = if ($EgressResolved.ContainsKey($name)) { [string]$EgressResolved[$name] } else { $name }
+                        $EgressResolved.Remove($name)
+                        Emit-Json @{
+                            t        = (Get-Date).ToUniversalTime().ToString('o')
+                            kind     = 'egress_attachment_disappeared'
+                            surface  = $eg.Id
+                            process  = $eg.Process
+                            pid      = $eg.Pid
+                            filename = $releaseName
+                        }
+                    }
+                    $EgressSeen[$key] = $current
+                }
+            }
+        }
+    } catch {
+        Emit-Json @{ t = (Get-Date).ToUniversalTime().ToString('o'); kind = 'error'; message = 'egress: ' + $_.Exception.Message }
+    }
+
     try {
         $fg = Get-ForegroundAiWindow
         if ($fg) {

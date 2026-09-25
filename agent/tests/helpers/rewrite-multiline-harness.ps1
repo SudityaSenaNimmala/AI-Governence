@@ -171,6 +171,10 @@ Out-Obj @{ case = 'timing_constants'
            margin_num     = [int](ConstOf 'REWRITE_BUDGET_MARGIN_NUM')
            margin_den     = [int](ConstOf 'REWRITE_BUDGET_MARGIN_DEN')
            max_chars      = [int](ConstOf 'REWRITE_MAX_CHARS')
+           # The focused-element pin checks the write loop makes, and what each
+           # one is charged — see FocusStillPinned in enforcer-win.ps1.
+           focus_pin_read_ms      = (ConstOf 'REWRITE_FOCUS_PIN_READ_MS')
+           focus_pin_every_chunks = (ConstOf 'REWRITE_FOCUS_PIN_EVERY_CHUNKS')
            # The ticks value the loop actually compares against must be the same
            # 9000ms — one number, two representations.
            budget_ticks   = [long](GetF 'REWRITE_WRITE_BUDGET') }

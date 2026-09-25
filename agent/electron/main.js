@@ -1,7 +1,7 @@
 // CloudFuze AI Governance — Electron main process
 // System tray app that wraps the existing OsMonitor for background DLP monitoring.
 
-const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell, dialog, screen } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell, dialog, screen, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -396,12 +396,42 @@ let _dialogCreating = false;
 let _dialogLastShownAt = 0;
 let _dialogDismissedAt = 0;
 let _lastDialogBlockId = null;
+// ── "Copy masked text": the fallback when a Tokenize & Send could not finish ─
+//
+// The MASKED candidate of the block the dialog is showing — the `preview` off
+// its @@CFAI-BLOCK line, which enforcer-win.ps1 only ever fills from
+// ComputeMaskCandidate's output (every detected value already replaced by a
+// fixed label, and rescanned clean). It is the ONLY string the copy handler
+// below may ever put on the clipboard: the renderer passes a block_id, never
+// text, so no other string — least of all the original prompt, which never
+// reaches this process at all — has a path onto the clipboard from here.
+let _lastDialogMasked = '';
+// The block_id whose rewrite FAILED in a way the copy fallback exists for, or
+// null. Set only by a matching @@CFAI-REWRITE line (see REWRITE_COPYABLE_REASONS)
+// and cleared on dismiss, so the copy is offered for exactly the failure the
+// user is looking at and never for a block that sent, or was never tried.
+let _copyableBlockId = null;
+// The outcomes where Enter was never pressed and the composer is no longer the
+// user's untouched original: part of the masked text (mid_write,
+// verify_mismatch), all of it verified but unsent (the four "_before_send"
+// reasons), or something that changed under the rewrite (content_changed). In
+// every one the user has to finish by hand, so the masked text is worth having.
+// Deliberately NOT: the "_before_write" aborts (element_changed_before_write,
+// interrupted_before_write) and the pre-flight refusals (text_changed,
+// rich_content, …) — nothing was typed, the block is still armed, and the
+// dialog's normal retry is the answer. Nor `not_submitted`: the masked text is
+// sitting in the composer and the send simply did not register.
+// Mirrors COPYABLE_REASONS in renderer/block-dialog.js (os-monitor-safety.test.mjs
+// holds the two lists and the enforcer's reasons in lockstep).
+const REWRITE_COPYABLE_REASONS = new Set(['verify_mismatch', 'interrupted_mid_write', 'element_changed_mid_write', 'focus_changed_before_send', 'element_changed_before_send', 'interrupted_before_send', 'content_changed_before_send']);
 
 function showBlockDialogWindow(data) {
   // Guard: skip if a create is already in flight, or recently dismissed
   if (_dialogCreating) return;
   if (Date.now() - _dialogDismissedAt < 1000) return;
   _lastDialogBlockId = data.block_id || null;
+  _lastDialogMasked = data.rewritable && typeof data.preview === 'string' ? data.preview : '';
+  _copyableBlockId = null;
 
   // Destroy old window on every call — create fresh each time to avoid
   // flashing stale content from the previous block.
@@ -562,6 +592,14 @@ function parseMonitorLine(line) {
   if (line.startsWith('@@CFAI-REWRITE ')) {
     try {
       const parsed = JSON.parse(line.slice('@@CFAI-REWRITE '.length));
+      // Outcome only — never `masked` or any other text field.
+      console.log('[cfai-main] @@CFAI-REWRITE result:', parsed.result, 'reason:', parsed.reason || '-');
+      // Arm the copy fallback BEFORE the renderer hears about the failure, so
+      // its "Copy masked text" click can never race ahead of the arming.
+      if (parsed.result !== 'ok' && parsed.block_id && parsed.block_id === _lastDialogBlockId
+          && REWRITE_COPYABLE_REASONS.has(parsed.reason) && _lastDialogMasked) {
+        _copyableBlockId = parsed.block_id;
+      }
       if (dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.webContents.send('rewrite-result', parsed);
       if (parsed.result === 'ok' && dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.hide();
     }
@@ -937,7 +975,28 @@ function setupIPC() {
     }
   });
 
+  // "Copy masked text" — see _lastDialogMasked. The renderer names a block_id
+  // and nothing else; the text comes from this process's own copy of the
+  // block's MASKED preview. Refused unless that block's rewrite failed with one
+  // of REWRITE_COPYABLE_REASONS. Never logged, and never retypes anything: the
+  // user pastes it themselves.
+  ipcMain.handle('copy-masked-text', (_event, blockId) => {
+    if (!blockId || blockId !== _copyableBlockId || blockId !== _lastDialogBlockId || !_lastDialogMasked) {
+      return { copied: false };
+    }
+    try {
+      clipboard.writeText(_lastDialogMasked);
+      return { copied: true };
+    } catch {
+      return { copied: false };
+    }
+  });
+
   ipcMain.on('dismiss-dialog', () => {
+    _dialogDismissedAt = Date.now();
+    _lastDialogBlockId = null;
+    _lastDialogMasked = '';
+    _copyableBlockId = null;
     if (dialogWindow && !dialogWindow.isDestroyed()) dialogWindow.destroy();
     dialogWindow = null;
   });
