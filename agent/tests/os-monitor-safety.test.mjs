@@ -1458,14 +1458,19 @@ test('enforcer-win.ps1: send-rect detection skips IDE/host-app processes for the
   // at the first match, so it never becomes the whole-window cost the branch
   // exists to avoid.
   const ideHostBlock = fn.slice(ideHostBranch);
-  assert.match(ideHostBlock, /if \(_fgIsPanel && !string\.IsNullOrEmpty\(_fgPanelId\) && PanelUiaOk\(\)\)/);
+  // The gate is factored into PanelSendRectSearchAllowed (2026-09-24) so the
+  // harness can assert it per tick; its body is the same enforcing-panel rule.
+  assert.match(ideHostBlock, /if \(PanelSendRectSearchAllowed\(\)\)/);
+  const gateAt = src.indexOf('static bool PanelSendRectSearchAllowed()');
+  assert.ok(gateAt >= 0, 'expected PanelSendRectSearchAllowed');
+  assert.match(src.slice(gateAt, gateAt + 400), /return _fgIsPanel && !string\.IsNullOrEmpty\(_fgPanelId\) && PanelUiaOk\(\);/);
   const panelSearch = ideHostBlock.indexOf('container.FindAll(TreeScope.Descendants');
   const depthLoop = ideHostBlock.indexOf('for (int depth = 0; depth < 8');
   assert.ok(panelSearch >= 0, 'expected a panel-scoped descendant search');
   assert.ok(depthLoop >= 0 && depthLoop < panelSearch, 'the ancestor widening must be bounded and precede the search it bounds');
   // The branch must still fall through to _hasRect=false for every case the
   // panel search doesn't return early on (no panel focused, or nothing found).
-  assert.match(ideHostBlock, /_hasRect = false; return;/);
+  assert.match(ideHostBlock, /_hasRect = false; _rectRoot = IntPtr\.Zero; return;/);
 });
 
 test('enforcer-win.ps1: a panel-keyed platform block matches the focused panel and honours enforce', async () => {
@@ -3339,7 +3344,10 @@ test('enforcer-win.ps1: the agent-surface catalog FAILS CLOSED on a bad payload'
   assert.match(src, /try \{ LoadAgentSurfaces\(agentSurfacesJson\); \}\r?\n\s*catch \(Exception ex\) \{ Emit\("error", "", "", "agent_surfaces_load_failed"/);
   // Narrowing requires BOTH flags, in one place, so no call site can forget one.
   const enforcing = src.slice(src.indexOf('static AgentSurface EnforcingAgentSurface(string proc)'), src.indexOf('// Trim + collapse internal whitespace'));
-  assert.match(enforcing, /return \(s\.Verified && s\.Enforce\) \? s : null;/);
+  assert.match(enforcing, /if \(s\.Verified && s\.Enforce\) return s;/);
+  // The one other arm (2026-09-24): the Office pane-heading read, armed PER
+  // PROCESS by the catalog's paneHeadingRead.verifiedProcs (WINWORD only).
+  assert.match(enforcing, /return PaneHeadingArmedFor\(s, proc\) \? s : null;/);
 });
 
 test('enforcer-win.ps1: the agent read is ONE property read, pid-checked, and never a tree walk', async () => {
@@ -4892,8 +4900,10 @@ test('no egress process can ever set _fgIsAi — a mail client is never a scanne
   //    and the three inside the hook's egress branch (the two gate calls and the
   //    StripExe for the block event's attribution).
   const readers = (code.match(/_fgProcAny/g) || []).length;
-  assert.equal(readers, 5,
-    `_fgProcAny gained a reference (${readers}) — declaration, the tick write, and the egress branch only`);
+  //    Plus two (2026-09-24) that only NARROW: UpdateHeldRect / HeldRectHit
+  //    compare it with the held app to DROP or REFUSE the held send rect.
+  assert.equal(readers, 7,
+    `_fgProcAny gained a reference (${readers}) — declaration, the tick write, the egress branch, and the two held-rect narrowing checks only`);
   assert.equal(assignsTo(code.replace(/_fgProcAny = proc \?\? "";/, '').replace(/static volatile string _fgProcAny = "";/, ''), '_fgProcAny'), false,
     'nothing but ApplyForegroundTick may write _fgProcAny');
 

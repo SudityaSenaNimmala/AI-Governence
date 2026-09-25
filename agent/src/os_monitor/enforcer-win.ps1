@@ -189,6 +189,10 @@ public static class CfaiEnforcer
     struct POINT { public int X; public int Y; }
     [DllImport("user32.dll")]
     static extern bool GetCursorPos(out POINT lpPoint);
+    [DllImport("user32.dll")]
+    static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")]
+    static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
     [DllImport("user32.dll", SetLastError = true)]
     static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
     [DllImport("user32.dll")]
@@ -554,6 +558,12 @@ public static class CfaiEnforcer
     // the UIA rect and the hook's screen coords are both physical pixels.
     static volatile bool _hasRect = false;
     static volatile int _rx = 0, _ry = 0, _rw = 0, _rh = 0;
+    // For a PANEL-scoped rect (an IDE/Office pane or the Teams composer): the
+    // top-level window under the rect when it was found. The mouse hook only
+    // swallows a click whose point is over that same top-level window (so a
+    // dialog or any other window overlapping the rect is never touched).
+    // IntPtr.Zero = not a panel rect (chat apps: unchanged, no hit test).
+    static IntPtr _rectRoot = IntPtr.Zero;
 
     // Foreground state — written only by the poll thread.
     static volatile bool _fgIsAi = false;
@@ -1298,6 +1308,20 @@ public static class CfaiEnforcer
         public string TitleSeparator;
         public string TitleSuffix;
         public HashSet<string> TitleKinds;
+        // Kinds that name a conversation in segment 1 ONLY in the FULL
+        // five-segment form (kind | name | tenant | account | suffix). See
+        // ExtractAgentNameFromTitle. Empty unless the catalog declares some.
+        public HashSet<string> TitleFullKinds;
+        // The Office pane-heading read (paneHeadingRead in ai-processes.js):
+        // which agent is selected in the Copilot pane, from the LAST agent
+        // message heading in its transcript. All-or-nothing; PaneVerifiedProcs
+        // (per process) is what arms it. See OfficePaneAgentReadArmed.
+        public string PaneContainerAid = "";
+        public string PaneTranscriptClass = "";
+        public string PaneHeadingClass = "";
+        public string PaneHeadingSuffix = "";
+        public HashSet<string> PaneGenericNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> PaneVerifiedProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         // A HOST APP: a general-purpose application (Microsoft Teams) that is
         // AI-relevant only inside one specific, separately-gated conversation.
         // It NEVER falls back to a whole-app block — see CheckFgBlocked. For an
@@ -1895,6 +1919,16 @@ public static class CfaiEnforcer
                     if (k.Length > 0) titleKinds.Add(k);
                 }
             }
+            var titleFullKinds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            object rawFullKinds;
+            if (d.TryGetValue("titleFullKinds", out rawFullKinds) && rawFullKinds != null)
+            {
+                foreach (var x in (IEnumerable)rawFullKinds)
+                {
+                    string k = NormalizeAgentName(Convert.ToString(x));
+                    if (k.Length > 0) titleFullKinds.Add(k);
+                }
+            }
             // Each mode validates on the fields IT can read a name with. A
             // half-configured entry is dropped rather than kept, in both modes:
             // a surface that can never read a name would silently narrow
@@ -2001,8 +2035,35 @@ public static class CfaiEnforcer
                     fbVerified = JsBool(fb, "verified");
                 }
             }
+            string phContainer = "", phTranscript = "", phHeading = "", phSuffix = "";
+            var phGenerics = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var phProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            object rawPane;
+            if (d.TryGetValue("paneHeadingRead", out rawPane) && rawPane is Dictionary<string, object>)
+            {
+                var ph = (Dictionary<string, object>)rawPane;
+                string c1 = JsStr(ph, "containerAid"), c2 = JsStr(ph, "transcriptClass"), c3 = JsStr(ph, "headingClass"), c4 = JsStr(ph, "headingSuffix");
+                var g = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                object rawG;
+                if (ph.TryGetValue("genericNames", out rawG) && rawG != null)
+                    foreach (var x in (IEnumerable)rawG) { string v = NormalizeAgentName(Convert.ToString(x)); if (v.Length > 0) g.Add(v); }
+                var vp = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                object rawVp;
+                if (ph.TryGetValue("verifiedProcs", out rawVp) && rawVp != null)
+                    foreach (var x in (IEnumerable)rawVp) { string v = StripExe(Convert.ToString(x) ?? "").Trim(); if (v.Length > 0) vp.Add(v); }
+                if (c1.Length > 0 && c2.Length > 0 && c3.Length > 0 && c4.Length > 0 && vp.Count > 0)
+                {
+                    phContainer = c1; phTranscript = c2; phHeading = c3; phSuffix = c4; phGenerics = g; phProcs = vp;
+                }
+            }
             surfaces.Add(new AgentSurface
             {
+                PaneContainerAid = phContainer,
+                PaneTranscriptClass = phTranscript,
+                PaneHeadingClass = phHeading,
+                PaneHeadingSuffix = phSuffix,
+                PaneGenericNames = phGenerics,
+                PaneVerifiedProcs = phProcs,
                 Id = id,
                 Procs = procs,
                 ControlType = ct,
@@ -2012,6 +2073,7 @@ public static class CfaiEnforcer
                 TitleSeparator = titleSep,
                 TitleSuffix = titleSuffix,
                 TitleKinds = titleKinds,
+                TitleFullKinds = titleFullKinds,
                 HostApp = hostApp,
                 PanelHosted = panelHosted,
                 Enforce = JsBool(d, "enforce"),
@@ -2314,7 +2376,18 @@ public static class CfaiEnforcer
     {
         AgentSurface s = MatchAgentSurface(proc);
         if (s == null) return null;
-        return (s.Verified && s.Enforce) ? s : null;
+        if (s.Verified && s.Enforce) return s;
+        // The per-PROCESS arm of the Office pane-heading read (WINWORD only, as
+        // measured). Only CheckFgBlocked's agent-scoped narrowing consults this
+        // for an Office process; the Teams host-app gates never see one.
+        return PaneHeadingArmedFor(s, proc) ? s : null;
+    }
+
+    static bool PaneHeadingArmedFor(AgentSurface s, string proc)
+    {
+        if (s == null || string.IsNullOrEmpty(proc)) return false;
+        if (s.PaneHeadingClass.Length == 0 || s.PaneContainerAid.Length == 0) return false;
+        return s.PaneVerifiedProcs.Contains(StripExe(proc).Trim());
     }
 
     // Trim + collapse internal whitespace. C# port of ai-processes.js's
@@ -2541,6 +2614,26 @@ public static class CfaiEnforcer
         // is why 'Copilot' must never be a TitleKind, and why the Copilot tab
         // needs the separate heading fallback instead).
         string kind = TitleKindOf(surface, title);
+        // A FULL-FORM kind (Teams' "Copilot", 2026-09-24): measured live, an
+        // agent 1:1 opened from the Copilot rail titles itself
+        //   Copilot | <agent> | <tenant> | <account> | Microsoft Teams
+        // while the generic Copilot home is the FOUR-segment
+        //   Copilot | <tenant> | <account> | Microsoft Teams
+        // whose segment 1 is the TENANT. So segment 1 names a conversation only
+        // when all five segments are present, and only a Named answer counts:
+        // a generic or participant-list segment there is NO EVIDENCE (so the
+        // Copilot-tab heading fallback still gets its turn), never Generic.
+        bool fullKind = surface.TitleFullKinds != null && surface.TitleFullKinds.Contains(kind);
+        if (fullKind)
+        {
+            string[] fparts = TitleParts(surface, title);
+            if (fparts == null || fparts.Length < 5) return AgentReadOutcome.NotComposer;
+            string fname = NormalizeAgentName(fparts[1]);
+            if (fname.Length == 0 || LooksLikeParticipantList(fname)) return AgentReadOutcome.NotComposer;
+            if (surface.GenericNames != null && surface.GenericNames.Contains(fname)) return AgentReadOutcome.NotComposer;
+            agentName = fname;
+            return AgentReadOutcome.Named;
+        }
         if (surface.TitleKinds == null || !surface.TitleKinds.Contains(kind)) return AgentReadOutcome.NotComposer;
         // The conversation name is the SECOND segment. Everything between it and
         // the suffix (org, tenant, the signed-in email) identifies the USER, not
@@ -2779,6 +2872,166 @@ public static class CfaiEnforcer
     //     evidence.
     //   * the Chat-list badge fallback reads its own nested fallback config and
     //     its own two flags off it, and the panel match IS that route's gate.
+    // ── Office Copilot pane: which agent is selected (pane-heading read) ──────
+    //
+    // See paneHeadingRead on office_copilot_pane_agent in ai-processes.js for
+    // the live measurement. PRIVACY: gated on a matched ENFORCING panel, a
+    // verified process and an agent-scoped (blocked or governed) row covering
+    // it; the walk reads AutomationId / ClassName only, plus the Name of the ONE
+    // last heading; that name is a lookup key only -- never emitted or stored
+    // beyond the per-composer cache below.
+    static bool OfficePaneAgentReadArmed(string proc, PanelSig hit)
+    {
+        if (hit == null || !hit.Enforce || string.IsNullOrEmpty(proc)) return false;
+        if (!(_agentScopedProcs.Contains(proc) || _dlpScopedProcs.Contains(proc))) return false;
+        return PaneHeadingArmedFor(MatchAgentSurface(proc), proc);
+    }
+
+    // PURE: the outcome for one pane read.
+    //   containerFound=false  -> NotComposer (no evidence; the latch survives it)
+    //   no heading            -> Generic (a new / empty chat: no specific agent)
+    //   heading w/o suffix    -> NotComposer (unknown shape: no evidence)
+    //   generic name          -> Generic
+    //   otherwise             -> Named(name)
+    static AgentReadOutcome PaneHeadingOutcome(AgentSurface s, bool containerFound, string lastHeading, out string agentName)
+    {
+        agentName = "";
+        if (s == null || !containerFound) return AgentReadOutcome.NotComposer;
+        string h = lastHeading ?? "";
+        if (h.Trim().Length == 0) return AgentReadOutcome.Generic;
+        string suffix = s.PaneHeadingSuffix ?? "";
+        string t = h.TrimEnd();
+        string sfx = suffix.TrimEnd();
+        if (sfx.Length == 0 || !t.EndsWith(sfx, StringComparison.OrdinalIgnoreCase)) return AgentReadOutcome.NotComposer;
+        string name = NormalizeAgentName(t.Substring(0, t.Length - sfx.Length));
+        if (name.Length == 0) return AgentReadOutcome.Generic;
+        if ((s.GenericNames != null && s.GenericNames.Contains(name)) || s.PaneGenericNames.Contains(name)) return AgentReadOutcome.Generic;
+        agentName = name;
+        return AgentReadOutcome.Named;
+    }
+
+    // The live pane read. A seam so the offline harness can script it.
+    internal delegate bool PaneHeadingSource(string containerAid, string transcriptClass, string headingClass, out bool containerFound, out string lastHeading);
+    static PaneHeadingSource _paneHeadingSource = ReadPaneHeadingLive;
+    const int PANE_HEADING_SCAN_CAP = 4000;
+
+    const int PANE_CONTAINER_MAX_DEPTH = 12;
+
+    // ONE stderr diagnostic for the pane-agent read (enforcer.js logs enforcer
+    // stderr as a warning). Gate booleans and the outcome KIND only -- never a
+    // name, a heading or any text -- and only when that signature CHANGES, so
+    // a steady state costs one line, not one per 150ms tick.
+    static string _paneDiagLast = "";
+    static void PaneDiag(string sig)
+    {
+        if (string.Equals(sig, _paneDiagLast, StringComparison.Ordinal)) return;
+        _paneDiagLast = sig;
+        try { Console.Error.WriteLine("cfai-pane-agent " + sig); Console.Error.Flush(); } catch { }
+    }
+
+    static bool ClassHasToken(string cls, string token)
+    {
+        if (string.IsNullOrEmpty(cls) || string.IsNullOrEmpty(token)) return false;
+        foreach (string t in cls.Split(CLASS_TOKEN_SEP)) if (string.Equals(t, token, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    static bool ReadPaneHeadingLive(string containerAid, string transcriptClass, string headingClass, out bool containerFound, out string lastHeading)
+    {
+        containerFound = false; lastHeading = "";
+        AutomationElement el = EffectiveFocusedElement();
+        if (el == null) return false;
+        return ReadPaneHeadingFrom(el, containerAid, transcriptClass, headingClass, out containerFound, out lastHeading);
+    }
+
+    // The walk itself, from a given composer element (split out so a read-only
+    // live probe can start from the pane composer without owning the focus).
+    static bool ReadPaneHeadingFrom(AutomationElement el, string containerAid, string transcriptClass, string headingClass, out bool containerFound, out string lastHeading)
+    {
+        containerFound = false; lastHeading = "";
+        if (el == null) return false;
+        try
+        {
+            // CONTROL view, not raw. Measured live 2026-09-24 (Word): in the
+            // control view "mainChat" is the composer's DIRECT parent and the
+            // fai-CopilotChat transcript its direct child; in the RAW view the
+            // same container sits EIGHT levels up, under seven unnamed wrapper
+            // Groups -- one past the old 8-level (0..7) raw walk, so the
+            // container was never found and every live read was no-evidence.
+            var walker = TreeWalker.ControlViewWalker;
+            AutomationElement container = null, cur = el;
+            for (int depth = 0; depth < PANE_CONTAINER_MAX_DEPTH && cur != null; depth++)
+            {
+                string aid = "";
+                try { aid = cur.Current.AutomationId ?? ""; } catch { }
+                if (string.Equals(aid, containerAid, StringComparison.Ordinal)) { container = cur; break; }
+                try { cur = walker.GetParent(cur); } catch { cur = null; }
+            }
+            if (container == null) return true;
+            containerFound = true;
+            AutomationElement transcript = null;
+            AutomationElement child = null;
+            try { child = walker.GetFirstChild(container); } catch { child = null; }
+            for (int i = 0; i < 64 && child != null; i++)
+            {
+                string cls = "";
+                try { cls = child.Current.ClassName ?? ""; } catch { }
+                if (ClassHasToken(cls, transcriptClass)) { transcript = child; break; }
+                try { child = walker.GetNextSibling(child); } catch { child = null; }
+            }
+            if (transcript == null) return true;   // no transcript: a new chat
+            AutomationElementCollection texts = null;
+            try { texts = transcript.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text)); }
+            catch { texts = null; }
+            if (texts == null) { containerFound = false; return false; }
+            int n = texts.Count, scanned = 0;
+            for (int i = n - 1; i >= 0 && scanned < PANE_HEADING_SCAN_CAP; i--, scanned++)
+            {
+                string cls = "";
+                try { cls = texts[i].Current.ClassName ?? ""; } catch { }
+                if (!ClassHasToken(cls, headingClass)) continue;
+                try { lastHeading = texts[i].Current.Name ?? ""; } catch { lastHeading = ""; containerFound = false; return false; }
+                return true;
+            }
+            if (scanned >= PANE_HEADING_SCAN_CAP) { containerFound = false; return false; }   // cap hit: no evidence
+            return true;
+        }
+        catch { containerFound = false; lastHeading = ""; return false; }
+    }
+
+    // Per-composer cache (runtime id), refreshed at most every
+    // PANE_HEADING_REFRESH so the pane is not re-walked on every 150ms tick. A
+    // different composer is read at once.
+    static string _paneAgentRid = "";
+    static AgentReadOutcome _paneAgentOutcome = AgentReadOutcome.Unreadable;
+    static string _paneAgentName = "";
+    static long _paneAgentTicks = 0;
+    static readonly long PANE_HEADING_REFRESH = TimeSpan.FromMilliseconds(1000).Ticks;
+
+    static AgentReadOutcome ReadOfficePaneAgent(AgentSurface s, string rid, out string agentName)
+    {
+        agentName = "";
+        long now = DateTime.UtcNow.Ticks;
+        string key = rid ?? "";
+        if (key.Length > 0 && string.Equals(key, _paneAgentRid, StringComparison.Ordinal)
+            && (now - _paneAgentTicks) < PANE_HEADING_REFRESH)
+        {
+            agentName = _paneAgentName;
+            return _paneAgentOutcome;
+        }
+        bool found; string heading;
+        var src = _paneHeadingSource;
+        bool ok = false;
+        found = false; heading = "";
+        try { ok = s != null && src != null && src(s.PaneContainerAid, s.PaneTranscriptClass, s.PaneHeadingClass, out found, out heading); } catch { ok = false; }
+        AgentReadOutcome o = ok ? PaneHeadingOutcome(s, found, heading, out agentName) : AgentReadOutcome.Unreadable;
+        if (o != AgentReadOutcome.Named) agentName = "";
+        _paneAgentRid = key; _paneAgentOutcome = o; _paneAgentName = agentName; _paneAgentTicks = now;
+        PaneDiag("armed=1 walk_ok=" + (ok ? 1 : 0) + " container=" + (found ? 1 : 0)
+            + " heading=" + (string.IsNullOrEmpty(heading) ? 0 : 1) + " outcome=" + o.ToString());
+        return o;
+    }
+
     static AgentReadOutcome ReadFocusedAgentName(AgentSurface surface, uint fgPid, IntPtr fgHwnd, PanelSig panel, out string agentName)
     {
         agentName = "";
@@ -5744,7 +5997,12 @@ public static class CfaiEnforcer
         while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) { }
     }
 
-    static bool Down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+    // A seam for the offline harness only (null in production): lets it drive
+    // HookCallback's real Enter / Ctrl+Enter decision with a scripted modifier
+    // state instead of the physical keyboard's.
+    internal delegate bool KeyDownProbe(int vk);
+    static KeyDownProbe _keyDownProbe = null;
+    static bool Down(int vk) { var p = _keyDownProbe; if (p != null) return p(vk); return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
     // Panic-hotkey window. Checked before ANY block decision is armed; when it
     // lapses (10 min) blocking resumes automatically.
@@ -5935,7 +6193,11 @@ public static class CfaiEnforcer
                 {
                     int x = Marshal.ReadInt32(lParam);        // MSLLHOOKSTRUCT.pt.x
                     int y = Marshal.ReadInt32(lParam, 4);     // MSLLHOOKSTRUCT.pt.y
-                    bool inRect = _hasRect && x >= _rx && x < _rx + _rw && y >= _ry && y < _ry + _rh;
+                    bool inRect = ClickInSendRect(x, y);
+                    if (!(_fgIsAi && inRect) && HeldRectHit(x, y))
+                    {
+                        return (IntPtr)1;   // the blocked panel's arrow, host not in front
+                    }
                     if (_fgIsAi && inRect)
                     {
                         if (BlockActiveForMouse())
@@ -6392,7 +6654,7 @@ public static class CfaiEnforcer
             // one comparison and a return. It observes and decides nothing about
             // any existing block: all it does is rebuild _egressHoldProcs, which
             // is read by exactly one function (EgressHoldArmed).
-            try { UpdateForeground(); UpdateBlockedAgents(); UpdateBannerState(); UpdateGovState(); UpdatePaste(); UpdateUia(); UpdateSendRect(); UpdatePendingRewrite(); CheckHeartbeat(); CheckAttachHoldExpiry(); UpdateModelRouting(); UpdateEgressPolicy(); }
+            try { UpdateForeground(); UpdateBlockedAgents(); UpdateBannerState(); UpdateGovState(); UpdatePaste(); UpdateUia(); UpdateSendRect(); UpdateHeldRect(); UpdatePendingRewrite(); CheckHeartbeat(); CheckAttachHoldExpiry(); UpdateModelRouting(); UpdateEgressPolicy(); }
             catch { }
             // The 150ms cadence above is unchanged; inside it we look at the
             // typed-buffer dirty flag every 30ms so the verdict trails the last
@@ -7580,6 +7842,14 @@ public static class CfaiEnforcer
             // match a real blocked/governed row there to mean anything.
             if (surface != null) agentOutcome = ReadFocusedAgentName(surface, pid, fg, hit, out agentName);
         }
+        // The Office Copilot pane: WHICH agent is selected, from the pane's own
+        // transcript headings -- only for a verified host with an agent-scoped
+        // row covering it, and only while the enforcing pane composer is focused.
+        if (isIde && OfficePaneAgentReadArmed(proc, hit))
+            agentOutcome = ReadOfficePaneAgent(MatchAgentSurface(proc), panelRid, out agentName);
+        else if (isIde && hit != null && PaneHeadingArmedFor(MatchAgentSurface(proc), proc))
+            PaneDiag("armed=0 enforce=" + (hit.Enforce ? 1 : 0) + " row_covers="
+                + ((_agentScopedProcs.Contains(proc) || _dlpScopedProcs.Contains(proc)) ? 1 : 0));
         ApplyForegroundTick(pid, proc, isIde, hit, panelRid, panelReadable, agentOutcome, agentName);
     }
 
@@ -7640,6 +7910,15 @@ public static class CfaiEnforcer
             if (hit != null)
             {
                 isAi = true; isPanel = true; panelId = hit.Id; panelEnforce = hit.Enforce;
+                // The Office pane-heading read (see ReadOfficePaneAgent): a
+                // Generic ("Copilot said:" / a new chat) or Named(anyone) read
+                // comes from the pane itself and is AUTHORITATIVE, exactly as in
+                // the chat-app branch below -- it retires an agent-scoped latch
+                // at once; CheckFgBlocked re-arms it this tick if the named agent
+                // is still blocked.
+                if (AgentBlockLatched()
+                    && (agentOutcome == AgentReadOutcome.Generic || agentOutcome == AgentReadOutcome.Named))
+                    ClearPanelBlockLatch();
             }
             else if (panelReadable)
             {
@@ -7965,6 +8244,180 @@ public static class CfaiEnforcer
         }
     }
 
+    // How strongly a Button/Custom control reads as THE send button. 0 = not a
+    // send control at all. Measured live 2026-09-24 in a Teams agent 1:1: the
+    // composer's container holds TWO send-labelled buttons -- the message-
+    // extensions popup (AutomationId "sendMessageCommands-popup-...", no "send"
+    // in its Name) FIRST in tree order, then the real arrow (Name "Send
+    // (Ctrl+Enter)"). The old first-match rule cached the popup's rect, 91px
+    // left of the arrow, so a click on the arrow was never swallowed. A Name
+    // that IS the send label outranks one that merely contains it, which
+    // outranks an AutomationId/HelpText-only match. The label is compared here
+    // and dropped -- never stored, logged or emitted.
+    internal static int SendButtonRank(string name, string aid, string help)
+    {
+        string n = (name ?? "").Trim().ToLowerInvariant();
+        string hay = n + " " + (aid ?? "").ToLowerInvariant() + " " + (help ?? "").ToLowerInvariant();
+        if (!(hay.Contains("send") || hay.Contains("submit"))) return 0;
+        if (n == "send" || n == "submit" || n.StartsWith("send (") || n == "send message") return 4;
+        if (n.StartsWith("send") || n.StartsWith("submit")) return 3;
+        if (n.Contains("send") || n.Contains("submit")) return 2;
+        return 1;
+    }
+
+    // The best-ranked send control with a usable rectangle in one FindAll
+    // result, or false. Ties keep tree order (the first).
+    static bool PickSendRect(AutomationElementCollection btns, out System.Windows.Rect best)
+    {
+        best = System.Windows.Rect.Empty;
+        if (btns == null) return false;
+        int bestRank = 0;
+        foreach (AutomationElement b in btns)
+        {
+            string name = "", aid = "", help = "";
+            try { name = b.Current.Name ?? ""; } catch { }
+            try { aid = b.Current.AutomationId ?? ""; } catch { }
+            try { help = b.Current.HelpText ?? ""; } catch { }
+            int rank = SendButtonRank(name, aid, help);
+            if (rank <= bestRank) continue;
+            System.Windows.Rect r;
+            try { r = b.Current.BoundingRectangle; } catch { continue; }
+            if (r.IsEmpty || r.Width <= 0 || r.Height <= 0) continue;
+            best = r; bestRank = rank;
+            if (rank >= 4) break;
+        }
+        return bestRank > 0;
+    }
+
+    // The top-level window under a screen point. A seam so the offline harness
+    // can drive the mouse hook's hit test without a real window.
+    internal delegate IntPtr RootAtPointFn(int x, int y);
+    static RootAtPointFn _rootAtPoint = RootAtPointLive;
+    static IntPtr RootAtPointLive(int x, int y)
+    {
+        try
+        {
+            POINT pt; pt.X = x; pt.Y = y;
+            IntPtr h = WindowFromPoint(pt);
+            if (h == IntPtr.Zero) return IntPtr.Zero;
+            IntPtr root = GetAncestor(h, 2 /* GA_ROOT */);
+            return root == IntPtr.Zero ? h : root;
+        }
+        catch { return IntPtr.Zero; }
+    }
+
+    // May the mouse hook treat (x, y) as a click on the cached send button?
+    static bool ClickInSendRect(int x, int y)
+    {
+        if (!_hasRect) return false;
+        if (!(x >= _rx && x < _rx + _rw && y >= _ry && y < _ry + _rh)) return false;
+        IntPtr want = _rectRoot;
+        if (want == IntPtr.Zero) return true;            // chat-app rect: unchanged
+        var f = _rootAtPoint;
+        IntPtr got = f != null ? f(x, y) : IntPtr.Zero;
+        return got == want;                               // panel rect: same top-level window only
+    }
+
+    // Cache a PANEL-scoped rect: remember the top-level window under its centre.
+    // A rect whose window cannot be resolved is not cached (fail closed = no
+    // swallow, never a wrong swallow).
+    static bool CachePanelRect(System.Windows.Rect r)
+    {
+        int x = (int)r.Left, y = (int)r.Top, w = (int)r.Width, h = (int)r.Height;
+        var f = _rootAtPoint;
+        IntPtr root = f != null ? f(x + w / 2, y + h / 2) : IntPtr.Zero;
+        if (root == IntPtr.Zero) { _hasRect = false; _rectRoot = IntPtr.Zero; return false; }
+        _hasRect = false;
+        _rx = x; _ry = y; _rw = w; _rh = h;
+        _rectRoot = root;
+        _hasRect = true;
+        return true;
+    }
+
+    // ── The HELD send rect of a PLATFORM/AGENT-blocked panel ────────────────
+    //
+    // A blocked Enter opens the Request Access dialog, which is FOCUSABLE (the
+    // user types a reason into it) and so takes the foreground. From that tick
+    // on the host app (Teams / Word) is not in front: _fgIsBlocked is no longer
+    // re-armed, the 3s sticky window runs out, and the ordinary rect is gone --
+    // yet the blocked conversation is still on screen, and a click on ITS send
+    // arrow reaches the host directly. Measured live 2026-09-24.
+    //
+    // So the last send rect found on a tick where an ENFORCING panel was
+    // platform/agent-BLOCKED and in front is held, and the mouse hook swallows
+    // a click on it while the foreground is some OTHER process. Bounded on
+    // every side:
+    //   * only a platform/agent block (_fgIsBlocked) -- never a DLP content
+    //     block, never an ungoverned or DLP-only conversation;
+    //   * only while the host is NOT the foreground: the moment it is (the
+    //     user clicked into it, closed the dialog) the ordinary per-tick
+    //     decision takes over and a non-blocked tick drops the hold, so a
+    //     conversation switch can never inherit it;
+    //   * dropped when another AI surface takes the foreground, when the
+    //     panic hotkey disarms, and after HELD_RECT_TTL;
+    //   * only a click whose point is over the SAME top-level window the rect
+    //     was found in (a dialog or any window over the arrow is untouched).
+    // Swallowed silently: the Request Access dialog explaining the block is
+    // already open, and EmitBlock describes the FOREGROUND surface, which here
+    // is not the blocked one.
+    static volatile int _heldRx = 0, _heldRy = 0, _heldRw = 0, _heldRh = 0;
+    static IntPtr _heldRoot = IntPtr.Zero;
+    static volatile string _heldApp = "";
+    static long _heldUntilTicks = 0;
+    static readonly long HELD_RECT_TTL = TimeSpan.FromMinutes(2).Ticks;
+
+    static void DropHeldRect() { Interlocked.Exchange(ref _heldUntilTicks, 0); }
+
+    // Poll thread, after UpdateSendRect's own decision for this tick.
+    static void UpdateHeldRect()
+    {
+        long now = DateTime.UtcNow.Ticks;
+        bool blockedPanelInFront = _hasRect && _rectRoot != IntPtr.Zero && _fgIsAi && _fgLeftAiTicks == 0
+            && _fgIsPanel && _fgIsBlocked && PanelEnforceOk() && !Disarmed();
+        if (blockedPanelInFront)
+        {
+            DropHeldRect();
+            _heldRx = _rx; _heldRy = _ry; _heldRw = _rw; _heldRh = _rh;
+            _heldRoot = _rectRoot;
+            _heldApp = _app ?? "";
+            Interlocked.Exchange(ref _heldUntilTicks, now + HELD_RECT_TTL);
+            return;
+        }
+        long until = Interlocked.Read(ref _heldUntilTicks);
+        if (until == 0) return;
+        if (now > until || Disarmed()
+            || string.Equals(_fgProcAny ?? "", _heldApp ?? "", StringComparison.OrdinalIgnoreCase)
+            || (_fgIsAi && _fgLeftAiTicks == 0))
+            DropHeldRect();
+    }
+
+    // Mouse hook: is (x, y) a click on the held rect of a blocked panel whose
+    // host is not in front? See the section comment.
+    static bool HeldRectHit(int x, int y)
+    {
+        long until = Interlocked.Read(ref _heldUntilTicks);
+        if (until == 0 || DateTime.UtcNow.Ticks > until || Disarmed()) return false;
+        if (string.Equals(_fgProcAny ?? "", _heldApp ?? "", StringComparison.OrdinalIgnoreCase)) return false;
+        if (!(x >= _heldRx && x < _heldRx + _heldRw && y >= _heldRy && y < _heldRy + _heldRh)) return false;
+        IntPtr want = _heldRoot;
+        if (want == IntPtr.Zero) return false;
+        var f = _rootAtPoint;
+        IntPtr got = f != null ? f(x, y) : IntPtr.Zero;
+        return got == want;
+    }
+
+    // The panel-scoped send-button search runs only while an ENFORCING panel of
+    // an IDE / Office / host app (Teams) is the focused surface RIGHT NOW. For
+    // Teams that is exactly a governed tick: ApplyForegroundTick sets
+    // _fgIsPanel only when the conversation is blocked (a Named row on a
+    // non-group header) or DLP-governed (incl. the agent-1:1 evidence), never
+    // for a human DM, a "@thread.v2" chat or an ungoverned conversation.
+    static bool PanelSendRectSearchAllowed()
+    {
+        if (!(_ideProcs.Contains(_app) || _hostAppProcs.Contains(_app))) return false;
+        return _fgIsPanel && !string.IsNullOrEmpty(_fgPanelId) && PanelUiaOk();
+    }
+
     // When a block is active, locate the send button so the mouse hook can
     // swallow clicks on it.  Strategy:
     //   1. Try UIA — look for a Button/Custom/Image with a send-related label.
@@ -7977,7 +8430,7 @@ public static class CfaiEnforcer
         // Locate the send button when a block is active (to swallow the click)
         // OR when there's a pending typed prompt (to capture a benign click-send).
         // Cleared otherwise so normal clicks are never swallowed or captured.
-        if (!_fgIsAi || (!BlockActiveForMouse() && TypedLength() < 1)) { _hasRect = false; return; }
+        if (!_fgIsAi || (!BlockActiveForMouse() && TypedLength() < 1)) { _hasRect = false; _rectRoot = IntPtr.Zero; return; }
         // IDE processes are skipped outright — panel or not. Two independent
         // reasons, either one sufficient:
         //   1. Cost. Attempt 1 below is a descendant-wide UIA search over the
@@ -8019,7 +8472,7 @@ public static class CfaiEnforcer
         // pane but a mouse click on its send arrow went through unblocked.
         if (_ideProcs.Contains(_app) || _hostAppProcs.Contains(_app))
         {
-            if (_fgIsPanel && !string.IsNullOrEmpty(_fgPanelId) && PanelUiaOk())
+            if (PanelSendRectSearchAllowed())
             {
                 try
                 {
@@ -8037,31 +8490,18 @@ public static class CfaiEnforcer
                         // stop at the first level whose descendants contain a
                         // send-labelled control — the smallest container that
                         // actually holds one, not the biggest available.
+                        //
+                        // The BEST-ranked send control at that level, not the
+                        // first -- see SendButtonRank for the live Teams case.
                         for (int depth = 0; depth < 8 && container != null; depth++)
                         {
                             AutomationElementCollection btns = null;
                             try { btns = container.FindAll(TreeScope.Descendants, cond); } catch { btns = null; }
-                            if (btns != null)
+                            System.Windows.Rect r;
+                            if (PickSendRect(btns, out r))
                             {
-                                foreach (AutomationElement b in btns)
-                                {
-                                    string name = "", aid = "", help = "";
-                                    try { name = b.Current.Name ?? ""; } catch { }
-                                    try { aid = b.Current.AutomationId ?? ""; } catch { }
-                                    try { help = b.Current.HelpText ?? ""; } catch { }
-                                    string hay = (name + " " + aid + " " + help).ToLowerInvariant();
-                                    if (hay.Contains("send") || hay.Contains("submit"))
-                                    {
-                                        System.Windows.Rect r = b.Current.BoundingRectangle;
-                                        if (!r.IsEmpty && r.Width > 0 && r.Height > 0)
-                                        {
-                                            _rx = (int)r.Left; _ry = (int)r.Top;
-                                            _rw = (int)r.Width; _rh = (int)r.Height;
-                                            _hasRect = true;
-                                            return;
-                                        }
-                                    }
-                                }
+                                CachePanelRect(r);
+                                return;
                             }
                             try { container = walker.GetParent(container); } catch { container = null; }
                         }
@@ -8069,8 +8509,12 @@ public static class CfaiEnforcer
                 }
                 catch { /* fall through to no-rect below */ }
             }
-            _hasRect = false; return;
+            // The gate failed on this tick: no panel rect. (A platform/agent-
+            // blocked panel's arrow stays covered by the HELD rect while the
+            // Request Access dialog has the foreground -- see UpdateHeldRect.)
+            _hasRect = false; _rectRoot = IntPtr.Zero; return;
         }
+        _rectRoot = IntPtr.Zero;
         try
         {
             IntPtr fg = GetForegroundWindow();
@@ -8087,24 +8531,13 @@ public static class CfaiEnforcer
                         new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Custom)
                     );
                     AutomationElementCollection btns = win.FindAll(TreeScope.Descendants, cond);
-                    foreach (AutomationElement b in btns)
+                    System.Windows.Rect r;
+                    if (PickSendRect(btns, out r))
                     {
-                        string name = "", aid = "", help = "";
-                        try { name = b.Current.Name ?? ""; } catch { }
-                        try { aid = b.Current.AutomationId ?? ""; } catch { }
-                        try { help = b.Current.HelpText ?? ""; } catch { }
-                        string hay = (name + " " + aid + " " + help).ToLowerInvariant();
-                        if (hay.Contains("send") || hay.Contains("submit"))
-                        {
-                            System.Windows.Rect r = b.Current.BoundingRectangle;
-                            if (!r.IsEmpty && r.Width > 0 && r.Height > 0)
-                            {
-                                _rx = (int)r.Left; _ry = (int)r.Top;
-                                _rw = (int)r.Width; _rh = (int)r.Height;
-                                _hasRect = true;
-                                return;
-                            }
-                        }
+                        _rx = (int)r.Left; _ry = (int)r.Top;
+                        _rw = (int)r.Width; _rh = (int)r.Height;
+                        _hasRect = true;
+                        return;
                     }
                 }
             }

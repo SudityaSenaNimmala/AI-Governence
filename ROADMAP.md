@@ -322,6 +322,30 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
 - [ ] **"Copy masked text" fallback in the CLI Tokenize popup (`toast-helper.ps1`)**
   Phase 0 added the fallback to the Electron block dialog only; a failed rewrite from the CLI popup still leaves the user with no masked text to paste.
 
+- [ ] **ML-based prompt-injection/jailbreak detection (incl. indirect injection in files/tool outputs)**
+  Today it is 24 regex guardrail patterns; CrowdStrike Falcon AIDR/Guardian claims 200+ techniques with a trained detector (competitive gap, 2026-09-25).
+
+- [ ] **Inline guardrail API/SDK + AI gateway plugins (LiteLLM, Kong, Portkey) for homegrown AI apps**
+  Our SDK only traces; apps and gateways cannot call us to block/redact inline before the model sees the prompt.
+
+- [ ] **Agent runtime guardrails — Claude Code hooks + Copilot Studio external threat-detection (tool-call allow/block)**
+  Claude tracker is observe-only and Copilot Studio agents are only discovered/suspended; neither gets a pre-execution allow/block on prompts or tool calls.
+
+- [ ] **Malicious URL/IP/domain detection in prompts & responses with threat intel + defang**
+  No detector exists for malicious entities today; would report, defang or block them.
+
+- [ ] **Agent action tracing — link a prompt to the processes/files/network calls the agent then made**
+  We detect agent frameworks and MCP configs but never trace what an agent does after a prompt (Falcon Guardian "see what AI agents actually do").
+
+- [ ] **Endpoint agent allow-list — stop unapproved agent processes from running (with Request access)**
+  The 24 detected agent frameworks are reported only; reuse the existing access-request flow to gate unapproved ones.
+
+- [ ] **AI incident reconstruction + one-click containment (kill agent, quarantine MCP, suspend/revoke)**
+  Builds on agent action tracing; ties existing suspend/delete and the planned MCP quarantine into one incident view.
+
+- [ ] **Format-preserving (reversible) encryption option alongside redact in Tokenize & Send**
+  Today desktop masking is fixed labels; the proxy token vault is reversible but not format-preserving.
+
 ---
 
 ## P2 — enterprise distribution

@@ -1073,6 +1073,16 @@ export const AGENT_SURFACES = [
     titleSeparator: ' | ',
     titleSuffix: 'Microsoft Teams',
     titleKinds: ['Chat'],
+    // FULL-FORM kinds: segment 1 names the conversation ONLY when the title has
+    // all five segments. Measured live 2026-09-24 (read-only, shape only): the
+    // IT Help Desk Agent 1:1 -- Chat-list CKEditor composer, "@unq.gbl.spaces"
+    // header -- titled itself "Copilot | <agent> | <tenant> | <account> |
+    // Microsoft Teams" when reached from the Copilot rail, so with 'Chat' alone
+    // the agent was never Named and its block never armed. The generic Copilot
+    // home stays "Copilot | <tenant> | <account> | Microsoft Teams" (four
+    // segments, tenant in segment 1), which is why 'Copilot' is NOT in
+    // titleKinds and why a four-segment Copilot title is still no evidence.
+    titleFullKinds: ['Copilot'],
     genericNames: ['Copilot', 'Chat', 'Microsoft Teams', 'Meeting chat'],
     hostApp: true,
     enforce: true, verified: true,
@@ -1203,6 +1213,39 @@ export const AGENT_SURFACES = [
       // shipped that way: a route nobody has verified end-to-end must not
       // inherit an armed flag from the entry it hangs off.
       enforce: false, verified: false,
+    },
+    // ── THE PANE-HEADING READ — which agent is selected in the Copilot pane ──
+    //
+    // MEASURED LIVE 2026-09-24 ~16:40, read-only UIA, Word, inside the pane's
+    // WebView2 (Chrome_WidgetWin_1 owned by a msedgewebview2 child of WINWORD),
+    // with the blocked Copilot Studio agent "IT Help Desk Agent" selected:
+    //   * the composer (Edit, class fai-EditorInput__input, AutomationId
+    //     m365-chat-editor-target-element) is ALWAYS Named "Message Copilot" --
+    //     its placeholder -- so the composer_name read above can never name an
+    //     agent here. That is why the entry's own pair stays false/false.
+    //   * its parent is a Group with AutomationId "mainChat", whose children
+    //     include the New chat button, the Send button (class token
+    //     fai-SendButton, Name "Send") and the transcript, a Group with class
+    //     token fai-CopilotChat.
+    //   * every agent reply carries a Text with class token
+    //     fai-CopilotMessage__accessibleHeading whose Name is
+    //     "IT Help Desk Agent said:" -- the agent's name plus " said:".
+    // The LAST such heading in that transcript names the selected agent;
+    // "Copilot"/"Microsoft 365 Copilot" (or no heading at all -- a new chat)
+    // means no specific agent. Only that ONE heading's Name is read (everything
+    // else is AutomationId / ClassName), it is only ever a lookup key against a
+    // blocked/governed row, and it is never emitted, logged or stored.
+    //
+    // verifiedProcs is the ONLY switch, and it is per PROCESS: WINWORD is the
+    // one host this was measured in. Excel/PowerPoint/OneNote ship the same
+    // pane but have not been read; they stay inert until they are.
+    paneHeadingRead: {
+      containerAid: 'mainChat',
+      transcriptClass: 'fai-CopilotChat',
+      headingClass: 'fai-CopilotMessage__accessibleHeading',
+      headingSuffix: ' said:',
+      genericNames: ['Copilot', 'Microsoft 365 Copilot', 'You'],
+      verifiedProcs: ['WINWORD'],
     },
   },
 ];
@@ -1457,6 +1500,19 @@ export function extractAgentNameFromTitle(surface, title) {
   // conversation name — which is exactly why 'Copilot' must never be added to
   // titleKinds, and why the Copilot tab needs the separate heading fallback).
   const kind = titleKindOf(surface, title).toLowerCase();
+  // FULL-FORM kinds (see teams_desktop.titleFullKinds): segment 1 is a name only
+  // in the five-segment form, and only a Named answer counts -- a generic or
+  // participant-list segment there is no evidence, never Generic.
+  for (const k of surface.titleFullKinds || []) {
+    if (normalizeAgentName(k).toLowerCase() !== kind) continue;
+    if (parts.length < 5) return AGENT_NAME_NOT_COMPOSER;
+    const fname = normalizeAgentName(parts[1]);
+    if (!fname || looksLikeParticipantList(fname)) return AGENT_NAME_NOT_COMPOSER;
+    for (const generic of surface.genericNames || []) {
+      if (normalizeAgentName(generic).toLowerCase() === fname.toLowerCase()) return AGENT_NAME_NOT_COMPOSER;
+    }
+    return fname;
+  }
   const kinds = surface.titleKinds || [];
   let kindOk = false;
   for (const k of kinds) if (normalizeAgentName(k).toLowerCase() === kind) { kindOk = true; break; }
@@ -2159,6 +2215,7 @@ export function buildAgentSurfaceConfig() {
     titleSeparator: surface.titleSeparator || '',
     titleSuffix: surface.titleSuffix || '',
     titleKinds: (surface.titleKinds || []).slice(),
+    titleFullKinds: (surface.titleFullKinds || []).slice(),
     hostApp: surface.hostApp === true,
     // The host-app SUB-KIND, and it travels for the same reason both flags do:
     // the C# side sorts a host app's processes into one of two sets on this
@@ -2200,6 +2257,18 @@ export function buildAgentSurfaceConfig() {
         genericNames: (surface.fallbackRead.genericNames || []).slice(),
         enforce: surface.fallbackRead.enforce === true,
         verified: surface.fallbackRead.verified === true,
+      },
+    } : {}),
+    // The Office pane-heading read, OMITTED unless declared (so every other
+    // payload is unchanged). verifiedProcs is what arms it, per process.
+    ...(surface.paneHeadingRead ? {
+      paneHeadingRead: {
+        containerAid: surface.paneHeadingRead.containerAid || '',
+        transcriptClass: surface.paneHeadingRead.transcriptClass || '',
+        headingClass: surface.paneHeadingRead.headingClass || '',
+        headingSuffix: surface.paneHeadingRead.headingSuffix || '',
+        genericNames: (surface.paneHeadingRead.genericNames || []).slice(),
+        verifiedProcs: (surface.paneHeadingRead.verifiedProcs || []).slice(),
       },
     } : {}),
   }));

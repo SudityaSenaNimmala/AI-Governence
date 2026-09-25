@@ -18,6 +18,7 @@ import { dirname, join } from 'node:path';
 
 import {
   buildIdeProcessConfig, buildAiPanelConfig, buildAgentSurfaceConfig, watcherProcessNames,
+  extractAgentNameFromTitle, agentSurfaceForProcess,
 } from '../src/os_monitor/ai-processes.js';
 
 const execFileAsync = promisify(execFile);
@@ -377,4 +378,223 @@ test('BUG A: one resolver for every panel reader; it searches only the host\'s d
   assert.equal(/GetWindowText|\.Current\.Name|ReadText\(/.test(sec.replace(/if \(readName\) \{ try \{ f\.Name = el\.Current\.Name \?\? ""; \} catch \{ \} \}/, '')), false,
     'the resolver reads no title and no text');
   assert.equal((code.match(/PropsOf\([^)]*, true\)/g) || []).length, 0, 'the resolver never reads a Name');
+});
+
+// -- LIVE 2026-09-24 16:09: IT Help Desk Agent (blocked) in a Teams 1:1 ------
+// Root cause: Teams titled the agent 1:1 "Copilot | <agent> | <tenant> |
+// <account> | Microsoft Teams" (reached from the Copilot rail; measured
+// read-only, shape only). titleKinds was ['Chat'] alone, so the agent was never
+// Named and the agent block never armed; the fleet evidence route only
+// DLP-governed the chat. Second defect, same test: the composer container holds
+// TWO send-labelled buttons and the first-match rule cached the extensions
+// popup, not the arrow. Third: the Request Access dialog takes the foreground,
+// after which nothing covered the blocked conversation's arrow.
+async function live(scenario) {
+  const r = (await run()).find((x) => x.case === 'live' && x.scenario === scenario);
+  assert.ok(r, `no live '${scenario}'`);
+  return r;
+}
+async function titleCase(variant) {
+  const r = (await run()).find((x) => x.case === 'title' && x.variant === variant);
+  assert.ok(r, `no title '${variant}'`);
+  return r;
+}
+
+test('LIVE: the five-segment Copilot title names the agent; the 4-segment home and a DM do not (C#)', { skip: !win }, async () => {
+  assert.deepEqual([await titleCase('copilot_agent')].map((r) => [r.outcome, r.namedAgent]), [['Named', true]]);
+  assert.deepEqual([await titleCase('chat_agent')].map((r) => [r.outcome, r.namedAgent]), [['Named', true]]);
+  for (const v of ['copilot_home', 'copilot_generic', 'dm']) {
+    const r = await titleCase(v);
+    assert.equal(r.outcome, 'NotComposer', `${v}: no evidence`);
+    assert.equal(r.namedAgent, false, `${v}: never the agent`);
+  }
+});
+
+test('LIVE: the JS title parser agrees with the C# port on the Copilot shapes', () => {
+  const teams = agentSurfaceForProcess('ms-teams');
+  assert.equal(extractAgentNameFromTitle(teams, 'Copilot | IT Help Desk Agent | filefuze | erik@filefuze.co | Microsoft Teams'), 'IT Help Desk Agent');
+  assert.equal(extractAgentNameFromTitle(teams, 'Chat | IT Help Desk Agent | filefuze | erik@filefuze.co | Microsoft Teams'), 'IT Help Desk Agent');
+  const none = extractAgentNameFromTitle(teams, 'Copilot | filefuze | erik@filefuze.co | Microsoft Teams');
+  const gen = extractAgentNameFromTitle(teams, 'Copilot | Copilot | filefuze | erik@filefuze.co | Microsoft Teams');
+  const grp = extractAgentNameFromTitle(teams, 'Copilot | alex, max | filefuze | erik@filefuze.co | Microsoft Teams');
+  for (const [label, v] of [['4-segment home', none], ['generic', gen], ['participant list', grp]]) {
+    assert.equal(v, '{not_composer}', `${label}: no evidence, never a name`);
+  }
+  assert.equal(none, gen, 'a generic full-form segment is NO EVIDENCE, same as the home view');
+});
+
+test('LIVE: the exact blocked-agents.json row + Copilot title arms the AGENT block; Enter, Ctrl+Enter and the arrow are swallowed', { skip: !win }, async () => {
+  const r = await live('live_copilot_title');
+  assert.equal(r.fgIsBlocked, true, 'the agent block must arm');
+  assert.equal(r.blockScope, 'agent');
+  assert.equal(r.dlpGoverned, false, 'blocked wins over the evidence route');
+  assert.equal(r.enterBlocked, true);
+  assert.equal(r.mouseBlocked, true, 'BlockActiveForMouse is true for an agent block');
+  assert.equal(r.sendRectGate, true, 'the bounded panel send-button search runs on this route');
+  assert.equal(r.enter, 1, 'Enter swallowed');
+  assert.equal(r.ctrlEnter, 1, 'Ctrl+Enter swallowed');
+  assert.equal(r.ctrlAltEnter, 1, 'the override hotkey does not walk through a platform/agent block');
+  assert.equal(r.shiftEnter, 0, 'Shift+Enter (newline) passes -- also what Tier B injects');
+  assert.equal(r.cached, true);
+  assert.equal(r.clickDown, 1, 'arrow click (down) swallowed');
+  assert.equal(r.clickUp, 1, 'arrow click (up) swallowed');
+  assert.equal(r.clickPopup, 0, 'the extensions popup 91px left is NOT the send rect');
+  for (const [k, reason] of [['enterLines', 'send'], ['ctrlEnterLines', 'send'], ['clickDownLines', 'click']]) {
+    const lines = r[k].split('\n').map((l) => JSON.parse(l));
+    const blk = lines.find((l) => l.kind === 'block');
+    assert.ok(blk, `${k}: a block line`);
+    assert.equal(blk.reason, reason);
+    assert.equal(blk.platform_block, true, `${k}: platform_block -> electron shows Request Access`);
+    assert.equal(blk.block_scope, 'agent');
+    assert.equal(blk.blocked_platform, 'copilot_studio');
+    assert.equal(blk.blocked_agent_id, '44ba298c-c12d-f111-88b4-6045bd08b5e6');
+    assert.equal(blk.rewritable, false);
+    assert.ok(lines.some((l) => l.kind === 'request_access_offer'), `${k}: Request Access offered`);
+    assert.equal(/filefuze|erik@|Microsoft Teams\b.*\|/.test(r[k]), false, `${k}: no title text on the wire`);
+  }
+  assert.deepEqual([r.rankPopup, r.rankArrow, r.rankWordSend, r.rankNone], [1, 4, 4, 0]);
+  const chat = await live('live_chat_title');
+  assert.equal(chat.fgIsBlocked, true, 'the Chat-kind title still blocks');
+});
+
+test('LIVE: with the Request Access dialog in front the blocked arrow stays swallowed, and only over the host window', { skip: !win }, async () => {
+  const d = await live('live_sticky_dialog');
+  assert.equal(d.heldAfterBlockedTick, true);
+  assert.equal(d.fgIsBlocked, false, 'the per-tick block is not re-armed while the dialog is in front');
+  assert.equal(d.clickDown, 1, 'held rect swallows the arrow click');
+  assert.equal(d.clickUp, 1);
+  assert.equal(d.clickDownLines, '', 'swallowed silently (the dialog explaining it is already open)');
+  assert.equal(d.clickOverOther, 0, 'a window over the arrow is never touched');
+  assert.equal(d.clickPopup, 0);
+  const late = await live('live_dialog_after_sticky');
+  assert.equal(late.fgIsAi, false, 'past the 3s sticky window');
+  assert.equal(late.clickDown, 1, 'still swallowed after the sticky window');
+  const dm = await live('live_back_to_dm');
+  assert.equal(dm.held, false, 'Teams in front on an unblocked conversation drops the hold');
+  assert.equal(dm.clickDown, 0);
+  assert.equal(dm.clickDownDialogAgain, 0, 'and it does not come back');
+});
+
+test('LIVE: a renamed @thread.v2 group, a human DM and the 4-segment Copilot home never block and get no rect', { skip: !win }, async () => {
+  for (const s of ['live_group_renamed', 'live_human_dm']) {
+    const r = await live(s);
+    assert.equal(r.fgIsBlocked, false, `${s}: never blocked`);
+    assert.equal(r.fgIsAi, false, `${s}: not an AI surface`);
+    assert.equal(r.sendRectGate, false, `${s}: no send-button search`);
+    assert.equal(r.hasRect, false, `${s}: a stale rect is cleared`);
+    assert.equal(r.clickDown, 0, `${s}: the send click passes`);
+  }
+  assert.equal((await live('live_human_dm')).enter, 0, 'a human DM Enter passes');
+  const home = await live('live_copilot_home');
+  assert.equal(home.fgIsBlocked, false);
+  assert.equal(home.mouseBlocked, false);
+});
+
+test('source: best-ranked send control in both searches; held rect bounded; hit test on the panel rect', async () => {
+  const src = await readFile(ENFORCER, 'utf8');
+  const fn = src.slice(src.indexOf('static void UpdateSendRect()'), src.indexOf('static void UpdateUia()'));
+  assert.equal((fn.match(/PickSendRect\(btns, out r\)/g) || []).length, 2, 'both the panel walk and the whole-window search rank');
+  assert.equal(/hay\.Contains\("send"\)/.test(fn), false, 'no first-match loop left in UpdateSendRect');
+  assert.match(fn, /CachePanelRect\(r\);/);
+  assert.match(src, /bool inRect = ClickInSendRect\(x, y\);\s*if \(!\(_fgIsAi && inRect\) && HeldRectHit\(x, y\)\)/);
+  assert.match(src, /UpdateSendRect\(\); UpdateHeldRect\(\);/);
+  const held = src.slice(src.indexOf('static void UpdateHeldRect()'), src.indexOf('static bool HeldRectHit('));
+  assert.match(held, /_fgIsPanel && _fgIsBlocked && PanelEnforceOk\(\) && !Disarmed\(\)/, 'held only for a platform/agent block on an enforcing panel');
+  assert.match(held, /string\.Equals\(_fgProcAny \?\? "", _heldApp \?\? "", StringComparison\.OrdinalIgnoreCase\)/, 'dropped when the host is in front');
+  assert.match(src, /static readonly long HELD_RECT_TTL = TimeSpan\.FromMinutes\(2\)\.Ticks;/);
+  assert.match(src, /static KeyDownProbe _keyDownProbe = null;/, 'the key-state seam is null in production');
+});
+
+// -- LIVE 2026-09-24 ~16:40: IT Help Desk Agent (blocked) in Word's Copilot pane --
+// The composer is always Named "Message Copilot", so the agent was never Named
+// in Word and the agent-scoped row could never arm. The selected agent is now
+// read from the LAST "<agent> said:" heading in the pane transcript (WINWORD
+// only, as measured), used ONLY as a lookup key against the row.
+async function word(scenario) {
+  const r = (await run()).find((x) => x.case === 'word' && x.scenario === scenario);
+  assert.ok(r, `no word '${scenario}'`);
+  return r;
+}
+test('LIVE Word: "IT Help Desk Agent said:" + the blocked row -> agent block; Enter, Ctrl+Enter and Send swallowed; Request Access offered', { skip: !win }, async () => {
+  const r = await word('word_agent_blocked');
+  assert.equal(r.armed, true);
+  assert.equal(r.walkArgs, 'mainChat|fai-CopilotChat|fai-CopilotMessage__accessibleHeading', 'the measured container / transcript / heading');
+  assert.equal(r.outcome, 'Named');
+  assert.equal(r.namedIsAgent, true);
+  assert.equal(r.fgIsBlocked, true);
+  assert.equal(r.blockScope, 'agent');
+  assert.equal(r.enter, 1);
+  assert.equal(r.ctrlEnter, 1);
+  assert.equal(r.cached, true, 'the pane Send button rect is searched on this route');
+  assert.equal(r.click, 1, 'the Send click is swallowed');
+  for (const [k, reason] of [['enterLines', 'send'], ['clickLines', 'click']]) {
+    const lines = r[k].split('\n').map((l) => JSON.parse(l));
+    const blk = lines.find((l) => l.kind === 'block');
+    assert.equal(blk.reason, reason);
+    assert.equal(blk.platform_block, true, 'platform_block -> Request Access window');
+    assert.equal(blk.block_scope, 'agent');
+    assert.equal(blk.process, 'WINWORD');
+    assert.equal(blk.panel, 'office_copilot_pane');
+    assert.equal(blk.blocked_agent, 'IT Help Desk Agent', 'the ROW\'s admin-typed name');
+    assert.equal(blk.blocked_agent_id, '44ba298c-c12d-f111-88b4-6045bd08b5e6');
+    assert.ok(lines.some((l) => l.kind === 'request_access_offer'));
+    assert.equal(/said:/.test(r[k]), false, 'the read heading never reaches the wire');
+  }
+});
+
+test('LIVE Word: Copilot / new chat / no container / another agent / unknown shape never block; switching back releases at once', { skip: !win }, async () => {
+  const want = {
+    word_back_to_copilot: 'Generic', word_copilot_reply: 'Generic', word_new_chat: 'Generic',
+    word_no_container: 'NotComposer', word_other_agent: 'Named', word_unknown_shape: 'NotComposer',
+  };
+  for (const [s, outcome] of Object.entries(want)) {
+    const r = await word(s);
+    assert.equal(r.outcome, outcome, `${s}: outcome`);
+    assert.equal(r.fgIsBlocked, false, `${s}: never blocked`);
+    assert.equal(r.enter, 0, `${s}: Enter passes`);
+    assert.equal(r.ctrlEnter, 0, `${s}: Ctrl+Enter passes`);
+    assert.equal(r.click, 0, `${s}: Send passes`);
+  }
+});
+
+test('LIVE Word: Excel (unmeasured) and a Word with no agent-scoped row are never walked; the read is cached per composer', { skip: !win }, async () => {
+  for (const s of ['excel_not_verified', 'word_no_agent_row']) {
+    const r = await word(s);
+    assert.equal(r.armed, false, `${s}: the pane read is not armed`);
+    assert.equal(r.fgIsBlocked, false);
+  }
+  const calls = (await run()).filter((x) => x.case === 'word_calls');
+  assert.equal(calls.find((c) => c.variant === 'no_agent_row').calls, 0, 'no row -> no walk at all');
+  assert.equal(calls.find((c) => c.variant === 'cache').calls, 2, 'same composer within 1s = one walk; a new composer walks at once');
+});
+
+test('source: the Office pane read is gated, reads one heading Name, and the catalog arms WINWORD only', async () => {
+  const { AGENT_SURFACES, buildAgentSurfaceConfig: build } = await import('../src/os_monitor/ai-processes.js');
+  const office = AGENT_SURFACES.find((x) => x.id === 'office_copilot_pane_agent');
+  assert.deepEqual(office.paneHeadingRead.verifiedProcs, ['WINWORD']);
+  assert.equal(office.enforce, false, 'the composer_name route itself stays inert');
+  assert.deepEqual(build().find((x) => x.id === 'office_copilot_pane_agent').paneHeadingRead, office.paneHeadingRead);
+  assert.equal('paneHeadingRead' in build().find((x) => x.id === 'teams_desktop'), false);
+  const src = await readFile(ENFORCER, 'utf8');
+  const live = src.slice(src.indexOf('static bool ReadPaneHeadingLive('), src.indexOf('static string _paneAgentRid'));
+  assert.equal((live.match(/\.Current\.Name/g) || []).length, 1, 'exactly one Name read: the matched heading');
+  assert.match(live, /i >= 0 && scanned < PANE_HEADING_SCAN_CAP/, 'bounded, last-first');
+  // LIVE 2026-09-24 root cause: in the RAW view mainChat is 8 levels up (one past a 0..7 walk);
+  // in the CONTROL view it is the composer's direct parent.
+  assert.ok(live.includes('var walker = TreeWalker.ControlViewWalker;'), 'the pane walk uses the control view');
+  assert.equal(live.includes('RawViewWalker'), false, 'the pane walk must not use the raw view');
+  assert.ok(src.includes('const int PANE_CONTAINER_MAX_DEPTH = 12;'));
+  // The one stderr diagnostic: booleans + outcome kind only, never the heading/name.
+  const diag = src.slice(src.indexOf('static void PaneDiag('), src.indexOf('static bool ClassHasToken('));
+  assert.ok(diag.includes('Console.Error.WriteLine("cfai-pane-agent " + sig)'), 'expected the stderr diag writer');
+  const calls = [...src.matchAll(/(?<!void )PaneDiag\(([\s\S]*?)\);/g)].map((m) => m[1]);
+  assert.equal(calls.length, 2, 'two PaneDiag call sites');
+  for (const x of calls) {
+    const scrubbed = x.replace(/string\.IsNullOrEmpty\(heading\)/g, '').replace(/"[^"]*"/g, '');
+    assert.equal(/\bheading\b|agentName|lastHeading|\.Name\b|_paneAgentName/.test(scrubbed), false, 'PaneDiag carries no text: ' + x);
+  }
+  assert.match(src, /if \(isIde && OfficePaneAgentReadArmed\(proc, hit\)\)/);
+  const gate = src.slice(src.indexOf('static bool OfficePaneAgentReadArmed('), src.indexOf('static AgentReadOutcome PaneHeadingOutcome('));
+  assert.match(gate, /_agentScopedProcs\.Contains\(proc\) \|\| _dlpScopedProcs\.Contains\(proc\)/, 'privacy gate: a row must cover the process');
+  assert.match(gate, /!hit\.Enforce/);
 });

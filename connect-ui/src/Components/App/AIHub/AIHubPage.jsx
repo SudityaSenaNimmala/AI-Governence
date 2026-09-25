@@ -4366,8 +4366,6 @@ function AIRegistryView() {
   const [pendingIds,setPendingIds]=useState(()=>new Set());
   const [hideInactive,setHideInactive]=useState(!sp.get("showAll"));
   const [selected,setSelected]=useState(null);
-  const [showAdd,setShowAdd]=useState(false);
-  const [showBlockAgent,setShowBlockAgent]=useState(false);
 
   // ── Guardrail policy (ai_platforms.surface / .capture_mode) ───────────────
   // The live platform rows behind the catalog half of this table. loadAll
@@ -5080,23 +5078,7 @@ function AIRegistryView() {
     <SectionHeader
       title="AI Applications"
       hint="Every AI system across your organization — discovered agents, endpoint-scanned tools, and the known-services catalog."
-      action={<span style={{display:"inline-flex",alignItems:"center",gap:10}}>
-        <StaleNote meta={staleMeta}/>
-        <button className="aihub_action_btn" onClick={()=>{setShowBlockAgent(false);setShowAdd(v=>!v);}}>
-          {showAdd ? <><X size={13}/> Cancel</> : <><Plus size={13}/> Add AI platform</>}
-        </button>
-        {/* Two different objects, hence two controls: the one above claims a
-            DOMAIN for governance, this one refuses ONE NAMED AGENT. Only one
-            form is open at a time — they ask for different things and stacking
-            both invites filling in the wrong one. */}
-        <button className="aihub_action_btn" onClick={()=>{setShowAdd(false);setShowBlockAgent(v=>!v);}}>
-          {showBlockAgent ? <><X size={13}/> Cancel</> : <><ShieldAlert size={13}/> Block an agent by name</>}
-        </button>
-      </span>}
     />
-
-    {showAdd && <AddPlatformForm onDone={()=>{setShowAdd(false);loadAll();}}/>}
-    {showBlockAgent && <BlockAgentByNameForm onDone={()=>loadAll()}/>}
 
     <TipBanner id="ai_systems_intro" title="Know what's really running before you decide what to block."
       actionLabel="Review unreviewed systems" onAction={()=>setFilterStatus('unknown')}>

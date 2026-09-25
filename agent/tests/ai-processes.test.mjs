@@ -911,6 +911,7 @@ test('buildAgentSurfaceConfig serialises the catalog without aliasing it', () =>
     titleSeparator: '',
     titleSuffix: '',
     titleKinds: [],
+    titleFullKinds: [],
     hostApp: false,
     panelHosted: false,
     enforce: true,
@@ -934,6 +935,8 @@ test('buildAgentSurfaceConfig serialises the catalog without aliasing it', () =>
     titleSeparator: ' | ',
     titleSuffix: 'Microsoft Teams',
     titleKinds: ['Chat'],
+    // Segment 1 names the agent only in the five-segment Copilot form (live 2026-09-24).
+    titleFullKinds: ['Copilot'],
     hostApp: true,
     panelHosted: false,
     enforce: true,

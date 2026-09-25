@@ -146,6 +146,91 @@ public class TeamsNode
             + ";cap=" + snap.CapHit + ";agent=" + agent + ";kind=" + args[5];
     }
 }
+// Drives the REAL MouseCallback / HookCallback with synthetic hook structs.
+// Never installs a hook: _mouseHook/_hook stay zero, so CallNextHookEx is a
+// no-op. The top-level-window hit test and the modifier state are scripted
+// through the enforcer's own seams (_rootAtPoint, _keyDownProbe).
+public static class FakeInput
+{
+    public static long AppRoot = 0x7001, OtherRoot = 0x7002;
+    public static int OtherL = -1, OtherT = -1, OtherR = -1, OtherB = -1;   // a window over the app
+    public static bool Ctrl = false, Shift = false, Alt = false;
+    static System.IntPtr Root(int x, int y)
+    {
+        if (x >= OtherL && x < OtherR && y >= OtherT && y < OtherB) return new System.IntPtr(OtherRoot);
+        return new System.IntPtr(AppRoot);
+    }
+    static bool KeyDown(int vk)
+    {
+        if (vk == 0x11) return Ctrl;
+        if (vk == 0x10) return Shift;
+        if (vk == 0x12) return Alt;
+        return false;
+    }
+    const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+    public static void Install()
+    {
+        typeof(CfaiEnforcer).GetField("_rootAtPoint", F).SetValue(null, new CfaiEnforcer.RootAtPointFn(Root));
+        typeof(CfaiEnforcer).GetField("_keyDownProbe", F).SetValue(null, new CfaiEnforcer.KeyDownProbe(KeyDown));
+    }
+    public static void Uninstall()
+    {
+        typeof(CfaiEnforcer).GetField("_keyDownProbe", F).SetValue(null, null);
+    }
+    public static bool Cache(double l, double t, double w, double h)
+    {
+        return (bool)typeof(CfaiEnforcer).GetMethod("CachePanelRect", F).Invoke(null, new object[] { new System.Windows.Rect(l, t, w, h) });
+    }
+    // 1 = swallowed. MSLLHOOKSTRUCT: pt.x @0, pt.y @4, mouseData @8, flags @12.
+    public static int Mouse(int msg, int x, int y)
+    {
+        System.IntPtr lp = System.Runtime.InteropServices.Marshal.AllocHGlobal(32);
+        try
+        {
+            for (int i = 0; i < 32; i += 4) System.Runtime.InteropServices.Marshal.WriteInt32(lp, i, 0);
+            System.Runtime.InteropServices.Marshal.WriteInt32(lp, 0, x);
+            System.Runtime.InteropServices.Marshal.WriteInt32(lp, 4, y);
+            object r = typeof(CfaiEnforcer).GetMethod("MouseCallback", F).Invoke(null, new object[] { 0, new System.IntPtr(msg), lp });
+            return ((System.IntPtr)r).ToInt64() == 1 ? 1 : 0;
+        }
+        finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(lp); }
+    }
+    // 1 = swallowed. KBDLLHOOKSTRUCT: vkCode @0, scanCode @4, flags @8.
+    public static int Key(int vk, bool ctrl, bool shift, bool alt)
+    {
+        Ctrl = ctrl; Shift = shift; Alt = alt;
+        System.IntPtr lp = System.Runtime.InteropServices.Marshal.AllocHGlobal(32);
+        try
+        {
+            for (int i = 0; i < 32; i += 4) System.Runtime.InteropServices.Marshal.WriteInt32(lp, i, 0);
+            System.Runtime.InteropServices.Marshal.WriteInt32(lp, 0, vk);
+            object r = typeof(CfaiEnforcer).GetMethod("HookCallback", F).Invoke(null, new object[] { 0, new System.IntPtr(0x0100), lp });
+            return ((System.IntPtr)r).ToInt64() == 1 ? 1 : 0;
+        }
+        finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(lp); Ctrl = false; Shift = false; Alt = false; }
+    }
+}
+// Scripted Office Copilot pane-heading read (the _paneHeadingSource seam).
+public static class FakePaneHeading
+{
+    public static bool Ok = true, Found = true;
+    public static string Heading = "";
+    public static int Calls = 0;
+    public static string LastContainer = "", LastTranscript = "", LastHeadingClass = "";
+    static bool Read(string containerAid, string transcriptClass, string headingClass, out bool found, out string heading)
+    {
+        Calls++;
+        LastContainer = containerAid; LastTranscript = transcriptClass; LastHeadingClass = headingClass;
+        found = Found; heading = Heading;
+        return Ok;
+    }
+    public static void Install()
+    {
+        typeof(CfaiEnforcer).GetField("_paneHeadingSource",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+            .SetValue(null, new CfaiEnforcer.PaneHeadingSource(Read));
+    }
+}
 '@
 
 Add-Type -TypeDefinition ($source + "`n" + $fakeSource) -ReferencedAssemblies @(
@@ -546,3 +631,234 @@ Wv 'non_holder_document' $true 'Edit' $FAI ([int]$me) 'Document' '_WwG' ([int]$p
 Wv 'holder_in_non_office_process' $true 'Edit' $FAI ([int]$me) 'Pane' 'WebView2Holder' ([int]$parent) $parent 'Code'
 Wv 'holder_in_teams' $true 'Edit' $FAI ([int]$me) 'Pane' 'WebView2Holder' ([int]$parent) $parent 'ms-teams'
 Wv 'holder_not_owned_by_host' $true 'Edit' $FAI ([int]$me) 'Pane' 'WebView2Holder' 4 $parent 'WINWORD'
+
+# -- LIVE 2026-09-24 16:09: a blocked Copilot Studio agent in a Teams 1:1 -----
+# The EXACT blocked-agents.json on the test machine (nulls and all) and the
+# measured title SHAPE: Teams titled the IT Help Desk Agent 1:1 (Chat-list
+# CKEditor composer, "@unq.gbl.spaces" header, feedback buttons on every reply)
+# "Copilot | <agent> | <tenant> | <account> | Microsoft Teams". With only 'Chat'
+# as a title kind the agent was never Named, the block never armed, and the
+# fleet evidence route merely DLP-governed the chat (the attach-hold events).
+# The collect loop above reuses $t, and PowerShell names are case-insensitive:
+# restore the type handle GetF/SetF/Call use.
+$T = [CfaiEnforcer]
+$LIVE_ROWS = '[{"agent_id":"b2db5c7d-c111-43d3-87ab-30106bff186e","agent_name":"Gemini Conversation Agent 1","blocked_at":"2026-09-03T05:02:29.502Z","platform":"personal_agent","reason":"Blocked by admin from AI Systems","agent_scope":"agent","oauth_key_id":null,"orphaned":false,"unenforceable":false,"unenforceable_reason":null,"agent_aliases":"Gemini Conversation Agent 1"},{"agent_id":"44ba298c-c12d-f111-88b4-6045bd08b5e6","agent_name":"IT Help Desk Agent","agent_scope":"agent","blocked_at":"2026-09-24T10:38:35.626Z","oauth_key_id":null,"platform":"copilot_studio","reason":"Blocked by admin from AI Systems","orphaned":false,"unenforceable":false,"unenforceable_reason":null,"agent_aliases":"IT Help Desk Agent"},{"platform":"ai_platform","process_name":"chatgpt","agent_name":"OpenAI API","agent_id":"","host":"chatgpt.com","reason":"Blocked by organization policy"},{"platform":"ai_platform","process_name":"chatgpt classic","agent_name":"OpenAI API","agent_id":"","host":"chatgpt.com","reason":"Blocked by organization policy"}]'
+$T_COPILOT_AGENT = 'Copilot | IT Help Desk Agent | filefuze | erik@filefuze.co | Microsoft Teams'
+$T_CHAT_AGENT    = 'Chat | IT Help Desk Agent | filefuze | erik@filefuze.co | Microsoft Teams'
+$T_COPILOT_HOME  = 'Copilot | filefuze | erik@filefuze.co | Microsoft Teams'
+$T_COPILOT_GEN   = 'Copilot | Copilot | filefuze | erik@filefuze.co | Microsoft Teams'
+$T_DM            = 'Sruthi Chimata | CloudFuze, Inc | p@cloudfuze.com | Microsoft Teams'
+$M_EXTRACT = [CfaiEnforcer].GetMethod('ExtractAgentName', $FLAGS)
+$TEAMS_SURFACE = Call 'MatchAgentSurface' @('ms-teams')
+function TitleRead([string]$title) {
+  $params = [object[]]@($TEAMS_SURFACE, '', $title, $null)
+  $o = $M_EXTRACT.Invoke($null, $params)
+  return ,@([string]$o, [string]$params[3], $o)
+}
+foreach ($tt in @(@('copilot_agent', $T_COPILOT_AGENT), @('chat_agent', $T_CHAT_AGENT), @('copilot_home', $T_COPILOT_HOME),
+                 @('copilot_generic', $T_COPILOT_GEN), @('dm', $T_DM))) {
+  $r = TitleRead $tt[1]
+  Out-Obj @{ case = 'title'; variant = $tt[0]; outcome = $r[0]; namedAgent = ($r[1] -eq 'IT Help Desk Agent') }
+}
+[FakeInput]::Install()
+function Capture([scriptblock]$body) {
+  $orig = [Console]::Out; $sw = New-Object System.IO.StringWriter
+  [Console]::SetOut($sw)
+  $ret = $null
+  try { $ret = & $body } finally { [Console]::SetOut($orig) }
+  return ,@($ret, ($sw.ToString().Trim() -split "`r?`n" | Where-Object { $_ }))
+}
+function LiveState([string]$scenario, $extra = @{}) {
+  $o = [ordered]@{
+    case = 'live'; scenario = $scenario
+    fgIsAi = [bool](GetF '_fgIsAi'); fgIsBlocked = [bool](GetF '_fgIsBlocked'); blockScope = [string](Call 'BlockScope')
+    dlpGoverned = [bool](GetF '_fgDlpGoverned')
+    enterBlocked = [bool](Call 'EnterBlockActive' @($false, $false, $false, $false))
+    mouseBlocked = [bool](Call 'BlockActiveForMouse')
+    sendRectGate = [bool](Call 'PanelSendRectSearchAllowed')
+    hasRect = [bool](GetF '_hasRect')
+  }
+  foreach ($k in $extra.Keys) { $o[$k] = $extra[$k] }
+  Out-Obj $o
+}
+function LiveTick([string]$scenario, [string]$title, [string]$rid = $R1, [string]$aid = $A1) {
+  $r = TitleRead $title
+  Tick $scenario 'ms-teams' $TEAMS_PID $COMPOSER $rid $aid -Settle -outcome $r[2] -agentName $r[1]
+}
+$ARROW = @(1737, 941, 41, 41)       # measured: the real send arrow
+$POPUP_PT = @(1660, 960)            # measured: the message-extensions popup, 91px left
+$IN = @(1757, 961)
+
+function Age([string]$field, [int]$ms) {
+  $v = [long](GetF $field)
+  if ($v -ne 0) { SetF $field ([long]($v - ([TimeSpan]::FromMilliseconds($ms).Ticks))) }
+}
+# L1: the Copilot-kind title -> Named -> the agent block arms.
+ResetState; Call 'DropHeldRect' | Out-Null; LoadRows $LIVE_ROWS; AgentPane $R1 $A1
+LiveTick 'live_copilot_title' $T_COPILOT_AGENT
+SetF '_hasRect' $false
+$cached = [FakeInput]::Cache($ARROW[0], $ARROW[1], $ARROW[2], $ARROW[3])
+$enter = Capture { [FakeInput]::Key(0x0D, $false, $false, $false) }
+SetF '_lastBlockFiredTicks' ([long]0)
+$ctrlEnter = Capture { [FakeInput]::Key(0x0D, $true, $false, $false) }
+SetF '_lastBlockFiredTicks' ([long]0)
+$shiftEnter = Capture { [FakeInput]::Key(0x0D, $false, $true, $false) }
+$ctrlAltEnter = Capture { [FakeInput]::Key(0x0D, $true, $false, $true) }
+$down = Capture { [FakeInput]::Mouse(0x0201, $IN[0], $IN[1]) }
+$up = Capture { [FakeInput]::Mouse(0x0202, $IN[0], $IN[1]) }
+$popup = Capture { [FakeInput]::Mouse(0x0201, $POPUP_PT[0], $POPUP_PT[1]) }
+function Lines($c) { return @($c[1]) -join "`n" }
+LiveState 'live_copilot_title' @{
+  cached = [bool]$cached
+  enter = [int]$enter[0]; enterLines = (Lines $enter)
+  ctrlEnter = [int]$ctrlEnter[0]; ctrlEnterLines = (Lines $ctrlEnter)
+  shiftEnter = [int]$shiftEnter[0]; ctrlAltEnter = [int]$ctrlAltEnter[0]; ctrlAltEnterLines = (Lines $ctrlAltEnter)
+  clickDown = [int]$down[0]; clickDownLines = (Lines $down); clickUp = [int]$up[0]
+  clickPopup = [int]$popup[0]
+  rankPopup = [int](Call 'SendButtonRank' @('', 'sendMessageCommands-popup-semo', ''))
+  rankArrow = [int](Call 'SendButtonRank' @('Send (Ctrl+Enter)', '', ''))
+  rankWordSend = [int](Call 'SendButtonRank' @('Send', '', 'Send'))
+  rankNone = [int](Call 'SendButtonRank' @('Attach file', 'attach', ''))
+}
+
+# L2: the Request Access dialog (focusable) takes the foreground. The blocked
+# conversation's arrow stays covered by the HELD rect -- inside the 3s sticky
+# window AND after it -- but never a click on a window OVER the arrow. The
+# cooldown is zeroed first so nothing else can be what swallows.
+Call 'UpdateHeldRect' | Out-Null
+$heldAfterBlockedTick = [long](GetF '_heldUntilTicks') -ne 0
+$DIALOG_PID = [uint32]77001
+function DialogTick() {
+  Call 'ApplyForegroundTick' @($DIALOG_PID, 'CloudFuze AI Governance', $false, $null, '', $false, $OUT_UNREADABLE, '') | Out-Null
+  Call 'CheckFgBlocked' | Out-Null
+  Call 'UpdateSendRect' | Out-Null
+  Call 'UpdateHeldRect' | Out-Null
+}
+DialogTick
+SetF '_lastBlockFiredTicks' ([long]0)
+$stickyDown = Capture { [FakeInput]::Mouse(0x0201, $IN[0], $IN[1]) }
+$stickyUp = Capture { [FakeInput]::Mouse(0x0202, $IN[0], $IN[1]) }
+[FakeInput]::OtherL = 1700; [FakeInput]::OtherT = 900; [FakeInput]::OtherR = 1900; [FakeInput]::OtherB = 1100
+$overDown = Capture { [FakeInput]::Mouse(0x0201, $IN[0], $IN[1]) }
+[FakeInput]::OtherL = -1; [FakeInput]::OtherT = -1; [FakeInput]::OtherR = -1; [FakeInput]::OtherB = -1
+$popupHeld = Capture { [FakeInput]::Mouse(0x0201, $POPUP_PT[0], $POPUP_PT[1]) }
+LiveState 'live_sticky_dialog' @{ heldAfterBlockedTick = [bool]$heldAfterBlockedTick; clickDown = [int]$stickyDown[0]; clickUp = [int]$stickyUp[0]
+  clickDownLines = (Lines $stickyDown); clickOverOther = [int]$overDown[0]; clickPopup = [int]$popupHeld[0] }
+Age '_fgLeftAiTicks' 4000
+DialogTick
+$lateDown = Capture { [FakeInput]::Mouse(0x0201, $IN[0], $IN[1]) }
+LiveState 'live_dialog_after_sticky' @{ clickDown = [int]$lateDown[0]; held = ([long](GetF '_heldUntilTicks') -ne 0) }
+
+# L3: back in Teams, now on a human DM -> the hold is dropped at once.
+$r = TitleRead $T_DM
+Tick 'live_back_to_dm' 'ms-teams' $TEAMS_PID $COMPOSER $R2 $A2 -outcome $r[2] -agentName $r[1]
+Call 'UpdateSendRect' | Out-Null
+Call 'UpdateHeldRect' | Out-Null
+$dmDown = Capture { [FakeInput]::Mouse(0x0201, $IN[0], $IN[1]) }
+# ...and it does not come back when the dialog is raised again afterwards.
+DialogTick
+$dmDialogDown = Capture { [FakeInput]::Mouse(0x0201, $IN[0], $IN[1]) }
+LiveState 'live_back_to_dm' @{ clickDown = [int]$dmDown[0]; clickDownDialogAgain = [int]$dmDialogDown[0]; held = ([long](GetF '_heldUntilTicks') -ne 0) }
+
+# L4: the Chat-kind title still blocks.
+ResetState; Call 'DropHeldRect' | Out-Null; LoadRows $LIVE_ROWS; AgentPane $R1 $A1
+LiveTick 'live_chat_title' $T_CHAT_AGENT
+LiveState 'live_chat_title'
+
+# L5: the four-segment Copilot home (tenant in segment 1) -> nothing.
+ResetState; Call 'DropHeldRect' | Out-Null; LoadRows $LIVE_ROWS; AgentPane $R1 $A1
+LiveTick 'live_copilot_home' $T_COPILOT_HOME
+LiveState 'live_copilot_home'
+
+# L6: a "@thread.v2" GROUP chat renamed to the agent, under the Copilot title
+# shape -> never blocked, no rect.
+ResetState; Call 'DropHeldRect' | Out-Null; LoadRows $LIVE_ROWS
+[FakePane]::Set($R1, $A1, [string[]]@((Hdr $GTID)), [string[]]$MSGS, [string[]]@((Fb $GTID '1727170000001') + (Fb $GTID '1727170000002')), $false)
+SetF '_hasRect' $true; SetF '_rectRoot' ([System.IntPtr]::new(0x7001))
+LiveTick 'live_group_renamed' $T_COPILOT_AGENT
+Call 'UpdateSendRect' | Out-Null
+$grpDown = Capture { [FakeInput]::Mouse(0x0201, $IN[0], $IN[1]) }
+LiveState 'live_group_renamed' @{ clickDown = [int]$grpDown[0] }
+
+# L7: a human 1:1 DM (no kind segment) -> never blocked, no rect.
+ResetState; Call 'DropHeldRect' | Out-Null; LoadRows $LIVE_ROWS
+[FakePane]::Set($R2, $A2, [string[]]@((Hdr $TID2)), [string[]]@('message-body-7'), [string[]]@(), $false)
+SetF '_hasRect' $true; SetF '_rectRoot' ([System.IntPtr]::new(0x7001))
+LiveTick 'live_human_dm' $T_DM $R2 $A2
+Call 'UpdateSendRect' | Out-Null
+$hdDown = Capture { [FakeInput]::Mouse(0x0201, $IN[0], $IN[1]) }
+$hdEnter = Capture { [FakeInput]::Key(0x0D, $false, $false, $false) }
+LiveState 'live_human_dm' @{ clickDown = [int]$hdDown[0]; enter = [int]$hdEnter[0] }
+[FakeInput]::Uninstall()
+
+
+# -- LIVE 2026-09-24 ~16:40: IT Help Desk Agent (blocked) in Word's Copilot pane --
+# The composer is always Named "Message Copilot"; the selected agent is the LAST
+# fai-CopilotMessage__accessibleHeading ("<agent> said:") in the pane's
+# fai-CopilotChat transcript under the "mainChat" container. The pane walk is
+# scripted; the gate, the parse, the cache, the block and the emitters are real.
+$T = [CfaiEnforcer]
+[FakePaneHeading]::Install()
+$M_PANE = [CfaiEnforcer].GetMethod('ReadOfficePaneAgent', $FLAGS)
+$WORD_PID = [uint32]9101
+$WORD_RID = '42.9101.7'
+function WordTick([string]$scenario, [bool]$found, [string]$heading, [string]$proc = 'WINWORD', [string]$rid = $WORD_RID) {
+  [FakePaneHeading]::Found = $found; [FakePaneHeading]::Heading = $heading
+  SetF '_paneAgentTicks' ([long]0)          # a fresh read (the 1s cache is tested separately)
+  $hit = Call 'MatchPanelSignature' @($proc, $PANE[0], $PANE[1], $PANE[2])
+  $armed = [bool](Call 'OfficePaneAgentReadArmed' @($proc, $hit))
+  $outcome = $OUT_UNREADABLE; $name = ''
+  if ($armed) {
+    $params = [object[]]@((Call 'MatchAgentSurface' @($proc)), $rid, $null)
+    $outcome = $M_PANE.Invoke($null, $params); $name = [string]$params[2]
+  }
+  Call 'ApplyForegroundTick' @([uint32]$WORD_PID, $proc, $true, $hit, $rid, $true, $outcome, $name) | Out-Null
+  Call 'CheckFgBlocked' | Out-Null
+  $enter = Capture { [FakeInput]::Key(0x0D, $false, $false, $false) }
+  SetF '_lastBlockFiredTicks' ([long]0)
+  $ctrlEnter = Capture { [FakeInput]::Key(0x0D, $true, $false, $false) }
+  SetF '_lastBlockFiredTicks' ([long]0)
+  SetF '_hasRect' $false
+  $cached = $false
+  if ([bool](Call 'PanelSendRectSearchAllowed')) { $cached = [FakeInput]::Cache(1821, 893, 28, 29) }   # measured Word "Send"
+  $click = Capture { [FakeInput]::Mouse(0x0201, 1830, 900) }
+  [FakeInput]::Mouse(0x0202, 1830, 900) | Out-Null
+  SetF '_lastBlockFiredTicks' ([long]0)
+  Out-Obj ([ordered]@{
+    case = 'word'; scenario = $scenario; armed = $armed; outcome = [string]$outcome
+    namedIsAgent = ($name -eq 'IT Help Desk Agent')
+    fgIsBlocked = [bool](GetF '_fgIsBlocked'); blockScope = [string](Call 'BlockScope')
+    enter = [int]$enter[0]; enterLines = (Lines $enter); ctrlEnter = [int]$ctrlEnter[0]
+    cached = [bool]$cached; click = [int]$click[0]; clickLines = (Lines $click)
+    walkArgs = ([FakePaneHeading]::LastContainer + '|' + [FakePaneHeading]::LastTranscript + '|' + [FakePaneHeading]::LastHeadingClass)
+  })
+}
+ResetState; Call 'DropHeldRect' | Out-Null; LoadRows $LIVE_ROWS
+WordTick 'word_agent_blocked' $true 'IT Help Desk Agent said:'
+# The user switches the pane back to Copilot -> released on the same tick.
+WordTick 'word_back_to_copilot' $true 'Copilot said:'
+ResetState; Call 'DropHeldRect' | Out-Null; LoadRows $LIVE_ROWS
+WordTick 'word_copilot_reply' $true 'Copilot said:'
+WordTick 'word_new_chat' $true ''
+WordTick 'word_no_container' $false ''
+WordTick 'word_other_agent' $true 'Expenses Helper said:'
+WordTick 'word_unknown_shape' $true 'IT Help Desk Agent'
+# Excel carries the same pane but was never measured: inert.
+ResetState; Call 'DropHeldRect' | Out-Null; LoadRows $LIVE_ROWS
+WordTick 'excel_not_verified' $true 'IT Help Desk Agent said:' 'EXCEL'
+# No agent-scoped row covering Word -> the pane is never walked at all.
+ResetState; Call 'DropHeldRect' | Out-Null; LoadRows '[{"platform":"ai_platform","process_name":"chatgpt","agent_name":"OpenAI API","agent_id":"","host":"chatgpt.com","reason":"x"}]'
+[FakePaneHeading]::Calls = 0
+WordTick 'word_no_agent_row' $true 'IT Help Desk Agent said:'
+Out-Obj @{ case = 'word_calls'; variant = 'no_agent_row'; calls = [int][FakePaneHeading]::Calls }
+# The per-composer cache: a second read inside 1s does not re-walk.
+ResetState; LoadRows $LIVE_ROWS
+[FakePaneHeading]::Calls = 0; [FakePaneHeading]::Found = $true; [FakePaneHeading]::Heading = 'IT Help Desk Agent said:'
+SetF '_paneAgentTicks' ([long]0)
+$sf = Call 'MatchAgentSurface' @('WINWORD')
+$pa = [object[]]@($sf, 'rid-cache', $null); $M_PANE.Invoke($null, $pa) | Out-Null
+$pb = [object[]]@($sf, 'rid-cache', $null); $M_PANE.Invoke($null, $pb) | Out-Null
+$pc = [object[]]@($sf, 'rid-other', $null); $M_PANE.Invoke($null, $pc) | Out-Null
+Out-Obj @{ case = 'word_calls'; variant = 'cache'; calls = [int][FakePaneHeading]::Calls }
+LoadRows '[]'
+[FakeInput]::Uninstall()
