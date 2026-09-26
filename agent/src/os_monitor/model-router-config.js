@@ -185,6 +185,24 @@ const TIER_UI_NAMES = {
   google: { 3: 'Pro', 2: 'Thinking', 1: 'Flash' },
 };
 
+// ── Server routing rules cache ──────────────────────────────────────────────
+const ROUTING_RULES_PATH = join(homedir(), '.cloudfuze-aigov', 'routing-rules.json');
+
+export function loadCachedRoutingRules() {
+  try {
+    if (!existsSync(ROUTING_RULES_PATH)) return [];
+    const raw = readFileSync(ROUTING_RULES_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+}
+
+export function saveCachedRoutingRules(rules) {
+  try {
+    mkdirSync(dirname(ROUTING_RULES_PATH), { recursive: true });
+    writeFileSync(ROUTING_RULES_PATH, JSON.stringify(rules, null, 2), 'utf8');
+  } catch {}
+}
 
 /**
  * Assemble the full CFAI_MODEL_ROUTER_CONFIG payload. Reads both source

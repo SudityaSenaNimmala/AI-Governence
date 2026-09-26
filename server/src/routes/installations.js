@@ -439,11 +439,15 @@ export function mountInstallations(app, db) {
   // The app includes all UI (banner, popups, dialogs) built-in.
   app.get('/api/v1/installations/desktop-app', a(async (req, res) => {
     const serverUrl = apiServerUrl(req);
-    const electronDist = join(__dirname, '..', '..', '..', 'agent', 'build', 'electron-dist');
-    // electron-fresh/win-unpacked is the latest build (electron-dist/win-unpacked
-    // may have stale locked files from a running Electron instance).
-    const freshBuild = join(electronDist, 'electron-fresh', 'win-unpacked');
-    const winUnpacked = existsSync(freshBuild) ? freshBuild : join(electronDist, 'win-unpacked');
+    // Check build locations in order: electron-v2 (latest) > electron-fresh > win-unpacked (original)
+    const buildRoot = join(__dirname, '..', '..', '..', 'agent', 'build');
+    const electronDist = join(buildRoot, 'electron-dist');
+    const candidates = [
+      join(buildRoot, 'electron-v2', 'win-unpacked'),
+      join(electronDist, 'electron-fresh', 'win-unpacked'),
+      join(electronDist, 'win-unpacked'),
+    ];
+    const winUnpacked = candidates.find(d => existsSync(d)) || candidates[candidates.length - 1];
 
     if (!existsSync(winUnpacked)) {
       return res.status(500).json({ error: 'Electron desktop app not built. Run npm run dist:win in agent/electron/' });
