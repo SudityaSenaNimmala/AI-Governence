@@ -50,7 +50,10 @@ import { Reporter } from './reporter.js';
 // that drains it. Owned by blocked-agents-sync.js — one path files these, one
 // path retries them.
 import { PENDING_REQUEST_PATH, EGRESS_PATH } from './blocked-agents-sync.js';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { chipToFilename, PathHints, resolveAttachment } from './attach-census.js';
+import { attachCensusSurfaceFor } from './ai-processes.js';
+import { classifyFile } from './classifier.js';
 
 // How long after firing a toast for a (clipboardSeq, processName) pair we
 // suppress re-firing for the same pair. 10s prevents rapid-fire spam while
@@ -142,6 +145,30 @@ function identifyEventAi(ev) {
 // Keys whose value is unknown are OMITTED rather than sent empty, so a record
 // can tell "no agent dimension" from "an agent with an empty name". Never
 // logged — see the 'block' handler's log line.
+// ── Composer census (2026-09-28) ─────────────────────────────────────────────
+// A census hold's dead-man TTL on the helper side: Node re-states it well inside
+// this (every <=3s, see #syncAttachHold), so a crashed monitor frees the send
+// within 15s and a live one never lets a still-attached file's hold lapse.
+const CENSUS_HOLD_TTL_MS = 15_000;
+// A file is released only on POSITIVE evidence: this many consecutive READABLE
+// census reads that no longer list it. An unreadable read never counts.
+const CENSUS_ABSENT_RELEASE = 2;
+// A census surface nobody has produced a census for in this long (the user
+// switched conversations and never came back) is dropped with its holds.
+const CENSUS_SURFACE_IDLE_MS = 30 * 60_000;
+// A file that left a draft and comes back within this window keeps its verdict.
+const CENSUS_RECENT_VERDICT_MS = 10 * 60_000;
+// The chip route's immediate provisional hold for a census-owned app lives at
+// most this long if no census takes over.
+const CENSUS_LEGACY_PROVISIONAL_MS = 8000;
+// Which Copilot PANE an Office / Outlook host's attachments belong to.
+function paneForProcess(processName) {
+  const p = String(processName || '').replace(/\.exe$/i, '').trim().toLowerCase();
+  if (['winword', 'excel', 'powerpnt', 'onenote', 'onenoteim'].includes(p)) return 'office_copilot_pane';
+  if (['outlook', 'olk'].includes(p)) return 'outlook_copilot_pane';
+  return '';
+}
+
 function blockAgentAttribution(ev) {
   const out = {};
   const src = String(ev?.agent_src ?? '');
@@ -421,14 +448,39 @@ export class OsMonitor extends EventEmitter {
     // pattern list re-stated on the hold is the UNION across every file still
     // held (see #syncAttachHold), so the block never under-reports what is
     // holding it.
-    this.attachHolds = new Map();
-    // Which app the current holds belong to. The helper has ONE hold slot, so
-    // holds from two different apps cannot coexist in it: an arm from a
-    // different process REPLACES the set rather than merging into it. The helper
-    // independently refuses to apply a hold whose process is not the foreground
-    // app — see AttachHoldActive in enforcer-win.ps1 — so this side and that
-    // side have to agree on which app it is.
-    this.attachHoldProcess = null;
+    //
+    // KEYED BY SURFACE (2026-09-28, ROADMAP P0 "Per-process attach-hold
+    // isolation"). The helper used to have ONE hold slot, so an arm from a
+    // different app REPLACED this map — an Outlook email attachment silently
+    // released a Teams agent chat's hold. Both sides now keep a TABLE:
+    //   holdKey = process|panel|surfaceKey          (AI / host-app surfaces)
+    //   holdKey = egress|process|surface            (mail-client egress holds)
+    // and each key is armed, refreshed and released on its own. The FILE is still
+    // the unit inside a key (removing one attachment releases only that file).
+    //
+    // `attachHolds` / `attachHoldProcess` (below) are read-only VIEWS of this
+    // table, kept for the log lines and the existing observers.
+    this.attachHoldGroups = new Map();
+    this.lastArmedHoldKey = null;
+    // ── The composer census (2026-09-28) ─────────────────────────────────────
+    // Map<surface_key, { key, process, pid, panel, surface, enforce, suspended,
+    //   lastSeen, files: Map<lowercased name, { attachmentId, display, state:
+    //   'scanning'|'held'|'clean', absent, holdReason, severity }> }>.
+    // One entry per governed conversation / pane / app the helper produced a
+    // census for. A surface whose key is not the one in front is SUSPENDED: its
+    // holds stay armed (keyed, so they cannot apply anywhere else) and resume
+    // the moment that conversation's census reappears.
+    this.censusSurfaces = new Map();
+    // Real paths seen recently (pickers, CF_HDROP, the chip watcher), used to
+    // resolve a chip NAME to the file it came from. Memory only; never logged.
+    this.pathHints = new PathHints();
+    // The name -> file resolver (attach-census.js). A field so the offline tests
+    // can script where a file "is" without touching the real profile folders.
+    this.resolveAttachmentFn = resolveAttachment;
+    // govstate scope:"pane" -- an Office / Outlook Copilot pane is the governed,
+    // focused surface. SEPARATE from hostGoverned (Teams), so a pane can never
+    // arm or disarm Teams' host watchers.
+    this.paneGoverned = null;
     // Keeps an attach hold alive past its own TTL for as long as the flagged
     // file stays attached. attachment_appeared only fires once, on first
     // appearance — it does NOT keep firing while a chip just sits there
@@ -471,6 +523,23 @@ export class OsMonitor extends EventEmitter {
     setInterval(() => this.#pruneFired(), 60_000).unref();
   }
 
+  // Read-only flattened view: Map<filename, { patterns, severity, ttlMs, key, process }>.
+  get attachHolds() {
+    const flat = new Map();
+    for (const g of this.attachHoldGroups.values()) {
+      for (const [filename, held] of g.files) flat.set(filename, { ...held, key: g.key, process: g.process });
+    }
+    return flat;
+  }
+
+  // The app of the most recently armed key still held, or null.
+  get attachHoldProcess() {
+    const g = this.lastArmedHoldKey ? this.attachHoldGroups.get(this.lastArmedHoldKey) : null;
+    if (g) return g.process || null;
+    const any = [...this.attachHoldGroups.values()].at(-1);
+    return any ? (any.process || null) : null;
+  }
+
   #pruneFired() {
     const cutoff = Date.now() - 2 * FIRE_DEDUP_TTL_MS;
     for (const [key, ts] of this.firedAt) {
@@ -478,90 +547,420 @@ export class OsMonitor extends EventEmitter {
     }
   }
 
-  // ── The attachment hold: one helper slot, N held files ────────────────────
+  // ── The attachment hold: a KEYED table, N files per key ───────────────────
   //
-  // The helper has exactly one hold (a flag, a filename, a pattern string and a
-  // TTL), and this side may be holding several files at once. #syncAttachHold is
-  // the single place that projects the map onto that slot, so arming and
-  // releasing cannot disagree about what the helper currently believes.
-  //
-  // Re-sends attach_hold('on', ...) on an interval well inside the shortest TTL
-  // in force, so a still-attached flagged file's hold never lapses on its own.
+  // Each key is projected onto the helper's table entry of the same key by
+  // #syncAttachHold, the single place that talks to the helper for 'on', so
+  // arming, refreshing and replaying cannot disagree about what it believes.
+  // Re-sent on an interval well inside the shortest TTL in force, so a
+  // still-attached flagged file's hold never lapses on its own, and replayed in
+  // full when a respawned helper says 'ready'.
 
-  // Push the CURRENT set of holds to the helper and (re)start the refresh
-  // ticker. Returns the payload sent, or null when nothing is held.
-  #syncAttachHold() {
-    if (this.attachHolds.size === 0) { this.#stopAttachHoldRefresh(); return null; }
-    const patterns = new Set();
-    let ttlMs = 0;
-    let shortestTtl = Infinity;
-    for (const held of this.attachHolds.values()) {
-      for (const p of String(held.patterns || '').split(',')) { if (p) patterns.add(p); }
-      ttlMs = Math.max(ttlMs, held.ttlMs);
-      shortestTtl = Math.min(shortestTtl, held.ttlMs);
-    }
-    const payload = {
-      // EVERY held filename, not just the newest. The helper puts this on the
-      // block it emits, and naming one of two flagged attachments would be a
-      // false statement about the other.
-      filename: [...this.attachHolds.keys()].join(', '),
-      // The UNION of pattern names across every held file, for the same reason.
-      patterns: [...patterns].join(','),
-      // The LONGEST TTL in force — the hold must outlive its most durable
-      // reason, and a shorter one being refreshed more often costs nothing.
-      ttlMs,
-      // Binds the hold to one app on the helper side. See attachHoldProcess.
-      process: this.attachHoldProcess || '',
-    };
-    this.enforcer.attachHold('on', payload);
-    // Derived from the SHORTEST TTL, not a constant: a 3s provisional hold
-    // refreshed on a 5s interval — which is what the old Math.max(5000, …) did —
-    // is a hold that expires.
-    this.#startAttachHoldRefresh(payload, Math.max(500, Math.floor(shortestTtl / 3)));
-    return payload;
+  // Is there an ENFORCING composer-census surface for this app's own composer
+  // (not a pane)? Then the census, not the legacy chip route, owns its drafts.
+  static censusOwnsProcess(processName) {
+    const s1 = attachCensusSurfaceFor(processName, '');
+    // Teams keeps its own (live-verified, host-armed) chip route alongside the
+    // census: the census holds per conversation, and its record defers to a
+    // report the chip route already made for the same file (see #censusScan).
+    return !!(s1 && s1.enforce && s1.verified);
   }
 
-  // Add (or re-state) a hold for one file.
-  #armAttachHold(filename, { patterns = '', severity = null, ttlMs = 3000, processName = '' } = {}) {
-    if (processName && this.attachHoldProcess && processName !== this.attachHoldProcess) {
-      // A different app's attachment. The helper has one slot, so the previous
-      // app's holds cannot still be in it — drop them rather than report them
-      // under this app's name.
-      this.attachHolds.clear();
+  static holdKeyFor({ processName = '', panel = '', surfaceKey = '', egressSurface = null } = {}) {
+    const proc = String(processName || '').replace(/\.exe$/i, '').trim();
+    if (egressSurface !== null && egressSurface !== undefined) return `egress|${proc}|${egressSurface || ''}`;
+    return `${proc}|${panel || ''}|${surfaceKey || ''}`;
+  }
+
+  // The helper payload for ONE key: every held filename in it, the UNION of
+  // their pattern names (the block must never under-report what holds it), and
+  // the LONGEST TTL (the hold must outlive its most durable reason).
+  #holdPayload(group) {
+    const patterns = new Set();
+    let ttlMs = 0;
+    for (const held of group.files.values()) {
+      for (const p of String(held.patterns || '').split(',')) { if (p) patterns.add(p); }
+      ttlMs = Math.max(ttlMs, held.ttlMs);
     }
-    if (processName) this.attachHoldProcess = processName;
-    this.attachHolds.set(filename, { patterns, severity, ttlMs });
-    return this.#syncAttachHold();
+    return {
+      key: group.key,
+      // The helper builds its table key from these validated parts and ignores
+      // `key` (finding 16); an egress hold says so explicitly.
+      egressSurface: group.egress ? String(group.key.split('|')[2] || '') : '',
+      egress: group.egress === true,
+      process: group.process || '',
+      panel: group.panel || '',
+      surfaceKey: group.surfaceKey || '',
+      filename: [...group.files.keys()].join(', '),
+      patterns: [...patterns].join(','),
+      ttlMs,
+    };
+  }
+
+  // Push EVERY key to the helper and (re)start the refresh ticker. Returns the
+  // payload of `onlyKey` (or of the last key) — null when nothing is held.
+  #syncAttachHold(onlyKey = null) {
+    if (this.attachHoldGroups.size === 0) { this.#stopAttachHoldRefresh(); return null; }
+    let shortestTtl = Infinity;
+    let ret = null;
+    for (const group of this.attachHoldGroups.values()) {
+      const payload = this.#holdPayload(group);
+      this.enforcer.attachHold('on', payload);
+      for (const held of group.files.values()) shortestTtl = Math.min(shortestTtl, held.ttlMs);
+      if (!onlyKey || group.key === onlyKey) ret = payload;
+    }
+    // Derived from the SHORTEST TTL, not a constant: a 3s provisional hold
+    // refreshed on a 5s interval is a hold that expires.
+    // At most every 3s: the census holds' 15s dead-man TTL is re-stated five
+    // times over before it could lapse.
+    this.#startAttachHoldRefresh(Math.max(500, Math.min(3000, Math.floor(shortestTtl / 3))));
+    return ret;
+  }
+
+  // Add (or re-state) a hold for one file under its surface key. Another app's
+  // (or another surface's) holds are untouched — the defect this table fixes.
+  #armAttachHold(filename, {
+    patterns = '', severity = null, ttlMs = 3000, processName = '',
+    panel = '', surfaceKey = '', egressSurface = null,
+  } = {}) {
+    const key = OsMonitor.holdKeyFor({ processName, panel, surfaceKey, egressSurface });
+    let group = this.attachHoldGroups.get(key);
+    if (!group) {
+      group = {
+        key,
+        process: String(processName || '').replace(/\.exe$/i, '').trim(),
+        panel: panel || '',
+        surfaceKey: surfaceKey || '',
+        egress: egressSurface !== null && egressSurface !== undefined,
+        files: new Map(),
+      };
+      this.attachHoldGroups.set(key, group);
+    }
+    group.files.set(filename, { patterns, severity, ttlMs });
+    this.lastArmedHoldKey = key;
+    return this.#syncAttachHold(key);
   }
 
   // Drop the hold for ONE file. Returns true if that file was actually held.
   //
-  // The other half of the multi-file fix: when other files are still held this
-  // re-states the hold with the narrowed union instead of releasing it. Before,
-  // any release released everything — so removing a clean attachment unblocked a
-  // send that a sensitive one was still holding.
-  #releaseAttachHold(filename) {
-    if (!this.attachHolds.delete(filename)) return false;
-    if (this.attachHolds.size === 0) {
-      this.#stopAttachHoldRefresh();
-      const processName = this.attachHoldProcess || '';
-      this.attachHoldProcess = null;
-      this.enforcer.attachHold('off', { filename, process: processName });
-    } else {
-      this.#syncAttachHold();
+  // Scoped by process (and by egress vs AI) when the caller knows it, so a file
+  // removed from one app cannot release a same-named file another app is still
+  // holding. A key whose last file goes is sent 'off' — for THAT key only; every
+  // other key is re-stated unchanged.
+  #releaseAttachHold(filename, { processName = null, egress = null, holdKey = null } = {}) {
+    const proc = processName ? String(processName).replace(/\.exe$/i, '').trim().toLowerCase() : null;
+    let removed = false;
+    for (const [key, group] of [...this.attachHoldGroups]) {
+      if (holdKey !== null && key !== holdKey) continue;
+      if (proc !== null && (group.process || '').toLowerCase() !== proc) continue;
+      if (egress !== null && group.egress !== egress) continue;
+      if (!group.files.delete(filename)) continue;
+      removed = true;
+      if (group.files.size === 0) {
+        this.attachHoldGroups.delete(key);
+        if (this.lastArmedHoldKey === key) this.lastArmedHoldKey = null;
+        this.enforcer.attachHold('off', {
+          key, process: group.process || '', panel: group.panel || '', surfaceKey: group.surfaceKey || '', filename,
+          egress: group.egress === true, egressSurface: group.egress ? String(key.split('|')[2] || '') : '',
+        });
+      }
     }
+    if (!removed) return false;
+    if (this.attachHoldGroups.size === 0) this.#stopAttachHoldRefresh();
+    else this.#syncAttachHold();
     return true;
   }
 
-  #startAttachHoldRefresh(payload, everyMs) {
+  // ── The composer census: reconciliation ──────────────────────────────────
+  //
+  // Every attachcensus line is one readable-or-not snapshot of ONE governed
+  // composer's draft attachments. New names get a provisional hold at once (on
+  // an enforcing surface), then a scan decides held / clean; a name is released
+  // only after CENSUS_ABSENT_RELEASE consecutive READABLE snapshots without it.
+  #onAttachCensus(ev) {
+    // The fleet `dlp` flag licenses file DLP at all (finding 3): with it off the
+    // census is not acted on -- nothing resolved, read, held or reported.
+    if (!this.running?.dlp) return;
+    const key = String(ev?.surface_key || '');
+    const processName = String(ev?.process || '').replace(/\.exe$/i, '').trim();
+    if (!key || !processName) return;
+    const now = Date.now();
+    let sfc = this.censusSurfaces.get(key);
+    if (!sfc) {
+      sfc = {
+        key, process: processName, pid: Number(ev.pid) || 0, panel: String(ev.panel || ''),
+        surface: String(ev.surface || ''), enforce: false, suspended: false, lastSeen: 0, files: new Map(),
+        // Verdicts of files that left this draft recently (finding 6): a name
+        // that comes back -- the user switched conversations inside one root and
+        // returned -- is re-held from its known verdict at once, no rescan gap.
+        recent: new Map(),
+      };
+      this.censusSurfaces.set(key, sfc);
+    }
+    sfc.enforce = ev.enforce === true;
+    sfc.lastSeen = now;
+    sfc.suspended = false;
+    // Another conversation / pane of the same app is now in front: suspend it.
+    for (const other of this.censusSurfaces.values()) {
+      if (other !== sfc && other.process.toLowerCase() === processName.toLowerCase()) other.suspended = true;
+    }
+    this.#pruneCensusSurfaces(now);
+    if (ev.readable !== true) return;   // an unreadable read NEVER releases anything
+    // The census has taken over from the chip route's immediate provisional
+    // hold for this app (finding 15): drop those now.
+    this.#releaseLegacyProvisional(processName);
+    const present = new Map();
+    for (const raw of Array.isArray(ev.names) ? ev.names : []) {
+      const name = chipToFilename(raw);
+      if (name) present.set(name.toLowerCase(), name);
+    }
+    for (const [lk, display] of present) {
+      if (!sfc.files.has(lk)) this.#censusNewFile(sfc, display);
+    }
+    for (const [lk, rec] of [...sfc.files]) {
+      if (present.has(lk)) { rec.absent = 0; continue; }
+      rec.absent += 1;
+      if (rec.absent >= CENSUS_ABSENT_RELEASE) this.#censusRemoveFile(sfc, lk);
+    }
+  }
+
+  #armLegacyProvisional(filename, processName) {
+    const proc = String(processName || '').replace(/\.exe$/i, '').trim();
+    if (!this.legacyProvisional) this.legacyProvisional = new Map();
+    const k = proc.toLowerCase() + '\u0000' + filename;
+    const prev = this.legacyProvisional.get(k);
+    if (prev) clearTimeout(prev.timer);
+    this.#armAttachHold(filename, { patterns: '', ttlMs: 3000, processName: proc });
+    const timer = setTimeout(() => {
+      this.legacyProvisional.delete(k);
+      this.#releaseAttachHold(filename, { processName: proc, egress: false, holdKey: OsMonitor.holdKeyFor({ processName: proc }) });
+    }, CENSUS_LEGACY_PROVISIONAL_MS);
+    timer.unref?.();
+    this.legacyProvisional.set(k, { filename, proc, timer });
+  }
+
+  #releaseLegacyProvisional(processName) {
+    if (!this.legacyProvisional?.size) return;
+    const proc = String(processName || '').toLowerCase();
+    for (const [k, v] of [...this.legacyProvisional]) {
+      if (v.proc.toLowerCase() !== proc) continue;
+      clearTimeout(v.timer);
+      this.legacyProvisional.delete(k);
+      this.#releaseAttachHold(v.filename, { processName: v.proc, egress: false, holdKey: OsMonitor.holdKeyFor({ processName: v.proc }) });
+    }
+  }
+
+  #censusHoldKey(sfc) {
+    return OsMonitor.holdKeyFor({ processName: sfc.process, panel: sfc.panel, surfaceKey: sfc.key });
+  }
+
+  #censusNewFile(sfc, display) {
+    const rec = {
+      attachmentId: randomUUID(), display, state: 'scanning', absent: 0, holdReason: '', severity: null,
+    };
+    sfc.files.set(display.toLowerCase(), rec);
+    // A known verdict for this name in this draft (it left and came back
+    // within CENSUS_RECENT_VERDICT_MS): restore it without a rescan or a second
+    // report.
+    const known = sfc.recent.get(display.toLowerCase());
+    if (known && Date.now() - known.at <= CENSUS_RECENT_VERDICT_MS) {
+      sfc.recent.delete(display.toLowerCase());
+      Object.assign(rec, { attachmentId: known.attachmentId, state: known.state, holdReason: known.holdReason, severity: known.severity });
+      if (sfc.enforce && known.state === 'held') {
+        this.#armAttachHold(display, {
+          patterns: known.patterns, severity: known.severity, ttlMs: CENSUS_HOLD_TTL_MS,
+          processName: sfc.process, panel: sfc.panel, surfaceKey: sfc.key,
+        });
+      }
+      return;
+    }
+    // PROVISIONAL hold the moment ANY name appears (finding 9: not only a
+    // scannable extension) -- before the file is even located -- so a fast Enter
+    // cannot beat the scan.
+    if (sfc.enforce) {
+      this.#armAttachHold(display, {
+        patterns: '', ttlMs: CENSUS_HOLD_TTL_MS, processName: sfc.process, panel: sfc.panel, surfaceKey: sfc.key,
+      });
+    }
+    this.#censusScan(sfc, rec).catch((err) => {
+      this.log?.warn(`os_monitor: composer census scan failed (${err?.code || err?.name || 'error'})`);
+    });
+  }
+
+  #censusRemoveFile(sfc, lk) {
+    const rec = sfc.files.get(lk);
+    sfc.files.delete(lk);
+    if (!rec) return;
+    if (rec.state !== 'scanning') {
+      sfc.recent.set(lk, { ...rec, patterns: rec.patterns || '', at: Date.now() });
+      while (sfc.recent.size > 50) sfc.recent.delete(sfc.recent.keys().next().value);
+    }
+    this.#releaseAttachHold(rec.display, { processName: sfc.process, egress: false, holdKey: this.#censusHoldKey(sfc) });
+    this.log?.info(`os_monitor: composer census — an attachment was removed (${sfc.files.size} still attached)`);
+  }
+
+  #pruneCensusSurfaces(now = Date.now()) {
+    for (const [key, sfc] of [...this.censusSurfaces]) {
+      if (now - sfc.lastSeen <= CENSUS_SURFACE_IDLE_MS) continue;
+      for (const lk of [...sfc.files.keys()]) this.#censusRemoveFile(sfc, lk);
+      this.censusSurfaces.delete(key);
+    }
+  }
+
+  // Locate, scan, decide, report. USER DECISIONS (2026-09-28): content is
+  // uploaded as today; a cloud-only file is HELD (hold_reason cloud_reference);
+  // a file over the scan cap is partially scanned -- held if the scanned part is
+  // sensitive, otherwise reported (partially_scanned); an unverifiable or
+  // not-found file on a governed surface is held (fail closed).
+  async #censusScan(sfc, rec) {
+    const lk = rec.display.toLowerCase();
+    const ident = identifyAiPanel(sfc.panel, sfc.process) || identifyAiProcess(sfc.process)
+      || { product: sfc.process, vendor: null };
+    const where = await this.resolveAttachmentFn(rec.display, { hints: this.pathHints, process: sfc.process, pid: sfc.pid });
+    if (sfc.files.get(lk) !== rec) return;   // removed while we looked
+    let fileEvent = null;
+    // Content is read ONLY for a path bound to this attach (finding 2); any other
+    // name match is reported as metadata only and, on an enforcing surface, held
+    // as unverified -- a same-named file elsewhere on disk is not evidence.
+    const bound = where.status === 'local' && where.trust === 'bound';
+    if (where.status === 'local') {
+      fileEvent = await buildFileUploadEvent({
+        path: where.path, via: 'composer_census', service: ident.product, vendor: ident.vendor,
+        processName: sfc.process, windowTitle: '', log: this.log, partialScan: true,
+        isolate: true, quiet: true, metadataOnly: !bound,
+      });
+      if (sfc.files.get(lk) !== rec) return;
+    }
+    let hold = false; let holdReason = ''; let patterns = ''; let severity = 'high';
+    if (fileEvent) {
+      const cs = fileEvent.content_scan;
+      severity = fileEvent.severity;
+      const sensitive = cs?.scanned === true && (severity === 'high' || severity === 'critical');
+      // FAIL CLOSED on an enforcing census surface (finding 9): anything not
+      // actually scanned is held -- an image over the cap, an OCR timeout, an
+      // unknown or missing extension, a worker that ran out of budget, and a
+      // name that could not be bound to this attach.
+      const notScanned = cs?.scanned !== true;
+      if (sensitive) {
+        hold = true; holdReason = 'sensitive_content';
+        patterns = (cs?.matches || []).map((m) => m.pattern).join(',') || fileEvent.file_class;
+      } else if (notScanned) {
+        hold = true;
+        holdReason = cs?.reason === 'too_large' ? 'too_large' : 'unverified';
+        patterns = `unscannable file (${cs?.reason || 'not readable'})`;
+        severity = 'high';
+      } else if (cs?.partial) {
+        holdReason = 'partially_scanned';
+      }
+    } else {
+      // No readable local copy. Cloud-only -> cloud_reference; nowhere -> not_found.
+      const cloud = where.status === 'cloud';
+      hold = true;
+      holdReason = cloud ? 'cloud_reference' : 'not_found';
+      patterns = cloud ? 'cloud file (no readable local copy)' : 'file not found on this device';
+      const cls = classifyFile(rec.display);
+      fileEvent = {
+        kind: 'file_upload', via: 'composer_census', service: ident.product, vendor: ident.vendor,
+        process_name: sfc.process, window_title: '', filename: rec.display, size: null, size_bucket: null,
+        mime_type: null, extension: null, file_class: cls.class, severity: 'high', reason: cls.reason,
+        content_scan: { scanned: false, reason: holdReason, unverified: true },
+        content_text: null, content_base64: null,
+      };
+    }
+    if (!sfc.enforce) hold = false;   // report-only surface
+    rec.state = hold ? 'held' : 'clean';
+    rec.holdReason = holdReason;
+    rec.severity = severity;
+    rec.patterns = patterns;
+    const holdKey = this.#censusHoldKey(sfc);
+    if (hold) {
+      this.#armAttachHold(rec.display, {
+        patterns, severity, ttlMs: CENSUS_HOLD_TTL_MS, processName: sfc.process, panel: sfc.panel, surfaceKey: sfc.key,
+      });
+    } else {
+      this.#releaseAttachHold(rec.display, { processName: sfc.process, egress: false, holdKey });
+    }
+    // The record.
+    fileEvent.via = 'composer_census';
+    fileEvent.window_title = '';
+    fileEvent.surface = sfc.surface;
+    fileEvent.attachment_id = rec.attachmentId;
+    fileEvent.enforcement = hold ? 'held' : 'reported';
+    if (holdReason) fileEvent.hold_reason = holdReason;
+    const governed = this.#hostGovernedFor(sfc.process);
+    if (governed) this.#attributeToAgent(fileEvent, governed);
+    else if (sfc.panel) { fileEvent.agent_name = 'Microsoft 365 Copilot'; fileEvent.agent_scope = 'panel'; }
+    // One record per file: when another route (Teams' own chip watcher, a
+    // picker) already reported this exact path moments ago, the census still
+    // HOLDS but does not report it a second time.
+    const dedupKey = where.status === 'local' ? `file|${where.path}|${sfc.process}` : `census|${rec.attachmentId}`;
+    if (Date.now() - (this.firedAt.get(dedupKey) ?? 0) < FIRE_DEDUP_TTL_MS) return;
+    this.firedAt.set(dedupKey, Date.now());
+    this.reporter.enqueue(fileEvent);
+    this.log?.info(
+      `os_monitor: composer census → ${ident.product} — [${fileEvent.file_class}, severity=${fileEvent.severity}, `
+      + `enforcement=${fileEvent.enforcement}${holdReason ? ', ' + holdReason : ''}]`
+    );
+    if (hold) {
+      this.toast.show({
+        title: `${ident.product} - attachment held`,
+        message: `"${rec.display}" can't be sent: ${OsMonitor.holdReasonText(holdReason, patterns)}\n`
+          + 'Remove the attachment to send. The app already uploaded a copy to OneDrive/SharePoint when you attached it; '
+          + 'this stops it from being sent to the agent.',
+      });
+    }
+  }
+
+  // Plain-language reason for a held attachment (toast + popup).
+  static holdReasonText(holdReason, patterns = '') {
+    switch (holdReason) {
+      case 'sensitive_content': return `it contains ${patterns}.`;
+      case 'cloud_reference': return 'it is a cloud file with no readable copy on this device, so it could not be checked.';
+      case 'not_found': return 'the file could not be found on this device, so it could not be checked.';
+      case 'too_large': return 'it is too large to check.';
+      case 'unverified': return 'it could not be read (it may be encrypted or damaged), so it could not be checked.';
+      default: return patterns ? `it contains ${patterns}.` : 'it is still being checked.';
+    }
+  }
+
+  // The census record for a block's file(s), for its client_event_id / state.
+  #censusRecordFor(processName, filenames) {
+    const proc = String(processName || '').replace(/\.exe$/i, '').trim().toLowerCase();
+    const names = String(filenames || '').split(', ').map((f) => f.trim().toLowerCase()).filter(Boolean);
+    for (const sfc of this.censusSurfaces.values()) {
+      if (sfc.process.toLowerCase() !== proc) continue;
+      for (const n of names) { const rec = sfc.files.get(n); if (rec) return rec; }
+    }
+    return null;
+  }
+
+  // The highest severity among the held files a block names, for its
+  // enforcement_block record — null when none is known.
+  #heldSeverity(processName, filenames) {
+    const rank = { low: 1, medium: 2, high: 3, critical: 4 };
+    const proc = String(processName || '').replace(/\.exe$/i, '').trim().toLowerCase();
+    const names = new Set(String(filenames || '').split(', ').map((f) => f.trim()).filter(Boolean));
+    let best = null;
+    for (const group of this.attachHoldGroups.values()) {
+      if (group.egress) continue;
+      if (proc && (group.process || '').toLowerCase() !== proc) continue;
+      for (const [filename, held] of group.files) {
+        if (names.size && !names.has(filename)) continue;
+        const sev = String(held.severity || '').toLowerCase();
+        if (rank[sev] && (!best || rank[sev] > rank[best])) best = sev;
+      }
+    }
+    return best;
+  }
+
+  #startAttachHoldRefresh(everyMs) {
     this.#stopAttachHoldRefresh();
     this.attachHoldRefreshTimer = setInterval(() => {
-      // The map emptying is the one condition that stops the ticker on its own,
-      // so a released hold can never be silently re-armed by a stale interval
-      // nobody cleared. Every arm/release re-enters #syncAttachHold, which
-      // replaces this timer with one carrying the fresh payload.
-      if (this.attachHolds.size === 0) { this.#stopAttachHoldRefresh(); return; }
-      this.enforcer.attachHold('on', payload);
+      // The table emptying is the one condition that stops the ticker on its
+      // own, so a released hold can never be silently re-armed by a stale
+      // interval nobody cleared. Re-sends the CURRENT table, every key.
+      if (this.attachHoldGroups.size === 0) { this.#stopAttachHoldRefresh(); return; }
+      for (const group of this.attachHoldGroups.values()) this.enforcer.attachHold('on', this.#holdPayload(group));
     }, everyMs);
     this.attachHoldRefreshTimer.unref?.();
   }
@@ -712,7 +1111,7 @@ export class OsMonitor extends EventEmitter {
       isTextReadable(filename) || isBinaryParseable(filename) || isImage(filename) || isArchive(filename)
     );
     if (scannable) {
-      this.#armAttachHold(filename, { patterns: '', ttlMs: 3000, processName });
+      this.#armAttachHold(filename, { patterns: '', ttlMs: 3000, processName, egressSurface: surfaceId || '' });
     }
     try {
       const fileEvent = await buildFileUploadEvent({
@@ -729,7 +1128,7 @@ export class OsMonitor extends EventEmitter {
         log: this.log,
       });
       if (!fileEvent) {
-        if (scannable) this.#releaseAttachHold(filename);
+        if (scannable) this.#releaseAttachHold(filename, { processName, egress: true });
         return;
       }
       // Which egress surface, and — for a sync root — which DIRECTION we believe
@@ -746,10 +1145,10 @@ export class OsMonitor extends EventEmitter {
       if (shouldHold) {
         const patternNames = (cs?.matches || []).map((m) => m.pattern).join(',') || fileEvent.file_class;
         this.#armAttachHold(filename, {
-          patterns: patternNames, severity, ttlMs: 60_000, processName,
+          patterns: patternNames, severity, ttlMs: 60_000, processName, egressSurface: surfaceId || '',
         });
       } else if (scannable) {
-        this.#releaseAttachHold(filename);
+        this.#releaseAttachHold(filename, { processName, egress: true });
       }
 
       const dedupKey = `egress|${path}|${surfaceId}`;
@@ -825,7 +1224,7 @@ export class OsMonitor extends EventEmitter {
           + 'may already have synced to the cloud.\nReported to CloudFuze AI Governance.',
       });
     } catch (err) {
-      if (scannable) this.#releaseAttachHold(filename);
+      if (scannable) this.#releaseAttachHold(filename, { processName, egress: true });
       this.log?.warn(`os_monitor: egress file event build failed: ${err?.message || err}`);
     }
   }
@@ -1420,6 +1819,9 @@ export class OsMonitor extends EventEmitter {
     });
 
     this.poller.on('clipboard_files', async (ev) => {
+      // Remember the real paths first (memory only) so a composer census chip
+      // for the same file can be resolved to it.
+      for (const hp of (ev.paths || [])) this.pathHints.remember(hp, 'clipboard_file_copy', { process: ev.process, pid: ev.pid });
       // User copied one or more files in Explorer (CF_HDROP) and is focused
       // on an AI window — typical pre-upload step for ChatGPT Store, Claude
       // Desktop, etc. Classify each file, content-scan text-readable ones,
@@ -1511,6 +1913,7 @@ export class OsMonitor extends EventEmitter {
     // UIA-based file dialog watcher — covers the "click attach button in
     // ChatGPT → pick file → Open" flow that CF_HDROP doesn't see.
     this.dialogWatcher.on('file_dialog_pick', async (ev) => {
+      if (ev?.path) this.pathHints.remember(ev.path, 'open_file_dialog', { process: ev.process, pid: ev.pid });
       const ai = identifyAiProcess(ev.process);
       if (!ai) return;
       // Same eligibility gate the attachment-chip watcher already applies
@@ -1587,6 +1990,20 @@ export class OsMonitor extends EventEmitter {
     // (the case where the user dragged a file from Explorer onto the
     // AI window — no clipboard write, no file dialog).
     this.attachmentWatcher.on('attachment_appeared', async (ev) => {
+      if (ev?.path) this.pathHints.remember(ev.path, 'attachment_chip', { process: ev.process });
+      // The ENFORCING composer census owns this app's draft attachments (the M365
+      // Copilot app): the census holds and reports them, keyed
+      // per conversation. This older chip route would only double-hold and
+      // double-report the same file, so it stands down -- it keeps covering
+      // every app the census does not.
+      if (OsMonitor.censusOwnsProcess(ev.process)) {
+        // ...but keep the chip route's IMMEDIATE provisional arm (finding 15):
+        // the census may not have produced this conversation's first snapshot
+        // yet. Short-lived, and handed over to the census on its first readable
+        // snapshot for this app (#releaseLegacyProvisional).
+        if (this.running?.dlp && ev.filename) this.#armLegacyProvisional(ev.filename, ev.process);
+        return;
+      }
       const ai = identifyAiProcess(ev.process);
       if (!ai) return;
 
@@ -1662,7 +2079,7 @@ export class OsMonitor extends EventEmitter {
           log: this.log,
         });
         if (!fileEvent) {
-          if (scannable) this.#releaseAttachHold(ev.filename);
+          if (scannable) this.#releaseAttachHold(ev.filename, { processName: ev.process, egress: false });
           return;
         }
         // Which governed Teams conversation this came from, when it came from
@@ -1717,7 +2134,7 @@ export class OsMonitor extends EventEmitter {
           // TTL with the send needlessly stuck. A no-op when this file was
           // never held, and it releases ONLY this file: other flagged files
           // still in the map keep the hold in force.
-          this.#releaseAttachHold(ev.filename);
+          this.#releaseAttachHold(ev.filename, { processName: ev.process, egress: false });
         }
         const dedupKey = `file|${ev.path}|${ev.process}`;
         const lastFired = this.firedAt.get(dedupKey) ?? 0;
@@ -1749,7 +2166,7 @@ export class OsMonitor extends EventEmitter {
         // extraction that threw left Enter dead until the helper's own TTL
         // lapsed, with nothing on screen to explain it — and the refresh ticker
         // now keeps that TTL from lapsing at all, so the leak became permanent.
-        if (scannable) this.#releaseAttachHold(ev.filename);
+        if (scannable) this.#releaseAttachHold(ev.filename, { processName: ev.process, egress: false });
         this.log?.warn(`os_monitor: attachment event build failed: ${err?.message || err}`);
       }
     });
@@ -1765,7 +2182,7 @@ export class OsMonitor extends EventEmitter {
     // single-slot version released EVERYTHING here, so removing a clean
     // attachment unblocked a send that a sensitive one was still holding.
     this.attachmentWatcher.on('attachment_disappeared', (ev) => {
-      if (!this.#releaseAttachHold(ev.filename)) return;
+      if (!this.#releaseAttachHold(ev.filename, { processName: ev.process || null, egress: false })) return;
       this.log?.info(
         `os_monitor: attachment "${ev.filename}" removed — ` +
         (this.attachHolds.size === 0
@@ -1814,7 +2231,7 @@ export class OsMonitor extends EventEmitter {
     // through the same map the AI path uses: removing one attachment must not
     // unblock a send another, still-attached, flagged file is holding.
     this.attachmentWatcher.on('egress_attachment_disappeared', (ev) => {
-      if (!this.#releaseAttachHold(ev.filename)) return;
+      if (!this.#releaseAttachHold(ev.filename, { processName: ev.process || null, egress: true })) return;
       this.log?.info(
         `os_monitor: egress attachment "${ev.filename}" removed — `
         + (this.attachHolds.size === 0 ? 'send hold released' : `hold still active for ${this.attachHolds.size} other file(s)`)
@@ -1828,6 +2245,42 @@ export class OsMonitor extends EventEmitter {
     // user deliberately clicked Attach, so there is no "is this the compose
     // window or the reading pane" question to answer. Separate handler from
     // file_dialog_pick for the same reason as above.
+    // ── A Copilot PANE upload dialog (Word / Excel / PowerPoint / OneNote /
+    //    Outlook) ─────────────────────────────────────────────────────────────
+    // Routed by the helper BEFORE the egress route, so an Outlook Copilot pane
+    // upload is never an email attachment. On an ENFORCING census surface the
+    // path is only remembered: the chip that appears in the pane is what the
+    // census holds and reports. On a report-only pane it is reported here.
+    this.dialogWatcher.on('pane_file_dialog_pick', async (ev) => {
+      if (!ev?.path || !ev.process) return;
+      this.pathHints.remember(ev.path, 'pane_file_dialog', { process: ev.process, pid: ev.pid });
+      const panel = paneForProcess(ev.process);
+      if (!panel) return;
+      const cs = attachCensusSurfaceFor(ev.process, panel);
+      if (cs && cs.enforce && cs.verified) return;
+      const ident = identifyAiPanel(panel, ev.process) || { product: ev.process, vendor: null };
+      try {
+        const fileEvent = await buildFileUploadEvent({
+          path: ev.path, via: 'pane_file_dialog', service: ident.product, vendor: ident.vendor,
+          processName: ev.process, windowTitle: '', log: this.log, partialScan: true, isolate: true, quiet: true,
+        });
+        if (!fileEvent) return;
+        const dedupKey = `file|${ev.path}|${ev.process}`;
+        if (Date.now() - (this.firedAt.get(dedupKey) ?? 0) < FIRE_DEDUP_TTL_MS) return;
+        this.firedAt.set(dedupKey, Date.now());
+        fileEvent.surface = cs?.id || panel;
+        fileEvent.attachment_id = randomUUID();
+        fileEvent.enforcement = 'reported';
+        if (fileEvent.content_scan?.partial) fileEvent.hold_reason = 'partially_scanned';
+        fileEvent.agent_name = 'Microsoft 365 Copilot';
+        fileEvent.agent_scope = 'panel';
+        this.reporter.enqueue(fileEvent);
+        this.log?.info(`os_monitor: pane upload → ${ident.product} — [${fileEvent.file_class}, severity=${fileEvent.severity}, reported]`);
+      } catch (err) {
+        this.log?.warn(`os_monitor: pane file event build failed (${err?.code || err?.name || 'error'})`);
+      }
+    });
+
     this.dialogWatcher.on('egress_file_dialog_pick', async (ev) => {
       if (!identifyEgressSurface(ev.surface)) return;
       if (!ev.path) return;
@@ -1998,6 +2451,22 @@ export class OsMonitor extends EventEmitter {
     // Gated on BOTH fleet flags the prompt-watcher path lives under: dlp (the
     // evidence routes) AND clipboard_monitor (typed-prompt capture itself —
     // the watcher is stopped when it is off). Either off: nothing is uploaded.
+    // A respawned helper starts with an EMPTY hold table (it is a new process).
+    // Replay every key the moment it says 'ready' instead of waiting up to a
+    // third of the longest TTL for the refresh ticker — the same "a respawn
+    // starts in the same state" rule the evidence-dlp flag follows.
+    // The composer census -- see #onAttachCensus. Carries chip names: never logged.
+    this.enforcer.on('attachcensus', (ev) => {
+      try { this.#onAttachCensus(ev); }
+      catch (err) { this.log?.warn(`os_monitor: attachcensus handling failed: ${err?.message || err}`); }
+    });
+
+    this.enforcer.on('ready', () => {
+      if (this.attachHoldGroups.size === 0) return;
+      this.#syncAttachHold();
+      this.log?.info(`os_monitor: replayed ${this.attachHoldGroups.size} attachment hold key(s) to the respawned enforcer`);
+    });
+
     this.enforcer.on('prompt_text', (ev) => {
       if (!this.running.dlp || !this.running.clipboard_monitor) return;
       this.#reportPromptText(ev, { fromEnforcer: true });
@@ -2043,11 +2512,20 @@ export class OsMonitor extends EventEmitter {
       // NOT a pattern list, so it must not be reported as one; the browser
       // extension's equivalent (blocked_for:'platform') reports matches:[] too.
       const isPlatform = !!ev.platform_block;
-      const matches = isPlatform ? [] : patterns.map((p) => ({ pattern: p, severity: 'high', count: 1 }));
+      // An ATTACHMENT block reports the held file's REAL highest severity when
+      // this side knows it (the scan that armed the hold recorded it), instead
+      // of a flat 'high' that under-reports a critical file. Unknown -> 'high',
+      // the hold threshold, as before.
+      const fileSeverity = isAttachment ? (this.#heldSeverity(ev.process, ev.filename) || 'high') : 'high';
+      // The composer-census file this block is about, when there is one: its
+      // attachment_id pairs the block with the file_upload record, and its state
+      // drives the popup ("still checking" vs "held, and why").
+      const censusRec = isAttachment ? this.#censusRecordFor(ev.process, ev.filename) : null;
+      const matches = isPlatform ? [] : patterns.map((p) => ({ pattern: p, severity: fileSeverity, count: 1 }));
       // Named rather than written inline in the enqueue below, so the rewrite
       // pin can carry the SAME value instead of a second copy of the same
       // expression that could later drift from it.
-      const highestSeverity = isPlatform ? 'critical' : 'high';
+      const highestSeverity = isPlatform ? 'critical' : fileSeverity;
       const agentName = ev.blocked_agent || ai.product;
       // The access-exception key — see blockToolHost(), which the Request
       // Access flow below shares so the two can never resolve a different host.
@@ -2095,7 +2573,7 @@ export class OsMonitor extends EventEmitter {
         // the outcome overwrite the block (see dlp.js's correlation_id note).
         // Omitted when there is no block_id (a non-rewritable block, which can
         // never have a redact to pair with).
-        client_event_id: ev.block_id || undefined,
+        client_event_id: censusRec?.attachmentId || ev.block_id || undefined,
       });
       // Everything the enforcement_redact record will need if the user takes the
       // Tokenize & Send offer this block just made. Pinned only when the block
@@ -2126,20 +2604,18 @@ export class OsMonitor extends EventEmitter {
         // already tells the user the app is blocked.
         if (isPlatform) {
           // skip toast for platform blocks
+        } else if (isAttachment && !ev.filename) {
+          // the first-census pending hold: the popup says "still checking"; a
+          // toast naming no file would say nothing useful
         } else this.toast.show(isAttachment ? {
           title: `${ai.product} - attachment blocked`,
           message: `Send blocked: "${ev.filename}" contains ${ev.patterns}\n` +
-            `Remove the attachment to send. If the app already uploaded it on attach, this only stops it from being used in the conversation.` +
-            // HOST APPS: one extra sentence, and it names a real gap rather
-            // than glossing it. UpdateSendRect returns early for every host app
-            // (a descendant-wide UIA search of a Teams window is too expensive,
-            // and its send button is not reliably locatable), so the mouse hook
-            // has no rectangle to swallow a click in — Enter is covered, the
-            // Send button is not. Saying "blocked" without that qualifier would
-            // be the overclaim this file's copy rules exist to prevent.
-            (isHostAppProcess(ev.process)
-              ? `\nPressing Enter is blocked; clicking Send is not yet covered — remove the attachment to be safe.`
-              : ''),
+            `Remove the attachment to send. If the app already uploaded it on attach, this only stops it from being used in the conversation.`,
+            // The old HOST-APP sentence ("clicking Send is not yet covered") is
+            // gone because it stopped being true: the panel-scoped send-button
+            // search (UpdateSendRect's bounded ancestor walk) now finds the send
+            // arrow of a governed Teams conversation and of the Office Copilot
+            // pane, and the mouse hook swallows it while the hold is in force.
         } : {
           title: `${ai.product} - BLOCKED`,
           message: `Send blocked: prompt contains ${ev.patterns}\n` +
@@ -2168,6 +2644,15 @@ export class OsMonitor extends EventEmitter {
         process_name: ev.process || '',
         panel: ev.panel || '',
         block_scope: ev.block_scope || '',
+        // Attachment popup state (composer census): 'scanning' while the file is
+        // still being checked, 'held' once decided; the reason; and whether the
+        // app already uploaded a cloud copy on attach (all census surfaces do).
+        // An attachment block with NO file named is the helper's first-census
+        // pending hold (a governed conversation whose attachments are still
+        // being read): "still checking".
+        attach_state: censusRec ? censusRec.state : (isAttachment && !ev.filename ? 'scanning' : ''),
+        hold_reason: censusRec?.holdReason || '',
+        cloud_copy: !!censusRec,
       })));
 
       // ── The Tokenize & Send offer, for the CLI agent ──────────────────────
@@ -2325,6 +2810,18 @@ export class OsMonitor extends EventEmitter {
     this.enforcer.on('govstate', (ev) => {
       const active = !!ev.active;
       const processName = String(ev.process || '').trim();
+      // scope "pane": an Office / Outlook Copilot pane. Its own state, and it
+      // arms ONLY the file-dialog watcher's pane route -- never Teams' host arms.
+      if (ev.scope === 'pane') {
+        const prevPane = this.paneGoverned;
+        this.paneGoverned = active && processName
+          ? { process: processName, pid: Number(ev.pid) || 0, panel: String(ev.panel || ''), scope: 'pane', hwnd: Number(ev.hwnd) || 0 }
+          : null;
+        if (prevPane?.process && prevPane.process !== this.paneGoverned?.process) this.dialogWatcher.paneArm?.(prevPane.process, false);
+        if (this.paneGoverned) this.dialogWatcher.paneArm?.(this.paneGoverned.process, true, this.paneGoverned.hwnd);
+        else if (processName) this.dialogWatcher.paneArm?.(processName, false);
+        return;
+      }
       const previous = this.hostGoverned;
       if (active && processName) {
         this.hostGoverned = {

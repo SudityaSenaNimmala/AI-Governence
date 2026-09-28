@@ -2201,6 +2201,84 @@ export function buildAiPanelConfig() {
 // replacing them: LoadAgentSurfaces branches on `read`, so an entry that does
 // not set it (m365_copilot) ships exactly the payload it always did, with the
 // title fields present and empty and read by nothing.
+// ── ATTACH_CENSUS_SURFACES — "which files are attached to this composer's
+//    draft right now" (the composer census, 2026-09-28) ─────────────────────
+//
+// The enforcer reads a governed composer's OWN draft-attachment area (a
+// background, bounded UIA walk off the poll thread) and reports the chip NAMES
+// to index.js, which holds the send for as long as a sensitive file stays
+// attached. PRIVACY: only while the surface is governed and first-hand (the
+// same gate as govstate / the evidence routes), only AutomationId / ClassName
+// plus the Names of attachment chips / dismiss buttons inside the composer's
+// own container, and the names are never logged.
+//
+// `style` selects the chip shape; `enforce` + `verified` (a statement of FACT:
+// a human watched it work) arm the HOLD. Unarmed entries are REPORT-ONLY: the
+// census still runs and files are reported, nothing is held.
+//
+// LIVE EVIDENCE, read-only UIA, 2026-09-28, secrets.txt attached (not sent):
+//
+//   M365 Copilot app (M365Copilot.exe; the content lives in a child process):
+//     composer Edit aid m365-chat-editor-target-element; its DIRECT parent is
+//     Group aid "m365-copilot-app-layout-main", which also holds the send button
+//     (NOT Named "Send" -- class tokens fai-SendButton / ChatInput__send).
+//     Draft attachments: ToolBar class token "fx-AttachmentList" Name
+//     "Attachments"; each chip a Group class token "fx-Attachment", AutomationId
+//     "SPO_<base64 id>" (the file is ALREADY uploaded to SharePoint/OneDrive at
+//     attach time), Name "secrets.txt"; child Button "fx-Attachment__primaryAction"
+//     Name "secrets.txt"; dismiss Button "fx-Attachment__dismissButton" Name
+//     "Remove attachment secrets.txt". MessageBar: "Uploading from device will
+//     send a copy to OneDrive (work/school)."
+//
+//   Word Copilot pane (WINWORD; composer in a child msedgewebview2 top-level
+//     Chrome_WidgetWin_1): composer parent Group aid "mainChat" (holds send).
+//     ToolBar class token "fai-AttachmentList" Name "Attachments"; chip primary
+//     Button "fai-Attachment__primaryAction" Name "txt secrets.txt secrets.txt
+//     upload finished" (format "<ext> <name> <name> <state>" -- the state suffix
+//     changes while uploading); dismiss Button "fai-Attachment__dismissButton"
+//     Name "Remove attachment secrets.txt". Same OneDrive MessageBar.
+//
+//   Teams agent 1:1 chat (ms-teams): composer Edit aid new-message-<guid>; its
+//     parent Group has NO buttons; the next ancestor, message-pane-layout-a11y,
+//     holds the WHOLE transcript + composer + send, so transcript chips must be
+//     excluded: SENT attachments live under Group aid "message-body-<ts>" ->
+//     Group aid "attachments-<ts>". The DRAFT chip is a Group Named
+//     "secrets 1.txt" (Teams RENAMED it -- secrets.txt already existed in the
+//     user's OneDrive: the displayed name is not the local filename, so a
+//     " N" suffix before the extension is stripped when resolving) with a child
+//     Text of the same name, followed by a Button Named just "Remove attachment"
+//     (no filename) and the "Attach files" toolbar button.
+//
+//   All three upload a copy to OneDrive/SharePoint ON ATTACH: holding the send
+//   stops the file reaching the AGENT, not the cloud copy. Copy must say so.
+export const ATTACH_CENSUS_SURFACES = [
+  { id: 'teams_agent_chat', procs: ['ms-teams'], panel: 'teams_composer', style: 'teams', enforce: true, verified: true },
+  { id: 'teams_copilot_tab', procs: ['ms-teams'], panel: 'teams_copilot_composer', style: 'fai', enforce: false, verified: false },
+  { id: 'm365_copilot_app', procs: ['M365Copilot'], panel: '', style: 'fx', enforce: true, verified: true },
+  { id: 'word_copilot_pane', procs: ['WINWORD'], panel: 'office_copilot_pane', style: 'fai', enforce: true, verified: true },
+  // Same pane, same Fluent chips, but never read live in these hosts: report-only.
+  { id: 'office_copilot_pane', procs: ['EXCEL', 'POWERPNT', 'ONENOTE', 'ONENOTEIM'], panel: 'office_copilot_pane', style: 'fai', enforce: false, verified: false },
+  { id: 'outlook_copilot_pane', procs: ['OUTLOOK', 'olk'], panel: 'outlook_copilot_pane', style: 'fai', enforce: false, verified: false },
+];
+
+export function buildAttachCensusConfig() {
+  return ATTACH_CENSUS_SURFACES.map((s) => ({
+    id: s.id, procs: s.procs.slice(), panel: s.panel || '', style: s.style,
+    enforce: s.enforce === true, verified: s.verified === true,
+  }));
+}
+
+// The census entry for a (process, panel) pair, or null. panel '' = not a panel.
+export function attachCensusSurfaceFor(processName, panelId) {
+  const proc = String(processName || '').replace(/\.exe$/i, '').trim().toLowerCase();
+  const panel = String(panelId || '');
+  for (const s of ATTACH_CENSUS_SURFACES) {
+    if ((s.panel || '') !== panel) continue;
+    if (s.procs.some((p) => p.toLowerCase() === proc)) return s;
+  }
+  return null;
+}
+
 export function buildAgentSurfaceConfig() {
   return AGENT_SURFACES.map((surface) => ({
     id: surface.id,

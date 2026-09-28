@@ -133,6 +133,9 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   fix is to stop trusting that attribute as an input and read flags only from
   the extension's own `chrome.storage.local`-backed cache.
 
+- [ ] **Require admin auth on DLP read routes (GET /dlp, /dlp/files, /dlp/:id/content — stored file/prompt content is readable without login)**
+  `server/src/routes/dlp.js` reads are open by design (the `requireAdminAuth` on `/dlp/:id/content` is commented out), and blocked files' content is uploaded and stored, so anyone who can reach the server can download sensitive files and prompts.
+
 ---
 
 ## P1 — broader OS / browser coverage
@@ -345,6 +348,9 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
 
 - [ ] **Format-preserving (reversible) encryption option alongside redact in Tokenize & Send**
   Today desktop masking is fixed labels; the proxy token vault is reversible but not format-preserving.
+
+- [ ] **Detect after the fact when a blocked file was sent anyway (e.g. it appears in the agent chat transcript)**
+  The planned M365 attachment hold stops sends while a sensitive file is attached, but touch/pen, screen-reader invokes or the panic hotkey can still get one through; nothing notices it landed.
 
 ---
 

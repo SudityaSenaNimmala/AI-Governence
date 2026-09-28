@@ -20,6 +20,7 @@ import { cacheStats, cacheClear, warmCache } from "./aiHubDemoCache";
 import { sanitizeReplayEvents } from "./replaySanitize";
 import { aliasResponse } from "./demoIdentity";
 import { createReplayHost, applyReplayIframeCsp } from "./rrwebHost";
+import { fileRowInScope, fileIsHeld, pairFileBlocks, mergeEventsById, attemptsLabel, fileReason } from "./dlpFileRows";
 import "./AIHub.css";
 
 const API = "/api/v1";
@@ -1686,6 +1687,7 @@ function surfaceKindBadge(row) {
 function DLPView() {
   const [summary,setS]=useState(null),[events,setEv]=useState(null),[files,setF]=useState(null),[e,setE]=useState(null);
   const [preview,setPreview]=useState(null);
+  const [fileBlockEvs,setFileBlockEvs]=useState(null); // severity-independent file-upload blocks; null = leg failed
   const [section,setSection]=useState(""); // "", "prompts", "files", "services"
   const [kind,setKind]=useState("");       // "" = both, else an EVENT_SURFACE_KINDS key
   const [openRows,setOpenRows]=useState(()=>new Set()); // grouped rows expanded to show their members
@@ -1709,7 +1711,12 @@ function DLPView() {
       tapMeta(apiFetchWithMeta("/dlp/summary"),addMeta).catch(()=>null),
       tapMeta(apiFetchWithMeta("/dlp?severity=high,critical&limit=2000"),addMeta).catch(()=>[]),
       tapMeta(apiFetchWithMeta("/dlp/files?limit=5000"),addMeta).catch(()=>[]),
-    ]).then(([s,ev,f])=>{setS(s);setEv(ev);setF(f)}).catch(x=>setE(x.message));
+      // Every file-upload block regardless of severity — a fail-closed hold
+      // (cloud file, unscanned) has no matches and so no severity, and never
+      // arrives in the high/critical leg above. Soft: on failure this is null
+      // and pairing falls back to the blocks the high/critical leg carries.
+      tapMeta(apiFetchWithMeta("/dlp?kind=enforcement_block&blocked_for=file_upload&limit=2000"),addMeta).catch(()=>null),
+    ]).then(([s,ev,f,fb])=>{setS(s);setEv(ev);setF(f);setFileBlockEvs(Array.isArray(fb)?fb:null)}).catch(x=>setE(x.message));
   },[]);
   if(e) return <Err msg={e}/>; if(!events) return <Loading/>;
 
@@ -1737,7 +1744,10 @@ function DLPView() {
   // feed Claude Usage, Conversations and the per-service breakdown. This is a
   // view-level scope, not a retention policy.
   const promptRows=allPrompts.filter(ev=>isHiCrit(ev.secret_class||ev.highest_severity));
-  const fileRows=allFiles.filter(f=>isHiCrit(f.severity||f.highest_severity));
+  // Files: high/critical PLUS every held (blocked) file — a fail-closed hold
+  // (cloud reference, unreadable file) can carry low or no severity, and a file
+  // the agent blocked must never be missing from this table.
+  const fileRows=allFiles.filter(fileRowInScope);
   // Grouped AFTER the severity narrowing, so a row never folds in a member the
   // table excludes — the expanded members are always exactly the rows shown, and
   // the "N events" count never disagrees with the table.
@@ -1750,6 +1760,13 @@ function DLPView() {
   const enforcementRows=(events||[]).filter(ev=>ENFORCEMENT_MEMBER_KINDS.has(ev.event_kind)).filter(inKind);
   const promptGroups=attachEnforcement(groupDlpEvents(promptRows),enforcementRows);
   const shownFileRows=fileRows;
+  // File-upload blocks (the "Send" the agent stopped) paired to the file they
+  // held — by correlation_id ⇄ attachment_id, else same machine + filename +
+  // service within ±10 min. Display only: never a row, never in any count.
+  // Merged with the dedicated file-block leg, deduped by id (mergeEventsById).
+  // Feeds ONLY this pairing — prompt grouping, cards and counts never see it.
+  const fileBlocks=pairFileBlocks(allFiles,mergeEventsById(events,fileBlockEvs).filter(inKind));
+  const fileAgent=r=>eventAgentName(r)||(fileBlocks.get(r.id)||[]).map(eventAgentName).find(Boolean)||null;
   // Grouping partitions promptRows, so summing members equals promptRows.length
   // — the cards below always count what the tables show.
   const shownPromptEvents=promptGroups.reduce((n,g)=>n+groupMembers(g).length,0);
@@ -1780,7 +1797,7 @@ function DLPView() {
     <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(4,1fr)"}}>
       <StatCard icon={<AlertTriangle size={18}/>} label="High / Critical" value={highCrit} hint="Total Flagged" color="#ef4444"/>
       <StatCard icon={<MessageSquare size={18}/>} label="Prompt Events" value={shownPromptEvents} hint="High & Critical" color="#0052e0" onClick={()=>toggle("prompts")}/>
-      <StatCard icon={<FileText size={18}/>} label="File Uploads" value={shownFileRows.length} hint="High & Critical" color="#f59e0b" onClick={()=>toggle("files")}/>
+      <StatCard icon={<FileText size={18}/>} label="File Uploads" value={shownFileRows.length} hint="High & Critical + Blocked" color="#f59e0b" onClick={()=>toggle("files")}/>
       <StatCard icon={<Server size={18}/>} label="AI Services" value={serviceCount} hint="Breakdown" color="#8b5cf6" onClick={()=>toggle("services")}/>
     </div>
 
@@ -1816,13 +1833,25 @@ function DLPView() {
     </div>}
 
     {section==="files"&&<div className="aihub_card">
-      <SectionHeader title="File Uploads" hint="High & Critical Severity Only"/>
+      <SectionHeader title="File Uploads" hint="High & critical, plus every blocked file"/>
       <DataTable onRow={r=>{ if(r.has_content) setPreview(r); }} columns={[
         {label:"Date & Time",hint:"When this file upload was captured.",render:r=><DateTimeCell d={r.occurred_at}/>},
         {label:"User",hint:"The employee this event is attributed to, resolved from the machine/session that captured it.",render:r=><UserCell row={r}/>},
-        {label:"Service",hint:"Which AI service this prompt or upload was sent to.",render:r=><ServiceCell row={r}/>},
+        {label:"Service",hint:"Which AI service this upload was sent to, exactly as the capturing agent named it (e.g. Microsoft Teams (agent), Word Copilot).",render:r=>{
+          const vendor=r.platform?.vendor;
+          return (<><div className="aihub_text_primary">{r.platform?.product||r.ai_service||"—"}</div>{vendor&&<div className="aihub_text_muted">{vendor}</div>}</>);
+        }},
+        {label:"Agent",hint:"Which agent on a host-app surface (e.g. a Teams or Word Copilot agent) this file was attached to. Blank when the service has no agent dimension.",render:r=>{
+          const agent=fileAgent(r);
+          return agent?<div className="aihub_text_primary aihub_dlp_agent_line" title={agent}>{agent}</div>:<span className="aihub_text_muted">—</span>;
+        }},
         {label:"Filename",hint:"The uploaded file's name, as captured at upload time.",render:r=><Mono>{r.metadata?.filename||"—"}</Mono>},
         {label:"File Type",hint:"The kind of file detected — document, image, spreadsheet, etc.",render:r=><Tag text={r.file_class||"—"}/>},
+        {label:"Action",hint:"Blocked: the desktop agent held this attachment so it could not be sent. Detected: the upload was recorded but not stopped. The count below is how many Send attempts on this file the agent stopped.",render:r=>{
+          const held=fileIsHeld(r), n=attemptsLabel((fileBlocks.get(r.id)||[]).length);
+          return (<><Badge text={held?"Blocked":"Detected"} color={held?"#ef4444":"#9ca3af"}/>{n&&<div className="aihub_text_muted">{n}</div>}</>);
+        }},
+        {label:"Reason",hint:"The sensitive-data patterns found in the file, or — for a file blocked without a full scan — why it was held (cloud file, partially scanned, could not be scanned, not found on disk).",render:r=><Mono>{fileReason(r)||"—"}</Mono>},
         {label:"Severity",hint:"The DLP severity assigned to this upload's content (low, medium, high, critical).",render:r=><SeverityBadge sev={r.severity||r.highest_severity}/>},
         {label:"",render:r=><ViewBtn has={r.has_content} onClick={()=>setPreview(r)}/>,right:true},
       ]} rows={shownFileRows} empty="No file upload events matching this filter." paginate={25}/>
@@ -5817,12 +5846,10 @@ function AccessRequestsView() {
                 </div>
                 {hostAppLine(r)}
                 {surfaceDetail(r)}
-                {/* Name the device too, but only when it adds something: on a
-                    machine with no detected user employee_name IS the hostname,
-                    and repeating it reads like two different facts. */}
+                {/* Requester only — the device name read as a second copy of the
+                    user's name (hostnames are usually the user's name). */}
                 <div className="aihub_text_muted" style={{marginBottom:6}}>
                   Requested by <strong>{r.employee_name}</strong>
-                  {r.hostname&&r.hostname!==r.employee_name&&<> on {r.hostname}</>}
                   {" · "}{relTime(r.submitted_at)}
                 </div>
                 {r.reason&&<div style={{fontSize:15.2,color:"#374151",background:"#f5f6f8",padding:"8px 12px",borderRadius:8,marginBottom:8}}>"{r.reason}"</div>}

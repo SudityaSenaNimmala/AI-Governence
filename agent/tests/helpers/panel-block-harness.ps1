@@ -535,8 +535,7 @@ function ResetState() {
   SetF '_blockTyped' $false
   SetF '_blockUia' $false
   SetF '_blockPaste' $false
-  SetF '_attachHoldActive' $false
-  SetF '_attachHoldProcess' ''
+  Call 'ClearAttachHolds' | Out-Null   # the keyed hold table (2026-09-28)
   SetF '_lastPasteTicks' ([long]0)
   # The govstate machine, and the per-tick host-governance fields
   # ApplyForegroundTick owns. Reset so each scenario starts from "nothing is

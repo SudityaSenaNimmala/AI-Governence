@@ -1027,25 +1027,45 @@ public static class CfaiEnforcer
     //      attachment chip is still present, released on attachment_disappeared,
     //      a clean scan, or TTL expiry (see CheckAttachHoldExpiry, called from
     //      the poll loop) if a crashed/hung parent stops refreshing it.
-    static volatile bool _attachHoldActive = false;
-    static string _attachHoldFilename = "";
-    static string _attachHoldPatterns = "";
-    static long _attachHoldExpiresAt = 0;
-    // WHICH APP the hold belongs to, as a bare process name.
     //
-    // The flag above used to be the whole state, with no process identity in it
-    // at all — so a hold armed for a flagged attachment in one app swallowed the
-    // next Enter in whatever app the user alt-tabbed to. A dead Enter in an
-    // unrelated window, with no toast and nothing on screen to explain it: the
-    // worst failure mode this file has, because it looks like the keyboard
-    // broke. AttachHoldActive() is the gate; every read of the raw flag that
-    // participates in a keystroke decision goes through it.
+    // ── A KEYED HOLD TABLE (2026-09-28, ROADMAP P0 "Per-process attach-hold
+    //    isolation") ─────────────────────────────────────────────────────────
     //
-    // EMPTY means "unbound", and unbound still counts. That is the fail-CLOSED
-    // direction and it is only reachable from a command that omitted the field
-    // (index.js always sends it): the alternative would be to silently stop
-    // holding a sensitive attachment because a field was missing.
-    static string _attachHoldProcess = "";
+    // Was ONE slot (a flag, a filename, a pattern string, a TTL, a process). A
+    // second app arming a hold REPLACED the first app's -- an Outlook email
+    // attachment silently released a Teams agent chat's hold -- and index.js had
+    // to clear its own map to match. Now every hold is its own entry, keyed on
+    //   holdKey = process|panel|surfaceKey          (AI / host-app surfaces)
+    //   holdKey = egress|process|surface            (mail-client egress holds)
+    // and "off" removes exactly ONE key. Each entry carries its own filename,
+    // pattern NAMES and TTL; nothing here is file content.
+    //
+    // Published as an IMMUTABLE ARRAY (copy-on-write under _attachHoldLock), so
+    // the keyboard/mouse hook threads read it lock-free and never see a
+    // half-updated entry.
+    //
+    // Binding (see AttachHoldMatches): a hold applies only while
+    //   * its process is the focused AI app (_app) -- EMPTY means unbound and
+    //     still counts, the fail-CLOSED direction for a command that omitted it;
+    //   * its panel is empty, OR equals the focused panel RIGHT NOW (_fgIsPanel,
+    //     _fgPanelId, _fgLeftAiTicks == 0) -- so a hold bound to an Office
+    //     Copilot pane never swallows Enter in the document body during the 3s
+    //     sticky window;
+    //   * its surface key is empty, OR equals _fgSurfaceKey (the open
+    //     conversation's hash -- not yet populated; the census round fills it).
+    // Egress holds never satisfy AttachHoldActive (they are about a mail send
+    // chord, see EgressHoldArmed), and AI holds never satisfy EgressHoldArmed.
+    internal sealed class AttachHoldEntry
+    {
+        public string Key = "", Process = "", Panel = "", SurfaceKey = "", Filename = "", Patterns = "";
+        public long ExpiresAt;
+        public bool Egress;
+    }
+    static readonly object _attachHoldLock = new object();
+    static volatile AttachHoldEntry[] _attachHolds = new AttachHoldEntry[0];
+    // The open conversation's opaque key, compared with a hold's SurfaceKey.
+    // Empty until the census round populates it; an empty hold key matches any.
+    static volatile string _fgSurfaceKey = "";
     // Platform → process name mapping for desktop enforcement.
     // MIRRORS ai-processes.js's PLATFORM_PROCS byte for byte; the two are held
     // in lockstep by agent/tests/ai-processes.test.mjs, which parses this block.
@@ -1635,6 +1655,17 @@ public static class CfaiEnforcer
         {
             try { LoadEgressSurfaces(egressSurfacesJson); }
             catch (Exception ex) { Emit("error", "", "", "egress_surfaces_load_failed", -1, -1, ex.GetType().Name); }
+        }
+        // The composer census catalog. Read here, from the environment, rather
+        // than widening Start()'s signature. A load failure leaves it EMPTY:
+        // no census at all, i.e. no attachment is held by the census route.
+        {
+            string censusJson = Environment.GetEnvironmentVariable("CFAI_ATTACH_CENSUS");
+            if (!string.IsNullOrEmpty(censusJson))
+            {
+                try { LoadAttachCensus(censusJson); }
+                catch (Exception ex) { Emit("error", "", "", "attach_census_load_failed", -1, -1, ex.GetType().Name); }
+            }
         }
         // The poll thread MUST be STA: UI Automation's FocusedElement read
         // returns null from an MTA thread for Chromium/Electron apps (Claude,
@@ -2315,20 +2346,21 @@ public static class CfaiEnforcer
     // ── WHY NOT AttachHoldActive() ITSELF ───────────────────────────────────
     //
     // Because it cannot answer this question, and finding that out is a real
-    // finding rather than a preference. AttachHoldActive() compares
-    // _attachHoldProcess against _app — and _app is assigned ONLY on a tick that
+    // finding rather than a preference. AttachHoldActive() compares a hold's
+    // process against _app — and _app is assigned ONLY on a tick that
     // established an AI surface. A mail client never does, so _app is never
     // "OUTLOOK" and AttachHoldActive() is structurally false for every egress
     // hold that will ever be armed. Calling it here would have shipped a code
     // path that can never fire.
     //
     // So the binding is re-stated against the process this decision is actually
-    // about, and AttachHoldActive() is left BYTE-FOR-BYTE UNCHANGED — every
-    // existing caller (the Enter path, the mouse path, ActivePatterns) keeps the
-    // exact answer it has today.
+    // about. Since the keyed hold table (2026-09-28) the two sides are also
+    // DISJOINT: only EGRESS-keyed holds ("egress|proc|surface") count here, and
+    // they never count in AttachHoldActive(), so an email attachment and an AI
+    // agent chat attachment can neither satisfy nor release each other.
     //
     // It is also STRICTER than AttachHoldActive() in one way, on purpose: an
-    // UNBOUND hold (empty _attachHoldProcess) returns true there and false here.
+    // UNBOUND hold (empty process) returns true there and false here.
     // "Some app somewhere has a sensitive file attached" must never be enough to
     // kill the send chord in a mail client.
     //
@@ -2342,11 +2374,27 @@ public static class CfaiEnforcer
         if (_egressHoldProcs.Count == 0) return false;
         string name = StripExe(proc).Trim();
         if (!_egressHoldProcs.Contains(name)) return false;
-        if (!_attachHoldActive) return false;
-        if (DateTime.UtcNow.Ticks >= _attachHoldExpiresAt) return false;
-        string owner = StripExe(_attachHoldProcess ?? "").Trim();
-        if (owner.Length == 0) return false;   // unbound — never enough here
-        return string.Equals(owner, name, StringComparison.OrdinalIgnoreCase);
+        return EgressHoldsFor(name).Count > 0;
+    }
+
+    // Unexpired EGRESS holds bound to this process (never an unbound one: "some
+    // app somewhere has a sensitive file attached" must never be enough to kill
+    // the send chord in a mail client). TTL checked inline -- this is a
+    // keystroke decision and the expiry sweep runs up to 150ms behind.
+    static List<AttachHoldEntry> EgressHoldsFor(string proc)
+    {
+        var r = new List<AttachHoldEntry>();
+        string name = StripExe(proc ?? "").Trim();
+        if (name.Length == 0) return r;
+        long now = DateTime.UtcNow.Ticks;
+        foreach (var h in _attachHolds)
+        {
+            if (!h.Egress || now >= h.ExpiresAt) continue;
+            string owner = StripExe(h.Process ?? "").Trim();
+            if (owner.Length == 0) continue;
+            if (string.Equals(owner, name, StringComparison.OrdinalIgnoreCase)) r.Add(h);
+        }
+        return r;
     }
 
     // Which AGENT_SURFACES entry hosts this process name, or null.
@@ -5902,12 +5950,12 @@ public static class CfaiEnforcer
     //       Hold the pinned block while that text box is open. Extends an
     //       EXISTING pin's expiry and nothing else — see HoldPendingRewrite.
     //
-    //   {"cmd":"attach_hold","state":"on"|"off","filename":"…","patterns":"…",
-    //    "ttl_ms":N,"process":"…"}
-    //       The attachment send-hold. `process` BINDS the hold to one app, so a
-    //       hold armed for an attachment in one window can no longer swallow the
-    //       next Enter in an unrelated one — see _attachHoldProcess. Still no
-    //       free text: a filename, pattern NAMES, a process name and a number.
+    //   {"cmd":"attach_hold","state":"on"|"off","key":"…","process":"…",
+    //    "panel":"…","surface_key":"…","filename":"…","patterns":"…","ttl_ms":N}
+    //       ONE entry of the keyed attachment send-hold table (see
+    //       AttachHoldEntry). `key` addresses it (default process|panel|
+    //       surface_key); "on" adds/re-states that key, "off" removes only it.
+    //       Still no free text: identifiers, a filename, pattern NAMES, a number.
     //
     //   {"cmd":"evidence_dlp","state":"on"|"off"}
     //       The fleet `dlp` flag for the AI-evidence routes — see
@@ -5946,23 +5994,20 @@ public static class CfaiEnforcer
                     else if (cmd == "attach_hold")
                     {
                         string state = ExtractJsonString(line, "state");
-                        if (state == "on")
-                        {
-                            _attachHoldFilename = ExtractJsonString(line, "filename");
-                            _attachHoldPatterns = ExtractJsonString(line, "patterns");
-                            // A bare PROCESS NAME, and the only new field on this
-                            // command. It binds the hold to one app — see
-                            // _attachHoldProcess / AttachHoldActive.
-                            _attachHoldProcess = ExtractJsonString(line, "process");
-                            long ttlMs = ExtractJsonNumber(line, "ttl_ms", 3000);
-                            _attachHoldExpiresAt = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(ttlMs).Ticks;
-                            _attachHoldActive = true;
-                        }
-                        else if (state == "off")
-                        {
-                            _attachHoldActive = false;
-                            _attachHoldFilename = ""; _attachHoldPatterns = ""; _attachHoldProcess = "";
-                        }
+                        // Bare identifiers only: a key, a process name, a panel
+                        // id, an opaque surface key, a filename, pattern NAMES
+                        // and a number. See the keyed hold table.
+                        // The caller's `key` is IGNORED (finding 16): the table
+                        // key is derived here from validated parts only.
+                        ApplyAttachHold(state,
+                            ExtractJsonString(line, "egress") == "true",
+                            ExtractJsonString(line, "egress_surface"),
+                            ExtractJsonString(line, "process"),
+                            ExtractJsonString(line, "panel"),
+                            ExtractJsonString(line, "surface_key"),
+                            ExtractJsonString(line, "filename"),
+                            ExtractJsonString(line, "patterns"),
+                            ExtractJsonNumber(line, "ttl_ms", 3000));
                     }
                     else if (cmd == "evidence_dlp")
                     {
@@ -6068,7 +6113,7 @@ public static class CfaiEnforcer
 
     // Is the attachment hold in force FOR THE APP THAT HAS FOCUS?
     //
-    // The process check is the whole point — see _attachHoldProcess. Compared
+    // The binding is the whole point — see AttachHoldMatches. The process is compared
     // against _app (the sticky foreground app name, the same field every other
     // block decision in this file is attributed to) case-insensitively, because
     // a process name arrives from Get-Process on one side and from
@@ -6080,11 +6125,106 @@ public static class CfaiEnforcer
     // patterns attribution (ActivePatterns).
     static bool AttachHoldActive()
     {
-        if (!_attachHoldActive) return false;
-        string owner = _attachHoldProcess ?? "";
-        if (owner.Length == 0) return true;   // unbound — see _attachHoldProcess
-        return string.Equals(owner, _app ?? "", StringComparison.OrdinalIgnoreCase);
+        // ...or a governed conversation whose FIRST census is still in flight
+        // (finding 14): briefly held, so a fast Enter cannot beat the first read.
+        return MatchingAttachHolds().Count > 0 || CensusPendingActive();
     }
+
+    // One hold's binding test -- see the keyed hold table's comment.
+    static bool AttachHoldMatches(AttachHoldEntry h, long now)
+    {
+        if (h == null || h.Egress || now >= h.ExpiresAt) return false;
+        string owner = h.Process ?? "";
+        if (owner.Length > 0 && !string.Equals(owner, _app ?? "", StringComparison.OrdinalIgnoreCase)) return false;
+        string panel = h.Panel ?? "";
+        if (panel.Length > 0)
+        {
+            if (!_fgIsPanel || _fgLeftAiTicks != 0) return false;
+            if (!string.Equals(panel, _fgPanelId ?? "", StringComparison.OrdinalIgnoreCase)) return false;
+        }
+        string sk = h.SurfaceKey ?? "";
+        if (sk.Length > 0 && !string.Equals(sk, _fgSurfaceKey ?? "", StringComparison.Ordinal)) return false;
+        return true;
+    }
+
+    static List<AttachHoldEntry> MatchingAttachHolds()
+    {
+        var r = new List<AttachHoldEntry>();
+        long now = DateTime.UtcNow.Ticks;
+        foreach (var h in _attachHolds) if (AttachHoldMatches(h, now)) r.Add(h);
+        return r;
+    }
+
+    // The union of pattern names / filenames across a set of holds, de-duplicated
+    // in order -- the block must never under-report what is holding it.
+    static string JoinHoldField(List<AttachHoldEntry> holds, bool patterns)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var parts = new List<string>();
+        foreach (var h in holds)
+        {
+            string v = patterns ? h.Patterns : h.Filename;
+            string[] seps = patterns ? new string[] { "," } : new string[] { ", " };
+            foreach (string raw in (v ?? "").Split(seps, StringSplitOptions.None))
+            {
+                string t = raw.Trim();
+                if (t.Length > 0 && seen.Add(t)) parts.Add(t);
+            }
+        }
+        return string.Join(patterns ? "," : ", ", parts.ToArray());
+    }
+    static string AttachHoldPatterns() { return JoinHoldField(MatchingAttachHolds(), true); }
+    static string AttachHoldFilenames() { return JoinHoldField(MatchingAttachHolds(), false); }
+
+    // One key part, validated: no separator, no control characters, bounded.
+    static string HoldKeyPart(string v)
+    {
+        var sb = new StringBuilder();
+        foreach (char c in (v ?? "").Trim()) { if (c == '|' || c < 0x20 || c == 0x7f) continue; sb.Append(c); if (sb.Length >= 128) break; }
+        return sb.ToString();
+    }
+
+    // The table key, built ONLY from validated parts (finding 16): an egress hold
+    // is egress|process|surface, every other hold process|panel|surfaceKey.
+    static string AttachHoldKey(bool egress, string egressSurface, string process, string panel, string surfaceKey)
+    {
+        string proc = HoldKeyPart(StripExe(process ?? ""));
+        if (egress) return "egress|" + proc + "|" + HoldKeyPart(egressSurface);
+        return proc + "|" + HoldKeyPart(panel) + "|" + HoldKeyPart(surfaceKey);
+    }
+
+    // The ONE mutator of the table (stdin thread; the expiry sweep and the
+    // harness reset go through ReplaceAttachHolds). "on" adds or re-states ONE
+    // key; "off" removes ONE key. Anything else is ignored.
+    static void ApplyAttachHold(string state, bool egress, string egressSurface, string process, string panel, string surfaceKey,
+                                string filename, string patterns, long ttlMs)
+    {
+        if (state != "on" && state != "off") return;
+        string k = AttachHoldKey(egress, egressSurface, process, panel, surfaceKey);
+        lock (_attachHoldLock)
+        {
+            var next = new List<AttachHoldEntry>();
+            foreach (var h in _attachHolds) if (!string.Equals(h.Key, k, StringComparison.OrdinalIgnoreCase)) next.Add(h);
+            if (state == "on")
+            {
+                if (ttlMs <= 0) ttlMs = 3000;
+                next.Add(new AttachHoldEntry
+                {
+                    Key = k,
+                    Process = HoldKeyPart(StripExe(process ?? "")),
+                    Panel = HoldKeyPart(panel),
+                    SurfaceKey = HoldKeyPart(surfaceKey),
+                    Filename = filename ?? "",
+                    Patterns = patterns ?? "",
+                    ExpiresAt = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(ttlMs).Ticks,
+                    Egress = egress,
+                });
+            }
+            _attachHolds = next.ToArray();
+        }
+    }
+
+    static void ClearAttachHolds() { lock (_attachHoldLock) { _attachHolds = new AttachHoldEntry[0]; } }
 
     // Block is active for Enter/send decisions: typed-buffer (fresh) or
     // paste-in-session.  UIA is intentionally excluded — see comment above.
@@ -6136,7 +6276,7 @@ public static class CfaiEnforcer
     // Precedence matches the Enter path's `pats` chain, platform block first —
     // otherwise a send-button click on a fully blocked app emitted a block with
     // an empty patterns field and no way for the Node side to tell what it was.
-    static string ActivePatterns() { return _fgIsBlocked ? _blockedReason : AttachHoldActive() ? _attachHoldPatterns : _blockTyped ? _typedPatterns : _blockUia ? _uiaPatterns : ""; }
+    static string ActivePatterns() { return _fgIsBlocked ? _blockedReason : AttachHoldActive() ? AttachHoldPatterns() : _blockTyped ? _typedPatterns : _blockUia ? _uiaPatterns : ""; }
 
     // Mouse hook — swallows a click on the send button while a block is active.
     // Only acts on left-button down/up that land inside the cached send-button
@@ -6196,7 +6336,11 @@ public static class CfaiEnforcer
                     bool inRect = ClickInSendRect(x, y);
                     if (!(_fgIsAi && inRect) && HeldRectHit(x, y))
                     {
-                        return (IntPtr)1;   // the blocked panel's arrow, host not in front
+                        // An ATTACH-held click is reported (the user needs to be
+                        // told why nothing happened); the platform kind stays
+                        // silent -- its Request Access dialog is already open.
+                        if (_heldIsAttach && msg == WM_LBUTTONDOWN) EmitHeldAttachBlock();
+                        return (IntPtr)1;   // the blocked / held panel's arrow
                     }
                     if (_fgIsAi && inRect)
                     {
@@ -6389,12 +6533,22 @@ public static class CfaiEnforcer
                     // press is decided independently by EgressHoldArmed), so the
                     // writes bought nothing and cost cross-surface isolation.
                     // agent/tests/os-monitor-egress-qa.test.mjs pins this.
+                    // Enter / Space on a composer's own SEND BUTTON while that
+                    // draft holds a held file (finding 10): keyboard activation
+                    // of Send is a send. Checked before everything below because
+                    // focus on a button is not a governed composer tick.
+                    if ((vk == VK_RETURN || vk == 0x20) && !ctrl && !alt && CensusCarrySendHeld())
+                    {
+                        EmitAttachBlockFor(_censusCarryApp, _censusCarryKey);
+                        return (IntPtr)1;
+                    }
                     if (EgressHoldArmed(_fgProcAny) && MatchesEgressChord(_fgProcAny, vk, ctrl, alt, shift))
                     {
                         string egressProc = StripExe(_fgProcAny ?? "").Trim();
                         string egressId = "";
                         _egressIdByProc.TryGetValue(egressProc, out egressId);
-                        EmitEgressBlock(egressProc, egressId ?? "", _attachHoldPatterns, _attachHoldFilename);
+                        List<AttachHoldEntry> egressHolds = EgressHoldsFor(egressProc);
+                        EmitEgressBlock(egressProc, egressId ?? "", JoinHoldField(egressHolds, true), JoinHoldField(egressHolds, false));
                         return (IntPtr)1;   // swallow — same return convention as the block below
                     }
 
@@ -6450,7 +6604,7 @@ public static class CfaiEnforcer
                             bool recentPaste = (DateTime.UtcNow.Ticks - _lastPasteTicks) < PASTE_WINDOW;
                             bool clipBlock = recentPaste && _blockPaste;
                             // A sensitive-file attachment holds the send exactly
-                            // like a flagged prompt does — see _attachHoldActive's
+                            // like a flagged prompt does — see the keyed hold table's
                             // own comment for the provisional/confirmed story.
                             bool attachHold = AttachHoldActive();
                             // Cooldown: if a block fired recently, keep blocking
@@ -6464,15 +6618,29 @@ public static class CfaiEnforcer
                             // different, enforcing surface had focus.
                             bool block = EnterBlockActive(attachHold, uiaBlock, clipBlock, cooldown);
                             string pats = _fgIsBlocked ? _blockedReason
-                                        : attachHold ? _attachHoldPatterns
+                                        : attachHold ? AttachHoldPatterns()
                                         : TypedBlockFresh() ? _typedPatterns
                                         : uiaBlock ? _uiaPatterns
                                         : cooldown ? _lastBlockPatterns
                                         : _pastePatterns();
                             if (block)
                             {
-                                _lastBlockFiredTicks = DateTime.UtcNow.Ticks;
-                                _lastBlockPatterns = pats;
+                                // The 30s cooldown is NOT stamped by a block the
+                                // attachment hold ALONE caused (2026-09-28). The
+                                // cooldown is read with no process binding by
+                                // EnterBlockActive / BlockActiveForMouse, so
+                                // stamping it here swallowed the next clean Enter
+                                // in ANY AI app for 30s, reported under the file's
+                                // pattern names -- the same leak the egress branch
+                                // above already refuses. The hold itself keeps the
+                                // send blocked for exactly as long as the file is
+                                // attached; it needs no cooldown.
+                                bool attachOnly = attachHold && !_fgIsBlocked && !TypedBlockFresh() && !uiaBlock && !clipBlock && !cooldown;
+                                if (!attachOnly)
+                                {
+                                    _lastBlockFiredTicks = DateTime.UtcNow.Ticks;
+                                    _lastBlockPatterns = pats;
+                                }
                                 // Ctrl+Alt+Enter override is intentionally NOT
                                 // honored for an attachment hold — that hotkey's
                                 // existing semantics are "send this prompt text
@@ -6654,7 +6822,7 @@ public static class CfaiEnforcer
             // one comparison and a return. It observes and decides nothing about
             // any existing block: all it does is rebuild _egressHoldProcs, which
             // is read by exactly one function (EgressHoldArmed).
-            try { UpdateForeground(); UpdateBlockedAgents(); UpdateBannerState(); UpdateGovState(); UpdatePaste(); UpdateUia(); UpdateSendRect(); UpdateHeldRect(); UpdatePendingRewrite(); CheckHeartbeat(); CheckAttachHoldExpiry(); UpdateModelRouting(); UpdateEgressPolicy(); }
+            try { UpdateForeground(); UpdateBlockedAgents(); UpdateBannerState(); UpdateGovState(); UpdatePaneGovState(); UpdateAttachCensus(); UpdatePaste(); UpdateUia(); UpdateSendRect(); UpdateHeldRect(); UpdatePendingRewrite(); CheckHeartbeat(); CheckAttachHoldExpiry(); UpdateModelRouting(); UpdateEgressPolicy(); }
             catch { }
             // The 150ms cadence above is unchanged; inside it we look at the
             // typed-buffer dirty flag every 30ms so the verdict trails the last
@@ -6685,11 +6853,17 @@ public static class CfaiEnforcer
     // tick — cheap (one volatile read + one comparison) when inactive.
     static void CheckAttachHoldExpiry()
     {
-        if (!_attachHoldActive) return;
-        if (DateTime.UtcNow.Ticks > _attachHoldExpiresAt)
+        var holds = _attachHolds;
+        if (holds.Length == 0) return;
+        long now = DateTime.UtcNow.Ticks;
+        bool any = false;
+        foreach (var h in holds) if (now > h.ExpiresAt) { any = true; break; }
+        if (!any) return;
+        lock (_attachHoldLock)
         {
-            _attachHoldActive = false;
-            _attachHoldFilename = ""; _attachHoldPatterns = ""; _attachHoldProcess = "";
+            var next = new List<AttachHoldEntry>();
+            foreach (var h in _attachHolds) if (now <= h.ExpiresAt) next.Add(h);
+            _attachHolds = next.ToArray();
         }
     }
 
@@ -7652,6 +7826,572 @@ public static class CfaiEnforcer
     //
     // Deliberately observes, never decides — modelled line for line on
     // UpdateBannerState, including its fast clear.
+    // ═══ THE COMPOSER ATTACHMENT CENSUS (2026-09-28) ═════════════════════════
+    //
+    // Which files a GOVERNED composer's draft holds right now, so index.js can
+    // hold the send for exactly as long as a sensitive file stays attached. See
+    // ATTACH_CENSUS_SURFACES in ai-processes.js for the live evidence.
+    //
+    // PRIVACY, in the order it is enforced:
+    //   * runs only for a catalogued surface that is GOVERNED and FIRST-HAND on
+    //     this tick (CensusGovernedNow -- the Teams half is exactly govstate's
+    //     _fgHostGoverned, so a human DM / group chat can never produce a census)
+    //     or, for the pane / app styles only, while a hold exists for the
+    //     surface key it last produced (focus moved onto a chip in the SAME
+    //     composer area);
+    //   * the walk is bounded and runs on its own background STA thread;
+    //   * it reads AutomationId / ClassName, and the Name ONLY of an attachment
+    //     chip's dismiss / primary button (and, for Teams, of the chip Group that
+    //     immediately precedes a "Remove attachment" button). Teams transcript
+    //     subtrees (message-body-* / attachments-*) are never entered;
+    //   * the names go to index.js on the attachcensus line and nowhere else --
+    //     never a log line, never a stderr diagnostic.
+    internal sealed class CensusSurface
+    {
+        public string Id = "", Panel = "", Style = "";
+        public HashSet<string> Procs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        public bool Enforce, Verified;
+    }
+    static volatile List<CensusSurface> _censusSurfaces = new List<CensusSurface>();
+
+    static void LoadAttachCensus(string json)
+    {
+        var serializer = new JavaScriptSerializer();
+        var raw = (object[])serializer.DeserializeObject(json);
+        var list = new List<CensusSurface>();
+        foreach (var item in raw)
+        {
+            var d = item as Dictionary<string, object>;
+            if (d == null) continue;
+            string style = JsStr(d, "style");
+            if (style != "teams" && style != "fai" && style != "fx") continue;
+            var cs = new CensusSurface { Id = JsStr(d, "id"), Panel = JsStr(d, "panel"), Style = style,
+                                         Enforce = JsBool(d, "enforce"), Verified = JsBool(d, "verified") };
+            object rp;
+            if (d.TryGetValue("procs", out rp) && rp != null)
+                foreach (var x in (IEnumerable)rp) { string v = StripExe(Convert.ToString(x) ?? "").Trim(); if (v.Length > 0) cs.Procs.Add(v); }
+            if (cs.Id.Length == 0 || cs.Procs.Count == 0) continue;
+            list.Add(cs);
+        }
+        _censusSurfaces = list;
+    }
+
+    static CensusSurface CensusSurfaceFor(string proc, string panelId)
+    {
+        string name = StripExe(proc ?? "").Trim();
+        if (name.Length == 0) return null;
+        foreach (var cs in _censusSurfaces)
+            if (string.Equals(cs.Panel, panelId ?? "", StringComparison.OrdinalIgnoreCase) && cs.Procs.Contains(name)) return cs;
+        return null;
+    }
+
+    // Is THIS tick a governed, first-hand census surface? The same gates the
+    // evidence routes and govstate apply, restated per kind of surface.
+    static CensusSurface CensusGovernedNow()
+    {
+        if (!_fgIsAi || _fgLeftAiTicks != 0 || Disarmed() || string.IsNullOrEmpty(_app)) return null;
+        if (_hostAppProcs.Contains(_app))
+        {
+            // Teams: governed == blocked or DLP-governed agent conversation.
+            if (!_fgHostGoverned || !_fgIsPanel) return null;
+            return CensusSurfaceFor(_app, _fgPanelId);
+        }
+        if (_ideProcs.Contains(_app))
+        {
+            // An Office / Outlook Copilot pane: focused, enforcing, content-licensed.
+            if (!_fgIsPanel || !_fgPanelEnforce || !_fgContentOk) return null;
+            return CensusSurfaceFor(_app, _fgPanelId);
+        }
+        if (_fgIsPanel) return null;
+        // A chat app (Microsoft 365 Copilot): reading its attachment area needs
+        // the same content licence the evidence routes need (security review
+        // 2026-09-28, finding 3) -- the fleet `dlp` flag.
+        if (!_evidenceDlpOn) return null;
+        return CensusSurfaceFor(_app, "");
+    }
+
+    static string Sha256Hex(string s)
+    {
+        using (var sha = System.Security.Cryptography.SHA256.Create())
+        {
+            byte[] h = sha.ComputeHash(Encoding.UTF8.GetBytes(s ?? ""));
+            var sb = new StringBuilder(h.Length * 2);
+            foreach (byte b in h) sb.Append(b.ToString("x2"));
+            return sb.ToString();
+        }
+    }
+
+    // ── Where the census reads (security review 2026-09-28, findings 4/6/7/10)
+    //
+    // The census ROOT (the composer's own container) is resolved on the POLL
+    // thread from the focused element, and that exact root -- not whatever has
+    // focus when a background thread gets round to it -- is what the read walks.
+    // No root (the focused element has no census-root ancestor: a Word document,
+    // an M365 search view) means no census and no surface key, so a hold can
+    // never match there.
+    internal sealed class CensusRootInfo
+    {
+        public AutomationElement Root;       // null in the offline harness
+        public string RootRid = "";          // the root's RuntimeId, joined
+        public bool FocusIsSend;             // the focused element is this root's send button
+    }
+    internal delegate CensusRootInfo CensusRootFinder(string style);
+    static CensusRootFinder _censusRootFinder = FindCensusRootLive;
+
+    static string RidString(AutomationElement el)
+    {
+        try { int[] r = el.GetRuntimeId(); return r == null ? "" : string.Join(".", Array.ConvertAll(r, x => x.ToString())); }
+        catch { return ""; }
+    }
+
+    static CensusRootInfo FindCensusRootLive(string style)
+    {
+        AutomationElement el = EffectiveFocusedElement();
+        if (el == null) return null;
+        var walker = TreeWalker.ControlViewWalker;
+        string rootAid = CensusRootAid(style);
+        AutomationElement cur = el;
+        for (int d = 0; d < 12 && cur != null; d++)
+        {
+            string aid = "";
+            try { aid = cur.Current.AutomationId ?? ""; } catch { }
+            if (string.Equals(aid, rootAid, StringComparison.Ordinal))
+            {
+                var info = new CensusRootInfo { Root = cur, RootRid = RidString(cur) };
+                if (info.RootRid.Length == 0) return null;
+                try
+                {
+                    if (el.Current.ControlType == ControlType.Button)
+                    {
+                        string nm = "", baid = "", help = "", cls = "";
+                        try { nm = el.Current.Name ?? ""; } catch { }
+                        try { baid = el.Current.AutomationId ?? ""; } catch { }
+                        try { help = el.Current.HelpText ?? ""; } catch { }
+                        try { cls = el.Current.ClassName ?? ""; } catch { }
+                        info.FocusIsSend = SendButtonRank(nm, baid, help) >= 3
+                            || ClassHasToken(cls, "fai-SendButton") || cls.IndexOf("ChatInput__send", StringComparison.Ordinal) >= 0;
+                    }
+                }
+                catch { }
+                return info;
+            }
+            try { cur = walker.GetParent(cur); } catch { cur = null; }
+        }
+        return null;
+    }
+
+    // The opaque per-conversation / per-pane key, hashed so neither a thread id,
+    // an agent name nor a RuntimeId leaves the process in the clear.
+    //   Teams:  the chat-header thread id of THIS composer's published evidence
+    //           (empty until known, so a key never flips mid-conversation);
+    //   panes:  pid + panel + the census ROOT's RuntimeId (the focused pane's own
+    //           container, not HostWebViewWindows()[0] -- finding 6);
+    //   M365:   pid + the root's RuntimeId + the agent this tick's read named.
+    static string CensusSurfaceKey(CensusSurface cs, uint pid, string rootRid)
+    {
+        if (cs == null || string.IsNullOrEmpty(rootRid)) return "";
+        if (cs.Style == "teams")
+        {
+            var ev = _teamsEv;
+            string aid = _tickComposerAid ?? "";
+            if (ev == null || ev.ThreadId.Length == 0 || aid.Length == 0 || !ev.Key.EndsWith("|" + aid, StringComparison.Ordinal)) return "";
+            return TeamsCensusKey(ev.ThreadId);
+        }
+        if (cs.Style == "fai") return "p:" + Sha256Hex(pid + "|" + cs.Panel + "|" + rootRid).Substring(0, 32);
+        string agent = _fgAgentOutcome == AgentReadOutcome.Named ? (_fgAgentName ?? "") : "";
+        return "m:" + Sha256Hex(pid + "|" + rootRid + "|" + agent).Substring(0, 32);
+    }
+    static string TeamsCensusKey(string threadId) { return "t:" + Sha256Hex("teams|" + (threadId ?? "")).Substring(0, 32); }
+
+    internal sealed class CensusSnapshot { public bool Readable; public List<string> Names = new List<string>(); }
+    internal delegate CensusSnapshot CensusReader(string style, AutomationElement root);
+    static CensusReader _censusReader = ReadCensusLive;
+
+    sealed class CensusCtx
+    {
+        public readonly CensusSurface Surface; public readonly string Key, App, RootRid; public readonly uint Pid;
+        public readonly AutomationElement Root;
+        public CensusCtx(CensusSurface s, string key, uint pid, string app, string rootRid, AutomationElement root)
+        { Surface = s; Key = key; Pid = pid; App = app; RootRid = rootRid; Root = root; }
+    }
+    static volatile CensusCtx _censusCtx = null;
+    static volatile bool _censusInFlight = false;
+    static long _censusStartedTicks = 0, _censusLastEmitTicks = 0;
+    static long _censusLastTargetTicks = 0;           // last tick the ctx's root was confirmed
+    static string _censusLastSig = "";
+    static readonly object _censusLock = new object();
+    static readonly long CENSUS_INTERVAL = TimeSpan.FromMilliseconds(600).Ticks;
+    static readonly long CENSUS_ROOT_INTERVAL = TimeSpan.FromMilliseconds(300).Ticks;
+    static readonly long CENSUS_HELD_REEMIT = TimeSpan.FromSeconds(2).Ticks;
+    static readonly long CENSUS_WATCHDOG = TimeSpan.FromSeconds(5).Ticks;
+    static readonly long CENSUS_TARGET_FRESH = TimeSpan.FromSeconds(1).Ticks;
+    const int CENSUS_NODE_CAP = 3000;
+    const int CENSUS_CLOSED_TICKS = 5;
+    static int _censusGen = 0;
+    static long _censusRootCheckedTicks = 0;
+    static CensusRootInfo _censusLastRoot = null;
+    static int _censusNoRootTicks = 0;
+    // Send-button carry (finding 10): the focused element is the census root's
+    // own send button, so Enter / Space on it is a send.
+    static volatile string _censusCarryKey = "";
+    static volatile string _censusCarryApp = "";
+    // The first-census gap (finding 14): a governed conversation whose key has
+    // no published census yet holds Enter briefly.
+    static volatile string _censusPendingKey = "";
+    static long _censusPendingUntil = 0;
+    static readonly long CENSUS_PENDING_MAX = TimeSpan.FromMilliseconds(1200).Ticks;
+
+    static bool HoldExistsForSurfaceKey(string key)
+    {
+        if (string.IsNullOrEmpty(key)) return false;
+        long now = DateTime.UtcNow.Ticks;
+        foreach (var h in _attachHolds)
+            if (!h.Egress && now < h.ExpiresAt && string.Equals(h.SurfaceKey, key, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    static bool CensusPendingActive()
+    {
+        string k = _censusPendingKey;
+        if (string.IsNullOrEmpty(k) || Disarmed()) return false;
+        if (DateTime.UtcNow.Ticks >= Interlocked.Read(ref _censusPendingUntil)) return false;
+        return string.Equals(k, _fgSurfaceKey ?? "", StringComparison.Ordinal);
+    }
+
+    // Keyboard hook: Enter / Space on the focused send button of a surface whose
+    // draft holds a held file, while that app is still in front.
+    static bool CensusCarrySendHeld()
+    {
+        string k = _censusCarryKey;
+        if (string.IsNullOrEmpty(k) || Disarmed()) return false;
+        if (!string.Equals(_fgProcAny ?? "", _censusCarryApp ?? "", StringComparison.OrdinalIgnoreCase)) return false;
+        return HoldExistsForSurfaceKey(k);
+    }
+
+    // Poll thread. Decides the context, fills _fgSurfaceKey, and starts (at most
+    // one) background read of the ROOT it resolved. Never walks the tree itself
+    // beyond the bounded ancestor climb in the root finder.
+    static void UpdateAttachCensus()
+    {
+        long now = DateTime.UtcNow.Ticks;
+        CensusSurface cs = CensusGovernedNow();
+        CensusCtx ctx = _censusCtx;
+        // A continuation candidate: not governed on this tick, but a hold exists
+        // for the context and the same process is in front. For Teams only the
+        // send-button carry may continue (other conversations look alike).
+        bool cont = cs == null && ctx != null && _fgPid == ctx.Pid && !Disarmed() && HoldExistsForSurfaceKey(ctx.Key);
+        CensusSurface target = cs ?? (cont ? ctx.Surface : null);
+        if (target == null)
+        {
+            _fgSurfaceKey = ""; _censusCarryKey = "";
+            if (ctx != null && !HoldExistsForSurfaceKey(ctx.Key)) _censusCtx = null;
+            return;
+        }
+        // The root, re-resolved at most every CENSUS_ROOT_INTERVAL.
+        CensusRootInfo ri = _censusLastRoot;
+        if (ri == null || (now - _censusRootCheckedTicks) >= CENSUS_ROOT_INTERVAL)
+        {
+            try { var f = _censusRootFinder; ri = f != null ? f(target.Style) : null; } catch { ri = null; }
+            _censusLastRoot = ri;
+            _censusRootCheckedTicks = now;
+        }
+        if (ri == null)
+        {
+            _fgSurfaceKey = ""; _censusCarryKey = "";
+            // A Word / Office pane closed with a file still held: after a few
+            // no-root ticks with the pane's webview gone, the draft died with the
+            // pane -- publish that (readable, empty, closed) and stop polling.
+            if (ctx != null && ctx.Surface.Style == "fai" && _fgPid == ctx.Pid)
+            {
+                bool gone = true;
+                try { var w = HostWebViewWindows(ctx.Pid); gone = w == null || w.Length == 0; } catch { gone = true; }
+                if (gone && ++_censusNoRootTicks >= CENSUS_CLOSED_TICKS)
+                {
+                    var closed = new CensusSnapshot { Readable = true };
+                    lock (_censusLock) { EmitAttachCensus(ctx, true, closed.Names, true); EmitAttachCensus(ctx, true, closed.Names, true); _censusLastSig = ""; }
+                    _censusCtx = null; _censusNoRootTicks = 0;
+                }
+            }
+            return;
+        }
+        _censusNoRootTicks = 0;
+        string key;
+        if (cs != null) key = CensusSurfaceKey(cs, _fgPid, ri.RootRid);
+        else key = (ctx != null && string.Equals(ctx.RootRid, ri.RootRid, StringComparison.Ordinal)) ? ctx.Key : "";
+        if (key.Length == 0) { _fgSurfaceKey = ""; _censusCarryKey = ""; return; }
+        if (cs == null && target.Style == "teams")
+        {
+            // Teams continuation is the send-button carry ONLY: no reads.
+            _fgSurfaceKey = "";
+            _censusCarryKey = ri.FocusIsSend ? key : ""; _censusCarryApp = ctx.App;
+            return;
+        }
+        if (ctx == null || !string.Equals(ctx.Key, key, StringComparison.Ordinal) || !string.Equals(ctx.RootRid, ri.RootRid, StringComparison.Ordinal))
+        {
+            bool fresh = ctx == null || !string.Equals(ctx.Key, key, StringComparison.Ordinal);
+            ctx = new CensusCtx(target, key, _fgPid, _app, ri.RootRid, ri.Root);
+            _censusCtx = ctx;
+            if (fresh && cs != null && target.Enforce && target.Verified)
+            {
+                _censusPendingKey = key;
+                Interlocked.Exchange(ref _censusPendingUntil, now + CENSUS_PENDING_MAX);
+            }
+        }
+        _fgSurfaceKey = key;
+        _censusCarryKey = ri.FocusIsSend ? key : ""; _censusCarryApp = ctx.App;
+        Interlocked.Exchange(ref _censusLastTargetTicks, now);
+        if (_censusInFlight && (now - _censusStartedTicks) < CENSUS_WATCHDOG) return;
+        if ((now - _censusStartedTicks) < CENSUS_INTERVAL) return;
+        _censusInFlight = true;
+        _censusStartedTicks = now;
+        int gen = Interlocked.Increment(ref _censusGen);
+        CensusCtx run = ctx;
+        var t = new Thread(() => CensusBackground(run, gen));
+        t.IsBackground = true;
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+    }
+
+    static void CensusBackground(CensusCtx ctx, int gen)
+    {
+        CensusSnapshot snap = null;
+        try { var r = _censusReader; snap = r != null ? r(ctx.Surface.Style, ctx.Root) : null; } catch { snap = null; }
+        if (snap == null) snap = new CensusSnapshot();
+        try { PublishCensus(ctx, snap); }
+        finally { if (gen == _censusGen) _censusInFlight = false; }
+    }
+
+    // Emit on a change, and every CENSUS_HELD_REEMIT while a hold exists for the
+    // key. RE-CHECKED before publishing (finding 4): the context is still this
+    // key and this root, the poll thread confirmed that root within the last
+    // second, the root element is still alive, and -- Teams -- the published
+    // thread id still hashes to this key. Anything else: dropped, never emitted.
+    static void PublishCensus(CensusCtx ctx, CensusSnapshot snap)
+    {
+        if (ctx.Root != null)
+        {
+            try { int p = ctx.Root.Current.ProcessId; if (!string.Equals(RidString(ctx.Root), ctx.RootRid, StringComparison.Ordinal)) return; }
+            catch { return; }
+        }
+        lock (_censusLock)
+        {
+            var cur = _censusCtx;
+            if (cur == null || !string.Equals(cur.Key, ctx.Key, StringComparison.Ordinal)
+                || !string.Equals(cur.RootRid, ctx.RootRid, StringComparison.Ordinal)) return;
+            long now = DateTime.UtcNow.Ticks;
+            if (now - Interlocked.Read(ref _censusLastTargetTicks) > CENSUS_TARGET_FRESH) return;
+            if (ctx.Surface.Style == "teams")
+            {
+                var ev = _teamsEv;
+                if (ev == null || ev.ThreadId.Length == 0 || !string.Equals(TeamsCensusKey(ev.ThreadId), ctx.Key, StringComparison.Ordinal)) return;
+            }
+            if (string.Equals(_censusPendingKey, ctx.Key, StringComparison.Ordinal)) _censusPendingKey = "";
+            var names = new List<string>(snap.Names ?? new List<string>());
+            names.Sort(StringComparer.Ordinal);
+            string sig = ctx.Key + "|" + (snap.Readable ? "1" : "0") + "|" + string.Join("\u0001", names.ToArray());
+            bool changed = !string.Equals(sig, _censusLastSig, StringComparison.Ordinal);
+            bool reemit = HoldExistsForSurfaceKey(ctx.Key) && (now - _censusLastEmitTicks) >= CENSUS_HELD_REEMIT;
+            if (!changed && !reemit) return;
+            _censusLastSig = sig;
+            _censusLastEmitTicks = now;
+            EmitAttachCensus(ctx, snap.Readable, names, false);
+        }
+    }
+
+    static void EmitAttachCensus(CensusCtx ctx, bool readable, List<string> names, bool closed)
+    {
+        var sb = new StringBuilder();
+        sb.Append("{\"kind\":\"attachcensus\"");
+        sb.Append(",\"process\":\"").Append(Esc(ctx.App ?? "")).Append("\"");
+        sb.Append(",\"pid\":").Append(ctx.Pid);
+        sb.Append(",\"panel\":\"").Append(Esc(ctx.Surface.Panel ?? "")).Append("\"");
+        sb.Append(",\"surface\":\"").Append(Esc(ctx.Surface.Id ?? "")).Append("\"");
+        sb.Append(",\"surface_key\":\"").Append(Esc(ctx.Key ?? "")).Append("\"");
+        sb.Append(",\"enforce\":").Append(ctx.Surface.Enforce && ctx.Surface.Verified ? "true" : "false");
+        sb.Append(",\"readable\":").Append(readable ? "true" : "false");
+        if (closed) sb.Append(",\"closed\":true");
+        sb.Append(",\"names\":[");
+        for (int i = 0; i < names.Count; i++) { if (i > 0) sb.Append(","); sb.Append("\"").Append(Esc(names[i])).Append("\""); }
+        sb.Append("]}");
+        lock (_emitLock) { Console.Out.WriteLine(sb.ToString()); Console.Out.Flush(); }
+    }
+
+    // ── The live read (background thread) ─────────────────────────────────
+    static string CensusRootAid(string style)
+    {
+        if (style == "teams") return "message-pane-layout-a11y";
+        if (style == "fx") return "m365-copilot-app-layout-main";
+        return "mainChat";
+    }
+
+    // "Remove attachment <name>" -> "<name>"; "" when the name is just the prefix.
+    internal static string CensusDismissName(string buttonName)
+    {
+        string n = (buttonName ?? "").Trim();
+        const string P = "Remove attachment";
+        if (!n.StartsWith(P, StringComparison.OrdinalIgnoreCase)) return null;
+        return n.Substring(P.Length).Trim();
+    }
+
+    // Walks the ROOT resolved on the poll thread. Panes / the M365 app: only the
+    // draft attachment ToolBar (class token fai-/fx-AttachmentList) beside the
+    // composer is read -- never a transcript chip (finding 8).
+    static CensusSnapshot ReadCensusLive(string style, AutomationElement root)
+    {
+        var snap = new CensusSnapshot();
+        if (root == null) return snap;
+        var walker = TreeWalker.ControlViewWalker;
+        try
+        {
+            if (style == "teams") return ReadTeamsDraftChips(root, walker, snap);
+            string token = style == "fx" ? "fx-Attachment" : "fai-Attachment";
+            string listToken = style == "fx" ? "fx-AttachmentList" : "fai-AttachmentList";
+            var bars = root.FindAll(TreeScope.Children,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ToolBar));
+            AutomationElement list = null;
+            foreach (AutomationElement b in bars)
+            {
+                string cls = "";
+                try { cls = b.Current.ClassName ?? ""; } catch { }
+                if (ClassHasToken(cls, listToken)) { list = b; break; }
+            }
+            if (list == null)
+            {
+                // Not a direct child in every build: one bounded descendant search
+                // for the ToolBar, still never reading a Name.
+                var all = root.FindAll(TreeScope.Descendants,
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ToolBar));
+                if (all.Count > CENSUS_NODE_CAP) return snap;
+                foreach (AutomationElement b in all)
+                {
+                    string cls = "";
+                    try { cls = b.Current.ClassName ?? ""; } catch { }
+                    if (ClassHasToken(cls, listToken)) { list = b; break; }
+                }
+            }
+            if (list == null) { snap.Readable = true; return snap; }   // no draft attachments at all
+            var btns = list.FindAll(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button));
+            if (btns.Count > CENSUS_NODE_CAP) return snap;   // unreadable, never "absent"
+            var dismiss = new List<string>(); var primary = new List<string>();
+            foreach (AutomationElement b in btns)
+            {
+                string cls = "";
+                try { cls = b.Current.ClassName ?? ""; } catch { }
+                bool isDismiss = ClassHasToken(cls, token + "__dismissButton");
+                bool isPrimary = !isDismiss && ClassHasToken(cls, token + "__primaryAction");
+                if (!isDismiss && !isPrimary) continue;
+                string nm = "";
+                try { nm = b.Current.Name ?? ""; } catch { continue; }
+                if (isDismiss) { string f = CensusDismissName(nm); if (!string.IsNullOrEmpty(f)) dismiss.Add(f); }
+                else if (nm.Trim().Length > 0) primary.Add(nm.Trim());
+            }
+            // The dismiss button names the file exactly; the primary label (Word:
+            // "<ext> <name> <name> <state>") is the fallback while it uploads.
+            snap.Names.AddRange(dismiss.Count > 0 ? dismiss : primary);
+            snap.Readable = true;
+        }
+        catch { snap.Readable = false; snap.Names.Clear(); }
+        return snap;
+    }
+
+    // Teams: a bounded control-view walk of the message pane that never enters
+    // a sent message (message-body-* / attachments-*). A draft chip is the Group
+    // immediately before a "Remove attachment" button (whose own Name carries no
+    // filename).
+    static CensusSnapshot ReadTeamsDraftChips(AutomationElement root, TreeWalker walker, CensusSnapshot snap)
+    {
+        var stack = new Stack<AutomationElement>();
+        stack.Push(root);
+        int visited = 0;
+        while (stack.Count > 0)
+        {
+            var node = stack.Pop();
+            if (++visited > CENSUS_NODE_CAP) { snap.Readable = false; snap.Names.Clear(); return snap; }
+            string aid = "";
+            try { aid = node.Current.AutomationId ?? ""; } catch { }
+            if (aid.StartsWith("message-body-", StringComparison.Ordinal) || aid.StartsWith("attachments-", StringComparison.Ordinal)) continue;
+            ControlType ct = null;
+            try { ct = node.Current.ControlType; } catch { }
+            if (ct == ControlType.Button)
+            {
+                string nm = "";
+                try { nm = node.Current.Name ?? ""; } catch { }
+                string f = CensusDismissName(nm);
+                if (f != null)
+                {
+                    if (f.Length == 0)
+                    {
+                        AutomationElement prev = null;
+                        try { prev = walker.GetPreviousSibling(node); } catch { prev = null; }
+                        if (prev != null)
+                        {
+                            ControlType pct = null;
+                            try { pct = prev.Current.ControlType; } catch { }
+                            if (pct == ControlType.Group) { try { f = (prev.Current.Name ?? "").Trim(); } catch { f = ""; } }
+                        }
+                    }
+                    if (!string.IsNullOrEmpty(f)) snap.Names.Add(f);
+                }
+                continue;   // a button's children are not chips
+            }
+            // Push children in reverse so document order is preserved.
+            var kids = new List<AutomationElement>();
+            AutomationElement c = null;
+            try { c = walker.GetFirstChild(node); } catch { c = null; }
+            while (c != null && kids.Count < 500) { kids.Add(c); try { c = walker.GetNextSibling(c); } catch { c = null; } }
+            for (int i = kids.Count - 1; i >= 0; i--) stack.Push(kids[i]);
+        }
+        snap.Readable = true;
+        return snap;
+    }
+
+    // ── govstate for the Office / Outlook Copilot PANES (scope "pane") ──────
+    // A second, independent state machine beside UpdateGovState's host-app one,
+    // so a pane can never arm (or disarm) Teams' host watchers. Node keeps it
+    // as paneGoverned and uses it to arm the file-dialog watcher's pane route.
+    static volatile bool _paneGovActive = false;
+    static long _paneGovHwnd = 0;
+    static uint _paneGovPid = 0;
+    static string _paneGovKey = "";
+    static void UpdatePaneGovState()
+    {
+        bool firstHand = _fgLeftAiTicks == 0;
+        bool want = _fgIsAi && firstHand && !Disarmed() && _fgIsPanel && _fgPanelEnforce && _fgContentOk
+            && !string.IsNullOrEmpty(_app) && _idePanelChildProcs.Contains(_app) && CensusSurfaceFor(_app, _fgPanelId) != null;
+        uint pid = _fgPid;
+        string key = (_app ?? "") + "|" + (_fgPanelId ?? "");
+        if (_paneGovActive)
+        {
+            if (!want || pid != _paneGovPid || !string.Equals(_paneGovKey, key, StringComparison.Ordinal))
+            {
+                string oldProc = _paneGovKey.Split('|')[0];
+                _paneGovActive = false; _paneGovPid = 0; _paneGovKey = "";
+                EmitGovState(false, oldProc, "pane", "", "", "", 0);
+            }
+            return;
+        }
+        if (!want) return;
+        _paneGovActive = true; _paneGovPid = pid; _paneGovKey = key;
+        // The pane's OWN webview window (finding 11): the top-level
+        // Chrome_WidgetWin_1 whose process owns the focused composer, so the
+        // file-dialog watcher can bind its pane-picker latch to that window.
+        long paneHwnd = 0;
+        try
+        {
+            var fe = EffectiveFocusedElement();
+            int fpid = fe != null ? fe.Current.ProcessId : 0;
+            foreach (var h in HostWebViewWindows(pid) ?? new IntPtr[0])
+            {
+                uint wp; GetWindowThreadProcessId(h, out wp);
+                if (fpid != 0 && wp == (uint)fpid) { paneHwnd = h.ToInt64(); break; }
+            }
+        }
+        catch { paneHwnd = 0; }
+        _paneGovHwnd = paneHwnd;
+        EmitGovState(true, _app, "pane", _fgPanelId, "", "", pid);
+    }
+
     static void UpdateGovState()
     {
         // FIRST-HAND ONLY, and it is the SAME term UpdateBannerState uses for
@@ -7730,6 +8470,7 @@ public static class CfaiEnforcer
             + ",\"panel\":\"" + Esc(panel ?? "") + "\""
             + ",\"agent\":\"" + Esc(agent ?? "") + "\""
             + ",\"agent_id\":\"" + Esc(agentId ?? "") + "\""
+            + (scope == "pane" && active ? ",\"hwnd\":" + _paneGovHwnd : "")
             + "}";
         lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }
@@ -8279,6 +9020,14 @@ public static class CfaiEnforcer
             try { aid = b.Current.AutomationId ?? ""; } catch { }
             try { help = b.Current.HelpText ?? ""; } catch { }
             int rank = SendButtonRank(name, aid, help);
+            if (rank == 0)
+            {
+                // Measured live 2026-09-28: the M365 Copilot app's send button is
+                // not Named "Send" -- only its class says so.
+                string cls = "";
+                try { cls = b.Current.ClassName ?? ""; } catch { }
+                if (ClassHasToken(cls, "fai-SendButton") || cls.IndexOf("ChatInput__send", StringComparison.Ordinal) >= 0) rank = 3;
+            }
             if (rank <= bestRank) continue;
             System.Windows.Rect r;
             try { r = b.Current.BoundingRectangle; } catch { continue; }
@@ -8368,27 +9117,100 @@ public static class CfaiEnforcer
 
     static void DropHeldRect() { Interlocked.Exchange(ref _heldUntilTicks, 0); }
 
+    // ── The ATTACH-held rect (2026-09-28) ─────────────────────────────────
+    // The same held rect, armed by an ATTACHMENT hold instead of a platform
+    // block: drag a file in from Explorer and Explorer stays the foreground, so
+    // the click on the send arrow that follows reaches the host with nothing
+    // swallowing it. Kept for exactly as long as a hold exists for the surface
+    // key the rect was found under; dropped the moment another AI surface (or
+    // another conversation) is in front, and -- for a host app, whose other
+    // conversations a non-governed tick cannot tell apart -- the moment the host
+    // is in front on a non-AI tick. Unlike the platform kind it also applies
+    // while the host itself is in front (focus on a chip in the same pane).
+    static volatile bool _heldIsAttach = false;
+    static volatile string _heldSurfaceKey = "";
+
+    static bool AttachHoldExistsFor(string app, string surfaceKey)
+    {
+        long now = DateTime.UtcNow.Ticks;
+        foreach (var h in _attachHolds)
+        {
+            if (h.Egress || now >= h.ExpiresAt) continue;
+            if ((h.Process ?? "").Length > 0 && !string.Equals(h.Process, app ?? "", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!string.Equals(h.SurfaceKey ?? "", surfaceKey ?? "", StringComparison.Ordinal)) continue;
+            return true;
+        }
+        return false;
+    }
+
     // Poll thread, after UpdateSendRect's own decision for this tick.
     static void UpdateHeldRect()
     {
         long now = DateTime.UtcNow.Ticks;
         bool blockedPanelInFront = _hasRect && _rectRoot != IntPtr.Zero && _fgIsAi && _fgLeftAiTicks == 0
             && _fgIsPanel && _fgIsBlocked && PanelEnforceOk() && !Disarmed();
-        if (blockedPanelInFront)
+        bool attachInFront = !blockedPanelInFront && _hasRect && _fgIsAi && _fgLeftAiTicks == 0
+            && AttachHoldActive() && !Disarmed();
+        if (blockedPanelInFront || attachInFront)
         {
+            IntPtr root = _rectRoot;
+            if (root == IntPtr.Zero) { var f = _rootAtPoint; root = f != null ? f(_rx + _rw / 2, _ry + _rh / 2) : IntPtr.Zero; }
+            if (root == IntPtr.Zero) return;
             DropHeldRect();
             _heldRx = _rx; _heldRy = _ry; _heldRw = _rw; _heldRh = _rh;
-            _heldRoot = _rectRoot;
+            _heldRoot = root;
             _heldApp = _app ?? "";
+            _heldIsAttach = attachInFront;
+            _heldSurfaceKey = attachInFront ? (_fgSurfaceKey ?? "") : "";
             Interlocked.Exchange(ref _heldUntilTicks, now + HELD_RECT_TTL);
             return;
         }
         long until = Interlocked.Read(ref _heldUntilTicks);
         if (until == 0) return;
+        if (_heldIsAttach)
+        {
+            bool hostInFront = string.Equals(_fgProcAny ?? "", _heldApp ?? "", StringComparison.OrdinalIgnoreCase);
+            bool otherAiInFront = _fgIsAi && _fgLeftAiTicks == 0
+                && !(string.Equals(_app ?? "", _heldApp ?? "", StringComparison.OrdinalIgnoreCase)
+                     && string.Equals(_fgSurfaceKey ?? "", _heldSurfaceKey ?? "", StringComparison.Ordinal));
+            bool hostUnknownConversation = hostInFront && !(_fgIsAi && _fgLeftAiTicks == 0) && _hostAppProcs.Contains(_heldApp ?? "");
+            if (Disarmed() || !AttachHoldExistsFor(_heldApp, _heldSurfaceKey) || otherAiInFront || hostUnknownConversation)
+                DropHeldRect();
+            else
+                Interlocked.Exchange(ref _heldUntilTicks, now + HELD_RECT_TTL);   // lives as long as the hold
+            return;
+        }
         if (now > until || Disarmed()
             || string.Equals(_fgProcAny ?? "", _heldApp ?? "", StringComparison.OrdinalIgnoreCase)
             || (_fgIsAi && _fgLeftAiTicks == 0))
             DropHeldRect();
+    }
+
+    // The attachment block for a click swallowed on the ATTACH-held rect: the
+    // held surface's own holds (not the foreground's), same line shape EmitBlock
+    // writes for reason "attachment" so index.js needs nothing new to read it.
+    static void EmitHeldAttachBlock() { EmitAttachBlockFor(_heldApp, _heldSurfaceKey, true); }
+
+    static void EmitAttachBlockFor(string app, string surfaceKey, bool heldRect = false)
+    {
+        var holds = new List<AttachHoldEntry>();
+        long now = DateTime.UtcNow.Ticks;
+        foreach (var h in _attachHolds)
+        {
+            if (h.Egress || now >= h.ExpiresAt) continue;
+            if ((h.Process ?? "").Length > 0 && !string.Equals(h.Process, app ?? "", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!string.Equals(h.SurfaceKey ?? "", surfaceKey ?? "", StringComparison.Ordinal)) continue;
+            holds.Add(h);
+        }
+        string panel = holds.Count > 0 ? (holds[0].Panel ?? "") : "";
+        string json = "{\"kind\":\"block\",\"reason\":\"attachment\""
+            + ",\"process\":\"" + Esc(app ?? "") + "\""
+            + (panel.Length > 0 ? ",\"panel\":\"" + Esc(panel) + "\"" : "")
+            + ",\"patterns\":\"" + Esc(JoinHoldField(holds, true)) + "\""
+            + ",\"block_id\":\"\",\"rewritable\":false"
+            + ",\"filename\":\"" + Esc(JoinHoldField(holds, false)) + "\""
+            + (heldRect ? ",\"held_rect\":true" : ",\"send_key\":true") + "}";
+        lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }
 
     // Mouse hook: is (x, y) a click on the held rect of a blocked panel whose
@@ -8397,7 +9219,9 @@ public static class CfaiEnforcer
     {
         long until = Interlocked.Read(ref _heldUntilTicks);
         if (until == 0 || DateTime.UtcNow.Ticks > until || Disarmed()) return false;
-        if (string.Equals(_fgProcAny ?? "", _heldApp ?? "", StringComparison.OrdinalIgnoreCase)) return false;
+        // The platform kind only covers a host that is NOT in front; the attach
+        // kind also covers the host itself (focus on a chip in the same area).
+        if (!_heldIsAttach && string.Equals(_fgProcAny ?? "", _heldApp ?? "", StringComparison.OrdinalIgnoreCase)) return false;
         if (!(x >= _heldRx && x < _heldRx + _heldRw && y >= _heldRy && y < _heldRy + _heldRh)) return false;
         IntPtr want = _heldRoot;
         if (want == IntPtr.Zero) return false;
@@ -9399,7 +10223,7 @@ public static class CfaiEnforcer
             + ",\"block_id\":\"" + Esc(blockId) + "\""
             + ",\"rewritable\":" + (rewritable ? "true" : "false")
             + (rewritable ? ",\"preview\":\"" + Esc(preview) + "\"" : (whyNot.Length > 0 ? ",\"why_not\":\"" + Esc(whyNot) + "\"" : ""))
-            + (reason == "attachment" ? ",\"filename\":\"" + Esc(_attachHoldFilename) + "\"" : "")
+            + (reason == "attachment" ? ",\"filename\":\"" + Esc(AttachHoldFilenames()) + "\"" : "")
             // Identity of the block, for the Request Access dialog. No prompt
             // content — a platform id, a display name and an agent id, all of
             // them values an admin typed into the blocklist.

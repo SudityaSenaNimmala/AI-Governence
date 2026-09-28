@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path';
 
 import {
   buildIdeProcessConfig, buildAiPanelConfig, buildAgentSurfaceConfig, watcherProcessNames,
-  extractAgentNameFromTitle, agentSurfaceForProcess,
+  extractAgentNameFromTitle, agentSurfaceForProcess, buildAttachCensusConfig,
 } from '../src/os_monitor/ai-processes.js';
 
 const execFileAsync = promisify(execFile);
@@ -37,6 +37,7 @@ async function run() {
     await writeFile(join(dir, 'panels.json'), JSON.stringify(buildAiPanelConfig()));
     await writeFile(join(dir, 'surfaces.json'), JSON.stringify(buildAgentSurfaceConfig()));
     await writeFile(join(dir, 'aiprocs.txt'), watcherProcessNames().join(','));
+    await writeFile(join(dir, 'census.json'), JSON.stringify(buildAttachCensusConfig()));
     const { stdout } = await execFileAsync(
       'powershell',
       ['-NoProfile', '-NonInteractive', '-Sta', '-ExecutionPolicy', 'Bypass', '-File', HARNESS, '-Ps1', ENFORCER, '-PayloadDir', dir],
@@ -597,4 +598,166 @@ test('source: the Office pane read is gated, reads one heading Name, and the cat
   const gate = src.slice(src.indexOf('static bool OfficePaneAgentReadArmed('), src.indexOf('static AgentReadOutcome PaneHeadingOutcome('));
   assert.match(gate, /_agentScopedProcs\.Contains\(proc\) \|\| _dlpScopedProcs\.Contains\(proc\)/, 'privacy gate: a row must cover the process');
   assert.match(gate, /!hit\.Enforce/);
+});
+
+// -- The KEYED attach-hold table (2026-09-28, ROADMAP P0 "Per-process
+//    attach-hold isolation"), on the REAL helper code -------------------------
+async function holds(variant) {
+  const r = (await run()).find((x) => x.case === 'holds' && x.variant === variant);
+  assert.ok(r, `no holds '${variant}'`);
+  return r;
+}
+test('holds: an egress (Outlook) arm does not clear a Teams hold; clearing one key leaves the others; expiry is per key', { skip: !win }, async () => {
+  const r = await holds('egress_does_not_clear_teams');
+  assert.equal(r.keys, 'egress|OUTLOOK|outlook_classic;ms-teams||', 'both keys coexist');
+  assert.equal(r.teamsActive, true, 'the Teams hold survives the email arm');
+  assert.equal(r.egressOutlook, 1, 'the email hold arms the mail send chord');
+  assert.equal(r.outlookAiActive, false, 'an EGRESS hold never counts as an AI-surface hold');
+  assert.equal(r.afterEgressOff_keys, 'ms-teams||');
+  assert.equal(r.afterEgressOff_teamsActive, true, 'clearing the email key leaves Teams held');
+  assert.equal(r.afterEgressOff_egress, 0);
+  assert.equal(r.afterTeamsOff_keys, 'ChatGPT||', 'clearing Teams leaves ChatGPT');
+  assert.equal(r.afterTeamsOff_teamsActive, false);
+  assert.equal(r.chatgptActive, true);
+  assert.equal(r.afterExpiry_keys, 'ChatGPT||', 'only the expired key is swept');
+});
+test('holds: a panel-bound Office Copilot hold blocks in the pane, not in the document during the sticky window', { skip: !win }, async () => {
+  const r = await holds('panel_bound_office');
+  assert.equal(r.inPane, true);
+  assert.equal(r.paneEnter, 1, 'Enter in the pane is swallowed');
+  const blk = JSON.parse(r.paneEnterLines.split('\n')[0]);
+  assert.equal(blk.reason, 'attachment');
+  assert.equal(blk.filename, 'deck-secrets.env');
+  assert.equal(r.docSticky, true, 'the document tick is inside the 3s sticky window');
+  assert.equal(r.inDoc, false, 'the pane-bound hold does not apply in the document body');
+  assert.equal(r.docEnter, 0, 'Enter in the document passes');
+  assert.equal(r.legacyInDoc, true, 'contrast: an unbound-panel hold still applies there (unchanged)');
+  assert.equal(r.paneCooldownStamped, false);
+});
+test('holds: an attachment block stamps NO 30s cooldown -- the next clean Enter in another AI app passes', { skip: !win }, async () => {
+  const r = await holds('no_cooldown_after_attachment');
+  assert.equal(r.gptEnter, 1, 'the held app is blocked');
+  assert.equal(JSON.parse(r.gptEnterLines.split('\n')[0]).reason, 'attachment');
+  assert.equal(r.cooldownStamped, false, 'the attachment block must not stamp the unbound cooldown');
+  assert.equal(r.claudeEnter, 0, 'a clean Enter in Claude right after passes');
+  assert.equal(r.gptAgain, 1, 'and ChatGPT is still held while the file stays attached');
+});
+test('source: the Enter path stamps the cooldown only for a block not caused by the hold alone', async () => {
+  const src = await readFile(ENFORCER, 'utf8');
+  assert.ok(src.includes('bool attachOnly = attachHold && !_fgIsBlocked && !TypedBlockFresh() && !uiaBlock && !clipBlock && !cooldown;'));
+  const at = src.indexOf('bool attachOnly = attachHold');
+  assert.match(src.slice(at, at + 400), /if \(!attachOnly\)\s*\r?\n\s*\{\s*\r?\n\s*_lastBlockFiredTicks = DateTime\.UtcNow\.Ticks;/);
+});
+
+// -- The COMPOSER CENSUS on the real helper code (2026-09-28) ----------------
+async function censusCase(variant) {
+  const r = (await run()).find((x) => x.case === 'census' && x.variant === variant);
+  assert.ok(r, `no census '${variant}'`);
+  return r;
+}
+test('census privacy gate: a human Teams chat never produces a census, a read, or a surface key', { skip: !win }, async () => {
+  const r = await censusCase('human_chat');
+  assert.ok(!r.line, 'no attachcensus line');
+  assert.equal(r.reads, 0, 'the chip area is never even read');
+  assert.equal(r.surfaceKey, '');
+});
+test('census: the governed agent 1:1 emits names + a hashed per-conversation key, and fills _fgSurfaceKey', { skip: !win }, async () => {
+  const r = await censusCase('agent_chat');
+  const ev = JSON.parse(r.line);
+  assert.equal(ev.kind, 'attachcensus');
+  assert.equal(ev.process, 'ms-teams');
+  assert.equal(ev.panel, 'teams_composer');
+  assert.equal(ev.surface, 'teams_agent_chat');
+  assert.equal(ev.enforce, true);
+  assert.equal(ev.readable, true);
+  assert.deepEqual(ev.names, ['secrets 1.txt']);
+  assert.match(ev.surface_key, /^t:[0-9a-f]{32}$/, 'a SHA-256 of the thread id, never the id itself');
+  assert.equal(r.surfaceKey, ev.surface_key);
+  assert.equal(r.style, 'teams');
+  assert.ok(!r.again, 'an unchanged census inside the interval is not re-emitted');
+  assert.equal(r.reads, 1);
+});
+test('census: a surface-keyed hold applies only in its own conversation (suspend / resume)', { skip: !win }, async () => {
+  const r = await censusCase('surface_keyed_hold');
+  assert.equal(r.inOwn, true);
+  assert.equal(r.inOther, false, 'another conversation: suspended');
+  assert.equal(r.inNone, false, 'no governed conversation: suspended');
+  assert.equal(r.back, true, 'returning resumes');
+  assert.equal(r.exists, true);
+});
+test('census: a report-only surface (Excel pane) is read and marked enforce:false', { skip: !win }, async () => {
+  const ev = JSON.parse((await censusCase('excel_report_only')).line);
+  assert.equal(ev.surface, 'office_copilot_pane');
+  assert.equal(ev.enforce, false);
+  assert.match(ev.surface_key, /^p:[0-9a-f]{32}$/);
+  assert.deepEqual(ev.names, ['Remove attachment book.xlsx'].map((n) => n), 'names travel as read; Node parses the label');
+});
+test('attach-held rect: with Explorer in front after a drag-drop, the pane Send click is swallowed and reported until the hold goes', { skip: !win }, async () => {
+  const r = await censusCase('attach_held_rect');
+  assert.equal(JSON.parse(r.wordLine).surface, 'word_copilot_pane');
+  assert.equal(r.cached, true);
+  assert.equal(r.heldAttach, true);
+  assert.equal(r.clickWhileHeld, 1);
+  const blk = JSON.parse(r.clickLines.split('\n')[0]);
+  assert.equal(blk.reason, 'attachment');
+  assert.equal(blk.process, 'WINWORD');
+  assert.equal(blk.filename, 'deck.pdf');
+  assert.equal(blk.held_rect, true);
+  assert.equal(r.clickAfterRelease, 0, 'no hold -> the click passes');
+});
+
+// -- Security review 2026-09-28: the census fixes on the real helper code ----
+async function sec(variant) {
+  const r = (await run()).find((x) => x.case === 'sec' && x.variant === variant);
+  assert.ok(r, `no sec '${variant}'`);
+  return r;
+}
+test('SEC 3: the M365 app produces no census with the fleet dlp flag off, and does with it on', { skip: !win }, async () => {
+  const r = await sec('dlp_gate');
+  assert.ok(!r.offLine); assert.equal(r.offReads, 0);
+  assert.equal(JSON.parse(r.onLine).surface, 'm365_copilot_app');
+});
+test('SEC 4: a read that finishes after focus moved to a human chat is dropped, never published', { skip: !win }, async () => {
+  const r = await sec('race');
+  assert.equal(r.reads, 1, 'the read ran');
+  assert.ok(!r.line, 'but its result was not published');
+});
+test('SEC 6: two census roots in one process are two keys (a switch suspends, never releases)', { skip: !win }, async () => {
+  const r = await sec('root_keys');
+  assert.match(r.keyA, /^p:[0-9a-f]{32}$/); assert.match(r.keyB, /^p:[0-9a-f]{32}$/);
+  assert.notEqual(r.keyA, r.keyB);
+});
+test('SEC 7: no census root under focus -> no key -> a keyed M365 hold never matches; a closed pane publishes closed and stops', { skip: !win }, async () => {
+  const r = await sec('root_bound');
+  assert.equal(r.withRoot, true);
+  assert.equal(r.noRootKey, '');
+  assert.equal(r.noRoot, false, 'a document / search view is not held');
+  assert.equal(r.closedCount, 2, 'twice, so the positive-evidence release fires');
+  const ev = JSON.parse(r.closedLine);
+  assert.deepEqual([ev.readable, ev.closed, ev.names], [true, true, []]);
+  assert.equal(r.ctxAfter, true, 'polling stopped');
+});
+test('SEC 10: Space and Enter on the focused Send button of a held draft are swallowed; free once released', { skip: !win }, async () => {
+  const r = await sec('send_key');
+  assert.equal(r.space, 1); assert.equal(r.enter, 1);
+  const blk = JSON.parse(r.spaceLines.split('\n')[0]);
+  assert.deepEqual([blk.reason, blk.process, blk.filename, blk.send_key], ['attachment', 'WINWORD', 's.pdf', true]);
+  assert.equal(r.spaceAfterRelease, 0);
+});
+test('SEC 14: a new governed key holds Enter until its first census is published', { skip: !win }, async () => {
+  const r = await sec('pending');
+  assert.equal(r.before, true); assert.equal(r.after, false);
+});
+test('SEC 16: the hold-table key is built from validated parts only', { skip: !win }, async () => {
+  const r = await sec('key_parts');
+  assert.equal(r.k, 'msteams|px|kz', 'separators and control characters stripped from every part');
+  assert.equal(r.e, 'egress|OUTLOOK|outlookclassic');
+});
+test('SEC 8: pane / app reads stay inside the draft AttachmentList ToolBar', async () => {
+  const src = await readFile(ENFORCER, 'utf8');
+  const fn = src.slice(src.indexOf('static CensusSnapshot ReadCensusLive('), src.indexOf('static CensusSnapshot ReadTeamsDraftChips('));
+  assert.match(fn, /string listToken = style == "fx" \? "fx-AttachmentList" : "fai-AttachmentList";/);
+  assert.match(fn, /var btns = list\.FindAll\(TreeScope\.Descendants,/, 'buttons only from inside the list');
+  assert.match(fn, /if \(list == null\) \{ snap\.Readable = true; return snap; \}/);
+  assert.equal(/EffectiveFocusedElement\(\)/.test(fn), false, 'the read walks the ROOT it was handed');
 });

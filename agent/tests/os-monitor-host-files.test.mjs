@@ -486,7 +486,11 @@ test('a CLEAN file disappearing does not release the hold a FLAGGED file still n
   } finally { monitor.stop(); }
 });
 
-test('a hold armed in one app is replaced, not merged, when a different app attaches a file', async () => {
+test('holds in two apps are SEPARATE keys: the second app never replaces or merges the first', async () => {
+  // THE P0 FIX (2026-09-28). With one helper slot the Claude arm REPLACED the
+  // ChatGPT hold, so ChatGPT's still-attached sensitive file became sendable.
+  // Now each app's hold is its own key ("ChatGPT||", "Claude||"), each pushed
+  // with ONLY its own files, and releasing one leaves the other held.
   const { monitor, calls } = makeMonitor();
   const a = await tmp('one-secrets.env', SECRET_TEXT);
   const b = await tmp('two-secrets.env', SECRET_TEXT);
@@ -496,13 +500,68 @@ test('a hold armed in one app is replaced, not merged, when a different app atta
     assert.equal(monitor.attachHoldProcess, 'ChatGPT');
 
     monitor.attachmentWatcher.emit('attachment_appeared', { process: 'Claude', filename: 'two-secrets.env', path: b });
-    await waitFor(() => monitor.attachHoldProcess === 'Claude', { label: 'the Claude hold' });
-    // The helper has ONE slot, so the previous app's holds cannot still be in
-    // it. Reporting them under this app's name would be a lie.
-    assert.deepEqual([...monitor.attachHolds.keys()], ['two-secrets.env']);
-    const last = calls.attachHold.filter((c) => c.state === 'on').at(-1);
-    assert.equal(last.process, 'Claude');
-    assert.equal(last.filename, 'two-secrets.env');
+    await waitFor(() => monitor.attachHolds.get('two-secrets.env')?.severity, { label: 'the Claude hold' });
+    assert.equal(monitor.attachHoldProcess, 'Claude', 'the most recently armed app');
+    assert.deepEqual([...monitor.attachHolds.keys()].sort(), ['one-secrets.env', 'two-secrets.env'], 'BOTH still held');
+    assert.deepEqual([...monitor.attachHoldGroups.keys()].sort(), ['ChatGPT||', 'Claude||']);
+    for (const push of calls.attachHold.filter((c) => c.state === 'on')) {
+      if (push.key === 'ChatGPT||') { assert.equal(push.process, 'ChatGPT'); assert.equal(push.filename, 'one-secrets.env'); }
+      else if (push.key === 'Claude||') { assert.equal(push.process, 'Claude'); assert.equal(push.filename, 'two-secrets.env'); }
+      else assert.fail('unexpected hold key ' + push.key);
+    }
+
+    // Clearing ONE key leaves the other.
+    calls.attachHold.length = 0;
+    monitor.attachmentWatcher.emit('attachment_disappeared', { process: 'Claude', filename: 'two-secrets.env' });
+    assert.deepEqual(calls.attachHold.filter((c) => c.state === 'off').map((c) => c.key), ['Claude||']);
+    assert.deepEqual([...monitor.attachHolds.keys()], ['one-secrets.env']);
+    assert.ok(calls.attachHold.some((c) => c.state === 'on' && c.key === 'ChatGPT||'));
+    // A disappearance reported by the OTHER app cannot release it either.
+    monitor.attachmentWatcher.emit('attachment_disappeared', { process: 'Claude', filename: 'one-secrets.env' });
+    assert.deepEqual([...monitor.attachHolds.keys()], ['one-secrets.env']);
+  } finally { monitor.stop(); }
+});
+
+test('a respawned enforcer gets every hold key replayed the moment it says ready', async () => {
+  const { monitor, calls } = makeMonitor();
+  const a = await tmp('replay-a-secrets.env', SECRET_TEXT);
+  const b = await tmp('replay-b-secrets.env', SECRET_TEXT);
+  try {
+    monitor.attachmentWatcher.emit('attachment_appeared', { process: 'ChatGPT', filename: 'replay-a-secrets.env', path: a });
+    monitor.attachmentWatcher.emit('attachment_appeared', { process: 'Claude', filename: 'replay-b-secrets.env', path: b });
+    await waitFor(() => monitor.attachHolds.get('replay-a-secrets.env')?.severity && monitor.attachHolds.get('replay-b-secrets.env')?.severity,
+      { label: 'both holds confirmed' });
+    calls.attachHold.length = 0;
+    monitor.enforcer.emit('ready', { kind: 'ready' });
+    const keys = calls.attachHold.filter((c) => c.state === 'on').map((c) => c.key).sort();
+    assert.deepEqual(keys, ['ChatGPT||', 'Claude||'], 'every key is re-sent at once, not after the refresh interval');
+    for (const c of calls.attachHold) assert.equal(c.ttlMs, 60_000);
+    // Nothing held -> a ready replays nothing.
+    monitor.attachmentWatcher.emit('attachment_disappeared', { process: 'ChatGPT', filename: 'replay-a-secrets.env' });
+    monitor.attachmentWatcher.emit('attachment_disappeared', { process: 'Claude', filename: 'replay-b-secrets.env' });
+    calls.attachHold.length = 0;
+    monitor.enforcer.emit('ready', { kind: 'ready' });
+    assert.deepEqual(calls.attachHold, []);
+  } finally { monitor.stop(); }
+});
+
+test('an attachment enforcement_block reports the held file\'s REAL severity, not a flat high', async () => {
+  const { monitor, calls } = makeMonitor();
+  const a = await tmp('sev-secrets.env', SECRET_TEXT);
+  try {
+    monitor.attachmentWatcher.emit('attachment_appeared', { process: 'ChatGPT', filename: 'sev-secrets.env', path: a });
+    await waitFor(() => monitor.attachHolds.get('sev-secrets.env')?.severity, { label: 'the hold confirmed' });
+    const held = monitor.attachHolds.get('sev-secrets.env').severity;
+    calls.enqueued.length = 0;
+    monitor.enforcer.emit('block', { kind: 'block', process: 'ChatGPT', patterns: 'aws_access_key_id', reason: 'attachment', filename: 'sev-secrets.env' });
+    const rec = calls.enqueued.find((e) => e.kind === 'enforcement_block');
+    assert.equal(rec.blocked_for, 'file_upload');
+    assert.equal(rec.highest_severity, held, 'the scan\'s own severity');
+    assert.ok(rec.matches.every((m) => m.severity === held));
+    // Unknown file (not held here) -> the hold threshold, 'high', as before.
+    calls.enqueued.length = 0;
+    monitor.enforcer.emit('block', { kind: 'block', process: 'ChatGPT', patterns: 'x', reason: 'attachment', filename: 'not-held.env' });
+    assert.equal(calls.enqueued.find((e) => e.kind === 'enforcement_block').highest_severity, 'high');
   } finally { monitor.stop(); }
 });
 
@@ -546,30 +605,23 @@ test('a file that vanishes mid-scan releases its provisional hold instead of lea
 
 // ── 6. the block toast tells the truth about the Enter-only limitation ─────
 
-test('a Teams attachment block toast states the Enter-only limitation; other apps are unchanged', async () => {
+test('an attachment block toast no longer claims clicking Send is uncovered for a host app', async () => {
+  // The panel-scoped send-button search now finds the send arrow in a governed
+  // Teams conversation (and the Office Copilot pane), and the mouse hook
+  // swallows it while the hold is in force -- so the old "clicking Send is not
+  // yet covered" sentence became false and is gone, for every app.
   const { monitor, calls } = makeMonitor();
   try {
-    monitor.enforcer.emit('block', {
-      kind: 'block', process: 'ms-teams', patterns: 'aws_access_key_id',
-      reason: 'attachment', filename: 'payroll.xlsx',
-    });
-    const teams = calls.toasts.at(-1);
-    assert.match(teams.message, /already uploaded it on attach/, 'the existing honest framing must stay');
-    assert.match(
-      teams.message,
-      /Pressing Enter is blocked; clicking Send is not yet covered — remove the attachment to be safe\./,
-      'a Teams attachment block must name the Send-button gap',
-    );
-
-    calls.toasts.length = 0;
-    monitor.enforcer.emit('block', {
-      kind: 'block', process: 'ChatGPT', patterns: 'aws_access_key_id',
-      reason: 'attachment', filename: 'payroll.xlsx',
-    });
-    const other = calls.toasts.at(-1);
-    assert.match(other.message, /already uploaded it on attach/);
-    assert.equal(other.message.includes('clicking Send is not yet covered'), false,
-      'the send-button click IS covered for an ordinary AI app — saying otherwise would be wrong');
+    for (const proc of ['ms-teams', 'ChatGPT']) {
+      calls.toasts.length = 0;
+      monitor.enforcer.emit('block', {
+        kind: 'block', process: proc, patterns: 'aws_access_key_id',
+        reason: 'attachment', filename: `payroll-${proc}.xlsx`,
+      });
+      const t = calls.toasts.at(-1);
+      assert.match(t.message, /already uploaded it on attach/, 'the existing honest framing must stay');
+      assert.equal(t.message.includes('not yet covered'), false, `${proc}: no stale send-button caveat`);
+    }
   } finally { monitor.stop(); }
 });
 
