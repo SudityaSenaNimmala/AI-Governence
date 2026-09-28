@@ -343,6 +343,10 @@ function renderBlockBanner() {
 }
 
 function showBlockBanner(data) {
+  // Banner disabled — it caused bugs (DPI misalignment, flickering, z-order
+  // issues) and the block dialog + access request popup already inform the
+  // user. Matches browser extension behavior which has no banner.
+  return;
   const name = String(data?.name || '').trim() || 'This AI platform';
   bannerState = {
     name,
