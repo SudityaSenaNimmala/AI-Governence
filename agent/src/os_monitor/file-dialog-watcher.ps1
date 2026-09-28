@@ -21,6 +21,12 @@
 #       file upload and never carries host_armed. Only ever produced when
 #       ~/.cloudfuze-aigov/egress-surfaces.json arms the owning process — see
 #       $EgressProcs.
+#   {"kind":"pane_file_dialog_pick","process":"WINWORD","pid":1234,"path":"C:\\...\\deck.pdf"}
+#       A file picked in an Office / Outlook COPILOT PANE's upload dialog: the
+#       #32770 is owned by a msedgewebview2 child of the host, and the host was
+#       pane-armed (pane_arm, from govstate scope:"pane") when the dialog was
+#       first seen. Checked BEFORE the egress route, so an Outlook Copilot pane
+#       upload is never classified as an email attachment.
 #   {"kind":"heartbeat","tick":N}
 #   {"kind":"error","message":"..."}
 #
@@ -102,6 +108,38 @@ $ArmedHostProcs = New-Object 'System.Collections.Generic.HashSet[string]' -Argum
 # file" pickers, which is not what the org asked to govern.
 $HostDisarmedAt = @{}
 $HOST_ARM_GRACE_MS = 5000
+
+# ── Office / Outlook COPILOT PANE pickers (2026-09-28) ──────────────────────
+# Armed by {"cmd":"pane_arm","process":"WINWORD","state":"on"|"off"} while that
+# host's Copilot pane is the governed, focused surface; latched per dialog at
+# first sighting with the same grace window as a host app. Only a picker whose
+# owner chain starts at a msedgewebview2 CHILD of an armed pane host counts.
+$PaneHostNames = @('WINWORD','EXCEL','POWERPNT','ONENOTE','ONENOTEIM','OUTLOOK','olk')
+$PaneArmedProcs = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @([System.StringComparer]::OrdinalIgnoreCase)
+$PaneDisarmedAt = @{}
+# The pane webview window each host was armed for (0 = unknown). A picker only
+# latches when its OWNER window is that very window (finding 11), and the
+# disarm grace applies only to the same window.
+$PaneArmedHwnd = @{}
+function Is-PaneArmedForNewDialog([string]$name, [int64]$ownerHwnd = 0) {
+    if (-not $name) { return $false }
+    $base = $name -replace '\.exe$',''
+    if (-not ($PaneHostNames -contains $base)) { return $false }
+    $want = 0
+    foreach ($k in $PaneArmedHwnd.Keys) { if ($k -ieq $base) { $want = [int64]$PaneArmedHwnd[$k] } }
+    if ($want -ne 0 -and $ownerHwnd -ne $want) { return $false }
+    if ($PaneArmedProcs.Contains($base)) { return $true }
+    foreach ($k in $PaneDisarmedAt.Keys) {
+        if ($k -ieq $base) {
+            $age = ([DateTime]::UtcNow - $PaneDisarmedAt[$k]).TotalMilliseconds
+            if ($age -ge 0 -and $age -le $HOST_ARM_GRACE_MS) { return $true }
+        }
+    }
+    return $false
+}
+function Get-OwnerHwnd([int64]$hwnd) {
+    try { return [int64][FileDlgWatch.Win32]::GetWindow([System.IntPtr]$hwnd, 4) } catch { return 0 }
+}
 
 # ── EGRESS surfaces (Outlook attach) ────────────────────────────────────────
 #
@@ -346,6 +384,16 @@ function Resolve-GovernedProcess([int64]$hwnd, [int]$procId) {
         for ($hop = 0; $hop -le $PROC_WALK_MAX -and $cur -gt 4; $hop++) {
             $name = Get-ProcessNameById $cur
             if (-not $name) { break }
+            # The Copilot PANE route, first: a msedgewebview2 whose DIRECT parent
+            # is a pane-armed Office / Outlook host. Before the egress check so a
+            # pane upload is never reported as an email attachment.
+            if ($hop -eq 0 -and ($name -replace '\.exe$','') -ieq 'msedgewebview2') {
+                $pp = Get-ParentProcessId $cur
+                if ($pp -gt 4) {
+                    $pn = Get-ProcessNameById $pp
+                    if ($pn -and (Is-PaneArmedForNewDialog $pn (Get-OwnerHwnd $hwnd))) { return @{ Name = ($pn -replace '\.exe$',''); Pid = $pp; Catalog = $false; Pane = $true } }
+                }
+            }
             if (Is-AiProcess $name) { return @{ Name = $name; Pid = $cur; Catalog = $true } }
             if (Is-HostArmedForNewDialog $name) { return @{ Name = $name; Pid = $cur; Catalog = $false } }
             # ── The one ADDITIVE check: an EGRESS surface (Outlook) ──────────
@@ -554,6 +602,14 @@ while ($true) {
         if ($cmdLine.Length -eq 0) { continue }
         try {
             $cmd = $cmdLine | ConvertFrom-Json
+            if ($cmd.cmd -eq 'pane_arm' -and $cmd.process) {
+                $paneProc = ([string]$cmd.process) -replace '\.exe$',''
+                $paneHwnd = 0
+                try { $paneHwnd = [int64]$cmd.hwnd } catch { $paneHwnd = 0 }
+                if ($cmd.state -eq 'on') { $null = $PaneArmedProcs.Add($paneProc); $PaneDisarmedAt.Remove($paneProc); $PaneArmedHwnd[$paneProc] = $paneHwnd }
+                else { $null = $PaneArmedProcs.Remove($paneProc); $PaneDisarmedAt[$paneProc] = [DateTime]::UtcNow }
+                continue
+            }
             if ($cmd.cmd -eq 'host_arm' -and $cmd.process) {
                 $procName = ([string]$cmd.process) -replace '\.exe$',''
                 if ($cmd.state -eq 'on') {
@@ -618,6 +674,7 @@ while ($true) {
                         # emit, so hostArmed is never consulted for an egress
                         # dialog and the existing line above is unchanged.
                         egress = if ($owner.ContainsKey('Egress')) { [string]$owner.Egress } else { '' }
+                        pane   = [bool]($owner.ContainsKey('Pane') -and $owner.Pane)
                     }
                     $Tracked[$hwnd] = $entry
                 }
@@ -644,6 +701,23 @@ while ($true) {
             # be reported as an AI file upload, and it never carries host_armed
             # (which would be a false claim — no govstate armed it; a policy file
             # did). The Node side has a separate handler for this kind.
+            if ($entry.pane) {
+                foreach ($n in $entry.names) {
+                    $resolved = Resolve-DialogPath $entry.folder $n
+                    if ($resolved) {
+                        Emit-Json @{
+                            t       = (Get-Date).ToUniversalTime().ToString('o')
+                            kind    = 'pane_file_dialog_pick'
+                            process = $entry.process
+                            pid     = $entry.pid
+                            title   = $entry.title
+                            path    = $resolved
+                        }
+                    }
+                }
+                $Tracked.Remove($h)
+                continue
+            }
             if ($entry.egress) {
                 foreach ($n in $entry.names) {
                     $resolved = Resolve-DialogPath $entry.folder $n

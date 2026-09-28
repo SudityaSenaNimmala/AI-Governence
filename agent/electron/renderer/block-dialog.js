@@ -56,6 +56,36 @@ function dismiss() {
   window.api.dismissDialog();
 }
 
+// The composer-census attachment popup (2026-09-28). hold_reason comes from
+// index.js (#censusScan); attach_state 'scanning' means the file is still being
+// checked; cloud_copy means the app already uploaded a copy to OneDrive /
+// SharePoint when the file was attached -- blocking stops it reaching the agent,
+// not that copy, and the popup must say so rather than imply otherwise.
+const HOLD_REASON_TEXT = {
+  sensitive_content: 'It contains sensitive data.',
+  cloud_reference: 'It is a cloud file with no readable copy on this device, so it could not be checked.',
+  not_found: 'The file could not be found on this device, so it could not be checked.',
+  too_large: 'It is too large to check.',
+  unverified: 'It could not be read — it may be encrypted or damaged — so it could not be checked.',
+};
+function attachmentCopy(ev) {
+  const file = ev.filename || 'the attached file';
+  if (ev.attach_state === 'scanning') {
+    return {
+      title: `Still checking ${file}…`,
+      hint: 'Your message will be sendable as soon as the check finishes, if the file is clean. Try again in a moment.',
+    };
+  }
+  const why = HOLD_REASON_TEXT[ev.hold_reason] || '';
+  const cloud = ev.cloud_copy
+    ? ' The app already uploaded a copy to OneDrive/SharePoint when you attached it — this stops it from being sent to the agent, it does not remove that copy.'
+    : ' If the app already uploaded the file when you attached it, this only stops it from being used in the conversation — it does not undo an upload that already happened.';
+  return {
+    title: "This attachment can't be sent",
+    hint: `${why ? why + ' ' : ''}Remove the attachment to send this message.${cloud}`,
+  };
+}
+
 function render(ev) {
   currentBlockId = ev.block_id || null;
   const isAttachment = ev.reason === 'attachment';
@@ -68,7 +98,7 @@ function render(ev) {
   // Title and body — matches browser extension's showBlockPopup exactly
   let title, body;
   if (isAttachment) {
-    title = "This attachment can't be sent";
+    title = escapeHtml(attachmentCopy(ev).title);
     body = `CloudFuze AI Governance blocked an attached file in <strong>${escapeHtml(ev.app || 'this app')}</strong>:`;
   } else if (hasGuardrail && !hasDlp) {
     title = 'Unsafe prompt blocked';
@@ -120,7 +150,7 @@ function render(ev) {
   if (ev.rewritable) {
     hint = 'Tokenize &amp; Send replaces each detected value with a fixed label before sending. The original values are never sent, and cannot be recovered from the label.';
   } else if (isAttachment) {
-    hint = 'Remove the attachment to send this message. If the app already uploaded the file when you attached it, this only stops it from being used in the conversation — it does not undo an upload that already happened.';
+    hint = escapeHtml(attachmentCopy(ev).hint);
   } else if (hasGuardrail && !hasDlp) {
     hint = 'Remove the flagged content from your prompt to continue.';
   } else {

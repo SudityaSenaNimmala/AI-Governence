@@ -381,8 +381,7 @@ function ResetState() {
   Call 'TypedClear' | Out-Null
   SetF '_blockUia' $false
   SetF '_blockPaste' $false
-  SetF '_attachHoldActive' $false
-  SetF '_attachHoldProcess' ''
+  Call 'ClearAttachHolds' | Out-Null
   SetF '_lastPasteTicks' ([long]0)
   SetF '_lastFocusMoveInputTicks' ([long]0)
   SetF '_browserNavInputTicks' ([long]0)

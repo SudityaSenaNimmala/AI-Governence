@@ -239,43 +239,52 @@ test('three email attachments: removing the middle one keeps the other two held'
   } finally { monitor.stop(); }
 });
 
-test('an egress hold and an AI-app hold never coexist in the helper\'s one slot', async () => {
-  // The isolation question. The helper has ONE hold slot, so the invariant is
-  // not "both are kept" but "the slot is never a MIXTURE": a hold must never be
-  // pushed naming one app's process while carrying another app's file.
+test('an egress hold and an AI-app hold are SEPARATE keys: arming one never clears the other', async () => {
+  // THE P0 FIX (2026-09-28, "Per-process attach-hold isolation"). The helper
+  // used to have ONE hold slot, so the mail client's arm REPLACED the Teams
+  // agent chat's hold and a sensitive file in Teams became sendable the moment
+  // an unrelated email attachment was scanned. Both sides now keep a keyed
+  // table: the Teams hold lives under "ms-teams||" and the email hold under
+  // "egress|OUTLOOK|<surface>", each pushed and released on its own.
   const { monitor, calls } = makeMonitor();
   const teamsFile = await tmp('teams-secret.env', SECRET_TEXT);
   const mailFile = await tmp('mail-secret.env', SECRET_TEXT);
   try {
-    // An AI/host-app hold first, armed through the PRE-EXISTING path.
     monitor.hostGoverned = { process: 'ms-teams', agent: '', kind: 'dlp' };
     monitor.attachmentWatcher.emit('attachment_appeared', {
-      process: 'ms-teams', filename: 'teams-secret.env', path: teamsFile, governed: true,
+      process: 'ms-teams', filename: 'teams-secret.env', path: teamsFile, governed: true, host_armed: true,
     });
-    await settle(1200);
-    const teamsArmed = monitor.attachHolds.size > 0;
+    await waitFor(() => monitor.attachHolds.get('teams-secret.env')?.severity, { label: 'the Teams hold confirmed' });
 
-    // Then the mail client's.
     monitor.attachmentWatcher.emit('egress_attachment_appeared', {
       surface: SURFACE, process: OUTLOOK, filename: 'mail-secret.env', path: mailFile,
     });
-    await waitFor(() => calls.enqueued.some((e) => e.filename === 'mail-secret.env'), { label: 'mail file' });
-    await settle(300);
+    await waitFor(() => monitor.attachHolds.get('mail-secret.env')?.severity, { label: 'the mail hold confirmed' });
 
-    assert.equal(monitor.attachHoldProcess, OUTLOOK, 'the binding must move to the app that armed last');
-    assert.ok(!monitor.attachHolds.has('teams-secret.env'),
-      'a previous app\'s file may not remain held under the mail client\'s name');
+    assert.equal(monitor.attachHolds.has('teams-secret.env'), true, 'the email arm must NOT clear the Teams hold');
+    assert.deepEqual([...monitor.attachHoldGroups.keys()].sort(), [`egress|${OUTLOOK}|${SURFACE}`, 'ms-teams||'].sort());
     for (const push of calls.attachHold) {
       if (push.state !== 'on') continue;
       const names = String(push.filename || '').split(', ').filter(Boolean);
-      const mixed = names.includes('teams-secret.env') && names.includes('mail-secret.env');
-      assert.equal(mixed, false,
-        `the helper was handed a hold mixing two apps' files: ${push.filename} (process=${push.process})`);
+      assert.equal(names.includes('teams-secret.env') && names.includes('mail-secret.env'), false,
+        `one helper key was handed two apps' files: ${push.filename} (key=${push.key})`);
+      if (names.includes('teams-secret.env')) assert.equal(push.key, 'ms-teams||');
+      if (names.includes('mail-secret.env')) assert.equal(push.key, `egress|${OUTLOOK}|${SURFACE}`);
     }
-    if (teamsArmed) {
-      assert.ok(calls.attachHold.some((p) => p.state === 'on' && p.process === 'ms-teams'),
-        'the pre-existing Teams hold must still have been armed under its OWN process name');
-    }
+
+    // Removing the EMAIL attachment releases only its key.
+    calls.attachHold.length = 0;
+    monitor.attachmentWatcher.emit('egress_attachment_disappeared', { surface: SURFACE, process: OUTLOOK, filename: 'mail-secret.env' });
+    await settle(200);
+    const offs = calls.attachHold.filter((c) => c.state === 'off');
+    assert.deepEqual(offs.map((c) => c.key), [`egress|${OUTLOOK}|${SURFACE}`], 'exactly the email key goes off');
+    assert.equal(monitor.attachHolds.has('teams-secret.env'), true, 'the Teams hold survives');
+    assert.ok(calls.attachHold.some((c) => c.state === 'on' && c.key === 'ms-teams||'), 'and is re-stated, not dropped');
+
+    // A same-named file disappearing from the mail client cannot release Teams.
+    monitor.attachmentWatcher.emit('egress_attachment_disappeared', { surface: SURFACE, process: OUTLOOK, filename: 'teams-secret.env' });
+    await settle(100);
+    assert.equal(monitor.attachHolds.has('teams-secret.env'), true, 'a release is scoped to its own process and kind');
   } finally { monitor.stop(); }
 });
 

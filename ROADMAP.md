@@ -142,6 +142,10 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   logged-in user, hourly, on an agent that installs a global `WH_KEYBOARD_LL` hook.
   Minimum fix: verify a published SHA-256 before extraction; never `npm install` from an
   unverified `package.json`.
+
+- [ ] **Require admin auth on DLP read routes (GET /dlp, /dlp/files, /dlp/:id/content — stored file/prompt content is readable without login)**
+  `server/src/routes/dlp.js` reads are open by design (the `requireAdminAuth` on `/dlp/:id/content` is commented out), and blocked files' content is uploaded and stored, so anyone who can reach the server can download sensitive files and prompts.
+
 ---
 
 ## P1 — broader OS / browser coverage
@@ -362,6 +366,10 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   hook after a stale parent heartbeat, or a `WEB_SURFACES` entry is disarmed. A fleet can
   therefore be ungoverned behind a green dashboard. Distinct from the `last_seen` item
   above — that answers "is the machine alive", this answers "is the hook armed".
+
+- [ ] **Detect after the fact when a blocked file was sent anyway (e.g. it appears in the agent chat transcript)**
+  The planned M365 attachment hold stops sends while a sensitive file is attached, but touch/pen, screen-reader invokes or the panic hotkey can still get one through; nothing notices it landed.
+
 ---
 
 ## P2 — enterprise distribution

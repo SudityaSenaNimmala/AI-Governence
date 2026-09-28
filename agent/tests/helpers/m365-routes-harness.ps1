@@ -231,6 +231,45 @@ public static class FakePaneHeading
             .SetValue(null, new CfaiEnforcer.PaneHeadingSource(Read));
     }
 }
+// Scripted composer-census snapshot (the _censusReader seam).
+public static class FakeCensus
+{
+    public static bool Readable = true;
+    public static string[] Names = new string[0];
+    public static int Calls = 0;
+    public static int DelayMs = 0;
+    public static string LastStyle = "";
+    // The scripted census ROOT the poll thread resolves (null = no root).
+    public static bool HasRoot = true;
+    public static string RootRid = "42.root.1";
+    public static bool FocusIsSend = false;
+    static CfaiEnforcer.CensusRootInfo FindRoot(string style)
+    {
+        if (!HasRoot) return null;
+        var r = new CfaiEnforcer.CensusRootInfo();
+        r.RootRid = RootRid; r.FocusIsSend = FocusIsSend;
+        return r;
+    }
+    static CfaiEnforcer.CensusSnapshot Read(string style, System.Windows.Automation.AutomationElement root)
+    {
+        System.Threading.Interlocked.Increment(ref Calls);
+        LastStyle = style;
+        if (DelayMs > 0) System.Threading.Thread.Sleep(DelayMs);
+        var snap = new CfaiEnforcer.CensusSnapshot();
+        snap.Readable = Readable;
+        foreach (var n in Names) snap.Names.Add(n);
+        return snap;
+    }
+    public static void Install()
+    {
+        typeof(CfaiEnforcer).GetField("_censusReader",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+            .SetValue(null, new CfaiEnforcer.CensusReader(Read));
+        typeof(CfaiEnforcer).GetField("_censusRootFinder",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+            .SetValue(null, new CfaiEnforcer.CensusRootFinder(FindRoot));
+    }
+}
 '@
 
 Add-Type -TypeDefinition ($source + "`n" + $fakeSource) -ReferencedAssemblies @(
@@ -315,9 +354,10 @@ $NO_WEB          = @($WEB_NOT_SURFACE, '', $false, '', $false, $WEB_ID_NOTCOMP, 
 
 function ResetState() {
   foreach ($b in @('_fgIsAi','_fgIsPanel','_fgPanelEnforce','_fgIsBlocked','_blockedByElement','_blockTyped','_blockUia','_blockPaste',
-                   '_attachHoldActive','_govActive','_fgHostGoverned','_fgDlpGoverned','_tickAgentChatEvidence','_tickChatIsGroup',
+                   '_govActive','_fgHostGoverned','_fgDlpGoverned','_tickAgentChatEvidence','_tickChatIsGroup',
                    '_fgAgentChatEvidence','_teamsEvSearchInProgress')) { SetF $b $false }
   SetF '_fgContentOk' $true
+  Call 'ClearAttachHolds' | Out-Null
   SetF '_fgPanelId' ''; SetF '_app' ''; SetF '_blockScope' ''
   SetF '_fgLeftAiTicks' ([long]0); SetF '_fgPid' ([uint32]0)
   SetF '_disarmedUntilTicks' ([long]0); SetF '_lastBlockFiredTicks' ([long]0); SetF '_lastPasteTicks' ([long]0)
@@ -869,4 +909,263 @@ $pb = [object[]]@($sf, 'rid-cache', $null); $M_PANE.Invoke($null, $pb) | Out-Nul
 $pc = [object[]]@($sf, 'rid-other', $null); $M_PANE.Invoke($null, $pc) | Out-Null
 Out-Obj @{ case = 'word_calls'; variant = 'cache'; calls = [int][FakePaneHeading]::Calls }
 LoadRows '[]'
+[FakeInput]::Uninstall()
+
+
+# -- The KEYED attach-hold table (2026-09-28, ROADMAP P0) ---------------------
+# The REAL ApplyAttachHold / AttachHoldActive / EgressHoldsFor / CheckAttachHoldExpiry
+# and the REAL HookCallback Enter decision (scripted modifiers, no hook).
+$T = [CfaiEnforcer]
+[FakeInput]::Install()
+function Hold([string]$state, [string]$key, [string]$proc, [string]$panel = '', [string]$file = 'f.env', [long]$ttl = 60000) {
+  # The helper derives the table key itself (finding 16); egress is explicit.
+  $eg = $key.StartsWith('egress|')
+  $surf = if ($eg) { $key.Split('|')[2] } else { '' }
+  Call 'ApplyAttachHold' @($state, [bool]$eg, $surf, $proc, $panel, '', $file, 'aws_access_key_id', [long]$ttl) | Out-Null
+}
+function Keys() { return (@((GetF '_attachHolds') | ForEach-Object { $_.Key }) | Sort-Object) -join ';' }
+function ActiveFor([string]$app) { SetF '_app' $app; return [bool](Call 'AttachHoldActive') }
+function EgressCount([string]$proc) { return [int](Call 'EgressHoldsFor' @($proc)).Count }
+
+# K1: an egress (Outlook) arm does NOT clear a Teams hold; clearing one key leaves the other.
+ResetState
+Hold 'on' 'ms-teams||' 'ms-teams' '' 'teams-secret.env'
+Hold 'on' 'egress|OUTLOOK|outlook_classic' 'OUTLOOK' '' 'mail-secret.env'
+$k1 = [ordered]@{ case = 'holds'; variant = 'egress_does_not_clear_teams'; keys = (Keys)
+  teamsActive = (ActiveFor 'ms-teams'); egressOutlook = (EgressCount 'OUTLOOK'); outlookAiActive = (ActiveFor 'OUTLOOK') }
+Hold 'off' 'egress|OUTLOOK|outlook_classic' 'OUTLOOK'
+$k1.afterEgressOff_keys = (Keys); $k1.afterEgressOff_teamsActive = (ActiveFor 'ms-teams'); $k1.afterEgressOff_egress = (EgressCount 'OUTLOOK')
+Hold 'on' 'ChatGPT||' 'ChatGPT' '' 'gpt.env'
+Hold 'off' 'ms-teams||' 'ms-teams'
+$k1.afterTeamsOff_keys = (Keys); $k1.afterTeamsOff_teamsActive = (ActiveFor 'ms-teams'); $k1.chatgptActive = (ActiveFor 'ChatGPT')
+# an EXPIRED key is swept on its own; the live one stays
+Hold 'on' 'Claude||' 'Claude' '' 'c.env' 1
+Start-Sleep -Milliseconds 30
+Call 'CheckAttachHoldExpiry' | Out-Null
+$k1.afterExpiry_keys = (Keys)
+Out-Obj $k1
+
+# K2: a PANEL-bound hold (Office Copilot pane) swallows Enter in the pane, and
+# NOT in the document body during the 3s sticky window after leaving it.
+ResetState; SetF '_evidenceDlpOn' $true
+Tick 'hold_word_pane' 'WINWORD' ([uint32]9201) $PANE
+Hold 'on' 'WINWORD|office_copilot_pane|' 'WINWORD' 'office_copilot_pane' 'deck-secrets.env'
+$inPane = [bool](Call 'AttachHoldActive')
+$paneEnter = Capture { [FakeInput]::Key(0x0D, $false, $false, $false) }
+$paneCooldown = [long](GetF '_lastBlockFiredTicks')
+Call 'ApplyForegroundTick' (@([uint32]9201, 'WINWORD', $true, $null, '', $true, $OUT_UNREADABLE, '') + $NO_WEB) | Out-Null   # the document body
+Call 'CheckFgBlocked' | Out-Null
+$docSticky = [bool](GetF '_fgIsAi')
+$inDoc = [bool](Call 'AttachHoldActive')
+$docEnter = Capture { [FakeInput]::Key(0x0D, $false, $false, $false) }
+# contrast: an UNBOUND-panel hold for the same app still applies in the sticky window
+Hold 'on' 'WINWORD||' 'WINWORD' '' 'legacy.env'
+$legacyInDoc = [bool](Call 'AttachHoldActive')
+Hold 'off' 'WINWORD||' 'WINWORD'
+Out-Obj ([ordered]@{ case = 'holds'; variant = 'panel_bound_office'; inPane = $inPane; paneEnter = [int]$paneEnter[0]
+  paneEnterLines = (Lines $paneEnter); paneCooldownStamped = ($paneCooldown -ne 0)
+  docSticky = $docSticky; inDoc = $inDoc; docEnter = [int]$docEnter[0]; legacyInDoc = $legacyInDoc })
+
+# K3: NO 30s cooldown after an attachment block -- the next clean Enter in
+# another AI app passes.
+ResetState; Call 'ClearAttachHolds' | Out-Null
+Tick 'hold_chatgpt' 'ChatGPT' ([uint32]9301) $null
+Hold 'on' 'ChatGPT||' 'ChatGPT' '' 'gpt-secrets.env'
+$gptEnter = Capture { [FakeInput]::Key(0x0D, $false, $false, $false) }
+$gptCooldown = [long](GetF '_lastBlockFiredTicks')
+Tick 'hold_claude' 'Claude' ([uint32]9302) $null
+$claudeEnter = Capture { [FakeInput]::Key(0x0D, $false, $false, $false) }
+# ...and back in ChatGPT the file is still attached: still held.
+Tick 'hold_chatgpt_again' 'ChatGPT' ([uint32]9301) $null
+$gptAgain = Capture { [FakeInput]::Key(0x0D, $false, $false, $false) }
+Out-Obj ([ordered]@{ case = 'holds'; variant = 'no_cooldown_after_attachment'; gptEnter = [int]$gptEnter[0]; gptEnterLines = (Lines $gptEnter)
+  cooldownStamped = ($gptCooldown -ne 0); claudeEnter = [int]$claudeEnter[0]; gptAgain = [int]$gptAgain[0] })
+Call 'ClearAttachHolds' | Out-Null
+[FakeInput]::Uninstall()
+
+
+# -- The COMPOSER CENSUS (2026-09-28): privacy gate, key, report-only flag,
+#    surface-keyed holds and the attach-held rect -- real helper code, scripted
+#    chip snapshot, no UIA and no hook.
+$T = [CfaiEnforcer]
+$censusJson = Join-Path $PayloadDir 'census.json'
+if (Test-Path -LiteralPath $censusJson) { Call 'LoadAttachCensus' @([string](Get-Content -Raw -LiteralPath $censusJson)) | Out-Null }
+[FakeCensus]::Install()
+[FakeInput]::Install()
+function ResetCensus() {
+  SetF '_censusCtx' $null; SetF '_censusStartedTicks' ([long]0); SetF '_censusLastSig' ''; SetF '_censusInFlight' $false
+  SetF '_fgSurfaceKey' ''; [FakeCensus]::Calls = 0; [FakeCensus]::DelayMs = 0
+  [FakeCensus]::HasRoot = $true; [FakeCensus]::RootRid = '42.root.1'; [FakeCensus]::FocusIsSend = $false
+  SetF '_censusLastRoot' $null; SetF '_censusRootCheckedTicks' ([long]0); SetF '_censusNoRootTicks' 0
+  SetF '_censusPendingKey' ''; SetF '_censusCarryKey' ''
+}
+function RunCensus() {
+  $r = Capture {
+    Call 'UpdateAttachCensus' | Out-Null
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ([bool](GetF '_censusInFlight') -and $sw.ElapsedMilliseconds -lt 3000) { Start-Sleep -Milliseconds 20 }
+    Start-Sleep -Milliseconds 30
+  }
+  $line = @($r[1]) | Where-Object { $_ -like '*"kind":"attachcensus"*' } | Select-Object -Last 1
+  return $line
+}
+
+# C1: a HUMAN Teams 1:1 is never governed -> no census, no read, no key.
+ResetState; ResetCensus; LoadRows '[]'
+[FakePane]::Set($R2, $A2, [string[]]@((Hdr $TID2)), [string[]]@('message-body-7'), [string[]]@(), $false)
+Tick 'census_human' 'ms-teams' $TEAMS_PID $COMPOSER $R2 $A2 -Settle | Out-Null
+[FakeCensus]::Names = [string[]]@('secrets.txt')
+$h = RunCensus
+Out-Obj ([ordered]@{ case = 'census'; variant = 'human_chat'; line = [string]$h; reads = [int][FakeCensus]::Calls; surfaceKey = [string](GetF '_fgSurfaceKey') })
+
+# C2: the governed agent 1:1 -> a census with a Teams key; the key fills _fgSurfaceKey.
+ResetState; ResetCensus; AgentPane $R1 $A1
+Tick 'census_agent' 'ms-teams' $TEAMS_PID $COMPOSER $R1 $A1 -Settle | Out-Null
+SetF '_tickComposerAid' $A1   # what UpdateForeground's panel read records (offline: set directly)
+[FakeCensus]::Readable = $true; [FakeCensus]::Names = [string[]]@('secrets 1.txt')
+$a = RunCensus
+$teamsKey = [string](GetF '_fgSurfaceKey')
+$again = RunCensus    # inside the interval, unchanged -> no new line
+Out-Obj ([ordered]@{ case = 'census'; variant = 'agent_chat'; line = [string]$a; again = [string]$again; reads = [int][FakeCensus]::Calls
+  style = [FakeCensus]::LastStyle; surfaceKey = $teamsKey })
+
+# C3: a surface-keyed hold applies only in ITS conversation (suspend / resume).
+Call 'ApplyAttachHold' @('on', $false, '', 'ms-teams', 'teams_composer', $teamsKey, 'secrets 1.txt', 'aws_access_key_id', [long]15000) | Out-Null
+SetF '_fgSurfaceKey' $teamsKey; $inOwn = [bool](Call 'AttachHoldActive')
+SetF '_fgSurfaceKey' 't:someotherconversation'; $inOther = [bool](Call 'AttachHoldActive')
+SetF '_fgSurfaceKey' ''; $inNone = [bool](Call 'AttachHoldActive')
+SetF '_fgSurfaceKey' $teamsKey; $back = [bool](Call 'AttachHoldActive')
+$exists = [bool](Call 'HoldExistsForSurfaceKey' @($teamsKey))
+Call 'ClearAttachHolds' | Out-Null
+Out-Obj ([ordered]@{ case = 'census'; variant = 'surface_keyed_hold'; inOwn = $inOwn; inOther = $inOther; inNone = $inNone; back = $back; exists = $exists })
+
+# C4: a REPORT-ONLY surface (Excel's pane) still produces a census, marked enforce:false.
+ResetState; ResetCensus
+Tick 'census_excel' 'EXCEL' ([uint32]9401) $PANE | Out-Null
+[FakeCensus]::Names = [string[]]@('Remove attachment book.xlsx')
+$x = RunCensus
+Out-Obj ([ordered]@{ case = 'census'; variant = 'excel_report_only'; line = [string]$x })
+
+# C5: the ATTACH-held rect -- drag-drop leaves Explorer in front; the click on
+# the Word pane's Send is still swallowed while the hold exists, and reported.
+ResetState; ResetCensus; Call 'DropHeldRect' | Out-Null
+Tick 'census_word' 'WINWORD' ([uint32]9402) $PANE | Out-Null
+[FakeCensus]::Names = [string[]]@('Remove attachment deck.pdf')
+$w = RunCensus
+$wordKey = [string](GetF '_fgSurfaceKey')
+Call 'ApplyAttachHold' @('on', $false, '', 'WINWORD', 'office_copilot_pane', $wordKey, 'deck.pdf', 'aws_access_key_id', [long]15000) | Out-Null
+SetF '_hasRect' $false
+$cachedW = [FakeInput]::Cache(1821, 893, 28, 29)
+Call 'UpdateHeldRect' | Out-Null
+$heldAttach = [bool](GetF '_heldIsAttach')
+Call 'ApplyForegroundTick' (@([uint32]7777, 'explorer', $false, $null, '', $false, $OUT_UNREADABLE, '') + $NO_WEB) | Out-Null
+Call 'UpdateSendRect' | Out-Null
+Call 'UpdateHeldRect' | Out-Null
+$down = Capture { [FakeInput]::Mouse(0x0201, 1830, 900) }
+[FakeInput]::Mouse(0x0202, 1830, 900) | Out-Null
+Call 'ClearAttachHolds' | Out-Null
+Call 'UpdateHeldRect' | Out-Null
+$after = Capture { [FakeInput]::Mouse(0x0201, 1830, 900) }
+Out-Obj ([ordered]@{ case = 'census'; variant = 'attach_held_rect'; wordLine = [string]$w; cached = [bool]$cachedW; heldAttach = $heldAttach
+  clickWhileHeld = [int]$down[0]; clickLines = (Lines $down); clickAfterRelease = [int]$after[0] })
+[FakeInput]::Uninstall()
+
+
+# -- Security review 2026-09-28: the census fixes, on the real helper code ---
+[FakeInput]::Install()
+# S3: fleet dlp OFF -> the M365 app never produces a census.
+ResetState; ResetCensus; SetF '_evidenceDlpOn' $false
+Tick 'sec_m365_dlp_off' 'M365Copilot' ([uint32]9501) @('Edit', 'Message Copilot', 'fai-EditorInput__input r18fti29') | Out-Null
+$off = RunCensus
+$offReads = [int][FakeCensus]::Calls
+SetF '_evidenceDlpOn' $true
+ResetCensus
+Tick 'sec_m365_dlp_on' 'M365Copilot' ([uint32]9501) @('Edit', 'Message Copilot', 'fai-EditorInput__input r18fti29') | Out-Null
+[FakeCensus]::Names = [string[]]@('Remove attachment a.txt')
+$on = RunCensus
+Out-Obj ([ordered]@{ case = 'sec'; variant = 'dlp_gate'; offLine = [string]$off; offReads = $offReads; onLine = [string]$on })
+
+# S4: the race -- focus moves to a human chat while a read is in flight -> dropped.
+ResetState; ResetCensus; AgentPane $R1 $A1
+Tick 'sec_race' 'ms-teams' $TEAMS_PID $COMPOSER $R1 $A1 -Settle | Out-Null
+SetF '_tickComposerAid' $A1
+[FakeCensus]::Names = [string[]]@('secrets.txt'); [FakeCensus]::DelayMs = 400
+$race = Capture {
+  Call 'UpdateAttachCensus' | Out-Null
+  Start-Sleep -Milliseconds 50
+  [FakePane]::Set($R2, $A2, [string[]]@((Hdr $TID2)), [string[]]@('message-body-7'), [string[]]@(), $false)
+  Tick 'sec_race_human' 'ms-teams' $TEAMS_PID $COMPOSER $R2 $A2 -Settle | Out-Null
+  Call 'UpdateAttachCensus' | Out-Null
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  while ([bool](GetF '_censusInFlight') -and $sw.ElapsedMilliseconds -lt 3000) { Start-Sleep -Milliseconds 20 }
+  Start-Sleep -Milliseconds 50
+}
+$raceLine = @($race[1]) | Where-Object { $_ -like '*"kind":"attachcensus"*' } | Select-Object -Last 1
+Out-Obj ([ordered]@{ case = 'sec'; variant = 'race'; line = [string]$raceLine; reads = [int][FakeCensus]::Calls })
+
+# S6: two roots in one process -> two keys (switching suspends, never releases).
+ResetState; ResetCensus
+Tick 'sec_word_a' 'WINWORD' ([uint32]9502) $PANE | Out-Null
+[FakeCensus]::Names = [string[]]@('Remove attachment a.pdf')
+$ka = RunCensus; $keyA = [string](GetF '_fgSurfaceKey')
+ResetCensus; [FakeCensus]::RootRid = '42.root.2'
+Tick 'sec_word_b' 'WINWORD' ([uint32]9502) $PANE | Out-Null
+$kb = RunCensus; $keyB = [string](GetF '_fgSurfaceKey')
+Out-Obj ([ordered]@{ case = 'sec'; variant = 'root_keys'; keyA = $keyA; keyB = $keyB })
+
+# S7: no census root under focus -> no surface key -> a keyed hold never matches;
+#     a closed pane (root gone, webview gone) publishes 'closed' twice and stops.
+ResetState; ResetCensus
+Tick 'sec_m365_root' 'M365Copilot' ([uint32]9503) @('Edit', 'Message Copilot', 'fai-EditorInput__input r18fti29') | Out-Null
+[FakeCensus]::Names = [string[]]@('Remove attachment m.txt')
+$mline = RunCensus; $mKey = [string](GetF '_fgSurfaceKey')
+Call 'ApplyAttachHold' @('on', $false, '', 'M365Copilot', '', $mKey, 'm.txt', 'x', [long]15000) | Out-Null
+$withRoot = [bool](Call 'AttachHoldActive')
+[FakeCensus]::HasRoot = $false; SetF '_censusRootCheckedTicks' ([long]0)
+Call 'UpdateAttachCensus' | Out-Null
+$noRootKey = [string](GetF '_fgSurfaceKey'); $noRoot = [bool](Call 'AttachHoldActive')
+Call 'ClearAttachHolds' | Out-Null
+ResetState; ResetCensus
+Tick 'sec_word_close' 'WINWORD' ([uint32]9504) $PANE | Out-Null
+[FakeCensus]::Names = [string[]]@('Remove attachment w.pdf')
+$wl = RunCensus; $wKey = [string](GetF '_fgSurfaceKey')
+Call 'ApplyAttachHold' @('on', $false, '', 'WINWORD', 'office_copilot_pane', $wKey, 'w.pdf', 'x', [long]15000) | Out-Null
+[FakeCensus]::HasRoot = $false
+Call 'ApplyForegroundTick' (@([uint32]9504, 'WINWORD', $true, $null, '', $true, $OUT_UNREADABLE, '') + $NO_WEB) | Out-Null   # the document
+$closed = Capture { for ($i = 0; $i -lt 7; $i++) { SetF '_censusRootCheckedTicks' ([long]0); Call 'UpdateAttachCensus' | Out-Null } }
+$closedLines = @(@($closed[1]) | Where-Object { $_ -like '*"closed":true*' })
+Call 'ClearAttachHolds' | Out-Null
+Out-Obj ([ordered]@{ case = 'sec'; variant = 'root_bound'; withRoot = $withRoot; noRootKey = $noRootKey; noRoot = $noRoot
+  closedCount = $closedLines.Count; closedLine = [string]($closedLines | Select-Object -First 1); ctxAfter = ($null -eq (GetF '_censusCtx')) })
+
+# S10: Space / Enter on the focused SEND button of a held draft is swallowed.
+ResetState; ResetCensus
+Tick 'sec_send' 'WINWORD' ([uint32]9505) $PANE | Out-Null
+[FakeCensus]::Names = [string[]]@('Remove attachment s.pdf')
+$sl = RunCensus; $sKey = [string](GetF '_fgSurfaceKey')
+Call 'ApplyAttachHold' @('on', $false, '', 'WINWORD', 'office_copilot_pane', $sKey, 's.pdf', 'aws_access_key_id', [long]15000) | Out-Null
+[FakeCensus]::FocusIsSend = $true; SetF '_censusRootCheckedTicks' ([long]0)
+Call 'ApplyForegroundTick' (@([uint32]9505, 'WINWORD', $true, $null, '', $true, $OUT_UNREADABLE, '') + $NO_WEB) | Out-Null   # focus on the Send button
+Call 'UpdateAttachCensus' | Out-Null
+$space = Capture { [FakeInput]::Key(0x20, $false, $false, $false) }
+$enter = Capture { [FakeInput]::Key(0x0D, $false, $false, $false) }
+Call 'ClearAttachHolds' | Out-Null
+$spaceFree = Capture { [FakeInput]::Key(0x20, $false, $false, $false) }
+Out-Obj ([ordered]@{ case = 'sec'; variant = 'send_key'; space = [int]$space[0]; spaceLines = (Lines $space); enter = [int]$enter[0]; spaceAfterRelease = [int]$spaceFree[0] })
+
+# S14: the first census of a NEW governed key: Enter held until it is published.
+ResetState; ResetCensus
+Tick 'sec_pending' 'WINWORD' ([uint32]9506) $PANE | Out-Null
+[FakeCensus]::Names = [string[]]@(); [FakeCensus]::DelayMs = 300
+Call 'UpdateAttachCensus' | Out-Null
+$pendingBefore = [bool](Call 'AttachHoldActive')
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+$cap = Capture { while ([bool](GetF '_censusInFlight') -and $sw.ElapsedMilliseconds -lt 3000) { Start-Sleep -Milliseconds 20 } }
+$pendingAfter = [bool](Call 'AttachHoldActive')
+Out-Obj ([ordered]@{ case = 'sec'; variant = 'pending'; before = $pendingBefore; after = $pendingAfter })
+
+# S16: the table key is built from validated parts only.
+$k16 = [string](Call 'AttachHoldKey' @($false, '', 'ms|teams', 'p|x', ("k" + [char]7 + "|z")))
+$e16 = [string](Call 'AttachHoldKey' @($true, 'outlook|classic', 'OUTLOOK', 'ignored', 'ignored'))
+Out-Obj ([ordered]@{ case = 'sec'; variant = 'key_parts'; k = $k16; e = $e16 })
 [FakeInput]::Uninstall()

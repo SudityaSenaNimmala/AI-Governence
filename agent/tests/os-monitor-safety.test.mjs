@@ -507,73 +507,53 @@ test('Enforcer passes the heartbeat path to the helper and beats every 5s', asyn
 
 // ── Attachment hold: block the send while a sensitive file is attached ───────
 
-test('Enforcer.attachHold writes only cmd/state/filename/patterns/ttl_ms/process to stdin — no file content', async () => {
+test('Enforcer.attachHold writes only cmd/state/key/process/panel/surface_key/filename/patterns/ttl_ms to stdin — no file content', async () => {
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer.js'), 'utf8');
-  // `process` was added when the hold gained a process BINDING — a hold armed
-  // for one app used to swallow the next Enter in whatever app the user
-  // alt-tabbed to. It is a bare process name, which is the same class of value
-  // the filename and pattern-name fields already are; still no file content and
-  // still no free text.
-  assert.match(src, /attachHold\(state, \{ filename = '', patterns = '', ttlMs = 3000, process: processName = '' \} = \{\}\)/);
-  assert.match(src, /cmd: 'attach_hold', state, filename, patterns, ttl_ms: ttlMs, process: processName/);
+  // `process` binds a hold to one app; `key` / `panel` / `surface_key` (the
+  // keyed table, 2026-09-28) address and narrow ONE entry. All bare identifiers
+  // — the same class of value the filename and pattern names are. Still no file
+  // content and no free text.
+  const fn = src.slice(src.indexOf('  attachHold(state, {'), src.indexOf('  #onStdout('));
+  assert.ok(fn.length > 0, 'expected the attachHold method');
+  assert.match(fn, /filename = '', patterns = '', ttlMs = 3000, process: processName = '',\s*\r?\n\s*key = '', panel = '', surfaceKey = '',/);
+  assert.match(fn, /cmd: 'attach_hold', state, key, process: processName, panel, surface_key: surfaceKey,\s*\r?\n\s*filename, patterns, ttl_ms: ttlMs,/);
+  assert.equal(/content|text|path/.test(fn.slice(fn.indexOf('JSON.stringify'), fn.indexOf("+ '\\n'"))), false, 'no content field on the wire');
 });
 
 test('enforcer-win.ps1: attach_hold ORs into both the Enter and mouse-click block decisions', async () => {
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
-  // Declared state.
-  assert.match(src, /static volatile bool _attachHoldActive = false;/);
-  // Mouse-click gate (BlockActiveForMouse). The platform block is checked on its
-  // own line ahead of the content signals (see _blockedByElement), so the hold is
-  // asserted on the content OR-chain it actually belongs to.
+  // Declared state: a KEYED table (2026-09-28), published as an immutable array.
+  assert.match(src, /static volatile AttachHoldEntry\[\] _attachHolds = new AttachHoldEntry\[0\];/);
   const mouseGate = src.slice(src.indexOf('static bool BlockActiveForMouse()'), src.indexOf('// Precedence matches the Enter path'));
   assert.ok(mouseGate.length > 0, 'expected a BlockActiveForMouse body');
-  // Both gates now read the hold through AttachHoldActive() rather than the raw
-  // flag. That accessor is the PROCESS BINDING: the flag alone had no process
-  // identity, so a hold armed for a flagged attachment in one app swallowed the
-  // next Enter in whatever app the user alt-tabbed to. Every keystroke decision
-  // goes through the accessor so the binding cannot be forgotten at one site.
+  // Both gates read the hold through AttachHoldActive(), the BINDING accessor.
   assert.match(mouseGate, /return AttachHoldActive\(\) \|\| TypedBlockFresh\(\) \|\| _blockUia \|\| \(recentPaste && _blockPaste\) \|\| cooldown;/);
   assert.match(mouseGate, /if \(_fgIsBlocked && \(_blockedByElement \|\| PanelEnforceOk\(\)\)\) return true;/);
-  // Enter-decision gate.
   assert.match(src, /bool attachHold = AttachHoldActive\(\);/);
-  // The accessor itself: the raw flag AND a case-insensitive match against the
-  // foreground app, with "unbound" (no process on the command) still counting so
-  // a missing field can never silently stop holding a sensitive attachment.
+  // The accessor: some unexpired hold MATCHES the focused surface.
   const holdGate = src.slice(src.indexOf('static bool AttachHoldActive()'), src.indexOf('static bool BlockActiveForSend('));
-  assert.ok(holdGate.length > 0, 'expected an AttachHoldActive body');
-  assert.match(holdGate, /if \(!_attachHoldActive\) return false;/);
-  assert.match(holdGate, /return string\.Equals\(owner, _app \?\? "", StringComparison\.OrdinalIgnoreCase\);/);
-  // Every keystroke-decision read goes through a PROCESS-BINDING accessor. The
-  // only places the raw flag may still be touched are its declaration, the stdin
-  // command, the TTL sweep, AttachHoldActive itself — and EgressHoldArmed, which
-  // is the SECOND binding accessor, added for the egress (mail client) send
-  // chord.
-  //
-  // WHY THAT SITE IS ALLOWED, and why it is not a loosening of the rule. The rule
-  // is "no keystroke decision may read the raw flag WITHOUT binding it to a
-  // process", because a hold armed in one app used to swallow the next Enter in
-  // whatever app the user alt-tabbed to. EgressHoldArmed binds it — more
-  // strictly than AttachHoldActive does, since an UNBOUND hold satisfies that one
-  // and is refused by this one. What it cannot do is DELEGATE to AttachHoldActive:
-  // that accessor compares against `_app`, which ApplyForegroundTick assigns only
-  // on a tick that established an AI surface, so it is structurally false for
-  // every mail client and calling it would have shipped a dead code path. The
-  // binding is asserted below rather than taken on trust.
-  const rawReads = (psCodeOnly(src).match(/_attachHoldActive/g) || []).length;
-  assert.equal(rawReads, 7, `_attachHoldActive gained a raw reference (${rawReads}) — it must be read through a process-binding accessor (AttachHoldActive / EgressHoldArmed)`);
+  // (+ the first-census pending window, finding 14 — bounded to one key, ~1.2s)
+  assert.match(holdGate, /return MatchingAttachHolds\(\)\.Count > 0 \|\| CensusPendingActive\(\);/);
+  const match = src.slice(src.indexOf('static bool AttachHoldMatches('), src.indexOf('static List<AttachHoldEntry> MatchingAttachHolds('));
+  assert.match(match, /if \(h == null \|\| h\.Egress \|\| now >= h\.ExpiresAt\) return false;/, 'egress holds and expired holds never count');
+  assert.match(match, /if \(owner\.Length > 0 && !string\.Equals\(owner, _app \?\? "", StringComparison\.OrdinalIgnoreCase\)\) return false;/);
+  // A PANEL-bound hold applies only while that panel is focused RIGHT NOW (not
+  // in the 3s sticky window) -- the Office document-body leak.
+  assert.match(match, /if \(!_fgIsPanel \|\| _fgLeftAiTicks != 0\) return false;/);
+  assert.match(match, /if \(sk\.Length > 0 && !string\.Equals\(sk, _fgSurfaceKey \?\? "", StringComparison\.Ordinal\)\) return false;/);
+  // The table is only ever read through a binding accessor on a keystroke path:
+  // declaration, EgressHoldsFor, MatchingAttachHolds, ApplyAttachHold (2),
+  // ClearAttachHolds, CheckAttachHoldExpiry (3) — plus (2026-09-28) the census
+  // HoldExistsForSurfaceKey and the attach-held rect's AttachHoldExistsFor /
+  // EmitHeldAttachBlock, all read-only existence/attribution checks.
+  const reads = (psCodeOnly(src).match(/_attachHolds\b/g) || []).length;
+  assert.equal(reads, 12, `_attachHolds gained a reference (${reads}) — keystroke decisions must go through AttachHoldActive / EgressHoldArmed`);
+  // The egress accessor: only EGRESS holds, bound to this process, never unbound.
   const egressGate = src.slice(src.indexOf('static bool EgressHoldArmed(string proc)'), src.indexOf('// Which AGENT_SURFACES entry hosts this process name'));
-  assert.ok(egressGate.length > 0, 'expected an EgressHoldArmed body');
-  assert.match(egressGate, /if \(!_attachHoldActive\) return false;/);
-  // BOUND to the process this decision is about, case-insensitively…
-  assert.match(egressGate, /return string\.Equals\(owner, name, StringComparison\.OrdinalIgnoreCase\);/);
-  // …and STRICTER than AttachHoldActive: an unbound hold is refused here. "Some
-  // app somewhere has a sensitive file attached" must never kill the send chord
-  // in a mail client.
-  assert.match(egressGate, /if \(owner\.Length == 0\) return false;/);
-  // The panic hotkey still wins, and the TTL is re-checked inline rather than
-  // trusting the poll thread's sweep — this is a keystroke decision.
   assert.match(egressGate, /if \(Disarmed\(\)\) return false;/);
-  assert.match(egressGate, /if \(DateTime\.UtcNow\.Ticks >= _attachHoldExpiresAt\) return false;/);
+  assert.match(egressGate, /return EgressHoldsFor\(name\)\.Count > 0;/);
+  assert.match(egressGate, /if \(!h\.Egress \|\| now >= h\.ExpiresAt\) continue;/);
+  assert.match(egressGate, /if \(owner\.Length == 0\) continue;/);
   const enterPred = src.slice(src.indexOf('static bool EnterBlockActive('), src.indexOf('static string ActivePatterns()'));
   assert.match(enterPred, /return attachHold \|\| TypedBlockFresh\(\) \|\| uiaBlock \|\| clipBlock \|\| cooldown;/);
   assert.match(enterPred, /if \(_fgIsBlocked && \(_blockedByElement \|\| PanelEnforceOk\(\)\)\) return true;/);
@@ -713,75 +693,55 @@ test('OsMonitor arms a provisional hold before the file scan resolves, and only 
 });
 
 test('OsMonitor refreshes EVERY attach hold — provisional included — so one cannot lapse while the file stays attached', async () => {
-  // Regression: attachment_appeared only fires once, on first appearance —
-  // it does not keep firing while a chip just sits there unchanged.
-  // Confirmed live: a confirmed hold (60s TTL) silently expired with the
-  // sensitive file never removed, and the next Enter went through
-  // unblocked, because nothing was re-sending attach_hold('on', ...) to
-  // keep it alive. #startAttachHoldRefresh is the fix.
-  //
-  // SECOND HALF of the same bug, fixed later: the ticker used to start only for
-  // a CONFIRMED hold, so the 3s PROVISIONAL one — whose entire job is to win the
-  // race against a fast Enter while the scan runs — could lapse before the scan
-  // returned. A slow extraction (OCR, a big PDF, a deep zip) is exactly the case
-  // where that happens, and exactly the file most worth holding. #syncAttachHold
-  // is now the single arming path and it always starts the ticker.
+  // Regression (see git history): a confirmed hold lapsed while the file stayed
+  // attached, and the 3s provisional one lapsed during a slow scan. Every arm
+  // goes through #syncAttachHold, which always (re)starts the ticker at a third
+  // of the SHORTEST TTL in force, and the ticker re-sends EVERY key.
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
-  assert.match(src, /#startAttachHoldRefresh\(payload, everyMs\)/);
+  assert.match(src, /#startAttachHoldRefresh\(everyMs\)/);
   assert.match(src, /this\.attachHoldRefreshTimer = setInterval\(/);
-  // Every arm goes through #syncAttachHold, and it starts the ticker
-  // unconditionally — there is no "only if confirmed" branch left.
-  const sync = src.slice(src.indexOf('#syncAttachHold()'), src.indexOf('#armAttachHold('));
+  const sync = src.slice(src.indexOf('#syncAttachHold(onlyKey = null)'), src.indexOf('#armAttachHold(filename, {'));
   assert.ok(sync.length > 0, 'expected a #syncAttachHold body');
   assert.match(sync, /this\.enforcer\.attachHold\('on', payload\);/);
-  assert.match(sync, /this\.#startAttachHoldRefresh\(payload, Math\.max\(500, Math\.floor\(shortestTtl \/ 3\)\)\);/);
-  // The interval is derived from the SHORTEST TTL in force. The old
-  // Math.max(5000, ttlMs/3) refreshed a 3s hold every 5s, i.e. never in time.
+  // …and never slower than every 3s (the census holds' 15s dead-man TTL).
+  assert.match(sync, /this\.#startAttachHoldRefresh\(Math\.max\(500, Math\.min\(3000, Math\.floor\(shortestTtl \/ 3\)\)\)\);/);
   assert.match(sync, /shortestTtl = Math\.min\(shortestTtl, held\.ttlMs\)/);
-  // The refresh timer stops itself once nothing is held — otherwise a released
-  // hold could get silently re-armed by a stale interval nobody cleared.
-  assert.match(src, /if \(this\.attachHolds\.size === 0\) \{ this\.#stopAttachHoldRefresh\(\); return; \}/);
+  // The ticker stops itself once nothing is held.
+  assert.match(src, /if \(this\.attachHoldGroups\.size === 0\) \{ this\.#stopAttachHoldRefresh\(\); return; \}/);
 });
 
-test('OsMonitor tracks holds PER FILE, so releasing one never releases another', async () => {
-  // The multi-file defect. attachHoldFilename was a single string, so a second
-  // attachment overwrote the first's tracking, and — the half that actually let
-  // a sensitive file through — an attachment_disappeared for a CLEAN file B
-  // released the hold that FLAGGED file A still needed.
+test('OsMonitor tracks holds PER FILE inside a PER-SURFACE key, so releasing one never releases another', async () => {
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
-  assert.match(src, /this\.attachHolds = new Map\(\);/);
-  // The single-string field is gone entirely — no call site can resurrect the
-  // "one slot" assumption.
-  assert.equal(codeOnly(src).includes('attachHoldFilename'), false,
-    'the single-slot hold field must not come back');
-  // Release deletes ONE key, and only tells the helper to release when nothing
-  // is left; otherwise it re-states the hold with the narrowed union.
-  const release = src.slice(src.indexOf('#releaseAttachHold(filename)'), src.indexOf('#startAttachHoldRefresh(payload, everyMs)'));
+  assert.match(src, /this\.attachHoldGroups = new Map\(\);/);
+  assert.equal(codeOnly(src).includes('attachHoldFilename'), false, 'the single-slot hold field must not come back');
+  // The key: process|panel|surfaceKey, or egress|process|surface.
+  assert.match(src, /if \(egressSurface !== null && egressSurface !== undefined\) return \`egress\|\$\{proc\}\|\$\{egressSurface \|\| ''\}\`;/);
+  assert.match(src, /return \`\$\{proc\}\|\$\{panel \|\| ''\}\|\$\{surfaceKey \|\| ''\}\`;/);
+  // Release deletes ONE file; a key whose last file goes is sent 'off' for THAT
+  // key only; everything else is re-stated.
+  const release = src.slice(src.indexOf('#releaseAttachHold(filename, {'), src.indexOf('#heldSeverity('));
   assert.ok(release.length > 0, 'expected a #releaseAttachHold body');
-  assert.match(release, /if \(!this\.attachHolds\.delete\(filename\)\) return false;/);
-  assert.match(release, /if \(this\.attachHolds\.size === 0\) \{/);
-  assert.match(release, /this\.enforcer\.attachHold\('off', \{ filename, process: processName \}\);/);
-  assert.match(release, /\} else \{\s*\r?\n\s*this\.#syncAttachHold\(\);/);
-  // The pattern list and the filename the helper is told about are the UNION
-  // across every file still held, so a block never under-reports what holds it.
-  const sync = src.slice(src.indexOf('#syncAttachHold()'), src.indexOf('#armAttachHold('));
-  assert.match(sync, /filename: \[\.\.\.this\.attachHolds\.keys\(\)\]\.join\(', '\)/);
-  assert.match(sync, /patterns: \[\.\.\.patterns\]\.join\(','\)/);
-  // …and the hold is bound to the app it was armed for.
-  assert.match(sync, /process: this\.attachHoldProcess \|\| ''/);
+  assert.match(release, /if \(!group\.files\.delete\(filename\)\) continue;/);
+  assert.match(release, /this\.enforcer\.attachHold\('off', \{\s*\r?\n\s*key, process: group\.process/);
+  assert.match(release, /else this\.#syncAttachHold\(\);/);
+  // Arming never clears another key (the P0 defect).
+  const arm = src.slice(src.indexOf('#armAttachHold(filename, {'), src.indexOf('#releaseAttachHold(filename, {'));
+  assert.equal(/\.clear\(\)|attachHoldGroups\.delete/.test(arm), false, 'an arm must never drop another key');
+  // Per key: the UNION of its files' patterns and every filename.
+  const payload = src.slice(src.indexOf('#holdPayload(group)'), src.indexOf('#syncAttachHold(onlyKey = null)'));
+  assert.match(payload, /filename: \[\.\.\.group\.files\.keys\(\)\]\.join\(', '\)/);
+  assert.match(payload, /patterns: \[\.\.\.patterns\]\.join\(','\)/);
+  assert.match(payload, /key: group\.key,/);
 });
 
 test('OsMonitor releases the hold when the flagged attachment disappears, and stops refreshing it', async () => {
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
   const disappearedHandler = src.slice(src.indexOf("this.attachmentWatcher.on('attachment_disappeared'"));
-  // Both the 'off' command and the ticker stop now live in #releaseAttachHold —
-  // which is what makes the release PER FILE. The handler's own job is only to
-  // ask for this one file to be released, and to say nothing when it was not
-  // held (an unrelated file's disappearance must change nothing at all).
-  assert.match(disappearedHandler.slice(0, 400), /if \(!this\.#releaseAttachHold\(ev\.filename\)\) return;/);
-  const release = src.slice(src.indexOf('#releaseAttachHold(filename)'), src.indexOf('#startAttachHoldRefresh(payload, everyMs)'));
-  assert.match(release, /attachHold\('off', \{ filename, process: processName \}\)/);
-  assert.match(release, /this\.#stopAttachHoldRefresh\(\);/);
+  // Scoped to the reporting app and to AI (not egress) holds.
+  assert.match(disappearedHandler.slice(0, 400), /if \(!this\.#releaseAttachHold\(ev\.filename, \{ processName: ev\.process \|\| null, egress: false \}\)\) return;/);
+  const release = src.slice(src.indexOf('#releaseAttachHold(filename, {'), src.indexOf('#heldSeverity('));
+  assert.match(release, /attachHold\('off', \{/);
+  assert.match(release, /if \(this\.attachHoldGroups\.size === 0\) this\.#stopAttachHoldRefresh\(\);/);
 });
 
 test('a blocked attachment reports blocked_for:file_upload and never claims the upload itself was prevented', async () => {
@@ -3895,9 +3855,11 @@ test('enforcer-win.ps1: the agent name read out of another app is never emitted 
   const code = codeOnly(src);
   const uses = (code.match(/_fgAgentName/g) || []).length;
   assert.ok(uses > 0, 'expected _fgAgentName to exist');
-  // Exactly three code references: the declaration, the per-tick assignment in
-  // ApplyForegroundTick, and the one comparison in CheckFgBlocked.
-  assert.equal(uses, 3, `_fgAgentName gained a reference (${uses}) — every use must be re-reviewed for PII`);
+  // Exactly four code references: the declaration, the per-tick assignment in
+  // ApplyForegroundTick, the one comparison in CheckFgBlocked — and (2026-09-28)
+  // CensusSurfaceKey, which only feeds it into a SHA-256 surface key, so the
+  // name itself never leaves the process.
+  assert.equal(uses, 4, `_fgAgentName gained a reference (${uses}) — every use must be re-reviewed for PII`);
   assert.match(code, /static volatile string _fgAgentName = "";/);
   assert.match(code, /_fgAgentName = agentName \?\? "";/);
   assert.match(code, /AgentNameMatchesAny\(_fgAgentName, agent\)/);
@@ -4832,8 +4794,10 @@ test('the govstate payload carries NO content — a bool, a scope, a panel id, a
   assert.ok(emit.length > 0, 'expected an EmitGovState body');
 
   const keys = [...emit.matchAll(/\\"([a-z_]+)\\":/g)].map((m) => m[1]).sort();
+  // 'hwnd' (2026-09-28): a window HANDLE, only on a scope:"pane" line, so the
+  // file-dialog watcher can bind its pane-picker latch to that window.
   assert.deepEqual(keys, [
-    'active', 'agent', 'agent_id', 'browser_host', 'kind', 'panel', 'pid', 'process', 'scope',
+    'active', 'agent', 'agent_id', 'browser_host', 'hwnd', 'kind', 'panel', 'pid', 'process', 'scope',
   ], 'the govstate payload gained or lost a field — every addition must be re-reviewed for PII');
 
   // browser_host is the ONE reviewed addition, for the browser arm: index.js
@@ -5010,10 +4974,17 @@ test('the two UIA watchers keep Teams out of their DEFAULT process set — armin
     const code = src.split(/\r?\n/).filter((l) => !l.trim().startsWith('#')).join('\n');
     assert.equal(/\$AiProcesses\s*\.\s*Add|\$AiProcesses\s*\+=|\$AiProcesses\s*=\s*\$AiProcesses/.test(code), false,
       `${file} must never mutate the catalog process list`);
-    // host_arm is the only command either helper accepts, and it carries a
-    // process name and an on/off — no path, no filename, no free text.
+    // host_arm is the only command the chip helper accepts; the dialog helper
+    // also takes pane_arm (2026-09-28, the Copilot PANE picker route). Both carry
+    // a process name and an on/off — no path, no filename, no free text.
     assert.match(code, /if \(\$cmd\.cmd -eq 'host_arm' -and \$cmd\.process\)/);
-    assert.equal((code.match(/\$cmd\.cmd -eq/g) || []).length, 1, `${file} must accept exactly one command`);
+    const cmds = (code.match(/\$cmd\.cmd -eq/g) || []).length;
+    if (file.includes('file-dialog')) {
+      assert.match(code, /if \(\$cmd\.cmd -eq 'pane_arm' -and \$cmd\.process\)/);
+      assert.equal(cmds, 2, `${file} must accept exactly host_arm and pane_arm`);
+    } else {
+      assert.equal(cmds, 1, `${file} must accept exactly one command`);
+    }
   }
 });
 
@@ -5068,7 +5039,9 @@ test('#hostGovernedFor is the ONLY gate the three file routes consult, and it is
 
   // Exactly three call sites — the three file routes — plus the declaration.
   const code = codeOnly(src);
-  assert.equal((code.match(/#hostGovernedFor\(/g) || []).length, 4,
+  // +1 (2026-09-28): the composer census attributes its record to the governed
+  // conversation's agent — attribution only, never a gate.
+  assert.equal((code.match(/#hostGovernedFor\(/g) || []).length, 5,
     '#hostGovernedFor gained a call site — every one must be re-reviewed');
   for (const [route, from, to] of [
     ['clipboard_files', "this.poller.on('clipboard_files', ", "this.poller.on('poller-error'"],
@@ -5101,7 +5074,8 @@ test('file-handler.js bounds every read it does and puts a deadline on every ext
   // readFile is the text-readable branch, which is already gated by
   // CONTENT_SCAN_MAX_BYTES and needs the whole text to scan it.
   const captures = (src.match(/await readCapped\(path, CONTENT_CAPTURE_MAX_BYTES, st\.size\)/g) || []).length;
-  assert.equal(captures, 4, 'every binary/archive/oversize/unknown capture must be bounded');
+  // +1 (2026-09-28): the partial-scan branch for an oversize binary document.
+  assert.equal(captures, 5, 'every binary/archive/oversize/unknown capture must be bounded');
   // Two whole-file reads remain, and both are already size-bounded:
   //   * the text-readable SCAN path, which is gated by CONTENT_SCAN_MAX_BYTES
   //     and needs the whole text to run the pattern catalog over it;
@@ -5115,7 +5089,12 @@ test('file-handler.js bounds every read it does and puts a deadline on every ext
   // exists: the attachment hold needs an answer within a bounded time, and an
   // extraction that never returns leaves the send in limbo.
   assert.match(src, /export const EXTRACTION_BUDGET_MS = 8000;/);
-  assert.match(src, /await withExtractionBudget\(extractTextFromBinary\(path, ext\)\)/);
+  // Every binary extraction goes through extractBinary: the budgeted in-process
+  // call, or (census / pane routes, isolate:true) a worker terminated on the same
+  // budget -- security review 2026-09-28, finding 5.
+  assert.match(src, /: withExtractionBudget\(extractTextFromBinary\(pth, ext2\)\)\);/);
+  assert.match(src, /setTimeout\(\(\) => finish\(TIMED_OUT\), EXTRACTION_BUDGET_MS\)/);
+  assert.equal(/await extractTextFromBinary\(/.test(src), false, 'no un-budgeted extraction');
   assert.match(src, /await withExtractionBudget\(extractZip\(\{ path, scan, log \}\)\)/);
   assert.match(src, /reason: 'extraction_timeout'/);
   // The timeout is a SENTINEL, not a message match, so a parser error and a
@@ -5204,28 +5183,26 @@ test('the fail-closed hold is scoped to a governed conversation and names its ow
   assert.match(handler, /\? `unscannable file \(\$\{cs\?\.reason \|\| 'not readable'\}\)`/);
 });
 
-test('the attach hold is bound to ONE app on both sides of the stdin channel', async () => {
-  // The defect: _attachHoldActive was a global bool with no process identity, so
-  // a hold armed for a flagged attachment in one app swallowed the next Enter in
-  // whatever app the user alt-tabbed to — a dead Enter in an unrelated window
-  // with nothing on screen to explain it.
+test('the attach hold is bound to ONE app, and is a KEYED table, on both sides of the stdin channel', async () => {
   const ps = await enforcerSrc();
-  assert.match(ps, /static string _attachHoldProcess = "";/);
-  assert.match(ps, /_attachHoldProcess = ExtractJsonString\(line, "process"\);/);
-  // Cleared with the hold, on BOTH release paths, so a stale owner cannot
-  // outlive it.
+  // Every entry carries its process binding, parsed from the command.
   const stdin = ps.slice(ps.indexOf('static void StdinLoop()'), ps.indexOf('static void PumpLoop()'));
-  assert.match(stdin, /_attachHoldFilename = ""; _attachHoldPatterns = ""; _attachHoldProcess = "";/);
+  // The caller's key is ignored: the helper derives it from validated parts.
+  assert.match(stdin, /ApplyAttachHold\(state,\s*\r?\n\s*ExtractJsonString\(line, "egress"\) == "true",\s*\r?\n\s*ExtractJsonString\(line, "egress_surface"\),\s*\r?\n\s*ExtractJsonString\(line, "process"\),/);
+  assert.equal(/ExtractJsonString\(line, "key"\)/.test(stdin), false);
+  // "off" removes ONE key; "on" replaces only its own key.
+  const apply = ps.slice(ps.indexOf('static void ApplyAttachHold('), ps.indexOf('static void ClearAttachHolds()'));
+  assert.match(apply, /if \(!string\.Equals\(h\.Key, k, StringComparison\.OrdinalIgnoreCase\)\) next\.Add\(h\);/);
+  assert.match(apply, /Egress = egress,/);
+  // Expired entries are swept one by one, never the whole table.
   const expiry = ps.slice(ps.indexOf('static void CheckAttachHoldExpiry()'), ps.indexOf('static void CheckHeartbeat()'));
-  assert.match(expiry, /_attachHoldFilename = ""; _attachHoldPatterns = ""; _attachHoldProcess = "";/);
+  assert.match(expiry, /foreach \(var h in _attachHolds\) if \(now <= h\.ExpiresAt\) next\.Add\(h\);/);
 
   const js = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
-  assert.match(js, /this\.attachHoldProcess = null;/);
-  // An arm from a different app REPLACES the set rather than merging into it:
-  // the helper has one hold slot, so the previous app's holds cannot still be in
-  // it, and reporting them under this app's name would be a lie.
-  assert.match(js, /if \(processName && this\.attachHoldProcess && processName !== this\.attachHoldProcess\) \{/);
-  assert.match(js, /this\.attachHolds\.clear\(\);/);
+  // Node keeps one group per key; nothing clears another app's holds any more.
+  assert.equal(/this\.attachHolds\.clear\(\)/.test(js), false, 'the one-slot "replace the set" rule is gone');
+  assert.match(js, /this\.enforcer\.on\('ready', \(\) => \{\s*\r?\n\s*if \(this\.attachHoldGroups\.size === 0\) return;\s*\r?\n\s*this\.#syncAttachHold\(\);/,
+    'a respawned helper gets every key replayed');
 });
 
 test('an in-flight stdin write to a dead helper cannot crash the agent', async () => {
@@ -5382,7 +5359,10 @@ test('no egress process can ever set _fgIsAi — a mail client is never a scanne
   const readers = (code.match(/_fgProcAny/g) || []).length;
   //    Plus two (2026-09-24) that only NARROW: UpdateHeldRect / HeldRectHit
   //    compare it with the held app to DROP or REFUSE the held send rect.
-  assert.equal(readers, 7,
+  //    Plus one (2026-09-28): the ATTACH-held rect's host-in-front check,
+  //    which only decides when to DROP that rect; and one: the census
+  //    send-button carry, which only NARROWS it to the carried app.
+  assert.equal(readers, 9,
     `_fgProcAny gained a reference (${readers}) — declaration, the tick write, the egress branch, and the two held-rect narrowing checks only`);
   assert.equal(assignsTo(code.replace(/_fgProcAny = proc \?\? "";/, '').replace(/static volatile string _fgProcAny = "";/, ''), '_fgProcAny'), false,
     'nothing but ApplyForegroundTick may write _fgProcAny');
@@ -5698,7 +5678,8 @@ test('the evidence arm needs the fleet dlp flag and the verified surface, and ne
   // _evidenceDlpOn: the declaration, the stdin write (x2), the evidence arm, the
   // evidenceOk term, the pane content gate and the prompt route — it can only
   // NARROW back to row-gated behaviour.
-  assert.equal((code.match(/_evidenceDlpOn/g) || []).length, 7, '_evidenceDlpOn gained a reference — re-review');
+  // +1 (2026-09-28): the M365 chat-app census gate -- again only a NARROWING.
+  assert.equal((code.match(/_evidenceDlpOn/g) || []).length, 8, '_evidenceDlpOn gained a reference — re-review');
   // L3: OFF unless the fleet value says "true".
   assert.match(code, /static volatile bool _evidenceDlpOn =\s*string\.Equals\(Environment\.GetEnvironmentVariable\("CFAI_EVIDENCE_DLP"\), "true", StringComparison\.OrdinalIgnoreCase\);/);
   // No block decision reads the evidence state.
