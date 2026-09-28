@@ -17,6 +17,7 @@ import {
   AI_PROCESSES,
   IDE_PROCESSES,
   PLATFORM_PROCS,
+  webSurfaceForHost,
   matchPanelSignature,
   isAttachmentWatcherEligible,
   shouldScrubClipboardFor,
@@ -438,6 +439,18 @@ test('synthesizePlatformBlocks only emits rows that are blocked AND resolve to a
       host: 'claude.ai',
       reason: 'Blocked by organization policy',
     },
+    // The BROWSER row for claude.ai. No process_name, deliberately: it is
+    // matched against the host resolved from the address bar and arms an
+    // element-scoped block on the page composer, whereas a process_name row is
+    // matched process-wide and would swallow Enter in every tab.
+    {
+      platform: PLATFORM_BLOCK_SENTINEL,
+      browser_host: 'claude.ai',
+      agent_name: 'Claude',
+      agent_id: '',
+      host: 'claude.ai',
+      reason: 'Blocked by organization policy',
+    },
     {
       platform: PLATFORM_BLOCK_SENTINEL,
       panel: 'cursor_composer',
@@ -543,9 +556,29 @@ test('synthesizePlatformBlocks dedupes hosts that resolve to the same desktop ap
   // for the safety property that no OFFICE PROCESS row is ever synthesized).
   // copilot.microsoft.com is the standalone client only and has no panel.
   // Process and panel keys are namespaced, so they can never collide.
+  // Each host that IS a WEB_SURFACES entry also contributes a browser row,
+  // deduped on its own `web:` key.
+  //
+  // Both Copilot hosts became WEB_SURFACES entries with AI-218, so each now
+  // yields a desktop row AND a browser row. The browser rows appear even though
+  // those surfaces ship enforce:false/verified:false — that is the documented
+  // rule right above this row's emitter: the flags are read on the ENFORCER
+  // side by its single EnforcingWebSurface() gate, so a row for an unverified
+  // surface is INERT, not absent, which keeps the whole path exercised before
+  // it is armed. If these rows ever stop appearing, the split has been broken.
+  //
+  // THE EXPECTATION BELOW IS THE UNION OF TWO BRANCHES, and that is the point.
+  // The Office/Outlook pane rows and the `web:` rows were added independently
+  // and each branch's test asserted only its own. Merging them, every row from
+  // BOTH still appears: 6 from the panel work, 7 from the browser work, 9
+  // distinct once the shared ones are counted once. If a future merge drops
+  // either family this array is what catches it.
   assert.deepEqual(
-    rows.map((r) => r.process_name || 'panel:' + r.panel),
-    ['claude', 'panel:claude_code', 'copilot', 'm365copilot', 'panel:office_copilot_pane', 'panel:outlook_copilot_pane'],
+    rows.map((r) => r.process_name || (r.panel ? 'panel:' + r.panel : 'web:' + r.browser_host)),
+    ['claude', 'panel:claude_code', 'web:claude.ai',
+     'copilot', 'web:copilot.microsoft.com',
+     'm365copilot', 'panel:office_copilot_pane', 'panel:outlook_copilot_pane',
+     'web:m365.cloud.microsoft'],
   );
   assert.equal(rows[0].agent_name, 'Claude', 'the FIRST row wins a dedup');
 });
@@ -597,13 +630,19 @@ test('filterBlockedAgents lifts a synthesised platform block via the row own hos
   // appears TWICE here — see processesForHost: ChatGPT Desktop ships under two
   // different process names ("ChatGPT" and "ChatGPT Classic"), so one host
   // now correctly synthesises one row per process name, not just the first.
+  // One approval lifts the claude.ai browser row too — that is what makes
+  // Request Access actually unblock a web surface. chatgpt.com keeps its two
+  // process rows AND its own browser row.
   const kept = filterBlockedAgents(list, [{ tool_host: 'CLAUDE.AI' }]);
-  assert.deepEqual(kept.map((r) => r.host || r.agent_id), ['chatgpt.com', 'chatgpt.com', 'a1']);
+  assert.deepEqual(kept.map((r) => r.host || r.agent_id), ['chatgpt.com', 'chatgpt.com', 'chatgpt.com', 'a1']);
+  assert.equal(kept.some((r) => r.browser_host === 'claude.ai'), false, 'the claude.ai browser row was not lifted');
+  assert.equal(kept.filter((r) => r.browser_host === 'chatgpt.com').length, 1, 'chatgpt.com must keep its browser row');
   // An exception for the agent-block row's platform host still lifts only that
   // row — the host-keyed chatgpt.com platform row is a separate decision.
   assert.deepEqual(
-    filterBlockedAgents(list, [{ tool_host: 'chatgpt.com' }]).map((r) => (r.host || r.agent_id) + (r.panel ? '/' + r.panel : '')),
-    ['claude.ai', 'claude.ai/claude_code'],
+    filterBlockedAgents(list, [{ tool_host: 'chatgpt.com' }])
+      .map((r) => (r.host || r.agent_id) + (r.panel ? '/' + r.panel : r.browser_host ? '/web' : '')),
+    ['claude.ai', 'claude.ai/claude_code', 'claude.ai/web'],
   );
 });
 
@@ -2003,11 +2042,33 @@ test('an Inventory host toggle can never synthesize a desktop block row for an e
     assert.equal(processForHost(surface.host), null, `${surface.host} must resolve to no blockable process`);
     assert.deepEqual(processesForHost(surface.host), [], `${surface.host} must resolve to no blockable processes`);
     assert.equal(panelForHost(surface.host), null, `${surface.host} must resolve to no blockable panel`);
-    assert.deepEqual(
-      synthesizePlatformBlocks([{ host: surface.host, product: surface.product, blocked: true }]),
-      [],
-      `an Inventory block on ${surface.host} must synthesize nothing`,
-    );
+
+    // THIS USED TO ASSERT "synthesizes nothing at all", and that was right when
+    // it was written: no row of any kind existed for a mail host. AI-253 added
+    // one — outlook.office.com is now ALSO a web surface, because Copilot lives
+    // inside Outlook on the web and has to be governable there.
+    //
+    // The property this test exists for is unchanged and still asserted above:
+    // no PROCESS row and no PANEL row, because both are matched process-WIDE
+    // and either would mean "nobody may write email". A browser row is a
+    // different thing: the enforcer scopes it to the COMPOSER element when the
+    // surface is a hostApp, so blocking Copilot in Outlook leaves sending mail
+    // alone. Verified live on the Gmail twin before it shipped.
+    //
+    // So the rule is narrowed to what it actually protects, and TIGHTENED where
+    // it matters: any row that does appear must be browser-scoped AND its
+    // surface must be a hostApp. A web row for a mail host whose surface was
+    // NOT composer-scoped would be exactly the outage this test was written to
+    // prevent, and that is what now fails here.
+    for (const row of synthesizePlatformBlocks([{ host: surface.host, product: surface.product, blocked: true }])) {
+      assert.ok(row.browser_host, `${surface.host} may only synthesize a browser row, got ${JSON.stringify(row)}`);
+      assert.equal(row.process_name, undefined, `${surface.host} must never get a process row`);
+      assert.equal(row.panel, undefined, `${surface.host} must never get a panel row`);
+      const web = webSurfaceForHost(row.browser_host);
+      assert.ok(web, `${row.browser_host} must resolve to a web surface`);
+      assert.equal(web.hostApp, true,
+        `${row.browser_host} is a mail host: its web surface MUST be composer-scoped`);
+    }
   }
   // The sync roots too — an admin blocking onedrive.live.com must not disable
   // any desktop process either.
@@ -2015,7 +2076,18 @@ test('an Inventory host toggle can never synthesize a desktop block row for an e
     for (const host of root.policyHosts) {
       assert.equal(processForHost(host), null);
       assert.deepEqual(processesForHost(host), []);
-      assert.deepEqual(synthesizePlatformBlocks([{ host, product: root.product, blocked: true }]), []);
+      // Same narrowing as above, and it bites on exactly one host: sharepoint.com
+      // is both an egress sync root and the policy host for Copilot in Office on
+      // the web (copilot_office_web). A browser row there is the feature; a
+      // PROCESS row there would be "nobody may use SharePoint".
+      for (const row of synthesizePlatformBlocks([{ host, product: root.product, blocked: true }])) {
+        assert.ok(row.browser_host, `${host} may only synthesize a browser row, got ${JSON.stringify(row)}`);
+        assert.equal(row.process_name, undefined);
+        assert.equal(row.panel, undefined);
+        const web = webSurfaceForHost(row.browser_host);
+        assert.ok(web && web.hostApp === true,
+          `${row.browser_host} is an egress host: its web surface MUST be composer-scoped`);
+      }
     }
   }
 });
@@ -2280,5 +2352,236 @@ test('buildEgressSurfaceConfig strips the characters that would break the .ps1 J
   } finally {
     EGRESS_SURFACES.length = 0;
     EGRESS_SURFACES.push(...original);
+  }
+});
+
+// ── AI-218: Microsoft Copilot agents in the browser ─────────────────────────
+
+test('webComposerIdentity answers "is this the composer" and "which agent" from one string', async () => {
+  const { WEB_SURFACES, webComposerIdentity } = await import('../src/os_monitor/ai-processes.js');
+  const ms = WEB_SURFACES.find((s) => s.host === 'm365.cloud.microsoft');
+  assert.ok(ms, 'expected the m365.cloud.microsoft surface');
+  const AID = 'm365-chat-editor-target-element';
+
+  // Every string below was MEASURED live in Chrome on 2026-09-21, not invented.
+  const cases = [
+    ['Message IT Help Desk Agent', AID, 'named', 'IT Help Desk Agent',
+      'the composer Name embeds the agent, which is the whole mechanism'],
+    ['Message Copilot', AID, 'generic', '',
+      'no specific agent open - must NOT be blockable by name'],
+    ['Message Microsoft Copilot', AID, 'generic', '', 'the same, spelled out'],
+    ['Message IT Help Desk Agent', 'some-other-id', 'not_composer', '',
+      'right name, WRONG element - the structural gate must refuse it'],
+    ['Message IT Help Desk Agent', '', 'not_composer', '',
+      'no AutomationId at all is not proof of anything'],
+    ['Search chats', AID, 'not_composer', '', 'a site search box is not a composer'],
+    ['Message ', AID, 'not_composer', '', 'a prefix with no remainder names no agent'],
+    ['', AID, 'not_composer', '', 'an unreadable Name is no evidence'],
+    ['message it help desk agent', AID, 'named', 'it help desk agent',
+      'prefix match is case-insensitive, as on the desktop path'],
+  ];
+  for (const [name, aid, outcome, agentName, why] of cases) {
+    const got = webComposerIdentity(ms, name, aid);
+    assert.equal(got.outcome, outcome, JSON.stringify(name) + ': ' + why);
+    assert.equal(got.agentName, agentName, JSON.stringify(name) + ': agent name - ' + why);
+    // ONLY 'named' may ever arm a block. This is the property that stops "we
+    // could not identify the agent" becoming "block the whole Microsoft site".
+    if (outcome !== 'named') assert.equal(got.agentName, '', 'only a named read may carry an agent');
+  }
+});
+
+test('webComposerIdentity: a url_path surface takes its agent from the URL, not the element', async () => {
+  // AI-219. The C# twin of this function grew a second mode, so the pure one
+  // must too or "held in lockstep by a test" stops being true. Gemini
+  // Enterprise's composer Name is the generic 'Search' for every agent — and
+  // EMPTY on the focusable child the enforcer actually caches — so no string on
+  // the element can name an agent. The URL path can, and the caller passes it.
+  const { WEB_SURFACES, webComposerIdentity } = await import('../src/os_monitor/ai-processes.js');
+  const ge = WEB_SURFACES.find((s) => s.host === 'vertexaisearch.cloud.google.com');
+  assert.ok(ge, 'expected the Gemini Enterprise surface');
+  const AID = 'agent-search-prosemirror-editor';
+  const ID_A = '18007293655158706549';
+
+  // Both MEASURED composer names — the parent's 'Search' and the focusable
+  // child's '' — identify, and both take the agent from the URL.
+  for (const name of ['Search', '']) {
+    const got = webComposerIdentity(ge, name, AID, ID_A);
+    assert.equal(got.outcome, 'named', JSON.stringify(name) + ' with an agent in the URL');
+    assert.equal(got.agentName, ID_A);
+  }
+  // THE STRUCTURAL GATE IS NOT RELAXED by the id being available elsewhere: a
+  // wrong AutomationId is still not the composer.
+  assert.equal(webComposerIdentity(ge, 'Search', 'some-other-input', ID_A).outcome, 'not_composer');
+  assert.equal(webComposerIdentity(ge, 'Search', '', ID_A).outcome, 'not_composer');
+  // No agent in the URL is GENERIC — a composer we are sure of, on a page that
+  // named no agent — and a generic outcome can never arm an agent block.
+  const generic = webComposerIdentity(ge, 'Search', AID, '');
+  assert.equal(generic.outcome, 'generic');
+  assert.equal(generic.agentName, '', 'only a named read may carry an agent');
+});
+
+test('the exact-name surfaces are untouched by the new identity path', async () => {
+  // claude.ai / chatgpt.com / gemini.google.com have no agent concept and keep
+  // their exact-match rule byte-for-byte. A regression here would silently
+  // change what can be read on three ARMED hosts. All three strings were
+  // re-verified against the live pages on 2026-09-21.
+  const { WEB_SURFACES, webComposerIdentity } = await import('../src/os_monitor/ai-processes.js');
+  const measured = {
+    'claude.ai': 'Write your prompt to Claude',
+    'chatgpt.com': 'Chat with ChatGPT',
+    'gemini.google.com': 'Enter a prompt for Gemini',
+  };
+  for (const host of Object.keys(measured)) {
+    const composer = measured[host];
+    const s = WEB_SURFACES.find((x) => x.host === host);
+    assert.ok(s, 'expected ' + host);
+    assert.equal(s.composerName, composer, host + ' composer name must match what was probed live');
+    assert.equal(webComposerIdentity(s, composer, '').isComposer, true, host + ' composer must identify');
+    assert.equal(webComposerIdentity(s, 'Search chats', '').outcome, 'not_composer',
+      host + ': a search box must never identify as the composer');
+    // No agent name can ever come off a fixed-name surface.
+    assert.equal(webComposerIdentity(s, composer, '').agentName, '');
+  }
+});
+
+test('the Microsoft surfaces ship INERT, and arming one has to be deliberate', async () => {
+  const { WEB_SURFACES } = await import('../src/os_monitor/ai-processes.js');
+  // The armed set is written out by name. Arming a new host means editing this
+  // list, which is the point: a surface cannot become live as a side effect.
+  const armed = WEB_SURFACES.filter((s) => s.enforce && s.verified).map((s) => s.host).sort();
+  // mail.google.com is the first hostApp surface -- Gmail with the Gemini panel.
+  // It is armed like the rest, but its BLOCK is composer-scoped; see
+  // enforcer-browser-block.test.mjs.
+  assert.deepEqual(armed, ['chatgpt.com', 'claude.ai', 'docs.google.com', 'gemini.google.com',
+                           'm365.cloud.microsoft', 'mail.google.com', 'outlook.office.com',
+                           'sharepoint.com',
+                           'vertexaisearch.cloud.google.com'],
+    'only live-probed hosts may be armed');
+  // copilot.microsoft.com stays inert: it redirected to m365 on the test
+  // machine and has never actually been observed.
+  const copilot = WEB_SURFACES.find((x) => x.host === 'copilot.microsoft.com');
+  assert.equal(copilot.enforce, false, 'an unobserved host must not be armed');
+  assert.equal(copilot.agentRead.enforce, false);
+
+  // Any surface carrying an agent read must have BOTH flags of its own nested
+  // pair off until that host has had its own live pass. Asserted over the whole
+  // array so a future entry cannot ship armed either.
+  // Armed agent reads are listed BY NAME, so turning one on means editing this
+  // line -- an agent read cannot become live as a side effect of anything else.
+  // vertexaisearch.cloud.google.com joined 2026-09-22 (AI-219) with the OTHER
+  // agent-read mode: url_path. Its composer names no agent at all, so listing
+  // it here is the record that a human measured two agents producing two
+  // different ids in the URL path -- not that a mechanism was assumed to carry
+  // over from Microsoft's.
+  const AGENT_READ_ARMED = new Set(['m365.cloud.microsoft', 'vertexaisearch.cloud.google.com']);
+  for (const s of WEB_SURFACES) {
+    if (!s.agentRead) continue;
+    const want = AGENT_READ_ARMED.has(s.host);
+    assert.equal(s.agentRead.enforce, want, s.host + ': agentRead.enforce');
+    assert.equal(s.agentRead.verified, want, s.host + ': agentRead.verified');
+    // An agent read may only be armed on a surface that is itself armed;
+    // otherwise it would be reading a host nothing else governs.
+    if (want) assert.ok(s.enforce && s.verified, s.host + ': agent read armed on an unarmed surface');
+  }
+
+  // Teams web is deliberately absent: it mixes human DMs with agent chats.
+  assert.equal(WEB_SURFACES.some((s) => s.host === 'teams.microsoft.com'), false,
+    'teams.microsoft.com must not ship until its DM composer is proven distinguishable');
+  // And the host must be the exact subdomain - a bare cloud.microsoft entry
+  // would govern word./outlook./everything, since matching is suffix-based.
+  assert.equal(WEB_SURFACES.some((s) => s.host === 'cloud.microsoft'), false,
+    'cloud.microsoft would govern every Microsoft cloud property');
+
+  // An unprobed surface carries no send-button signature, so it can only ever
+  // do Enter-blocking - never a guessed rectangle over unrelated controls.
+  for (const s of WEB_SURFACES) {
+    if (s.enforce && s.verified) {
+      // An ARMED surface with NO click block is a bypass, not a conservative
+      // default: the user clicks the send arrow and the block does nothing.
+      // This project has already had to fix exactly that escape once.
+      assert.ok(s.sendButtonName && s.sendButtonControlType,
+        s.host + ': an armed surface must have a probed send button');
+      continue;
+    }
+    assert.equal(s.sendButtonName, '', s.host + ': an unarmed surface must carry no send signature');
+  }
+});
+
+test('the browser platforms never reach the process-wide matcher', async () => {
+  // PLATFORM_PROCS is matched process-WIDE. A browser entry there would govern
+  // every tab in the browser, which is the one thing this whole design forbids.
+  const { WEB_SURFACES, buildWebSurfaceConfig } = await import('../src/os_monitor/ai-processes.js');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = await readFile(join(here, '..', 'src', 'os_monitor', 'ai-processes.js'), 'utf8');
+  const platforms = WEB_SURFACES.flatMap((s) => s.platforms || []);
+  assert.ok(platforms.includes('copilot_studio'), 'expected the new platforms to exist');
+  const at = src.indexOf('PLATFORM_PROCS');
+  const procsBlock = src.slice(at, at + 2000);
+  for (const host of ['m365.cloud.microsoft', 'copilot.microsoft.com', 'chrome', 'msedge']) {
+    assert.equal(procsBlock.includes(host), false, 'PLATFORM_PROCS must not mention ' + host);
+  }
+
+  // The payload resolves every new field to an explicit value, so the C# side
+  // never has to tell absent from empty.
+  const cfg = buildWebSurfaceConfig().find((c) => c.host === 'm365.cloud.microsoft');
+  assert.deepEqual(cfg.composerNamePrefixes, ['Message ']);
+  assert.equal(cfg.composerAutomationId, 'm365-chat-editor-target-element');
+  assert.equal(cfg.agentReadMode, 'composer_name');
+  // Armed 2026-09-21 after the live pass. Both flags travel, and both must be
+  // true together: a half-flip would look armed in the catalog and read nothing.
+  assert.equal(cfg.agentReadEnforce, true);
+  assert.equal(cfg.agentReadVerified, true);
+  assert.ok(cfg.platforms.includes('personal_agent'));
+  // And the three original entries keep the SINGULAR platform field, so their
+  // payload is byte-for-byte what it was.
+  const claude = buildWebSurfaceConfig().find((c) => c.host === 'claude.ai');
+  assert.equal(claude.platform, 'claude_ai_project');
+  assert.deepEqual(claude.platforms, []);
+
+  // AI-219. The second agent-read mode, and the fields only it uses. The
+  // pattern's FIRST CAPTURE GROUP is the agent id; nothing else is ever taken
+  // out of the URL, which is what keeps the host-only rule intact.
+  const ge = buildWebSurfaceConfig().find((c) => c.host === 'vertexaisearch.cloud.google.com');
+  assert.equal(ge.agentReadMode, 'url_path');
+  assert.equal(ge.agentReadUrlPattern, '/r/agent/([0-9]+)');
+  assert.equal(ge.agentReadEnforce, true);
+  assert.equal(ge.agentReadVerified, true);
+  // Identified by the AutomationId ALONE: the composer Name is the generic
+  // 'Search' for every agent, so there is nothing else on the element to match.
+  assert.equal(ge.composerAutomationId, 'agent-search-prosemirror-editor');
+  assert.equal(ge.composerName, '');
+  assert.deepEqual(ge.composerNamePrefixes, []);
+  // A [Group], not an [Edit] -- the first surface that is not.
+  assert.equal(ge.composerControlType, 'Group');
+  // AI-219 follow-up, after the first build FAILED ITS LIVE TEST: the element
+  // carrying the AutomationId is not keyboard-focusable and the focusable one
+  // carries no AutomationId, so the composer is the identified element's CHILD.
+  // Both halves are required by the enforcer -- 'ProseMirror' alone is the most
+  // common editor class on the web and identifies nothing.
+  assert.equal(ge.composerFocusableChildClassName, 'ProseMirror');
+  assert.deepEqual(ge.platforms, ['gemini_enterprise']);
+  // genericNames filters DISPLAY NAMES, and none are read here. "No agent"
+  // is the empty id, not a name on a list.
+  assert.deepEqual(ge.genericNames, []);
+  // And the url_path fields must not have leaked onto any other surface.
+  for (const row of buildWebSurfaceConfig()) {
+    if (row.agentReadMode === 'url_path') continue;
+    assert.equal(row.agentReadUrlPattern, '', row.id + ' carries a URL pattern it cannot use');
+    // The composer control type is CATALOG DATA since AI-219, and three values
+    // are now in use across live-probed surfaces: Edit (claude.ai,
+    // chatgpt.com, m365), Group (Gemini Enterprise) and ComboBox (the Gemini
+    // panel in Gmail). What must hold is that every value is one the .ps1 can
+    // map -- an unmappable type yields no search condition and no walk, the
+    // fail-closed direction -- not that every surface asks for an Edit.
+    // 'Document' is NOT in this set: on a web page that is the RootWebArea --
+    // the whole page -- so a surface declaring it would have capture read
+    // everything instead of one composer.
+    assert.ok(['Edit', 'Group', 'ComboBox'].includes(row.composerControlType),
+      row.id + ' has a composer control type the .ps1 cannot map: ' + row.composerControlType);
+    // …and no older surface acquired a child descent. An empty value is what
+    // makes the change invisible to them: the identified element IS the
+    // composer, exactly as before.
+    assert.equal(row.composerFocusableChildClassName, '',
+      row.id + ' must keep identifying the composer element itself');
   }
 });

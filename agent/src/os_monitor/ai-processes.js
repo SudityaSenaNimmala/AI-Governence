@@ -845,6 +845,206 @@ export const AI_PANELS = [
 // same discipline PLATFORM_PROCS is kept under.
 export const DEFAULT_NEWLINE_KEYS = 'shift_enter';
 
+// AI-219. The UIA control type a web surface's composer is assumed to be when
+// its entry says nothing. Every surface up to Gemini Enterprise was an [Edit]
+// and the enforcer hard-coded that type in three places; this constant is what
+// keeps those four surfaces byte-identical in behaviour now that the type is
+// data. Mirrored by exactly one C# constant in enforcer-win.ps1
+// (WEB_COMPOSER_CONTROL_TYPE_DEFAULT), held in lockstep by a test — the same
+// discipline DEFAULT_NEWLINE_KEYS is kept under.
+export const DEFAULT_COMPOSER_CONTROL_TYPE = 'Edit';
+
+// ── AI-216: model routing on a WEB surface ────────────────────────────────
+//
+// The picker button's name prefix, its control type, and the control types its
+// menu items use. All three were HARDCODED IN C# ("Model:", Button,
+// RadioButton|MenuItem) for the Claude DESKTOP path; they are lifted here so a
+// web surface can declare its own, and so the desktop path keeps running off a
+// named default instead of three bare literals.
+//
+// THE DESKTOP PATH MUST STAY BYTE-IDENTICAL. These are the exact strings
+// enforcer-win.ps1 carried at :3378 and :3639, and the C# constants they mirror
+// (MODEL_PICKER_NAME_PREFIX_DEFAULT / MODEL_PICKER_CONTROL_TYPE_DEFAULT /
+// MODEL_PICKER_ITEM_CONTROL_TYPES_DEFAULT) are what the desktop path now reads.
+// A test holds both sides in lockstep — the same discipline
+// DEFAULT_NEWLINE_KEYS and DEFAULT_COMPOSER_CONTROL_TYPE are kept under.
+export const MODEL_PICKER_NAME_PREFIX_DEFAULT = 'Model:';
+export const MODEL_PICKER_CONTROL_TYPE_DEFAULT = 'Button';
+export const MODEL_PICKER_ITEM_CONTROL_TYPES_DEFAULT = ['RadioButton', 'MenuItem'];
+
+// The effort tokens claude.ai appends to the model name in the picker's own
+// label ('Model: Opus 5 High', 'Model: Sonnet 5 Medium').
+//
+// WHY THIS EXISTS AT ALL, since routing does not set effort: switching model
+// changes effort AS A SIDE EFFECT (measured live: Opus 5 High -> Sonnet 5
+// Medium). That downgrade is accepted, but if it is not RECORDED then the cost
+// model silently attributes a Medium-effort request to a High-effort price.
+// The token is already inside the string being parsed for the tier, so
+// capturing it costs nothing.
+//
+// Deliberately a CLOSED SET rather than "the last word": the remainder after
+// the model name is arbitrary site text, and emitting an arbitrary trailing
+// word would put page-derived content into a governance event. An unrecognised
+// trailing token yields '' — no effort known — which is the same
+// fail-to-nothing direction every other unprobed value here takes.
+export const MODEL_EFFORT_TOKENS = ['High', 'Medium', 'Low'];
+
+// Does `name` start with the tier label `label` AT A TOKEN BOUNDARY?
+//
+// THE PURE MATCHER, ported to C# as ModelItemNameMatches and held in lockstep
+// by a test. Written here rather than only in C# so the rule can be exercised
+// against the measured strings without a Windows box.
+//
+// A bare StartsWith is WRONG and the measured menu is why. The items read
+//   'Opus 5 For complex tasks'
+//   'Sonnet 5 Most efficient for everyday tasks'
+//   'Haiku 4.5 Fastest for quick answers'
+// so the label ('Sonnet 5') is genuinely a prefix of the item's whole name —
+// but a bare prefix test would ALSO accept 'Sonnet 5.5 ...' and 'Sonnet 50 ...'
+// for the label 'Sonnet 5'. Routing to the wrong model is worse than not
+// routing: the user is silently billed for, and served by, a model nobody
+// chose.
+//
+// THE BOUNDARY RULE: the character immediately after the label must not be a
+// letter, a digit, '.' or '-'. Those four are exactly the characters that can
+// EXTEND a model identifier ('5' -> '50', '5' -> '5.5', 'Sonnet' -> 'Sonnets',
+// 'Opus' -> 'Opus-Max'). A space, which is what every measured item has there,
+// passes. End-of-string passes too — a menu that renders the bare label is a
+// match, not a miss.
+//
+// Case-insensitive on the label compare only, mirroring the desktop path's
+// existing OrdinalIgnoreCase StartsWith so Claude Desktop's behaviour is
+// unchanged.
+export function modelItemNameMatches(name, label) {
+  const n = String(name == null ? '' : name);
+  const l = String(label == null ? '' : label);
+  if (l.length === 0 || n.length < l.length) return false;
+  if (n.slice(0, l.length).toLowerCase() !== l.toLowerCase()) return false;
+  if (n.length === l.length) return true;
+  const next = n.charAt(l.length);
+  // Letter / digit / '.' / '-' -> the label was a fragment of a LONGER
+  // identifier, not the identifier. Refuse.
+  return !/[0-9a-z.\-]/i.test(next);
+}
+
+// Every menu item matching `label`, by control type AND the boundary rule.
+//
+// AMBIGUITY IS A REFUSAL, NEVER A FIRST-MATCH. `items` is the whole open menu;
+// exactly one match may be clicked. Zero matches is `target_item_not_found` —
+// an ORDINARY runtime path, because model availability is per ACCOUNT, not per
+// host (one claude.ai account shows Fable 5.1 and another does not; a ChatGPT
+// Go account has no picker at all). Two or more is `target_item_ambiguous`:
+// taking the first would be a coin flip over which model the user is billed
+// for, and there is no evidence available at that moment to break the tie.
+//
+// `itemControlTypes` empty means NO MATCH AT ALL rather than "any type" — the
+// same fail-closed direction an empty sendButtonName takes.
+export function matchModelPickerItems(items, label, itemControlTypes, selectedPrefix) {
+  const types = (itemControlTypes || []).map((t) => String(t || '').toLowerCase()).filter(Boolean);
+  if (types.length === 0) return [];
+  const pfx = String(selectedPrefix == null ? '' : selectedPrefix);
+  return (items || []).filter((it) => {
+    if (!it) return false;
+    if (!types.includes(String(it.controlType || '').toLowerCase())) return false;
+    return modelItemNameMatches(stripSelectedPrefix(it.name, pfx), label);
+  });
+}
+
+// AI-216 / Gemini. Some sites fold the SELECTION STATE into the item's Name
+// instead of exposing SelectionItemPattern: gemini.google.com's active item
+// reads 'Selected 3.1 Pro Advanced reasoning' while the other three read
+// '3.8 Flash All-around help'. Measured live 2026-09-22.
+//
+// Without stripping it, the boundary matcher refuses EXACTLY ONE item -- the
+// currently selected one -- which is a silent, state-dependent hole: it would
+// only ever show up when routing happened to target the active model.
+//
+// A SINGLE, CATALOG-DECLARED prefix, stripped once at a token boundary. NOT a
+// general "tolerate any leading words" rule: that would gut the whole-token
+// discipline on every other surface, where a leading word is exactly the kind
+// of near-miss an impostor looks like. A surface that declares no prefix
+// (claude.ai) is byte-identical to before.
+export function stripSelectedPrefix(name, selectedPrefix) {
+  const n = String(name == null ? '' : name);
+  const p = String(selectedPrefix == null ? '' : selectedPrefix);
+  if (p.length === 0 || n.length <= p.length) return n;
+  if (n.slice(0, p.length).toLowerCase() !== p.toLowerCase()) return n;
+  return n.slice(p.length);
+}
+
+// AI-216 / Gemini. Resolve the CURRENT tier from the picker BUTTON's label.
+//
+// WHY THIS EXISTS RATHER THAN detectModelInfo's keyword chain: on
+// gemini.google.com the chain is measurably WRONG. Its rules are
+// ['flash','lite']->economy before ['pro']->premium, so both 'currently Flash'
+// and 'currently Flash-Lite' resolve to economy -- but the live menu has three
+// distinct tiers (3.5 Flash-Lite, 3.8 Flash, 3.1 Pro). A user on Flash would be
+// read as already-cheapest and never routed down, and routed UP too eagerly.
+//
+// The button labels are also NOT the menu labels on that surface: the button
+// says 'currently Pro' while the menu item says '3.1 Pro'. So this needs its
+// own table -- tierLabels is what we CLICK, buttonTierLabels is what we READ.
+// claude.ai needs neither, because its button and menu agree ('Opus 5' in both)
+// and its keyword chain is correct; it passes no buttonTierLabels and falls
+// through to the keyword chain exactly as before.
+//
+// Same boundary rule as the menu matcher, and it is load-bearing here rather
+// than theoretical: 'Flash' is a prefix of 'Flash-Lite', and only the rule that
+// '-' continues an identifier keeps the standard tier from swallowing economy.
+// Longest label first, so ordering cannot decide a match the boundary rule
+// should have decided.
+export function resolveButtonTier(label, buttonTierLabels) {
+  const raw = String(label == null ? '' : label);
+  const table = buttonTierLabels || {};
+  const entries = [3, 2, 1]
+    .map((n) => ({ num: n, label: String(table[n] || '') }))
+    .filter((e) => e.label.length > 0)
+    .sort((a, b) => b.label.length - a.label.length);
+  if (entries.length === 0) return 0;
+  const low = raw.toLowerCase();
+  for (const e of entries) {
+    const at = low.indexOf(e.label.toLowerCase());
+    if (at < 0) continue;
+    const after = raw.slice(at + e.label.length);
+    // The SAME boundary rule the menu matcher uses, applied to the character
+    // that follows the label inside the sentence.
+    if (after.length > 0 && /[0-9a-z.\-]/i.test(after.charAt(0))) continue;
+    return e.num;
+  }
+  return 0;
+}
+
+// Split a picker button label into the part that identifies the MODEL and the
+// effort token, e.g. 'Model: Opus 5 High' -> { body:'Opus 5', effort:'High' }.
+//
+// The prefix is stripped case-insensitively, exactly as the desktop path's
+// StartsWith test finds it. Nothing here decides a TIER — that stays with
+// detectModelInfo, which keys on the model keyword and is therefore already
+// blind to the effort token. That blindness is required by the design: a
+// from_tier comparison must be TIER-ONLY, so an effort change on its own can
+// never read as a model change.
+export function parseModelPickerLabel(label, namePrefix) {
+  const raw = String(label == null ? '' : label).trim();
+  const pfx = String(namePrefix == null ? '' : namePrefix);
+  let body = raw;
+  if (pfx.length > 0 && raw.toLowerCase().startsWith(pfx.toLowerCase())) {
+    body = raw.slice(pfx.length).trim();
+  }
+  let effort = '';
+  // Split on runs of whitespace with no empties, rather than on a literal
+  // ' ' — a double space in the label must not produce an empty last token.
+  const parts = body.split(/\s+/).filter(Boolean);
+  if (parts.length > 1) {
+    const last = parts[parts.length - 1];
+    const hit = MODEL_EFFORT_TOKENS.find((t) => t.toLowerCase() === last.toLowerCase());
+    if (hit) {
+      effort = hit;
+      body = parts.slice(0, -1).join(' ');
+    }
+  }
+  return { body, effort };
+}
+
 // The `newlineKeys` values the enforcer knows how to synthesize. Anything else
 // (including a typo in a future entry) is treated as "no safe newline key here",
 // which makes Tier B refuse multi-line text on that surface rather than guess a
@@ -1485,6 +1685,85 @@ export function titleKindOf(surface, title) {
   const parts = titleSegments(surface, title);
   if (!parts) return '';
   return normalizeAgentName(parts[0]);
+}
+
+// ── Web composer identity, for AI-218 ───────────────────────────────────────
+//
+// Answers TWO questions from ONE string, which is the whole point: "is this
+// element the composer of a governed AI surface" and "which agent is open in
+// it". They are the same question on Microsoft's surfaces, because the
+// composer's accessible Name is "Message <agent>".
+//
+// Returns { isComposer, outcome, agentName } where outcome is one of
+// 'named' | 'generic' | 'not_composer', mirroring extractAgentName's
+// three-outcome contract. ONLY 'named' may ever arm an agent-scoped block;
+// 'generic' and 'not_composer' block nothing, which is what stops "we could not
+// name the agent" from turning into "block the whole Microsoft site".
+//
+// Pure and side-effect free so the C# port can be held in lockstep by a test.
+export function webComposerIdentity(surface, name, automationId, urlAgentId = '') {
+  const out = { isComposer: false, outcome: 'not_composer', agentName: '' };
+  if (!surface) return out;
+  const nm = String(name ?? '').trim();
+
+  // A surface with a fixed composer Name (claude.ai, chatgpt.com,
+  // gemini.google.com) keeps its exact-match rule untouched. It has no agent
+  // concept at all, so a match is a composer and nothing more.
+  const exact = String(surface.composerName ?? '');
+  if (exact) {
+    if (nm !== exact) return out;
+    return { isComposer: true, outcome: 'generic', agentName: '' };
+  }
+
+  // A surface identified STRUCTURALLY must satisfy that first. The
+  // AutomationId is the strongest signal Microsoft gives us -- stable, semantic
+  // and independent of UI language -- so when the catalog carries one it is
+  // required, not merely preferred.
+  const wantAid = String(surface.composerAutomationId ?? '');
+  if (wantAid && String(automationId ?? '') !== wantAid) return out;
+
+  // AI-219: a url_path surface's ELEMENT names no agent. Gemini Enterprise's
+  // composer Name is the generic 'Search' for every agent (and '' on the
+  // focusable child), so identity is the opaque id in the URL path, which the
+  // caller passes in. The composer test is NOT relaxed by this: reaching here
+  // means the AutomationId matched ordinally, and it is REQUIRED -- with no id
+  // to pin the element there is no identity at all.
+  const mode = String((surface.agentRead && surface.agentRead.mode) || '');
+  if (mode === 'url_path') {
+    if (!wantAid) return out;
+    const id = String(urlAgentId ?? '');
+    // An empty id is a composer we are sure of on a page that named no agent,
+    // and a generic outcome can never arm an agent block.
+    if (!id) return { isComposer: true, outcome: 'generic', agentName: '' };
+    return { isComposer: true, outcome: 'named', agentName: id };
+  }
+
+  // THE EMPTY-NAME REFUSAL belongs to the NAME routes, which are the only ones
+  // that read a name at all -- see the C# twin. The fixed-name route above
+  // already refuses '' because '' never equals its string.
+  if (!nm) return out;
+  const prefixes = surface.composerNamePrefixes || [];
+  if (!prefixes.length) return out;
+  for (const prefix of prefixes) {
+    const pre = String(prefix ?? '');
+    if (!pre) continue;
+    if (nm.length <= pre.length) continue;
+    if (nm.slice(0, pre.length).toLowerCase() !== pre.toLowerCase()) continue;
+    const remainder = normalizeAgentName(nm.slice(pre.length));
+    // "Message " with nothing after it is not an agent, and not proof of a
+    // composer either.
+    if (!remainder) return out;
+    // GENERIC FILTER BEFORE ANY MATCH, same ordering and same reason as
+    // extractAgentName: an agent literally named "Copilot" must not be
+    // matchable, because "block all of Copilot" is a platform-scoped decision.
+    for (const generic of surface.genericNames || []) {
+      if (normalizeAgentName(generic).toLowerCase() === remainder.toLowerCase()) {
+        return { isComposer: true, outcome: 'generic', agentName: '' };
+      }
+    }
+    return { isComposer: true, outcome: 'named', agentName: remainder };
+  }
+  return out;
 }
 
 export function extractAgentNameFromTitle(surface, title) {
@@ -2451,6 +2730,39 @@ export function synthesizePlatformBlocks(platformRows) {
         reason: 'Blocked by organization policy',
       });
     }
+    // THE BROWSER ROW — a third row shape beside process_name and panel.
+    //
+    // This is what makes an Inventory block on claude.ai reach a browser tab
+    // now that the extension is not the one enforcing the web surface. The row
+    // carries `browser_host` and NO process_name, deliberately: the enforcer
+    // matches it against the host it resolved from the address bar and arms an
+    // ELEMENT-scoped block on the page composer. A process_name:'chrome' row
+    // would be matched process-WIDE and swallow Enter in every tab of the
+    // browser — which is why processesForHost() above can never return a
+    // browser (they are absent from AI_PROCESSES) and why this row shape has to
+    // exist separately at all.
+    //
+    // `host` is already carried, which is what lets filterBlockedAgents()
+    // subtract an approved {machine_id, tool_host} exception with no new code:
+    // it matches on row.host, so an approved claude.ai exception drops this row
+    // before blocked-agents.json is written and the enforcer never sees it.
+    //
+    // Emitted regardless of the surface's enforce/verified flags — those are
+    // read on the ENFORCER side by its single EnforcingWebSurface() gate, the
+    // same split AI_PANELS uses. A row for an unverified surface is inert, not
+    // absent, so the whole path stays exercised before it is armed.
+    const web = webSurfaceForHost(row.host);
+    if (web && !seen.has(`web:${web.host}`)) {
+      seen.add(`web:${web.host}`);
+      rows.push({
+        platform: PLATFORM_BLOCK_SENTINEL,
+        browser_host: sanitizeForPs1(web.host),
+        agent_name: agentName,
+        agent_id: '',
+        host,
+        reason: 'Blocked by organization policy',
+      });
+    }
   }
   return rows;
 }
@@ -2938,6 +3250,758 @@ export function egressSurfaceForProcess(processName) {
   return null;
 }
 
+// ── Browser web surfaces ────────────────────────────────────────────────────
+//
+// A BROWSER IS A HOST APP WHOSE "WHICH AI IS OPEN" QUESTION IS ANSWERED BY THE
+// URL. That framing is the whole design: everything below reuses the host-app
+// and panel machinery that Microsoft Teams and the IDE panels already proved,
+// with the resolved HOST standing in for the window title / composer label that
+// names the open agent everywhere else.
+//
+// This exists because the browser extension is being taken out of the loop. Up
+// to now every web surface was governed in-page and the desktop side
+// deliberately looked away — see the AGENT_SURFACES note above ("the browser
+// extension still covers the web surface"). With the extension disabled that
+// premise is void and these hosts are completely ungoverned.
+//
+// DO NOT ADD chrome/msedge TO AI_PROCESSES. This is the same separation
+// IDE_PROCESSES documents, and the consequences here are worse:
+//   * hostForProcess('chrome') would return ONE arbitrary host as *the*
+//     access-exception key for every site the browser can reach.
+//   * identifyAiProcess('chrome') would attribute every browser event to one
+//     product.
+//   * processForHost('claude.ai') must keep returning the Claude DESKTOP
+//     process — the desktop app and claude.ai in a tab are different surfaces
+//     and the server tells them apart.
+//   * AI_PROCESSES drives index.js's aiProcNames, which arms the clipboard
+//     poller and the file-dialog / attachment / prompt-text watchers. A browser
+//     there would turn on clipboard scanning and attachment watching across the
+//     WHOLE browser — every download, every "Open" dialog, every paste into any
+//     tab. That is general browser surveillance, not AI governance.
+// agent/tests/ai-processes.test.mjs asserts the separation.
+//
+// One literal process name per entry, same constraint as everywhere else: the
+// .ps1 side turns each `match` into an exact-match HashSet key, so a regex
+// alternation would silently match nothing. Name variants need their own row.
+export const BROWSER_PROCS = [
+  { match: /^chrome$/i,   browser: 'Chrome',  engine: 'chromium' },
+  { match: /^msedge$/i,   browser: 'Edge',    engine: 'chromium' },
+  // Chromium siblings — catalogued so a future live pass has somewhere to land,
+  // but they reach nothing until a WEB_SURFACES entry is verified AND the
+  // browser itself has been probed. Firefox's omnibox Name differs ("Search
+  // with ... or enter address") and is already covered by the address-bar
+  // regex; its PAGE composer through Gecko accessibility is a separate
+  // unknown, so it is listed and untested. Arc is deliberately absent: it
+  // hides the address bar entirely, so the URL read has no anchor.
+  { match: /^brave$/i,    browser: 'Brave',   engine: 'chromium' },
+  { match: /^vivaldi$/i,  browser: 'Vivaldi', engine: 'chromium' },
+  { match: /^opera$/i,    browser: 'Opera',   engine: 'chromium' },
+  { match: /^firefox$/i,  browser: 'Firefox', engine: 'gecko'    },
+];
+
+// The governed web surfaces, keyed by HOST — never by path.
+//
+// `product` is deliberately the SAME string the browser extension reported
+// (content.js inferService): 'Claude', 'ChatGPT', 'Gemini'. The monitor is
+// REPLACING the extension on this surface, so its events must merge into the
+// existing platform row on the AI Usage dashboard rather than opening a
+// parallel "claude.ai" row beside the history.
+//
+// HOST ONLY, NO PATHS. The tracker's Classify-ClaudeUrl reads a path to tell
+// claude.ai/code from claude.ai; that is NOT ported here. A path is one
+// URL-shaped field away from a query string, and a query string on an AI URL
+// routinely contains the prompt itself. Sub-product-by-path can come back later
+// as a `pathRules` data field with its own redaction argument; it is not worth
+// carrying that risk for a display label.
+//
+// `platform` is the governance platform id an Inventory/blocked-agents row uses
+// for this host, so a `platform:'gemini'` block can reach the browser without
+// PLATFORM_PROCS (and its hand-maintained C# twin) gaining a browser entry.
+// Unused in phase 1 — capture only — and read by the phase 3 blocking arm.
+//
+// `enforce` / `verified` are the same two-flag safety gate AI_PANELS and
+// AGENT_SURFACES use, and every entry ships with BOTH FALSE: matched,
+// unit-tested and exercised end to end, but arming no enforcement until a human
+// runs a live pass on THAT HOST in THAT BROWSER and flips them. Per-host, not
+// per-engine — passing a live pass on claude.ai says nothing about whether
+// Gemini's composer reads correctly.
+// `newlineKeys` / `postSendVerifyMs` are the Tier B (Tokenize & Send) knobs,
+// same fields and semantics as AI_PANELS'. postSendVerifyMs is 1500 for every
+// browser surface — NOT the 200ms default — for the same reason the Teams entry
+// uses 1500: a Chromium composer's value reaches UIA one serialization hop
+// late, so a shorter window reads the pre-write text back and abandons a
+// rewrite that actually succeeded.
+// ── The send button, for the mouse-click block path ─────────────────────────
+//
+// `sendButtonName` / `sendButtonControlType` locate the site's Send control so
+// the enforcer can swallow a CLICK on it, not just an Enter keypress. Without
+// this the DLP block is trivially bypassed: type the secret, click the arrow.
+//
+// Same `controlType` + `nameEquals` shape AI_PANELS uses, and DATA for the same
+// reason. These values are LIVE-PROBED, not guessed — the desktop heuristic
+// UpdateSendRect uses elsewhere ("the button in the bottom-right corner") is
+// unusable in a browser, where that corner is arbitrary page content and a
+// cached rectangle there would swallow clicks on any website.
+//
+// claude.ai, probed 2026-09-08 in Chrome with a non-empty composer:
+//   [Button] Name='Send message' AutomationId='_r_bn_' rect=1560,1042 40x41
+// The AutomationId is a generated Base UI id (`_r_bn_`) that changes between
+// renders, and the ClassName is the shared `cds-reset group/btn ...` utility
+// soup every button on the site carries — so the NAME is the only durable
+// signal, which is why this is a name and not an id or a class.
+//
+// Two properties of this control that the enforcer must not be surprised by:
+//   * It EXISTS ONLY while the composer is non-empty. Claude renders 'Use voice
+//     mode' in the same 40x41 rect when the composer is empty, so a rect cached
+//     while text was present must never be trusted after the text is gone.
+//     Harmless in practice — a block only arms when the typed buffer matched —
+//     but it means the rect has to be re-resolved, not remembered.
+//   * It is nested under two unnamed Groups (`class='flex'`, then
+//     `class='relative flex items-center justify-end'`), and the OUTER group is
+//     the one that reports InvokePattern. Search must therefore be a descendant
+//     search for the named Button, not a scan of the composer's siblings.
+//
+// A surface with no signature gets NO click blocking (Enter only) rather than a
+// guessed rectangle. chatgpt.com and gemini.google.com are null until each is
+// probed live in the same way — the same per-host discipline the enforce/verified
+// flags impose, for the same reason: one site's DOM says nothing about another's.
+//
+// Locale caveat, stated rather than hidden: 'Send message' is the English-UI
+// string. A non-English Claude renders another name, matches nothing, and gets
+// Enter-only blocking — the same accepted fail-open as composerNamePrefixes.
+export const WEB_SURFACES = [
+  // ARMED 2026-09-09 for the live pass. Live-verified on this host before the
+  // flags were flipped: URL read from the Chrome AND Edge omnibox resolves
+  // claude.ai; the composer ([Edit] 'Write your prompt to Claude', class
+  // 'tiptap ProseMirror') reads through UIA; three real captures landed as
+  // prompt_typed with tab_host=claude.ai; the send button ([Button] 'Send
+  // message') was probed live and its relabel-to-'Use voice mode' behaviour is
+  // covered by a test against a real UIA element.
+  // STILL TO CONFIRM by hand while armed, which is what this flip is for:
+  // Enter is not swallowed in the omnibox or on a non-governed host, and a
+  // sensitive prompt IS swallowed on both the Enter and click paths.
+  {
+    id: 'claude_web',  host: 'claude.ai',         product: 'Claude',  vendor: 'Anthropic', platform: 'claude_ai_project',
+    newlineKeys: 'shift_enter', postSendVerifyMs: 1500,
+    sendButtonControlType: 'Button', sendButtonName: 'Send message',
+    composerName: 'Write your prompt to Claude',
+    // ── AI-216: MODEL ROUTING on this surface, and ONLY this surface ──────
+    //
+    // ARMED 2026-09-22 (enforce:true, verified:true) after a live UIA probe on
+    // this host. It is the ONLY entry in this catalog with a modelPicker block,
+    // and an entry without one must behave EXACTLY as it did before the field
+    // existed: no picker search, no Enter ever swallowed for routing, no route
+    // event. chatgpt.com deliberately has none — that account has no picker at
+    // all, and its entry is left untouched because it is what carries
+    // chatgpt.com's blocking and DLP coverage.
+    //
+    // MEASURED LIVE, verbatim. Picker button, composer non-empty, menu closed:
+    //   [Button] Name='Model: Opus 5 High'  patterns=ExpandCollapse
+    //            AutomationId='base-ui-_r_36_'
+    // Menu OPEN:
+    //   [Menu]        Name='Model: Opus 5 High'
+    //   [RadioButton] Name='Opus 5 For complex tasks'
+    //                 patterns=Invoke,SelectionItem,Value
+    //   [RadioButton] Name='Sonnet 5 Most efficient for everyday tasks'
+    //   [RadioButton] Name='Haiku 4.5 Fastest for quick answers'
+    //   [MenuItem]    Name='Effort High'   patterns=ExpandCollapse
+    //   [MenuItem]    Name='More models'   patterns=ExpandCollapse
+    //
+    // THE AUTOMATIONIDS HERE ARE REACT-GENERATED ('base-ui-_r_36_', '_r_8t_')
+    // AND CHANGE PER RENDER. This inverts the rule the rest of this file
+    // follows — m365's 'm365-chat-editor-target-element' and Gemini
+    // Enterprise's 'agent-search-prosemirror-editor' are SEMANTIC ids and are
+    // the right signature there. On claude.ai the AutomationId is a render
+    // counter, so matching on it would work once and then silently stop
+    // matching, which is why NAME IS THE ONLY SIGNAL used for the picker and
+    // for every item. A source-invariant test asserts no AutomationId compare
+    // exists in that code, precisely because "improving" it to use the id
+    // looks like the house style.
+    //
+    // WHAT A MODEL SWITCH DOES TO THE COMPOSER, measured across a real
+    // Opus->Sonnet switch:
+    //   BEFORE picker='Model: Opus 5 High'    RuntimeId=42.9375834.4.3604.8.589
+    //   AFTER  picker='Model: Sonnet 5 Medium' RuntimeId=42.9375834.4.3604.8.589
+    //   text UNCHANGED
+    // So the prompt SURVIVES the switch and the composer is NOT remounted.
+    // The restore path in the enforcer is therefore the EDGE case here, not the
+    // common one — it is implemented anyway, because "the user's text is either
+    // sent exactly once or visibly present" must not depend on a site keeping a
+    // behaviour it never promised.
+    //
+    // EFFORT IS A SIDE EFFECT, NOT A TARGET. Switching model also changes
+    // effort ('Opus 5 High' -> 'Sonnet 5 Medium'). Nothing here sets effort;
+    // the token is captured before AND after and emitted so the downgrade is
+    // recorded rather than silently mispriced. tierLabels are MODEL names only,
+    // so a from_tier comparison stays tier-only.
+    modelPicker: {
+      controlType: 'Button',
+      namePrefix: 'Model:',
+      itemControlTypes: ['RadioButton', 'MenuItem'],
+      // The strings a menu item's Name must START WITH, at a token boundary —
+      // see modelItemNameMatches for why a bare prefix test is not enough.
+      // 'Haiku 4.5' carries its minor version because that is what the item
+      // reads; the boundary rule then keeps 'Haiku 4.5' from matching a future
+      // 'Haiku 4.55'.
+      tierLabels: { 3: 'Opus 5', 2: 'Sonnet 5', 1: 'Haiku 4.5' },
+      // The provider whose tier arithmetic applies. Stated as DATA rather than
+      // inferred from the product string: the router's ceiling logic is keyed
+      // on provider, and a host serving another vendor's models one day must
+      // change this row, not a keyword table.
+      provider: 'anthropic',
+      // Where from_tier comes from at PIN time. 'button_label' means "parse the
+      // picker button's own text" — the only reading available before the menu
+      // is opened. Inside the route it is CONFIRMED a second time against
+      // SelectionItemPattern.IsSelected, so the pin is never acted on from one
+      // reading alone.
+      fromTier: 'button_label',
+      // The picker's OWN two-flag gate, read through exactly one accessor
+      // (enforcingWebPicker / the .ps1's EnforcingWebPicker) so no call site can
+      // consult one and forget the other — the same discipline the surface's
+      // own pair and agentRead's pair are under. Separate from the surface pair
+      // on purpose: a host can be cleared to BLOCK without being cleared to
+      // DRIVE ITS UI, and those are different live passes.
+      enforce: true, verified: true,
+    },
+    enforce: true,  verified: true,
+  },
+  // ARMED 2026-09-09. Live pass in Edge:
+  //   composer  [Edit] Name='Chat with ChatGPT' Class='ProseMirror'
+  //             AutomationId='prompt-textarea' — read back through BOTH
+  //             ValuePattern and TextPattern.
+  //   send      [Button] Name='Send prompt' AutomationId='composer-submit-button'
+  // Note this site's AutomationId is SEMANTIC and stable ('composer-submit-button'),
+  // unlike claude.ai's generated '_r_bn_' — but the catalog still keys on the
+  // NAME so all three surfaces are matched the same way and the .ps1 needs one
+  // comparison, not a per-site choice of field.
+  { id: 'chatgpt_web', host: 'chatgpt.com',       product: 'ChatGPT', vendor: 'OpenAI',    platform: 'openai_assistant',  newlineKeys: 'shift_enter', postSendVerifyMs: 1500, sendButtonControlType: 'Button', sendButtonName: 'Send prompt',  composerName: 'Chat with ChatGPT', enforce: true,  verified: true  },
+  // ARMED 2026-09-09. Live pass in Chrome:
+  //   composer  [Edit] Name='Enter a prompt for Gemini'
+  //             Class='ql-editor textarea new-input-ui' (Quill, not ProseMirror —
+  //             a different editor framework from the other two, which is
+  //             exactly why each surface needs its own read verification rather
+  //             than an assumption) — read back through both patterns.
+  //   send      [Button] Name='Send message', nested inside a Group whose class
+  //             carries 'send-button … has-input'. Same NAME as claude.ai's
+  //             button by coincidence, not by shared implementation.
+  {
+    id: 'gemini_web',  host: 'gemini.google.com', product: 'Gemini',  vendor: 'Google',    platform: 'gemini',
+    newlineKeys: 'shift_enter', postSendVerifyMs: 1500,
+    sendButtonControlType: 'Button', sendButtonName: 'Send message',
+    composerName: 'Enter a prompt for Gemini',
+    // ---- AI-216: model routing ------------------------------------------
+    // ARMED 2026-09-22 after a live pass in Chrome, menu OPEN. Measured:
+    //   button  [Button] Name='Open mode picker, currently Pro'
+    //           ExpandCollapse, ExpandCollapseState=Expanded, AutomationId=''
+    //   items   [MenuItem] '3.5 Flash-Lite Fastest answers'
+    //           [MenuItem] '3.8 Flash All-around help New'
+    //           [MenuItem] 'Selected 3.1 Pro Advanced reasoning'
+    //           [MenuItem] 'Extended thinking Complex problem solving'
+    //           -- Invoke ONLY. No SelectionItemPattern anywhere.
+    //
+    // FOUR ways this differs from claude.ai, each answered by data:
+    //   1. Items are MenuItem, not RadioButton.
+    //   2. NO SelectionItem pattern, so the post-switch dual check has only the
+    //      button label here. A surface that cannot supply IsSelected must not
+    //      be failed for not supplying it.
+    //   3. The SELECTED item's Name is prefixed 'Selected ' -- see
+    //      itemSelectedPrefix and stripSelectedPrefix.
+    //   4. The button and the menu NAME THE SAME MODEL DIFFERENTLY ('currently
+    //      Pro' vs '3.1 Pro'), so reading the current tier and clicking a target
+    //      need two tables -- see buttonTierLabels.
+    modelPicker: {
+      controlType: 'Button',
+      // The model name is the SUFFIX here, not the prefix -- the trailing comma
+      // is part of the measured string and keeps this from matching a future
+      // 'Open mode picker settings'.
+      namePrefix: 'Open mode picker,',
+      itemControlTypes: ['MenuItem'],
+      itemSelectedPrefix: 'Selected ',
+      // What we CLICK: the menu's own strings, carrying their version numbers
+      // because that is what the items read.
+      tierLabels: { 3: '3.1 Pro', 2: '3.8 Flash', 1: '3.5 Flash-Lite' },
+      // What we READ off the button. NOT the same strings, and NOT derivable
+      // from the keyword chain: model-router-config's google rules put
+      // ['flash','lite'] -> economy AHEAD of ['pro'] -> premium, which collapses
+      // Flash and Flash-Lite into one tier and would leave a user on Flash
+      // permanently unroutable downward.
+      buttonTierLabels: { 3: 'Pro', 2: 'Flash', 1: 'Flash-Lite' },
+      provider: 'google',
+      fromTier: 'button_label',
+      enforce: true, verified: true,
+    },
+    // 'Extended thinking' is DELIBERATELY absent from both tables. It reads as a
+    // second axis -- Gemini's analogue of Claude's Effort -- not a tier, so it
+    // must never be a routing target. Same treatment Effort gets on claude.ai.
+    enforce: true,  verified: true,
+  },
+
+  // ── Gemini INSIDE Gmail ─────────────────────────────────────────────────
+  //
+  // THE FIRST `hostApp` WEB SURFACE, and the flag is the whole point of the
+  // entry. Every host above is a dedicated AI tool: everything typed on
+  // claude.ai is a prompt. mail.google.com is NOT -- it is the user's mail,
+  // with an AI panel bolted to the side. So:
+  //
+  //   * governance is scoped to the AI composer and nothing else. The caret
+  //     being in Gmail is not the same fact as the caret being in Gemini, and
+  //     only the second one governs anything;
+  //   * a BLOCK kills Enter in the Gemini box only. Blocking "Gemini in Gmail"
+  //     must never stop somebody sending an email -- see hostApp above;
+  //   * capture reads the AI composer only. The mail body is never read, which
+  //     Is-BrowserComposerElement enforces on the capture side independently.
+  //
+  // ARMED 2026-09-23 after a live pass in Chrome. Measured, panel open, caret
+  // in the box:
+  //   panel     [Group]    Name='Gemini'      Class='MxSLJe'
+  //   composer  [ComboBox] Name='Ask Gemini'  Class='Pv5YRd TIYGAd VMkJgc'
+  //             AutomationId='' -- patterns Value AND Text
+  //   the only other text-capable focusable elements in the whole window were
+  //   the page RootWebAreas and [Edit] 'Search mail'. Nothing else is close to
+  //   this signature, which is what makes the exact match safe here.
+  //
+  // A THIRD composer control type, after Edit (claude.ai / chatgpt.com / m365)
+  // and Group (Gemini Enterprise). composerControlType already carries it, so
+  // this is catalog data rather than code.
+  //
+  // NOTE the panel header read 'Gemini Alpha' on the probed tenant, and the
+  // OTHER tenant tested the same day had no Gemini in Gmail at all. Panel
+  // presence is a per-account fact like every picker this project has met; the
+  // enforcer must treat "no panel here" as the ordinary case, never an error.
+  {
+    id: 'gemini_gmail', host: 'mail.google.com',
+    product: 'Gemini', vendor: 'Google', platform: 'gemini',
+    hostApp: true,
+    newlineKeys: 'shift_enter', postSendVerifyMs: 1500,
+    composerControlType: 'ComboBox',
+    composerName: 'Ask Gemini',
+    // Measured 2026-09-23 alongside the composer:
+    //   [Button] Name='Submit' Class='wX4xVc-JX-I ... MNFoWc' at 1773,1004
+    //
+    // It EXISTS while the composer is empty and merely reports IsEnabled=false,
+    // which is the opposite of claude.ai (where the control is absent until
+    // something is typed, and its Name flips to 'Use voice mode'). Both shapes
+    // are fine for the rect cache -- it re-verifies the element every tick --
+    // but the difference is recorded so nobody "fixes" one site to match the
+    // other.
+    //
+    // NAME COLLISION, DISAMBIGUATED BY CONTROL TYPE: this window also holds a
+    // [Button] Name='Ask Gemini' (the toolbar control that OPENS the panel)
+    // while the composer itself is a [ComboBox] Name='Ask Gemini'. The catalog
+    // keys on both name AND control type, so the two cannot be confused --
+    // which is exactly why sendButtonControlType is not optional here.
+    sendButtonControlType: 'Button', sendButtonName: 'Submit',
+    enforce: true, verified: true,
+  },
+
+  // ── Gemini INSIDE Docs / Sheets / Slides ────────────────────────────────
+  //
+  // The SECOND hostApp surface, and the same reasoning as Gmail: docs.google.com
+  // is the user's documents and spreadsheets, not an AI tool. Governance is
+  // scoped to the Gemini composer, a block kills Enter in that box only, and
+  // capture never reads the document body.
+  //
+  // ONE ENTRY COVERS THREE PRODUCTS. Docs, Sheets and Slides all live on
+  // docs.google.com (/document/, /spreadsheets/, /presentation/) and all embed
+  // the SAME panel -- the container class is `appsElementsSidekickRoot`, the
+  // Workspace-wide AI side panel. So the composer signature measured in Docs is
+  // the signature in all three.
+  //
+  // IF Sheets and Docs ever need to be blocked SEPARATELY, that needs the
+  // url_path mechanism AI-219 built for Gemini Enterprise -- the host cannot
+  // tell them apart. Not built here because nobody has asked for it, and an
+  // unused discriminator is a liability rather than a feature.
+  //
+  // ARMED 2026-09-24 after a live pass in Chrome:
+  //   panel     [Group]    Name='Gemini'      Class='appsElementsSidekickRoot docsSidek...'
+  //   composer  [ComboBox] Name='Ask Gemini'  Class='appsElementsRichTextInputContentEd...'
+  //   send      [Button]   Name='Submit'      at 1823,1004
+  //
+  // The composer's Name and ControlType are IDENTICAL to Gmail's; only the
+  // ClassName differs, which is why the catalog keys on name + control type
+  // rather than class.
+  //
+  // THE SEND BUTTON READS 'Cancel' WHILE A RESPONSE IS GENERATING, at the same
+  // rect. Two probes caught it mid-generation and only the third, with the box
+  // emptied, showed 'Submit'. Recorded because it is exactly the kind of state
+  // -dependent reading that produced two no-op builds on Gemini Enterprise: the
+  // catalog must carry the RESTING name, and the rect cache re-verifies the
+  // element every tick anyway.
+  //
+  // NO COLLISION with the app's own inputs: Docs also exposes [Edit] 'Rename',
+  // [ComboBox] 'Menus', [Edit] 'Zoom', [Edit] 'Font size' and -- the one that
+  // matters -- [Edit] 'Document content', the document body itself. That is an
+  // Edit, not a ComboBox, and is not named 'Ask Gemini', so the exact match
+  // cannot reach it.
+  {
+    id: 'gemini_workspace_docs', host: 'docs.google.com',
+    product: 'Gemini', vendor: 'Google', platform: 'gemini',
+    hostApp: true,
+    newlineKeys: 'shift_enter', postSendVerifyMs: 1500,
+    composerControlType: 'ComboBox',
+    composerName: 'Ask Gemini',
+    sendButtonControlType: 'Button', sendButtonName: 'Submit',
+    enforce: true, verified: true,
+  },
+
+  // ── Copilot INSIDE Outlook on the web ───────────────────────────────────
+  //
+  // The FOURTH hostApp surface, and the highest-stakes one: this window is the
+  // user's mail. A block here is scoped to the Copilot composer and can never
+  // stop them sending an email -- the same rule Gmail proved.
+  //
+  // ARMED 2026-09-24 after a live pass in Chrome with the Copilot pane open:
+  //   pane      [Document] Name='Copilot'  (a cacheable-iframe render surface)
+  //   composer  [Edit] Name='Message Copilot'
+  //             AutomationId='m365-chat-editor-target-element'
+  //             Class='fai-EditorInput__input ...'
+  //   send      [Button] Name='Send'
+  //
+  // THE SAME COMPONENT AS M365 COPILOT WEB, measured rather than assumed: the
+  // AutomationId, the class prefix, the 'Message ' name prefix and the 'Send'
+  // button all match m365.cloud.microsoft. Microsoft ships one Copilot editor
+  // across M365, Outlook web and Office web, which is why the Microsoft batch
+  // needed far less measuring than the Google one.
+  //
+  // KNOWN GAP -- outlook.office365.com. That is the older Outlook web domain and
+  // an earlier sweep saw a [Group] 'Copilot' on it, but its composer was never
+  // measured and it is NOT a subdomain of outlook.office.com, so this entry does
+  // not cover it. Left out rather than guessed: it needs its own probe and its
+  // own entry.
+  {
+    id: 'copilot_outlook_web', host: 'outlook.office.com',
+    product: 'Microsoft Copilot', vendor: 'Microsoft', platform: 'copilot_studio',
+    hostApp: true,
+    newlineKeys: 'shift_enter', postSendVerifyMs: 1500,
+    composerControlType: 'Edit',
+    composerAutomationId: 'm365-chat-editor-target-element',
+    composerNamePrefixes: ['Message '],
+    sendButtonControlType: 'Button', sendButtonName: 'Send',
+    enforce: true, verified: true,
+  },
+
+  // ── Copilot INSIDE Office on the web (Word / Excel / PowerPoint) ────────
+  //
+  // The THIRD hostApp surface: somebody's documents and spreadsheets with a
+  // Copilot pane attached. Block scope is the Copilot composer, never the file.
+  //
+  // ONE ENTRY COVERS EVERY TENANT. Office web documents live on a per-customer
+  // host -- 'filefuze-my.sharepoint.com', 'contoso.sharepoint.com' -- so a
+  // literal host would govern one customer. 'sharepoint.com' matches them all
+  // through the catalog's DOT-BOUNDARY suffix rule, which is also what stops it
+  // matching an attacker's 'sharepoint.com.evil.example'.
+  //
+  // ARMED 2026-09-24 after a live pass in Chrome on a Word document:
+  //   pane      [Document] Name='Copilot (Preview)'  Class='AddinIframe'
+  //             [Document] Name='Copilot Chat'
+  //   composer  [Edit] Name='Describe what you'd like to edit'
+  //             AutomationId='m365-chat-editor-target-element'
+  //             Class='fai-EditorInput__input ...'
+  //
+  // IDENTIFIED BY AutomationId + PREFIX, not by the exact name. That id is
+  // Microsoft's own semantic component id -- the SAME one m365.cloud.microsoft
+  // uses, because Office web and M365 Copilot share one editor component -- and
+  // it is the strongest signal available here. The name prefix is the secondary
+  // check: 'Describe ' was measured in Word, and Excel/PowerPoint were NOT
+  // measured, so a different wording there simply fails to match. A miss, never
+  // a leak, and the fix is to add the measured prefix rather than to loosen the
+  // AutomationId.
+  //
+  // NO SEND-BUTTON SIGNATURE. The pane's send control was not measured, so the
+  // click path is not armed here -- Enter is covered, the arrow is not. Left as
+  // a recorded gap rather than a guess: a wrong rectangle in a browser swallows
+  // clicks on arbitrary page content, which in a WORD DOCUMENT means swallowing
+  // clicks on the user's own text.
+  {
+    id: 'copilot_office_web', host: 'sharepoint.com',
+    product: 'Microsoft Copilot', vendor: 'Microsoft', platform: 'copilot_studio',
+    hostApp: true,
+    newlineKeys: 'shift_enter', postSendVerifyMs: 1500,
+    composerControlType: 'Edit',
+    composerAutomationId: 'm365-chat-editor-target-element',
+    composerNamePrefixes: ['Describe '],
+    // Measured 2026-09-24 in a Word document on a TEAM SITE
+    // (filefuze.sharepoint.com), having first been measured on a OneDrive host
+    // (filefuze-my.sharepoint.com). Two different tenant hosts, one entry --
+    // which is the dot-boundary suffix rule doing exactly what it is for.
+    //   [Button] Name='Send' Class='fui-Button ... fai-SendButton...'
+    // The same name Outlook web and m365.cloud.microsoft use: one Copilot
+    // component across all three.
+    sendButtonControlType: 'Button', sendButtonName: 'Send',
+    enforce: true, verified: true,
+  },
+
+  // ── AI-218: Microsoft Copilot in the browser ────────────────────────────
+  //
+  // BOTH ENTRIES ARE INERT (enforce:false, verified:false, agentRead off). They
+  // exist so the catalog, the payload and the pure functions can be built and
+  // tested with no behaviour change at all; arming is a separate, per-host flag
+  // flip after its own live pass, exactly as the three above went through.
+  //
+  // WHY THESE NEED A DIFFERENT COMPOSER GATE FROM EVERY OTHER SURFACE.
+  // The three entries above identify their composer by an EXACT Name. Microsoft
+  // cannot: the composer's Name embeds the agent's own display name, so it
+  // changes per agent. Measured live 2026-09-21 in Chrome on
+  // m365.cloud.microsoft with an agent open:
+  //   composer  [Edit] Name='Message IT Help Desk Agent'
+  //             AutomationId='m365-chat-editor-target-element'
+  //             ClassName='fai-EditorInput__input r18fti29 ...'  <- minified
+  //             hashes, NEVER use it as a signature
+  //             read back through BOTH ValuePattern and TextPattern
+  //   send      [Button] Name='Send', NO AutomationId, and it does not exist at
+  //             all while the composer is empty (same as claude.ai)
+  //   agent id  the URL path carries /chat/agent/<id>
+  //   agent name also appears as a [Text] and a [Button] on the page
+  //
+  // So identity comes from `composerNamePrefixes` ("Message ") plus the stable
+  // `composerAutomationId`, and the SAME read yields the agent name as the
+  // remainder after the prefix. That is why the agent read costs no extra UIA
+  // call: VerifiedWebComposer already reads this element's Name every tick.
+  //
+  // THE URL ROUTE WAS DELIBERATELY NOT TAKEN even though the id is sitting
+  // there. The catalog is host-only by a rule enforced in code (LoadWebSurfaces
+  // drops any host containing '/'), and GetCachedBrowserUrl is shaped so the URL
+  // string cannot leave the function -- because a query string on an AI URL
+  // routinely contains the prompt itself. On top of that, nobody has shown the
+  // id in a Copilot URL equals the agent_id the blocklist is keyed on. Two
+  // unproven things stacked; not worth re-opening that door for.
+  //
+  // sendButton* are DELIBERATELY EMPTY for both. 'Send' is a generic word on a
+  // page with no AutomationId to disambiguate it, and this file's rule is that
+  // an unprobed-or-ambiguous send button means ENTER-ONLY blocking rather than
+  // a guessed rectangle that could swallow clicks on unrelated M365 controls.
+  {
+    id: 'm365_copilot_web', host: 'm365.cloud.microsoft', product: 'Microsoft Copilot', vendor: 'Microsoft',
+    // N platforms per host: copilot_studio / personal_agent / teams_chat_agent
+    // all surface here. `platforms` is the plural form of `platform`; the three
+    // entries above keep the singular so their payload is byte-for-byte what it
+    // was. NEITHER may ever reach PLATFORM_PROCS -- that is matched
+    // process-WIDE and a browser must never be in it.
+    platforms: ['copilot_studio', 'personal_agent', 'teams_chat_agent'],
+    newlineKeys: 'shift_enter', postSendVerifyMs: 1500,
+    // Measured 2026-09-21: [Button] Name='Send', NO AutomationId, and it does
+    // not exist at all while the composer is empty (same as claude.ai's).
+    //
+    // 'Send' IS A GENERIC WORD and this is the weakest signature in the
+    // catalog, so the residual risk is written down rather than glossed:
+    // another control called exactly "Send" inside m365.cloud.microsoft could
+    // in principle match. What bounds it is WHEN the rect is consulted at all --
+    // only while a web block is already armed on THIS host, with the composer
+    // identified. A Send button in Outlook or anywhere else is a different
+    // host, so no rect is ever cached there. The probe found exactly one on
+    // this page.
+    //
+    // Shipping it EMPTY was the alternative, and it is worse: an armed surface
+    // with no click block means the send arrow silently bypasses the block,
+    // which is a bypass of the same class as the one this project already had
+    // to fix once.
+    sendButtonControlType: 'Button', sendButtonName: 'Send',
+    composerName: '',
+    composerNamePrefixes: ['Message '],
+    composerAutomationId: 'm365-chat-editor-target-element',
+    // An agent literally called "Copilot" is unmatchable by construction: the
+    // generic filter runs before any match, so "block all of Copilot" stays a
+    // platform-scoped decision rather than something a name can imitate.
+    genericNames: ['Copilot', 'Microsoft Copilot', 'M365 Copilot'],
+    // ARMED 2026-09-21 after a live pass in Chrome. Measured, in this order:
+    //   host      the omnibox resolves m365.cloud.microsoft through the SSO
+    //             redirect chain and stays resolved on a deep link
+    //             (/chat/agent/<id>)
+    //   composer  [Edit] AutomationId='m365-chat-editor-target-element',
+    //             Name='Message IT Help Desk Agent'
+    //   read back BOTH ValuePattern and TextPattern returned the typed text,
+    //             so DLP scanning works on this surface
+    //   agent     the prefix remainder is the agent's display name, and the
+    //             same name is independently visible as a [Text] and a [Button]
+    //
+    // STILL UNMEASURED, and the reason this is worth writing down: the GENERIC
+    // state (the composer's Name with no agent open) was never observed -- the
+    // test account landed straight in an agent. genericNames therefore carries
+    // the three plausible spellings rather than one measured string. If the
+    // real generic name is none of them, a generic Copilot chat would read as
+    // an agent named "Copilot"-something; it still could not be BLOCKED unless
+    // an admin had blocked an agent by exactly that name, but it is a gap in
+    // the evidence, not a proven case.
+    agentRead: { mode: 'composer_name', enforce: true, verified: true },
+    enforce: true, verified: true,
+  },
+  // UNMEASURED. Opening copilot.microsoft.com on the test machine REDIRECTED to
+  // m365.cloud.microsoft (a work account), so the consumer surface has never
+  // been observed. Everything here is therefore empty rather than copied from
+  // its sibling: two Microsoft products that redirect into each other are still
+  // two different builds, and this file does not guess a signature.
+  {
+    id: 'copilot_web', host: 'copilot.microsoft.com', product: 'Microsoft Copilot', vendor: 'Microsoft',
+    platforms: ['copilot_studio', 'personal_agent'],
+    newlineKeys: 'shift_enter', postSendVerifyMs: 1500,
+    sendButtonControlType: '', sendButtonName: '',
+    composerName: '',
+    composerNamePrefixes: [],
+    composerAutomationId: '',
+    genericNames: ['Copilot', 'Microsoft Copilot'],
+    agentRead: { mode: 'composer_name', enforce: false, verified: false },
+    enforce: false, verified: false,
+  },
+
+  // ── AI-219: Gemini Enterprise (Vertex AI Search) in the browser ──────────
+  //
+  // ARMED 2026-09-22 after a live UIA probe on this host. The whole reason this
+  // entry is worth reading is that it is the FIRST surface where the agent's
+  // identity is not in the composer at all -- so it needs two mechanisms no
+  // other entry has, and both are recorded here rather than inferred.
+  //
+  // MEASURED 2026-09-22, verbatim:
+  //   url       vertexaisearch.cloud.google.com/home/cid/<customerId>
+  //             /r/agent/18007293655158706549/session/-?hl=en_US
+  //             and /r/agent/14428384541633907119/session/-?hl=en_US
+  //             -- two different agents, two different ids, and the id is the
+  //             `[0-9]+` run after /r/agent/.
+  //   composer  [Group] Name='Search' AutomationId='agent-search-prosemirror-editor'
+  //             ClassName='prosemirror-editor' rect=677,937 909x76 patterns=Invoke
+  //             with  [Group] Name='' ClassName='ProseMirror' focusable=True
+  //             patterns=Text  rect=677,952 909x48 nested inside it, and a
+  //             [Text] leaf carrying the typed characters.
+  //   send      [Button] Name='Submit' AutomationId='button'
+  //             ClassName='icon-button  filled-tonal ' patterns=Invoke
+  //             rect=1541,1012 51x51
+  //
+  // A GROUP, NOT AN EDIT, and with NO ValuePattern. Every other surface in this
+  // catalog is an [Edit] that answers ValuePattern, which is why
+  // `composerControlType` exists at all: it defaults to 'Edit' on BOTH sides so
+  // the four entries above behave byte-for-byte as they did, and only this one
+  // asks for a Group. Text is read through the ValuePattern-then-TextPattern
+  // reader the enforcer already had.
+  //
+  // THE AGENT NAME IS NOT AVAILABLE IN THE COMPOSER. Name='Search' is the same
+  // generic string for every agent, so the `composer_name` mechanism AI-218
+  // built for Microsoft cannot work here -- there is no per-agent string to
+  // read. The id in the URL PATH is the only per-agent signal on the page, so
+  // this is the first `url_path` agent read.
+  //
+  // WHAT url_path DOES NOT DO, because the host-only rule still stands: the URL
+  // is NOT stored, NOT emitted and NOT compared. The enforcer extracts ONLY the
+  // `([0-9]+)` capture and discards the raw string in the same statement it
+  // always did -- no path, no query and no full URL leaves that function. That
+  // matters more here than anywhere else in the catalog: this URL carries a
+  // customerId AND a session id.
+  //
+  // WHAT IT MATCHES ON, and this is the second thing that differs from AI-218:
+  // the extracted value is an OPAQUE ID, not a display name, so the block route
+  // compares it against the blocked row's `agent_id`, never against
+  // `agent_name`. A 20-digit id is not a label and must not be case-folded,
+  // trimmed or prefix-matched.
+  //
+  // TWO ID FORMS ARE ACCEPTED, and the second one is not a convenience. The URL
+  // carries only the LAST SEGMENT of the agent's resource name. The Inventory
+  // stores what the Discovery Engine API returned, which is the whole thing --
+  //   projects/<p>/locations/<l>/collections/<c>/engines/<e>
+  //     /assistants/<a>/agents/18007293655158706549
+  // -- and connect-ui's DiscoveryTab blocks with that string verbatim
+  // (blockAgent({ agent_id: agent.id })). Matching only on an exact compare
+  // would therefore match NOTHING: the feature would look armed and never fire.
+  // The enforcer accepts either the bare id or a row ending in the literal
+  // "/agents/" + that id -- a whole-segment ordinal tail compare, never a
+  // substring test. See WebAgentRowMatches.
+  //
+  // genericNames is EMPTY on purpose: it filters display NAMES, and no display
+  // name is read on this surface. "No agent in the URL" is represented by the
+  // id being empty, which yields GENERIC -- and a generic tick can never arm an
+  // agent block.
+  {
+    id: 'gemini_enterprise_web', host: 'vertexaisearch.cloud.google.com',
+    product: 'Gemini Enterprise', vendor: 'Google',
+    // Plural, like the Microsoft entries: one host, N governance platforms.
+    // It must NEVER reach PLATFORM_PROCS -- that is matched process-WIDE and a
+    // browser must never be in it.
+    platforms: ['gemini_enterprise'],
+    newlineKeys: 'shift_enter', postSendVerifyMs: 1500,
+    // Live-probed, so the click path is covered rather than Enter-only.
+    sendButtonControlType: 'Button', sendButtonName: 'Submit',
+    // NEW FIELD. Absent/empty means 'Edit' on both sides, so every existing
+    // entry is unaffected.
+    composerControlType: 'Group',
+    // The composer's Name is generic ('Search'), so identity here is PURELY
+    // structural -- which is exactly what security-audit finding 4 warned about
+    // when it stood alone. What makes it sufficient on this surface: the
+    // AutomationId is SEMANTIC and specific ('agent-search-prosemirror-editor'),
+    // matched ordinally and whole-string, and the agent identity comes from a
+    // SECOND, independent signal (the URL) rather than from the same string.
+    composerName: '',
+    composerNamePrefixes: [],
+    composerAutomationId: 'agent-search-prosemirror-editor',
+    // ── THE COMPOSER IS TWO ELEMENTS ──────────────────────────────────────
+    //
+    // Live re-probe 2026-09-22 after the first build FAILED A LIVE TEST (the
+    // prompt sent, no block, no BLOCKED line in the log):
+    //   [Group] Name='Search' AutomationId='agent-search-prosemirror-editor'
+    //           ClassName='prosemirror-editor   '  IsKeyboardFocusable=FALSE
+    //   [Group] Name=''       AutomationId=''      ClassName='ProseMirror'
+    //           IsKeyboardFocusable=TRUE  patterns=Text
+    //   [Text]  Name='Ask Credit Amendment workflow agent'  (the placeholder)
+    //
+    // The element carrying the AutomationId CANNOT TAKE THE CARET, and the one
+    // that can carries NO AutomationId -- so no single element could satisfy
+    // both the exact-id identity test and the focusable requirement, nothing
+    // was ever cached, and Enter was never swallowed.
+    //
+    // So the identity stays ANCHORED on the parent's distinctive AutomationId
+    // while the element used as the composer is its focusable child. BOTH
+    // halves are required by the enforcer, and that is the point: 'ProseMirror'
+    // on its own is the most common rich-text editor class on the web --
+    // claude.ai's composer carries it too ('tiptap ProseMirror') -- so
+    // accepting the class alone would cache any editor on any page and read it
+    // every tick, which is precisely security-audit finding 4.
+    //
+    // The placeholder Text ('Ask <AgentName>') is NOT used as identity: it
+    // disappears the moment the user types, so it is present exactly when
+    // there is nothing to govern and absent exactly when there is.
+    composerFocusableChildClassName: 'ProseMirror',
+    genericNames: [],
+    // mode:'url_path' -- the id comes from the URL PATH, never from the
+    // element. urlPattern's FIRST CAPTURE GROUP is the agent id and nothing
+    // else is kept. Both flags of the nested pair are on because every shape
+    // above was measured live on this host today.
+    agentRead: {
+      mode: 'url_path',
+      urlPattern: '/r/agent/([0-9]+)',
+      enforce: true, verified: true,
+    },
+    enforce: true, verified: true,
+  },
+  // teams.microsoft.com is DELIBERATELY ABSENT from v1. It carries ordinary
+  // human DMs and channels alongside agent chats, so governing it wrongly means
+  // reading colleagues' messages -- a far worse failure than missing a block.
+  // It ships only once a probe proves the DM/channel composer is distinguishable
+  // from the agent composer.
+  //
+  // KNOWN GAP, accepted and documented rather than fixed: an INSTALLED PWA /
+  // --app window has no address bar, so GetCachedBrowserUrl can never resolve a
+  // host and nothing in this file governs it. Teams and M365 Copilot are both
+  // commonly installed that way, which makes installing the app a user-level
+  // bypass of every browser surface here.
+];
+
+// Host → web surface, and the ONLY place a host string is normalised.
+//
+// Exact match first, then a registrable-suffix match, mirroring the server's
+// resolvePlatform (`endsWith('.' + host)`) so the agent and the dashboard agree
+// on what "this host is claude.ai" means. An unknown host returns null, which
+// every caller reads as "not an AI surface" — see the fail-open decision:
+// unknown URL means no capture AND no block, because stale-open capture would
+// read a Gmail composer and stale-open blocking would swallow Enter in one.
+export function webSurfaceForHost(host) {
+  if (!host) return null;
+  const h = String(host).trim().toLowerCase().replace(/^www\./, '');
+  if (!h) return null;
+  for (const s of WEB_SURFACES) {
+    if (h === s.host) return s;
+  }
+  for (const s of WEB_SURFACES) {
+    if (h.endsWith('.' + s.host)) return s;
+  }
+  return null;
+}
+
 // True when this process name is an egress surface. Mirrors isHostAppProcess'
 // role: identity resolution and capture permission are different questions, and
 // this one only answers "is this app in the egress catalog at all".
@@ -3123,4 +4187,175 @@ export function synthesizeEgressSurfaces(platformRows, logger) {
   }
 
   return { surfaces, sync_roots: syncRoots };
+}
+
+// The browser process names, for the watcher/enforcer env payloads. Separate
+// from watcherProcessNames() on purpose: that function answers "which processes
+// get the AI-app watchers", and a browser must never be in that answer.
+export function browserProcNames() {
+  return BROWSER_PROCS.map((entry) => processNameForEntry(entry)).filter(Boolean);
+}
+
+// The web-surface catalog for the CFAI_WEB_SURFACES handoff, same JSON-payload
+// convention as CFAI_AI_PANELS / CFAI_AGENT_SURFACES: the .ps1 owns the
+// comparison code, never the data. BOTH flags travel — dropping either would
+// silently move a surface to the other side of the enforcement gate.
+export function buildWebSurfaceConfig() {
+  return WEB_SURFACES.map((s) => ({
+    id: s.id,
+    host: s.host,
+    product: s.product,
+    vendor: s.vendor,
+    platform: s.platform || '',
+    // Resolved here so the C# side never has to distinguish missing from
+    // empty — same convention buildAiPanelConfig() uses. An unrecognised
+    // newlineKeys value travels VERBATIM rather than being silently rewritten
+    // to the default: the enforcer must be able to tell "this surface declares
+    // a combo I cannot synthesize" (which refuses multi-line Tier B there)
+    // from "this surface said nothing" (which gets the default).
+    newlineKeys: s.newlineKeys === undefined ? DEFAULT_NEWLINE_KEYS : String(s.newlineKeys),
+    // Clamped on BOTH sides: here so the payload is already sane, and again in
+    // the .ps1 because that side must not trust an env var it did not build.
+    postSendVerifyMs: clampPostSendVerifyMs(s.postSendVerifyMs),
+    // The send-button signature for the click-block path. BOTH fields must be
+    // non-empty for the enforcer to attempt a search at all — a control type
+    // with no name would match every Button on the page, and a name with no
+    // control type would widen the search to every element. Resolved to '' here
+    // (never undefined) so the C# side never has to tell missing from empty.
+    sendButtonControlType: String(s.sendButtonControlType || ''),
+    sendButtonName: String(s.sendButtonName || ''),
+    // The composer's OWN accessible name, live-probed per site. Security audit
+    // finding 4: the composer test was purely structural (an Edit that is not a
+    // password and is not chrome-named), so ANY such field on a governed host
+    // qualified — a "Search chats" box, a rename input, and most seriously an
+    // Edit inside a CROSS-ORIGIN IFRAME, because the omnibox only reveals the
+    // TOP-LEVEL url. A payment iframe's card-number field is an Edit, is not
+    // IsPassword, and matches no chrome name: it was cached as the composer,
+    // read every tick, matched the credit-card pattern, and had its raw value
+    // persisted. Requiring a POSITIVE identity match is the cheap fix, and the
+    // strings were already measured — they were sitting in comments.
+    // '' means "no identity known" and is read as "refuse", not "allow any".
+    composerName: String(s.composerName || ''),
+    // AI-219. The composer's UIA control type, resolved to the DEFAULT rather
+    // than to '' -- the one field here that has a meaningful default instead of
+    // a meaningful empty. Every surface up to Gemini Enterprise was an [Edit]
+    // and the enforcer hard-coded that; sending 'Edit' explicitly is what keeps
+    // those four byte-identical in behaviour while letting one entry declare a
+    // [Group]. The .ps1 defaults it a second time, because that side must not
+    // trust an env var it did not build.
+    composerControlType: String(s.composerControlType || DEFAULT_COMPOSER_CONTROL_TYPE),
+    // AI-218. All resolved to explicit empties so the .ps1 never distinguishes
+    // absent from empty -- the same convention every other field here follows.
+    composerNamePrefixes: (s.composerNamePrefixes || []).map((x) => String(x || '')).filter(Boolean),
+    composerAutomationId: String(s.composerAutomationId || ''),
+    // AI-219 follow-up. '' means "the identified element IS the composer",
+    // which is every surface that predates the field -- so the four older
+    // entries are untouched. A non-empty value means the composer is that
+    // element's focusable CHILD, matched by ClassName, with identity still
+    // anchored on composerAutomationId. See the entry comment.
+    composerFocusableChildClassName: String(s.composerFocusableChildClassName || ''),
+    genericNames: (s.genericNames || []).map((x) => String(x || '')).filter(Boolean),
+    platforms: (s.platforms || []).map((x) => String(x || '')).filter(Boolean),
+    // BOTH flags of the nested pair travel, for the same reason the surface's
+    // own pair does: dropping either would silently move the agent read to the
+    // other side of its gate.
+    agentReadMode: String((s.agentRead && s.agentRead.mode) || ''),
+    // AI-219. The Regex whose FIRST CAPTURE GROUP is the agent id, for
+    // mode:'url_path' only. '' for every other mode, and an empty pattern can
+    // never extract anything -- so a mode/pattern mismatch yields "no agent",
+    // which means no agent block rather than a wrong one.
+    agentReadUrlPattern: String((s.agentRead && s.agentRead.urlPattern) || ''),
+    agentReadEnforce: !!(s.agentRead && s.agentRead.enforce === true),
+    agentReadVerified: !!(s.agentRead && s.agentRead.verified === true),
+    // AI-216. The nested modelPicker block, FLATTENED exactly the way agentRead
+    // is, for the same reason: the .ps1 owns the comparison code and never the
+    // data, and a flat payload means the C# side never walks a nested object.
+    //
+    // A surface with NO modelPicker block resolves to empty strings, an empty
+    // list and false/false -- which the enforcer reads as "no routing on this
+    // surface" and is what keeps chatgpt.com, gemini.google.com, m365 and
+    // Gemini Enterprise byte-for-byte unchanged.
+    //
+    // The defaults are applied ONLY when the block EXISTS. That asymmetry is
+    // the point: `modelPickerNamePrefix` must stay '' for a surface with no
+    // block, because a non-empty prefix there would describe a picker the
+    // enforcer would then go looking for.
+    modelPickerControlType: String((s.modelPicker && (s.modelPicker.controlType || MODEL_PICKER_CONTROL_TYPE_DEFAULT)) || ''),
+    modelPickerNamePrefix: String((s.modelPicker && (s.modelPicker.namePrefix || MODEL_PICKER_NAME_PREFIX_DEFAULT)) || ''),
+    modelPickerItemControlTypes: (
+      (s.modelPicker && (s.modelPicker.itemControlTypes || MODEL_PICKER_ITEM_CONTROL_TYPES_DEFAULT)) || []
+    ).map((x) => String(x || '')).filter(Boolean),
+    // The three tier labels, resolved to explicit empties. A tier with no label
+    // can never be a routing TARGET -- ComputeRoute has nothing to search the
+    // menu for -- which is the fail-to-nothing direction, not a guess.
+    modelPickerTier3Label: String((s.modelPicker && s.modelPicker.tierLabels && s.modelPicker.tierLabels[3]) || ''),
+    modelPickerTier2Label: String((s.modelPicker && s.modelPicker.tierLabels && s.modelPicker.tierLabels[2]) || ''),
+    modelPickerTier1Label: String((s.modelPicker && s.modelPicker.tierLabels && s.modelPicker.tierLabels[1]) || ''),
+    // The BUTTON's own tier strings, separate from the menu's. Empty on a
+    // surface whose button agrees with its menu (claude.ai), which then falls
+    // through to the keyword chain exactly as before -- see resolveButtonTier.
+    modelPickerButtonTier3Label: String((s.modelPicker && s.modelPicker.buttonTierLabels && s.modelPicker.buttonTierLabels[3]) || ''),
+    modelPickerButtonTier2Label: String((s.modelPicker && s.modelPicker.buttonTierLabels && s.modelPicker.buttonTierLabels[2]) || ''),
+    modelPickerButtonTier1Label: String((s.modelPicker && s.modelPicker.buttonTierLabels && s.modelPicker.buttonTierLabels[1]) || ''),
+    // The single prefix a site folds into the SELECTED item's Name in place of
+    // SelectionItemPattern. Empty means "this surface does no such thing".
+    modelPickerItemSelectedPrefix: String((s.modelPicker && s.modelPicker.itemSelectedPrefix) || ''),
+    modelPickerProvider: String((s.modelPicker && s.modelPicker.provider) || ''),
+    modelPickerFromTier: String((s.modelPicker && s.modelPicker.fromTier) || ''),
+    // BOTH flags of the nested pair travel, for the same reason the surface's
+    // own pair and agentRead's do: dropping either would silently move model
+    // routing to the other side of its gate.
+    modelPickerEnforce: !!(s.modelPicker && s.modelPicker.enforce === true),
+    modelPickerVerified: !!(s.modelPicker && s.modelPicker.verified === true),
+    // AI EMBEDDED IN A GENERAL-PURPOSE APP, the web twin of AGENT_SURFACES'
+    // `hostApp`. TRUE means this host is NOT an AI tool -- it is somebody's
+    // email, spreadsheet or document editor that happens to contain an AI
+    // panel.
+    //
+    // It changes exactly one thing, and it is the thing that matters: a block
+    // on such a host is scoped to the AI COMPOSER, never to the host. Without
+    // it, EnterBlockActive's `_blockedByElement` term makes an armed block
+    // swallow Enter anywhere in the window -- which on claude.ai is right (the
+    // whole site IS the AI tool) and on mail.google.com would stop the user
+    // sending email. See WebBlockIsComposerScoped in the .ps1.
+    hostApp: s.hostApp === true,
+    enforce: s.enforce === true,
+    verified: s.verified === true,
+  }));
+}
+
+// The single reader of both safety flags for a web surface, the JS twin of the
+// .ps1's EnforcingWebSurface and the same shape as EnforcingAgentSurface.
+// Returns the surface only when it is cleared to enforce; null otherwise, which
+// means "capture yes, block no".
+export function enforcingWebSurface(host) {
+  const s = webSurfaceForHost(host);
+  if (!s) return null;
+  return s.enforce === true && s.verified === true ? s : null;
+}
+
+// AI-216. The single reader of BOTH of the model picker's own safety flags, the
+// JS twin of the .ps1's EnforcingWebPicker and the same shape as
+// enforcingWebSurface / EnforcingWebAgentRead.
+//
+// Takes the SURFACE, not a host, so the caller has already had to pass the
+// surface's own gate to get here -- routing can never be reached on a host that
+// is not itself cleared to enforce.
+//
+// Returns the modelPicker block only when it is cleared to drive the UI; null
+// otherwise, which means "this surface gets no routing at all" -- no picker
+// search, no Enter swallowed, no route event. A surface with no block at all
+// takes the same path, because `undefined` fails the flag test.
+export function enforcingWebPicker(surface) {
+  if (!surface) return null;
+  const mp = surface.modelPicker;
+  if (!mp) return null;
+  if (mp.enforce !== true || mp.verified !== true) return null;
+  // A block that declares no name prefix and no item types describes no picker
+  // this code could find. Refused rather than defaulted HERE -- the defaults
+  // belong to buildWebSurfaceConfig, and a gate must not manufacture the
+  // signature it is gating on.
+  if (String(mp.namePrefix || '').length === 0) return null;
+  if (!Array.isArray(mp.itemControlTypes) || mp.itemControlTypes.length === 0) return null;
+  return mp;
 }

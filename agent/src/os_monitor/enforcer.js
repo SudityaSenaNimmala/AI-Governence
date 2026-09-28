@@ -22,12 +22,17 @@ import {
   clearEnforcerState,
 } from './enforcer-watchdog.js';
 import { buildModelRouterConfig } from './model-router-config.js';
-// One import statement for the four catalog payload builders. The names are
+// One import statement for the catalog payload builders. The names are
 // pinned byte-for-byte by agent/tests/os-monitor-safety.test.mjs as the payload
 // contract, so a builder added here has to be added there too — which is the
 // point of the pin.
 import {
-  buildIdeProcessConfig, buildAiPanelConfig, buildAgentSurfaceConfig, buildEgressSurfaceConfig,
+  buildIdeProcessConfig,
+  buildAiPanelConfig,
+  buildAgentSurfaceConfig,
+  buildEgressSurfaceConfig,
+  buildWebSurfaceConfig,
+  browserProcNames,
 } from './ai-processes.js';
 
 // Resolved through helperScript() rather than import.meta.url: this module is
@@ -144,6 +149,37 @@ export class Enforcer extends EventEmitter {
           // today this payload arms nothing at all — it exercises the whole
           // bridge and waits for a human live-probe pass.
           CFAI_EGRESS_SURFACES: JSON.stringify(buildEgressSurfaceConfig(this.log)),
+          // ── Browser surfaces: the FOURTH catalog ────────────────────────
+          // Two payloads, same JSON-over-env-var mechanism as the three above,
+          // and deliberately a FOURTH catalog for the same reason each of those
+          // is its own: it answers a question none of them can. Not "which app
+          // is this" (CFAI_AI_PROCESSES), not "which composer is focused"
+          // (CFAI_AI_PANELS), not "which named agent is open"
+          // (CFAI_AGENT_SURFACES), but "which HOST is this browser tab on".
+          //
+          // CFAI_BROWSER_PROCESSES is browserProcNames(), which is NOT
+          // watcherProcessNames() and must never be folded into it. A browser in
+          // CFAI_AI_PROCESSES would land in the helper's _aiProcs, and a
+          // whole-app AI surface means every Enter in every tab becomes a
+          // candidate for swallowing — Gmail, Jira, the corporate wiki, a
+          // password field. The helper keeps these names in a separate
+          // _browserProcs set for exactly that reason, and never widens
+          // enforcement past a page composer on a catalog host.
+          // agent/tests/web-surfaces.test.mjs asserts the two lists are disjoint.
+          //
+          // CFAI_WEB_SURFACES carries every per-host field INCLUDING both
+          // `enforce` and `verified`, which the helper reads through exactly one
+          // gate (EnforcingWebSurface). EVERY entry ships false/false, so this
+          // payload arms nothing today — that pair is what makes the whole
+          // browser path exercisable while inert, and only a human flipping it
+          // per host after a live pass changes that.
+          //
+          // An ABSENT or empty payload IS the feature switch: the helper then
+          // loads no surfaces, EnforcingWebSurface answers null for every host,
+          // and every browser stays completely ungoverned. That is also what a
+          // by-hand debugging run of the .ps1 gets, with no parent to set it.
+          CFAI_BROWSER_PROCESSES: browserProcNames().join(','),
+          CFAI_WEB_SURFACES: JSON.stringify(buildWebSurfaceConfig()),
         },
       }
     );
@@ -461,6 +497,13 @@ export class Enforcer extends EventEmitter {
         // user-initiated suspension of enforcement.
         this.log?.warn(`enforcer: DISARMED by panic hotkey for ${ev.seconds ?? '?'}s`);
         this.emit('disarmed', ev);
+        break;
+      case 'hook_reinstalled':
+        // Windows removed the low-level hooks (a callback overran
+        // LowLevelHooksTimeout) and the enforcer's own watchdog put them back.
+        // WARN, not info: while they were gone NOTHING was blocked, on any app,
+        // and the count in ev.reason is the only way to see it recurring.
+        this.log?.warn('enforcer: low-level hooks were dropped by Windows and have been reinstalled — ' + (ev.reason || ''));
         break;
       case 'error':
         this.log?.warn('enforcer error: ' + ev.message);

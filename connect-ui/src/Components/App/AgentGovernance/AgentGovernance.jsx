@@ -172,7 +172,7 @@ function convertGoogleResultToAgents(googleResult) {
       description: `Custom Gemini Gem created by ${gem.owner?.displayName || gem.owner?.email}${gem.shared ? ` · Shared with ${gem.sharedWith?.length || 0} user${(gem.sharedWith?.length || 0) !== 1 ? "s" : ""}` : " · Private"}`,
       vendor: "Google",
       category: "generative-ai",
-      platform: "gemini_gem",
+      platform: "gemini_gems",
       discoverySource: "google_drive_api",
       firstSeen: gem.createdTime || now,
       lastModified: gem.modifiedTime,
@@ -973,7 +973,7 @@ function AgentGovernanceInner() {
 
   // Only show scopes that belong to a connected platform and have agents
   const MICROSOFT_SCOPES = new Set(["copilot_studio", "personal_agent", "teams_chat_agent", "sharepoint_embedded", "teams_app", "isv_store", "azure_foundry", "oauth_app"]);
-  const GOOGLE_SCOPES = new Set(["vertex_ai", "gemini", "google_workspace", "gemini_gmail", "gemini_docs", "gemini_sheets", "gemini_slides", "gemini_meet", "gemini_drive", "gemini_chat", "google_chat", "apps_script", "gemini_gems", "gemini_workspace"]);
+  const GOOGLE_SCOPES = new Set(["vertex_ai", "reasoning_engine", "agent_builder", "notebooklm", "gemini", "google_workspace", "gemini_gmail", "gemini_docs", "gemini_sheets", "gemini_slides", "gemini_meet", "gemini_drive", "gemini_chat", "google_chat", "apps_script", "gemini_gems", "gemini_workspace"]);
   const OPENAI_SCOPES = new Set(["openai_assistant", "custom_gpt", "openai_api_key"]);
   const CLAUDE_SCOPES = new Set(["claude_ai_project"]);
   const GEMINI_ENTERPRISE_SCOPES = new Set(["gemini_enterprise"]);

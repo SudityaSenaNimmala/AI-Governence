@@ -231,6 +231,8 @@ function LoadPanels([string]$json) { Call 'LoadAiPanels' @($json) | Out-Null }
 $aiProcSet = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($p in @('M365Copilot', 'Copilot', 'ChatGPT', 'Claude', 'Gemini')) { $null = $aiProcSet.Add($p) }
 SetF '_aiProcs' $aiProcSet
+$browserSet = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @([System.StringComparer]::OrdinalIgnoreCase)
+SetF '_browserProcs' $browserSet
 
 # The fleet `dlp` flag, which since 2026-09-24 is the ONLY licence for the
 # AI-evidence routes (the Copilot tab's panel-alone governance among them) and
@@ -257,6 +259,12 @@ SetF '_patInfos' ([Activator]::CreateInstance($patListType))
 $OUTCOME_T = $T.GetNestedType('AgentReadOutcome', $FLAGS)
 if (-not $OUTCOME_T) { throw 'no nested AgentReadOutcome enum' }
 $OUT_UNREADABLE = [Enum]::Parse($OUTCOME_T, 'Unreadable')
+# The BROWSER read outcome enum. Every scenario in THIS harness is a non-browser
+# one, so it only ever needs the inert value; the browser scenarios live in
+# tests/helpers/browser-block-harness.ps1.
+$WEBOUT_T = $T.GetNestedType('WebReadOutcome', $FLAGS)
+if (-not $WEBOUT_T) { throw 'no nested WebReadOutcome enum' }
+$OUT_WEB_UNREADABLE = [Enum]::Parse($WEBOUT_T, 'Unreadable')
 $M_EXTRACT = $T.GetMethod('ExtractAgentName', $FLAGS)
 if (-not $M_EXTRACT) { throw 'no method ExtractAgentName' }
 # The SECOND Teams route's pure extractor. Same deal: the only thing substituted
@@ -597,7 +605,7 @@ function Tick([string]$scenario, [int]$n, $focus, [uint32]$fgPid = $CODE_PID, [s
     $hit = Call 'MatchPanelSignature' @($proc, $ct, $nm, $cls)
   }
   $rid = if ($null -ne $hit) { '42.9047508.4.9.49.164537' } else { '' }
-  Call 'ApplyForegroundTick' @($fgPid, $proc, $true, $hit, $rid, $readable, $OUT_UNREADABLE, '') | Out-Null
+  Call 'ApplyForegroundTick' @($fgPid, $proc, $true, $hit, $rid, $readable, $OUT_UNREADABLE, '', $OUT_WEB_UNREADABLE, '', $false, '', $false, 0, '') | Out-Null
   Call 'CheckFgBlocked' | Out-Null
   RunGovState
   Report $scenario $n $hit $readable
@@ -636,7 +644,7 @@ function AgentTick([string]$scenario, [int]$n, $focus, [uint32]$fgPid = $M365_PI
       $agentName = [string]$params[3]
     }
   }
-  Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $null, '', $false, $outcome, $agentName) | Out-Null
+  Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $null, '', $false, $outcome, $agentName, $OUT_WEB_UNREADABLE, '', $false, '', $false, 0, '') | Out-Null
   Call 'CheckFgBlocked' | Out-Null
   RunGovState
   Report $scenario $n $null $false $outcome
@@ -699,7 +707,7 @@ function TeamsTick([string]$scenario, [int]$n, $focus, [string]$title,
     }
   }
   $rid = if ($null -ne $hit) { '7.3311.4.9.31.90210' } else { '' }
-  Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $hit, $rid, $readable, $outcome, $agentName) | Out-Null
+  Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $hit, $rid, $readable, $outcome, $agentName, $OUT_WEB_UNREADABLE, '', $false, '', $false, 0, '') | Out-Null
   Call 'CheckFgBlocked' | Out-Null
   RunGovState
   Report $scenario $n $hit $readable $outcome
@@ -773,7 +781,7 @@ function TeamsCopilotTick([string]$scenario, [int]$n, $focus, [string]$title, $h
     }
   }
   $rid = if ($null -ne $hit) { '7.3311.4.9.31.90211' } else { '' }
-  Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $hit, $rid, $readable, $outcome, $agentName) | Out-Null
+  Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $hit, $rid, $readable, $outcome, $agentName, $OUT_WEB_UNREADABLE, '', $false, '', $false, 0, '') | Out-Null
   Call 'CheckFgBlocked' | Out-Null
   RunGovState
   Report $scenario $n $hit $readable $outcome $searchAttempted
@@ -876,7 +884,7 @@ function TeamsBadgeTick([string]$scenario, [int]$n, $focus, [string]$title, $bad
     }
   }
   $rid = if ($null -ne $hit) { '7.3311.4.9.31.90212' } else { '' }
-  Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $hit, $rid, $readable, $outcome, $agentName) | Out-Null
+  Call 'ApplyForegroundTick' @($fgPid, $proc, $false, $hit, $rid, $readable, $outcome, $agentName, $OUT_WEB_UNREADABLE, '', $false, '', $false, 0, '') | Out-Null
   Call 'CheckFgBlocked' | Out-Null
   RunGovState
   Report $scenario $n $hit $readable $outcome $searchAttempted
@@ -2613,7 +2621,7 @@ function CaptureBlock([string]$scenario, [string]$app, [string]$patterns = 'ssn'
   $orig = [Console]::Out
   $sw = New-Object System.IO.StringWriter
   [Console]::SetOut($sw)
-  try { Call 'EmitBlock' @($app, $patterns, $reason) | Out-Null }
+  try { Call 'EmitBlock' @($app, $patterns, $reason, [bool](GetF '_fgIsBlocked')) | Out-Null }
   finally { [Console]::SetOut($orig) }
   Write-Output (@{ scenario = $scenario; attr = $true; line = $sw.ToString().Trim() } | ConvertTo-Json -Compress)
 }
@@ -2677,7 +2685,7 @@ LoadPanels ('[' + $IDE_PANELS + ',' + $TEAMS_PANEL_OFF + ',' + $TEAMS_COPILOT_PA
 LoadSurfaces $SURFACES_OFFICE
 ResetState
 Tick 'attr_sticky_none' 0 $FOCUS_OFFICE_PANE_GENERIC $WINWORD_PID 'WINWORD'
-Call 'ApplyForegroundTick' @([uint32]4242, 'explorer', $false, $null, '', $false, $OUT_UNREADABLE, '') | Out-Null
+Call 'ApplyForegroundTick' @([uint32]4242, 'explorer', $false, $null, '', $false, $OUT_UNREADABLE, '', $OUT_WEB_UNREADABLE, '', $false, '', $false, 0, '') | Out-Null
 CaptureBlock 'attr_sticky_none' 'WINWORD'
 
 # Leave the catalog exactly as it SHIPS, so nothing after this point could

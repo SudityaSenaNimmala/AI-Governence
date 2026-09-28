@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { EventEmitter } from 'node:events';
 
-import { buildIdeProcessConfig, buildAiPanelConfig } from './ai-processes.js';
+import { buildIdeProcessConfig, buildAiPanelConfig, buildWebSurfaceConfig, browserProcNames } from './ai-processes.js';
 
 // Resolved defensively: under a bundler that emits CJS (the SEA tracker build)
 // import.meta.url is not available, so this must not throw at module load. The
@@ -30,12 +30,24 @@ export class PromptWatcher extends EventEmitter {
   // scriptPath overrides where prompt-watcher.ps1 is found. A SEA-built binary
   // has no real directory to resolve it from, so the tracker locates the script
   // next to the executable and passes it in.
-  constructor({ log, aiProcessNames, trackerMode = false, browserProcessNames = null, scriptPath = null }) {
+  //
+  // webSurfaces=true turns on BROWSER coverage for the full agent: the .ps1
+  // resolves the focused browser window's host and, only for a host in the
+  // WEB_SURFACES catalog, reads the composer. This is what replaces the browser
+  // extension's capture. Left false, no browser window is ever looked at — the
+  // watcher behaves exactly as it always has, which is what every existing
+  // caller (including the Claude tracker, which has its own narrower browser
+  // path) continues to get.
+  constructor({ log, aiProcessNames, trackerMode = false, browserProcessNames = null, scriptPath = null, webSurfaces = false }) {
     super();
     this.log = log;
     this.aiProcessNames = aiProcessNames;
     this.trackerMode = trackerMode;
-    this.browserProcessNames = browserProcessNames;
+    this.webSurfaces = webSurfaces;
+    // The browser list is needed by BOTH browser paths (tracker mode and web
+    // surfaces), so it defaults from the catalog rather than from the tracker's
+    // hardcoded four. An explicit list still wins.
+    this.browserProcessNames = browserProcessNames || (webSurfaces ? browserProcNames() : null);
     this.scriptPath = scriptPath || WATCHER_SCRIPT;
     this.child = null;
     this.buffer = '';
@@ -71,6 +83,14 @@ export class PromptWatcher extends EventEmitter {
           CFAI_AI_PANELS: JSON.stringify(buildAiPanelConfig()),
           ...(this.trackerMode ? { CFAI_CLAUDE_TRACKER: '1' } : {}),
           ...(this.browserProcessNames ? { CFAI_BROWSER_PROCESSES: this.browserProcessNames.join(',') } : {}),
+          // The governed web-surface catalog — the browser half of what the
+          // extension used to do. Sent ONLY when the caller asked for it: an
+          // absent/empty payload makes the .ps1's Classify-WebSurface return
+          // null for every URL, so no browser window is read at all. That is
+          // the switch that keeps this feature off for every caller that has
+          // not opted in, rather than a flag the .ps1 has to be trusted to
+          // check. Same JSON-over-env-var mechanism as the two payloads above.
+          ...(this.webSurfaces ? { CFAI_WEB_SURFACES: JSON.stringify(buildWebSurfaceConfig()) } : {}),
         },
       }
     );
@@ -122,6 +142,11 @@ export class PromptWatcher extends EventEmitter {
           // means no IDE composer can be read at all (the fail-closed default),
           // so an in-IDE prompt going unseen has an explanation in the log.
           `, ${ev.panel_count ?? '?'} panel(s) in ${ev.ide_count ?? '?'} IDE(s)` +
+          // Same reason panel_count is logged: a web_count of 0 means no
+          // browser window can be read at all, so browser AI usage going
+          // unseen has an explanation here rather than looking like a broken
+          // URL read. Counts only — never the host list.
+          `, ${ev.web_count ?? 0} web surface(s) in ${ev.browser_count ?? 0} browser(s)` +
           `${ev.tracker ? ', claude-tracker mode' : ''})`,
         );
         break;

@@ -72,6 +72,64 @@ export async function seedAiPlatforms(db) {
         throw e;
       }
     }
+
+    // ── Reconcile IDENTITY on rows that already exist ────────────────────────
+    //
+    // insertMany above only ever INSERTS — a host already in the collection is
+    // silently skipped by the unique index. So a correction to ai-apps.json
+    // never reached any deployment that had already seeded, and the dashboard
+    // kept showing whatever the registry said the first time it ran.
+    //
+    // That is how claude.ai came to display as "Anthropic API": it used to ride
+    // on the api-platform entry for api.anthropic.com, and splitting the
+    // consumer apps out of those entries fixed the registry but would have left
+    // every existing row untouched — including the name in the BLOCK DIALOG,
+    // which is the text a user sees when their send is stopped.
+    //
+    // ONLY IDENTITY IS RECONCILED — vendor, product, category. Never `blocked`,
+    // `governed`, `capture_mode`, `governance_note` or `pinned`: those are
+    // ADMIN DECISIONS, and a server restart silently reverting someone's block
+    // would be far worse than a stale display name.
+    //
+    // Scoped to source:'seed' so a host an admin added by hand, or one that
+    // arrived through discovery, is never rewritten from the static registry.
+    const identityOps = docs.map((d) => ({
+      updateOne: {
+        filter: {
+          host: d.host,
+          source: 'seed',
+          // Only touch rows that actually disagree, so this is a no-op write on
+          // every normal startup rather than a full-collection rewrite.
+          $or: [
+            { vendor: { $ne: d.vendor } },
+            { product: { $ne: d.product } },
+            { category: { $ne: d.category } },
+          ],
+        },
+        update: {
+          $set: {
+            vendor: d.vendor,
+            product: d.product,
+            category: d.category,
+            updated_at: now,
+          },
+        },
+      },
+    }));
+
+    if (identityOps.length > 0) {
+      try {
+        const res = await db.collection('ai_platforms').bulkWrite(identityOps, { ordered: false });
+        const n = res.modifiedCount ?? 0;
+        if (n > 0) {
+          console.log(`[seed] reconciled vendor/product/category on ${n} existing AI platform row(s) from ai-apps.json`);
+        }
+      } catch (e) {
+        // Non-fatal: a failed reconcile leaves a stale DISPLAY NAME, which is
+        // cosmetic. It must never stop the server from starting.
+        console.warn('[seed] identity reconcile failed (display names may be stale):', e.message);
+      }
+    }
   }
 
   // ── Browser-only AI platforms not covered by ai-apps.json ────────────────

@@ -191,6 +191,12 @@ test('govstate arms BOTH UIA watchers for the process, and disarms them on the w
     assert.deepEqual(monitor.hostGoverned, {
       process: 'ms-teams', pid: 13472, agent: 'IT Help Desk Agent',
       agent_id: 'agent-ithelp', scope: 'agent', panel: 'teams_composer',
+      // Empty for a host app. The field carries the governed WEB surface when
+      // the armed process is a browser, which is what lets a file picker opened
+      // from a claude.ai tab be attributed to Claude rather than to 'msedge'.
+      // '' here is what makes #webGovernedFor() answer null for Teams, so this
+      // path is unchanged for a host app.
+      browser_host: '',
     });
     assert.equal(calls.hostArm.length, 2);
     assert.deepEqual(calls.hostArm.map((c) => [c.watcher, c.proc, c.on]), [
@@ -658,7 +664,16 @@ test('index.js passes the SAME re-arm hook to both watchers, and it reads the li
   assert.match(src, /new AttachmentWatcher\(\{ log, aiProcessNames: aiProcNames, onRespawn: reArm \}\)/);
   // The prompt watcher is deliberately NOT armed: typed prompt text in Teams is
   // enforcer-win.ps1's job, at the element level, and was never asked for here.
-  assert.match(src, /new PromptWatcher\(\{ log, aiProcessNames: aiProcNames \}\)/);
+  //
+  // It DOES now take webSurfaces:true — browser capture, which is a separate
+  // axis from host_arm: it is scoped by the resolved URL rather than by an
+  // armed host process. What must stay true is that it takes no onRespawn hook
+  // (nothing to re-arm) and that its process list is still plain aiProcNames,
+  // which carries no browser.
+  assert.match(src, /new PromptWatcher\(\{ log, aiProcessNames: aiProcNames, webSurfaces: true \}\)/);
+  const pw = src.slice(src.indexOf('new PromptWatcher({'));
+  assert.equal(/onRespawn/.test(pw.slice(0, 120)), false,
+    'the prompt watcher must not take a re-arm hook — it has no armed host state');
 });
 
 test('attachment-watcher.ps1: Teams is armed through a SEPARATE set, and $AiProcesses is never touched', async () => {

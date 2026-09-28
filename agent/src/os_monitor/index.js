@@ -33,6 +33,8 @@ import {
   synthesizePlatformBlocks,
   normalizeAgentRows,
   identifyEgressSurface,
+  webSurfaceForHost,
+  enforcingWebSurface,
 } from './ai-processes.js';
 import { scan, lengthBucket, BLOCK_PATTERNS, getBlockPatterns, isTextReadable, isBinaryParseable, isImage, isArchive } from './classifier.js';
 import { PolicySync } from './policy-sync.js';
@@ -112,7 +114,19 @@ function agentMatchKey({ block_scope, agent_id, agent_name }) {
 // Falls back to the existing process-based resolution when there is no panel:
 // every pure chat app, and an IDE in its whole-app fallback mode (Cursor with no
 // panel focused), where process:"Cursor" is the correct identity.
+// Browser-host FIRST, for the same reason panel comes before process: it is the
+// most specific thing the event knows. A browser is not in AI_PROCESSES at all
+// (deliberately — see the WEB_SURFACES note in ai-processes.js), so without
+// this term a prompt typed into claude.ai in Chrome resolves to nothing and is
+// silently dropped. `process` there is 'chrome', which must never name a
+// product.
 function identifyEventAi(ev) {
+  // A BROWSER EVENT IS NAMED BY ITS HOST, and that is checked first: the
+  // process is `chrome`, which identifies nothing, and there is no panel. Lost
+  // once in a merge — git took the other side of this function without
+  // conflicting, and browser blocks silently started reporting as unattributed.
+  const web = ev?.browser_host ? webSurfaceForHost(ev.browser_host) : null;
+  if (web) return { product: web.product, vendor: web.vendor };
   // The PROCESS rides along so a pane hosted by several apps is named per host
   // ("Word Copilot", "Excel Copilot" — see office_copilot_pane.productByProc).
   return (ev?.panel ? identifyAiPanel(ev.panel, ev.process) : null) || identifyAiProcess(ev?.process);
@@ -156,6 +170,9 @@ function blockAgentAttribution(ev) {
   const surface = String(ev?.panel || ev?.surface || '').trim();
   if (surface) out.surface = surface;
   return out;
+  const web = ev?.browser_host ? webSurfaceForHost(ev.browser_host) : null;
+  if (web) return { product: web.product, vendor: web.vendor };
+  return (ev?.panel ? identifyAiPanel(ev.panel) : null) || identifyAiProcess(ev?.process);
 }
 
 // The access-exception key for a platform/agent/panel block event. Most
@@ -169,8 +186,14 @@ function blockAgentAttribution(ev) {
 // host /access-exceptions/check is later consulted with, and the same one
 // filterBlockedAgents subtracts on. A second copy of this expression is a
 // silent way for an approval to never lift the block it was granted for.
+// browser_host is FIRST and is authoritative when present: it is the actual
+// host the user was on, read from the address bar, so it is strictly better
+// than any catalog inference. hostForProcess('chrome') would return nothing
+// anyway (a browser is not in AI_PROCESSES), and hostsForPlatform would answer
+// with the DESKTOP app's host — so without this term a browser block would ask
+// for an exception against the wrong surface, or against none at all.
 function blockToolHost(ev) {
-  return hostForPanel(ev.panel) || hostForProcess(ev.process) || hostsForPlatform(ev.blocked_platform)[0] || '';
+  return ev.browser_host || hostForPanel(ev.panel) || hostForProcess(ev.process) || hostsForPlatform(ev.blocked_platform)[0] || '';
 }
 
 // ── WHICH governed conversation an arm is for, as an opaque digest ──────────
@@ -340,6 +363,14 @@ export class OsMonitor extends EventEmitter {
     // enforcer will not actually arm.
     this.egressCaptureModeById = new Map();
     this.egressPolicyTimer = null;
+    // webSurfaces: browser coverage. The watcher resolves the focused browser
+    // window's host from the address bar and reads the composer ONLY for a host
+    // in the WEB_SURFACES catalog — the capture half of what the browser
+    // extension used to do. aiProcNames is unchanged and still carries no
+    // browser: a browser is never handed to the clipboard poller or the
+    // file/attachment watchers, which is what keeps this from becoming general
+    // browser surveillance.
+    this.promptWatcher = new PromptWatcher({ log, aiProcessNames: aiProcNames, webSurfaces: true });
     // Keystroke send-blocker — actually prevents the send (swallows Enter /
     // Ctrl+V) when the focused AI prompt or clipboard holds a blocked pattern.
     this.enforcer = new Enforcer({
@@ -838,6 +869,32 @@ export class OsMonitor extends EventEmitter {
     return String(g.process).replace(/\.exe$/i, '').trim().toLowerCase() === base ? g : null;
   }
 
+  // The browser twin of #hostGovernedFor: is THIS browser process currently
+  // armed on a governed web surface, and which one?
+  //
+  // A separate method rather than a widened #hostGovernedFor because the two
+  // ask different questions of different catalogs — that one gates on
+  // isHostAppProcess (an AI_PROCESSES membership flag a browser can never
+  // have), this one on the govstate's resolved browser_host. Merging them
+  // would mean one predicate whose answer depends on which catalog happened to
+  // match, which is exactly the confusion the separate BROWSER_PROCS catalog
+  // exists to avoid.
+  //
+  // Returns the WEB_SURFACES entry, so a caller gets the product/vendor to
+  // attribute a file upload to ('Claude', not 'msedge') along with the host.
+  // null means "this browser is not on a governed AI surface right now", and
+  // every caller reads that as no capture — the same fail-open direction the
+  // URL gate uses.
+  #webGovernedFor(processName) {
+    if (!processName) return null;
+    const g = this.hostGoverned;
+    if (!g || !g.process || !g.browser_host) return null;
+    const base = String(processName).replace(/\.exe$/i, '').trim().toLowerCase();
+    if (String(g.process).replace(/\.exe$/i, '').trim().toLowerCase() !== base) return null;
+    const web = webSurfaceForHost(g.browser_host);
+    return web ? { ...g, web } : null;
+  }
+
   // ── Tokenize & Send: what the BLOCK knew, for the REWRITE that follows ─────
   //
   // The helper's `rewrite` line carries the outcome, the block id and (on a
@@ -891,8 +948,12 @@ export class OsMonitor extends EventEmitter {
     // so we'd otherwise re-fire constantly. Re-warn only when a new pattern
     // appears or after the TTL lapses. Shares the gate with the clipboard
     // path so a paste isn't reported twice (once as paste, once as typed).
+    // Keyed per browser HOST as well as per process: one chrome.exe serves
+    // every web surface, so a process-only key would let the same secret typed
+    // on claude.ai suppress the report for chatgpt.com.
     const sig = matches.map((m) => m.pattern).sort().join(',');
-    if (!this.#shouldFire(`${ev.process}|${sig}`)) return;
+    const fireKey = ev.browser_host ? `${ev.process}|${ev.browser_host}` : ev.process;
+    if (!this.#shouldFire(`${fireKey}|${sig}`)) return;
 
     const pasted = fromEnforcer && ev.cause === 'paste';
     this.reporter.enqueue({
@@ -908,6 +969,9 @@ export class OsMonitor extends EventEmitter {
       matches,
       highest_severity: highestSeverity,
       content_text: ev.text,
+      // The browser dimension. Present only for a browser event, so a desktop
+      // record is byte-identical to what it was before web surfaces existed.
+      ...(ev.browser_host ? { tabHost: ev.browser_host } : {}),
       ...(fromEnforcer ? blockAgentAttribution(ev) : {}),
     });
     // Product and pattern names only — no agent, no text.
@@ -916,12 +980,47 @@ export class OsMonitor extends EventEmitter {
       `severity=${highestSeverity} [${matches.map((m) => m.pattern).join(', ')}]`
     );
 
+    // ── The passive detection toast, and when NOT to show it ────────────────
+    //
+    // This fires WHILE THE USER IS STILL TYPING — the UIA watcher reads the
+    // composer every ~1.2s, so it lands before any send has been attempted. On
+    // a surface where the enforcer is armed that is the wrong notification at
+    // the wrong time, and the user gets three pop-ups for one event, of which
+    // only the block dialog can be acted on.
+    //
+    // The suppression is CONDITIONAL, and every condition matters: going quiet
+    // on a detect-only surface would be real lost coverage, because there is no
+    // dialog coming to take over. Reporting above is unconditional — only the
+    // pop-up moves, so the dashboard and audit trail are untouched.
+    //
+    // Scoped to BROWSER surfaces on purpose. A desktop AI app double-notifies
+    // the same way, but that behaviour is long-shipped on the fleet and quietly
+    // changing which pop-ups Claude Desktop users get is not part of governing
+    // the web surface.
     if (highestSeverity === 'critical' || highestSeverity === 'high') {
       const patterns = matches.map((m) => m.pattern + (m.count > 1 ? '×' + m.count : '')).join(', ');
-      this.toast.show({
-        title: `${ai.product} - ${highestSeverity.toUpperCase()}`,
-        message: `Sensitive content ${pasted ? 'pasted' : 'typed'} into the prompt: ${patterns}\nReported to CloudFuze AI Governance.`,
-      });
+      const willBlock = (() => {
+        if (!ev.browser_host) return false;                      // desktop: unchanged
+        if (!this.enforcerEnabled) return false;                 // enforcer off => detect-only
+        if (!enforcingWebSurface(ev.browser_host)) return false; // unverified surface => detect-only
+        // The matched pattern must really be blockable. The scan set and the
+        // block set are the same today, but both come from synced fleet policy,
+        // and a policy blocking a subset of what it detects would otherwise
+        // silence the remainder with no notification at all.
+        const blockable = new Set(getBlockPatterns().map((p) => p.name || p.pattern || String(p)));
+        return matches.some((m) => blockable.has(m.pattern));
+      })();
+      if (willBlock) {
+        this.log?.info(
+          `os_monitor: detection toast suppressed for ${ai.product} (${ev.browser_host}) — `
+          + 'the block dialog is the actionable notification'
+        );
+      } else {
+        this.toast.show({
+          title: `${ai.product} - ${highestSeverity.toUpperCase()}`,
+          message: `Sensitive content ${pasted ? 'pasted' : 'typed'} into the prompt: ${patterns}\nReported to CloudFuze AI Governance.`,
+        });
+      }
     }
   }
 
@@ -1112,7 +1211,16 @@ export class OsMonitor extends EventEmitter {
 
     const identity = { tool_host: toolHost, block_scope: blockScope, agent_id: agentId, agent_name: agentName };
     const key = `${toolHost.toLowerCase()}|${agentMatchKey(identity)}`;
-    if (this.accessRequestInFlight.has(key)) return;
+    // A dialog for THIS host is already on screen. Returning silently is right —
+    // a second popup for the same block would stack on the first — but it must
+    // be VISIBLE in the log, because from the outside "the dialog is already
+    // open" and "the dialog never opened" look identical, and this is the only
+    // branch in a notification path that produces no output at all. That
+    // ambiguity is exactly what made a missing dialog hard to diagnose.
+    if (this.accessRequestInFlight.has(key)) {
+      this.log?.info(`access-request: dialog already open for ${toolHost} — not offering a second one`);
+      return;
+    }
     this.accessRequestInFlight.add(key);
     try {
       const subject = blockScope === 'agent' && agentName ? agentName : (ai.product || ev.process || toolHost);
@@ -1151,8 +1259,21 @@ export class OsMonitor extends EventEmitter {
       }
       // 'cancel' / 'suppressed' / 'timeout' — the user said no, or a dialog for
       // this same block session is already on screen. Nothing is sent, and
-      // nothing is said: they know what they just dismissed.
-      if (result.action !== 'submit') return;
+      // nothing is SHOWN: they know what they just dismissed.
+      //
+      // But it is LOGGED. These three outcomes are indistinguishable from "the
+      // dialog never opened" without a line here, and that ambiguity cost real
+      // debugging time: a blocked ChatGPT surface produced eleven blocks and no
+      // dialog, and nothing in the log said whether the popup had been shown and
+      // dismissed, suppressed as a duplicate, or never attempted at all.
+      //
+      // 'timeout' in particular is worth seeing — it means a dialog WAS put on
+      // screen and the user never touched it, which is a usability signal, not
+      // a defect.
+      if (result.action !== 'submit') {
+        this.log?.info(`access-request: dialog for ${toolHost} closed as "${result.action}" — nothing submitted`);
+        return;
+      }
 
       await this.#submitAccessRequest({
         ...identity,
@@ -1511,7 +1632,20 @@ export class OsMonitor extends EventEmitter {
     // UIA-based file dialog watcher — covers the "click attach button in
     // ChatGPT → pick file → Open" flow that CF_HDROP doesn't see.
     this.dialogWatcher.on('file_dialog_pick', async (ev) => {
-      const ai = identifyAiProcess(ev.process);
+      // A BROWSER file picker resolves its product from the govstate-armed web
+      // surface, not from the process — 'msedge' names no product and would be
+      // dropped here. This is the "attach a file on claude.ai" flow, which the
+      // extension used to cover in-page and nothing covered once it was off.
+      //
+      // The arming is what scopes it: the helper only tracks a browser dialog
+      // while the browser is host-armed (govstate said a governed AI tab is
+      // focused), and it LATCHES that answer when the picker opens — which is
+      // the only correct moment to ask, because the picker steals focus from
+      // the tab and the URL state is already stale by the time it closes.
+      // Without the arming, every "Save As" and every download dialog in the
+      // browser would be reported as an AI file upload.
+      const web = this.#webGovernedFor(ev.process);
+      const ai = web ? { product: web.web.product, vendor: web.web.vendor } : identifyAiProcess(ev.process);
       if (!ai) return;
       // Same eligibility gate the attachment-chip watcher already applies
       // below: an IDE's File > Open dialog is not an AI upload. Without this,
@@ -1529,7 +1663,12 @@ export class OsMonitor extends EventEmitter {
       // this.hostGoverned is usually already null by the time it closes.
       const governed = this.#hostGovernedFor(ev.process);
       const hostPick = isHostAppProcess(ev.process) && ev.host_armed === true;
-      if (!isAttachmentWatcherEligible(ev.process) && !hostPick) return;
+      // A browser picker rides the SAME latched `host_armed` flag a host app's
+      // does — it is the helper's answer from when the picker opened. `web`
+      // being non-null already proves the process is an armed browser on a
+      // governed surface, so this clause adds the latch requirement to it.
+      const webPick = !!web && ev.host_armed === true;
+      if (!isAttachmentWatcherEligible(ev.process) && !hostPick && !webPick) return;
       try {
         const fileEvent = await buildFileUploadEvent({
           path: ev.path,
@@ -1539,8 +1678,11 @@ export class OsMonitor extends EventEmitter {
           processName: ev.process,
           // The dialog's own window Name ("Open"), and never a Teams window
           // title — see the clipboard_files handler for why that distinction
-          // matters for a host app.
-          windowTitle: hostPick ? '' : ev.title,
+          // matters for a host app. Suppressed for a browser pick too: the
+          // picker title is innocuous, but the rule here is that a governed
+          // HOST's window text never travels, and a browser is the broadest
+          // host there is.
+          windowTitle: (hostPick || webPick) ? '' : ev.title,
           log: this.log,
         });
         if (!fileEvent) return;
@@ -1549,6 +1691,12 @@ export class OsMonitor extends EventEmitter {
         // cleared — the file is still reported and still held, just without an
         // agent name, which is the honest outcome rather than a guess.
         if (hostPick && governed) this.#attributeToAgent(fileEvent, governed);
+        // The web surface the picker was opened FROM. tab_host is already an
+        // accepted metadata field on a file_upload event (routes/dlp.js sends
+        // it in the isFileUpload branch), which is how the extension reported
+        // the same thing — so this needs no schema change and renders on the
+        // dashboard exactly as an extension-era upload did.
+        if (webPick) fileEvent.tabHost = web.web.host;
 
         const dedupKey = `file|${ev.path}|${ev.process}`;
         const lastFired = this.firedAt.get(dedupKey) ?? 0;
@@ -1587,7 +1735,14 @@ export class OsMonitor extends EventEmitter {
     // (the case where the user dragged a file from Explorer onto the
     // AI window — no clipboard write, no file dialog).
     this.attachmentWatcher.on('attachment_appeared', async (ev) => {
-      const ai = identifyAiProcess(ev.process);
+      // Browser surface first, same as the picker handler — 'msedge' names no
+      // product. This is the drag-a-file-onto-the-tab flow. Coverage here is
+      // genuinely weaker than the picker's: an attachment CHIP in a web page is
+      // site-authored DOM with no standard UIA shape, so whether a chip is
+      // visible to the watcher varies by site and may simply not be. The
+      // picker path above is the reliable one; this is best-effort.
+      const web = this.#webGovernedFor(ev.process);
+      const ai = web ? { product: web.web.product, vendor: web.web.vendor } : identifyAiProcess(ev.process);
       if (!ai) return;
 
       // Skip IDE-like AI apps (Cursor, GitHub Copilot, Claude Desktop) whose
@@ -1615,8 +1770,12 @@ export class OsMonitor extends EventEmitter {
       // is the helper's answer from the tick the chip was actually seen, and the
       // helper only ever looks at Teams while armed.
       const governed = this.#hostGovernedFor(ev.process);
+      // Two escapes, added independently and both required. `hostChip` is a
+      // Teams attachment chip seen on an armed tick; `web` is a governed
+      // browser surface. Dropping either silently stops scanning that whole
+      // class of attachment, so this ANDs all four rather than choosing.
       const hostChip = isHostAppProcess(ev.process) && ev.host_armed === true;
-      if (!isAttachmentWatcherEligible(ev.process) && !governed && !hostChip) {
+      if (!isAttachmentWatcherEligible(ev.process) && !governed && !hostChip && !web) {
         return;
       }
 
@@ -1668,6 +1827,8 @@ export class OsMonitor extends EventEmitter {
         // Which governed Teams conversation this came from, when it came from
         // one. Null for every ordinary AI app.
         if (governed) this.#attributeToAgent(fileEvent, governed);
+        // The web surface this chip appeared on — see the picker handler.
+        if (web) fileEvent.tabHost = web.web.host;
 
         // CONFIRMED hold — high/critical, matching the browser extension's
         // existing file-upload block threshold, PLUS the fail-closed case
@@ -2001,6 +2162,14 @@ export class OsMonitor extends EventEmitter {
     this.enforcer.on('prompt_text', (ev) => {
       if (!this.running.dlp || !this.running.clipboard_monitor) return;
       this.#reportPromptText(ev, { fromEnforcer: true });
+      // The body that used to be duplicated here is GONE. Both prompt_text
+      // handlers now share #reportPromptText: the watcher passes
+      // fromEnforcer:false, the enforcer true, and the browser dimension
+      // (the per-host dedup key and tabHost) lives there with everything
+      // else. The merge had appended this handler an inline copy of the old
+      // body, which referenced an `ai` that no longer existed here -- so
+      // every enforcer prompt_text threw ReferenceError and the whole route
+      // was silently dead.
     });
 
     // Benign Enter-sends the enforcer lets through — captured from the SAME
@@ -2025,8 +2194,20 @@ export class OsMonitor extends EventEmitter {
         process_name: ev.process,
         content_length: len,
         length_bucket: lengthBucket(len),
+        // The browser dimension. THIS is what finally counts ordinary browser
+        // prompt usage: prompt_typed only ever records a prompt that matched a
+        // DLP pattern, so a plain "write me a poem" on claude.ai produced no
+        // usage row at all. The enforcer's clean-send event carries a LENGTH
+        // only (no content), which is exactly how sealed desktop apps like
+        // Claude Desktop have always been counted — the same mechanism now
+        // reaches the web surface, with no vendor placeholder string to go
+        // stale.
+        ...(ev.browser_host ? { tabHost: ev.browser_host } : {}),
       });
-      this.log?.info(`os_monitor: prompt sent into ${ai.product} (${len} chars)`);
+      this.log?.info(
+        `os_monitor: prompt sent into ${ai.product}` +
+        `${ev.browser_host ? ` (${ev.browser_host}, browser)` : ''} (${len} chars)`
+      );
     });
 
     // Enforcer — the only real block for sealed desktop apps. When it swallows
@@ -2076,6 +2257,19 @@ export class OsMonitor extends EventEmitter {
         // They travel on the @@CFAI-BLOCK line below, which is where they are
         // actually consumed, and reach the server on the access request itself.
         // blocked_for/mechanism already carry "this was a platform block".
+        // NOTE: the blocked platform id / agent id / tool_host are deliberately
+        // NOT sent here. POST /api/v1/dlp maps enforcement metadata from an
+        // explicit allowlist (see its metadata block), so extra keys would be
+        // silently dropped — which reads as "we recorded it" when nothing was
+        // recorded. They travel on the @@CFAI-BLOCK line below, which is where
+        // they are actually consumed, and reach the server on the access request
+        // itself. blocked_for/mechanism already carry "this was a platform block".
+        //
+        // tab_host IS on that allowlist though (it has to be — the browser
+        // extension has always sent it on every event kind), so the browser
+        // dimension can travel here and does. Omitted entirely for a desktop
+        // block, so those records are byte-identical to before.
+        ...(ev.browser_host ? { tabHost: ev.browser_host } : {}),
         matches,
         highest_severity: highestSeverity,
         // agent_name / agent_id / agent_scope / surface — the four keys the
@@ -2113,10 +2307,72 @@ export class OsMonitor extends EventEmitter {
           // Same object's values as the record above, so the redact pairs with
           // its block on agent too. Identity only — never content.
           ...agentAttr,
+          // Pinned with the rest of the block's identity so a Tokenize & Send
+          // on a web surface records WHICH surface it happened on. The rewrite
+          // event itself cannot supply it: by the time the masked text is
+          // confirmed the foreground may have moved, so the host has to come
+          // from the block that armed the rewrite rather than be re-resolved.
+          browser_host: ev.browser_host || '',
         });
       }
-      this.log?.info(`os_monitor: BLOCKED ${how} into ${ai.product} — [${ev.patterns}]`);
-      if (this.#shouldFire(`enf|${ev.process}|${ev.patterns}|${ev.filename || ''}`)) {
+      this.log?.info(`os_monitor: BLOCKED ${how} into ${ai.product} — [${ev.patterns || 'no reason reported'}]`);
+      // A block with no reason at all means something armed the swallow and
+      // then lost the identity that justified it — on 2026-09-21 that was a
+      // stale agent latch holding after the user switched agents. It is always
+      // a defect, so say so here rather than leaving it to be noticed in a
+      // screenshot of a toast.
+      if (!isPlatform && !isAttachment && !ev.patterns) {
+        this.log?.warn(`os_monitor: block carried NO reason (process=${ev.process || '?'}, `
+          + `host=${ev.browser_host || '-'}) — a swallow with nothing to justify it is a defect`);
+      }
+      // ── Does the interactive dialog take over from the toast? ──────────────
+      //
+      // On a browser surface the Tokenize & Send / Edit / Override popup IS the
+      // notification: it names the app and the patterns, and unlike a toast it
+      // can be acted on. Firing both is the double-notification the user asked
+      // to be rid of.
+      //
+      // BUT THE TOAST IS THE ONLY FALLBACK. The popup opens on exactly the
+      // condition below (see the #offerTokenize call at the end of this
+      // handler) — a REWRITABLE block with a preview. Everything else reaches
+      // no dialog at all on the CLI path: an attachment hold, a platform block,
+      // and any content block whose composer could not be re-read for a rewrite
+      // candidate. The Electron block dialog is not a second safety net either
+      // — its `@@CFAI-BLOCK` relay is gated behind `legacyStdout`, which is OFF
+      // for everything except the packaged desktop app.
+      //
+      // So suppressing the toast unconditionally would leave a swallowed Enter
+      // with NO explanation anywhere: the user's keyboard appears broken on
+      // claude.ai and nothing on screen says why. That is worse than one extra
+      // toast, so the suppression is scoped to the case where a dialog provably
+      // follows, and the dialog's own failure path below re-shows the toast.
+      // TWO dialogs can take over from the toast, and they are mutually
+      // exclusive because a platform block is never rewritable:
+      //
+      //   Tokenize & Send  — a DLP content block on a browser surface. Offers
+      //                      Tokenize / Edit in the app / Override.
+      //   Request Access   — a PLATFORM block ("your organization has blocked
+      //                      this app"). There is nothing to tokenize: the site
+      //                      is disallowed outright, so the only useful action
+      //                      is asking for an exception, which is exactly what
+      //                      that dialog does.
+      //
+      // The Request Access dialog opens from the enforcer's own
+      // `request_access_offer` line, which OfferAccessRequest emits for every
+      // armed block except an attachment hold. #offerAccessRequest then needs a
+      // resolvable tool_host to have something to ask for — without one it
+      // refuses to open a dialog whose Submit could only fail — so `toolHost`
+      // is required here too, or we would suppress the toast for a block that
+      // shows nothing at all.
+      //
+      // The in-flight case (a dialog already open for this host) deliberately
+      // still suppresses: there IS a dialog on screen, which is the whole point.
+      const tokenizeWillOffer = !!(
+        ev.browser_host && ev.rewritable && ev.block_id && !isPlatform && !isAttachment && ev.preview
+      );
+      const accessWillOffer = !!(isPlatform && !isAttachment && toolHost);
+      const dialogWillOffer = tokenizeWillOffer || accessWillOffer;
+      if (!dialogWillOffer && this.#shouldFire(`enf|${ev.process}|${ev.patterns}|${ev.filename || ''}`)) {
         // Honest framing per the design decision: this stops the MESSAGE,
         // not necessarily the upload — several chat apps upload an attached
         // file to the vendor's backend the instant it's attached, well
@@ -2142,8 +2398,17 @@ export class OsMonitor extends EventEmitter {
               : ''),
         } : {
           title: `${ai.product} - BLOCKED`,
-          message: `Send blocked: prompt contains ${ev.patterns}\n` +
-            `Remove the sensitive data to send. Override (logged): Ctrl+Alt+Enter.`,
+          // A content block ALWAYS carries the pattern names it matched — that
+          // string is the whole justification for stopping someone's work. When
+          // it is missing the block came from somewhere that lost its reason,
+          // and interpolating it anyway printed "prompt contains undefined" to
+          // a user on 2026-09-21. Do not name a cause we do not have; the same
+          // rule the platform-block copy above already follows.
+          message: ev.patterns
+            ? `Send blocked: prompt contains ${ev.patterns}\n`
+              + `Remove the sensitive data to send. Override (logged): Ctrl+Alt+Enter.`
+            : `This send was blocked by your organization's policy.\n`
+              + `If this looks wrong, tell IT. Override (logged): Ctrl+Alt+Enter.`,
         });
       }
       // Structured relay for the Electron dialog — separate from the plain-text
@@ -2195,6 +2460,22 @@ export class OsMonitor extends EventEmitter {
       if (ev.rewritable && ev.block_id && !isPlatform && !isAttachment && ev.preview) {
         this.#offerTokenize(ev, ai).catch((err) => {
           this.log?.warn(`tokenize: offer failed — ${err?.message || err}`);
+          // THE FALLBACK. The toast above stood down because this dialog was
+          // going to take over as the notification (see dialogWillOffer). It
+          // did not, so the user is sitting in front of a swallowed Enter with
+          // nothing on screen to explain it — show the toast after all.
+          // Same dedup key, so this can never double up with the toast the
+          // suppression skipped.
+          if (dialogWillOffer && this.#shouldFire(`enf|${ev.process}|${ev.patterns}|${ev.filename || ''}`)) {
+            this.toast.show({
+              title: `${ai.product} - BLOCKED`,
+              message: ev.patterns
+                ? `Send blocked: prompt contains ${ev.patterns}\n`
+                  + `Remove the sensitive data to send. Override (logged): Ctrl+Alt+Enter.`
+                : `This send was blocked by your organization's policy.\n`
+                  + `If this looks wrong, tell IT. Override (logged): Ctrl+Alt+Enter.`,
+            });
+          }
         });
       }
     });
@@ -2261,6 +2542,23 @@ export class OsMonitor extends EventEmitter {
     this.enforcer.on('requestaccessoffer', (ev) => {
       this.#offerAccessRequest(ev).catch((err) => {
         this.log?.warn(`access-request: offer failed — ${err?.message || err}`);
+        // THE FALLBACK. The 'block' handler stood its toast down because this
+        // dialog was going to be the notification (see accessWillOffer). It
+        // threw, so the user is looking at an app that silently will not send
+        // and nothing on screen says why — the worst outcome, and worse than
+        // the extra toast the suppression was meant to remove.
+        //
+        // Same dedup namespace as the block toast, so this can never double up
+        // with the one that was skipped.
+        const ai = identifyEventAi(ev) || { product: ev.process, vendor: null };
+        const who = String(ev.blocked_agent || '').trim() || ai.product;
+        if (this.#shouldFire(`enf|${ev.process}|${ev.blocked_platform || ''}|`)) {
+          this.toast.show({
+            title: `${ai.product} is blocked`,
+            message: `Your organization has blocked ${who} on this device — nothing can be sent here.\n` +
+              `Contact your security team for access.`,
+          });
+        }
       });
     });
 
@@ -2337,6 +2635,12 @@ export class OsMonitor extends EventEmitter {
           agent_id: String(ev.agent_id || ''),
           scope: String(ev.scope || ''),
           panel: String(ev.panel || ''),
+          // The governed WEB surface, when the armed process is a browser. This
+          // is what lets a file picker opened from a claude.ai tab be attributed
+          // to Claude rather than to 'msedge', and what #webGovernedFor() reads.
+          // The catalog-matched host only — never the URL. '' for a host app,
+          // so #webGovernedFor() answers null and nothing changes for Teams.
+          browser_host: String(ev.browser_host || ''),
         };
       } else {
         this.hostGoverned = null;
@@ -2409,6 +2713,8 @@ export class OsMonitor extends EventEmitter {
           ...(ctx.agent_id !== undefined ? { agent_id: ctx.agent_id } : {}),
           ...(ctx.agent_scope !== undefined ? { agent_scope: ctx.agent_scope } : {}),
           ...(ctx.surface !== undefined ? { surface: ctx.surface } : {}),
+          // From the PINNED block context, not from this event — see the pin.
+          ...(ctx.browser_host ? { tabHost: ctx.browser_host } : {}),
         } : {}),
         // Length OF THE MASKED TEXT — the text this record actually carries and
         // the text that was actually sent. (The browser side reports the
@@ -2445,7 +2751,22 @@ export class OsMonitor extends EventEmitter {
     // here would imply support that does not exist.
     this.enforcer.on('route', (ev) => {
       this.#console.log('@@CFAI-ROUTE ' + JSON.stringify(this.#ui('route', ev)));
-      const ai = identifyAiProcess(ev.process) || { product: ev.process, vendor: null };
+      // Browser surface FIRST, then the process. Confirmed broken live
+      // (2026-09-09): the router fired on a claude.ai tab and the record landed
+      // as `ai_service: 'chrome'` with no tab_host, because identifyAiProcess
+      // returns null for a browser and the `|| { product: ev.process }` fallback
+      // then used the PROCESS NAME as the product. That put a nonexistent
+      // "chrome" platform on the dashboard and left the row unattributable to
+      // any surface.
+      //
+      // Panel resolution is still deliberately NOT used here — model routing is
+      // excluded from IDE panels on purpose, and identifyEventAi() would pull a
+      // panel product in. So this reads the browser term explicitly rather than
+      // delegating, and keeps identifyAiProcess as the desktop path untouched.
+      const web = ev.browser_host ? webSurfaceForHost(ev.browser_host) : null;
+      const ai = (web ? { product: web.product, vendor: web.vendor } : null)
+        || identifyAiProcess(ev.process)
+        || { product: ev.process, vendor: null };
       this.reporter.enqueue({
         kind: 'model_routed',
         mechanism: 'keystroke_route',
@@ -2457,6 +2778,26 @@ export class OsMonitor extends EventEmitter {
         current_tier: ev.from_tier || null,
         provider: ev.provider || null,
         ui_changed: ev.result === 'ok',
+        // model_routed is one of the three event kinds routes/dlp.js maps
+        // tab_host for explicitly, so the browser dimension travels here too.
+        ...(ev.browser_host ? { tabHost: ev.browser_host } : {}),
+        // AI-216: THE EFFORT SIDE EFFECT. Switching model on claude.ai also
+        // changes effort (measured: 'Opus 5 High' -> 'Sonnet 5 Medium').
+        // Nothing in this feature SETS effort and the user has accepted the
+        // downgrade -- but if it is not recorded, the cost model prices a
+        // Medium-effort request as High forever with nothing in the data to
+        // show it. That is the specific failure this carries: wrong, and
+        // UNDETECTABLY wrong.
+        //
+        // Omitted entirely when unknown (a label with no recognised token, and
+        // every desktop route), so no pre-existing row gains a null column.
+        //
+        // NOTE FOR THE SERVER SIDE: routes/dlp.js maps `model_routed` through
+        // an explicit per-kind field list, so these two do not reach dlp_events
+        // until that list carries them. They do reach the monitor's own
+        // @@CFAI-ROUTE line today.
+        ...(ev.effort_from ? { effort_from: ev.effort_from } : {}),
+        ...(ev.effort_to ? { effort_to: ev.effort_to } : {}),
       });
       this.log?.info(`os_monitor: model route ${ev.result} — ${ai.product} ${ev.from_tier}->${ev.to_tier} (${ev.complexity})`);
       if (ev.result === 'ok' && this.#shouldFire(`route|${ev.process}`)) {
@@ -2479,6 +2820,10 @@ export class OsMonitor extends EventEmitter {
         process_name: ev.process,
         matches: (ev.patterns || '').split(',').filter(Boolean).map((p) => ({ pattern: p, severity: 'high', count: 1 })),
         highest_severity: 'high',
+        // An override is the record of a person deliberately sending anyway, so
+        // it needs the surface as much as the block does — without it the audit
+        // can say a block was overridden but not where.
+        ...(ev.browser_host ? { tabHost: ev.browser_host } : {}),
       });
       this.log?.info(`os_monitor: OVERRIDE send into ${ai.product} — [${ev.patterns}]`);
     });

@@ -28,6 +28,11 @@ export const SCOPE_LABELS = {
   isv_store: "ISV Store Apps",
   azure_foundry: "Azure AI Foundry",
   vertex_ai: "Vertex AI",
+  // The Google scan reports these three; without a key here getScopeCounts
+  // skipped them and the filter could never select them.
+  reasoning_engine: "Vertex AI Agents",
+  agent_builder: "Agent Builder",
+  notebooklm: "NotebookLM",
   gemini: "Gemini",               // Standalone Gemini AI (gemini.google.com)
   google_workspace: "Google Workspace", // Combined view — all Workspace apps
   gemini_gmail: "Gmail",
@@ -60,6 +65,9 @@ export const SCOPE_COLORS = {
   isv_store: "#D83B01",
   azure_foundry: "#0078D4",
   vertex_ai: "#1A73E8",
+  reasoning_engine: "#1A73E8",
+  agent_builder: "#0B8043",
+  notebooklm: "#F9AB00",
   gemini: "#886FBF",
   google_workspace: "#4285F4",
   gemini_gmail: "#EA4335",
@@ -148,7 +156,7 @@ export function getScopedAgents(result, scope) {
 }
 
 export function getScopeCounts(result) {
-  const counts = { all: 0, copilot_studio: 0, personal_agent: 0, teams_chat_agent: 0, sharepoint_embedded: 0, teams_app: 0, isv_store: 0, azure_foundry: 0, vertex_ai: 0, gemini: 0, google_workspace: 0, gemini_gmail: 0, gemini_docs: 0, gemini_sheets: 0, gemini_slides: 0, gemini_meet: 0, gemini_drive: 0, gemini_chat: 0, google_chat: 0, apps_script: 0, gemini_gems: 0, gemini_workspace: 0, oauth_app: 0, openai_assistant: 0, custom_gpt: 0, claude_project: 0, claude_model: 0, claude_agent: 0, claude_ai_project: 0, gemini_enterprise: 0, aws_bedrock: 0, aws_sagemaker: 0 };
+  const counts = { all: 0, copilot_studio: 0, personal_agent: 0, teams_chat_agent: 0, sharepoint_embedded: 0, teams_app: 0, isv_store: 0, azure_foundry: 0, vertex_ai: 0, reasoning_engine: 0, agent_builder: 0, notebooklm: 0, gemini: 0, google_workspace: 0, gemini_gmail: 0, gemini_docs: 0, gemini_sheets: 0, gemini_slides: 0, gemini_meet: 0, gemini_drive: 0, gemini_chat: 0, google_chat: 0, apps_script: 0, gemini_gems: 0, gemini_workspace: 0, oauth_app: 0, openai_assistant: 0, custom_gpt: 0, claude_project: 0, claude_model: 0, claude_agent: 0, claude_ai_project: 0, gemini_enterprise: 0, aws_bedrock: 0, aws_sagemaker: 0 };
   if (!result) return counts;
   counts.all = result.agents.length;
   for (const a of result.agents) {

@@ -404,6 +404,157 @@ function Classify-ClaudeUrl([string]$u) {
     return 'Claude'
 }
 
+# ── Governed web surfaces (CFAI_WEB_SURFACES) ─────────────────────────────────
+#
+# The catalog-driven successor to Classify-ClaudeUrl, for the FULL agent rather
+# than the Claude tracker. ai-processes.js owns the data (WEB_SURFACES); this
+# side owns only the comparison, exactly as CFAI_AI_PANELS works.
+#
+# An empty/absent payload leaves every browser ungoverned, which is what keeps
+# this whole block inert for any caller that has not opted in.
+#
+# Parsed with a DIRECT ConvertFrom-Json call inside foreach, matching the
+# CFAI_IDE_PROCESSES / CFAI_AI_PANELS loaders above. This is not a style
+# preference: in Windows PowerShell 5.1 ConvertFrom-Json hands a JSON array to
+# the PIPELINE as one un-enumerated object, so `@($env:X | ConvertFrom-Json)`
+# yields a single element containing all the rows. Every host comparison then
+# runs against an array instead of a string and silently matches nothing —
+# i.e. it fails to the "no surface" side and governs nothing at all.
+$WebSurfaces = @()
+if ($env:CFAI_WEB_SURFACES) {
+    try {
+        foreach ($s in (ConvertFrom-Json $env:CFAI_WEB_SURFACES)) {
+            $h = (('' + $s.host).Trim()).ToLower() -replace '^www\.',''
+            # A row with no host can never match a URL; drop it rather than
+            # carry an entry whose comparison is guaranteed to be dead.
+            if (-not $h) { continue }
+            $WebSurfaces += [pscustomobject]@{
+                id       = '' + $s.id
+                host     = $h
+                product  = '' + $s.product
+                vendor   = '' + $s.vendor
+                platform = '' + $s.platform
+                composerName = '' + $s.composerName
+                # THE OTHER TWO IDENTITY SHAPES. Capture knew only the exact
+                # composerName, so every surface that identifies by
+                # AutomationId -- m365.cloud.microsoft and Office web, whose
+                # composerName is deliberately empty -- was refused here and
+                # produced NO DLP record while blocking worked fine. Same
+                # class of gap as the hard-coded Edit control type.
+                composerNamePrefixes = @($s.composerNamePrefixes | Where-Object { $_ })
+                composerAutomationId = '' + $s.composerAutomationId
+                agentReadMode = '' + $s.agentReadMode
+                # The composer's CONTROL TYPE, catalog data since AI-219.
+                # It was hard-coded to Edit here, which silently excluded
+                # every surface whose composer is not one: Gemini
+                # Enterprise's is a Group, and the Gemini panel in Gmail is
+                # a ComboBox. Capture saw neither, so those surfaces could
+                # block but never produce a DLP record. Empty defaults to
+                # Edit, so every older surface is unchanged.
+                composerControlType = '' + $s.composerControlType
+                # Both flags travel and are read as strict booleans. Phase 1
+                # reads neither — capture does not consult them — but they must
+                # arrive intact for the blocking arm that will.
+                enforce  = ($s.enforce -eq $true)
+                verified = ($s.verified -eq $true)
+            }
+        }
+    } catch {
+        $WebSurfaces = @()
+    }
+}
+
+# URL -> the governed surface it belongs to, or $null for "don't look at this
+# window". HOST ONLY: unlike Classify-ClaudeUrl above, no path is ever
+# inspected, because a path is one field away from a query string and a query
+# string on an AI URL routinely contains the prompt itself.
+#
+# Normalisation must match webSurfaceForHost() in ai-processes.js: lowercase,
+# strip a leading "www.", exact match, then registrable-suffix match.
+function Classify-WebSurface([string]$u) {
+    if (-not $u) { return $null }
+    if (@($WebSurfaces).Count -eq 0) { return $null }
+    $s = $u.Trim()
+    if (-not $s) { return $null }
+    # The omnibox hides the scheme, so a bare "claude.ai/chat" must still parse.
+    if ($s -notmatch '^[a-zA-Z][a-zA-Z0-9+.-]*://') { $s = 'https://' + $s }
+    try { $uri = [Uri]$s } catch { return $null }
+    # Only real web traffic. about:, chrome://, file:, view-source: and friends
+    # are never a governed AI surface and must not be coerced into one.
+    if ($uri.Scheme -ne 'http' -and $uri.Scheme -ne 'https') { return $null }
+    $h = ''
+    try { $h = ('' + $uri.Host).ToLower() -replace '^www\.','' } catch { return $null }
+    if (-not $h) { return $null }
+    foreach ($ws in $WebSurfaces) { if ($h -eq ('' + $ws.host).ToLower()) { return $ws } }
+    foreach ($ws in $WebSurfaces) { if ($h.EndsWith('.' + ('' + $ws.host).ToLower())) { return $ws } }
+    return $null
+}
+
+# ── The omnibox exclusion ─────────────────────────────────────────────────────
+#
+# THIS IS A PRIVACY GATE, NOT AN OPTIMISATION, AND IT MUST NEVER BE REMOVED.
+#
+# Once the URL says the tab is a governed AI host, the code below reads whatever
+# editable element holds focus. In a browser that set INCLUDES THE ADDRESS BAR:
+# a user on claude.ai who hits Ctrl+L and starts typing a URL — or a search
+# query, which the omnibox also accepts — would have that text read and reported
+# as a prompt. The URL bar is where people paste internal hostnames, signed
+# S3 links and password-reset links.
+#
+# The exclusion regex is deliberately THE SAME ONE Get-BrowserUrl uses to FIND
+# the address bar. That identity is the invariant: anything the finder is
+# willing to call an address bar must never be read as a composer. A narrower
+# exclusion than the finder would leave a gap by construction.
+#
+# It also covers the find-in-page bar and the tab-search box, which are browser
+# chrome for the same reason. The failure direction is a MISS, never a leak: a
+# composer whose accessible name happens to contain "search bar" is skipped
+# rather than read, which is the correct way for this to break.
+function Is-BrowserChromeElement($el) {
+    if (-not $el) { return $false }
+    $nm = ''
+    try { $nm = '' + $el.Current.Name } catch { return $true }  # unreadable ⇒ treat as chrome
+    if (-not $nm) { return $false }
+    if ($nm -match 'address|url|search bar|location') { return $true }
+    if ($nm -match '^(find|search tabs|find in page)$') { return $true }
+    # Edge's TOOLBAR search box, found by live UIA probe (2026-09-08):
+    #   name='Search for tools, help, and more (Alt + Q)'  class='input-337'
+    # It is browser chrome, it accepts typed text, and it matches none of the
+    # address-bar alternations above — so on a claude.ai tab it was being read
+    # and reported as a prompt. Matched on the distinctive leading phrase rather
+    # than the whole string, because the "(Alt + Q)" accelerator hint varies.
+    if ($nm -match '(?i)^search for tools') { return $true }
+    return $false
+}
+
+# WHY THIS IS A NAME LIST AND NOT A STRUCTURAL TEST.
+#
+# The obvious better idea is to ask "is the focused element inside the web
+# page?" — walk up the UIA tree and require a ControlType.Document ancestor,
+# since a page composer is in the document and browser chrome is not. That idea
+# was implemented, probed against live browsers, and REVERTED. It does not work:
+#
+#   Edge toolbar search box  -> Document ancestor at depth 24
+#   Excel Online 'grid'      -> Document ancestor at depth 14
+#   Excel Online 'formula bar'-> Document ancestor at depth 15
+#
+# Edge renders parts of its OWN toolbar as web content, so browser chrome has a
+# Document ancestor exactly like page content does. There is no depth bound that
+# separates the two — a bound tight enough to reject Edge's toolbar (24) also
+# rejects genuine composers in deeply-nested web apps, and a bound loose enough
+# to keep those accepts the toolbar. The apparent success of a depth-14 bound
+# was a coincidence of those two numbers, not a principle.
+#
+# So the name list stays, with its known cost stated plainly: these strings are
+# English-UI-specific and vendor-owned, a browser build or a locale can add a
+# box we do not match, and the failure mode is reading typed text from a browser
+# widget while the user is on a governed AI host. The URL gate bounds the
+# exposure to governed hosts only. This is the same tradeoff the catalog already
+# accepts for composerNamePrefixes in ai-processes.js ("Message " is
+# English-only, a non-English UI matches nothing) — documented rather than
+# pretended away.
+
+
 function Get-DesktopService([string]$procName) {
     $base = $procName -replace '\.exe$',''
     # 'Claude Desktop', not 'Claude' — the server needs to tell the desktop app
@@ -470,6 +621,160 @@ function Read-FocusedText($el) {
 
 # Only treat an element as a prompt box if it's an editable control type. This
 # avoids reading button labels, menu items, etc. that may hold focus.
+# ── The BROWSER composer test: stricter than Is-EditableControl below ────────
+#
+# SECURITY FIX (2026-09-09, found by audit). Is-EditableControl was written for
+# DESKTOP AI apps and then inherited by the browser path, where two of its rules
+# are actively dangerous:
+#
+#   1. It accepts ControlType.Document. In a Chromium accessibility tree THE
+#      PAGE ITSELF is a Document and so is the transcript pane — so clicking the
+#      page background on claude.ai made "the focused editable element" the whole
+#      conversation, and Read-FocusedText would return up to $MaxChars (16,000)
+#      characters of it: every earlier prompt AND every model response. On a
+#      pattern match that text is emitted as `content_text` and persisted
+#      verbatim server-side.
+#   2. Its IsPassword guard only covers the Custom/Group fallback branch, NOT
+#      the Edit branch — so a web login form's password field, which reports as
+#      a plain Edit, was readable.
+#
+# The keystroke enforcer already refuses both (it is Edit-only and checks
+# IsPassword first), so the READING path was more permissive than the BLOCKING
+# path — exactly backwards. This predicate brings the browser read in line with
+# it and is applied ONLY to a browser foreground, so desktop-app coverage is
+# byte-for-byte unchanged (an Electron composer that reports as Document still
+# reads, as it always has).
+#
+# Fails CLOSED on a throw: an element whose ControlType or IsPassword cannot be
+# read is not eligible. The cost of that is a missed prompt; the cost of the
+# other direction is reading a password.
+function Is-BrowserComposerElement($el, $surface) {
+    if (-not $el) { return $false }
+    try {
+        if ($el.Current.IsPassword) { return $false }
+        # The control type is CATALOG DATA, defaulting to Edit. An unknown
+        # value REFUSES rather than falling back to 'any type': a surface
+        # whose composer type we cannot name gets no capture, which is the
+        # miss-not-leak direction every gate in this file takes.
+        $wantCt = 'Edit'
+        if ($surface -and ('' + $surface.composerControlType).Trim()) {
+            $wantCt = ('' + $surface.composerControlType).Trim()
+        }
+        $ctObj = $null
+        switch ($wantCt) {
+            'Edit'     { $ctObj = [System.Windows.Automation.ControlType]::Edit }
+            'ComboBox' { $ctObj = [System.Windows.Automation.ControlType]::ComboBox }
+            'Group'    { $ctObj = [System.Windows.Automation.ControlType]::Group }
+            # 'Document' IS DELIBERATELY ABSENT. On a web page that control type
+            # is the RootWebArea -- the WHOLE DOCUMENT -- so accepting it would
+            # read the entire page every tick instead of one composer. There is
+            # an existing test asserting exactly this, and it caught the case
+            # being added here by reflex while widening the set for ComboBox.
+            default    { return $false }
+        }
+        if ($el.Current.ControlType -ne $ctObj) { return $false }
+        # POSITIVE IDENTITY, not merely "an Edit that isn't chrome".
+        #
+        # Security audit finding 4: the structural test alone matched ANY
+        # non-password Edit on a governed host -- a "Search chats" box, a rename
+        # field, and most seriously an Edit inside a CROSS-ORIGIN IFRAME, since
+        # the omnibox only reveals the TOP-LEVEL url. A payment iframe's
+        # card-number field is an Edit, is not IsPassword, and matches no chrome
+        # name, so it was read every tick and its raw value persisted.
+        #
+        # The composer's accessible name is live-probed per site and travels in
+        # the catalog. An empty/absent name REFUSES (rather than allowing any
+        # Edit): a surface whose composer has not been identified gets no
+        # capture, which is the miss-not-leak direction every gate here takes.
+        # THREE SHAPES, the same three the enforcer's WebSurfaceCanIdentifyComposer
+        # allows, so capture and blocking agree on what "the composer" is. They
+        # used to disagree: capture knew only shape (a), which silently excluded
+        # every AutomationId-identified surface.
+        #
+        #   (a) exact composerName
+        #   (b) exact composerAutomationId AND a name prefix
+        #   (c) exact composerAutomationId alone -- ONLY on a url_path surface,
+        #       where the agent identity comes from the URL and the element has
+        #       no usable name of its own
+        #
+        # A surface matching none of the three REFUSES: no capture, which is the
+        # miss-not-leak direction every gate in this file takes.
+        $nm = ''
+        try { $nm = ('' + $el.Current.Name).Trim() } catch { return $false }
+        $wantName = ''
+        $wantAid  = ''
+        $prefixes = @()
+        $mode     = ''
+        if ($surface) {
+            $wantName = ('' + $surface.composerName).Trim()
+            $wantAid  = ('' + $surface.composerAutomationId).Trim()
+            $prefixes = @($surface.composerNamePrefixes | Where-Object { $_ })
+            $mode     = ('' + $surface.agentReadMode).Trim()
+        }
+        # (a) -- an exact name is sufficient on its own.
+        if ($wantName) { return ($nm -ieq $wantName) }
+        # Both remaining shapes REQUIRE the AutomationId, exactly.
+        if (-not $wantAid) { return $false }
+        $aid = ''
+        try { $aid = ('' + $el.Current.AutomationId).Trim() } catch { return $false }
+        if ($aid -cne $wantAid) { return $false }
+        # (b) -- AutomationId plus a name prefix.
+        if ($prefixes.Count -gt 0) {
+            foreach ($pfx in $prefixes) {
+                $p2 = ('' + $pfx)
+                if ($p2 -and $nm.Length -ge $p2.Length -and
+                    $nm.Substring(0, $p2.Length) -ieq $p2) { return $true }
+            }
+            return $false
+        }
+        # (c) -- AutomationId alone, and ONLY where the agent identity comes from
+        # the URL instead of the element.
+        return ($mode -ieq 'url_path')
+    } catch { return $false }
+}
+
+# ── Does this element actually belong to the foreground app? ──────────────────
+#
+# SECURITY FIX (2026-09-09, found by audit). `AutomationElement::FocusedElement`
+# is a GLOBAL read: it routinely returns an element belonging to a DIFFERENT
+# window in a DIFFERENT process from the one in the foreground. enforcer-win.ps1
+# calls its own equivalent of this check non-negotiable for exactly that
+# measured reason.
+#
+# This watcher had no such check. So while a browser was foreground on a
+# governed host, a stolen focused element from Outlook, Teams, a password
+# manager or Notepad could be read, DLP-scanned, and — on a pattern match —
+# emitted verbatim as `content_text` mislabelled as an AI prompt on claude.ai.
+# Pre-existing for AI processes, but a browser is in the foreground far more
+# often than Claude Desktop is, so extending capture to browsers multiplied how
+# often the window is open.
+#
+# A Chromium page element belongs to a RENDERER child process, not to the
+# browser process itself, so an exact pid match is not enough — the parent pid
+# is accepted too, mirroring the enforcer. One level only: a grandchild is not
+# accepted, because that would re-admit an arbitrary process launched by the
+# browser.
+#
+# Fails CLOSED: a pid that cannot be read, or a parent lookup that fails, means
+# the element is not eligible. Cost is a missed prompt.
+function Get-ParentPid([int]$procId) {
+    try {
+        $p = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction Stop
+        if ($p -and $p.ParentProcessId) { return [int]$p.ParentProcessId }
+    } catch {}
+    return -1
+}
+
+function Element-BelongsToForeground($el, [int]$fgPid) {
+    if (-not $el) { return $false }
+    if ($fgPid -le 0) { return $false }
+    $elPid = -1
+    try { $elPid = [int]$el.Current.ProcessId } catch { return $false }
+    if ($elPid -le 0) { return $false }
+    if ($elPid -eq $fgPid) { return $true }
+    return ((Get-ParentPid $elPid) -eq $fgPid)
+}
+
 function Is-EditableControl($el) {
     try {
         $ct = $el.Current.ControlType
@@ -574,6 +879,12 @@ Emit-Json @{
     # shipped (every bodySig is null pending a live probe), and zero on any
     # machine whose admin governs no mail host.
     egress_count = $EgressBodyIds.Count
+    # A web_count of 0 is the diagnostic that matters: it means no browser
+    # window can be read at all, so browser AI usage going unseen has an
+    # explanation in the log rather than looking like a broken URL read. Same
+    # reasoning as panel_count. A COUNT, never the host list.
+    web_count    = @($WebSurfaces).Count
+    browser_count = @($BrowserProcesses).Count
 }
 
 # ── EGRESS send-transition state ────────────────────────────────────────────
@@ -732,8 +1043,10 @@ while ($true) {
         if ($TrackerMode) {
             # ── Claude tracker: resolve the surface FIRST, then read text ──────
             $service = $null
+            $isBrowserFg = $false
             if ($fg) {
                 if (Is-BrowserProcess $fg.process) {
+                    $isBrowserFg = $true
                     $service = Classify-ClaudeUrl (Get-BrowserUrlCached $fg.hwnd)
                 } elseif (Is-AiProcess $fg.process) {
                     $service = Get-DesktopService $fg.process
@@ -747,7 +1060,19 @@ while ($true) {
                 # from non-empty to empty is not a prompt submit, so reading it
                 # would invent usage as well as read source.
                 $gate = Get-CaptureGate $focused $fg.process
-                if ($focused -and (Is-EditableControl $focused) -and $gate.allowed) {
+                # Browser chrome is never a composer. Applied only to a browser
+                # foreground so a desktop app whose composer Name cannot be read
+                # keeps behaving exactly as it did before this gate existed.
+                # TRACKER MODE ONLY. The composer-IDENTITY gate is deliberately NOT
+                # applied here: this branch resolves its surface with
+                # Classify-ClaudeUrl (claude.ai only) and has no $webSurface, and it
+                # reports LENGTH ONLY -- no text is ever emitted or persisted, so the
+                # finding-4 harm (a card number from a payment iframe reaching
+                # dlp_content) cannot occur on this path. The chrome-name exclusion
+                # and the pid check DO apply, since both are pure improvements. This
+                # keeps the shipped Claude tracker byte-for-byte in behaviour.
+                $chromeBlocked = $isBrowserFg -and ((Is-BrowserChromeElement $focused) -or -not (Element-BelongsToForeground $focused $fg.pid))
+                if ($focused -and (Is-EditableControl $focused) -and $gate.allowed -and -not $chromeBlocked) {
                     $text = Read-FocusedText $focused
                     if ($text -and $text.Length -gt $MaxChars) { $text = $text.Substring(0, $MaxChars) }
                     $key = "$($fg.process)|$service"
@@ -779,7 +1104,26 @@ while ($true) {
             continue
         }
 
-        if ($fg -and (Is-AiProcess $fg.process)) {
+        # ── Resolve the browser surface FIRST, before any text box is touched ──
+        #
+        # Same ordering discipline as the tracker branch, and for the same
+        # reason: on a browser foreground the URL decides whether we are allowed
+        # to look at the focused element AT ALL. A Gmail, Jira or Confluence
+        # composer must never be read, so "is this a governed AI host" is
+        # answered before "what is in the text box", never after.
+        #
+        # $null (unknown or non-AI host) means the browser is treated as not an
+        # AI surface — no capture. That is the fail-open direction the design
+        # settled on, and here capture and blocking agree: reading an unknown
+        # tab would be the privacy leak, blocking it would freeze Enter in Gmail.
+        $webSurface = $null
+        $isBrowserFg = $false
+        if ($fg -and (Is-BrowserProcess $fg.process)) {
+            $isBrowserFg = $true
+            $webSurface = Classify-WebSurface (Get-BrowserUrlCached $fg.hwnd)
+        }
+
+        if ($fg -and ((Is-AiProcess $fg.process) -or $webSurface)) {
             $focused = $null
             try { $focused = [System.Windows.Automation.AutomationElement]::FocusedElement } catch {}
             # Panel gate BEFORE Read-FocusedText: in an IDE, "the focused
@@ -787,19 +1131,35 @@ while ($true) {
             # than it is an AI composer, and reading one character of it would
             # already be the leak. Non-IDE apps are unaffected (allowed = true).
             $gate = Get-CaptureGate $focused $fg.process
-            if ($focused -and (Is-EditableControl $focused) -and $gate.allowed) {
+            # And in a browser, "the focused editable element" is the ADDRESS BAR
+            # far more often than people assume. See Is-BrowserChromeElement.
+            $chromeBlocked = $isBrowserFg -and ((Is-BrowserChromeElement $focused) -or -not (Is-BrowserComposerElement $focused $webSurface) -or -not (Element-BelongsToForeground $focused $fg.pid))
+            if ($focused -and (Is-EditableControl $focused) -and $gate.allowed -and -not $chromeBlocked) {
                 $text = Read-FocusedText $focused
                 if ($text) {
                     if ($text.Length -gt $MaxChars) { $text = $text.Substring(0, $MaxChars) }
                     # Keyed per panel as well as per process: two panels can live
                     # in one IDE, and sharing a dedup key across them would drop
-                    # the second one's first prompt.
-                    $key = if ($gate.panel) { "$($fg.process)|$($gate.panel)" } else { $fg.process }
+                    # the second one's first prompt. A browser is keyed per HOST
+                    # for the same reason — one chrome.exe serves every surface,
+                    # so a process-only key would let a claude.ai prompt suppress
+                    # an identical first prompt on chatgpt.com.
+                    $key = if ($webSurface) { "$($fg.process)|$($webSurface.host)" }
+                           elseif ($gate.panel) { "$($fg.process)|$($gate.panel)" }
+                           else { $fg.process }
                     $last = $LastTextByProc[$key]
                     if ($text.Length -ge 4 -and $text -ne $last) {
                         $LastTextByProc[$key] = $text
+                        # The element Name is a useful label for a desktop app
+                        # ("Message Claude") but on a web page it is
+                        # site-authored and can carry the document or
+                        # conversation title, so it is NOT collected for a
+                        # browser surface. Nothing downstream needs it there:
+                        # the product comes from the catalog, not the label.
                         $title = $null
-                        try { $title = $focused.Current.Name } catch {}
+                        if (-not $isBrowserFg) {
+                            try { $title = $focused.Current.Name } catch {}
+                        }
                         Emit-Json @{
                             t       = (Get-Date).ToUniversalTime().ToString('o')
                             kind    = 'prompt_text'
@@ -812,6 +1172,13 @@ while ($true) {
                             # attribute an in-IDE prompt to the panel's product
                             # (Claude Code) instead of the host editor (Cursor).
                             panel   = $gate.panel
+                            # THE CATALOG-MATCHED HOST ONLY — never the URL, never
+                            # a path, never a query string. index.js uses it to
+                            # attribute the prompt to the right product and to
+                            # set tab_host on the event. '' for a desktop app,
+                            # so every existing consumer is unchanged.
+                            browser_host = if ($webSurface) { '' + $webSurface.host } else { '' }
+                            service      = if ($webSurface) { '' + $webSurface.product } else { '' }
                         }
                     }
                 }

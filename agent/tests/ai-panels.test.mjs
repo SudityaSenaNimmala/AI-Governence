@@ -440,9 +440,16 @@ test('blocking m365.cloud.microsoft emits a PANEL row for the Office pane — an
     { host: 'm365.cloud.microsoft', product: 'Microsoft Copilot', vendor: 'Microsoft', blocked: true },
   ]);
   // The standalone app's process row (unchanged) PLUS one panel row per pane of
-  // this product — the Office pane and (since 2026-09-24) the Outlook pane.
-  assert.deepEqual(rows.map((r) => r.process_name || `panel:${r.panel}`),
-    ['m365copilot', 'panel:office_copilot_pane', 'panel:outlook_copilot_pane']);
+  // this product — the Office pane and (since 2026-09-24) the Outlook pane —
+  // PLUS, since AI-218, the browser row: m365.cloud.microsoft is a WEB_SURFACES
+  // entry too, because the same Copilot is reachable in a tab. Each of the three
+  // kinds is element- or panel-scoped; none of them is a process row for an
+  // Office app, which is the property the rest of this test pins down.
+  assert.deepEqual(rows.map((r) => (
+    r.process_name || (r.panel ? `panel:${r.panel}` : `web:${r.browser_host}`)
+  )),
+  ['m365copilot', 'panel:office_copilot_pane', 'panel:outlook_copilot_pane',
+   'web:m365.cloud.microsoft']);
   const panelRow = rows.find((r) => r.panel === 'office_copilot_pane');
   assert.deepEqual(panelRow, {
     platform: PLATFORM_BLOCK_SENTINEL,
@@ -485,13 +492,21 @@ test('an approved exception for m365.cloud.microsoft lifts the Office pane block
     { host: 'm365.cloud.microsoft', product: 'Microsoft Copilot', blocked: true },
     { host: 'claude.ai', product: 'Claude', blocked: true },
   ]);
-  assert.equal(list.length, 5);  // m365 process + Office & Outlook panels + claude process + claude panel
+  // m365 process + Office & Outlook panels + m365 browser row,
+  // claude process + claude panel + claude browser row.
+  // The browser rows arrived with AI-218 and they make the point of this test
+  // STRONGER, not weaker: one approval has to reach the tab as well, or the
+  // admin approves the request and Copilot stays dead in the browser with
+  // nothing left to approve.
+  const key = (r) => r.process_name || (r.panel ? `panel:${r.panel}` : `web:${r.browser_host}`);
+  assert.equal(list.length, 7);
   const kept = filterBlockedAgents(list, [{ tool_host: 'M365.CLOUD.MICROSOFT' }]);
-  assert.deepEqual(kept.map((r) => r.process_name || `panel:${r.panel}`), ['claude', 'panel:claude_code']);
-  // …and the reverse: an approval for an unrelated host leaves both m365 rows.
+  assert.deepEqual(kept.map(key), ['claude', 'panel:claude_code', 'web:claude.ai']);
+  // …and the reverse: an approval for an unrelated host leaves every m365 row.
   assert.deepEqual(
-    filterBlockedAgents(list, [{ tool_host: 'claude.ai' }]).map((r) => r.process_name || `panel:${r.panel}`),
-    ['m365copilot', 'panel:office_copilot_pane', 'panel:outlook_copilot_pane'],
+    filterBlockedAgents(list, [{ tool_host: 'claude.ai' }]).map(key),
+    ['m365copilot', 'panel:office_copilot_pane', 'panel:outlook_copilot_pane',
+     'web:m365.cloud.microsoft'],
   );
 });
 
@@ -958,7 +973,14 @@ test('claude.ai blocks the desktop app AND the Claude Code panel', () => {
   const rows = synthesizePlatformBlocks([
     { host: 'claude.ai', product: 'Claude', blocked: true },
   ]);
-  assert.deepEqual(rows.map((r) => r.process_name || r.panel), ['claude', 'claude_code']);
+  // Three row shapes now: the desktop process, the IDE panel, and — since the
+  // desktop monitor took over the web surface from the browser extension — the
+  // browser row, which is matched against the host read from the address bar
+  // and arms an ELEMENT-scoped block on the page composer.
+  assert.deepEqual(
+    rows.map((r) => r.process_name || r.panel || `web:${r.browser_host}`),
+    ['claude', 'claude_code', 'web:claude.ai'],
+  );
   for (const row of rows) assert.equal(row.host, 'claude.ai');
 });
 
@@ -982,9 +1004,13 @@ test('a panel block is lifted by an access exception for its host', () => {
     { host: 'cursor.com', product: 'Cursor', blocked: true },
     { host: 'claude.ai', product: 'Claude', blocked: true },
   ]);
-  assert.equal(list.length, 3);   // cursor panel + claude process + claude panel
+  // cursor panel + claude process + claude panel + claude BROWSER row
+  assert.equal(list.length, 4);
   const kept = filterBlockedAgents(list, [{ tool_host: 'CURSOR.COM' }]);
-  assert.deepEqual(kept.map((r) => r.process_name || r.panel), ['claude', 'claude_code']);
+  assert.deepEqual(
+    kept.map((r) => r.process_name || r.panel || `web:${r.browser_host}`),
+    ['claude', 'claude_code', 'web:claude.ai'],
+  );
   // One approval for claude.ai lifts BOTH claude.ai rows — the desktop app and
   // the panel — which is the point of keying exceptions on the host.
   assert.deepEqual(
@@ -1000,7 +1026,10 @@ test('panel rows are deduped separately from process rows', () => {
     { host: 'claude.ai', product: 'Claude', blocked: true },
     { host: 'CLAUDE.AI', product: 'Claude again', blocked: true },
   ]);
-  assert.deepEqual(rows.map((r) => r.process_name || r.panel), ['claude', 'claude_code']);
+  assert.deepEqual(
+    rows.map((r) => r.process_name || r.panel || `web:${r.browser_host}`),
+    ['claude', 'claude_code', 'web:claude.ai'],
+  );
   assert.equal(rows[0].agent_name, 'Claude', 'the FIRST row wins a dedup');
 });
 

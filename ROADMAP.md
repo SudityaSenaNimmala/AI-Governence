@@ -133,6 +133,15 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   fix is to stop trusting that attribute as an input and read flags only from
   the extension's own `chrome.storage.local`-backed cache.
 
+
+- [ ] **Sign and verify the auto-updater artifact before it overwrites `agent/src`**
+  `agent/src/auto-updater.js` downloads a zip that is neither signed nor hash-verified,
+  `cpSync(force:true)` over `agent/src`, overwrites `package.json`, then runs
+  `npm install` from it — executing whatever `postinstall` that file declares. Whoever
+  controls the server (or can present a trusted cert for it) gets code execution as the
+  logged-in user, hourly, on an agent that installs a global `WH_KEYBOARD_LL` hook.
+  Minimum fix: verify a published SHA-256 before extraction; never `npm install` from an
+  unverified `package.json`.
 ---
 
 ## P1 — broader OS / browser coverage
@@ -346,6 +355,13 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
 - [ ] **Format-preserving (reversible) encryption option alongside redact in Tokenize & Send**
   Today desktop masking is fixed labels; the proxy token vault is reversible but not format-preserving.
 
+
+- [ ] **Report ENFORCEMENT liveness to the server, not just machine `last_seen`**
+  Enforcement stops silently three ways, all indistinguishable to the user and invisible
+  to an admin: the monitor is killed (memory pressure), the enforcer releases its keyboard
+  hook after a stale parent heartbeat, or a `WEB_SURFACES` entry is disarmed. A fleet can
+  therefore be ungoverned behind a green dashboard. Distinct from the `last_seen` item
+  above — that answers "is the machine alive", this answers "is the hook armed".
 ---
 
 ## P2 — enterprise distribution
@@ -562,6 +578,12 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   but it grows linearly with headcount — a 500-person org at 15% high/critical would
   send ~150 per click, and a flooded channel is a channel someone disables.
 
+
+- [ ] **`api.anthropic.com` is claimed by two registry entries, so `appForHost()` is ambiguous**
+  Both `Anthropic API` and `Claude Code` list it in `apiDomains`, and `loader.js` builds a
+  Map, so whichever loads last wins — today the host resolves to `Claude Code`. Decides
+  attribution for Anthropic API traffic. Pre-existing; surfaced by the duplicate check
+  added while splitting the consumer chat apps out of the api-platform entries.
 ---
 
 ## P4 — legal / policy (non-code)

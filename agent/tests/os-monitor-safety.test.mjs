@@ -606,7 +606,7 @@ test('enforcer-win.ps1: a full platform block is never offered as rewritable eit
   // composer, retyped the masked text, and then failed with not_submitted.
   // Same technique as the attachment override one line above.
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
-  assert.match(src, /bool platformBlock = _fgIsBlocked && reason != "attachment";/);
+  assert.match(src, /bool platformBlock = blockedNow && reason != "attachment";/);
   assert.match(src, /if \(platformBlock\) \{ rewritable = false; blockId = ""; \}/);
 });
 
@@ -645,7 +645,7 @@ test('enforcer-win.ps1: Ctrl+Alt+Enter no longer overrides a full platform block
 
 test('enforcer-win.ps1: a send-button click during a platform block reports the block, not an empty patterns field', async () => {
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
-  assert.match(src, /static string ActivePatterns\(\) \{ return _fgIsBlocked \? _blockedReason :/);
+  assert.match(src, /blockedNow = _fgIsBlocked;\s*\r?\n\s*return blockedNow \? _blockedReason/);
 });
 
 test('enforcer-win.ps1: attach_hold stdin command only accepts on/off + a numeric ttl_ms, never free-form text', async () => {
@@ -1326,12 +1326,29 @@ test('enforcer-win.ps1: a host-keyed platform block matches on process_name, kee
   assert.match(check, /if \(!string\.IsNullOrEmpty\(agent\["process_name"\]\)\)/);
   assert.match(check, /_blockedPlatform = "ai_platform";/);
   assert.match(check, /_blockedReason = "Blocked platform: " \+ _blockedAgentName;/);
-  // All FOUR arm sites (the agent-scoped narrowing of the PLATFORM_PROCS branch,
-  // PLATFORM_PROCS whole-app, process_name, panel) must feed the same fields
-  // EmitBlock already reports, or the Request Access dialog cannot name what to
-  // ask for. Was three before agent_scope:'agent' added the narrowing modifier.
-  assert.equal((check.match(/_fgIsBlocked = true;/g) || []).length, 4);
-  assert.equal((check.match(/_blockedAgentId = agent\["agent_id"\] \?\? "";/g) || []).length, 4);
+  // All FIVE arm sites (the agent-scoped narrowing of the PLATFORM_PROCS branch,
+  // PLATFORM_PROCS whole-app, process_name, panel, browser host) must feed the
+  // same fields EmitBlock already reports, or the Request Access dialog cannot
+  // name what to ask for. Was three before agent_scope:'agent' added the
+  // narrowing modifier, and four before the browser arm.
+  assert.equal((check.match(/_fgIsBlocked = true;/g) || []).length, 5);
+  assert.equal((check.match(/_blockedAgentId = agent\["agent_id"\] \?\? "";/g) || []).length, 5);
+  // A BROWSER is barred from every one of the three COARSE arms. Each of those
+  // is a route to a process-WIDE block, and a process-wide block on a browser
+  // means Enter is dead in Gmail, in Jira, in the wiki and in the address bar.
+  // In particular a `process_name:"chrome"` row must be unhonourable here even
+  // though ai-processes.js already refuses to synthesize one.
+  assert.match(check, /bool browserProc = _browserProcs\.Contains\(_app\);/);
+  // The two PROCESS-WIDE arms now read `wholeAppBarred` rather than `hostApp`:
+  // the M365 work widened that term to cover the panel-hosted Office apps too,
+  // and it subsumes `hostApp`. The PANEL arm deliberately keeps the narrower
+  // `hostApp`, because a panel-hosted app must stay eligible there. What this
+  // test is about — `!browserProc` on all three — is unchanged.
+  assert.match(check, /if \(!narrowed && !wholeAppBarred && !browserProc\) \{/);
+  assert.match(check, /if \(!wholeAppBarred && !browserProc\s+&& string\.Equals\(agent\["process_name"\], _app, StringComparison\.OrdinalIgnoreCase\)\) \{/);
+  assert.match(check, /if \(!hostApp && !browserProc && string\.Equals\(agent\["panel"\], _fgPanelId, StringComparison\.OrdinalIgnoreCase\)\) \{/);
+  // …and the row field the browser arm DOES key on is parsed off each row.
+  assert.match(src, /d\["browser_host"\] = ExtractJsonString\(item, "browser_host"\);/);
   // The whole point of the sentinel: PLATFORM_PROCS stays untouched.
   assert.equal(/"ai_platform",\s*new HashSet/.test(src), false, 'ai_platform must NOT be added to PLATFORM_PROCS');
 });
@@ -1433,12 +1450,76 @@ test('enforcer-win.ps1: model routing still excludes IDE and HOST-APP processes 
   // A host app (Microsoft Teams) is excluded on the same terms and for a
   // stronger reason — there is no picker there to detect or drive at all, and
   // the picker search is a descendant-wide UIA walk on the poll thread.
+  //
+  // THE BROWSER TERM MOVED (AI-216), and this test was deliberately rewritten
+  // rather than deleted. A browser used to be in this same blanket guard, for
+  // the IDE reason: no model-picker signature had been probed for any web
+  // surface, so routing there would have meant synthesizing clicks through a
+  // menu nobody had measured — on arbitrary page content, where a wrong click is
+  // a wrong action in the user's own document rather than a no-op.
+  //
+  // claude.ai has now BEEN probed, so that reason no longer holds for that one
+  // host. What replaced the blanket exclusion has to be at least as strict for
+  // every host that has NOT been probed, and the assertions below are what pin
+  // that: a browser reaches routing only through TWO flag gates in series, with
+  // the caret in the identified composer, and every other surface takes exactly
+  // the path the blanket exclusion used to take.
+  //
+  // The IDE / host-app / _fgIsAi / Disarmed terms are asserted as TERM
+  // MEMBERSHIP rather than one exact line, so adding a future exclusion
+  // strengthens this test instead of breaking it, while dropping any existing
+  // one still fails.
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer-win.ps1'), 'utf8');
-  const routing = src.slice(src.indexOf('static void UpdateModelRouting()'), src.indexOf('static void ClearPendingRoute()'));
+  const routing = src.slice(src.indexOf('static void UpdateModelRouting()'), src.indexOf('static void UpdateWebModelRouting('));
   assert.ok(routing.length > 0, 'expected an UpdateModelRouting body');
-  assert.match(routing, /if \(!_fgIsAi \|\| _ideProcs\.Contains\(_app\) \|\| _hostAppProcs\.Contains\(_app\) \|\| Disarmed\(\)\) \{ ClearPendingRoute\(\); return; \}/);
+  const guard = routing.slice(0, routing.indexOf('ClearPendingRoute(); return; }') + 30);
+  for (const term of ['!_fgIsAi', '_ideProcs.Contains(_app)', '_hostAppProcs.Contains(_app)', 'Disarmed()']) {
+    assert.ok(guard.includes(term), `the routing guard lost its ${term} term`);
+  }
+  assert.match(guard, /\{ ClearPendingRoute\(\); return; \}/, 'the guard must clear the pending route as it returns');
   // Not PanelUiaOk / _fgIsPanel — that would make routing panel-aware.
   assert.equal(/PanelUiaOk|_fgIsPanel/.test(routing), false, 'model routing must not become panel-aware');
+
+  // ── THE BROWSER ARM, and every term of it is required ─────────────────
+  //
+  // The arm is still keyed on the PER-TICK ForegroundIsBrowser(), not the
+  // sticky _app — that distinction is what stopped routing from running over a
+  // browser window for 3s after an alt-tab out of a desktop AI app.
+  assert.ok(routing.includes('ForegroundIsBrowser()'),
+    'the routing arm must still ask the per-tick browser question');
+  const arm = routing.slice(routing.indexOf('if (ForegroundIsBrowser())'));
+  // TWO GATES IN SERIES: the surface's own pair, then the picker's own pair.
+  assert.match(arm, /WebSurface webSurface = EnforcingWebSurface\(_fgWebHost\);/,
+    'the host must be past its own enforce/verified pair first');
+  assert.match(arm, /WebPicker webPicker = EnforcingWebPicker\(webSurface\);/,
+    'the picker must be past its OWN enforce/verified pair');
+  // A surface with no probed picker -> webPicker is null -> the pin is cleared
+  // and nothing is armed, which is exactly what the blanket exclusion did.
+  assert.match(arm, /if \(webPicker == null/);
+  // COMPOSER FOCUS, not merely readability. Routing swallows an Enter, so it
+  // must not arm while the caret is somewhere else in the page.
+  assert.ok(arm.includes('|| !_fgIsWebComposer'),
+    'routing must require the caret IN the composer');
+  // First-hand tick only.
+  assert.ok(arm.includes('|| !_fgWebComposerReadable || _fgLeftAiTicks != 0'),
+    'routing must refuse on a second-hand tick');
+  // Never in browser chrome, never in a password field.
+  assert.ok(arm.includes('|| _fgWebChromeFocused || _fgWebPasswordFocused'),
+    'routing must refuse in the address bar and in a login form');
+  // And the arm clears the pin on every refusal, so nothing survives into a
+  // tick that no longer qualifies.
+  assert.match(arm.slice(0, arm.indexOf('UpdateWebModelRouting(')), /\{ ClearPendingRoute\(\); return; \}/);
+
+  // THE PIN-CLEARING ASYMMETRY. The web arm clears the pin when the picker is
+  // gone; the desktop arm keeps its bare `return`, which is what makes Claude
+  // Desktop byte-identical. Both halves asserted, because either one alone
+  // would pass while the other regressed.
+  const webBody = src.slice(src.indexOf('static void UpdateWebModelRouting('), src.indexOf('static void ClearPendingRoute()'));
+  const webPickerDecision = webBody.slice(webBody.indexOf('AutomationElement picker = VerifiedWebPicker('));
+  assert.match(webPickerDecision.slice(0, webPickerDecision.indexOf('string label')), /ClearPendingRoute\(\);/,
+    'an armed pin must NOT survive the picker disappearing on a web surface');
+  assert.match(routing, /AutomationElement picker = GetCachedModelPicker\(fg\);\s*\r?\n\s*if \(picker == null\) return;/,
+    'the DESKTOP arm must keep its bare return — Claude Desktop stays byte-identical');
 });
 
 test('enforcer-win.ps1: send-rect detection skips IDE/host-app processes for the WHOLE-WINDOW search, except a bounded panel-scoped one', async () => {
@@ -1476,6 +1557,32 @@ test('enforcer-win.ps1: send-rect detection skips IDE/host-app processes for the
   // The branch must still fall through to _hasRect=false for every case the
   // panel search doesn't return early on (no panel focused, or nothing found).
   assert.match(ideHostBlock, /_hasRect = false; _rectRoot = IntPtr\.Zero; return;/);
+  // A HOST APP is skipped too: attempt 2's "the bottom-right corner is the send
+  // button" heuristic is just as wrong in Teams, where which composer that
+  // corner belongs to depends on which conversation is open — so a cached rect
+  // would swallow an ordinary click in an ordinary chat.
+  //
+  // A BROWSER is skipped for both reasons as well, and the second is worse
+  // there than anywhere: the bottom-right corner of a browser window is
+  // ARBITRARY PAGE CONTENT, so a cached rect would swallow ordinary clicks on
+  // whatever website is open. Accepted consequence, and it is a real gap worth
+  // keeping visible: clicking Send with the MOUSE on a governed browser surface
+  // is not swallowed. Enter-to-send is, through the keystroke hook.
+  const skip = fn.indexOf('if (_ideProcs.Contains(_app) || _hostAppProcs.Contains(_app)) { _hasRect = false; return; }');
+  const search = fn.indexOf('win.FindAll(TreeScope.Descendants');
+  assert.ok(skip >= 0, 'expected an IDE + host-app skip in UpdateSendRect');
+  // A BROWSER is kept away from both generic attempts too, but by DELEGATION
+  // rather than refusal: it gets a narrower catalog-driven path
+  // (UpdateWebSendRect) that looks for one exact (control type, Name) pair and
+  // RE-VERIFIES it every tick. The delegation must come BEFORE both attempts,
+  // or the generic "name contains send/submit" search would run across a whole
+  // website and the corner heuristic would cover arbitrary page content.
+  const webDelegate = fn.indexOf('if (ForegroundIsBrowser()) { UpdateWebSendRect(); return; }');
+  assert.ok(webDelegate >= 0, 'expected the browser delegation in UpdateSendRect');
+  assert.ok(webDelegate < search, 'the browser must never reach the generic descendant search');
+  assert.ok(webDelegate < fn.indexOf('_rx = wr.Right - 160;'), 'the browser must never reach the corner heuristic');
+  assert.ok(search >= 0, 'expected the UIA descendant search to still exist for chat apps');
+  assert.ok(skip < search, 'the skip must come BEFORE the expensive search');
 });
 
 test('enforcer-win.ps1: a panel-keyed platform block matches the focused panel and honours enforce', async () => {
@@ -1514,14 +1621,42 @@ test('enforcer-win.ps1: a platform block established in an IDE panel is latched,
   // latching one would keep a whole chat app blocked after the user left it.
   const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static void ClearFgBlocked()'));
   assert.ok(check.length > 0, 'expected a CheckFgBlocked body');
-  // TWO arming sites now, both ELEMENT-scoped: the panel branch and the
-  // agent-scoped narrowing of the PLATFORM_PROCS branch. Each passes a
-  // NAMESPACED key ("panel:<id>" / "agent:<id>"), which is what keeps a panel id
-  // and an agent-surface id from ever being confused for one another.
-  const armKinds = (check.match(/ArmPanelBlockLatch\("(panel|agent):/g) || [])
-    .map((m) => m.slice('ArmPanelBlockLatch("'.length, -1));
-  assert.deepEqual(armKinds, ['agent', 'panel'], 'exactly two arming sites, one per element-scoped branch');
-  assert.equal((check.match(/ArmPanelBlockLatch\(/g) || []).length, 2, 'no unkeyed arming site may exist');
+  // THREE arming sites now, ALL ELEMENT-scoped: the panel branch, the
+  // agent-scoped narrowing of the PLATFORM_PROCS branch, and the browser-host
+  // arm. Each passes a NAMESPACED key ("panel:<id>" / "agent:<id>" / "web:<host>"),
+  // which is what keeps a panel id, an agent-surface id and a browser host from
+  // ever being confused for one another — LatchedPanelId(), AgentBlockLatched()
+  // and WebBlockLatched() each read only their own namespace.
+  const armKinds = [...check.matchAll(/ArmPanelBlockLatch\((?:\(agentRow \? )?"(panel|agent|webagent|web):/g)]
+    .map((m) => m[1]);
+  assert.deepEqual(armKinds, ['agent', 'panel', 'webagent'],
+    'exactly three arming sites, one per element-scoped branch');
+  // The browser site arms ONE of two namespaces depending on which route
+  // matched, so both must be present at that single site.
+  assert.match(check, /ArmPanelBlockLatch\(\(agentRow \? "webagent:" : "web:"\) \+ web\.Host\)/);
+
+  // THE NAMESPACES MUST NOT PREFIX ONE ANOTHER. WebBlockLatched() tests
+  // StartsWith("web:") and WebAgentBlockLatched() tests StartsWith("webagent:");
+  // if either could match the other's key, leaving a HOST would retire an AGENT
+  // latch (or worse, an agent read would retire a host block). They are
+  // distinct only because of the colon, which is easy to lose in a rename — so
+  // assert it rather than rely on noticing.
+  const keys = ['panel:', 'agent:', 'web:', 'webagent:'];
+  for (const a of keys) {
+    for (const b of keys) {
+      if (a === b) continue;
+      assert.equal(a.startsWith(b), false, `latch namespace ${a} must not be prefixed by ${b}`);
+    }
+  }
+  // And each reader looks at exactly its own namespace.
+  assert.match(src, /static bool WebBlockLatched\(\)[\s\S]{0,240}?StartsWith\("web:", StringComparison\.Ordinal\)/);
+  assert.match(src, /static bool WebAgentBlockLatched\(\)[\s\S]{0,600}?StartsWith\("webagent:", StringComparison\.Ordinal\)/);
+  assert.equal((check.match(/ArmPanelBlockLatch\(/g) || []).length, 3, 'no unkeyed arming site may exist');
+  // The three namespace readers must stay disjoint, or one scope's latch would
+  // be attributed as another's.
+  assert.match(src, /return k\.StartsWith\("panel:", StringComparison\.Ordinal\) \? k\.Substring\(6\) : "";/);
+  assert.match(src, /return k\.StartsWith\("agent:", StringComparison\.Ordinal\);/);
+  assert.match(src, /return k\.StartsWith\("web:", StringComparison\.Ordinal\);/);
   const panelBranchIdx = check.indexOf('if (_fgIsPanel && !string.IsNullOrEmpty(agent["panel"]))');
   const panelArmIdx = check.indexOf('ArmPanelBlockLatch("panel:');
   assert.ok(panelBranchIdx >= 0 && panelBranchIdx < panelArmIdx, 'the latch must be armed inside the panel branch');
@@ -1534,7 +1669,14 @@ test('enforcer-win.ps1: a platform block established in an IDE panel is latched,
   // …and both arm only on a tick whose focused-element read really succeeded,
   // reusing the existing sticky signal rather than inventing a second counter.
   // Arming inside the sticky window would stack the two grace periods.
-  assert.equal((check.match(/if \(_fgLeftAiTicks == 0\) ArmPanelBlockLatch\(/g) || []).length, 2);
+  assert.equal((check.match(/if \(_fgLeftAiTicks == 0\) ArmPanelBlockLatch\(/g) || []).length, 3);
+  // The browser arm sits behind BOTH the verified+enforcing surface check and an
+  // AUTHORITATIVE URL read, so neither an unverified host nor a failed read can
+  // arm it -- the exact pair of gates the agent arm has.
+  const webArmIdx = check.indexOf('ArmPanelBlockLatch((agentRow ?');
+  const webSurfaceIdx = check.indexOf('WebSurface web = EnforcingWebSurface(_fgWebHost);');
+  assert.ok(webSurfaceIdx >= 0 && webSurfaceIdx < webArmIdx, 'the web arm must sit behind EnforcingWebSurface');
+  assert.match(check, /if \(browserProc && _fgWebOutcome == WebReadOutcome\.Surface && !string\.IsNullOrEmpty\(_fgWebHost\)\) \{/);
 
   // The block decision consults the latch instead of being torn down.
   assert.match(src, /if \(_fgIsAi \|\| PanelBlockLatchHeld\(\)\)/);
@@ -1809,11 +1951,13 @@ test('enforcer-win.ps1: a detection-only panel can never CANCEL another panel\'s
   const panelBranchIdx = check.indexOf('if (_fgPanelEnforce) {');
   const panelArmIdx = check.lastIndexOf('_blockedByElement = true;');
   assert.ok(panelBranchIdx >= 0 && panelArmIdx > panelBranchIdx, '_blockedByElement must be set inside the _fgPanelEnforce branch');
-  // TWO places set it now, one per element-scoped branch — the panel branch
-  // (gated on _fgPanelEnforce) and the agent-scoped narrowing (gated on a
-  // verified AND enforcing AGENT_SURFACES entry). Both gates encode the same
-  // rule: an unverified surface can never arm a block.
-  assert.equal((check.match(/_blockedByElement = true;/g) || []).length, 2, 'exactly one arm per element-scoped branch');
+  // THREE places set it now, one per element-scoped branch — the panel branch
+  // (gated on _fgPanelEnforce), the agent-scoped narrowing (gated on a verified
+  // AND enforcing AGENT_SURFACES entry) and the browser-host arm (gated on a
+  // verified AND enforcing WEB_SURFACES entry, via EnforcingWebSurface). All
+  // three gates encode the same rule: an unverified surface can never arm a
+  // block.
+  assert.equal((check.match(/_blockedByElement = true;/g) || []).length, 3, 'exactly one arm per element-scoped branch');
   assert.equal((check.match(/_blockedByElement = false;/g) || []).length, 2, 'both process-keyed branches must clear it');
   // Cleared with the block itself, so it can never outlive it.
   const clear = src.slice(src.indexOf('static void ClearFgBlocked()'), src.indexOf('static string ExtractJsonString('));
@@ -1882,7 +2026,16 @@ test('enforcer-win.ps1: the enforce gate is applied on BOTH the capture and the 
   const enterPred = src.slice(src.indexOf('static bool EnterBlockActive('), src.indexOf('static string ActivePatterns()'));
   assert.match(enterPred, /if \(!PanelEnforceOk\(\)\) return false;/);
   const forMouse = src.slice(src.indexOf('static bool BlockActiveForMouse()'), src.indexOf('// The Enter-decision predicate'));
-  assert.match(forMouse, /if \(!PanelEnforceOk\(\)\) return false;/);
+  // The mouse path asks MouseEnforceOk(), which DELEGATES to PanelEnforceOk for
+  // every non-browser scope — so a detection-only panel still has zero live
+  // effect here. Only the BROWSER branch differs, because a click is scoped by
+  // the send-button rectangle rather than by composer focus, and requiring focus
+  // there was a total bypass of the click block. See 'the source separates the
+  // ENTER decision from the CLICK decision' in enforcer-browser-block.test.mjs.
+  assert.match(forMouse, /if \(!MouseEnforceOk\(\)\) return false;/);
+  const mouseEnforce = src.slice(src.indexOf('static bool MouseEnforceOk()'), src.indexOf('// Block is active for mouse-hook send-button detection'));
+  assert.ok(mouseEnforce.length > 0, 'expected a MouseEnforceOk body');
+  assert.match(mouseEnforce, /return PanelEnforceOk\(\);/);
   assert.match(src, /return _fgIsPanel && _fgPanelEnforce && _fgLeftAiTicks == 0;/);
 });
 
@@ -1945,13 +2098,59 @@ test('enforcer-win.ps1: the ONLY window-title read is the gated agent read, and 
   const src = await enforcerSrc();
   const code = codeOnly(src);
 
-  // 1. EXACTLY ONE read site, and it is inside ReadFocusedAgentName.
+  // 1. EXACTLY ONE read site, and it is now its own function — ReadTitleRaw —
+  //    because there are TWO consumers (the agent read, and the browser path's
+  //    cache invalidation). The rule was never "the read is inline in
+  //    ReadFocusedAgentName"; it is "one place reads a title, and the title
+  //    never leaves it". One reader with two callers keeps that true; two
+  //    inline reads would have been two places to get it wrong.
   const read = src.slice(src.indexOf('static AgentReadOutcome ReadFocusedAgentName('), src.indexOf('static readonly char[] CLASS_TOKEN_SEP'));
   assert.ok(read.length > 0, 'expected a ReadFocusedAgentName body');
+  const titleRead = src.slice(src.indexOf('static string ReadTitleRaw(IntPtr hwnd)'), src.indexOf('// A SINGLE property read of the currently-focused element'));
+  assert.ok(titleRead.length > 0, 'expected a ReadTitleRaw body');
   assert.equal((code.match(/GetWindowText\(/g) || []).length, 2, 'exactly one GetWindowText call site (plus its DllImport)');
   assert.equal((code.match(/GetWindowTextLength\(/g) || []).length, 2, 'exactly one GetWindowTextLength call site (plus its DllImport)');
-  assert.ok(read.includes('GetWindowText(fgHwnd, sb, cap)'), 'the only title read must be the agent read');
-  assert.ok(read.includes('GetWindowTextLength(fgHwnd)'));
+  assert.ok(titleRead.includes('GetWindowText(hwnd, sb, cap)'), 'the only title read must be ReadTitleRaw');
+  assert.ok(titleRead.includes('GetWindowTextLength(hwnd)'));
+  // EVERY failure path returns "" rather than throwing or returning null, so no
+  // caller can mistake a failed read for content — the same distinction the
+  // Unreadable outcome draws, kept in the reader itself now that it is shared.
+  assert.equal((titleRead.match(/return "";/g) || []).length, 4, 'every failure path in the title read must return ""');
+  assert.equal(/Emit\(|EmitBlock\(|EmitGovState\(|Console\.Out/.test(titleRead), false,
+    'the title reader must emit nothing');
+  // EXACTLY TWO callers, and each is checked below: the gated agent read, and
+  // the browser invalidation — which passes the result STRAIGHT into
+  // TitleFingerprint and keeps only the hash.
+  assert.equal((code.match(/ReadTitleRaw\(/g) || []).length, 3, 'one definition and exactly two callers');
+  assert.ok(read.includes('string title = ReadTitleRaw(fgHwnd);'), 'the agent read must go through the shared reader');
+  const fgFn = src.slice(src.indexOf('static void UpdateForeground()'), src.indexOf('// Everything UpdateForeground does once the focused-element read is in.'));
+  // The whole expression, including the CONDITION: the title is read only for a
+  // tab already known to be on a catalog host, and 0 (no read at all) is what
+  // every other tab gets. Pinning the ternary rather than just the call is what
+  // stops the condition being dropped while the call survives.
+  assert.match(fgFn, /long titleFp = \(webOutcome == WebReadOutcome\.Surface\)\r?\n\s*\? TitleFingerprint\(ReadTitleRaw\(fg\)\) : 0;/);
+  // signature, not of the sweep's discipline.
+  assert.match(fgFn, /UpdateBrowserNav\(fg, webOutcome == WebReadOutcome\.Surface \? webHost : "", titleFp\);/);
+  assert.match(src, /static void UpdateBrowserNav\(IntPtr fg, string host, long titleFp\)/);
+  const sweep = src.slice(src.indexOf('static void UpdateBrowserNav(IntPtr fg, string host, long titleFp)'), src.indexOf('// ---- Bump the navigation generation'));
+  assert.ok(sweep.length > 0, 'expected an UpdateBrowserNav body');
+  for (const forbidden of ['ReadTitleRaw', 'GetWindowText', 'Emit', 'Console.Out']) {
+    assert.equal(sweep.includes(forbidden), false, `the invalidation sweep must not reach ${forbidden}`);
+  }
+  // The browser consumer keeps a HASH and never the text: there is no local, no
+  // field and no parameter on that path that holds a title string.
+  assert.equal(/string title/.test(fgFn), false, 'the browser path must not bind a title to a variable');
+  // …and it is reached ONLY once the URL has already said this tab is on a
+  // catalog host, so a Gmail or an intranet title is never read at all.
+  const surfaceIdx = fgFn.indexOf('webOutcome == WebReadOutcome.Surface');
+  assert.ok(surfaceIdx >= 0 && surfaceIdx < fgFn.indexOf('TitleFingerprint('),
+    'the browser title read must sit behind the catalog-host check');
+  // The fingerprint is INVALIDATION ONLY: it is compared against its own
+  // previous value and nothing else, never against a catalog and never emitted.
+  const fpFn = src.slice(src.indexOf('static long TitleFingerprint(string title)'), src.indexOf('static void BumpBrowserNav()'));
+  assert.ok(fpFn.length > 0, 'expected a TitleFingerprint body');
+  assert.equal(/Emit|Console\.Out|_webSurfaces|MatchWebSurface/.test(fpFn), false,
+    'the title fingerprint must not identify anything or reach an emitter');
   // Nothing reads a title through the OTHER routes either — Process.MainWindowTitle
   // would bypass every gate here.
   assert.equal(/MainWindowTitle|WindowTitle\b/.test(code), false, 'no other window-title route may exist');
@@ -1959,7 +2158,7 @@ test('enforcer-win.ps1: the ONLY window-title read is the gated agent read, and 
   // 2. It is behind the read-mode branch, so a composer-name surface (every
   //    pre-Teams entry, m365_copilot included) never reaches it at all.
   const titleIdx = read.indexOf('if (string.Equals(surface.ReadFrom, "window_title", StringComparison.OrdinalIgnoreCase))');
-  assert.ok(titleIdx >= 0 && titleIdx < read.indexOf('GetWindowTextLength(fgHwnd)'),
+  assert.ok(titleIdx >= 0 && titleIdx < read.indexOf('ReadTitleRaw(fgHwnd)'),
     'the title read must sit inside the window_title branch');
   // …and it reuses the foreground HWND the tick already has: no second
   // GetForegroundWindow(), so it can never read a different window than the one
@@ -1999,12 +2198,27 @@ test('enforcer-win.ps1: the ONLY window-title read is the gated agent read, and 
   //    process's window title can never make this expensive.
   assert.match(src, /const int WINDOW_TITLE_MAX = 1024;/);
   assert.match(src, /const int TITLE_PARSE_MAX = 512;/);
-  assert.match(read, /if \(cap > WINDOW_TITLE_MAX\) cap = WINDOW_TITLE_MAX;/);
+  // Asserted against ReadTitleRaw, which is where the allocation now happens.
+  // Same bound, same reason: an unbounded StringBuilder sized from another
+  // process's window is not something a 150ms loop should be able to be handed.
+  assert.match(titleRead, /if \(cap > WINDOW_TITLE_MAX\) cap = WINDOW_TITLE_MAX;/);
   // 5. An empty or failed read is Unreadable — NO EVIDENCE — never the
   //    authoritative "no agent is open". Same distinction the composer read
   //    draws, and the one the latch keys on.
   const titleBlock = read.slice(titleIdx, read.indexOf('AutomationElement el;'));
-  assert.equal((titleBlock.match(/return AgentReadOutcome\.Unreadable;/g) || []).length, 5,
+  // TWO here, not the five this counted while the Win32 calls were inline. The
+  // three that were `len <= 0`, `GetWindowText(...) <= 0` and the catch now live
+  // in ReadTitleRaw, which returns "" for all of them -- asserted above with the
+  // same "every failure path" wording, and there are FOUR of them there because
+  // the shared reader guards a null handle itself as well. So the total number
+  // of failure paths went UP, not down; only their location moved.
+  //
+  // What this still pins is the property that matters: every way this BRANCH can
+  // fail lands on Unreadable -- no window handle, or a read that produced
+  // nothing usable -- never on an outcome that would claim to know which agent
+  // is open. The assertion below is the other half of it: the read site may not
+  // decide a Generic/NotComposer/Named outcome that the pure parser owns.
+  assert.equal((titleBlock.match(/return AgentReadOutcome\.Unreadable;/g) || []).length, 2,
     'every failure path in the title read must be Unreadable');
   assert.equal(/AgentReadOutcome\.(Generic|NotComposer|Named)/.test(titleBlock), false,
     'the read site must not decide an outcome the pure parser owns');
@@ -2020,7 +2234,43 @@ test('enforcer.js passes the IDE process and panel payloads, built from the cata
   // builders come through ONE import statement, so this pin is what forces a new
   // payload to be declared here as well as wired above.
   assert.match(src, /CFAI_EGRESS_SURFACES:\s*JSON\.stringify\(buildEgressSurfaceConfig\(this\.log\)\)/);
-  assert.match(src, /import \{\s*buildIdeProcessConfig, buildAiPanelConfig, buildAgentSurfaceConfig, buildEgressSurfaceConfig,\s*\} from '\.\/ai-processes\.js';/);
+  // SIX names now, one per line: the egress builder and the web builder arrived
+  // on separate branches and the merge put them in one statement. The pin is on
+  // the SET, not the formatting — what it forces is that a new payload has to be
+  // declared here as well as wired above.
+  // Found by its SOURCE, not by searching forward from a builder name — the
+  // first mention of a builder is inside the statement itself, so searching
+  // forward from it lands on the next import instead.
+  const fromIdx = src.indexOf("} from './ai-processes.js';");
+  assert.ok(fromIdx > 0, 'expected a catalog import');
+  const importStmt = src.slice(src.lastIndexOf('import {', fromIdx), fromIdx + 27);
+  const names = importStmt.slice(0, importStmt.indexOf('}'));
+  for (const builder of [
+    'buildIdeProcessConfig', 'buildAiPanelConfig', 'buildAgentSurfaceConfig',
+    'buildEgressSurfaceConfig', 'buildWebSurfaceConfig', 'browserProcNames',
+  ]) {
+    assert.ok(names.includes(builder), `${builder} must come through the one catalog import`);
+  }
+  assert.match(importStmt, /^import \{[^}]*\} from '\.\/ai-processes\.js';/s,
+    'they must still be ONE import statement, so the pin above cannot be sidestepped');
+  // Fourth catalog: the BROWSER payloads. Two env vars, and the process list is
+  // deliberately browserProcNames() rather than watcherProcessNames() — a
+  // browser in the latter would arm the clipboard poller and the file/attachment
+  // watchers across the whole browser. web-surfaces.test.mjs asserts the two
+  // lists are disjoint; this asserts the enforcer is handed the right one.
+  assert.match(src, /CFAI_BROWSER_PROCESSES:\s*browserProcNames\(\)\.join\(','\)/);
+  assert.match(src, /CFAI_WEB_SURFACES:\s*JSON\.stringify\(buildWebSurfaceConfig\(\)\)/);
+  // Neither may be folded into the AI-process list.
+  assert.equal(/CFAI_AI_PROCESSES:[^\n]*browserProcNames/.test(src), false,
+    'a browser must never reach CFAI_AI_PROCESSES');
+  // The import grew the two browser builders and wrapped, so this asserts the
+  // MEMBERS rather than one literal line — the point is that every payload is
+  // built from the catalog rather than restated here.
+  for (const fn of ['buildIdeProcessConfig', 'buildAiPanelConfig', 'buildAgentSurfaceConfig',
+                    'buildWebSurfaceConfig', 'browserProcNames']) {
+    assert.match(src, new RegExp(`\\b${fn}\\b`), `${fn} must be imported from the catalog`);
+  }
+  assert.match(src, /from '\.\/ai-processes\.js';/);
   // The IDE names must NOT have been folded into CFAI_AI_PROCESSES, which is
   // what the clipboard/attachment/file-dialog watchers key on.
   assert.match(src, /CFAI_AI_PROCESSES: this\.aiProcessNames\.join\(','\)/);
@@ -2350,7 +2600,11 @@ test('the host-app guard sits at all three capture sites, before anything is rea
 
 test('prompt-watcher.js hands the panel payloads to its .ps1, built from the catalog', async () => {
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'prompt-watcher.js'), 'utf8');
-  assert.match(src, /import \{ buildIdeProcessConfig, buildAiPanelConfig \} from '\.\/ai-processes\.js';/);
+  // The two panel builders must be imported from the catalog (the import list
+  // has since grown a browser web-surface payload, so this asserts membership
+  // rather than the exact list).
+  assert.match(src, /import \{[^}]*\bbuildIdeProcessConfig\b[^}]*\} from '\.\/ai-processes\.js';/);
+  assert.match(src, /import \{[^}]*\bbuildAiPanelConfig\b[^}]*\} from '\.\/ai-processes\.js';/);
   assert.match(src, /CFAI_IDE_PROCESSES:\s*JSON\.stringify\(buildIdeProcessConfig\(\)\)/);
   assert.match(src, /CFAI_AI_PANELS:\s*JSON\.stringify\(buildAiPanelConfig\(\)\)/);
   // Passed unconditionally — not behind trackerMode or any other flag, or the
@@ -2405,8 +2659,18 @@ test('prompt-watcher.ps1 leaves non-IDE AI apps exactly as they were', async () 
     assert.equal(IDE_PROCESSES.some((e) => e.match.test(name)), false, `${name} must not be an IDE process`);
   }
   // The gating is keyed on the IDE list only — never on Is-AiProcess, which is
-  // still what decides whether a window is looked at at all.
-  assert.match(src, /if \(\$fg -and \(Is-AiProcess \$fg\.process\)\)/);
+  // still what decides whether a DESKTOP window is looked at at all.
+  //
+  // The condition now carries a second, independent term for browser windows
+  // ($webSurface, resolved from the address bar against the WEB_SURFACES
+  // catalog). Is-AiProcess must remain in it: a browser is deliberately absent
+  // from AI_PROCESSES, so the two terms cover disjoint sets of windows and
+  // dropping either silently un-governs one whole surface.
+  assert.match(src, /if \(\$fg -and \(\(Is-AiProcess \$fg\.process\) -or \$webSurface\)\)/);
+  // …and the browser term must be OR'd, never AND'd — an AI desktop app must
+  // not require a web surface to be read.
+  assert.equal(/Is-AiProcess \$fg\.process\) -and \$webSurface/.test(src), false,
+    'the browser term must widen the read set, not narrow the desktop one');
   // The hardcoded fallback list (used only when the env payload is missing or
   // unparseable) must stay in step with the catalog, and it must be non-empty:
   // an empty list would restore the old read-everything behaviour.
@@ -2444,17 +2708,57 @@ test('index.js resolves a panel event panel-first, so a process:"Code" prompt is
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
   // Panel first — WITH the process, so a pane hosted by several apps is named
   // per host (office_copilot_pane → "Word Copilot" / "Excel Copilot" …).
-  assert.match(src, /function identifyEventAi\(ev\) \{[\s\S]{0,300}?return \(ev\?\.panel \? identifyAiPanel\(ev\.panel, ev\.process\) : null\) \|\| identifyAiProcess\(ev\?\.process\);/);
+  // The window is wide enough for the BROWSER branch that now precedes the
+  // return: a browser event is named by its host, because its process is
+  // `chrome` and there is no panel. Both are asserted — the browser branch
+  // first, then the unchanged panel-first fallback.
+  assert.match(src, /function identifyEventAi\(ev\) \{[\s\S]{0,700}?const web = ev\?\.browser_host \? webSurfaceForHost\(ev\.browser_host\) : null;/);
+  assert.match(src, /function identifyEventAi\(ev\) \{[\s\S]{0,900}?return \(ev\?\.panel \? identifyAiPanel\(ev\.panel, ev\.process\) : null\) \|\| identifyAiProcess\(ev\?\.process\);/);
+  // Panel before process — and, since browser capture landed, browser-host
+  // before both, for exactly the same reason: it is the most specific thing the
+  // event knows, and 'chrome' must never name a product.
+  const resolver = src.slice(src.indexOf('function identifyEventAi(ev) {'));
+  const resolverBody = resolver.slice(0, resolver.indexOf('\n}'));
+  assert.match(resolverBody, /webSurfaceForHost\(ev\.browser_host\)/);
+  // identifyAiPanel takes the PROCESS as a second argument now — a pane hosted
+  // by several apps is named per host ("Word Copilot", "Excel Copilot"). It
+  // changes nothing about the ordering this test is asserting.
+  assert.match(resolverBody, /\(ev\?\.panel \? identifyAiPanel\(ev\.panel, ev\.process\) : null\) \|\| identifyAiProcess\(ev\?\.process\)/);
+  // Ordering: the web surface is consulted and returned before the panel /
+  // process fallback is reached.
+  assert.ok(
+    resolverBody.indexOf('webSurfaceForHost') < resolverBody.indexOf('identifyAiPanel'),
+    'browser_host must be resolved before the panel/process fallback',
+  );
   for (const handler of ['prompt', 'block', 'override']) {
     const h = src.slice(src.indexOf(`this.enforcer.on('${handler}'`));
     assert.match(h.slice(0, 400), /identifyEventAi\(ev\)/, `the '${handler}' handler must resolve panel-first`);
   }
   // tool_host: panel host first, then the process host, then the platform map.
   assert.match(src, /hostForPanel\(ev\.panel\) \|\| hostForProcess\(ev\.process\) \|\| hostsForPlatform\(ev\.blocked_platform\)\[0\] \|\| ''/);
-  // Model routing is excluded from IDE panels, so its handler stays
-  // process-based on purpose.
-  const route = src.slice(src.indexOf("this.enforcer.on('route'"));
-  assert.match(route.slice(0, 300), /identifyAiProcess\(ev\.process\)/);
+  // Model routing is excluded from IDE panels, so its handler must NOT resolve
+  // panel-first. Asserted by what it calls rather than by proximity to the top
+  // of the handler: a byte-offset window silently breaks on a comment, and this
+  // one did — the real invariant is "no panel resolution here", not "the call
+  // appears within N characters".
+  const routeStart = src.indexOf("this.enforcer.on('route'");
+  const routeAll = src.slice(routeStart, src.indexOf("this.enforcer.on('override'", routeStart));
+  // Comments stripped before asserting on CALLS. This file's comments
+  // deliberately name the thing the code must not do ("identifyEventAi would
+  // pull a panel product in"), and a raw source match reads that prose as a
+  // violation — which it did, failing this test on a comment.
+  const route = routeAll.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+  assert.match(route, /identifyAiProcess\(ev\.process\)/, 'the route handler must resolve the process');
+  assert.equal(/identifyEventAi\(/.test(route), false,
+    'model routing must not resolve panel-first — identifyEventAi would attribute an IDE panel product');
+  assert.equal(/identifyAiPanel\(|hostForPanel\(/.test(route), false,
+    'model routing must not touch the panel catalog');
+  // It MAY resolve a browser surface, though: a router event on a claude.ai tab
+  // arrives as process:'chrome', which names no product, so without this the
+  // record landed as ai_service:'chrome' with no tab_host (confirmed live
+  // 2026-09-09). The browser term is a web-surface lookup, not a panel one.
+  assert.match(route, /webSurfaceForHost\(ev\.browser_host\)/, 'a browser router event must resolve its surface');
+  assert.match(route, /tabHost: ev\.browser_host/, 'a browser router event must carry tab_host');
 
   // …and the resolution really does work for a real panel event shape.
   const { identifyAiPanel, hostForPanel, identifyAiProcess } = await import('../src/os_monitor/ai-processes.js');
@@ -2557,15 +2861,48 @@ test('enforcer-win.ps1: a platform block declares its SCOPE, taken from _blocked
   assert.ok(groupIdx >= 0, 'expected the platform_block group in EmitBlock');
   assert.ok(scopeIdx > groupIdx, 'block_scope belongs in the platform_block group');
 
-  // All FOUR arm sites in CheckFgBlocked, in file order: the agent-scoped
-  // narrowing, the two process-keyed whole-app ones, then the panel-keyed one.
-  // Every site must declare BOTH flags together, so a fifth arm site fails this
-  // until its scope is decided deliberately.
+  // All FIVE arm sites in CheckFgBlocked, in file order: the agent-scoped
+  // narrowing, the two process-keyed whole-app ones, the panel-keyed one, then
+  // the browser-host one. Every site must declare BOTH flags together, so a
+  // SIXTH arm site fails this until its scope is decided deliberately.
+  //
+  // The scope alternation lists every legal scope on purpose. If a new scope
+  // were added without appearing here the regex would stop matching that arm
+  // and the count would silently keep passing — which is the one way this test
+  // could rot into uselessness.
   const check = src.slice(src.indexOf('static void CheckFgBlocked()'), src.indexOf('static string BlockScope()'));
-  const arms = [...check.matchAll(/_fgIsBlocked = true;\s*\r?\n\s*_blockedByElement = (true|false);[^\r\n]*\r?\n\s*_blockScope = "(app|panel|agent)";/g)]
-    .map((m) => [m[1], m[2]]);
-  assert.deepEqual(arms, [['true', 'agent'], ['false', 'app'], ['false', 'app'], ['true', 'panel']],
-    'the four CheckFgBlocked arm sites must keep their scopes');
+  // The SCOPE EXPRESSION is captured WHOLE rather than as a literal, because
+  // the browser arm's is now conditional: AI-218 gave that arm a third match
+  // route (an agent-scoped row, matched against the agent the composer named),
+  // and a block naming ONE agent must declare scope "agent" so
+  // UpdateBannerState keeps the full-screen bar off -- one blocked agent is not
+  // a blocked site. Comment lines between the two assignments are skipped, but
+  // a SIXTH arm site, or any changed scope, still fails this.
+  const arms = [...check.matchAll(/_fgIsBlocked = true;\s*\r?\n\s*_blockedByElement = (true|false);[^\r\n]*(?:\r?\n\s*\/\/[^\r\n]*)*\r?\n\s*_blockScope = ([^;]+);/g)]
+    .map((m) => [m[1], m[2].trim()]);
+  assert.deepEqual(arms, [
+    ['true', '"agent"'],
+    ['false', '"app"'],
+    ['false', '"app"'],
+    ['true', '"panel"'],
+    ['true', 'agentRow ? "agent" : "web"'],
+  ], 'the five CheckFgBlocked arm sites must keep their scopes');
+  // A "web" block is ELEMENT-scoped, so it must arm behind the same kind of
+  // two-flag gate the other two element-scoped arms use — EnforcingWebSurface,
+  // the only place either browser flag is read.
+  const webArm = check.slice(check.indexOf('WebSurface web = EnforcingWebSurface(_fgWebHost);'));
+  assert.ok(webArm.length > 0, 'the web arm must resolve its surface through EnforcingWebSurface');
+  assert.ok(webArm.indexOf('_blockScope = agentRow ? "agent" : "web";') > 0,
+    'the web arm must sit inside the EnforcingWebSurface gate');
+  // And the AGENT route inside it sits behind a SECOND, nested gate of its own,
+  // so a host can be armed for DLP while its agent read is still dark.
+  assert.ok(webArm.indexOf('EnforcingWebAgentRead(web) != null') > 0,
+    'the agent route must sit behind its own two-flag gate');
+  // The agent route may only fire on a POSITIVE identification. Generic, not-a-
+  // composer and unreadable all mean no block, which is what stops "we could
+  // not tell which agent" becoming "block the whole host".
+  assert.ok(webArm.indexOf('_fgWebAgentOutcome == WEB_ID_NAMED') > 0,
+    'only a NAMED agent read may arm an agent-scoped browser block');
 });
 
 test('index.js relays block_scope to Electron without inventing it', async () => {
@@ -3010,19 +3347,55 @@ test('a HOST-APP surface can never fall back to a whole-app block', async () => 
   // staying eligible for the ELEMENT-scoped panel arm, which is where the
   // live-verified office_copilot_pane block actually lives.
   assert.match(check, /bool wholeAppBarred = hostApp \|\| _panelHostAppProcs\.Contains\(_app\);/);
-  // All THREE coarse arms are guarded. Each one is a route to a whole-app block.
-  assert.match(check, /if \(!narrowed && !wholeAppBarred\) \{/);
-  assert.match(check, /if \(!wholeAppBarred && string\.Equals\(agent\["process_name"\], _app, StringComparison\.OrdinalIgnoreCase\)\)/);
-  assert.match(check, /if \(!hostApp && string\.Equals\(agent\["panel"\], _fgPanelId, StringComparison\.OrdinalIgnoreCase\)\)/);
+  // All THREE coarse arms are guarded, and each carries BOTH exclusions.
+  //
+  // This block used to be two: one set naming `wholeAppBarred` (the panel-hosted
+  // Office apps) and one naming `hostApp && browserProc` (Teams and the
+  // browsers), written on separate branches against the same three arms. They
+  // are one set now, because the arms are one thing — each is a route to a
+  // whole-app block, and dropping EITHER term from ANY of them is the same bug
+  // with a different victim: a dead Enter across all of Word, or across the
+  // entire web.
+  //
+  // The two process-WIDE arms take `wholeAppBarred`, which already subsumes
+  // `hostApp`. The panel arm deliberately takes the narrower `hostApp` instead —
+  // a panel-hosted Office app must stay eligible there, because that is where
+  // the element-scoped office_copilot_pane block actually lives.
+  assert.match(check, /if \(!narrowed && !wholeAppBarred && !browserProc\) \{/);
+  assert.match(check, /if \(!wholeAppBarred && !browserProc\s+&& string\.Equals\(agent\["process_name"\], _app, StringComparison\.OrdinalIgnoreCase\)\)/);
+  assert.match(check, /if \(!hostApp && !browserProc && string\.Equals\(agent\["panel"\], _fgPanelId, StringComparison\.OrdinalIgnoreCase\)\)/);
   // …and the guard really does cover every arm site: each `_fgIsBlocked = true;`
   // other than the agent-scoped narrowing sits behind a host-app term. Both
   // spellings are accepted, and the term is what matters — a whole-app arm with
   // no guard at all is the failure this catches.
   const armSegments = check.split('_fgIsBlocked = true;').slice(0, -1);
-  assert.equal(armSegments.length, 4, 'expected four arm sites');
+  assert.equal(armSegments.length, 5, 'expected five arm sites');
   for (const [i, seg] of armSegments.entries()) {
-    if (i === 0) continue;   // the agent-scoped narrowing — element-scoped by construction
-    assert.match(seg.slice(-800), /!hostApp|!wholeAppBarred/, `arm site ${i} has no host-app guard`);
+    // Sites 0 and 4 are ELEMENT-scoped BY CONSTRUCTION and need NEITHER guard:
+    // 0 is the agent-scoped narrowing, and 4 is the browser arm, which can only
+    // be reached at all when the foreground process IS a browser — so a
+    // `!browserProc` term there would be a contradiction, not a guard, and a
+    // host-app term would be meaningless. Its own guarantee is different and
+    // stronger: scoped to the resolved HOST and to the page composer element,
+    // asserted separately above.
+    //
+    // THE SKIP HAS TO COME FIRST. It used to sit after the host-app assertion,
+    // which was harmless while site 4 did not exist and became a false failure
+    // the moment the browser arm was added.
+    if (i === 0 || i === 4) continue;
+    // COMMENTS STRIPPED FIRST. This used to look at the last 800 raw characters,
+    // which silently measured prose as well as code — adding a paragraph above
+    // an arm pushed its own guard out of the window and failed the test with
+    // "no host-app guard" on code that had one. codeOnly() makes the window
+    // mean what it says.
+    assert.match(codeOnly(seg).slice(-400), /!hostApp|!wholeAppBarred/,
+      `arm site ${i} has no host-app guard`);
+    // The host-app half is asserted once, above, against BOTH spellings —
+    // `!hostApp` and the broader `!wholeAppBarred` the process-wide arms use.
+    // This line used to repeat it accepting only `!hostApp`, which is the
+    // narrower of the two, so the merge failed here on arms that were correctly
+    // guarded by the wider term. Only the browser half is left here.
+    assert.match(codeOnly(seg).slice(-400), /!browserProc/, `arm site ${i} has no browser guard`);
   }
   // Both sets are derived from the catalog, in one place each, and empty by
   // default — so a malformed payload means "no process is a host app", i.e.
@@ -3421,14 +3794,16 @@ test('enforcer-win.ps1: the WebView2 pid rule accepts a DIRECT child and nothing
   const code = codeOnly(src);
   assert.equal((code.match(/CreateToolhelp32Snapshot\(TH32CS_SNAPPROCESS/g) || []).length, 1,
     'exactly one snapshot site');
-  assert.equal((code.match(/ElementPidBelongsToForeground\(/g) || []).length, 9,
-    'the rule is declared once and called eight times — the agent read, the host-app panel read, '
-    + 'the Copilot-tab heading search, the Chat-list badge search, the Teams agent-chat pane reader, '
-    + 'the matched-composer check in UpdateUia, and the Office WebView2Holder resolver\'s two '
-    + 'direct-child checks (2026-09-24). Legacy wording follows: '
-    + 'read, the Copilot-tab heading search, and the Chat-list badge search. Every call site '
-    + 'must go through THIS rule; a new one that rolls its own pid check is what this count '
-    + 'exists to catch');
+  assert.equal((code.match(/ElementPidBelongsToForeground\(/g) || []).length, 12,
+    'the rule is declared once and called eleven times: ReadFocusedAgentName, '
+    + 'ResolveEffectiveFocus and FindFocusedWebViewEditLive (the Office WebView2Holder '
+    + 'resolver\'s two direct-child checks), ReadFocusedPanel, SearchCopilotHeadingsBackground, '
+    + 'ReadTeamsPaneLive, SearchAiBadgeHeadingsBackground, FocusedIsMatchedComposer, and the '
+    + 'three browser readers — ReadFocusedWebComposer, SearchWebComposerBackground and '
+    + 'SearchWebPickerBackground. The last three arrived with AI-216/218 and RAISING this '
+    + 'number is the safe direction: the count exists to catch a new site that rolls its own '
+    + 'pid check instead of going through THIS rule, so more callers routed through it is the '
+    + 'thing being asked for. A DROP is what should worry a reader.');
   // The third and fourth call sites: the two background pane searches (Teams'
   // Copilot tab, and the Chat-list badge route added 2026-09-21). Both start
   // from AutomationElement.FocusedElement like the other two, so both need the
@@ -3444,6 +3819,49 @@ test('enforcer-win.ps1: the WebView2 pid rule accepts a DIRECT child and nothing
     assert.ok(search.indexOf('ElementPidBelongsToForeground(') < search.indexOf('GetParent('),
       'the ownership check must precede any tree walk');
   }
+  // FIVE references: the declaration, and FOUR call sites -- the agent read, the
+  // host-app panel read, the Copilot-tab heading search, and the browser
+  // composer read. The browser read is the newest, and it needs the
+  // child-process rule for the same reason the host-app read does: a Chromium
+  // browser renders each site in a CHILD renderer process, so with an exact pid
+  // compare a page composer could never be matched at all.
+  const webRead = src.slice(src.indexOf('static bool ReadFocusedWebComposer('), src.indexOf('// Is a "web"-scoped block allowed'));
+  assert.ok(webRead.length > 0, 'expected a ReadFocusedWebComposer body');
+  assert.match(webRead, /if \(!ElementPidBelongsToForeground\(el\.Current\.ProcessId, fgPid\)\) return false;/);
+  assert.equal(/GetParentProcessId/.test(webRead), false,
+    'the browser read must go through the shared rule, never its own parent lookup');
+  // The GLOBAL count lives in one place now — the "no egress process can ever
+  // set _fgIsAi" neighbourhood pins it and names every site. Two independent
+  // copies of the same number is how both branches ended up asserting a stale
+  // one. What is asserted HERE is the thing this test is actually about: the
+  // browser readers go through the shared rule rather than their own lookup,
+  // which is checked by the GetParentProcessId assertion above and the
+  // per-reader ones below.
+  // THE FIFTH CALL SITE (AI-216). The model-picker search walks a browser
+  // window's descendants, so it faces exactly the hazard the browser composer
+  // read does — a Chromium browser renders each site in a CHILD renderer
+  // process — and it must not be allowed to cache a control owned by some
+  // unrelated process that happens to be in the tree.
+  const pickerSearch = src.slice(
+    src.indexOf('static void SearchWebPickerBackground('),
+    src.indexOf('static void MaybeSearchWebPicker('),
+  );
+  assert.ok(pickerSearch.length > 0, 'expected a SearchWebPickerBackground body');
+  assert.match(pickerSearch, /if \(!ElementPidBelongsToForeground\(el\.Current\.ProcessId, fgPid\)\) continue;/);
+  assert.equal(/GetParentProcessId/.test(pickerSearch), false,
+    'the picker search must go through the shared rule, never its own parent lookup');
+  // The third call site: the background heading search for Teams' Copilot tab.
+  // It starts from AutomationElement.FocusedElement like the other two, so it
+  // needs the identical ownership rule — the same GLOBAL-read hazard, and the
+  // same WebView2 child process.
+  const search = src.slice(
+    src.indexOf('static void SearchCopilotHeadingsBackground('),
+    src.indexOf('static void CollectCopilotHeadings('),
+  );
+  assert.ok(search.length > 0, 'expected a SearchCopilotHeadingsBackground body');
+  assert.match(search, /if \(ElementPidBelongsToForeground\(el\.Current\.ProcessId, fgPid\)\)/);
+  assert.ok(search.indexOf('ElementPidBelongsToForeground(') < search.indexOf('GetParent('),
+    'the ownership check must precede any tree walk');
   // The PANEL read's DEFAULT stays exact-pid: VS Code and Cursor were verified
   // live with it, and widening a code editor's read is a separate decision with
   // its own false-positive surface. The one-generation rule is reachable via
@@ -4148,8 +4566,8 @@ test('enforcer-win.ps1: the send site offers a Request Access dialog ALONGSIDE E
   const code = codeOnly(src);
   // The existing block emit is untouched and still first.
   assert.match(code, /string blockReason = attachHold \? "attachment" : "send";/);
-  assert.match(code, /EmitBlock\(_app, pats, blockReason\);/);
-  const emitIdx = code.indexOf('EmitBlock(_app, pats, blockReason);');
+  assert.match(code, /EmitBlock\(_app, pats, blockReason, blockedNow\);/);
+  const emitIdx = code.indexOf('EmitBlock(_app, pats, blockReason, blockedNow);');
   const offerIdx = code.indexOf('OfferAccessRequest(_app, blockReason);');
   assert.ok(emitIdx >= 0 && offerIdx > emitIdx, 'the offer must come after EmitBlock, never replace it');
   // …and the swallow still happens.
@@ -4169,8 +4587,8 @@ test('enforcer-win.ps1: the send-BUTTON click site offers the same dialog, on th
   const src = await enforcerSrc();
   const code = codeOnly(src);
   // The pre-existing mouse-path emit is untouched, and the offer sits after it.
-  assert.match(code, /EmitBlock\(_app, ActivePatterns\(\), "click"\);/);
-  const emitIdx = code.indexOf('EmitBlock(_app, ActivePatterns(), "click");');
+  assert.match(code, /EmitBlock\(_app, clickPats, "click", clickBlockedNow\);/);
+  const emitIdx = code.indexOf('EmitBlock(_app, clickPats, "click", clickBlockedNow);');
   const offerIdx = code.indexOf('OfferAccessRequest(_app, "click");');
   assert.ok(emitIdx >= 0 && offerIdx > emitIdx, 'the click offer must come after its EmitBlock, never replace it');
   // Both still live behind the same WM_LBUTTONDOWN guard and the same swallow,
@@ -4260,7 +4678,7 @@ test('toast-helper.ps1: show_request_dialog runs on its own STA thread and never
   // A DEDICATED STA thread with its own message loop — never ShowDialog() on the
   // thread that owns the stdin read, which must keep pumping toasts while a
   // dialog is up.
-  assert.match(src, /new Thread\(delegate\(\) \{ Run\(requestId, key, agentName, appName\); \}\)/);
+  assert.match(src, /new Thread\(delegate\(\) \{ Run\(requestId, key, agentName, appName, owner\); \}\)/);
   assert.match(src, /t\.SetApartmentState\(ApartmentState\.STA\);/);
   assert.match(src, /t\.IsBackground = true;/);
   assert.match(src, /Application\.Run\(form\);/);
@@ -4298,7 +4716,10 @@ test('toast-helper.ps1: the dialog is ephemeral — no taskbar entry, one at a t
   // to "already on screen" only — the key is released when the form closes, so
   // the next attempt opens a fresh dialog. index.js keeps its own in-flight set
   // for the same window, but this is the layer that actually draws.
-  assert.match(src, /if \(Open\.ContainsKey\(key\)\) return false;/);
+  // The lookup carries the LIVE HWND out (see the resurface case below), so it
+  // is TryGetValue rather than ContainsKey — but the guard itself is unchanged:
+  // a key already present opens nothing new.
+  assert.match(src, /if \(Open\.TryGetValue\(key, out existing\)\) dup = true;/);
   assert.match(src, /"action":"suppressed"/);
   // Client-side cap matching REASON_MAX in server/src/routes/access-requests.js.
   assert.match(src, /public const int ReasonMax = 500;/);
@@ -4335,7 +4756,11 @@ test('index.js files the access request with the enrolment token and the block s
   assert.match(src, /this\.enforcer\.on\('requestaccessoffer', \(ev\) => \{/);
   // ONE host resolver, shared with the block relay — a second copy is how an
   // approval silently fails to lift the block it was granted for.
-  assert.match(src, /function blockToolHost\(ev\) \{\s*\r?\n\s*return hostForPanel\(ev\.panel\) \|\| hostForProcess\(ev\.process\) \|\| hostsForPlatform\(ev\.blocked_platform\)\[0\] \|\| '';/);
+  // browser_host leads and is authoritative when present: it is the host read
+  // from the address bar, so it beats any catalog inference — and for a browser
+  // the catalog would otherwise answer with the DESKTOP app's host, minting an
+  // exception against the wrong surface.
+  assert.match(src, /function blockToolHost\(ev\) \{\s*\r?\n\s*return ev\.browser_host \|\| hostForPanel\(ev\.panel\) \|\| hostForProcess\(ev\.process\) \|\| hostsForPlatform\(ev\.blocked_platform\)\[0\] \|\| '';/);
   assert.equal((src.match(/blockToolHost\(ev\)/g) || []).length, 3,
     'blockToolHost must have exactly two callers (plus its definition)');
   // block_scope is 'agent' ONLY with an identity to name — the server 400s
@@ -4350,7 +4775,13 @@ test('index.js files the access request with the enrolment token and the block s
   assert.equal(/window_title|ev\.title|ev\.patterns|ev\.preview/.test(offer), false,
     'no prompt content or window title may reach the access request');
   // Cancel sends nothing.
-  assert.match(offer, /if \(result\.action !== 'submit'\) return;/);
+  // Still the ONLY path that submits — cancel / suppressed / timeout all bail.
+  // The bail now logs which of the three it was: those outcomes were previously
+  // indistinguishable from "the dialog never opened", which cost real debugging
+  // time on a blocked surface that produced blocks and no visible popup.
+  assert.match(offer, /if \(result\.action !== 'submit'\) \{/);
+  assert.match(offer, /access-request: dialog for \$\{toolHost\} closed as/);
+  assert.equal(/nothing submitted`\);/.test(offer), true, 'the bail must log before returning');
   // The POST reuses the machine bearer token, and does not invent machine_id.
   const post = src.slice(src.indexOf('async #submitAccessRequest(body, subject)'));
   assert.match(post, /authorization: `Bearer \$\{this\.token\}`/);
@@ -4402,10 +4833,42 @@ test('the govstate payload carries NO content — a bool, a scope, a panel id, a
 
   const keys = [...emit.matchAll(/\\"([a-z_]+)\\":/g)].map((m) => m[1]).sort();
   assert.deepEqual(keys, [
-    'active', 'agent', 'agent_id', 'kind', 'panel', 'pid', 'process', 'scope',
+    'active', 'agent', 'agent_id', 'browser_host', 'kind', 'panel', 'pid', 'process', 'scope',
   ], 'the govstate payload gained or lost a field — every addition must be re-reviewed for PII');
 
+  // browser_host is the ONE reviewed addition, for the browser arm: index.js
+  // needs it to arm the browser file-picker watchers for the right host. The
+  // review is what the next three assertions encode.
+  //
+  // It arrives as a PARAMETER, so this function cannot reach any browser state
+  // of its own — in particular it cannot reach a URL, because no function in
+  // the .ps1 returns one (GetCachedBrowserUrl hands its caller a HOST via an
+  // out parameter and lets the URL string die as a local, precisely so this is
+  // structurally true rather than a matter of care).
+  assert.match(emit, /static void EmitGovState\(bool active, string process, string scope, string panel, string agent, string agentId, uint pid, string browserHost\)/);
+  assert.match(emit, /",\\"browser_host\\":\\"" \+ Esc\(browserHost \?\? ""\) \+ "\\""/);
+  // …and the ONE value the caller may pass is the catalog host, assigned in
+  // ApplyForegroundTick's browser branch from a WEB_SURFACES entry.
+  const govFn = src.slice(src.indexOf('static void UpdateGovState()'), src.indexOf('static void EmitGovState('));
+  assert.match(govFn, /string webHost = webWant \? \(_fgWebGovHost \?\? ""\) : "";/);
+  const tickFn = src.slice(src.indexOf('static void ApplyForegroundTick('), src.indexOf('// When a block is active, locate the send button'));
+  assert.match(tickFn, /webGovHost = web\.Host;/);
+  // The field is WRITTEN in exactly two places: its declaration and the
+  // per-tick assignment from the browser branch's catalog value. Counted the
+  // same way _fgAgentName's references are, so a third write has to be
+  // re-reviewed rather than sliding in.
+  assert.match(codeOnly(src), /static volatile string _fgWebGovHost = "";/);
+  assert.match(codeOnly(src), /_fgWebGovHost = webGovHost;/);
+  assert.equal((codeOnly(src).match(/_fgWebGovHost\s*=(?!=)/g) || []).length, 2,
+    'the govstate browser host may only come from the per-tick catalog value');
+
   for (const forbidden of [
+    // A URL, a path or a QUERY STRING. The last one is the reason this field is
+    // a host and not a URL at all: a query string on an AI URL routinely
+    // contains the prompt itself, so a URL here would be prompt content wearing
+    // a governance label.
+    'GetCachedBrowserUrl', 'HostFromBrowserUrl', '_browserUrlHost', 'AbsolutePath', '.Query',
+    'TitleFingerprint', '_browserTitleFingerprint',
     // Titles and accessibility reads — the two things this file goes out of its
     // way never to emit anywhere else either.
     'GetWindowText', '.Current.Name', '_fgAgentName', '_copilotHeading', 'heading',
@@ -4420,7 +4883,7 @@ test('the govstate payload carries NO content — a bool, a scope, a panel id, a
   }
   // Every string field goes through the same escaper every other emit uses, so
   // an admin-typed name containing a quote cannot break the line.
-  assert.equal((emit.match(/Esc\(/g) || []).length, 5, 'every string field must be escaped');
+  assert.equal((emit.match(/Esc\(/g) || []).length, 6, 'every string field must be escaped');
 });
 
 test('govstate is emitted on TRANSITIONS only, from the poll thread, and decides nothing', async () => {
@@ -4434,7 +4897,12 @@ test('govstate is emitted on TRANSITIONS only, from the poll thread, and decides
   // event would stay "active" after the user left the governed conversation —
   // leaving Teams' file watchers armed over whatever they moved to.
   assert.match(code, /bool firstHand = _fgLeftAiTicks == 0;/);
-  assert.match(code, /bool want = _fgHostGoverned && firstHand && !Disarmed\(\);/);
+  // TWO arms, and each carries BOTH guards independently rather than sharing a
+  // combined term — so a change to one cannot silently drop a guard from the
+  // other. The host-app arm is byte-for-byte the rule that shipped.
+  assert.match(code, /bool hostWant = _fgHostGoverned && firstHand && !Disarmed\(\);/);
+  assert.match(code, /bool webWant = _fgWebGoverned && firstHand && !Disarmed\(\);/);
+  assert.match(code, /bool want = hostWant \|\| webWant;/);
 
   // Exactly two emit sites: one clear, one arm. Anything else would be a line
   // per 150ms poll tick.
@@ -4888,8 +5356,15 @@ test('no egress process can ever set _fgIsAi — a mail client is never a scanne
   //    (asserted in ai-processes.test.mjs) is structurally absent from _aiProcs
   //    because it never reaches watcherProcessNames().
   const tickCode = codeOnly(tick);
+  // FIVE since AI-218, not four: the browser arm sets it behind `if (web !=
+  // null)`, i.e. only when the resolved URL host matched a WEB_SURFACES entry.
+  // That is the same shape as the other four — a positively identified AI
+  // surface — and it is not a widening of this test's invariant, which is about
+  // EGRESS processes and is asserted by the forbidden-list loop below rather
+  // than by this count. The count is a canary: it fires on ANY new site so the
+  // new one gets read, which is what just happened.
   const isAiSites = (tickCode.match(/\bisAi = true;/g) || []).length;
-  assert.equal(isAiSites, 4, `isAi gained an assignment site (${isAiSites})`);
+  assert.equal(isAiSites, 5, `isAi gained an assignment site (${isAiSites})`);
   // …and NONE of them mentions the egress state.
   for (const forbidden of ['_egressProcs', '_egressSendKeys', '_egressHoldProcs', '_egressIdByProc', 'EgressHoldArmed', 'MatchesEgressChord']) {
     assert.equal(tickCode.includes(forbidden), false,
@@ -5303,4 +5778,197 @@ test('the per-tick Teams evidence fields are set ONLY by ComputeTickTeamsEvidenc
   assert.match(fn, /_tickChatIsGroup = ev != null && ev\.Kind == TeamsChatKind\.GroupOrChannel;/);
   const fg = src.slice(src.indexOf('static void UpdateForeground()'), src.indexOf('static void ApplyForegroundTick('));
   assert.match(fg, /ComputeTickTeamsEvidence\(fg, hostAppArmed \|\| hostEvidenceArmed, hit, panelRid, _tickComposerAid\);/);
+});
+
+test('toast-helper.ps1: a dialog cannot outlive its caller and hold the dedupe key forever', async () => {
+  // THE DEFECT, observed live: a Request Access dialog opened, was never
+  // answered, and never closed. Its dedupe key is released only when the form
+  // closes, so from that moment every later block for the same host answered
+  // "suppressed" — the user pressed send, was blocked, and saw nothing, for the
+  // rest of the session. notify.js had always abandoned its own side after
+  // REQUEST_DIALOG_TIMEOUT_MS; the WINDOW had no clock at all.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'toast-helper.ps1'), 'utf8');
+  assert.match(src, /public const int TimeoutMs = 5 \* 60 \* 1000;/);
+  assert.match(src, /life\.Interval = TimeoutMs;/);
+  assert.match(src, /life\.Tick \+= delegate\(object s3, EventArgs e3\) \{ life\.Stop\(\); form\.Close\(\); \};/);
+  // And the timer dies with the window, so a closed dialog leaves nothing
+  // running on its STA thread.
+  assert.match(src, /form\.FormClosed \+= delegate\(object s4, FormClosedEventArgs e4\)/);
+  assert.match(src, /try \{ life\.Stop\(\); life\.Dispose\(\); \} catch \{ \}/);
+
+  // The two clocks must not disagree about when a dialog is abandoned.
+  const notify = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'notify.js'), 'utf8');
+  assert.match(notify, /const REQUEST_DIALOG_TIMEOUT_MS = 5 \* 60 \* 1000;/);
+});
+
+test('toast-helper.ps1: the dialog is topmost on the LIVE window, and a repeat block raises it', async () => {
+  // Form.TopMost alone was not enough. This process never owns the foreground,
+  // and the form is shown from a background STA thread, so WinForms lost the
+  // race: the live handle came back with exstyle 0x10101 — no WS_EX_TOPMOST —
+  // and the dialog sat BEHIND the browser. With ShowInTaskbar=false there is no
+  // taskbar button either, so it was invisible: the user was blocked and saw
+  // nothing at all. CreateParams sets the bit at creation, which is the same
+  // thing CfaiNoActivateForm has always done for the tokenize popup.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'toast-helper.ps1'), 'utf8');
+  assert.match(src, /public class CfaiTopForm : Form/);
+  assert.match(src, /cp\.ExStyle \|= 0x8 \/\* WS_EX_TOPMOST \*\/ \| 0x80 \/\* WS_EX_TOOLWINDOW \*\/;/);
+  assert.match(src, /CfaiTopForm form = new CfaiTopForm\(\);/);
+
+  // A duplicate must produce SOMETHING the user can see. Silence is what made
+  // "the dialog is already open" and "the dialog never opened" look identical.
+  assert.match(src, /public static void Resurface\(IntPtr hWnd\)/);
+  assert.match(src, /if \(dup\) \{ Resurface\(existing\); TakeForeground\(existing\); return false; \}/);
+  assert.match(src, /if \(dup\) \{ CfaiRequestDialog\.Resurface\(existing\); return false; \}/);
+  // Raising must never steal the foreground, because Resurface is SHARED with
+  // the tokenize popup: the enforcer re-checks GetForegroundWindow() against the
+  // window it pinned at block time before it types a rewrite, so a popup that
+  // activated would break the very thing it is offering.
+  assert.match(src, /SWP_NOACTIVATE/);
+  const resurface = src.slice(src.indexOf('public static void Resurface(IntPtr hWnd)'));
+  const resurfaceBody = resurface.slice(0, resurface.indexOf('\n    }') + 6);
+  assert.equal(
+    /SetForegroundWindow|Activate\(\)|\.Focus\(\)|FlashWindow/.test(resurfaceBody), false,
+    'Resurface must only raise — it is shared with the tokenize popup',
+  );
+  // FlashWindow is gone entirely. FlashWindow(h, true) INVERTS the caption and
+  // leaves it inverted, which on a repeatedly-raised window reads as a blinking
+  // dialog — reported as exactly that.
+  assert.equal(/FlashWindow/.test(codeOnly(src)), false, 'no caption flashing anywhere');
+
+  // Both dialogs publish their live handle once shown, or there is nothing to
+  // raise.
+  assert.equal(
+    (src.match(/lock \(Open\) \{ Open\[key\] = form\.Handle; \}/g) || []).length, 2,
+    'both dialogs must publish their handle on Shown',
+  );
+});
+
+test('enforcer-win.ps1: the low-level hooks are watched and reinstalled when Windows drops them', async () => {
+  // THE DEFECT, and it is the worst class this file has: Windows silently
+  // removes a WH_KEYBOARD_LL / WH_MOUSE_LL hook whose callback overruns
+  // LowLevelHooksTimeout. Nothing reports it — the handle is still held, the
+  // process is alive, the heartbeat still writes, the poll thread still resolves
+  // surfaces — and NOTHING IS EVER BLOCKED AGAIN for ANY app until restart.
+  // Observed live: three blocks on chatgpt.com, then silence, and the next site
+  // tested sent a blocked prompt with not one line logged. It read as a per-site
+  // bug and was not.
+  const ps = await enforcerSrc();
+  assert.match(ps, /static void HookWatchdog\(\)/);
+  assert.match(ps, /SetTimer\(IntPtr\.Zero, HOOK_WATCHDOG_TIMER_ID, HOOK_WATCHDOG_INTERVAL_MS, IntPtr\.Zero\);/);
+  // The tick must actually be serviced — an unread WM_TIMER is a no-op.
+  assert.match(ps, /if \(msg\.message == WM_TIMER && msg\.wParam == HOOK_WATCHDOG_TIMER_ID\) HookWatchdog\(\);/);
+
+  // Liveness is the SYSTEM's input clock vs ours. An idle user moves neither, so
+  // idleness reads healthy; only a system that saw input our callbacks did not
+  // is evidence the hooks left the chain.
+  assert.match(ps, /GetLastInputInfo\(ref lii\)/);
+  assert.match(ps, /int lag = unchecked\(\(int\)\(lii\.dwTime - _lastHookTick\)\);/);
+  assert.match(ps, /if \(lag <= HOOK_DEAD_SLACK_MS\) return;/);
+  // No evidence must never be treated as bad evidence.
+  assert.match(ps, /if \(!GetLastInputInfo\(ref lii\)\) return;/);
+
+  // BOTH callbacks stamp the clock, or a keyboard-only user looks dead to the
+  // mouse hook and vice versa.
+  const code = codeOnly(ps);
+  assert.match(code, /static IntPtr MouseCallback\(int nCode, IntPtr wParam, IntPtr lParam\)\s*\{\s*MarkHookAlive\(\);/);
+  assert.match(code, /static IntPtr HookCallback\(int nCode, IntPtr wParam, IntPtr lParam\)\s*\{\s*MarkHookAlive\(\);/);
+
+  // UNHOOK BEFORE RE-HOOK. Installing first would leave both hooks in the chain
+  // for an instant and a pass-through keystroke would run the callback twice,
+  // buffering the character twice and corrupting the scan.
+  const wd = ps.slice(ps.indexOf('static void HookWatchdog()'), ps.indexOf('static void PumpLoop()'));
+  const unhookAt = wd.indexOf('UnhookWindowsHookEx(oldK)');
+  const rehookAt = wd.indexOf('SetWindowsHookEx(WH_KEYBOARD_LL, _proc, _hookModule, 0)');
+  assert.ok(unhookAt > 0 && rehookAt > unhookAt, 'must unhook before re-hooking');
+
+  // A cooldown, so a wrong verdict cannot thrash the chain.
+  assert.match(wd, /if \(unchecked\(\(int\)\(now - _lastHookReinstallTick\)\) < HOOK_REINSTALL_COOLDOWN_MS\) return;/);
+
+  // Loud, not silent: a callback that keeps overrunning will keep tripping this,
+  // and the count is the only signal that it is happening.
+  assert.match(wd, /Emit\("hook_reinstalled"/);
+  const js = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer.js'), 'utf8');
+  assert.match(js, /case 'hook_reinstalled':/);
+  assert.match(js, /this\.log\?\.warn\('enforcer: low-level hooks were dropped by Windows/);
+});
+
+test('toast-helper.ps1: the Request Access dialog gets the keyboard, and only it does', async () => {
+  // THE DEFECT: the dialog was up but the user's typing went into the ChatGPT
+  // composer. A window that does not hold the foreground receives no keyboard
+  // input, and form.Activate() cannot take it — Windows refuses
+  // SetForegroundWindow to a process that owns neither the foreground nor the
+  // last input event, and this process owns neither: the block came from the
+  // user's keypress in the BROWSER. Attaching our input queue to the foreground
+  // thread for the duration of the call is the documented way through.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'toast-helper.ps1'), 'utf8');
+  assert.match(src, /public static void TakeForeground\(IntPtr hWnd\)/);
+  assert.match(src, /attached = AttachThreadInput\(fgThread, us, true\);/);
+  assert.match(src, /SetForegroundWindow\(hWnd\);/);
+  // Detaching is NOT optional — a leaked attachment ties this process's input
+  // queue to another app's thread, so that app stalls whenever we do.
+  assert.match(src, /if \(attached\) \{ try \{ AttachThreadInput\(fgThread, us, false\); \} catch \{ \} \}/);
+  const take = src.slice(src.indexOf('public static void TakeForeground'));
+  assert.match(take.slice(0, take.indexOf('\n    }') + 6), /finally/,
+    'the detach must run even when SetForegroundWindow throws');
+
+  // ONLY the Request Access dialog may call it. The tokenize popup's whole
+  // contract is that it never holds the foreground.
+  const tokenize = src.slice(src.indexOf('public static class CfaiTokenizeDialog'));
+  assert.equal(/TakeForeground/.test(tokenize), false,
+    'the tokenize popup must never take the foreground');
+});
+
+test('toast-helper.ps1: the Request Access dialog is dismissed when its moment passes', async () => {
+  // Two reports, one rule. "I closed the browser and the dialog was still
+  // there" and "if we go to another tab the dialog must be disabled" are the
+  // same event from the helper's side: the window this prompt is about stopped
+  // being what the user is looking at. Keying on THE FOREGROUND rather than on
+  // the tab or the host is what keeps it generic — the helper knows nothing
+  // about browsers or sites, and the next blocked send opens a fresh dialog.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'toast-helper.ps1'), 'utf8');
+  assert.match(src, /public const int GuardIntervalMs = 400;/);
+  // The owner is the window the dialog appears over, captured when the command
+  // arrives rather than plumbed from the block: index.js awaits a server
+  // round-trip in between, so the block-time window may no longer be on screen.
+  assert.match(src, /IntPtr owner = IntPtr\.Zero;/);
+  assert.match(src, /try \{ owner = GetForegroundWindow\(\); \} catch \{ \}/);
+  assert.match(src, /if \(owner != IntPtr\.Zero && !IsWindow\(owner\)\) \{ guard\.Stop\(\); form\.Close\(\); return; \}/);
+  // The foreground rule ARMS ONLY AFTER we have actually held the foreground.
+  // If TakeForeground lost its race the dialog never becomes foreground, and an
+  // unarmed rule would close it instantly — turning a recoverable focus failure
+  // into no dialog at all.
+  assert.match(src, /if \(fg == form\.Handle\) \{ wasForeground\[0\] = true; return; \}/);
+  assert.match(src, /if \(wasForeground\[0\]\) \{ guard\.Stop\(\); form\.Close\(\); \}/);
+  // Both timers die with the window, so a closed dialog leaves nothing running.
+  assert.match(src, /try \{ guard\.Stop\(\); guard\.Dispose\(\); \} catch \{ \}/);
+});
+
+test('the Request Access reason is OPTIONAL, and the dialog says so truthfully', async () => {
+  // The dialog labels the box "(OPTIONAL)". That has to be true of the button
+  // as well: a label saying optional over a button disabled until you type is
+  // the dialog lying about its own rule, and it would strand a user who has
+  // nothing to add but still wants to ask.
+  const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'toast-helper.ps1'), 'utf8');
+  const dlg = src.slice(src.indexOf('public static class CfaiRequestDialog'),
+                        src.indexOf('public class CfaiNoActivateForm'));
+  assert.match(dlg, /WHY DO YOU NEED ACCESS\? \(OPTIONAL\)/);
+  assert.equal(/submit\.Enabled/.test(dlg), false,
+    'the submit button must not be gated on the reason being non-empty');
+
+  // And it is optional SERVER-side too, or the dialog would be promising
+  // something the API rejects. Only machine_id and tool_host are required.
+  const route = await readFile(join(AGENT_DIR, '..', 'server', 'src', 'routes', 'access-requests.js'), 'utf8');
+  assert.match(route, /machine_id and tool_host are required/);
+  const post = route.slice(route.indexOf("app.post('/api/v1/access-requests'"),
+                           route.indexOf("app.get('/api/v1/access-requests/mine'"));
+  assert.equal(/reason.*required|required.*reason/i.test(post), false,
+    'the server must not require a reason while the dialog calls it optional');
+
+  // The placeholder is a drawn label, not a cue banner: EM_SETCUEBANNER does
+  // nothing on a MULTILINE text box, so a cue would have silently shown nothing.
+  assert.match(dlg, /hintText\.Visible = box\.Text\.Length == 0;/);
+  assert.equal(/EM_SETCUEBANNER/.test(codeOnly(dlg)), false);
+  // Clicking the placeholder must put the caret where it looks like it will go —
+  // the label is painted over the box, so the box never sees that click.
+  assert.match(dlg, /hintText\.Click \+= delegate\(object s, EventArgs e\) \{ try \{ box\.Focus\(\); \} catch \{ \} \};/);
 });

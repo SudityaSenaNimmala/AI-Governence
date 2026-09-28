@@ -90,12 +90,319 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
+// ── The look ────────────────────────────────────────────────────────────────
+//
+// These are the DASHBOARD's colours (connect-ui), not invented ones, so the
+// prompt a user gets on their desktop reads as the same product as the console
+// their admin answers it in. Kept as one palette because two dialogs draw from
+// it and a second copy would drift.
+public static class CfaiTheme
+{
+    public static readonly Color Accent      = ColorTranslator.FromHtml("#0052e0");
+    public static readonly Color AccentHover = ColorTranslator.FromHtml("#0041b3");
+    public static readonly Color AccentSoft  = ColorTranslator.FromHtml("#eef3ff");
+    public static readonly Color Ink         = ColorTranslator.FromHtml("#1f2129");
+    public static readonly Color Muted       = ColorTranslator.FromHtml("#64748b");
+    public static readonly Color Line        = ColorTranslator.FromHtml("#e2e8f0");
+    public static readonly Color Surface     = Color.White;
+    public static readonly Color SurfaceSoft = ColorTranslator.FromHtml("#f8fafc");
+    // The alert/tokenize family, matching the browser extension's own modal so
+    // the desktop popup and the in-page one read as the same product.
+    public static readonly Color AlertSoft   = ColorTranslator.FromHtml("#fde8e8");
+    public static readonly Color AlertInk    = ColorTranslator.FromHtml("#c5303a");
+    public static readonly Color Warn        = ColorTranslator.FromHtml("#f5a623");
+    public static readonly Color SafeSoft    = ColorTranslator.FromHtml("#f0fdf4");
+    public static readonly Color SafeLine    = ColorTranslator.FromHtml("#bbf7d0");
+    public static readonly Color SafeInk     = ColorTranslator.FromHtml("#15803d");
+    public static readonly Color Go          = ColorTranslator.FromHtml("#0f9d58");
+    public static readonly Color GoHover     = ColorTranslator.FromHtml("#0c7f47");
+    public static readonly Color Alt         = ColorTranslator.FromHtml("#4f46e5");
+    public static readonly Color AltHover    = ColorTranslator.FromHtml("#4338ca");
+
+    // Monospace for the masked preview: the whole point of that box is that the
+    // user can read a label like [API-KEY] exactly as it will be sent.
+    public static Font Mono(float size, FontStyle style)
+    {
+        try { return new Font("Consolas", size, style); }
+        catch { return new Font(FontFamily.GenericMonospace, size, style); }
+    }
+
+    // Segoe UI is present on every supported Windows; the fallback keeps a
+    // missing-font machine legible rather than throwing.
+    public static Font Ui(float size, FontStyle style)
+    {
+        try { return new Font("Segoe UI", size, style); }
+        catch { return new Font(SystemFonts.MessageBoxFont.FontFamily, size, style); }
+    }
+}
+
+// A flat button that owns its own paint, because the stock WinForms button is
+// the single thing that makes a dialog look twenty years old. Two variants:
+// PRIMARY (filled accent) and SECONDARY (quiet outline).
+public class CfaiButton : Button
+{
+    public bool Primary = false;
+    // When set, these win over Primary. Two filled buttons of DIFFERENT colours
+    // sit side by side in the tokenize popup, so "primary or not" is not enough
+    // to describe them.
+    public Color Fill = Color.Empty;
+    public Color FillHover = Color.Empty;
+    bool _hover = false;
+
+    public CfaiButton()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
+               | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        FlatStyle = FlatStyle.Flat;
+        FlatAppearance.BorderSize = 0;
+        BackColor = Color.Transparent;
+        Cursor = Cursors.Hand;
+        Font = CfaiTheme.Ui(9.75f, FontStyle.Regular);
+        MouseEnter += delegate(object s, EventArgs e) { _hover = true; Invalidate(); };
+        MouseLeave += delegate(object s, EventArgs e) { _hover = false; Invalidate(); };
+        EnabledChanged += delegate(object s, EventArgs e) { Invalidate(); };
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
+        using (System.Drawing.Drawing2D.GraphicsPath path = CfaiDraw.Rounded(r, 6))
+        {
+            Color fill, text;
+            if (Fill != Color.Empty)
+            {
+                fill = Enabled ? (_hover && FillHover != Color.Empty ? FillHover : Fill)
+                               : ControlPaint.Light(Fill, 0.55f);
+                text = Color.White;
+                using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, path);
+            }
+            else if (Primary)
+            {
+                // A disabled primary button must still read as the primary
+                // action, just unavailable -- greying it to the secondary's
+                // colours would hide where the user is meant to go.
+                if (!Enabled) { fill = ColorTranslator.FromHtml("#b9ccf5"); text = Color.White; }
+                else { fill = _hover ? CfaiTheme.AccentHover : CfaiTheme.Accent; text = Color.White; }
+                using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, path);
+            }
+            else
+            {
+                fill = _hover ? CfaiTheme.SurfaceSoft : CfaiTheme.Surface;
+                text = Enabled ? CfaiTheme.Ink : CfaiTheme.Muted;
+                using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, path);
+                using (Pen pen = new Pen(CfaiTheme.Line)) g.DrawPath(pen, path);
+            }
+            TextRenderer.DrawText(g, Text, Font, r, text,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
+                | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        }
+    }
+}
+
+// Rounded-rectangle geometry, shared by the button and the card.
+// A filled circle with a glyph in it — the alert mark at the top of the card.
+// Painted rather than an image so it scales with DPI and ships no assets.
+public class CfaiBadge : Control
+{
+    public Color Fill = Color.White;
+    public Color Glyph = Color.Black;
+    public string Mark = "!";
+    public float MarkSize = 22f;
+    // Draw a "no entry" ring-and-slash instead of a text glyph. The natural
+    // character for this is U+1F6AB, which is ASTRAL -- C# \u takes exactly four
+    // hex digits, so it cannot be written as a single escape, and the four-digit
+    // truncation is what turned an earlier badge into mojibake. Painting it
+    // sidesteps both that and any question of font coverage.
+    public bool Ban = false;
+
+    public CfaiBadge()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
+               | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+        BackColor = Color.Transparent;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using (SolidBrush b = new SolidBrush(Fill)) g.FillEllipse(b, 0, 0, Width - 1, Height - 1);
+        if (Ban)
+        {
+            // A ring with a diagonal bar, inset from the pastel disc.
+            float inset = Width * 0.28f;
+            float d = Width - inset * 2;
+            using (Pen pen = new Pen(Glyph, Math.Max(2f, Width * 0.055f)))
+            {
+                g.DrawEllipse(pen, inset, inset, d, d);
+                double a = Math.PI / 4;   // 45 degrees
+                float r = d / 2f, cx = Width / 2f, cy = Height / 2f;
+                g.DrawLine(pen,
+                    cx - (float)(r * Math.Cos(a)), cy + (float)(r * Math.Sin(a)),
+                    cx + (float)(r * Math.Cos(a)), cy - (float)(r * Math.Sin(a)));
+            }
+            return;
+        }
+        using (Font f = CfaiTheme.Ui(MarkSize, FontStyle.Bold))
+            TextRenderer.DrawText(g, Mark, f, new Rectangle(0, 0, Width, Height), Glyph,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+    }
+}
+
+// The category chip: a rounded pill, one per detected pattern name.
+public class CfaiPill : Control
+{
+    public Color Fill = Color.White;
+    public Color Ink = Color.Black;
+
+    public CfaiPill()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
+               | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+        BackColor = Color.Transparent;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
+        using (System.Drawing.Drawing2D.GraphicsPath path = CfaiDraw.Rounded(r, Height / 2))
+        using (SolidBrush b = new SolidBrush(Fill)) g.FillPath(b, path);
+        TextRenderer.DrawText(g, Text, Font, r, Ink,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
+            | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+    }
+}
+
+// A rounded, tinted, bordered box — the "this is what gets sent" panel.
+public class CfaiRoundPanel : Panel
+{
+    public Color Line = Color.Gainsboro;
+    public int Radius = 8;
+
+    public CfaiRoundPanel()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
+               | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        g.Clear(Parent != null ? Parent.BackColor : CfaiTheme.Surface);
+        Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
+        using (System.Drawing.Drawing2D.GraphicsPath path = CfaiDraw.Rounded(r, Radius))
+        {
+            using (SolidBrush b = new SolidBrush(BackColor)) g.FillPath(b, path);
+            using (Pen pen = new Pen(Line)) g.DrawPath(pen, path);
+        }
+    }
+}
+
+public static class CfaiDraw
+{
+    public static System.Drawing.Drawing2D.GraphicsPath Rounded(Rectangle r, int radius)
+    {
+        var p = new System.Drawing.Drawing2D.GraphicsPath();
+        int d = radius * 2;
+        if (d <= 0 || r.Width <= d || r.Height <= d) { p.AddRectangle(r); return p; }
+        p.AddArc(r.X, r.Y, d, d, 180, 90);
+        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
+}
+
+// ── The Request Access dialog's window ──────────────────────────────────────
+// WS_EX_TOPMOST comes from CreateParams for exactly the reason CfaiNoActivateForm
+// (further down) already sets it there: this process never owns the foreground,
+// so WinForms' Form.TopMost is not reliably applied to the live window when the
+// form is shown from a background STA thread. A dialog that loses that race sits
+// BEHIND the browser, and with no taskbar button it is invisible — the user
+// presses send, is blocked, and sees nothing. Observed in the field: exstyle on
+// the live handle came back 0x10101, i.e. without WS_EX_TOPMOST, even though
+// form.TopMost had been set to true.
+//
+// WS_EX_TOOLWINDOW keeps it out of the taskbar and Alt-Tab, which is what
+// ShowInTaskbar=false was asking for anyway.
+//
+// It deliberately does NOT set WS_EX_NOACTIVATE: unlike the tokenize popup's
+// first view, this dialog is a text box the user has to type a reason into.
+public class CfaiTopForm : Form
+{
+    [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+    static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int val, int size);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern bool ReleaseCapture();
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wp, IntPtr lp);
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            CreateParams cp = base.CreateParams;
+            cp.ExStyle |= 0x8 /* WS_EX_TOPMOST */ | 0x80 /* WS_EX_TOOLWINDOW */;
+            return cp;
+        }
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        // Windows 11 rounds the corners for us when asked; on Windows 10 the
+        // call simply fails and the card stays square, which is the correct
+        // fallback -- a hand-clipped Region there costs anti-aliasing on every
+        // resize and looks worse than square.
+        try { int pref = 2 /* DWMWCP_ROUND */; DwmSetWindowAttribute(Handle, 33, ref pref, 4); } catch { }
+    }
+
+    // A borderless window has no title bar to drag, so the header does it. This
+    // is the standard ReleaseCapture + WM_NCLBUTTONDOWN(HTCAPTION) handoff: the
+    // window manager takes over the drag, so there is no mouse-move bookkeeping
+    // here and the drag behaves exactly like a real title bar.
+    public void DragBy(Control handle)
+    {
+        handle.MouseDown += delegate(object s, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+            try { ReleaseCapture(); SendMessage(Handle, 0xA1 /* WM_NCLBUTTONDOWN */, (IntPtr)2 /* HTCAPTION */, IntPtr.Zero); } catch { }
+        };
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        // A 1px hairline so the card separates from whatever is behind it. It is
+        // drawn rather than borrowed from FormBorderStyle because the form is
+        // borderless -- that is what removes the grey 1990s chrome.
+        using (Pen pen = new Pen(CfaiTheme.Line))
+            e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+    }
+}
+
 public static class CfaiRequestDialog
 {
     // Mirrors REASON_MAX in server/src/routes/access-requests.js — the server
     // truncates past this, so the box refuses past it and the user can see that
     // happen instead of silently losing the end of a sentence.
     public const int ReasonMax = 500;
+
+    // Mirrors REQUEST_DIALOG_TIMEOUT_MS in notify.js. The window closes itself on
+    // the same schedule Node gives up on, so a dialog can never outlive its
+    // caller and hold its dedupe key open against every future block.
+    public const int TimeoutMs = 5 * 60 * 1000;
+
+    // How often the dismissal guard asks whether this dialog's moment has
+    // passed. Fast enough that the window is gone before the user has finished
+    // clicking away, slow enough to be free.
+    public const int GuardIntervalMs = 400;
 
     static readonly object OutLock = new object();
     // dedupe_key -> open. ONE DIALOG AT A TIME per block, and this is the only
@@ -104,7 +411,99 @@ public static class CfaiRequestDialog
     // stack a window per keystroke. The key is released the moment the form
     // closes, so the very next blocked send opens a fresh dialog — which is the
     // point, for a user who was declined or who cancelled.
-    static readonly Dictionary<string, bool> Open = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+    // The value is the LIVE WINDOW HANDLE (IntPtr.Zero until the form is shown),
+    // so a second blocked send can pull the window that is already up back to the
+    // front instead of being answered with silence.
+    static readonly Dictionary<string, IntPtr> Open = new Dictionary<string, IntPtr>(StringComparer.OrdinalIgnoreCase);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndAfter, int x, int y, int cx, int cy, uint flags);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr hWnd);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern bool SetForegroundWindow(IntPtr hWnd);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern bool BringWindowToTop(IntPtr hWnd);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr pid);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern bool AttachThreadInput(uint attach, uint attachTo, bool fAttach);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern uint GetCurrentThreadId();
+    static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10, SWP_SHOWWINDOW = 0x40;
+
+    // Re-assert topmost on a LIVE handle. CreateParams covers the moment the
+    // window is created; this covers every moment after it, and it is also the
+    // only thing that can help a window the browser has since covered. It never
+    // takes the foreground (SWP_NOACTIVATE), so it cannot disturb the composer
+    // the enforcer pinned at block time. Both dialogs use it.
+    public static void ForceOnTop(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero) return;
+        try { SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW); } catch { }
+    }
+
+    // A duplicate request for a dialog that is already up: nothing new is
+    // opened, the existing window is raised. SHARED WITH THE TOKENIZE POPUP, so
+    // it must never focus or activate — that popup's entire contract is that it
+    // does not hold the foreground, because the enforcer re-checks
+    // GetForegroundWindow() against the window it pinned at block time before it
+    // types the rewrite. CfaiRequestDialog adds TakeForeground() on top of this
+    // for its own window only.
+    //
+    // It also does NOT flash. FlashWindow(h, true) inverts the caption and
+    // leaves it inverted; on a window that is raised repeatedly that reads as a
+    // blinking dialog, which is what it was reported as.
+    public static void Resurface(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero) return;
+        ForceOnTop(hWnd);
+    }
+
+    // ── Taking the foreground, and why this dialog is allowed to ─────────────
+    //
+    // ONLY CfaiRequestDialog calls this. Its reason box is a text box the user
+    // has to type a sentence into, and a window that does not hold the
+    // foreground DOES NOT RECEIVE KEYBOARD INPUT — the keystrokes go to whatever
+    // does, which is the AI composer the block just came from. That is exactly
+    // what was reported: the dialog was up and the typing landed in ChatGPT.
+    //
+    // form.Activate() alone cannot fix it. Windows refuses SetForegroundWindow
+    // to a process that does not own the foreground or the last input event, and
+    // this process owns neither: the block was triggered by the user's keypress
+    // in the BROWSER. The documented way through is to attach our input queue to
+    // the foreground thread for the duration of the call, which makes the two
+    // threads share a foreground state, and detach immediately after.
+    //
+    // This is safe here in a way it would NOT be for the tokenize popup: this
+    // dialog never types into a composer, so nothing downstream re-checks the
+    // foreground against a pinned window. It submits to the server and closes.
+    public static void TakeForeground(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero) return;
+        uint us = GetCurrentThreadId();
+        uint fgThread = 0;
+        bool attached = false;
+        try
+        {
+            IntPtr fg = GetForegroundWindow();
+            if (fg != IntPtr.Zero) fgThread = GetWindowThreadProcessId(fg, IntPtr.Zero);
+            if (fgThread != 0 && fgThread != us) attached = AttachThreadInput(fgThread, us, true);
+            try { BringWindowToTop(hWnd); } catch { }
+            SetForegroundWindow(hWnd);
+        }
+        catch { }
+        finally
+        {
+            // Detaching is not optional: a leaked attachment ties this process's
+            // input queue to another app's thread, so that app stalls whenever
+            // we do.
+            if (attached) { try { AttachThreadInput(fgThread, us, false); } catch { } }
+        }
+    }
 
     // The single stdout writer for this whole process.
     public static void Write(string line)
@@ -143,12 +542,27 @@ public static class CfaiRequestDialog
     public static bool Show(string requestId, string dedupeKey, string agentName, string appName)
     {
         string key = string.IsNullOrEmpty(dedupeKey) ? requestId : dedupeKey;
+        IntPtr existing = IntPtr.Zero;
+        bool dup = false;
         lock (Open)
         {
-            if (Open.ContainsKey(key)) return false;
-            Open[key] = true;
+            if (Open.TryGetValue(key, out existing)) dup = true;
+            else Open[key] = IntPtr.Zero;
         }
-        Thread t = new Thread(delegate() { Run(requestId, key, agentName, appName); });
+        if (dup) { Resurface(existing); TakeForeground(existing); return false; }
+        // THE WINDOW THIS DIALOG IS ABOUT. Captured here, on the stdin thread, at
+        // the moment the command arrives — i.e. whatever the user is actually
+        // looking at when the dialog is about to appear over it. The guard timer
+        // in Run() closes the dialog when this window is destroyed, which is what
+        // stops a closed browser from leaving an orphaned prompt on screen.
+        //
+        // Deliberately read HERE rather than plumbed from the enforcer's block:
+        // index.js awaits a server round-trip between the block and this command,
+        // so the block-time window may no longer be the one on screen, and a
+        // dialog should belong to the window it actually appears over.
+        IntPtr owner = IntPtr.Zero;
+        try { owner = GetForegroundWindow(); } catch { }
+        Thread t = new Thread(delegate() { Run(requestId, key, agentName, appName, owner); });
         t.SetApartmentState(ApartmentState.STA);
         // Background: a dialog left open must never keep this process — or the
         // agent's shutdown — waiting.
@@ -158,7 +572,7 @@ public static class CfaiRequestDialog
         return true;
     }
 
-    static void Run(string requestId, string key, string agentName, string appName)
+    static void Run(string requestId, string key, string agentName, string appName, IntPtr owner)
     {
         string action = "cancel";
         string reason = "";
@@ -174,9 +588,16 @@ public static class CfaiRequestDialog
                 subject = agentName + " \u2014 " + appName;
             }
 
-            Form form = new Form();
+            const int CardW = 520;
+            const int Pad = 32;
+
+            CfaiTopForm form = new CfaiTopForm();
             form.Text = "CloudFuze AI Governance";
-            form.FormBorderStyle = FormBorderStyle.FixedDialog;
+            // BORDERLESS: the grey system title bar is most of what made this
+            // look dated. The window is still a real top-level window, so the
+            // topmost style, the no-taskbar rule, Esc-to-cancel and taking the
+            // foreground are all unaffected.
+            form.FormBorderStyle = FormBorderStyle.None;
             form.StartPosition = FormStartPosition.CenterScreen;
             form.MinimizeBox = false;
             form.MaximizeBox = false;
@@ -185,46 +606,140 @@ public static class CfaiRequestDialog
             // owns or can go back to.
             form.ShowInTaskbar = false;
             form.TopMost = true;
-            form.ClientSize = new Size(430, 250);
-            form.Padding = new Padding(14);
+            form.BackColor = CfaiTheme.Surface;
+            form.Font = CfaiTheme.Ui(9.75f, FontStyle.Regular);
+            form.ClientSize = new Size(CardW, 524);
+
+            // The blocked thing's own name, for the title and the chip. `subject`
+            // already folds agent-vs-app naming; this is the SHORT form for
+            // places where a sentence would not fit.
+            string shortName = string.IsNullOrEmpty(agentName) ? appName : agentName;
+            if (string.IsNullOrEmpty(shortName)) shortName = "This AI app";
+
+            CfaiBadge badge = new CfaiBadge();
+            badge.SetBounds((CardW - 72) / 2, Pad, 72, 72);
+            badge.Fill = CfaiTheme.AlertSoft;
+            badge.Glyph = CfaiTheme.AlertInk;
+            badge.Ban = true;
+            // The header is also the drag handle: a borderless window has no
+            // title bar, so something has to move it.
+            form.DragBy(badge);
 
             Label head = new Label();
-            head.Text = subject;
-            head.Font = new Font(SystemFonts.MessageBoxFont.FontFamily, 10.5f, FontStyle.Bold);
+            head.Text = shortName + " is blocked";
+            head.Font = CfaiTheme.Ui(15f, FontStyle.Bold);
+            head.ForeColor = CfaiTheme.Ink;
+            head.TextAlign = ContentAlignment.MiddleCenter;
             head.AutoEllipsis = true;
-            head.SetBounds(14, 14, 400, 22);
+            head.SetBounds(Pad, 112, CardW - Pad * 2, 30);
+            form.DragBy(head);
 
             Label body = new Label();
-            body.Text = "Your organization has blocked this on this device. Tell your "
-                      + "administrator why you need it and they can grant temporary access.";
-            body.SetBounds(14, 40, 400, 38);
+            body.Text = "Your organization has disallowed this AI app on this device. "
+                      + "Nothing you type here can be sent.";
+            body.ForeColor = CfaiTheme.Muted;
+            body.Font = CfaiTheme.Ui(10f, FontStyle.Regular);
+            body.TextAlign = ContentAlignment.TopCenter;
+            body.SetBounds(Pad, 148, CardW - Pad * 2, 44);
+            form.DragBy(body);
+
+            CfaiPill pill = new CfaiPill();
+            pill.Text = shortName;
+            pill.Font = CfaiTheme.Ui(9f, FontStyle.Bold);
+            pill.Fill = CfaiTheme.AlertSoft;
+            pill.Ink = CfaiTheme.AlertInk;
+            int pillW;
+            using (Graphics mg = form.CreateGraphics())
+                pillW = Math.Min(TextRenderer.MeasureText(mg, pill.Text, pill.Font).Width + 28, CardW - Pad * 2);
+            pill.SetBounds((CardW - pillW) / 2, 200, pillW, 28);
+
+            Label boxLabel = new Label();
+            // OPTIONAL, and it means it: the server requires only machine_id and
+            // tool_host, so a request with no reason is a valid request. Saying
+            // "optional" while disabling the button until something is typed
+            // would be the dialog lying about its own rule.
+            boxLabel.Text = "WHY DO YOU NEED ACCESS? (OPTIONAL)";
+            boxLabel.Font = CfaiTheme.Ui(8.25f, FontStyle.Bold);
+            boxLabel.ForeColor = CfaiTheme.Muted;
+            boxLabel.SetBounds(Pad, 244, CardW - Pad * 2, 16);
+
+            Panel boxFrame = new Panel();
+            boxFrame.SetBounds(Pad, 264, CardW - Pad * 2, 104);
+            boxFrame.BackColor = CfaiTheme.Line;
+            boxFrame.Padding = new Padding(1);
+
+            Panel boxPad = new Panel();
+            boxPad.Dock = DockStyle.Fill;
+            boxPad.BackColor = CfaiTheme.SurfaceSoft;
+            boxPad.Padding = new Padding(10, 9, 5, 9);
 
             TextBox box = new TextBox();
             box.Multiline = true;
             box.ScrollBars = ScrollBars.Vertical;
             box.MaxLength = ReasonMax;
-            box.SetBounds(14, 86, 400, 96);
+            box.BorderStyle = BorderStyle.None;
+            box.Dock = DockStyle.Fill;
+            box.BackColor = CfaiTheme.SurfaceSoft;
+            box.ForeColor = CfaiTheme.Ink;
+            box.Font = CfaiTheme.Ui(9.75f, FontStyle.Regular);
+
+            // A cue banner (EM_SETCUEBANNER) does not work on a MULTILINE text
+            // box, so the placeholder is a label drawn over the box and hidden
+            // the moment there is real text. It stays visible while focused and
+            // empty, which is what makes it read as guidance rather than as a
+            // value someone typed.
+            Label hintText = new Label();
+            hintText.Text = "e.g. Drafting the customer migration runbook \u2014 no customer data involved.";
+            hintText.Font = CfaiTheme.Ui(9.75f, FontStyle.Regular);
+            hintText.ForeColor = ColorTranslator.FromHtml("#94a3b8");
+            hintText.BackColor = Color.Transparent;
+            hintText.SetBounds(12, 10, boxFrame.Width - 26, 40);
+            // Clicking the placeholder must put the caret where it looks like it
+            // will go -- the label is on top, so the box never sees the click.
+            hintText.Click += delegate(object s, EventArgs e) { try { box.Focus(); } catch { } };
+
+            boxPad.Controls.Add(hintText);
+            boxPad.Controls.Add(box);
+            hintText.BringToFront();
+            boxFrame.Controls.Add(boxPad);
+            box.GotFocus += delegate(object s, EventArgs e) { boxFrame.BackColor = CfaiTheme.Accent; };
+            box.LostFocus += delegate(object s, EventArgs e) { boxFrame.BackColor = CfaiTheme.Line; };
 
             Label count = new Label();
-            count.SetBounds(14, 186, 200, 16);
-            count.ForeColor = SystemColors.GrayText;
+            count.SetBounds(CardW - Pad - 200, 374, 200, 16);
+            count.ForeColor = CfaiTheme.Muted;
+            count.Font = CfaiTheme.Ui(8.25f, FontStyle.Regular);
+            count.TextAlign = ContentAlignment.MiddleRight;
             count.Text = "0 / " + ReasonMax;
 
-            Button submit = new Button();
-            submit.Text = "Request access";
-            submit.SetBounds(258, 206, 156, 28);
-            submit.Enabled = false;
-            submit.DialogResult = DialogResult.OK;
+            int btnGap = 12, submitW = 184, laterW = 128;
+            int btnX = (CardW - (submitW + laterW + btnGap)) / 2;
 
-            Button cancel = new Button();
-            cancel.Text = "Cancel";
-            cancel.SetBounds(170, 206, 80, 28);
-            cancel.DialogResult = DialogResult.Cancel;
+            CfaiButton submit = new CfaiButton();
+            submit.Text = "Request access";
+            submit.Font = CfaiTheme.Ui(10f, FontStyle.Bold);
+            submit.Fill = CfaiTheme.Go;
+            submit.FillHover = CfaiTheme.GoHover;
+            submit.SetBounds(btnX, 404, submitW, 44);
+
+            CfaiButton cancel = new CfaiButton();
+            cancel.Text = "Not now";
+            cancel.Font = CfaiTheme.Ui(10f, FontStyle.Bold);
+            cancel.Fill = CfaiTheme.Alt;
+            cancel.FillHover = CfaiTheme.AltHover;
+            cancel.SetBounds(btnX + submitW + btnGap, 404, laterW, 44);
+
+            Label foot = new Label();
+            foot.Text = "Your administrator decides, and any access they grant expires automatically.";
+            foot.ForeColor = CfaiTheme.Muted;
+            foot.Font = CfaiTheme.Ui(8.5f, FontStyle.Regular);
+            foot.TextAlign = ContentAlignment.TopCenter;
+            foot.SetBounds(Pad, 462, CardW - Pad * 2, 34);
 
             box.TextChanged += delegate(object s, EventArgs e)
             {
                 count.Text = box.Text.Length + " / " + ReasonMax;
-                submit.Enabled = box.Text.Trim().Length > 0;
+                hintText.Visible = box.Text.Length == 0;
             };
             submit.Click += delegate(object s, EventArgs e)
             {
@@ -239,15 +754,82 @@ public static class CfaiRequestDialog
             form.CancelButton = cancel;
             form.Shown += delegate(object s, EventArgs e)
             {
+                // Publish the live handle so a second blocked send raises THIS
+                // window rather than being silently suppressed.
+                try { lock (Open) { Open[key] = form.Handle; } } catch { }
+                ForceOnTop(form.Handle);
+                // Then TAKE the foreground, because form.Activate() cannot from a
+                // process that owns neither the foreground nor the last input
+                // event — see TakeForeground. Without it the reason box gets no
+                // keystrokes and the user's typing lands in the AI composer.
+                TakeForeground(form.Handle);
                 try { form.Activate(); box.Focus(); } catch { }
             };
 
+            form.Controls.Add(badge);
             form.Controls.Add(head);
             form.Controls.Add(body);
-            form.Controls.Add(box);
+            form.Controls.Add(pill);
+            form.Controls.Add(boxLabel);
+            form.Controls.Add(boxFrame);
             form.Controls.Add(count);
+            form.Controls.Add(foot);
             form.Controls.Add(cancel);
             form.Controls.Add(submit);
+
+            // ── The window's own clock ──────────────────────────────────────
+            // Without this a dialog nobody answers stays on screen FOREVER, and
+            // its dedupe key is only released when the form closes — so every
+            // later block for the same host resolves to "suppressed" and the
+            // user can never get a fresh dialog again. notify.js abandons its
+            // side at REQUEST_DIALOG_TIMEOUT_MS; this closes the window on the
+            // same schedule so the two cannot disagree. Matches the tokenize
+            // popup, which has had a self-close from the start.
+            // ── The dismissal guard ─────────────────────────────────────────
+            // This dialog is a MOMENTARY PROMPT about one blocked send, not a
+            // window the user owns. Two ways that moment ends, and both were
+            // reported as bugs when neither was handled:
+            //
+            //   * the window it is about goes away  — "I closed the browser and
+            //     the dialog was still there".
+            //   * the user moves on                 — "if we go to another tab
+            //     the dialog must be disabled". Switching tab, switching window
+            //     and switching app are all the same event from here: THIS
+            //     WINDOW STOPS BEING THE FOREGROUND ONE. Keying on that rather
+            //     than on the tab/host is what makes the rule generic — the
+            //     helper needs to know nothing about browsers or sites, and the
+            //     next blocked send simply opens a fresh dialog.
+            //
+            // The foreground rule ARMS ONLY ONCE WE HAVE HELD THE FOREGROUND. If
+            // TakeForeground lost its race the dialog never becomes foreground,
+            // and an unarmed rule would then close it instantly — turning a
+            // recoverable focus failure into no dialog at all. Until it arms,
+            // the owner check and the timeout below still apply.
+            bool[] wasForeground = new bool[1];
+            System.Windows.Forms.Timer guard = new System.Windows.Forms.Timer();
+            guard.Interval = GuardIntervalMs;
+            guard.Tick += delegate(object s5, EventArgs e5)
+            {
+                try
+                {
+                    if (owner != IntPtr.Zero && !IsWindow(owner)) { guard.Stop(); form.Close(); return; }
+                    IntPtr fg = GetForegroundWindow();
+                    if (fg == form.Handle) { wasForeground[0] = true; return; }
+                    if (wasForeground[0]) { guard.Stop(); form.Close(); }
+                }
+                catch { }
+            };
+            guard.Start();
+
+            System.Windows.Forms.Timer life = new System.Windows.Forms.Timer();
+            life.Interval = TimeoutMs;
+            life.Tick += delegate(object s3, EventArgs e3) { life.Stop(); form.Close(); };
+            life.Start();
+            form.FormClosed += delegate(object s4, FormClosedEventArgs e4)
+            {
+                try { life.Stop(); life.Dispose(); } catch { }
+                try { guard.Stop(); guard.Dispose(); } catch { }
+            };
 
             // The message loop for THIS thread only. The main thread stays in
             // its stdin read the whole time this is up.
@@ -409,6 +991,11 @@ public static class CfaiTokenizeDialog
     // REWRITE_TTL (15s) in enforcer-win.ps1. THE CHOICE VIEW ONLY.
     public const int TimeoutMs = 16000;
 
+    // Card geometry. One place, because the choice view and the edit view share
+    // the same window and must agree about its width and gutter.
+    const int CardW = 480;
+    const int Pad = 28;
+
     // ── The edit view's own clock ────────────────────────────────────────────
     // 16s is a fine budget for reading two buttons and clicking one. It is not a
     // budget for typing a sentence, so the edit view gets its own, and the
@@ -461,17 +1048,22 @@ public static class CfaiTokenizeDialog
     // stable while the composer text is unchanged — so repeated attempts at the
     // same prompt all resolve to the one popup, and a genuinely new prompt (new
     // id) gets a fresh one. Released when the form closes.
-    static readonly Dictionary<string, bool> Open = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+    // Value is the live window handle, as in CfaiRequestDialog: a repeat of the
+    // same blocked send raises the popup that is already up.
+    static readonly Dictionary<string, IntPtr> Open = new Dictionary<string, IntPtr>(StringComparer.OrdinalIgnoreCase);
 
     // Returns false when a popup for this block is already on screen.
     public static bool Show(string requestId, string dedupeKey, string appName, string categories, string preview)
     {
         string key = string.IsNullOrEmpty(dedupeKey) ? requestId : dedupeKey;
+        IntPtr existing = IntPtr.Zero;
+        bool dup = false;
         lock (Open)
         {
-            if (Open.ContainsKey(key)) return false;
-            Open[key] = true;
+            if (Open.TryGetValue(key, out existing)) dup = true;
+            else Open[key] = IntPtr.Zero;
         }
+        if (dup) { CfaiRequestDialog.Resurface(existing); return false; }
         Thread t = new Thread(delegate() { Run(requestId, key, appName, categories, preview); });
         t.SetApartmentState(ApartmentState.STA);
         // Background: a popup left on screen must never keep this process — or
@@ -511,69 +1103,168 @@ public static class CfaiTokenizeDialog
 
             CfaiNoActivateForm form = new CfaiNoActivateForm();
             form.Text = "CloudFuze AI Governance";
-            form.FormBorderStyle = FormBorderStyle.FixedDialog;
+            // BORDERLESS, like the Request Access dialog and for the same reason:
+            // the grey system title bar is most of what made this look dated.
+            // The window is still a real top-level window, so WS_EX_NOACTIVATE,
+            // the topmost style and the no-taskbar rule are all unaffected.
+            form.FormBorderStyle = FormBorderStyle.None;
             form.StartPosition = FormStartPosition.CenterScreen;
             form.MinimizeBox = false;
             form.MaximizeBox = false;
             // NO TASKBAR ENTRY, same standing rule as the Request Access dialog.
             form.ShowInTaskbar = false;
             form.TopMost = true;
-            form.ClientSize = new Size(470, 322);
+            form.BackColor = CfaiTheme.Surface;
+            form.Font = CfaiTheme.Ui(9.75f, FontStyle.Regular);
+            form.ClientSize = new Size(CardW, 500);
+            // Publish the live handle so a repeat of the same blocked send raises
+            // this popup instead of being silently suppressed. CreateParams
+            // already gives this form WS_EX_TOPMOST, so unlike the Request Access
+            // dialog it does not also need ForceOnTop at show time.
+            form.Shown += delegate(object s2, EventArgs e2)
+            {
+                try { lock (Open) { Open[key] = form.Handle; } } catch { }
+            };
+
+            // ── The alert mark ──────────────────────────────────────────────
+            CfaiBadge badge = new CfaiBadge();
+            badge.SetBounds((CardW - 72) / 2, 28, 72, 72);
+            badge.Fill = CfaiTheme.AlertSoft;
+            badge.Glyph = CfaiTheme.Warn;
+            // A warning triangle. A \u escape rather than a literal, because this
+            // .ps1 has no BOM and PowerShell 5.1 would read a literal glyph in the
+            // system ANSI codepage and hand the label mojibake.
+            badge.Mark = "\u26A0";
+            badge.MarkSize = 26f;
 
             Label head = new Label();
-            // The em dash is a \u escape, not a literal: this .ps1 has no BOM, so
-            // PowerShell 5.1 reads it in the system ANSI codepage and a literal
-            // em dash would reach the label as mojibake.
-            head.Text = "Sensitive data detected — " + app;
-            head.Font = new Font(SystemFonts.MessageBoxFont.FontFamily, 10.5f, FontStyle.Bold);
-            head.AutoEllipsis = true;
-            head.SetBounds(14, 12, 442, 22);
+            head.Text = "This prompt can't be sent";
+            head.Font = CfaiTheme.Ui(15f, FontStyle.Bold);
+            head.ForeColor = CfaiTheme.Ink;
+            head.TextAlign = ContentAlignment.MiddleCenter;
+            head.SetBounds(Pad, 116, CardW - Pad * 2, 30);
 
-            Label body = new Label();
-            body.Text = "This message was not sent. It matched:";
-            body.SetBounds(14, 38, 442, 18);
+            // The app name is bold INSIDE the sentence, which a Label cannot do —
+            // hence a borderless read-only RichTextBox. It is not an input: it
+            // cannot be tabbed to, shows no caret and ignores the mouse, so it
+            // behaves exactly like the label it replaces.
+            RichTextBox body = new RichTextBox();
+            body.BorderStyle = BorderStyle.None;
+            body.ReadOnly = true;
+            body.BackColor = CfaiTheme.Surface;
+            body.ForeColor = CfaiTheme.Muted;
+            body.Font = CfaiTheme.Ui(10f, FontStyle.Regular);
+            body.TabStop = false;
+            body.Cursor = Cursors.Default;
+            body.ScrollBars = RichTextBoxScrollBars.None;
+            body.SetBounds(Pad, 152, CardW - Pad * 2, 46);
+            body.SelectionAlignment = HorizontalAlignment.Center;
+            body.AppendText("CloudFuze AI Governance blocked this message in ");
+            body.SelectionFont = CfaiTheme.Ui(10f, FontStyle.Bold);
+            body.SelectionColor = CfaiTheme.Ink;
+            body.AppendText(app);
+            body.SelectionFont = CfaiTheme.Ui(10f, FontStyle.Regular);
+            body.SelectionColor = CfaiTheme.Muted;
+            body.AppendText(" because it contains sensitive data:");
+            body.SelectAll();
+            body.SelectionAlignment = HorizontalAlignment.Center;
+            body.Select(0, 0);
+            // A read-only box still takes focus on click and shows a selection;
+            // neither belongs on what is really a paragraph of text.
+            body.Enter += delegate(object s3, EventArgs e3) { try { form.ActiveControl = null; } catch { } };
 
-            Label chip = new Label();
-            chip.Text = cats;
-            chip.Font = new Font(SystemFonts.MessageBoxFont.FontFamily, 9f, FontStyle.Bold);
-            chip.ForeColor = Color.FromArgb(178, 34, 34);
-            chip.AutoEllipsis = true;
-            chip.SetBounds(14, 58, 442, 18);
+            // ── One pill per detected pattern, centred as a row ─────────────
+            // `cats` is a comma-separated list of pattern NAMES (never content),
+            // so splitting it is safe and gives the design's chips.
+            List<CfaiPill> pills = new List<CfaiPill>();
+            string[] catNames = (cats ?? "").Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            int pillY = 206, pillH = 26, gap = 8, totalW = 0;
+            using (Graphics mg = form.CreateGraphics())
+            {
+                foreach (string raw in catNames)
+                {
+                    string name = raw.Trim();
+                    if (name.Length == 0) continue;
+                    CfaiPill pill = new CfaiPill();
+                    pill.Text = name;
+                    pill.Font = CfaiTheme.Ui(9f, FontStyle.Bold);
+                    pill.Fill = CfaiTheme.AlertSoft;
+                    pill.Ink = CfaiTheme.AlertInk;
+                    Size sz = TextRenderer.MeasureText(mg, name, pill.Font);
+                    pill.Height = pillH;
+                    pill.Width = Math.Min(sz.Width + 26, CardW - Pad * 2);
+                    pills.Add(pill);
+                    totalW += pill.Width + gap;
+                }
+            }
+            if (totalW > 0) totalW -= gap;
+            int pillX = (CardW - totalW) / 2;
+            foreach (CfaiPill pill in pills)
+            {
+                pill.SetBounds(pillX, pillY, pill.Width, pillH);
+                pillX += pill.Width + gap;
+            }
+
+            // ── What actually gets sent ─────────────────────────────────────
+            CfaiRoundPanel previewBox = new CfaiRoundPanel();
+            previewBox.SetBounds(Pad, 244, CardW - Pad * 2, 80);
+            previewBox.BackColor = CfaiTheme.SafeSoft;
+            previewBox.Line = CfaiTheme.SafeLine;
 
             Label previewLabel = new Label();
             // Same words the browser extension's own modal uses, so the desktop
             // and browser experiences read as one product.
-            previewLabel.Text = "This is what gets sent";
-            previewLabel.ForeColor = SystemColors.GrayText;
-            previewLabel.SetBounds(14, 82, 442, 16);
+            previewLabel.Text = "THIS IS WHAT GETS SENT";
+            previewLabel.Font = CfaiTheme.Ui(7.75f, FontStyle.Bold);
+            previewLabel.ForeColor = CfaiTheme.SafeInk;
+            previewLabel.BackColor = Color.Transparent;
+            previewLabel.SetBounds(14, 10, previewBox.Width - 28, 14);
 
             Label previewText = new Label();
             previewText.Text = shownPreview;
-            previewText.BorderStyle = BorderStyle.FixedSingle;
-            previewText.BackColor = Color.FromArgb(248, 248, 248);
-            previewText.Padding = new Padding(6);
-            previewText.SetBounds(14, 100, 442, 76);
+            previewText.Font = CfaiTheme.Mono(9.5f, FontStyle.Regular);
+            previewText.ForeColor = CfaiTheme.Ink;
+            previewText.BackColor = Color.Transparent;
+            previewText.UseMnemonic = false;
+            previewText.SetBounds(14, 28, previewBox.Width - 28, 44);
+            previewBox.Controls.Add(previewLabel);
+            previewBox.Controls.Add(previewText);
 
             Label hint = new Label();
-            hint.Text = "Tokenize & Send replaces each detected value with a fixed label such as "
-                      + "[SSN] before sending. The original values are never sent, and cannot be "
+            hint.Text = "Tokenize & Send replaces each detected value with a fixed label "
+                      + "before sending. The original values are never sent, and cannot be "
                       + "recovered from the label.";
             // '&' in "Tokenize & Send" is literal text here, not an access key.
             hint.UseMnemonic = false;
-            hint.SetBounds(14, 184, 442, 62);
+            hint.ForeColor = CfaiTheme.Muted;
+            hint.Font = CfaiTheme.Ui(9.5f, FontStyle.Regular);
+            hint.TextAlign = ContentAlignment.TopCenter;
+            hint.SetBounds(Pad, 336, CardW - Pad * 2, 56);
+
+            // ── The two actions, centred as a pair ──────────────────────────
+            int btnW = 176, btnH = 44, btnGap = 12;
+            int btnX = (CardW - (btnW * 2 + btnGap)) / 2;
+
+            CfaiButton tokenize = new CfaiButton();
+            tokenize.Text = "Tokenize & Send";
+            tokenize.Font = CfaiTheme.Ui(10f, FontStyle.Bold);
+            tokenize.Fill = CfaiTheme.Go;
+            tokenize.FillHover = CfaiTheme.GoHover;
+            tokenize.SetBounds(btnX, 400, btnW, btnH);
+
+            CfaiButton edit = new CfaiButton();
+            edit.Text = "Edit manually";
+            edit.Font = CfaiTheme.Ui(10f, FontStyle.Bold);
+            edit.Fill = CfaiTheme.Alt;
+            edit.FillHover = CfaiTheme.AltHover;
+            edit.SetBounds(btnX + btnW + btnGap, 400, btnW, btnH);
 
             Label foot = new Label();
             foot.Text = "This event was reported to the security team.";
-            foot.ForeColor = SystemColors.GrayText;
-            foot.SetBounds(14, 250, 442, 16);
-
-            Button tokenize = new Button();
-            tokenize.Text = "Tokenize && Send";
-            tokenize.SetBounds(316, 274, 140, 30);
-
-            Button edit = new Button();
-            edit.Text = "Edit manually";
-            edit.SetBounds(206, 274, 104, 30);
+            foot.ForeColor = CfaiTheme.Muted;
+            foot.Font = CfaiTheme.Ui(8.5f, FontStyle.Regular);
+            foot.TextAlign = ContentAlignment.MiddleCenter;
+            foot.SetBounds(Pad, 456, CardW - Pad * 2, 18);
 
             // ── The edit view's controls ────────────────────────────────────
             // Built now and hidden, rather than created on the click: the swap
@@ -678,25 +1369,64 @@ public static class CfaiTokenizeDialog
                 form.Close();
             };
 
-            // "Edit manually" no longer just closes. It swaps this same window
-            // over to the edit view — the user was otherwise sent back to the app
-            // to retype a whole message from memory, which is what live testing
-            // found people actually doing.
+            // "EDIT IN THE APP" — closes this window and hands the user back to
+            // the AI tool's OWN composer, where their text is still sitting
+            // untouched (the send was swallowed; nothing was cleared).
+            //
+            // CHANGED 2026-09-09 at the user's request. This button used to swap
+            // the window over to an in-dialog edit box, which was itself added
+            // because live testing found people going back to the app and
+            // retyping a whole message from memory. The complaint with the
+            // in-dialog box is that it edits a COPY: you fix the text in a
+            // CloudFuze window rather than in the composer you were already
+            // typing in, and the thing that then gets sent is typed back in by
+            // us. Editing in place is the more natural gesture and keeps the
+            // user in one context.
+            //
+            // WHAT MAKES THIS SAFE, and it is not the dialog: the block is NOT
+            // lifted by closing this window. `action` stays "edit", so nothing
+            // downstream acts, the composer keeps its text, and the enforcer
+            // keeps scanning it every 150ms. So the outcome is decided by what
+            // the user leaves in the box:
+            //   * still sensitive -> the next send is swallowed again
+            //   * edited clean    -> the UIA rescan drops _blockUia AND releases
+            //                        the 30s cooldown (see UpdateUia in
+            //                        enforcer-win.ps1), so the send goes through
+            // That cooldown release had to be added for this to work at all: it
+            // existed only on the typed-buffer rescan, which is empty after a
+            // paste and discarded on focus-out, so on a web surface "delete the
+            // secret and press Enter" was swallowed for up to 30 seconds.
+            //
+            // The in-dialog edit view's controls are still built above and are
+            // now unreachable. Left in place deliberately rather than deleted:
+            // the `edit_send` path they drive is live, tested and reported as
+            // `enforcement_redact` with the user's own text, and re-pointing a
+            // button at it is a one-line change if this decision is revisited.
             edit.Click += delegate(object s, EventArgs e)
             {
-                // FIRST, before anything visual and before this window takes the
-                // foreground: tell the caller the edit box is opening, so the
-                // enforcer's pin can be held. Correlation id only — no content.
-                CfaiRequestDialog.Write("{\"kind\":\"tokenize_dialog_editing\""
-                    + ",\"request_id\":\"" + CfaiRequestDialog.Esc(requestId) + "\""
-                    + "}");
+                // Same outcome as Cancel: stop the expiry and close, leaving
+                // `action` as "edit". No `tokenize_dialog_editing` line is
+                // written — that told the enforcer to HOLD its pin for a text
+                // box that was about to open, and no box opens now. Holding it
+                // would keep a block pinned for the hold's full window while the
+                // user edits in the app, which is exactly what we do not want:
+                // the pin is what a rewrite consumes, and there is no rewrite
+                // on this path.
+                expiry.Stop();
+                form.Close();
+            };
 
+            // Unreachable while "Edit in the app" closes instead of swapping.
+            // See the note above.
+            Action swapToEditView = delegate()
+            {
                 expiry.Stop();
 
+                badge.Visible = false;
+                head.Visible = false;
                 body.Visible = false;
-                chip.Visible = false;
-                previewLabel.Visible = false;
-                previewText.Visible = false;
+                foreach (CfaiPill p in pills) p.Visible = false;
+                previewBox.Visible = false;
                 hint.Visible = false;
                 foot.Visible = false;
                 tokenize.Visible = false;
@@ -718,6 +1448,8 @@ public static class CfaiTokenizeDialog
                 expiry.Start();
                 activate.Start();
             };
+            // Referenced so the compiler does not warn it is unused.
+            if (swapToEditView == null) { }
 
             editBox.TextChanged += delegate(object s, EventArgs e)
             {
@@ -748,11 +1480,11 @@ public static class CfaiTokenizeDialog
             // the block stands and nothing downstream acts on it.
             cancel.Click += delegate(object s, EventArgs e) { expiry.Stop(); form.Close(); };
 
+            form.Controls.Add(badge);
             form.Controls.Add(head);
             form.Controls.Add(body);
-            form.Controls.Add(chip);
-            form.Controls.Add(previewLabel);
-            form.Controls.Add(previewText);
+            foreach (CfaiPill p in pills) form.Controls.Add(p);
+            form.Controls.Add(previewBox);
             form.Controls.Add(hint);
             form.Controls.Add(foot);
             form.Controls.Add(edit);

@@ -304,6 +304,14 @@ LoadGoverned '[]'
 $OUTCOME_T = $T.GetNestedType('AgentReadOutcome', $FLAGS)
 $OUT_UNREADABLE = [Enum]::Parse($OUTCOME_T, 'Unreadable')
 $OUT_NAMED = [Enum]::Parse($OUTCOME_T, 'Named')
+# The web arm of ApplyForegroundTick. None of these routes involve a browser,
+# so every call below passes "no browser in the foreground". Reflection does
+# NOT apply C# default parameter values, so even the defaulted trailing two
+# have to be supplied or Invoke throws a parameter-count mismatch.
+$WEBOUT_T        = $T.GetNestedType('WebReadOutcome', $FLAGS)
+$WEB_NOT_SURFACE = [Enum]::Parse($WEBOUT_T, 'NotSurface')
+$WEB_ID_NOTCOMP  = [int](GetF 'WEB_ID_NOT_COMPOSER')
+$NO_WEB          = @($WEB_NOT_SURFACE, '', $false, '', $false, $WEB_ID_NOTCOMP, '')
 
 function ResetState() {
   foreach ($b in @('_fgIsAi','_fgIsPanel','_fgPanelEnforce','_fgIsBlocked','_blockedByElement','_blockTyped','_blockUia','_blockPaste',
@@ -342,7 +350,7 @@ function CaptureBlock() {
   SetF '_pendingWhyNot' ''; SetF '_pendingFrozen' $false
   $orig = [Console]::Out; $sw = New-Object System.IO.StringWriter
   [Console]::SetOut($sw)
-  try { Call 'EmitBlock' @([string](GetF '_app'), 'ssn', 'send') | Out-Null } finally { [Console]::SetOut($orig) }
+  try { Call 'EmitBlock' @([string](GetF '_app'), 'ssn', 'send', [bool](GetF '_fgIsBlocked')) | Out-Null } finally { [Console]::SetOut($orig) }
   SetF '_pendingRewritable' $false; SetF '_pendingBlockId' ''
   return $sw.ToString().Trim()
 }
@@ -379,7 +387,7 @@ function Tick([string]$scenario, [string]$proc, [uint32]$fgPid, $focus, [string]
     if ($Settle) { WaitSearch; Call 'ComputeTickTeamsEvidence' @($HWND, [bool]($hostAppArmed -or $hostEvidenceArmed), $hit, $rid, $aid) | Out-Null }
   }
   $panelRid = if ($null -ne $hit) { if ($rid) { $rid } else { '42.1.2.3' } } else { '' }
-  Call 'ApplyForegroundTick' @($fgPid, $proc, $isIde, $hit, $panelRid, $readable, $outcome, $agentName) | Out-Null
+  Call 'ApplyForegroundTick' (@($fgPid, $proc, $isIde, $hit, $panelRid, $readable, $outcome, $agentName) + $NO_WEB) | Out-Null
   Call 'CheckFgBlocked' | Out-Null
 
   $matched = if ($null -ne $hit) { [string]$hit.GetType().GetField('Id').GetValue($hit) } else { '' }
@@ -729,7 +737,7 @@ Call 'UpdateHeldRect' | Out-Null
 $heldAfterBlockedTick = [long](GetF '_heldUntilTicks') -ne 0
 $DIALOG_PID = [uint32]77001
 function DialogTick() {
-  Call 'ApplyForegroundTick' @($DIALOG_PID, 'CloudFuze AI Governance', $false, $null, '', $false, $OUT_UNREADABLE, '') | Out-Null
+  Call 'ApplyForegroundTick' (@($DIALOG_PID, 'CloudFuze AI Governance', $false, $null, '', $false, $OUT_UNREADABLE, '') + $NO_WEB) | Out-Null
   Call 'CheckFgBlocked' | Out-Null
   Call 'UpdateSendRect' | Out-Null
   Call 'UpdateHeldRect' | Out-Null
@@ -812,7 +820,7 @@ function WordTick([string]$scenario, [bool]$found, [string]$heading, [string]$pr
     $params = [object[]]@((Call 'MatchAgentSurface' @($proc)), $rid, $null)
     $outcome = $M_PANE.Invoke($null, $params); $name = [string]$params[2]
   }
-  Call 'ApplyForegroundTick' @([uint32]$WORD_PID, $proc, $true, $hit, $rid, $true, $outcome, $name) | Out-Null
+  Call 'ApplyForegroundTick' (@([uint32]$WORD_PID, $proc, $true, $hit, $rid, $true, $outcome, $name) + $NO_WEB) | Out-Null
   Call 'CheckFgBlocked' | Out-Null
   $enter = Capture { [FakeInput]::Key(0x0D, $false, $false, $false) }
   SetF '_lastBlockFiredTicks' ([long]0)

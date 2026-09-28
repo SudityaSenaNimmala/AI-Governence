@@ -25,9 +25,7 @@
       "apiDomains": [
         "api.anthropic.com"
       ],
-      "webDomains": [
-        "claude.ai"
-      ],
+      "webDomains": [],
       "processes": []
     },
     {
@@ -40,10 +38,7 @@
       "apiDomains": [
         "api.openai.com"
       ],
-      "webDomains": [
-        "chatgpt.com",
-        "chat.openai.com"
-      ],
+      "webDomains": [],
       "processes": [],
       "pinned": true,
       "governanceNote": "ChatGPT Desktop pins TLS certs; web/desktop body capture relies on browser extension + asar hook, not the proxy."
@@ -58,10 +53,7 @@
       "apiDomains": [
         "generativelanguage.googleapis.com"
       ],
-      "webDomains": [
-        "gemini.google.com",
-        "aistudio.google.com"
-      ],
+      "webDomains": [],
       "processes": []
     },
     {
@@ -350,6 +342,41 @@
         "llama-cpp"
       ],
       "governanceNote": "Local inference server; captured via localhost intercept. Standalone CLI binary covered by Tier 3 audit-watch (file open) + GPU watch."
+    },
+    {
+      "id": "claude-web",
+      "name": "Claude",
+      "vendor": "Anthropic",
+      "category": "chat-frontend",
+      "sandbox": "remote",
+      "webDomains": [
+        "claude.ai"
+      ],
+      "processes": []
+    },
+    {
+      "id": "chatgpt-web",
+      "name": "ChatGPT",
+      "vendor": "OpenAI",
+      "category": "chat-frontend",
+      "sandbox": "remote",
+      "webDomains": [
+        "chatgpt.com",
+        "chat.openai.com"
+      ],
+      "processes": []
+    },
+    {
+      "id": "gemini-web",
+      "name": "Gemini",
+      "vendor": "Google",
+      "category": "chat-frontend",
+      "sandbox": "remote",
+      "webDomains": [
+        "gemini.google.com",
+        "aistudio.google.com"
+      ],
+      "processes": []
     }
   ]
 }

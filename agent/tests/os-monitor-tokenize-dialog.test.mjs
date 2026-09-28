@@ -524,10 +524,16 @@ test('toast-helper.ps1: the tokenize popup\'s CHOICE view never takes the foregr
   const fn = src.slice(src.indexOf('public static class CfaiTokenizeDialog'));
   assert.match(fn, /CfaiNoActivateForm form = new CfaiNoActivateForm\(\);/);
   // The Request Access dialog DOES activate (its reason box needs typing), so
-  // the two must not be unified — assert it still builds a plain Form.
-  const request = src.slice(src.indexOf('public static class CfaiRequestDialog'), src.indexOf('public class CfaiNoActivateForm'));
-  assert.match(request, /Form form = new Form\(\);/);
+  // the two must not be unified. It now has a Form subclass of its own
+  // (CfaiTopForm) because Form.TopMost alone lost the race from a background STA
+  // thread and left the dialog behind the browser — but that subclass takes
+  // WS_EX_TOPMOST and WS_EX_TOOLWINDOW ONLY, never WS_EX_NOACTIVATE, which is
+  // the property that separates the two.
+  const request = src.slice(src.indexOf('public class CfaiTopForm'), src.indexOf('public class CfaiNoActivateForm'));
+  assert.match(request, /CfaiTopForm form = new CfaiTopForm\(\);/);
   assert.match(request, /form\.Activate\(\); box\.Focus\(\);/);
+  const topForm = src.slice(src.indexOf('public class CfaiTopForm'), src.indexOf('public static class CfaiRequestDialog'));
+  assert.equal(/NOACTIVATE/.test(codeOnly(topForm)), false, 'the Request Access dialog must still be able to activate');
 
   // …and the CHOICE view still grabs nothing: not while it is being built, and
   // not from the button the user is expected to click. A stray keypress from
@@ -541,9 +547,16 @@ test('toast-helper.ps1: the tokenize popup\'s CHOICE view never takes the foregr
   assert.equal(/Activate\(\)|\.Focus\(\)|AllowActivation\(\)|SetForegroundWindow/.test(onTokenize), false,
     'Tokenize & Send must close, not focus — the rewrite starts the moment it does');
   // Nor is the form ever shown activated: Application.Run on a
-  // CfaiNoActivateForm is the whole mechanism, and there is no Show()/Shown
-  // handler doing what the Request Access dialog's does.
-  assert.equal(/form\.Shown \+=/.test(codeOnly(fn)), false);
+  // CfaiNoActivateForm is the whole mechanism. There IS one Shown handler — it
+  // publishes the live HWND so a repeat of the same blocked send raises this
+  // popup instead of being answered with silence — and it must do THAT AND
+  // NOTHING ELSE. Unlike the Request Access dialog's, it never activates or
+  // focuses, which is the property this whole test exists to pin.
+  const shown = codeOnly(fn).match(/form\.Shown \+= delegate[\s\S]*?\};/g) || [];
+  assert.equal(shown.length, 1, 'exactly one Shown handler on the tokenize popup');
+  assert.match(shown[0], /lock \(Open\) \{ Open\[key\] = form\.Handle; \}/);
+  assert.equal(/Activate\(\)|\.Focus\(\)|AllowActivation\(\)|SetForegroundWindow|ForceOnTop/.test(shown[0]), false,
+    'the tokenize popup must not grab anything when it appears');
 });
 
 test('toast-helper.ps1: ONLY the edit view takes focus, and it hands it back before anything is typed', async () => {
@@ -595,8 +608,12 @@ test('toast-helper.ps1: the tokenize popup is ephemeral — no taskbar entry, on
   // The standing rule: nothing this process shows may look like a running app.
   assert.match(fn, /form\.ShowInTaskbar = false;/);
   assert.equal(/NotifyIcon|ContextMenuStrip|TrayIcon/.test(fn), false);
-  // Concurrency guard, released when the form closes.
-  assert.match(fn, /if \(Open\.ContainsKey\(key\)\) return false;/);
+  // Concurrency guard, released when the form closes. The lookup carries the
+  // live HWND out so a repeat of the same blocked send raises the popup that is
+  // already up instead of being answered with silence — the guard itself is
+  // unchanged.
+  assert.match(fn, /if \(Open\.TryGetValue\(key, out existing\)\) dup = true;/);
+  assert.match(fn, /if \(dup\) \{ CfaiRequestDialog\.Resurface\(existing\); return false; \}/);
   assert.match(fn, /lock \(Open\) \{ Open\.Remove\(key\); \}/);
   assert.match(src, /"action":"suppressed"/);
   // Self-closes at 16s, derived from the Electron popup's own 16s, itself
@@ -621,7 +638,12 @@ test('toast-helper.ps1: the buttons produce exactly three actions, and "edit" is
   assert.match(fn, /string action = "edit";/);
   assert.match(fn, /action = "tokenize";/);
   assert.match(fn, /action = "edit_send";/);
-  assert.match(fn, /tokenize\.Text = "Tokenize && Send";/);
+  assert.match(fn, /tokenize\.Text = "Tokenize & Send";/);
+  assert.match(src, /TextFormatFlags\.NoPrefix/);
+  // RELABELLED 2026-09-09: the button closes the window and hands the user back
+  // to the AI tool's own composer instead of swapping to an in-dialog edit box,
+  // so the label names where the editing happens. The `edit` ACTION is
+  // unchanged and is still the safe default.
   assert.match(fn, /edit\.Text = "Edit manually";/);
   assert.match(fn, /send\.Text = "Send";/);
   assert.match(fn, /cancel\.Text = "Cancel";/);
@@ -652,9 +674,17 @@ test('toast-helper.ps1: the edit view is the SAME window, swapped in place', asy
 
   // The swap is a Visible flip, both ways, over the controls of each view.
   const click = fn.slice(fn.indexOf('edit.Click += delegate'), fn.indexOf('editBox.TextChanged'));
-  for (const hidden of ['body', 'chip', 'previewLabel', 'previewText', 'hint', 'foot', 'tokenize', 'edit']) {
+  for (const hidden of ['badge', 'head', 'body', 'previewBox', 'hint', 'foot', 'tokenize', 'edit']) {
     assert.match(click, new RegExp(`${hidden}\\.Visible = false;`), `${hidden} must be hidden`);
   }
+  // The category chips are a LIST now — one pill per detected pattern — so
+  // they are hidden by iteration rather than by name, but they must still go.
+  assert.match(click, /foreach \(CfaiPill p in pills\) p\.Visible = false;/,
+    'every category pill must be hidden with the rest of the choice view');
+  // previewLabel and previewText are CHILDREN of previewBox now, so hiding the
+  // box hides them; asserting on them by name would pass for the wrong reason.
+  assert.match(fn, /previewBox\.Controls\.Add\(previewLabel\);/);
+  assert.match(fn, /previewBox\.Controls\.Add\(previewText\);/);
   for (const shown of ['editLabel', 'editHint', 'editBox', 'editCount', 'send', 'cancel']) {
     assert.match(click, new RegExp(`${shown}\\.Visible = true;`), `${shown} must be shown`);
   }
@@ -732,12 +762,13 @@ test('toast-helper.ps1: the popup mirrors the browser extension\'s wording', asy
   // browser modal's copy is the source of truth (browser-extension/content).
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'toast-helper.ps1'), 'utf8');
   const fn = src.slice(src.indexOf('public static class CfaiTokenizeDialog'));
-  assert.match(fn, /"This is what gets sent"/);
+  assert.match(fn, /"THIS IS WHAT GETS SENT"/);
   assert.match(fn, /The original values are never sent, and cannot be /);
   assert.match(fn, /recovered from the label\./);
   // The matched category is SHOWN, and comes from the caller — this type must
   // not re-derive it (it has no patterns and no original text to derive from).
-  assert.match(fn, /chip\.Text = cats;/);
+  assert.match(fn, /string\[\] catNames = \(cats \?\? ""\)\.Split/);
+  assert.match(fn, /pill\.Text = name;/);
   assert.equal(/Regex|new Regex/.test(fn), false, 'the popup must not scan anything itself');
   // '&' in the hint is literal text, not a WinForms access key.
   assert.match(fn, /hint\.UseMnemonic = false;/);
@@ -768,12 +799,32 @@ test('toast-helper.ps1: the result line carries the choice, and text on exactly 
 test('toast-helper.ps1: the editing line is a correlation id and nothing else', async () => {
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'toast-helper.ps1'), 'utf8');
   const fn = src.slice(src.indexOf('public static class CfaiTokenizeDialog'));
+  // NO LONGER EMITTED as of 2026-09-09. "Edit in the app" closes the window and
+  // returns the user to the AI tool's own composer, so no in-dialog edit box
+  // opens and there is nothing to hold the enforcer's rewrite pin for. Holding
+  // it would keep a block pinned for the hold's full window while the user
+  // edits in the app, and no rewrite consumes it on that path.
+  //
+  // The assertion is kept as a CONDITIONAL rather than deleted: the protocol and
+  // its Node-side handler both still exist for the (currently unreachable)
+  // in-dialog edit view, so if a button is ever re-pointed at it the PII guard
+  // must still be in force. Absent is fine; present-with-extra-fields is not.
   const from = fn.indexOf('CfaiRequestDialog.Write("{\\"kind\\":\\"tokenize_dialog_editing');
-  assert.ok(from >= 0, 'expected the editing-line write');
-  const write = fn.slice(from, fn.indexOf('+ "}");', from));
-  const keys = [...write.matchAll(/\\"([a-z_]+)\\":/g)].map((m) => m[1]).sort();
-  assert.deepEqual(keys, ['kind', 'request_id'],
-    'the editing line gained a field — every addition must be re-reviewed for PII');
+  if (from >= 0) {
+    const write = fn.slice(from, fn.indexOf('+ "}");', from));
+    const keys = [...write.matchAll(/\\"([a-z_]+)\\":/g)].map((m) => m[1]).sort();
+    assert.deepEqual(keys, ['kind', 'request_id'],
+      'the editing line gained a field — every addition must be re-reviewed for PII');
+  }
+  // And while it is unreachable, the button must genuinely just close — no pin
+  // hold, no swap. This is what makes "edit in the composer" safe: the block is
+  // not lifted, so the next send is re-scanned.
+  const editHandler = fn.slice(fn.indexOf('edit.Click +='));
+  const editBody = editHandler.slice(0, editHandler.indexOf('};') + 2).replace(/\s+/g, ' ');
+  assert.match(editBody, /expiry\.Stop\(\); form\.Close\(\);/,
+    '"Edit in the app" must close the dialog, not open an in-dialog editor');
+  assert.equal(/Visible = true/.test(editBody), false,
+    'the edit button must not reveal the in-dialog edit view');
   // Documented in the protocol header alongside the others.
   assert.match(src, /#   \{"kind":"tokenize_dialog_editing","request_id":"…"\}/);
 });

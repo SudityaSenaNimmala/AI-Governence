@@ -157,6 +157,27 @@ $agentSurfacesJson = if ($env:CFAI_AGENT_SURFACES) { $env:CFAI_AGENT_SURFACES } 
 # cadence — see UpdateEgressPolicy.
 $egressSurfacesJson = if ($env:CFAI_EGRESS_SURFACES) { $env:CFAI_EGRESS_SURFACES } else { '' }
 
+# Browser surfaces. Two payloads, the same pass-through-unparsed treatment the
+# three above get (deserialized on the C# side with JavaScriptSerializer), and
+# the same reason: re-flattening a nested shape by hand here would just move the
+# parsing problem.
+#
+#   CFAI_BROWSER_PROCESSES  - one literal process name per browser, comma
+#                             separated. These go into their OWN _browserProcs
+#                             set on the C# side and NEVER into _aiProcs: a
+#                             browser in the AI-process set would make the whole
+#                             browser an AI surface, and every Enter in every tab
+#                             a candidate for swallowing.
+#   CFAI_WEB_SURFACES       - the governed hosts, each carrying its own
+#                             enforce/verified pair. Every entry ships false and
+#                             false, so this payload arms nothing.
+#
+# EMPTY (either env var unset) leaves every browser completely ungoverned, which
+# is the right default for a by-hand debugging run of this script and is the
+# feature switch for the whole browser path.
+$browserProcs    = if ($env:CFAI_BROWSER_PROCESSES) { $env:CFAI_BROWSER_PROCESSES } else { '' }
+$webSurfacesJson = if ($env:CFAI_WEB_SURFACES)      { $env:CFAI_WEB_SURFACES }      else { '' }
+
 $source = @'
 using System;
 using System.Diagnostics;
@@ -312,6 +333,20 @@ public static class CfaiEnforcer
     struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam; public IntPtr lParam; public uint time; public int x; public int y; }
     [DllImport("user32.dll")]
     static extern int GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+    // -- The hook watchdog's three imports -----------------------------------
+    // SetTimer with a NULL hWnd posts WM_TIMER to THIS thread's queue, which is
+    // the only way to get a periodic tick out of a blocking GetMessage pump
+    // without giving this process a window. The check has to run on the hook
+    // thread, because that is the thread a low-level hook must be installed on.
+    const uint WM_TIMER = 0x0113;
+    [DllImport("user32.dll")]
+    static extern IntPtr SetTimer(IntPtr hWnd, IntPtr nIDEvent, uint uElapse, IntPtr lpTimerFunc);
+    [DllImport("kernel32.dll")]
+    static extern uint GetTickCount();
+    [StructLayout(LayoutKind.Sequential)]
+    struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+    [DllImport("user32.dll")]
+    static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
     [DllImport("user32.dll")]
     static extern bool SetProcessDPIAware();
 
@@ -368,6 +403,16 @@ public static class CfaiEnforcer
     // Alt+S is a mail client's ribbon Send accelerator — see MatchesEgressChord.
     // Read by that function and by nothing else; no existing decision consults it.
     const int VK_S = 0x53;
+    // Browser NAVIGATION chords only (see the hook's browser nav stamp). None
+    // of these is ever swallowed and none is ever recorded as anything but a
+    // timestamp -- they exist so a tab switch or a page change invalidates the
+    // cached URL and drops the typed buffer.
+    const int VK_LEFT = 0x25;
+    const int VK_RIGHT = 0x27;
+    const int VK_1 = 0x31;
+    const int VK_9 = 0x39;
+    const int VK_W = 0x57;
+    const int VK_F5 = 0x74;
     const int VK_T = 0x54;
     const int VK_V = 0x56;
     const int VK_F1 = 0x70;
@@ -688,6 +733,12 @@ public static class CfaiEnforcer
     static string _blockedPlatform = "";
     static string _blockedAgentName = "";
     static string _blockedAgentId = "";
+    // WHICH BROWSER HOST the current block was armed for -- the CATALOG host, set
+    // only by CheckFgBlocked's web arm and cleared by ClearFgBlocked. Emitted as
+    // `browser_host` so the Request Access dialog asks for an exception against
+    // claude.ai rather than against the desktop app's host. See BrowserHostField
+    // for the rule about what may and may not go in that field.
+    static string _blockedBrowserHost = "";
     static string _blockedAgentFile = "";
     static long _lastBlockedCheck = 0;
     static readonly long BLOCKED_CHECK_INTERVAL = TimeSpan.FromSeconds(10).Ticks;
@@ -1126,6 +1177,15 @@ public static class CfaiEnforcer
     static long _lastBlockFiredTicks = 0;
     static string _lastBlockPatterns = "";
     static readonly long BLOCK_COOLDOWN = TimeSpan.FromSeconds(30).Ticks;
+    // WHICH SURFACE the cooldown belongs to. Written beside
+    // _lastBlockFiredTicks and read beside it, because a 30-second window with
+    // no identity is a 30-second block on everything the user can reach.
+    //
+    // Observed live 2026-09-21: a block on the agent "IT Help Desk Agent"
+    // killed Enter in "stone Conversation Agent" twelve seconds later. The
+    // agent latch had correctly released -- the swallow came from the cooldown
+    // alone, which is why the block reported no reason at all.
+    static volatile string _lastBlockSurfaceKey = "";
 
     // Panic hotkey (Ctrl+Alt+Shift+F12): disarms every block decision for 10
     // minutes, then blocking resumes on its own with no user action. This is
@@ -1547,7 +1607,7 @@ public static class CfaiEnforcer
     static volatile bool _evidenceDlpOn =
         string.Equals(Environment.GetEnvironmentVariable("CFAI_EVIDENCE_DLP"), "true", StringComparison.OrdinalIgnoreCase);
 
-    public static void Start(string[] aiProcs, string[] patNames, string[] patSources, string[] patSevs, string[] patLabels, bool[] patIgnoreCase, string heartbeatFile, bool modelRouterEnabled, string modelRouterConfigJson, string ideProcsJson, string aiPanelsJson, string agentSurfacesJson, string egressSurfacesJson)
+    public static void Start(string[] aiProcs, string[] patNames, string[] patSources, string[] patSevs, string[] patLabels, bool[] patIgnoreCase, string heartbeatFile, bool modelRouterEnabled, string modelRouterConfigJson, string ideProcsJson, string aiPanelsJson, string agentSurfacesJson, string egressSurfacesJson, string[] browserProcs, string webSurfacesJson)
     {
         try { SetProcessDPIAware(); } catch { }   // align UIA rect with hook screen coords
         _startTicks = DateTime.UtcNow.Ticks;
@@ -1635,6 +1695,22 @@ public static class CfaiEnforcer
         {
             try { LoadEgressSurfaces(egressSurfacesJson); }
             catch (Exception ex) { Emit("error", "", "", "egress_surfaces_load_failed", -1, -1, ex.GetType().Name); }
+        }
+        // Browser processes + web surfaces. FAIL OPEN, which for a browser is
+        // the only defensible direction: a load failure leaves _browserProcs
+        // and/or _webSurfaces empty, _anyWebSurfaceEnforcing false, and every
+        // browser completely ungoverned -- no capture, no read, no block. The
+        // opposite direction would be "a malformed env var started swallowing
+        // Enter in the user's browser", which is the failure mode this whole
+        // section is written to make impossible. The two are loaded
+        // independently so a bad surface payload cannot also un-classify the
+        // browser processes (and vice versa), but neither can arm anything on
+        // its own -- see UpdateForeground's browserArmed gate, which needs both.
+        LoadBrowserProcesses(browserProcs);
+        if (!string.IsNullOrEmpty(webSurfacesJson))
+        {
+            try { LoadWebSurfaces(webSurfacesJson); }
+            catch (Exception ex) { Emit("error", "", "", "web_surfaces_load_failed", -1, -1, ex.GetType().Name); }
         }
         // The poll thread MUST be STA: UI Automation's FocusedElement read
         // returns null from an MTA thread for Chromium/Electron apps (Claude,
@@ -2849,6 +2925,56 @@ public static class CfaiEnforcer
         return false;
     }
 
+    // ---- THE ONE WINDOW-TITLE READ IN THIS FILE ---------------------------
+    //
+    // Factored out of ReadFocusedAgentName so that it STAYS the only place a
+    // window title is read, now that there are TWO consumers. That property --
+    // one reader, and the title never leaves it -- is the entire safety argument
+    // for reading a title at all, and agent/tests/os-monitor-safety.test.mjs
+    // asserts it by counting GetWindowText / GetWindowTextLength call sites.
+    // Two inline reads would have been two places to get it wrong.
+    //
+    // A WINDOW TITLE IS PII. A Teams title carries a colleague's display name,
+    // the tenant and the signed-in user's email address. A BROWSER title carries
+    // the page's own name -- a conversation name on claude.ai, a subject line on
+    // Gmail. So the rule for both callers is identical and absolute: compare it,
+    // or hash it, and never let it out.
+    //
+    // The two callers, and what each may do with the result:
+    //   ReadFocusedAgentName (window_title mode) -- parses it against the
+    //     AGENT_SURFACES catalog to learn which conversation is open, behind that
+    //     surface's own privacy gate, and drops it.
+    //   UpdateForeground's browser branch -- passes it straight to
+    //     TitleFingerprint and keeps only the HASH, purely to notice that the tab
+    //     or the page changed. It identifies nothing there, and it is reached
+    //     ONLY once the URL has already said this tab is on a catalog host, so a
+    //     Gmail title is never read at all.
+    //
+    // EVERY failure returns "" rather than throwing or returning null, so a
+    // caller cannot mistake "the read failed" for content. The allocation is
+    // capped: an unbounded StringBuilder sized from another process's window is
+    // not something a 150ms loop should be able to be handed.
+    //
+    // There is no Emit / Console path in this function, and its result reaches
+    // no emitter through either caller.
+    static string ReadTitleRaw(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return "";
+        try
+        {
+            int len = GetWindowTextLength(hwnd);
+            if (len <= 0) return "";
+            // +1 for the terminator, then capped. A Teams title runs long (kind,
+            // name, org, signed-in address, suffix) but never near this.
+            int cap = len + 1;
+            if (cap > WINDOW_TITLE_MAX) cap = WINDOW_TITLE_MAX;
+            var sb = new StringBuilder(cap);
+            if (GetWindowText(hwnd, sb, cap) <= 0) return "";
+            return sb.ToString();
+        }
+        catch { return ""; }
+    }
+
     // A SINGLE property read of the currently-focused element, turned into which
     // named agent is open. Same single-read discipline as ReadFocusedPanel — no
     // tree walk, ever — and the same non-negotiable pid check, for the same
@@ -3047,22 +3173,13 @@ public static class CfaiEnforcer
         if (string.Equals(surface.ReadFrom, "window_title", StringComparison.OrdinalIgnoreCase))
         {
             if (fgHwnd == IntPtr.Zero) return AgentReadOutcome.Unreadable;
-            string title = "";
-            try
-            {
-                int len = GetWindowTextLength(fgHwnd);
-                if (len <= 0) return AgentReadOutcome.Unreadable;
-                // +1 for the terminator, then capped: a Teams title runs long
-                // (kind, name, org, signed-in address, suffix) but never near
-                // this, and an unbounded allocation off another process's window
-                // is not something this loop should be able to be handed.
-                int cap = len + 1;
-                if (cap > WINDOW_TITLE_MAX) cap = WINDOW_TITLE_MAX;
-                var sb = new StringBuilder(cap);
-                if (GetWindowText(fgHwnd, sb, cap) <= 0) return AgentReadOutcome.Unreadable;
-                title = sb.ToString();
-            }
-            catch { return AgentReadOutcome.Unreadable; }
+            // ReadTitleRaw is the ONE place in this file that reads a window
+            // title. It returns "" for every failure path, and every one of
+            // those is Unreadable here -- NO EVIDENCE, never the authoritative
+            // "no agent open". Exactly the taxonomy this branch had before the
+            // read was factored out; what changed is only that the Win32 calls
+            // live in one function instead of being inline in this one.
+            string title = ReadTitleRaw(fgHwnd);
             if (title.Trim().Length == 0) return AgentReadOutcome.Unreadable;
             // Not ExtractAgentName directly any more: a title-mode surface may
             // declare a SECOND UI route whose title carries no conversation name
@@ -3514,6 +3631,53 @@ public static class CfaiEnforcer
         return hit;
     }
 
+    // Is the FOREGROUND a browser RIGHT NOW, for the purpose of a REFUSAL?
+    //
+    // WHY THIS EXISTS. Every browser guard in this file used to ask
+    // `_browserProcs.Contains(_app)`, and _app is the STICKY foreground app
+    // name: it is assigned ONLY on a tick that was an AI surface (see
+    // ApplyForegroundTick) and then survives FG_STICKY_TTL -- 3 seconds --
+    // after focus leaves one. So alt-tabbing from Claude Desktop or ChatGPT
+    // Desktop straight into a browser left _app naming the DESKTOP app while
+    // the window in front of the user was Chrome, and every guard keyed on it
+    // was SKIPPED for those three seconds: the desktop code paths then ran
+    // against a browser window. Measured consequences, all live-reachable:
+    //   * UpdateUia fell through to AutomationElement.FocusedElement and
+    //     DLP-scanned whatever text box had focus in ANY tab on ANY site -- a
+    //     web login form, a bank form, the omnibox -- and a match armed
+    //     _blockUia, so Enter was swallowed in an unrelated page and the block
+    //     was reported against the desktop app;
+    //   * UpdatePendingRewrite pinned a mask candidate, a runtime id and an
+    //     hwnd off the same read, and RunRewrite's pre-flight (same hwnd,
+    //     same rid, unchanged text) then PASSED -- so the tokenize hotkey
+    //     retyped masked text into an arbitrary website's input field;
+    //   * UpdateSendRect skipped the browser delegation and ran its generic
+    //     name-contains-"send"/"submit" descendant search (measured 489ms on a
+    //     67-tab window, on the 150ms poll thread) plus its bottom-right
+    //     corner heuristic over a whole web page. On a checkout page
+    //     "Submit" is the payment button;
+    //   * UpdateModelRouting ran its body, so model routing was not in fact
+    //     disabled for browsers at all.
+    //
+    // _fgIsBrowser is the PER-TICK truth: UpdateForeground assigns it
+    // unconditionally, every tick, from the actual foreground process. That is
+    // what a guard has to consult. The sticky term is kept as an OR because
+    // every call site is a REFUSAL -- a guard that fires is a path NOT taken --
+    // so "either answer says browser" is the conservative direction, and it
+    // keeps a browser out of the desktop paths through the sticky window too.
+    //
+    // WHERE IT IS THE WRONG QUESTION. It must never GRANT a browser a
+    // permission. Using it to select the browser BRANCH of a predicate is fine
+    // and is what PanelUiaOk and MouseEnforceOk do, because that branch is the
+    // STRICTER one, so firing it more often can only refuse more; but the
+    // value the branch returns still has to come from per-tick facts
+    // (_fgWebComposerReadable) ANDed with _fgLeftAiTicks == 0, so a sticky
+    // tick can never license a read.
+    //
+    // PURE and cheap -- the hook thread reaches it through MouseEnforceOk. One
+    // volatile read and one hash lookup. No UIA, no regex, no allocation.
+    static bool ForegroundIsBrowser() { return _fgIsBrowser || _browserProcs.Contains(_app); }
+
     // Is the CURRENT foreground surface allowed to enforce at all?
     //
     // Only ever false for a detection-only panel (AI_PANELS enforce:false —
@@ -3531,6 +3695,37 @@ public static class CfaiEnforcer
     // to opt out of deliberately, not fall out of by accident.
     static bool PanelEnforceOk()
     {
+        // A BROWSER is stated POSITIVELY for exactly the reason a host app is,
+        // only more so: it is the most general-purpose app on the machine, and it
+        // is an AI surface ONLY while the focused element is the page composer of
+        // a governed host. Without this line the fall-through below would answer
+        // `true` for a browser (it is not in _ideProcs and not in _hostAppProcs
+        // and sets no panel), which would license capture and blocking in the
+        // omnibox, in a web login form and in every ungoverned tab.
+        // ApplyForegroundTick already refuses to set _fgIsAi otherwise, so this
+        // is belt-and-braces -- but it is the kind of default a future change
+        // must have to opt OUT of deliberately rather than fall out of.
+        //
+        // DELIBERATELY THE STICKY _app, unlike PanelUiaOk beside it and unlike
+        // every refusal guard that now goes through ForegroundIsBrowser(). Two
+        // reasons, and both are load-bearing:
+        //   * the CAPTURE consumer already closes the sticky window itself.
+        //     FgIsAiNow() is `_fgIsAi && _fgLeftAiTicks == 0 && PanelEnforceOk()`,
+        //     so not one keystroke is buffered from a browser tick inside that
+        //     window, whatever this line answers;
+        //   * the BLOCK consumers (EnterBlockActive, BlockActiveForMouse) are
+        //     sticky ON PURPOSE -- that is the whole point of FG_STICKY_TTL, and
+        //     it is what stops a toast stealing focus for a moment and letting
+        //     the next Enter through. Answering `false` here because the
+        //     foreground is now a browser would WITHDRAW a block armed in the
+        //     desktop AI app the user just left: the fail-OPEN direction, on the
+        //     one path whose job is to fail closed.
+        // The accepted cost is uniform and bounded: for up to FG_STICKY_TTL after
+        // leaving a desktop AI app with a content block armed, Enter is dead in
+        // the browser too -- exactly as it already is in Notepad. Nothing here
+        // can ARM a new block off browser content; that route was the real
+        // defect and it is closed in PanelUiaOk.
+        if (_browserProcs.Contains(_app)) return _fgIsWebComposer;
         if (_hostAppProcs.Contains(_app)) return _fgIsPanel && _fgPanelEnforce;
         if (!_fgIsPanel) return true;   // pure chat app, or an IDE whole-app fallback
         return _fgPanelEnforce;
@@ -3557,6 +3752,34 @@ public static class CfaiEnforcer
     // is blockGoverned or dlpGoverned — may a UIA-derived signal be trusted.
     static bool PanelUiaOk()
     {
+        // A BROWSER gets the IDE/host-app treatment and MUST be tested before
+        // the permissive fall-through below, which would otherwise answer `true`
+        // for it. Reading "the focused element" in a browser means reading
+        // whatever text box has focus -- an internal wiki page, a Jira ticket, a
+        // web login form, the address bar. Only while the page composer of a
+        // governed host is focused RIGHT NOW (never merely within the 3s sticky
+        // window, during which the user may already be typing in a different
+        // tab) may a UIA-derived signal be trusted here.
+        // READABLE, not FOCUSED -- see the separation note in
+        // ApplyForegroundTick's browser branch. What this licenses is reading THE
+        // CACHED COMPOSER's own text (UpdateUia / UpdatePendingRewrite both pick
+        // the element through CachedWebComposer for a browser, never
+        // FocusedElement), which is why it can be true while the caret is
+        // elsewhere in the page without widening what can be read by one element.
+        // Still first-hand only: never inside the 3s sticky window, during which
+        // the user may already be in a different app.
+        //
+        // ForegroundIsBrowser(), NOT _browserProcs.Contains(_app). With the
+        // sticky name this branch was SKIPPED for 3s after alt-tabbing out of a
+        // desktop AI app into a browser, and the PERMISSIVE fall-through below
+        // then answered `true` for the browser window (a plain chat app is in
+        // neither _ideProcs nor _hostAppProcs, and that branch carries no
+        // _fgLeftAiTicks term). That is precisely what let UpdateUia and
+        // UpdatePendingRewrite read the BROWSER's FocusedElement -- any text
+        // box, any tab, any site. See ForegroundIsBrowser. Selecting this
+        // branch more often can only refuse more, because the value it returns
+        // is per-tick and first-hand.
+        if (ForegroundIsBrowser()) return _fgWebComposerReadable && _fgLeftAiTicks == 0;
         if (!_ideProcs.Contains(_app) && !_hostAppProcs.Contains(_app)) return true;
         return _fgIsPanel && _fgPanelEnforce && _fgLeftAiTicks == 0;
     }
@@ -4878,6 +5101,32 @@ public static class CfaiEnforcer
         public string Model;              // optional: API model name
     }
 
+    // AI-216. Everything a BROWSER route needs that a desktop route does not.
+    // Pinned alongside the rest of the decision and handed to RunWebRoute whole,
+    // so the web arm never re-derives page state on the route thread that the
+    // poll thread already established.
+    class RouteCtx
+    {
+        // The CATALOG host. Our own value, selected by a comparison -- never a
+        // URL, a path or a title. This is the only browser-derived-looking
+        // string the route ever carries, and it is the same one BrowserHostField
+        // already emits.
+        public string Host;
+        // The surface's picker signature, resolved through EnforcingWebPicker at
+        // pin time. Carried rather than re-looked-up so a catalog reload between
+        // the pin and the Enter cannot change what is driven mid-route.
+        public WebPicker Picker;
+        // The effort token read off the button label at PIN time. Emitted as
+        // effort_from. "" means the label carried no recognised token.
+        public string EffortFrom;
+        // The full button label at pin time, for the post-switch comparison.
+        public string LabelBefore;
+        // The nav generation the pin was made in. A navigation or tab switch
+        // moves it, and the route refuses -- the pinned composer and picker
+        // describe a page that is no longer in front of the user.
+        public int NavGen;
+    }
+
     static volatile bool _modelRouterEnabled = false;
     static List<ServerRoutingRule> _mrServerRules = new List<ServerRoutingRule>();
     static List<LexCategory> _mrPositive = new List<LexCategory>();
@@ -5249,33 +5498,63 @@ public static class CfaiEnforcer
     // Mirrors content.js's smartRoute() tier arithmetic exactly (simple ->
     // economy; complex -> at least standard, or the ceiling if higher;
     // moderate -> standard; capped at the ceiling for anything but complex).
-    static RouteDecision ComputeRoute(MrModelInfo current, string complexity)
+    // THE TIER ARITHMETIC, extracted verbatim so the desktop and web arms can
+    // never drift apart on WHICH tier to route to. They differ only in where the
+    // menu LABEL for that tier comes from: the desktop reads the hand-ported
+    // TIER_UI_NAMES table, a web surface reads its own catalog entry.
+    //
+    // Returns the target tier NUMBER, or the current number when no move is
+    // needed -- the caller compares. Also performs the one-time ceiling seed,
+    // exactly where it happened before.
+    static int ComputeRouteTargetNum(MrModelInfo current, string complexity, out int currentNum)
     {
         if (_mrCeilingTier == null) { _mrCeilingProvider = current.Provider; _mrCeilingTier = current.Tier; }
-
-        // ── Server rules first (admin overrides) ──────────────────────────
-        // Same matching logic as the browser extension's serverRuleFor():
-        // first enabled rule whose provider + complexity conditions match wins.
-        foreach (var sr in _mrServerRules)
-        {
-            if (sr.Providers != null && !sr.Providers.Contains(current.Provider.ToLowerInvariant())) continue;
-            if (sr.Complexities != null && !sr.Complexities.Contains(complexity)) continue;
-            // Matched. The rule specifies a UI label to click.
-            if (!string.IsNullOrEmpty(sr.UiName))
-                return new RouteDecision { ToTier = "server_rule", ToLabel = sr.UiName };
-        }
 
         // ── Built-in routing table (fallback) ─────────────────────────────
         string ceilingTier = (_mrCeilingProvider == current.Provider) ? _mrCeilingTier : "standard";
         int ceilingNum = MrTierNum(ceilingTier);
-        int currentNum = MrTierNum(current.Tier);
+        currentNum = MrTierNum(current.Tier);
 
         int targetNum;
         if (complexity == "simple") targetNum = 1;
         else if (complexity == "complex") targetNum = Math.Max(ceilingNum, 2);
         else targetNum = 2;
         if (complexity != "complex") targetNum = Math.Min(targetNum, Math.Max(ceilingNum, 2));
+        return targetNum;
+    }
 
+    // ── Server rules (admin overrides) ────────────────────────────────────
+    //
+    // Same matching logic as the browser extension's serverRuleFor(): the first
+    // enabled rule whose provider + complexity conditions match wins, and it
+    // names a UI label to click outright rather than a tier to compute.
+    //
+    // LIFTED OUT OF ComputeRouteTargetNum, where the two branches first put it.
+    // That helper returns a tier NUMBER and is shared by the desktop and web
+    // arms precisely so they cannot drift; a server rule is not a tier number,
+    // it is a finished decision, so it has to be answered by the callers that
+    // return RouteDecision. Doing it here rather than in only ComputeRoute also
+    // means an admin override now applies to a WEB surface too, which is what
+    // an admin who wrote the rule would expect -- the desktop-only behaviour
+    // was an artifact of where the check happened to sit.
+    static string ServerRuleUiName(MrModelInfo current, string complexity)
+    {
+        foreach (var sr in _mrServerRules)
+        {
+            if (sr.Providers != null && !sr.Providers.Contains(current.Provider.ToLowerInvariant())) continue;
+            if (sr.Complexities != null && !sr.Complexities.Contains(complexity)) continue;
+            if (!string.IsNullOrEmpty(sr.UiName)) return sr.UiName;
+        }
+        return null;
+    }
+
+    static RouteDecision ComputeRoute(MrModelInfo current, string complexity)
+    {
+        string ruleLabel = ServerRuleUiName(current, complexity);
+        if (!string.IsNullOrEmpty(ruleLabel))
+            return new RouteDecision { ToTier = "server_rule", ToLabel = ruleLabel };
+        int currentNum;
+        int targetNum = ComputeRouteTargetNum(current, complexity, out currentNum);
         if (targetNum == currentNum) return null;
         string targetTierName = MrTierName(targetNum);
         Dictionary<int, string> uiNames;
@@ -5284,6 +5563,203 @@ public static class CfaiEnforcer
         if (!uiNames.TryGetValue(targetNum, out uiName)) return null;
         return new RouteDecision { ToTier = targetTierName, ToLabel = uiName };
     }
+
+    // AI-216. The same arithmetic, with the label taken from the SURFACE'S OWN
+    // catalog entry rather than from the shared TIER_UI_NAMES table.
+    //
+    // WHY NOT REUSE TIER_UI_NAMES: that table is the browser extension's, keyed
+    // on provider and written for the strings the extension saw ('Opus',
+    // 'Sonnet', 'Haiku'). The measured claude.ai menu carries VERSIONED labels
+    // ('Opus 5', 'Sonnet 5', 'Haiku 4.5'), and the boundary-aware matcher needs
+    // the version to be present -- matching a bare 'Opus' would happily accept
+    // an 'Opus 4.1' the user never chose. Per-surface data is also what lets a
+    // second host with different labels ship without touching code.
+    //
+    // A tier with NO LABEL on this surface returns null: nothing to search the
+    // menu for, so no route is armed. That is an ordinary outcome, not an error
+    // -- model availability is per account.
+    static RouteDecision ComputeWebRoute(MrModelInfo current, string complexity, WebPicker picker)
+    {
+        if (picker == null) return null;
+        // An admin override outranks the built-in table here too -- see
+        // ServerRuleUiName. The label is clicked in the surface's own menu, so
+        // a rule naming a model this surface does not offer simply finds
+        // nothing and no route is armed, which is the same ordinary outcome as
+        // a tier with no label.
+        string ruleLabel = ServerRuleUiName(current, complexity);
+        if (!string.IsNullOrEmpty(ruleLabel))
+            return new RouteDecision { ToTier = "server_rule", ToLabel = ruleLabel };
+        int currentNum;
+        int targetNum = ComputeRouteTargetNum(current, complexity, out currentNum);
+        if (targetNum == currentNum) return null;
+        string uiName = WebPickerTierLabel(picker, targetNum);
+        if (string.IsNullOrEmpty(uiName)) return null;
+        return new RouteDecision { ToTier = MrTierName(targetNum), ToLabel = uiName };
+    }
+
+    // ---- AI-216: the model picker's signature, as NAMED DEFAULTS ----------
+    //
+    // These three were BARE LITERALS in this file: "Model:" at the picker
+    // search and again at the post-switch re-find, and a hardcoded
+    // `ct == RadioButton || ct == MenuItem` in the item walk. They are named
+    // here so a WEB surface can declare its own signature as catalog data while
+    // the DESKTOP path keeps running off exactly the strings it always used.
+    //
+    // THE DESKTOP PATH MUST STAY BYTE-IDENTICAL. "Model:" is confirmed live
+    // against Claude Desktop's real button text (Phase 0's probe) and the two
+    // item control types are the shapes that probe found. Nothing about Claude
+    // Desktop's behaviour changes by naming them.
+    //
+    // The C# twins of ai-processes.js's MODEL_PICKER_NAME_PREFIX_DEFAULT /
+    // MODEL_PICKER_CONTROL_TYPE_DEFAULT / MODEL_PICKER_ITEM_CONTROL_TYPES_DEFAULT,
+    // held in lockstep by a test -- the same discipline
+    // WEB_COMPOSER_CONTROL_TYPE_DEFAULT and NEWLINE_KEYS are under.
+    const string MODEL_PICKER_NAME_PREFIX_DEFAULT = "Model:";
+    const string MODEL_PICKER_CONTROL_TYPE_DEFAULT = "Button";
+    // A '|'-joined string rather than a string[], so it can be a `const` and sit
+    // beside the other two. Split with StringSplitOptions.RemoveEmptyEntries at
+    // the one place it is read.
+    const string MODEL_PICKER_ITEM_CONTROL_TYPES_DEFAULT = "RadioButton|MenuItem";
+
+    // The short UIA type name for an element's ControlType ("RadioButton"),
+    // derived from ProgrammaticName ("ControlType.RadioButton") exactly the way
+    // VerifiedWebComposer already derives it. One place, so the two do not
+    // drift.
+    static string MrControlTypeShortName(ControlType ct)
+    {
+        try
+        {
+            string pn = ct.ProgrammaticName ?? "";
+            int dot = pn.LastIndexOf('.');
+            return ((dot >= 0) ? pn.Substring(dot + 1) : pn).Trim();
+        }
+        catch { return ""; }
+    }
+
+    // Is this control type in the '|'-joined allow-list?
+    //
+    // AN EMPTY LIST MATCHES NOTHING, which is the fail-closed direction an
+    // empty SendButtonName already takes here: a surface that declares no item
+    // types gets no routing, never "any control on the page".
+    static bool MrItemTypeAllowed(ControlType ct, string pipeJoined)
+    {
+        if (string.IsNullOrEmpty(pipeJoined)) return false;
+        string name = MrControlTypeShortName(ct);
+        if (name.Length == 0) return false;
+        // RemoveEmptyEntries, and split on a string[] rather than a char[]
+        // literal -- a char-array literal in this here-string has broken this
+        // file before ("Newline in constant").
+        string[] parts = pipeJoined.Split(new string[] { "|" }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (string part in parts)
+        {
+            if (string.Equals(part.Trim(), name, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    // ---- AI-216: THE ITEM MATCHER, and why it is not a StartsWith ---------
+    //
+    // The C# twin of ai-processes.js's modelItemNameMatches, held in lockstep
+    // by a test. Used ONLY by the web arm -- the desktop item walk keeps its
+    // pre-existing bare StartsWith, see FindMenuItemByLabel.
+    //
+    // The measured claude.ai menu items are
+    //   'Opus 5 For complex tasks'
+    //   'Sonnet 5 Most efficient for everyday tasks'
+    //   'Haiku 4.5 Fastest for quick answers'
+    // so the catalog label ('Sonnet 5') genuinely IS a prefix of the whole
+    // name -- but a bare prefix test would equally accept 'Sonnet 5.5 ...' and
+    // 'Sonnet 50 ...'. Selecting the wrong model is WORSE than not routing:
+    // the user is silently served and billed by a model nobody chose, and
+    // nothing downstream can tell.
+    //
+    // THE BOUNDARY RULE: the character immediately after the label must not be
+    // a letter, a digit, '.' or '-'. Those four are exactly what can EXTEND a
+    // model identifier. A space (what every measured item has there) passes,
+    // and so does end-of-string.
+    static bool ModelItemNameMatches(string name, string label)
+    {
+        if (name == null || label == null) return false;
+        if (label.Length == 0 || name.Length < label.Length) return false;
+        if (string.Compare(name, 0, label, 0, label.Length, StringComparison.OrdinalIgnoreCase) != 0) return false;
+        if (name.Length == label.Length) return true;
+        char next = name[label.Length];
+        if (char.IsLetterOrDigit(next)) return false;
+        if (next == '.' || next == '-') return false;
+        return true;
+    }
+
+    // AI-216 / Gemini. The C# twin of stripSelectedPrefix, held in lockstep by
+    // a test. Some sites fold the SELECTION STATE into the item's Name instead
+    // of exposing SelectionItemPattern: gemini.google.com's active item reads
+    // 'Selected 3.1 Pro Advanced reasoning'. Measured live 2026-09-22.
+    //
+    // Without this, the boundary matcher refuses EXACTLY ONE item -- the
+    // currently selected one -- a silent, state-dependent hole that would only
+    // surface when a route happened to target the active model.
+    //
+    // ONE catalog-declared prefix, stripped once. NOT a general "tolerate
+    // leading words" rule: that would gut the whole-token discipline on every
+    // other surface, where a leading word is what an impostor looks like.
+    static string StripSelectedPrefix(string name, string selectedPrefix)
+    {
+        string n = name ?? "";
+        string pfx = selectedPrefix ?? "";
+        if (pfx.Length == 0 || n.Length <= pfx.Length) return n;
+        if (string.Compare(n, 0, pfx, 0, pfx.Length, StringComparison.OrdinalIgnoreCase) != 0) return n;
+        return n.Substring(pfx.Length);
+    }
+
+    // AI-216 / Gemini. The C# twin of resolveButtonTier, held in lockstep by a
+    // test. Returns 0 for "no table, or no label matched" -- the caller then
+    // falls through to DetectModelInfo exactly as before.
+    //
+    // WHY THIS EXISTS AND IS NOT OPTIONAL ON GEMINI: the keyword chain in
+    // model-router-config orders ['flash','lite'] -> economy AHEAD of ['pro'] ->
+    // premium, so BOTH 'currently Flash' and 'currently Flash-Lite' resolve to
+    // economy. The live menu has three distinct tiers, so a user sitting on
+    // Flash would be read as already-cheapest and never routed down, and routed
+    // up too eagerly. Measured, not theorised.
+    //
+    // Longest label first, so ordering cannot decide a match the boundary rule
+    // should have decided -- and the boundary rule is load-bearing here rather
+    // than theoretical, because 'Flash' is a prefix of 'Flash-Lite' and only the
+    // rule that '-' continues an identifier keeps standard from swallowing
+    // economy.
+    static int ResolveButtonTier(string label, WebPicker p)
+    {
+        if (p == null) return 0;
+        string raw = label ?? "";
+        if (raw.Length == 0) return 0;
+        string[] labels = new string[3];
+        int[] nums = new int[3];
+        labels[0] = p.ButtonTier3Label ?? ""; nums[0] = 3;
+        labels[1] = p.ButtonTier2Label ?? ""; nums[1] = 2;
+        labels[2] = p.ButtonTier1Label ?? ""; nums[2] = 1;
+        // Longest-first by simple selection; three entries, no allocation.
+        for (int a = 0; a < 3; a++)
+            for (int b = a + 1; b < 3; b++)
+                if (labels[b].Length > labels[a].Length)
+                {
+                    string ts = labels[a]; labels[a] = labels[b]; labels[b] = ts;
+                    int tn = nums[a]; nums[a] = nums[b]; nums[b] = tn;
+                }
+        for (int i = 0; i < 3; i++)
+        {
+            if (labels[i].Length == 0) continue;
+            int at = raw.IndexOf(labels[i], StringComparison.OrdinalIgnoreCase);
+            if (at < 0) continue;
+            int afterAt = at + labels[i].Length;
+            if (afterAt < raw.Length)
+            {
+                char next = raw[afterAt];
+                if (char.IsLetterOrDigit(next) || next == '.' || next == '-') continue;
+            }
+            return nums[i];
+        }
+        return 0;
+    }
+
 
     static volatile bool _mrPickerSearchInProgress = false;
     static AutomationElement _mrCachedPicker = null;
@@ -5317,7 +5793,13 @@ public static class CfaiEnforcer
                     // real button text (Phase 0 probe). Claude-only for v1 —
                     // ChatGPT/Gemini need their own probe data before a
                     // picker signature for them can be added here.
-                    if (!string.IsNullOrEmpty(name) && name.StartsWith("Model:", StringComparison.OrdinalIgnoreCase))
+                    //
+                    // AI-216: the literal became a named constant whose VALUE
+                    // is the same string. This is the DESKTOP/process path and
+                    // it must stay byte-identical; a web surface brings its own
+                    // prefix from the catalog and goes through
+                    // SearchWebPickerBackground instead, never through here.
+                    if (!string.IsNullOrEmpty(name) && name.StartsWith(MODEL_PICKER_NAME_PREFIX_DEFAULT, StringComparison.OrdinalIgnoreCase))
                     {
                         _mrCachedPicker = el; _mrCachedPickerHwnd = fg;
                         break;
@@ -5349,15 +5831,35 @@ public static class CfaiEnforcer
         return null;   // not available this tick — will be cached once the background search finishes
     }
 
-    static void EmitRoute(string process, string provider, string fromTier, string toTier, string toLabel, string complexity, string result, int len, string reason = null)
+    // AI-216 adds THREE fields, all of them optional and all of them empty on
+    // every pre-existing (desktop) line, so those stay byte-for-byte as they
+    // were.
+    //
+    // browser_host comes from the EXISTING BrowserHostField(), which is
+    // structurally catalog-host-only: it can return our own catalog value or
+    // nothing. No URL, no path, no query string, no page title and no prompt
+    // content can reach it, here or anywhere else.
+    //
+    // effort_from / effort_to record the EFFORT SIDE EFFECT of a model switch
+    // (measured: Opus 5 High becomes Sonnet 5 Medium). Nothing in this feature
+    // sets effort; the user has accepted the downgrade. It is emitted because
+    // the token is already inside the button label being parsed for the tier,
+    // so it is free -- and because omitting it makes the cost model wrong
+    // UNDETECTABLY: a Medium-effort request would be priced as High forever
+    // with nothing in the data to show it.
+    static void EmitRoute(string process, string provider, string fromTier, string toTier, string toLabel, string complexity, string result, int len, string reason = null,
+        string effortFrom = null, string effortTo = null)
     {
         string json = "{\"kind\":\"route\""
             + ",\"process\":\"" + Esc(process ?? "") + "\""
+            + BrowserHostField()
             + ",\"provider\":\"" + Esc(provider ?? "") + "\""
             + ",\"from_tier\":\"" + Esc(fromTier ?? "") + "\""
             + ",\"to_tier\":\"" + Esc(toTier ?? "") + "\""
             + ",\"to_label\":\"" + Esc(toLabel ?? "") + "\""
             + ",\"complexity\":\"" + Esc(complexity ?? "") + "\""
+            + (!string.IsNullOrEmpty(effortFrom) ? ",\"effort_from\":\"" + Esc(effortFrom) + "\"" : "")
+            + (!string.IsNullOrEmpty(effortTo) ? ",\"effort_to\":\"" + Esc(effortTo) + "\"" : "")
             + ",\"result\":\"" + Esc(result) + "\""
             + ",\"len\":" + len
             + (!string.IsNullOrEmpty(reason) ? ",\"reason\":\"" + Esc(reason) + "\"" : "")
@@ -5383,6 +5885,10 @@ public static class CfaiEnforcer
     static IntPtr _pendingRouteHwnd = IntPtr.Zero;
     static long _pendingRouteExpiresAt = 0;
     static readonly long ROUTE_TTL = TimeSpan.FromSeconds(15).Ticks;
+    // AI-216. NULL for every desktop pin, which is what keeps StartRoute's
+    // dispatch a single null test and the desktop path literally the code it
+    // was. Non-null only for a browser pin.
+    static RouteCtx _pendingRouteCtx = null;
 
     static volatile bool _routeInProgress = false;
     static volatile bool _routeAbort = false;
@@ -5404,7 +5910,71 @@ public static class CfaiEnforcer
         // the picker search (FindModelPickerButton) is a descendant-wide UIA
         // walk of the foreground window that has no business running over a
         // chat client's tree on the poll thread.
-        if (!_fgIsAi || _ideProcs.Contains(_app) || _hostAppProcs.Contains(_app) || Disarmed()) { ClearPendingRoute(); return; }
+        //
+        // These four terms — _fgIsAi, _ideProcs, _hostAppProcs, Disarmed() —
+        // are UNCHANGED by AI-216.
+        if (!_fgIsAi || _ideProcs.Contains(_app) || _hostAppProcs.Contains(_app)
+            || Disarmed()) { ClearPendingRoute(); return; }
+
+        // ── AI-216: THE BROWSER ARM ──────────────────────────────────────────
+        //
+        // This replaces a BLANKET `|| ForegroundIsBrowser()` exclusion. That
+        // exclusion was correct for everything that existed when it was written,
+        // and the three reasons it gave still stand for every surface EXCEPT
+        // one: the picker signature was Claude Desktop's "Model:" button, which
+        // no web page was known to expose; the search was a descendant FindAll
+        // over a whole browser window, on the poll thread; and the body read the
+        // browser's FocusedElement, i.e. whatever text box happened to have the
+        // caret.
+        //
+        // Each of the three is answered SPECIFICALLY rather than waived:
+        //   * the signature is now CATALOG DATA, live-probed per host, behind
+        //     its own enforce/verified pair (EnforcingWebPicker);
+        //   * the search runs on a background STA thread with a give-up
+        //     threshold, never on the poll thread and never on the hook thread;
+        //   * the composer is read through CachedWebComposer() -- the ONE door
+        //     every other browser path uses -- and never through
+        //     AutomationElement.FocusedElement.
+        //
+        // EVERY TERM BELOW IS REQUIRED. Together they say: the foreground is a
+        // browser, on a host past BOTH its surface flags, whose picker is past
+        // BOTH its own flags; the caret is in the identified composer RIGHT NOW
+        // (not merely "the composer is readable" -- routing swallows an Enter,
+        // so it must not arm while the user is typing somewhere else in the
+        // page); this tick is first-hand; and the caret is in neither browser
+        // chrome nor a password field.
+        //
+        // A surface with NO modelPicker block fails at EnforcingWebPicker and
+        // takes exactly the path the blanket exclusion used to take: the pin is
+        // cleared and nothing is armed.
+        if (ForegroundIsBrowser())
+        {
+            WebSurface webSurface = EnforcingWebSurface(_fgWebHost);
+            WebPicker webPicker = EnforcingWebPicker(webSurface);
+            if (webPicker == null
+                || !_fgIsWebComposer
+                || !_fgWebComposerReadable || _fgLeftAiTicks != 0
+                || _fgWebChromeFocused || _fgWebPasswordFocused)
+            { ClearPendingRoute(); return; }
+
+            // The SAME precedence the desktop arm applies, in the same order:
+            // a block always wins, and a live Tokenize & Send offer must never
+            // be disturbed.
+            if (_fgIsBlocked || _blockUia || _blockTyped) { ClearPendingRoute(); return; }
+            if (_rewriteInProgress || _routeInProgress) return;   // leave any existing pin alone mid-write
+            bool webPendingRewritable;
+            lock (_pendingLock) { webPendingRewritable = _pendingRewritable; }
+            if (webPendingRewritable) { ClearPendingRoute(); return; }
+
+            IntPtr webFg = GetForegroundWindow();
+            if (webFg == IntPtr.Zero) { ClearPendingRoute(); return; }
+            uint webFgPid = 0;
+            try { GetWindowThreadProcessId(webFg, out webFgPid); } catch { webFgPid = 0; }
+            UpdateWebModelRouting(webFg, webFgPid, webSurface, webPicker);
+            return;
+        }
+
+        // ── Everything below is the DESKTOP / PROCESS path, unchanged ────────
         // Block always wins, and a live Tokenize & Send offer must never be
         // disturbed — same precedence RunRewrite's callers already respect.
         if (_fgIsBlocked || _blockUia || _blockTyped) { ClearPendingRoute(); return; }
@@ -5431,6 +6001,15 @@ public static class CfaiEnforcer
         try { composerRid = el.GetRuntimeId(); } catch { }
         if (composerRid == null) return;
 
+        // THE BARE `return` IS DELIBERATE HERE, and it is the asymmetry the web
+        // arm exists to break. On the desktop it leaves any existing pin ARMED,
+        // which is the behaviour Claude Desktop shipped with and must keep: a
+        // pin that outlives its picker there is survivable, because RunRoute
+        // reaches picker_not_found and FallbackSendOrReport re-sends the prompt
+        // with whatever model is selected. On a WEB surface that same survival
+        // means the hook keeps swallowing Enter for the full 15s ROUTE_TTL on a
+        // page with no picker to drive, so UpdateWebModelRouting clears the pin
+        // instead. See the note there.
         AutomationElement picker = GetCachedModelPicker(fg);
         if (picker == null) return;   // not found yet, or a background search is still running
         string label = null;
@@ -5471,12 +6050,159 @@ public static class CfaiEnforcer
             _pendingRouteComposerRid = composerRid;
             _pendingRouteHwnd = fg;
             _pendingRouteExpiresAt = DateTime.UtcNow.Ticks + ROUTE_TTL;
+            // NULL, which is what makes StartRoute dispatch to RunRoute and
+            // leaves the desktop route the code it has always been.
+            _pendingRouteCtx = null;
+        }
+    }
+
+    // ── AI-216: the browser arm's body ──────────────────────────────────────
+    //
+    // Split out so the gate above reads as one decision and so this can be
+    // driven directly by the test harness with a synthetic window handle -- the
+    // same "substitute only the reads" discipline the browser-block harness
+    // already follows.
+    //
+    // THE ORDER HERE IS NOT THE DESKTOP'S, ON PURPOSE. The picker is resolved
+    // FIRST, before the composer's text is read at all. On an account with no
+    // picker -- which is the modal case across a fleet -- that means this
+    // function reads no prompt text whatsoever before deciding it has nothing to
+    // do. Cheaper, and one fewer read of the user's words on every tick of every
+    // page that will never be routed.
+    static void UpdateWebModelRouting(IntPtr fg, uint fgPid, WebSurface webSurface, WebPicker webPicker)
+    {
+        // ── THE PIN-CLEARING FIX ────────────────────────────────────────────
+        //
+        // A pin armed on an EARLIER tick must not survive the picker going away.
+        // If it did, it would stay armed for the full 15s ROUTE_TTL, the hook
+        // would keep swallowing Enter on it, StartRoute would accept it, and
+        // RunWebRoute would reach picker_not_found -- turning every one of those
+        // Enters into a synthetic re-send on a page this code cannot drive.
+        // That is exactly the swallow-and-maybe-lose-the-prompt case this
+        // feature exists to avoid.
+        //
+        // NET EFFECT ON AN ACCOUNT WITH NO PICKER: _pendingRouteArmed is false,
+        // the hook's route branch is never taken, and Enter passes through
+        // untouched into the normal clean-send path. "No picker on this account"
+        // is INDISTINGUISHABLE from "routing disabled", by construction.
+        //
+        // AND NO EVENT IS EMITTED ON THIS PATH. It is the expected state for
+        // most of a fleet, and a per-session event would leak a plan-tier signal
+        // into governance telemetry for no governance benefit at all.
+        AutomationElement picker = VerifiedWebPicker(fg, _fgWebHost, webPicker);
+        if (picker == null)
+        {
+            MaybeSearchWebPicker(fg, fgPid, _fgWebHost, webSurface);
+            ClearPendingRoute();
+            return;
+        }
+
+        string label = null;
+        try { label = picker.Current.Name; } catch { DropWebPicker(); ClearPendingRoute(); return; }
+        if (string.IsNullOrEmpty(label)) { ClearPendingRoute(); return; }
+
+        // AI-216 / Gemini. THE CATALOG'S BUTTON TABLE WINS, and the keyword
+        // chain is only the fallback. On gemini.google.com the chain is
+        // measurably wrong -- it orders ['flash','lite'] -> economy ahead of
+        // ['pro'] -> premium, so 'currently Flash' and 'currently Flash-Lite'
+        // both read as economy and a user on Flash could never be routed down.
+        // A surface with no button table (claude.ai) resolves 0 here and takes
+        // the chain exactly as before.
+        MrModelInfo current;
+        int buttonTierNum = ResolveButtonTier(label, webPicker);
+        if (buttonTierNum > 0)
+        {
+            current = new MrModelInfo { Provider = webPicker.Provider, Tier = MrTierName(buttonTierNum) };
+        }
+        else
+        {
+            current = DetectModelInfo(label);
+        }
+        if (current == null) { ClearPendingRoute(); return; }
+        // The catalog STATES which provider's tier arithmetic applies here, so a
+        // page that turns out to be showing another vendor's model refuses
+        // rather than routing through the wrong tier table.
+        if (!string.Equals(current.Provider, webPicker.Provider, StringComparison.OrdinalIgnoreCase))
+        { ClearPendingRoute(); return; }
+        UpdateCeiling(current);
+
+        // THE ONE DOOR. Never AutomationElement.FocusedElement -- on a browser
+        // that is whatever text box has the caret. The element this returns is
+        // the one VerifiedWebComposer re-verified earlier in THIS tick (that
+        // re-verify is what set _fgWebComposerReadable, which the gate already
+        // required), so it costs no extra UIA call and cannot widen what is
+        // readable by one element.
+        AutomationElement el = CachedWebComposer();
+        if (el == null) { ClearPendingRoute(); return; }
+        string text = null;
+        try { text = ReadText(el); } catch { }
+        if (string.IsNullOrEmpty(text)) { ClearPendingRoute(); return; }
+        int[] composerRid = null;
+        try { composerRid = el.GetRuntimeId(); } catch { }
+        if (composerRid == null) { ClearPendingRoute(); return; }
+
+        // ── THE RESTORE BUDGET, and it gates ARMING, not restoring ──────────
+        //
+        // "We never swallow an Enter for a prompt we could not put back."
+        //
+        // If the switch does empty the composer, the only way back is to retype
+        // the prompt through the Tier B segmented writer, and that writer has a
+        // hard time budget. A prompt too long to retype inside it is a prompt
+        // this code could not restore -- so it must never take responsibility
+        // for it. Refusing to ARM means the Enter is never swallowed and the
+        // prompt takes the ordinary clean-send path, unrouted.
+        //
+        // WEB ONLY. The desktop path has never had a restore step and is not
+        // being given one; adding this gate there would change which prompts
+        // Claude Desktop routes.
+        if (!WriteFitsBudget(text)) { ClearPendingRoute(); return; }
+
+        // Dedup against the poll thread's own ~150ms cadence. The HOST joins the
+        // key: the same text in front of the same label on a different surface
+        // is a different decision.
+        string dedupKey = NormalizeWs(text) + "|" + label + "|" + (_fgWebHost ?? "");
+        if (dedupKey == _mrLastObservedKey) return;
+        _mrLastObservedKey = dedupKey;
+
+        string complexity = ClassifyComplexity(text);
+        var decision = ComputeWebRoute(current, complexity, webPicker);
+        // null means EITHER already at the right tier OR this surface lists no
+        // label for the target tier. The second is an ordinary runtime outcome,
+        // not an error: model availability is per account.
+        if (decision == null) { ClearPendingRoute(); return; }
+
+        lock (_routeLock)
+        {
+            bool samePrompt = _pendingRouteArmed && _pendingRouteOriginalText == text
+                && string.Equals(_pendingRouteToLabel, decision.ToLabel, StringComparison.Ordinal);
+            if (!samePrompt) _pendingRouteId = Guid.NewGuid().ToString("N");
+            _pendingRouteArmed = true;
+            _pendingRouteFromTier = current.Tier;
+            _pendingRouteToTier = decision.ToTier;
+            _pendingRouteToLabel = decision.ToLabel;
+            _pendingRouteProvider = current.Provider;
+            _pendingRouteComplexity = complexity;
+            _pendingRouteOriginalText = text;
+            _pendingRouteComposerRid = composerRid;
+            _pendingRouteHwnd = fg;
+            _pendingRouteExpiresAt = DateTime.UtcNow.Ticks + ROUTE_TTL;
+            _pendingRouteCtx = new RouteCtx
+            {
+                Host = _fgWebHost ?? "",
+                Picker = webPicker,
+                // from_tier comes from the BUTTON LABEL at pin time
+                // (fromTier:'button_label'), and the effort token rides along for
+                // free out of the same string. Nothing here SETS effort.
+                EffortFrom = ModelEffortFromLabel(label, webPicker.NamePrefix),
+                LabelBefore = label,
+                NavGen = _browserNavGen,
+            };
         }
     }
 
     static void ClearPendingRoute()
     {
-        lock (_routeLock) { _pendingRouteId = ""; _pendingRouteArmed = false; }
+        lock (_routeLock) { _pendingRouteId = ""; _pendingRouteArmed = false; _pendingRouteCtx = null; }
     }
 
     // Locates every currently-visible model-choice item in the foreground
@@ -5509,7 +6235,17 @@ public static class CfaiEnforcer
                 try
                 {
                     ControlType ct = el.Current.ControlType;
-                    if (ct == ControlType.RadioButton || ct == ControlType.MenuItem)
+                    // AI-216: the DESKTOP item test, unchanged in behaviour.
+                    // Deliberately still a BARE StartsWith with a FIRST-MATCH
+                    // return, and deliberately NOT the strict boundary+ambiguity
+                    // matcher the web arm uses (ModelItemNameMatches /
+                    // FindWebPickerItemUnique). The asymmetry is on purpose:
+                    // Claude Desktop's menu is the surface this loop was probed
+                    // and tuned against, and tightening it here would be a
+                    // behaviour change to a shipped, working path made for the
+                    // convenience of a different surface. The web arm is new,
+                    // so it starts strict.
+                    if (MrItemTypeAllowed(ct, MODEL_PICKER_ITEM_CONTROL_TYPES_DEFAULT))
                     {
                         string name = null;
                         try { name = el.Current.Name; } catch { }
@@ -5561,7 +6297,10 @@ public static class CfaiEnforcer
                     {
                         string name = null;
                         try { name = el.Current.Name; } catch { }
-                        if (!string.IsNullOrEmpty(name) && name.StartsWith("Model:", StringComparison.OrdinalIgnoreCase))
+                        // AI-216: same named constant, same value. DESKTOP path
+                        // only -- the web arm re-finds its picker through
+                        // FindWebPickerButton with the catalog's own prefix.
+                        if (!string.IsNullOrEmpty(name) && name.StartsWith(MODEL_PICKER_NAME_PREFIX_DEFAULT, StringComparison.OrdinalIgnoreCase))
                             return el;
                     }
                 }
@@ -5604,7 +6343,7 @@ public static class CfaiEnforcer
         if (_routeInProgress || _rewriteInProgress) { EmitRoute(_app, "", "", "", "", "", "aborted", -1, "route_or_rewrite_already_in_progress"); return; }
         if (string.IsNullOrEmpty(routeId)) return;
         string fromTier, toTier, toLabel, provider, complexity, originalText;
-        int[] composerRid; IntPtr hwnd; long expiresAt;
+        int[] composerRid; IntPtr hwnd; long expiresAt; RouteCtx ctx;
         lock (_routeLock)
         {
             if (_pendingRouteId != routeId || !_pendingRouteArmed) { EmitRoute(_app, "", "", "", "", "", "aborted", -1, "stale_route_id"); return; }
@@ -5612,12 +6351,31 @@ public static class CfaiEnforcer
             provider = _pendingRouteProvider; complexity = _pendingRouteComplexity;
             originalText = _pendingRouteOriginalText; composerRid = _pendingRouteComposerRid;
             hwnd = _pendingRouteHwnd; expiresAt = _pendingRouteExpiresAt;
+            ctx = _pendingRouteCtx;
         }
-        if (DateTime.UtcNow.Ticks > expiresAt) { ClearPendingRoute(); EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, "expired"); return; }
+        if (DateTime.UtcNow.Ticks > expiresAt) { ClearPendingRoute(); EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, "expired", ctx != null ? ctx.EffortFrom : null); return; }
 
         _routeInProgress = true;
         _routeAbort = false;
-        var t = new Thread(() => RunRoute(routeId, fromTier, toTier, toLabel, provider, complexity, originalText, composerRid, hwnd));
+        // AI-216. A SINGLE NULL TEST decides which route runs, and the desktop
+        // branch is literally the call it always was. The web route is a
+        // SEPARATE function rather than a set of `if (isWeb)` branches threaded
+        // through RunRoute, and that is a deliberate choice: "no behaviour
+        // change for desktop routing" is a hard constraint, and the cheapest way
+        // to guarantee it is to not edit the desktop code path at all. The cost
+        // is some structural duplication between the two, which is visible and
+        // reviewable; the alternative cost was a silent regression in the one
+        // surface this feature already ships on.
+        Thread t;
+        if (ctx != null)
+        {
+            RouteCtx c = ctx;
+            t = new Thread(() => RunWebRoute(routeId, fromTier, toTier, toLabel, provider, complexity, originalText, composerRid, hwnd, c));
+        }
+        else
+        {
+            t = new Thread(() => RunRoute(routeId, fromTier, toTier, toLabel, provider, complexity, originalText, composerRid, hwnd));
+        }
         t.IsBackground = true;
         t.SetApartmentState(ApartmentState.STA);
         t.Start();
@@ -5878,6 +6636,495 @@ public static class CfaiEnforcer
         }
     }
 
+    // ════ AI-216: THE WEB ROUTE ═════════════════════════════════════════════
+    //
+    // A SEPARATE function from RunRoute rather than branches threaded through
+    // it. "No behaviour change for desktop routing" is a hard constraint, and
+    // the cheapest way to guarantee it is to not edit that code path at all.
+    // The cost is structural duplication, which is visible and reviewable; the
+    // alternative cost was a silent regression on the one surface this feature
+    // already ships on.
+    //
+    // ── THE FAILURE INVARIANT, which every path below serves ───────────────
+    //
+    //   At the end of every path the user's text is either SENT EXACTLY ONCE
+    //   or VISIBLY PRESENT in the composer.
+    //
+    // Four rules enforce it, and none of them is optional:
+    //   1. NEVER SEND AFTER A FOREGROUND / HOST / NAV CHANGE. Sending into a
+    //      page the user has navigated away from is actively wrong, not merely
+    //      suboptimal -- it puts their prompt into a conversation they did not
+    //      choose.
+    //   2. NEVER SEND TEXT THAT WAS NOT JUST READ BACK FROM THE COMPOSER. What
+    //      is sent is always what is verifiably there.
+    //   3. NEVER RETYPE-AND-RESEND AFTER A FAILED SEND. A send that reports
+    //      "not submitted" may still have landed; retyping and pressing Enter
+    //      again is how one prompt becomes two.
+    //   4. WHEN IN DOUBT, STOP AND LEAVE THE TEXT. A swallowed Enter with the
+    //      prompt still sitting in the composer costs the user one keypress.
+    //      Every other failure mode costs them their prompt or sends it twice.
+    //
+    // ── THE RESULT TAXONOMY ────────────────────────────────────────────────
+    //
+    //   sent_unrouted  the switch did not happen, but the composer was intact
+    //                  and focused, so the prompt was sent with whatever model
+    //                  is currently selected. Switching models carries none of
+    //                  the risk an unmasked rewrite would -- the prompt text is
+    //                  never touched by this feature -- so this is the right
+    //                  answer for every mechanical failure.
+    //                  reasons: picker_not_found, picker_unreadable,
+    //                  target_item_not_found, target_item_ambiguous,
+    //                  select_failed, switch_not_verified, modifiers_stuck,
+    //                  model_changed, from_tier_not_confirmed, no_expand_pattern,
+    //                  expand_failed, interrupted_after_expand,
+    //                  interrupted_before_select
+    //   failed         nothing was sent, and the text is still in the composer.
+    //                  reasons: focus_changed, navigated, host_changed,
+    //                  composer_lost, not_submitted, expired, exception
+    //   ok + restored  the switch emptied the composer, the prompt was retyped,
+    //                  read back exactly, and sent.
+    //   restored_not_sent  the retype did not read back exactly. Stopped. The
+    //                  text is whatever is visibly in the composer, and nothing
+    //                  was sent.
+    static void RunWebRoute(string routeId, string fromTier, string toTier, string toLabel, string provider, string complexity,
+        string originalText, int[] pinnedComposerRid, IntPtr pinnedHwnd, RouteCtx ctx)
+    {
+        string effortFrom = (ctx != null ? ctx.EffortFrom : "") ?? "";
+        try
+        {
+            if (ctx == null || ctx.Picker == null)
+            { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, "", "exception"); return; }
+
+            // ── Pre-flight. Everything pinned at Enter-press time must still
+            // hold, and on a web surface that is THREE questions, not one:
+            // the same window, the same page instance, and the same host. A
+            // same-host SPA navigation moves _browserNavGen without changing
+            // either of the other two, and it is exactly the case that would
+            // otherwise put this prompt into a different conversation.
+            if (GetForegroundWindow() != pinnedHwnd)
+            { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, "", "focus_changed"); return; }
+            if (_browserNavGen != ctx.NavGen)
+            { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, "", "navigated"); return; }
+            if (!string.Equals(_fgWebHost ?? "", ctx.Host ?? "", StringComparison.Ordinal))
+            { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, "", "host_changed"); return; }
+
+            // THE ONE DOOR. Never AutomationElement.FocusedElement -- on a
+            // browser that is whatever text box has the caret, which is the
+            // whole defect this ticket's design note is about.
+            AutomationElement composerEl = CachedWebComposer();
+            if (composerEl == null)
+            { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, "", "composer_lost"); return; }
+            int[] curRid = null;
+            try { curRid = composerEl.GetRuntimeId(); } catch { }
+            if (!RuntimeIdEquals(curRid, pinnedComposerRid))
+            { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, "", "composer_lost"); return; }
+            string curText = null;
+            try { curText = ReadText(composerEl); } catch { }
+            // "The composer no longer holds what we pinned" IS composer_lost for
+            // this purpose: the element we were given responsibility for is not
+            // the thing we were given responsibility for any more. Nothing is
+            // sent, and whatever the user has typed stays visibly in front of
+            // them.
+            if (NormalizeWs(curText) != NormalizeWs(originalText))
+            { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, "", "composer_lost"); return; }
+
+            // Our own synthetic keys pass back through the same keyboard hook,
+            // so wait for a clean physical keyboard state first.
+            long waitStart = DateTime.UtcNow.Ticks;
+            while (Down(VK_CONTROL) || Down(VK_MENU) || Down(VK_SHIFT) || Down(VK_RETURN))
+            {
+                if ((DateTime.UtcNow.Ticks - waitStart) > TimeSpan.FromMilliseconds(2500).Ticks)
+                { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "modifiers_stuck"); return; }
+                Thread.Sleep(20);
+            }
+
+            AutomationElement win = null;
+            try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
+            if (win == null)
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "picker_not_found"); return; }
+
+            AutomationElement picker = VerifiedWebPicker(pinnedHwnd, ctx.Host, ctx.Picker);
+            if (picker == null)
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "picker_not_found"); return; }
+            string labelBefore = null;
+            try { labelBefore = picker.Current.Name; } catch { }
+            if (string.IsNullOrEmpty(labelBefore))
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "picker_unreadable"); return; }
+            // Re-read the effort from the FRESH label rather than trusting the
+            // pin's copy, so effort_from describes the moment the switch was
+            // actually attempted.
+            effortFrom = ModelEffortFromLabel(labelBefore, ctx.Picker.NamePrefix);
+            // TIER-ONLY, and that is the point of doing it through
+            // DetectModelInfo rather than a string compare: the label also
+            // carries an effort token, and an effort change on its own must
+            // never read as a model change.
+            var currentCheck = DetectModelInfo(labelBefore);
+            if (currentCheck == null || currentCheck.Tier != fromTier)
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "model_changed"); return; }
+
+            object expandObj;
+            if (!picker.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out expandObj))
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "no_expand_pattern"); return; }
+            try { ((ExpandCollapsePattern)expandObj).Expand(); }
+            catch { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "expand_failed"); return; }
+
+            if (_routeAbort || GetForegroundWindow() != pinnedHwnd || _browserNavGen != ctx.NavGen)
+            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "interrupted_after_expand"); return; }
+
+            Thread.Sleep(150);   // let the popover render its items
+
+            // ── PRE-SWITCH CONFIRMATION of the pinned from_tier ─────────────
+            //
+            // The button label already said which tier is current, but that is
+            // ONE reading of ONE string. SelectionItemPattern.IsSelected is a
+            // SECOND, INDEPENDENT signal from a different element, and the pin
+            // is 15s old by the time it is consumed. Requiring both is what
+            // stops a route acting on a stale picture of the world.
+            //
+            // Skipped only when this surface lists no label for the current
+            // tier -- there is then nothing to look for, and the button label
+            // stands alone. Any other failure to confirm sends unrouted: the
+            // prompt still goes, just with whatever model is selected.
+            string fromLabel = WebPickerTierLabel(ctx.Picker, MrTierNum(fromTier));
+            if (!string.IsNullOrEmpty(fromLabel))
+            {
+                int fromCount;
+                AutomationElement fromItem = FindWebPickerItemUnique(win, fromLabel, ctx.Picker.ItemControlTypes, ctx.Picker.ItemSelectedPrefix, out fromCount);
+                // Fail ONLY on positive evidence of a mismatch. WEB_SEL_UNKNOWN
+                // means this surface exposes no SelectionItemPattern (Gemini),
+                // and refusing there would abort every route on it.
+                if (fromItem == null || WebItemSelectionState(fromItem) == WEB_SEL_NO)
+                { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "from_tier_not_confirmed"); return; }
+            }
+
+            // ── THE TARGET ITEM: exactly one, or nothing ───────────────────
+            //
+            // NO "More models" SUBMENU HUNT on a web surface. The desktop path
+            // has one, and it works by MOVING THE USER'S MOUSE CURSOR over a
+            // hover flyout -- a technique that was probed against Claude
+            // Desktop and has not been probed here. All three measured
+            // claude.ai tiers are top-level items, so nothing needs it; if a
+            // future surface hides a tier behind a submenu, that tier simply
+            // reports target_item_not_found and the prompt sends unrouted.
+            int matchCount;
+            AutomationElement targetItem = FindWebPickerItemUnique(win, toLabel, ctx.Picker.ItemControlTypes, ctx.Picker.ItemSelectedPrefix, out matchCount);
+            if (targetItem == null)
+            {
+                TryCollapsePicker(picker);
+                // ZERO is an ORDINARY runtime path, not an anomaly: model
+                // availability is per ACCOUNT, not per host. TWO OR MORE is a
+                // refusal -- never take the first, because there is no evidence
+                // available to break the tie and the cost of guessing wrong is
+                // that the user is served and billed by a model nobody chose.
+                string why = (matchCount >= 2) ? "target_item_ambiguous" : "target_item_not_found";
+                WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, why);
+                return;
+            }
+
+            if (_routeAbort || GetForegroundWindow() != pinnedHwnd || _browserNavGen != ctx.NavGen)
+            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "interrupted_before_select"); return; }
+
+            bool selected = false;
+            object selObj;
+            if (targetItem.TryGetCurrentPattern(SelectionItemPattern.Pattern, out selObj))
+            { try { ((SelectionItemPattern)selObj).Select(); selected = true; } catch { } }
+            if (!selected && targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out selObj))
+            { try { ((InvokePattern)selObj).Invoke(); selected = true; } catch { } }
+            if (!selected)
+            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "select_failed"); return; }
+
+            Thread.Sleep(300);
+            TryCollapsePicker(picker);   // best-effort — selecting usually closes it on its own
+
+            // Re-find the button FRESH rather than trusting the cached
+            // reference: a stale reference can keep returning its last-known
+            // (pre-switch) value without ever throwing, which would make
+            // verification wait out its whole deadline for a switch that
+            // already happened. Same reasoning as the desktop path's.
+            AutomationElement verifyEl = FindWebPickerButton(win, ctx.Picker) ?? picker;
+            // Keep the POLL thread's cache current too, so the next tick of
+            // UpdateModelRouting is not re-verifying something stale.
+            if (verifyEl != null) { _webPickerCached = verifyEl; _webPickerHwnd = pinnedHwnd; _webPickerHost = ctx.Host ?? ""; }
+
+            // ── VERIFICATION: tier-from-label OR IsSelected ────────────────
+            //
+            // TWO independent confirmations, OR'd, and BOTH are tier-only.
+            //
+            // The label comparison is deliberately NOT `labelAfter != labelBefore`
+            // the way the desktop path's is. On this surface the label carries
+            // an EFFORT token that changes as a side effect of the switch, so a
+            // plain string inequality would report "switched" for an effort
+            // change with the same model. Comparing the DETECTED TIER to the
+            // target is the only comparison that means what it says.
+            string labelAfter = null;
+            string effortTo = "";
+            bool switched = false;
+            long verifyDeadline = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(1500).Ticks;
+            do
+            {
+                try { labelAfter = verifyEl.Current.Name; } catch { }
+                if (!string.IsNullOrEmpty(labelAfter))
+                {
+                    var afterInfo = DetectModelInfo(labelAfter);
+                    if (afterInfo != null && string.Equals(afterInfo.Tier, toTier, StringComparison.Ordinal)) { switched = true; break; }
+                }
+                if (WebItemIsSelected(targetItem)) { switched = true; break; }
+                Thread.Sleep(60);
+            } while (DateTime.UtcNow.Ticks < verifyDeadline);
+            if (!switched)
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "switch_not_verified"); return; }
+            // Captured AFTER the switch, from the same string the tier came
+            // from. "" when the label carried no recognised token.
+            effortTo = ModelEffortFromLabel(labelAfter, ctx.Picker.NamePrefix);
+
+            // The dropdown interaction moves keyboard focus into the popover and
+            // does not necessarily return it. Ask UIA to put it back on the SAME
+            // element that was pinned.
+            try { composerEl.SetFocus(); } catch { }
+            Thread.Sleep(150);
+
+            if (GetForegroundWindow() != pinnedHwnd)
+            { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, effortTo, "focus_changed"); return; }
+            if (_browserNavGen != ctx.NavGen)
+            { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, effortTo, "navigated"); return; }
+            if (!string.Equals(_fgWebHost ?? "", ctx.Host ?? "", StringComparison.Ordinal))
+            { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, effortTo, "host_changed"); return; }
+
+            // ── WHAT THE SWITCH DID TO THE COMPOSER ───────────────────────
+            //
+            // MEASURED on claude.ai across a real Opus->Sonnet switch: the
+            // RuntimeId is unchanged and the text is unchanged. So the FIRST
+            // branch is the common path here and the restore branch is the edge
+            // case -- implemented anyway, because "sent once or visibly
+            // present" must not depend on a site keeping a behaviour it never
+            // promised.
+            bool composerAlive = true;
+            string afterText = null;
+            try { afterText = ReadText(composerEl); } catch { composerAlive = false; }
+            int[] afterRid = null;
+            try { afterRid = composerEl.GetRuntimeId(); } catch { composerAlive = false; }
+            if (!composerAlive || !RuntimeIdEquals(afterRid, pinnedComposerRid))
+            { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, effortTo, "composer_lost"); return; }
+
+            if (NormalizeWs(afterText) == NormalizeWs(originalText))
+            {
+                // The prompt survived, which is the measured behaviour. Send it.
+                WebSendAndReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, composerEl, originalText, effortFrom, effortTo, null);
+                return;
+            }
+
+            if (!string.IsNullOrEmpty(afterText))
+            {
+                // The composer holds something that is neither the prompt nor
+                // nothing. DO NOT TOUCH IT. Retyping over content we did not put
+                // there would destroy whatever it is, and sending it would send
+                // text we never verified.
+                WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, effortTo, "composer_lost");
+                return;
+            }
+
+            // ── THE RESTORE PATH ──────────────────────────────────────────
+            //
+            // The composer is EMPTY and the switch is verified, so the switch
+            // took the prompt. Retype it through the same Tier B segmented
+            // writer the rewrite uses -- respecting this surface's newlineKeys
+            // for line breaks rather than typing a '\\n' a page may treat as
+            // send -- then READ IT BACK and only send on an EXACT match.
+            //
+            // No Ctrl+A/Delete first: the composer already read as empty, and
+            // clearing something we believe is empty can only ever destroy
+            // something we were wrong about.
+            //
+            // UpdateModelRouting refused to ARM at all for a prompt that does
+            // not fit the write budget, so reaching here means the retype was
+            // always affordable -- "we never swallow an Enter for a prompt we
+            // could not put back."
+            if (!WebRestoreComposer(composerEl, originalText, pinnedHwnd, ctx))
+            {
+                // The retype did not read back exactly. STOP. Whatever is in the
+                // composer is visibly in front of the user and nothing was sent;
+                // that is the invariant's second half, and it is a far better
+                // outcome than sending text we could not verify.
+                EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "restored_not_sent", originalText.Length, "restore_verify_mismatch", effortFrom, effortTo);
+                ClearPendingRoute();
+                _mrLastObservedKey = "";
+                return;
+            }
+            WebSendAndReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, composerEl, originalText, effortFrom, effortTo, "restored");
+        }
+        catch (Exception)
+        {
+            // NO FALLBACK SEND from an exception on the web path, unlike the
+            // desktop path's. An exception means this code does not know what
+            // state the page is in, and a synthetic Enter into an unknown state
+            // is how a prompt lands in the wrong conversation. The text stays in
+            // the composer; the user presses Enter again.
+            WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, "", "exception");
+        }
+        finally
+        {
+            _routeInProgress = false;
+        }
+    }
+
+    // Nothing was sent and nothing will be. Clears the pin so a held Enter
+    // cannot re-trigger the same stale attempt (Windows key-repeat auto-fires
+    // every ~30-50ms, and a pin left armed through a failure produced a visible
+    // open/close flicker loop on the desktop path once already).
+    static void WebRouteFailed(string provider, string fromTier, string toTier, string toLabel, string complexity,
+        string effortFrom, string effortTo, string reason)
+    {
+        ClearPendingRoute();
+        EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason, effortFrom, effortTo);
+    }
+
+    // The switch did not happen, but nothing about the page changed either.
+    //
+    // Switching models carries none of the risk an unmasked rewrite would --
+    // this feature never touches the prompt text -- so the right answer to a
+    // mechanical failure is to send the prompt with whatever model IS selected,
+    // rather than leaving the user's Enter swallowed with nothing having
+    // happened. Only a genuine change of focus, host, page instance or content
+    // declines.
+    static void WebFallbackSendOrReport(RouteCtx ctx, string provider, string fromTier, string toTier, string toLabel, string complexity,
+        IntPtr pinnedHwnd, int[] pinnedComposerRid, string originalText, string effortFrom, string reason)
+    {
+        // Cleared unconditionally and FIRST, whether or not the send below
+        // works: one attempt per Enter, always.
+        ClearPendingRoute();
+
+        if (GetForegroundWindow() != pinnedHwnd)
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_focus_changed", effortFrom); return; }
+        if (ctx != null && _browserNavGen != ctx.NavGen)
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_navigated", effortFrom); return; }
+        if (ctx != null && !string.Equals(_fgWebHost ?? "", ctx.Host ?? "", StringComparison.Ordinal))
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_host_changed", effortFrom); return; }
+
+        // THE ONE DOOR again -- never FocusedElement.
+        AutomationElement el = CachedWebComposer();
+        if (el == null)
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_no_element", effortFrom); return; }
+        int[] rid = null; string text = null;
+        try { rid = el.GetRuntimeId(); } catch { }
+        try { text = ReadText(el); } catch { }
+        if (!RuntimeIdEquals(rid, pinnedComposerRid) || NormalizeWs(text) != NormalizeWs(originalText))
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_text_changed", effortFrom); return; }
+
+        Emit("prompt", _app, "", "send", originalText.Length);
+        TypedClear(); _blockTyped = false; _typedPatterns = ""; _lastBlockFiredTicks = 0;
+        _blockUia = false; _uiaPatterns = "";
+        _blockPaste = false; _lastPasteTicks = 0;
+        _mrLastObservedKey = "";
+
+        SendKeyPress(VK_RETURN);
+        Thread.Sleep(PostSendVerifyMsFor());
+        string postSend = null;
+        try { postSend = ReadText(el); } catch { }
+        bool stillThere = NormalizeWs(postSend) == NormalizeWs(originalText);
+        // NO RETRY. A send that reports "not submitted" may still have landed,
+        // and pressing Enter again is how one prompt becomes two.
+        if (stillThere) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_fallback_not_submitted", effortFrom); return; }
+
+        EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "sent_unrouted", originalText.Length, reason, effortFrom);
+    }
+
+    // The switch worked and the composer holds exactly the pinned prompt. Send.
+    //
+    // `okReason` is null on the ordinary path and "restored" when the text had
+    // to be retyped first, so the two are distinguishable in the data without a
+    // second result value.
+    static void WebSendAndReport(RouteCtx ctx, string provider, string fromTier, string toTier, string toLabel, string complexity,
+        IntPtr pinnedHwnd, AutomationElement composerEl, string originalText, string effortFrom, string effortTo, string okReason)
+    {
+        if (GetForegroundWindow() != pinnedHwnd)
+        { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, effortTo, "focus_changed"); return; }
+        if (ctx != null && _browserNavGen != ctx.NavGen)
+        { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, effortTo, "navigated"); return; }
+
+        // Release state before Enter -- our own synthetic Enter passes back
+        // through this same keyboard hook. Same clearing RunRewrite and RunRoute
+        // do, and for the same reasons.
+        Emit("prompt", _app, "", "send", originalText.Length);
+        TypedClear(); _blockTyped = false; _typedPatterns = ""; _lastBlockFiredTicks = 0;
+        _blockUia = false; _uiaPatterns = "";
+        _blockPaste = false; _lastPasteTicks = 0;
+        ClearPendingRoute();
+        _mrLastObservedKey = "";
+
+        SendKeyPress(VK_RETURN);
+        // The per-surface post-send window. Every web surface asks for the
+        // 1500ms ceiling rather than the 200ms default: a Chromium composer's
+        // "I am empty now" has to cross an accessibility serialization hop
+        // before UIA can report it, and a shorter window reads back the
+        // pre-send text and calls a successful send a failure.
+        Thread.Sleep(PostSendVerifyMsFor());
+        string postSend = null;
+        try { postSend = ReadText(composerEl); } catch { }
+        bool stillThere = NormalizeWs(postSend) == NormalizeWs(originalText);
+        // NO RETRY, NO RETYPE. See the failure invariant's rule 3.
+        if (stillThere)
+        { EmitRoute(_app, provider, toTier /* now-current */, toTier, toLabel, complexity, "failed", originalText.Length, "not_submitted", effortFrom, effortTo); return; }
+
+        EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "ok", originalText.Length, okReason, effortFrom, effortTo);
+    }
+
+    // Retype the prompt into an empty composer and verify it landed EXACTLY.
+    //
+    // The same segmented writer Tier B uses: one segment per line, with this
+    // surface's newlineKeys combination between segments instead of a typed
+    // newline character, because on a chat surface a bare newline keystroke is
+    // routinely the SEND key. A surface whose combination this file cannot
+    // synthesize refuses a multi-line restore rather than guessing.
+    //
+    // Returns true ONLY on an exact read-back. Every other outcome returns
+    // false, and the caller then stops and leaves the text alone.
+    static bool WebRestoreComposer(AutomationElement composerEl, string originalText, IntPtr pinnedHwnd, RouteCtx ctx)
+    {
+        try
+        {
+            var segments = SplitMaskedLines(originalText);
+            int nlMod = 0, nlKey = 0;
+            bool multiline = segments.Count > 1;
+            if (multiline && !ResolveNewlineKeys(NewlineKeysFor(), out nlMod, out nlKey)) return false;
+
+            long budgetEnd = DateTime.UtcNow.Ticks + REWRITE_WRITE_BUDGET;
+            for (int seg = 0; seg < segments.Count; seg++)
+            {
+                if (seg > 0)
+                {
+                    if (DateTime.UtcNow.Ticks > budgetEnd || GetForegroundWindow() != pinnedHwnd) return false;
+                    if (ctx != null && _browserNavGen != ctx.NavGen) return false;
+                    SendKeyCombo(nlMod, nlKey);
+                    Thread.Sleep(REWRITE_CHUNK_DELAY_MS);
+                }
+                string line = segments[seg];
+                for (int i = 0; i < line.Length; i += REWRITE_CHUNK)
+                {
+                    if (DateTime.UtcNow.Ticks > budgetEnd || GetForegroundWindow() != pinnedHwnd) return false;
+                    if (ctx != null && _browserNavGen != ctx.NavGen) return false;
+                    int len = Math.Min(REWRITE_CHUNK, line.Length - i);
+                    SendUnicodeChunk(line.Substring(i, len));
+                    Thread.Sleep(REWRITE_CHUNK_DELAY_MS);
+                }
+            }
+
+            // Polled rather than a single fixed-delay read, for the reason the
+            // rewrite's verify documents: a one-shot read can catch the composer
+            // mid-write and report a perfectly good write as a failure.
+            string after = null;
+            long verifyDeadline = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(400).Ticks;
+            do
+            {
+                try { after = ReadText(composerEl); } catch { }
+                if (NormalizeWs(after) == NormalizeWs(originalText)) return true;
+                Thread.Sleep(40);
+            } while (DateTime.UtcNow.Ticks < verifyDeadline);
+            return false;
+        }
+        catch { return false; }
+    }
+
+
     // Control channel from the Node parent (the Electron dialog, or the CLI
     // agent's own Tokenize popup). Three commands, and nothing else is read:
     //
@@ -5912,6 +7159,3030 @@ public static class CfaiEnforcer
     //   {"cmd":"evidence_dlp","state":"on"|"off"}
     //       The fleet `dlp` flag for the AI-evidence routes — see
     //       _evidenceDlpOn. A bare on/off.
+    // ======================= BROWSER SURFACES ==============================
+    //
+    // "Which HOST is this browser tab on", and blocking a send on it.
+    //
+    // THIS IS THE MOST DANGEROUS CATALOG IN THIS FILE, and every rule below
+    // exists because of a specific way it could go wrong. A browser is the most
+    // general-purpose application on the machine: one process serves the AI
+    // composer, Gmail, an internal wiki, Jira, a bank login and the address bar.
+    // The three catalogs above are each scoped by something structural -- a
+    // process is an AI app or it is not, an element matches a composer signature
+    // or it does not. Neither helps here: the process is the same for every
+    // site, and the "composer" of claude.ai and the "composer" of a
+    // password-reset form are the same shape of UIA element.
+    //
+    // So the scoping is the URL, and there are exactly two things this section
+    // may ever conclude:
+    //   * "the resolved HOST is a catalog entry, past its own two flags, AND the
+    //      focused element is the page composer"  -> this tick is an AI surface;
+    //   * anything else at all                    -> it is not, and nothing is
+    //      captured, scanned, offered or blocked.
+    //
+    // ---- FAIL OPEN ON AN UNKNOWN OR UNREADABLE URL. NOT NEGOTIABLE. ---------
+    // An unknown host, an unparseable URL, a UIA read that threw, a browser
+    // whose omnibox we could not find: ALL of them mean "not an AI surface" --
+    // no scan, no block. The repo already made this call for a host app (see
+    // ai-processes.js's note that for Teams "'cannot tell' means NO BLOCK AT
+    // ALL"), and a browser is the stronger case by a wide margin. Fail CLOSED
+    // here would mean one UIA hiccup froze Enter across every tab in the user's
+    // browser -- indistinguishable from a broken keyboard, with no toast and
+    // nothing on screen to explain it. The cost of failing open is a missed
+    // block on one send, which the very next poll tick re-arms.
+    //
+    // ---- WHAT THE KEYBOARD HOOK MAY KNOW ------------------------------------
+    // NOTHING about a URL. The hook must decide synchronously, and resolving a
+    // URL means walking another process's accessibility tree (measured 72-189ms
+    // for FindAll(Edit) on a browser window -- prompt-watcher.ps1's live probe).
+    // So the hook reads only pre-computed booleans the poll thread published:
+    // _fgIsAi (as always), _fgIsBrowser, _fgWebChromeFocused, and the owner key
+    // it already compares. It never sees a host string and never touches an
+    // AutomationElement.
+    //
+    // ---- THE SLOW/FAST SPLIT ------------------------------------------------
+    // SLOW (background STA thread, SearchOmniboxBackground): find the omnibox
+    // AutomationElement, keyed by top-level hwnd. Same shape as
+    // SearchModelPickerBackground / SearchCopilotHeadingsBackground, including
+    // the empty-run backoff, for the same measured reason: a descendant search
+    // cannot run on a 150ms loop.
+    //
+    // FAST (poll thread, GetCachedBrowserUrl): the omnibox is ONE PERSISTENT
+    // WIDGET per browser window. Its VALUE changes on a tab switch and on every
+    // navigation; its ELEMENT IDENTITY does not. So the cached element's
+    // ValuePattern is re-read on the ordinary poll tick -- exactly what the
+    // model router already does with its cached picker button, whose Name it
+    // re-reads per tick. The URL is therefore never more than one poll tick
+    // stale, with no tree walk anywhere on the poll path.
+    class WebSurface
+    {
+        public string Id;
+        // The catalog host, already lowercased and www-stripped by
+        // ai-processes.js and normalised again here. The ONLY
+        // browser-derived-looking string this file will ever emit -- and it is
+        // not browser-derived at all: it is our own catalog value, selected by a
+        // comparison. A URL, a path, a query string and a page title never leave
+        // the functions that read them.
+        public string Host;
+        public string Product;
+        public string Vendor;
+        // The governance platform id for this host. Carried so a platform-scoped
+        // blocked row can reach a browser tab WITHOUT PLATFORM_PROCS (and its
+        // hand-maintained C# twin above) ever gaining a browser entry -- which it
+        // must not, because a PLATFORM_PROCS hit is matched process-WIDE.
+        public string Platform;
+        // Tier B knobs, same fields and semantics as PanelSig's.
+        public string NewlineKeys;
+        public int PostSendVerifyMs;
+        // ---- The SEND BUTTON signature, for the mouse-click block ----------
+        //
+        // BOTH are required before any search happens. Empty means this surface
+        // gets ENTER-ONLY blocking: no descendant search, no cached rect, and
+        // therefore no possibility of swallowing a click on the wrong control.
+        // That is the shipped state of chatgpt.com and gemini.google.com, which
+        // have not been probed -- and "unprobed" must mean "no rectangle", never
+        // "guess one". The bottom-right-corner heuristic UpdateSendRect uses for
+        // native chat apps stays permanently excluded for a browser: that
+        // rectangle is arbitrary page content, and caching a rect there would
+        // swallow ordinary clicks on whatever website is open.
+        //
+        // Measured live on claude.ai in Chrome with a NON-EMPTY composer:
+        //   [Button] Name='Send message' AutomationId='_r_bn_' rect=1560,1042 40x41
+        // and its ancestry is why the search below is a DESCENDANT search rather
+        // than a scan of the composer's siblings: the button sits two unnamed
+        // Groups below the button strip, and the OUTER group is the one that
+        // reports InvokePattern -- so "find the invokable thing next to the
+        // composer" lands on the wrong element.
+        public string SendButtonControlType;
+        public string SendButtonName;
+        // ---- The COMPOSER signature, for the BACKGROUND search only --------
+        //
+        // The live-probed Name of this surface's prompt box. Used by exactly one
+        // caller, SearchWebComposerBackground, and it is REQUIRED there: a
+        // search has no evidence that the element it found is the composer,
+        // whereas the focused read has the caret itself as evidence. So the
+        // search demands an exact catalog match and the focused path does not.
+        //
+        // EMPTY MEANS NO BACKGROUND SEARCH for this surface -- exactly the
+        // discipline SendButtonName already uses for the click block. An
+        // unprobed surface keeps the old focus-only behaviour rather than
+        // getting a guess.
+        public string ComposerName;
+        // ---- AI-218: surfaces whose composer Name is not a fixed string ----
+        //
+        // Microsoft's composer is named "Message <agent>", so it changes with
+        // whichever agent is open and no single string can match it. Identity
+        // there is STRUCTURAL FIRST (the AutomationId, which is stable and
+        // language-independent) and then the prefix, whose remainder IS the
+        // agent name. Both are required: a prefix alone would be a structural
+        // match wearing a name, which is the defect audit finding 4 was about.
+        //
+        // Empty on every surface that has a fixed ComposerName, so those keep
+        // their exact-match rule byte-for-byte.
+        public string ComposerAutomationId;
+        public List<string> ComposerNamePrefixes;
+        // ---- AI-219: the composer's UIA CONTROL TYPE -----------------------
+        //
+        // Every surface up to Gemini Enterprise was an [Edit], and this file
+        // hard-coded ControlType.Edit in the search condition and in both the
+        // focused read and the per-tick re-verify. Gemini Enterprise's composer
+        // was measured 2026-09-22 as
+        //   [Group] Name='Search' AutomationId='agent-search-prosemirror-editor'
+        //           ClassName='prosemirror-editor' patterns=Invoke
+        // so the type has to be data rather than a literal.
+        //
+        // DEFAULTS TO "Edit" -- in LoadWebSurfaces, in the field initialiser
+        // here, and once more in WebComposerControlType -- so a surface that
+        // says nothing behaves EXACTLY as it did before this field existed.
+        // An unrecognised value yields no Condition, i.e. no background search,
+        // which is the same fail-closed direction SendButtonControlType takes.
+        public string ComposerControlType = WEB_COMPOSER_CONTROL_TYPE_DEFAULT;
+        // ---- AI-219 follow-up: THE COMPOSER IS TWO ELEMENTS ----------------
+        //
+        // Live re-probe 2026-09-22 (Gemini Enterprise, composer empty):
+        //   [Group] Name='Search' AutomationId='agent-search-prosemirror-editor'
+        //           ClassName='prosemirror-editor   '  IsKeyboardFocusable=FALSE
+        //   [Group] Name=''       AutomationId=''      ClassName='ProseMirror'
+        //           IsKeyboardFocusable=TRUE  patterns=Text
+        //
+        // THE ELEMENT THAT CARRIES THE IDENTITY CANNOT TAKE THE CARET, AND THE
+        // ONE THAT CAN CARRIES NO IDENTITY. No single element could satisfy
+        // both the exact-AutomationId test and `if (!focusable) return false`,
+        // so nothing was ever cached, _fgIsWebComposer stayed false,
+        // PanelEnforceOk() answered false for the browser and EnterBlockActive
+        // short-circuited. Observed live: the prompt SENT, no block, and not
+        // one BLOCKED line in the log.
+        //
+        // EMPTY ON EVERY OTHER SURFACE, which is what keeps claude.ai,
+        // chatgpt.com, gemini.google.com and m365.cloud.microsoft byte-for-byte
+        // unchanged: an empty value means "the identified element IS the
+        // composer", the only shape that existed before this.
+        public string ComposerFocusableChildClassName;
+        // ---- AI-219: the agent id in the URL PATH --------------------------
+        //
+        // A Regex whose FIRST CAPTURE GROUP is the agent id, used ONLY by
+        // mode:'url_path'. Measured: /r/agent/([0-9]+).
+        //
+        // THIS IS NOT A LICENCE TO KEEP THE URL. GetCachedBrowserUrl still
+        // destroys `raw` in the same statement it always did; this pattern lets
+        // it lift ONE opaque id out on the way past, and nothing else -- no
+        // path, no query, no host-plus-path string. See _fgWebUrlAgentId.
+        // Empty means no extraction at all, so a mode/pattern mismatch yields
+        // "no agent", which is "no agent block" rather than a wrong one.
+        public string AgentUrlPattern;
+        // Names that mean "no specific agent is open". Filtered BEFORE any
+        // match, so an agent literally called "Copilot" can never be matched by
+        // name -- blocking all of Copilot stays a platform-scoped decision.
+        public HashSet<string> GenericNames;
+        // N platform ids per host (copilot_studio / personal_agent / ...).
+        // Never reaches PLATFORM_PROCS, which is matched process-WIDE.
+        public List<string> Platforms;
+        // The agent read's OWN two-flag gate, read only through
+        // EnforcingWebAgentRead so no call site can consult one and forget the
+        // other -- the same discipline EnforcingWebSurface enforces.
+        public string AgentReadMode;
+        public bool AgentReadEnforce;
+        public bool AgentReadVerified;
+        // ---- AI-216: MODEL ROUTING on this surface -------------------------
+        //
+        // NULL on every surface that declares no modelPicker block, and null is
+        // what keeps chatgpt.com, gemini.google.com, m365.cloud.microsoft and
+        // Gemini Enterprise byte-for-byte unchanged: no picker search is ever
+        // kicked, no Enter is ever swallowed for routing, no route event is ever
+        // emitted on them.
+        //
+        // Read ONLY through EnforcingWebPicker -- never this field directly --
+        // so the pair of flags inside it cannot be half-consulted. Same
+        // discipline as EnforcingWebSurface and EnforcingWebAgentRead.
+        public WebPicker ModelPicker;
+        // AI EMBEDDED IN A GENERAL-PURPOSE APP -- the web twin of the desktop
+        // `hostApp` flag. TRUE means this host is NOT an AI tool: it is the
+        // user's mail or documents, with an AI panel attached.
+        //
+        // It changes exactly one thing, and it is the thing that matters: a
+        // block here is scoped to the AI COMPOSER, never to the host. See
+        // WebBlockIsComposerScoped.
+        public bool HostApp;
+        // The two-flag safety gate, read in EXACTLY ONE place
+        // (EnforcingWebSurface) so no call site can consult one and forget the
+        // other. Every shipped entry is false/false.
+        public bool Enforce;
+        public bool Verified;
+    }
+
+    // ---- AI-216: the web surface's model picker, as DATA -------------------
+    //
+    // A nested block with its OWN enforce/verified pair, deliberately separate
+    // from the surface's: a host can be cleared to BLOCK a sensitive send
+    // without being cleared to DRIVE ITS UI, and those are two different live
+    // passes. claude.ai ships both pairs armed because it has passed both.
+    //
+    // NOTHING HERE IS AN AUTOMATIONID, and that is a rule rather than an
+    // omission. claude.ai's picker and its items carry React-generated ids
+    // ('base-ui-_r_36_', '_r_8t_') that change on every render, so an id match
+    // would work once and then silently stop matching. NAME IS THE ONLY SIGNAL.
+    // A source-invariant test asserts no AutomationId comparison exists in the
+    // picker/item code, because "improving" it to match on the id is exactly
+    // what the rest of this file's house style would suggest.
+    class WebPicker
+    {
+        // The picker BUTTON's UIA control type and the prefix its Name starts
+        // with. Measured: [Button] Name='Model: Opus 5 High'.
+        public string ControlType;
+        public string NamePrefix;
+        // '|'-joined, same representation the desktop default uses, so ONE
+        // helper (MrItemTypeAllowed) tests membership for both paths.
+        public string ItemControlTypes;
+        // Tier number -> the MODEL-NAME prefix of the menu item to click.
+        // Model names only -- never an effort token -- so a from_tier
+        // comparison stays tier-only and an effort change cannot read as a
+        // model change. An empty label means that tier is not a reachable
+        // TARGET on this surface: there is nothing to search the menu for, so
+        // the route is simply not armed.
+        public string Tier3Label;
+        public string Tier2Label;
+        public string Tier1Label;
+        // AI-216 / Gemini. The BUTTON's own tier strings, which are NOT the
+        // menu's on every surface: gemini.google.com's button reads 'currently
+        // Pro' while its menu item reads '3.1 Pro'. Empty on a surface whose
+        // button agrees with its menu (claude.ai), which then falls through to
+        // DetectModelInfo's keyword chain exactly as before.
+        public string ButtonTier3Label;
+        public string ButtonTier2Label;
+        public string ButtonTier1Label;
+        // The single prefix a site folds into the SELECTED item's Name in place
+        // of SelectionItemPattern. "" means the site does no such thing.
+        public string ItemSelectedPrefix;
+        // The provider whose tier arithmetic applies, as DATA rather than
+        // inferred from a keyword table.
+        public string Provider;
+        // Where from_tier comes from at PIN time. 'button_label' is the only
+        // implemented value; anything else is treated as OFF rather than as the
+        // default, so a catalog typo cannot silently pick a mechanism -- the
+        // same rule EnforcingWebAgentRead applies to its mode.
+        public string FromTier;
+        public bool Enforce;
+        public bool Verified;
+    }
+    static List<WebSurface> _webSurfaces = new List<WebSurface>();
+
+    // AI-219. The composer control type assumed when a surface declares none.
+    // The C# twin of ai-processes.js's DEFAULT_COMPOSER_CONTROL_TYPE, held in
+    // lockstep by a test -- the same discipline NEWLINE_KEYS_DEFAULT is under.
+    // Changing it would silently move every surface that says nothing, which is
+    // four of the six shipped entries.
+    const string WEB_COMPOSER_CONTROL_TYPE_DEFAULT = "Edit";
+
+    // The browser process names, and they live HERE rather than in _aiProcs,
+    // _ideProcs or _hostAppProcs. That separation is the single most important
+    // line in this section: a browser in _aiProcs would make the ENTIRE browser
+    // an AI surface, so FgIsAiNow() would be true in every tab and the Enter
+    // decision would run over a keystroke buffer reconstructed from the user's
+    // Gmail, their wiki edits and their web logins. Reviewers: if you ever find
+    // a browser name being added to one of those three sets, that is the bug.
+    static HashSet<string> _browserProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    // "Does the catalog contain AT LEAST ONE surface past its two flags?"
+    //
+    // The whole-feature inert gate, and the exact counterpart of hostAppArmed's
+    // EnforcingAgentSurface term. With every entry shipping false/false this is
+    // FALSE, and UpdateForeground then performs no omnibox search, no element
+    // read, no title read and writes no browser state at all -- not "reads but
+    // does not act", genuinely nothing. Recomputed only in LoadWebSurfaces, so
+    // the poll path is a single volatile read.
+    static volatile bool _anyWebSurfaceEnforcing = false;
+
+    // ---- Per-tick browser state (written only by the poll thread) ----------
+    //
+    // What ONE browser tick established about the URL. Deliberately the same
+    // taxonomy as AgentReadOutcome, because the latch keys on the same
+    // distinction:
+    //   Unreadable - no omnibox yet, the read threw, or the value was empty.
+    //                NO EVIDENCE. Capture stops at once (fail open) but an
+    //                ALREADY-ESTABLISHED block survives, via the existing latch.
+    //   NotSurface - the URL read fine and its host is not in the catalog. That
+    //                is AUTHORITATIVE "not an AI surface", so a latched block
+    //                retires on this tick.
+    //   Surface    - AUTHORITATIVE: this tab is on a catalog host.
+    enum WebReadOutcome { Unreadable = 0, NotSurface = 1, Surface = 2 }
+    static volatile WebReadOutcome _fgWebOutcome = WebReadOutcome.Unreadable;
+    // The CATALOG-MATCHED host for this tick, or "". Never a URL.
+    static volatile string _fgWebHost = "";
+    // Is the foreground process a browser at all? Published for the hook, which
+    // uses it to skip its navigation-chord check entirely for every other app.
+    static volatile bool _fgIsBrowser = false;
+    // Is the focused element the PAGE COMPOSER right now? Mirrors THIS tick's
+    // read, so it is false on an unreadable one -- the fail-open direction for
+    // capture, identical to _fgIsPanel's treatment.
+    static volatile bool _fgIsWebComposer = false;
+    // Is the focused element the browser's OWN chrome (address bar, find bar,
+    // tab search)? STICKY UNTIL CONTRADICTED, and that asymmetry is deliberate:
+    // it is the term that keeps Enter ALIVE in the address bar while a block is
+    // armed, and an unreadable tick must not be able to silently withdraw it.
+    // Only a SUCCESSFUL element read may change this value.
+    static volatile bool _fgWebChromeFocused = false;
+    // "This browser tick is on a governed AI host" -- the file-watcher arm
+    // signal, read only by UpdateGovState. Assigned on EVERY branch of
+    // ApplyForegroundTick, exactly as _fgHostGoverned is, so it cannot outlive
+    // the tick that earned it.
+    static volatile bool _fgWebGoverned = false;
+    static volatile string _fgWebGovHost = "";
+
+    // ---- The COMPOSER element cache ---------------------------------------
+    //
+    // See the long note above LoadWebSurfaces for the live bypass this fixes.
+    // In one line: the composer must stay READABLE while the window is on a
+    // governed host, so that a PASTE is caught on the next 150ms tick no matter
+    // where focus happens to be -- while the composer-FOCUSED test still decides
+    // what may be swallowed and what may be captured from the keyboard.
+    //
+    // Populated for free: ReadFocusedWebComposer already identifies the composer
+    // when it has focus, so the cache costs no extra UIA call and no search.
+    // That is also why a focus round-trip costs ONE POLL TICK rather than a
+    // background search plus its backoff.
+    static AutomationElement _webComposerCached = null;
+    // ---- The composer background search -----------------------------------
+    //
+    // WHY THIS EXISTS. The composer cache used to be fillable from ONE place:
+    // a tick on which the composer already held keyboard focus. The address bar
+    // has had a background searcher since it was written; the composer had
+    // nothing, so it was found by waiting rather than by looking.
+    //
+    // That is a HOLE, not just a latency problem. MouseEnforceOk() requires
+    // _fgWebComposerReadable, so until the cache is filled a CLICK ON THE SEND
+    // BUTTON IS NOT SWALLOWED AT ALL -- the prompt goes, unblocked. Reported as
+    // "why am I getting a very late dialog for Gemini", and before that as "for
+    // gemini the prompt was directly sent".
+    //
+    // Shape is deliberately identical to the omnibox searcher's (same interval,
+    // same backoff, same never-half-apply rule, same STA background thread), so
+    // the two read as one mechanism rather than two.
+    // volatile, exactly like _omniboxSearchInProgress. Written by the background
+    // thread and read by the poll thread: a stale TRUE silently stops every future
+    // search (back to the no-swallow bypass this exists to fix), a stale FALSE
+    // starts a second concurrent search and widens the nav race below.
+    static volatile bool _webComposerSearchInProgress = false;
+    static IntPtr _webComposerSearchHwnd = IntPtr.Zero;
+    static long _webComposerLastSearchTicks = 0;
+    static int _webComposerEmptyRuns = 0;
+    // Counts RUNS THAT DID NOT LEAVE A USABLE CACHE, not merely runs that found
+    // nothing. A search can find an element that VerifiedWebComposer then drops
+    // on the next tick (still settling, momentarily not focusable); counting only
+    // empty runs let that loop re-run a full descendant walk every second
+    // forever, because each find reset the counter.
+    static readonly long WEB_COMPOSER_SEARCH_MIN_INTERVAL = TimeSpan.FromSeconds(1).Ticks;
+    static readonly long WEB_COMPOSER_SEARCH_BACKOFF_INTERVAL = TimeSpan.FromSeconds(5).Ticks;
+    const int WEB_COMPOSER_EMPTY_RUNS_BEFORE_BACKOFF = 3;
+    static IntPtr _webComposerHwnd = IntPtr.Zero;
+    static string _webComposerHost = "";
+    static string _webComposerRid = "";
+    // Did the cached composer RE-VERIFY this tick? This is what PanelUiaOk keys
+    // on for a browser, and therefore what licenses reading the composer's text
+    // at all. Mirrors this tick's re-verify, so a single failure stops the read
+    // immediately -- fail open, exactly as _fgIsWebComposer does for capture.
+    static volatile bool _fgWebComposerReadable = false;
+    // ---- AI-218: which agent the browser composer says is open -------------
+    //
+    // Derived from the SAME Name the composer re-verify already reads every
+    // tick, so the agent read costs no extra UIA call and can never see an
+    // element the composer cache would not.
+    //
+    // WEB_ID_NOT_COMPOSER (0) is the safe default and the value assigned on
+    // every branch that is not a first-hand read of a governed composer, so a
+    // stale Named can never survive into a later tick and block the wrong page.
+    static volatile int _fgWebAgentOutcome = 0;
+    static volatile string _fgWebAgentName = "";
+    // ---- AI-219: the agent id this tick's URL named, or "" -----------------
+    //
+    // THE ONLY THING EVER RETAINED FROM A URL, and it is retained under exactly
+    // the same rule the host is: extracted inside GetCachedBrowserUrl, from a
+    // `raw` that is destroyed in the same statement, by a catalog-supplied
+    // Regex whose FIRST CAPTURE GROUP this is. No path, no query string, no
+    // full URL and nothing containing one is stored here, logged, emitted or
+    // compared -- which matters on this surface more than anywhere else,
+    // because the measured URL carries a customerId AND a session id.
+    //
+    // It is an OPAQUE ID, never a display name: the block route compares it to
+    // a blocked row's agent_id, ordinal and whole-string. "" means "the URL
+    // named no agent", which yields WEB_ID_GENERIC and therefore no agent
+    // block -- the same fail-open direction every other web term takes.
+    // Cleared alongside _browserUrlHost on a window change and on an
+    // unreadable tick, so it can never outlive the read that produced it.
+    static volatile string _fgWebUrlAgentId = "";
+    // Is a PASSWORD field focused right now? STICKY UNTIL CONTRADICTED, for the
+    // same reason _fgWebChromeFocused is: it is a term that must not be
+    // withdrawn by an unreadable tick. Read only by WebBlockGateOk, to keep a
+    // whole-site block from swallowing Enter in a login form -- capture is
+    // already impossible there (a password field can never be the composer).
+    static volatile bool _fgWebPasswordFocused = false;
+
+    // ---- The omnibox element cache + the resolved host ---------------------
+    static volatile bool _omniboxSearchInProgress = false;
+    static AutomationElement _omniboxCached = null;
+    static IntPtr _omniboxCachedHwnd = IntPtr.Zero;
+    static IntPtr _omniboxSearchHwnd = IntPtr.Zero;
+    static long _omniboxLastSearchTicks = 0;
+    static int _omniboxEmptyRuns = 0;
+    static readonly long OMNIBOX_SEARCH_MIN_INTERVAL = TimeSpan.FromSeconds(1).Ticks;
+    // Back off hard once a window has repeatedly yielded no omnibox -- a browser
+    // in a mode that hides it (a popup window, an installed PWA, kiosk) must not
+    // spin a background thread every second forever.
+    static readonly long OMNIBOX_SEARCH_BACKOFF_INTERVAL = TimeSpan.FromSeconds(5).Ticks;
+    const int OMNIBOX_EMPTY_RUNS_BEFORE_BACKOFF = 3;
+    // Bounds what a hostile or merely enormous URL can cost. A real URL is far
+    // inside this; anything longer is truncated before it is parsed, and
+    // truncation can only ever LOSE a match (fail open).
+    const int BROWSER_URL_MAX = 2048;
+
+    // The last host successfully resolved, and when. This is the FAIL-OPEN bound
+    // on the fast path: the per-tick re-read is what normally answers, and this
+    // is only consulted when that read hiccups.
+    //
+    // TWO SECONDS, not the three the other caches use, and not because two is a
+    // nicer number: this one GATES A BLOCK. Everything else a stale value could
+    // do here is recoverable on the next tick; keeping a host alive too long
+    // could keep Enter swallowed in a tab the user has already navigated away
+    // from. It is also the backstop for the one invalidation signal nothing else
+    // catches -- a single-page-app route change under an unchanged window title.
+    static readonly long BROWSER_URL_TTL = TimeSpan.FromSeconds(2).Ticks;
+    static string _browserUrlHost = "";
+    static IntPtr _browserUrlHwnd = IntPtr.Zero;
+    static long _browserUrlTicks = 0;
+
+    // ---- The SEND-BUTTON element cache, and why it is RE-RESOLVED ---------
+    //
+    // Same slow/fast split as the omnibox: a background STA thread finds the
+    // ELEMENT, and the poll thread re-reads a property off the cached element
+    // once per tick. Measured cost of the search: 105ms on a plain claude.ai
+    // window (62 buttons) and 489ms on a 67-tab Edge window -- three times the
+    // whole poll interval, so it cannot run inline, and the mouse hook may only
+    // ever read a cached rectangle.
+    //
+    // ---- THE SHARP EDGE THIS CONTROL HAS, AND THE RULE THAT ANSWERS IT -----
+    //
+    // `Send message` EXISTS ONLY WHILE THE COMPOSER IS NON-EMPTY. When the
+    // composer is empty, claude.ai renders
+    //     [Button] Name='Use voice mode'
+    // AT THE IDENTICAL RECTANGLE (measured: 1560,1042 40x41 in both states).
+    // So a rect cached while text was present and reused when it is not would
+    // swallow clicks on the MICROPHONE -- a control that has nothing to do with
+    // sending, on a surface where the user has no idea why their click did
+    // nothing. That is a worse failure than not blocking the click at all.
+    //
+    // THE RULE IS THEREFORE: RE-RESOLVE, NEVER REMEMBER. The rect is published
+    // ONLY on a tick where the cached element's Name was just read and still
+    // equals the catalog's SendButtonName. A mismatch does not publish. Two
+    // independent bounds on top of that:
+    //
+    //   * _webSendVerifiedTicks + WEB_SEND_RECT_TTL. The hook cannot re-verify
+    //     anything itself, so it checks that the poll thread verified RECENTLY.
+    //     A poll thread that stalls, or a tick that stopped publishing, makes
+    //     the rect go COLD rather than being trusted indefinitely. 400ms is
+    //     between two and three poll ticks: wide enough to absorb a slow tick,
+    //     far too narrow to survive the composer being emptied.
+    //   * the rect is published ONLY while a WEB-scoped block is actually armed
+    //     on a verified+enforcing surface (see UpdateWebSendRect's gates), so
+    //     the whole mechanism is inert unless a send is already being stopped.
+    //
+    // WORST-CASE EXPOSURE, stated plainly: one poll tick (150ms) between the
+    // composer emptying and the rect being withdrawn. Reaching it requires a
+    // web block to be armed AND the composer to have just been emptied AND a
+    // click on the microphone inside that window. It cannot be driven to zero
+    // without doing UIA on the hook thread, which is not on the table.
+    static volatile bool _webSendSearchInProgress = false;
+    static AutomationElement _webSendCached = null;
+    static IntPtr _webSendCachedHwnd = IntPtr.Zero;
+    static string _webSendCachedHost = "";
+    static IntPtr _webSendSearchHwnd = IntPtr.Zero;
+    static string _webSendSearchHost = "";
+    static long _webSendLastSearchTicks = 0;
+    static int _webSendEmptyRuns = 0;
+    static readonly long WEB_SEND_SEARCH_MIN_INTERVAL = TimeSpan.FromSeconds(1).Ticks;
+    static readonly long WEB_SEND_SEARCH_BACKOFF_INTERVAL = TimeSpan.FromSeconds(5).Ticks;
+    const int WEB_SEND_EMPTY_RUNS_BEFORE_BACKOFF = 3;
+    // WHEN the rect was last positively re-verified. Written only by the poll
+    // thread, read by the mouse hook as a timestamp comparison -- no UIA, no
+    // allocation, no scan on that path.
+    static long _webSendVerifiedTicks = 0;
+    static readonly long WEB_SEND_RECT_TTL = TimeSpan.FromMilliseconds(400).Ticks;
+
+    // ---- Cache invalidation, cheapest signal first ------------------------
+    //
+    // (a) The foreground hwnd changed. Free -- UpdateForeground already has it.
+    // (b) The window TITLE changed. One GetWindowText, and a strong cheap proxy
+    //     for "the tab or the page changed": Chromium puts the document title in
+    //     it and rewrites it on every tab switch and every navigation.
+    //     A title is PII -- a browser title carries the page's name, which on
+    //     claude.ai is a conversation name and on Gmail is a subject line. So:
+    //       * it is read ONLY once the URL has already said this tab is on a
+    //         catalog host, so a Gmail title is never read at all;
+    //       * only a HASH of it is retained (TitleFingerprint), never the text;
+    //       * it is used ONLY to invalidate. It never identifies anything, it is
+    //         never compared against a catalog, and there is no path from it to
+    //         an emitter.
+    // (c) Navigation CHORDS, stamped by the hook (a timestamp only, never which
+    //     key): Ctrl+T/W/Tab, Ctrl+1-9, Alt+Left/Right, F5, and Enter while the
+    //     caret is in the omnibox. Same idea as _lastFocusMoveInputTicks, kept
+    //     as a SEPARATE field so nothing about the panel-latch machinery moves.
+    // (d) The TTL above, as a backstop for anything the three miss.
+    //
+    // Any of them bumps _browserNavGen, which is part of the typed buffer's
+    // OWNER KEY -- so the hook's existing "owner changed, drop the buffer" line
+    // discards the buffer on a tab switch or a navigation, with no new hook code
+    // and no new lock.
+    static long _browserNavInputTicks = 0;
+    static long _browserNavSeenTicks = 0;
+    static long _browserTitleFingerprint = 0;
+    static int _browserNavGen = 0;
+    // What the invalidation sweep last observed. Separate from the URL cache's
+    // own hwnd/host, because these answer a different question: not "may the
+    // cached host still be served" but "has anything changed since the last time
+    // the buffer was allowed to keep accumulating".
+    static IntPtr _browserNavHwnd = IntPtr.Zero;
+    static string _browserNavHost = "";
+
+    // ---- Loaders -----------------------------------------------------------
+    //
+    // CFAI_BROWSER_PROCESSES -> _browserProcs. One literal name per entry, made
+    // an exact-match HashSet key exactly as _aiProcs/_ideProcs are: a regex
+    // alternation would silently match nothing, which is why ai-processes.js
+    // requires one BROWSER_PROCS row per name variant.
+    static void LoadBrowserProcesses(string[] names)
+    {
+        var procs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (names != null)
+        {
+            foreach (var n in names)
+            {
+                if (string.IsNullOrEmpty(n)) continue;
+                string name = StripExe(n).Trim();
+                if (name.Length > 0) procs.Add(name);
+            }
+        }
+        _browserProcs = procs;
+    }
+
+    // CFAI_WEB_SURFACES -> _webSurfaces. Same "build locals, assign only at the
+    // end" discipline as the other three parsers, and the same fail direction as
+    // LoadAiPanels rather than LoadAgentSurfaces: a throw anywhere below leaves
+    // the list EMPTY and _anyWebSurfaceEnforcing false, i.e. every browser
+    // ungoverned. For a browser that is the ONLY safe direction -- see the
+    // fail-open note at the top of this section.
+    static void LoadWebSurfaces(string json)
+    {
+        var serializer = new JavaScriptSerializer();
+        var raw = (object[])serializer.DeserializeObject(json);
+        var surfaces = new List<WebSurface>();
+        bool anyEnforcing = false;
+        foreach (var item in raw)
+        {
+            var d = (Dictionary<string, object>)item;
+            string id = JsStr(d, "id");
+            // Normalised HERE and only here, the same way ai-processes.js's
+            // webSurfaceForHost does it, so the two sides agree on what "this
+            // host is claude.ai" means. A row with no host can never match a
+            // URL, so it is dropped rather than carried as a dead comparison.
+            string host = JsStr(d, "host").Trim().ToLowerInvariant();
+            if (host.StartsWith("www.", StringComparison.Ordinal)) host = host.Substring(4);
+            if (id.Length == 0 || host.Length == 0) continue;
+            // A host with a slash in it is a PATH, and this catalog is host-only
+            // on purpose: a path is one field away from a query string, and a
+            // query string on an AI URL routinely contains the prompt itself.
+            // Refused rather than trimmed, so a mistake shows up as "this
+            // surface does nothing" instead of silently governing a whole site.
+            if (host.IndexOf('/') >= 0) continue;
+            bool enforce = JsBool(d, "enforce");
+            bool verified = JsBool(d, "verified");
+            if (enforce && verified) anyEnforcing = true;
+            // AI-219. Absent or empty is the DEFAULT, not a refusal: four of
+            // the shipped surfaces predate this field and must keep behaving as
+            // if the type were still the literal it used to be.
+            string composerCt = JsStr(d, "composerControlType").Trim();
+            if (composerCt.Length == 0) composerCt = WEB_COMPOSER_CONTROL_TYPE_DEFAULT;
+            surfaces.Add(new WebSurface
+            {
+                Id = id,
+                Host = host,
+                Product = JsStr(d, "product"),
+                Vendor = JsStr(d, "vendor"),
+                Platform = JsStr(d, "platform"),
+                // Absent / empty means NO CLICK BLOCKING for this surface --
+                // see the field comments. Both travel already resolved by
+                // buildWebSurfaceConfig, so this side never has to tell missing
+                // from empty.
+                SendButtonControlType = JsStr(d, "sendButtonControlType"),
+                SendButtonName = JsStr(d, "sendButtonName"),
+                // Travels already resolved by buildWebSurfaceConfig, so this
+                // side never has to tell missing from empty -- and empty is a
+                // meaningful value here (no background search).
+                ComposerName = JsStr(d, "composerName"),
+                ComposerAutomationId = JsStr(d, "composerAutomationId"),
+                ComposerNamePrefixes = JsStrList(d, "composerNamePrefixes"),
+                // AI-219. Defaulted HERE as well as in buildWebSurfaceConfig,
+                // because this side must not trust an env var it did not build
+                // -- and the value it falls back to is the type every surface
+                // before Gemini Enterprise was hard-coded to, so an absent
+                // field reproduces the old behaviour exactly.
+                ComposerControlType = composerCt,
+                // AI-219 follow-up. Empty means "no descent", which is every
+                // surface that predates the field -- see the field comment.
+                ComposerFocusableChildClassName = JsStr(d, "composerFocusableChildClassName"),
+                AgentUrlPattern = JsStr(d, "agentReadUrlPattern"),
+                GenericNames = JsStrSet(d, "genericNames"),
+                Platforms = JsStrList(d, "platforms"),
+                HostApp = JsBool(d, "hostApp"),
+                AgentReadMode = JsStr(d, "agentReadMode"),
+                AgentReadEnforce = JsBool(d, "agentReadEnforce"),
+                AgentReadVerified = JsBool(d, "agentReadVerified"),
+                // AI-216. Null unless the payload actually carried a picker --
+                // see ParseWebPicker. A surface with no block gets null and
+                // therefore no routing of any kind.
+                ModelPicker = ParseWebPicker(d),
+                // Absent means the default combo; a value this side does not
+                // recognise is kept VERBATIM so ResolveNewlineKeys can refuse it
+                // rather than fall back to a combo the page might treat as send.
+                // Identical treatment to PanelSig.NewlineKeys.
+                NewlineKeys = JsStr(d, "newlineKeys"),
+                // Clamped again on this side even though buildWebSurfaceConfig
+                // already clamped: the C# side must not trust an env var it did
+                // not build, and the rewrite's whole time budget is reasoned
+                // about against these bounds. Every browser surface asks for the
+                // ceiling, for the same reason Teams' composers do -- a Chromium
+                // composer's value reaches UIA one serialization hop late, so a
+                // shorter window reads back the pre-write text and abandons a
+                // rewrite that actually succeeded.
+                PostSendVerifyMs = JsIntClamped(d, "postSendVerifyMs",
+                    REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MS, REWRITE_POST_SEND_MAX_MS),
+                Enforce = enforce,
+                Verified = verified,
+            });
+        }
+        _webSurfaces = surfaces;
+        _anyWebSurfaceEnforcing = anyEnforcing;
+    }
+
+    // AI-216. Build the picker block from the flattened payload, or return NULL.
+    //
+    // NULL IS THE IMPORTANT RETURN. It is what a surface with no modelPicker
+    // block produces, and it is what makes "this surface behaves exactly as it
+    // did before AI-216" a structural fact rather than a promise: every routing
+    // path starts by asking EnforcingWebPicker, which starts by asking this.
+    //
+    // A block whose name prefix or item-type list is empty describes no picker
+    // that could be found, so it is refused here rather than defaulted. The
+    // DEFAULTS live in buildWebSurfaceConfig, which applies them only when the
+    // block exists -- this side must not manufacture a signature it was not
+    // given, on the same principle that keeps it from trusting an env var it
+    // did not build.
+    static WebPicker ParseWebPicker(Dictionary<string, object> d)
+    {
+        string prefix = JsStr(d, "modelPickerNamePrefix").Trim();
+        List<string> itemTypes = JsStrList(d, "modelPickerItemControlTypes");
+        if (prefix.Length == 0) return null;
+        if (itemTypes == null || itemTypes.Count == 0) return null;
+        string ct = JsStr(d, "modelPickerControlType").Trim();
+        if (ct.Length == 0) ct = MODEL_PICKER_CONTROL_TYPE_DEFAULT;
+        return new WebPicker
+        {
+            ControlType = ct,
+            NamePrefix = prefix,
+            ItemControlTypes = string.Join("|", itemTypes.ToArray()),
+            Tier3Label = JsStr(d, "modelPickerTier3Label"),
+            Tier2Label = JsStr(d, "modelPickerTier2Label"),
+            Tier1Label = JsStr(d, "modelPickerTier1Label"),
+            ButtonTier3Label = JsStr(d, "modelPickerButtonTier3Label"),
+            ButtonTier2Label = JsStr(d, "modelPickerButtonTier2Label"),
+            ButtonTier1Label = JsStr(d, "modelPickerButtonTier1Label"),
+            ItemSelectedPrefix = JsStr(d, "modelPickerItemSelectedPrefix"),
+            Provider = JsStr(d, "modelPickerProvider"),
+            FromTier = JsStr(d, "modelPickerFromTier"),
+            Enforce = JsBool(d, "modelPickerEnforce"),
+            Verified = JsBool(d, "modelPickerVerified"),
+        };
+    }
+
+    // ---- Host -> surface, and the ONE enforcement gate ---------------------
+    //
+    // Exact match first, then a registrable-suffix match, mirroring
+    // ai-processes.js's webSurfaceForHost (and the server's resolvePlatform) so
+    // the agent and the dashboard agree. Plain string comparison, no Regex --
+    // same reason MatchPanelSignature has none.
+    //
+    // The suffix form is `endsWith("." + host)`, which is a DOT-BOUNDARY test:
+    // "notclaude.ai" does not match "claude.ai", and neither does
+    // "claude.ai.attacker.example" (the suffix has to be at the END).
+    static WebSurface MatchWebSurface(string host)
+    {
+        var surfaces = _webSurfaces;
+        if (surfaces == null || surfaces.Count == 0) return null;
+        if (string.IsNullOrEmpty(host)) return null;
+        string h = host.Trim().ToLowerInvariant();
+        if (h.StartsWith("www.", StringComparison.Ordinal)) h = h.Substring(4);
+        if (h.Length == 0) return null;
+        foreach (var s in surfaces)
+        {
+            if (string.Equals(h, s.Host, StringComparison.Ordinal)) return s;
+        }
+        foreach (var s in surfaces)
+        {
+            if (h.EndsWith("." + s.Host, StringComparison.Ordinal)) return s;
+        }
+        return null;
+    }
+
+    // May this host enforce at all? The exact twin of EnforcingAgentSurface, and
+    // the ONLY place either flag is read -- so a call site cannot consult one and
+    // forget the other, and arming a host live is a data change in
+    // ai-processes.js with no code change anywhere.
+    //
+    // Every shipped entry is false/false, so this returns null for every host
+    // today. That is the point: the path below is fully wired and fully
+    // exercised, and it arms nothing until a human runs a live pass on THAT HOST
+    // in THAT BROWSER. Per host, not per engine -- passing on claude.ai says
+    // nothing about whether Gemini's composer reads correctly.
+    // String-array payload fields. Same shape as LoadAgentSurfaces' inline
+    // prefix parse, factored out because AI-218 needs it three times. An absent
+    // or unreadable field yields an EMPTY collection, never null, so every call
+    // site can iterate without a guard and an unparseable catalog degrades to
+    // "identifies nothing" rather than throwing.
+    static List<string> JsStrList(Dictionary<string, object> d, string key)
+    {
+        var outp = new List<string>();
+        object raw;
+        if (!d.TryGetValue(key, out raw) || raw == null) return outp;
+        try
+        {
+            foreach (var x in (IEnumerable)raw)
+            {
+                string v = Convert.ToString(x);
+                if (!string.IsNullOrEmpty(v)) outp.Add(v);
+            }
+        }
+        catch { }
+        return outp;
+    }
+
+    static HashSet<string> JsStrSet(Dictionary<string, object> d, string key)
+    {
+        var outp = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string v in JsStrList(d, key)) { string n = NormalizeAgentName(v); if (n.Length > 0) outp.Add(n); }
+        return outp;
+    }
+
+    // ---- AI-218: the agent read's own gate --------------------------------
+    //
+    // The ONLY reader of AgentReadEnforce/AgentReadVerified, exactly as
+    // EnforcingWebSurface is the only reader of the surface's own pair. A
+    // surface can be armed for DLP while its agent read is still dark, which is
+    // the whole point of the nested pair: behaviour (B) ships before (A).
+    // Does this web surface serve the platform a blocked row names? One host
+    // serves several (copilot_studio / personal_agent / teams_chat_agent),
+    // which is why this is a list rather than the singular `Platform` the three
+    // original surfaces use. An empty list claims nothing, so a surface that
+    // has not declared its platforms can never produce an agent block.
+    static bool WebSurfaceClaimsPlatform(WebSurface web, string platform)
+    {
+        if (web == null || web.Platforms == null) return false;
+        string want = platform ?? "";
+        if (want.Length == 0) return false;
+        foreach (string pf in web.Platforms)
+            if (string.Equals(pf, want, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    // ---- AI-219: WHICH field of a blocked row identifies the agent ---------
+    //
+    // ONE function for both the arm (CheckFgBlocked) and the retirement (the
+    // web-agent latch), so the question "is this still the blocked agent" has a
+    // single answer per surface shape:
+    //
+    //   composer_name -> the row's agent_name, matched WHOLE-STRING by
+    //     AgentNameMatches -- the same rule the desktop agent arm uses. Never a
+    //     substring: an agent called "HR" must not match "HR Policy Bot".
+    //   url_path -> the row's agent_id, matched ORDINAL and whole-string
+    //     against the id this tick's URL named. An id is an OPAQUE TOKEN, not a
+    //     label, so case-folding, trimming or prefix-matching it would all be
+    //     guesses -- and two ids differing only in case are two different
+    //     agents, not one. BOTH sides must be non-empty: a row with no agent_id
+    //     names no agent, and a tick that read no id saw none.
+    //
+    // It never decides WHETHER an agent was identified -- every caller has
+    // already required WEB_ID_NAMED -- only WHICH one.
+    static bool WebAgentRowMatches(WebSurface web, string evidenceName, string evidenceId,
+                                   string rowAgentName, string rowAgentId)
+    {
+        if (web == null) return false;
+        if (WebAgentReadIsUrlPath(web))
+        {
+            string want = rowAgentId ?? "";
+            string have = evidenceId ?? "";
+            if (want.Length == 0 || have.Length == 0) return false;
+            if (string.Equals(have, want, StringComparison.Ordinal)) return true;
+            // ---- THE RESOURCE-NAME FORM, and why it is not a substring test --
+            //
+            // The URL carries the LAST SEGMENT of the agent's resource name
+            // (measured: /r/agent/18007293655158706549). The Inventory stores
+            // what the Discovery Engine API returned, which is the WHOLE name:
+            //   projects/<p>/locations/<l>/collections/<c>/engines/<e>
+            //     /assistants/<a>/agents/18007293655158706549
+            // and connect-ui blocks with that string verbatim (DiscoveryTab's
+            // blockAgent sends agent.id). So an exact compare alone would match
+            // nothing and the feature would silently never fire -- a no-op that
+            // looks armed, which is worse than a missing feature.
+            //
+            // This is a WHOLE-SEGMENT tail compare, not a Contains(): the row
+            // must end with the literal separator "/agents/" followed by the id
+            // and NOTHING else. An id cannot match part of another id, and no
+            // string that is not a resource name for that exact agent can
+            // satisfy it. Ordinal, like the compare above -- an id is an opaque
+            // token, never a label.
+            //
+            // The narrower direction was considered and rejected: shortening
+            // the id SERVER-side would change what an existing blocked_agents
+            // row means, and this file must not depend on a migration to be
+            // correct.
+            const string AGENT_SEG = "/agents/";
+            if (want.Length > AGENT_SEG.Length + have.Length)
+            {
+                int cut = want.Length - have.Length;
+                if (string.CompareOrdinal(want, cut, have, 0, have.Length) == 0
+                    && cut >= AGENT_SEG.Length
+                    && string.CompareOrdinal(want, cut - AGENT_SEG.Length, AGENT_SEG, 0, AGENT_SEG.Length) == 0)
+                    return true;
+            }
+            return false;
+        }
+        return AgentNameMatches(evidenceName, rowAgentName);
+    }
+
+    // ---- AI-219: is this surface's agent identity in the URL PATH? ---------
+    //
+    // Reads the RAW mode rather than going through EnforcingWebAgentRead, and
+    // that is deliberate: this answers "which SHAPE is this surface", which
+    // decides how its COMPOSER is identified and which field of a blocked row
+    // an agent must be matched against. Those questions have answers whether or
+    // not the agent read is armed. Whether an agent may be BLOCKED is a
+    // separate question and still goes through EnforcingWebAgentRead, which is
+    // the only reader of the two flags.
+    static bool WebAgentReadIsUrlPath(WebSurface web)
+    {
+        if (web == null) return false;
+        return string.Equals(web.AgentReadMode ?? "", "url_path", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ---- Does this surface carry enough signature to IDENTIFY its composer? -
+    //
+    // ONE rule, consulted by all three paths into the composer cache (the
+    // focused read, the per-tick re-verify and the background search), so they
+    // cannot drift apart -- the property the whole identity gate rests on is
+    // that a SEARCH can never be laxer than a FOCUSED READ.
+    //
+    // THREE accepted shapes, and no fourth:
+    //   (a) an exact ComposerName -- claude.ai, chatgpt.com, gemini.google.com.
+    //   (b) an AutomationId AND at least one name prefix -- m365, whose
+    //       composer Name embeds the agent's display name. A PREFIX ALONE is
+    //       NOT one of the shapes: it would be a structural match wearing a
+    //       name, which is the defect security-audit finding 4 was about.
+    //   (c) AI-219: an AutomationId ALONE, and ONLY for a url_path surface.
+    //       Gemini Enterprise's composer Name is the generic 'Search' for every
+    //       agent, so there is no name to match and no prefix to take. What
+    //       makes the AutomationId sufficient here rather than "structural
+    //       alone" is that it is semantic and specific
+    //       ('agent-search-prosemirror-editor'), matched ORDINALLY and
+    //       whole-string, and that the agent identity comes from a SECOND,
+    //       INDEPENDENT signal (the URL) instead of from the same string.
+    //
+    // FALSE means "this surface has no opinion", which keeps the pre-identity
+    // behaviour for an unprobed entry -- the same rule an empty SendButtonName
+    // follows. It never means "allow anything through a gate".
+    static bool WebSurfaceCanIdentifyComposer(WebSurface web)
+    {
+        if (web == null) return false;
+        if ((web.ComposerName ?? "").Length > 0) return true;
+        if ((web.ComposerAutomationId ?? "").Length == 0) return false;
+        if (web.ComposerNamePrefixes != null && web.ComposerNamePrefixes.Count > 0) return true;
+        return WebAgentReadIsUrlPath(web);
+    }
+
+    static WebSurface EnforcingWebAgentRead(WebSurface web)
+    {
+        if (web == null) return null;
+        if (!web.AgentReadEnforce || !web.AgentReadVerified) return null;
+        // A mode we do not implement is treated as OFF rather than as the
+        // default, so a catalog typo cannot silently pick a mechanism.
+        //
+        // TWO modes are implemented, and they are not interchangeable:
+        //   composer_name  the composer's own Name carries the agent's DISPLAY
+        //                  NAME (m365: "Message <agent>").
+        //   url_path       AI-219. The composer names no agent at all (Gemini
+        //                  Enterprise's is the generic 'Search' for every one of
+        //                  them), so identity is the OPAQUE ID in the URL path.
+        // Which one a surface uses decides how its composer is identified AND
+        // which field of a blocked row an agent is matched against, so the two
+        // are kept apart everywhere rather than merged into "has an agent read".
+        if (!string.Equals(web.AgentReadMode, "composer_name", StringComparison.OrdinalIgnoreCase)
+            && !WebAgentReadIsUrlPath(web)) return null;
+        return web;
+    }
+
+    // ---- AI-218: web composer identity, the C# twin of webComposerIdentity --
+    //
+    // Answers BOTH "is this element the composer" and "which agent is open in
+    // it" from one string, because on Microsoft's surfaces they are the same
+    // question. Held in lockstep with the JS by a test.
+    //
+    // outcome: 0 = not_composer, 1 = generic, 2 = named.
+    // ONLY 2 may ever arm an agent-scoped block.
+    const int WEB_ID_NOT_COMPOSER = 0, WEB_ID_GENERIC = 1, WEB_ID_NAMED = 2;
+
+    // ---- AI-219 follow-up: the CHILD-DESCENT rule, in two halves ----------
+    //
+    // WHY IT IS TWO REQUIRED HALVES, and this is the part that must not be
+    // simplified away. An element is the composer only when
+    //
+    //   (a) its own ClassName equals ComposerFocusableChildClassName, AND
+    //   (b) an ancestor's AutomationId equals ComposerAutomationId, ordinally.
+    //
+    // EITHER HALF ALONE IS A BYPASS.
+    //   * The class alone is 'ProseMirror' -- the most common rich-text editor
+    //     class on the web. claude.ai's composer carries it ('tiptap
+    //     ProseMirror') and so does chatgpt.com's. Accepting it on its own
+    //     would cache any editor on any page as "the composer" and read its
+    //     text every tick, which is EXACTLY security-audit finding 4: an
+    //     element matched structurally, with no proof it is the thing we think
+    //     it is. "Never accept an unidentified element" is the rule this whole
+    //     design exists to protect, and it is not weakened here -- the anchor
+    //     is still an exact, ordinal, whole-string AutomationId match, on a
+    //     semantic and site-specific id.
+    //   * The AutomationId alone is what shipped and did not work: it names an
+    //     element that is not keyboard-focusable and cannot be typed into.
+    //
+    // Split into a PURE half and a UIA half so the class rule can be driven by
+    // a test with the measured strings, and so the ancestor walk is reached
+    // ONLY for an element whose class already matched -- one property read per
+    // candidate, not a tree walk per candidate.
+    const int WEB_CHILD_NOT_APPLICABLE = 0, WEB_CHILD_CANDIDATE = 1, WEB_CHILD_REFUSED = 2;
+
+    static int WebComposerChildRole(WebSurface web, string className)
+    {
+        if (web == null) return WEB_CHILD_NOT_APPLICABLE;
+        string want = (web.ComposerFocusableChildClassName ?? "").Trim();
+        // THE LINE EVERY PRE-EXISTING SURFACE TAKES. No field, no descent, no
+        // behaviour change of any kind.
+        if (want.Length == 0) return WEB_CHILD_NOT_APPLICABLE;
+        // A descent with no anchor to hang identity on is not an identity at
+        // all, so it refuses rather than falling back to the class alone.
+        if ((web.ComposerAutomationId ?? "").Length == 0) return WEB_CHILD_REFUSED;
+        string cls = (className ?? "").Trim();
+        if (cls.Length == 0) return WEB_CHILD_REFUSED;
+        // ORDINAL and WHOLE-STRING, the same discipline every other catalog
+        // comparison here uses. Measured: the child is exactly 'ProseMirror'
+        // and the identified parent is 'prosemirror-editor   ' (trailing
+        // spaces are the site's, hence the Trim of the READ value only), so a
+        // substring or case-folded test would match both -- and the parent is
+        // the element that cannot be typed into.
+        // TOKEN-WISE, because ClassName is a CSS class LIST. Measured live from
+        // inside the enforcer with the editor FOCUSED: "ProseMirror
+        // ProseMirror-focused". The earlier probe read the same element while it
+        // was UNFOCUSED and saw the one-token form, so a whole-string compare was
+        // written against a spelling this path can never observe -- it runs only
+        // on the focused element, and ProseMirror appends its focus class then.
+        //
+        // Whole tokens only, NEVER Contains: "ProseMirror-focused" must not
+        // satisfy a want of "ProseMirror".
+        //
+        // A token hit alone is NOT identity -- claude.ai's own composer is
+        // "tiptap ProseMirror" and carries the same token. The anchor
+        // AutomationId on the parent is what separates them, and is still
+        // required by the caller.
+        bool tokenHit = false;
+        foreach (string tok in cls.Split((char[])null, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (string.Equals(tok, want, StringComparison.Ordinal)) { tokenHit = true; break; }
+        }
+        if (!tokenHit) return WEB_CHILD_REFUSED;
+        return WEB_CHILD_CANDIDATE;
+    }
+
+    // HOW FAR UP, and why a BOUND rather than a walk to the root: the measured
+    // parent is the identified Group itself, but Chromium may insert an
+    // anonymous container between the two, and the ControlView and Raw views do
+    // not always agree on what "the parent" is. So: at most two ControlView
+    // ancestors, then the immediate Raw parent. Every candidate must still
+    // match the AutomationId EXACTLY and ordinally -- widening the search for
+    // the ANCHOR is not the same thing as weakening the anchor, and an
+    // unbounded walk would eventually reach the document, where any id could
+    // be found.
+    //
+    // Returns the anchor id on a match and "" otherwise; "" then fails the
+    // identity test in WebComposerIdentity, which is how a non-qualifying
+    // element is refused.
+    const int WEB_COMPOSER_ANCHOR_MAX_HOPS = 2;
+
+    static string WebComposerAnchorAid(WebSurface web, AutomationElement el)
+    {
+        if (web == null || el == null) return "";
+        string wantAid = web.ComposerAutomationId ?? "";
+        if (wantAid.Length == 0) return "";
+        try
+        {
+            AutomationElement cur = el;
+            for (int i = 0; i < WEB_COMPOSER_ANCHOR_MAX_HOPS; i++)
+            {
+                cur = TreeWalker.ControlViewWalker.GetParent(cur);
+                if (cur == null) break;
+                string paid = "";
+                try { paid = cur.Current.AutomationId ?? ""; } catch { paid = ""; }
+                if (string.Equals(paid, wantAid, StringComparison.Ordinal)) return wantAid;
+            }
+        }
+        catch { }
+        try
+        {
+            AutomationElement raw = TreeWalker.RawViewWalker.GetParent(el);
+            if (raw != null)
+            {
+                string paid = "";
+                try { paid = raw.Current.AutomationId ?? ""; } catch { paid = ""; }
+                if (string.Equals(paid, wantAid, StringComparison.Ordinal)) return wantAid;
+            }
+        }
+        catch { }
+        return "";
+    }
+
+    // THE ONE ENTRY POINT, used by all FOUR paths that identify a composer (the
+    // focused read, the per-tick re-verify, the background search and the agent
+    // read), so none of them can end up laxer than another -- the bug class
+    // this file already had to fix once.
+    //
+    // For a surface with no descent declared it returns the element's OWN
+    // AutomationId, unchanged and unread from anywhere new.
+    static string WebComposerIdentityAid(WebSurface web, AutomationElement el, string ownAutomationId, string className)
+    {
+        string own = ownAutomationId ?? "";
+        int role = WebComposerChildRole(web, className);
+        if (role == WEB_CHILD_NOT_APPLICABLE) return own;
+        if (role == WEB_CHILD_REFUSED) return "";
+        return WebComposerAnchorAid(web, el);
+    }
+
+    static int WebComposerIdentity(WebSurface web, string name, string automationId, out string agentName)
+    {
+        agentName = "";
+        if (web == null) return WEB_ID_NOT_COMPOSER;
+        string nm = (name ?? "").Trim();
+
+        // A fixed-name surface keeps its exact-match rule untouched. It has no
+        // agent concept, so a match is a composer and nothing more. An empty
+        // name cannot equal a non-empty catalog string, so the empty-name
+        // refusal that used to sit above this line is still made here.
+        string exact = web.ComposerName ?? "";
+        if (exact.Length > 0)
+        {
+            if (!string.Equals(nm, exact, StringComparison.Ordinal)) return WEB_ID_NOT_COMPOSER;
+            return WEB_ID_GENERIC;
+        }
+
+        // STRUCTURE FIRST. When the catalog carries an AutomationId it is
+        // required, not preferred: it is the one signal here that is stable
+        // across agents and independent of UI language.
+        string wantAid = web.ComposerAutomationId ?? "";
+        if (wantAid.Length > 0 && !string.Equals(automationId ?? "", wantAid, StringComparison.Ordinal))
+            return WEB_ID_NOT_COMPOSER;
+
+        // ---- AI-219: url_path -- the ELEMENT does not name the agent -------
+        //
+        // Gemini Enterprise's composer is [Group] Name='Search' for EVERY
+        // agent, so there is no per-agent string in it to read. Identity is the
+        // id in the URL path, which GetCachedBrowserUrl already extracted into
+        // _fgWebUrlAgentId this tick.
+        //
+        // THE COMPOSER TEST IS NOT RELAXED BY THIS. Reaching here means the
+        // AutomationId matched ORDINALLY and whole-string, and the id is
+        // REQUIRED: with no AutomationId to pin the element there is no
+        // identity at all, and "never accept an unidentified element" outranks
+        // reading an agent. That refusal is why this sits AFTER the id compare
+        // and not before it.
+        //
+        // The URL id decides only WHICH agent, never WHETHER this is the
+        // composer: an empty id is WEB_ID_GENERIC -- a composer we are sure of,
+        // on a page whose URL named no agent -- and a generic tick can never
+        // arm an agent block.
+        if (WebAgentReadIsUrlPath(web))
+        {
+            if (wantAid.Length == 0) return WEB_ID_NOT_COMPOSER;
+            string urlId = _fgWebUrlAgentId ?? "";
+            if (urlId.Length == 0) return WEB_ID_GENERIC;
+            agentName = urlId;
+            return WEB_ID_NAMED;
+        }
+
+        // THE EMPTY-NAME REFUSAL, moved down from the top of this function and
+        // not deleted. It belongs to the NAME routes, which are the only ones
+        // that read a name at all: AI-219's url_path composer is measured with
+        // Name='' on the focusable element, so refusing on an empty name above
+        // would refuse the element this whole descent exists to accept. Every
+        // name-based outcome below still requires a name, and the fixed-name
+        // route above still refuses "" because "" never equals its string.
+        if (nm.Length == 0) return WEB_ID_NOT_COMPOSER;
+        if (web.ComposerNamePrefixes == null || web.ComposerNamePrefixes.Count == 0) return WEB_ID_NOT_COMPOSER;
+        foreach (string prefix in web.ComposerNamePrefixes)
+        {
+            string pre = prefix ?? "";
+            if (pre.Length == 0) continue;
+            if (nm.Length <= pre.Length) continue;
+            if (!string.Equals(nm.Substring(0, pre.Length), pre, StringComparison.OrdinalIgnoreCase)) continue;
+            string remainder = NormalizeAgentName(nm.Substring(pre.Length));
+            // "Message " with nothing after it names no agent and is not proof
+            // of a composer either.
+            if (remainder.Length == 0) return WEB_ID_NOT_COMPOSER;
+            // GENERIC FILTER BEFORE ANY MATCH, same ordering and same reason as
+            // ExtractAgentName's.
+            if (web.GenericNames != null && web.GenericNames.Contains(remainder)) return WEB_ID_GENERIC;
+            agentName = remainder;
+            return WEB_ID_NAMED;
+        }
+        return WEB_ID_NOT_COMPOSER;
+    }
+
+    static WebSurface EnforcingWebSurface(string host)
+    {
+        WebSurface s = MatchWebSurface(host);
+        if (s == null) return null;
+        return (s.Verified && s.Enforce) ? s : null;
+    }
+
+    // ---- AI-216: THE ONE READER of the model picker's own two flags --------
+    //
+    // The exact twin of EnforcingWebSurface and EnforcingWebAgentRead, and the
+    // ONLY place WebPicker.Enforce / WebPicker.Verified are read -- so a call
+    // site cannot consult one and forget the other, and arming routing on a
+    // host live is a data change in ai-processes.js with no code change here.
+    //
+    // TAKES THE SURFACE, NOT A HOST, deliberately: the caller must already hold
+    // a surface that passed EnforcingWebSurface, so routing can never be
+    // reached on a host that is not itself cleared to enforce. Two gates in
+    // series, not two gates in parallel.
+    //
+    // Returns null for: no surface, no picker block, either flag down, an
+    // unimplemented fromTier mechanism, and a picker with no signature. Null
+    // means NO ROUTING AT ALL on this surface -- no search, no swallowed Enter,
+    // no event.
+    static WebPicker EnforcingWebPicker(WebSurface web)
+    {
+        if (web == null) return null;
+        WebPicker p = web.ModelPicker;
+        if (p == null) return null;
+        if (!p.Enforce || !p.Verified) return null;
+        // A mechanism we do not implement is treated as OFF rather than as the
+        // default, so a catalog typo cannot silently select one -- the same rule
+        // EnforcingWebAgentRead applies to AgentReadMode.
+        if (!string.Equals(p.FromTier, "button_label", StringComparison.OrdinalIgnoreCase)) return null;
+        if (string.IsNullOrEmpty(p.NamePrefix)) return null;
+        if (string.IsNullOrEmpty(p.ItemControlTypes)) return null;
+        return p;
+    }
+
+    // The menu-item label this surface uses for a tier number, or "".
+    //
+    // "" means THIS TIER IS NOT A REACHABLE TARGET HERE. That is an ordinary
+    // runtime answer, not an anomaly: model availability is per ACCOUNT, not
+    // per host. One claude.ai account shows Fable 5.1 and another does not; a
+    // ChatGPT Go account has no picker at all. A tier with no label simply does
+    // not arm a route.
+    static string WebPickerTierLabel(WebPicker p, int tierNum)
+    {
+        if (p == null) return "";
+        if (tierNum >= 3) return p.Tier3Label ?? "";
+        if (tierNum == 2) return p.Tier2Label ?? "";
+        return p.Tier1Label ?? "";
+    }
+
+    // The surface the CURRENT tick is on, or null. Used by the Tier B knob
+    // lookups; it requires the composer to be focused, so an omnibox tick
+    // answers null and cannot hand the rewrite a per-surface setting.
+    static WebSurface CurrentWebSurface()
+    {
+        // _fgIsBrowser, the per-tick truth, rather than the sticky _app. The
+        // practical effect is nil -- _fgIsWebComposer below is assigned from the
+        // same tick and can only ever be true in a browser, so it already
+        // implies this -- but a POSITIVE gate must not be written against a
+        // value that can name a different app than the one in front of the
+        // user, and stating it per-tick is what makes that visible. The sticky
+        // answer was never harmful in the other direction either: it can only
+        // return null, i.e. the Tier B knobs fall back to their defaults.
+        if (!_fgIsBrowser) return null;
+        if (!_fgIsWebComposer) return null;
+        return EnforcingWebSurface(_fgWebHost);
+    }
+
+    // ---- The browser-chrome name test: THE PRIVACY GATE -------------------
+    //
+    // ONE function, used for BOTH jobs, and that identity IS the invariant:
+    // anything the omnibox FINDER is willing to read a URL out of must never be
+    // read as a composer. An exclusion narrower than the finder leaves a gap by
+    // construction. (prompt-watcher.ps1's Get-BrowserUrl and
+    // Is-BrowserChromeElement are the live-verified reference pair for this, and
+    // the token list is theirs.)
+    //
+    // Two independent reasons it must never be removed:
+    //   * PRIVACY. Once the URL says the tab is on a governed AI host, the code
+    //     below reads whatever editable element has focus. In a browser that set
+    //     INCLUDES THE ADDRESS BAR, which also accepts search queries -- and is
+    //     where people paste internal hostnames, signed S3 links and
+    //     password-reset URLs.
+    //   * IT WOULD TRAP THE USER. Swallowing Enter in the omnibox while a site is
+    //     blocked would stop them navigating AWAY from the blocked site. A block
+    //     the user cannot leave is a broken browser, not enforcement.
+    //
+    // Names measured live on this machine: Edge's omnibox is exactly "Address
+    // and search bar"; Firefox's is "Search with ... or enter address". Both are
+    // covered by the substring tokens. The exact list additionally covers the
+    // find-in-page bar and the tab-search box, which are browser chrome for the
+    // same reason.
+    //
+    // FAILURE DIRECTION IS A MISS, NEVER A LEAK: an UNREADABLE name is treated
+    // as chrome, and a page composer whose accessible name happens to contain
+    // "search bar" is skipped rather than read. Both cost coverage; neither
+    // costs the user anything.
+    static readonly string[] BROWSER_CHROME_NAME_TOKENS = new string[] { "address", "url", "search bar", "location" };
+    static readonly string[] BROWSER_CHROME_NAME_EXACT = new string[] { "find", "search tabs", "find in page" };
+
+    static bool NameLooksLikeBrowserChrome(string name)
+    {
+        if (name == null) return true;              // unreadable -> treat as chrome
+        string n = name.Trim().ToLowerInvariant();
+        if (n.Length == 0) return false;
+        foreach (string tok in BROWSER_CHROME_NAME_TOKENS)
+        {
+            if (n.IndexOf(tok, StringComparison.Ordinal) >= 0) return true;
+        }
+        foreach (string exact in BROWSER_CHROME_NAME_EXACT)
+        {
+            if (string.Equals(n, exact, StringComparison.Ordinal)) return true;
+        }
+        return false;
+    }
+
+    // ---- URL -> host. The URL string dies inside this function -------------
+    //
+    // HOST ONLY. A path is deliberately not parsed and not returned: the
+    // tracker's own Classify-ClaudeUrl reads one to tell claude.ai/code apart
+    // from claude.ai, and that is NOT ported here, because a path field is one
+    // step from a query string and a query string on an AI URL routinely
+    // contains the prompt itself.
+    //
+    // Returns "" for anything that is not real web traffic. about:, chrome://,
+    // edge://, file:, view-source: and a data: URL are never a governed AI
+    // surface and must not be coerced into one.
+    static string HostFromBrowserUrl(string url)
+    {
+        if (string.IsNullOrEmpty(url)) return "";
+        string s = url.Trim();
+        if (s.Length == 0) return "";
+        if (s.Length > BROWSER_URL_MAX) s = s.Substring(0, BROWSER_URL_MAX);
+        // The omnibox HIDES the scheme, so a bare "claude.ai/chat" must still
+        // parse. A scheme is detected without a Regex (this file adds none):
+        // the first ':' must be preceded only by scheme-legal characters.
+        int colon = s.IndexOf(':');
+        bool hasScheme = false;
+        if (colon > 0)
+        {
+            hasScheme = true;
+            for (int i = 0; i < colon; i++)
+            {
+                char c = s[i];
+                bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                       || (c >= '0' && c <= '9') || c == '+' || c == '.' || c == '-';
+                if (!ok) { hasScheme = false; break; }
+            }
+        }
+        if (!hasScheme) s = "https://" + s;
+        Uri uri;
+        if (!Uri.TryCreate(s, UriKind.Absolute, out uri)) return "";
+        if (!string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase)) return "";
+        string host = "";
+        try { host = (uri.Host ?? "").Trim().ToLowerInvariant(); } catch { return ""; }
+        if (host.StartsWith("www.", StringComparison.Ordinal)) host = host.Substring(4);
+        return host;
+    }
+
+    // ---- AI-219: URL -> the AGENT ID, and nothing else --------------------
+    //
+    // THE SECOND AND LAST thing this file will ever take out of a URL, and it
+    // is held to the same rule as the first (the host): the URL string dies in
+    // the caller, in the statement that calls this, and only the value returned
+    // here survives. That value is ONE capture group -- a digit run on the
+    // measured surface -- and it is never concatenated with anything that could
+    // reconstitute a path.
+    //
+    // WHY A PATH IS BEING READ AT ALL, when this file's standing rule is
+    // host-only: on Gemini Enterprise the agent id is in the path and NOWHERE
+    // ELSE. The composer is [Group] Name='Search' for every agent, so without
+    // this the choice is "block the whole host" or "block nothing" -- and this
+    // feature exists precisely to avoid that choice. The rule the host-only
+    // discipline is really protecting (a query string on an AI URL routinely
+    // contains the prompt) is preserved by extracting a CAPTURE GROUP rather
+    // than a substring of the URL: a group the catalog defined as [0-9]+ cannot
+    // contain a prompt, a customerId or a session id.
+    //
+    // Returns "" for: no pattern, an uncompilable pattern, no match, a match
+    // with no group 1, a timeout, or anything else that throws. Every one of
+    // those means "this tick named no agent", which means NO AGENT BLOCK.
+    static Regex _webAgentUrlRe = null;
+    static string _webAgentUrlRePattern = "";
+
+    static string AgentIdFromBrowserUrl(string url, string pattern)
+    {
+        if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(pattern)) return "";
+        try
+        {
+            // Compiled ONCE per pattern and reused, like every other rule in
+            // this file, and with the SAME 25ms hard timeout: this runs on the
+            // poll thread, and a catalog pattern with catastrophic backtracking
+            // must not be able to stretch the 150ms tick.
+            if (_webAgentUrlRe == null || !string.Equals(_webAgentUrlRePattern, pattern, StringComparison.Ordinal))
+            {
+                _webAgentUrlRe = new Regex(pattern, RegexOptions.CultureInvariant, REGEX_TIMEOUT);
+                _webAgentUrlRePattern = pattern;
+            }
+            // The same bound HostFromBrowserUrl applies, for the same reason:
+            // truncation can only ever LOSE a match, which fails open.
+            string s2 = url;
+            if (s2.Length > BROWSER_URL_MAX) s2 = s2.Substring(0, BROWSER_URL_MAX);
+            Match m = _webAgentUrlRe.Match(s2);
+            if (!m.Success || m.Groups.Count < 2 || !m.Groups[1].Success) return "";
+            string id = m.Groups[1].Value ?? "";
+            // A defensive ceiling on what a catalog pattern can capture. The
+            // measured ids are 20 digits; anything remotely near this bound is
+            // a broken pattern, and refusing is the fail-open direction.
+            if (id.Length == 0 || id.Length > 128) return "";
+            return id;
+        }
+        catch { return ""; }
+    }
+
+    // ---- SLOW PATH: find the omnibox on a background STA thread ------------
+    //
+    // Runs on its OWN background STA thread, never the poll thread, for the same
+    // measured reason SearchModelPickerBackground and
+    // SearchCopilotHeadingsBackground do: FindAll(Edit) over a browser window
+    // was measured at 72-189ms live (prompt-watcher.ps1's probe), returning 1-3
+    // elements. That is a large fraction of the 150ms poll tick, and the tick's
+    // other jobs -- UpdateUia's content scan above all -- must never queue
+    // behind it. The poll thread only ever reads whatever is currently cached
+    // and never waits on a search.
+    //
+    // FindAll with a PropertyCondition is used here rather than a manual
+    // TreeWalker, which is the OPPOSITE of the choice CollectCopilotHeadings
+    // made -- deliberately. The omnibox is browser CHROME, i.e. a native
+    // Win32/Views control whose UIA provider exposes it properly; the Copilot
+    // case needed a walk because its target was inside a Chromium-rendered
+    // DOCUMENT, where a property-filtered FindAll was measured finding nothing.
+    // This is the shape prompt-watcher.ps1 has been running live against real
+    // browsers.
+    //
+    // NOTHING read here is emitted, logged or persisted. The only value kept is
+    // the ELEMENT REFERENCE; its Value is read later, on the poll thread, and
+    // turned into a host immediately.
+    static void SearchOmniboxBackground(IntPtr fg)
+    {
+        try
+        {
+            AutomationElement found = null;
+            try
+            {
+                AutomationElement win = AutomationElement.FromHandle(fg);
+                if (win != null)
+                {
+                    var cond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit);
+                    AutomationElementCollection edits = win.FindAll(TreeScope.Descendants, cond);
+                    foreach (AutomationElement el in edits)
+                    {
+                        string name = null;
+                        try { name = el.Current.Name; } catch { }
+                        // The SAME test the composer exclusion uses -- see
+                        // NameLooksLikeBrowserChrome for why that identity is the
+                        // invariant rather than a convenience.
+                        if (name == null) continue;
+                        if (!NameLooksLikeBrowserChrome(name)) continue;
+                        // It must actually be able to hand us a value. A find bar
+                        // matches the name test too and holds a search term
+                        // rather than a URL; HostFromBrowserUrl then rejects that
+                        // term (no scheme, no dot-host) as a second line of
+                        // defence.
+                        object pattern;
+                        if (!el.TryGetCurrentPattern(ValuePattern.Pattern, out pattern)) continue;
+                        found = el;
+                        break;
+                    }
+                }
+            }
+            catch { }
+
+            // Assigned only at the END, and only on a search that actually found
+            // something -- the same "never half-apply a result" discipline the
+            // catalog parsers and the heading search use. A search that found
+            // nothing leaves the previous cache exactly as it was and counts
+            // toward the backoff.
+            if (found != null)
+            {
+                _omniboxCached = found;
+                _omniboxCachedHwnd = fg;
+                _omniboxEmptyRuns = 0;
+            }
+            else if (_omniboxEmptyRuns < OMNIBOX_EMPTY_RUNS_BEFORE_BACKOFF)
+            {
+                _omniboxEmptyRuns++;
+            }
+        }
+        catch { }
+        finally { _omniboxSearchInProgress = false; }
+    }
+
+    // ---- FAST PATH: re-read the cached omnibox's value on the poll tick ----
+    //
+    // The whole reason this is cheap: the omnibox is ONE PERSISTENT WIDGET per
+    // browser window. Its VALUE changes on a tab switch and on every navigation;
+    // its ELEMENT IDENTITY does not. So this re-reads ValuePattern.Current.Value
+    // off the cached element every 150ms tick -- exactly what
+    // GetCachedModelPicker already does with its cached button's Name -- and the
+    // resolved host is never more than one tick stale, with no tree walk on the
+    // poll path at all.
+    //
+    // The `out host` shape is not cosmetic. The URL string -- which carries the
+    // path and the query, and therefore possibly the prompt itself -- exists
+    // ONLY as a local inside this function. It has no route out: no caller can
+    // receive it, so no caller can log, emit, retain or compare it.
+    //
+    // THREE outcomes, and the caller must treat them differently -- see
+    // WebReadOutcome.
+    static WebReadOutcome GetCachedBrowserUrl(IntPtr fg, out string host)
+    {
+        host = "";
+        if (fg == IntPtr.Zero) return WebReadOutcome.Unreadable;
+        long now = DateTime.UtcNow.Ticks;
+
+        // A different window is a different omnibox. Drop the element AND the
+        // resolved host: serving one window's host for another is exactly the
+        // "block the wrong tab" failure this cache has to make impossible.
+        if (_omniboxCachedHwnd != fg)
+        {
+            _omniboxCached = null;
+            _omniboxCachedHwnd = IntPtr.Zero;
+        }
+        if (_browserUrlHwnd != fg)
+        {
+            _browserUrlHost = "";
+            _browserUrlHwnd = IntPtr.Zero;
+            _browserUrlTicks = 0;
+            // AI-219. Dropped with the host it was read alongside: serving one
+            // window's agent id for another is the "block the wrong tab"
+            // failure, one level finer.
+            _fgWebUrlAgentId = "";
+        }
+
+        string raw = null;
+        AutomationElement cached = _omniboxCached;
+        if (cached != null)
+        {
+            try
+            {
+                object pattern;
+                if (cached.TryGetCurrentPattern(ValuePattern.Pattern, out pattern))
+                {
+                    raw = ((ValuePattern)pattern).Current.Value;
+                }
+            }
+            catch
+            {
+                // Stale reference (the window was rebuilt, or the browser
+                // navigated a whole profile away). Drop it and fall through to a
+                // fresh search -- the same recovery GetCachedModelPicker's
+                // liveness probe performs.
+                _omniboxCached = null;
+                _omniboxCachedHwnd = IntPtr.Zero;
+                raw = null;
+            }
+        }
+
+        // Kick off (or re-kick) the background search when there is nothing
+        // usable cached. Backoff identical in shape to the heading search's: a
+        // window we have never searched is searched at once; one that has
+        // repeatedly yielded nothing is searched every 5s instead of every 1s.
+        bool newWindow = _omniboxSearchHwnd != fg;
+        if (newWindow) _omniboxEmptyRuns = 0;
+        long searchInterval = (_omniboxEmptyRuns >= OMNIBOX_EMPTY_RUNS_BEFORE_BACKOFF)
+            ? OMNIBOX_SEARCH_BACKOFF_INTERVAL : OMNIBOX_SEARCH_MIN_INTERVAL;
+        if (string.IsNullOrEmpty(raw) && !_omniboxSearchInProgress
+            && (newWindow || (now - _omniboxLastSearchTicks) > searchInterval))
+        {
+            _omniboxSearchHwnd = fg;
+            _omniboxLastSearchTicks = now;
+            _omniboxSearchInProgress = true;
+            var t = new Thread(() => SearchOmniboxBackground(fg));
+            t.IsBackground = true;
+            t.SetApartmentState(ApartmentState.STA);   // UIA requires STA, same as the poll thread
+            t.Start();
+        }
+
+        if (!string.IsNullOrEmpty(raw))
+        {
+            string h = HostFromBrowserUrl(raw);
+            // AI-219. The one other thing taken out of `raw`, taken HERE so the
+            // sentence below stays literally true. What is kept is a CAPTURE
+            // GROUP defined by the matched surface's own pattern -- never the
+            // path, never the query, never the URL. A host that declares no
+            // pattern (every surface but Gemini Enterprise) extracts nothing
+            // and publishes "".
+            WebSurface urlSurface = (h.Length > 0) ? MatchWebSurface(h) : null;
+            _fgWebUrlAgentId = (urlSurface == null) ? ""
+                : AgentIdFromBrowserUrl(raw, urlSurface.AgentUrlPattern);
+            // `raw` goes out of scope here and is never touched again.
+            if (h.Length == 0)
+            {
+                // A READ THAT SUCCEEDED and is not web traffic at all -- a
+                // chrome:// page, a local file, a half-typed search term in the
+                // omnibox. Authoritative "not an AI surface", and the resolved
+                // host is dropped so the TTL below cannot resurrect the previous
+                // tab's answer.
+                _browserUrlHost = "";
+                _browserUrlHwnd = fg;
+                _browserUrlTicks = now;
+                return WebReadOutcome.NotSurface;
+            }
+            _browserUrlHost = h;
+            _browserUrlHwnd = fg;
+            _browserUrlTicks = now;
+            host = h;
+            return MatchWebSurface(h) != null ? WebReadOutcome.Surface : WebReadOutcome.NotSurface;
+        }
+
+        // Nothing readable this tick. Reuse the last answer for at most
+        // BROWSER_URL_TTL -- long enough to ride out a UIA hiccup, short enough
+        // that a host cannot outlive the tab it was read from by more than a
+        // moment. Past the TTL this is NO EVIDENCE, which fails open for capture
+        // and leaves an already-armed block to the existing latch.
+        if (_browserUrlHost.Length > 0 && _browserUrlHwnd == fg && (now - _browserUrlTicks) <= BROWSER_URL_TTL)
+        {
+            host = _browserUrlHost;
+            return MatchWebSurface(host) != null ? WebReadOutcome.Surface : WebReadOutcome.NotSurface;
+        }
+        _browserUrlHost = "";
+        host = "";
+        // AI-219. Retired with the host, on the same tick and by the same rule:
+        // past the TTL there is NO EVIDENCE, and an agent id is the last thing
+        // that should outlive the read that produced it.
+        _fgWebUrlAgentId = "";
+        return WebReadOutcome.Unreadable;
+    }
+
+    // ---- The window-title fingerprint: invalidation only ------------------
+    //
+    // A 64-bit FNV-1a hash of the window title. The title TEXT is never stored.
+    // This is not a security hash and does not need to be: the property that
+    // matters is that what is RETAINED is not the title, so there is nothing to
+    // leak even if a future change put this field somewhere it should not be.
+    // Comparing two fingerprints answers exactly one question -- "did the title
+    // change" -- and nothing else about the title is knowable from it.
+    //
+    // Deliberately NOT an identity signal. It is never compared against a
+    // catalog, never emitted, and never used to decide whether a tab is
+    // governed; the URL is the only thing that decides that.
+    static long TitleFingerprint(string title)
+    {
+        if (string.IsNullOrEmpty(title)) return 0;
+        ulong h = 14695981039346656037UL;
+        foreach (char c in title)
+        {
+            h ^= (ulong)c;
+            h *= 1099511628211UL;
+        }
+        return unchecked((long)h);
+    }
+
+    // ---- The invalidation sweep -------------------------------------------
+    //
+    // Called once per browser tick from UpdateForeground, with the resolved
+    // CATALOG HOST ("" when this tab is not on one) and the window title's
+    // FINGERPRINT (0 when no title was read). It never sees a title or a URL --
+    // that is a property of its signature, not of its discipline.
+    //
+    // Its whole output is: did anything change that means the typed buffer must
+    // not carry on accumulating? If so it bumps the generation, which is part of
+    // the buffer's OWNER KEY, which is what makes the keyboard hook's existing
+    // "the owner changed, drop the buffer" line fire. No new hook code, no new
+    // lock, and no way for a buffer to survive a navigation.
+    //
+    // FOUR signals, cheapest first, and they are ORed rather than ranked because
+    // each catches a case the others miss:
+    //   (a) hwnd    -- a different window is a different tab set. Free.
+    //   (b) title   -- Chromium rewrites the window title on every tab switch
+    //                  and every navigation, so this is the signal that catches
+    //                  switching between two tabs on the SAME host, which
+    //                  nothing else here can see.
+    //   (c) chord   -- Ctrl+T/W/Tab, Ctrl+1-9, Alt+Left/Right, F5, Enter in the
+    //                  omnibox. A timestamp the hook stamped; compared against
+    //                  the last value THIS thread observed, so one chord counts
+    //                  exactly once no matter how many ticks pass.
+    //   (d) host    -- the strongest of the four and the one that cannot be
+    //                  missed. Also what covers the transition OFF a governed
+    //                  host: leaving claude.ai for an internal wiki arrives here
+    //                  with host "" and bumps, so the buffer of the AI composer
+    //                  is discarded rather than being carried onto the wiki.
+    static void UpdateBrowserNav(IntPtr fg, string host, long titleFp)
+    {
+        if (host == null) host = "";
+        bool navChanged = false;
+        if (fg != _browserNavHwnd) { _browserNavHwnd = fg; navChanged = true; }
+        if (titleFp != _browserTitleFingerprint) { _browserTitleFingerprint = titleFp; navChanged = true; }
+        long navTicks = _browserNavInputTicks;
+        if (navTicks != _browserNavSeenTicks) { _browserNavSeenTicks = navTicks; navChanged = true; }
+        if (!string.Equals(host, _browserNavHost, StringComparison.Ordinal))
+        { _browserNavHost = host; navChanged = true; }
+        if (navChanged)
+        {
+            BumpBrowserNav();
+            // The COMPOSER CACHE goes with the buffer. A tab switch, a
+            // navigation or a window change means the element that was the
+            // composer belongs to a page that is no longer in front of the user,
+            // and reading it would be reading the previous page. This is the one
+            // place that decides "something changed", so it is the one place that
+            // has to drop it. Focus moving inside the page is deliberately NOT
+            // one of these signals -- that is the whole point of the fix.
+            DropWebComposer();
+        }
+    }
+
+    // ---- Bump the navigation generation ------------------------------------
+    //
+    // The typed buffer's owner key carries this number, so bumping it is what
+    // makes the hook's existing "the owner of this buffer changed" line discard
+    // the buffer. That is the whole mechanism for "a buffer must never survive a
+    // navigation": one that did would be a keystroke reconstruction of the
+    // PREVIOUS page's typing, scanned and attributed to the new one.
+    //
+    // Unsigned wraparound is fine and intended -- the owner key only ever
+    // compares two consecutive values for equality.
+    static void BumpBrowserNav()
+    {
+        _browserNavGen = unchecked(_browserNavGen + 1);
+    }
+
+    // ---- Element read: is the focused element the PAGE COMPOSER? ----------
+    //
+    // ONE property read of AutomationElement.FocusedElement, matched against a
+    // fixed set of rules. No tree walk, ever -- the same single-read discipline
+    // as ReadFocusedPanel and ReadFocusedAgentName, and the same non-negotiable
+    // pid check for the same measured reason: FocusedElement is a GLOBAL read
+    // that routinely returns an element from another window in another process.
+    //
+    // The pid rule allows a DIRECT CHILD, via the same
+    // ElementPidBelongsToForeground every other read here uses: a Chromium
+    // browser renders each site in a child renderer process, so with an exact
+    // pid compare a page composer could never be matched at all. It still
+    // rejects an unrelated app's focused element, which is the entire reason the
+    // check exists.
+    //
+    // NOTHING read here is ever emitted, logged or persisted. On a web page the
+    // element Name is SITE-AUTHORED and can carry the document or conversation
+    // title, which is exactly why the composer test uses it only to EXCLUDE and
+    // never to identify.
+    //
+    // The rules, and why each one is here:
+    //   * EDIT ONLY, and Document is deliberately EXCLUDED. In a Chromium
+    //     accessibility tree the PAGE is a Document and the transcript pane is a
+    //     Document, so accepting it made the whole page eligible to be "the
+    //     composer" -- which, now that the composer is cached and read every
+    //     tick, would mean scanning the entire conversation transcript on a
+    //     150ms loop. Found by the harness on 2026-09-09.
+    //     Narrower than prompt-watcher.ps1's Is-EditableControl (which also
+    //     accepts a Custom/Group exposing a text pattern) on purpose: a miss
+    //     costs COVERAGE and is caught by the per-host live pass, while
+    //     over-reading is caught by nothing. claude.ai's composer was measured
+    //     as an Edit ("Write your prompt to Claude", ClassName
+    //     "tiptap ProseMirror") readable via both ValuePattern and TextPattern.
+    //   * NOT browser chrome by name -- the privacy gate, see
+    //     NameLooksLikeBrowserChrome.
+    //   * NOT IsPassword. A web login form is the single worst thing a keystroke
+    //     buffer could reconstruct, and this is the one property that names it.
+    //   * IsKeyboardFocusable, so a decorative or disabled element cannot be
+    //     mistaken for a composer.
+    //
+    // `readable` distinguishes "the read failed" from "the read succeeded and
+    // this is not a composer", exactly as ReadFocusedPanel's does and for the
+    // same reason: only the second is authoritative.
+    static bool ReadFocusedWebComposer(uint fgPid, IntPtr fg, string host, out string runtimeIdKey, out bool chromeFocused, out bool readable, out bool passwordFocused)
+    {
+        runtimeIdKey = "";
+        chromeFocused = false;
+        readable = false;
+        passwordFocused = false;
+        AutomationElement el;
+        try { el = AutomationElement.FocusedElement; } catch { return false; }
+        if (el == null) return false;
+        try
+        {
+            if (!ElementPidBelongsToForeground(el.Current.ProcessId, fgPid)) return false;
+        }
+        catch { return false; }
+
+        string ctName = "", name = null;
+        bool isPassword = true, focusable = false;
+        try
+        {
+            string pn = el.Current.ControlType.ProgrammaticName ?? "";
+            int dot = pn.LastIndexOf('.');
+            ctName = (dot >= 0) ? pn.Substring(dot + 1) : pn;
+        }
+        catch { }
+        // A Name that will not read stays NULL, and NameLooksLikeBrowserChrome
+        // treats null as chrome. That null is load-bearing: "" would read as
+        // "not chrome" and let an unnameable element through as a composer.
+        try { name = el.Current.Name; } catch { name = null; }
+        // Both of these default to the REFUSING value, so a property that throws
+        // refuses the composer rather than being assumed benign.
+        try { isPassword = el.Current.IsPassword; } catch { isPassword = true; }
+        try { focusable = el.Current.IsKeyboardFocusable; } catch { focusable = false; }
+
+        ctName = (ctName ?? "").Trim();
+        readable = ctName.Length > 0;
+        if (!readable) return false;
+        chromeFocused = NameLooksLikeBrowserChrome(name);
+        if (chromeFocused) return false;
+        // Reported OUT so WebBlockGateOk can keep a whole-site block from
+        // swallowing Enter in a login form. Capture was never possible here --
+        // this returns false, so the element is not the composer and nothing
+        // reads it -- but a dead Enter in a password field is its own bug.
+        passwordFocused = isPassword;
+        if (isPassword) return false;
+        if (!focusable) return false;
+        // AI-219. Was the literal "Edit". Now the catalog's value for THIS
+        // host, defaulted to "Edit" for every surface that declares none, so
+        // the four pre-AI-219 surfaces make exactly the same demand they always
+        // did. Gemini Enterprise's composer is a [Group].
+        if (!string.Equals(ctName, WebComposerControlType(host), StringComparison.OrdinalIgnoreCase)) return false;
+        // ---- POSITIVE IDENTITY, not merely "not obviously wrong" -----------
+        //
+        // Everything above this line is a set of REFUSALS: not chrome, not a
+        // password, focusable, an Edit. Passing all of them meant an element was
+        // cached as THE COMPOSER, and the composer cache is the only door
+        // through which any text in a browser is read -- so on a governed host
+        // any focused Edit that was not one of those things got its contents
+        // scanned every tick. A site search box ("Search chats" on claude.ai) is
+        // exactly that shape.
+        //
+        // SearchWebComposerBackground has required an exact catalog-name match
+        // since it was written, on the argument that a search has no evidence
+        // the element is the composer. The focused read was held to a weaker
+        // rule because the caret WAS the evidence -- but the caret only proves
+        // the user is typing somewhere, not that they are typing in the
+        // composer. The two paths now make the same demand.
+        //
+        // FAIL DIRECTION: a surface whose composer has been renamed stops being
+        // captured until the catalog is re-probed. That is a MISS, which this
+        // file has always preferred over an over-read -- "a miss costs COVERAGE
+        // and is caught by the per-host live pass, while over-reading is caught
+        // by nothing". An UNPROBED surface (empty ComposerName) keeps its
+        // previous behaviour rather than being silently disabled.
+        WebSurface identity = MatchWebSurface(host);
+        if (identity != null)
+        {
+            string aid = "";
+            try { aid = el.Current.AutomationId ?? ""; } catch { aid = ""; }
+            // AI-219 follow-up. On a descent surface the focused element is the
+            // focusable CHILD, which carries no AutomationId of its own -- the
+            // identity is anchored on its parent. Returns `aid` untouched for
+            // every surface that declares no descent.
+            string cls = "";
+            try { cls = el.Current.ClassName ?? ""; } catch { cls = ""; }
+            aid = WebComposerIdentityAid(identity, el, aid, cls);
+            string ignoredAgent;
+            // A surface with NO identity fields at all (unprobed) yields
+            // NOT_COMPOSER here, which would newly refuse it. Keep the previous
+            // behaviour for that case explicitly: no signature means no opinion,
+            // the same rule an empty SendButtonName follows.
+            bool hasIdentity = WebSurfaceCanIdentifyComposer(identity);
+            if (hasIdentity && WebComposerIdentity(identity, name, aid, out ignoredAgent) == WEB_ID_NOT_COMPOSER)
+            {
+                // readable stays TRUE: the read succeeded and the answer is "this is
+                // not the composer", which is authoritative -- as distinct from a
+                // failed read, which is no evidence at all.
+                return false;
+            }
+        }
+        try
+        {
+            int[] rid = el.GetRuntimeId();
+            if (rid != null) runtimeIdKey = string.Join(".", Array.ConvertAll(rid, delegate(int i) { return i.ToString(); }));
+        }
+        catch { }
+        // CACHE IT. This element has just passed the FULL composer test while it
+        // held focus, which is the only way anything ever enters this cache --
+        // so the one element whose text a browser can have read is always one
+        // that was, at some point, provably the page composer. Keyed by window
+        // AND host so it can never be served to a different tab's page.
+        _webComposerCached = el;
+        _webComposerHwnd = fg;
+        _webComposerHost = host ?? "";
+        _webComposerRid = runtimeIdKey;
+        return true;
+    }
+
+    // ---- Re-verify the cached composer, once per poll tick -----------------
+    //
+    // RE-RESOLVE, NEVER REMEMBER -- the same rule the send button follows. The
+    // cached element is put through the SAME property tests
+    // ReadFocusedWebComposer applies before its text may be read, because a
+    // web page can reuse or relabel a node: if the element that was the composer
+    // now reports IsPassword, or is no longer an Edit/Document, or now carries
+    // an address-bar-ish name, it stops being readable on THIS tick.
+    //
+    // Deliberately does NOT require focus. That is the entire point of the fix:
+    // the composer's own text stays scannable across a focus move inside the
+    // page, so a paste is caught on the next tick.
+    //
+    // Returns the element only when it re-verified. Any throw drops the cache --
+    // a stale reference means the page navigated or the window was rebuilt.
+    static AutomationElement VerifiedWebComposer(IntPtr fg, string host)
+    {
+        AutomationElement el = _webComposerCached;
+        if (el == null) return null;
+        if (_webComposerHwnd != fg) { DropWebComposer(); return null; }
+        if (!string.Equals(_webComposerHost ?? "", host ?? "", StringComparison.Ordinal)) { DropWebComposer(); return null; }
+        try
+        {
+            string ctName = "";
+            string pn = el.Current.ControlType.ProgrammaticName ?? "";
+            int dot = pn.LastIndexOf('.');
+            ctName = ((dot >= 0) ? pn.Substring(dot + 1) : pn).Trim();
+            if (ctName.Length == 0) return null;
+            // AI-219, same substitution and same default as the focused read:
+            // the re-verify must make the IDENTICAL demand, or an element the
+            // focused read accepted would be dropped on the very next tick.
+            if (!string.Equals(ctName, WebComposerControlType(host), StringComparison.OrdinalIgnoreCase)) { DropWebComposer(); return null; }
+            // Every one of these defaults to the REFUSING answer on a throw,
+            // exactly as the focused read's do.
+            bool isPassword = true, focusable = false;
+            string name = null;
+            try { name = el.Current.Name; } catch { name = null; }
+            try { isPassword = el.Current.IsPassword; } catch { isPassword = true; }
+            try { focusable = el.Current.IsKeyboardFocusable; } catch { focusable = false; }
+            if (isPassword) { DropWebComposer(); return null; }
+            if (!focusable) return null;
+            if (NameLooksLikeBrowserChrome(name)) { DropWebComposer(); return null; }
+            // The identity gate again, every tick. A single-page app can RENAME
+            // the composer in place when the user switches what they are talking
+            // to, and a cache that was filled while the name matched must not
+            // keep being read after it stops matching.
+            WebSurface identity = MatchWebSurface(host);
+            if (identity != null)
+            {
+                string aid = "";
+                try { aid = el.Current.AutomationId ?? ""; } catch { aid = ""; }
+                // AI-219 follow-up, same resolution as the focused read -- the
+                // re-verify must make the IDENTICAL demand, every tick, or a
+                // cached child would be dropped on the tick after it was found.
+                string cls = "";
+                try { cls = el.Current.ClassName ?? ""; } catch { cls = ""; }
+                aid = WebComposerIdentityAid(identity, el, aid, cls);
+                string ignoredAgent;
+                bool hasIdentity = WebSurfaceCanIdentifyComposer(identity);
+                if (hasIdentity && WebComposerIdentity(identity, name, aid, out ignoredAgent) == WEB_ID_NOT_COMPOSER)
+                { DropWebComposer(); return null; }
+            }
+            return el;
+        }
+        catch
+        {
+            DropWebComposer();
+            return null;
+        }
+    }
+
+    // Find this surface's composer without waiting for it to take focus.
+    //
+    // STRICTER THAN THE FOCUSED READ, and that asymmetry is the whole safety
+    // argument. ReadFocusedWebComposer accepts any non-chrome, non-password,
+    // focusable Edit BECAUSE THE CARET IS IN IT -- the user put it there, which
+    // is evidence no search can produce. A search that accepted the same set
+    // would cache the first page input it happened to walk past: a site search
+    // box, a comment field, a login form's username. Its text would then be read
+    // every tick by UpdateUia. So this one additionally requires an EXACT match
+    // on the catalog's live-probed composer Name, and runs at all only for a
+    // surface that has one.
+    //
+    // Every other property is re-checked here as well rather than deferred to
+    // VerifiedWebComposer, so a bad element is never in the cache even for the
+    // instant before the next tick re-verifies it.
+    static void SearchWebComposerBackground(IntPtr fg, uint fgPid, string host, string composerName, int navGen)
+    {
+        try
+        {
+            AutomationElement found = null;
+            string foundRid = "";
+            // Resolved from the host this search was kicked for, so the search
+            // and both read paths consult the SAME identity rule.
+            WebSurface surfaceForSearch = MatchWebSurface(host);
+            if (surfaceForSearch == null) return;
+            try
+            {
+                AutomationElement win = AutomationElement.FromHandle(fg);
+                if (win != null)
+                {
+                    // AI-219. The type is CATALOG DATA now, resolved from the
+                    // surface this search was kicked for and defaulted to
+                    // "Edit" -- so every surface that predates the field
+                    // searches for exactly what it searched for before.
+                    // A type this file cannot map yields NO CONDITION and
+                    // therefore NO SEARCH: fail closed, never a widened walk
+                    // over every control in the window.
+                    Condition cond = WebControlTypeCondition(surfaceForSearch.ComposerControlType);
+                    if (cond == null) return;
+                    AutomationElementCollection edits = win.FindAll(TreeScope.Descendants, cond);
+                    foreach (AutomationElement el in edits)
+                    {
+                        // ORDER MATTERS FOR COST, not for safety: every test
+                        // below still has to pass before anything is cached.
+                        // The name compare is a string equality; the ownership
+                        // test takes a WHOLE-SYSTEM PROCESS SNAPSHOT for any
+                        // element whose pid is not the foreground's -- which is
+                        // every page element, because a Chromium renderer is a
+                        // child process. Doing that first meant one full process
+                        // enumeration per Edit on the page, and the number of
+                        // Edits is chosen by the page. Cheap test first.
+                        string name = null;
+                        try { name = el.Current.Name; } catch { name = null; }
+                        // THE GATE. Ordinal, not case-insensitive and not a
+                        // prefix: the catalog value was read off the live
+                        // element, and anything that is merely CLOSE to it is
+                        // exactly what an impostor would be.
+                        if (name == null) continue;
+                        // Exact name OR the structural+prefix identity, decided
+                        // by ONE function shared with both read paths, so a
+                        // search can never be laxer than a focused read.
+                        string aidS = "";
+                        try { aidS = el.Current.AutomationId ?? ""; } catch { aidS = ""; }
+                        // AI-219 follow-up. THE SEARCH MUST NOT BE LAXER THAN
+                        // THE FOCUSED READ, so it resolves identity through the
+                        // same one function. The class test inside it runs
+                        // first, so the ancestor walk is reached only for an
+                        // element whose ClassName already matched -- one
+                        // property read per candidate Group, not a tree walk.
+                        string clsS = "";
+                        try { clsS = el.Current.ClassName ?? ""; } catch { clsS = ""; }
+                        aidS = WebComposerIdentityAid(surfaceForSearch, el, aidS, clsS);
+                        string ignoredS;
+                        if (WebComposerIdentity(surfaceForSearch, name, aidS, out ignoredS) == WEB_ID_NOT_COMPOSER) continue;
+                        // A name that also reads as browser chrome is refused
+                        // outright -- a catalog typo must not be able to point
+                        // this at the address bar.
+                        if (NameLooksLikeBrowserChrome(name)) continue;
+
+                        // Same ownership test the focused read makes: a Chromium
+                        // renderer is a CHILD of the browser process, so this
+                        // accepts the parent pid too.
+                        try { if (!ElementPidBelongsToForeground(el.Current.ProcessId, fgPid)) continue; }
+                        catch { continue; }
+
+                        // Both default to the REFUSING value on a throw, as
+                        // everywhere else that tests an element.
+                        bool isPassword = true, focusable = false;
+                        try { isPassword = el.Current.IsPassword; } catch { isPassword = true; }
+                        try { focusable = el.Current.IsKeyboardFocusable; } catch { focusable = false; }
+                        if (isPassword) continue;
+                        if (!focusable) continue;
+
+                        try
+                        {
+                            int[] rid = el.GetRuntimeId();
+                            if (rid != null) foundRid = string.Join(".", Array.ConvertAll(rid, delegate(int i) { return i.ToString(); }));
+                        }
+                        catch { foundRid = ""; }
+
+                        // A VISIBILITY TIEBREAK, not a filter. During an in-page
+                        // transition a site can briefly hold two elements with
+                        // the identical catalog name -- the detached previous
+                        // composer and the live one -- and first-in-tree-order
+                        // can be the dead one. That fails toward an enforcement
+                        // MISS (the cache verifies, so nothing blocks, but the
+                        // text scanned is not what the user is typing).
+                        //
+                        // Visibility is only ever used to PREFER one match over
+                        // another, never to reject the only one: IsOffscreen is
+                        // a layout answer and a composer that reports offscreen
+                        // spuriously must still be governed.
+                        bool offscreen = false;
+                        try { offscreen = el.Current.IsOffscreen; } catch { offscreen = false; }
+                        found = el;
+                        if (!offscreen) break;
+                        // keep it as the fallback and carry on looking for a
+                        // visible one
+                    }
+                }
+            }
+            catch { }
+
+            // Assigned only at the END and only on a search that found
+            // something -- the same "never half-apply a result" rule the omnibox
+            // search and the catalog parsers follow. A search that found nothing
+            // leaves the previous cache exactly as it was and counts toward the
+            // backoff.
+            // THE NAVIGATION GATE, and it is what keeps DropWebComposer()
+            // AUTHORITATIVE. UpdateBrowserNav is documented as the one place that
+            // decides "something changed", and it drops the cache there. This
+            // search runs on another thread for up to a few hundred ms, so
+            // without this check a search kicked on page A can COMPLETE AFTER a
+            // tab switch or an in-page navigation and re-install page A's
+            // element -- undoing the drop, with the pre-navigation host string.
+            // VerifiedWebComposer cannot catch that: same window, same host,
+            // still an Edit. A same-host SPA navigation (picking another
+            // conversation) is exactly the case it misses.
+            //
+            // Discarding is the only safe answer -- the element was identified
+            // against a page that is no longer in front of the user. The next
+            // tick re-kicks the search against the page that is.
+            if (navGen != _browserNavGen) return;
+            if (found != null)
+            {
+                _webComposerCached = found;
+                _webComposerHwnd = fg;
+                _webComposerHost = host ?? "";
+                _webComposerRid = foundRid;
+                _webComposerEmptyRuns = 0;
+            }
+            else if (_webComposerEmptyRuns < WEB_COMPOSER_EMPTY_RUNS_BEFORE_BACKOFF)
+            {
+                _webComposerEmptyRuns++;
+            }
+        }
+        catch { }
+        finally { _webComposerSearchInProgress = false; }
+    }
+
+    // Kick the search when, and only when, there is nothing usable cached for a
+    // governed enforcing surface. Backoff identical in shape to the omnibox's:
+    // a window never searched is searched at once; one that has repeatedly
+    // yielded nothing is searched every 5s instead of every 1s.
+    static void MaybeSearchWebComposer(IntPtr fg, uint fgPid, string host, WebSurface web)
+    {
+        if (web == null) return;
+        // No probed signature -> no search. An unprobed surface keeps the exact
+        // behaviour it had before this existed. ONE rule, shared with both read
+        // paths -- see WebSurfaceCanIdentifyComposer.
+        bool canIdentify = WebSurfaceCanIdentifyComposer(web);
+        if (!canIdentify) return;
+        // AI-219. A control type this file cannot map would search for nothing
+        // and find nothing, once a second, forever. Refused here as well as in
+        // the search body so the thread is never even started.
+        if (WebControlTypeCondition(web.ComposerControlType) == null) return;
+        if (_webComposerSearchInProgress) return;
+        long now = DateTime.UtcNow.Ticks;
+        bool newWindow = _webComposerSearchHwnd != fg;
+        if (newWindow) _webComposerEmptyRuns = 0;
+        long interval = (_webComposerEmptyRuns >= WEB_COMPOSER_EMPTY_RUNS_BEFORE_BACKOFF)
+            ? WEB_COMPOSER_SEARCH_BACKOFF_INTERVAL : WEB_COMPOSER_SEARCH_MIN_INTERVAL;
+        if (!newWindow && (now - _webComposerLastSearchTicks) <= interval) return;
+        _webComposerSearchHwnd = fg;
+        _webComposerLastSearchTicks = now;
+        _webComposerSearchInProgress = true;
+        // The generation the search is being kicked FOR. Read here, on the poll
+        // thread, so it cannot move between this decision and the capture.
+        int navGen = _browserNavGen;
+        // The latch is cleared by the search's own finally -- but only if the
+        // search ever starts. A throw here (thread creation failure, OOM) would
+        // otherwise leave it true for the life of the process, and the composer
+        // would never be searched for again: a PERMANENT, SILENT return to the
+        // bypass this whole function exists to close.
+        try
+        {
+            var t = new Thread(delegate() { SearchWebComposerBackground(fg, fgPid, host, web.ComposerName, navGen); });
+            t.IsBackground = true;
+            t.SetApartmentState(ApartmentState.STA);   // UIA requires STA, same as the poll thread
+            t.Start();
+        }
+        catch
+        {
+            _webComposerSearchInProgress = false;
+        }
+    }
+
+    static void DropWebComposer()
+    {
+        _webComposerCached = null;
+        _webComposerHwnd = IntPtr.Zero;
+        _webComposerHost = "";
+        _webComposerRid = "";
+    }
+
+    // The composer element whose text may be read on THIS tick, or null.
+    //
+    // The ONLY way any element in a browser becomes readable. UpdateUia and
+    // UpdatePendingRewrite call this INSTEAD of AutomationElement.FocusedElement
+    // when the foreground is a browser, which is what makes the wider scan safe:
+    // focus moving to a password field, the omnibox or arbitrary page content
+    // cannot make any of those readable, because none of them is what gets read.
+    static AutomationElement CachedWebComposer()
+    {
+        if (!_fgWebComposerReadable) return null;
+        return _webComposerCached;
+    }
+
+    // ════ AI-216: THE WEB MODEL PICKER ══════════════════════════════════════
+    //
+    // Modelled line-for-line on the composer searcher above, and the parallel is
+    // the point: background STA thread, keyed on hwnd + catalog host, a 1s
+    // throttle with backoff, results dropped when _browserNavGen moved, the
+    // same ownership test, the same NameLooksLikeBrowserChrome refusal, and an
+    // exact catalog control type + name prefix. Two mechanisms that look alike
+    // are two mechanisms one reviewer can hold in their head.
+    //
+    // NO TREE WALK ON THE POLL THREAD, and NO NEW WORK ON THE HOOK THREAD AT
+    // ALL. The poll thread pays exactly one Name read per tick to re-verify
+    // whatever is cached; the hook thread's only involvement is the route branch
+    // that already existed, which reads two fields under a lock.
+    static AutomationElement _webPickerCached = null;
+    static IntPtr _webPickerHwnd = IntPtr.Zero;
+    static string _webPickerHost = "";
+    // volatile for exactly the reason the composer's twin is: written by the
+    // background thread, read by the poll thread. A stale TRUE stops every
+    // future search; a stale FALSE starts a second concurrent one.
+    static volatile bool _webPickerSearchInProgress = false;
+    static IntPtr _webPickerSearchHwnd = IntPtr.Zero;
+    static string _webPickerSearchHost = "";
+    static int _webPickerSearchNavGen = -1;
+    static long _webPickerLastSearchTicks = 0;
+    static int _webPickerEmptyRuns = 0;
+    static readonly long WEB_PICKER_SEARCH_MIN_INTERVAL = TimeSpan.FromSeconds(1).Ticks;
+    static readonly long WEB_PICKER_SEARCH_BACKOFF_INTERVAL = TimeSpan.FromSeconds(5).Ticks;
+    const int WEB_PICKER_EMPTY_RUNS_BEFORE_BACKOFF = 2;
+    // ---- THE GIVE-UP THRESHOLD --------------------------------------------
+    //
+    // After this many consecutive empty searches for ONE (hwnd, catalog host,
+    // navGen) triple, stop searching that triple ENTIRELY. Not "search more
+    // slowly" -- stop.
+    //
+    // WHY A BACKOFF IS NOT ENOUGH HERE, and this is the difference from the
+    // composer. A composer that is not found yet is usually a composer that is
+    // still rendering, so retrying forever eventually pays off. A MODEL PICKER
+    // THAT IS NOT THERE IS USUALLY NOT COMING: model availability is per
+    // ACCOUNT, and a Free / ChatGPT-Go style account's page has no picker at
+    // all. Walking that page's descendants every five seconds for the life of
+    // the tab is pure cost with zero-probability payoff, and it is the MODAL
+    // case across a fleet rather than an edge case.
+    //
+    // RESUMPTION is exactly the two events that can make the answer different:
+    // the nav generation moving (a navigation, a tab switch -- a different page
+    // instance, which genuinely might have one) or the window changing. A page
+    // instance does not grow a picker, so nothing short of that is worth a
+    // retry.
+    //
+    // The BACKOFF constant is set to 2 rather than 3 on purpose: with give-up
+    // at 3, a backoff that only engaged at 3 would be dead code. As shipped the
+    // three runs are paced immediate / +1s / +5s and then it stops.
+    const int WEB_PICKER_EMPTY_RUNS_BEFORE_GIVE_UP = 3;
+
+    static void DropWebPicker()
+    {
+        _webPickerCached = null;
+        _webPickerHwnd = IntPtr.Zero;
+        _webPickerHost = "";
+    }
+
+    // Re-verify the cached picker, ONCE PER POLL TICK, for the cost of ONE Name
+    // read.
+    //
+    // THE BUDGET IS THE DESIGN. The poll loop runs every 150ms and its other
+    // jobs (UpdateUia's PII scan above all) must never queue behind this, so the
+    // re-verify is deliberately one property read and two reference compares --
+    // no control-type read, no tree walk, nothing that can block.
+    //
+    // WHAT MAKES ONE READ SUFFICIENT: the control type, the ownership and the
+    // chrome-name refusal were all checked at SEARCH time, and nothing the poll
+    // thread does here ever DRIVES the element. Before anything is clicked,
+    // RunRoute re-finds the picker fresh (FindWebPickerButton) against the
+    // pinned window and re-reads its label -- so the cache can only ever cause a
+    // route to be PINNED, never a click to land. A pin that turns out to be
+    // wrong is refused there and reported; it cannot select a model.
+    //
+    // A NAME THAT NO LONGER CARRIES THE CATALOG PREFIX DROPS THE CACHE. A
+    // single-page app can relabel or reuse a node, and a cache filled while it
+    // was the picker must not keep being read after it stops being one.
+    static AutomationElement VerifiedWebPicker(IntPtr fg, string host, WebPicker picker)
+    {
+        if (picker == null) { DropWebPicker(); return null; }
+        AutomationElement el = _webPickerCached;
+        if (el == null) return null;
+        if (_webPickerHwnd != fg) { DropWebPicker(); return null; }
+        if (!string.Equals(_webPickerHost ?? "", host ?? "", StringComparison.Ordinal)) { DropWebPicker(); return null; }
+        string name = null;
+        try { name = el.Current.Name; } catch { DropWebPicker(); return null; }
+        if (string.IsNullOrEmpty(name)) { DropWebPicker(); return null; }
+        if (!name.StartsWith(picker.NamePrefix, StringComparison.OrdinalIgnoreCase)) { DropWebPicker(); return null; }
+        return el;
+    }
+
+    // Find this surface's picker button without waiting for anything to focus
+    // it. Runs on its OWN background STA thread, never the poll thread -- a
+    // FindAll(Descendants) over a browser window is the expensive call this
+    // whole structure exists to keep off the 150ms loop.
+    static void SearchWebPickerBackground(IntPtr fg, uint fgPid, string host, string controlType, string namePrefix, int navGen)
+    {
+        try
+        {
+            AutomationElement found = null;
+            try
+            {
+                // Re-resolved from the host the search was kicked for, so the
+                // search and the re-verify consult the SAME catalog row.
+                WebSurface surfaceForSearch = MatchWebSurface(host);
+                if (surfaceForSearch == null) return;
+                if (EnforcingWebPicker(surfaceForSearch) == null) return;
+                AutomationElement win = AutomationElement.FromHandle(fg);
+                if (win != null)
+                {
+                    // A control type this file cannot map yields NO CONDITION
+                    // and therefore NO SEARCH -- fail closed, never a widened
+                    // walk over every element in the window.
+                    Condition cond = WebControlTypeCondition(controlType);
+                    if (cond == null) return;
+                    AutomationElementCollection buttons = win.FindAll(TreeScope.Descendants, cond);
+                    foreach (AutomationElement el in buttons)
+                    {
+                        // Cheap test first, same cost ordering and same
+                        // reasoning as the composer search: the ownership test
+                        // takes a WHOLE-SYSTEM PROCESS SNAPSHOT for any element
+                        // whose pid is not the foreground's, which is every page
+                        // element, and the number of Buttons is chosen by the
+                        // page.
+                        string name = null;
+                        try { name = el.Current.Name; } catch { name = null; }
+                        if (string.IsNullOrEmpty(name)) continue;
+                        // THE GATE: the catalog's live-probed prefix.
+                        // NO AUTOMATIONID IS READ OR COMPARED ANYWHERE IN THIS
+                        // FUNCTION -- claude.ai's are React render counters
+                        // and change per render, so an id match would work once
+                        // and then silently stop. Name is the only stable signal
+                        // on this surface.
+                        if (!name.StartsWith(namePrefix, StringComparison.OrdinalIgnoreCase)) continue;
+                        // A catalog typo must not be able to point this at the
+                        // address bar, exactly as in the composer search.
+                        if (NameLooksLikeBrowserChrome(name)) continue;
+                        // Same ownership test every other read here makes: a
+                        // Chromium renderer is a CHILD of the browser process,
+                        // so this accepts the parent pid too.
+                        try { if (!ElementPidBelongsToForeground(el.Current.ProcessId, fgPid)) continue; }
+                        catch { continue; }
+                        // A VISIBILITY TIEBREAK, not a filter -- identical
+                        // treatment to the composer search. During an in-page
+                        // transition a site can briefly hold a detached previous
+                        // picker alongside the live one, and first-in-tree-order
+                        // can be the dead one. Never used to reject the only
+                        // match.
+                        bool offscreen = false;
+                        try { offscreen = el.Current.IsOffscreen; } catch { offscreen = false; }
+                        found = el;
+                        if (!offscreen) break;
+                    }
+                }
+            }
+            catch { }
+
+            // THE NAVIGATION GATE, and it does the same job here as in the
+            // composer search: this thread runs for up to a few hundred ms, so
+            // without it a search kicked on page A can COMPLETE AFTER a tab
+            // switch and install page A's button as page B's picker. Discarding
+            // is the only safe answer -- and the run is NOT counted toward the
+            // give-up threshold either, because it answered a question about a
+            // page that is no longer in front of the user.
+            if (navGen != _browserNavGen) return;
+            if (found != null)
+            {
+                _webPickerCached = found;
+                _webPickerHwnd = fg;
+                _webPickerHost = host ?? "";
+                _webPickerEmptyRuns = 0;
+            }
+            else if (_webPickerEmptyRuns < WEB_PICKER_EMPTY_RUNS_BEFORE_GIVE_UP)
+            {
+                _webPickerEmptyRuns++;
+            }
+        }
+        catch { }
+        finally { _webPickerSearchInProgress = false; }
+    }
+
+    // Kick the picker search when, and only when, there is nothing usable cached
+    // for a surface whose picker is past BOTH its flags.
+    //
+    // THE SEARCH KEY IS THE TRIPLE (hwnd, catalog host, navGen). All three
+    // reset the empty-run counter when they change, because all three mean "a
+    // different page instance, which might genuinely have a picker". Within one
+    // triple the counter only ever climbs, and at
+    // WEB_PICKER_EMPTY_RUNS_BEFORE_GIVE_UP the search stops for good.
+    static void MaybeSearchWebPicker(IntPtr fg, uint fgPid, string host, WebSurface web)
+    {
+        WebPicker picker = EnforcingWebPicker(web);
+        if (picker == null) return;
+        // A control type this file cannot map would search for nothing and find
+        // nothing forever. Refused here as well as in the search body, so the
+        // thread is never even started.
+        if (WebControlTypeCondition(picker.ControlType) == null) return;
+        if (_webPickerSearchInProgress) return;
+        int navGen = _browserNavGen;
+        bool newKey = _webPickerSearchHwnd != fg
+            || !string.Equals(_webPickerSearchHost ?? "", host ?? "", StringComparison.Ordinal)
+            || _webPickerSearchNavGen != navGen;
+        if (newKey) _webPickerEmptyRuns = 0;
+        // THE GIVE-UP. Checked AFTER the key comparison, so a nav-gen bump or a
+        // window change resumes searching on the very next tick.
+        if (_webPickerEmptyRuns >= WEB_PICKER_EMPTY_RUNS_BEFORE_GIVE_UP) return;
+        long now = DateTime.UtcNow.Ticks;
+        long interval = (_webPickerEmptyRuns >= WEB_PICKER_EMPTY_RUNS_BEFORE_BACKOFF)
+            ? WEB_PICKER_SEARCH_BACKOFF_INTERVAL : WEB_PICKER_SEARCH_MIN_INTERVAL;
+        if (!newKey && (now - _webPickerLastSearchTicks) <= interval) return;
+        _webPickerSearchHwnd = fg;
+        _webPickerSearchHost = host ?? "";
+        _webPickerSearchNavGen = navGen;
+        _webPickerLastSearchTicks = now;
+        _webPickerSearchInProgress = true;
+        string ct = picker.ControlType;
+        string pfx = picker.NamePrefix;
+        // The latch is cleared by the search's own finally -- but only if the
+        // search ever STARTS. A throw here would otherwise leave it true for the
+        // life of the process and the picker would never be searched for again.
+        try
+        {
+            var t = new Thread(delegate() { SearchWebPickerBackground(fg, fgPid, host, ct, pfx, navGen); });
+            t.IsBackground = true;
+            t.SetApartmentState(ApartmentState.STA);   // UIA requires STA, same as the poll thread
+            t.Start();
+        }
+        catch
+        {
+            _webPickerSearchInProgress = false;
+        }
+    }
+
+    // Re-find the picker button FRESH, on the ROUTE thread, for post-switch
+    // verification.
+    //
+    // Same job and same reasoning as FindModelPickerButton on the desktop path
+    // (a stale reference can keep returning its last-known pre-switch value
+    // without ever throwing, which makes verification wait out its whole
+    // deadline for a switch that already happened) -- but driven by the
+    // CATALOG's control type and prefix instead of the desktop constants, and
+    // still by NAME ONLY, never by AutomationId.
+    static AutomationElement FindWebPickerButton(AutomationElement win, WebPicker picker)
+    {
+        if (win == null || picker == null) return null;
+        try
+        {
+            var walker = TreeWalker.ControlViewWalker;
+            var stack = new Stack<KeyValuePair<AutomationElement, int>>();
+            stack.Push(new KeyValuePair<AutomationElement, int>(win, 0));
+            while (stack.Count > 0)
+            {
+                var cur = stack.Pop();
+                if (cur.Value > 30) continue;   // same depth cap the rest of this file uses
+                AutomationElement el = cur.Key;
+                try
+                {
+                    string ctName = MrControlTypeShortName(el.Current.ControlType);
+                    if (string.Equals(ctName, picker.ControlType, StringComparison.OrdinalIgnoreCase))
+                    {
+                        string name = null;
+                        try { name = el.Current.Name; } catch { }
+                        if (!string.IsNullOrEmpty(name)
+                            && name.StartsWith(picker.NamePrefix, StringComparison.OrdinalIgnoreCase)
+                            && !NameLooksLikeBrowserChrome(name))
+                            return el;
+                    }
+                }
+                catch { }
+                try
+                {
+                    AutomationElement child = walker.GetFirstChild(el);
+                    while (child != null)
+                    {
+                        stack.Push(new KeyValuePair<AutomationElement, int>(child, cur.Value + 1));
+                        child = walker.GetNextSibling(child);
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    // Find THE ONE menu item matching the label in the currently-open menu.
+    //
+    // AMBIGUITY IS A REFUSAL, NEVER A FIRST-MATCH, and that is the whole reason
+    // this exists beside FindMenuItemByLabel rather than reusing it. The walk
+    // visits the WHOLE open menu and counts every match before returning
+    // anything:
+    //   0 matches -> matchCount 0, null. target_item_not_found, which is an
+    //                ORDINARY runtime path: model availability is per account,
+    //                so a tier this catalog lists may simply not exist for this
+    //                user.
+    //   1 match   -> the element. The only case that clicks.
+    //   2+        -> matchCount >= 2, null. target_item_ambiguous. There is no
+    //                evidence available at that moment to break the tie, and
+    //                taking the first would be a coin flip over which model the
+    //                user is served and billed by.
+    //
+    // A TreeWalker walk, not FindAll(Descendants, condition) -- confirmed live
+    // that Chromium's UIA bridge is not reliable at server-side condition
+    // filtering for its own web-rendered controls (four real attempts against
+    // Claude Desktop's open menu found nothing, while a plain walk over the same
+    // popover found the item without difficulty). Visiting every node and
+    // checking ControlType ourselves is the same tradeoff FindMenuItemByLabel
+    // and attachment-watcher.ps1 already make.
+    //
+    // NO AUTOMATIONID IS READ OR COMPARED HERE either -- the measured item ids
+    // are React render counters.
+    static AutomationElement FindWebPickerItemUnique(AutomationElement win, string label, string itemControlTypes, string selectedPrefix, out int matchCount)
+    {
+        matchCount = 0;
+        AutomationElement hit = null;
+        if (win == null || string.IsNullOrEmpty(label) || string.IsNullOrEmpty(itemControlTypes)) return null;
+        try
+        {
+            var walker = TreeWalker.ControlViewWalker;
+            var stack = new Stack<KeyValuePair<AutomationElement, int>>();
+            stack.Push(new KeyValuePair<AutomationElement, int>(win, 0));
+            while (stack.Count > 0)
+            {
+                var cur = stack.Pop();
+                if (cur.Value > 30) continue;
+                AutomationElement el = cur.Key;
+                try
+                {
+                    if (MrItemTypeAllowed(el.Current.ControlType, itemControlTypes))
+                    {
+                        string name = null;
+                        try { name = el.Current.Name; } catch { }
+                        // The BOUNDARY-AWARE matcher, not a bare StartsWith --
+                        // see ModelItemNameMatches for why 'Sonnet 5' must not
+                        // match 'Sonnet 5.5 ...'.
+                        if (ModelItemNameMatches(StripSelectedPrefix(name, selectedPrefix), label))
+                        {
+                            matchCount++;
+                            if (hit == null) hit = el;
+                        }
+                    }
+                }
+                catch { }
+                try
+                {
+                    AutomationElement child = walker.GetFirstChild(el);
+                    while (child != null)
+                    {
+                        stack.Push(new KeyValuePair<AutomationElement, int>(child, cur.Value + 1));
+                        child = walker.GetNextSibling(child);
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        // The count is what decides, never the first hit. Counting the WHOLE
+        // menu before answering is the entire point.
+        return (matchCount == 1) ? hit : null;
+    }
+
+    // Is this item reporting itself as the SELECTED one right now?
+    //
+    // Measured: claude.ai's items carry SelectionItem. Used twice inside the
+    // route -- once BEFORE the switch, to confirm the pinned from_tier against a
+    // second, independent signal rather than the button label alone, and once
+    // AFTER, OR'd with the label change so a verification does not hang on one
+    // mechanism.
+    //
+    // DEFAULTS TO FALSE on a throw or a missing pattern, which is the refusing
+    // direction in both uses: pre-switch it declines the route, post-switch it
+    // falls back to the label comparison.
+    // AI-216. THREE answers, not two: Yes / No / UNKNOWN.
+    //
+    // The two-valued version returned false both for "the pattern says this is
+    // not selected" and for "this element has no SelectionItemPattern at all",
+    // and those demand opposite handling. gemini.google.com's menu items expose
+    // Invoke ONLY -- no SelectionItemPattern anywhere (measured live
+    // 2026-09-22) -- so the pre-switch confirmation below would have read the
+    // absent pattern as a definite "no" and aborted EVERY route on that surface
+    // with from_tier_not_confirmed. A surface must never be failed for not
+    // supplying a signal it structurally cannot supply.
+    //
+    // Returns: 1 = selected, 0 = NOT selected (positive evidence), -1 = unknown
+    // (no pattern, or the read threw). A THROW is unknown rather than no, for
+    // the same reason every other read in this file treats a failed read as no
+    // evidence instead of as a negative answer.
+    const int WEB_SEL_NO = 0, WEB_SEL_YES = 1, WEB_SEL_UNKNOWN = -1;
+    static int WebItemSelectionState(AutomationElement item)
+    {
+        if (item == null) return WEB_SEL_UNKNOWN;
+        try
+        {
+            object patObj;
+            if (!item.TryGetCurrentPattern(SelectionItemPattern.Pattern, out patObj)) return WEB_SEL_UNKNOWN;
+            return ((SelectionItemPattern)patObj).Current.IsSelected ? WEB_SEL_YES : WEB_SEL_NO;
+        }
+        catch { return WEB_SEL_UNKNOWN; }
+    }
+
+    // Kept for the POST-switch confirmation, which ORs this with the label
+    // change: there, "unknown" and "no" are genuinely the same answer, because
+    // the label is the other half of the OR and carries the surface on its own.
+    static bool WebItemIsSelected(AutomationElement item)
+    {
+        return WebItemSelectionState(item) == WEB_SEL_YES;
+    }
+
+    // The EFFORT token in a picker label, e.g. High / Medium / Low.
+    //
+    // The C# twin of ai-processes.js's parseModelPickerLabel, held in lockstep
+    // by a test. Nothing here SETS effort -- switching model changes it as a
+    // side effect (measured: Opus 5 High becomes Sonnet 5 Medium) and the user
+    // has accepted that downgrade. It is captured before AND after purely so the
+    // change is RECORDED: it is already inside the string being parsed for the
+    // tier, so it costs nothing, and omitting it makes the cost model wrong
+    // undetectably.
+    //
+    // A CLOSED SET, not "the last word". The remainder after the model name is
+    // arbitrary site text, and emitting an arbitrary trailing word would put
+    // page-derived content into a governance event. An unrecognised token
+    // yields "" -- effort unknown.
+    static readonly string[] MODEL_EFFORT_TOKENS = new string[] { "High", "Medium", "Low" };
+
+    static string ModelEffortFromLabel(string label, string namePrefix)
+    {
+        if (string.IsNullOrEmpty(label)) return "";
+        string body = label.Trim();
+        if (!string.IsNullOrEmpty(namePrefix) && body.StartsWith(namePrefix, StringComparison.OrdinalIgnoreCase))
+            body = body.Substring(namePrefix.Length).Trim();
+        // Split on whitespace with RemoveEmptyEntries, passing null for the
+        // separator set -- a char[] literal in this here-string has broken this
+        // file before ("Newline in constant"), and null means "any whitespace".
+        string[] parts = body.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2) return "";
+        string last = parts[parts.Length - 1];
+        foreach (string tok in MODEL_EFFORT_TOKENS)
+        {
+            if (string.Equals(tok, last, StringComparison.OrdinalIgnoreCase)) return tok;
+        }
+        return "";
+    }
+
+
+    // Is a "web"-scoped block allowed to swallow this keystroke right now?
+    //
+    // The ONE extra term the browser arm carries that no other arm needs, and it
+    // exists because of a difference in kind: a panel block and an agent block
+    // are scoped to an element sitting among OTHER elements of the same app, but
+    // a web block is scoped to an element sitting in the same window as THE
+    // BROWSER'S OWN ADDRESS BAR. Swallowing Enter there would stop the user
+    // navigating away from the blocked site -- a block they cannot leave, which
+    // is a broken browser rather than enforcement.
+    //
+    // Written as its own predicate and ADDITIVE to the existing decision rather
+    // than a change to it, so nothing about the panel/agent arms moves.
+    //
+    // THE FAIL DIRECTION: it refuses only on POSITIVE evidence that the caret is
+    // in browser chrome (_fgWebChromeFocused is sticky until a successful read
+    // says otherwise). An unreadable tick therefore KEEPS the block, which is
+    // what lets the latch survive one bad read -- and is the acknowledged sharp
+    // edge here: an unreadable tick immediately after Ctrl+L can cost the user
+    // one swallowed Enter in the address bar. Bounded by one poll tick in the
+    // normal case and by PANEL_BLOCK_LATCH_TTL in the worst, and the panic
+    // hotkey still releases everything.
+    static bool WebBlockGateOk()
+    {
+        // _fgIsBrowser, NOT _blockScope -- same defect as SendRectFreshEnough's.
+        // A pattern-based CONTENT block leaves _blockScope "", so keying on it
+        // exempted content blocks from the omnibox and password-field guards.
+        // Belt-and-braces for Enter (a content block also needs PanelEnforceOk,
+        // which requires the composer to be focused), but load-bearing for the
+        // send-button CLICK, which has no such term.
+        if (!_fgIsBrowser) return true;
+        // ---- THE HOST THE BLOCK WAS ARMED FOR ------------------------------
+        //
+        // A whole-site block means "you may not use THIS SITE". It is not a
+        // licence to swallow Enter on the next site the user opens, and until
+        // this test existed that is exactly what happened: _blockedBrowserHost
+        // was set by CheckFgBlocked's web arm and cleared by ClearFgBlocked, but
+        // NOTHING EVER COMPARED IT to the host in front of the user. The block
+        // survives a foreground change on purpose (the latch and the sticky
+        // window both keep it alive so a momentary bad read cannot tear down a
+        // real block), so "still armed" and "still on the blocked site" had
+        // silently become the same question.
+        //
+        // Observed twice, live: switching from a blocked Gemini tab to ChatGPT,
+        // and from a blocked ChatGPT tab to claude.ai -- which was NOT blocked
+        // and was governed only for DLP. Both produced a swallowed send on the
+        // new tab, logged against the OLD tab's platform
+        // ("BLOCKED send into Claude -- [Blocked platform: ChatGPT]"). The wrong
+        // label was the visible half; the false block was the real damage.
+        //
+        // FAIL DIRECTION, and it matches every other web term in this file: it
+        // refuses only on POSITIVE evidence of a DIFFERENT governed host. An
+        // empty _fgWebHost means the host could not be read this tick, or the
+        // tab is not a governed surface at all -- neither is proof the user left
+        // the blocked site, and ApplyForegroundTick already retires the latch on
+        // an authoritative NotSurface read. So an unreadable tick KEEPS the
+        // block, exactly as WebBlockLatched()'s own no-evidence rule does.
+        string armedHost = _blockedBrowserHost ?? "";
+        string hereHost = _fgWebHost ?? "";
+        if (armedHost.Length > 0 && hereHost.Length > 0
+            && !string.Equals(armedHost, hereHost, StringComparison.OrdinalIgnoreCase)) return false;
+        // A PASSWORD FIELD is refused for a second, independent reason: a
+        // whole-site block means "you may not use this site", not "your Enter
+        // key is dead in its login form". Capture there was never possible (a
+        // password field can never satisfy the composer test), so this is purely
+        // about not leaving a dead key in the one field where a user has no way
+        // to understand why. Sticky until contradicted, like the chrome term.
+        if (_fgWebPasswordFocused) return false;
+        return !_fgWebChromeFocused;
+    }
+
+    // Is the latch holding a WEB-scoped block? Its retirement rules differ from
+    // a panel's and an agent's -- see the web-evidence guard in CheckFgBlocked.
+    static bool WebBlockLatched()
+    {
+        string k = _elementBlockKey ?? "";
+        return k.StartsWith("web:", StringComparison.Ordinal);
+    }
+
+    // AI-218. A SEPARATE latch kind, because it retires on a different event.
+    // A "web:" latch is about being on a host, and the URL read tells you when
+    // you have left it. A "webagent:" latch is about which AGENT is open, and
+    // switching agents never changes the URL host at all -- so without its own
+    // rule the block would outlive the agent it was armed for and swallow Enter
+    // in the next conversation the user opened.
+    static bool WebAgentBlockLatched()
+    {
+        string k = _elementBlockKey ?? "";
+        return k.StartsWith("webagent:", StringComparison.Ordinal);
+    }
+
+    // May the mouse hook trust the cached send rectangle right now?
+    //
+    // PURE and side-effect free, because the hook thread calls it: it reads two
+    // fields the poll thread writes and does one subtraction. No UIA, no regex,
+    // no allocation.
+    //
+    // `true` for every NON-web scope, unchanged -- the desktop/Teams rect
+    // semantics must not move. For the WEB scope it additionally requires the
+    // poll thread to have RE-VERIFIED the element's Name recently, which is what
+    // stops a rect cached while `Send message` existed from being honoured once
+    // the same rectangle is occupied by `Use voice mode`. See the cache notes.
+    static bool SendRectFreshEnough()
+    {
+        // _fgIsBrowser, NOT _blockScope. _blockScope is set only by
+        // CheckFgBlocked's PLATFORM arms, so a pattern-based CONTENT block (the
+        // ordinary "you typed a secret" case) leaves it "" -- and keying on it
+        // meant this returned true unconditionally for precisely those blocks,
+        // skipping the bound that stops a stale rect swallowing a click on the
+        // MICROPHONE. Every browser rect needs the bound, whatever armed it.
+        if (!_fgIsBrowser) return true;
+        long t = _webSendVerifiedTicks;
+        if (t == 0) return false;
+        return (DateTime.UtcNow.Ticks - t) < WEB_SEND_RECT_TTL;
+    }
+
+    // The catalog's control-type string -> a UIA Condition, or NULL for
+    // anything this file does not know how to search for.
+    //
+    // ONE mapper for BOTH catalog control types -- the send button's and (since
+    // AI-219) the composer's. Deliberately not two: a second copy would be a
+    // second place for "Group" to be missing from, and the failure of a missing
+    // entry is silent (no search, no block, no error).
+    //
+    // FAIL CLOSED on an unrecognised value: null means no search at all, so a
+    // typo in a future entry disables that surface's click blocking (or its
+    // composer search) rather than widening the search to every control in the
+    // window. The control type is FILTERED IN THE CONDITION rather than
+    // compared afterwards because that is what the measurement was taken
+    // against (62 Buttons at 105ms); filtering on the NAME instead would be
+    // more selective still, but a property-filtered FindAll on a
+    // Chromium-rendered DOCUMENT was measured finding NOTHING elsewhere in this
+    // file, and Name is the property most likely to be provider-computed. So:
+    // filter on the type that was measured, compare the name in the loop.
+    static Condition WebControlTypeCondition(string ctName)
+    {
+        if (string.IsNullOrEmpty(ctName)) return null;
+        if (string.Equals(ctName, "Button", StringComparison.OrdinalIgnoreCase))
+            return new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button);
+        if (string.Equals(ctName, "Custom", StringComparison.OrdinalIgnoreCase))
+            return new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Custom);
+        if (string.Equals(ctName, "Image", StringComparison.OrdinalIgnoreCase))
+            return new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Image);
+        if (string.Equals(ctName, "MenuItem", StringComparison.OrdinalIgnoreCase))
+            return new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem);
+        // AI-219. The two COMPOSER types: Edit is what every surface before
+        // Gemini Enterprise used (and is still the default), Group is what
+        // Gemini Enterprise's prosemirror composer was measured as.
+        if (string.Equals(ctName, "Edit", StringComparison.OrdinalIgnoreCase))
+            return new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit);
+        if (string.Equals(ctName, "Group", StringComparison.OrdinalIgnoreCase))
+            return new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Group);
+        return null;
+    }
+
+    // AI-219. The catalog's composer control type for a host, always resolved
+    // to a non-empty value. THE DEFAULT IS THE WHOLE POINT: an unknown host, a
+    // surface that predates the field, or a payload that omitted it all answer
+    // "Edit", which is the literal the three read paths used to carry.
+    static string WebComposerControlType(string host)
+    {
+        WebSurface s = MatchWebSurface(host);
+        string ct = (s == null) ? "" : (s.ComposerControlType ?? "");
+        return (ct.Length > 0) ? ct : WEB_COMPOSER_CONTROL_TYPE_DEFAULT;
+    }
+
+    // ---- SLOW PATH: find the send button on a background STA thread --------
+    //
+    // Runs on its OWN background STA thread, never the poll thread, for the
+    // measured reason in the cache notes above (105ms / 489ms). Same shape as
+    // SearchOmniboxBackground and SearchModelPickerBackground, including the
+    // reentrancy guard released in a finally and the empty-run backoff.
+    //
+    // A DESCENDANT search, not a walk out from the composer, and that choice is
+    // forced by the measured ancestry: `Send message` sits two UNNAMED Groups
+    // below the button strip, and the outer of those groups is the one that
+    // reports InvokePattern -- so a "find the invokable thing beside the
+    // composer" strategy resolves to the wrong element and would cache the
+    // wrong rectangle.
+    //
+    // The NAME comparison is WHOLE-STRING and case-insensitive, the same
+    // discipline MatchPanelSignature uses for nameEquals -- deliberately not a
+    // substring test, which would match "Send message to a new chat" or any
+    // other control whose label happens to contain the catalog string.
+    //
+    // NOTHING read here is emitted, logged or persisted: the only value kept is
+    // the ELEMENT REFERENCE. Its Name and rectangle are re-read later, on the
+    // poll thread.
+    static void SearchWebSendButtonBackground(IntPtr fg, string host, string ctName, string wantName)
+    {
+        try
+        {
+            AutomationElement found = null;
+            try
+            {
+                Condition cond = WebControlTypeCondition(ctName);
+                AutomationElement win = (cond == null) ? null : AutomationElement.FromHandle(fg);
+                if (win != null)
+                {
+                    AutomationElementCollection all = win.FindAll(TreeScope.Descendants, cond);
+                    foreach (AutomationElement el in all)
+                    {
+                        string name = null;
+                        try { name = el.Current.Name; } catch { }
+                        if (name == null) continue;
+                        if (!string.Equals(name.Trim(), wantName, StringComparison.OrdinalIgnoreCase)) continue;
+                        found = el;
+                        break;
+                    }
+                }
+            }
+            catch { }
+
+            // Assigned only at the END, and only on a search that found
+            // something -- the same "never half-apply a result" discipline every
+            // other search in this file uses. A search that found nothing leaves
+            // the previous cache exactly as it was (the poll thread's own
+            // re-verify is what decides whether that cache may still be trusted)
+            // and counts toward the backoff.
+            if (found != null)
+            {
+                _webSendCached = found;
+                _webSendCachedHwnd = fg;
+                _webSendCachedHost = host ?? "";
+                _webSendEmptyRuns = 0;
+            }
+            else if (_webSendEmptyRuns < WEB_SEND_EMPTY_RUNS_BEFORE_BACKOFF)
+            {
+                // The overwhelmingly common reason to find nothing here is that
+                // the composer is EMPTY, so `Send message` does not exist. That
+                // is a normal state, not an error, and it is why the backoff
+                // matters: a block armed over an empty composer must not spin a
+                // background search every second forever.
+                _webSendEmptyRuns++;
+            }
+        }
+        catch { }
+        finally { _webSendSearchInProgress = false; }
+    }
+
+    // ---- FAST PATH: re-verify and publish the rect, once per poll tick -----
+    //
+    // Called from UpdateSendRect for a browser foreground, and it is the ONLY
+    // way a browser can ever publish a send rectangle. UpdateSendRect's two
+    // generic attempts -- the "anything whose name contains send/submit"
+    // descendant search and the bottom-right-corner heuristic -- stay excluded
+    // for a browser permanently, for the reasons stated there.
+    //
+    // FOUR GATES before a single UIA call, and every one of them is a gate
+    // rather than a convenience. NONE of them is a block: this is the
+    // resolve-early / decide-late split described inside, so the gates here
+    // only establish "a governed AI page is genuinely in front of the user",
+    // and every term about whether to SWALLOW lives in MouseCallback and
+    // BlockActiveForMouse.
+    //   1. _fgIsAi -- the tab resolved to a catalog host past both its flags;
+    //   2. not Disarmed(). The panic hotkey means stop;
+    //   3. the cached composer RE-VERIFIED on this tick
+    //      (_fgWebComposerReadable) and the tick is FIRST-HAND
+    //      (_fgLeftAiTicks == 0). READABLE, not FOCUSED -- see the gate itself
+    //      for the total bypass that requiring focus here produced;
+    //   4. EnforcingWebSurface(_fgWebHost) -- the host must be past BOTH its
+    //      flags, BOTH catalog send-button fields must be non-empty, and the
+    //      control type must be one this file can build a condition for. This
+    //      is what keeps chatgpt.com and gemini.google.com on Enter-only
+    //      blocking: unprobed means no rectangle, never a guessed one.
+    static void UpdateWebSendRect()
+    {
+        // DEFAULT TO NOTHING. Every early return below leaves the hook with no
+        // rectangle at all, and clears the freshness stamp so a rect published
+        // on an earlier tick cannot be honoured after this one declined.
+        _hasRect = false;
+        // ---- THE WARM GATE, and the 2026-09-09 click bypass it fixes -------
+        //
+        // WHAT WENT WRONG. This used to require `_fgIsBlocked` and
+        // `_blockScope == "web"` before it would even look for the button, and
+        // that failed in two separate ways at once:
+        //
+        //   1. TOTAL FAILURE for a content block. _blockScope is set by
+        //      CheckFgBlocked's PLATFORM arms and by nothing else, so the
+        //      ordinary "you typed/pasted a secret" block leaves it "". The
+        //      second gate could therefore NEVER pass for the blocks this
+        //      feature exists for, and the send arrow was never swallowed at
+        //      all -- reported live on chatgpt.com and gemini.google.com as
+        //      "Enter is blocked, the arrow sends, every time".
+        //   2. A LOST RACE even for a platform block. The search only started
+        //      once a block existed: block arms instantly (the keyboard hook
+        //      sets a boolean), then one poll tick to pass these gates, then a
+        //      105ms (Chrome) to 489ms (Edge) descendant search, then another
+        //      tick to verify and publish. Anyone clicking within ~half a second
+        //      of finishing typing -- i.e. the normal way people send -- was
+        //      unprotected. claude.ai's "the first click blocks, the second
+        //      sends" was the same race with a warm cache on the first attempt.
+        //
+        // THE FIX IS TO RESOLVE EARLY AND DECIDE LATE. The gates below license
+        // the SEARCH and the RECT; they say nothing about swallowing. What they
+        // require is only that this is genuinely a governed AI composer:
+        //   * the surface is an AI surface at all (_fgIsAi);
+        //   * enforcement is not disarmed;
+        //   * THE COMPOSER IS READABLE ON THIS TICK. This is the privacy and
+        //     cost bound, and it is a bound on the PAGE rather than on the
+        //     caret: the cache is filled only by an element that passed the
+        //     full composer test WHILE FOCUSED on a governed host, and it is
+        //     dropped by a navigation, a tab switch, a host change or a window
+        //     change. So the search runs only while a governed AI page really
+        //     is in front of the user, never while they are on some other
+        //     site. It deliberately does NOT require the caret to be in the
+        //     composer right now -- see the gate below for why that
+        //     requirement was a total bypass;
+        //   * the host is past BOTH its flags;
+        //   * the catalog declares a send-button signature, and this file can
+        //     build a condition for it.
+        //
+        // THE DECISION TO SWALLOW DID NOT MOVE. It is still, entirely, in
+        // MouseCallback: _fgIsAi, the point being inside this rect,
+        // SendRectFreshEnough(), and BlockActiveForMouse() -- which is where
+        // _fgIsBlocked, WebBlockGateOk(), Disarmed(), the cooldown and every
+        // content signal live. A warm rect with no block armed swallows nothing;
+        // it only means that when a block DOES arm, the answer is already known
+        // and costs zero UIA work, so the click is swallowed on the same tick
+        // rather than several hundred milliseconds later.
+        //
+        // COST. One throttled background search (1s, backing off to 5s after 3
+        // empty runs) while a governed AI tab has composer focus, plus one
+        // property read per poll tick to re-verify. That is affordable; a
+        // click-block that loses a race is not a control at all.
+        if (!_fgIsAi) { _webSendVerifiedTicks = 0; return; }
+        if (Disarmed()) { _webSendVerifiedTicks = 0; return; }
+        // READABLE, NOT FOCUSED -- and this one line was a TOTAL bypass of the
+        // click block, in exactly the shape the previous fix left open.
+        // _fgIsWebComposer means "the caret is in the composer RIGHT NOW", so
+        // the moment the user clicked the transcript or the page margin this
+        // returned early, the rect stopped being published, _hasRect went false
+        // and the mouse hook never even consulted BlockActiveForMouse(). Click
+        // the send arrow at that point and EVERY browser block was defeated --
+        // a DLP content block and a whole-site platform block alike, i.e. "you
+        // may not use this site" was beaten by clicking the page first.
+        //
+        // Requiring focus adds NOTHING here, because for a CLICK the RECTANGLE
+        // is the element scoping: it is published only while the cached
+        // composer re-verified this tick, the surface is past both its flags,
+        // and the element at that rectangle still calls itself the catalog's
+        // send button. A click outside that rectangle is never considered at
+        // all. Focus is the element scoping for ENTER, and PanelEnforceOk still
+        // requires it there -- see MouseEnforceOk for why the two decisions
+        // must stay separate rather than being "simplified" into one.
+        //
+        // FIRST-HAND ONLY, the same term PanelUiaOk carries and for the same
+        // reason: never inside the 3s sticky window, during which the user may
+        // already be in another application.
+        if (!_fgWebComposerReadable || _fgLeftAiTicks != 0) { _webSendVerifiedTicks = 0; return; }
+        WebSurface web = EnforcingWebSurface(_fgWebHost);
+        if (web == null) { _webSendVerifiedTicks = 0; return; }
+        string ctName = web.SendButtonControlType ?? "";
+        string wantName = (web.SendButtonName ?? "").Trim();
+        // BOTH fields, or nothing at all.
+        if (ctName.Length == 0 || wantName.Length == 0) { _webSendVerifiedTicks = 0; return; }
+        if (WebControlTypeCondition(ctName) == null) { _webSendVerifiedTicks = 0; return; }
+
+        IntPtr fg = GetForegroundWindow();
+        if (fg == IntPtr.Zero) { _webSendVerifiedTicks = 0; return; }
+
+        // A different window, or a different host in the same window, is a
+        // different button. Drop the cache rather than re-verifying a rectangle
+        // that belongs to something else.
+        if (_webSendCachedHwnd != fg
+            || !string.Equals(_webSendCachedHost ?? "", web.Host ?? "", StringComparison.Ordinal))
+        {
+            _webSendCached = null;
+            _webSendCachedHwnd = IntPtr.Zero;
+            _webSendCachedHost = "";
+        }
+
+        bool verified = false;
+        AutomationElement cached = _webSendCached;
+        if (cached != null)
+        {
+            try
+            {
+                // THE RE-VERIFY. This single property read is the whole answer to
+                // the `Use voice mode` problem: the rectangle is published only
+                // while the element AT that rectangle still calls itself the send
+                // button. A mismatch publishes nothing.
+                string liveName = cached.Current.Name ?? "";
+                if (string.Equals(liveName.Trim(), wantName, StringComparison.OrdinalIgnoreCase))
+                {
+                    System.Windows.Rect r = cached.Current.BoundingRectangle;
+                    if (!r.IsEmpty && r.Width > 0 && r.Height > 0)
+                    {
+                        _rx = (int)r.Left; _ry = (int)r.Top;
+                        _rw = (int)r.Width; _rh = (int)r.Height;
+                        _webSendVerifiedTicks = DateTime.UtcNow.Ticks;
+                        _hasRect = true;
+                        verified = true;
+                        // A successful verify restarts the fast search interval,
+                        // so the common "type -> send -> composer empties -> type
+                        // again" cycle does not accumulate its way into the 5s
+                        // backoff and then resolve slowly on the next prompt.
+                        _webSendEmptyRuns = 0;
+                    }
+                }
+                // A MISMATCH DELIBERATELY KEEPS THE CACHE. The measured behaviour
+                // is that claude.ai relabels the SAME control (`Send message` <->
+                // `Use voice mode`) as the composer fills and empties, so keeping
+                // the reference means the next tick after the user types again
+                // verifies instantly with no 105-489ms search. It publishes
+                // nothing in the meantime, which is the part that matters. If the
+                // control is instead genuinely REPLACED, the throttled search
+                // below is what recovers -- see its condition, which is keyed on
+                // "not verified" rather than "nothing cached" precisely so that
+                // case cannot dead-end.
+            }
+            catch
+            {
+                // Stale reference -- the window was rebuilt, or the page
+                // navigated. Drop it and fall through to a fresh search, the same
+                // recovery the omnibox and model-picker caches perform.
+                _webSendCached = null;
+                _webSendCachedHwnd = IntPtr.Zero;
+                _webSendCachedHost = "";
+            }
+        }
+        if (!verified) _webSendVerifiedTicks = 0;
+        if (verified) return;
+
+        // Kick (or re-kick) the background search. Keyed on "not verified", not
+        // on "nothing cached", so a control that was genuinely replaced rather
+        // than relabelled is still recovered.
+        bool newTarget = _webSendSearchHwnd != fg
+            || !string.Equals(_webSendSearchHost ?? "", web.Host ?? "", StringComparison.Ordinal);
+        if (newTarget) _webSendEmptyRuns = 0;
+        long now = DateTime.UtcNow.Ticks;
+        long interval = (_webSendEmptyRuns >= WEB_SEND_EMPTY_RUNS_BEFORE_BACKOFF)
+            ? WEB_SEND_SEARCH_BACKOFF_INTERVAL : WEB_SEND_SEARCH_MIN_INTERVAL;
+        if (!_webSendSearchInProgress && (newTarget || (now - _webSendLastSearchTicks) > interval))
+        {
+            _webSendSearchHwnd = fg;
+            _webSendSearchHost = web.Host ?? "";
+            _webSendLastSearchTicks = now;
+            _webSendSearchInProgress = true;
+            string searchCt = ctName, searchName = wantName, searchHost = web.Host ?? "";
+            var t = new Thread(() => SearchWebSendButtonBackground(fg, searchHost, searchCt, searchName));
+            t.IsBackground = true;
+            t.SetApartmentState(ApartmentState.STA);   // UIA requires STA, same as the poll thread
+            t.Start();
+        }
+    }
+
     static void StdinLoop()
     {
         string line;
@@ -5982,19 +10253,112 @@ public static class CfaiEnforcer
         // a dead/hung parent; this just means no more commands can arrive.
     }
 
+    // -- THE HOOK WATCHDOG ---------------------------------------------------
+    //
+    // Windows SILENTLY REMOVES a WH_KEYBOARD_LL / WH_MOUSE_LL hook whose
+    // callback overruns LowLevelHooksTimeout (HKCU\Control Panel\Desktop,
+    // default 300ms). There is no notification, no error, and no return value
+    // anywhere that says it happened: SetWindowsHookEx still returned a handle,
+    // this process is still alive, the heartbeat still writes, the poll thread
+    // still resolves surfaces - and NOTHING IS EVER BLOCKED AGAIN, for any app,
+    // until the agent is restarted.
+    //
+    // That is exactly the failure that was observed on 2026-09-15: three blocks
+    // on chatgpt.com inside two seconds, then total silence - the next site
+    // tested (gemini.google.com) sent a blocked prompt with not one line in the
+    // log, because the log lines are written BY the hook. "Nothing logged for
+    // Gemini" looked like a per-site detection bug and was not: it was this file
+    // having gone deaf for every site at once.
+    //
+    // DETECTION, without a false positive when the user is simply idle:
+    // GetLastInputInfo() reports when the SYSTEM last saw input. A live
+    // low-level hook sees every one of those events, so _lastHookTick cannot lag
+    // it by more than a moment. If the system has seen input meaningfully more
+    // recently than our callbacks have, the hooks are no longer in the chain. An
+    // idle user moves BOTH clocks not at all, so idleness reads as healthy -
+    // which is correct.
+    //
+    // RECOVERY unhooks BEFORE re-hooking. Installing first would leave the old
+    // and the new hook in the chain together for an instant, and a pass-through
+    // keystroke would then run the callback TWICE - buffering the character
+    // twice and corrupting the scan. The resulting gap is a few microseconds on
+    // this thread; a keystroke landing inside it is not blocked, which is an
+    // incomparably smaller failure than staying deaf forever.
+    const uint HOOK_WATCHDOG_INTERVAL_MS = 2000;
+    // How far the system clock may run ahead of our last callback before the
+    // hooks are declared dead. Must comfortably exceed one watchdog interval.
+    const int HOOK_DEAD_SLACK_MS = 4000;
+    // Floor between two reinstalls, so a wrong verdict cannot thrash the chain.
+    const int HOOK_REINSTALL_COOLDOWN_MS = 5000;
+    static readonly IntPtr HOOK_WATCHDOG_TIMER_ID = new IntPtr(0x43464149);  // 'CFAI'
+    // Stamped by BOTH callbacks, and by every (re)install so a freshly armed
+    // hook is never judged on its predecessor's clock.
+    static volatile uint _lastHookTick = 0;
+    static uint _lastHookReinstallTick = 0;
+    static IntPtr _hookModule = IntPtr.Zero;
+    static int _hookReinstalls = 0;
+
+    // Called from the top of both hook callbacks. Deliberately the cheapest
+    // thing in this file - one kernel call, no lock, no allocation - because it
+    // runs on the timing-critical path whose overrun is the very thing being
+    // guarded against.
+    static void MarkHookAlive() { _lastHookTick = GetTickCount(); }
+
+    static void HookWatchdog()
+    {
+        LASTINPUTINFO lii = new LASTINPUTINFO();
+        lii.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+        if (!GetLastInputInfo(ref lii)) return;   // no evidence - never act on none
+        uint now = GetTickCount();
+        // Unsigned subtraction cast to int, so GetTickCount's 49.7-day rollover
+        // is a wrap rather than a jump, and a callback that ran AFTER the input
+        // it saw (the normal case - a hook sees the event first) reads negative
+        // and is treated as healthy instead of as a huge lag.
+        int lag = unchecked((int)(lii.dwTime - _lastHookTick));
+        if (lag <= HOOK_DEAD_SLACK_MS) return;
+        if (unchecked((int)(now - _lastHookReinstallTick)) < HOOK_REINSTALL_COOLDOWN_MS) return;
+        _lastHookReinstallTick = now;
+
+        IntPtr oldK = _hook, oldM = _mouseHook;
+        _hook = IntPtr.Zero; _mouseHook = IntPtr.Zero;
+        try { if (oldK != IntPtr.Zero) UnhookWindowsHookEx(oldK); } catch { }
+        try { if (oldM != IntPtr.Zero) UnhookWindowsHookEx(oldM); } catch { }
+        IntPtr newK = IntPtr.Zero, newM = IntPtr.Zero;
+        try { newK = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, _hookModule, 0); } catch { }
+        try { newM = SetWindowsHookEx(WH_MOUSE_LL, _mouseProc, _hookModule, 0); } catch { }
+        _hook = newK; _mouseHook = newM;
+        _lastHookTick = GetTickCount();
+        _hookReinstalls++;
+        // Loud on purpose. A silent recovery would hide a real regression - a
+        // callback that keeps overrunning 300ms will keep tripping this, and the
+        // count is the only signal that it is happening at all.
+        Emit("hook_reinstalled", "", "", "lag_ms=" + lag.ToString()
+            + " keyboard=" + (newK != IntPtr.Zero ? "ok" : "FAILED")
+            + " mouse=" + (newM != IntPtr.Zero ? "ok" : "FAILED")
+            + " count=" + _hookReinstalls.ToString());
+    }
+
     static void PumpLoop()
     {
         using (Process cur = Process.GetCurrentProcess())
         using (ProcessModule mod = cur.MainModule)
         {
-            IntPtr h = GetModuleHandle(mod.ModuleName);
-            _hook = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, h, 0);
-            _mouseHook = SetWindowsHookEx(WH_MOUSE_LL, _mouseProc, h, 0);
+            _hookModule = GetModuleHandle(mod.ModuleName);
+            _hook = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, _hookModule, 0);
+            _mouseHook = SetWindowsHookEx(WH_MOUSE_LL, _mouseProc, _hookModule, 0);
         }
+        _lastHookTick = GetTickCount();
+        _lastHookReinstallTick = GetTickCount();
+        SetTimer(IntPtr.Zero, HOOK_WATCHDOG_TIMER_ID, HOOK_WATCHDOG_INTERVAL_MS, IntPtr.Zero);
         Emit("ready", "", "", "");
         MSG msg;
-        // Blocking message pump — required to service the low-level hook.
-        while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) { }
+        // Blocking message pump - required to service the low-level hook. The
+        // only message it ever handles is the watchdog's own WM_TIMER; the hooks
+        // themselves are serviced by the pump merely existing.
+        while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0)
+        {
+            if (msg.message == WM_TIMER && msg.wParam == HOOK_WATCHDOG_TIMER_ID) HookWatchdog();
+        }
     }
 
     // A seam for the offline harness only (null in production): lets it drive
@@ -6094,6 +10458,50 @@ public static class CfaiEnforcer
         return TypedBlockFresh() || (pastedThisSession && clipBlock);
     }
 
+    // May the MOUSE path enforce for the current foreground?
+    //
+    // The click twin of PanelEnforceOk, and it exists as a SEPARATE predicate
+    // rather than as a widening of that one because Enter and a click are
+    // scoped by DIFFERENT THINGS, and conflating them breaks whichever one
+    // loses:
+    //
+    //   * ENTER is scoped by COMPOSER FOCUS. That is the only fact that says
+    //     the keystroke is going into the governed composer rather than into a
+    //     site's own search box, a form on the page, or the address bar.
+    //     Loosening it would swallow Enter in arbitrary page fields, which for
+    //     a browser means a dead Enter key across the user's whole web. So
+    //     PanelEnforceOk keeps requiring _fgIsWebComposer, and EnterBlockActive
+    //     keeps calling PanelEnforceOk. Neither may move.
+    //
+    //   * A CLICK is scoped by the SEND-BUTTON RECTANGLE. UpdateWebSendRect
+    //     publishes that rect only while the cached composer re-verified on
+    //     this tick, the surface is past both its flags, and the element AT
+    //     that rectangle still calls itself the catalog's send button. A click
+    //     one pixel outside it is never considered. Focus adds nothing to that
+    //     scoping -- and REQUIRING it is what created the bypass: unfocus the
+    //     composer (click the transcript, click the page margin), click the
+    //     send arrow, and every browser block was defeated. PanelEnforceOk
+    //     answers `_fgIsWebComposer` for a browser, and a DLP CONTENT block
+    //     sets no _blockedByElement, so BlockActiveForMouse fell through to it
+    //     and returned false.
+    //
+    // So the browser branch takes PanelUiaOk's shape -- READABLE, not FOCUSED,
+    // and first-hand only -- while every non-browser scope delegates to
+    // PanelEnforceOk verbatim, leaving the detection-only-panel rule and the
+    // Teams host-app rule untouched on this path.
+    //
+    // The omnibox and password-field refusal is NOT here and must not move
+    // either: WebBlockGateOk() is checked ahead of this in BlockActiveForMouse,
+    // so a click is still never swallowed while the caret is in browser chrome.
+    //
+    // PURE and cheap, because the HOOK THREAD calls it: two volatile reads, one
+    // long compare and one hash lookup. No UIA, no regex, no allocation.
+    static bool MouseEnforceOk()
+    {
+        if (ForegroundIsBrowser()) return _fgWebComposerReadable && _fgLeftAiTicks == 0;
+        return PanelEnforceOk();
+    }
+
     // Block is active for mouse-hook send-button detection: includes UIA
     // and the paste-window clipboard check so pasted secrets also block
     // the send button click.
@@ -6104,11 +10512,84 @@ public static class CfaiEnforcer
         // block armed by an enforcing panel survives a tick whose focused-element
         // read landed on a detection-only panel sharing the window, while every
         // CONTENT signal stays gated on the current surface. See _blockedByElement.
+        // A "web"-scoped block carries ONE extra term no other arm needs, and it
+        // is added AHEAD of the line below rather than folded into it so nothing
+        // about the panel/agent arms changes. See WebBlockGateOk: the element a
+        // web block is scoped to shares its window with the browser's own
+        // ADDRESS BAR, and swallowing Enter there would stop the user navigating
+        // AWAY from the blocked site.
+        if (_fgIsBlocked && !WebBlockGateOk()) return false;
+        // AI INSIDE A GENERAL-PURPOSE APP IS SCOPED TO ITS COMPOSER.
+        //
+        // The `_blockedByElement` term below deliberately holds a block through
+        // a tick whose focused-element read landed elsewhere -- on claude.ai that
+        // is right, because the whole site IS the AI tool and a flickering read
+        // must not let a blocked Enter through.
+        //
+        // On mail.google.com the SAME term would swallow Enter anywhere in the
+        // window: replying, sending, the search box. Blocking "Gemini in Gmail"
+        // would stop the user sending email -- not a governance outcome anybody
+        // asked for, and far worse than the flicker it guards against. So for a
+        // hostApp surface the block requires the caret to be in the identified
+        // composer, exactly as the desktop host-app path requires _fgIsPanel
+        // (PanelEnforceOk's _hostAppProcs branch -- Teams has always worked this
+        // way; this is the same rule for a general-purpose app that happens to
+        // live in a browser).
+        //
+        // THE TRADE, STATED: one flickering read can now let one Enter through in
+        // the AI box. A bounded miss on one composer, against a whole email client
+        // going dead. Recorded rather than glossed.
+        if (_fgIsBlocked && WebBlockIsComposerScoped() && !_fgIsWebComposer) return false;
         if (_fgIsBlocked && (_blockedByElement || PanelEnforceOk())) return true;
-        if (!PanelEnforceOk()) return false;   // detection-only panel — zero live effect
+        // MouseEnforceOk(), NOT PanelEnforceOk(). For every non-browser scope it
+        // IS PanelEnforceOk, so a detection-only panel still has zero live
+        // effect here. For a BROWSER it asks the CLICK question instead of the
+        // ENTER one: this line answered `_fgIsWebComposer`, and a DLP content
+        // block sets no _blockedByElement, so unfocusing the composer and
+        // clicking the send arrow defeated the block outright. See
+        // MouseEnforceOk. The line ABOVE deliberately still calls
+        // PanelEnforceOk: it is ORed with _blockedByElement, which every
+        // element-scoped platform arm (including the web one) sets, so that arm
+        // needs no widening.
+        if (!MouseEnforceOk()) return false;   // detection-only panel: zero live effect
         bool recentPaste = (DateTime.UtcNow.Ticks - _lastPasteTicks) < PASTE_WINDOW;
-        bool cooldown = (DateTime.UtcNow.Ticks - _lastBlockFiredTicks) < BLOCK_COOLDOWN;
+        bool cooldown = BlockCooldownActive();
         return AttachHoldActive() || TypedBlockFresh() || _blockUia || (recentPaste && _blockPaste) || cooldown;
+    }
+
+    // The surface a block cooldown belongs to.
+    //
+    // PURE, allocation-light and UIA-free: the keyboard hook thread calls this
+    // on every Enter, and a hook callback that overruns LowLevelHooksTimeout is
+    // silently unhooked by Windows. It reads only volatile fields the poll
+    // thread publishes.
+    //
+    // THE AGENT NAME IS PART OF THE KEY, and that is the whole point on a host
+    // like m365.cloud.microsoft that carries dozens of agents behind ONE host
+    // and ONE url: switching agents changes neither, so a host-only key cannot
+    // tell two agents apart and the cooldown leaks from the blocked one onto
+    // every other. An empty name (an ordinary site, or a tick whose composer
+    // read did not name an agent) is a stable key of its own, not a wildcard.
+    static string BlockCooldownKey()
+    {
+        string app = _app ?? "";
+        if (_browserProcs.Contains(app))
+            return "web:" + (_fgWebHost ?? "") + "|" + (_fgWebAgentName ?? "");
+        if (_fgIsPanel) return "panel:" + (_fgPanelId ?? "");
+        return "app:" + app;
+    }
+
+    // Is a recent block still holding Enter down on THIS surface?
+    //
+    // The cooldown exists for one narrow race: the poll thread re-evaluates
+    // every 150ms, so a user hammering Enter straight after a block could
+    // otherwise slip a send through the gap where _blockUia/_blockTyped have
+    // gone stale but the next read has not landed. That protection only ever
+    // made sense for the surface the block fired on.
+    static bool BlockCooldownActive()
+    {
+        if ((DateTime.UtcNow.Ticks - _lastBlockFiredTicks) >= BLOCK_COOLDOWN) return false;
+        return string.Equals(BlockCooldownKey(), _lastBlockSurfaceKey ?? "", StringComparison.Ordinal);
     }
 
     // The Enter-decision predicate, factored out of HookCallback so the offline
@@ -6125,9 +10606,41 @@ public static class CfaiEnforcer
     // block for a detection-only panel, so nothing here widens what such a
     // panel can cause — it only stops one from CANCELLING another panel's
     // block. See _blockedByElement.
+    // Is the armed block on a host that is a GENERAL-PURPOSE APP with an AI
+    // panel in it, rather than an AI tool?
+    //
+    // PURE and allocation-light: the hook thread calls this on every Enter.
+    // Reads the host the block was ARMED FOR, never the current foreground, so
+    // a tab switch cannot change the answer for an already-armed block.
+    static bool WebBlockIsComposerScoped()
+    {
+        string h = _blockedBrowserHost ?? "";
+        if (h.Length == 0) return false;
+        WebSurface w = MatchWebSurface(h);
+        return w != null && w.HostApp;
+    }
+
     static bool EnterBlockActive(bool attachHold, bool uiaBlock, bool clipBlock, bool cooldown)
     {
         if (Disarmed()) return false;
+        // A "web"-scoped block carries ONE extra term no other arm needs, and it
+        // is added AHEAD of the line below rather than folded into it so nothing
+        // about the panel/agent arms changes. See WebBlockGateOk: the element a
+        // web block is scoped to shares its window with the browser's own
+        // ADDRESS BAR, and swallowing Enter there would stop the user navigating
+        // AWAY from the blocked site.
+        if (_fgIsBlocked && !WebBlockGateOk()) return false;
+        // SAME SCOPING AS THE MOUSE PATH ABOVE, and needed on both for the same
+        // reason: a hostApp surface is somebody's mail with an AI panel in it, so
+        // a block there is scoped to the AI composer and never to the app. Without
+        // this, the _blockedByElement term below would swallow Enter anywhere in
+        // the window -- replying, sending, the search box -- and blocking "Gemini
+        // in Gmail" would stop the user sending email.
+        //
+        // THE TRADE, STATED: one flickering composer read can now let one Enter
+        // through in the AI box. A bounded miss on one composer, against a whole
+        // email client going dead.
+        if (_fgIsBlocked && WebBlockIsComposerScoped() && !_fgIsWebComposer) return false;
         if (_fgIsBlocked && (_blockedByElement || PanelEnforceOk())) return true;
         if (!PanelEnforceOk()) return false;
         return attachHold || TypedBlockFresh() || uiaBlock || clipBlock || cooldown;
@@ -6136,7 +10649,37 @@ public static class CfaiEnforcer
     // Precedence matches the Enter path's `pats` chain, platform block first —
     // otherwise a send-button click on a fully blocked app emitted a block with
     // an empty patterns field and no way for the Node side to tell what it was.
-    static string ActivePatterns() { return _fgIsBlocked ? _blockedReason : AttachHoldActive() ? _attachHoldPatterns : _blockTyped ? _typedPatterns : _blockUia ? _uiaPatterns : ""; }
+    static string ActivePatterns() { bool ignored; return ActivePatterns(out ignored); }
+
+    // ---- THE DESCRIPTION AND THE TYPE COME FROM ONE READ -------------------
+    //
+    // _fgIsBlocked decides two separate things about the same event: WHAT to
+    // report as `patterns` (here) and WHETHER the event is a platform block
+    // (EmitBlock's platformBlock). They used to be two reads of a volatile
+    // field, seconds apart in wall-clock terms -- the hook thread reads this as
+    // it swallows the key, EmitBlock re-read it afterwards -- and the poll
+    // thread can clear the block in between.
+    //
+    // Observed live on 2026-09-21: three identical agent blocks in twenty
+    // seconds, and the third was reported as reason "send" (a content block)
+    // while still carrying "Blocked agent: IT Help Desk Agent" as its
+    // description. The agent named was right; the TYPE was wrong, so that event
+    // is filed in the audit record as a DLP catch rather than a policy block
+    // and miscounts in any report grouped by reason.
+    //
+    // Passing the flag OUT from the same read that produced the description
+    // makes the two agree by construction. The block may still clear a moment
+    // later -- that is unavoidable and harmless -- but the event is then
+    // internally coherent: it describes what was true at the instant the
+    // keystroke was swallowed, which is the instant the event is about.
+    static string ActivePatterns(out bool blockedNow)
+    {
+        blockedNow = _fgIsBlocked;
+        return blockedNow ? _blockedReason
+             : AttachHoldActive() ? _attachHoldPatterns
+             : _blockTyped ? _typedPatterns
+             : _blockUia ? _uiaPatterns : "";
+    }
 
     // Mouse hook — swallows a click on the send button while a block is active.
     // Only acts on left-button down/up that land inside the cached send-button
@@ -6144,6 +10687,7 @@ public static class CfaiEnforcer
     // through, so normal clicking/editing is unaffected.
     static IntPtr MouseCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
+        MarkHookAlive();
         try
         {
             if (nCode >= 0)
@@ -6198,13 +10742,17 @@ public static class CfaiEnforcer
                     {
                         return (IntPtr)1;   // the blocked panel's arrow, host not in front
                     }
+                    // `inRect` above already carries BOTH the panel root-window
+                    // scoping and the web freshness check -- see ClickInSendRect.
                     if (_fgIsAi && inRect)
                     {
                         if (BlockActiveForMouse())
                         {
                             if (msg == WM_LBUTTONDOWN)
                             {
-                                EmitBlock(_app, ActivePatterns(), "click");
+                                bool clickBlockedNow;
+                                string clickPats = ActivePatterns(out clickBlockedNow);
+                                EmitBlock(_app, clickPats, "click", clickBlockedNow);
                                 // Clicking the send arrow IS a send attempt — in
                                 // Teams and Copilot it is the common one — so it
                                 // gets the same Request Access offer the Enter
@@ -6233,7 +10781,17 @@ public static class CfaiEnforcer
                         // Benign send-button click — capture the prompt (LENGTH ONLY),
                         // then let the click through so the prompt actually sends. Mirrors
                         // the Enter path so click-to-send is counted on sealed apps too.
-                        if (msg == WM_LBUTTONDOWN)
+                        //
+                        // NOT IN A BROWSER. The browser rect is warmed whenever a
+                        // governed composer has focus (so that a block can be
+                        // acted on with no search latency), which means an
+                        // ORDINARY unblocked click now lands here. Two reasons it
+                        // must not be treated as a capture: prompt-watcher.ps1
+                        // owns prompt capture on that surface and does not use
+                        // this rect, so it would double-report; and TypedClear()
+                        // below would wipe the scan buffer on every send-button
+                        // click in a browser. One volatile read on the hook path.
+                        if (msg == WM_LBUTTONDOWN && !_fgIsBrowser)
                         {
                             int len = TypedLength();
                             if (len >= 1)
@@ -6252,6 +10810,7 @@ public static class CfaiEnforcer
 
     static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
+        MarkHookAlive();
         try
         {
             if (nCode >= 0)
@@ -6287,6 +10846,39 @@ public static class CfaiEnforcer
                     {
                         uint fmFlags = (uint)Marshal.ReadInt32(lParam, 8);   // KBDLLHOOKSTRUCT.flags
                         if ((fmFlags & LLKHF_INJECTED) == 0) _lastFocusMoveInputTicks = DateTime.UtcNow.Ticks;
+                    }
+
+                    // BROWSER NAVIGATION evidence -- "the tab or the page may
+                    // just have changed". A SEPARATE field from the focus-move
+                    // stamp directly above, on purpose: that one is consulted
+                    // only when retiring a panel latch, and widening it would
+                    // change the panel machinery. This one only ever invalidates
+                    // a cached URL and drops the typed buffer.
+                    //
+                    // Gated on _fgIsBrowser, which the poll thread publishes, so
+                    // the whole branch costs one volatile read for every other
+                    // app on the machine. NOTHING is swallowed here, and nothing
+                    // is recorded but a TIMESTAMP -- never which key.
+                    //
+                    // Enter counts ONLY while the caret is in the browser's own
+                    // chrome (_fgWebChromeFocused): Enter in the ADDRESS BAR is a
+                    // navigation, Enter in the page composer is a SEND and must
+                    // never be mistaken for one -- doing so would drop the very
+                    // buffer the send decision is about to be made on. Our own
+                    // synthetic input is excluded for the same reason it is
+                    // above: Tier B's rewrite types Ctrl+A, and that is not the
+                    // user navigating.
+                    if (_fgIsBrowser)
+                    {
+                        bool navChord = (ctrl && (vk == VK_T || vk == VK_W || vk == VK_TAB || (vk >= VK_1 && vk <= VK_9)))
+                                     || (alt && (vk == VK_LEFT || vk == VK_RIGHT))
+                                     || vk == VK_F5
+                                     || (vk == VK_RETURN && _fgWebChromeFocused);
+                        if (navChord)
+                        {
+                            uint navFlags = (uint)Marshal.ReadInt32(lParam, 8);   // KBDLLHOOKSTRUCT.flags
+                            if ((navFlags & LLKHF_INJECTED) == 0) _browserNavInputTicks = DateTime.UtcNow.Ticks;
+                        }
                     }
 
                     // Confirm hotkey — Ctrl+Alt+T. Masks the pinned block's
@@ -6453,8 +11045,10 @@ public static class CfaiEnforcer
                             // like a flagged prompt does — see _attachHoldActive's
                             // own comment for the provisional/confirmed story.
                             bool attachHold = AttachHoldActive();
-                            // Cooldown: if a block fired recently, keep blocking
-                            bool cooldown = (DateTime.UtcNow.Ticks - _lastBlockFiredTicks) < BLOCK_COOLDOWN;
+                            // Cooldown: if a block fired recently ON THIS SURFACE,
+                            // keep blocking. Scoped, because an unscoped window
+                            // blocked every other agent on the host for 30s.
+                            bool cooldown = BlockCooldownActive();
                             // Panic hotkey wins over every other signal: while
                             // disarmed nothing is ever swallowed. PanelEnforceOk
                             // sits at the same level for the same reason: a
@@ -6463,15 +11057,15 @@ public static class CfaiEnforcer
                             // 30s cooldown or an attachment hold armed while a
                             // different, enforcing surface had focus.
                             bool block = EnterBlockActive(attachHold, uiaBlock, clipBlock, cooldown);
-                            string pats = _fgIsBlocked ? _blockedReason
-                                        : attachHold ? _attachHoldPatterns
-                                        : TypedBlockFresh() ? _typedPatterns
-                                        : uiaBlock ? _uiaPatterns
-                                        : cooldown ? _lastBlockPatterns
-                                        : _pastePatterns();
+bool blockedNow;
+                            string pats = ActivePatterns(out blockedNow);
                             if (block)
                             {
                                 _lastBlockFiredTicks = DateTime.UtcNow.Ticks;
+                                // Stamped with the timestamp, never after it: a
+                                // cooldown whose key lands a tick later is a
+                                // cooldown that briefly applies everywhere.
+                                _lastBlockSurfaceKey = BlockCooldownKey();
                                 _lastBlockPatterns = pats;
                                 // Ctrl+Alt+Enter override is intentionally NOT
                                 // honored for an attachment hold — that hotkey's
@@ -6496,7 +11090,7 @@ public static class CfaiEnforcer
                                 if (ctrl && alt && !attachHold && !_fgIsBlocked) { Emit("override", _app, pats, ""); }  // allow, logged
                                 else {
                                     string blockReason = attachHold ? "attachment" : "send";
-                                    EmitBlock(_app, pats, blockReason);
+                                    EmitBlock(_app, pats, blockReason, blockedNow);
                                     // The blocked send just happened — this is the
                                     // one moment the Request Access dialog is
                                     // offered, and it is a SECOND line alongside
@@ -6793,6 +11387,20 @@ public static class CfaiEnforcer
                     // Absent on rows written before this field existed, same as
                     // every other field here.
                     d["agent_aliases"] = ExtractJsonString(item, "agent_aliases");
+                    // BROWSER-keyed platform blocks: the row names a HOST that is
+                    // reached in a browser tab, and nothing else. Empty on every
+                    // other row shape. See the browser arm in CheckFgBlocked.
+                    //
+                    // ai-processes.js's synthesizePlatformBlocks emits this
+                    // WITHOUT a process_name, deliberately: a process_name row is
+                    // matched process-WIDE here, so a row saying
+                    // process_name:"chrome" would swallow Enter in every tab of
+                    // the browser. That must be impossible from two directions --
+                    // the synthesiser refuses to produce one (asserted in
+                    // agent/tests/web-surfaces.test.mjs), and this file refuses to
+                    // honour one (the browserProc exclusions on all three coarse
+                    // arms below).
+                    d["browser_host"] = ExtractJsonString(item, "browser_host");
                     if (!string.IsNullOrEmpty(d["platform"])) list.Add(d);
                 }
             }
@@ -7202,6 +11810,28 @@ public static class CfaiEnforcer
         // m365.cloud.microsoft legitimately synthesizes a panel-keyed row for it
         // — live-verified 2026-09-21. Only the two PROCESS-WIDE arms are barred.
         bool wholeAppBarred = hostApp || _panelHostAppProcs.Contains(_app);
+        // A BROWSER NEVER PRODUCES AN APP-SCOPED BLOCK EITHER, and the argument
+        // is the host-app one turned up to its limit. Every coarse arm below is a
+        // FAIL-CLOSED fallback -- "we cannot tell which surface this is, so block
+        // the whole process". For an AI product that costs the user an AI tool.
+        // For Microsoft Teams it costs them messaging a colleague. For a BROWSER
+        // it costs them the web: Enter would be swallowed in Gmail, in Jira, in
+        // the corporate wiki, in every login form and in the address bar, with no
+        // toast and nothing on screen to explain it. So for a browser the correct
+        // direction is fail-OPEN on every coarse arm without exception, and the
+        // only block it may ever produce is the ELEMENT-SCOPED web arm below.
+        //
+        // Keyed on the PROCESS being a browser, not on a surface being verified,
+        // for the same reason the host-app flag is: an UNVERIFIED web surface must
+        // produce no block either, which is the opposite of what an unverified
+        // chat-app surface does.
+        //
+        // This is the guard that makes a `process_name:"chrome"` row unhonourable
+        // no matter where it came from. ai-processes.js already refuses to
+        // synthesize one, but "unreachable" there depends on a rule in a
+        // different file, and the failure mode here is a dead Enter across the
+        // user's entire browser.
+        bool browserProc = _browserProcs.Contains(_app);
         foreach (var agent in _blockedList) {
             HashSet<string> procs;
             if (PLATFORM_PROCS.TryGetValue(agent["platform"], out procs)) {
@@ -7253,7 +11883,7 @@ public static class CfaiEnforcer
                     // the next row), because another row may still cover this
                     // foreground some other way. Same reasoning as the
                     // detection-only panel fall-through below.
-                    if (!narrowed && !wholeAppBarred) {
+                    if (!narrowed && !wholeAppBarred && !browserProc) {
                         _fgIsBlocked = true;
                         _blockedByElement = false;   // process-keyed — see _blockedByElement
                         _blockScope = "app";
@@ -7279,7 +11909,15 @@ public static class CfaiEnforcer
                 // "unreachable" here depends on a rule in a different file, and
                 // the failure mode is swallowing Enter across a company's whole
                 // chat client — or across every Word document in the company.
-                if (!wholeAppBarred && string.Equals(agent["process_name"], _app, StringComparison.OrdinalIgnoreCase)) {
+                //
+                // …and never for a BROWSER either. A browser is a host app whose
+                // open agent is decided by the URL, so a process-wide row against
+                // chrome.exe would swallow Enter in every tab. `wholeAppBarred`
+                // already covers the panel-hosted host apps (Teams, Word, Excel);
+                // `browserProc` is the separate browser exclusion and both are
+                // required here, because this arm is process-WIDE.
+                if (!wholeAppBarred && !browserProc
+                    && string.Equals(agent["process_name"], _app, StringComparison.OrdinalIgnoreCase)) {
                     _fgIsBlocked = true;
                     _blockedByElement = false;   // process-keyed — see _blockedByElement
                     _blockScope = "app";
@@ -7317,7 +11955,7 @@ public static class CfaiEnforcer
                 // through the host-app exclusion would silently switch it off.
                 // A Teams composer is the opposite case in every one of those
                 // respects, which is why one flag cannot serve both.
-                if (!hostApp && string.Equals(agent["panel"], _fgPanelId, StringComparison.OrdinalIgnoreCase)) {
+                    if (!hostApp && !browserProc && string.Equals(agent["panel"], _fgPanelId, StringComparison.OrdinalIgnoreCase)) {
                     // A detection-only panel (AI_PANELS enforce:false) never
                     // blocks, even with a matching row present. This is the same
                     // gate FgIsAiNow/PanelUiaOk apply on the capture side; both
@@ -7341,6 +11979,134 @@ public static class CfaiEnforcer
                         // succeeded" signal — arming inside the sticky window
                         // instead would stack the two grace periods.
                         if (_fgLeftAiTicks == 0) ArmPanelBlockLatch("panel:" + _fgPanelId);
+                        return;
+                    }
+                }
+            }
+            // ---- BROWSER-keyed platform block: THE FOURTH ARM ----------------
+            //
+            // Matched against the resolved HOST of the tab in front of the user,
+            // never against the process. Keyed this way for exactly the reason the
+            // panel arm is keyed on a panel: process_name matching is
+            // process-WIDE, and one browser process serves every website. Checked
+            // in the SAME iteration as the three branches above so first-match-
+            // wins ordering across the file is unchanged -- an earlier row still
+            // wins.
+            //
+            // FOUR conditions, all required, and no coarse fallback of any kind:
+            //   * the foreground process is a browser AND this tick resolved a
+            //     catalog host. _fgWebHost is assigned on every branch of
+            //     ApplyForegroundTick from THIS tick's URL read, so it says
+            //     "the tab in front of the user is on a governed host" and
+            //     nothing about where the caret is -- which is what makes a
+            //     whole-site block survive a click into the transcript, as it
+            //     must;
+            //   * EnforcingWebSurface(host) is non-null, i.e. that host is past
+            //     BOTH its flags. Every shipped entry is false/false, so this is
+            //     where every browser block stops today;
+            //   * the row actually names this surface -- see the two match routes
+            //     below;
+            //   * this tick's URL read was AUTHORITATIVE (Surface). An Unreadable
+            //     read may keep an existing block alive through the latch, but it
+            //     may never ARM one: manufacturing a block out of a failed read is
+            //     how the wrong tab gets blocked.
+            if (browserProc && _fgWebOutcome == WebReadOutcome.Surface && !string.IsNullOrEmpty(_fgWebHost)) {
+                WebSurface web = EnforcingWebSurface(_fgWebHost);
+                if (web != null) {
+                    // TWO match routes, and neither is process-keyed.
+                    //
+                    //   browser_host -- what synthesizePlatformBlocks emits for an
+                    //     Inventory host toggle, and the primary route. Compared
+                    //     against the CATALOG host so a subdomain governs through
+                    //     its parent entry.
+                    //   platform -- a platform-scoped row (platform:'gemini') that
+                    //     the WEB_SURFACES entry claims. This is why `platform`
+                    //     travels in the payload at all: it lets such a row reach
+                    //     a browser tab WITHOUT PLATFORM_PROCS (and its
+                    //     hand-maintained C# twin) ever gaining a browser entry,
+                    //     which it must not, because a PLATFORM_PROCS hit is
+                    //     matched process-WIDE.
+                    //
+                    // An agent_scope:'agent' row is deliberately EXCLUDED from the
+                    // platform route. Such a row names one agent inside an app,
+                    // and nothing in a browser can tell which agent a page has
+                    // open -- that would need reading the page, which is precisely
+                    // what this design refuses to do outside a composer. "Cannot
+                    // tell" means NO BLOCK, the same answer a host app gets.
+                    bool hostRow = !string.IsNullOrEmpty(agent["browser_host"])
+                        && string.Equals(agent["browser_host"], web.Host, StringComparison.OrdinalIgnoreCase);
+                    // EITHER the singular `platform` OR the plural `platforms`
+                    // list. The plural exists because one host can serve several
+                    // platforms -- m365.cloud.microsoft carries copilot_studio,
+                    // personal_agent and teams_chat_agent -- and such an entry
+                    // has NO singular value at all.
+                    //
+                    // Matching only the singular meant a platform-wide block
+                    // reached outlook.office.com but silently skipped
+                    // m365.cloud.microsoft, so "block Copilot" covered some
+                    // Copilot surfaces and not others with nothing to say why.
+                    // WebSurfaceClaimsPlatform is the same test the AGENT route
+                    // already uses, so both routes now agree on what it means
+                    // for a surface to claim a platform.
+                    bool platformRow = !string.Equals(agent["agent_scope"], "agent", StringComparison.OrdinalIgnoreCase)
+                        && !string.IsNullOrEmpty(agent["platform"])
+                        && (string.Equals(agent["platform"], web.Platform, StringComparison.OrdinalIgnoreCase)
+                            || WebSurfaceClaimsPlatform(web, agent["platform"]));
+                    // ---- AI-218: THE AGENT ROUTE ---------------------------
+                    //
+                    // The exclusion above still stands: an agent-scoped row can
+                    // never reach the whole-host route. This is an ADDITIVE
+                    // third route that blocks exactly one agent, and every one
+                    // of its terms is required:
+                    //
+                    //   * the surface's agent read is past BOTH of its own
+                    //     flags (EnforcingWebAgentRead) -- a host that has not
+                    //     had its own live pass identifies nothing;
+                    //   * this host claims the row's platform. `Platforms` is
+                    //     the plural field; it never reaches PLATFORM_PROCS,
+                    //     which is matched process-WIDE;
+                    //   * this tick POSITIVELY NAMED an agent. Generic (no
+                    //     specific agent open), NotComposer and an unreadable
+                    //     tick all mean NO BLOCK -- which is precisely what
+                    //     stops "we could not tell which agent" from becoming
+                    //     "block the whole Microsoft site";
+                    //   * the row NAMES THIS AGENT, by whichever field this
+                    //     surface's mode says carries the identity -- the
+                    //     display name for composer_name, the opaque agent_id
+                    //     for url_path. One function decides, and the same one
+                    //     retires the latch, so the arm and the release can
+                    //     never disagree about which agent is open. See
+                    //     WebAgentRowMatches.
+                    bool agentRow = string.Equals(agent["agent_scope"] ?? "", "agent", StringComparison.OrdinalIgnoreCase)
+                        && EnforcingWebAgentRead(web) != null
+                        && _fgWebAgentOutcome == WEB_ID_NAMED
+                        && WebSurfaceClaimsPlatform(web, agent["platform"])
+                        && WebAgentRowMatches(web, _fgWebAgentName, _fgWebUrlAgentId,
+                                              agent["agent_name"], agent["agent_id"]);
+                    if (hostRow || platformRow || agentRow) {
+                        _fgIsBlocked = true;
+                        _blockedByElement = true;   // see _blockedByElement
+                        // "agent" for the agent route, so UpdateBannerState keeps
+                        // the full-screen bar OFF: one blocked agent is not a
+                        // blocked site, and saying otherwise would be a lie
+                        // about the user's own machine.
+                        _blockScope = agentRow ? "agent" : "web";
+                        _blockedPlatform = agent["platform"] ?? "";
+                        _blockedAgentName = string.IsNullOrEmpty(agent["agent_name"]) ? web.Host : agent["agent_name"];
+                        _blockedAgentId = agent["agent_id"] ?? "";
+                        // The CATALOG host, so the Request Access exception is
+                        // asked for against the same string an admin toggled in
+                        // Inventory. Never the resolved subdomain, never a URL.
+                        _blockedBrowserHost = web.Host;
+                        _blockedReason = (agentRow ? "Blocked agent: " : "Blocked platform: ") + _blockedAgentName;
+                        // Same latch, same rule as the other two element-scoped
+                        // arms: arm only on a tick whose read was first-hand, so
+                        // the TTL is not stacked on top of the sticky window.
+                        // A SEPARATE latch key for the agent route. A "web:"
+                        // latch retires when the user leaves the HOST; an agent
+                        // latch has to retire when they leave the AGENT, which
+                        // happens without the host changing at all.
+                        if (_fgLeftAiTicks == 0) ArmPanelBlockLatch((agentRow ? "webagent:" : "web:") + web.Host);
                         return;
                     }
                 }
@@ -7390,6 +12156,25 @@ public static class CfaiEnforcer
         bool noAgentEvidence = _fgAgentOutcome == AgentReadOutcome.Unreadable
                             || _fgAgentOutcome == AgentReadOutcome.NotComposer;
         if (noAgentEvidence && AgentBlockLatched() && PanelBlockLatchHeld()) return;
+        // The same principle for a WEB-scoped latch, keyed on the outcome of this
+        // tick's URL read.
+        //
+        //   NotSurface is AUTHORITATIVE -- the URL read fine and this tab is not
+        //   a governed host. The latch was already retired for it, in
+        //   ApplyForegroundTick, on the tick it arrived, so control reaches here
+        //   with nothing held and the block clears at once. That is the
+        //   fail-OPEN direction a browser has to have: an Enter left swallowed
+        //   after the user navigated away would be a dead key in an unrelated
+        //   website.
+        //
+        //   Unreadable is NO EVIDENCE -- the omnibox was not found yet, the read
+        //   threw, or the value was empty. Treating that as "the user left the
+        //   blocked site" is a read failure dressed up as a fact, and it would
+        //   tear the block down on the first bad tick while the user sits on the
+        //   very site an admin blocked. Bounded by PANEL_BLOCK_LATCH_TTL like
+        //   every other use of the latch, and released by the panic hotkey.
+        bool noWebEvidence = _fgWebOutcome == WebReadOutcome.Unreadable;
+        if (noWebEvidence && WebBlockLatched() && PanelBlockLatchHeld()) return;
         // Inside the sticky window the state is second-hand, and the latch keeps
         // its say — unchanged.
         if (_fgLeftAiTicks != 0 && PanelBlockLatchHeld()) return;
@@ -7538,6 +12323,26 @@ public static class CfaiEnforcer
         // with no popup (platform blocks don't show the DLP dialog).
         _lastBlockFiredTicks = 0;
         _lastBlockPatterns = "";
+        // THE FIELD THIS FUNCTION USED TO MISS, and the one that is actually
+        // REPORTED: ActivePatterns() returns _blockedReason whenever
+        // _fgIsBlocked is true, and that string is what reaches the log and the
+        // audit record as `patterns`. Leaving it behind meant a cleared block's
+        // description outlived every other field of the block it described --
+        // precisely what the comment above this function warns about, applied to
+        // the one field it did not list.
+        //
+        // It also closes a hook/poll RACE that no per-field fix could: the hook
+        // thread reads ActivePatterns() at the moment it swallows the key, while
+        // EmitBlock re-reads _fgIsBlocked a moment later to decide whether this
+        // is a platform block. The poll thread can clear the flag in between, so
+        // the event went out with platform=false (hence "send", not "blocked
+        // platform") while still carrying the platform block's description.
+        // Clearing the string with the flag means the worst that race can now
+        // produce is an EMPTY patterns field, never another surface's name.
+        _blockedReason = "";
+        // Cleared with the block itself, so a host can never outlive the block it
+        // was armed for and be reported against an unrelated tab.
+        _blockedBrowserHost = "";
     }
 
     static string ExtractJsonString(string json, string key)
@@ -7671,7 +12476,21 @@ public static class CfaiEnforcer
         // !Disarmed() for the same reason the bar carries it: the panic hotkey
         // means "stop", and an armed file watcher whose hold can no longer
         // swallow anything would be capture with no enforcement to justify it.
-        bool want = _fgHostGoverned && firstHand && !Disarmed();
+        //
+        // TWO arms now, and each carries BOTH guards independently rather than
+        // sharing a combined term, so a future change to one cannot silently
+        // weaken the other:
+        //   hostWant -- a HOST APP (Microsoft Teams) inside a governed or blocked
+        //               agent conversation. Byte-for-byte the pre-existing rule.
+        //   webWant  -- a BROWSER on a governed AI host, with the page composer
+        //               focused. index.js uses it to arm the browser
+        //               file-picker/upload watchers for exactly as long as that
+        //               is true, and to disarm them the instant it is not.
+        // Both are pure OBSERVATIONS of what ApplyForegroundTick already decided;
+        // neither decides anything and neither can arm a block.
+        bool hostWant = _fgHostGoverned && firstHand && !Disarmed();
+        bool webWant = _fgWebGoverned && firstHand && !Disarmed();
+        bool want = hostWant || webWant;
         uint pid = _fgPid;
         // Blocked row first, mirroring ApplyForegroundTick's precedence.
         // CheckFgBlocked has already run this tick, so for a blocked
@@ -7688,7 +12507,19 @@ public static class CfaiEnforcer
         // Identity of the CURRENT state, so switching between two governed
         // conversations re-announces instead of silently keeping the first one's
         // agent name. Same idea as _bannerAgent, one field wider.
+        // A BROWSER tick has no agent and no panel: what identifies it is the
+        // HOST. So the scope says so, and the host joins the identity key --
+        // which is what makes switching between two governed tabs (claude.ai ->
+        // chatgpt.com) re-announce instead of silently keeping the first one's
+        // host, exactly as switching between two governed agents already does.
+        string webHost = webWant ? (_fgWebGovHost ?? "") : "";
+        if (webWant) scope = "web";
         string key = (agent ?? "") + "|" + (agentId ?? "") + "|" + (_fgHostGovPanel ?? "");
+        // APPENDED, not always present, so a HOST-APP key is byte-for-byte what
+        // it was before the browser arm existed. A trailing separator on every
+        // Teams key would be a silent behaviour change in the one field that
+        // decides whether a transition re-announces.
+        if (webHost.Length > 0) key = key + "|" + webHost;
         if (_govActive)
         {
             if (!want || pid != _govPid || !string.Equals(_govKey, key, StringComparison.Ordinal))
@@ -7696,7 +12527,7 @@ public static class CfaiEnforcer
                 _govActive = false;
                 _govPid = 0;
                 _govKey = "";
-                EmitGovState(false, "", "", "", "", "", 0);
+                EmitGovState(false, "", "", "", "", "", 0, "");
             }
             return;
         }
@@ -7704,7 +12535,7 @@ public static class CfaiEnforcer
         _govActive = true;
         _govPid = pid;
         _govKey = key;
-        EmitGovState(true, _app, scope, _fgHostGovPanel, agent, agentId, pid);
+        EmitGovState(true, _app, scope, _fgHostGovPanel, agent, agentId, pid, webHost);
     }
 
     // The govstate payload. PII discipline identical to EmitBlockState's, and
@@ -7720,7 +12551,16 @@ public static class CfaiEnforcer
     // whole job is to ARM a file watcher inside a company's chat client — if it
     // could carry any of those, the act of arming would itself be the leak it is
     // supposed to make unnecessary.
-    static void EmitGovState(bool active, string process, string scope, string panel, string agent, string agentId, uint pid)
+    // `browserHost` is the CATALOG host from WEB_SURFACES and NOTHING ELSE --
+    // never a URL, never a path, never a query string (which on an AI URL
+    // routinely contains the prompt), never a page or window title. It reaches
+    // this function through exactly one route: ApplyForegroundTick's browser
+    // branch assigns _fgWebGovHost from web.Host, i.e. from our own catalog. The
+    // rule is stricter here than anywhere else in this file for the reason the
+    // note above already gives -- this event's whole job is to ARM a file
+    // watcher, so if it could carry any of those, the act of arming would itself
+    // be the leak it exists to make unnecessary.
+    static void EmitGovState(bool active, string process, string scope, string panel, string agent, string agentId, uint pid, string browserHost)
     {
         string json = "{\"kind\":\"govstate\""
             + ",\"active\":" + (active ? "true" : "false")
@@ -7730,6 +12570,7 @@ public static class CfaiEnforcer
             + ",\"panel\":\"" + Esc(panel ?? "") + "\""
             + ",\"agent\":\"" + Esc(agent ?? "") + "\""
             + ",\"agent_id\":\"" + Esc(agentId ?? "") + "\""
+            + ",\"browser_host\":\"" + Esc(browserHost ?? "") + "\""
             + "}";
         lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }
@@ -7850,7 +12691,218 @@ public static class CfaiEnforcer
         else if (isIde && hit != null && PaneHeadingArmedFor(MatchAgentSurface(proc), proc))
             PaneDiag("armed=0 enforce=" + (hit.Enforce ? 1 : 0) + " row_covers="
                 + ((_agentScopedProcs.Contains(proc) || _dlpScopedProcs.Contains(proc)) ? 1 : 0));
-        ApplyForegroundTick(pid, proc, isIde, hit, panelRid, panelReadable, agentOutcome, agentName);
+        // The ApplyForegroundTick call USED TO BE HERE. It now happens once, at
+        // the end of the browser read below, with the web values filled in.
+        // Leaving a call here as well would apply the tick TWICE per poll --
+        // once with no web evidence and again with it -- and the first of those
+        // would retire a web latch on the strength of information it never had.
+
+        // ---- THE BROWSER READ -------------------------------------------------
+        //
+        // THE GATE, and it is the counterpart of hostAppArmed above. Three terms,
+        // all required, and each one is a gate rather than a convenience:
+        //   * not an IDE (an IDE is never a browser, but the chain above owns
+        //     that case and this must not compete with it);
+        //   * the process is in _browserProcs -- its OWN set, never _aiProcs;
+        //   * the catalog holds AT LEAST ONE surface past its two flags. With
+        //     every entry shipping enforce:false/verified:false this is FALSE, so
+        //     not one omnibox search, not one element read, not one title read and
+        //     not one byte of browser state happens. That is what "inert" means
+        //     here, and it is the same standard an unverified HOST-APP surface is
+        //     held to: not "reads but does not act", genuinely nothing.
+        bool browserArmed = !isIde && proc != null && _browserProcs.Contains(proc) && _anyWebSurfaceEnforcing;
+        // Published for the keyboard hook, which uses it to skip its
+        // navigation-chord branch for every non-browser app. Assigned
+        // unconditionally so it cannot outlive the tick that earned it.
+        _fgIsBrowser = proc != null && _browserProcs.Contains(proc);
+        WebReadOutcome webOutcome = WebReadOutcome.Unreadable;
+        string webHost = "";
+        bool webComposer = false, webChrome = false, webChromeReadable = false, webPassword = false;
+        // Is the CACHED composer readable this tick, whether or not it has focus?
+        // This is what keeps a PASTE detectable across a focus move inside the
+        // page -- the defect that produced the 2026-09-09 live bypass.
+        bool webComposerReadable = false;
+        string webRid = "";
+        // AI-218. Default to "no agent identified", so every path that does not
+        // positively read one publishes that rather than leaving a stale value.
+        int webAgentOutcome = WEB_ID_NOT_COMPOSER;
+        string webAgentName = "";
+        if (browserArmed)
+        {
+            // URL FIRST. This ordering IS the privacy gate and it must never be
+            // reversed: the host is resolved BEFORE any element is touched, so a
+            // Gmail composer, a Jira ticket or a web login form is never read at
+            // all -- only a focused element on a catalog host is. Reading the
+            // element first and classifying afterwards would already be the leak.
+            // (prompt-watcher.ps1 draws the same ordering, and
+            // agent/tests asserts it there too.)
+            webOutcome = GetCachedBrowserUrl(fg, out webHost);
+            // THE INVALIDATION SWEEP. Reached with a host only when the URL
+            // already said this tab is on a catalog host, which is what confines
+            // the WINDOW-TITLE READ below to governed AI pages -- a Gmail or an
+            // intranet title is never read at all. Only the already-computed
+            // FINGERPRINT is passed on, so nothing downstream can hold a title.
+            long titleFp = (webOutcome == WebReadOutcome.Surface)
+                ? TitleFingerprint(ReadTitleRaw(fg)) : 0;
+            UpdateBrowserNav(fg, webOutcome == WebReadOutcome.Surface ? webHost : "", titleFp);
+
+            // THE ELEMENT READ, and both gates it sits behind matter:
+            //   * the URL says this tab is on a CATALOG host, so the element on
+            //     an ungoverned tab (a Gmail composer, a Jira field, a bank
+            //     login form) is never touched at all -- that ordering IS the
+            //     privacy gate and it must never be reversed;
+            //   * that host is past its OWN two flags. An unverified host is
+            //     completely inert, down to performing no read: nothing about it
+            //     could act on the answer, so the answer is not obtained.
+            // What it decides is whether the focused element is the PAGE
+            // COMPOSER -- see ReadFocusedWebComposer for every rule and why.
+            if (webOutcome == WebReadOutcome.Surface && EnforcingWebSurface(webHost) != null)
+            {
+                // FOCUSED read first: it answers "is the caret in the composer
+                // right now" (which gates swallowing and keystroke capture) AND
+                // it is what populates the composer cache, for free.
+                webComposer = ReadFocusedWebComposer(pid, fg, webHost, out webRid, out webChrome, out webChromeReadable, out webPassword);
+                // Then the CACHE re-verify, which answers the DIFFERENT question
+                // "may the composer's own text be read this tick". True across a
+                // focus move inside the page, which is the whole point: a paste
+                // into the composer is caught on the next 150ms tick even if the
+                // user has clicked the response, a scroll container has taken
+                // focus, or the caret is momentarily somewhere else.
+                //
+                // Never a search and never a tree walk -- the cache was filled by
+                // the focused read above, so a focus round-trip costs ONE TICK.
+                AutomationElement composer = VerifiedWebComposer(fg, webHost);
+                webComposerReadable = composer != null;
+                // ---- AI-218: the agent read ---------------------------------
+                // Only on a surface whose agent read is past BOTH of its own
+                // flags, and only from the composer this tick already verified.
+                // Reading the Name again is free: VerifiedWebComposer just read
+                // it to run the chrome test.
+                if (composer != null)
+                {
+                    WebSurface ar = EnforcingWebAgentRead(EnforcingWebSurface(webHost));
+                    if (ar != null)
+                    {
+                        string cname = null, caid = "", ccls = "";
+                        try { cname = composer.Current.Name; } catch { cname = null; }
+                        try { caid = composer.Current.AutomationId ?? ""; } catch { caid = ""; }
+                        // AI-219 follow-up. The FOURTH path that identifies a
+                        // composer, and it resolves identity through the same
+                        // one function as the other three -- without this the
+                        // agent read would answer NOT_COMPOSER for the very
+                        // element the re-verify just accepted.
+                        try { ccls = composer.Current.ClassName ?? ""; } catch { ccls = ""; }
+                        caid = WebComposerIdentityAid(ar, composer, caid, ccls);
+                        string an;
+                        webAgentOutcome = WebComposerIdentity(ar, cname, caid, out an);
+                        webAgentName = an;
+                    }
+                }
+                // NOTHING CACHED, on a surface we are supposed to be enforcing.
+                // Until this is filled MouseEnforceOk() is false and a click on
+                // the send button is not swallowed, so "wait for the composer to
+                // take focus" is not an acceptable way to get there. Look for it
+                // instead -- off the poll thread, so a heavy page's descendant
+                // walk cannot stretch the 150ms tick.
+                if (!webComposerReadable) MaybeSearchWebComposer(fg, pid, webHost, EnforcingWebSurface(webHost));
+                if (webComposer && webRid.Length == 0) webRid = _webComposerRid ?? "";
+                // A focused composer that just re-verified keeps the runtime id
+                // the owner key needs even on a tick where GetRuntimeId threw.
+                if (!webComposer && webComposerReadable) webRid = _webComposerRid ?? "";
+            }
+        }
+        // STICKY UNTIL CONTRADICTED, and only a SUCCESSFUL element read may move
+        // it -- see _fgWebChromeFocused. This is the term that keeps Enter alive
+        // in the address bar while a web block is armed, so an unreadable tick
+        // must not be able to silently withdraw it.
+        if (webChromeReadable) _fgWebChromeFocused = webChrome;
+        // STICKY UNTIL CONTRADICTED, exactly like the chrome term beside it and
+        // for the same reason: only a SUCCESSFUL element read may move it, so an
+        // unreadable tick cannot silently withdraw the protection.
+        if (webChromeReadable) _fgWebPasswordFocused = webPassword;
+        // Mirrors THIS tick's re-verify on every branch, so a composer that
+        // stopped verifying cannot leave its text readable for even one tick.
+        _fgWebComposerReadable = webComposerReadable;
+        // Assigned unconditionally, like every other per-tick web field: a tick
+        // that did not positively identify an agent publishes NOT_COMPOSER, so
+        // "we could not tell" can never be mistaken for the previous tick's
+        // answer.
+        _fgWebAgentOutcome = webAgentOutcome;
+        _fgWebAgentName = webAgentName ?? "";
+        // THE APP SWITCH: clear every ANSWER, keep the two cached ELEMENTS.
+        //
+        // The sticky flags and the resolved host are cleared outright the moment
+        // the foreground is not a browser, so none of them can leak into another
+        // app's decisions. Belt-and-braces for two of them -- _fgIsWebComposer is
+        // false off a browser anyway, and the block arm needs an AUTHORITATIVE url
+        // read -- but a stale host sitting in a field that two block decisions
+        // read is the kind of thing a later change trips over.
+        //
+        // WHAT DELIBERATELY SURVIVES, AND WHY. This branch used to call
+        // DropWebComposer() and to null the send-button reference, and that pair
+        // was a BYPASS of the same class as the unfocused click:
+        //
+        //   block armed on a governed tab -> click the transcript (the caret
+        //   leaves the composer) -> alt-tab to another app -> alt-tab back ->
+        //   click the send arrow. Measured: no rect, no swallow, IT SENT.
+        //
+        // The cache could only be refilled by ReadFocusedWebComposer, which
+        // requires the composer to HAVE FOCUS -- so returning to the page with the
+        // caret anywhere else left the click block unarmable until the user
+        // happened to click into the composer. That made the file's own
+        // "READABLE, not FOCUSED" separation -- the one PanelUiaOk documents and
+        // the 2026-09-09 paste fix depends on -- hold INSIDE the browser and break
+        // silently ACROSS an app switch. An inconsistency, not a boundary.
+        //
+        // Keeping the two element references widens NOTHING, because in both
+        // cases the RE-VERIFY is the control and the drop never was:
+        //   * the composer goes through VerifiedWebComposer on every single read,
+        //     which re-checks hwnd, host, ControlType == "Edit", !IsPassword,
+        //     IsKeyboardFocusable and !NameLooksLikeBrowserChrome, and drops the
+        //     cache on any failure or any throw. A retained element cannot be read
+        //     unless it STILL qualifies and STILL belongs to this window and this
+        //     host;
+        //   * the send button goes through UpdateWebSendRect's fast path, which
+        //     re-checks hwnd and host and then re-reads the live Name against the
+        //     catalog before it publishes a rectangle.
+        // A dead reference (the window closed, the page was rebuilt) throws on the
+        // next property read and is dropped there.
+        //
+        // AND THEY STAY INERT WHILE ANOTHER APP IS IN FRONT. _fgWebComposerReadable
+        // is forced false here, and CachedWebComposer() -- the ONLY door to the
+        // composer's text -- gates on it, so nothing can be read off a browser
+        // tick. The element persists; its READABILITY does not.
+        //
+        // A NAVIGATION, A TAB SWITCH, A HOST CHANGE and A WINDOW CHANGE must all
+        // still drop the composer, and they do -- in UpdateBrowserNav, which is the
+        // one place that decides "something changed". Those mean the element
+        // belongs to a page the user is no longer on, which is a different
+        // statement from "the user is looking at another window for a moment".
+        if (!_fgIsBrowser)
+        {
+            _fgWebChromeFocused = false;
+            _fgWebPasswordFocused = false;
+            _fgWebComposerReadable = false;
+            _fgWebHost = "";
+            // AI-219. Cleared with the host, for the same reason and in the same
+            // breath: an agent id read from a browser tab must never be sitting
+            // in a field two block decisions read while another app is in front.
+            _fgWebUrlAgentId = "";
+            // THE RECT ITSELF STILL GOES. A rectangle verified on an earlier tick
+            // must not survive an app switch even inside the 400ms freshness
+            // window, so the stamp is zeroed -- and _hasRect is cleared by
+            // UpdateWebSendRect at the top of every call anyway. Only the ELEMENT
+            // reference is kept, and it cannot produce a rect again until the fast
+            // path re-verifies its Name on a matching window and host. Without
+            // that, returning to the page cost a fresh 105-489ms descendant
+            // search, which is the very race "resolve early, decide late" exists
+            // to remove -- the click on the RETURN TICK would have been unprotected.
+            _webSendVerifiedTicks = 0;
+        }
+
+        ApplyForegroundTick(pid, proc, isIde, hit, panelRid, panelReadable, agentOutcome, agentName,
+                            webOutcome, webHost, webComposer, webRid, webComposerReadable,
+                            webAgentOutcome, webAgentName);
     }
 
     // Everything UpdateForeground does once the focused-element read is in.
@@ -7861,7 +12913,10 @@ public static class CfaiEnforcer
     // harness in agent/tests drives THIS method with reads built from real,
     // measured UIA property values (fed through the real MatchPanelSignature),
     // so the only thing it substitutes is the AutomationElement lookup itself.
-    static void ApplyForegroundTick(uint pid, string proc, bool isIde, PanelSig hit, string panelRid, bool panelReadable, AgentReadOutcome agentOutcome, string agentName)
+    static void ApplyForegroundTick(uint pid, string proc, bool isIde, PanelSig hit, string panelRid, bool panelReadable, AgentReadOutcome agentOutcome, string agentName,
+                                    WebReadOutcome webOutcome, string webHost, bool webComposer, string webRid,
+                                    bool webComposerReadable, int webAgentOutcome = WEB_ID_NOT_COMPOSER,
+                                    string webAgentName = "")
     {
         _fgPid = pid;
         // ADDITIVE, and the only line this method gained for the egress feature.
@@ -7889,6 +12944,19 @@ public static class CfaiEnforcer
         string hostGovPanel = "", hostGovAgent = "", hostGovAgentId = "";
         string panelId = "";
         if (panelRid == null) panelRid = "";
+        // "This BROWSER tick is on a governed AI host" -- the file-watcher arm
+        // signal, read only by UpdateGovState. Declared with the other per-tick
+        // locals so EVERY branch leaves it false and only the browser branch can
+        // set it, exactly as hostGoverned above.
+        bool webGoverned = false;
+        string webGovHost = "";
+        if (webHost == null) webHost = "";
+        if (webRid == null) webRid = "";
+        // Always mirrors THIS tick's browser read -- Unreadable whenever
+        // UpdateForeground performed none -- so a stale Surface can never leak
+        // forward into a later tick's block decision. Same discipline as
+        // _fgAgentOutcome directly below.
+        _fgWebOutcome = webOutcome;
         // Always mirrors THIS tick's read — Unreadable whenever UpdateForeground
         // performed none — so a stale Named outcome can never leak forward into a
         // later tick's block decision. Never emitted; see the field comments.
@@ -8139,6 +13207,176 @@ public static class CfaiEnforcer
                 ClearPanelBlockLatch();
             }
         }
+        else if (proc != null && _browserProcs.Contains(proc))
+        {
+            // ---- AI-218: retire an AGENT latch on positive evidence ---------
+            //
+            // The mirror of the chat-app rule directly above, and it exists for
+            // a failure the host rules cannot catch. Switching from a blocked
+            // agent to another agent in the SAME TAB produces no navigation and
+            // no host change, so the web-evidence rule in CheckFgBlocked never
+            // fires and the block would be held by its latch indefinitely --
+            // Enter dead in an agent nobody blocked.
+            //
+            // HOLD ONLY WHILE THIS TICK STILL NAMES THE SAME AGENT. Everything
+            // else releases -- a different agent, a generic chat, or a composer
+            // we could not read at all.
+            //
+            // THIS IS THE OPPOSITE FAIL DIRECTION TO EVERY OTHER LATCH HERE, and
+            // the asymmetry is the whole point. The panel and agent latches
+            // guard ONE app, so "I could not read it" holding the block costs a
+            // dead Enter in the app the admin blocked anyway. A web-agent latch
+            // guards ONE AGENT ON A HOST THAT CARRIES DOZENS, so the same rule
+            // means "I could not tell which agent this is, therefore block all
+            // of them" -- which is precisely the outcome this feature exists to
+            // avoid.
+            //
+            // Observed live 2026-09-21: blocking "IT Help Desk Agent" also
+            // blocked "New Agent123" in the same tab. The composer identified
+            // perfectly (Name "Message New Agent123", the expected
+            // AutomationId); the latch simply never let go, and because
+            // _fgIsBlocked had already cleared, the swallowed send reported no
+            // reason at all.
+            //
+            // Releasing early is cheap: CheckFgBlocked re-arms on the very next
+            // tick that positively names the blocked agent again.
+            if (WebAgentBlockLatched())
+            {
+                bool sameAgentStillOpen = webAgentOutcome == WEB_ID_NAMED
+                    && AgentNameMatches(webAgentName, _blockedAgentName);
+                // AI-219. On a url_path surface the agent is an ID, not a
+                // display name, so the line above can never match there: the
+                // tick carries an id and the block carries the row's name. Same
+                // question, other field -- does THIS tick's id still name the
+                // agent the block was armed for?
+                //
+                // ADDITIVE ON PURPOSE. It can only HOLD a latch the name rule
+                // would have released, never release one it would have held,
+                // and it is reachable only on a surface whose own mode says the
+                // id IS the identity -- so composer_name behaviour, including
+                // its fail-open direction, is untouched. WEB_ID_NAMED is still
+                // required, so an unreadable or generic tick still releases.
+                if (!sameAgentStillOpen && webAgentOutcome == WEB_ID_NAMED)
+                {
+                    WebSurface armedOn = EnforcingWebSurface(_blockedBrowserHost);
+                    if (WebAgentReadIsUrlPath(armedOn))
+                        sameAgentStillOpen = WebAgentRowMatches(armedOn, webAgentName, _fgWebUrlAgentId,
+                                                                _blockedAgentName, _blockedAgentId);
+                }
+                if (!sameAgentStillOpen) ClearPanelBlockLatch();
+            }
+            // ---- BROWSER ------------------------------------------------------
+            //
+            // THE PRIVACY BOUNDARY OF THIS WHOLE FEATURE, and the reason it is
+            // written as three separate ANDed facts rather than one condition: a
+            // browser is a general-purpose application, and it is treated as an
+            // AI surface for EXACTLY the ticks on which all three hold.
+            //
+            //   1. The resolved URL says this tab is on a CATALOG HOST
+            //      (webOutcome == Surface). Resolved before any element was
+            //      touched -- see UpdateForeground.
+            //   2. That host is past its OWN two flags (EnforcingWebSurface).
+            //      Every shipped entry is false/false, so today this is where
+            //      every browser tick stops. An UNVERIFIED host is treated like
+            //      an unverified HOST-APP surface -- completely inert, not
+            //      "detected but not enforcing" -- because the failure mode of
+            //      getting a browser wrong is capture of, or a dead Enter in,
+            //      arbitrary web content.
+            //   3. The focused element is the PAGE COMPOSER (webComposer).
+            //      NOT the address bar, NOT a find bar, NOT a password field, and
+            //      not merely "some editable element in a browser that happens to
+            //      be on claude.ai".
+            //
+            // On every OTHER browser tick isAi stays false, so FgIsAiNow() is
+            // false, so no keystroke is buffered, no clipboard or UIA content is
+            // scanned, no Tier B candidate is pinned and no block decision is even
+            // evaluated. That is what confines this to an AI composer and to
+            // nowhere else in the browser: not Gmail, not an internal wiki, not
+            // Jira, not a bank login, not the omnibox.
+            //
+            // WHY isPanel STAYS FALSE. A browser surface is not an AI_PANELS
+            // entry and must not pretend to be one: _fgPanelId feeds PanelField()
+            // (which index.js resolves a tool_host from), NewlineKeysFor and
+            // PostSendVerifyMsFor. Putting a web-surface id there would send
+            // Request Access at the wrong key and make the panel lookups miss.
+            // The browser's own enforcement gating is stated positively instead,
+            // in PanelEnforceOk / PanelUiaOk, and its Tier B knobs come from
+            // CurrentWebSurface().
+            WebSurface web = (webOutcome == WebReadOutcome.Surface) ? EnforcingWebSurface(webHost) : null;
+            // ---- THE SEPARATION, and the 2026-09-09 bypass fix -------------
+            //
+            // isAi now depends on THE WINDOW BEING ON A GOVERNED HOST, and NOT on
+            // where the caret is. It used to require `webComposer`, and that is
+            // what produced the bypass: a focus move inside the page -- clicking
+            // the response, a scroll container taking focus -- made the whole
+            // surface stop being an AI surface, which switched OFF the UIA read
+            // that is the only paste detector this file has. The monitor log
+            // showed the govstate arm/disarm flapping every 500ms and then
+            // sitting disarmed for 55 seconds, and a pasted secret sent raw
+            // inside that window with nothing logged at all.
+            //
+            // ELEMENT SCOPING NOW GATES WHAT GETS SWALLOWED, NOT WHETHER THE
+            // SURFACE IS WATCHED. Nothing about the narrow parts moved:
+            //   * keystroke CAPTURE still needs FgIsAiNow() -> PanelEnforceOk()
+            //     -> _fgIsWebComposer, so a keystroke is buffered only while the
+            //     caret is genuinely in the composer. The omnibox and a password
+            //     field are as excluded as they ever were.
+            //   * a CONTENT block still needs PanelEnforceOk(), so Enter is
+            //     swallowed only in the composer -- and never in the omnibox,
+            //     which WebBlockGateOk enforces on top.
+            //   * the composer's TEXT is read through the CACHED COMPOSER
+            //     (PanelUiaOk -> _fgWebComposerReadable), never through
+            //     FocusedElement, so a wider isAi cannot make any other element
+            //     readable.
+            // What DOES widen is exactly the intended thing: the surface stays
+            // resolved and the composer stays scanned across a focus move, so a
+            // paste is caught on the next tick and re-arming costs one tick
+            // instead of a background search plus its backoff.
+            if (web != null)
+            {
+                isAi = true;
+                // The CATALOG host, not the resolved one: a subdomain
+                // (foo.chatgpt.com) governs through its parent entry, and every
+                // downstream consumer -- the block event, govstate, the Request
+                // Access key -- must see the same host an admin toggled in
+                // Inventory. This field is the only browser-derived-looking
+                // string that ever leaves this file, and it is not
+                // browser-derived: it is our own catalog value.
+                _fgWebHost = web.Host;
+                // The file-scanning arm signal, for index.js's browser
+                // file-picker wiring. Not a block input -- UpdateGovState is its
+                // only reader and it decides nothing itself.
+                webGoverned = true;
+                webGovHost = web.Host;
+            }
+            else
+            {
+                // Not a governed composer this tick. _fgWebHost is cleared rather
+                // than left standing, because CurrentWebSurface() and the block
+                // arm both read it and a stale host is how the wrong tab gets
+                // blocked.
+                _fgWebHost = "";
+            }
+            // THE LATCH RULE, and it is the fail-OPEN direction a browser
+            // requires -- the same call the host-app branch makes, for the same
+            // reason but with more at stake.
+            //
+            // A READABLE URL that is NOT a governed surface (NotSurface) is
+            // POSITIVE evidence that the user navigated away, so an armed web
+            // block retires on that tick. Keeping it would leave Enter swallowed
+            // in whatever the user opened next, which in a browser is anything at
+            // all.
+            //
+            // Unreadable is NO EVIDENCE and deliberately does nothing here: that
+            // is the single bad UIA read the latch exists to survive. Capture has
+            // already failed open by this point (PanelUiaOk/FgIsAiNow go false the
+            // instant _fgIsWebComposer does), so what survives is only an
+            // already-established block.
+            if (WebBlockLatched() && webOutcome != WebReadOutcome.Unreadable)
+            {
+                ClearPanelBlockLatch();
+            }
+        }
         else if (proc != null && _aiProcs != null && _aiProcs.Contains(proc))
         {
             isAi = true;
@@ -8206,6 +13444,17 @@ public static class CfaiEnforcer
             _fgAttr = new BlockAttr(attrAgent, attrAgentId, attrSrc);
         }
         else _fgAttr = BLOCK_ATTR_NONE;
+        // Same rule, same reason, for the BROWSER arm signal: assigned on every
+        // branch, so a tick that stopped being a governed composer cannot leave
+        // the browser file watchers armed. UpdateGovState adds the first-hand
+        // guard on top, exactly as it does for the host-app pair.
+        _fgWebGoverned = webGoverned;
+        _fgWebGovHost = webGovHost;
+        // Mirrors THIS tick's composer read on every branch. False for every
+        // non-browser app and for an unreadable browser tick, which is the
+        // fail-OPEN direction for capture: PanelEnforceOk/PanelUiaOk both key on
+        // it, so one bad read stops capture and scanning at once.
+        _fgIsWebComposer = webComposer;
 
         if (isAi)
         {
@@ -8217,6 +13466,20 @@ public static class CfaiEnforcer
             _fgPanelEnforce = isPanel ? panelEnforce : true;   // non-panel surfaces enforce as before
             // Composite owner key for the typed buffer — see _fgOwnerKey.
             _fgOwnerKey = pid.ToString() + "|" + (isPanel ? panelId : "none") + "|" + panelRid;
+            // A BROWSER tick carries THREE more facts in the buffer's identity,
+            // and each one is a way the buffer must be discarded:
+            //   * the catalog HOST -- so text typed on claude.ai can never be
+            //     scanned or reported as part of a prompt on chatgpt.com;
+            //   * the NAVIGATION GENERATION -- bumped on a tab switch, a
+            //     navigation chord, a title change or a window change, which is
+            //     how "a buffer must never survive a navigation" is enforced
+            //     without a single new line in the keyboard hook (it already
+            //     drops the buffer whenever this key changes);
+            //   * the composer element's own RUNTIME ID -- so moving between two
+            //     composers, or out to the omnibox and back, is a new owner.
+            // panelRid is empty on this branch (a browser sets no panel), so this
+            // appends rather than competing with it.
+            if (webComposer) _fgOwnerKey = _fgOwnerKey + "|web:" + _fgWebHost + "#" + _browserNavGen.ToString() + "|" + webRid;
         }
         else
         {
@@ -8239,6 +13502,12 @@ public static class CfaiEnforcer
                 _fgIsPanel = false;
                 _fgPanelId = "";
                 _fgPanelEnforce = false;
+                // The browser host outlives _fgIsAi through the sticky window for
+                // the same reason the panel id does (a block armed on a surface
+                // stays attributed to it), and must not outlive the block itself:
+                // a stale host would let the web arm below match a tab nobody is
+                // looking at.
+                _fgWebHost = "";
             }
             // During the sticky window, _fgIsAi stays true
         }
@@ -8310,6 +13579,16 @@ public static class CfaiEnforcer
     static bool ClickInSendRect(int x, int y)
     {
         if (!_hasRect) return false;
+        // AI-216. Freshness is ANDed in HERE rather than at the call site so
+        // every caller gets it, and folded in after _hasRect so the desktop and
+        // Teams paths are unchanged -- SendRectFreshEnough() returns true for
+        // every non-web scope, and only a WEB rect has to be recent.
+        //
+        // Without it a rect published while `Send message` existed could still
+        // be honoured after the composer emptied and the same rectangle became
+        // the MICROPHONE button. It is a timestamp comparison, so the hook still
+        // does no UIA, no regex and no scanning.
+        if (!SendRectFreshEnough()) return false;
         if (!(x >= _rx && x < _rx + _rw && y >= _ry && y < _ry + _rh)) return false;
         IntPtr want = _rectRoot;
         if (want == IntPtr.Zero) return true;            // chat-app rect: unchanged
@@ -8427,10 +13706,34 @@ public static class CfaiEnforcer
     // Cleared when no block is active so normal clicks are never swallowed.
     static void UpdateSendRect()
     {
+        // A BROWSER IS DELEGATED FIRST, ahead of the "is a block active or is
+        // there typed text" test below, and that ordering is load-bearing rather
+        // than cosmetic. That test is why the click bypass was TOTAL rather than
+        // merely racy: for a PASTE the typed buffer is empty (a Ctrl+V
+        // contributes no character keystrokes) and before the block arms
+        // BlockActiveForMouse() is false, so this line returned early and the
+        // browser branch was never reached -- the send button could not be
+        // resolved even in principle. UpdateWebSendRect applies its OWN gates,
+        // which are about being on a governed composer rather than about a block
+        // already existing. See its notes.
+        // ForegroundIsBrowser(), NOT _browserProcs.Contains(_app): with the
+        // sticky name the delegation did not fire for the 3s after alt-tabbing
+        // out of a desktop AI app into a browser, so BOTH generic attempts
+        // below ran against the browser window -- the
+        // name-contains-"send"/"submit" descendant search (489ms measured, on
+        // the 150ms poll thread; and on a checkout page "Submit" is the payment
+        // button) and the bottom-right corner heuristic, which in a browser is
+        // arbitrary page content. See ForegroundIsBrowser.
+        if (ForegroundIsBrowser()) { UpdateWebSendRect(); return; }
         // Locate the send button when a block is active (to swallow the click)
         // OR when there's a pending typed prompt (to capture a benign click-send).
         // Cleared otherwise so normal clicks are never swallowed or captured.
-        if (!_fgIsAi || (!BlockActiveForMouse() && TypedLength() < 1)) { _hasRect = false; _rectRoot = IntPtr.Zero; return; }
+        //
+        // The freshness stamp is cleared here as well, not only inside
+        // UpdateWebSendRect: this return path does not reach that function, so
+        // leaving a stamp behind would let the "rect is recent" fact outlive the
+        // tick that earned it. Making the invariant local costs one assignment.
+        if (!_fgIsAi || (!BlockActiveForMouse() && TypedLength() < 1)) { _hasRect = false; _webSendVerifiedTicks = 0; return; }
         // IDE processes are skipped outright — panel or not. Two independent
         // reasons, either one sufficient:
         //   1. Cost. Attempt 1 below is a descendant-wide UIA search over the
@@ -8515,6 +13818,28 @@ public static class CfaiEnforcer
             _hasRect = false; _rectRoot = IntPtr.Zero; return;
         }
         _rectRoot = IntPtr.Zero;
+        // A BROWSER is excluded from BOTH ATTEMPTS BELOW for the same two
+        // reasons, and the second is worse there than anywhere else:
+        //   1. Cost. Attempt 1 is a descendant-wide FindAll over the whole
+        //      browser window on the 150ms poll thread. Measured on this
+        //      machine: 105ms on a plain claude.ai window and 489ms on a 67-tab
+        //      Edge window -- more than three times the entire poll interval.
+        //   2. Meaning, and this is the disqualifying one. Attempt 1 matches
+        //      ANYTHING whose name, automation id or help text merely CONTAINS
+        //      "send" or "submit", which across a whole website is a lottery.
+        //      Attempt 2's "the bottom-right corner is the send button" is
+        //      simply FALSE of a browser: that rectangle is arbitrary page
+        //      content, so caching a rect there would swallow ordinary clicks on
+        //      whatever site is open.
+        //
+        // It is NOT excluded from click blocking altogether any more. It gets a
+        // NARROWER path of its own -- UpdateWebSendRect -- which searches for one
+        // exact catalog-declared (control type, Name) pair, on a background
+        // thread, only while a web-scoped block is armed on a verified host, and
+        // RE-VERIFIES the element's Name every tick before the rect may be
+        // trusted. See its own notes, and the `Use voice mode` problem they
+        // exist for. A surface with no such signature gets Enter-only blocking.
+        if (_ideProcs.Contains(_app) || _hostAppProcs.Contains(_app)) { _hasRect = false; return; }
         try
         {
             IntPtr fg = GetForegroundWindow();
@@ -8585,20 +13910,65 @@ public static class CfaiEnforcer
         string text = null;
         try
         {
-            AutomationElement el = EffectiveFocusedElement();
+            // ONE declaration for both worlds. A BROWSER reads its CACHED
+            // COMPOSER; everything else reads the effective focused element.
+            AutomationElement el = ForegroundIsBrowser()
+                ? CachedWebComposer()
+                : EffectiveFocusedElement();
             // PANEL surfaces: scan (and arm) ONLY the element this tick matched —
             // same runtime id as _fgOwnerKey, owned by the foreground process or
             // its direct child. FocusedElement is a global read, and focus that
             // moved between the panel read and this one (a colleague's message,
             // a document paragraph) must never be scanned as the composer.
             if (el != null && (!_fgIsPanel || FocusedIsMatchedComposer(el))) text = ReadText(el);
+            // A BROWSER reads ITS CACHED COMPOSER, never FocusedElement, and this
+            // is what makes the wider PanelUiaOk safe. The set of elements whose
+            // text can be read in a browser is exactly one per window: the
+            // element that passed the full composer test while it had focus, and
+            // that re-verified this tick. Focus moving to a password field, the
+            // omnibox, an internal wiki's textarea in another tab or arbitrary
+            // page content cannot make any of them readable, because none of them
+            // is what gets read.
+            //
+            // THIS READ IS THE PASTE DETECTOR. The typed buffer sees no
+            // characters from a Ctrl+V, so without this a pasted secret has no
+            // signal at all -- which is precisely how the 2026-09-09 bypass got
+            // through. It has to keep running across a focus move.
+            // ForegroundIsBrowser(), NOT _browserProcs.Contains(_app).
+            // PanelUiaOk above now shuts this whole function inside the sticky
+            // window, so this is the second, independent half of the same fix:
+            // even if a future change loosens that gate, a browser foreground
+            // can never reach FocusedElement from here. See
+            // ForegroundIsBrowser. The browser branch is in the single `el`
+            // declaration above; `_fgIsPanel` is false for a browser, so the
+            // panel guard on that read does not apply to it -- the cached
+            // composer already passed the full composer test while focused.
         }
         catch { }
         string hits = (text != null) ? ScanNames(text) : "";
+        bool wasBlockedUia = _blockUia;
         _uiaPatterns = hits;
         _blockUia = hits.Length > 0;
         if (hits.Length > 0) MaybeEmitEvidencePrompt(text, hits);
         else _lastEvidencePromptSig = "";
+        // RELEASE THE 30s COOLDOWN when the composer comes back clean.
+        //
+        // Exact twin of the typed-buffer rescan's release (see the `else if
+        // (wasBlocked)` in the typed rescan) and needed for the same reason --
+        // but that one keys on the TYPED BUFFER, which on a browser is empty
+        // after a paste and is discarded on focus-out. So for a web surface
+        // THIS read is the only thing that can observe "the user edited the
+        // secret out", and without the release `cooldown` in EnterBlockActive
+        // held for up to 30 seconds after the block: the user deletes the SSN
+        // from the composer, presses Enter, and is swallowed again with nothing
+        // on screen to explain why.
+        //
+        // That is the ONLY remediation path for a block the user chose not to
+        // tokenize -- "fix it yourself and send" -- so leaving it broken makes
+        // the block feel arbitrary. Fires only on the non-empty -> empty
+        // transition, so a still-dirty composer keeps its cooldown and a clean
+        // one does not keep re-zeroing.
+        if (wasBlockedUia && hits.Length == 0) _lastBlockFiredTicks = 0;
     }
 
     // Is this element the composer THIS tick matched? Runtime id equal to the
@@ -8779,6 +14149,27 @@ public static class CfaiEnforcer
         }
         AutomationElement el;
         try { el = EffectiveFocusedElement(); } catch { el = null; }
+        // Same element choice as UpdateUia, for the same reason: in a browser the
+        // only element whose text may be read is the cached, re-verified
+        // composer. Reading FocusedElement here would compute a Tier B candidate
+        // from whatever the user happened to click on.
+        //
+        // Computing the pin while the composer is not focused is safe and
+        // deliberate: RunRewrite's pre-flight still requires the SAME foreground
+        // window and the SAME focused element by runtime id before it types a
+        // character, so a pin computed off-focus simply fails that check until
+        // the caret comes back. What it buys is that clicking the block dialog
+        // does not destroy the pin for the block being acted on.
+        try
+        {
+            // ForegroundIsBrowser(), for the reason stated at UpdateUia's twin:
+            // the sticky name let this read the BROWSER's FocusedElement and
+            // pin a mask candidate, a runtime id and an hwnd off it -- and
+            // RunRewrite's pre-flight then PASSED, retyping masked text into an
+            // arbitrary website's input field. See ForegroundIsBrowser.
+            el = ForegroundIsBrowser() ? CachedWebComposer() : AutomationElement.FocusedElement;
+        }
+        catch { el = null; }
         if (el == null)
         {
             // A transient UIA read failure, not a confirmed content change —
@@ -8933,6 +14324,18 @@ public static class CfaiEnforcer
     {
         if (!_fgIsAi) { _blockPaste = false; return; }
         if (!_fgContentOk) { _blockPaste = false; return; }
+        // A BROWSER keeps the NARROW gate, deliberately NOT widened along with
+        // isAi. This reads the user's actual clipboard, and "the window is on
+        // claude.ai" is not a reason to do that while the caret is in a login
+        // form or another tab's textarea. The composer's own text is covered by
+        // UpdateUia above, which is what catches a paste; this signal only adds
+        // the case where the clipboard is dirty and Ctrl+V was pressed IN the
+        // composer, and that requires the composer anyway.
+        // ForegroundIsBrowser(), NOT _browserProcs.Contains(_app): with the
+        // sticky name this refusal did not fire for a browser foreground inside
+        // the sticky window, so the clipboard was read and scanned on a tick
+        // whose window was an arbitrary web page. See ForegroundIsBrowser.
+        if (ForegroundIsBrowser() && !_fgIsWebComposer) { _blockPaste = false; return; }
         string clip = ReadClipboard();
         string hits = (clip != null) ? ScanNames(clip) : "";
         _pastePatternsValue = hits;
@@ -9256,12 +14659,64 @@ public static class CfaiEnforcer
         return PanelField();
     }
 
+    // ---- `browser_host`: THE CATALOG HOST, AND ONLY THAT -------------------
+    //
+    // ONE field, and the rule for what may go in it is absolute:
+    //
+    //   MAY:     the catalog-matched host string from WEB_SURFACES -- our own
+    //            data, selected by a comparison. "claude.ai".
+    //   MAY NOT: the URL. A path. A QUERY STRING -- a query string on an AI URL
+    //            routinely contains the prompt itself, so a URL-shaped field
+    //            here would be a prompt-content leak with a governance label on
+    //            it. The window title. The resolved subdomain. Anything read out
+    //            of a page.
+    //
+    // It is the same discipline EmitGovState holds to, and it is enforced
+    // STRUCTURALLY rather than by care: the only strings this function can reach
+    // are _blockedBrowserHost (set by CheckFgBlocked's web arm from web.Host) and
+    // a WebSurface.Host straight out of the catalog. There is no variable in
+    // scope here that holds a URL -- GetCachedBrowserUrl never returns one to any
+    // caller, precisely so that this is true.
+    //
+    // WHY THE CATALOG HOST AND NOT THE RESOLVED ONE: a subdomain
+    // (foo.chatgpt.com) governs through its parent entry, and index.js's
+    // blockToolHost() turns this into the key the Request Access dialog asks for
+    // an exception against. That key has to be the same string an admin toggled
+    // in Inventory, or the user files a request that can never lift the block
+    // they are actually hitting.
+    //
+    // TWO sources, in precedence order:
+    //   * a block ARMED by the web arm reports the host it was armed for, so the
+    //     attribution survives a tick whose read hiccupped;
+    //   * otherwise the surface the CURRENT tick is on, which is what puts the
+    //     host on a pattern-based content block (the DLP path) -- there is no
+    //     blocked row involved in that case at all.
+    // Empty for every non-browser event, so every pre-existing line is
+    // byte-for-byte unchanged.
+    static string BrowserHostField()
+    {
+        string host = _blockedBrowserHost ?? "";
+        if (host.Length == 0)
+        {
+            WebSurface web = CurrentWebSurface();
+            if (web != null) host = web.Host ?? "";
+        }
+        return host.Length > 0 ? ",\"browser_host\":\"" + Esc(host) + "\"" : "";
+    }
+
     static void Emit(string kind, string app, string patterns, string reason, int len = -1, int seconds = -1, string message = null)
     {
         string json = "{\"kind\":\"" + kind + "\""
             + (reason.Length > 0 ? ",\"reason\":\"" + Esc(reason) + "\"" : "")
             + (app.Length > 0 ? ",\"process\":\"" + Esc(app) + "\"" : "")
             + (app.Length > 0 ? PanelField() : "")
+            // The BROWSER counterpart of PanelField, and it answers the same
+            // question for index.js: "which product/tool was this, given that the
+            // process name does not identify one". `chrome` says nothing; the
+            // catalog host says claude.ai. Carried here so the `prompt`
+            // (prompt_submit) and `override` (enforcement_override) lines are
+            // attributed to the web surface rather than to the browser.
+            + (app.Length > 0 ? BrowserHostField() : "")
             + (patterns.Length > 0 ? ",\"patterns\":\"" + Esc(patterns) + "\"" : "")
             + (len >= 0 ? ",\"len\":" + len : "")
             + (seconds >= 0 ? ",\"seconds\":" + seconds : "")
@@ -9336,7 +14791,11 @@ public static class CfaiEnforcer
         lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }
 
-    static void EmitBlock(string app, string patterns, string reason)
+    // `blockedNow` is the value of _fgIsBlocked AS READ WHEN THE PATTERNS WERE
+    // TAKEN, not re-read here -- see ActivePatterns(out bool). Defaulted, which
+    // is what keeps the three-argument callers on the other branch compiling,
+    // and what lets the reflection harnesses drive this directly.
+    static void EmitBlock(string app, string patterns, string reason, bool blockedNow = false)
     {
         string blockId, preview, whyNot;
         bool rewritable;
@@ -9371,7 +14830,7 @@ public static class CfaiEnforcer
         // with not_submitted. The user's actual remediation here is Request
         // Access (the fields below), not masking: the org disallowed the whole
         // app, not this one sentence.
-        bool platformBlock = _fgIsBlocked && reason != "attachment";
+        bool platformBlock = blockedNow && reason != "attachment";
         if (platformBlock) { rewritable = false; blockId = ""; }
         // WHICH AGENT this block is about, for EVERY kind of block — a content-
         // pattern block included, which before this carried no agent at all.
@@ -9395,6 +14854,15 @@ public static class CfaiEnforcer
             + ",\"reason\":\"" + Esc(reason) + "\""
             + (app.Length > 0 ? ",\"process\":\"" + Esc(app) + "\"" : "")
             + (platformBlock ? PlatformBlockPanelField() : PanelField())
+            // OUTSIDE the platform_block group on purpose. A browser block is
+            // most often a PATTERN-BASED content block -- the user typed a secret
+            // into the claude.ai composer and Enter was swallowed -- and that
+            // path involves no blocked row at all, so a host confined to the
+            // platform group would never reach the one event that needs it.
+            // index.js's blockToolHost() reads this FIRST, which is what makes
+            // Request Access ask for an exception against claude.ai rather than
+            // against the Claude desktop app's host.
+            + BrowserHostField()
             + (patterns.Length > 0 ? ",\"patterns\":\"" + Esc(patterns) + "\"" : "")
             + ",\"block_id\":\"" + Esc(blockId) + "\""
             + ",\"rewritable\":" + (rewritable ? "true" : "false")
@@ -9460,6 +14928,12 @@ public static class CfaiEnforcer
     {
         string json = "{\"kind\":\"rewrite\""
             + ",\"block_id\":\"" + Esc(blockId ?? "") + "\""
+            // So an enforcement_redact audit event for a browser surface is
+            // attributed to claude.ai rather than to `chrome`. A host, added by
+            // BrowserHostField, and omitted entirely when empty -- so every
+            // pre-existing rewrite line, including every abort and failure line,
+            // is byte-for-byte what it was.
+            + BrowserHostField()
             + ",\"result\":\"" + Esc(result) + "\""
             + (!string.IsNullOrEmpty(reason) ? ",\"reason\":\"" + Esc(reason) + "\"" : "")
             + (masked != null ? ",\"masked\":\"" + Esc(masked) + "\"" : "")
@@ -9512,6 +14986,23 @@ public static class CfaiEnforcer
             + ",\"block_scope\":\"" + Esc(scope) + "\""
             + (app.Length > 0 ? ",\"process\":\"" + Esc(app) + "\"" : "")
             + PlatformBlockPanelField()
+            // THE HOST THE EXCEPTION WILL BE ASKED FOR. Added 2026-09-15 after a
+            // live failure: a blocked BROWSER surface offered no dialog at all,
+            // logging "no tool_host for chrome — no dialog offered".
+            //
+            // blockToolHost() on the Node side resolves the host from, in order:
+            // browser_host, the panel, the PROCESS, then the platform map. For a
+            // browser every one of those except the first is empty BY DESIGN —
+            // hostForProcess('chrome') is deliberately null (a browser is not in
+            // AI_PROCESSES, so it can never name one host), and the
+            // PLATFORM_BLOCK_SENTINEL has no PLATFORM_PROCS entry. So without
+            // this field the resolver returns "" and #offerAccessRequest refuses
+            // to open a dialog it would have nothing to ask for.
+            //
+            // EmitBlock already carried it; this emitter did not, and the two
+            // disagreeing is what produced a block with no way to request access.
+            // Same catalog-matched host, same helper — never a URL or a path.
+            + BrowserHostField()
             + ",\"blocked_platform\":\"" + Esc(_blockedPlatform) + "\""
             + ",\"blocked_agent\":\"" + Esc(_blockedAgentName) + "\""
             + ",\"blocked_agent_id\":\"" + Esc(_blockedAgentId) + "\""
@@ -9575,6 +15066,14 @@ public static class CfaiEnforcer
     // A matched panel's entry wins; anything else gets the default.
     static string NewlineKeysFor()
     {
+        // A BROWSER COMPOSER first, because it has no AI_PANELS entry at all and
+        // would otherwise silently take the default. It happens to declare the
+        // same combo today, but taking it from the catalog is what lets a surface
+        // that needs something else be a DATA change rather than a code change --
+        // and an unrecognised value still travels verbatim so ResolveNewlineKeys
+        // refuses it rather than pressing a combination the page treats as send.
+        WebSurface web = CurrentWebSurface();
+        if (web != null) return string.IsNullOrEmpty(web.NewlineKeys) ? NEWLINE_KEYS_DEFAULT : web.NewlineKeys;
         if (_fgIsPanel && !string.IsNullOrEmpty(_fgPanelId))
         {
             var panels = _panels;
@@ -9706,6 +15205,18 @@ public static class CfaiEnforcer
     // the payload said.
     static int PostSendVerifyMsFor()
     {
+        // A BROWSER COMPOSER first, same shape and same reason as NewlineKeysFor
+        // above -- and this one MATTERS rather than merely being tidy. Every web
+        // surface asks for the 1500ms ceiling, not the 200ms default, because a
+        // browser composer is Chromium-rendered: "the composer is empty now" has
+        // to cross an accessibility serialization hop before UIA can report it.
+        // With the default single read, a mask-and-send that genuinely landed in
+        // the conversation is reported "not_submitted" and index.js's early
+        // return loses the enforcement_redact audit event -- the exact governance
+        // gap measured live against Teams' WebView2 composers, which are the same
+        // class of surface.
+        WebSurface web = CurrentWebSurface();
+        if (web != null) return web.PostSendVerifyMs < REWRITE_POST_SEND_MS ? REWRITE_POST_SEND_MS : web.PostSendVerifyMs;
         if (_fgIsPanel && !string.IsNullOrEmpty(_fgPanelId))
         {
             var panels = _panels;
@@ -10443,7 +15954,7 @@ Add-Type -TypeDefinition $source -ReferencedAssemblies @(
     'System.Web.Extensions'
 ) -ErrorAction Stop
 
-[CfaiEnforcer]::Start(($aiProcs -split ','), $patNames.ToArray(), $patSources.ToArray(), $patSevs.ToArray(), $patLabels.ToArray(), [bool[]]($patIgnoreCase.ToArray()), $hbPath, $modelRouterEnabled, $mrConfigJson, $ideProcsJson, $aiPanelsJson, $agentSurfacesJson, $egressSurfacesJson)
+[CfaiEnforcer]::Start(($aiProcs -split ','), $patNames.ToArray(), $patSources.ToArray(), $patSevs.ToArray(), $patLabels.ToArray(), [bool[]]($patIgnoreCase.ToArray()), $hbPath, $modelRouterEnabled, $mrConfigJson, $ideProcsJson, $aiPanelsJson, $agentSurfacesJson, $egressSurfacesJson, ($browserProcs -split ','), $webSurfacesJson)
 
 # Keep the process alive — the C# background threads (poll + message pump) do
 # the work and write events to stdout. Node reads them.

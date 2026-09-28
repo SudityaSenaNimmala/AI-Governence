@@ -344,8 +344,13 @@ test('the pinned block context holds pattern names and identity only — never t
   try {
     h.monitor.enforcer.emit('block', BLOCK);
     const ctx = h.monitor.rewriteContext;
+    // browser_host joined the pin so a Tokenize & Send on a web surface records
+    // WHICH surface it happened on — the rewrite event itself cannot supply it,
+    // because by the time the masked text is confirmed the foreground may have
+    // moved. It is a catalog-matched HOST, never a URL or a path, so it does
+    // not weaken the no-content assertion below.
     assert.deepEqual(Object.keys(ctx).sort(), [
-      'block_id', 'highest_severity', 'matches', 'pinnedAt', 'process_name', 'service', 'vendor',
+      'block_id', 'browser_host', 'highest_severity', 'matches', 'pinnedAt', 'process_name', 'service', 'vendor',
     ]);
     const serialized = JSON.stringify(ctx);
     for (const forbidden of [ORIGINAL, MASKED, BLOCK.preview, 'AKIAIOSFODNN7EXAMPLE']) {
@@ -502,8 +507,18 @@ test('the four attribution keys are exactly the server contract, and the pin gai
   try {
     h.monitor.enforcer.emit('block', ROW_BLOCK);
     const ctx = h.monitor.rewriteContext;
+    // `browser_host` joined the pin with AI-253: a Tokenize & Send on a web
+    // surface has to record WHICH surface it happened on, and the rewrite event
+    // cannot supply it — by the time the masked text is confirmed the foreground
+    // may have moved, so the host has to come from the block that armed the
+    // rewrite rather than be re-resolved.
+    //
+    // It is IDENTITY, which is what this pin is for, not content. The list is
+    // exact on purpose: the thing it guards against is the pin quietly growing
+    // to hold composer text, and the loop right below asserts that separately.
     assert.deepEqual(Object.keys(ctx).sort(), [
-      'agent_id', 'agent_name', 'agent_scope', 'block_id', 'highest_severity', 'matches', 'pinnedAt',
+      'agent_id', 'agent_name', 'agent_scope', 'block_id', 'browser_host',
+      'highest_severity', 'matches', 'pinnedAt',
       'process_name', 'service', 'surface', 'vendor',
     ]);
     const serialized = JSON.stringify(ctx);

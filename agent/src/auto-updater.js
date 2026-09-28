@@ -31,6 +31,19 @@ export function startAutoUpdater({ serverUrl, token, log }) {
     return null;
   }
 
+  // A DEVELOPER ESCAPE HATCH, and it earns its keep: the updater replaces the
+  // agent's own source and restarts it 30s after start. On a machine running
+  // the working tree that silently swaps the build under test mid-session —
+  // observed 2026-09-21, twice, where it looked exactly like the fix under test
+  // having no effect, because by then nothing was enforcing at all.
+  //
+  // Opt-OUT rather than opt-in, so a deployed agent keeps updating unless
+  // someone deliberately sets this.
+  if (process.env.CFAI_NO_AUTO_UPDATE === '1') {
+    log?.info?.('auto-updater: disabled by CFAI_NO_AUTO_UPDATE=1');
+    return null;
+  }
+
   const currentVersion = readCurrentVersion();
   log?.info?.(`auto-updater: current version ${currentVersion || 'unknown'}, checking every hour`);
 

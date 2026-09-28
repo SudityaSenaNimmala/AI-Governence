@@ -2084,9 +2084,14 @@ test('govstate PII: the payload is a bool, a scope, a panel id, admin names, a p
   for (const ev of lines) {
     assert.deepEqual(
       Object.keys(ev).sort(),
-      ['active', 'agent', 'agent_id', 'kind', 'panel', 'pid', 'process', 'scope'],
+      ['active', 'agent', 'agent_id', 'browser_host', 'kind', 'panel', 'pid', 'process', 'scope'],
       'the govstate payload gained or lost a field — every addition must be re-reviewed for PII',
     );
+    // browser_host was ADDED for the browser arm, and it must be EMPTY on every
+    // line this harness produces: every scenario here is a HOST APP (Teams) or an
+    // IDE panel, and neither has a browser host. A non-empty value on one of
+    // these lines would mean the field leaked across arms.
+    assert.equal(ev.browser_host, '', 'a Teams/IDE govstate must carry no browser host');
     assert.equal(typeof ev.active, 'boolean');
     assert.ok(['agent', 'panel', ''].includes(ev.scope), `unexpected scope ${JSON.stringify(ev.scope)}`);
     assert.ok(['ms-teams', ''].includes(ev.process), `unexpected process ${JSON.stringify(ev.process)}`);
@@ -2104,8 +2109,8 @@ test('govstate PII: the payload is a bool, a scope, a panel id, admin names, a p
   // outlive the conversation it described.
   for (const ev of lines.filter((e) => e.active === false)) {
     assert.deepEqual(
-      [ev.process, ev.scope, ev.panel, ev.agent, ev.agent_id, ev.pid],
-      ['', '', '', '', '', 0],
+      [ev.process, ev.scope, ev.panel, ev.agent, ev.agent_id, ev.pid, ev.browser_host],
+      ['', '', '', '', '', 0, ''],
       'an inactive govstate must be empty',
     );
   }

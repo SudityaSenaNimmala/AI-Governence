@@ -595,7 +595,14 @@ export class GoogleWorkspaceClient {
       return out;
     } catch (e) {
       const status = e instanceof GoogleWorkspaceError ? e.status : 0;
-      console.warn(`[Google] Could not list projects (${status || "error"}) — falling back to the single configured project`);
+      // The MESSAGE, not just the status. A bare 403 here reads as "missing
+      // permission" and sends people to IAM, but Google returns 403 just as
+      // readily for "Cloud Resource Manager API has not been used in project X
+      // before or it is disabled" — a completely different fix. Dropping the
+      // body cost a real debugging session on 2026-09-22, where the account
+      // already held Owner and Organization Administrator.
+      const why = e instanceof Error ? e.message : String(e);
+      console.warn(`[Google] Could not list projects (${status || "error"}) — falling back to the single configured project. Reason: ${why}`);
       return [];
     }
   }
