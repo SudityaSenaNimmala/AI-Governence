@@ -127,6 +127,9 @@ services:
       - "8787:8787"
     volumes:
       - server-data:/app/server/data
+      # Electron desktop agent build — produced by CI, bind-mounted so the
+      # download endpoint can serve it without baking it into the image.
+      - ./agent/build/electron-dist:/app/agent/build/electron-dist:ro
     restart: unless-stopped
 
   mongo:
