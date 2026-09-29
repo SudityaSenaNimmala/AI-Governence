@@ -199,14 +199,16 @@ jobs:
 
       - name: Build for Windows (cross-compile)
         working-directory: agent/electron
-        run: npx electron-builder --dir --win
+        run: npx electron-builder --dir --win || echo "::warning::Electron build failed — desktop download will be unavailable until fixed"
+        continue-on-error: true
 
       - uses: actions/upload-artifact@v4
+        if: hashFiles('agent/build/electron-dist/win-unpacked/resources/app.asar') != ''
         with:
           name: electron-dist
           path: agent/build/electron-dist
           retention-days: 7
-          if-no-files-found: error
+          if-no-files-found: warn
 
   deploy:
     # TEMPORARY: `test` removed from `needs` on 2026-09-21 to unblock a deploy

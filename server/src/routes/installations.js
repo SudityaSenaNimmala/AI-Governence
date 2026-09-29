@@ -452,36 +452,8 @@ export function mountInstallations(app, db) {
     ];
     let winUnpacked = candidates.find(d => existsSync(d));
 
-    // Auto-build if no build exists
     if (!winUnpacked) {
-      if (_electronBuilding) {
-        return res.status(503).json({ error: 'Desktop app is being built — try again in a few minutes.' });
-      }
-      if (!existsSync(join(agentElectron, 'package.json'))) {
-        return res.status(500).json({ error: 'Electron source not found.' });
-      }
-      _electronBuilding = true;
-      console.log('[desktop-app] No build found — auto-building Electron app...');
-      try {
-        // Install electron deps if needed
-        if (!existsSync(join(agentElectron, 'node_modules'))) {
-          execSync('npm install', { cwd: agentElectron, stdio: 'pipe', timeout: 120000 });
-        }
-        // Cross-compile for Windows (--dir = unpacked, no installer, no Wine needed)
-        execSync('npx electron-builder --dir --win -c.directories.output=../build/electron-dist', {
-          cwd: agentElectron, stdio: 'pipe', timeout: 300000,
-        });
-        console.log('[desktop-app] Build complete.');
-      } catch (err) {
-        _electronBuilding = false;
-        console.error('[desktop-app] Build failed:', err.stderr?.toString()?.slice(-500) || err.message);
-        return res.status(500).json({ error: 'Auto-build failed. Check server logs.' });
-      }
-      _electronBuilding = false;
-      winUnpacked = candidates.find(d => existsSync(d));
-      if (!winUnpacked) {
-        return res.status(500).json({ error: 'Build completed but output not found.' });
-      }
+      return res.status(503).json({ error: 'Desktop app build not available yet. The CI pipeline builds it on each deploy — if this is a fresh deployment, wait for the next deploy to complete, or run "cd agent/electron && npm install && npx electron-builder --dir --win" on a machine with Node.js.' });
     }
 
     // Bake server URL and enroll secret into settings for auto-enrollment
