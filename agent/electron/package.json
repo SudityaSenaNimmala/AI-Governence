@@ -36,7 +36,8 @@
       },
       {
         "from": "../node_modules",
-        "to": "agent/node_modules"
+        "to": "agent/node_modules",
+        "filter": ["**/*"]
       },
       {
         "from": "../package.json",
@@ -65,7 +66,6 @@
       "target": [
         { "target": "dir", "arch": ["x64"] }
       ],
-      "icon": "assets/icon.png",
       "requestedExecutionLevel": "asInvoker"
     },
     "mac": {

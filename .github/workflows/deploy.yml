@@ -193,6 +193,10 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Install agent deps (needed by extraResources)
+        working-directory: agent
+        run: npm install --no-audit --no-fund
+
       - name: Install electron deps
         working-directory: agent/electron
         run: npm install --no-audit --no-fund
