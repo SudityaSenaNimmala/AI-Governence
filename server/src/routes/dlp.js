@@ -252,6 +252,11 @@ export function mountDlp(app, db) {
             // uses (string-only, control/bidi/zero-width stripped, trimmed,
             // capped), so the two branches cannot disagree about what is stored.
             ...agentMetaFields(e),
+            // Desktop-agent attachment enforcement: which attachment this was
+            // (joins to the enforcement_block whose correlation_id is the same
+            // id), whether it was held or only reported, and why it was held.
+            // Validated by attachmentEnforcementFields(); absent when malformed.
+            ...attachmentEnforcementFields(e),
           } : isAiResponse ? {
             // How the reply was decoded on the client, and whether the page-side
             // buffer had to cut it short. No content here — the text itself goes
@@ -438,7 +443,7 @@ export function mountDlp(app, db) {
   // — which is how the dashboard ended up showing an empty "Sensitive prompts"
   // table underneath a "1,196 high/critical" counter.
   app.get('/api/v1/dlp', a(async (req, res) => {
-    const { service, severity, machineId, limit = 500 } = req.query;
+    const { service, severity, machineId, kind, blocked_for: blockedFor, limit = 500 } = req.query;
     const filter = {};
     if (service)   filter.ai_service = String(service);
     if (machineId) filter.machine_id = String(machineId);
@@ -449,6 +454,25 @@ export function mountDlp(app, db) {
       if (wanted.length === 1)      filter.secret_class = wanted[0];
       else if (wanted.length > 1)   filter.secret_class = { $in: wanted };
       else                          filter.secret_class = '__no_such_severity__';
+    }
+    // ?kind= — one exact event_kind from DLP_KIND_VALUES. Same stance as
+    // severity: an unknown value yields an empty page, never an unfiltered one.
+    if (kind !== undefined) {
+      const k = typeof kind === 'string' ? kind.trim() : '';
+      filter.event_kind = DLP_KIND_VALUES.has(k) ? k : '__no_such_kind__';
+    }
+    // ?blocked_for= — what an enforcement event stopped (e.g. 'file_upload').
+    // Stored only inside metadata_json (no column), so it is matched there as
+    // the exact JSON pair JSON.stringify writes. The [a-z_]{1,32} allowlist
+    // means the value needs no regex escaping and cannot inject an operator;
+    // the closing quote makes it an exact match, not a prefix. Fail-closed
+    // file blocks have no matches and so no severity, which is why this filter
+    // exists — pair it with kind=enforcement_block and NO severity param.
+    if (blockedFor !== undefined) {
+      const b = typeof blockedFor === 'string' ? blockedFor.trim() : '';
+      filter.metadata_json = BLOCKED_FOR_RE.test(b)
+        ? { $regex: `"blocked_for":"${b}"` }
+        : '__no_such_blocked_for__';
     }
 
     // Cap the page size: an unbounded Number(limit) let one request pull the whole
@@ -1033,6 +1057,40 @@ export function agentMetaFields(e) {
   return out;
 }
 
+// Attachment-enforcement context on file_upload events from the desktop agent.
+// Same stance as agentMetaFields(): string-only, the same invisible-character
+// stripping, trimmed, and DROPPED (never truncated or coerced) when malformed.
+//   attachment_id — opaque id (a uuid today), at most 64 chars. The matching
+//                   enforcement_block carries it as client_event_id, which lands
+//                   in metadata.correlation_id.
+//   enforcement   — exactly 'held' or 'reported'.
+//   hold_reason   — short machine code ([a-z_], at most 64 chars), e.g.
+//                   'cloud_reference', 'partially_scanned', 'unverified'.
+// metadata_json only — no column, no migration, not in lib/cef.js's SIEM allowlist.
+export const ATTACHMENT_META_KEYS = ['attachment_id', 'enforcement', 'hold_reason'];
+const ATTACHMENT_ID_MAX = 64;
+const HOLD_REASON_MAX = 64;
+const HOLD_REASON_RE = /^[a-z_]+$/;
+const ENFORCEMENT_VALUES = new Set(['held', 'reported']);
+
+function cleanMetaString(value, max) {
+  if (typeof value !== 'string') return null;
+  const s = value.replace(AGENT_META_STRIP_RE, '').trim();
+  if (!s || s.length > max) return null;
+  return s;
+}
+
+export function attachmentEnforcementFields(e) {
+  const out = {};
+  const attachmentId = cleanMetaString(e?.attachment_id, ATTACHMENT_ID_MAX);
+  if (attachmentId) out.attachment_id = attachmentId;
+  const enforcement = cleanMetaString(e?.enforcement, 16);
+  if (enforcement && ENFORCEMENT_VALUES.has(enforcement)) out.enforcement = enforcement;
+  const holdReason = cleanMetaString(e?.hold_reason, HOLD_REASON_MAX);
+  if (holdReason && HOLD_REASON_RE.test(holdReason)) out.hold_reason = holdReason;
+  return out;
+}
+
 function encodeFilename(name) {
   return String(name).replace(/[\r\n"\\]/g, '_');
 }
@@ -1040,6 +1098,18 @@ function encodeFilename(name) {
 // Severity names accepted by the ?severity= filter. Anything else is dropped, so a
 // caller cannot smuggle a query operator or a regex through this parameter.
 const SEVERITY_VALUES = new Set(['critical', 'high', 'moderate', 'medium', 'low']);
+
+// Event kinds accepted by GET /api/v1/dlp's ?kind= filter — the kinds the
+// browser extension and desktop agent actually post here. Anything else yields
+// an empty page (same stance as ?severity=).
+export const DLP_KIND_VALUES = new Set([
+  'prompt_submit', 'prompt_paste', 'prompt_typed', 'file_upload', 'egress_body',
+  'ai_response', 'model_routed', 'mcp_tool_call', 'coverage_gap',
+  'enforcement_block', 'enforcement_redact', 'enforcement_tokenize',
+  'enforcement_override', 'enforcement_decision',
+]);
+// ?blocked_for= allowlist. Also what makes the value safe to embed in $regex.
+const BLOCKED_FOR_RE = /^[a-z_]{1,32}$/;
 
 // Response Content-Type allowlist for GET /api/v1/dlp/:id/content.
 //

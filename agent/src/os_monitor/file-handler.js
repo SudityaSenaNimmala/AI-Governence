@@ -22,6 +22,35 @@ import {
   CONTENT_CAPTURE_MAX_BYTES,
 } from './classifier.js';
 import { extractTextFromBinary, extractZip } from './binary-extractors.js';
+import { Worker } from 'node:worker_threads';
+
+// Binary extraction in a WORKER (security review 2026-09-28, finding 5), for the
+// composer census and pane routes (`isolate: true`): the parsers -- SheetJS's
+// readFile is synchronous -- then cannot block the event loop that keeps every
+// attach hold alive. Terminated on EXTRACTION_BUDGET_MS; resourceLimits bound an
+// inflating document. Resolves like extractTextFromBinary, or TIMED_OUT, or
+// { failed: 'too_large' | 'extraction_failed' }.
+const WORKER_URL = new URL('./extract-worker.js', import.meta.url);
+export const WORKER_RESOURCE_LIMITS = { maxOldGenerationSizeMb: 512, maxYoungGenerationSizeMb: 64, stackSizeMb: 8 };
+function extractIsolated(path, ext, { maxChars = 0 } = {}) {
+  return new Promise((resolve) => {
+    let done = false;
+    let worker;
+    const finish = (v) => { if (done) return; done = true; clearTimeout(timer); try { worker?.terminate(); } catch {} resolve(v); };
+    try {
+      worker = new Worker(WORKER_URL, { workerData: { path, ext, maxChars }, resourceLimits: WORKER_RESOURCE_LIMITS });
+    } catch { resolve({ failed: 'extraction_failed' }); return; }
+    const timer = setTimeout(() => finish(TIMED_OUT), EXTRACTION_BUDGET_MS);
+    timer.unref?.();
+    worker.once('message', (m) => {
+      if (!m?.ok) finish({ failed: 'extraction_failed' });
+      else if (m.none) finish(null);
+      else finish({ text: m.text, via: m.via, pages: m.pages ?? undefined, sheets: m.sheets ?? undefined });
+    });
+    worker.once('error', (err) => finish({ failed: /ERR_WORKER_OUT_OF_MEMORY/.test(String(err?.code || err)) ? 'too_large' : 'extraction_failed' }));
+    worker.once('exit', (code) => { if (!done) finish({ failed: code === 0 ? 'extraction_failed' : 'too_large' }); });
+  });
+}
 
 const SEVERITY_ORDER = ['low', 'moderate', 'high', 'critical'];
 
@@ -129,18 +158,49 @@ function scanExtractedText({ text, via, bytesScanned, pages, sheets }) {
  * Returns null if the path doesn't exist (race with the user — file was
  * deleted, moved, or never resolvable from clipboard) — caller should skip.
  */
-export async function buildFileUploadEvent({ path, via, service, vendor, processName, windowTitle, log }) {
+// PARTIAL SCAN (user decision 2026-09-28, composer census only): a file over
+// CONTENT_SCAN_MAX_BYTES is not waved through unscanned. The FIRST part is
+// scanned instead -- the first CONTENT_SCAN_MAX_BYTES bytes of a text file, or
+// the first CONTENT_SCAN_MAX_BYTES characters of a document's extracted text for
+// a binary document up to PARTIAL_BINARY_MAX_BYTES -- and content_scan says so
+// (partial:true). A sensitive hit in that part holds the send like any other; a
+// clean partial scan is reported, not held (hold_reason 'partially_scanned').
+// Anything too big even for that stays too_large -> unverified -> fail closed on
+// a governed surface.
+export const PARTIAL_BINARY_MAX_BYTES = 50 * 1024 * 1024;
+
+// `isolate`: run binary extraction in a worker (see extractIsolated).
+// `quiet`: never put the filename or path in a log line (the census routes:
+// finding 12) -- only an error code.
+// `metadataOnly`: stat + classify, never read the content (a name-only census
+// resolution that is not bound to this attach: finding 2).
+export async function buildFileUploadEvent({
+  path, via, service, vendor, processName, windowTitle, log, partialScan = false,
+  isolate = false, quiet = false, metadataOnly = false,
+}) {
+  const extractBinary = (pth, ext2, maxChars = 0) => (isolate
+    ? extractIsolated(pth, ext2, { maxChars })
+    : withExtractionBudget(extractTextFromBinary(pth, ext2)));
   let st;
   try { st = await stat(path); }
   catch (err) {
     if (err.code === 'ENOENT') return null;
-    log?.warn(`file-handler: stat failed for ${path}: ${err.message}`);
+    log?.warn(quiet ? `file-handler: stat failed (${err.code || 'error'})` : `file-handler: stat failed for ${path}: ${err.message}`);
     return null;
   }
   if (!st.isFile()) return null;   // directories, devices etc. — skip
 
   const filename = basename(path);
   const r = classifyFile(filename);
+  if (metadataOnly) {
+    return {
+      kind: 'file_upload', via, service, vendor, process_name: processName, window_title: windowTitle,
+      filename, size: st.size, size_bucket: sizeBucket(st.size), mime_type: null,
+      extension: extname(filename) || null, file_class: r.class, severity: r.severity, reason: r.reason,
+      content_scan: { scanned: false, reason: 'unbound_name_match', unverified: true },
+      content_text: null, content_base64: null,
+    };
+  }
 
   // Try to scan content. Three routing paths:
   //   1) Text-readable formats (.env, .csv, .json, source code, etc.) — read as UTF-8
@@ -156,7 +216,45 @@ export async function buildFileUploadEvent({ path, via, service, vendor, process
   // Set by any capture below that had to stop at CONTENT_CAPTURE_MAX_BYTES, so
   // the preview is never silently presented as the whole file.
   let captureTruncated = false;
-  if (st.size > CONTENT_SCAN_MAX_BYTES) {
+  if (st.size > CONTENT_SCAN_MAX_BYTES && partialScan && isTextReadable(filename)) {
+    try {
+      const { buf } = await readCapped(path, CONTENT_SCAN_MAX_BYTES, st.size);
+      const text = buf.toString('utf8');
+      capturedText = text;
+      captureTruncated = true;
+      capturedMime = 'text/plain; charset=utf-8';
+      contentScan = scanExtractedText({ text, via: 'utf8', bytesScanned: buf.length });
+      contentScan.partial = true;
+    } catch (err) {
+      contentScan = { scanned: false, reason: 'read_failed', error: String(err?.message || err) };
+    }
+  } else if (st.size > CONTENT_SCAN_MAX_BYTES && partialScan && isBinaryParseable(filename) && st.size <= PARTIAL_BINARY_MAX_BYTES) {
+    try {
+      const extraction = await extractBinary(path, ext, CONTENT_SCAN_MAX_BYTES);
+      if (extraction === TIMED_OUT) {
+        contentScan = { scanned: false, reason: 'extraction_timeout', extension: ext, budgetMs: EXTRACTION_BUDGET_MS };
+      } else if (extraction?.failed) {
+        contentScan = { scanned: false, reason: extraction.failed === 'too_large' ? 'too_large' : 'extraction_failed', extension: ext };
+      } else if (!extraction) {
+        contentScan = { scanned: false, reason: 'unsupported_format', extension: ext };
+      } else {
+        contentScan = scanExtractedText({
+          text: String(extraction.text || '').slice(0, CONTENT_SCAN_MAX_BYTES),
+          via: extraction.via, bytesScanned: Math.min(st.size, CONTENT_SCAN_MAX_BYTES),
+          pages: extraction.pages, sheets: extraction.sheets,
+        });
+        contentScan.partial = true;
+      }
+    } catch (err) {
+      contentScan = { scanned: false, reason: 'extraction_failed', extension: ext, error: String(err?.message || err) };
+    }
+    try {
+      const { buf, truncated } = await readCapped(path, CONTENT_CAPTURE_MAX_BYTES, st.size);
+      capturedBase64 = buf.toString('base64');
+      capturedMime = mimeFromExt(ext) || 'application/octet-stream';
+      captureTruncated = captureTruncated || truncated;
+    } catch { /* leave null */ }
+  } else if (st.size > CONTENT_SCAN_MAX_BYTES) {
     contentScan = { scanned: false, reason: 'too_large', bytes: st.size };
     // Still capture the bytes for preview if we can. They're already on disk;
     // failing to forward is worse than skipping the local scan.
@@ -182,13 +280,15 @@ export async function buildFileUploadEvent({ path, via, service, vendor, process
     }
   } else if (isBinaryParseable(filename) || isImage(filename)) {
     try {
-      const extraction = await withExtractionBudget(extractTextFromBinary(path, ext));
-      if (extraction === TIMED_OUT) {
+      const extraction = await extractBinary(path, ext);
+      if (extraction?.failed) {
+        contentScan = { scanned: false, reason: extraction.failed === 'too_large' ? 'too_large' : 'extraction_failed', extension: ext };
+      } else if (extraction === TIMED_OUT) {
         // Ran past EXTRACTION_BUDGET_MS. Reported as its own reason rather than
         // folded into extraction_failed so the dashboard can tell a corrupt or
         // encrypted file from a slow one — both are equally unverified, which is
         // what the hold decision keys on.
-        log?.warn(`file-handler: extraction of ${filename} exceeded ${EXTRACTION_BUDGET_MS}ms — answering without it`);
+        log?.warn(quiet ? `file-handler: extraction exceeded ${EXTRACTION_BUDGET_MS}ms — answering without it` : `file-handler: extraction of ${filename} exceeded ${EXTRACTION_BUDGET_MS}ms — answering without it`);
         contentScan = { scanned: false, reason: 'extraction_timeout', extension: ext, budgetMs: EXTRACTION_BUDGET_MS };
       } else if (!extraction) {
         contentScan = { scanned: false, reason: 'unsupported_format', extension: ext };
@@ -202,7 +302,7 @@ export async function buildFileUploadEvent({ path, via, service, vendor, process
         });
       }
     } catch (err) {
-      log?.warn(`file-handler: binary extraction failed for ${filename}: ${err?.message || err}`);
+      log?.warn(quiet ? `file-handler: binary extraction failed (${err?.code || err?.name || 'error'})` : `file-handler: binary extraction failed for ${filename}: ${err?.message || err}`);
       contentScan = {
         scanned: false,
         reason: 'extraction_failed',
@@ -225,10 +325,10 @@ export async function buildFileUploadEvent({ path, via, service, vendor, process
         ? { scanned: false, reason: 'extraction_timeout', extension: ext, budgetMs: EXTRACTION_BUDGET_MS }
         : zipScan;
       if (zipScan === TIMED_OUT) {
-        log?.warn(`file-handler: zip extraction of ${filename} exceeded ${EXTRACTION_BUDGET_MS}ms — answering without it`);
+        log?.warn(quiet ? `file-handler: zip extraction exceeded ${EXTRACTION_BUDGET_MS}ms — answering without it` : `file-handler: zip extraction of ${filename} exceeded ${EXTRACTION_BUDGET_MS}ms — answering without it`);
       }
     } catch (err) {
-      log?.warn(`file-handler: zip extraction failed for ${filename}: ${err?.message || err}`);
+      log?.warn(quiet ? `file-handler: zip extraction failed (${err?.code || err?.name || 'error'})` : `file-handler: zip extraction failed for ${filename}: ${err?.message || err}`);
       contentScan = { scanned: false, reason: 'zip_failed', error: String(err?.message || err) };
     }
     try {

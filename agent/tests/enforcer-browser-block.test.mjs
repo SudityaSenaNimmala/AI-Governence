@@ -389,8 +389,12 @@ test('both browser flags are read in exactly one place', async () => {
   // exactly one place (EnforcingWebPicker) for the same reason the surface's own
   // pair and agentRead's are: no call site may consult one flag and forget the
   // other. Counted so a FOURTH reader has to be re-reviewed.
-  assert.equal((code.match(/\.Verified/g) || []).length, 3,
-    'Verified is read in the two surface gates and the model-picker gate only');
+  // FIVE since the composer census (2026-09-28): its per-surface
+  // attachCensus {enforce, verified} pair is read twice -- once to decide a
+  // hold may be armed from a fresh census, once to stamp the census line's own
+  // "enforce" flag -- both requiring Enforce && Verified together.
+  assert.equal((code.match(/\.Verified/g) || []).length, 5,
+    'Verified is read in the two surface gates, the model-picker gate and the census gate only');
   const pickerGate = src.slice(src.indexOf('static WebPicker EnforcingWebPicker(WebSurface web)'),
                                src.indexOf('// The menu-item label this surface uses for a tier number'));
   assert.ok(pickerGate.length > 0, 'expected an EnforcingWebPicker body');

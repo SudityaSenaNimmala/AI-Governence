@@ -34,6 +34,7 @@ import {
   buildWebSurfaceConfig,
   browserProcNames,
 } from './ai-processes.js';
+import { buildAttachCensusConfig } from './ai-processes.js';
 
 // Resolved through helperScript() rather than import.meta.url: this module is
 // bundled to CommonJS for the packaged binary, where import.meta does not exist
@@ -180,6 +181,10 @@ export class Enforcer extends EventEmitter {
           // by-hand debugging run of the .ps1 gets, with no parent to set it.
           CFAI_BROWSER_PROCESSES: browserProcNames().join(','),
           CFAI_WEB_SURFACES: JSON.stringify(buildWebSurfaceConfig()),
+          // The composer census catalog (ATTACH_CENSUS_SURFACES): which governed
+          // composers' draft attachments the helper may read, and which of them
+          // may HOLD a send. Read by the helper itself at Start().
+          CFAI_ATTACH_CENSUS: JSON.stringify(buildAttachCensusConfig()),
         },
       }
     );
@@ -376,10 +381,26 @@ export class Enforcer extends EventEmitter {
    * no explanation. It is a bare process name (the same value that arrives on
    * every watcher event), never a window title or a path.
    */
-  attachHold(state, { filename = '', patterns = '', ttlMs = 3000, process: processName = '' } = {}) {
+  //
+  // KEYED (2026-09-28): the helper holds a TABLE of holds, one per `key`
+  // (process|panel|surfaceKey, or egress|process|surface for a mail client), and
+  // "off" removes only that key — so one app's hold can no longer replace or
+  // release another's. `panel` / `surfaceKey` narrow where the hold applies
+  // (see AttachHoldMatches in enforcer-win.ps1); both optional, both bare ids.
+  attachHold(state, {
+    filename = '', patterns = '', ttlMs = 3000, process: processName = '',
+    key = '', panel = '', surfaceKey = '',
+    egress = false, egressSurface = '',
+  } = {}) {
     if (!this.child?.stdin || this.child.stdin.destroyed) return false;
     try {
-      this.child.stdin.write(JSON.stringify({ cmd: 'attach_hold', state, filename, patterns, ttl_ms: ttlMs, process: processName }) + '\n');
+      this.child.stdin.write(JSON.stringify({
+        cmd: 'attach_hold', state, key, process: processName, panel, surface_key: surfaceKey,
+        filename, patterns, ttl_ms: ttlMs,
+        // The helper derives its table key from these validated parts and
+        // ignores `key` (finding 16); an egress (mail-client) hold says so.
+        egress: egress === true ? 'true' : 'false', egress_surface: egressSurface,
+      }) + '\n');
       return true;
     } catch (err) {
       this.log?.warn(`enforcer: attach_hold command failed — ${err?.message || err}`);
@@ -400,6 +421,8 @@ export class Enforcer extends EventEmitter {
         // NEVER echo a line that may be a (malformed) prompt_text record: it
         // carries composer text. A fixed string instead (security review L4).
         if (line.startsWith('{"kind":"prompt_text"')) this.log?.warn('enforcer: malformed prompt_text line dropped');
+        // Nor a census line: it carries attachment names (finding 12).
+        else if (line.includes('"kind":"attachcensus"')) this.log?.warn('enforcer: malformed attachcensus line dropped');
         else this.log?.warn('enforcer: non-JSON: ' + line.slice(0, 120));
         continue;
       }
@@ -470,6 +493,13 @@ export class Enforcer extends EventEmitter {
         // put a window title, a heading, a filename or a path on it — see
         // EmitGovState in enforcer-win.ps1.
         this.emit('govstate', ev);
+        break;
+      case 'attachcensus':
+        // The composer census: which files a GOVERNED composer's draft holds
+        // right now. Carries attachment chip NAMES, so it is deliberately never
+        // logged here (or anywhere) -- index.js reconciles it into the keyed
+        // attach holds. See UpdateAttachCensus in enforcer-win.ps1.
+        this.emit('attachcensus', ev);
         break;
       case 'request_access_offer':
         // A platform/agent/panel block just swallowed a send, and the helper is

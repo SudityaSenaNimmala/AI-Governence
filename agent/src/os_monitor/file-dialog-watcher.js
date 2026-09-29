@@ -116,6 +116,28 @@ export class FileDialogWatcher extends EventEmitter {
     }
   }
 
+  /**
+   * Arm/disarm an Office / Outlook host's COPILOT PANE picker route while that
+   * pane is the governed, focused surface (govstate scope:"pane"). A bare
+   * process name and an on/off -- see $PaneArmedProcs in file-dialog-watcher.ps1.
+   */
+  paneArm(processName, on, hwnd = 0) {
+    if (!processName) return false;
+    if (!this.child?.stdin || this.child.stdin.destroyed) return false;
+    try {
+      this.child.stdin.write(JSON.stringify({
+        cmd: 'pane_arm', process: String(processName), state: on ? 'on' : 'off',
+        // The pane's own webview window, when the helper knew it: the picker
+        // latch binds to exactly that window (finding 11).
+        hwnd: Number(hwnd) || 0,
+      }) + '\n');
+      return true;
+    } catch (err) {
+      this.log?.warn(`file-dialog-watcher: pane_arm command failed — ${err?.message || err}`);
+      return false;
+    }
+  }
+
   #onStdout(chunk) {
     this.buffer += chunk;
     let idx;
@@ -144,6 +166,12 @@ export class FileDialogWatcher extends EventEmitter {
       // mail client satisfies none of it.
       case 'egress_file_dialog_pick':
         this.emit('egress_file_dialog_pick', ev);
+        break;
+      // A Copilot PANE upload dialog (Word / Excel / PowerPoint / OneNote /
+      // Outlook). Its own event, like egress, so it never reaches either the
+      // AI/host-app or the email handler.
+      case 'pane_file_dialog_pick':
+        this.emit('pane_file_dialog_pick', ev);
         break;
       case 'heartbeat':
         // First one only — see AttachmentWatcher's copy. `ready` proves the
