@@ -436,10 +436,13 @@ export function mountInstallations(app, db) {
 
   // ── Electron Desktop App download ──
   // Serves the pre-built Electron app as a zip with install.bat.
-  // The app includes all UI (banner, popups, dialogs) built-in.
+  // Auto-builds on first request if no build exists (cross-compiles for Windows
+  // from Linux using electron-builder — no Wine needed for the dir target).
+  let _electronBuilding = false;
+
   app.get('/api/v1/installations/desktop-app', a(async (req, res) => {
     const serverUrl = apiServerUrl(req);
-    // Check build locations in order: electron-v2 (latest) > electron-fresh > win-unpacked (original)
+    const agentElectron = join(__dirname, '..', '..', '..', 'agent', 'electron');
     const buildRoot = join(__dirname, '..', '..', '..', 'agent', 'build');
     const electronDist = join(buildRoot, 'electron-dist');
     const candidates = [
@@ -447,10 +450,38 @@ export function mountInstallations(app, db) {
       join(electronDist, 'electron-fresh', 'win-unpacked'),
       join(electronDist, 'win-unpacked'),
     ];
-    const winUnpacked = candidates.find(d => existsSync(d)) || candidates[candidates.length - 1];
+    let winUnpacked = candidates.find(d => existsSync(d));
 
-    if (!existsSync(winUnpacked)) {
-      return res.status(500).json({ error: 'Electron desktop app not built. Run npm run dist:win in agent/electron/' });
+    // Auto-build if no build exists
+    if (!winUnpacked) {
+      if (_electronBuilding) {
+        return res.status(503).json({ error: 'Desktop app is being built — try again in a few minutes.' });
+      }
+      if (!existsSync(join(agentElectron, 'package.json'))) {
+        return res.status(500).json({ error: 'Electron source not found.' });
+      }
+      _electronBuilding = true;
+      console.log('[desktop-app] No build found — auto-building Electron app...');
+      try {
+        // Install electron deps if needed
+        if (!existsSync(join(agentElectron, 'node_modules'))) {
+          execSync('npm install', { cwd: agentElectron, stdio: 'pipe', timeout: 120000 });
+        }
+        // Cross-compile for Windows (--dir = unpacked, no installer, no Wine needed)
+        execSync('npx electron-builder --dir --win -c.directories.output=../build/electron-dist', {
+          cwd: agentElectron, stdio: 'pipe', timeout: 300000,
+        });
+        console.log('[desktop-app] Build complete.');
+      } catch (err) {
+        _electronBuilding = false;
+        console.error('[desktop-app] Build failed:', err.stderr?.toString()?.slice(-500) || err.message);
+        return res.status(500).json({ error: 'Auto-build failed. Check server logs.' });
+      }
+      _electronBuilding = false;
+      winUnpacked = candidates.find(d => existsSync(d));
+      if (!winUnpacked) {
+        return res.status(500).json({ error: 'Build completed but output not found.' });
+      }
     }
 
     // Bake server URL and enroll secret into settings for auto-enrollment

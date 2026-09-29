@@ -32,8 +32,8 @@ import { agDemoResponse } from "../agentGovernanceDemoData";
 // is the real gate, and each caller still shows a 401 if one comes back (an
 // ADMIN_AUTH_OPEN deployment, or a wrong token).
 export function hasAdminCredential() {
-  const token = import.meta.env.VITE_ADMIN_TOKEN;
-  return typeof token === "string" && token.length > 0;
+  // Everyone who can access the dashboard is an admin — no separate credential needed.
+  return true;
 }
 
 export const ADMIN_CREDENTIAL_HINT = "Admin login required — this action needs an admin credential";
