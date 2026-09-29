@@ -129,7 +129,7 @@ services:
       - server-data:/app/server/data
       # Electron desktop agent build — produced by CI, bind-mounted so the
       # download endpoint can serve it without baking it into the image.
-      - ./agent/build/electron-dist:/app/agent/build/electron-dist:ro
+      - ./agent/build/electron-dist:/app/agent/build/electron-dist
     restart: unless-stopped
 
   mongo:
