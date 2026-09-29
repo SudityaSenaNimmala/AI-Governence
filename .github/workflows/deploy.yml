@@ -178,6 +178,38 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  # ── Blocking: the Electron desktop agent build ───────────────────────────
+  # Cross-compiles for Windows from Linux. electron-builder downloads the
+  # Windows Electron binary; no Wine needed for the --dir target (unpacked,
+  # no installer). The deploy job ships this into the deploy dir so the
+  # download endpoint works without a manual build step.
+  electron:
+    name: build electron desktop agent
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: agent/electron/package-lock.json
+
+      - name: Install electron deps
+        working-directory: agent/electron
+        run: npm install --no-audit --no-fund
+
+      - name: Build for Windows (cross-compile)
+        working-directory: agent/electron
+        run: npx electron-builder --dir --win
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: electron-dist
+          path: agent/build/electron-dist
+          retention-days: 7
+          if-no-files-found: error
+
   deploy:
     # TEMPORARY: `test` removed from `needs` on 2026-09-21 to unblock a deploy
     # backlog — `test (agent)` was failing on the ubuntu-latest runner on a test
@@ -189,7 +221,7 @@ jobs:
     # RESTORE `needs: [test, frontend]` once the agent-suite Linux failure is
     # diagnosed with real CI log access and fixed or added to the documented
     # skip pattern above.
-    needs: [frontend]
+    needs: [frontend, electron]
     runs-on: [self-hosted, linux, ai-gov]
     env:
       DEPLOY_DIR: ${{ vars.DEPLOY_DIR || '/opt/ai-gov' }}
@@ -215,6 +247,13 @@ jobs:
 
       - name: Sanity-check the bundle arrived
         run: test -f connect-ui/dist/index.html || { echo "::error::no connect-ui/dist/index.html"; exit 1; }
+
+      # Electron desktop agent — built by the `electron` job on a GitHub-hosted
+      # runner (cross-compiled for Windows from Linux).
+      - uses: actions/download-artifact@v4
+        with:
+          name: electron-dist
+          path: agent/build/electron-dist
 
       - name: Verify the server keeps its own .env
         run: |
@@ -265,6 +304,16 @@ jobs:
             agent server connect-ui browser-extension scripts sdk-js \
             docker-compose.yml .dockerignore \
             | tar xf - -C "$DEPLOY_DIR"
+
+          # Ship the Electron desktop agent build separately (the --exclude
+          # above strips */build, but this is the CI-built artifact, not a
+          # leftover dev build).
+          if [ -d "agent/build/electron-dist/win-unpacked" ]; then
+            mkdir -p "$DEPLOY_DIR/agent/build/electron-dist"
+            cp -r agent/build/electron-dist/win-unpacked "$DEPLOY_DIR/agent/build/electron-dist/"
+            cp agent/build/electron-dist/install.bat "$DEPLOY_DIR/agent/build/electron-dist/" 2>/dev/null || true
+            echo "Electron desktop agent build shipped."
+          fi
 
           if [ -d "$STASH" ] && [ ! -d "$DEPLOY_DIR/agent/prebuilt" ]; then
             mkdir -p "$DEPLOY_DIR/agent"
