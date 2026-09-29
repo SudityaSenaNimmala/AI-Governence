@@ -192,8 +192,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: agent/electron/package-lock.json
 
       - name: Install electron deps
         working-directory: agent/electron
@@ -222,6 +220,7 @@ jobs:
     # diagnosed with real CI log access and fixed or added to the documented
     # skip pattern above.
     needs: [frontend, electron]
+    if: always() && needs.frontend.result == 'success'
     runs-on: [self-hosted, linux, ai-gov]
     env:
       DEPLOY_DIR: ${{ vars.DEPLOY_DIR || '/opt/ai-gov' }}
@@ -249,8 +248,10 @@ jobs:
         run: test -f connect-ui/dist/index.html || { echo "::error::no connect-ui/dist/index.html"; exit 1; }
 
       # Electron desktop agent — built by the `electron` job on a GitHub-hosted
-      # runner (cross-compiled for Windows from Linux).
+      # runner (cross-compiled for Windows from Linux). Optional — if the electron
+      # job failed, the deploy proceeds without the desktop download.
       - uses: actions/download-artifact@v4
+        if: needs.electron.result == 'success'
         with:
           name: electron-dist
           path: agent/build/electron-dist
