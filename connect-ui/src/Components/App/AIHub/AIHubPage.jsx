@@ -20,7 +20,7 @@ import { cacheStats, cacheClear, warmCache } from "./aiHubDemoCache";
 import { sanitizeReplayEvents } from "./replaySanitize";
 import { aliasResponse } from "./demoIdentity";
 import { createReplayHost, applyReplayIframeCsp } from "./rrwebHost";
-import { fileRowInScope, fileIsHeld, pairFileBlocks, mergeEventsById, attemptsLabel, fileReason } from "./dlpFileRows";
+import { fileRowInScope, fileIsHeld, fileIsUnscannedReported, pairFileBlocks, mergeEventsById, attemptsLabel, fileReason, fileHasContent, fileNoContentNote, filesWithPromptBlock } from "./dlpFileRows";
 import "./AIHub.css";
 
 const API = "/api/v1";
@@ -1691,6 +1691,7 @@ function DLPView() {
   const [section,setSection]=useState(""); // "", "prompts", "files", "services"
   const [kind,setKind]=useState("");       // "" = both, else an EVENT_SURFACE_KINDS key
   const [openRows,setOpenRows]=useState(()=>new Set()); // grouped rows expanded to show their members
+  const [showUnscanned,setShowUnscanned]=useState(false); // File Uploads: also list allowed files the agent could not scan
   const [staleMeta,setStaleMeta]=useState(null);
   const toggleRow=id=>setOpenRows(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;});
   useEffect(()=>{
@@ -1744,10 +1745,17 @@ function DLPView() {
   // feed Claude Usage, Conversations and the per-service breakdown. This is a
   // view-level scope, not a retention policy.
   const promptRows=allPrompts.filter(ev=>isHiCrit(ev.secret_class||ev.highest_severity));
-  // Files: high/critical PLUS every held (blocked) file — a fail-closed hold
-  // (cloud reference, unreadable file) can carry low or no severity, and a file
-  // the agent blocked must never be missing from this table.
-  const fileRows=allFiles.filter(fileRowInScope);
+  // Files: high/critical PLUS every held (blocked) file. Since 2026-09-30 the
+  // agent holds only sensitive content, a credential/key file type
+  // (sensitive_filename) or a suspicious unscannable file; those holds can carry
+  // low or no severity, and a file the agent blocked must never be missing from
+  // this table. Provisional "still checking" blocks are never paired or counted
+  // (see isProvisionalFileBlock).
+  const fileRows=allFiles.filter(f=>fileRowInScope(f));
+  // Allowed uploads the agent could not scan (encrypted, too large, unsupported
+  // type, cloud file…). Not findings, so never in the default table or the
+  // "High / Critical" card — but a reviewer can opt in to see the blind spots.
+  const unscannedRows=allFiles.filter(fileIsUnscannedReported);
   // Grouped AFTER the severity narrowing, so a row never folds in a member the
   // table excludes — the expanded members are always exactly the rows shown, and
   // the "N events" count never disagrees with the table.
@@ -1759,7 +1767,9 @@ function DLPView() {
   // belong to a high/critical prompt.
   const enforcementRows=(events||[]).filter(ev=>ENFORCEMENT_MEMBER_KINDS.has(ev.event_kind)).filter(inKind);
   const promptGroups=attachEnforcement(groupDlpEvents(promptRows),enforcementRows);
-  const shownFileRows=fileRows;
+  // Same order as /dlp/files (newest first); the opt-in rows are interleaved by
+  // time rather than appended, and the Action badge tells them apart.
+  const shownFileRows=showUnscanned?allFiles.filter(f=>fileRowInScope(f,{includeUnscanned:true})):fileRows;
   // File-upload blocks (the "Send" the agent stopped) paired to the file they
   // held — by correlation_id ⇄ attachment_id, else same machine + filename +
   // service within ±10 min. Display only: never a row, never in any count.
@@ -1767,10 +1777,14 @@ function DLPView() {
   // Feeds ONLY this pairing — prompt grouping, cards and counts never see it.
   const fileBlocks=pairFileBlocks(allFiles,mergeEventsById(events,fileBlockEvs).filter(inKind));
   const fileAgent=r=>eventAgentName(r)||(fileBlocks.get(r.id)||[]).map(eventAgentName).find(Boolean)||null;
+  // Files whose blocked Send also had its prompt text blocked (same machine +
+  // service, ±5 s of the file's block). Reuses the events already fetched above.
+  const promptAlsoBlocked=filesWithPromptBlock(fileBlocks,(events||[]).filter(inKind));
   // Grouping partitions promptRows, so summing members equals promptRows.length
   // — the cards below always count what the tables show.
   const shownPromptEvents=promptGroups.reduce((n,g)=>n+groupMembers(g).length,0);
-  const highCrit=shownPromptEvents+shownFileRows.length;
+  // fileRows, not shownFileRows: the opt-in unscanned rows are not high/critical.
+  const highCrit=shownPromptEvents+fileRows.length;
 
   return (<div>
     {/* The severity scope moves into the hint now that it is fixed — with no
@@ -1797,7 +1811,7 @@ function DLPView() {
     <div className="aihub_stat_grid" style={{gridTemplateColumns:"repeat(4,1fr)"}}>
       <StatCard icon={<AlertTriangle size={18}/>} label="High / Critical" value={highCrit} hint="Total Flagged" color="#ef4444"/>
       <StatCard icon={<MessageSquare size={18}/>} label="Prompt Events" value={shownPromptEvents} hint="High & Critical" color="#0052e0" onClick={()=>toggle("prompts")}/>
-      <StatCard icon={<FileText size={18}/>} label="File Uploads" value={shownFileRows.length} hint="High & Critical + Blocked" color="#f59e0b" onClick={()=>toggle("files")}/>
+      <StatCard icon={<FileText size={18}/>} label="File Uploads" value={shownFileRows.length} hint={showUnscanned?"High & Critical + Blocked + Unscanned":"High & Critical + Blocked"} color="#f59e0b" onClick={()=>toggle("files")}/>
       <StatCard icon={<Server size={18}/>} label="AI Services" value={serviceCount} hint="Breakdown" color="#8b5cf6" onClick={()=>toggle("services")}/>
     </div>
 
@@ -1833,8 +1847,12 @@ function DLPView() {
     </div>}
 
     {section==="files"&&<div className="aihub_card">
-      <SectionHeader title="File Uploads" hint="High & critical, plus every blocked file"/>
-      <DataTable onRow={r=>{ if(r.has_content) setPreview(r); }} columns={[
+      <SectionHeader title="File Uploads"
+        hint={showUnscanned?"High & critical, every blocked file, plus allowed files that could not be scanned":"High & critical, plus every blocked file"}
+        action={unscannedRows.length>0&&<button type="button" className={`aihub_filter_btn${showUnscanned?" active":""}`} aria-pressed={showUnscanned}
+          title="Files the agent let through without a full scan (encrypted, too large, unsupported type, cloud file…). They carry no finding, so they are hidden by default."
+          onClick={()=>setShowUnscanned(v=>!v)}>{showUnscanned?"Hide":"Show"} {unscannedRows.length} unscanned allowed file{unscannedRows.length===1?"":"s"}</button>}/>
+      <DataTable onRow={r=>{ if(fileHasContent(r)) setPreview(r); }} columns={[
         {label:"Date & Time",hint:"When this file upload was captured.",render:r=><DateTimeCell d={r.occurred_at}/>},
         {label:"User",hint:"The employee this event is attributed to, resolved from the machine/session that captured it.",render:r=><UserCell row={r}/>},
         {label:"Service",hint:"Which AI service this upload was sent to, exactly as the capturing agent named it (e.g. Microsoft Teams (agent), Word Copilot).",render:r=>{
@@ -1847,13 +1865,18 @@ function DLPView() {
         }},
         {label:"Filename",hint:"The uploaded file's name, as captured at upload time.",render:r=><Mono>{r.metadata?.filename||"—"}</Mono>},
         {label:"File Type",hint:"The kind of file detected — document, image, spreadsheet, etc.",render:r=><Tag text={r.file_class||"—"}/>},
-        {label:"Action",hint:"Blocked: the desktop agent held this attachment so it could not be sent. Detected: the upload was recorded but not stopped. The count below is how many Send attempts on this file the agent stopped.",render:r=>{
+        {label:"Action",hint:"Blocked: the desktop agent held this attachment so it could not be sent. Detected: the upload was recorded but not stopped. Not scanned: the upload was allowed but its contents could not be checked. The lines below show how many Send attempts on this file the agent stopped, and whether the prompt text of that Send was blocked too.",render:r=>{
           const held=fileIsHeld(r), n=attemptsLabel((fileBlocks.get(r.id)||[]).length);
-          return (<><Badge text={held?"Blocked":"Detected"} color={held?"#ef4444":"#9ca3af"}/>{n&&<div className="aihub_text_muted">{n}</div>}</>);
+          const unscanned=!held&&fileIsUnscannedReported(r);
+          const [text,color]=held?["Blocked","#ef4444"]:unscanned?["Not scanned","#f59e0b"]:["Detected","#9ca3af"];
+          return (<><Badge text={text} color={color}/>{n&&<div className="aihub_text_muted">{n}</div>}{promptAlsoBlocked.has(r.id)&&<div className="aihub_text_muted">Also blocked: prompt text</div>}</>);
         }},
-        {label:"Reason",hint:"The sensitive-data patterns found in the file, or — for a file blocked without a full scan — why it was held (cloud file, partially scanned, could not be scanned, not found on disk).",render:r=><Mono>{fileReason(r)||"—"}</Mono>},
+        {label:"Reason",hint:"The sensitive-data patterns found in the file, or — for a file held or allowed without a full scan — why (cloud file, too large, encrypted, unsupported type, scan timed out, not found on disk, could not confirm which file was attached).",render:r=><Mono>{fileReason(r)||"—"}</Mono>},
         {label:"Severity",hint:"The DLP severity assigned to this upload's content (low, medium, high, critical).",render:r=><SeverityBadge sev={r.severity||r.highest_severity}/>},
-        {label:"",render:r=><ViewBtn has={r.has_content} onClick={()=>setPreview(r)}/>,right:true},
+        {label:"",render:r=>{
+          const note=fileNoContentNote(r);
+          return note?<span className="aihub_text_muted" title={note.title}>{note.label}</span>:<ViewBtn has onClick={()=>setPreview(r)}/>;
+        },right:true},
       ]} rows={shownFileRows} empty="No file upload events matching this filter." paginate={25}/>
     </div>}
 

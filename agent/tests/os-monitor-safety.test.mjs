@@ -677,18 +677,18 @@ test('OsMonitor arms a provisional hold before the file scan resolves, and only 
   assert.ok(provisionalIdx >= 0, 'expected a provisional #armAttachHold call');
   assert.ok(scanIdx >= 0, 'expected a buildFileUploadEvent call');
   assert.ok(provisionalIdx < scanIdx, 'the provisional hold must be armed BEFORE the scan starts, not after');
-  // Escalation threshold matches the browser extension's existing file-block
-  // severity (high/critical only, not moderate) — PLUS the fail-closed case,
-  // which is gated on the conversation being governed/blocked so that nothing
-  // changes for any ordinary AI app.
-  assert.match(appearedHandler, /shouldHold = severity === 'high' \|\| severity === 'critical' \|\| failClosed/);
-  // "Inside a governed conversation" is the condition, and the reliable
-  // statement of it is the helper's LATCHED host_armed — a live read of
-  // this.hostGoverned has usually already bounced to null by the time a chip is
-  // visible, which would fail OPEN on exactly the attachments this covers. Still
-  // false for every non-host app, so fail-closed stays governed-only.
-  assert.match(appearedHandler, /const inGovernedConversation = !!governed \|\| hostChip;/);
-  assert.match(appearedHandler, /const failClosed = inGovernedConversation && unverified;/);
+  // Escalation threshold matches the browser extension's file-block severity
+  // (high/critical only, not moderate) -- and, since 2026-09-30, ONLY that: the
+  // governed-conversation fail-closed term is gone (browser parity), so an
+  // unscannable file is reported and its provisional hold released.
+  // 2026-09-30 correction: the CONTENT severity (not the merged filename class,
+  // which held a clean team.csv), a credential file type, or a suspicious file.
+  assert.match(appearedHandler, /const contentHi = cs\?\.scanned === true && \(cs\.contentSeverity === 'high' \|\| cs\.contentSeverity === 'critical'\);/);
+  assert.match(appearedHandler, /const shouldHold = contentHi \|\| suspicious \|\| credentialName;/);
+  const code = appearedHandler.split(/\r?\n/).filter((l) => !l.trim().startsWith('//')).join('\n');
+  assert.equal(/failClosed|inGovernedConversation/.test(code), false, 'no fail-closed term left in the chip route');
+  // The helper's latched host_armed still gates ELIGIBILITY (a governed Teams
+  // chip is seen at all) -- it just no longer escalates a hold.
   assert.match(appearedHandler, /const hostChip = isHostAppProcess\(ev\.process\) && ev\.host_armed === true;/);
 });
 
@@ -769,7 +769,8 @@ test('main.js relays reason/filename to the block dialog without needing to pars
 test('block-dialog.js never offers Tokenize & Send copy for an attachment block, and states the honest limitation', async () => {
   const src = await readFile(join(AGENT_DIR, 'electron', 'renderer', 'block-dialog.js'), 'utf8');
   assert.match(src, /const isAttachment = ev\.reason === 'attachment';/);
-  assert.match(src, /This attachment can't be sent/);
+  // The browser extension's own attachment-popup title (content.js).
+  assert.match(src, /This file can't be sent/);
   // The one sentence that matters most in this whole feature: never imply
   // the upload itself was prevented.
   assert.match(src, /does not undo an upload that already happened/);
@@ -5155,7 +5156,9 @@ test('the scan result says WHETHER WE COULD VERIFY the file, and only for format
   // bytes only to have them truncated on arrival.
   const { CONTENT_CAPTURE_MAX_BYTES, CONTENT_SCAN_MAX_BYTES } = await import('../src/os_monitor/classifier.js');
   assert.equal(CONTENT_CAPTURE_MAX_BYTES, 25 * 1024 * 1024);
-  assert.ok(CONTENT_CAPTURE_MAX_BYTES > CONTENT_SCAN_MAX_BYTES, 'we may capture more than we parse');
+  // Equal since 2026-09-30 (scan cap raised to the extension's 25 MB); the
+  // invariant is only that we never parse more than we are allowed to capture.
+  assert.ok(CONTENT_CAPTURE_MAX_BYTES >= CONTENT_SCAN_MAX_BYTES, 'we never parse more than we may capture');
   const dlp = await readFile(join(AGENT_DIR, '..', 'server', 'src', 'routes', 'dlp.js'), 'utf8').catch(() => '');
   if (dlp) {
     assert.match(dlp, /const MAX_CONTENT_BYTES = 25 \* 1024 \* 1024;/,
@@ -5163,24 +5166,25 @@ test('the scan result says WHETHER WE COULD VERIFY the file, and only for format
   }
 });
 
-test('the fail-closed hold is scoped to a governed conversation and names its own reason', async () => {
+test('no fail-closed hold anywhere (browser parity, 2026-09-30): the chip route and the census hold only on sensitive content', async () => {
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
   const handler = src.slice(
     src.indexOf("this.attachmentWatcher.on('attachment_appeared'"),
     src.indexOf("this.attachmentWatcher.on('attachment_disappeared'"),
   );
-  // Escalating on "we could not read it" for EVERY app would start blocking .7z
-  // archives and legacy .doc files across the board, which nobody asked for.
-  assert.match(handler, /const unverified = cs\?\.scanned !== true && cs\?\.unverified === true;/);
-  // Governed-scoped, via the helper's latched host_armed rather than a live read
-  // of this.hostGoverned: the govstate bounces off the composer constantly, so a
-  // live read would fail OPEN on an unscannable file for nearly every real
-  // attachment. hostChip is false for every non-host app, so the scoping holds.
-  assert.match(handler, /const inGovernedConversation = !!governed \|\| hostChip;/);
-  assert.match(handler, /const failClosed = inGovernedConversation && unverified;/);
-  // The block has to be able to say WHY, and "high" would be a claim about
-  // content nobody read.
-  assert.match(handler, /\? `unscannable file \(\$\{cs\?\.reason \|\| 'not readable'\}\)`/);
+  const code = (s) => s.split(/\r?\n/).filter((l) => !l.trim().startsWith('//')).join('\n');
+  // The chip route: no unverified / fail-closed escalation, no "unscannable
+  // file" pseudo-pattern (a hold now always names real pattern names).
+  for (const gone of ['failClosed', 'inGovernedConversation', 'unscannable file', 'cs?.unverified']) {
+    assert.equal(code(handler).includes(gone), false, `chip route: ${gone} must be gone`);
+  }
+  // The census: a hold is only ever sensitive_content, suspicious_unscannable
+  // or sensitive_filename (credential file types) -- never "could not read it".
+  const census = src.slice(src.indexOf('#censusFinish(sfc, rec, ident, {'), src.indexOf('static CENSUS_REMOVE_HINT'));
+  assert.ok(census.length > 0);
+  const holds = [...code(census).matchAll(/hold = true; holdReason = '([a-z_]+)'/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(holds)].sort(), ['sensitive_content', 'sensitive_filename', 'suspicious_unscannable']);
+  assert.equal((code(census).match(/hold = true/g) || []).length, holds.length, 'no other way to hold');
 });
 
 test('the attach hold is bound to ONE app, and is a KEYED table, on both sides of the stdin channel', async () => {
@@ -5533,9 +5537,13 @@ test('block attribution: _fgAttr is written every tick by ApplyForegroundTick an
   const code = codeOnly(src);
   // Declaration, the two tick writes, EmitBlock's read and EmitEvidencePrompt's
   // read (the typed-prompt record for the AI-evidence routes, 2026-09-24).
-  assert.equal((code.match(/_fgAttr\b/g) || []).length, 5, '_fgAttr gained a reference — re-review for PII');
+  // …and EmitAttachCensus's read (A6, 2026-09-30: census file rows carry the same
+  // row / SoleAgent attribution a block does -- reviewed; admin-typed values only).
+  assert.equal((code.match(/_fgAttr\b/g) || []).length, 6, '_fgAttr gained a reference — re-review for PII');
   const evEmit = codeOnly(src.slice(src.indexOf('static void EmitEvidencePrompt('), src.indexOf('// Recomputes the pinned rewrite candidate')));
   assert.match(evEmit, /BlockAttr attr = _fgAttr \?\? BLOCK_ATTR_NONE;/);
+  const censusEmit = codeOnly(src.slice(src.indexOf('static void EmitAttachCensus('), src.indexOf('// ── The live read (background thread)')));
+  assert.match(censusEmit, /BlockAttr attr = closed \? BLOCK_ATTR_NONE : \(_fgAttr \?\? BLOCK_ATTR_NONE\);/);
   const tick = codeOnly(src.slice(src.indexOf('static void ApplyForegroundTick('), src.indexOf('// When a block is active, locate the send button')));
   assert.match(tick, /_fgAttr = new BlockAttr\(attrAgent, attrAgentId, attrSrc\);/);
   assert.match(tick, /else _fgAttr = BLOCK_ATTR_NONE;/);

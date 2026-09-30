@@ -152,6 +152,13 @@ test('attachmentEnforcementFields is a pure allowlist', () => {
   assert.deepEqual(attachmentEnforcementFields(null), {});
 });
 
+test('binding: only the exact value "weak" survives', () => {
+  assert.equal(attachmentEnforcementFields({ binding: 'weak' }).binding, 'weak');
+  for (const bad of ['strong', 'WEAK', 'weakly', '', 1, true, null, {}]) {
+    assert.equal('binding' in attachmentEnforcementFields({ binding: bad }), false, `${JSON.stringify(bad)} should be dropped`);
+  }
+});
+
 test('an older-shape file_upload with none of the keys has none of them (absent, not null)', async () => {
   await withServer(async ({ db, post }) => {
     await post([fileEvent({})]);

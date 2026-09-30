@@ -608,9 +608,8 @@ test('an overflow is reported as a coverage gap rather than silently dropped', a
 
 test('an unverified / unscannable attachment is REPORTED but never HELD', async () => {
   // FAIL OPEN, achieved by OMISSION: #reportEgressFile has no `unverified` term
-  // at all. The host-app fail-CLOSED rule is scoped to `inGovernedConversation`
-  // (`!!governed || hostChip`), and an egress surface satisfies neither — it is
-  // not a host app and no govstate ever names it.
+  // at all. (The host-app chip route's former fail-CLOSED rule was removed on
+  // 2026-09-30 for browser parity, so no route escalates on "unreadable" now.)
   //
   // Escalating on "we could not read it" in a mail client would mean nobody can
   // email a legacy .doc or a password-protected archive, which nobody asked for.
@@ -645,10 +644,9 @@ test('an unverified / unscannable attachment is REPORTED but never HELD', async 
     assert.equal(code.includes(forbidden), false,
       `#reportEgressFile must not gain a ${forbidden} term — fail-open is the rule for a mail client`);
   }
-  // …and the existing host-app rule is untouched: still scoped to a governed
-  // conversation, which an egress surface can never be.
-  assert.match(src, /const inGovernedConversation = !!governed \|\| hostChip;/);
-  assert.match(src, /const failClosed = inGovernedConversation && unverified;/);
+  // …and since 2026-09-30 (browser parity) the host-app chip route has no
+  // fail-closed term either, so fail-open is now the rule everywhere.
+  assert.equal(/const failClosed = /.test(src), false);
 });
 
 test('a FLAGGED email attachment is scanned, HELD, and toasted with the real limitations', async () => {

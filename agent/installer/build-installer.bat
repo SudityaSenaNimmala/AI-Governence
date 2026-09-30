@@ -22,6 +22,15 @@ mkdir "%BUILD_DIR%\node"
 echo [1/5] Copying agent source...
 xcopy /s /e /q /y "%~dp0..\src" "%BUILD_DIR%\agent\src\" >nul
 copy /y "%~dp0..\package.json" "%BUILD_DIR%\agent\" >nul
+REM OCR language data: the agent never downloads it (os_monitor/ocr-service.js).
+REM The installer ships only src\, so stage the extension's bundled copy there.
+mkdir "%BUILD_DIR%\agent\src\os_monitor\tessdata" 2>nul
+copy /y "%~dp0..\..\browser-extension\vendor\tesseract\eng.traineddata.gz" "%BUILD_DIR%\agent\src\os_monitor\tessdata\" >nul
+if not exist "%BUILD_DIR%\agent\src\os_monitor\tessdata\eng.traineddata.gz" (
+  echo [ERROR] browser-extension\vendor\tesseract\eng.traineddata.gz not found - OCR would be disabled
+  pause
+  exit /b 1
+)
 echo [OK] Agent source copied
 
 echo [2/5] Downloading portable Node.js...

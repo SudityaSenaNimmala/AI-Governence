@@ -1168,4 +1168,61 @@ Out-Obj ([ordered]@{ case = 'sec'; variant = 'pending'; before = $pendingBefore;
 $k16 = [string](Call 'AttachHoldKey' @($false, '', 'ms|teams', 'p|x', ("k" + [char]7 + "|z")))
 $e16 = [string](Call 'AttachHoldKey' @($true, 'outlook|classic', 'OUTLOOK', 'ignored', 'ignored'))
 Out-Obj ([ordered]@{ case = 'sec'; variant = 'key_parts'; k = $k16; e = $e16 })
+
+# -- 2026-09-30: attribution on the census line (A6), the text half of an
+#    attachment block (A5), pasted images (D7) -- real helper code.
+$ATTR_T = $T.GetNestedType('BlockAttr', [System.Reflection.BindingFlags]'NonPublic,Public')
+function SetAttr([string]$agent, [string]$id, [string]$src) {
+  SetF '_fgAttr' ([Activator]::CreateInstance($ATTR_T, [object[]]@($agent, $id, $src)))
+}
+# A6: the census line carries the tick's BlockAttr (row / sole / none).
+ResetState; ResetCensus
+Tick 'a6_m365' 'M365Copilot' ([uint32]9601) @('Edit', 'Message Copilot', 'fai-EditorInput__input r18fti29') | Out-Null
+SetAttr 'Researcher' 'row-17' 'row'
+[FakeCensus]::Names = [string[]]@('Remove attachment a6.txt')
+$a6 = RunCensus
+SetAttr '' '' 'none'
+Out-Obj ([ordered]@{ case = 'v930'; variant = 'census_attr'; line = [string]$a6 })
+
+# A5: a held file + a sensitive TYPED prompt -> the attachment block names the
+#     text patterns too; the same hold with a clean prompt carries none.
+ResetState; ResetCensus; SetF '_evidenceDlpOn' $true
+Tick 'a5_word' 'WINWORD' ([uint32]9602) $PANE | Out-Null
+Hold 'on' 'WINWORD|office_copilot_pane|' 'WINWORD' 'office_copilot_pane' 'deck-secrets.env'
+SetF '_typedOwnerKey' ([string](GetF '_fgOwnerKey'))
+SetF '_blockTyped' $true; SetF '_typedPatterns' 'us_ssn,credit_card'; SetF '_typedBlockTicks' ([long][DateTime]::UtcNow.Ticks)
+$a5dirty = Capture { [FakeInput]::Key(0x0D, $false, $false, $false) }
+SetF '_blockTyped' $false; SetF '_typedPatterns' ''; SetF '_lastBlockFiredTicks' ([long]0)
+$a5clean = Capture { [FakeInput]::Key(0x0D, $false, $false, $false) }
+Call 'ClearAttachHolds' | Out-Null
+Out-Obj ([ordered]@{ case = 'v930'; variant = 'text_patterns'; dirty = [int]$a5dirty[0]; dirtyLines = (Lines $a5dirty)
+  clean = [int]$a5clean[0]; cleanLines = (Lines $a5clean) })
+
+# D7: CF_DIB -> .bmp (pure); the paste-image gate never touches the clipboard
+#     off a census surface; the pastehint line shape.
+$dib = New-Object byte[] (40 + 4)
+[BitConverter]::GetBytes([int]40).CopyTo($dib, 0); [BitConverter]::GetBytes([int]1).CopyTo($dib, 4); [BitConverter]::GetBytes([int]1).CopyTo($dib, 8)
+[BitConverter]::GetBytes([int16]1).CopyTo($dib, 12); [BitConverter]::GetBytes([int16]24).CopyTo($dib, 14)
+$M_BMP = $T.GetMethod('BmpFromDib', $FLAGS)
+$argOk = New-Object object[] 1; $argOk[0] = [byte[]]$dib
+$bmp = [byte[]]$M_BMP.Invoke($null, $argOk)
+$argBad = New-Object object[] 1; $argBad[0] = [byte[]](1, 2, 3)
+$bad = $M_BMP.Invoke($null, $argBad)
+ResetState; ResetCensus
+Tick 'd7_claude' 'Claude' ([uint32]9603) $null | Out-Null
+SetF '_pasteImageTicks' ([long][DateTime]::UtcNow.Ticks)
+$gate = Capture { Call 'UpdatePasteImage' | Out-Null; Start-Sleep -Milliseconds 100 }
+$consumed = ([long](GetF '_pasteImageTicks') -eq 0)
+$hint = Capture { Call 'EmitPasteHint' @('saved', 'C:\x\paste\0f8fad5b-d9cb-469f-a165-70867728950e.png', 'M365Copilot', [uint32]77, [long]1759226400000, $false) | Out-Null }
+# S1: a 24-bit DIB -> BMP -> PNG through System.Drawing (loaded at run time), and the IHDR side check.
+$argP = New-Object object[] 1; $argP[0] = [byte[]]$bmp
+$png = $T.GetMethod('EncodePngCapped', $FLAGS).Invoke($null, $argP)
+$pngMagic = if ($png) { ([byte[]]$png)[1..3] | ForEach-Object { [char]$_ } } else { @() }
+$argS = New-Object object[] 1
+if ($png) { $argS[0] = [byte[]]$png } else { $argS[0] = [byte[]]@(0) }
+$sideOk = [bool]$T.GetMethod('ImageSideOk', $FLAGS).Invoke($null, $argS)
+Out-Obj ([ordered]@{ case = 'v930'; variant = 'paste_image'; bmpLen = $bmp.Length; bmpMagic = [string]([char]$bmp[0]) + [string]([char]$bmp[1])
+  bmpSize = [BitConverter]::ToInt32($bmp, 2); bmpOffset = [BitConverter]::ToInt32($bmp, 10); badNull = ($null -eq $bad)
+  gateLines = (Lines $gate); consumed = $consumed; hintLine = (Lines $hint)
+  pngMagic = (-join $pngMagic); pngSideOk = $sideOk })
 [FakeInput]::Uninstall()

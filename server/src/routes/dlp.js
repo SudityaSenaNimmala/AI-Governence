@@ -329,6 +329,9 @@ export function mountDlp(app, db) {
               // an older-shape event simply carries none of these keys.
               // NOT forwarded to SIEM — lib/cef.js keeps its own allowlist.
               ...agentMetaFields(e),
+              // A block raised while the attachment was still being scanned is
+              // provisional, not a finding: keep the marker so dashboards skip it.
+              ...(cleanMetaString(e?.attach_state, 16) === 'scanning' ? { attach_state: 'scanning' } : {}),
             } : {}),
           },
         ),
@@ -1066,12 +1069,17 @@ export function agentMetaFields(e) {
 //   enforcement   — exactly 'held' or 'reported'.
 //   hold_reason   — short machine code ([a-z_], at most 64 chars), e.g.
 //                   'cloud_reference', 'partially_scanned', 'unverified'.
+//   binding       — exactly 'weak' when the agent matched the chip to a file by
+//                   name only (content scanned locally, never uploaded).
 // metadata_json only — no column, no migration, not in lib/cef.js's SIEM allowlist.
-export const ATTACHMENT_META_KEYS = ['attachment_id', 'enforcement', 'hold_reason'];
+//   attach_state  — exactly 'scanning' on a block raised while the file was still
+//                   being checked (provisional, not a finding).
+export const ATTACHMENT_META_KEYS = ['attachment_id', 'enforcement', 'hold_reason', 'binding', 'attach_state'];
 const ATTACHMENT_ID_MAX = 64;
 const HOLD_REASON_MAX = 64;
 const HOLD_REASON_RE = /^[a-z_]+$/;
 const ENFORCEMENT_VALUES = new Set(['held', 'reported']);
+const BINDING_VALUES = new Set(['weak']);
 
 function cleanMetaString(value, max) {
   if (typeof value !== 'string') return null;
@@ -1088,6 +1096,9 @@ export function attachmentEnforcementFields(e) {
   if (enforcement && ENFORCEMENT_VALUES.has(enforcement)) out.enforcement = enforcement;
   const holdReason = cleanMetaString(e?.hold_reason, HOLD_REASON_MAX);
   if (holdReason && HOLD_REASON_RE.test(holdReason)) out.hold_reason = holdReason;
+  const binding = cleanMetaString(e?.binding, 16);
+  if (binding && BINDING_VALUES.has(binding)) out.binding = binding;
+  if (cleanMetaString(e?.attach_state, 16) === 'scanning') out.attach_state = 'scanning';
   return out;
 }
 

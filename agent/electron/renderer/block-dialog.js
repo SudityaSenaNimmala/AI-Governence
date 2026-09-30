@@ -56,17 +56,23 @@ function dismiss() {
   window.api.dismissDialog();
 }
 
-// The composer-census attachment popup (2026-09-28). hold_reason comes from
-// index.js (#censusScan); attach_state 'scanning' means the file is still being
-// checked; cloud_copy means the app already uploaded a copy to OneDrive /
-// SharePoint when the file was attached -- blocking stops it reaching the agent,
-// not that copy, and the popup must say so rather than imply otherwise.
-const HOLD_REASON_TEXT = {
-  sensitive_content: 'It contains sensitive data.',
-  cloud_reference: 'It is a cloud file with no readable copy on this device, so it could not be checked.',
-  not_found: 'The file could not be found on this device, so it could not be checked.',
-  too_large: 'It is too large to check.',
-  unverified: 'It could not be read — it may be encrypted or damaged — so it could not be checked.',
+// The composer-census attachment popup. Aligned with the browser extension's
+// attachment popup (content.js showAttachmentBlockPopup): "This file can't be
+// sent", the matched pattern chips, and the remove-the-attachment instruction.
+// Since 2026-09-30 a census file is held ONLY for sensitive content (every
+// unscannable / cloud-only / not-found file is allowed and reported), so there
+// is no other hold reason to explain. attach_state 'scanning' means the file is
+// still being checked; cloud_copy means the app already uploaded a copy to
+// OneDrive / SharePoint on attach -- blocking stops it reaching the agent, not
+// that copy, and the popup must say so rather than imply otherwise.
+// text_patterns (A5): the prompt text itself also matched these pattern names.
+// Why the file is held, per HOLDING reason (index.js #censusFinish). The pattern
+// chips below name the specifics (the matched patterns, the file type, or the
+// scanner's suspicious_reason).
+const ATTACH_BODY_REASON = {
+  sensitive_content: 'the attached file contains sensitive data',
+  sensitive_filename: 'the attached file is a credential or key file, which can\'t be shared with an agent',
+  suspicious_unscannable: 'the attached file could not be safely checked (it looks built to hide its contents)',
 };
 function attachmentCopy(ev) {
   const file = ev.filename || 'the attached file';
@@ -76,13 +82,16 @@ function attachmentCopy(ev) {
       hint: 'Your message will be sendable as soon as the check finishes, if the file is clean. Try again in a moment.',
     };
   }
-  const why = HOLD_REASON_TEXT[ev.hold_reason] || '';
+  const textPatterns = String(ev.text_patterns || '').split(',').map(s => s.trim()).filter(Boolean);
+  const alsoText = textPatterns.length
+    ? `Your message also contains ${textPatterns.join(', ')} — remove that too. `
+    : '';
   const cloud = ev.cloud_copy
     ? ' The app already uploaded a copy to OneDrive/SharePoint when you attached it — this stops it from being sent to the agent, it does not remove that copy.'
     : ' If the app already uploaded the file when you attached it, this only stops it from being used in the conversation — it does not undo an upload that already happened.';
   return {
-    title: "This attachment can't be sent",
-    hint: `${why ? why + ' ' : ''}Remove the attachment to send this message.${cloud}`,
+    title: "This file can't be sent",
+    hint: `${alsoText}Remove the attachment from the chat before sending.${cloud}`,
   };
 }
 
@@ -99,7 +108,9 @@ function render(ev) {
   let title, body;
   if (isAttachment) {
     title = escapeHtml(attachmentCopy(ev).title);
-    body = `CloudFuze AI Governance blocked an attached file in <strong>${escapeHtml(ev.app || 'this app')}</strong>:`;
+    body = ev.attach_state === 'scanning'
+      ? `CloudFuze AI Governance is still checking an attached file in <strong>${escapeHtml(ev.app || 'this app')}</strong>:`
+      : `CloudFuze AI Governance blocked the send in <strong>${escapeHtml(ev.app || 'this app')}</strong> because ${escapeHtml(ATTACH_BODY_REASON[ev.hold_reason] || ATTACH_BODY_REASON.sensitive_content)}:`;
   } else if (hasGuardrail && !hasDlp) {
     title = 'Unsafe prompt blocked';
     body = `CloudFuze AI Governance blocked this message in <strong>${escapeHtml(ev.app || 'this app')}</strong> because it contains a security or safety violation:`;

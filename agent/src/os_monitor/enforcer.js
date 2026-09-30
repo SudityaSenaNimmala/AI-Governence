@@ -423,6 +423,7 @@ export class Enforcer extends EventEmitter {
         if (line.startsWith('{"kind":"prompt_text"')) this.log?.warn('enforcer: malformed prompt_text line dropped');
         // Nor a census line: it carries attachment names (finding 12).
         else if (line.includes('"kind":"attachcensus"')) this.log?.warn('enforcer: malformed attachcensus line dropped');
+        else if (line.includes('"kind":"pastehint"')) this.log?.warn('enforcer: malformed pastehint line dropped');
         else this.log?.warn('enforcer: non-JSON: ' + line.slice(0, 120));
         continue;
       }
@@ -500,6 +501,13 @@ export class Enforcer extends EventEmitter {
         // logged here (or anywhere) -- index.js reconciles it into the keyed
         // attach holds. See UpdateAttachCensus in enforcer-win.ps1.
         this.emit('attachcensus', ev);
+        break;
+      case 'pastehint':
+        // A Ctrl+V of an IMAGE into a census surface: the helper saved the
+        // clipboard image to the private paste dir (a uuid file name) so the
+        // census can scan the chip it becomes. Not logged here -- index.js
+        // validates the path and binds it. See UpdatePasteImage.
+        this.emit('pastehint', ev);
         break;
       case 'request_access_offer':
         // A platform/agent/panel block just swallowed a send, and the helper is

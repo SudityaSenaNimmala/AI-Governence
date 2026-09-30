@@ -10475,6 +10475,31 @@ public static class CfaiEnforcer
         return _blockTyped && (DateTime.UtcNow.Ticks - _typedBlockTicks) < TYPED_BLOCK_TTL;
     }
 
+    // The TEXT half of an attachment block (A5, 2026-09-30): when a held file
+    // swallows the send, which pattern NAMES the prompt itself also matched --
+    // the typed buffer (fresh), the composer's UIA text, and the clipboard
+    // within PASTE_WINDOW of a Ctrl+V: the same three signals, with the same
+    // gates, the Enter decision reads. Names only, de-duplicated, never text.
+    // "" when the prompt is clean (or when none of those signals is about the
+    // app in front).
+    static string AttachTextPatterns()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var outL = new List<string>();
+        Action<string> add = s =>
+        {
+            foreach (var part in (s ?? "").Split(','))
+            {
+                string t = part.Trim();
+                if (t.Length > 0 && seen.Add(t)) outL.Add(t);
+            }
+        };
+        if (TypedBlockFresh()) add(_typedPatterns);
+        if (PanelUiaOk() && _blockUia) add(_uiaPatterns);
+        if ((DateTime.UtcNow.Ticks - _lastPasteTicks) < PASTE_WINDOW && _blockPaste) add(_pastePatterns());
+        return string.Join(",", outL.ToArray());
+    }
+
     // Is the attachment hold in force FOR THE APP THAT HAS FOCUS?
     //
     // The binding is the whole point — see AttachHoldMatches. The process is compared
@@ -11175,9 +11200,13 @@ public static class CfaiEnforcer
 
                         // Track Ctrl+V — record timestamp so clipboard is checked
                         // in the Enter decision only within a short window.
-                        if (vk == VK_V && ctrl && !alt)
+                        // Shift+Insert is the other paste chord.
+                        if ((vk == VK_V && ctrl && !alt) || (vk == 0x2D && shift && !ctrl && !alt))
                         {
                             _lastPasteTicks = DateTime.UtcNow.Ticks;
+                            // D7: the poll thread checks for a pasted IMAGE (never
+                            // here -- the hook does no clipboard I/O). A timestamp only.
+                            Interlocked.Exchange(ref _pasteImageTicks, _lastPasteTicks);
                         }
 
                         // Enter-to-send decision.
@@ -11410,7 +11439,7 @@ public static class CfaiEnforcer
             // one comparison and a return. It observes and decides nothing about
             // any existing block: all it does is rebuild _egressHoldProcs, which
             // is read by exactly one function (EgressHoldArmed).
-            try { UpdateForeground(); UpdateBlockedAgents(); UpdateBannerState(); UpdateGovState(); UpdatePaneGovState(); UpdateAttachCensus(); UpdatePaste(); UpdateUia(); UpdateSendRect(); UpdateHeldRect(); UpdatePendingRewrite(); CheckHeartbeat(); CheckAttachHoldExpiry(); UpdateModelRouting(); UpdateEgressPolicy(); }
+            try { UpdateForeground(); UpdateBlockedAgents(); UpdateBannerState(); UpdateGovState(); UpdatePaneGovState(); UpdateAttachCensus(); UpdatePaste(); UpdatePasteImage(); UpdateUia(); UpdateSendRect(); UpdateHeldRect(); UpdatePendingRewrite(); CheckHeartbeat(); CheckAttachHoldExpiry(); UpdateModelRouting(); UpdateEgressPolicy(); }
             catch { }
             // The 150ms cadence above is unchanged; inside it we look at the
             // typed-buffer dirty flag every 30ms so the verdict trails the last
@@ -13011,7 +13040,19 @@ public static class CfaiEnforcer
         if (closed) sb.Append(",\"closed\":true");
         sb.Append(",\"names\":[");
         for (int i = 0; i < names.Count; i++) { if (i > 0) sb.Append(","); sb.Append("\"").Append(Esc(names[i])).Append("\""); }
-        sb.Append("]}");
+        sb.Append("]");
+        // WHICH AGENT this draft is for -- the SAME BlockAttr EmitBlock uses
+        // (ResolveBlockAgent: an agent-scoped policy row's admin-typed name and
+        // server id, or the panel's own SoleAgent entry; never a name read off the
+        // app), so a census file row and a block on the same draft agree.
+        // PublishCensus only gets here after re-confirming this context is the
+        // one in front, which is the surface _fgAttr was resolved for. A CLOSED
+        // line is published after focus has left that surface, so it carries none.
+        BlockAttr attr = closed ? BLOCK_ATTR_NONE : (_fgAttr ?? BLOCK_ATTR_NONE);
+        sb.Append(",\"agent\":\"").Append(Esc(attr.Agent)).Append("\"");
+        sb.Append(",\"agent_id\":\"").Append(Esc(attr.AgentId)).Append("\"");
+        sb.Append(",\"agent_src\":\"").Append(Esc(attr.Src)).Append("\"");
+        sb.Append("}");
         lock (_emitLock) { Console.Out.WriteLine(sb.ToString()); Console.Out.Flush(); }
     }
 
@@ -14482,8 +14523,17 @@ public static class CfaiEnforcer
             + ",\"patterns\":\"" + Esc(JoinHoldField(holds, true)) + "\""
             + ",\"block_id\":\"\",\"rewritable\":false"
             + ",\"filename\":\"" + Esc(JoinHoldField(holds, false)) + "\""
+            // A5: the text signals describe the app in FRONT, so they are only
+            // attached when that is this held app (a send-key press on its own
+            // Send button) -- never for a held rect, whose host is not in front.
+            + (!heldRect && string.Equals(app ?? "", _app ?? "", StringComparison.OrdinalIgnoreCase) ? TextPatternsField(AttachTextPatterns()) : "")
             + (heldRect ? ",\"held_rect\":true" : ",\"send_key\":true") + "}";
         lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
+    }
+
+    static string TextPatternsField(string names)
+    {
+        return string.IsNullOrEmpty(names) ? "" : ",\"text_patterns\":\"" + Esc(names) + "\"";
     }
 
     // Mouse hook: is (x, y) a click on the held rect of a blocked panel whose
@@ -15138,6 +15188,268 @@ public static class CfaiEnforcer
     static string _pastePatternsValue = "";
     static string _pastePatterns() { return _pastePatternsValue; }
 
+    // ── Pasted screenshots into a census surface (D7, 2026-09-30) ────────────
+    //
+    // A picture pasted into a governed Microsoft composer becomes an attachment
+    // chip ("image.png") that no file on disk backs, so the census could only
+    // report it unscanned. When the clipboard holds an IMAGE (a "PNG" stream,
+    // else CF_DIB, encoded to PNG) it is written to
+    //   %LOCALAPPDATA%\cloudfuze-aigov\paste\<uuid>.png   (.bmp only as a last resort)
+    // and announced on a pastehint line; index.js binds it to an image chip
+    // that appears AFTER the paste, scans it locally, uploads its content only
+    // if it is held, and deletes it.
+    //
+    // TWO triggers, both only while a census surface is the one in front
+    // (CensusGovernedNow: governed, content-licensed):
+    //   * a PASTE KEY -- Ctrl+V or Shift+Insert. The hook only stamps the time.
+    //     A "pending" line goes out on the next poll tick so index.js knows to
+    //     wait (a short grace) for the saved image rather than guessing.
+    //   * a CLIPBOARD CHANGE seen while that surface is in front, when the new
+    //     clipboard content is an image ("staged"). This covers a right-click
+    //     Paste / an app's own Paste button, which no keyboard hook sees. Staged
+    //     images bind only to a generically named chip ("image.png") -- see
+    //     attach-census.js takeClipboardImage.
+    // Never for a file copy (CF_HDROP has its own route); capped in size; the
+    // image and its path are never logged. The clipboard is read on a
+    // short-lived STA thread, never on the hook or poll thread.
+    //
+    // Line states: pending (paste key seen) | saved (path) | none (no image on
+    // the clipboard) | too_large (could not be brought under the cap).
+    static long _pasteImageTicks = 0;
+    static int _pasteImageBusy = 0;
+    static uint _stagedClipSeq = 0;
+    static readonly long PASTE_IMAGE_WINDOW = TimeSpan.FromSeconds(2).Ticks;
+    // Raw clipboard payload we are willing to read at all, and the size the
+    // saved file must end up under: the scanner's OCR cap (classifier.js
+    // OCR_MAX_BYTES, 8 MB). Longest side capped so OCR stays affordable.
+    const long PASTE_IMAGE_READ_MAX = 64L * 1024 * 1024;
+    const long PASTE_IMAGE_MAX_BYTES = 8L * 1024 * 1024;
+    const int PASTE_IMAGE_MAX_SIDE = 4096;
+
+    [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll")] static extern bool IsClipboardFormatAvailable(uint format);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern uint RegisterClipboardFormat(string name);
+    static uint _cfPng = 0;
+
+    static long UnixMs(long utcTicks) { return (utcTicks - 621355968000000000L) / TimeSpan.TicksPerMillisecond; }
+
+    static void UpdatePasteImage()
+    {
+        long t = Interlocked.Exchange(ref _pasteImageTicks, 0);
+        bool keyed = t != 0 && DateTime.UtcNow.Ticks - t <= PASTE_IMAGE_WINDOW;
+        if (!keyed && Volatile.Read(ref _pasteImageBusy) != 0) return;
+        if (CensusGovernedNow() == null) return;
+        string app = _app ?? ""; uint pid = _fgPid;
+        uint seq = 0;
+        try { seq = GetClipboardSequenceNumber(); } catch { }
+        bool staged = false;
+        if (!keyed)
+        {
+            // A clipboard change while this surface is in front, to an image.
+            if (seq == 0 || seq == _stagedClipSeq) return;
+            _stagedClipSeq = seq;
+            if (!ClipboardHasImageFormat()) return;
+            staged = true;
+            t = DateTime.UtcNow.Ticks;
+        }
+        else
+        {
+            _stagedClipSeq = seq;   // this clipboard content is handled now
+            EmitPasteHint("pending", null, app, pid, UnixMs(t), false);
+        }
+        string dir = PasteImageDir();
+        if (dir == null) { if (keyed) EmitPasteHint("none", null, app, pid, UnixMs(t), false); return; }
+        if (Interlocked.CompareExchange(ref _pasteImageBusy, 1, 0) != 0)
+        {
+            if (keyed) EmitPasteHint("none", null, app, pid, UnixMs(t), false);
+            return;
+        }
+        long stamp = UnixMs(t);
+        var th = new Thread(() =>
+        {
+            try
+            {
+                string state;
+                string path = SavePastedImage(dir, out state);
+                // A staged read that found nothing says nothing (no paste happened).
+                if (path != null) EmitPasteHint("saved", path, app, pid, stamp, staged);
+                else if (!staged) EmitPasteHint(state, null, app, pid, stamp, false);
+                else if (state == "too_large") EmitPasteHint("too_large", null, app, pid, stamp, true);
+            }
+            catch { if (!staged) EmitPasteHint("none", null, app, pid, stamp, false); }
+            finally { Interlocked.Exchange(ref _pasteImageBusy, 0); }
+        });
+        th.IsBackground = true;
+        th.SetApartmentState(ApartmentState.STA);
+        th.Start();
+    }
+
+    static bool ClipboardHasImageFormat()
+    {
+        try
+        {
+            if (_cfPng == 0) _cfPng = RegisterClipboardFormat("PNG");
+            if (IsClipboardFormatAvailable(15)) return false;          // CF_HDROP: a file copy
+            return IsClipboardFormatAvailable(8) || IsClipboardFormatAvailable(17)   // CF_DIB / CF_DIBV5
+                || (_cfPng != 0 && IsClipboardFormatAvailable(_cfPng));
+        }
+        catch { return false; }
+    }
+
+    static string PasteImageDir()
+    {
+        try
+        {
+            string la = Environment.GetEnvironmentVariable("LOCALAPPDATA");
+            if (string.IsNullOrEmpty(la)) return null;
+            string d = System.IO.Path.Combine(System.IO.Path.Combine(la, "cloudfuze-aigov"), "paste");
+            System.IO.Directory.CreateDirectory(d);
+            return d;
+        }
+        catch { return null; }
+    }
+
+    static byte[] ReadClipStream(System.Windows.Forms.IDataObject data, string format)
+    {
+        if (!data.GetDataPresent(format)) return null;
+        var s = data.GetData(format) as System.IO.Stream;
+        if (s == null || s.Length <= 0 || s.Length > PASTE_IMAGE_READ_MAX) return null;
+        var ms = new System.IO.MemoryStream();
+        s.Position = 0; s.CopyTo(ms);
+        return ms.ToArray();
+    }
+
+    // The clipboard image -> a new file in `dir`, or null with `state` saying
+    // why: "none" (no image, a file copy, a failure) or "too_large". STA only.
+    static string SavePastedImage(string dir, out string state)
+    {
+        state = "none";
+        var data = System.Windows.Forms.Clipboard.GetDataObject();
+        if (data == null) return null;
+        if (data.GetDataPresent(System.Windows.Forms.DataFormats.FileDrop)) return null;
+        byte[] png = ReadClipStream(data, "PNG");
+        byte[] bmp = null;
+        if (png == null)
+        {
+            byte[] dib = ReadClipStream(data, System.Windows.Forms.DataFormats.Dib);
+            bmp = dib != null ? BmpFromDib(dib) : null;
+            if (bmp == null) return null;
+        }
+        // Encode / downscale to PNG under the cap (System.Drawing, loaded at run
+        // time so the helper -- and its test harnesses -- compile without it).
+        byte[] outBytes = null; string ext = ".png";
+        if (png != null && png.Length <= PASTE_IMAGE_MAX_BYTES && ImageSideOk(png)) outBytes = png;
+        else outBytes = EncodePngCapped(png ?? bmp);
+        if (outBytes == null && png == null && bmp.Length <= PASTE_IMAGE_MAX_BYTES) { outBytes = bmp; ext = ".bmp"; }
+        if (outBytes == null) { state = "too_large"; return null; }
+        string path = System.IO.Path.Combine(dir, Guid.NewGuid().ToString("D") + ext);
+        try { System.IO.File.WriteAllBytes(path, outBytes); state = "saved"; return path; }
+        catch { try { System.IO.File.Delete(path); } catch { } return null; }
+    }
+
+    // PNG IHDR width/height (bytes 16..23, big-endian) within PASTE_IMAGE_MAX_SIDE.
+    internal static bool ImageSideOk(byte[] png)
+    {
+        if (png == null || png.Length < 24) return false;
+        int w = (png[16] << 24) | (png[17] << 16) | (png[18] << 8) | png[19];
+        int h = (png[20] << 24) | (png[21] << 16) | (png[22] << 8) | png[23];
+        return w > 0 && h > 0 && w <= PASTE_IMAGE_MAX_SIDE && h <= PASTE_IMAGE_MAX_SIDE;
+    }
+
+    static System.Reflection.Assembly _drawingAsm = null;
+    static bool _drawingTried = false;
+    static System.Reflection.Assembly DrawingAsm()
+    {
+        if (!_drawingTried)
+        {
+            _drawingTried = true;
+            try { _drawingAsm = System.Reflection.Assembly.Load("System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a"); }
+            catch { _drawingAsm = null; }
+        }
+        return _drawingAsm;
+    }
+
+    // Any image System.Drawing can decode (PNG / BMP) -> PNG bytes, downscaled
+    // (longest side halved until it fits PASTE_IMAGE_MAX_SIDE and the bytes fit
+    // PASTE_IMAGE_MAX_BYTES). null when System.Drawing is unavailable or it
+    // cannot be brought under the cap.
+    internal static byte[] EncodePngCapped(byte[] src)
+    {
+        var asm = DrawingAsm();
+        if (asm == null || src == null) return null;
+        object img = null;
+        try
+        {
+            Type bmpT = asm.GetType("System.Drawing.Bitmap");
+            Type imgT = asm.GetType("System.Drawing.Image");
+            Type sizeT = asm.GetType("System.Drawing.Size");
+            Type fmtT = asm.GetType("System.Drawing.Imaging.ImageFormat");
+            object pngFmt = fmtT.GetProperty("Png").GetValue(null, null);
+            var save = imgT.GetMethod("Save", new Type[] { typeof(System.IO.Stream), fmtT });
+            img = Activator.CreateInstance(bmpT, new object[] { new System.IO.MemoryStream(src) });
+            int w = (int)imgT.GetProperty("Width").GetValue(img, null);
+            int h = (int)imgT.GetProperty("Height").GetValue(img, null);
+            var ctor = bmpT.GetConstructor(new Type[] { imgT, sizeT });
+            for (int pass = 0; pass < 6; pass++)
+            {
+                double scale = Math.Min(1.0, (double)PASTE_IMAGE_MAX_SIDE / Math.Max(w, h));
+                if (pass > 0) scale = Math.Min(scale, Math.Pow(0.5, pass));
+                object cur = img;
+                if (scale < 1.0)
+                {
+                    int nw = Math.Max(1, (int)(w * scale)), nh = Math.Max(1, (int)(h * scale));
+                    cur = ctor.Invoke(new object[] { img, Activator.CreateInstance(sizeT, new object[] { nw, nh }) });
+                }
+                try
+                {
+                    var ms = new System.IO.MemoryStream();
+                    save.Invoke(cur, new object[] { ms, pngFmt });
+                    if (ms.Length <= PASTE_IMAGE_MAX_BYTES) return ms.ToArray();
+                }
+                finally { if (!object.ReferenceEquals(cur, img)) ((IDisposable)cur).Dispose(); }
+            }
+            return null;
+        }
+        catch { return null; }
+        finally { if (img != null) ((IDisposable)img).Dispose(); }
+    }
+
+    // CF_DIB (BITMAPINFOHEADER + optional masks / colour table + bits) -> a .bmp
+    // file: prepend the 14-byte BITMAPFILEHEADER. null for anything that is not
+    // a plausible DIB.
+    internal static byte[] BmpFromDib(byte[] dib)
+    {
+        if (dib == null || dib.Length < 40) return null;
+        int biSize = BitConverter.ToInt32(dib, 0);
+        if (biSize < 40 || biSize > dib.Length) return null;
+        int bitCount = BitConverter.ToInt16(dib, 14);
+        int compression = BitConverter.ToInt32(dib, 16);
+        int clrUsed = BitConverter.ToInt32(dib, 32);
+        int masks = (biSize == 40 && (compression == 3 || compression == 6)) ? (compression == 3 ? 12 : 16) : 0;
+        int colors = clrUsed > 0 ? clrUsed : (bitCount > 0 && bitCount <= 8 ? (1 << bitCount) : 0);
+        long offset = 14L + biSize + masks + 4L * colors;
+        if (offset > 14L + dib.Length) return null;
+        var outB = new byte[14 + dib.Length];
+        outB[0] = (byte)'B'; outB[1] = (byte)'M';
+        BitConverter.GetBytes(outB.Length).CopyTo(outB, 2);
+        BitConverter.GetBytes((int)offset).CopyTo(outB, 10);
+        Buffer.BlockCopy(dib, 0, outB, 14, dib.Length);
+        return outB;
+    }
+
+    static void EmitPasteHint(string state, string path, string app, uint pid, long pasteMs, bool staged)
+    {
+        string json = "{\"kind\":\"pastehint\",\"via\":\"clipboard_image\""
+            + ",\"state\":\"" + Esc(state ?? "none") + "\""
+            + ",\"process\":\"" + Esc(app ?? "") + "\""
+            + ",\"pid\":" + pid
+            + ",\"paste_ms\":" + pasteMs
+            + (staged ? ",\"staged\":true" : "")
+            + (path != null ? ",\"path\":\"" + Esc(path) + "\"" : "")
+            + "}";
+        lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
+    }
+
     static void UpdatePaste()
     {
         if (!_fgIsAi) { _blockPaste = false; return; }
@@ -15686,6 +15998,9 @@ public static class CfaiEnforcer
             + ",\"rewritable\":" + (rewritable ? "true" : "false")
             + (rewritable ? ",\"preview\":\"" + Esc(preview) + "\"" : (whyNot.Length > 0 ? ",\"why_not\":\"" + Esc(whyNot) + "\"" : ""))
             + (reason == "attachment" ? ",\"filename\":\"" + Esc(AttachHoldFilenames()) + "\"" : "")
+            // A5: the prompt text was sensitive too -- pattern NAMES only, so
+            // index.js can record the text finding alongside the file's.
+            + (reason == "attachment" ? TextPatternsField(AttachTextPatterns()) : "")
             // Identity of the block, for the Request Access dialog. No prompt
             // content — a platform id, a display name and an agent id, all of
             // them values an admin typed into the blocklist.

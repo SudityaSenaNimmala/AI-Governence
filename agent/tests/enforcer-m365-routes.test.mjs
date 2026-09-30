@@ -766,3 +766,56 @@ test('SEC 8: pane / app reads stay inside the draft AttachmentList ToolBar', asy
   assert.match(fn, /if \(list == null\) \{ snap\.Readable = true; return snap; \}/);
   assert.equal(/EffectiveFocusedElement\(\)/.test(fn), false, 'the read walks the ROOT it was handed');
 });
+
+// -- 2026-09-30: census attribution (A6), the text half of an attachment block
+//    (A5), pasted images (D7) -- on the real helper code ----------------------
+async function v930(variant) {
+  const r = (await run()).find((x) => x.case === 'v930' && x.variant === variant);
+  assert.ok(r, `no v930 '${variant}'`);
+  return r;
+}
+test('A6: the attachcensus line carries the tick\'s agent attribution (same BlockAttr as EmitBlock)', { skip: !win }, async () => {
+  const ev = JSON.parse((await v930('census_attr')).line);
+  assert.equal(ev.kind, 'attachcensus');
+  assert.deepEqual([ev.agent, ev.agent_id, ev.agent_src], ['Researcher', 'row-17', 'row']);
+});
+test('A5: an attachment block also names the prompt\'s own sensitive patterns; a clean prompt adds nothing', { skip: !win }, async () => {
+  const r = await v930('text_patterns');
+  assert.equal(r.dirty, 1, 'swallowed');
+  const blk = JSON.parse(r.dirtyLines.split('\n').find((l) => l.includes('"kind":"block"')));
+  assert.equal(blk.reason, 'attachment');
+  assert.equal(blk.text_patterns, 'us_ssn,credit_card');
+  assert.equal(r.clean, 1, 'the file alone still holds');
+  const clean = JSON.parse(r.cleanLines.split('\n').find((l) => l.includes('"kind":"block"')));
+  assert.equal('text_patterns' in clean, false);
+});
+test('D7: CF_DIB becomes a valid .bmp; no paste-image work off a census surface; the pastehint line shape', { skip: !win }, async () => {
+  const r = await v930('paste_image');
+  assert.equal(r.bmpMagic, 'BM');
+  assert.equal(r.bmpLen, 14 + 44);
+  assert.equal(r.bmpSize, 58);
+  assert.equal(r.bmpOffset, 14 + 40, 'a 24-bit DIB has no colour table');
+  assert.equal(r.badNull, true, 'garbage is refused');
+  assert.equal(r.gateLines, '', 'Claude is not a census surface: nothing read, nothing emitted');
+  assert.equal(r.consumed, true, 'the paste stamp is consumed either way');
+  const ev = JSON.parse(r.hintLine);
+  assert.deepEqual([ev.kind, ev.via, ev.state, ev.process, ev.pid, ev.paste_ms], ['pastehint', 'clipboard_image', 'saved', 'M365Copilot', 77, 1759226400000]);
+  assert.equal('staged' in ev, false);
+  // S1: the DIB is re-encoded as PNG (System.Drawing loaded at run time), within the side cap.
+  assert.equal(r.pngMagic, 'PNG');
+  assert.equal(r.pngSideOk, true);
+  assert.ok(ev.path.endsWith('\\paste\\0f8fad5b-d9cb-469f-a165-70867728950e.png'), ev.path);
+});
+test('D7 source: the hook only stamps a time; the clipboard is read on an STA thread, gated on a census surface, never logged', async () => {
+  const src = await readFile(ENFORCER, 'utf8');
+  assert.match(src, /Interlocked\.Exchange\(ref _pasteImageTicks, _lastPasteTicks\);/);
+  assert.match(src, /\(vk == VK_V && ctrl && !alt\) \|\| \(vk == 0x2D && shift && !ctrl && !alt\)/, 'Shift+Insert stamps too');
+  assert.match(src, /if \(seq == 0 \|\| seq == _stagedClipSeq\) return;/, 'a clipboard change on the surface is staged once');
+  const fn = src.slice(src.indexOf('static void UpdatePasteImage()'), src.indexOf('static string PasteImageDir()'));
+  assert.match(fn, /if \(CensusGovernedNow\(\) == null\) return;/);
+  assert.match(fn, /th\.SetApartmentState\(ApartmentState\.STA\);/);
+  const save = src.slice(src.indexOf('static string SavePastedImage('), src.indexOf('static void EmitPasteHint('));
+  assert.match(save, /DataFormats\.FileDrop\)\) return null;/, 'a file copy is CF_HDROP\'s route, not this one');
+  assert.equal(/Emit\("|Console\.Error|NoteLog|log\(/i.test(save), false, 'nothing about the image is logged');
+  assert.match(src, /UpdatePaste\(\); UpdatePasteImage\(\);/);
+});
