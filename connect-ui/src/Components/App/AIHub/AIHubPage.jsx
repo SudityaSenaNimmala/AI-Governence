@@ -8604,39 +8604,44 @@ function InstallationsView() {
         </details>
       </div>
 
-      {/* Browser Extension */}
+      {/* Intune / Enterprise Deployment */}
       <div className="aihub_card">
         <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
-          <div style={{width:44,height:44,borderRadius:10,background:"#f0fdf4",display:"flex",alignItems:"center",justifyContent:"center",fontSize:24.7}}>🌐</div>
+          <div style={{width:44,height:44,borderRadius:10,background:"#eef2ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:24.7}}>🏢</div>
           <div>
-            <h4 style={{margin:0,fontSize:16.9,fontWeight:700}}>Browser Extension</h4>
-            <div style={{fontSize:14.1,color:"#9ca3af"}}>Chrome · Edge · Brave</div>
+            <h4 style={{margin:0,fontSize:16.9,fontWeight:700}}>Enterprise Deployment</h4>
+            <div style={{fontSize:14.1,color:"#9ca3af"}}>Intune · SCCM · GPO</div>
           </div>
-          <div style={{marginLeft:"auto",fontSize:13,color:"#166534",background:"#f0fdf4",padding:"3px 8px",borderRadius:6,fontWeight:600}}>Step 2</div>
+          <div style={{marginLeft:"auto",fontSize:13,color:"#4f46e5",background:"#eef2ff",padding:"3px 8px",borderRadius:6,fontWeight:600}}>IT Admin</div>
         </div>
 
         <div style={{fontSize:14.7,color:"#6b7280",marginBottom:14,lineHeight:1.5}}>
-          Monitors AI tool usage in the browser — DLP scanning, model routing, access requests. Auto-detects the desktop agent for employee linking.
+          Pre-configured package ready for mass deployment. Server URL and enrollment secret are baked in — employees see zero setup. Governs both desktop AI apps and browser AI tools from a single agent.
         </div>
 
-        <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/extension-package','CloudFuze-Browser-Extension.zip','extension')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:downloading==='extension'?"#6b7280":"#0052e0",color:"#fff",fontSize:15.2,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",width:"100%",marginBottom:14,opacity:downloading&&downloading!=='extension'?0.5:1}}>{downloading==='extension'?'⏳ Preparing package...':'⬇ Download Extension'}</button>
+        <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/desktop-app','CloudFuze-Desktop-Agent.zip','intune')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:downloading==='intune'?"#6b7280":"#4f46e5",color:"#fff",fontSize:15.2,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",width:"100%",marginBottom:14,opacity:downloading&&downloading!=='intune'?0.5:1}}>{downloading==='intune'?'⏳ Preparing package...':'⬇ Download Intune Package'}</button>
 
         <details style={{fontSize:14.7,color:"#374151",marginBottom:10}}>
-          <summary style={{cursor:"pointer",fontWeight:600,fontSize:15.2,marginBottom:6}}>Installation steps</summary>
+          <summary style={{cursor:"pointer",fontWeight:600,fontSize:15.2,marginBottom:6}}>Intune deployment steps</summary>
           <ol style={{lineHeight:2,paddingLeft:18,margin:0}}>
-            <li>Download and extract the ZIP</li>
-            <li>Chrome → <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:14.1}}>chrome://extensions</code></li>
-            <li>Enable <strong>Developer mode</strong></li>
-            <li><strong>Load unpacked</strong> → select folder</li>
-            <li>Auto-enrolls — no setup needed</li>
+            <li>Download the package above</li>
+            <li>In Intune → Apps → Add → Win32 app</li>
+            <li>Install command: <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:14.1}}>install.bat</code></li>
+            <li>Uninstall command: <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:14.1}}>uninstall-silent.bat</code></li>
+            <li>Detection: file exists <code style={{background:"#f1f5f9",padding:"1px 5px",borderRadius:3,fontSize:14.1}}>win-unpacked\CloudFuze AI Governance.exe</code></li>
+            <li>Assign to device groups → silently installs on all managed laptops</li>
           </ol>
         </details>
 
         <details style={{fontSize:14.7,color:"#6b7280"}}>
-          <summary style={{cursor:"pointer",fontWeight:600,fontSize:14.7,color:"#374151"}}>IT mass deployment</summary>
-          <div style={{marginTop:6,lineHeight:1.6}}>
-            Chrome Enterprise policy:<br/>
-            <code style={{background:"#f1f5f9",padding:"2px 6px",borderRadius:3,fontSize:13}}>ExtensionInstallForcelist</code>
+          <summary style={{cursor:"pointer",fontWeight:600,fontSize:14.7,color:"#374151"}}>What's included</summary>
+          <div style={{marginTop:6,lineHeight:1.8,fontSize:14.1}}>
+            ✅ Server URL + enrollment secret pre-configured<br/>
+            ✅ Auto-starts on boot (Task Scheduler + Registry)<br/>
+            ✅ Auto-updates agent source from server<br/>
+            ✅ DLP blocking, guardrails, model routing<br/>
+            ✅ Governs desktop apps + browser AI tools<br/>
+            ✅ Silent install & uninstall scripts
           </div>
         </details>
       </div>
