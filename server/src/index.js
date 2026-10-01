@@ -15,6 +15,7 @@ import { mountSessions } from './routes/sessions.js';
 import { mountConversations } from './routes/conversations.js';
 import { mountReplays } from './routes/replays.js';
 import { startReplayRetentionSweeper } from './lib/replay-retention.js';
+import { startRiskScoreScheduler } from './lib/risk-score-scheduler.js';
 import { mountServerAgents } from './routes/server-agents.js';
 import { mountDiscovered } from './routes/discovered.js';
 import { mountClassifications } from './routes/classifications.js';
@@ -181,6 +182,12 @@ startReplayRetentionSweeper(db);
 // raw-content rows), so the sweep is explicit — children first, parent last.
 // Only meaningful for the local backend; relayed traces are Langfuse's to expire.
 if (tracingBackend() === 'local') startTracingRetentionSweeper(db);
+
+// Risk scores recompute in the background (resolve profiles, then score per
+// person) every RISK_SCORE_INTERVAL_MIN minutes — default 15, 0 disables —
+// first run ~60s after boot. Overlap-guarded against itself and a manual
+// POST /api/v1/risk-scores/compute.
+startRiskScoreScheduler(db);
 
 // Analytics indexes build in the background, once the port is open. Awaiting them
 // before listen() would put an index build in front of the deploy health check.

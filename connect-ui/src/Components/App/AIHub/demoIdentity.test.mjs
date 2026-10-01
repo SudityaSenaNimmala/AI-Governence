@@ -8,7 +8,10 @@
 // the actionable queues keep the row.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { aliasResponse } from "./demoIdentity.js";
+import { aliasResponse, DEMO_IDENTITIES_ENABLED } from "./demoIdentity.js";
+// Demo aliasing is switched off in production (7500ded). These tests describe
+// the aliasing behaviour itself, so they only apply while it is on.
+const whenDemo = { skip: !DEMO_IDENTITIES_ENABLED && "demo identities disabled" };
 
 const machines = [
   { id: "m-emily", hostname: "EMILY", user: "EmilyRodriguez" },
@@ -21,7 +24,7 @@ const rows = [
   { id: "r2", machine_id: "m-laptop", hostname: "LAPTOP-FCRNKB4", employee_name: "LAPTOP-FCRNKB4", user: null, tool_host: "chatgpt.com", status: "pending" },
 ];
 
-test("access requests from a non-demo device stay in the review queue", async () => {
+test("access requests from a non-demo device stay in the review queue", whenDemo, async () => {
   const out = await aliasResponse("/access-requests", structuredClone(rows), fetchRaw);
   assert.deepEqual(out.map((r) => r.id), ["r1", "r2"]);
   // The demo person is still aliased…
@@ -31,18 +34,18 @@ test("access requests from a non-demo device stay in the review queue", async ()
   assert.equal(out[1].status, "pending");
 });
 
-test("query strings do not change the route match", async () => {
+test("query strings do not change the route match", whenDemo, async () => {
   const out = await aliasResponse("/access-requests?status=pending", structuredClone(rows), fetchRaw);
   assert.equal(out.length, 2);
 });
 
-test("active exceptions are kept too, so every live grant stays revocable", async () => {
+test("active exceptions are kept too, so every live grant stays revocable", whenDemo, async () => {
   const ex = [{ request_id: "r2", machine_id: "m-laptop", hostname: "LAPTOP-FCRNKB4", employee_name: "LAPTOP-FCRNKB4", tool_host: "chatgpt.com" }];
   const out = await aliasResponse("/access-exceptions", ex, fetchRaw);
   assert.equal(out.length, 1);
 });
 
-test("report routes still show only the three demo people", async () => {
+test("report routes still show only the three demo people", whenDemo, async () => {
   const dlp = [
     { id: "d1", machine_id: "m-emily", hostname: "EMILY", user: "EmilyRodriguez" },
     { id: "d2", machine_id: "m-laptop", hostname: "LAPTOP-FCRNKB4" },

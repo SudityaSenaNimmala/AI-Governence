@@ -21,7 +21,7 @@ import { a } from '../util.js';
 import { fireWebhooks } from './webhooks.js';
 import { scoreToLevel } from '../lib/risk-scale.js';
 import {
-  RESPONSE_BUDGET_MS, raceWithFallback, applyBudgetHeaders, registerResponseWarmer,
+  RESPONSE_BUDGET_MS, raceWithFallback, applyBudgetHeaders, registerResponseWarmer, invalidateRoute,
 } from '../lib/response-budget.js';
 
 const WINDOW_DAYS = 90;
@@ -52,78 +52,19 @@ export function mountRiskScore(app, db) {
   const scores    = () => db.collection('risk_scores');
   const profiles  = () => db.collection('employee_profiles');
   const dlpEvents = () => db.collection('dlp_events');
-  const findings  = () => db.collection('findings');
-  const sanctions = () => db.collection('sanctions');
 
   // ── Compute scores for all employees ──
 
-  // WHY THIS IS BATCHED AND NOT A LOOP OF QUERIES.
-  //
-  // This endpoint used to issue SIX sequential Mongo queries per profile and then
-  // TWO sequential writes, inside a sequential for-loop. At 48 profiles that is
-  // 384 serialized round trips against Atlas over a 90-day window. Measured at
-  // 46ms per round trip it takes ~18s from a developer machine; on the deploy host
-  // it exceeded nginx's 120s proxy_read_timeout (connect-ui/nginx.conf) and the
-  // caller got a 504 — while the run monopolised the box long enough that
-  // concurrent requests (/identity/resolve, /access-exceptions) failed too.
-  //
-  // The cost is now independent of the profile count: two aggregations to collect
-  // every per-machine metric, then pure in-memory scoring, then two bulk writes.
-  // Same numbers out — the per-machine counts are summed per profile exactly as
-  // the per-profile $in queries counted them.
+  // PER PERSON, NOT PER PROFILE. One human routinely owns several
+  // employee_profiles (one per agent machine/OS-user resolve_key, one per
+  // unmatched browser extension), so each PERSON is scored once over the union
+  // of their machines and the result is written to every member profile. The
+  // body is computeAllScores (below) so the background scheduler
+  // (lib/risk-score-scheduler.js) runs exactly the same thing; see runCompute for
+  // why it is batched rather than a loop of queries.
   app.post('/api/v1/risk-scores/compute', a(async (req, res) => {
-    const allProfiles = await profiles().find({}).project({ _id: 0 }).toArray();
-    const allSanctions = await sanctions().find({}).project({ _id: 0 }).toArray();
-    const sanctionedKeys = new Set(allSanctions.filter(s => s.status === 'approved').map(s => s.tool_key));
-
-    const machineIds = [...new Set(allProfiles.flatMap(p => p.machine_ids || []).filter(Boolean))];
-    const metrics = await machineMetrics(db, machineIds);
-
-    const results = allProfiles.map(profile => computeScore(profile, metrics, sanctionedKeys));
-
-    const computedAt = new Date();
-    // Historical rows for trending — one insert for the whole run.
-    const history = allProfiles.map((profile, i) => ({
-      id: crypto.randomUUID(),
-      profile_id: profile.id,
-      display_name: profile.display_name,
-      score: results[i].score,
-      level: results[i].level,
-      factors: results[i].factors,
-      computed_at: computedAt,
-    }));
-    if (history.length) await scores().insertMany(history);
-
-    if (allProfiles.length) {
-      await profiles().bulkWrite(allProfiles.map((profile, i) => ({
-        updateOne: {
-          filter: { id: profile.id },
-          update: { $set: {
-            risk_score: results[i].score,
-            risk_level: results[i].level,
-            risk_factors: results[i].factors,
-            risk_computed_at: computedAt,
-          } },
-        },
-      })));
-    }
-
-    // Webhooks last, and still not awaited — same fire-and-forget as before, but
-    // now after the writes so a slow endpoint cannot delay the response.
-    allProfiles.forEach((profile, i) => {
-      const score = results[i];
-      if (score.level !== 'high' && score.level !== 'critical') return;
-      fireWebhooks(db, 'risk_score_high', {
-        title: 'Risk Score Alert: ' + (profile.display_name || 'Employee') + ' → ' + score.level.toUpperCase(),
-        body: (profile.display_name || 'An employee') + ' has a risk score of ' + score.score + ' (' + score.level + '). Top factors: DLP violations (' + (score.factors?.dlp_violations?.raw || 0) + '), overrides (' + (score.factors?.enforcement_overrides?.raw || 0) + '), shadow tools (' + (score.factors?.shadow_tools?.raw || 0) + ').',
-        severity: score.level,
-        employee: profile.display_name || profile.email || 'Unknown',
-        tool: 'Risk Score Engine',
-        trigger: 'risk_score_high',
-      });
-    });
-
-    res.json({ computed: results.length, scores: results });
+    // A scheduled run already in flight is joined rather than duplicated.
+    res.json(await computeAllScores(db, { source: 'manual', ifBusy: 'join' }));
   }));
 
   // ── Get all current scores (from profiles) ──
@@ -172,7 +113,9 @@ export function mountRiskScore(app, db) {
   // row already carries the display_name it was scored under, so the same
   // UNIDENTIFIED_NAME exclusion /summary uses applies directly here with no
   // join back to employee_profiles. Sparse by construction: a day only
-  // appears if "Compute Scores" actually ran that day.
+  // appears if a compute ran that day AND wrote history — rows are deduped per
+  // person (only on a change, or once a day), so a day averages the people
+  // whose score was recorded that day.
   app.get('/api/v1/risk-scores/trend', a(async (req, res) => {
     const days = Math.min(365, Math.max(1, Number(req.query.days) || 90));
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
@@ -194,89 +137,217 @@ export function mountRiskScore(app, db) {
     const profile = await profiles().findOne({ id: req.params.profileId }, { projection: { _id: 0 } });
     if (!profile) return res.status(404).json({ error: 'profile not found' });
 
+    // The list shows ONE row per person, keyed by the highest-scoring member's
+    // id, so its breakdown covers every profile sharing that person_key —
+    // otherwise the expanded row would show one device's events under a score
+    // computed over all of them. Before the first compute there is no
+    // person_key yet and the profile stands alone, as it always did.
+    let members = [profile];
+    if (profile.person_key) {
+      const same = await profiles().find({ person_key: profile.person_key }).project({ _id: 0 }).toArray();
+      if (same.length) members = same.some(m => m.id === profile.id) ? same : [profile, ...same];
+    }
+    const memberIds = members.map(m => m.id);
+    const machineIds = [...new Set(members.flatMap(m => m.machine_ids || []).filter(Boolean))];
+
     const history = await scores()
-      .find({ profile_id: req.params.profileId })
+      .find({ profile_id: { $in: memberIds } })
       .sort({ computed_at: -1 })
       .limit(90)
       .project({ _id: 0, score: 1, level: 1, computed_at: 1 })
       .toArray();
 
-    // Get recent DLP events for this employee
+    // Recent DLP events across all of this person's machines
     const recentEvents = await dlpEvents()
-      .find({ machine_id: { $in: profile.machine_ids || [] }, occurred_at: { $gte: windowStart() } })
+      .find({ machine_id: { $in: machineIds }, occurred_at: { $gte: windowStart() } })
       // occurred_at is stored as ISO string — string comparison works for sorting
       .sort({ occurred_at: -1 })
       .limit(20)
       .project({ _id: 0 })
       .toArray();
 
-    res.json({ profile, history, recent_events: recentEvents });
+    res.json({ profile, history, recent_events: recentEvents, merged_profile_ids: memberIds });
   }));
+}
+
+// ── Person grouping ───────────────────────────────────────────────────
+//
+// WHY. resolveProfiles (routes/identity.js) mints one employee_profile per
+// agent machine/OS-user pair (`agent:host:user`) and one per browser extension
+// it could not link, so a single human with a laptop, a desktop and a browser
+// showed up three times in "Employees by Risk" — each with a slice of their
+// behaviour and therefore a score that understated them.
+//
+// RULE. Profiles that share a normalized email OR a detected OS username (any
+// machine `user` / profile os_user, DOMAIN\ stripped, lowercased) are the same
+// person — joined transitively with union-find, so A~B by email and B~C by
+// username puts all three together. Display names are deliberately NOT a join
+// key: two different people can share one. Unidentified ("Browser User …")
+// profiles never join anything.
+//
+// person_key: the component's smallest email, else its smallest username, else
+// the profile id (a singleton with nothing to join on).
+
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const HIGH_LEVELS = new Set(['high', 'critical']);
+const HISTORY_REFRESH_MS = 24 * 60 * 60 * 1000;
+
+function normUser(u) {
+  const s = String(u || '').trim();
+  if (!s) return null;
+  if (EMAIL_RE.test(s)) return { email: s.toLowerCase() };
+  const bare = s.split('\\').pop().trim().toLowerCase();
+  return bare ? { user: bare } : null;
+}
+
+/**
+ * Pure. Groups profiles into persons.
+ * @param {object[]} allProfiles
+ * @param {Map<string, {id,user,hostname}>} machinesById
+ * @returns {{ person_key: string, identified: boolean, members: object[] }[]}
+ */
+export function groupPersons(allProfiles, machinesById = new Map()) {
+  const parent = allProfiles.map((_, i) => i);
+  const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  const union = (x, y) => { const a = find(x), b = find(y); if (a !== b) parent[b] = a; };
+
+  const tokens = allProfiles.map((p) => {
+    const emails = new Set(), users = new Set();
+    if (UNIDENTIFIED_NAME.test(p.display_name || '')) return { emails, users };
+    const add = (v) => {
+      const n = normUser(v);
+      if (n?.email) emails.add(n.email); else if (n?.user) users.add(n.user);
+    };
+    if (p.email) add(p.email);
+    if (p.os_user) add(p.os_user);
+    for (const id of p.machine_ids || []) add(machinesById.get(id)?.user);
+    return { emails, users };
+  });
+
+  const owner = new Map();
+  tokens.forEach((t, i) => {
+    const keys = [...[...t.emails].map(e => 'e:' + e), ...[...t.users].map(u => 'u:' + u)];
+    for (const k of keys) {
+      if (owner.has(k)) union(owner.get(k), i); else owner.set(k, i);
+    }
+  });
+
+  const comps = new Map();
+  allProfiles.forEach((_, i) => {
+    const r = find(i);
+    if (!comps.has(r)) comps.set(r, []);
+    comps.get(r).push(i);
+  });
+
+  return [...comps.values()].map((idx) => {
+    const members = idx.map(i => allProfiles[i]).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const emails = [...new Set(idx.flatMap(i => [...tokens[i].emails]))].sort();
+    const users = [...new Set(idx.flatMap(i => [...tokens[i].users]))].sort();
+    const identified = members.some(m => !UNIDENTIFIED_NAME.test(m.display_name || ''));
+    return { person_key: emails[0] || users[0] || String(members[0].id), identified, members };
+  });
+}
+
+// The identity the agent/extension actually reported (machine OS user → profile
+// email → machine hostname → profile hostname), over the person's profiles, the
+// preferred one first.
+function detectedName(members, byId) {
+  for (const p of members) {
+    const ms = (p.machine_ids || []).map(id => byId.get(id)).filter(Boolean);
+    const n = ms.find(m => m.user)?.user || p.email || ms.find(m => m.hostname)?.hostname || p.hostname;
+    if (n) return n;
+  }
+  return null;
+}
+
+function unionSources(members) {
+  const arrays = members.map(m => m.sources).filter(Array.isArray);
+  return arrays.length ? [...new Set(arrays.flat())] : undefined;
+}
+
+// Highest-scoring member, ties broken by id — the same order computeAllScores
+// uses for its representative, so history rows and list rows agree on the id.
+function topMember(members) {
+  return [...members].sort((a, b) =>
+    ((b.risk_score ?? -1) - (a.risk_score ?? -1)) || String(a.id).localeCompare(String(b.id)))[0];
+}
+
+const PROFILE_FIELDS = { _id: 0, id: 1, display_name: 1, email: 1, hostname: 1, department: 1, os_user: 1,
+  risk_score: 1, risk_level: 1, risk_factors: 1, risk_computed_at: 1, sources: 1, machine_ids: 1, person_key: 1 };
+
+// TWO READS, IN PARALLEL, whatever the head count: every profile and every
+// machine's reported identity; grouping is then pure in-memory work. Grouping
+// is recomputed live with the same rule compute uses, so a profile created
+// since the last compute (no person_key yet) is already folded into its person
+// and the table is right before the next run.
+async function loadPersonGroups(db) {
+  const [allProfiles, machines] = await Promise.all([
+    db.collection('employee_profiles').find({}).project(PROFILE_FIELDS).toArray(),
+    db.collection('machines').find({}).project({ _id: 0, id: 1, user: 1, hostname: 1 }).toArray(),
+  ]);
+  const byId = new Map(machines.map(m => [m.id, m]));
+  return { groups: groupPersons(allProfiles, byId), byId };
 }
 
 // The work behind GET /api/v1/risk-scores, pulled out of the handler so the
 // route can race it against the budget and the boot warmer can run the same
 // read — one definition, so a warmed body can never differ from a served one.
+//
+// ONE ROW PER PERSON. The row carries the highest-scoring member's id, so the
+// existing /:profileId detail route keeps working, plus merged_profile_ids.
 async function fetchScores(db) {
-  const allProfiles = await db.collection('employee_profiles').find({ risk_score: { $ne: null } })
-    .sort({ risk_score: -1 })
-    .project({ _id: 0, id: 1, display_name: 1, email: 1, hostname: 1, department: 1,
-      risk_score: 1, risk_level: 1, risk_factors: 1, risk_computed_at: 1, sources: 1 })
-    .toArray();
-
-  // Tag each row as identified or not, using the SAME rule the summary applies.
-  //
-  // This endpoint returned every scored profile while /summary silently excluded
-  // "Browser User (hash)" ones, so the same screen reported 18 people in the table
-  // and 3 in the header. Both numbers were defensible in isolation and impossible
-  // to reconcile on screen. The filter stays out of this endpoint — dropping rows
-  // here would hide real people whose extension has not yet been matched to an
-  // account — but the flag lets the caller group them and the two counts add up.
-  return allProfiles.map(p => ({ ...p, is_identified: !UNIDENTIFIED_NAME.test(p.display_name || '') }));
+  const { groups, byId } = await loadPersonGroups(db);
+  const rows = [];
+  for (const g of groups) {
+    const scored = g.members.filter(m => m.risk_score != null);
+    if (!scored.length) continue;
+    const top = topMember(scored);
+    rows.push({
+      id: top.id,
+      display_name: top.display_name,
+      email: top.email || g.members.find(m => m.email)?.email || null,
+      hostname: top.hostname ?? null,
+      department: top.department || g.members.find(m => m.department)?.department || null,
+      risk_score: top.risk_score,
+      risk_level: top.risk_level,
+      risk_factors: top.risk_factors,
+      risk_computed_at: top.risk_computed_at,
+      sources: unionSources(g.members),
+      detected_name: detectedName([top, ...g.members.filter(m => m !== top)], byId),
+      person_key: g.person_key,
+      merged_profile_ids: g.members.map(m => m.id),
+      // Tagged identified or not using the SAME rule the summary applies, so
+      // total_employees + unidentified equals this row count. The filter stays
+      // out of this endpoint — dropping rows here would hide real people whose
+      // extension has not yet been matched to an account.
+      is_identified: g.identified,
+    });
+  }
+  rows.sort((a, b) => (b.risk_score - a.risk_score) || String(a.id).localeCompare(String(b.id)));
+  return rows;
 }
 
-// The work behind GET /api/v1/risk-scores/summary.
-//
-// ALL THREE READS IN PARALLEL. They were awaited one after another — a find()
-// and two countDocuments() over the same collection, none of them feeding
-// another — on the endpoint whose own history is a serialized-round-trip
-// incident. Same treatment as /api/v1/overview and /api/v1/machines.
+// The work behind GET /api/v1/risk-scores/summary. Counts PERSONS, from the same
+// two parallel reads as the list, so the header and the table cannot disagree.
 async function fetchScoresSummary(db) {
-  const profiles = () => db.collection('employee_profiles');
-  const [allProfiles, unidentified, notAssessed] = await Promise.all([
-    profiles().find({
-      risk_score: { $ne: null },
-      display_name: { $not: UNIDENTIFIED_NAME },
-    }).project({ _id: 0, risk_score: 1, risk_level: 1 }).toArray(),
+  const { groups } = await loadPersonGroups(db);
+  let unidentified = 0, notAssessed = 0;
+  const scoredPeople = [];
+  for (const g of groups) {
+    const scored = g.members.filter(m => m.risk_score != null);
+    // Scored but not attributable to a named person: counted separately rather
+    // than dropped, and kept out of the average (an unnamed row cannot be actioned).
+    if (!g.identified) { if (scored.length) unidentified++; continue; }
+    // Report the unmeasured population instead of quietly dropping it — "we
+    // measured 4 of 40 people" is a different statement from "we measured 4".
+    if (!scored.length) { notAssessed++; continue; }
+    scoredPeople.push(topMember(scored));
+  }
 
-    // Scored, but not attributable to a named person. Counted separately rather
-    // than dropped: excluding them from the average is right (an unnamed row cannot
-    // be actioned), but omitting them entirely is what made the header disagree
-    // with the table below it. GET /api/v1/risk-scores returns these with
-    // is_identified: false, so total_employees + unidentified equals its row count.
-    profiles().countDocuments({
-      risk_score: { $ne: null },
-      display_name: UNIDENTIFIED_NAME,
-    }),
-
-    // Report the unmeasured population instead of quietly dropping it.
-    //
-    // The risk_score:{$ne:null} filter above correctly keeps unassessed people out
-    // of the average — but on its own it makes them invisible, so an org where
-    // most staff have no endpoint agent shows a small, healthy-looking cohort and
-    // no hint that the coverage is thin. "We measured 4 of 40 people" is a
-    // materially different statement from "we measured 4 people", and the second
-    // one is what this endpoint used to imply.
-    profiles().countDocuments({
-      $or: [{ risk_score: null }, { risk_score: { $exists: false } }],
-      display_name: { $not: /^Browser User/ },
-    }),
-  ]);
-
-  const total = allProfiles.length;
-  const avgScore = total ? Math.round(allProfiles.reduce((s, p) => s + p.risk_score, 0) / total) : 0;
+  const total = scoredPeople.length;
+  const avgScore = total ? Math.round(scoredPeople.reduce((s, p) => s + p.risk_score, 0) / total) : 0;
   const distribution = { low: 0, medium: 0, high: 0, critical: 0 };
-  for (const p of allProfiles) distribution[p.risk_level] = (distribution[p.risk_level] || 0) + 1;
+  for (const p of scoredPeople) distribution[p.risk_level] = (distribution[p.risk_level] || 0) + 1;
 
   return {
     total_employees: total,
@@ -285,6 +356,150 @@ async function fetchScoresSummary(db) {
     unidentified,
     not_assessed: notAssessed,
     coverage_percent: (total + notAssessed) ? Math.round((total / (total + notAssessed)) * 100) : 0,
+  };
+}
+
+// ── Compute (shared by POST /compute and the scheduler) ───────────────
+
+// One run per db at a time. WeakMap so separate test dbs never block each other.
+const inFlight = new WeakMap();
+
+export function isRiskComputeRunning(db) {
+  return inFlight.has(db);
+}
+
+/**
+ * Score every person and persist the result onto each member profile.
+ *
+ * @param {object} db
+ * @param {{ source?: string, ifBusy?: 'join'|'skip' }} [opts]
+ *   ifBusy 'join' (default) returns the in-flight run's result; 'skip' returns
+ *   `{ skipped: true }` immediately — what the scheduler wants.
+ */
+export function computeAllScores(db, { source = 'manual', ifBusy = 'join' } = {}) {
+  const running = inFlight.get(db);
+  if (running) return ifBusy === 'skip' ? Promise.resolve({ skipped: true, reason: 'in_flight' }) : running;
+  const p = runCompute(db, source).finally(() => inFlight.delete(db));
+  inFlight.set(db, p);
+  return p;
+}
+
+// WHY THIS IS BATCHED AND NOT A LOOP OF QUERIES.
+//
+// This used to issue SIX sequential Mongo queries per profile and then TWO
+// sequential writes, inside a sequential for-loop. At 48 profiles that is 384
+// serialized round trips against Atlas; on the deploy host it exceeded nginx's
+// 120s proxy_read_timeout and the caller got a 504 — while the run monopolised
+// the box long enough that concurrent requests failed too.
+//
+// The cost is independent of the head count: three parallel reads (profiles,
+// sanctions, machine identities), the metric aggregations, pure in-memory
+// scoring, then at most one insertMany and one bulkWrite.
+async function runCompute(db, source) {
+  const profilesC = db.collection('employee_profiles');
+  const [allProfiles, allSanctions, machines] = await Promise.all([
+    profilesC.find({}).project({ _id: 0 }).toArray(),
+    db.collection('sanctions').find({}).project({ _id: 0 }).toArray(),
+    db.collection('machines').find({}).project({ _id: 0, id: 1, user: 1, hostname: 1 }).toArray(),
+  ]);
+  const sanctionedKeys = new Set(allSanctions.filter(s => s.status === 'approved').map(s => s.tool_key));
+  const byId = new Map(machines.map(m => [m.id, m]));
+  const groups = groupPersons(allProfiles, byId);
+
+  const machineIds = [...new Set(allProfiles.flatMap(p => p.machine_ids || []).filter(Boolean))];
+  const metrics = await machineMetrics(db, machineIds);
+
+  const computedAt = new Date();
+  const results = [];
+  const history = [];
+  const updates = [];
+  const alerts = [];
+
+  for (const g of groups) {
+    const rep = g.members[0];   // id-ordered; matches topMember once all members share the score
+    const merged = {
+      id: rep.id,
+      display_name: rep.display_name,
+      email: rep.email || g.members.find(m => m.email)?.email,
+      machine_ids: [...new Set(g.members.flatMap(m => m.machine_ids || []).filter(Boolean))],
+      // Unknown provenance on ANY member keeps the full denominator — the same
+      // conservative rule computeScore applies to a single profile.
+      sources: g.members.every(m => Array.isArray(m.sources)) ? unionSources(g.members) : undefined,
+    };
+    const score = computeScore(merged, metrics, sanctionedKeys);
+    const detected = detectedName(g.members, byId);
+    results.push({ ...score, person_key: g.person_key, profile_ids: g.members.map(m => m.id), detected_name: detected });
+
+    // HISTORY DEDUPE: one row per person, and only when the number moved or the
+    // last row is a day old — the scheduler runs every 15 minutes and identical
+    // rows would only bloat risk_scores. The last-written time is kept on the
+    // profiles (risk_history_at), so this costs no extra read.
+    const changed = g.members.some(m => (m.risk_score ?? null) !== score.score || (m.risk_level ?? null) !== score.level);
+    const lastAt = Math.max(0, ...g.members.map(m => (m.risk_history_at ? new Date(m.risk_history_at).getTime() : 0)));
+    const writeHistory = changed || !lastAt || computedAt.getTime() - lastAt >= HISTORY_REFRESH_MS;
+    if (writeHistory) {
+      history.push({
+        id: crypto.randomUUID(),
+        profile_id: rep.id,
+        person_key: g.person_key,
+        profile_ids: g.members.map(m => m.id),
+        // display_name stays the profile's resolved name so the trend's
+        // UNIDENTIFIED_NAME exclusion keeps working; the detected identity
+        // rides alongside it.
+        display_name: rep.display_name,
+        detected_name: detected,
+        score: score.score,
+        level: score.level,
+        factors: score.factors,
+        computed_at: computedAt,
+        source,
+      });
+    }
+
+    for (const m of g.members) {
+      const set = {
+        risk_score: score.score,
+        risk_level: score.level,
+        risk_factors: score.factors,
+        risk_computed_at: computedAt,
+        person_key: g.person_key,
+      };
+      if (writeHistory) set.risk_history_at = computedAt;
+      updates.push({ updateOne: { filter: { id: m.id }, update: { $set: set } } });
+    }
+
+    // Alert on the TRANSITION into high/critical, once per person — not on every
+    // 15-minute run while they stay there, and not once per member profile.
+    const wasHigh = g.members.some(m => HIGH_LEVELS.has(m.risk_level));
+    if (HIGH_LEVELS.has(score.level) && !wasHigh) alerts.push({ name: rep.display_name || detected, email: merged.email, score });
+  }
+
+  if (history.length) await db.collection('risk_scores').insertMany(history);
+  if (updates.length) await profilesC.bulkWrite(updates);
+
+  // Readers must see the new numbers now, not after the budget cache ages out.
+  invalidateRoute(SCORES_ROUTE);
+  invalidateRoute(SUMMARY_ROUTE);
+
+  // Webhooks last, and not awaited — a slow endpoint cannot delay the run.
+  for (const { name, email, score } of alerts) {
+    fireWebhooks(db, 'risk_score_high', {
+      title: 'Risk Score Alert: ' + (name || 'Employee') + ' → ' + score.level.toUpperCase(),
+      body: (name || 'An employee') + ' has a risk score of ' + score.score + ' (' + score.level + '). Top factors: DLP violations (' + (score.factors?.dlp_violations?.raw || 0) + '), overrides (' + (score.factors?.enforcement_overrides?.raw || 0) + '), shadow tools (' + (score.factors?.shadow_tools?.raw || 0) + ').',
+      severity: score.level,
+      employee: name || email || 'Unknown',
+      tool: 'Risk Score Engine',
+      trigger: 'risk_score_high',
+    });
+  }
+
+  return {
+    computed: results.length,
+    profiles_updated: updates.length,
+    history_written: history.length,
+    alerts_fired: alerts.length,
+    source,
+    scores: results,
   };
 }
 

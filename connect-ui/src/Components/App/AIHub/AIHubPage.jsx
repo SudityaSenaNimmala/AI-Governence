@@ -527,8 +527,28 @@ function enforcementMembers(row) { return row?._enforcement || []; }
 // ("SudityaNimmala" for Suditya Nimmala) — split on a lower→upper letter
 // boundary so names read as two words instead of one merged string. A no-op
 // on names that already have spaces, and on hostnames/ids (no such boundary).
+// Each word is also capitalised ("sruthi.chimata" / "sruthiChimata" -> "Sruthi
+// Chimata"); '.' and '_' separate words too. Emails are left exactly as they are.
 function splitConcatenatedName(name) {
-  return typeof name === "string" ? name.replace(/([a-z])([A-Z])/g, "$1 $2") : name;
+  if (typeof name !== "string" || name.includes("@")) return name;
+  return name
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .split(/[\s._]+/)
+    .filter(Boolean)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+// "First Last" for a person. A single-word username ("Pravallikapunumalli")
+// has no boundary to split on, so when the work email is known its local part
+// ("pravallika.punumalli") supplies the first/last split instead.
+function personDisplayName(name, email) {
+  const n = splitConcatenatedName(name);
+  const local = typeof email === "string" && email.includes("@") ? email.split("@")[0] : "";
+  if (local && (!n || n.includes("@") || !n.includes(" "))) {
+    const fromEmail = splitConcatenatedName(local);
+    if (fromEmail.includes(" ")) return fromEmail;
+  }
+  return n || email || null;
 }
 function UserCell({ row }) {
   const name = splitConcatenatedName(row?.employee_name || row?.user || null);
@@ -3751,7 +3771,14 @@ function RiskScoreView() {
       s=>{ if(s===false) setErr("Could not load employee risk scores. Reload to try again."); else setScores(s); },false,setWarn);
     soft(tapMeta(apiFetchWithMeta("/risk-scores/summary"),addMeta),"the summary cards",setSummary,false,setWarn);
   };
-  useEffect(()=>{ loadAll(); },[]);
+  // The server recomputes scores in the background every 15 minutes, so keep
+  // the table and cards current while this tab is open: refetch every 60s,
+  // stopped on unmount.
+  useEffect(()=>{
+    loadAll();
+    const t=setInterval(loadAll,60000);
+    return ()=>clearInterval(t);
+  },[]);
 
   const compute=async()=>{
     setComputing(true);
@@ -3827,7 +3854,7 @@ function RiskScoreView() {
         <Shield size={40} color="#d1d5db" style={{marginBottom:12}}/>
         <h4 style={{margin:"0 0 8px",color:"#374151"}}>No risk scores computed yet</h4>
         <p style={{color:"#9ca3af",fontSize:15.2,maxWidth:400,margin:"0 auto 16px"}}>
-          Click "Compute Scores" to analyze employee AI behavior and generate risk scores from DLP events, tool usage, and violation history.
+          Scores are calculated automatically every 15 minutes. Click "Compute Scores" to run it now and analyze employee AI behavior and generate risk scores from DLP events, tool usage, and violation history.
         </p>
       </div>
     ) : (
@@ -3837,12 +3864,12 @@ function RiskScoreView() {
           columns={[
             {label:"Employee",hint:"The employee this risk score belongs to.",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
               <ChevronRight size={13} style={{color:"#9ca3af",flexShrink:0,transition:"transform .15s",transform:selected===r.id?"rotate(90deg)":"none"}}/>
-              <div className="aihub_text_primary">{splitConcatenatedName(r.display_name)||r.email||r.hostname||"—"}</div>
+              <div className="aihub_text_primary">{personDisplayName(r.detected_name||r.display_name, r.email)||r.hostname||"—"}</div>
             </div>},
             {label:"Score",hint:"A 0–100 score built from DLP violations, overridden blocks, shadow AI tool use, data sensitivity, and usage-volume anomalies. Low 0–30, Medium 31–60, High/Critical 61–100.",render:r=><RiskLevelBadge level={r.risk_level} score={r.risk_score}/>},
             {label:"",render:r=><div style={{minWidth:120}}><ScoreBar score={r.risk_score}/></div>},
             {label:"Sources",hint:"Which data feeds contributed to this employee's score — DLP events, tool usage, violation history.",render:r=><div style={{display:"flex",gap:3,flexWrap:"wrap"}}>{(r.sources||[]).map(s=><Tag key={s} text={slugLabel(s)}/>)}</div>},
-            {label:"Computed",hintAlign:"right",hint:"When this score was last calculated. Click 'Compute Scores' above to refresh it.",render:r=>relTime(r.risk_computed_at)},
+            {label:"Computed",hintAlign:"right",hint:"When this score was last calculated. Scores recalculate automatically every 15 minutes; click 'Compute Scores' above to refresh now.",render:r=>relTime(r.risk_computed_at)},
           ]}
           rows={realScores}
           onRow={r=>toggleRow(r.id)}

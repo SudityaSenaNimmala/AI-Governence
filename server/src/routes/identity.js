@@ -15,6 +15,7 @@
 
 import crypto from 'node:crypto';
 import { a } from '../util.js';
+import { isNonEndpointMachine } from '../lib/desktop-agent-presence.js';
 
 export function mountIdentity(app, db) {
   const profiles = () => db.collection('employee_profiles');
@@ -129,15 +130,19 @@ export async function resolveProfiles(db, allMachines) {
   let created = 0, updated = 0, skipped = 0;
 
   // STEP 1: Filter — only desktop agents and browser extensions count.
-  // Desktop agent: has real hostname + user + platform (win32/darwin/linux)
+  // Desktop agent: has real hostname + user, and either a platform (scanner
+  // reports) or type 'desktop-agent' (the tray app / os_monitor, which never
+  // sent a platform — same rule as the Overview "Systems" count, so every
+  // counted system can get a profile and a risk score).
   // Browser extension: hostname ends with "browser-extension"
-  // Everything else (CLI, test data, demo seeds) is ignored.
+  // Everything else (CLI, trackers, test data, demo seeds) is ignored.
   const agents = [];
   const extensions = [];
 
   for (const m of allMachines) {
     const h = (m.hostname || '').toLowerCase();
-    if (m.user && m.platform && h && !h.includes('browser-extension') && !h.includes('claude code')) {
+    const isAgent = !isNonEndpointMachine(m) && (m.platform || m.type === 'desktop-agent');
+    if (m.user && isAgent && h && !h.includes('browser-extension') && !h.includes('claude code')) {
       agents.push(m);
     } else if (h.includes('browser-extension')) {
       extensions.push(m);
