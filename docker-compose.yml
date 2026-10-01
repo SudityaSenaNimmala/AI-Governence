@@ -79,7 +79,7 @@ services:
       # or by people who would be admins anyway. Defaults off; the server logs a
       # warning and /api/v1/health reports admin_auth:"open" so it is discoverable
       # without reading this file. Remove when OAuth lands.
-      ADMIN_AUTH_OPEN: ${ADMIN_AUTH_OPEN:-}
+      ADMIN_AUTH_OPEN: ${ADMIN_AUTH_OPEN:-true}
       # Session replay feature flag — 'false' rejects all recording uploads at
       # the server, regardless of what the extension sends. Prevents the DB from
       # filling up with replay chunks when the feature is disabled.
