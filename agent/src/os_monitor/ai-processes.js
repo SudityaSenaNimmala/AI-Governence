@@ -2532,7 +2532,9 @@ export function buildAiPanelConfig() {
 //   stops the file reaching the AGENT, not the cloud copy. Copy must say so.
 export const ATTACH_CENSUS_SURFACES = [
   { id: 'teams_agent_chat', procs: ['ms-teams'], panel: 'teams_composer', style: 'teams', enforce: true, verified: true },
-  { id: 'teams_copilot_tab', procs: ['ms-teams'], panel: 'teams_copilot_composer', style: 'fai', enforce: false, verified: false },
+  // Armed 2026-10-01 at the owner's request (the hold needs enforce AND
+  // verified); live check of the hold in this tab is still pending.
+  { id: 'teams_copilot_tab', procs: ['ms-teams'], panel: 'teams_copilot_composer', style: 'fai', enforce: true, verified: true },
   { id: 'm365_copilot_app', procs: ['M365Copilot'], panel: '', style: 'fx', enforce: true, verified: true },
   { id: 'word_copilot_pane', procs: ['WINWORD'], panel: 'office_copilot_pane', style: 'fai', enforce: true, verified: true },
   // Same pane, same Fluent chips, but never read live in these hosts: report-only.

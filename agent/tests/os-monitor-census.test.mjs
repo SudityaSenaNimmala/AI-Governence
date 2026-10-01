@@ -148,13 +148,13 @@ test('resolveAttachment: hint -> local; OneDrive placeholder -> cloud (never ope
 
 // ── catalog ─────────────────────────────────────────────────────────────────
 
-test('attachCensus flags: enforcing for the three live-verified surfaces only; the rest report-only', () => {
+test('attachCensus flags: enforcing for the armed surfaces only (Teams Copilot tab armed 2026-10-01 at the owner\'s request); the rest report-only', () => {
   const armed = ATTACH_CENSUS_SURFACES.filter((s) => s.enforce && s.verified).map((s) => s.id).sort();
-  assert.deepEqual(armed, ['m365_copilot_app', 'teams_agent_chat', 'word_copilot_pane']);
+  assert.deepEqual(armed, ['m365_copilot_app', 'teams_agent_chat', 'teams_copilot_tab', 'word_copilot_pane']);
   for (const s of ATTACH_CENSUS_SURFACES) assert.equal(s.enforce, s.verified, `${s.id}: enforce only together with verified`);
   assert.equal(attachCensusSurfaceFor('EXCEL', 'office_copilot_pane').enforce, false, 'Excel: report-only');
   assert.equal(attachCensusSurfaceFor('OUTLOOK', 'outlook_copilot_pane').enforce, false, 'Outlook pane: report-only');
-  assert.equal(attachCensusSurfaceFor('ms-teams', 'teams_copilot_composer').enforce, false, 'Teams Copilot tab: report-only');
+  assert.equal(attachCensusSurfaceFor('ms-teams', 'teams_copilot_composer').enforce, true, 'Teams Copilot tab: enforcing');
   assert.equal(attachCensusSurfaceFor('WINWORD', 'office_copilot_pane').enforce, true);
   assert.deepEqual(buildAttachCensusConfig().map((s) => s.id), ATTACH_CENSUS_SURFACES.map((s) => s.id));
   const enf = readFileSync(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer.js'), 'utf8');

@@ -29,9 +29,6 @@ import {
   hostsForPlatform,
   identifyAiPanel,
   hostForPanel,
-  filterBlockedAgents,
-  synthesizePlatformBlocks,
-  normalizeAgentRows,
   identifyEgressSurface,
   webSurfaceForHost,
   enforcingWebSurface,
@@ -319,7 +316,6 @@ export class OsMonitor extends EventEmitter {
     // Same enrolment machine JWT either way — see #submitAccessRequest.
     this.serverUrl = String(serverUrl || '').replace(/\/$/, '');
     this.token = token || null;
-    this._blockedAgentsInterval = null;
     this.poller = createPoller({ log });
     this.reporter = new Reporter({ serverUrl, token, log });
     this.toast = createNotifier({ log });
@@ -3634,13 +3630,15 @@ export class OsMonitor extends EventEmitter {
     // within a poll of startup.
     this.featureSync.start();
 
-    // ── Blocked agents + access request sync (10s interval) ──────────────
-    // Same logic as electron/monitor-runner.mjs — syncs blocked agents,
-    // platform blocks, and access exceptions to blocked-agents.json, and
-    // flushes any offline access-request queue.
-    const tick = () => { this._refreshBlockedAgents(); this._flushPendingAccessRequest(); };
-    tick(); // immediate first sync
-    this._blockedAgentsInterval = setInterval(tick, 10_000);
+    // ── Blocked agents + access request sync: NOT here ─────────────────────
+    // Every entry point that constructs an OsMonitor starts the ONE shared sync
+    // itself — startBlockedAgentsSync() in blocked-agents-sync.js (Electron's
+    // monitor-runner.mjs, src/index.js --monitor, src/claude_tracker/index.js).
+    // A second copy used to run from here too, so every process had TWO 10s
+    // ticks writing blocked-agents.json and TWO flushers draining the offline
+    // access-request slot. Both fired at startup within milliseconds, both read
+    // the same queued file, both POSTed it — and the server filed it twice
+    // (seen live: two pending rows for one device + tool, 9ms apart).
 
     // ── Routing rules sync (60s interval, 5s first check) ─────────────────
     // Fetches server-defined routing rules and caches them locally so the
@@ -3926,138 +3924,6 @@ export class OsMonitor extends EventEmitter {
     this._spawnUi('block-dialog.ps1', data);
   }
 
-  _showAccessRequest(data) {
-    this._spawnUi('access-request.ps1', data);
-  }
-
-  async _handleAccessRequestStatus(ps, toolHost) {
-    const serverUrl = String(this.serverUrl || '').replace(/\/+$/, '');
-    try {
-      const res = await fetch(`${serverUrl}/api/v1/access-requests?tool_host=${encodeURIComponent(toolHost)}&status=pending`, {
-        headers: { authorization: `Bearer ${this.token}` },
-      });
-      if (res.ok) {
-        const rows = await res.json();
-        const pending = Array.isArray(rows) && rows.length > 0;
-        const response = pending
-          ? { pending: true, requested_at: rows[0].requested_at || rows[0].created_at }
-          : { pending: false };
-        try { ps.stdin.write(JSON.stringify(response) + '\n'); } catch {}
-      } else {
-        try { ps.stdin.write(JSON.stringify({ pending: false }) + '\n'); } catch {}
-      }
-    } catch {
-      try { ps.stdin.write(JSON.stringify({ pending: false }) + '\n'); } catch {}
-    }
-  }
-
-  async _handleAccessRequestSubmit(ps, msg) {
-    const serverUrl = String(this.serverUrl || '').replace(/\/+$/, '');
-    try {
-      const res = await fetch(`${serverUrl}/api/v1/access-requests`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` },
-        body: JSON.stringify({
-          tool_host: msg.tool_host, tool_name: msg.tool_name,
-          tool_vendor: msg.tool_vendor, reason: msg.reason || '',
-        }),
-      });
-      if (res.status < 500) {
-        try { ps.stdin.write(JSON.stringify({ submitted: true }) + '\n'); } catch {}
-      } else {
-        // Queue offline
-        const pendingPath = join(homedir(), '.cloudfuze-aigov', 'pending-access-request.json');
-        writeFileSync(pendingPath, JSON.stringify({ ...msg, queued_at: new Date().toISOString() }));
-        try { ps.stdin.write(JSON.stringify({ submitted: false, queued: true }) + '\n'); } catch {}
-      }
-    } catch {
-      const pendingPath = join(homedir(), '.cloudfuze-aigov', 'pending-access-request.json');
-      writeFileSync(pendingPath, JSON.stringify({ ...msg, queued_at: new Date().toISOString() }));
-      try { ps.stdin.write(JSON.stringify({ submitted: false, queued: true }) + '\n'); } catch {}
-    }
-  }
-
-  // ── Blocked agents + platform blocks → blocked-agents.json ─────────────
-  // Ported from electron/monitor-runner.mjs so the bare Node.js agent path
-  // (install.bat / VBS auto-start) gets the same enforcement as Electron.
-  async _refreshBlockedAgents() {
-    const serverUrl = String(this.serverUrl || '').replace(/\/+$/, '');
-    if (!serverUrl) return;
-    const headers = this.token ? { authorization: `Bearer ${this.token}` } : {};
-
-    // Fetch access exceptions (fail → null → keep previous file)
-    let exceptions = null;
-    try {
-      const r = await fetch(`${serverUrl}/api/v1/access-exceptions/mine`, { headers });
-      if (r.ok) { const rows = await r.json(); if (Array.isArray(rows)) exceptions = rows; }
-    } catch {}
-
-    // Fetch ai_platforms (fail → null → keep previous file)
-    let platforms = null;
-    try {
-      const r = await fetch(`${serverUrl}/api/v1/ai-platforms`, { headers });
-      if (r.ok) { const rows = await r.json(); if (Array.isArray(rows)) platforms = rows; }
-    } catch {}
-
-    try {
-      const r = await fetch(`${serverUrl}/api/lifecycle/blocked-agents`);
-      if (!r.ok) return;
-      const agentRows = await r.json();
-      if (platforms === null) return; // fail closed
-      const list = normalizeAgentRows(Array.isArray(agentRows) ? agentRows : [], this.log)
-        .concat(synthesizePlatformBlocks(platforms));
-      const effective = exceptions === null ? list : filterBlockedAgents(list, exceptions, this.log);
-      const blockedPath = join(homedir(), '.cloudfuze-aigov', 'blocked-agents.json');
-      mkdirSync(join(homedir(), '.cloudfuze-aigov'), { recursive: true });
-      writeFileSync(blockedPath, JSON.stringify(effective), 'utf8');
-      const lifted = list.length - effective.length;
-      this.log?.info?.(`blocked-agents: synced ${effective.length} blocked agent(s)` + (lifted > 0 ? ` (${lifted} lifted by access exception)` : ''));
-      // Compare with previous sync — if any entry was removed, hide the banner.
-      // Name matching is unreliable (display name vs process name vs agent name).
-      const curSet = new Set(effective.map(r => (r.process_name || r.agent_name || '').toLowerCase()).filter(Boolean));
-      if (this._prevBlockedSet) {
-        const removed = [...this._prevBlockedSet].filter(n => !curSet.has(n));
-        if (removed.length > 0 && this._bannerName) {
-          this.log?.info?.(`blocked-agents: ${removed.join(', ')} unblocked — hiding banner`);
-          this._hideBanner();
-        }
-        const added = [...curSet].filter(n => !this._prevBlockedSet.has(n));
-        if (added.length > 0) {
-          this._bannerHideAt = 0; // clear suppression — new block detected
-        }
-      }
-      this._prevBlockedSet = curSet;
-    } catch (err) {
-      this.log?.warn?.(`blocked-agents: sync failed — ${err.message}`);
-    }
-  }
-
-  // ── Offline access-request queue flush ────────────────────────────────────
-  async _flushPendingAccessRequest() {
-    const pendingPath = join(homedir(), '.cloudfuze-aigov', 'pending-access-request.json');
-    if (!existsSync(pendingPath)) return;
-    let payload;
-    try { payload = JSON.parse(readFileSync(pendingPath, 'utf8')); } catch { rmSync(pendingPath, { force: true }); return; }
-    const queuedAt = Date.parse(payload?.queued_at || '');
-    if (Number.isFinite(queuedAt) && Date.now() - queuedAt > 24 * 3600 * 1000) {
-      rmSync(pendingPath, { force: true });
-      return;
-    }
-    const { queued_at, ...body } = payload || {};
-    const serverUrl = String(this.serverUrl || '').replace(/\/+$/, '');
-    try {
-      const res = await fetch(`${serverUrl}/api/v1/access-requests`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` },
-        body: JSON.stringify(body),
-      });
-      if (res.status < 500) {
-        rmSync(pendingPath, { force: true });
-        this.log?.info?.(`access-request: queued request submitted (${res.status})`);
-      }
-    } catch {}
-  }
-
   // ── Routing rules sync ──────────────────────────────────────────────────────
   // Mirrors the browser extension's service-worker refreshRoutingRules():
   // fetch /api/v1/routing/rules every 60s, cache to disk, restart the enforcer
@@ -4095,7 +3961,6 @@ export class OsMonitor extends EventEmitter {
     // awaiting its fetch will still fire onChange after this returns, and
     // #applyFeatures no-ops on this flag rather than restarting the hook.
     this.isRunning = false;
-    if (this._blockedAgentsInterval) { clearInterval(this._blockedAgentsInterval); this._blockedAgentsInterval = null; }
     // The 5s first-check TIMEOUT and the 60s INTERVAL it starts are two timers:
     // clearing only the first leaked the interval once it had fired, which kept
     // the process alive forever after stop().

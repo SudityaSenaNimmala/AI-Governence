@@ -898,13 +898,14 @@ test('access-request.js never captures or forwards anything but the typed reason
   assert.equal(/ev\.preview|ev\.patterns|block_id/.test(src), false);
   // On load it asks what this device already requested, instead of submitting
   // into a 409.
-  assert.match(src, /getAccessRequestStatus\(current\.tool_host\)/);
+  // The block rides along as a 2nd argument so "pending" is judged per agent.
+  assert.match(src, /getAccessRequestStatus\(current\.tool_host, current\)/);
 });
 
 test('the preload bridge exposes only the two access-request calls plus the event', async () => {
   const src = await readFile(join(AGENT_DIR, 'electron', 'preload.js'), 'utf8');
   assert.match(src, /submitAccessRequest: \(payload\) => ipcRenderer\.invoke\('access-request', payload\)/);
-  assert.match(src, /getAccessRequestStatus: \(toolHost\) => ipcRenderer\.invoke\('access-request-status', toolHost\)/);
+  assert.match(src, /getAccessRequestStatus: \(toolHost, identity\) => ipcRenderer\.invoke\('access-request-status', toolHost, identity/);
   assert.match(src, /ipcRenderer\.on\('access-request-dialog', handler\)/);
 });
 
@@ -978,7 +979,9 @@ test('the offline access-request queue is one slot and is not retried forever', 
   assert.match(src, /pending-access-request\.json/);
   // A 4xx is a verdict (already pending / rejected in cooldown / bad payload) —
   // clear the slot. Only 5xx or a thrown network error keeps it.
-  assert.match(src, /if \(res\.status < 500\)[\s\S]{0,160}rmSync\(PENDING_REQUEST_PATH/);
+  // The slot is CLAIMED (renamed) before the POST, so the claim is what is
+  // removed — see access-request-flow.test.mjs for the behaviour.
+  assert.match(src, /if \(res\.status < 500\)[\s\S]{0,160}rmSync\(claim/);
   assert.match(src, /PENDING_REQUEST_TTL_MS = 24 \* 3600 \* 1000/);
 });
 

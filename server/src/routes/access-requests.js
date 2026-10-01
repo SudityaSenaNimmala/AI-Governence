@@ -147,6 +147,28 @@ function optionalMachineAuth(req, res, next) {
   return requireMachineAuth(req, res, next);
 }
 
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Browser-brand names the extension falls back to when it cannot learn the real
+// hostname: it then enrols as "<Brand>-browser-extension", and EVERY such install
+// in the fleet shares that one string (live: 47 machines named
+// "Mozilla-browser-extension"). Such a name identifies nobody.
+const SYNTHETIC_EXTENSION_BASES = new Set(['mozilla', 'firefox', 'chrome', 'chromium', 'google', 'edge', 'msedge', 'microsoft', 'safari', 'opera', 'brave', 'browser', 'unknown']);
+
+// The hostname an approval may widen across (desktop agent + that same host's
+// browser-extension enrolments), or null when it must NOT widen at all. Null for
+// a synthetic extension name: widening "Mozilla" granted the approved tool to
+// every unidentified Firefox install that had checked in within 30 days.
+export function siblingBaseHostname(hostname) {
+  const h = typeof hostname === 'string' ? hostname.trim() : '';
+  if (!h) return null;
+  const base = h.replace(/-browser-extension$/i, '');
+  if (!base || SYNTHETIC_EXTENSION_BASES.has(base.toLowerCase())) return null;
+  return base;
+}
+
 // Who a machine belongs to. Two independent sources, both keyed by machine_id:
 // `employee_profiles` carries the admin-curated display name, `machines` the
 // identity captured at enrolment (OS username / signed-in email + hostname).
@@ -376,6 +398,24 @@ export function mountAccessRequests(app, db) {
 
     await requests().insertOne(request);
 
+    // Close the check-then-insert race. The pending check above and the insert
+    // are two round trips, so two submissions landing together (two offline
+    // queue flushers draining the same slot on one tick — seen live as two
+    // pending rows for one device + tool 9ms apart) both passed the check and
+    // both inserted. The admin then approved one and the twin sat in the queue
+    // forever. Re-read the twins AFTER inserting and let exactly one survive:
+    // the earliest by (submitted_at, id), an order every racer computes the same
+    // way, so the losers withdraw themselves and no extra webhook fires.
+    const twins = await requests().find({
+      machine_id, tool_host, agent_key: agentClause, status: 'pending',
+    }).toArray();
+    const winner = twins.sort((x, y) =>
+      (new Date(x.submitted_at) - new Date(y.submitted_at)) || String(x.id).localeCompare(String(y.id)))[0];
+    if (winner && winner.id !== request.id) {
+      await requests().deleteOne({ id: request.id });
+      return res.status(409).json({ error: 'A pending request already exists for this tool', code: 'pending', request_id: winner.id });
+    }
+
     // Fire webhook for access_request trigger.
     //
     // An agent-scoped ask names the AGENT, with the host app in parentheses:
@@ -582,11 +622,16 @@ export function mountAccessRequests(app, db) {
       { projection: { hostname: 1 } }
     );
     let allMachineIds = [request.machine_id];
-    if (requestingMachine?.hostname) {
-      const baseHostname = requestingMachine.hostname.replace(/-browser-extension$/, '');
+    const baseHostname = siblingBaseHostname(requestingMachine?.hostname);
+    if (baseHostname) {
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+      // EXACT host, or that host's own extension enrolment — anchored at both
+      // ends. The old pattern was a bare prefix (^HOST), so approving one
+      // device also granted every device whose hostname merely STARTED with
+      // it (LAPTOP-1 → LAPTOP-10, LAPTOP-1X…). See siblingBaseHostname for the
+      // synthetic extension names that are refused outright.
       const siblings = await db.collection('machines').find({
-        hostname: { $regex: new RegExp('^' + baseHostname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+        hostname: { $regex: new RegExp('^' + escapeRegex(baseHostname) + '(-browser-extension)?$', 'i') },
         last_seen: { $gt: thirtyDaysAgo },
       }, { projection: { id: 1 } }).toArray();
       const siblingIds = siblings.map(m => m.id).filter(Boolean);

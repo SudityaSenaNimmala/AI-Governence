@@ -7,6 +7,7 @@
 import { a } from '../util.js';
 import { createZip } from '../lib/zip.js';
 import { ENROLL_SECRET, requireMachineAuth } from '../auth.js';
+import { markDesktopAgentSeen } from '../lib/desktop-agent-presence.js';
 import crypto from 'node:crypto';
 import { readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSync, cpSync, rmSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
@@ -54,6 +55,10 @@ export function mountInstallations(app, db) {
       { id: req.machine.id },
       { projection: { _id: 0, preferences: 1 } },
     );
+    // Only the desktop agent's tray app calls this (on every launch), so it is
+    // the earliest proof an already-installed agent is alive — before it has
+    // sent a single os_monitor event. See lib/desktop-agent-presence.js.
+    try { await markDesktopAgentSeen(db, req.machine.id); } catch { /* advisory */ }
     // Default: model routing ON for new machines.
     const prefs = machine?.preferences || {};
     res.json({ model_routing_enabled: prefs.model_routing_enabled !== false });

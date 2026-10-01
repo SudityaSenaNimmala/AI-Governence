@@ -1,5 +1,6 @@
 import { a } from '../util.js';
 import { attachMachineIdentity } from '../lib/machine-identity.js';
+import { SYSTEMS_FILTER } from '../lib/desktop-agent-presence.js';
 import {
   RESPONSE_BUDGET_MS, raceWithFallback, applyBudgetHeaders, registerResponseWarmer,
 } from '../lib/response-budget.js';
@@ -414,14 +415,13 @@ async function fetchOverview(db) {
   // first call the Overview tab makes, so those seconds were the tab's load
   // time. /machines went from 11.8s to 272ms on exactly this change.
   const [machines, scans, findingsCount, uniqueToolKeys, byType, topTools] = await Promise.all([
-    // Count only real desktop agents — machines with a real OS user and platform.
-    // Browser extensions, CLI sessions, test data, trackers and demo seeds are
-    // excluded. This is the "employees with the agent installed" number.
-    db.collection('machines').countDocuments({
-      user: { $exists: true, $ne: null },
-      platform: { $exists: true, $ne: null },
-      hostname: { $not: /browser-extension|Claude Code CLI/i },
-    }),
+    // Count only real endpoints with the agent installed: known desktop agents
+    // (type 'desktop-agent', set at enroll or backfilled from desktop-agent
+    // traffic for installs that predate it) plus machines carrying a user and
+    // platform (scanner reports). Browser extensions, the CLI's synthetic
+    // machines and the Claude usage tracker are excluded. The definition and the
+    // reasons live in lib/desktop-agent-presence.js.
+    db.collection('machines').countDocuments(SYSTEMS_FILTER),
     db.collection('scans').countDocuments(),
     db.collection('findings').countDocuments(),
     db.collection('findings').distinct('tool_key'),

@@ -5,6 +5,7 @@ import { emitWebhook } from './webhooks.js';
 import { siemForward } from '../lib/siem-forward.js';
 import { attachMachineIdentity, machineIdentity } from '../lib/machine-identity.js';
 import { lookupSessionClients } from '../lib/claude-sessions.js';
+import { markDesktopAgentSeen } from '../lib/desktop-agent-presence.js';
 import {
   RESPONSE_BUDGET_MS, raceWithFallback, applyBudgetHeaders, dlpResponseStore,
   registerResponseWarmer,
@@ -381,6 +382,19 @@ export function mountDlp(app, db) {
       // Real-time push to a configured SIEM syslog collector (no-op if unset).
       siemForward('dlp', eventDoc);
       stored++;
+    }
+
+    // Only the desktop agent's OS monitor sends source 'os_monitor', so a batch
+    // carrying one proves this machine is a desktop agent. Installs that enrolled
+    // before enroll sent type/platform never re-enroll, and without this they are
+    // missing from the Overview "Systems" count. Throttled per machine, never
+    // creates or overwrites anything; best-effort so it can't fail an ingest
+    // that has already been stored.
+    const osEvent = events.find((e) => e?.source === 'os_monitor' && !validateEvent(e).error);
+    if (osEvent) {
+      try {
+        await markDesktopAgentSeen(db, req.machine.id, { user: osEvent.user });
+      } catch { /* presence marking is advisory */ }
     }
 
     res.status(201).json({ ok: true, stored, bound });

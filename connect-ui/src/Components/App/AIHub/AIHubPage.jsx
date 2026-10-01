@@ -5792,7 +5792,10 @@ function AccessRequestsView() {
   const approve=async(id)=>{
     const body={note:reviewNote};
     if(expiryMode==="hours") body.expires_in_hours=Number(expiryHours);
-    else body.expires_at=expiryDate;
+    // datetime-local is the ADMIN'S wall-clock time with no zone. Sent raw, the
+    // server (UTC) parsed it as UTC, so an IST admin's "expires 18:00" expired
+    // at 23:30 local. Convert here, where the browser knows the zone.
+    else { const d=new Date(expiryDate); body.expires_at=Number.isNaN(d.getTime())?expiryDate:d.toISOString(); }
     const res=await adminFetch(`${ACCESS_API}/${id}/approve`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     if(res.status===401||res.status===403){setAuthFail(true);alert(ACCESS_DENIED_MSG);return;}
     if(!res.ok){const e=await res.json().catch(()=>({}));alert(e.error||"Failed");return;}

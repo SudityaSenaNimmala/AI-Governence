@@ -381,6 +381,12 @@ async function runTracker() {
     });
     monitor.start();
     log.info('governance: clipboard + file dialogs + drag-drop + send-blocker armed');
+    // blocked-agents.json / access exceptions / offline access-request flush.
+    // OsMonitor no longer runs a private copy of this (two copies per process
+    // double-POSTed the queued request), so this entry point starts the shared
+    // one exactly like src/index.js --monitor and electron/monitor-runner.mjs.
+    const { startBlockedAgentsSync } = await import('../os_monitor/blocked-agents-sync.js');
+    startBlockedAgentsSync({ serverUrl: SERVER_URL, token: creds.token, log });
   } catch (err) {
     monitor = null;
     log.warn(`governance stack not started: ${err?.message || err}`);
