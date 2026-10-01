@@ -5872,7 +5872,7 @@ function AccessRequestsView() {
                 {/* Requester only — the device name read as a second copy of the
                     user's name (hostnames are usually the user's name). */}
                 <div className="aihub_text_muted" style={{marginBottom:6}}>
-                  Requested by <strong>{r.employee_name}</strong>
+                  Requested by <strong>{splitConcatenatedName(r.employee_name)}</strong>
                   {" · "}{relTime(r.submitted_at)}
                 </div>
                 {r.reason&&<div style={{fontSize:15.2,color:"#374151",background:"#f5f6f8",padding:"8px 12px",borderRadius:8,marginBottom:8}}>"{r.reason}"</div>}
