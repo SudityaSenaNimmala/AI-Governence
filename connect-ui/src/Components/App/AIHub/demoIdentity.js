@@ -10,7 +10,7 @@
 // Server-computed aggregates (KPI totals, the DLP trend, per-surface totals in
 // /claude-usage) are NOT recomputed and still count everyone's events.
 
-export const DEMO_IDENTITIES_ENABLED = true;
+export const DEMO_IDENTITIES_ENABLED = false;
 
 // `match` is tested against every identity string on a row. The first person
 // whose pattern matches wins. The three assessed desktop-agent identities map

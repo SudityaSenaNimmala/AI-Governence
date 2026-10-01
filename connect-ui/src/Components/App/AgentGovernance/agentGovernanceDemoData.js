@@ -114,8 +114,8 @@ function readDemoFlag() {
   }
 }
 
-/** Read once at module load, before the router rewrites the query string. */
-export const AG_DEMO = AG_DEMO_FORCE || readDemoFlag();
+/** Demo mode permanently disabled — product uses real data only. */
+export const AG_DEMO = false;
 
 if (AG_DEMO && typeof console !== "undefined") {
   console.warn(
