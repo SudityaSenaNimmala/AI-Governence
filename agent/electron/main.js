@@ -34,6 +34,50 @@ const PENDING_ACCESS_REQUEST_PATH = path.join(CRED_DIR, 'pending-access-request.
 // independently — this is the client being well-behaved, not the enforcement.
 const REASON_MAX = 500;
 
+// ── Access-request identity (pure; os-monitor-safety.test.mjs evaluates this block) ──
+// WHICH block a Request Access submission is about. The dialog's payload is the
+// @@CFAI-BLOCK line, whose block_scope / blocked_agent / agent_id come straight
+// from the enforcer's armed blocklist row.
+//
+// block_scope used to be dropped here, so EVERY desktop request reached the
+// server as a whole-app ask: an agent block in Teams / M365 Copilot (agent_id
+// set, no block_scope) was filed as block_scope 'app', and approving it minted a
+// HOST-wide exception that unblocked every blocked agent on that host. Same rule
+// as #offerAccessRequest in src/os_monitor/index.js: 'agent' only when there is
+// an agent identity to name (the server 400s an agent request with neither),
+// 'panel' passes through, anything else is 'app'.
+function accessRequestScope(p) {
+  const src = p || {};
+  const agentId = String(src.agent_id || '').trim();
+  const agentName = String(src.agent_name || src.blocked_agent || '').trim();
+  if (src.block_scope === 'agent' && (agentId || agentName)) {
+    return { block_scope: 'agent', agent_id: agentId, agent_name: agentName };
+  }
+  return { block_scope: src.block_scope === 'panel' ? 'panel' : 'app', agent_id: agentId, agent_name: '' };
+}
+
+// The comparison key the server derives (agentKeyFor in
+// server/src/routes/access-requests.js): '' = host-wide, otherwise the agent id,
+// otherwise the folded display name. Local comparisons only — never sent.
+function accessRequestKey(identity) {
+  const s = identity || {};
+  if (s.block_scope !== 'agent') return '';
+  const id = String(s.agent_id || '').trim();
+  if (id) return id;
+  return String(s.agent_name || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+// Does a /access-requests/mine row (or the queued slot) describe the same block?
+// Host AND agent: "pending" for the finance bot is not an answer about the IT
+// help-desk bot on the same host, and the server's own 409 is keyed the same way.
+function sameAccessRequest(row, toolHost, identity) {
+  if (!row) return false;
+  if (String(row.tool_host || '').toLowerCase() !== String(toolHost || '').toLowerCase()) return false;
+  return accessRequestKey({ block_scope: row.block_scope || 'app', agent_id: row.agent_id, agent_name: row.agent_name })
+    === accessRequestKey(identity);
+}
+// ── end access-request identity ──
+
 // ── Icons ──────────────────────────────────────────────────────────────────────
 const ICON_PATH = path.join(__dirname, 'assets', 'icon.png');
 
@@ -757,11 +801,20 @@ async function enrollWithServer(serverUrl, enrollSecret) {
     const machineId = getMachineId();
     const hostname = os.hostname();
     const url = serverUrl.replace(/\/$/, '');
+    // user/platform/type are what the Overview "Systems" count keys on. Without
+    // them this machine enrolled as an anonymous record and was never counted,
+    // however many events it sent. os.userInfo() can throw (no passwd entry /
+    // odd service accounts), and the server only stores user when one is sent.
+    let user;
+    try { user = os.userInfo().username || undefined; } catch { user = undefined; }
 
     const res = await fetch(`${url}/api/v1/enroll`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ machineId, hostname, enrollSecret }),
+      body: JSON.stringify({
+        machineId, hostname, enrollSecret,
+        user, platform: process.platform, type: 'desktop-agent',
+      }),
     });
 
     if (!res.ok) {
@@ -1023,7 +1076,16 @@ function setupIPC() {
       return { ok: false, code: 'no_tool_host', error: 'Could not identify which AI app to request access for.' };
     }
 
+    // block_scope + agent identity, derived ONCE so the POST, the offline queue
+    // and the pending check all describe the same block. See accessRequestScope.
+    const scope = accessRequestScope(p);
+    // The OS username, so the review queue names a person instead of falling
+    // back to the hostname (every live desktop row had user:null). Same value
+    // enrolment reports; the server folds it with normalizeIdentity.
+    let osUser;
+    try { osUser = os.userInfo().username || undefined; } catch { osUser = undefined; }
     const body = {
+      user: osUser,
       machine_id: creds.machineId || null,   // ignored by the server when the token verifies; kept for the offline queue
       tool_host: String(p.tool_host),
       tool_name: p.tool_name ? String(p.tool_name) : undefined,
@@ -1032,7 +1094,9 @@ function setupIPC() {
       surface: 'desktop',
       platform: p.platform ? String(p.platform) : undefined,
       process_name: p.process_name ? String(p.process_name) : undefined,
-      agent_id: p.agent_id ? String(p.agent_id) : undefined,
+      agent_id: scope.agent_id || undefined,
+      block_scope: scope.block_scope,
+      agent_name: scope.agent_name || undefined,
     };
 
     try {
@@ -1073,9 +1137,24 @@ function setupIPC() {
 
   // What this device has already asked for, so the dialog can render an
   // "already pending" state instead of submitting into a 409.
-  ipcMain.handle('access-request-status', async (_event, toolHost) => {
+  //
+  // `identity` (the dialog's block payload) is a SECOND argument so an older
+  // renderer that passes only the host still works, and an older main.js simply
+  // ignores it. With it, the match is per host AND agent — host-only, agent B's
+  // dialog said "already pending" because agent A on the same host had asked.
+  ipcMain.handle('access-request-status', async (_event, toolHost, identity) => {
     const creds = loadCredentials();
     if (!creds?.token || !creds?.serverUrl) return { ok: false, code: 'not_enrolled' };
+    const want = accessRequestScope(identity || {});
+    // The single offline slot counts only when it is about THIS block — any
+    // queued file used to make every dialog, for every app, read "pending".
+    const queuedForThis = () => {
+      try {
+        if (!fs.existsSync(PENDING_ACCESS_REQUEST_PATH)) return false;
+        const q = JSON.parse(fs.readFileSync(PENDING_ACCESS_REQUEST_PATH, 'utf8'));
+        return sameAccessRequest(q, toolHost, want);
+      } catch { return false; }
+    };
     try {
       const res = await fetch(`${creds.serverUrl.replace(/\/$/, '')}/api/v1/access-requests/mine`, {
         headers: { authorization: `Bearer ${creds.token}` },
@@ -1083,8 +1162,7 @@ function setupIPC() {
       if (res.status === 401) return { ok: false, code: 'reenroll' };
       if (!res.ok) return { ok: false, code: `http_${res.status}` };
       const rows = await res.json();
-      const host = String(toolHost || '').toLowerCase();
-      const mine = Array.isArray(rows) ? rows.filter((r) => String(r.tool_host || '').toLowerCase() === host) : [];
+      const mine = Array.isArray(rows) ? rows.filter((r) => sameAccessRequest(r, toolHost, want)) : [];
       return {
         ok: true,
         pending: mine.find((r) => r.status === 'pending') || null,
@@ -1092,10 +1170,10 @@ function setupIPC() {
         // A locally queued submission has not reached the server yet, so it
         // cannot come back on /mine — surface it so the dialog does not invite
         // the user to submit the same thing twice.
-        queued: fs.existsSync(PENDING_ACCESS_REQUEST_PATH),
+        queued: queuedForThis(),
       };
     } catch (err) {
-      return { ok: false, code: 'offline', error: err.message, queued: fs.existsSync(PENDING_ACCESS_REQUEST_PATH) };
+      return { ok: false, code: 'offline', error: err.message, queued: queuedForThis() };
     }
   });
 

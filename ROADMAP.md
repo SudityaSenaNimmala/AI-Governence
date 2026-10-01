@@ -370,6 +370,9 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
 - [ ] **Detect after the fact when a blocked file was sent anyway (e.g. it appears in the agent chat transcript)**
   The planned M365 attachment hold stops sends while a sensitive file is attached, but touch/pen, screen-reader invokes or the panic hotkey can still get one through; nothing notices it landed.
 
+- [ ] **Split DLP report batches on HTTP 413 so oversized file captures don't stall reporting**
+  reporter.js re-queues the whole batch at the head on any non-OK response; two 25 MB captures in one POST 413 forever.
+
 ---
 
 ## P2 — enterprise distribution
@@ -541,6 +544,12 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
   governance agent. Fix: wait for `wscript.exe` to actually launch (or use a
   longer/adaptive delay, or delete on the helper's own exit) instead of a
   fixed timer race.
+
+- [ ] **Scan legacy .doc/.ppt/.msg attachments (currently allowed as unsupported)**
+  Needs a new extractor dependency (e.g. word-extractor, msgreader) on desktop and browser.
+
+- [ ] **Scan OneDrive/SharePoint files picked inside Copilot via Microsoft Graph**
+  In-app cloud picks are reported as cloud_reference and allowed; a Graph lookup on the chip's SPO id needs tenant app consent.
 
 ---
 

@@ -1896,9 +1896,12 @@
 
   // ---- File upload detection ----
   // Vectors: file picker, drag-and-drop, paste. We additionally do a LOCAL
-  // content scan on text-readable files: read bytes in the browser, run our
-  // secret/PII pattern catalog, send only match COUNTS to the server. The
-  // file bytes never leave the user's machine.
+  // content scan: read the bytes in the browser, extract text (text formats,
+  // PDF, Office/ODF, OCR for images, zip entries), and run our secret/PII
+  // pattern catalog over it. The SCAN is local, but the file itself is NOT kept
+  // on the machine: emitFileUpload forwards the file's content (content_text or
+  // content_base64, up to 25 MB) to the server with the event for the
+  // dashboard preview -- and the AI site of course receives the upload too.
 
   // Extensions we can read directly as UTF-8 text.
   const TEXT_READABLE_EXTENSIONS = new Set([
@@ -1918,8 +1921,10 @@
   // Binary formats extracted via bundled parsers.
   const BINARY_PARSEABLE = new Set([
     '.pdf',
-    '.docx',
+    '.docx', '.docm',
     '.xlsx', '.xls', '.xlsm', '.ods',
+    '.pptx', '.pptm', '.ppsx',
+    '.odt', '.odp',
   ]);
   const IMAGE_EXTENSIONS = new Set([
     '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tif', '.tiff',
@@ -1947,6 +1952,108 @@
     }
   }
 
+  // ── Office/ODF text extraction (pure) ─────────────────────────────────────
+  // No DOM, no chrome.*, no window: everything here takes a JSZip instance or
+  // bytes, so tests/office-extract.test.mjs runs this exact region in Node
+  // against real JSZip. Mirrors agent/src/os_monitor/binary-extractors.js so a
+  // file gets the same answer on the desktop and in the browser.
+  const OOXML_SLIDE_EXTENSIONS = new Set(['.pptx', '.pptm', '.ppsx']);
+  const ODF_TEXT_EXTENSIONS = new Set(['.odt', '.odp']);
+  // Zip-based containers. Office wraps a PASSWORD-PROTECTED one in an OLE2
+  // Compound File instead (magic D0 CF 11 E0) holding EncryptionInfo +
+  // EncryptedPackage streams. CFB bytes WITHOUT those streams are a renamed
+  // legacy file (.xls -> .xlsx, .doc -> .docx): read as legacy where SheetJS can,
+  // otherwise unsupported_format -- never "encrypted". Mirrors
+  // agent/src/os_monitor/binary-extractors.js cfbKind.
+  const ZIP_CONTAINER_EXTENSIONS = new Set([
+    '.docx', '.docm', '.xlsx', '.xlsm', '.pptx', '.pptm', '.ppsx', '.odt', '.odp', '.ods',
+  ]);
+  const LEGACY_SHEET_EXTENSIONS = new Set(['.xlsx', '.xlsm', '.ods']);
+
+  // HINT only: CFB magic under a zip-container name. cfbKind decides.
+  function isCfbEncryptedContainer(head, ext) {
+    if (!ZIP_CONTAINER_EXTENSIONS.has(ext) || !head || head.length < 4) return false;
+    return head[0] === 0xd0 && head[1] === 0xcf && head[2] === 0x11 && head[3] === 0xe0;
+  }
+
+  // 'encrypted' | 'legacy' | 'invalid' | 'unknown' (no CFB reader available).
+  // `CFB` is SheetJS's reader (window.XLSX.CFB in the page).
+  function cfbKind(bytes, CFB) {
+    if (!CFB || typeof CFB.read !== 'function') return 'unknown';
+    let names;
+    try { names = CFB.read(bytes, { type: 'array' }).FileIndex.map((f) => f.name); }
+    catch { return 'invalid'; }
+    return (names.includes('EncryptionInfo') || names.includes('EncryptedPackage')) ? 'encrypted' : 'legacy';
+  }
+
+  const XML_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+  function decodeXmlEntities(s) {
+    return String(s).replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+      if (e[0] === '#') {
+        const cp = (e[1] === 'x' || e[1] === 'X') ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+        try { return String.fromCodePoint(cp); } catch { return m; }
+      }
+      return XML_ENTITIES[e.toLowerCase()] ?? m;
+    });
+  }
+
+  // DrawingML: runs are <a:t>, paragraphs end at </a:p>. Runs are joined with no
+  // separator because Office splits a single word across runs freely.
+  function drawingMlText(xml) {
+    const out = [];
+    const re = /<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>|<a:t\s*\/>|<\/a:p>|<a:br\s*\/?>/g;
+    let m;
+    while ((m = re.exec(xml))) {
+      if (m[1] !== undefined) out.push(decodeXmlEntities(m[1]));
+      else if (m[0].startsWith('</a:p') || m[0].startsWith('<a:br')) out.push('\n');
+    }
+    return out.join('');
+  }
+
+  function odfText(xml) {
+    const body = (xml.match(/<office:body[\s>][\s\S]*<\/office:body>/) || [xml])[0];
+    return decodeXmlEntities(body
+      .replace(/<text:s(?:\s+text:c="(\d+)")?\s*\/>/g, (_, c) => ' '.repeat(Math.min(Number(c) || 1, 256)))
+      .replace(/<text:tab\s*\/>/g, '\t')
+      .replace(/<text:line-break\s*\/>/g, '\n')
+      .replace(/<\/text:(?:p|h)>/g, '\n')
+      .replace(/<\/table:table-cell>/g, '\t')
+      .replace(/<[^>]+>/g, ''));
+  }
+
+  function slideOrder(a, b) {
+    const na = Number((a.match(/(\d+)\.xml$/) || [])[1] || 0);
+    const nb = Number((b.match(/(\d+)\.xml$/) || [])[1] || 0);
+    return na - nb || a.localeCompare(b);
+  }
+
+  // .pptx/.pptm/.ppsx: slide text, then speaker notes, in slide order.
+  async function pptxTextFromZip(zip) {
+    const names = Object.keys(zip.files);
+    const slides = names.filter((n) => /^ppt\/slides\/slide\d+\.xml$/i.test(n)).sort(slideOrder);
+    const notes = names.filter((n) => /^ppt\/notesSlides\/notesSlide\d+\.xml$/i.test(n)).sort(slideOrder);
+    const parts = [];
+    for (const n of slides) parts.push(drawingMlText(await zip.files[n].async('string')));
+    for (const n of notes) parts.push(drawingMlText(await zip.files[n].async('string')));
+    return { text: parts.join('\n'), via: 'jszip-pptx', pages: slides.length };
+  }
+
+  // .odt/.odp: content.xml carries the document text.
+  async function odfTextFromZip(zip) {
+    const content = zip.file('content.xml');
+    if (!content) throw new Error('odf_missing_content');
+    return { text: odfText(await content.async('string')), via: 'jszip-odf' };
+  }
+
+  // Which of a file's content matches may BLOCK it (toast + remembered for the
+  // send-time check). Same rule as the prompt text (scanForBlockers): only
+  // high/critical. A low/moderate hit -- an internal ticket key, say -- is still
+  // in the file_upload event, it just does not stop the send.
+  function fileBlockingMatches(contentScan, blockSeverities) {
+    return (contentScan?.matches || []).filter((m) => blockSeverities.has(m.severity));
+  }
+  // ── end Office/ODF text extraction ────────────────────────────────────────
+
   async function extractTextFromFile(file) {
     const ext = extOf(file.name);
 
@@ -1968,11 +2075,31 @@
       return { text, via: 'pdfjs', pages: pdf.numPages };
     }
 
-    if (ext === '.docx') {
+    // A CFB file under an Office/ODF name: password-protected, or a renamed
+    // legacy file. Say which, rather than a generic parse failure.
+    if (ZIP_CONTAINER_EXTENSIONS.has(ext)) {
+      const head = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+      if (isCfbEncryptedContainer(head, ext)) {
+        const kind = cfbKind(new Uint8Array(await file.arrayBuffer()), window.XLSX && window.XLSX.CFB);
+        if (kind === 'encrypted') return { error: 'encrypted' };
+        if (kind === 'unknown') return { error: 'xlsx_not_loaded' };
+        if (kind === 'invalid') return { error: 'extraction_failed' };
+        if (!LEGACY_SHEET_EXTENSIONS.has(ext)) return { error: 'unsupported_format', extension: ext };
+        // legacy workbook: falls through to the SheetJS branch, which reads .xls bytes
+      }
+    }
+
+    if (ext === '.docx' || ext === '.docm') {
       if (typeof window.mammoth === 'undefined') return { error: 'mammoth_not_loaded' };
       const buf = await file.arrayBuffer();
       const r = await window.mammoth.extractRawText({ arrayBuffer: buf });
       return { text: r.value || '', via: 'mammoth' };
+    }
+
+    if (OOXML_SLIDE_EXTENSIONS.has(ext) || ODF_TEXT_EXTENSIONS.has(ext)) {
+      if (typeof window.JSZip === 'undefined') return { error: 'jszip_not_loaded' };
+      const zip = await window.JSZip.loadAsync(await file.arrayBuffer());
+      return OOXML_SLIDE_EXTENSIONS.has(ext) ? pptxTextFromZip(zip) : odfTextFromZip(zip);
     }
 
     if (ext === '.xlsx' || ext === '.xls' || ext === '.xlsm' || ext === '.ods') {
@@ -2240,14 +2367,21 @@
     // is the hard backstop — even if the user ignores this toast, the actual
     // send won't go through while the prompt or attachment still contains
     // sensitive data.
-    const hasContentMatches = contentScan?.matchCount > 0;
-    const filenameWasRisky = severity === 'high' || severity === 'critical';
+    //
+    // HIGH/CRITICAL ONLY -- the same threshold as the prompt text
+    // (scanForBlockers) and the desktop agent. It used to be ANY content match,
+    // so a low-severity hit (an internal ticket key in a slide deck) blocked the
+    // send while the same string typed into the prompt did not.
+    const blockingMatches = fileBlockingMatches(contentScan, BLOCK_SEVERITIES);
+    const hasContentMatches = blockingMatches.length > 0;
+    const filenameWasRisky = BLOCK_SEVERITIES.has(r.severity);
     if (hasContentMatches || filenameWasRisky) {
-      const patterns = hasContentMatches && contentScan.matches?.length
-        ? contentScan.matches.map((m) => ({ pattern: m.pattern, class: m.class, severity: m.severity, count: m.count }))
+      const patterns = hasContentMatches
+        ? blockingMatches.map((m) => ({ pattern: m.pattern, class: m.class, severity: m.severity, count: m.count }))
         : [{ pattern: r.class || 'file', class: r.class, severity, count: 1 }];
+      const blockingCount = blockingMatches.reduce((a, m) => a + (m.count || 1), 0);
       const note = hasContentMatches
-        ? `${file.name} → ${SERVICE}  (${contentScan.matchCount} sensitive matches found)`
+        ? `${file.name} → ${SERVICE}  (${blockingCount} sensitive matches found)`
         : `${file.name} → ${SERVICE}  (${r.reason})`;
       if (hasContentMatches) {
         clog('[cfai] file content-scan flagged', file.name, '— matches:',

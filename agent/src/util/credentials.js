@@ -23,12 +23,22 @@ export async function saveCredentials(creds) {
 }
 
 export async function enroll({ serverUrl, machineId, hostname, user, enrollSecret }) {
+  // Fall back to the OS username when the caller has none; os.userInfo() can
+  // throw on accounts with no passwd entry, so it is guarded.
+  let resolvedUser = user;
+  if (!resolvedUser) {
+    try { resolvedUser = os.userInfo().username || undefined; } catch { resolvedUser = undefined; }
+  }
   const res = await fetch(`${serverUrl.replace(/\/$/, '')}/api/v1/enroll`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     // `user` is optional and the server only overwrites when it is sent, so an
-    // older caller that omits it enrols exactly as before.
-    body: JSON.stringify({ machineId, hostname, user, enrollSecret }),
+    // older caller that omits it enrols exactly as before. platform + type are
+    // what the Overview "Systems" count keys on (server lib/desktop-agent-presence.js).
+    body: JSON.stringify({
+      machineId, hostname, user: resolvedUser, enrollSecret,
+      platform: process.platform, type: 'desktop-agent',
+    }),
   });
   if (!res.ok) {
     const text = await res.text();

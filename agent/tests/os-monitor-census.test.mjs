@@ -31,7 +31,13 @@ async function tmp(name, contents) {
   await writeFile(p, contents);
   return p;
 }
-test.after?.(async () => { if (dir) await rm(dir, { recursive: true, force: true }); });
+test.after?.(async () => {
+  // The D7 image scan starts the shared OCR thread (ocr-service.js); under CPU
+  // load its init can outlast the test, and a live worker keeps this file's
+  // process from exiting. Stop it explicitly.
+  try { (await import('../src/os_monitor/ocr-service.js')).shutdownOcr(); } catch { /* not loaded */ }
+  if (dir) await rm(dir, { recursive: true, force: true });
+});
 
 const SECRET_TEXT = 'AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\nAWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n';
 const CLEAN_TEXT = 'minutes of the tuesday standup\n';
@@ -142,13 +148,13 @@ test('resolveAttachment: hint -> local; OneDrive placeholder -> cloud (never ope
 
 // ── catalog ─────────────────────────────────────────────────────────────────
 
-test('attachCensus flags: enforcing for the three live-verified surfaces only; the rest report-only', () => {
+test('attachCensus flags: enforcing for the armed surfaces only (Teams Copilot tab armed 2026-10-01 at the owner\'s request); the rest report-only', () => {
   const armed = ATTACH_CENSUS_SURFACES.filter((s) => s.enforce && s.verified).map((s) => s.id).sort();
-  assert.deepEqual(armed, ['m365_copilot_app', 'teams_agent_chat', 'word_copilot_pane']);
+  assert.deepEqual(armed, ['m365_copilot_app', 'teams_agent_chat', 'teams_copilot_tab', 'word_copilot_pane']);
   for (const s of ATTACH_CENSUS_SURFACES) assert.equal(s.enforce, s.verified, `${s.id}: enforce only together with verified`);
   assert.equal(attachCensusSurfaceFor('EXCEL', 'office_copilot_pane').enforce, false, 'Excel: report-only');
   assert.equal(attachCensusSurfaceFor('OUTLOOK', 'outlook_copilot_pane').enforce, false, 'Outlook pane: report-only');
-  assert.equal(attachCensusSurfaceFor('ms-teams', 'teams_copilot_composer').enforce, false, 'Teams Copilot tab: report-only');
+  assert.equal(attachCensusSurfaceFor('ms-teams', 'teams_copilot_composer').enforce, true, 'Teams Copilot tab: enforcing');
   assert.equal(attachCensusSurfaceFor('WINWORD', 'office_copilot_pane').enforce, true);
   assert.deepEqual(buildAttachCensusConfig().map((s) => s.id), ATTACH_CENSUS_SURFACES.map((s) => s.id));
   const enf = readFileSync(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer.js'), 'utf8');
@@ -252,27 +258,65 @@ test('a REPORT-ONLY surface (Excel pane) reports and never holds', async () => {
   } finally { monitor.stop(); }
 });
 
-test('fail closed: a cloud-only file and a missing file are HELD with their hold_reason, content never read', async () => {
+test('browser parity: a cloud-only file and a missing file are ALLOWED and REPORTED with their hold_reason, content never read', async () => {
   const { monitor, calls } = makeMonitor();
   const answers = { 'cloud.docx': { status: 'cloud' }, 'missing.pdf': { status: 'not_found' } };
   monitor.resolveAttachmentFn = async (name) => answers[chipToFilename(name)];
   try {
     census(monitor, { names: ['Remove attachment cloud.docx', 'Remove attachment missing.pdf'] });
+    assert.ok(calls.attachHold.some((c) => c.state === 'on'), 'provisional holds while locating');
     await waitFor(() => calls.enqueued.filter((e) => e.kind === 'file_upload').length === 2, { label: 'both records' });
     const byName = Object.fromEntries(calls.enqueued.filter((e) => e.kind === 'file_upload').map((e) => [e.filename, e]));
-    assert.equal(byName['cloud.docx'].enforcement, 'held');
+    assert.equal(byName['cloud.docx'].enforcement, 'reported');
     assert.equal(byName['cloud.docx'].hold_reason, 'cloud_reference');
+    assert.equal(byName['missing.pdf'].enforcement, 'reported');
     assert.equal(byName['missing.pdf'].hold_reason, 'not_found');
     for (const e of Object.values(byName)) { assert.equal(e.content_text, null); assert.equal(e.content_base64, null); }
-    assert.deepEqual([...monitor.attachHolds.keys()].sort(), ['cloud.docx', 'missing.pdf']);
-    const toast = calls.toasts.at(-1);
-    assert.match(toast.message, /already uploaded a copy to OneDrive\/SharePoint/, 'honest about the cloud copy');
+    assert.deepEqual([...monitor.attachHolds.keys()], [], 'the provisional holds were released');
+    assert.equal(calls.toasts.length, 0, 'nothing held, nothing to explain');
   } finally { monitor.stop(); }
 });
 
-test('a >5 MB text file is partially scanned: clean -> reported (partially_scanned); sensitive in the first part -> held', async () => {
+test('browser parity: an unsupported / unreadable local file is ALLOWED and REPORTED with a specific hold_reason', async () => {
   const { monitor, calls } = makeMonitor();
-  const big = 'x'.repeat(5 * 1024 * 1024 + 100) + '\n';
+  const blob = await tmp('mystery.qqq', Buffer.from([0, 1, 2, 3, 4, 5, 6, 7]));
+  const corrupt = await tmp('corrupt.docx', 'not really a docx at all');
+  bind(monitor, blob); bind(monitor, corrupt);
+  try {
+    census(monitor, { names: ['Remove attachment mystery.qqq', 'Remove attachment corrupt.docx'] });
+    await waitFor(() => calls.enqueued.filter((e) => e.kind === 'file_upload').length === 2, { label: 'both records' });
+    const byName = Object.fromEntries(calls.enqueued.filter((e) => e.kind === 'file_upload').map((e) => [e.filename, e]));
+    assert.equal(byName['mystery.qqq'].enforcement, 'reported');
+    assert.equal(byName['mystery.qqq'].hold_reason, 'unsupported_type');
+    assert.equal(byName['corrupt.docx'].enforcement, 'reported');
+    assert.ok(['extraction_failed', 'extraction_timeout', 'encrypted'].includes(byName['corrupt.docx'].hold_reason),
+      `unexpected ${byName['corrupt.docx'].hold_reason}`);
+    assert.deepEqual([...monitor.attachHolds.keys()], []);
+  } finally { monitor.stop(); }
+});
+
+test('the scanner\'s not-scanned reasons map to the census hold_reason codes', () => {
+  const m = (r) => OsMonitor.censusNotScannedReason(r);
+  assert.equal(m('unsupported_format'), 'unsupported_type');
+  assert.equal(m('too_large'), 'too_large');
+  assert.equal(m('encrypted'), 'encrypted');
+  assert.equal(m('extraction_timeout'), 'extraction_timeout');
+  assert.equal(m('extraction_failed'), 'extraction_failed');
+  assert.equal(m('read_failed'), 'extraction_failed', 'anything unrecognised is an extraction failure');
+  assert.equal(m(undefined), 'extraction_failed');
+  // The toast copy only ever explains sensitive content now.
+  assert.equal(OsMonitor.holdReasonText('sensitive_content', 'aws_access_key_id'), 'contains sensitive data: aws_access_key_id.');
+  const src = readFileSync(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  const fn = src.slice(src.indexOf('static holdReasonText('), src.indexOf('// The census record for a block'));
+  assert.equal(/could not be checked|cloud file with no readable copy/.test(fn), false, 'no fail-closed copy left');
+});
+
+test('a text file over the scan cap is partially scanned: clean -> reported (partially_scanned); sensitive in the first part -> held', async () => {
+  const { monitor, calls } = makeMonitor();
+  // Sized from the scanner's own cap (raised 5 -> 25 MB on 2026-09-30), so the
+  // test keeps exercising the partial path whatever the cap is.
+  const { CONTENT_SCAN_MAX_BYTES } = await import('../src/os_monitor/classifier.js');
+  const big = 'x'.repeat(CONTENT_SCAN_MAX_BYTES + 100) + '\n';
   const clean = await tmp('big-clean.txt', big);
   const dirty = await tmp('big-secret.txt', SECRET_TEXT + big);
   bind(monitor, clean); bind(monitor, dirty);
@@ -291,20 +335,42 @@ test('a >5 MB text file is partially scanned: clean -> reported (partially_scann
 test('the popup payload carries the attachment state: scanning, then held + reason + cloud copy', async () => {
   const { monitor, calls } = makeMonitor();
   const lines = [];
+  const p = await tmp('slow-secrets.env', SECRET_TEXT);
   try {
     let release;
     monitor.resolveAttachmentFn = () => new Promise((r) => { release = r; });
     monitor.on('ui', (ev) => { if (ev.kind === 'block') lines.push(ev); });
-    census(monitor, { names: ['Remove attachment slow.pdf'] });
-    monitor.enforcer.emit('block', { kind: 'block', process: 'WINWORD', panel: 'office_copilot_pane', patterns: '', reason: 'attachment', filename: 'slow.pdf' });
+    census(monitor, { names: ['Remove attachment slow-secrets.env'] });
+    monitor.enforcer.emit('block', { kind: 'block', process: 'WINWORD', panel: 'office_copilot_pane', patterns: '', reason: 'attachment', filename: 'slow-secrets.env' });
     assert.equal(lines.at(-1).attach_state, 'scanning');
-    release({ status: 'not_found' });
+    release({ status: 'local', path: p, source: 'hint', trust: 'bound' });
     await waitFor(() => calls.enqueued.find((e) => e.kind === 'file_upload'), { label: 'the record' });
-    monitor.enforcer.emit('block', { kind: 'block', process: 'WINWORD', panel: 'office_copilot_pane', patterns: 'x', reason: 'attachment', filename: 'slow.pdf' });
+    monitor.enforcer.emit('block', { kind: 'block', process: 'WINWORD', panel: 'office_copilot_pane', patterns: 'x', reason: 'attachment', filename: 'slow-secrets.env' });
     const last = lines.at(-1);
     assert.equal(last.attach_state, 'held');
-    assert.equal(last.hold_reason, 'not_found');
+    assert.equal(last.hold_reason, 'sensitive_content');
     assert.equal(last.cloud_copy, true);
+    assert.equal(last.text_patterns, '', 'no text finding on this block');
+    assert.match(calls.toasts[0].title, /still checking/, 'the block while scanning never claims "contains"');
+    const toast = calls.toasts.find((t) => /can't be sent/.test(t.title));
+    assert.ok(toast, 'the held toast');
+    assert.match(toast.message, /Remove the attachment from the chat before sending\./, 'the browser\'s instruction');
+    assert.match(toast.message, /already uploaded a copy to OneDrive\/SharePoint/, 'honest about the cloud copy');
+  } finally { monitor.stop(); }
+});
+
+test('the provisional hold while scanning is RELEASED when the scan comes back non-sensitive', async () => {
+  const { monitor, calls } = makeMonitor();
+  const p = await tmp('slow-clean.txt', CLEAN_TEXT);
+  try {
+    let release;
+    monitor.resolveAttachmentFn = () => new Promise((r) => { release = r; });
+    census(monitor, { names: ['Remove attachment slow-clean.txt'] });
+    assert.ok(monitor.attachHolds.has('slow-clean.txt'), 'held while scanning');
+    release({ status: 'local', path: p, source: 'hint', trust: 'bound' });
+    const rec = await waitFor(() => calls.enqueued.find((e) => e.kind === 'file_upload'), { label: 'the record' });
+    assert.equal(rec.enforcement, 'reported');
+    assert.equal(monitor.attachHolds.has('slow-clean.txt'), false, 'released');
   } finally { monitor.stop(); }
 });
 
@@ -376,7 +442,7 @@ test('SEC 1: the placeholder check passes the path out of band -- a U+2019 quote
   assert.match(src, /-LiteralPath \$env:CFAI_ATTR_PATH/);
 });
 
-test('SEC 2: a same-named file found by search is metadata only and HELD unverified -- never uploaded', async () => {
+test('SEC 2 / D2: a SENSITIVE same-named file found by search is scanned locally and HELD -- its content is never uploaded', async () => {
   const { monitor, calls } = makeMonitor();
   const namesake = await tmp('namesake-secrets.env', SECRET_TEXT);
   monitor.resolveAttachmentFn = async () => ({ status: 'local', path: namesake, source: 'search', trust: 'weak' });
@@ -385,10 +451,29 @@ test('SEC 2: a same-named file found by search is metadata only and HELD unverif
     const rec = await waitFor(() => calls.enqueued.find((e) => e.kind === 'file_upload'), { label: 'the record' });
     assert.equal(rec.content_text, null, 'no content from an unbound name match');
     assert.equal(rec.content_base64, null);
-    assert.equal(rec.content_scan.scanned, false);
+    assert.equal(rec.content_scan.scanned, true, 'scanned locally');
+    assert.ok(rec.content_scan.matches.length > 0, 'the scan result (pattern names) travels');
+    assert.equal(JSON.stringify(rec).includes('AKIAIOSFODNN7EXAMPLE'), false, 'not one byte of the content leaves');
     assert.equal(rec.enforcement, 'held');
-    assert.equal(rec.hold_reason, 'unverified');
+    assert.equal(rec.hold_reason, 'sensitive_content');
+    assert.equal(rec.binding, 'weak');
     assert.ok(monitor.attachHolds.has('namesake-secrets.env'));
+  } finally { monitor.stop(); }
+});
+
+test('D2: a CLEAN same-named file found by search is ALLOWED and reported unverified_location, content never uploaded', async () => {
+  const { monitor, calls } = makeMonitor();
+  const namesake = await tmp('namesake-notes.txt', CLEAN_TEXT);
+  monitor.resolveAttachmentFn = async () => ({ status: 'local', path: namesake, source: 'recent', trust: 'weak' });
+  try {
+    census(monitor, { names: ['Remove attachment namesake-notes.txt'] });
+    const rec = await waitFor(() => calls.enqueued.find((e) => e.kind === 'file_upload'), { label: 'the record' });
+    assert.equal(rec.enforcement, 'reported');
+    assert.equal(rec.hold_reason, 'unverified_location');
+    assert.equal(rec.binding, 'weak');
+    assert.equal(rec.content_text, null);
+    assert.equal(rec.content_base64, null);
+    assert.equal(monitor.attachHolds.has('namesake-notes.txt'), false);
   } finally { monitor.stop(); }
 });
 
@@ -418,7 +503,10 @@ test('SEC 5: binary extraction runs in a worker with limits -- the event loop (a
   assert.match(src, /new Worker\(WORKER_URL, \{ workerData: \{ path, ext, maxChars \}, resourceLimits: WORKER_RESOURCE_LIMITS \}\)/);
   assert.match(src, /setTimeout\(\(\) => finish\(TIMED_OUT\), EXTRACTION_BUDGET_MS\)/, 'terminated on budget');
   const idx = readFileSync(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
-  assert.match(idx, /isolate: true, quiet: true, metadataOnly: !bound,/);
+  // Every census match is scanned in the worker; a weak one then has its
+  // content stripped before it is reported (D2).
+  assert.match(idx, /isolate: true, quiet: true, metadataOnly: false,/);
+  assert.match(idx, /if \(weak\) OsMonitor\.stripCensusContent\(fileEvent, \{ weak: true \}\);/);
   // A real worker round-trip on a bogus .xlsx, while the main loop keeps ticking.
   const bogus = await tmp('bogus.xlsx', Buffer.alloc(6 * 1024 * 1024, 7));
   let ticks = 0; const t = setInterval(() => { ticks++; }, 20);
@@ -428,20 +516,127 @@ test('SEC 5: binary extraction runs in a worker with limits -- the event loop (a
   assert.ok(ticks > 0, 'the main loop ran during the extraction');
 });
 
-test('SEC 5/9: a census file that could not be scanned (worker failure, unknown extension) is HELD, and holds keep refreshing', async () => {
+test('SEC 5/9 (browser parity): a census file that could not be scanned is provisionally held, then RELEASED and reported; a real hold keeps refreshing', async () => {
   const { monitor, calls } = makeMonitor();
   const noext = await tmp('NOEXTENSION', 'AKIAIOSFODNN7EXAMPLE');
-  bind(monitor, noext);
+  const sec = await tmp('refresh-secrets.env', SECRET_TEXT);
+  bind(monitor, noext); bind(monitor, sec);
   try {
     census(monitor, { names: ['Remove attachment NOEXTENSION'] });
     const first = calls.attachHold.find((c) => c.state === 'on');
     assert.ok(first, 'a provisional hold for EVERY new name, scannable extension or not');
     const rec = await waitFor(() => calls.enqueued.find((e) => e.kind === 'file_upload'), { label: 'the record' });
-    assert.equal(rec.enforcement, 'held');
-    assert.equal(rec.hold_reason, 'unverified');
+    assert.equal(rec.enforcement, 'reported');
+    assert.equal(rec.hold_reason, 'unsupported_type');
+    assert.equal(monitor.attachHolds.has('NOEXTENSION'), false, 'an unscannable file is allowed');
+    census(monitor, { names: ['Remove attachment NOEXTENSION', 'Remove attachment refresh-secrets.env'] });
+    await waitFor(() => calls.enqueued.filter((e) => e.kind === 'file_upload').length === 2, { label: 'the second record' });
+    assert.ok(monitor.attachHolds.has('refresh-secrets.env'));
     const before = calls.attachHold.length;
     await settle(3300);
     assert.ok(calls.attachHold.length > before, 'the hold is re-stated (dead-man TTL never lapses)');
+  } finally { monitor.stop(); }
+});
+
+// ── 2026-09-30: attribution, the double record, pasted images ───────────────
+
+test('A6: the census line\'s agent attribution lands on the M365 Copilot app file row', async () => {
+  const { monitor, calls } = makeMonitor();
+  const p = await tmp('m365-notes.txt', CLEAN_TEXT);
+  bind(monitor, p, 'M365Copilot', 4242);
+  try {
+    census(monitor, {
+      process: 'M365Copilot', panel: '', surface: 'm365_copilot_app', key: 'm:abc', names: ['Remove attachment m365-notes.txt'],
+    });
+    // the attribution arrives on the census line itself
+    bind(monitor, await tmp('m365-agent.txt', CLEAN_TEXT), 'M365Copilot', 4242);
+    monitor.enforcer.emit('attachcensus', {
+      kind: 'attachcensus', process: 'M365Copilot', pid: 4242, panel: '', surface: 'm365_copilot_app', surface_key: 'm:abc2',
+      enforce: true, readable: true, names: ['Remove attachment m365-agent.txt'], agent: 'Researcher', agent_id: 'row-17', agent_src: 'row',
+    });
+    const rec = await waitFor(() => calls.enqueued.find((e) => e.kind === 'file_upload' && e.filename === 'm365-agent.txt'), { label: 'the attributed record' });
+    assert.equal(rec.agent_name, 'Researcher');
+    assert.equal(rec.agent_id, 'row-17');
+    assert.equal(rec.agent_scope, 'agent');
+    assert.equal(rec.surface, 'm365_copilot_app', 'the census surface id, not overwritten');
+    const plain = await waitFor(() => calls.enqueued.find((e) => e.kind === 'file_upload' && e.filename === 'm365-notes.txt'), { label: 'the plain record' });
+    assert.equal(plain.agent_name, undefined, 'no agent_src -> no agent keys at all');
+  } finally { monitor.stop(); }
+});
+
+test('A5: an attachment block whose prompt text is ALSO sensitive files a second prompt_submit record, same attribution, names only', async () => {
+  const { monitor, calls } = makeMonitor();
+  const lines = [];
+  monitor.on('ui', (ev) => { if (ev.kind === 'block') lines.push(ev); });
+  try {
+    monitor.enforcer.emit('block', {
+      kind: 'block', process: 'M365Copilot', patterns: 'aws_access_key_id', reason: 'attachment', filename: 'keys.env',
+      text_patterns: 'us_ssn,credit_card,us_ssn', agent: 'Researcher', agent_id: 'row-17', agent_src: 'row', surface: 'm365_copilot',
+    });
+    const blocks = calls.enqueued.filter((e) => e.kind === 'enforcement_block');
+    assert.equal(blocks.length, 2);
+    const [file, text] = [blocks.find((b) => b.blocked_for === 'file_upload'), blocks.find((b) => b.blocked_for === 'prompt_submit')];
+    assert.equal(file.mechanism, 'attachment_hold');
+    assert.equal(text.mechanism, 'keystroke_block');
+    assert.deepEqual(text.matches.map((m) => m.pattern), ['us_ssn', 'credit_card']);
+    for (const k of ['agent_name', 'agent_id', 'agent_scope', 'surface']) assert.equal(text[k], file[k], k);
+    assert.equal(text.agent_name, 'Researcher');
+    assert.equal(lines.at(-1).text_patterns, 'us_ssn,credit_card', 'the dialog is told');
+    assert.match(calls.toasts.at(-1).message, /also contains us_ssn, credit_card/);
+    // …and a plain attachment block stays ONE record.
+    calls.enqueued.length = 0;
+    monitor.enforcer.emit('block', { kind: 'block', process: 'M365Copilot', patterns: 'aws_access_key_id', reason: 'attachment', filename: 'keys2.env' });
+    assert.equal(calls.enqueued.filter((e) => e.kind === 'enforcement_block').length, 1);
+  } finally { monitor.stop(); }
+  const dlg = readFileSync(join(AGENT_DIR, 'electron', 'renderer', 'block-dialog.js'), 'utf8');
+  assert.match(dlg, /Your message also contains \$\{textPatterns\.join\(', '\)\}/);
+  assert.match(dlg, /title: "This file can't be sent"/);
+  assert.match(dlg, /Remove the attachment from the chat before sending\./);
+  assert.equal(/HOLD_REASON_TEXT|could not be checked/.test(dlg), false, 'the fail-closed copy is gone');
+});
+
+test('D7: a pasted image binds to the next image chip in THAT app, is scanned, then deleted; a stranger path is refused', async () => {
+  const { mkdir } = await import('node:fs/promises');
+  const { existsSync } = await import('node:fs');
+  const { randomUUID } = await import('node:crypto');
+  const { isPasteImagePath, sweepPasteDir, PathHints: PH } = await import('../src/os_monitor/attach-census.js');
+  const { monitor, calls } = makeMonitor();
+  if (!dir) await tmp('seed.txt', 'x');
+  const pdir = join(dir, 'paste');
+  await mkdir(pdir, { recursive: true });
+  monitor.pasteDir = pdir;
+  const img = join(pdir, randomUUID() + '.png');
+  // a valid 1x1 PNG
+  await writeFile(img, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64'));
+  try {
+    assert.equal(isPasteImagePath(img, pdir), true);
+    assert.equal(isPasteImagePath(join(dir, 'seed.txt'), pdir), false, 'outside the paste dir');
+    assert.equal(isPasteImagePath(join(pdir, 'evil.png'), pdir), false, 'not a uuid name');
+    // a stranger path is ignored
+    monitor.enforcer.emit('pastehint', { kind: 'pastehint', via: 'clipboard_image', process: 'M365Copilot', pid: 4242, path: join(dir, 'seed.txt') });
+    assert.equal(monitor.pathHints.get('seed.txt'), null);
+    monitor.enforcer.emit('pastehint', { kind: 'pastehint', via: 'clipboard_image', process: 'M365Copilot', pid: 4242, path: img });
+    const hint = monitor.pathHints.lookup(img.split(/[\\/]/).pop());
+    assert.equal(hint?.via, 'clipboard_image');
+    assert.equal(PH.isBound(hint, { process: 'M365Copilot', pid: 4242 }), true, 'clipboard_image is a bound via');
+    assert.equal(PH.isBound(hint, { process: 'ChatGPT', pid: 1 }), false, 'but only for the app it was pasted into');
+    // a non-image chip does not claim it
+    const nonImage = await resolveAttachment('notes.txt', { hints: monitor.pathHints, process: 'M365Copilot', pid: 4242, searchDirs: [], recent: '', roots: [], placeholder: async () => false });
+    assert.equal(nonImage.status, 'not_found');
+    // the image chip does -- through the real census path
+    monitor.resolveAttachmentFn = (name, opts) => resolveAttachment(name, { ...opts, searchDirs: [], recent: '', roots: [], placeholder: async () => false });
+    census(monitor, { process: 'M365Copilot', panel: '', surface: 'm365_copilot_app', key: 'm:img', names: ['Remove attachment image.png'] });
+    const rec = await waitFor(() => calls.enqueued.find((e) => e.kind === 'file_upload'), { label: 'the image record' });
+    assert.equal(rec.filename, 'image.png', 'the chip name, not our temp name');
+    assert.equal(rec.binding, undefined, 'bound -- not a weak match');
+    assert.notEqual(rec.hold_reason, 'not_found');
+    assert.equal(existsSync(img), false, 'the temp file is deleted after the scan');
+    assert.ok(!calls.logs.some(([, m]) => m.includes(pdir)), 'the paste path is never logged');
+    // the startup sweep clears leftovers
+    const stale = join(pdir, randomUUID() + '.bmp');
+    await writeFile(stale, 'BM');
+    assert.equal(sweepPasteDir({ dir: pdir }), 1);
+    assert.equal(existsSync(stale), false);
   } finally { monitor.stop(); }
 });
 
@@ -500,4 +695,266 @@ test('SEC 11/16: pane picker latch binds to the pane window; the helper builds t
   const stdin = enf.slice(enf.indexOf('static void StdinLoop()'), enf.indexOf('static void PumpLoop()'));
   assert.equal(/ExtractJsonString\(line, "key"\)/.test(stdin), false, 'the caller-supplied key is ignored');
   assert.match(enf, /static string AttachHoldKey\(bool egress, string egressSurface, string process, string panel, string surfaceKey\)/);
+});
+
+// ── Round 2 (2026-09-30): review fixes ──────────────────────────────────────
+
+const M365 = { process: 'M365Copilot', panel: '', surface: 'm365_copilot_app' };
+const fakeScan = (path, { sensitive = false, cs = null } = {}) => ({
+  kind: 'file_upload', via: 'composer_census', service: 's', vendor: null, process_name: 'M365Copilot', window_title: '',
+  filename: path.split(/[\\/]/).pop(), size: 10, size_bucket: '<1KB', mime_type: 'image/png', extension: '.png',
+  file_class: 'image', severity: sensitive ? 'critical' : 'low', reason: 'r',
+  content_scan: cs || (sensitive
+    ? { scanned: true, via: 'ocr', matchCount: 1, matches: [{ pattern: 'aws-access-key', severity: 'critical', count: 1 }], contentSeverity: 'critical' }
+    : { scanned: true, via: 'ocr', matchCount: 0, matches: [], contentSeverity: null }),
+  content_text: null, content_base64: 'QUFBQQ==',
+});
+async function pasteSetup(monitor) {
+  const { mkdir } = await import('node:fs/promises');
+  const { randomUUID } = await import('node:crypto');
+  if (!dir) await tmp('seed.txt', 'x');
+  const pdir = join(dir, 'paste-' + randomUUID().slice(0, 8));
+  await mkdir(pdir, { recursive: true });
+  monitor.pasteDir = pdir;
+  const make = async () => { const p = join(pdir, randomUUID() + '.png'); await writeFile(p, 'png'); return p; };
+  const hint = (extra) => monitor.enforcer.emit('pastehint', { kind: 'pastehint', via: 'clipboard_image', process: 'M365Copilot', pid: 4242, ...extra });
+  return { pdir, make, hint };
+}
+
+test('M3 correction: content severity decides, never the merged filename class; credential file types hold by name alone', async () => {
+  const { workbook } = await import('./helpers/office-fixtures.mjs');
+  const { monitor, calls } = makeMonitor();
+  const csv = await tmp('team.csv', 'name,role\nann,dev\nbob,qa\n');
+  const xlsx = await tmp('budget.xlsx', workbook([['item', 'cost'], ['chairs', 120]], 'xlsx'));
+  const pfx = await tmp('certs.pfx', Buffer.from([0x30, 0x82, 0x01, 0x02, 9, 9, 9]));
+  for (const p of [csv, xlsx, pfx]) bind(monitor, p);
+  try {
+    census(monitor, { names: ['Remove attachment team.csv', 'Remove attachment budget.xlsx', 'Remove attachment certs.pfx'] });
+    await waitFor(() => calls.enqueued.filter((e) => e.kind === 'file_upload').length === 3, { label: 'three records' });
+    const by = Object.fromEntries(calls.enqueued.filter((e) => e.kind === 'file_upload').map((e) => [e.filename, e]));
+    assert.equal(by['team.csv'].enforcement, 'reported', 'a clean table is not "sensitive content"');
+    assert.equal(by['budget.xlsx'].enforcement, 'reported');
+    assert.equal(by['certs.pfx'].enforcement, 'held');
+    assert.equal(by['certs.pfx'].hold_reason, 'sensitive_filename');
+    assert.deepEqual([...monitor.attachHolds.keys()], ['certs.pfx']);
+    assert.equal(calls.toasts.some((t) => /tabular_data/.test(t.message)), false, 'no "contains sensitive data: tabular_data"');
+  } finally { monitor.stop(); }
+  // A cloud-only key file holds by name too; a keyword name does not.
+  const { monitor: m2, calls: c2 } = makeMonitor();
+  const answers = { id_rsa: { status: 'cloud' }, 'secret-santa.txt': { status: 'cloud' } };
+  m2.resolveAttachmentFn = async (name) => answers[chipToFilename(name)];
+  try {
+    census(m2, { names: ['Remove attachment id_rsa', 'Remove attachment secret-santa.txt'] });
+    await waitFor(() => c2.enqueued.filter((e) => e.kind === 'file_upload').length === 2, { label: 'two records' });
+    const by = Object.fromEntries(c2.enqueued.filter((e) => e.kind === 'file_upload').map((e) => [e.filename, e]));
+    assert.equal(by.id_rsa.hold_reason, 'sensitive_filename');
+    assert.equal(by['secret-santa.txt'].enforcement, 'reported');
+    assert.equal(by['secret-santa.txt'].hold_reason, 'cloud_reference');
+  } finally { m2.stop(); }
+});
+
+test('S2: a scanner that THROWS is reported extraction_failed and its provisional hold released', async () => {
+  const { monitor, calls } = makeMonitor();
+  const p = await tmp('boom.docx', 'x'); bind(monitor, p);
+  monitor.buildFileUploadEventFn = async () => { throw Object.assign(new Error('boom ' + p), { code: 'EBOOM2' }); };
+  try {
+    census(monitor, { names: ['Remove attachment boom.docx'] });
+    const rec = await waitFor(() => calls.enqueued.find((e) => e.kind === 'file_upload'), { label: 'the record' });
+    assert.equal(rec.enforcement, 'reported');
+    assert.equal(rec.hold_reason, 'extraction_failed');
+    assert.equal(monitor.attachHolds.has('boom.docx'), false);
+    assert.equal(calls.logs.some(([, m]) => m.includes('boom.docx') || m.includes(p)), false);
+  } finally { monitor.stop(); }
+});
+
+test('(a) a SUSPICIOUS unscannable file is held suspicious_unscannable; a plain unsupported one passes', async () => {
+  const { monitor, calls } = makeMonitor();
+  const bomb = await tmp('bomb.zip', 'x'); const odd = await tmp('odd.qqq', 'x');
+  bind(monitor, bomb); bind(monitor, odd);
+  monitor.buildFileUploadEventFn = async ({ path }) => fakeScan(path, {
+    cs: path.endsWith('.zip')
+      ? { scanned: false, reason: 'extraction_failed', suspicious: true, suspicious_reason: 'decompression_ratio' }
+      : { scanned: false, reason: 'unsupported_format' },
+  });
+  try {
+    census(monitor, { names: ['Remove attachment bomb.zip', 'Remove attachment odd.qqq'] });
+    await waitFor(() => calls.enqueued.filter((e) => e.kind === 'file_upload').length === 2, { label: 'two records' });
+    const by = Object.fromEntries(calls.enqueued.filter((e) => e.kind === 'file_upload').map((e) => [e.filename, e]));
+    assert.equal(by['bomb.zip'].enforcement, 'held');
+    assert.equal(by['bomb.zip'].hold_reason, 'suspicious_unscannable');
+    assert.equal(monitor.attachHolds.get('bomb.zip').patterns, 'decompression_ratio');
+    assert.equal(by['odd.qqq'].enforcement, 'reported');
+    assert.equal(by['odd.qqq'].hold_reason, 'unsupported_type');
+    assert.match(calls.toasts.at(-1).message, /could not be safely checked \(decompression_ratio\)/);
+  } finally { monitor.stop(); }
+  const idx = readFileSync(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  const chip = idx.slice(idx.indexOf("this.attachmentWatcher.on('attachment_appeared'"), idx.indexOf("this.attachmentWatcher.on('attachment_disappeared'"));
+  assert.match(chip, /const suspicious = cs\?\.suspicious === true;/, 'the chip route holds on it too');
+});
+
+test('S3: a failed placeholder check is its own reported reason, never "cloud"; resolveAttachment says so', async () => {
+  const p = await tmp('ph.txt', CLEAN_TEXT);
+  const hints = new PathHints(); hints.remember(p, 'open_file_dialog', { process: 'ChatGPT', pid: 7 });
+  const r = await resolveAttachment('ph.txt', { hints, process: 'ChatGPT', pid: 7, searchDirs: [], recent: '', roots: [], placeholder: async () => 'error' });
+  assert.equal(r.status, 'placeholder_check_failed');
+  const { monitor, calls } = makeMonitor();
+  monitor.resolveAttachmentFn = async () => ({ status: 'placeholder_check_failed', source: 'hint' });
+  try {
+    census(monitor, { names: ['Remove attachment ph.txt'] });
+    const rec = await waitFor(() => calls.enqueued.find((e) => e.kind === 'file_upload'), { label: 'the record' });
+    assert.deepEqual([rec.enforcement, rec.hold_reason], ['reported', 'placeholder_check_failed']);
+  } finally { monitor.stop(); }
+});
+
+test('(b) a pasted image is scanned locally: content uploaded ONLY when held; temp files deleted; no name search', async () => {
+  const { existsSync } = await import('node:fs');
+  const { monitor, calls } = makeMonitor();
+  const { make, hint } = await pasteSetup(monitor);
+  const clean = await make(); const dirty = await make();
+  let resolverCalls = 0;
+  monitor.resolveAttachmentFn = async () => { resolverCalls++; return { status: 'not_found' }; };
+  monitor.buildFileUploadEventFn = async ({ path }) => fakeScan(path, { sensitive: path === dirty });
+  try {
+    hint({ state: 'saved', path: clean, paste_ms: Date.now() - 50 });
+    census(monitor, { ...M365, key: 'm:b1', names: ['Remove attachment image.png'] });
+    const r1 = await waitFor(() => calls.enqueued.find((e) => e.kind === 'file_upload'), { label: 'clean record' });
+    assert.equal(r1.enforcement, 'reported');
+    assert.equal(r1.content_base64, null, 'clean paste: content NOT uploaded');
+    assert.equal(r1.binding, undefined, 'not a weak match');
+    assert.equal(r1.filename, 'image.png');
+    assert.equal(existsSync(clean), false);
+    hint({ state: 'saved', path: dirty, paste_ms: Date.now() - 50 });
+    census(monitor, { ...M365, key: 'm:b2', names: ['Remove attachment image.png'] });
+    const r2 = await waitFor(() => calls.enqueued.find((e) => e.kind === 'file_upload' && e.enforcement === 'held'), { label: 'held record' });
+    assert.equal(r2.content_base64, 'QUFBQQ==', 'held paste: content uploaded');
+    assert.equal(existsSync(dirty), false);
+    assert.equal(resolverCalls, 0, 'a bound paste never reaches the name search (or its placeholder check)');
+  } finally { monitor.stop(); }
+});
+
+test('M1: clean paste -> removed -> a SENSITIVE paste under the same name is rescanned and held; two image.png are two records', async () => {
+  const { monitor, calls } = makeMonitor();
+  const { make, hint } = await pasteSetup(monitor);
+  const a = await make(); const b = await make();
+  monitor.resolveAttachmentFn = async () => ({ status: 'not_found' });
+  monitor.buildFileUploadEventFn = async ({ path }) => fakeScan(path, { sensitive: path === b });
+  const K = 'm:m1';
+  try {
+    hint({ state: 'saved', path: a, paste_ms: Date.now() - 50 });
+    census(monitor, { ...M365, key: K, names: ['Remove attachment image.png'] });
+    await waitFor(() => calls.enqueued.filter((e) => e.kind === 'file_upload').length === 1, { label: 'first' });
+    census(monitor, { ...M365, key: K, names: [] }); census(monitor, { ...M365, key: K, names: [] });
+    hint({ state: 'saved', path: b, paste_ms: Date.now() - 50 });
+    census(monitor, { ...M365, key: K, names: ['Remove attachment image.png'] });
+    const r2 = await waitFor(() => calls.enqueued.filter((e) => e.kind === 'file_upload')[1], { label: 'second (rescanned)' });
+    assert.equal(r2.enforcement, 'held');
+    assert.ok(monitor.attachHolds.has('image.png'));
+  } finally { monitor.stop(); }
+  const { monitor: m2, calls: c2 } = makeMonitor();
+  const s2 = await pasteSetup(m2);
+  const x = await s2.make(); const y = await s2.make();
+  m2.resolveAttachmentFn = async () => ({ status: 'not_found' });
+  m2.buildFileUploadEventFn = async ({ path }) => fakeScan(path, { sensitive: path === y });
+  try {
+    s2.hint({ state: 'saved', path: x, paste_ms: Date.now() - 80 });
+    s2.hint({ state: 'saved', path: y, paste_ms: Date.now() - 40 });
+    census(m2, { ...M365, key: 'm:two', names: ['Remove attachment image.png', 'Remove attachment image.png'] });
+    await waitFor(() => c2.enqueued.filter((e) => e.kind === 'file_upload').length === 2, { label: 'both scanned' });
+    const recs = c2.enqueued.filter((e) => e.kind === 'file_upload');
+    assert.deepEqual(recs.map((e) => e.enforcement).sort(), ['held', 'reported']);
+    assert.notEqual(recs[0].attachment_id, recs[1].attachment_id);
+    assert.deepEqual([...m2.attachHolds.keys()], ['image.png (2)'], 'the second instance is held on its own');
+  } finally { m2.stop(); }
+});
+
+test('M1: a cached FILE verdict is only kept when path + size + mtime still match', async () => {
+  const { monitor, calls } = makeMonitor();
+  const p = await tmp('changing.txt', CLEAN_TEXT); bind(monitor, p);
+  try {
+    census(monitor, { names: ['Remove attachment changing.txt'] });
+    await waitFor(() => calls.enqueued.find((e) => e.kind === 'file_upload'), { label: 'first' });
+    census(monitor, { names: [] }); census(monitor, { names: [] });
+    await writeFile(p, SECRET_TEXT); bind(monitor, p);
+    calls.enqueued.length = 0;
+    census(monitor, { names: ['Remove attachment changing.txt'] });
+    const rec = await waitFor(() => calls.enqueued.find((e) => e.kind === 'file_upload'), { label: 'rescanned' });
+    assert.equal(rec.enforcement, 'held', 'the changed file was rescanned, not waved through on the old verdict');
+  } finally { monitor.stop(); }
+});
+
+test('M2: chip BEFORE the saved hint waits (held) and binds; a stale / staged hint never binds photo.png; too_large skips the name search', async () => {
+  const { monitor, calls } = makeMonitor();
+  const { make, hint } = await pasteSetup(monitor);
+  const late = await make();
+  let resolverCalls = 0;
+  monitor.resolveAttachmentFn = async () => { resolverCalls++; return { status: 'not_found' }; };
+  monitor.buildFileUploadEventFn = async ({ path }) => fakeScan(path, { sensitive: true });
+  try {
+    const t0 = Date.now();
+    hint({ state: 'pending', paste_ms: t0 });
+    census(monitor, { ...M365, key: 'm:m2', names: ['Remove attachment image.png'] });
+    assert.ok(monitor.attachHolds.has('image.png'), 'provisionally held while the image is saved');
+    await settle(300);
+    assert.equal(calls.enqueued.length, 0, 'still waiting for the saved file');
+    hint({ state: 'saved', path: late, paste_ms: t0 });
+    const rec = await waitFor(() => calls.enqueued.find((e) => e.kind === 'file_upload'), { label: 'bound record' });
+    assert.equal(rec.enforcement, 'held');
+    assert.equal(resolverCalls, 0, 'no weak name search for a pasted chip');
+  } finally { monitor.stop(); }
+
+  const { monitor: m2, calls: c2 } = makeMonitor();
+  const s2 = await pasteSetup(m2);
+  const stale = await s2.make();
+  let resolved = 0;
+  m2.resolveAttachmentFn = async () => { resolved++; return { status: 'not_found' }; };
+  try {
+    s2.hint({ state: 'saved', path: stale, paste_ms: Date.now() - 30_000 });
+    census(m2, { ...M365, key: 'm:stale', names: ['Remove attachment photo.png'] });
+    await waitFor(() => c2.enqueued.find((e) => e.kind === 'file_upload'), { label: 'photo record' });
+    assert.equal(resolved, 1, 'resolved by name, not by the stale paste');
+    const staged = await s2.make();
+    s2.hint({ state: 'saved', path: staged, paste_ms: Date.now() - 100, staged: true });
+    census(m2, { ...M365, key: 'm:staged', names: ['Remove attachment photo2.png'] });
+    await waitFor(() => c2.enqueued.filter((e) => e.kind === 'file_upload').length === 2, { label: 'second photo record' });
+    assert.equal(resolved, 2, 'a staged clipboard image never claims a real file name');
+    const h = m2.pathHints.takeClipboardImage({ process: 'M365Copilot', pid: 4242, appearedAt: Date.now(), chipName: 'image.png' });
+    assert.ok(h && h.staged, 'but it does bind a generically named chip');
+  } finally { m2.stop(); }
+
+  const { monitor: m3, calls: c3 } = makeMonitor();
+  await pasteSetup(m3);
+  let r3 = 0;
+  m3.resolveAttachmentFn = async () => { r3++; return { status: 'not_found' }; };
+  try {
+    const t = Date.now();
+    m3.enforcer.emit('pastehint', { kind: 'pastehint', via: 'clipboard_image', process: 'M365Copilot', pid: 4242, state: 'pending', paste_ms: t });
+    m3.enforcer.emit('pastehint', { kind: 'pastehint', via: 'clipboard_image', process: 'M365Copilot', pid: 4242, state: 'too_large', paste_ms: t });
+    census(m3, { ...M365, key: 'm:big', names: ['Remove attachment image.png'] });
+    const rec = await waitFor(() => c3.enqueued.find((e) => e.kind === 'file_upload'), { label: 'too_large record' });
+    assert.deepEqual([rec.enforcement, rec.hold_reason], ['reported', 'too_large']);
+    assert.equal(r3, 0);
+  } finally { m3.stop(); }
+});
+
+test('S5: a block while the file is still being checked is provisional: attach_state scanning, no matches, no severity', async () => {
+  const { monitor, calls } = makeMonitor();
+  try {
+    monitor.resolveAttachmentFn = () => new Promise(() => {});
+    census(monitor, { names: ['Remove attachment pending.pdf'] });
+    monitor.enforcer.emit('block', { kind: 'block', process: 'WINWORD', panel: 'office_copilot_pane', patterns: '', reason: 'attachment', filename: 'pending.pdf' });
+    const blk = calls.enqueued.find((e) => e.kind === 'enforcement_block');
+    assert.equal(blk.attach_state, 'scanning');
+    assert.deepEqual(blk.matches, []);
+    assert.equal(blk.highest_severity, null);
+  } finally { monitor.stop(); }
+});
+
+test('L1/L3: the paste dir is swept on a timer, cleared on stop; stop() shuts the OCR thread; archive entries stripped', () => {
+  const src = readFileSync(join(AGENT_DIR, 'src', 'os_monitor', 'index.js'), 'utf8');
+  assert.match(src, /this\.pasteSweepTimer = setInterval\(\(\) => sweepPasteDir\(\{ dir: this\.pasteDir, olderThanMs: PASTE_SWEEP_AGE_MS \}\), PASTE_SWEEP_EVERY_MS\);/);
+  assert.match(src, /if \(this\.pasteSweepTimer\) \{ clearInterval\(this\.pasteSweepTimer\); this\.pasteSweepTimer = null; \}/);
+  assert.match(src, /try \{ shutdownOcr\(\); \} catch/);
+  // stop() clears BOTH routing timers (the leaked 60s interval kept test processes alive)
+  assert.match(src, /if \(this\._routingRulesInterval\) \{ clearInterval\(this\._routingRulesInterval\); this\._routingRulesInterval = null; \}/);
+  assert.match(src, /const \{ error: _err, captureTruncated: _trunc, entries: _entries, \.\.\.rest \} = fileEvent\.content_scan;/);
 });

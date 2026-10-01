@@ -24,22 +24,101 @@
 // CF_HDROP copy while it was focused) within BOUND_HINT_WINDOW_MS, and the file
 // still has the size and mtime it had then. Every other match (Recent .lnk,
 // folder search, OneDrive, an unbound or stale hint) is trust:'weak': the caller
-// reports METADATA ONLY and, on an enforcing surface, holds it as 'unverified'.
+// may scan it LOCALLY (to hold a sensitive namesake) but never uploads its
+// content, and reports a clean one as 'unverified_location' (2026-09-30).
 //
 // NEVER opens a Files-On-Demand placeholder: EVERY candidate path's attribute
 // word is checked (not only under a known OneDrive root -- synced SharePoint
 // libraries live elsewhere) before it is treated as local. Nothing here logs a
 // name or a path.
 
-import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { existsSync, readdirSync, statSync, readFileSync, unlinkSync } from 'node:fs';
+import { join, basename, dirname, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 
 const REMOVE_PREFIX = /^remove attachment\s*/i;
 
+// Every `via` that proves a path was handed to THIS app (see PathHints.isBound).
+// 'clipboard_image' (2026-09-30): a screenshot / image pasted with Ctrl+V into a
+// census surface. The helper saved the clipboard image to a private temp file
+// (pasteImageDir) at the moment of the paste, for that process / pid, so the
+// temp file IS the pasted bytes -- as bound as a picker path.
+export const BOUND_VIAS = ['open_file_dialog', 'pane_file_dialog', 'clipboard_file_copy', 'clipboard_image'];
+
+// %LOCALAPPDATA%\cloudfuze-aigov\paste -- where enforcer-win.ps1 saves pasted
+// clipboard images. Per-user (LOCALAPPDATA's own ACL); '' when unknown.
+export function pasteImageDir(env = process.env) {
+  return env.LOCALAPPDATA ? join(env.LOCALAPPDATA, 'cloudfuze-aigov', 'paste') : '';
+}
+
+// Is `path` a file DIRECTLY inside the paste dir, named the way the helper names
+// them (<uuid>.png / <uuid>.bmp)? Anything else is refused: a pastehint line
+// must never be able to bind -- or get us to delete -- an arbitrary path.
+export function isPasteImagePath(path, dir = pasteImageDir()) {
+  if (!path || !dir) return false;
+  const full = resolvePath(String(path));
+  if (dirname(full).toLowerCase() !== resolvePath(dir).toLowerCase()) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(png|bmp)$/i.test(basename(full));
+}
+
+// Delete one pasted-image temp file. Only ever a paste-dir file; errors ignored.
+export function removePasteImage(path, dir = pasteImageDir()) {
+  if (!isPasteImagePath(path, dir)) return false;
+  try { unlinkSync(path); return true; } catch { return false; }
+}
+
+// Remove paste-dir files older than `olderThanMs` (0 = all of them): the
+// startup sweep, and the per-paste sweep of pastes no chip ever claimed.
+export function sweepPasteDir({ dir = pasteImageDir(), olderThanMs = 0, now = Date.now() } = {}) {
+  if (!dir) return 0;
+  let entries = [];
+  try { entries = readdirSync(dir); } catch { return 0; }
+  let n = 0;
+  for (const e of entries) {
+    const full = join(dir, e);
+    if (!isPasteImagePath(full, dir)) continue;
+    try {
+      if (olderThanMs > 0 && now - statSync(full).mtimeMs < olderThanMs) continue;
+      unlinkSync(full); n++;
+    } catch { /* in use, or already gone */ }
+  }
+  return n;
+}
+
+// A chip that may be a PASTED picture: an image extension, or the generic
+// labels a composer gives a pasted image.
+export function isImageChipName(name) {
+  const n = String(name ?? '').trim();
+  return /\.(png|jpe?g|gif|bmp|webp)$/i.test(n) || isGenericPasteName(n);
+}
+
+// The generic names a composer gives a pasted picture ("image.png", "Pasted
+// image", "Screenshot 2026-..."), as opposed to a real file's own name. A
+// STAGED clipboard image (no paste key seen) may only bind to one of these.
+export function isGenericPasteName(name) {
+  const n = String(name ?? '').trim();
+  return /^(pasted )?(image|screenshot)\b/i.test(n);
+}
+
+// Credential / key file types that hold on their NAME ALONE, whatever the scan
+// says (user decision 2026-09-30, browser parity for the dangerous classes
+// only). Name keywords ("secret-santa.txt") and the tabular class (team.csv)
+// never hold by themselves.
+const CREDENTIAL_EXT = /\.(pfx|p12|pem|key|ppk|kdbx|jks|keystore|npmrc|pgpass)$/i;
+const CREDENTIAL_EXACT = /^(id_rsa|id_dsa|id_ecdsa|id_ed25519|\.env|\.npmrc|\.pgpass)$/i;
+export function isCredentialFileName(name) {
+  const n = basename(String(name ?? '').trim());
+  if (!n) return false;
+  return CREDENTIAL_EXACT.test(n) || CREDENTIAL_EXT.test(n) || /^\.env(\..+)?$/i.test(n) || /\.env$/i.test(n);
+}
+
 // How long after a picker / CF_HDROP a hint may bind a census name to a path.
 export const BOUND_HINT_WINDOW_MS = 2 * 60_000;
+// A paste KEY binds only to an image chip that appears within this long after it.
+export const CLIPBOARD_BIND_MS = 10_000;
+// Helper clock vs Node clock, and a chip first seen on the paste's own tick.
+export const CLIPBOARD_CLOCK_SKEW_MS = 500;
 
 // "Remove attachment secrets.txt" -> "secrets.txt"
 // Word's primary label "txt secrets.txt secrets.txt upload finished" -> "secrets.txt"
@@ -90,7 +169,9 @@ export class PathHints {
     this.map = new Map();
   }
 
-  remember(path, via = '', { process: proc = '', pid = 0 } = {}) {
+  // `pastedAt` / `staged`: clipboard_image hints only -- when the paste (or,
+  // staged, the clipboard change) happened, by the helper's clock.
+  remember(path, via = '', { process: proc = '', pid = 0, pastedAt = 0, staged = false } = {}) {
     if (!path) return;
     const key = basename(String(path)).toLowerCase();
     this.map.delete(key);
@@ -98,6 +179,7 @@ export class PathHints {
       path: String(path), via, at: Date.now(),
       process: String(proc || '').replace(/\.exe$/i, '').trim().toLowerCase(), pid: Number(pid) || 0,
       stat: statOf(path),
+      pastedAt: Number(pastedAt) || 0, staged: staged === true,
     });
     while (this.map.size > this.max) this.map.delete(this.map.keys().next().value);
   }
@@ -115,12 +197,60 @@ export class PathHints {
     return null;
   }
 
+  // The OLDEST unclaimed pasted image bound to (process, pid), taken OUT of the
+  // table so one paste binds at most one chip. A pasted image's chip is named
+  // by the app ("image.png"), never by our temp file, so it is matched by
+  // "the next new image-type chip", not by name.
+  //
+  // ONLY a paste that happened BEFORE the chip appeared (`appearedAt`, allowing
+  // a little clock skew), and recently: CLIPBOARD_BIND_MS for a paste key,
+  // BOUND_HINT_WINDOW_MS for a staged clipboard change -- and a staged image
+  // only for a generically named chip, so it can never claim a dragged
+  // "photo.png". Once one is claimed, every OLDER unclaimed paste for the same
+  // app is stale and comes back in `dropped` (the caller deletes the files).
+  takeClipboardImage({ process: proc = '', pid = 0, appearedAt = Date.now(), chipName = '' } = {}) {
+    const want = String(proc || '').replace(/\.exe$/i, '').trim().toLowerCase();
+    const eligible = [];
+    for (const [k, h] of this.map) {
+      if (h.via !== 'clipboard_image' || h.process !== want) continue;
+      if (!PathHints.isBound(h, { process: proc, pid })) continue;
+      const pastedAt = h.pastedAt || h.at;
+      if (pastedAt > appearedAt + CLIPBOARD_CLOCK_SKEW_MS) continue;   // pasted after the chip appeared
+      if (appearedAt - pastedAt > (h.staged ? BOUND_HINT_WINDOW_MS : CLIPBOARD_BIND_MS)) continue;
+      if (h.staged && !isGenericPasteName(chipName)) continue;
+      eligible.push([k, h, pastedAt]);
+    }
+    if (!eligible.length) return null;
+    eligible.sort((a, b) => a[2] - b[2]);
+    const [k, h, at] = eligible[0];
+    this.map.delete(k);
+    const dropped = [];
+    for (const [k2, h2] of [...this.map]) {
+      if (h2.via === 'clipboard_image' && h2.process === want && (h2.pastedAt || h2.at) < at) {
+        this.map.delete(k2); dropped.push(h2.path);
+      }
+    }
+    return { ...h, dropped };
+  }
+
+  // Forget clipboard image hints for this app (a paste key makes a staged one
+  // stale); returns their paths for deletion.
+  dropClipboardImages({ process: proc = '', stagedOnly = false } = {}) {
+    const want = String(proc || '').replace(/\.exe$/i, '').trim().toLowerCase();
+    const dropped = [];
+    for (const [k, h] of [...this.map]) {
+      if (h.via !== 'clipboard_image' || h.process !== want || (stagedOnly && !h.staged)) continue;
+      this.map.delete(k); dropped.push(h.path);
+    }
+    return dropped;
+  }
+
   // Is this hint BOUND to an attach into (process, pid)? Seen for that process
   // (and pid, when both sides know it), within the window, and the file is
   // unchanged since (size + mtime).
   static isBound(hint, { process: proc = '', pid = 0, windowMs = BOUND_HINT_WINDOW_MS } = {}) {
     if (!hint) return false;
-    if (!['open_file_dialog', 'pane_file_dialog', 'clipboard_file_copy'].includes(hint.via)) return false;
+    if (!BOUND_VIAS.includes(hint.via)) return false;
     if (Date.now() - hint.at > windowMs) return false;
     const want = String(proc || '').replace(/\.exe$/i, '').trim().toLowerCase();
     if (!want || hint.process !== want) return false;
@@ -183,8 +313,9 @@ export function oneDriveRoots({ env = process.env, home = homedir() } = {}) {
 const PLACEHOLDER_BITS = 0x1000 | 0x40000 | 0x400000;
 
 // Is this path a Files-On-Demand placeholder (bytes not local)? Asks the OS for
-// the attribute word without opening the file. Any failure answers TRUE — the
-// fail-closed direction: never read what might trigger a download.
+// the attribute word without opening the file. Any failure answers 'error'
+// (truthy, so a caller that only tests truthiness still never reads the file);
+// resolveAttachment reports it as placeholder_check_failed, not as a cloud file.
 export function isCloudPlaceholder(path, { timeoutMs = 3000 } = {}) {
   return new Promise((resolve) => {
     if (process.platform !== 'win32') { resolve(false); return; }
@@ -194,7 +325,7 @@ export function isCloudPlaceholder(path, { timeoutMs = 3000 } = {}) {
     // interpolating them into -Command was a command injection.
     execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', '[int](Get-Item -LiteralPath $env:CFAI_ATTR_PATH -Force).Attributes'],
       { timeout: timeoutMs, windowsHide: true, env: { ...process.env, CFAI_ATTR_PATH: String(path) } }, (err, stdout) => {
-        if (err) { resolve(true); return; }
+        if (err) { resolve('error'); return; }
         const n = Number(String(stdout).trim());
         resolve(!Number.isFinite(n) || (n & PLACEHOLDER_BITS) !== 0);
       });
@@ -247,10 +378,13 @@ export async function resolveAttachment(name, {
   const accept = async (path, source, trust) => {
     if (!path || !existsSync(path)) return null;
     if (!statOf(path)) return null;
-    if (await placeholder(path)) return { status: 'cloud', source };
+    const ph = await placeholder(path);
+    if (ph === 'error') return { status: 'placeholder_check_failed', source };
+    if (ph) return { status: 'cloud', source };
     return { status: 'local', path, source, trust };
   };
-  // 1. BOUND hints: the only content-readable answers.
+  // 1. BOUND hints: the only content-readable answers. (Pasted images are bound
+  //    by index.js before this is called -- see #resolveClipboardImage.)
   for (const v of variants) {
     const h = hints?.get(v);
     if (h && PathHints.isBound(h, { process: proc, pid })) {

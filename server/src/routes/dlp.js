@@ -5,6 +5,7 @@ import { emitWebhook } from './webhooks.js';
 import { siemForward } from '../lib/siem-forward.js';
 import { attachMachineIdentity, machineIdentity } from '../lib/machine-identity.js';
 import { lookupSessionClients } from '../lib/claude-sessions.js';
+import { markDesktopAgentSeen } from '../lib/desktop-agent-presence.js';
 import {
   RESPONSE_BUDGET_MS, raceWithFallback, applyBudgetHeaders, dlpResponseStore,
   registerResponseWarmer,
@@ -329,6 +330,9 @@ export function mountDlp(app, db) {
               // an older-shape event simply carries none of these keys.
               // NOT forwarded to SIEM — lib/cef.js keeps its own allowlist.
               ...agentMetaFields(e),
+              // A block raised while the attachment was still being scanned is
+              // provisional, not a finding: keep the marker so dashboards skip it.
+              ...(cleanMetaString(e?.attach_state, 16) === 'scanning' ? { attach_state: 'scanning' } : {}),
             } : {}),
           },
         ),
@@ -378,6 +382,19 @@ export function mountDlp(app, db) {
       // Real-time push to a configured SIEM syslog collector (no-op if unset).
       siemForward('dlp', eventDoc);
       stored++;
+    }
+
+    // Only the desktop agent's OS monitor sends source 'os_monitor', so a batch
+    // carrying one proves this machine is a desktop agent. Installs that enrolled
+    // before enroll sent type/platform never re-enroll, and without this they are
+    // missing from the Overview "Systems" count. Throttled per machine, never
+    // creates or overwrites anything; best-effort so it can't fail an ingest
+    // that has already been stored.
+    const osEvent = events.find((e) => e?.source === 'os_monitor' && !validateEvent(e).error);
+    if (osEvent) {
+      try {
+        await markDesktopAgentSeen(db, req.machine.id, { user: osEvent.user });
+      } catch { /* presence marking is advisory */ }
     }
 
     res.status(201).json({ ok: true, stored, bound });
@@ -1066,12 +1083,17 @@ export function agentMetaFields(e) {
 //   enforcement   — exactly 'held' or 'reported'.
 //   hold_reason   — short machine code ([a-z_], at most 64 chars), e.g.
 //                   'cloud_reference', 'partially_scanned', 'unverified'.
+//   binding       — exactly 'weak' when the agent matched the chip to a file by
+//                   name only (content scanned locally, never uploaded).
 // metadata_json only — no column, no migration, not in lib/cef.js's SIEM allowlist.
-export const ATTACHMENT_META_KEYS = ['attachment_id', 'enforcement', 'hold_reason'];
+//   attach_state  — exactly 'scanning' on a block raised while the file was still
+//                   being checked (provisional, not a finding).
+export const ATTACHMENT_META_KEYS = ['attachment_id', 'enforcement', 'hold_reason', 'binding', 'attach_state'];
 const ATTACHMENT_ID_MAX = 64;
 const HOLD_REASON_MAX = 64;
 const HOLD_REASON_RE = /^[a-z_]+$/;
 const ENFORCEMENT_VALUES = new Set(['held', 'reported']);
+const BINDING_VALUES = new Set(['weak']);
 
 function cleanMetaString(value, max) {
   if (typeof value !== 'string') return null;
@@ -1088,6 +1110,9 @@ export function attachmentEnforcementFields(e) {
   if (enforcement && ENFORCEMENT_VALUES.has(enforcement)) out.enforcement = enforcement;
   const holdReason = cleanMetaString(e?.hold_reason, HOLD_REASON_MAX);
   if (holdReason && HOLD_REASON_RE.test(holdReason)) out.hold_reason = holdReason;
+  const binding = cleanMetaString(e?.binding, 16);
+  if (binding && BINDING_VALUES.has(binding)) out.binding = binding;
+  if (cleanMetaString(e?.attach_state, 16) === 'scanning') out.attach_state = 'scanning';
   return out;
 }
 

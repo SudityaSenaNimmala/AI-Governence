@@ -275,7 +275,15 @@ const TEXT_READABLE = new Set([
   '.pem', '.key',  // these are usually base64-text key files
 ]);
 
-const CONTENT_SCAN_MAX_BYTES = 5 * 1024 * 1024;   // 5 MB cap
+// Matches the browser extension's hard cap (content.js CONTENT_SCAN_MAX_BYTES), so
+// the same file gets the same answer on either surface. Above it the census route
+// still partial-scans (file-handler.js PARTIAL SCAN); every other route reports
+// reason 'too_large'.
+const CONTENT_SCAN_MAX_BYTES = 25 * 1024 * 1024;   // 25 MB cap
+
+// OCR is far slower per byte than any text extractor, so images get their own,
+// lower ceiling -- the extension's OCR_MAX_BYTES. Over it: reason 'too_large'.
+const OCR_MAX_BYTES = 8 * 1024 * 1024;   // 8 MB
 
 // Ceiling on how many bytes we will ever READ off disk to forward as a preview.
 //
@@ -305,13 +313,20 @@ export function isTextReadable(filename) {
 
 // Binary file formats we can extract text from with a Node-side parser.
 // (Differ from TEXT_READABLE because they need a dedicated decoder.)
+// Legacy binary Office (.doc/.ppt) and Outlook .msg stay unsupported: no parser
+// for them ships with the agent. They are still isDocumentLikeFormat, so an
+// unscanned one is 'unverified'.
 const BINARY_PARSEABLE = new Set([
-  '.docx',  // mammoth
-  '.pdf',   // pdf-parse
-  '.xlsx', '.xls',  // xlsx (SheetJS)
+  '.docx', '.docm', '.dotx',        // mammoth
+  '.pdf',                           // pdf-parse
+  '.xlsx', '.xls', '.xlsm', '.xlsb', '.ods',   // SheetJS
+  '.pptx', '.pptm', '.ppsx',        // jszip: a:t runs of slides + notes
+  '.odt', '.odp',                   // jszip: content.xml text
+  '.eml',                           // MIME text parts
+  '.rtf',                           // control words stripped
 ]);
 const IMAGE_EXTENSIONS = new Set([
-  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp',
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tif', '.tiff',   // tesseract
 ]);
 const ARCHIVE_EXTENSIONS = new Set([
   '.zip',  // jszip
@@ -372,9 +387,9 @@ export function extOf(filename) {
 // the strongest version of "unverified", not an exemption from it.
 const UNREADABLE_DOCUMENT_EXTENSIONS = new Set([
   // Office / word-processing formats with no Node extractor here.
-  '.doc', '.ppt', '.pptx', '.pps', '.ppsx',
-  '.odt', '.ods', '.odp', '.rtf', '.pages', '.numbers', '.keynote',
-  '.msg', '.eml', '.pst', '.ost', '.one', '.onepkg', '.vsdx', '.mpp',
+  // (.pptx/.ppsx/.odt/.odp/.ods/.rtf/.eml moved to BINARY_PARSEABLE.)
+  '.doc', '.ppt', '.pps', '.pages', '.numbers', '.keynote',
+  '.msg', '.pst', '.ost', '.one', '.onepkg', '.vsdx', '.mpp',
   // Archive formats we cannot open (only .zip has an extractor).
   '.7z', '.rar', '.tar', '.tgz', '.gz', '.bz2', '.xz', '.zst', '.iso', '.cab',
   // Structured data stores — the highest-value targets in this whole catalog.
@@ -390,5 +405,5 @@ export function isDocumentLikeFormat(filename) {
   return UNREADABLE_DOCUMENT_EXTENSIONS.has(extOf(filename));
 }
 
-export { CONTENT_SCAN_MAX_BYTES, CONTENT_CAPTURE_MAX_BYTES };
+export { CONTENT_SCAN_MAX_BYTES, CONTENT_CAPTURE_MAX_BYTES, OCR_MAX_BYTES };
 

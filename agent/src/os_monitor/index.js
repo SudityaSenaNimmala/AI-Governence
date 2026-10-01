@@ -11,7 +11,7 @@
 //     2. fire a native Windows toast if severity is high/critical (notify)
 
 import { EventEmitter } from 'node:events';
-import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn as cpSpawn } from 'node:child_process';
@@ -29,9 +29,6 @@ import {
   hostsForPlatform,
   identifyAiPanel,
   hostForPanel,
-  filterBlockedAgents,
-  synthesizePlatformBlocks,
-  normalizeAgentRows,
   identifyEgressSurface,
   webSurfaceForHost,
   enforcingWebSurface,
@@ -39,7 +36,7 @@ import {
 import { scan, lengthBucket, BLOCK_PATTERNS, getBlockPatterns, isTextReadable, isBinaryParseable, isImage, isArchive } from './classifier.js';
 import { PolicySync } from './policy-sync.js';
 import { FeatureSync } from './feature-sync.js';
-import { buildFileUploadEvent } from './file-handler.js';
+import { buildFileUploadEvent, stripContentScanNames } from './file-handler.js';
 import { FileDialogWatcher } from './file-dialog-watcher.js';
 import { AttachmentWatcher } from './attachment-watcher.js';
 import { PromptWatcher } from './prompt-watcher.js';
@@ -53,8 +50,12 @@ import { Reporter } from './reporter.js';
 // path retries them.
 import { PENDING_REQUEST_PATH, EGRESS_PATH } from './blocked-agents-sync.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { chipToFilename, PathHints, resolveAttachment } from './attach-census.js';
+import {
+  chipToFilename, PathHints, resolveAttachment, pasteImageDir, isPasteImagePath, removePasteImage, sweepPasteDir,
+  isImageChipName, isCredentialFileName, CLIPBOARD_BIND_MS, CLIPBOARD_CLOCK_SKEW_MS,
+} from './attach-census.js';
 import { attachCensusSurfaceFor } from './ai-processes.js';
+import { warmOcr, shutdownOcr } from './ocr-service.js';
 import { classifyFile } from './classifier.js';
 
 // How long after firing a toast for a (clipboardSeq, processName) pair we
@@ -175,6 +176,11 @@ const CENSUS_RECENT_VERDICT_MS = 10 * 60_000;
 // The chip route's immediate provisional hold for a census-owned app lives at
 // most this long if no census takes over.
 const CENSUS_LEGACY_PROVISIONAL_MS = 8000;
+// A pasted image chip seen before its saved file: wait this long for it (M2).
+const CLIPBOARD_GRACE_MS = 2000;
+// Pasted-image temp files older than this are swept; the sweep runs this often.
+const PASTE_SWEEP_AGE_MS = 10 * 60_000;
+const PASTE_SWEEP_EVERY_MS = 5 * 60_000;
 // Which Copilot PANE an Office / Outlook host's attachments belong to.
 function paneForProcess(processName) {
   const p = String(processName || '').replace(/\.exe$/i, '').trim().toLowerCase();
@@ -310,7 +316,6 @@ export class OsMonitor extends EventEmitter {
     // Same enrolment machine JWT either way — see #submitAccessRequest.
     this.serverUrl = String(serverUrl || '').replace(/\/$/, '');
     this.token = token || null;
-    this._blockedAgentsInterval = null;
     this.poller = createPoller({ log });
     this.reporter = new Reporter({ serverUrl, token, log });
     this.toast = createNotifier({ log });
@@ -508,6 +513,14 @@ export class OsMonitor extends EventEmitter {
     // The name -> file resolver (attach-census.js). A field so the offline tests
     // can script where a file "is" without touching the real profile folders.
     this.resolveAttachmentFn = resolveAttachment;
+    // Where the helper saves pasted clipboard images (D7). A field so the
+    // offline tests can point it at a temp dir.
+    this.pasteDir = pasteImageDir();
+    // The last paste KEY per app (lower-cased process): { at, state }. See #onPasteHint.
+    this.pasteEvents = new Map();
+    // The scanner. A field so the offline tests can make it throw or return a
+    // suspicious result without a real file of that shape.
+    this.buildFileUploadEventFn = buildFileUploadEvent;
     // govstate scope:"pane" -- an Office / Outlook Copilot pane is the governed,
     // focused surface. SEPARATE from hostGoverned (Teams), so a pane can never
     // arm or disarm Teams' host watchers.
@@ -708,6 +721,10 @@ export class OsMonitor extends EventEmitter {
   // composer's draft attachments. New names get a provisional hold at once (on
   // an enforcing surface), then a scan decides held / clean; a name is released
   // only after CENSUS_ABSENT_RELEASE consecutive READABLE snapshots without it.
+  //
+  // INSTANCES: two chips with the same name (two pasted "image.png") are two
+  // records. The first keeps the plain name; the n-th is keyed and held as
+  // "<name> (n)", so each is scanned, held and released on its own.
   #onAttachCensus(ev) {
     // The fleet `dlp` flag licenses file DLP at all (finding 3): with it off the
     // census is not acted on -- nothing resolved, read, held or reported.
@@ -721,15 +738,24 @@ export class OsMonitor extends EventEmitter {
       sfc = {
         key, process: processName, pid: Number(ev.pid) || 0, panel: String(ev.panel || ''),
         surface: String(ev.surface || ''), enforce: false, suspended: false, lastSeen: 0, files: new Map(),
-        // Verdicts of files that left this draft recently (finding 6): a name
-        // that comes back -- the user switched conversations inside one root and
-        // returned -- is re-held from its known verdict at once, no rescan gap.
+        // Verdicts of files that left this draft recently (finding 6): a file
+        // that comes back is re-held from its known verdict at once -- but the
+        // verdict is only KEPT when the same bytes are found again (#censusScan).
         recent: new Map(),
       };
       this.censusSurfaces.set(key, sfc);
     }
     sfc.enforce = ev.enforce === true;
     sfc.lastSeen = now;
+    // WHICH AGENT this draft is for (A6): the same admissible sources as a block
+    // (an agent-scoped policy row, or the panel's catalog SoleAgent -- see
+    // blockAgentAttribution), carried on the census line by the helper. Kept
+    // from the last census that had one: the key is per conversation, so a
+    // later tick that could not resolve it does not mean a different agent.
+    const attr = blockAgentAttribution(ev);
+    if (attr.agent_name || attr.agent_id) {
+      sfc.attr = { agent_name: attr.agent_name, agent_id: attr.agent_id, agent_scope: attr.agent_scope };
+    }
     sfc.suspended = false;
     // Another conversation / pane of the same app is now in front: suspend it.
     for (const other of this.censusSurfaces.values()) {
@@ -741,12 +767,18 @@ export class OsMonitor extends EventEmitter {
     // hold for this app (finding 15): drop those now.
     this.#releaseLegacyProvisional(processName);
     const present = new Map();
+    const counts = new Map();
     for (const raw of Array.isArray(ev.names) ? ev.names : []) {
       const name = chipToFilename(raw);
-      if (name) present.set(name.toLowerCase(), name);
+      if (!name) continue;
+      const base = name.toLowerCase();
+      const n = (counts.get(base) || 0) + 1;
+      counts.set(base, n);
+      const holdName = n === 1 ? name : `${name} (${n})`;
+      present.set(holdName.toLowerCase(), { display: name, holdName });
     }
-    for (const [lk, display] of present) {
-      if (!sfc.files.has(lk)) this.#censusNewFile(sfc, display);
+    for (const [lk, chip] of present) {
+      if (!sfc.files.has(lk)) this.#censusNewFile(sfc, chip.display, chip.holdName);
     }
     for (const [lk, rec] of [...sfc.files]) {
       if (present.has(lk)) { rec.absent = 0; continue; }
@@ -781,35 +813,100 @@ export class OsMonitor extends EventEmitter {
     }
   }
 
+  // A pastehint line (D7): {state: pending|saved|none|too_large, paste_ms,
+  // process, pid, path?, staged?}. `pending` = a paste key was pressed on a
+  // census surface and the helper is saving the clipboard image; the rest end
+  // that paste. Only a SAVED file the helper itself wrote (a uuid under the
+  // paste dir) is ever bound -- see #resolveClipboardImage.
+  #onPasteHint(ev) {
+    if (ev?.via !== 'clipboard_image') return;
+    const proc = String(ev.process || '').replace(/\.exe$/i, '').trim();
+    const state = ['pending', 'saved', 'none', 'too_large'].includes(ev.state) ? ev.state : (ev.path ? 'saved' : 'none');
+    const pastedAt = Number(ev.paste_ms) || Date.now();
+    const staged = ev.staged === true;
+    const path = String(ev.path || '');
+    if (state === 'saved' && !isPasteImagePath(path, this.pasteDir)) return;   // never a stranger path
+    // Pastes nobody claimed are swept as they age.
+    sweepPasteDir({ dir: this.pasteDir, olderThanMs: PASTE_SWEEP_AGE_MS });
+    // File DLP is licensed by the fleet dlp flag (finding 3): with it off the
+    // pasted image is not kept at all.
+    if (!this.running?.dlp) { if (state === 'saved') removePasteImage(path, this.pasteDir); return; }
+    if (!staged) {
+      // A paste KEY is the specific evidence: any staged (clipboard-change)
+      // image for this app is superseded by it.
+      for (const p of this.pathHints.dropClipboardImages({ process: proc, stagedOnly: true })) removePasteImage(p, this.pasteDir);
+      this.pasteEvents.set(proc.toLowerCase(), { at: pastedAt, state });
+    }
+    if (state === 'saved') {
+      this.pathHints.remember(path, 'clipboard_image', { process: proc, pid: ev.pid, pastedAt, staged });
+      this.log?.info('os_monitor: composer census — a pasted image was captured for scanning');
+    }
+  }
+
+  // Bind an image chip to a pasted image (D7, M2). Returns a `where`, or null
+  // when no paste is anywhere near this chip (resolve it normally). Never falls
+  // through to the weak name search once a paste key is known to be involved:
+  //   * a saved paste made BEFORE the chip appeared -> that file, bound;
+  //   * a paste key seen, image still being saved   -> wait (provisional hold
+  //     stays) up to CLIPBOARD_GRACE_MS, retrying;
+  //   * the helper could not bring it under the cap -> too_large (reported);
+  //   * grace over with nothing saved                -> not_found (reported).
+  async #resolveClipboardImage(sfc, rec) {
+    if (!isImageChipName(rec.display)) return null;
+    const lk = rec.key;
+    const deadline = rec.appearedAt + CLIPBOARD_GRACE_MS;
+    for (;;) {
+      const h = this.pathHints.takeClipboardImage({
+        process: sfc.process, pid: sfc.pid, appearedAt: rec.appearedAt, chipName: rec.display,
+      });
+      if (h) {
+        for (const p of h.dropped || []) removePasteImage(p, this.pasteDir);
+        if (existsSync(h.path)) return { status: 'local', path: h.path, source: 'clipboard_image', trust: 'bound' };
+      }
+      const pe = this.pasteEvents.get(sfc.process.toLowerCase());
+      const near = pe && pe.at <= rec.appearedAt + CLIPBOARD_CLOCK_SKEW_MS && rec.appearedAt - pe.at <= CLIPBOARD_BIND_MS;
+      if (!near) return null;                                      // no paste around this chip
+      if (pe.state === 'none') return null;                        // that paste was not a picture
+      if (pe.state === 'too_large') return { status: 'clipboard_too_large', source: 'clipboard_image' };
+      if (Date.now() >= deadline) return { status: 'not_found', source: 'clipboard_image' };
+      await new Promise((r) => { const t = setTimeout(r, 100); t.unref?.(); });
+      if (sfc.files.get(lk) !== rec) return { status: 'not_found', source: 'clipboard_image' };
+    }
+  }
+
   #censusHoldKey(sfc) {
     return OsMonitor.holdKeyFor({ processName: sfc.process, panel: sfc.panel, surfaceKey: sfc.key });
   }
 
-  #censusNewFile(sfc, display) {
+  #censusNewFile(sfc, display, holdName = display) {
+    const key = holdName.toLowerCase();
     const rec = {
-      attachmentId: randomUUID(), display, state: 'scanning', absent: 0, holdReason: '', severity: null,
+      attachmentId: randomUUID(), display, holdName, key, state: 'scanning', absent: 0, holdReason: '',
+      severity: null, appearedAt: Date.now(), basis: null,
     };
-    sfc.files.set(display.toLowerCase(), rec);
-    // A known verdict for this name in this draft (it left and came back
-    // within CENSUS_RECENT_VERDICT_MS): restore it without a rescan or a second
-    // report.
-    const known = sfc.recent.get(display.toLowerCase());
-    if (known && Date.now() - known.at <= CENSUS_RECENT_VERDICT_MS) {
-      sfc.recent.delete(display.toLowerCase());
-      Object.assign(rec, { attachmentId: known.attachmentId, state: known.state, holdReason: known.holdReason, severity: known.severity });
+    sfc.files.set(key, rec);
+    // A known verdict for this chip in this draft (it left and came back within
+    // CENSUS_RECENT_VERDICT_MS). M1: never for an image / pasted chip (the same
+    // "image.png" name is a different picture every time), and for a file only
+    // as a CANDIDATE -- #censusScan keeps it only if the same path, size and
+    // mtime are found again. A held one is re-held at once meanwhile.
+    const known = sfc.recent.get(key);
+    if (known) sfc.recent.delete(key);
+    if (known && Date.now() - known.at <= CENSUS_RECENT_VERDICT_MS && known.basis && !isImageChipName(display)) {
+      rec.known = known;
       if (sfc.enforce && known.state === 'held') {
-        this.#armAttachHold(display, {
+        this.#armAttachHold(holdName, {
           patterns: known.patterns, severity: known.severity, ttlMs: CENSUS_HOLD_TTL_MS,
           processName: sfc.process, panel: sfc.panel, surfaceKey: sfc.key,
         });
       }
-      return;
     }
     // PROVISIONAL hold the moment ANY name appears (finding 9: not only a
     // scannable extension) -- before the file is even located -- so a fast Enter
-    // cannot beat the scan.
-    if (sfc.enforce) {
-      this.#armAttachHold(display, {
+    // cannot beat the scan. It lasts only while scanning: #censusFinish releases
+    // it unless the file is held.
+    if (sfc.enforce && !(rec.known && rec.known.state === 'held')) {
+      this.#armAttachHold(holdName, {
         patterns: '', ttlMs: CENSUS_HOLD_TTL_MS, processName: sfc.process, panel: sfc.panel, surfaceKey: sfc.key,
       });
     }
@@ -822,11 +919,11 @@ export class OsMonitor extends EventEmitter {
     const rec = sfc.files.get(lk);
     sfc.files.delete(lk);
     if (!rec) return;
-    if (rec.state !== 'scanning') {
+    if (rec.state !== 'scanning' && rec.basis) {
       sfc.recent.set(lk, { ...rec, patterns: rec.patterns || '', at: Date.now() });
       while (sfc.recent.size > 50) sfc.recent.delete(sfc.recent.keys().next().value);
     }
-    this.#releaseAttachHold(rec.display, { processName: sfc.process, egress: false, holdKey: this.#censusHoldKey(sfc) });
+    this.#releaseAttachHold(rec.holdName, { processName: sfc.process, egress: false, holdKey: this.#censusHoldKey(sfc) });
     this.log?.info(`os_monitor: composer census — an attachment was removed (${sfc.files.size} still attached)`);
   }
 
@@ -838,78 +935,204 @@ export class OsMonitor extends EventEmitter {
     }
   }
 
-  // Locate, scan, decide, report. USER DECISIONS (2026-09-28): content is
-  // uploaded as today; a cloud-only file is HELD (hold_reason cloud_reference);
-  // a file over the scan cap is partially scanned -- held if the scanned part is
-  // sensitive, otherwise reported (partially_scanned); an unverifiable or
-  // not-found file on a governed surface is held (fail closed).
+  // Locate, scan, decide, report. USER DECISIONS (2026-09-30): behave like the
+  // browser extension. HELD only for
+  //   sensitive_content      -- the CONTENT scan matched high/critical data
+  //                             (content_scan.contentSeverity, never the
+  //                             filename class: a clean team.csv is not held);
+  //   sensitive_filename     -- a credential / key file type by name alone
+  //                             (.pfx .pem .key id_rsa .env ... -- see
+  //                             isCredentialFileName), whatever the scan said;
+  //   suspicious_unscannable -- the scanner flagged the file as suspicious
+  //                             (content_scan.suspicious: a zip bomb ratio, a
+  //                             self-timeout, OOM, an unscanned tail, a
+  //                             truncated container).
+  // Everything else is ALLOWED and REPORTED with a specific hold_reason:
+  //   unsupported_type / too_large / encrypted / extraction_timeout /
+  //   extraction_failed / placeholder_check_failed / cloud_reference /
+  //   not_found / unverified_location (weak match, clean) / partially_scanned.
+  // CONTENT UPLOAD: a weak (unbound) name match is scanned locally but its
+  // content is NEVER uploaded; a pasted image's content is uploaded only when
+  // it is held.
   async #censusScan(sfc, rec) {
-    const lk = rec.display.toLowerCase();
+    const lk = rec.key;
     const ident = identifyAiPanel(sfc.panel, sfc.process) || identifyAiProcess(sfc.process)
       || { product: sfc.process, vendor: null };
-    const where = await this.resolveAttachmentFn(rec.display, { hints: this.pathHints, process: sfc.process, pid: sfc.pid });
-    if (sfc.files.get(lk) !== rec) return;   // removed while we looked
-    let fileEvent = null;
-    // Content is read ONLY for a path bound to this attach (finding 2); any other
-    // name match is reported as metadata only and, on an enforcing surface, held
-    // as unverified -- a same-named file elsewhere on disk is not evidence.
-    const bound = where.status === 'local' && where.trust === 'bound';
-    if (where.status === 'local') {
-      fileEvent = await buildFileUploadEvent({
-        path: where.path, via: 'composer_census', service: ident.product, vendor: ident.vendor,
-        processName: sfc.process, windowTitle: '', log: this.log, partialScan: true,
-        isolate: true, quiet: true, metadataOnly: !bound,
-      });
-      if (sfc.files.get(lk) !== rec) return;
+    let where;
+    try {
+      const clip = isImageChipName(rec.display) ? await this.#resolveClipboardImage(sfc, rec) : null;
+      where = clip || await this.resolveAttachmentFn(rec.display, { hints: this.pathHints, process: sfc.process, pid: sfc.pid });
+    } catch (err) {
+      // Never leave the provisional hold standing on an error: nothing was
+      // scanned, so there is nothing to hold for. Allowed, and reported.
+      this.#censusFinish(sfc, rec, ident, { where: { status: 'not_found' }, fileEvent: null, reason: 'extraction_failed' });
+      throw err;
     }
-    let hold = false; let holdReason = ''; let patterns = ''; let severity = 'high';
+    if (sfc.files.get(lk) !== rec) { this.#discardPasteImage(where); return; }   // removed while we looked
+    if (where.status === 'placeholder_check_failed') {
+      this.#censusFinish(sfc, rec, ident, { where, fileEvent: null, reason: 'placeholder_check_failed' });
+      return;
+    }
+    if (where.status === 'clipboard_too_large') {
+      this.#censusFinish(sfc, rec, ident, { where, fileEvent: null, reason: 'too_large' });
+      return;
+    }
+    const clipboard = where.source === 'clipboard_image';
+    const bound = where.status === 'local' && where.trust === 'bound';
+    const basis = where.status === 'local' && !clipboard ? OsMonitor.fileBasis(where.path) : null;
+    // M1: the known verdict stands only for the SAME bytes (path + size + mtime).
+    const known = rec.known;
+    rec.known = null;
+    if (known && basis && OsMonitor.sameBasis(known.basis, basis)) {
+      Object.assign(rec, {
+        attachmentId: known.attachmentId, state: known.state, holdReason: known.holdReason,
+        severity: known.severity, patterns: known.patterns, basis,
+      });
+      if (sfc.enforce && known.state === 'held') {
+        this.#armAttachHold(rec.holdName, {
+          patterns: known.patterns, severity: known.severity, ttlMs: CENSUS_HOLD_TTL_MS,
+          processName: sfc.process, panel: sfc.panel, surfaceKey: sfc.key,
+        });
+      } else {
+        this.#releaseAttachHold(rec.holdName, { processName: sfc.process, egress: false, holdKey: this.#censusHoldKey(sfc) });
+      }
+      return;
+    }
+    let fileEvent = null;
+    if (where.status === 'local') {
+      try {
+        fileEvent = await this.buildFileUploadEventFn({
+          path: where.path, via: 'composer_census', service: ident.product, vendor: ident.vendor,
+          processName: sfc.process, windowTitle: '', log: this.log, partialScan: true,
+          isolate: true, quiet: true, metadataOnly: false,
+        });
+      } catch (err) {
+        // S2: a scanner that throws is an extraction failure -- reported,
+        // allowed, the provisional hold released. Never a name in the log.
+        this.log?.warn(`os_monitor: composer census scan threw (${err?.code || err?.name || 'error'})`);
+        fileEvent = null;
+        if (sfc.files.get(lk) !== rec) return;
+        this.#censusFinish(sfc, rec, ident, { where, fileEvent: null, reason: 'extraction_failed' });
+        return;
+      } finally {
+        // A pasted-image temp file has done its job once it is scanned (D7).
+        this.#discardPasteImage(where);
+      }
+      if (sfc.files.get(lk) !== rec) return;
+      // The temp file's uuid name means nothing to anyone; the chip's does.
+      if (fileEvent && clipboard) fileEvent.filename = rec.display;
+    }
+    rec.basis = basis;
+    // `rescan`: the file came back CHANGED -- a new verdict that must be
+    // reported even though its path was reported moments ago.
+    this.#censusFinish(sfc, rec, ident, { where, fileEvent, bound, weak: where.status === 'local' && !bound, clipboard, rescan: !!known });
+  }
+
+  // path + size + mtime of a local file, or null.
+  static fileBasis(path) {
+    try { const st = statSync(path); return st.isFile() ? { path: String(path), size: st.size, mtimeMs: Math.round(st.mtimeMs) } : null; }
+    catch { return null; }
+  }
+
+  static sameBasis(a, b) {
+    return !!(a && b && a.path === b.path && a.size === b.size && a.mtimeMs === b.mtimeMs);
+  }
+
+  // The scanner's not-scanned reason (content_scan.reason: unsupported_format |
+  // too_large | encrypted | extraction_timeout | extraction_failed) -> the
+  // census hold_reason. Anything unrecognised is an extraction failure.
+  static censusNotScannedReason(csReason) {
+    switch (csReason) {
+      case 'unsupported_format': return 'unsupported_type';
+      case 'too_large': return 'too_large';
+      case 'encrypted': return 'encrypted';
+      case 'extraction_timeout': return 'extraction_timeout';
+      default: return 'extraction_failed';
+    }
+  }
+
+  // Drop every byte of file content from a census record. The scan RESULT --
+  // pattern names, counts, severity, partial -- stays; content never leaves,
+  // and neither do an extractor error string or an archive's entry list.
+  // `weak` also marks the record binding:'weak'.
+  static stripCensusContent(fileEvent, { weak = true } = {}) {
+    fileEvent.content_text = null;
+    fileEvent.content_base64 = null;
+    if (fileEvent.content_scan && typeof fileEvent.content_scan === 'object') {
+      const { error: _err, captureTruncated: _trunc, entries: _entries, ...rest } = fileEvent.content_scan;
+      // Archive entry NAMES are content too (the scanner's own helper).
+      fileEvent.content_scan = stripContentScanNames(rest);
+    }
+    if (weak) fileEvent.binding = 'weak';
+    return fileEvent;
+  }
+
+  #discardPasteImage(where) {
+    if (where?.source === 'clipboard_image' && where.path) removePasteImage(where.path, this.pasteDir);
+  }
+
+  // Decide held / reported for one census file, arm or release its hold, and
+  // report it (once). `reason` names the not-scanned hold_reason when there is
+  // no file event at all.
+  #censusFinish(sfc, rec, ident, { where, fileEvent, bound = false, weak = false, clipboard = false, reason = '', rescan = false }) {
+    if (sfc.files.get(rec.key) !== rec) return;
+    const HI = (s) => s === 'high' || s === 'critical';
+    let hold = false; let holdReason = ''; let patterns = ''; let severity = 'low';
+    const credentialName = isCredentialFileName(rec.display) || isCredentialFileName(fileEvent?.filename);
     if (fileEvent) {
       const cs = fileEvent.content_scan;
       severity = fileEvent.severity;
-      const sensitive = cs?.scanned === true && (severity === 'high' || severity === 'critical');
-      // FAIL CLOSED on an enforcing census surface (finding 9): anything not
-      // actually scanned is held -- an image over the cap, an OCR timeout, an
-      // unknown or missing extension, a worker that ran out of budget, and a
-      // name that could not be bound to this attach.
-      const notScanned = cs?.scanned !== true;
-      if (sensitive) {
+      if (cs?.scanned === true && HI(cs.contentSeverity)) {
+        // A partial scan counts: a hit in the scanned part holds.
         hold = true; holdReason = 'sensitive_content';
-        patterns = (cs?.matches || []).map((m) => m.pattern).join(',') || fileEvent.file_class;
-      } else if (notScanned) {
-        hold = true;
-        holdReason = cs?.reason === 'too_large' ? 'too_large' : 'unverified';
-        patterns = `unscannable file (${cs?.reason || 'not readable'})`;
+        patterns = [...new Set((cs.matches || []).map((m) => m.pattern).filter(Boolean))].join(',') || 'sensitive data';
+        severity = cs.contentSeverity;
+      } else if (cs?.suspicious === true) {
+        hold = true; holdReason = 'suspicious_unscannable';
+        patterns = String(cs.suspicious_reason || 'suspicious');
         severity = 'high';
+      } else if (credentialName) {
+        hold = true; holdReason = 'sensitive_filename'; patterns = fileEvent.file_class || 'credential file';
+        if (!HI(severity)) severity = 'high';
+      } else if (cs?.scanned !== true) {
+        holdReason = OsMonitor.censusNotScannedReason(cs?.reason);
+      } else if (weak) {
+        holdReason = 'unverified_location';
       } else if (cs?.partial) {
         holdReason = 'partially_scanned';
       }
     } else {
       // No readable local copy. Cloud-only -> cloud_reference; nowhere -> not_found.
-      const cloud = where.status === 'cloud';
-      hold = true;
-      holdReason = cloud ? 'cloud_reference' : 'not_found';
-      patterns = cloud ? 'cloud file (no readable local copy)' : 'file not found on this device';
+      holdReason = reason || (where?.status === 'cloud' ? 'cloud_reference' : 'not_found');
       const cls = classifyFile(rec.display);
+      severity = cls.severity || 'low';
+      if (credentialName) {
+        hold = true; holdReason = 'sensitive_filename'; patterns = cls.class || 'credential file';
+        if (!HI(severity)) severity = 'high';
+      }
       fileEvent = {
         kind: 'file_upload', via: 'composer_census', service: ident.product, vendor: ident.vendor,
         process_name: sfc.process, window_title: '', filename: rec.display, size: null, size_bucket: null,
-        mime_type: null, extension: null, file_class: cls.class, severity: 'high', reason: cls.reason,
-        content_scan: { scanned: false, reason: holdReason, unverified: true },
+        mime_type: null, extension: null, file_class: cls.class, severity, reason: cls.reason,
+        content_scan: { scanned: false, reason: reason || holdReason },
         content_text: null, content_base64: null,
       };
     }
     if (!sfc.enforce) hold = false;   // report-only surface
+    // Content upload: never for a weak match; for a pasted image only when held.
+    if (weak) OsMonitor.stripCensusContent(fileEvent, { weak: true });
+    else if (clipboard && !hold) OsMonitor.stripCensusContent(fileEvent, { weak: false });
     rec.state = hold ? 'held' : 'clean';
     rec.holdReason = holdReason;
     rec.severity = severity;
     rec.patterns = patterns;
     const holdKey = this.#censusHoldKey(sfc);
     if (hold) {
-      this.#armAttachHold(rec.display, {
+      this.#armAttachHold(rec.holdName, {
         patterns, severity, ttlMs: CENSUS_HOLD_TTL_MS, processName: sfc.process, panel: sfc.panel, surfaceKey: sfc.key,
       });
     } else {
-      this.#releaseAttachHold(rec.display, { processName: sfc.process, egress: false, holdKey });
+      this.#releaseAttachHold(rec.holdName, { processName: sfc.process, egress: false, holdKey });
     }
     // The record.
     fileEvent.via = 'composer_census';
@@ -918,39 +1141,55 @@ export class OsMonitor extends EventEmitter {
     fileEvent.attachment_id = rec.attachmentId;
     fileEvent.enforcement = hold ? 'held' : 'reported';
     if (holdReason) fileEvent.hold_reason = holdReason;
+    // Agent attribution: a governed Teams conversation's own agent first, then
+    // the census line's (A6: the policy row / catalog SoleAgent the helper
+    // resolved -- what gives an M365 Copilot app file row its agent), then the
+    // Office / Outlook pane's generic Copilot.
     const governed = this.#hostGovernedFor(sfc.process);
     if (governed) this.#attributeToAgent(fileEvent, governed);
-    else if (sfc.panel) { fileEvent.agent_name = 'Microsoft 365 Copilot'; fileEvent.agent_scope = 'panel'; }
+    else if (sfc.attr) {
+      if (sfc.attr.agent_name) fileEvent.agent_name = sfc.attr.agent_name;
+      if (sfc.attr.agent_id) fileEvent.agent_id = sfc.attr.agent_id;
+      fileEvent.agent_scope = sfc.attr.agent_scope;
+    } else if (sfc.panel) { fileEvent.agent_name = 'Microsoft 365 Copilot'; fileEvent.agent_scope = 'panel'; }
     // One record per file: when another route (Teams' own chip watcher, a
     // picker) already reported this exact path moments ago, the census still
-    // HOLDS but does not report it a second time.
-    const dedupKey = where.status === 'local' ? `file|${where.path}|${sfc.process}` : `census|${rec.attachmentId}`;
-    if (Date.now() - (this.firedAt.get(dedupKey) ?? 0) < FIRE_DEDUP_TTL_MS) return;
+    // HOLDS but does not report it a second time. A pasted image's temp path
+    // is unique, so it keys on the record.
+    const dedupKey = where?.status === 'local' && !clipboard ? `file|${where.path}|${sfc.process}` : `census|${rec.attachmentId}`;
+    if (!rescan && Date.now() - (this.firedAt.get(dedupKey) ?? 0) < FIRE_DEDUP_TTL_MS) return;
     this.firedAt.set(dedupKey, Date.now());
     this.reporter.enqueue(fileEvent);
     this.log?.info(
       `os_monitor: composer census → ${ident.product} — [${fileEvent.file_class}, severity=${fileEvent.severity}, `
-      + `enforcement=${fileEvent.enforcement}${holdReason ? ', ' + holdReason : ''}]`
+      + `enforcement=${fileEvent.enforcement}${holdReason ? ', ' + holdReason : ''}${fileEvent.binding ? ', weak binding' : ''}]`
     );
     if (hold) {
       this.toast.show({
-        title: `${ident.product} - attachment held`,
-        message: `"${rec.display}" can't be sent: ${OsMonitor.holdReasonText(holdReason, patterns)}\n`
-          + 'Remove the attachment to send. The app already uploaded a copy to OneDrive/SharePoint when you attached it; '
-          + 'this stops it from being sent to the agent.',
+        title: `${ident.product} - this file can't be sent`,
+        message: `"${rec.display}" ${OsMonitor.holdReasonText(holdReason, patterns)}\n`
+          + `${OsMonitor.CENSUS_REMOVE_HINT} ${OsMonitor.CENSUS_CLOUD_COPY_NOTE}`,
       });
     }
   }
 
-  // Plain-language reason for a held attachment (toast + popup).
+  // Toast copy, aligned with the browser extension's attachment popup
+  // (content.js showAttachmentBlockPopup): "This file can't be sent", the
+  // matched pattern names, and the remove-the-attachment instruction -- plus
+  // the desktop-only truth that the app already uploaded a cloud copy.
+  static CENSUS_REMOVE_HINT = 'Remove the attachment from the chat before sending.';
+  static CENSUS_CLOUD_COPY_NOTE = 'The app already uploaded a copy to OneDrive/SharePoint when you attached it; '
+    + 'this stops it from being sent to the agent, it does not remove that copy.';
+
+  // Why a held attachment is held (toast), one sentence per HOLDING reason.
   static holdReasonText(holdReason, patterns = '') {
     switch (holdReason) {
-      case 'sensitive_content': return `it contains ${patterns}.`;
-      case 'cloud_reference': return 'it is a cloud file with no readable copy on this device, so it could not be checked.';
-      case 'not_found': return 'the file could not be found on this device, so it could not be checked.';
-      case 'too_large': return 'it is too large to check.';
-      case 'unverified': return 'it could not be read (it may be encrypted or damaged), so it could not be checked.';
-      default: return patterns ? `it contains ${patterns}.` : 'it is still being checked.';
+      case 'sensitive_filename':
+        return `is a credential or key file${patterns ? ` (${patterns})` : ''}, which can't be shared with an agent.`;
+      case 'suspicious_unscannable':
+        return `could not be safely checked${patterns ? ` (${patterns})` : ''}, so it was blocked.`;
+      default:
+        return patterns ? `contains sensitive data: ${patterns}.` : 'contains sensitive data.';
     }
   }
 
@@ -1841,6 +2080,18 @@ export class OsMonitor extends EventEmitter {
     // Set AFTER the platform guard, which starts nothing: on an unsupported
     // platform the monitor never runs, so it must never look like it did.
     this.isRunning = true;
+    // Pasted-image temp files left by a previous run (D7): none can still be
+    // bound to anything, so all go.
+    sweepPasteDir({ dir: this.pasteDir });
+    this.pasteSweepTimer = setInterval(() => sweepPasteDir({ dir: this.pasteDir, olderThanMs: PASTE_SWEEP_AGE_MS }), PASTE_SWEEP_EVERY_MS);
+    this.pasteSweepTimer.unref?.();
+    // Warm the shared OCR thread (ocr-service.js) so the first pasted screenshot
+    // or image attachment the census scans is not a cold start. Fire-and-forget;
+    // only where the census can run at all (Windows, enforcer on); a failure
+    // here just means the first OCR pays the start-up cost.
+    if (process.platform === 'win32' && this.localEnforcerEnabled) {
+      try { warmOcr(); } catch { /* cold start later */ }
+    }
 
     this.reporter.start();
     this.toast.start();
@@ -2248,44 +2499,32 @@ export class OsMonitor extends EventEmitter {
         if (web) fileEvent.tabHost = web.web.host;
 
         // CONFIRMED hold — high/critical, matching the browser extension's
-        // existing file-upload block threshold, PLUS the fail-closed case
-        // below. A longer TTL than the provisional one, and kept alive for as
-        // long as the attachment stays present, since this is a real finding
-        // that must survive until the file actually disappears.
+        // file-upload block threshold, and ONLY that. A longer TTL than the
+        // provisional one, and kept alive for as long as the attachment stays
+        // present, since this is a real finding that must survive until the
+        // file actually disappears.
+        //
+        // NO FAIL-CLOSED TERM (user decision 2026-09-30, the same one the
+        // composer census follows): a file that could not be scanned -- an
+        // encrypted PDF, an unopenable archive -- is ALLOWED and reported, even
+        // inside a governed Teams conversation, exactly as the browser extension
+        // treats it. content_scan.unverified still travels on the record so the
+        // dashboard can show it; it no longer decides a hold.
+        //
+        // THE SAME RULE AS THE CENSUS (#censusFinish): the CONTENT scan's own
+        // severity (content_scan.contentSeverity -- never the merged filename
+        // class, which held a clean team.csv), a credential / key file type by
+        // name, or a scanner-flagged suspicious file.
         const cs = fileEvent.content_scan;
-        const severity = fileEvent.severity;
-        // ── FAIL CLOSED on a file we could not verify ──────────────────────
-        //
-        // `severity` cannot express this: a file that was never scanned has no
-        // contentSeverity to raise, so an encrypted PDF or a password-protected
-        // workbook full of customer data scores exactly what an empty one does.
-        // content_scan.unverified is the fact (set in file-handler.js — it is
-        // true only for a format that SHOULD have been readable, so media and
-        // unknown extensions are untouched and still fail OPEN).
-        //
-        // ONLY INSIDE A GOVERNED OR BLOCKED CONVERSATION. Everywhere else the
-        // severity threshold is exactly what it was: escalating on "we could not
-        // read it" for every app would start blocking .7z archives and legacy
-        // .doc files across the board, which nobody asked for. Where the org HAS
-        // asked for the conversation to be governed, "we could not verify this"
-        // is a reason to hold the send rather than a reason to wave it through.
-        const unverified = cs?.scanned !== true && cs?.unverified === true;
-        // `|| hostChip` for the same reason the eligibility gate above carries it:
-        // inside a governed conversation is the condition, and the helper's latch
-        // is the reliable statement of it. A live-only read would fail OPEN on an
-        // unscannable file whenever the govstate had already bounced — i.e. on
-        // nearly every real attachment. Still false for every non-host app, so
-        // "fail closed is governed-only" is unchanged.
-        const inGovernedConversation = !!governed || hostChip;
-        const failClosed = inGovernedConversation && unverified;
-        const shouldHold = severity === 'high' || severity === 'critical' || failClosed;
+        const contentHi = cs?.scanned === true && (cs.contentSeverity === 'high' || cs.contentSeverity === 'critical');
+        const suspicious = cs?.suspicious === true;
+        const credentialName = isCredentialFileName(ev.filename) || isCredentialFileName(fileEvent.filename);
+        const severity = contentHi ? cs.contentSeverity : 'high';
+        const shouldHold = contentHi || suspicious || credentialName;
         if (shouldHold) {
-          // For a fail-closed hold there are no pattern names to report, so the
-          // reason itself is what the block names — the toast has to be able to
-          // say WHY, and "high" would be a claim about content nobody read.
-          const patternNames = failClosed && !(cs?.matches || []).length
-            ? `unscannable file (${cs?.reason || 'not readable'})`
-            : (cs?.matches || []).map((m) => m.pattern).join(',') || fileEvent.file_class;
+          const patternNames = contentHi
+            ? (cs?.matches || []).map((m) => m.pattern).join(',') || 'sensitive data'
+            : suspicious ? String(cs.suspicious_reason || 'suspicious') : (fileEvent.file_class || 'credential file');
           this.#armAttachHold(ev.filename, {
             patterns: patternNames, severity, ttlMs: 60_000, processName: ev.process,
           });
@@ -2621,6 +2860,15 @@ export class OsMonitor extends EventEmitter {
       try { this.#onAttachCensus(ev); }
       catch (err) { this.log?.warn(`os_monitor: attachcensus handling failed: ${err?.message || err}`); }
     });
+    // A pasted image (D7): the helper saw Ctrl+V into a census surface with an
+    // image on the clipboard and saved it to the private paste dir. Remembered
+    // as a BOUND hint for that process / pid, so the next image-type chip in
+    // that draft is scanned from these exact bytes (see resolveAttachment 1b).
+    // Never logged beyond the fact; the path is ours (a uuid under the paste dir).
+    this.enforcer.on('pastehint', (ev) => {
+      try { this.#onPasteHint(ev); }
+      catch (err) { this.log?.warn(`os_monitor: pastehint handling failed (${err?.code || err?.name || 'error'})`); }
+    });
 
     this.enforcer.on('ready', () => {
       if (this.attachHoldGroups.size === 0) return;
@@ -2702,11 +2950,16 @@ export class OsMonitor extends EventEmitter {
       // attachment_id pairs the block with the file_upload record, and its state
       // drives the popup ("still checking" vs "held, and why").
       const censusRec = isAttachment ? this.#censusRecordFor(ev.process, ev.filename) : null;
-      const matches = isPlatform ? [] : patterns.map((p) => ({ pattern: p, severity: fileSeverity, count: 1 }));
+      // S5: a PROVISIONAL attachment block -- the file is still being checked
+      // (census state 'scanning'; for any other route, a hold with no pattern
+      // names yet). It is not a finding: no matches, no severity, and
+      // attach_state:'scanning' so no dashboard counts it as one.
+      const attachScanning = isAttachment && (censusRec ? censusRec.state === 'scanning' : !ev.patterns);
+      const matches = isPlatform || attachScanning ? [] : patterns.map((p) => ({ pattern: p, severity: fileSeverity, count: 1 }));
       // Named rather than written inline in the enqueue below, so the rewrite
       // pin can carry the SAME value instead of a second copy of the same
       // expression that could later drift from it.
-      const highestSeverity = isPlatform ? 'critical' : fileSeverity;
+      const highestSeverity = isPlatform ? 'critical' : attachScanning ? null : fileSeverity;
       const agentName = ev.blocked_agent || ai.product;
       // The access-exception key — see blockToolHost(), which the Request
       // Access flow below shares so the two can never resolve a different host.
@@ -2723,6 +2976,7 @@ export class OsMonitor extends EventEmitter {
         blocked_for: reason,
         mechanism: isPlatform ? 'platform_block' : isAttachment ? 'attachment_hold' : 'keystroke_block',
         blocked_by: isAttachment ? 'attachment_hold' : undefined,
+        attach_state: attachScanning ? 'scanning' : undefined,
         filename: isAttachment ? ev.filename : undefined,
         source: 'os_monitor_enforcer',
         service: ai.product,
@@ -2769,6 +3023,30 @@ export class OsMonitor extends EventEmitter {
         // never have a redact to pair with).
         client_event_id: censusRec?.attachmentId || ev.block_id || undefined,
       });
+      // THE PROMPT WAS SENSITIVE TOO (A5). An attachment hold swallowed this
+      // send, and the helper found the typed / composer / pasted TEXT sensitive
+      // at the same instant: the text is its own finding and gets its own record,
+      // exactly as a text-only block would have (prompt_submit /
+      // keystroke_block), with the same attribution. Pattern NAMES only -- the
+      // helper never puts text on this field.
+      const textPatterns = isAttachment && !isPlatform
+        ? [...new Set(String(ev.text_patterns || '').split(',').map((p) => p.trim()).filter(Boolean))]
+        : [];
+      if (textPatterns.length) {
+        this.reporter.enqueue({
+          kind: 'enforcement_block',
+          blocked_for: 'prompt_submit',
+          mechanism: 'keystroke_block',
+          source: 'os_monitor_enforcer',
+          service: ai.product,
+          vendor: ai.vendor,
+          process_name: ev.process,
+          ...(ev.browser_host ? { tabHost: ev.browser_host } : {}),
+          matches: textPatterns.map((p) => ({ pattern: p, severity: 'high', count: 1 })),
+          highest_severity: 'high',
+          ...agentAttr,
+        });
+      }
       // Everything the enforcement_redact record will need if the user takes the
       // Tokenize & Send offer this block just made. Pinned only when the block
       // is actually rewritable — EmitBlock clears block_id for an attachment
@@ -2863,16 +3141,26 @@ export class OsMonitor extends EventEmitter {
         } else if (isAttachment && !ev.filename) {
           // the first-census pending hold: the popup says "still checking"; a
           // toast naming no file would say nothing useful
-        } else this.toast.show(isAttachment ? {
-          title: `${ai.product} - attachment blocked`,
-          message: `Send blocked: "${ev.filename}" contains ${ev.patterns}\n` +
-            `Remove the attachment to send. If the app already uploaded it on attach, this only stops it from being used in the conversation.`,
+        } else this.toast.show(isAttachment ? (attachScanning ? {
+          // Still being checked: say so, never "contains".
+          title: `${ai.product} - still checking an attachment`,
+          message: `"${ev.filename}" is still being checked. Try sending again in a moment.`,
+        } : {
+          title: `${ai.product} - this file can't be sent`,
+          message: `"${ev.filename}" ${censusRec
+            ? OsMonitor.holdReasonText(censusRec.holdReason, ev.patterns)
+            : `contains sensitive data${ev.patterns ? ': ' + ev.patterns : ''}`}\n`
+            + (textPatterns.length ? `Your message also contains ${textPatterns.join(', ')}.\n` : '')
+            + `${OsMonitor.CENSUS_REMOVE_HINT} `
+            + (censusRec
+              ? OsMonitor.CENSUS_CLOUD_COPY_NOTE
+              : 'If the app already uploaded it on attach, this only stops it from being used in the conversation.'),
             // The old HOST-APP sentence ("clicking Send is not yet covered") is
             // gone because it stopped being true: the panel-scoped send-button
             // search (UpdateSendRect's bounded ancestor walk) now finds the send
             // arrow of a governed Teams conversation and of the Office Copilot
             // pane, and the mouse hook swallows it while the hold is in force.
-        } : {
+        }) : {
           title: `${ai.product} - BLOCKED`,
           // A content block ALWAYS carries the pattern names it matched — that
           // string is the whole justification for stopping someone's work. When
@@ -2915,9 +3203,11 @@ export class OsMonitor extends EventEmitter {
         // An attachment block with NO file named is the helper's first-census
         // pending hold (a governed conversation whose attachments are still
         // being read): "still checking".
-        attach_state: censusRec ? censusRec.state : (isAttachment && !ev.filename ? 'scanning' : ''),
+        attach_state: attachScanning ? 'scanning' : (censusRec ? censusRec.state : ''),
         hold_reason: censusRec?.holdReason || '',
         cloud_copy: !!censusRec,
+        // A5: the prompt text was sensitive too -- pattern NAMES only.
+        text_patterns: textPatterns.join(','),
       })));
 
       // ── The Tokenize & Send offer, for the CLI agent ──────────────────────
@@ -3340,13 +3630,15 @@ export class OsMonitor extends EventEmitter {
     // within a poll of startup.
     this.featureSync.start();
 
-    // ── Blocked agents + access request sync (10s interval) ──────────────
-    // Same logic as electron/monitor-runner.mjs — syncs blocked agents,
-    // platform blocks, and access exceptions to blocked-agents.json, and
-    // flushes any offline access-request queue.
-    const tick = () => { this._refreshBlockedAgents(); this._flushPendingAccessRequest(); };
-    tick(); // immediate first sync
-    this._blockedAgentsInterval = setInterval(tick, 10_000);
+    // ── Blocked agents + access request sync: NOT here ─────────────────────
+    // Every entry point that constructs an OsMonitor starts the ONE shared sync
+    // itself — startBlockedAgentsSync() in blocked-agents-sync.js (Electron's
+    // monitor-runner.mjs, src/index.js --monitor, src/claude_tracker/index.js).
+    // A second copy used to run from here too, so every process had TWO 10s
+    // ticks writing blocked-agents.json and TWO flushers draining the offline
+    // access-request slot. Both fired at startup within milliseconds, both read
+    // the same queued file, both POSTed it — and the server filed it twice
+    // (seen live: two pending rows for one device + tool, 9ms apart).
 
     // ── Routing rules sync (60s interval, 5s first check) ─────────────────
     // Fetches server-defined routing rules and caches them locally so the
@@ -3632,138 +3924,6 @@ export class OsMonitor extends EventEmitter {
     this._spawnUi('block-dialog.ps1', data);
   }
 
-  _showAccessRequest(data) {
-    this._spawnUi('access-request.ps1', data);
-  }
-
-  async _handleAccessRequestStatus(ps, toolHost) {
-    const serverUrl = String(this.serverUrl || '').replace(/\/+$/, '');
-    try {
-      const res = await fetch(`${serverUrl}/api/v1/access-requests?tool_host=${encodeURIComponent(toolHost)}&status=pending`, {
-        headers: { authorization: `Bearer ${this.token}` },
-      });
-      if (res.ok) {
-        const rows = await res.json();
-        const pending = Array.isArray(rows) && rows.length > 0;
-        const response = pending
-          ? { pending: true, requested_at: rows[0].requested_at || rows[0].created_at }
-          : { pending: false };
-        try { ps.stdin.write(JSON.stringify(response) + '\n'); } catch {}
-      } else {
-        try { ps.stdin.write(JSON.stringify({ pending: false }) + '\n'); } catch {}
-      }
-    } catch {
-      try { ps.stdin.write(JSON.stringify({ pending: false }) + '\n'); } catch {}
-    }
-  }
-
-  async _handleAccessRequestSubmit(ps, msg) {
-    const serverUrl = String(this.serverUrl || '').replace(/\/+$/, '');
-    try {
-      const res = await fetch(`${serverUrl}/api/v1/access-requests`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` },
-        body: JSON.stringify({
-          tool_host: msg.tool_host, tool_name: msg.tool_name,
-          tool_vendor: msg.tool_vendor, reason: msg.reason || '',
-        }),
-      });
-      if (res.status < 500) {
-        try { ps.stdin.write(JSON.stringify({ submitted: true }) + '\n'); } catch {}
-      } else {
-        // Queue offline
-        const pendingPath = join(homedir(), '.cloudfuze-aigov', 'pending-access-request.json');
-        writeFileSync(pendingPath, JSON.stringify({ ...msg, queued_at: new Date().toISOString() }));
-        try { ps.stdin.write(JSON.stringify({ submitted: false, queued: true }) + '\n'); } catch {}
-      }
-    } catch {
-      const pendingPath = join(homedir(), '.cloudfuze-aigov', 'pending-access-request.json');
-      writeFileSync(pendingPath, JSON.stringify({ ...msg, queued_at: new Date().toISOString() }));
-      try { ps.stdin.write(JSON.stringify({ submitted: false, queued: true }) + '\n'); } catch {}
-    }
-  }
-
-  // ── Blocked agents + platform blocks → blocked-agents.json ─────────────
-  // Ported from electron/monitor-runner.mjs so the bare Node.js agent path
-  // (install.bat / VBS auto-start) gets the same enforcement as Electron.
-  async _refreshBlockedAgents() {
-    const serverUrl = String(this.serverUrl || '').replace(/\/+$/, '');
-    if (!serverUrl) return;
-    const headers = this.token ? { authorization: `Bearer ${this.token}` } : {};
-
-    // Fetch access exceptions (fail → null → keep previous file)
-    let exceptions = null;
-    try {
-      const r = await fetch(`${serverUrl}/api/v1/access-exceptions/mine`, { headers });
-      if (r.ok) { const rows = await r.json(); if (Array.isArray(rows)) exceptions = rows; }
-    } catch {}
-
-    // Fetch ai_platforms (fail → null → keep previous file)
-    let platforms = null;
-    try {
-      const r = await fetch(`${serverUrl}/api/v1/ai-platforms`, { headers });
-      if (r.ok) { const rows = await r.json(); if (Array.isArray(rows)) platforms = rows; }
-    } catch {}
-
-    try {
-      const r = await fetch(`${serverUrl}/api/lifecycle/blocked-agents`);
-      if (!r.ok) return;
-      const agentRows = await r.json();
-      if (platforms === null) return; // fail closed
-      const list = normalizeAgentRows(Array.isArray(agentRows) ? agentRows : [], this.log)
-        .concat(synthesizePlatformBlocks(platforms));
-      const effective = exceptions === null ? list : filterBlockedAgents(list, exceptions, this.log);
-      const blockedPath = join(homedir(), '.cloudfuze-aigov', 'blocked-agents.json');
-      mkdirSync(join(homedir(), '.cloudfuze-aigov'), { recursive: true });
-      writeFileSync(blockedPath, JSON.stringify(effective), 'utf8');
-      const lifted = list.length - effective.length;
-      this.log?.info?.(`blocked-agents: synced ${effective.length} blocked agent(s)` + (lifted > 0 ? ` (${lifted} lifted by access exception)` : ''));
-      // Compare with previous sync — if any entry was removed, hide the banner.
-      // Name matching is unreliable (display name vs process name vs agent name).
-      const curSet = new Set(effective.map(r => (r.process_name || r.agent_name || '').toLowerCase()).filter(Boolean));
-      if (this._prevBlockedSet) {
-        const removed = [...this._prevBlockedSet].filter(n => !curSet.has(n));
-        if (removed.length > 0 && this._bannerName) {
-          this.log?.info?.(`blocked-agents: ${removed.join(', ')} unblocked — hiding banner`);
-          this._hideBanner();
-        }
-        const added = [...curSet].filter(n => !this._prevBlockedSet.has(n));
-        if (added.length > 0) {
-          this._bannerHideAt = 0; // clear suppression — new block detected
-        }
-      }
-      this._prevBlockedSet = curSet;
-    } catch (err) {
-      this.log?.warn?.(`blocked-agents: sync failed — ${err.message}`);
-    }
-  }
-
-  // ── Offline access-request queue flush ────────────────────────────────────
-  async _flushPendingAccessRequest() {
-    const pendingPath = join(homedir(), '.cloudfuze-aigov', 'pending-access-request.json');
-    if (!existsSync(pendingPath)) return;
-    let payload;
-    try { payload = JSON.parse(readFileSync(pendingPath, 'utf8')); } catch { rmSync(pendingPath, { force: true }); return; }
-    const queuedAt = Date.parse(payload?.queued_at || '');
-    if (Number.isFinite(queuedAt) && Date.now() - queuedAt > 24 * 3600 * 1000) {
-      rmSync(pendingPath, { force: true });
-      return;
-    }
-    const { queued_at, ...body } = payload || {};
-    const serverUrl = String(this.serverUrl || '').replace(/\/+$/, '');
-    try {
-      const res = await fetch(`${serverUrl}/api/v1/access-requests`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` },
-        body: JSON.stringify(body),
-      });
-      if (res.status < 500) {
-        rmSync(pendingPath, { force: true });
-        this.log?.info?.(`access-request: queued request submitted (${res.status})`);
-      }
-    } catch {}
-  }
-
   // ── Routing rules sync ──────────────────────────────────────────────────────
   // Mirrors the browser extension's service-worker refreshRoutingRules():
   // fetch /api/v1/routing/rules every 60s, cache to disk, restart the enforcer
@@ -3801,10 +3961,16 @@ export class OsMonitor extends EventEmitter {
     // awaiting its fetch will still fire onChange after this returns, and
     // #applyFeatures no-ops on this flag rather than restarting the hook.
     this.isRunning = false;
-    if (this._blockedAgentsInterval) { clearInterval(this._blockedAgentsInterval); this._blockedAgentsInterval = null; }
-    if (this._routingRulesTimer) { clearInterval(this._routingRulesTimer); this._routingRulesTimer = null; }
+    // The 5s first-check TIMEOUT and the 60s INTERVAL it starts are two timers:
+    // clearing only the first leaked the interval once it had fired, which kept
+    // the process alive forever after stop().
+    if (this._routingRulesTimer) { clearTimeout(this._routingRulesTimer); this._routingRulesTimer = null; }
+    if (this._routingRulesInterval) { clearInterval(this._routingRulesInterval); this._routingRulesInterval = null; }
     try { this._hideBannerProc(); } catch {}
     this.#stopAttachHoldRefresh();
+    if (this.pasteSweepTimer) { clearInterval(this.pasteSweepTimer); this.pasteSweepTimer = null; }
+    // The shared OCR thread (warmed at start, used by image scans).
+    try { shutdownOcr(); } catch { /* not started */ }
     if (this.egressPolicyTimer) {
       clearInterval(this.egressPolicyTimer);
       this.egressPolicyTimer = null;

@@ -35,7 +35,7 @@
 // directly), so nothing here may assume how the caller got them.
 
 import { join } from 'node:path';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import {
   filterBlockedAgents,
@@ -271,20 +271,41 @@ async function refreshGovernedAgents(serverUrl, token, log, blockedRows) {
 //
 // The payload holds only what the user typed plus the block's own identity — no
 // prompt text, no clipboard, no file contents ever reach this file.
+//
+// CLAIMED BEFORE IT IS SENT. Two flushers can see the same slot — a second
+// agent process on the machine (the Claude Usage Tracker runs its own sync), or
+// the overlapping ticks that used to run inside one process — and both POSTing
+// it filed the request twice. rename() is atomic on one volume, so exactly one
+// flusher wins the claim; the loser finds nothing and returns. On a retryable
+// failure the claim is put BACK, unless a newer Submit has refilled the slot in
+// the meantime, in which case the newer one wins (one slot, last writer wins).
 async function flushPendingAccessRequest(serverUrl, token, log) {
   if (!existsSync(PENDING_REQUEST_PATH)) return;
+  const claim = `${PENDING_REQUEST_PATH}.sending-${process.pid}`;
+  try {
+    renameSync(PENDING_REQUEST_PATH, claim);
+  } catch {
+    return;   // another flusher claimed it first (or it just vanished)
+  }
+  const release = () => {
+    try {
+      if (existsSync(PENDING_REQUEST_PATH)) rmSync(claim, { force: true });
+      else renameSync(claim, PENDING_REQUEST_PATH);
+    } catch { /* best effort — worst case the request is re-asked by the user */ }
+  };
+
   let payload;
   try {
-    payload = JSON.parse(readFileSync(PENDING_REQUEST_PATH, 'utf8'));
+    payload = JSON.parse(readFileSync(claim, 'utf8'));
   } catch {
-    rmSync(PENDING_REQUEST_PATH, { force: true });   // unreadable — nothing to retry
+    rmSync(claim, { force: true });   // unreadable — nothing to retry
     return;
   }
 
   const queuedAt = Date.parse(payload?.queued_at || '');
   if (Number.isFinite(queuedAt) && Date.now() - queuedAt > PENDING_REQUEST_TTL_MS) {
     log.info('access-request: dropping a queued request older than 24h');
-    rmSync(PENDING_REQUEST_PATH, { force: true });
+    rmSync(claim, { force: true });
     return;
   }
 
@@ -298,12 +319,15 @@ async function flushPendingAccessRequest(serverUrl, token, log) {
     // 2xx is success; 4xx is a verdict (already pending, rejected within the
     // cooldown, bad payload) — in both cases the queued copy has served its
     // purpose and must not be retried forever. Only 5xx / a thrown network
-    // error leaves the slot in place for the next tick.
+    // error puts the slot back for the next tick.
     if (res.status < 500) {
-      rmSync(PENDING_REQUEST_PATH, { force: true });
+      rmSync(claim, { force: true });
       log.info(`access-request: queued request submitted (${res.status})`);
+    } else {
+      release();
     }
   } catch (err) {
+    release();
     log.warn(`access-request: still offline — ${err.message}`);
   }
 }
@@ -407,4 +431,5 @@ export {
   refreshBlockedAgents,
   refreshGovernedAgents,
   refreshEgressSurfaces,
+  flushPendingAccessRequest,
 };

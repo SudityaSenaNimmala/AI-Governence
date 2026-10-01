@@ -3,6 +3,8 @@ import { a } from '../util.js';
 import { resolveProfiles } from './identity.js';
 import { normalizeIdentity } from '../lib/identity-normalize.js';
 
+const ENROLL_PLATFORMS = new Set(['win32', 'darwin', 'linux']);
+
 export function mountEnroll(app, db) {
   app.post('/api/v1/enroll', a(async (req, res) => {
     const { machineId, hostname, user, claudeAccountEmail, displayName, enrollSecret, employeeEmail } = req.body ?? {};
@@ -37,6 +39,14 @@ export function mountEnroll(app, db) {
     if (claudeAccountEmail) set.claude_account_email = String(claudeAccountEmail).toLowerCase();
     if (displayName) set.display_name = displayName;
     if (req.body?.type) set.type = req.body.type;  // 'server-monitor' or 'desktop-agent'
+    // Node's process.platform, allowlisted. The Overview "Systems" count keys on
+    // it (routes/queries.js SYSTEMS_FILTER), and enrol never stored it before, so
+    // a desktop agent that only ever enrolled — never sent a scan report, which
+    // is the other place platform is written — was invisible to that count.
+    // Anything outside the allowlist is dropped rather than stored verbatim.
+    if (typeof req.body?.platform === 'string' && ENROLL_PLATFORMS.has(req.body.platform)) {
+      set.platform = req.body.platform;
+    }
 
     // WHERE THE IDENTITY CAME FROM, or why there isn't one. On a browser-only
     // rollout attribution rests on the browser profile being signed in, which is

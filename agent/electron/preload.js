@@ -34,7 +34,9 @@ contextBridge.exposeInMainWorld('api', {
   // The reason text goes straight into the POST body in the main process — it is
   // never scanned, logged or persisted locally except in the offline queue file.
   submitAccessRequest: (payload) => ipcRenderer.invoke('access-request', payload),
-  getAccessRequestStatus: (toolHost) => ipcRenderer.invoke('access-request-status', toolHost),
+  getAccessRequestStatus: (toolHost, identity) => ipcRenderer.invoke('access-request-status', toolHost, identity ? {
+    block_scope: identity.block_scope, agent_id: identity.agent_id, blocked_agent: identity.blocked_agent,
+  } : undefined),
 
   // Auto-launch
   getAutoLaunch: () => ipcRenderer.invoke('get-auto-launch'),

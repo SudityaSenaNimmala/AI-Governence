@@ -99,6 +99,11 @@ function renderForm(note) {
       platform: current?.blocked_platform,
       process_name: current?.process_name,
       agent_id: current?.agent_id,
+      // What was blocked: the whole app, a panel, or ONE agent inside the host
+      // app. main.js turns these into block_scope/agent_name on the POST; without
+      // them an agent block was filed (and approved) as the whole app.
+      block_scope: current?.block_scope,
+      blocked_agent: current?.blocked_agent,
       reason: $reason.value.slice(0, REASON_MAX),
     });
 
@@ -144,7 +149,9 @@ window.api.onAccessRequestDialog(async (ev) => {
   // is in flight; swap to the pending view only if there is one.
   renderForm(current.tool_host ? null : 'This app could not be matched to a known AI platform, so the request may need extra detail.');
 
-  const status = await window.api.getAccessRequestStatus(current.tool_host);
+  // The block itself rides along as a second argument so "already pending" is
+  // judged per agent, not per host. An older main.js ignores it.
+  const status = await window.api.getAccessRequestStatus(current.tool_host, current);
   if (status?.ok && (status.pending || status.queued)) {
     renderPending(status.pending, status.queued === true);
     return;

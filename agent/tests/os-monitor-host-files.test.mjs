@@ -343,13 +343,16 @@ test('a FILE PASTED into a governed conversation goes through the same pipeline'
   } finally { monitor.stop(); }
 });
 
-// ── 4. DECISION #3: fail closed on a file we could not verify ──────────────
+/// ── 4. DECISION #3, REVERSED 2026-09-30: browser parity, no fail-closed ────
+//
+// The user's decision: behave like the browser extension -- hold ONLY a file
+// whose content scan is high/critical. An unscannable file is ALLOWED and
+// reported, even inside a governed conversation. (Was: held "fail closed".)
 
-test('FAIL CLOSED: an unopenable archive in a governed conversation is HELD even though nothing was scanned', async () => {
+test('BROWSER PARITY: an unopenable archive in a governed conversation is REPORTED, and its provisional hold released', async () => {
   const { monitor, calls } = makeMonitor();
   // .7z has no extractor here at all, so there is no scan result and no
-  // contentSeverity — the file classifies as `archive`/moderate, which is BELOW
-  // the hold threshold. Before the fail-closed rule this went out unexamined.
+  // contentSeverity -- the file classifies as `archive`/moderate.
   const p = await tmp('quarterly.7z', Buffer.from('377ABCAF271C0004', 'hex'));
   try {
     govOn(monitor);
@@ -357,24 +360,18 @@ test('FAIL CLOSED: an unopenable archive in a governed conversation is HELD even
       process: 'ms-teams', filename: 'quarterly.7z', path: p,
     });
     const ev = await waitFor(() => calls.enqueued[0], { label: 'the reported file event' });
-    assert.equal(ev.severity, 'moderate', 'the severity alone would NOT have held this');
+    assert.equal(ev.severity, 'moderate');
     assert.equal(ev.content_scan.scanned, false);
-    assert.equal(ev.content_scan.unverified, true, 'a .7z should have been readable');
-    const held = await waitFor(
-      () => calls.attachHold.find((c) => c.state === 'on' && c.ttlMs === 60_000),
-      { label: 'the fail-closed hold' },
-    );
-    // The block has to be able to say WHY, and "high" would be a claim about
-    // content nobody read.
-    assert.match(held.patterns, /^unscannable file \(/);
+    await settle(200);
+    assert.equal(calls.attachHold.some((c) => c.state === 'on' && c.ttlMs === 60_000), false, 'no confirmed hold');
+    assert.equal(monitor.attachHolds.size, 0, 'the provisional hold (if any) was released');
   } finally { monitor.stop(); }
 });
 
-test('FAIL CLOSED: a corrupt/encrypted .docx in a governed conversation is HELD', async () => {
+test('BROWSER PARITY: a corrupt/encrypted .docx in a governed conversation is REPORTED, not held', async () => {
   const { monitor, calls } = makeMonitor();
-  // Not a real zip container, so mammoth throws exactly as it does for an
-  // encrypted or password-protected document: reason 'extraction_failed' on a
-  // format the extractors are supposed to handle.
+  // Not a real zip container, so the extractor fails exactly as it does for an
+  // encrypted or password-protected document.
   const p = await tmp('salaries.docx', Buffer.from('not a real docx container at all', 'utf8'));
   try {
     govOn(monitor);
@@ -383,14 +380,9 @@ test('FAIL CLOSED: a corrupt/encrypted .docx in a governed conversation is HELD'
     });
     const ev = await waitFor(() => calls.enqueued[0], { label: 'the reported file event' });
     assert.equal(ev.content_scan.scanned, false);
-    assert.ok(
-      ['extraction_failed', 'extraction_timeout'].includes(ev.content_scan.reason),
-      `unexpected reason ${ev.content_scan.reason}`,
-    );
-    assert.equal(ev.content_scan.unverified, true);
-    assert.equal(ev.severity, 'moderate', 'a document classifies moderate — below the threshold');
-    await waitFor(() => calls.attachHold.some((c) => c.state === 'on' && c.ttlMs === 60_000),
-      { label: 'the fail-closed hold' });
+    await settle(200);
+    assert.equal(calls.attachHold.some((c) => c.state === 'on' && c.ttlMs === 60_000), false, 'no confirmed hold');
+    assert.equal(monitor.attachHolds.size, 0);
   } finally { monitor.stop(); }
 });
 
@@ -415,11 +407,9 @@ test('FAIL OPEN, unchanged: a media file in a governed conversation is NOT held'
   } finally { monitor.stop(); }
 });
 
-test('FAIL CLOSED IS GOVERNED-ONLY: the same unopenable archive in ChatGPT is not held', async () => {
-  // The fail-closed rule is a behaviour change and it is scoped to conversations
-  // the org asked to govern. Escalating on "we could not read it" everywhere
-  // would start blocking .7z archives and legacy .doc files across every app,
-  // which nobody asked for.
+test('an unopenable archive in ChatGPT is not held either (there is no fail-closed rule anywhere now)', async () => {
+  // Escalating on "we could not read it" would block .7z archives and legacy
+  // .doc files; since 2026-09-30 that is true inside governed conversations too.
   const { monitor, calls } = makeMonitor();
   const p = await tmp('chatgpt-quarterly.7z', Buffer.from('377ABCAF271C0004', 'hex'));
   try {

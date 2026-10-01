@@ -41,6 +41,16 @@ const EMAIL_FIELDS = ["email", "user_email", "employee_email"];
 const ROUTES = [/^\/dlp(\/files|\/summary)?$/, /^\/findings$/, /^\/machines$/, /^\/risk-scores(\/[^/]+)?$/,
   /^\/claude-usage$/, /^\/access-requests$/, /^\/access-exceptions$/, /^\/sessions(\/[^/]+)?$/];
 
+// ACTIONABLE queues: aliased like every other route, but a row belonging to
+// someone outside the three is KEPT, not dropped. Dropping is fine for a report;
+// for the access-request review queue it meant a real employee's request was
+// invisible on the only page that can approve it — the device was blocked, it
+// asked, and the admin saw nothing (live, 2026-10-01: both pending requests
+// from LAPTOP-FCRNKB4 hidden, while the SideNav badge, which reads the raw
+// route, still counted them). Exceptions are kept for the same reason: a grant
+// nobody can see is a grant nobody can revoke.
+const KEEP_UNMATCHED_ROUTES = [/^\/access-requests$/, /^\/access-exceptions$/];
+
 const personFor = s => PEOPLE.find(p => p.match.test(s)) || null;
 
 // machine_id → person|null, built once from the raw /machines list so rows
@@ -98,11 +108,11 @@ function rewrite(row, person) {
 
 // `inKept` is true below a row that belongs to one of the three, so free text
 // nested in it (metadata.filename) is scrubbed too.
-function walk(value, machines, inArray, inKept) {
+function walk(value, machines, inArray, inKept, keepUnmatched = false) {
   if (Array.isArray(value)) {
     const out = [];
     for (const v of value) {
-      const w = walk(v, machines, true, inKept);
+      const w = walk(v, machines, true, inKept, keepUnmatched);
       if (w !== DROP) out.push(w);
     }
     return out;
@@ -111,11 +121,11 @@ function walk(value, machines, inArray, inKept) {
   const c = classify(value, machines);
   // A dropped row only disappears from a list; a lone object (a detail
   // response) can't be removed, so it is returned as-is.
-  if (c?.drop && inArray) return DROP;
+  if (c?.drop && inArray && !keepUnmatched) return DROP;
   const kept = inKept || !!c?.person;
   const obj = { ...value };
   for (const [k, v] of Object.entries(obj)) {
-    if (v && typeof v === "object") obj[k] = walk(v, machines, false, kept);
+    if (v && typeof v === "object") obj[k] = walk(v, machines, false, kept, keepUnmatched);
     else if (kept && typeof v === "string" && !isIdKey(k)) obj[k] = scrubText(v);
   }
   if (c?.person) rewrite(obj, c.person);
@@ -197,5 +207,6 @@ export async function aliasResponse(path, data, fetchRaw) {
   const pathname = String(path).split("?")[0];
   if (!ROUTES.some(rx => rx.test(pathname))) return data;
   const machines = pathname === "/machines" ? null : await loadMachineIndex(fetchRaw);
-  return finish(pathname, walk(data, machines, false, false));
+  const keepUnmatched = KEEP_UNMATCHED_ROUTES.some(rx => rx.test(pathname));
+  return finish(pathname, walk(data, machines, false, false, keepUnmatched));
 }
