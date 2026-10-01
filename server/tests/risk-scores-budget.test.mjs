@@ -89,15 +89,19 @@ test('/risk-scores/summary keeps its shape, and its counts still reconcile with 
   });
 });
 
-test('/risk-scores/summary issues its three reads together, not one after another', async () => {
+// Summary now counts PERSONS, so it reads every profile plus every machine's
+// reported identity (two reads) and groups in memory — replacing the earlier
+// find + two countDocuments. The property pinned is unchanged: the reads run
+// together, not one after another.
+test('/risk-scores/summary issues its reads together, not one after another', async () => {
   await withServer({ latencyMs: QUERY_LATENCY_MS }, async ({ db, get }) => {
     const started = Date.now();
     const res = await get('/api/v1/risk-scores/summary');
     const elapsed = Date.now() - started;
     assert.equal(res.status, 200);
 
-    assert.equal(db.__latency.calls, 3, 'still exactly three round trips');
-    assert.equal(db.__latency.maxConcurrent, 3, 'all three must be in flight at once');
+    assert.equal(db.__latency.calls, 2, 'exactly two round trips (profiles + machines)');
+    assert.equal(db.__latency.maxConcurrent, 2, 'both must be in flight at once');
     assert.ok(elapsed < QUERY_LATENCY_MS * 2.5, `expected ~one query of latency, took ${elapsed}ms`);
   });
 });

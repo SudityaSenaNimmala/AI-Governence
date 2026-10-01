@@ -119,6 +119,23 @@ test('count includes desktop agents (even with no user) and excludes non-endpoin
   });
 });
 
+test('leftover demo machines are not Systems; a real machine named EMILY still is', async () => {
+  await withServer(async ({ systems }) => {
+    assert.equal(await systems(), 2);
+  }, async (db) => {
+    await db.collection('machines').insertMany([
+      // excluded — demo host with a demo or empty user
+      { id: 'demo-j', hostname: 'JAMES', user: 'JamesCarter', platform: 'win32' },
+      { id: 'demo-e', hostname: 'EMILY', user: 'emilyrodriguez', platform: 'win32', type: 'desktop-agent' },
+      { id: 'demo-s', hostname: 'SARAH', type: 'desktop-agent' },
+      { id: 'demo-s2', hostname: 'sarah', user: '', platform: 'win32', type: 'desktop-agent' },
+      // counted — real users, even on a demo-looking hostname
+      { id: 'f0031ea6', hostname: 'EMILY', user: 'Pravallikapunumalli', platform: 'win32', type: 'desktop-agent' },
+      { id: 'real-2', hostname: 'Pravallika', user: 'Pravallika', type: 'desktop-agent' },
+    ]);
+  });
+});
+
 test('an already-installed agent is counted once it sends os_monitor events', async () => {
   await withServer(async ({ db, post, systems }) => {
     assert.equal(await systems(), 0, 'old-style record is not counted before any traffic');

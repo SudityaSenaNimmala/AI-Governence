@@ -15,6 +15,7 @@
 // fetch). This module is that marking plus the one shared definition of the count.
 
 import { normalizeIdentity } from './identity-normalize.js';
+import { DEMO_MACHINE_MATCH } from './demo-personas.js';
 
 // Records that are not an endpoint with the agent installed: the browser
 // extension enrols as '<browser>-browser-extension', the OTel CLI path writes a
@@ -25,7 +26,9 @@ const NON_ENDPOINT_ID = /^(clautrk|clicode):/;
 
 // Mongo filter for the Overview "Systems" count (routes/queries.js fetchOverview).
 // A machine counts when it is a known desktop agent, or when it carries the
-// user + platform pair a scanner report / new-style enroll writes.
+// user + platform pair a scanner report / new-style enroll writes. Leftover demo
+// machines (lib/demo-personas.js: JAMES/EMILY/SARAH host with a demo or empty
+// user) never count; a real machine with such a hostname but a real user does.
 export const SYSTEMS_FILTER = {
   id: { $not: NON_ENDPOINT_ID },
   hostname: { $not: NON_ENDPOINT_HOSTNAME },
@@ -37,6 +40,7 @@ export const SYSTEMS_FILTER = {
       platform: { $exists: true, $ne: null },
     },
   ],
+  $nor: [DEMO_MACHINE_MATCH],
 };
 
 export function isNonEndpointMachine(m) {
