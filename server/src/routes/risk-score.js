@@ -20,6 +20,7 @@ import crypto from 'node:crypto';
 import { a } from '../util.js';
 import { fireWebhooks } from './webhooks.js';
 import { scoreToLevel } from '../lib/risk-scale.js';
+import { isDemoIdentity, isDemoMachine } from '../lib/demo-personas.js';
 import {
   RESPONSE_BUDGET_MS, raceWithFallback, applyBudgetHeaders, registerResponseWarmer, invalidateRoute,
 } from '../lib/response-budget.js';
@@ -147,8 +148,18 @@ export function mountRiskScore(app, db) {
       const same = await profiles().find({ person_key: profile.person_key }).project({ _id: 0 }).toArray();
       if (same.length) members = same.some(m => m.id === profile.id) ? same : [profile, ...same];
     }
+    // Demo personas and demo machines are never part of a real person: a stale
+    // person_key on a leftover demo profile must not pull it (or the JAMES /
+    // EMILY machines) back into a real employee's breakdown.
+    const allMachineIds = [...new Set(members.flatMap(m => m.machine_ids || []).filter(Boolean))];
+    const machineDocs = allMachineIds.length
+      ? await db.collection('machines').find({ id: { $in: allMachineIds } })
+        .project({ _id: 0, id: 1, user: 1, hostname: 1 }).toArray()
+      : [];
+    const byId = new Map(machineDocs.map(m => [m.id, m]));
+    members = members.filter(m => m.id === profile.id || !isDemoProfile(m, byId));
     const memberIds = members.map(m => m.id);
-    const machineIds = [...new Set(members.flatMap(m => m.machine_ids || []).filter(Boolean))];
+    const machineIds = realMachineIds(members, byId);
 
     const history = await scores()
       .find({ profile_id: { $in: memberIds } })
@@ -187,6 +198,17 @@ export function mountRiskScore(app, db) {
 //
 // person_key: the component's smallest email, else its smallest username, else
 // the profile id (a singleton with nothing to join on).
+//
+// OWN IDENTITY FIRST. A profile's tokens come from what identifies THAT profile:
+// its resolve_key (`agent:<host>:<user>` → user, `ext:<machineId>` → that
+// machine's user/email), its email and its os_user. Users of the OTHER machines
+// in machine_ids are only a fallback for a profile with no identity of its own.
+// Otherwise one machine that ended up on two people's profiles (old demo seeds
+// absorbed real employees' extensions this way) bridged them into one person.
+//
+// DEMO PERSONAS (lib/demo-personas.js) never contribute a token, and a profile
+// whose own identity is a demo persona — or which has no real identity and only
+// demo machines — is dropped from the output entirely.
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const HIGH_LEVELS = new Set(['high', 'critical']);
@@ -200,13 +222,58 @@ function normUser(u) {
   return bare ? { user: bare } : null;
 }
 
+// The identity values a profile carries itself, before any demo filtering.
+function ownIdentityValues(p, machinesById) {
+  const out = [];
+  const rk = String(p.resolve_key || '');
+  if (rk.startsWith('agent:')) {
+    const rest = rk.slice('agent:'.length);
+    const i = rest.indexOf(':');
+    if (i >= 0) out.push(rest.slice(i + 1));
+  } else if (rk.startsWith('ext:')) {
+    out.push(machinesById.get(rk.slice('ext:'.length))?.user);
+  }
+  out.push(p.email, p.os_user);
+  return out.filter(v => String(v ?? '').trim());
+}
+
+// Profile's machines, minus demo machines. A machine id with no record is kept —
+// nothing says it is demo.
+function realMachines(p, machinesById) {
+  return (p.machine_ids || []).filter(Boolean).filter(id => !isDemoMachine(machinesById.get(id)));
+}
+
+function realMachineIds(members, machinesById) {
+  return [...new Set(members.flatMap(m => realMachines(m, machinesById)))];
+}
+
 /**
- * Pure. Groups profiles into persons.
+ * Pure. True for a leftover demo persona profile: its own identity is a demo
+ * persona, or it has no real identity of its own and every machine it lists is a
+ * demo machine (or, with nothing else to go on, a demo display name).
+ */
+export function isDemoProfile(p, machinesById = new Map()) {
+  if (!p) return false;
+  const own = ownIdentityValues(p, machinesById);
+  const realOwn = own.filter(v => !isDemoIdentity(v));
+  if (realOwn.length) return false;
+  if (own.length) return true;                         // only demo identities
+  const ids = (p.machine_ids || []).filter(Boolean);
+  if (ids.length && ids.every(id => isDemoMachine(machinesById.get(id)))) return true;
+  // No identity, no machines that say otherwise: fall back to the name.
+  const borrowed = realMachines(p, machinesById)
+    .map(id => machinesById.get(id)?.user).filter(u => u && !isDemoIdentity(u));
+  return !borrowed.length && isDemoIdentity(p.display_name);
+}
+
+/**
+ * Pure. Groups profiles into persons. Demo persona profiles are excluded.
  * @param {object[]} allProfiles
  * @param {Map<string, {id,user,hostname}>} machinesById
  * @returns {{ person_key: string, identified: boolean, members: object[] }[]}
  */
 export function groupPersons(allProfiles, machinesById = new Map()) {
+  allProfiles = allProfiles.filter(p => !isDemoProfile(p, machinesById));
   const parent = allProfiles.map((_, i) => i);
   const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
   const union = (x, y) => { const a = find(x), b = find(y); if (a !== b) parent[b] = a; };
@@ -215,12 +282,14 @@ export function groupPersons(allProfiles, machinesById = new Map()) {
     const emails = new Set(), users = new Set();
     if (UNIDENTIFIED_NAME.test(p.display_name || '')) return { emails, users };
     const add = (v) => {
+      if (isDemoIdentity(v)) return;
       const n = normUser(v);
       if (n?.email) emails.add(n.email); else if (n?.user) users.add(n.user);
     };
-    if (p.email) add(p.email);
-    if (p.os_user) add(p.os_user);
-    for (const id of p.machine_ids || []) add(machinesById.get(id)?.user);
+    for (const v of ownIdentityValues(p, machinesById)) add(v);
+    if (!emails.size && !users.size) {
+      for (const id of realMachines(p, machinesById)) add(machinesById.get(id)?.user);
+    }
     return { emails, users };
   });
 
@@ -250,11 +319,20 @@ export function groupPersons(allProfiles, machinesById = new Map()) {
 
 // The identity the agent/extension actually reported (machine OS user → profile
 // email → machine hostname → profile hostname), over the person's profiles, the
-// preferred one first.
+// preferred one first. Each profile's OWN machine (the one its resolve_key names)
+// is consulted before any other it lists, and demo machines / demo personas are
+// skipped, so a real person is never labelled with a demo persona's username.
 function detectedName(members, byId) {
   for (const p of members) {
-    const ms = (p.machine_ids || []).map(id => byId.get(id)).filter(Boolean);
-    const n = ms.find(m => m.user)?.user || p.email || ms.find(m => m.hostname)?.hostname || p.hostname;
+    const rk = String(p.resolve_key || '');
+    const ownExt = rk.startsWith('ext:') ? rk.slice(4) : null;
+    const ownUser = rk.startsWith('agent:') ? rk.slice(6).split(':').slice(1).join(':') : null;
+    const ms = realMachines(p, byId).map(id => byId.get(id)).filter(Boolean);
+    const rank = (m) => (m.id === ownExt || (ownUser && String(m.user || '').toLowerCase() === ownUser.toLowerCase())) ? 0 : 1;
+    ms.sort((a, b) => rank(a) - rank(b));
+    const user = ms.find(m => m.user && !isDemoIdentity(m.user))?.user;
+    const email = p.email && !isDemoIdentity(p.email) ? p.email : null;
+    const n = user || email || ms.find(m => m.hostname)?.hostname || p.hostname;
     if (n) return n;
   }
   return null;
@@ -273,7 +351,8 @@ function topMember(members) {
 }
 
 const PROFILE_FIELDS = { _id: 0, id: 1, display_name: 1, email: 1, hostname: 1, department: 1, os_user: 1,
-  risk_score: 1, risk_level: 1, risk_factors: 1, risk_computed_at: 1, sources: 1, machine_ids: 1, person_key: 1 };
+  risk_score: 1, risk_level: 1, risk_factors: 1, risk_computed_at: 1, sources: 1, machine_ids: 1, person_key: 1,
+  resolve_key: 1 };
 
 // TWO READS, IN PARALLEL, whatever the head count: every profile and every
 // machine's reported identity; grouping is then pure in-memory work. Grouping
@@ -406,7 +485,7 @@ async function runCompute(db, source) {
   const byId = new Map(machines.map(m => [m.id, m]));
   const groups = groupPersons(allProfiles, byId);
 
-  const machineIds = [...new Set(allProfiles.flatMap(p => p.machine_ids || []).filter(Boolean))];
+  const machineIds = realMachineIds(allProfiles, byId);
   const metrics = await machineMetrics(db, machineIds);
 
   const computedAt = new Date();
@@ -421,7 +500,8 @@ async function runCompute(db, source) {
       id: rep.id,
       display_name: rep.display_name,
       email: rep.email || g.members.find(m => m.email)?.email,
-      machine_ids: [...new Set(g.members.flatMap(m => m.machine_ids || []).filter(Boolean))],
+      // Demo machines never count toward a real person's score.
+      machine_ids: realMachineIds(g.members, byId),
       // Unknown provenance on ANY member keeps the full denominator — the same
       // conservative rule computeScore applies to a single profile.
       sources: g.members.every(m => Array.isArray(m.sources)) ? unionSources(g.members) : undefined,

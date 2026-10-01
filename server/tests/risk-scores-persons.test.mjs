@@ -134,7 +134,9 @@ test('grouping is transitive: email links A~B, username links B~C', () => {
   const byId = new Map([['m2', { id: 'm2', user: 'cuser' }], ['m3', { id: 'm3', user: 'cuser' }]]);
   const groups = groupPersons([
     { id: 'a', display_name: 'C', email: 'c@x.com' },
-    { id: 'b', display_name: 'C', email: 'c@x.com', machine_ids: ['m2'] },
+    // b's username is its OWN (os_user) — a machine's user only stands in for a
+    // profile that has no identity of its own.
+    { id: 'b', display_name: 'C', email: 'c@x.com', os_user: 'cuser', machine_ids: ['m2'] },
     { id: 'c', display_name: 'C', machine_ids: ['m3'] },
   ], byId);
   assert.equal(groups.length, 1);
@@ -154,6 +156,137 @@ test('before the first compute, reads already group (no person_key yet)', async 
     assert.equal(rows[0].id, 'p2', 'highest-scoring member represents the person');
     assert.equal(rows[0].risk_score, 70);
   });
+});
+
+// ── Demo personas (real data only — commit 7500ded) ────────────────────
+//
+// Live shape: leftover demo profiles absorbed real people's extensions, so
+// Suditya was merged into a "JamesCarter" row and Pravallika's data showed
+// under an Emily profile.
+
+const SUDITYA_EXT = 'dc769a1f-0000-4000-8000-000000000001';
+const PRAVALLIKA_EXT = '494e23e4-0000-4000-8000-000000000002';
+
+const demoSeed = async (db) => {
+  await db.collection('machines').insertMany([
+    { id: 'm-james', hostname: 'JAMES', user: 'JamesCarter', platform: 'win32' },
+    { id: 'm-james-ext', hostname: 'JAMES-browser-extension', user: 'JamesCarter' },
+    { id: 'm-emily', hostname: 'EMILY', user: 'EmilyRodriguez', platform: 'win32' },
+    { id: 'm-sarah', hostname: 'SARAH', user: '' },
+    { id: SUDITYA_EXT, hostname: 'chrome-browser-extension', user: 'SudityaNimmala' },
+    { id: PRAVALLIKA_EXT, hostname: 'chrome-browser-extension', user: 'Pravallikapunumalli' },
+  ]);
+  await db.collection('employee_profiles').insertMany([
+    { id: 'p-james', display_name: 'James Carter', resolve_key: 'agent:james:jamescarter', os_user: 'JamesCarter',
+      machine_ids: ['m-james', 'm-james-ext', SUDITYA_EXT], sources: ['agent', 'extension'] },
+    { id: 'p-suditya', display_name: 'Suditya Nimmala', resolve_key: 'ext:' + SUDITYA_EXT,
+      machine_ids: [SUDITYA_EXT], sources: ['extension'] },
+    { id: 'p-emily', display_name: 'Emily Rodriguez', resolve_key: 'agent:emily:emilyrodriguez', os_user: 'EmilyRodriguez',
+      machine_ids: ['m-emily', PRAVALLIKA_EXT], sources: ['agent', 'extension'] },
+    { id: 'p-pravallika', display_name: 'Pravallikapunumalli', resolve_key: 'ext:' + PRAVALLIKA_EXT,
+      machine_ids: [PRAVALLIKA_EXT], sources: ['extension'] },
+    // No identity of its own, only a demo machine → also demo.
+    { id: 'p-sarah', display_name: 'Sarah Mitchell', machine_ids: ['m-sarah'], sources: ['agent'] },
+  ]);
+  await db.collection('dlp_events').insertMany([
+    block('ev-james', 'm-james'), block('ev-emily', 'm-emily'),
+    block('ev-s', SUDITYA_EXT), block('ev-p', PRAVALLIKA_EXT),
+  ]);
+};
+
+test('demo personas never absorb real people: rows are Suditya and Pravallika only', async () => {
+  const db = await seedDb(demoSeed);
+  await withServer(db, async ({ get, compute }) => {
+    const body = await compute();
+    assert.equal(body.computed, 2, 'two real people scored, no demo persona');
+    assert.ok(body.scores.every((s) => !/james|emily|sarah/i.test(String(s.detected_name) + s.person_key)));
+
+    const rows = await get('/api/v1/risk-scores');
+    assert.equal(rows.length, 2);
+    const byKey = Object.fromEntries(rows.map((r) => [r.person_key, r]));
+    assert.deepEqual(Object.keys(byKey).sort(), ['pravallikapunumalli', 'sudityanimmala']);
+
+    const s = byKey.sudityanimmala;
+    assert.equal(s.detected_name, 'SudityaNimmala');
+    assert.equal(s.display_name, 'Suditya Nimmala');
+    assert.deepEqual(s.merged_profile_ids, ['p-suditya'], 'the James profile is not merged in');
+    assert.equal(s.risk_factors.dlp_violations.raw, 1, 'only Suditya\'s own events');
+
+    const p = byKey.pravallikapunumalli;
+    assert.equal(p.detected_name, 'Pravallikapunumalli');
+    assert.deepEqual(p.merged_profile_ids, ['p-pravallika'], 'the Emily profile is not merged in');
+    assert.equal(p.risk_factors.dlp_violations.raw, 1);
+
+    const summary = await get('/api/v1/risk-scores/summary');
+    assert.equal(summary.total_employees, 2);
+    assert.equal(summary.not_assessed, 0, 'demo personas are not counted as unassessed people');
+    assert.equal(summary.unidentified, 0);
+
+    // Demo profiles are left as they were — skipped, not written.
+    const james = db._rows('employee_profiles').find((x) => x.id === 'p-james');
+    assert.equal(james.risk_score, undefined);
+
+    // The detail route for a real person carries no demo profile or machine.
+    const detail = await get('/api/v1/risk-scores/' + s.id);
+    assert.deepEqual(detail.merged_profile_ids, ['p-suditya']);
+    assert.deepEqual(detail.recent_events.map((e) => e.id), ['ev-s']);
+  });
+});
+
+test('a stale person_key on a demo profile does not leak into the detail view', async () => {
+  const db = await seedDb(async (db) => {
+    await demoSeed(db);
+    // Old compute stamped both with the same key.
+    await db.collection('employee_profiles').updateMany(
+      { id: { $in: ['p-james', 'p-suditya'] } }, { $set: { person_key: 'jamescarter' } });
+  });
+  await withServer(db, async ({ get }) => {
+    const detail = await get('/api/v1/risk-scores/p-suditya');
+    assert.deepEqual(detail.merged_profile_ids, ['p-suditya']);
+    assert.deepEqual(detail.recent_events.map((e) => e.id), ['ev-s']);
+  });
+});
+
+test('a real machine with a demo hostname but a real user is NOT demo', async () => {
+  const { isDemoMachine, isDemoIdentity } = await import('../src/lib/demo-personas.js');
+  assert.equal(isDemoMachine({ hostname: 'EMILY', user: 'Pravallikapunumalli' }), false);
+  assert.equal(isDemoMachine({ hostname: 'EMILY', user: 'EmilyRodriguez' }), true);
+  assert.equal(isDemoMachine({ hostname: 'EMILY' }), true, 'host match + empty user');
+  assert.equal(isDemoMachine({ hostname: 'JAMES-browser-extension', user: 'jamescarter' }), true);
+  assert.equal(isDemoMachine({ hostname: 'LAPTOP-1', user: 'JamesCarter' }), false, 'host must match too');
+  assert.equal(isDemoIdentity('CORP\\EmilyRodriguez'), true);
+  assert.equal(isDemoIdentity('Sarah.Mitchell@CloudFuze.com'), true);
+  assert.equal(isDemoIdentity('James Carter'), true);
+  assert.equal(isDemoIdentity('pravallikapunumalli'), false);
+  assert.equal(isDemoIdentity(''), false);
+
+  const db = await seedDb(async (db) => {
+    await db.collection('machines').insertOne(
+      { id: 'f0031ea6', hostname: 'EMILY', user: 'Pravallikapunumalli', platform: 'win32', type: 'desktop-agent' });
+    await db.collection('employee_profiles').insertOne(
+      { id: 'p-pc', display_name: 'Pravallikapunumalli', resolve_key: 'agent:emily:pravallikapunumalli',
+        os_user: 'Pravallikapunumalli', hostname: 'EMILY', machine_ids: ['f0031ea6'], sources: ['agent'] });
+    await db.collection('dlp_events').insertOne(block('ev-pc', 'f0031ea6'));
+  });
+  await withServer(db, async ({ get, compute }) => {
+    await compute();
+    const rows = await get('/api/v1/risk-scores');
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].detected_name, 'Pravallikapunumalli');
+    assert.equal(rows[0].risk_factors.dlp_violations.raw, 1, 'its events still count');
+  });
+});
+
+test('one borrowed machine does not bridge two real people', () => {
+  const byId = new Map([
+    ['ma', { id: 'ma', user: 'alice', hostname: 'A-PC' }],
+    ['mb', { id: 'mb', user: 'bob', hostname: 'B-PC' }],
+  ]);
+  const groups = groupPersons([
+    { id: 'pa', display_name: 'Alice', resolve_key: 'agent:a-pc:alice', os_user: 'alice', machine_ids: ['ma', 'mb'] },
+    { id: 'pb', display_name: 'Bob', resolve_key: 'agent:b-pc:bob', os_user: 'bob', machine_ids: ['mb'] },
+  ], byId);
+  assert.equal(groups.length, 2);
 });
 
 // ── Per-person score ───────────────────────────────────────────────────
