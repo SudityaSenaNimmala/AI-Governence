@@ -472,11 +472,16 @@ export function mountInstallations(app, db) {
 
     // Build zip
     const files = [];
-    // Add install/uninstall scripts from the dist directory
-    const distDir = join(__dirname, '..', '..', '..', 'agent', 'build', 'electron-dist');
+    // Add install/uninstall scripts — check both the build dir and the source dir
+    const scriptDirs = [
+      join(__dirname, '..', '..', '..', 'agent', 'build', 'electron-dist'),
+      join(__dirname, '..', '..', '..', 'agent', 'electron'),
+    ];
     for (const script of ['install.bat', 'uninstall.bat', 'uninstall-silent.bat']) {
-      const p = join(distDir, script);
-      if (existsSync(p)) files.push({ name: script, data: readFileSync(p) });
+      for (const dir of scriptDirs) {
+        const p = join(dir, script);
+        if (existsSync(p)) { files.push({ name: script, data: readFileSync(p) }); break; }
+      }
     }
     // Walk win-unpacked/
     const SKIP_EL = new Set(['.git', 'node_modules']);
