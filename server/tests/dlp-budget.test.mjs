@@ -241,7 +241,7 @@ test('/dlp/files rows keep their existing shape', async () => {
     const rows = await (await get('/api/v1/dlp/files')).json();
     assert.equal(rows.length, 1);
     assert.deepEqual(Object.keys(rows[0]).sort(), [
-      'ai_service', 'employee_name', 'file_class', 'has_content', 'hostname', 'id',
+      'ai_service', 'email', 'employee_name', 'file_class', 'has_content', 'hostname', 'id',
       'machine_id', 'metadata', 'metadata_json', 'occurred_at', 'platform', 'severity', 'size', 'user',
     ].sort());
     assert.equal(rows[0].severity, 'critical');

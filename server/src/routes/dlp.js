@@ -737,6 +737,9 @@ async function fetchDlpFiles(db, lim) {
       user: r.user,
       hostname: r.hostname,
       employee_name: r.employee_name,
+      // attachMachineIdentity's fleet-known email — the UI needs it to split a
+      // run-together username ("Pravallikapunumalli" → "Pravallika Punumalli").
+      email: r.email ?? null,
       occurred_at: r.occurred_at,
       ai_service: r.ai_service,
       file_class: r.pattern_matched,
