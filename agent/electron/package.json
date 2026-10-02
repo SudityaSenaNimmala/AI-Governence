@@ -57,6 +57,11 @@
         "to": "electron/main-impl.js"
       },
       {
+        "from": "assets",
+        "to": "electron/assets",
+        "filter": ["**/*"]
+      },
+      {
         "from": "preload.js",
         "to": "electron/preload.js"
       },
