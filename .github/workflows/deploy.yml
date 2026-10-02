@@ -315,11 +315,17 @@ jobs:
           # Ship the Electron desktop agent build separately (the --exclude
           # above strips */build, but this is the CI-built artifact, not a
           # leftover dev build).
+          echo "Checking electron build at: $(pwd)/agent/build/electron-dist/win-unpacked"
+          ls -d agent/build/electron-dist/win-unpacked 2>/dev/null && echo "Found!" || echo "NOT FOUND"
+          ls agent/build/electron-dist/ 2>/dev/null || echo "electron-dist dir missing entirely"
           if [ -d "agent/build/electron-dist/win-unpacked" ]; then
             mkdir -p "$DEPLOY_DIR/agent/build/electron-dist"
             cp -r agent/build/electron-dist/win-unpacked "$DEPLOY_DIR/agent/build/electron-dist/"
             cp agent/build/electron-dist/install.bat "$DEPLOY_DIR/agent/build/electron-dist/" 2>/dev/null || true
-            echo "Electron desktop agent build shipped."
+            echo "Electron desktop agent build shipped to $DEPLOY_DIR/agent/build/electron-dist/"
+            ls "$DEPLOY_DIR/agent/build/electron-dist/" 2>/dev/null
+          else
+            echo "::warning::Electron build not found — desktop download will be unavailable"
           fi
 
           if [ -d "$STASH" ] && [ ! -d "$DEPLOY_DIR/agent/prebuilt" ]; then
