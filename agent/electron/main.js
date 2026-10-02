@@ -920,15 +920,6 @@ function updateTrayMenu() {
       checked: modelRoutingEnabled,
       click: (menuItem) => { toggleModelRouting(menuItem.checked); },
     },
-    { type: 'separator' },
-    {
-      label: 'Quit',
-      click: () => {
-        app.isQuitting = true;
-        stopMonitor();
-        app.quit();
-      },
-    },
   ]);
   tray.setContextMenu(menu);
 }
