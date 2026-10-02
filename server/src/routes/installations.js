@@ -458,7 +458,12 @@ export function mountInstallations(app, db) {
     let winUnpacked = candidates.find(d => existsSync(d));
 
     if (!winUnpacked) {
-      return res.status(503).json({ error: 'Desktop app build not available yet. The CI pipeline builds it on each deploy — if this is a fresh deployment, wait for the next deploy to complete, or run "cd agent/electron && npm install && npx electron-builder --dir --win" on a machine with Node.js.' });
+      return res.status(503).json({
+        error: 'Desktop app build not available yet.',
+        checked: candidates,
+        cwd: process.cwd(),
+        dirname: __dirname,
+      });
     }
 
     // Bake server URL and enroll secret into settings for auto-enrollment
