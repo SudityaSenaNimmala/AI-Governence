@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { sanitizeReplayEvents } from "./replaySanitize";
 import { aliasResponse } from "./demoIdentity";
+import { formatPersonName, formatRowPerson } from "./personName";
 import { createReplayHost, applyReplayIframeCsp } from "./rrwebHost";
 import { fileRowInScope, fileIsHeld, fileIsUnscannedReported, pairFileBlocks, mergeEventsById, attemptsLabel, fileReason, fileHasContent, fileNoContentNote, filesWithPromptBlock } from "./dlpFileRows";
 import "./AIHub.css";
@@ -523,35 +524,10 @@ function enforcementMembers(row) { return row?._enforcement || []; }
 // Neither name nor host is guaranteed on a machine that was never enrolled, so
 // the machine id is the last resort: the row stays traceable instead of showing
 // a bare dash the admin can do nothing with.
-// OS account usernames often concatenate given+family name with no separator
-// ("SudityaNimmala" for Suditya Nimmala) — split on a lower→upper letter
-// boundary so names read as two words instead of one merged string. A no-op
-// on names that already have spaces, and on hostnames/ids (no such boundary).
-// Each word is also capitalised ("sruthi.chimata" / "sruthiChimata" -> "Sruthi
-// Chimata"); '.' and '_' separate words too. Emails are left exactly as they are.
-function splitConcatenatedName(name) {
-  if (typeof name !== "string" || name.includes("@")) return name;
-  return name
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .split(/[\s._]+/)
-    .filter(Boolean)
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-// "First Last" for a person. A single-word username ("Pravallikapunumalli")
-// has no boundary to split on, so when the work email is known its local part
-// ("pravallika.punumalli") supplies the first/last split instead.
-function personDisplayName(name, email) {
-  const n = splitConcatenatedName(name);
-  const local = typeof email === "string" && email.includes("@") ? email.split("@")[0] : "";
-  if (local && (!n || n.includes("@") || !n.includes(" "))) {
-    const fromEmail = splitConcatenatedName(local);
-    if (fromEmail.includes(" ")) return fromEmail;
-  }
-  return n || email || null;
-}
+// Person names: one formatter for every table, drawer and dialog — see
+// ./personName.js ("SruthiChimata" / "sruthi.chimata" / DOMAIN\user -> "Sruthi Chimata").
 function UserCell({ row }) {
-  const name = splitConcatenatedName(row?.employee_name || row?.user || null);
+  const name = formatRowPerson(row?.employee_name || row?.user || null, row?.email || row?.user, row?.hostname);
   const host = row?.hostname || null;
   // Name only — the hostname is a fallback for rows with no resolved user, not
   // a second line under every name.
@@ -941,7 +917,7 @@ function ContentDrawer({ eventId, meta, onClose }) {
             <div className="aihub_drawer_title">{title}</div>
             {/* The person leads the line: the first question about a flagged
                 prompt is whose it was, and the drawer is where an admin lands. */}
-            <div className="aihub_drawer_sub">{[meta?.user||meta?.hostname,service,meta?.event_kind,meta?.occurred_at&&absTime(meta.occurred_at)].filter(Boolean).join(" · ")}</div>
+            <div className="aihub_drawer_sub">{[formatPersonName(meta?.user, meta?.email)||meta?.hostname,service,meta?.event_kind,meta?.occurred_at&&absTime(meta.occurred_at)].filter(Boolean).join(" · ")}</div>
             <div style={{display:"flex",gap:6,marginTop:8,flexWrap:"wrap"}}>
               {meta?.source && <Badge text={(meta.source||"").replace(/_/g," ")}/>}
               {sev && <SeverityBadge sev={sev}/>}
@@ -1475,7 +1451,7 @@ function MachinesView() {
     <SectionHeader title="Enrolled Systems" hint={`${filtered.length} of ${rows.length} systems`} action={<div className="aihub_search_box"><Search size={14}/><input placeholder="Search hostname, user, OS..." value={q} onChange={e=>setQ(e.target.value)}/></div>}/>
     <div className="aihub_card">
       <DataTable columns={[
-        {label:"System",hint:"The enrolled endpoint's hostname and the OS user account observed on it.",render:r=><><div className="aihub_text_primary">{r.hostname||r.id?.slice(0,12)}</div><div className="aihub_text_muted">{splitConcatenatedName(r.user)}</div></>},
+        {label:"System",hint:"The enrolled endpoint's hostname and the OS user account observed on it.",render:r=><><div className="aihub_text_primary">{r.hostname||r.id?.slice(0,12)}</div><div className="aihub_text_muted">{formatPersonName(r.user)}</div></>},
         {label:"Platform",hint:"Operating system the endpoint agent runs on.",render:r=><Badge text={platLabel[r.platform]||slugLabel(r.platform)} color={platTone[r.platform]||"#6b7280"}/>},
         {label:"Findings",hint:"Total scan detections logged on this machine — every piece of evidence the endpoint scanner recorded, not deduplicated by tool.",key:"findings_count",right:true},
         {label:"Tools",hint:"Distinct AI tools detected on this machine, counted once each no matter how many findings they produced.",key:"unique_tools",right:true},
@@ -1550,9 +1526,13 @@ function AgentsView() {
   const UNKNOWN_USER="Unknown";
   const machineById=new Map((Array.isArray(machines)?machines:[]).map(m=>[m.id,m]));
   const userKey=r=>{const m=machineById.get(r.machine_id); return m?.user||m?.hostname||UNKNOWN_USER;};
+  // A filter key is a person only when it came from a machine's user — a hostname
+  // fallback is shown exactly as enrolled.
+  const machineUsers=new Set([...machineById.values()].map(m=>m?.user).filter(Boolean));
+  const userKeyLabel=u=>machineUsers.has(u)?formatPersonName(u):u;
   const renderUser=r=>{
     const m=machineById.get(r.machine_id);
-    const label=splitConcatenatedName(m?.user)||m?.hostname;
+    const label=formatPersonName(m?.user)||m?.hostname;
     if(label) return <div className="aihub_text_primary">{label}</div>;
     // Unresolved: name the bucket, then the raw id so the row is still traceable.
     return <><div className="aihub_text_muted">{UNKNOWN_USER}</div><Mono>{(r.machine_id||"").slice(0,10)||"—"}</Mono></>;
@@ -1580,7 +1560,7 @@ function AgentsView() {
       action={<div style={{display:"flex",gap:10,alignItems:"center"}}>
         <select value={filterUser} onChange={ev=>setFilterUser(ev.target.value)} aria-label="Filter by user" style={{padding:"6px 10px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:14.7,fontWeight:600}}>
           <option value="">All Users</option>
-          {userOptions.map(u=><option key={u} value={u}>{splitConcatenatedName(u)}</option>)}
+          {userOptions.map(u=><option key={u} value={u}>{userKeyLabel(u)}</option>)}
         </select>
         {filterSection&&<button className="aihub_filter_btn" onClick={()=>setFilterSection("")}>Clear selection</button>}
       </div>}/>
@@ -1605,7 +1585,7 @@ function AgentsView() {
         {label:"Scopes",hint:"The kind of access this MCP server provides (e.g. filesystem, database, source control), inferred by the endpoint scanner from its known server type — not a live, verified permission grant.",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.payload?.scopes||[]).map((s,i)=><Tag key={i} text={slugLabel(s)}/>)}</div>},
         {label:"Command",hint:"The literal shell command (and arguments) the client uses to launch this MCP server process.",render:r=><Mono>{[r.payload?.command,...(r.payload?.args||[])].filter(Boolean).join(" ").slice(0,60)}</Mono>},
         {label:"Config File",hint:"Path to the config file where this MCP server is registered for the client.",render:r=>r.payload?.configPath?<Mono title={r.payload.configPath}>{r.payload.configPath}</Mono>:<span className="aihub_text_muted">—</span>},
-      ]} rows={mcpRows} empty={filterUser?`No MCP servers for ${splitConcatenatedName(filterUser)}`:"No MCP servers found"}/>
+      ]} rows={mcpRows} empty={filterUser?`No MCP servers for ${userKeyLabel(filterUser)}`:"No MCP servers found"}/>
     </div>}
 
     {/* Agent project categories */}
@@ -1618,7 +1598,7 @@ function AgentsView() {
           {label:"Language",hint:"The project's primary programming language, as detected by the scanner.",render:r=>languageLabel(r.payload?.language)||"—"},
           {label:"Frameworks",hint:"Agent or AI frameworks/libraries the scanner found referenced in this project.",render:r=><div style={{display:"flex",flexWrap:"wrap",gap:2}}>{(r.payload?.frameworks||[]).map((f,i)=><Tag key={i} text={f} color={cfg.color}/>)}</div>},
           {label:"Modified",hint:"When the scanner last saw this project's files change.",render:r=>relTime(r.payload?.lastModified)},
-        ]} rows={catRows(cat)} empty={filterUser?`No ${cfg.title.toLowerCase()} for ${splitConcatenatedName(filterUser)}`:`No ${cfg.title.toLowerCase()} found`}/>
+        ]} rows={catRows(cat)} empty={filterUser?`No ${cfg.title.toLowerCase()} for ${userKeyLabel(filterUser)}`:`No ${cfg.title.toLowerCase()} found`}/>
       </div>
     ))}
 
@@ -1655,7 +1635,7 @@ function ServerAgentsView() {
       <StatCard icon={<Server size={18}/>} label="Distinct Systems" value={summary.totals.distinct_machines||0} color="#f59e0b"/>
     </div>
     <div className="aihub_two_col">
-      <div className="aihub_card"><SectionHeader title="Cost by User"/><DataTable columns={[{label:"User",hint:"The OS user account whose processes made these LLM API calls.",render:r=>splitConcatenatedName(r.user)},{label:"Calls",hint:"Number of LLM API calls this row accounts for.",key:"calls",right:true},{label:"Cost",hint:"Total spend for these calls, at the provider's list price.",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byUser||[]}/></div>
+      <div className="aihub_card"><SectionHeader title="Cost by User"/><DataTable columns={[{label:"User",hint:"The OS user account whose processes made these LLM API calls.",render:r=>formatPersonName(r.user)},{label:"Calls",hint:"Number of LLM API calls this row accounts for.",key:"calls",right:true},{label:"Cost",hint:"Total spend for these calls, at the provider's list price.",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byUser||[]}/></div>
       <div className="aihub_card"><SectionHeader title="Cost by Model"/><DataTable columns={[{label:"Model",hint:"The specific LLM model called (e.g. gpt-4o, claude-sonnet-5).",render:r=><Mono>{r.model}</Mono>},{label:"Calls",hint:"Number of LLM API calls this row accounts for.",key:"calls",right:true},{label:"Cost",hint:"Total spend for these calls, at the provider's list price.",render:r=>fmtUsd(r.cost),right:true}]} rows={summary.byModel||[]}/></div>
     </div>
     <div className="aihub_two_col">
@@ -1666,7 +1646,7 @@ function ServerAgentsView() {
       <SectionHeader title="Recent Calls"/>
       <DataTable columns={[
         {label:"When",hint:"When this API call was intercepted by the server monitor.",render:r=>relTime(r.occurred_at)},
-        {label:"User",hint:"The OS user account whose process made this call.",render:r=>splitConcatenatedName(r.user)||"—"},
+        {label:"User",hint:"The OS user account whose process made this call.",render:r=>formatPersonName(r.user)||"—"},
         {label:"Trigger",hint:"How the process that made this call was started — an interactive shell, a scheduled cron job, a systemd service, an SSH session, CI pipeline, a container, or a login shell.",render:r=><Badge text={slugLabel(r.trigger)} color={triggerTone[r.trigger]||"#9ca3af"}/>},
         {label:"Agent",hint:"The command line of the process that made this call, truncated.",render:r=><Mono>{(r.cmdline||"").slice(0,60)}</Mono>},
         {label:"Provider",hint:"The LLM API vendor this call was made to (e.g. OpenAI, Anthropic, Google, Azure OpenAI, AWS Bedrock).",render:r=><Badge text={slugLabel(r.provider)} color={providerTone[r.provider]||"#9ca3af"}/>},
@@ -3068,7 +3048,7 @@ function SessionListView({ onOpen, machines }) {
       <SectionHeader title="Sessions" hint={`${filtered.length} of ${rows.length} sessions`}/>
       <DataTable onRow={r=>onOpen(r)} columns={[
         {label:"When",render:r=>relTime(r.last_activity_at||r.started_at)},
-        {label:"System / User",render:r=><div className="aihub_text_primary">{splitConcatenatedName(machines?.[r.machine_id]?.user)||machineLabel(machines,r.machine_id)}</div>},
+        {label:"System / User",render:r=><div className="aihub_text_primary">{formatPersonName(machines?.[r.machine_id]?.user)||machineLabel(machines,r.machine_id)}</div>},
         {label:"AI Service",render:r=><Badge text={r.ai_service||"Unknown"} color="#0052e0"/>},
         {label:"Messages",render:r=>r.message_count??0,right:true},
         {label:"Highest Severity",render:r=>{const s=sessionSeverity(r);return s?<SeverityBadge sev={s}/>:<span className="aihub_text_muted">—</span>;}},
@@ -3875,11 +3855,10 @@ function RiskScoreView() {
           columns={[
             {label:"Employee",hint:"The employee this risk score belongs to.",render:r=><div style={{display:"flex",alignItems:"center",gap:8}}>
               <ChevronRight size={13} style={{color:"#9ca3af",flexShrink:0,transition:"transform .15s",transform:selected===r.id?"rotate(90deg)":"none"}}/>
-              <div className="aihub_text_primary">{personDisplayName(r.detected_name||r.display_name, r.email)||r.hostname||"—"}</div>
+              <div className="aihub_text_primary">{formatPersonName(r.detected_name||r.display_name, r.email)||r.hostname||"—"}</div>
             </div>},
             {label:"Score",hint:"A 0–100 score built from DLP violations, overridden blocks, shadow AI tool use, data sensitivity, and usage-volume anomalies. Low 0–30, Medium 31–60, High/Critical 61–100.",render:r=><RiskLevelBadge level={r.risk_level} score={r.risk_score}/>},
             {label:"",render:r=><div style={{minWidth:120}}><ScoreBar score={r.risk_score}/></div>},
-            {label:"Sources",hint:"Which data feeds contributed to this employee's score — DLP events, tool usage, violation history.",render:r=><div style={{display:"flex",gap:3,flexWrap:"wrap"}}>{(r.sources||[]).map(s=><Tag key={s} text={slugLabel(s)}/>)}</div>},
             {label:"Computed",hintAlign:"right",hint:"When this score was last calculated. Scores recalculate automatically every 15 minutes; click 'Compute Scores' above to refresh now.",render:r=>relTime(r.risk_computed_at)},
           ]}
           rows={realScores}
@@ -5249,7 +5228,7 @@ function AIRegistryView() {
           // Endpoint-discovered tools (ChatGPT, Claude...) never do, so the
           // column is dead weight in the "AI Tools" filtered view.
           ...(filterType!=="tool"?[{label:"Owner",width:"17%",hint:"The person who registered this app in your identity provider (e.g. Azure AD). Endpoint-discovered tools like ChatGPT or Claude aren’t registered apps, so they show — here — that’s expected, not missing data.",render:r=><div style={{whiteSpace:"nowrap"}}>
-            <div style={{fontSize:14.7}}>{splitConcatenatedName(r.owner)||"—"}</div>
+            <div style={{fontSize:14.7}}>{formatPersonName(r.owner)||"—"}</div>
             {r.is_orphaned&&<span style={{fontSize:13,color:"#ef4444",fontWeight:600}}>⚠ Orphaned</span>}
           </div>}]:[]),
           {label:"Events",width:filterType==="tool"?"20%":"17%",hint:"Total DLP events captured for this tool across every prompt, file upload and enforcement action (block, redaction or override) — a lifetime running count, not a per-session one.",render:r=><div style={{textAlign:"right",whiteSpace:"nowrap"}}>
@@ -5618,7 +5597,7 @@ function RegistryRowDetail({ row, onStatus, pending, children }) {
     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:8,marginBottom:14,fontSize:14.7}}>
       {cell("Category",categoryLabel(row.category))}
       {cell("Lifecycle",capitalizeWord(row.lifecycle))}
-      {cell("Owner",splitConcatenatedName(row.owner))}
+      {cell("Owner",formatPersonName(row.owner))}
       {cell("Owner Email",row.owner_email)}
       {cell("Model",row.model)}
       {cell("Source",row.source_detail||row.source)}
@@ -5910,7 +5889,7 @@ function AccessRequestsView() {
                 {/* Requester only — the device name read as a second copy of the
                     user's name (hostnames are usually the user's name). */}
                 <div className="aihub_text_muted" style={{marginBottom:6}}>
-                  Requested by <strong>{splitConcatenatedName(r.employee_name)}</strong>
+                  Requested by <strong>{formatRowPerson(r.employee_name, r.email || r.user, r.hostname)}</strong>
                   {" · "}{relTime(r.submitted_at)}
                 </div>
                 {r.reason&&<div style={{fontSize:15.2,color:"#374151",background:"#f5f6f8",padding:"8px 12px",borderRadius:8,marginBottom:8}}>"{r.reason}"</div>}
@@ -6786,7 +6765,7 @@ function ClaudeUsageView() {
           // presenting it as the person's address attributes one colleague's usage
           // to another. Machine and OS user are what the tracker actually observes,
           // so those are what is shown. The field is untouched in the API.
-          {label:"User",render:r=><div className="aihub_text_primary">{splitConcatenatedName(r.user)||r.label}</div>},
+          {label:"User",render:r=><div className="aihub_text_primary">{formatPersonName(r.user, r.email)||formatRowPerson(r.label, null, r.hostname)}</div>},
           {label:"Desktop",render:r=>(r.by_surface?.["Claude Desktop"]||0),right:true},
           {label:"Browser",render:r=>(r.by_surface?.["Claude (browser)"]||0),right:true},
           // Reads the new key first, the pre-rename one second. The API emits both
@@ -6850,7 +6829,7 @@ function ClaudeUsageView() {
             count, and the table below carries the per-user tokens. */}
         <SectionHeader title={`${selected.surface} — usage by user`}/>
         <DataTable columns={[
-          {label:"User",render:r=><><div className="aihub_text_primary">{r.label||splitConcatenatedName(r.user)||r.hostname||"—"}</div>{!r.attributed&&<div className="aihub_text_muted">unattributed</div>}</>},
+          {label:"User",render:r=><><div className="aihub_text_primary">{formatPersonName(r.user, r.email)||formatRowPerson(r.label, null, r.hostname)||r.hostname||"—"}</div>{!r.attributed&&<div className="aihub_text_muted">unattributed</div>}</>},
           // Per-person client mix, so "the team uses the extension" can be checked
           // against who actually does. Rendered as "VS Code 41 · Terminal 12"
           // rather than one winner, because people genuinely split across both.
@@ -6927,7 +6906,7 @@ function AIUsageView() {
               columns={[
                 // breakdown rows carry label / user / hostname — `identity` is not
                 // one of them. Prefer the human label the server already resolved.
-                { label: "User", render: r => <span style={{ fontSize:14.7 }}>{r.label || splitConcatenatedName(r.user) || r.hostname || "Unknown"}</span> },
+                { label: "User", render: r => <span style={{ fontSize:14.7 }}>{formatPersonName(r.user, r.email) || formatRowPerson(r.label, null, r.hostname) || r.hostname || "Unknown"}</span> },
                 { label: "Prompts", key: "prompts", right: true },
                 { label: "Est. Tokens", render: r => fmtTokens(r.est_total_tokens), right: true },
                 { label: "Est. Cost", render: r => fmtUsd(r.est_cost_usd), right: true },
@@ -7544,7 +7523,7 @@ function PolicyPacksView() {
                 ? <span style={{fontSize:14.1,color:"#16a34a"}}>patterns seen</span>
                 : <span style={{fontSize:14.1,color:"#b45309"}}>no events yet</span>;
               return r.attestation
-                ? <span style={{fontSize:14.1,color:"#16a34a"}}>attested — {r.attestation.owner}</span>
+                ? <span style={{fontSize:14.1,color:"#16a34a"}}>attested — {formatPersonName(r.attestation.owner)}</span>
                 : <span style={{fontSize:14.1,color:"#b45309"}}>outstanding</span>;
             }},
             {label:"",render:r=>{
@@ -7700,7 +7679,7 @@ function PackSimulation({ pack, onClose }) {
       <div style={{...SIM_PANEL,marginBottom:14}}>
         <SectionHeader title="Highest Impact People" hint={result.productivity.summary}/>
         <DataTable columns={[
-          {label:"Person",render:r=><><div className="aihub_text_primary">{splitConcatenatedName(r.user)}</div>{!r.attributed&&<div className="aihub_text_muted">unattributed install, not a confirmed person</div>}</>},
+          {label:"Person",render:r=><><div className="aihub_text_primary">{formatPersonName(r.user)}</div>{!r.attributed&&<div className="aihub_text_muted">unattributed install, not a confirmed person</div>}</>},
           {label:"Would Block",key:"blocks",right:true},
           {label:"Per Day",key:"per_day",right:true},
         ]} rows={result.top_users} empty="Nobody would be affected."/>
@@ -7811,7 +7790,7 @@ function EuAiActView() {
     {mode==="portfolio" && <div className="aihub_card">
       <SectionHeader title="Assessed AI Systems"/>
       <DataTable columns={[
-        {label:"System",hint:"The AI system that was classified, and which compliance officer assessed it.",render:r=><><div className="aihub_text_primary">{r.system_name}</div><div className="aihub_text_muted">{splitConcatenatedName(r.assessed_by)}</div></>},
+        {label:"System",hint:"The AI system that was classified, and which compliance officer assessed it.",render:r=><><div className="aihub_text_primary">{r.system_name}</div><div className="aihub_text_muted">{formatPersonName(r.assessed_by)}</div></>},
         {label:"Risk Tier",hint:"The EU AI Act's four risk classes: Prohibited, High, Limited, or Minimal. Prohibited systems must not be deployed; High carries the Act's full obligations.",render:r=><Badge text={capitalizeWord(r.final_tier)} color={TIER_COLOR[r.final_tier]||"#6b7280"}/>},
         {label:"Basis",hint:"Why this tier was assigned — the questionnaire's triggered citations, or the tier the wizard proposed if the officer overrode it.",render:r=>r.overridden
           ? <span style={{fontSize:14.1,color:"#b45309"}}>overridden from {r.proposed_tier}</span>
@@ -8868,7 +8847,7 @@ function FeatureSettingsView() {
           <div className="aihub_text_primary" style={{ fontWeight: 600, marginBottom: 8 }}>Recent changes</div>
           {audit.map((row, i) => (
             <div key={i} className="aihub_text_muted" style={{ fontSize: 13.9, padding: "3px 0" }}>
-              {new Date(row.at).toLocaleString()} — {row.actor} —{" "}
+              {new Date(row.at).toLocaleString()} — {formatPersonName(row.actor)} —{" "}
               {row.changes.map((c) => `${c.key}: ${c.from} → ${c.to}`).join(", ")}
             </div>
           ))}

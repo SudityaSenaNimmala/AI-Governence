@@ -2,6 +2,7 @@ import React, { useContext } from "react";
 import TopNav from "../../Resuables/Nav/TopNav";
 import SideNav from "../../Resuables/Nav/SideNav";
 import { GlobalContext } from "../../../GlobalContext/GlobalContext";
+import { formatPersonName } from "../AIHub/personName";
 
 const MyAccount = () => {
   const { globalContext, dispatch } = useContext(GlobalContext);
@@ -46,7 +47,7 @@ const MyAccount = () => {
                       className="cf_jobOptions_Options_Div_Key"
                       style={{ fontWeight: "400" }}
                     >
-                      {globalContext?.user?.name}
+                      {formatPersonName(globalContext?.user?.name, globalContext?.user?.email)}
                     </div>
                   </div>
                   <div

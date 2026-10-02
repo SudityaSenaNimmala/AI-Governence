@@ -11,6 +11,7 @@ import { UserActivityTab } from "./tabs/UserActivityTab";
 import { AlertsTab } from "./tabs/AlertsTab";
 import { CostTab } from "./tabs/CostTab";
 import { ShieldCheck, RefreshCw, LogOut, Plus, Radar, Shield, Settings2, Activity, ChevronDown, Cloud, Bell, DollarSign } from "lucide-react";
+import { formatPersonName } from "../AIHub/personName";
 import "./css/AgentGovernance.css";
 
 // Band mid-points for PLATFORM BASELINES — see common/riskScale.js.
@@ -169,7 +170,7 @@ function convertGoogleResultToAgents(googleResult) {
     agents.push({
       id: `gem-${gem.id}`,
       name: gem.name,
-      description: `Custom Gemini Gem created by ${gem.owner?.displayName || gem.owner?.email}${gem.shared ? ` · Shared with ${gem.sharedWith?.length || 0} user${(gem.sharedWith?.length || 0) !== 1 ? "s" : ""}` : " · Private"}`,
+      description: `Custom Gemini Gem created by ${formatPersonName(gem.owner?.displayName, gem.owner?.email) || gem.owner?.email}${gem.shared ? ` · Shared with ${gem.sharedWith?.length || 0} user${(gem.sharedWith?.length || 0) !== 1 ? "s" : ""}` : " · Private"}`,
       vendor: "Google",
       category: "generative-ai",
       platform: "gemini_gems",

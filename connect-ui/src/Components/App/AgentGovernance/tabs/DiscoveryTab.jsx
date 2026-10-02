@@ -13,6 +13,7 @@ import { StatCard } from "../common/StatCard";
 import { Badge, riskColor, riskLabel, statusColor, statusLabel } from "../common/Badge";
 import { LoadingSpinner } from "../common/LoadingSpinner";
 import { AgentMetadataPanel } from "../common/AgentMetadataPanel";
+import { formatPersonName } from "../../AIHub/personName";
 
 // ── Azure AI colors ──
 
@@ -565,7 +566,7 @@ function AgentOverviewTab({ agent, platColor }) {
         {agent.llmModel && <div><span style={{ color: "#999" }}>Model:</span> <span style={{ fontWeight: 600, color: "#6366f1" }}>{agent.llmModel}</span></div>}
         {agent.firstSeen && <div><span style={{ color: "#999" }}>Created:</span> {new Date(agent.firstSeen).toLocaleDateString()}</div>}
         {agent.lastModified && <div><span style={{ color: "#999" }}>Updated:</span> {new Date(agent.lastModified).toLocaleDateString()}</div>}
-        {agent.owner && <div><span style={{ color: "#999" }}>Owner:</span> {agent.owner.displayName}</div>}
+        {agent.owner && <div><span style={{ color: "#999" }}>Owner:</span> {formatPersonName(agent.owner.displayName, agent.owner.userPrincipalName)}</div>}
         {isOpenAI && agent.appId && <div style={{ gridColumn: "1/-1" }}><span style={{ color: "#999" }}>ID:</span> <span style={{ fontFamily: "monospace", fontSize: 11 }}>{agent.appId}</span></div>}
       </div>
 
@@ -578,7 +579,7 @@ function AgentOverviewTab({ agent, platColor }) {
                 <div style={{ width: 18, height: 18, borderRadius: "50%", background: platColor + "25", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: platColor }}>
                   {(u.displayName || u.userPrincipalName || "?")[0].toUpperCase()}
                 </div>
-                {u.displayName || u.userPrincipalName}
+                {formatPersonName(u.displayName, u.userPrincipalName) || u.userPrincipalName}
               </span>
             ))}
             {users.length > 10 && <span style={{ fontSize: 11, color: "#999", padding: "4px 10px" }}>+{users.length - 10} more</span>}
@@ -1069,7 +1070,7 @@ function GoogleWorkspaceAgentView() {
                           }}>
                             {(u.displayName || "?")[0].toUpperCase()}
                           </div>
-                          <span style={{ fontWeight: 600, color: "#111" }}>{u.displayName || u.userPrincipalName}</span>
+                          <span style={{ fontWeight: 600, color: "#111" }}>{formatPersonName(u.displayName, u.userPrincipalName) || u.userPrincipalName}</span>
                         </div>
                       </td>
                       <td style={{ padding: "9px 12px", color: "#666" }}>{u.userPrincipalName}</td>
@@ -1574,7 +1575,7 @@ function AgentTableView() {
                   </td>
                   <td style={{ padding: "10px" }}><Badge text={riskLabel(a.risk)} color={riskColor[a.risk?.level] || riskColor.not_assessed} /></td>
                   <td style={{ padding: "10px" }}><Badge text={statusLabel[a.lifecycleStatus] || a.lifecycleStatus} color={statusColor[a.lifecycleStatus] || "#6b7280"} /></td>
-                  <td style={{ padding: "10px", fontSize: 11, color: "#999" }}>{a.owner ? <span style={{ color: a.owner.accountEnabled ? "#333" : "#ef4444" }}>{a.owner.displayName}</span> : "—"}</td>
+                  <td style={{ padding: "10px", fontSize: 11, color: "#999" }}>{a.owner ? <span style={{ color: a.owner.accountEnabled ? "#333" : "#ef4444" }}>{formatPersonName(a.owner.displayName, a.owner.userPrincipalName)}</span> : "—"}</td>
                   <td style={{ padding: "10px" }}>
                     <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 4, background: sourceStyle[a.discoverySource]?.bg || "#f0f0f0", color: sourceStyle[a.discoverySource]?.color || "#999" }}>{a.discoverySource}</span>
                   </td>
@@ -2244,7 +2245,7 @@ function GoogleVertexView() {
                           </div>
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ fontSize: 12, fontWeight: 600, color: "#111", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                              {u.displayName || u.email.split("@")[0]}
+                              {formatPersonName(u.displayName, u.email) || u.email.split("@")[0]}
                             </div>
                             <div style={{ fontSize: 10, color: "#888", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                               {u.email}

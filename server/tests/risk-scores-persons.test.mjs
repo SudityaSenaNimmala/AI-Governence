@@ -445,3 +445,29 @@ test('a failing scheduled pass never throws', async () => {
     assert.match(r.error, /db down/);
   } finally { console.error = realErr; }
 });
+
+// ── Email for a run-together username ─────────────────────────────────────
+// "Pravallikapunumalli" has no boundary to split on; the work email reported by
+// another of the fleet's machines (a Claude Code session) supplies one.
+test('a run-together username picks up the matching work email seen elsewhere in the fleet', async () => {
+  const db = await seedDb(async (db) => {
+    await db.collection('machines').insertMany([
+      { id: 'm-ext', user: 'Pravallikapunumalli', hostname: 'Pravallika-browser-extension' },
+      { id: 'clicode:Pravallika.Punumalli@cloudfuze.com', user: 'Pravallika.Punumalli@cloudfuze.com', hostname: 'Claude Code CLI' },
+      { id: 'clicode:a@x.com', user: 'ab.c@x.com', hostname: 'Claude Code CLI' },
+      { id: 'clicode:b@x.com', user: 'a.bc@y.com', hostname: 'Claude Code CLI' },
+      { id: 'm-abc', user: 'Abc', hostname: 'abc-browser-extension' },
+    ]);
+    await db.collection('employee_profiles').insertMany([
+      { id: 'p-prav', display_name: 'Pravallikapunumalli', resolve_key: 'ext:m-ext', machine_ids: ['m-ext'], risk_score: 49, risk_level: 'medium' },
+      { id: 'p-abc', display_name: 'Abc', resolve_key: 'ext:m-abc', machine_ids: ['m-abc'], risk_score: 10, risk_level: 'low' },
+    ]);
+  });
+  await withServer(db, async ({ get }) => {
+    const rows = await get('/api/v1/risk-scores');
+    const prav = rows.find((r) => r.id === 'p-prav');
+    assert.equal(prav.email, 'pravallika.punumalli@cloudfuze.com');
+    // Two different emails compact to "abc" → ambiguous, so none is guessed.
+    assert.equal(rows.find((r) => r.id === 'p-abc').email, null);
+  });
+});
