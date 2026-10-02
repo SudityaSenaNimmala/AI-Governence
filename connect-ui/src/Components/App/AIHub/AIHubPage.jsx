@@ -834,22 +834,33 @@ function LineChart({ points, min, max, color="#0052e0", dotColor, height=180, un
   };
   const hp=hover!=null?points[hover]:null;
   return (<div style={{position:"relative"}}>
+    {/* The SVG stretches to the card's width (preserveAspectRatio="none"), which
+        squashes anything drawn inside it — circles became ovals and labels went
+        wide. So the SVG draws only the line and grid (non-scaling strokes), and
+        the dots and axis labels are HTML laid over it at the same percentage
+        positions: always perfectly round and crisp at any card width. */}
     <svg ref={svgRef} width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img"
       aria-label={points.map(p=>`${p.label}: ${p.value}`).join(", ")}
-      style={{overflow:"visible"}}
+      style={{overflow:"visible",display:"block"}}
       onMouseMove={onMove} onMouseLeave={()=>setHover(null)}>
-      {[0,0.25,0.5,0.75,1].map(t=><line key={t} x1={padL} x2={w-padR} y1={padT+t*(h-padT-padB)} y2={padT+t*(h-padT-padB)} stroke="var(--ah-border-light)"/>)}
-      {n>0 && <path d={path} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round"/>}
-      {hover!=null && <line x1={x(hover)} x2={x(hover)} y1={padT} y2={h-padB} stroke="var(--ah-text-faint)" strokeWidth="1" strokeDasharray="3 3"/>}
-      {points.map((p,i)=>(<g key={i}>
-        <circle cx={x(i)} cy={y(p.value)} r={hover===i?4:2.5} fill={dotColor?dotColor(p):color}/>
-        {/* Always centered on the point (textAnchor="middle") so the label sits
-            exactly below its own dot, even at the first/last point — the SVG's
-            overflow:visible above is what lets that centered text bleed past
-            the viewBox edge instead of being clipped. */}
-        {(i%labelEvery===0||i===n-1)&&<text x={x(i)} y={h-6} textAnchor="middle" fontSize="9" fontWeight="600" fill="#1a1a1a">{p.label}</text>}
-      </g>))}
+      {[0,0.25,0.5,0.75,1].map(t=><line key={t} x1={padL} x2={w-padR} y1={padT+t*(h-padT-padB)} y2={padT+t*(h-padT-padB)} stroke="var(--ah-border-light)" vectorEffect="non-scaling-stroke"/>)}
+      {n>0 && <path d={path} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke"/>}
+      {hover!=null && <line x1={x(hover)} x2={x(hover)} y1={padT} y2={h-padB} stroke="var(--ah-text-faint)" strokeWidth="1" strokeDasharray="3 3" vectorEffect="non-scaling-stroke"/>}
     </svg>
+    {points.map((p,i)=>{
+      const size=hover===i?9:6;
+      return <div key={`d${i}`} aria-hidden="true" style={{
+        position:"absolute",left:`${(x(i)/w)*100}%`,top:`${(y(p.value)/h)*100}%`,
+        width:size,height:size,borderRadius:"50%",transform:"translate(-50%,-50%)",
+        background:dotColor?dotColor(p):color,boxShadow:"0 0 0 1.5px var(--ah-surface, #fff)",
+        pointerEvents:"none",
+      }}/>;
+    })}
+    {/* Centered under its own dot, even at the first/last point. */}
+    {points.map((p,i)=>(i%labelEvery===0||i===n-1)&&<div key={`l${i}`} aria-hidden="true" style={{
+      position:"absolute",left:`${(x(i)/w)*100}%`,top:h-padB+6,transform:"translateX(-50%)",
+      fontSize:11,fontWeight:600,color:"#1a1a1a",whiteSpace:"nowrap",pointerEvents:"none",
+    }}>{p.label}</div>)}
     {hp&&<div style={{
         position:"absolute",left:`${(x(hover)/w)*100}%`,top:`${(y(hp.value)/h)*100}%`,
         // Centering on the point (-50%) clips off the container's edge for the
