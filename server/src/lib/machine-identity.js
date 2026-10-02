@@ -1,3 +1,6 @@
+import { isDemoIdentity } from './demo-personas.js';
+import { EMAIL_SHAPE, knownEmailsByKey, emailForUsername } from './known-emails.js';
+
 // Batch-join the enrolled person onto rows that only carry a machine_id.
 //
 // DLP events, findings, agents, etc. are keyed by machine_id (a device hash),
@@ -14,13 +17,22 @@
 // hint); the curated profile name, built from the person's email when one is
 // on file, is the reliable source for "Pravallika Punumalli" instead.
 
+//
+// DEMO PERSONAS NEVER NAME A ROW. Old demo relabelling left real machines and
+// profiles carrying "Emily Rodriguez" / "EmilyRodriguez" etc. while the events
+// themselves are stamped with the real OS user (e.g. "Pravallikapunumalli"), so
+// a demo name — from the machine record or the profile — is never attached.
+//
+// EMAIL. Each row also gets `email` (when it has none) from the work emails the
+// fleet has reported, matched to its user (lib/known-emails.js), so the UI can
+// split a run-together username into "First Last".
 export async function attachMachineIdentity(db, rows, idKey = 'machine_id') {
   if (!Array.isArray(rows) || rows.length === 0) return rows;
 
   const ids = [...new Set(rows.map((r) => r?.[idKey]).filter(Boolean))];
   if (ids.length === 0) return rows;
 
-  const [machines, profiles] = await Promise.all([
+  const [machines, profiles, emailMachines] = await Promise.all([
     db.collection('machines')
       .find({ id: { $in: ids } })
       .project({ _id: 0, id: 1, user: 1, hostname: 1 })
@@ -29,20 +41,32 @@ export async function attachMachineIdentity(db, rows, idKey = 'machine_id') {
       .find({ machine_ids: { $in: ids } })
       .project({ _id: 0, machine_ids: 1, display_name: 1 })
       .toArray(),
+    db.collection('machines')
+      .find({ user: /@/ })
+      .project({ _id: 0, id: 1, user: 1 })
+      .toArray(),
   ]);
   const machineMap = new Map(machines.map((m) => [m.id, m]));
   const nameMap = new Map();
   for (const p of profiles) {
-    if (!p.display_name) continue;
+    if (!p.display_name || isDemoIdentity(p.display_name)) continue;
     for (const mid of p.machine_ids || []) nameMap.set(mid, p.display_name);
   }
+  const emailsByKey = knownEmailsByKey(emailMachines);
 
   for (const r of rows) {
     const m = machineMap.get(r?.[idKey]);
-    if (r.user == null) r.user = m?.user ?? null;
+    if (r.user == null || isDemoIdentity(r.user)) {
+      const mu = m?.user && !isDemoIdentity(m.user) ? m.user : null;
+      if (r.user == null || mu) r.user = mu;
+    }
     if (r.hostname == null) r.hostname = m?.hostname ?? null;
     const name = nameMap.get(r?.[idKey]);
     if (name && r.employee_name == null) r.employee_name = name;
+    if (r.employee_name && isDemoIdentity(r.employee_name)) r.employee_name = null;
+    if (r.email == null && r.user) {
+      r.email = EMAIL_SHAPE.test(String(r.user)) ? String(r.user).toLowerCase() : (emailForUsername(emailsByKey, r.user) || null);
+    }
   }
   return rows;
 }

@@ -739,7 +739,7 @@ function DataTable({ columns, rows, empty, onRow, renderExpanded, isExpanded, pa
   }
 
   return (<div>
-    <div className="aihub_table_wrap"><table className="aihub_table"><thead><tr>{columns.map((c,i)=><th key={i} style={{...(c.right?{textAlign:"right"}:null),...(c.width?{width:c.width}:null)}}>{c.label}{c.hint&&<InfoHint text={c.hint} align={c.hintAlign||(c.right?"right":"left")}/>}</th>)}</tr></thead><tbody>{(!visibleRows.length)?<tr><td colSpan={columns.length} className="aihub_table_empty">{empty||"No data"}</td></tr>:visibleRows.map((r,i)=>{
+    <div className="aihub_table_wrap"><table className="aihub_table"><thead><tr>{columns.map((c,i)=><th key={i} style={{...(c.right?{textAlign:"right"}:null),...(c.width?{width:c.width}:null)}}>{c.label}{c.hint&&<InfoHint text={c.hint} align={c.hintAlign||((c.right||i>=Math.ceil(columns.length*2/3))?"right":"left")}/>}</th>)}</tr></thead><tbody>{(!visibleRows.length)?<tr><td colSpan={columns.length} className="aihub_table_empty">{empty||"No data"}</td></tr>:visibleRows.map((r,i)=>{
     const open=isExpanded?.(r);
     return (<Fragment key={rowKey(r,i)}>
       <tr onClick={()=>onRow?.(r)} style={{cursor:onRow?"pointer":"default",background:open?"rgba(0,82,224,0.04)":undefined}}>
@@ -1860,7 +1860,8 @@ function DLPView() {
         action={unscannedRows.length>0&&<button type="button" className={`aihub_filter_btn${showUnscanned?" active":""}`} aria-pressed={showUnscanned}
           title="Files the agent let through without a full scan (encrypted, too large, unsupported type, cloud file…). They carry no finding, so they are hidden by default."
           onClick={()=>setShowUnscanned(v=>!v)}>{showUnscanned?"Hide":"Show"} {unscannedRows.length} unscanned allowed file{unscannedRows.length===1?"":"s"}</button>}/>
-      <DataTable onRow={r=>{ if(fileHasContent(r)) setPreview(r); }} columns={[
+      {/* No row-click: the file opens only from the View button in the last column. */}
+      <DataTable columns={[
         {label:"Date & Time",hint:"When this file upload was captured.",render:r=><DateTimeCell d={r.occurred_at}/>},
         {label:"User",hint:"The employee this event is attributed to, resolved from the machine/session that captured it.",render:r=><UserCell row={r}/>},
         {label:"Service",hint:"Which AI service this upload was sent to, exactly as the capturing agent named it (e.g. Microsoft Teams (agent), Word Copilot).",render:r=>{
