@@ -8,6 +8,7 @@ import { agentGovernanceApi } from "../AgentGovernanceActions/AgentGovernanceAct
 import { LoadingSpinner } from "../common/LoadingSpinner";
 import { StatCard } from "../common/StatCard";
 import { Badge } from "../common/Badge";
+import { formatPersonName } from "../../AIHub/personName";
 
 const GE_COLOR = "#886FBF";
 
@@ -269,7 +270,7 @@ function ChatsView({ chats }) {
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ag-text-primary)" }}>{c.displayName}</div>
                   <div style={{ fontSize: 11, color: "var(--ag-text-secondary)", display: "flex", gap: 8, alignItems: "center" }}>
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}><Users size={11} /> {c.userName}</span>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}><Users size={11} /> {formatPersonName(c.userName)}</span>
                     <span>{c.turnCount} turn(s)</span>
                   </div>
                 </div>

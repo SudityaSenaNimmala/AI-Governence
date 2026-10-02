@@ -16,6 +16,8 @@
 import crypto from 'node:crypto';
 import { a } from '../util.js';
 import { isNonEndpointMachine } from '../lib/desktop-agent-presence.js';
+import { knownEmailsByKey, emailForUsername } from '../lib/known-emails.js';
+import { isDemoIdentity } from '../lib/demo-personas.js';
 
 export function mountIdentity(app, db) {
   const profiles = () => db.collection('employee_profiles');
@@ -127,7 +129,7 @@ export function mountIdentity(app, db) {
 
 export async function resolveProfiles(db, allMachines) {
   const profiles = db.collection('employee_profiles');
-  let created = 0, updated = 0, skipped = 0;
+  let created = 0, updated = 0, skipped = 0, emailed = 0;
 
   // STEP 1: Filter — only desktop agents and browser extensions count.
   // Desktop agent: has real hostname + user, and either a platform (scanner
@@ -317,7 +319,38 @@ export async function resolveProfiles(db, allMachines) {
     }
   }
 
-  return { created, updated, skipped, total_profiles: created + updated };
+  // STEP 4: Give every email-less profile the work email the fleet already
+  // knows for it. A desktop agent reports only the OS username
+  // ("Pravallikapunumalli"), but the same person's Claude Code session
+  // (clicode:…), usage tracker (clautrk:…) or signed-in extension reports
+  // "pravallika.punumalli@cloudfuze.com" on a DIFFERENT machine record. Matching
+  // the compacted local part to the compacted OS username links them, and with
+  // the email on the profile every consumer (Risk Scores, access requests, the
+  // UI's name formatter) can show "Pravallika Punumalli". Runs on every
+  // scheduler pass (lib/risk-score-scheduler.js), so it heals old profiles too.
+  // Ambiguous keys and demo personas are skipped — never a guess.
+  const emailsByKey = knownEmailsByKey(allMachines);
+  if (emailsByKey.size) {
+    const all = await profiles.find({}).project({ _id: 0 }).toArray();
+    for (const p of all) {
+      if (p.email) continue;
+      const username = p.os_user || null;
+      if (!username || isDemoIdentity(username) || isDemoIdentity(p.display_name)) continue;
+      const email = emailForUsername(emailsByKey, username);
+      if (!email) continue;
+      const updates = { email, updated_at: new Date() };
+      // Same unspaced-name repair as above: only a name that still has no space
+      // (never an admin-edited one) is rebuilt from the email's local part.
+      if (p.display_name && (!/\s/.test(p.display_name) || p.display_name.includes('@'))) {
+        const better = nameFromEmail(email);
+        if (better) updates.display_name = better;
+      }
+      await profiles.updateOne({ id: p.id }, { $set: updates });
+      emailed++;
+    }
+  }
+
+  return { created, updated, skipped, emailed, total_profiles: created + updated };
 }
 
 // "pravallika.punumalli@cloudfuze.com" → "Pravallika Punumalli". The reliable

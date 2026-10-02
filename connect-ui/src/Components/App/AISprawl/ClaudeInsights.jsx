@@ -17,6 +17,7 @@ import SideNav from "../../Resuables/Nav/SideNav";
 import TopNav from "../../Resuables/Nav/TopNav";
 import PiCharts from "../../Resuables/Charts/PiCharts";
 import UsageTrendAreaChart from "../../Resuables/Charts/UsageTrendAreaChart";
+import { formatPersonName } from "../AIHub/personName";
 
 const CLAUDE_REQUESTS_BY_MODEL = [
     { name: "claude-sonnet-4-6", y: 11 },
@@ -732,7 +733,7 @@ const ClaudeInsights = () => {
                                                         color: "#0f1729",
                                                     }}
                                                 >
-                                                    {u.name}
+                                                    {formatPersonName(u.name, u.email)}
                                                 </p>
                                                 <p style={{ fontSize: 11, color: "#64748b" }}>
                                                     {u.role}
@@ -770,7 +771,7 @@ const ClaudeInsights = () => {
                                                     color: "#0f1729",
                                                 }}
                                             >
-                                                {selectedUser.name}
+                                                {formatPersonName(selectedUser.name, selectedUser.email)}
                                             </p>
                                             <p style={{ fontSize: 12, color: "#64748b" }}>
                                                 {selectedUser.email}

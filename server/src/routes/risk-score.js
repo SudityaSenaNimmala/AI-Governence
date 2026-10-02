@@ -21,6 +21,7 @@ import { a } from '../util.js';
 import { fireWebhooks } from './webhooks.js';
 import { scoreToLevel } from '../lib/risk-scale.js';
 import { isDemoIdentity, isDemoMachine } from '../lib/demo-personas.js';
+import { compactKey, knownEmailsByKey } from '../lib/known-emails.js';
 import {
   RESPONSE_BUDGET_MS, raceWithFallback, applyBudgetHeaders, registerResponseWarmer, invalidateRoute,
 } from '../lib/response-budget.js';
@@ -374,17 +375,28 @@ async function loadPersonGroups(db) {
 //
 // ONE ROW PER PERSON. The row carries the highest-scoring member's id, so the
 // existing /:profileId detail route keeps working, plus merged_profile_ids.
+// Work emails the fleet has reported anywhere (any machine whose user is an
+// address: Claude Code sessions, trackers, signed-in extensions), keyed by the
+// local part with separators removed — "pravallika.punumalli@x" → key
+// "pravallikapunumalli". A person whose only identity is a run-together Windows
+// username ("Pravallikapunumalli") gets that email, which is what lets the UI
+// show "Pravallika Punumalli". Ambiguous keys (two different emails) are
+// dropped rather than guessed. Demo personas never count.
+// (Matcher shared with resolveProfiles — see lib/known-emails.js.)
 async function fetchScores(db) {
   const { groups, byId } = await loadPersonGroups(db);
+  const emailsByKey = knownEmailsByKey(byId);
   const rows = [];
   for (const g of groups) {
     const scored = g.members.filter(m => m.risk_score != null);
     if (!scored.length) continue;
     const top = topMember(scored);
+    const detected = detectedName([top, ...g.members.filter(m => m !== top)], byId);
+    const ownEmail = [top, ...g.members].map(m => m.email).find(e => e && !isDemoIdentity(e)) || null;
     rows.push({
       id: top.id,
       display_name: top.display_name,
-      email: top.email || g.members.find(m => m.email)?.email || null,
+      email: ownEmail || emailsByKey.get(compactKey(detected)) || null,
       hostname: top.hostname ?? null,
       department: top.department || g.members.find(m => m.department)?.department || null,
       risk_score: top.risk_score,
@@ -392,7 +404,7 @@ async function fetchScores(db) {
       risk_factors: top.risk_factors,
       risk_computed_at: top.risk_computed_at,
       sources: unionSources(g.members),
-      detected_name: detectedName([top, ...g.members.filter(m => m !== top)], byId),
+      detected_name: detected,
       person_key: g.person_key,
       merged_profile_ids: g.members.map(m => m.id),
       // Tagged identified or not using the SAME rule the summary applies, so

@@ -18,6 +18,7 @@ import { Section } from "../common/Section";
 import { Badge } from "../common/Badge";
 import { complianceToRisk, scoreToLevel } from "../common/riskScale";
 import { LoadingSpinner } from "../common/LoadingSpinner";
+import { formatPersonName } from "../../AIHub/personName";
 
 // ═══════════════════════════════════════════════════
 // Sensitive Data Scanner — detects PII, financial,
@@ -386,7 +387,7 @@ function ChatCard({ chat, isExpanded, onToggle }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2, flexWrap: "wrap" }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: "var(--ag-text-primary)" }}>
-              # {chat.userName}
+              # {formatPersonName(chat.userName)}
             </span>
             <span style={{ fontSize: 11, color: "var(--ag-text-secondary)" }}>&rarr;</span>
             <span style={{ fontSize: 12, fontWeight: 600, color: "#6366f1" }}>
@@ -463,7 +464,7 @@ function FileRow({ file }) {
         </div>
       </td>
       <td style={{ padding: "10px 8px" }}>
-        <div style={{ fontSize: 12, fontWeight: 500 }}>{file.userName}</div>
+        <div style={{ fontSize: 12, fontWeight: 500 }}>{formatPersonName(file.userName)}</div>
         <div style={{ fontSize: 10, color: "var(--ag-text-secondary)" }}>{file.userId}</div>
       </td>
       <td style={{ padding: "10px 8px" }}>
@@ -1621,7 +1622,7 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                                 <AlertTriangle size={10} /> Orphaned
                               </span>
                             ) : (
-                              <span>{agent.ownerName}</span>
+                              <span>{formatPersonName(agent.ownerName)}</span>
                             )}
                           </div>
                         </td>
@@ -1768,7 +1769,7 @@ function RiskManagementPanel({ oauthKeyId, dataverseEnvUrl, discoveredAgents = [
                                     {agent.connectors?.length > 0 && <div><strong>Connectors:</strong> {agent.connectors.map(c => c.name || c.type).join(", ")}</div>}
                                     {agent.deployedTo?.length > 0 && <div><strong>Deployed To:</strong> {agent.deployedTo.join(", ")}</div>}
                                     <div><strong>Renewal Due:</strong> {agent.renewalDate ? `${new Date(agent.renewalDate).toLocaleDateString()} (${agent.isExpiredRenewal ? "EXPIRED" : daysToRenewal !== null ? `${daysToRenewal} days left` : ""})` : "No review scheduled"}</div>
-                                    <div><strong>Owner:</strong> {agent.ownerName} {agent.isOrphaned ? "(DISABLED/ORPHANED)" : ""}</div>
+                                    <div><strong>Owner:</strong> {formatPersonName(agent.ownerName)} {agent.isOrphaned ? "(DISABLED/ORPHANED)" : ""}</div>
                                     {infoFactors.map((f, i) => (
                                       <div key={i} style={{ color: "#6366f1" }}>{f.description}</div>
                                     ))}
@@ -2666,7 +2667,7 @@ function GoogleConversationsPanel({ application }) {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ag-text-primary)" }}>{String(conv.agentName || "Unknown Agent")}</div>
                   <div style={{ fontSize: 11, color: "var(--ag-text-secondary)" }}>
-                    <User size={10} style={{ marginRight: 3 }} />{String(conv.userName || "Anonymous")}
+                    <User size={10} style={{ marginRight: 3 }} />{formatPersonName(String(conv.userName || "Anonymous"))}
                     <span style={{ margin: "0 6px", color: "#ddd" }}>|</span>
                     <Clock size={10} style={{ marginRight: 3 }} />{new Date(conv.startTime).toLocaleString()}
                     <span style={{ margin: "0 6px", color: "#ddd" }}>|</span>
@@ -3423,7 +3424,7 @@ export function UserActivityTab() {
                             <AlertTriangle size={14} color="#ef4444" />
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2, flexWrap: "wrap" }}>
-                                <span style={{ fontSize: 13, fontWeight: 600 }}>{chat.userName}</span>
+                                <span style={{ fontSize: 13, fontWeight: 600 }}>{formatPersonName(chat.userName)}</span>
                                 <span style={{ fontSize: 11, color: "#999" }}>→</span>
                                 <span style={{ fontSize: 12, fontWeight: 600, color: "#6366f1" }}>{chat.botName}</span>
                               </div>
@@ -3970,7 +3971,7 @@ function GeminiActivityPanel() {
                       <div style={{ width: 28, height: 28, borderRadius: "50%", background: "#6366f115", display: "flex", alignItems: "center", justifyContent: "center" }}>
                         <User size={14} color="#6366f1" />
                       </div>
-                      <span style={{ fontWeight: 500 }}>{user.displayName}</span>
+                      <span style={{ fontWeight: 500 }}>{formatPersonName(user.displayName, user.email) || user.email}</span>
                     </div>
                   </td>
                   <td style={{ padding: "10px 14px", color: "#666" }}>{user.email}</td>

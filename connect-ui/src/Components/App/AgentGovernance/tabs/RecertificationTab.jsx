@@ -5,6 +5,7 @@ import {
   ShieldCheck, Clock, CheckCircle2, XCircle, AlertTriangle,
   ChevronDown, RefreshCw, Send, ChevronsUp, Trash2, Plus
 } from "lucide-react";
+import { formatPersonName } from "../../AIHub/personName";
 
 const STATUS_CONFIG = {
   pending:   { color: "#f59e0b", bg: "#fef3c7", label: "Pending",   icon: <Clock size={12} /> },
@@ -271,7 +272,7 @@ export function RecertificationTab() {
                     </td>
                     <td style={{ padding: "10px 14px", color: "#6b7280" }}>{PLATFORM_LABELS[c.platform] || c.platform}</td>
                     <td style={{ padding: "10px 14px", color: "#374151" }}>
-                      <div style={{ fontSize: 11 }}>{c.owner_name || "—"}</div>
+                      <div style={{ fontSize: 11 }}>{formatPersonName(c.owner_name, c.owner_email) || "—"}</div>
                       {c.owner_email && <div style={{ fontSize: 10, color: "#9ca3af" }}>{c.owner_email}</div>}
                     </td>
                     <td style={{ padding: "10px 14px", color: isOverdue ? "#dc2626" : "#374151", fontWeight: isOverdue ? 600 : 400 }}>

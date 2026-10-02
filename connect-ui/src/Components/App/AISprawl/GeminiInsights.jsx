@@ -17,6 +17,7 @@ import SideNav from "../../Resuables/Nav/SideNav";
 import TopNav from "../../Resuables/Nav/TopNav";
 import { getCFTextLoader } from "../../Resuables/Loaders/Loaders";
 import PiCharts from "../../Resuables/Charts/PiCharts";
+import { formatPersonName } from "../AIHub/personName";
 
 const GEMINI_APP_USAGE = [
     { name: "gemini_app", y: 42 },
@@ -664,7 +665,7 @@ const GeminiInsights = () => {
                                                             color: "#0f1729",
                                                         }}
                                                     >
-                                                        {u.name}
+                                                        {formatPersonName(u.name, u.email)}
                                                     </p>
                                                     <p style={{ fontSize: 11, color: "#64748b" }}>
                                                         {u.role}
@@ -702,7 +703,7 @@ const GeminiInsights = () => {
                                                         color: "#0f1729",
                                                     }}
                                                 >
-                                                    {selectedUser.name}
+                                                    {formatPersonName(selectedUser.name, selectedUser.email)}
                                                 </p>
                                                 <p style={{ fontSize: 12, color: "#64748b" }}>
                                                     {selectedUser.email}

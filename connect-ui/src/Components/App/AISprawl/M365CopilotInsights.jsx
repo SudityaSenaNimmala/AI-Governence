@@ -24,6 +24,7 @@ import {
     DUMMY_USAGE_TREND_DATA,
     TOOL_USAGE_DATA,
 } from "../AIHub/aiHubDemoData";
+import { formatPersonName } from "../AIHub/personName";
 
 const getShortDay = (dayOfWeek) => {
     if (!dayOfWeek) return "";
@@ -628,7 +629,7 @@ const M365CopilotInsights = () => {
                                                         color: "#0f1729",
                                                     }}
                                                 >
-                                                    {u.name}
+                                                    {formatPersonName(u.name, u.email)}
                                                 </p>
                                                 <p style={{ fontSize: 11, color: "#64748b" }}>
                                                     {u.role}
@@ -666,7 +667,7 @@ const M365CopilotInsights = () => {
                                                     color: "#0f1729",
                                                 }}
                                             >
-                                                {selectedUser.name}
+                                                {formatPersonName(selectedUser.name, selectedUser.email)}
                                             </p>
                                             <p style={{ fontSize: 12, color: "#64748b" }}>
                                                 {selectedUser.email}
