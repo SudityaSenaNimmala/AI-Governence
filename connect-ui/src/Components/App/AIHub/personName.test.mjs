@@ -79,9 +79,11 @@ test("legacy aliases keep working", () => {
   assert.equal(personDisplayName(null, null), null);
 });
 
-test("formatRowPerson leaves a hostname fallback alone", async () => {
+test("formatRowPerson: machine-shaped hostname fallback stays raw, name-shaped one is formatted", async () => {
   const { formatRowPerson } = await import("./personName.js");
-  assert.equal(formatRowPerson("SATYA", null, "SATYA"), "SATYA");
+  assert.equal(formatRowPerson("SATYA", null, "SATYA"), "Satya");
+  assert.equal(formatRowPerson("SudityaSena", null, "SudityaSena"), "Suditya Sena");
+  assert.equal(formatRowPerson("LAPTOP-FCRNKB4", null, "LAPTOP-FCRNKB4"), "LAPTOP-FCRNKB4");
   assert.equal(formatRowPerson("Mozilla-browser-extension", null, "Mozilla-browser-extension"), "Mozilla-browser-extension");
   assert.equal(formatRowPerson("asmith@corp.com", "asmith@corp.com", "BUILD-07"), "Asmith");
   assert.equal(formatRowPerson("SudityaNimmala", null, "SUDITYA-PC"), "Suditya Nimmala");
