@@ -113,7 +113,7 @@ export function mountInstallations(app, db) {
     const SKIP = new Set(['node_modules', 'tests', '.git', 'package-lock.json', 'build', 'browser-extension', 'launcher.cjs', 'start-agent.vbs', 'start-agent.cmd', 'start-agent.ps1']);
     // Inside the electron/ dir, only hash renderer/ and preload.js (not main.js,
     // package.json, etc. which live in app.asar and can't be auto-updated).
-    const ELECTRON_INCLUDE = new Set(['renderer', 'preload.js', 'monitor-runner.mjs']);
+    const ELECTRON_INCLUDE = new Set(['renderer', 'preload.js', 'main-impl.js', 'monitor-runner.mjs']);
     function walkHash(dir, isElectron) {
       for (const entry of readdirSync(dir).sort()) {
         if (SKIP.has(entry)) continue;
@@ -742,7 +742,7 @@ pause >nul
     // Includes electron/renderer/ and electron/preload.js so the auto-updater
     // can patch UI files without rebuilding the entire Electron app.
     const SKIP = new Set(['node_modules', 'tests', '.git', 'package-lock.json', 'build', 'browser-extension', 'launcher.cjs', 'start-agent.vbs', 'start-agent.cmd', 'start-agent.ps1']);
-    const ELECTRON_INCLUDE = new Set(['renderer', 'preload.js', 'monitor-runner.mjs']);
+    const ELECTRON_INCLUDE = new Set(['renderer', 'preload.js', 'main-impl.js', 'monitor-runner.mjs']);
     function walk(dir, prefix, isElectron) {
       for (const entry of readdirSync(dir)) {
         if (SKIP.has(entry)) continue;

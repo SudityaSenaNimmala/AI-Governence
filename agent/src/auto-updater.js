@@ -183,6 +183,14 @@ async function applyUpdate({ serverUrl, token, serverVersion, log }) {
       copyFileSync(preloadFrom, join(elTo, 'preload.js'));
       log?.info?.('auto-updater: preload updated');
     }
+    // main-impl.js — the real main process code, loaded by the thin
+    // loader in app.asar. This makes ALL Electron changes auto-updatable.
+    const mainImplFrom = join(elFrom, 'main-impl.js');
+    if (existsSync(mainImplFrom)) {
+      mkdirSync(elTo, { recursive: true });
+      copyFileSync(mainImplFrom, join(elTo, 'main-impl.js'));
+      log?.info?.('auto-updater: main-impl.js updated');
+    }
     // monitor-runner.mjs
     const mrFrom = join(elFrom, 'monitor-runner.mjs');
     if (existsSync(mrFrom)) {

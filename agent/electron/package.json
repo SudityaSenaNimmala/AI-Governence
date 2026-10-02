@@ -53,6 +53,10 @@
         "filter": ["**/*", "!**/node_modules/**"]
       },
       {
+        "from": "main-impl.js",
+        "to": "electron/main-impl.js"
+      },
+      {
         "from": "preload.js",
         "to": "electron/preload.js"
       },
