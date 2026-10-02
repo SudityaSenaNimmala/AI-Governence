@@ -256,11 +256,13 @@ jobs:
       # Electron desktop agent — built by the `electron` job on a GitHub-hosted
       # runner (cross-compiled for Windows from Linux). Optional — if the electron
       # job failed, the deploy proceeds without the desktop download.
+      # Download to a path OUTSIDE agent/ so the tar --exclude='*/build' doesn't
+      # interfere. Copied into the deploy dir in the "Ship" step below.
       - uses: actions/download-artifact@v4
         if: needs.electron.result == 'success'
         with:
           name: electron-dist
-          path: agent/build/electron-dist
+          path: .electron-build
 
       - name: Verify the server keeps its own .env
         run: |
@@ -315,17 +317,14 @@ jobs:
           # Ship the Electron desktop agent build separately (the --exclude
           # above strips */build, but this is the CI-built artifact, not a
           # leftover dev build).
-          echo "Checking electron build at: $(pwd)/agent/build/electron-dist/win-unpacked"
-          ls -d agent/build/electron-dist/win-unpacked 2>/dev/null && echo "Found!" || echo "NOT FOUND"
-          ls agent/build/electron-dist/ 2>/dev/null || echo "electron-dist dir missing entirely"
-          if [ -d "agent/build/electron-dist/win-unpacked" ]; then
+          # Ship the Electron build from the artifact (downloaded to .electron-build/)
+          if [ -d ".electron-build/win-unpacked" ]; then
             mkdir -p "$DEPLOY_DIR/agent/build/electron-dist"
-            cp -r agent/build/electron-dist/win-unpacked "$DEPLOY_DIR/agent/build/electron-dist/"
-            cp agent/build/electron-dist/install.bat "$DEPLOY_DIR/agent/build/electron-dist/" 2>/dev/null || true
-            echo "Electron desktop agent build shipped to $DEPLOY_DIR/agent/build/electron-dist/"
-            ls "$DEPLOY_DIR/agent/build/electron-dist/" 2>/dev/null
+            cp -r .electron-build/win-unpacked "$DEPLOY_DIR/agent/build/electron-dist/"
+            cp .electron-build/install.bat "$DEPLOY_DIR/agent/build/electron-dist/" 2>/dev/null || true
+            echo "Electron desktop agent build shipped."
           else
-            echo "::warning::Electron build not found — desktop download will be unavailable"
+            echo "::warning::Electron build artifact not found — desktop download unavailable"
           fi
 
           if [ -d "$STASH" ] && [ ! -d "$DEPLOY_DIR/agent/prebuilt" ]; then
