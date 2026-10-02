@@ -14,6 +14,24 @@
 // keystroke capture — gated on _fgIsAi — and the clipboard watcher both ignore
 // it), never logged, and never written anywhere except the offline queue file.
 
+// Replace ISO timestamps (e.g., 2026-10-02T13:53:10.401Z) in error messages
+// with a human-readable relative time like "in about 5 hours".
+function formatErrorMessage(msg) {
+  if (!msg) return msg;
+  return String(msg).replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g, (iso) => {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    const diff = d.getTime() - Date.now();
+    if (diff <= 0) return 'now';
+    const mins = Math.ceil(diff / 60000);
+    if (mins < 60) return `in about ${mins} minute${mins === 1 ? '' : 's'}`;
+    const hours = Math.ceil(mins / 60);
+    if (hours < 24) return `in about ${hours} hour${hours === 1 ? '' : 's'}`;
+    const days = Math.ceil(hours / 24);
+    return `in about ${days} day${days === 1 ? '' : 's'}`;
+  });
+}
+
 function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str == null ? '' : String(str);
@@ -111,7 +129,8 @@ function renderForm(note) {
 
     btn.disabled = false;
     btn.textContent = 'Request access';
-    $footnote.textContent = res?.error || 'Could not submit the request.';
+    // Format ISO timestamps in error messages to human-readable countdown
+    $footnote.textContent = formatErrorMessage(res?.error || 'Could not submit the request.');
     $footnote.style.color = 'var(--danger)';
     // A rejected-within-24h answer is final for now, so stop offering Submit.
     if (res?.code === 'recently_rejected' || res?.code === 'pending') {
