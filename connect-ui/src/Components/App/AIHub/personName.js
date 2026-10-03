@@ -121,7 +121,11 @@ export function formatPersonName(name, email) {
 export function formatRowPerson(name, email, hostname) {
   if (typeof name === "string" && hostname) {
     const strip = (s) => String(s).trim().toLowerCase().replace(/-?browser-?extension$/, "");
-    if (strip(name) === strip(hostname)) return name;
+    // A hostname fallback stays raw only when it is machine-shaped (digits,
+    // '-', '_', '.', e.g. "LAPTOP-FCRNKB4", "Mozilla-browser-extension"). A
+    // name-shaped hostname ("SudityaSena", "SATYA") is how people name their
+    // PCs, so it is formatted like any other person name.
+    if (strip(name) === strip(hostname) && /[\d\-_.]/.test(String(name))) return name;
   }
   return formatPersonName(name, email);
 }

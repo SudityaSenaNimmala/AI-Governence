@@ -1303,6 +1303,8 @@ function OverviewView() {
   const avgRisk=riskSummary?.average_score;
   const riskBand=avgRisk==null?null:avgRisk<=30?"low":avgRisk<=60?"medium":"high";
   const riskHiCrit=riskSummary?(riskSummary.distribution?.high||0)+(riskSummary.distribution?.critical||0):0;
+  // Last 7 days of the zero-filled daily trend (whatever range the chart shows).
+  const weekEvents=(dlpTrend||[]).slice(-7).reduce((s,r)=>s+(r.events||0),0);
   const dlpPoints=(dlpTrend||[]).map(r=>({
     label:new Date(r.date+"T00:00:00").toLocaleDateString(undefined,{month:"short",day:"numeric"}),
     value:r.events,
@@ -1372,17 +1374,25 @@ function OverviewView() {
       <StatCard icon={<Bot size={18}/>} label="Autonomy" value={noAutonomy?"—":autonomy} hint={noAutonomy?"Counts Unavailable":"Agents & MCP Servers"} color="#f59e0b" onClick={()=>nav(OV_ROUTE.agents)}/>
     </div>
 
-    {/* 2. Open governance items — two real counts */}
+    {/* 2. Shortcuts — one click to the three places admins go most. Open to-dos
+        (pending access requests, tools not risk-assessed, undecided tools) live
+        only in Needs Attention below, so nothing is shown twice. */}
     <div className="aihub_gov_banner">
-      <button className="aihub_gov_stat" onClick={()=>nav("/AIHub/Inventory?tab=systems&showAll=1&risk=not_assessed")}>
-        <span className="aihub_gov_num">{toolsCount==null?<span className="aihub_shimmer_block" style={{width:24,height:20,borderRadius:4}}/>:(byRisk.not_assessed||0)}</span>
-        <span className="aihub_gov_txt">tools not yet risk-assessed</span>
+      <button className="aihub_gov_stat" onClick={()=>nav(OV_ROUTE.dlp)} title="Open Activity — the prompts and files flagged">
+        <span className="aihub_gov_num">{dlpTrend==null?<span className="aihub_shimmer_block" style={{width:24,height:20,borderRadius:4}}/>:weekEvents}</span>
+        <span className="aihub_gov_txt">sensitive-data event{weekEvents===1?"":"s"} in the last 7 days</span>
         <ChevronRight size={14}/>
       </button>
       <span className="aihub_gov_div"/>
-      <button className="aihub_gov_stat" onClick={()=>nav(OV_ROUTE.access)}>
-        <span className="aihub_gov_num">{reqs===false?"—":pending}</span>
-        <span className="aihub_gov_txt">access requests pending</span>
+      <button className="aihub_gov_stat" onClick={()=>nav("/AIHub/Inventory?tab=systems&showAll=1&status=blocked")} title="Open Inventory filtered to blocked tools">
+        <span className="aihub_gov_num">{toolsCount==null?<span className="aihub_shimmer_block" style={{width:24,height:20,borderRadius:4}}/>:(byStatus.blocked||0)}</span>
+        <span className="aihub_gov_txt">tool{(byStatus.blocked||0)===1?"":"s"} blocked</span>
+        <ChevronRight size={14}/>
+      </button>
+      <span className="aihub_gov_div"/>
+      <button className="aihub_gov_stat" onClick={()=>nav(OV_ROUTE.risk)} title="Open Risk Scores">
+        <span className="aihub_gov_num">{riskSummary==null?<span className="aihub_shimmer_block" style={{width:24,height:20,borderRadius:4}}/>:riskHiCrit}</span>
+        <span className="aihub_gov_txt">high-risk employee{riskHiCrit===1?"":"s"}</span>
         <ChevronRight size={14}/>
       </button>
     </div>
@@ -4426,7 +4436,8 @@ function AIRegistryView() {
   const [err,setErr]=useState(null);
   const [staleMeta,setStaleMeta]=useState(null);
   const [search,setSearch]=useState("");
-  const [filterStatus,setFilterStatus]=useState("");
+  // ?status= deep-links a status filter (e.g. the Overview's "tools blocked" shortcut).
+  const [filterStatus,setFilterStatus]=useState(()=>{const s=sp.get("status"); return ["approved","unknown","blocked"].includes(s)?s:"";});
   const [filterType,setFilterType]=useState("");
   const [filterCategory,setFilterCategory]=useState("");
   const [filterRisk,setFilterRisk]=useState(sp.get("risk")||"");
