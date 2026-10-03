@@ -183,6 +183,13 @@ async function applyUpdate({ serverUrl, token, serverVersion, log }) {
       copyFileSync(preloadFrom, join(elTo, 'preload.js'));
       log?.info?.('auto-updater: preload updated');
     }
+    // Assets (icon, etc.)
+    const assetsFrom = join(elFrom, 'assets');
+    if (existsSync(assetsFrom)) {
+      mkdirSync(join(elTo, 'assets'), { recursive: true });
+      cpSync(assetsFrom, join(elTo, 'assets'), { recursive: true, force: true });
+      log?.info?.('auto-updater: assets updated');
+    }
     // main-impl.js — the real main process code, loaded by the thin
     // loader in app.asar. This makes ALL Electron changes auto-updatable.
     const mainImplFrom = join(elFrom, 'main-impl.js');

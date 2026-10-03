@@ -48,6 +48,18 @@ if exist "%BAKED_CONFIG%" (
 )
 if "%SERVER_URL%"=="" set "SERVER_URL=http://localhost:8787"
 
+REM -- Delete old credentials if server URL changed (forces re-enrollment) --
+set "OLD_URL="
+if exist "%USERPROFILE%\.cloudfuze-aigov\credentials.json" (
+    for /f "tokens=*" %%i in ('powershell -NoProfile -Command "try{(Get-Content '%USERPROFILE%\.cloudfuze-aigov\credentials.json' | ConvertFrom-Json).serverUrl}catch{}"') do set "OLD_URL=%%i"
+)
+if not "%OLD_URL%"=="" if not "%OLD_URL%"=="%SERVER_URL%" (
+    echo  [..] Server URL changed from %OLD_URL% — re-enrolling...
+    del "%USERPROFILE%\.cloudfuze-aigov\credentials.json" >nul 2>&1
+    del "%USERPROFILE%\.cloudfuze-aigov\blocked-agents.json" >nul 2>&1
+    del "%USERPROFILE%\.cloudfuze-aigov\agent-version" >nul 2>&1
+)
+
 REM -- Write Electron settings --
 echo {"serverUrl":"%SERVER_URL%","enrollSecret":"%ENROLL_SECRET%","autoStart":true,"monitorClipboard":true,"monitorFileDialogs":true,"monitorTypedPrompts":true,"monitorAttachments":true,"monitorEnforcer":true,"startMonitorOnLaunch":true} > "%USERPROFILE%\.cloudfuze-aigov\electron-settings.json"
 echo  [OK] Settings configured (%SERVER_URL%)
@@ -55,10 +67,9 @@ echo  [OK] Settings configured (%SERVER_URL%)
 REM -- Enrollment happens automatically when the app starts with saved settings --
 echo  [OK] Will auto-enroll on first launch
 
-REM -- Auto-start via Task Scheduler (starts earlier than registry Run key) --
-schtasks /Create /TN "CloudFuzeAIGovernance" /TR "\"!EXE!\" --hidden" /SC ONLOGON /RL LIMITED /F >nul 2>&1
-REM Also add registry entry as fallback
-reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v CloudFuzeAIGovernance /t REG_SZ /d "\"!EXE!\" --hidden" /f >nul 2>&1
+REM -- Auto-start via Task Scheduler + Registry (both for reliability) --
+powershell -NoProfile -Command "schtasks /Create /TN 'CloudFuzeAIGovernance' /TR ('\"' + '%EXE%' + '\" --hidden') /SC ONLOGON /RL LIMITED /F" >nul 2>&1
+powershell -NoProfile -Command "Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'CloudFuzeAIGovernance' -Value ('\"' + '%EXE%' + '\" --hidden') -ErrorAction SilentlyContinue" >nul 2>&1
 echo  [OK] Auto-start registered
 
 REM -- Start now (hidden) --
