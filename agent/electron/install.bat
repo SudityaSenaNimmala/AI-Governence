@@ -28,7 +28,11 @@ echo  [OK] Security flags cleared
 REM -- Stop old agent (both bare and electron) --
 taskkill /IM "CloudFuze AI Governance.exe" /F >nul 2>&1
 taskkill /IM node.exe /FI "WINDOWTITLE eq CloudFuze*" /F >nul 2>&1
+REM -- Wait for processes to fully exit before clearing locks --
+timeout /t 3 /nobreak >nul 2>&1
 if exist "%USERPROFILE%\.cloudfuze-aigov\monitor.lock" del "%USERPROFILE%\.cloudfuze-aigov\monitor.lock" >nul 2>&1
+if exist "%USERPROFILE%\.cloudfuze-aigov\enforcer.pid" del "%USERPROFILE%\.cloudfuze-aigov\enforcer.pid" >nul 2>&1
+if exist "%USERPROFILE%\.cloudfuze-aigov\enforcer.parent" del "%USERPROFILE%\.cloudfuze-aigov\enforcer.parent" >nul 2>&1
 
 REM -- Remove old auto-start entries --
 reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v CloudFuzeAgent /f >nul 2>&1

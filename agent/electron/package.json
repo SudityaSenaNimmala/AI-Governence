@@ -48,11 +48,6 @@
         "to": "agent/electron/monitor-runner.mjs"
       },
       {
-        "from": "../../browser-extension",
-        "to": "browser-extension",
-        "filter": ["**/*", "!**/node_modules/**"]
-      },
-      {
         "from": "main-impl.js",
         "to": "electron/main-impl.js"
       },

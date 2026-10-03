@@ -211,7 +211,21 @@ export function saveCachedRoutingRules(rules) {
  */
 export function buildModelRouterConfig() {
   if (BAKED) return BAKED;
-  const complexitySrc = readFileSync(COMPLEXITY_JS_PATH, 'utf8');
+  let complexitySrc;
+  try {
+    complexitySrc = readFileSync(COMPLEXITY_JS_PATH, 'utf8');
+  } catch {
+    // browser-extension not present — return minimal config so the enforcer
+    // starts without model routing instead of crashing the whole monitor.
+    return {
+      version: 1,
+      positiveCategories: [], negativeCategories: [],
+      thresholds: { COMPLEX_AT: 6, SIMPLE_AT: -3, STRONG_WEIGHT: 4, CAP_PER_CATEGORY: 2, WINDOW_HEAD: 3000, WINDOW_TAIL: 1000, MAX_TRIVIAL_TOKENS: 4, MAX_FILLER_CONTENT_TOKENS: 2 },
+      tierKeywordRules: TIER_KEYWORD_RULES,
+      tierUiNames: TIER_UI_NAMES,
+      serverRules: loadCachedRoutingRules(),
+    };
+  }
 
   const positiveCategories = POSITIVE_CATEGORY_NAMES.map((name) => {
     const structuralName = STRUCTURAL_FOR_CATEGORY[name];
