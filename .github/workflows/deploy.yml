@@ -393,6 +393,16 @@ jobs:
           docker compose up -d
           docker compose ps
 
+      # Restart the server container so bind-mounted electron build is visible.
+      # The bind mount path was deleted by `find -exec rm -rf` and recreated by
+      # the Ship step — Docker needs a container restart to see the new inode.
+      - name: Restart server for electron build mount
+        if: needs.electron.result == 'success'
+        run: |
+          cd "$DEPLOY_DIR"
+          docker compose restart server
+          sleep 3
+
       - name: Health check over the address users actually reach
         run: |
           set -euo pipefail
