@@ -7517,6 +7517,350 @@ public static class CfaiEnforcer
         return !string.Equals(labelAfter, labelBefore, StringComparison.Ordinal);
     }
 
+    // ── Claude's own "Switch model?" confirmation ──────────────────────────
+    //
+    // Live 2026-10-05 (Claude Desktop, an EXISTING conversation on "Opus 5.5
+    // Medium"): selecting Sonnet in the picker does not switch. Claude opens its
+    // own modal -- "Switch model?" / "...This task is cached for the current
+    // model..." -- with "Cancel" and "Switch to Sonnet 5.5" (focused). The route
+    // then failed switch_not_verified_no_fallback_focus_not_in_composer: focus
+    // was in the dialog, nothing was sent. New conversations show no dialog.
+    //
+    // The user's requirement is that routing switches AUTOMATICALLY, so after
+    // the select the verify poll also looks (bounded) for that dialog and
+    // Invokes its "Switch to <target>" button -- never Cancel. A dialog that
+    // cannot be confirmed (no button naming the target, or confirming does not
+    // land) is DISMISSED (its Cancel, else Escape) so the fallback can put focus
+    // back on the composer and send the prompt once, unrouted.
+    //
+    // The signature is catalog data (apps.<app>.confirm_dialog), so only a
+    // surface that declares it ever has this probe run -- claude_desktop today.
+    class RouteConfirmCfg
+    {
+        public string TitleContains = "", ButtonPrefix = "", CancelName = "";
+    }
+
+    // What one probe of the window saw: every Button whose Name starts with the
+    // catalog prefix (at a word boundary), and whether a dialog-shaped element
+    // carried the catalog title. Names only; nothing here is prompt text.
+    class RouteConfirmSeen
+    {
+        public bool Title;
+        public List<string> Buttons = new List<string>();
+    }
+
+    // Everything the switch-wait touches outside itself, injected so the REAL
+    // loop can be driven by the harness with a scripted dialog and a fake clock.
+    class RouteSwitchIo
+    {
+        public Func<string> ReadLabel;                 // the picker label now (re-finds it as needed)
+        public Func<string, string> TierOf;            // label -> tier, through the catalog
+        public Action RetryActivate;                   // Invoke() the target menu item again
+        public Func<RouteConfirmSeen> ProbeConfirm;    // the confirm dialog, if one is up
+        public Func<string, bool> InvokeConfirm;       // activate the button with this Name
+        public Action DismissConfirm;                  // its Cancel, else Escape
+        public Func<long> NowMs;
+        public Action<int> Sleep;
+    }
+
+    class RouteSwitchOutcome
+    {
+        public bool Switched;
+        public string LabelAfter;
+        public string Reason;          // null when Switched
+        public bool DialogSeen;
+        public int ConfirmInvokes, Dismissals, Retries;
+    }
+
+    const int ROUTE_VERIFY_MS = 2500;            // the poll, as before
+    const int ROUTE_RETRY_INVOKE_MS = 500;       // Select() -> Invoke() retry, as before
+    const int ROUTE_CONFIRM_APPEAR_MS = 1500;    // how long a dialog is looked for at all
+    const int ROUTE_CONFIRM_SETTLE_MS = 1500;    // after confirming: time for the switch to land
+    const int ROUTE_CONFIRM_PROBE_MS = 150;      // a probe is a tree walk: throttled
+    const int ROUTE_CONFIRM_REINVOKE_MS = 600;
+    const int ROUTE_CONFIRM_MAX_INVOKES = 2;
+
+    // The catalog's confirm-dialog signature for a DESKTOP app, or null.
+    static RouteConfirmCfg MrConfirmDialogCfg(string surface, string hostOrApp)
+    {
+        if (!string.Equals(surface, "desktop_app", StringComparison.Ordinal)) return null;
+        var apps = DrObj(DrGet(_mrCatalog, "apps"));
+        if (apps == null) return null;
+        string want = DrLower(hostOrApp);
+        Dictionary<string, object> app = null;
+        foreach (string k in apps.Keys) if (DrLower(k) == want) { app = DrObj(apps[k]); break; }
+        var cd = DrObj(DrGet(app, "confirm_dialog"));
+        if (cd == null) return null;
+        string prefix = DrGet(cd, "button_name_prefix") as string;
+        if (prefix == null || prefix.Trim().Length == 0) return null;
+        return new RouteConfirmCfg
+        {
+            TitleContains = ((DrGet(cd, "title_contains") as string) ?? "").Trim(),
+            ButtonPrefix = prefix,
+            CancelName = ((DrGet(cd, "cancel_button_name") as string) ?? "").Trim(),
+        };
+    }
+
+    // Does a Button Name start with the catalog prefix at a word boundary?
+    // ("Switch to Sonnet 5.5" yes; "Switch toolbar" no.)
+    static bool RouteConfirmHasPrefix(string name, string prefix)
+    {
+        if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(prefix)) return false;
+        string n = name.Trim();
+        string pf = prefix.Trim();
+        if (pf.Length == 0 || n.Length <= pf.Length) return false;
+        if (!n.StartsWith(pf, StringComparison.OrdinalIgnoreCase)) return false;
+        return char.IsWhiteSpace(n[pf.Length]);
+    }
+
+    // The family word of a click label ("Sonnet 5.5" -> "Sonnet"), or null when
+    // the first token is not a plain word of 3+ letters ("3.8 Flash").
+    static string RouteLabelFamily(string label)
+    {
+        string[] parts = (label ?? "").Trim().Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0 || parts[0].Length < 3) return null;
+        foreach (char ch in parts[0]) if (!char.IsLetter(ch)) return null;
+        return parts[0];
+    }
+
+    // Is this the "Switch to <TARGET>" button? The remainder after the prefix
+    // must name the target: one of the route's click labels, or its family word,
+    // at the catalog's token boundary (DrLabelMatches -- so "Sonnet 5" does NOT
+    // match "Sonnet 5.5"; "Sonnet 5.5" or "Sonnet" does). A button naming
+    // another model is never pressed.
+    static bool RouteConfirmButtonMatches(string name, string prefix, List<string> labels)
+    {
+        if (!RouteConfirmHasPrefix(name, prefix) || labels == null) return false;
+        string rest = name.Trim().Substring(prefix.Trim().Length).Trim();
+        if (rest.Length == 0) return false;
+        foreach (string l in labels)
+        {
+            if (string.IsNullOrEmpty(l)) continue;
+            if (DrLabelMatches(rest, l)) return true;
+            string fam = RouteLabelFamily(l);
+            if (fam != null && DrLabelMatches(rest, fam)) return true;
+        }
+        return false;
+    }
+
+    // One probe -> what to do. Returns the Name of the button to Invoke; ""
+    // when a confirm dialog is up but nothing in it names the target (it is
+    // dismissed); null when there is no dialog. An unrelated "Switch to ..."
+    // button with no dialog title around it is ignored, not dismissed.
+    static string RouteConfirmVerdict(RouteConfirmSeen seen, RouteConfirmCfg cfg, List<string> labels)
+    {
+        if (seen == null || cfg == null) return null;
+        if (seen.Buttons != null)
+            foreach (string b in seen.Buttons)
+                if (RouteConfirmButtonMatches(b, cfg.ButtonPrefix, labels)) return b;
+        return seen.Title ? "" : null;
+    }
+
+    // THE SWITCH WAIT, after the target item was activated. Polls the picker
+    // label until it reads the target tier; meanwhile (for the first
+    // ROUTE_CONFIRM_APPEAR_MS, and for as long as one is up after that) looks for
+    // the confirm dialog and Invokes its "Switch to <target>" button. Never
+    // sends anything: the caller sends exactly once, routed when Switched, else
+    // through FallbackSendOrReport -- and a dialog still up at that point has
+    // been dismissed here first, so the fallback can reach the composer.
+    static RouteSwitchOutcome RouteAwaitSwitch(RouteSwitchIo io, RouteConfirmCfg cfg, List<string> labels,
+        string toTier, string labelBefore, bool usedSelect, bool usedInvoke)
+    {
+        var o = new RouteSwitchOutcome();
+        long start = io.NowMs();
+        long deadline = start + ROUTE_VERIFY_MS;
+        long invokeAt = start + ROUTE_RETRY_INVOKE_MS;
+        long appearBy = start + ROUTE_CONFIRM_APPEAR_MS;
+        long nextProbe = start;
+        long nextConfirmAt = start;
+        bool unconfirmable = false;
+        do
+        {
+            string label = null;
+            try { label = io.ReadLabel(); } catch { }
+            string tier = null;
+            if (!string.IsNullOrEmpty(label)) { try { tier = io.TierOf(label); } catch { } }
+            o.LabelAfter = label;
+            if (RouteSwitchVerified(tier, toTier, label, labelBefore)) { o.Switched = true; break; }
+
+            long now = io.NowMs();
+            if (cfg != null && (now < appearBy || o.DialogSeen) && now >= nextProbe)
+            {
+                RouteConfirmSeen seen = null;
+                try { seen = io.ProbeConfirm(); } catch { }
+                nextProbe = now + ROUTE_CONFIRM_PROBE_MS;
+                string btn = RouteConfirmVerdict(seen, cfg, labels);
+                if (btn != null)
+                {
+                    o.DialogSeen = true;
+                    if (btn.Length == 0) { unconfirmable = true; break; }
+                    if (now >= nextConfirmAt)
+                    {
+                        if (o.ConfirmInvokes >= ROUTE_CONFIRM_MAX_INVOKES) { unconfirmable = true; break; }
+                        o.ConfirmInvokes++;
+                        try { io.InvokeConfirm(btn); } catch { }
+                        long after = io.NowMs();
+                        nextConfirmAt = after + ROUTE_CONFIRM_REINVOKE_MS;
+                        if (after + ROUTE_CONFIRM_SETTLE_MS > deadline) deadline = after + ROUTE_CONFIRM_SETTLE_MS;
+                    }
+                }
+            }
+            // The Select()->Invoke() retry is for a Select() that only
+            // highlighted. Once Claude has put up its dialog the menu item was
+            // activated; re-activating it behind the modal is never wanted.
+            if (!o.DialogSeen && usedSelect && !usedInvoke && now >= invokeAt)
+            {
+                usedInvoke = true;
+                o.Retries++;
+                try { io.RetryActivate(); } catch { }
+            }
+            io.Sleep(60);
+        } while (io.NowMs() < deadline);
+
+        if (o.Switched) return o;
+
+        // Not switched. A dialog still up (or one that appeared late) would keep
+        // focus away from the composer: dismiss it, exactly once.
+        bool dismiss = unconfirmable;
+        if (!dismiss && cfg != null)
+        {
+            RouteConfirmSeen last = null;
+            try { last = io.ProbeConfirm(); } catch { }
+            if (RouteConfirmVerdict(last, cfg, labels) != null) { o.DialogSeen = true; dismiss = true; }
+        }
+        if (dismiss)
+        {
+            o.Dismissals++;
+            try { io.DismissConfirm(); } catch { }
+        }
+        o.Reason = o.DialogSeen ? "confirm_dialog_not_confirmed" : "switch_not_verified";
+        return o;
+    }
+
+    // UIA side of the probe: one depth-capped TreeWalker walk (the technique
+    // FindMenuItemByLabel documents) over `root`, collecting prefix Buttons and
+    // noting a dialog-shaped element carrying the title. `anchor` is the first
+    // thing found, the starting point for finding the dialog's own Cancel.
+    static RouteConfirmSeen RouteProbeConfirmUia(AutomationElement root, RouteConfirmCfg cfg,
+        Dictionary<string, AutomationElement> buttons, ref AutomationElement anchor)
+    {
+        var seen = new RouteConfirmSeen();
+        if (root == null || cfg == null) return seen;
+        string title = cfg.TitleContains ?? "";
+        try
+        {
+            var walker = TreeWalker.ControlViewWalker;
+            var stack = new Stack<KeyValuePair<AutomationElement, int>>();
+            stack.Push(new KeyValuePair<AutomationElement, int>(root, 0));
+            while (stack.Count > 0)
+            {
+                var cur = stack.Pop();
+                if (cur.Value > 30) continue;
+                AutomationElement el = cur.Key;
+                try
+                {
+                    ControlType ct = el.Current.ControlType;
+                    string name = null;
+                    try { name = el.Current.Name; } catch { }
+                    if (!string.IsNullOrEmpty(name))
+                    {
+                        if (ct == ControlType.Button && RouteConfirmHasPrefix(name, cfg.ButtonPrefix))
+                        {
+                            string key = name.Trim();
+                            if (!buttons.ContainsKey(key)) { buttons[key] = el; seen.Buttons.Add(key); }
+                            if (anchor == null) anchor = el;
+                        }
+                        else if (title.Length > 0 && !seen.Title)
+                        {
+                            // A dialog container named with the title, or a
+                            // heading that IS the title ("Switch model?"). Chat
+                            // history text merely mentioning it never counts.
+                            string lct = "";
+                            try { lct = el.Current.LocalizedControlType ?? ""; } catch { }
+                            bool container = ct == ControlType.Window || lct.IndexOf("dialog", StringComparison.OrdinalIgnoreCase) >= 0;
+                            string nt = name.Trim().TrimEnd('?').Trim();
+                            if ((container && name.IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0)
+                                || (ct == ControlType.Text && string.Equals(nt, title, StringComparison.OrdinalIgnoreCase)))
+                            {
+                                seen.Title = true;
+                                if (anchor == null) anchor = el;
+                            }
+                        }
+                    }
+                }
+                catch { }
+                try
+                {
+                    AutomationElement child = walker.GetFirstChild(el);
+                    while (child != null)
+                    {
+                        stack.Push(new KeyValuePair<AutomationElement, int>(child, cur.Value + 1));
+                        child = walker.GetNextSibling(child);
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return seen;
+    }
+
+    // The dialog's OWN Cancel: searched only under the nearest few ancestors of
+    // what the probe found, so an unrelated "Cancel" elsewhere in the app (an
+    // in-progress message edit) is never pressed.
+    static AutomationElement RouteFindDialogCancel(AutomationElement anchor, string cancelName)
+    {
+        if (anchor == null || string.IsNullOrEmpty(cancelName)) return null;
+        try
+        {
+            var walker = TreeWalker.ControlViewWalker;
+            AutomationElement scope = anchor;
+            for (int up = 0; up < 4 && scope != null; up++)
+            {
+                scope = walker.GetParent(scope);
+                if (scope == null) break;
+                var stack = new Stack<KeyValuePair<AutomationElement, int>>();
+                stack.Push(new KeyValuePair<AutomationElement, int>(scope, 0));
+                while (stack.Count > 0)
+                {
+                    var cur = stack.Pop();
+                    if (cur.Value > 6) continue;
+                    try
+                    {
+                        if (cur.Key.Current.ControlType == ControlType.Button
+                            && string.Equals((cur.Key.Current.Name ?? "").Trim(), cancelName, StringComparison.OrdinalIgnoreCase))
+                            return cur.Key;
+                    }
+                    catch { }
+                    try
+                    {
+                        AutomationElement child = walker.GetFirstChild(cur.Key);
+                        while (child != null)
+                        {
+                            stack.Push(new KeyValuePair<AutomationElement, int>(child, cur.Value + 1));
+                            child = walker.GetNextSibling(child);
+                        }
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    static bool RouteInvokeElement(AutomationElement el)
+    {
+        if (el == null) return false;
+        try
+        {
+            object p;
+            if (el.TryGetCurrentPattern(InvokePattern.Pattern, out p)) { ((InvokePattern)p).Invoke(); return true; }
+        }
+        catch { }
+        return false;
+    }
+
     // Keyboard hook. A plain, user-typed Enter in the route's own window while
     // a route runs is held key-repeat or an impatient second press. It used to
     // set _routeAbort (killing the route between expand and select) and reach
@@ -7798,36 +8142,80 @@ public static class CfaiEnforcer
             AutomationElement verifyEl = FindModelPickerButton(win) ?? picker;
             if (verifyEl != null) { _mrCachedPicker = verifyEl; _mrCachedPickerHwnd = pinnedHwnd; }
 
-            string labelAfter = null;
-            bool switched = false;
-            long verifyStart = DateTime.UtcNow.Ticks;
-            long verifyDeadline = verifyStart + TimeSpan.FromMilliseconds(2500).Ticks;
-            long invokeAt = verifyStart + TimeSpan.FromMilliseconds(500).Ticks;
-            long nextRefind = verifyStart + TimeSpan.FromMilliseconds(250).Ticks;
-            do
+            // The wait itself is RouteAwaitSwitch (pure loop, harness-driven);
+            // these are its UIA hands. ReadLabel re-finds the picker DURING the
+            // poll (every ~250ms, or when a read fails) -- a reference fetched
+            // once goes stale when Claude Desktop re-renders the button.
+            long nextRefind = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(250).Ticks;
+            RouteConfirmCfg confirmCfg = meta != null ? MrConfirmDialogCfg(meta.Surface, meta.HostOrApp) : null;
+            var confirmButtons = new Dictionary<string, AutomationElement>(StringComparer.OrdinalIgnoreCase);
+            AutomationElement confirmAnchor = null;
+            var io = new RouteSwitchIo();
+            io.ReadLabel = delegate
             {
-                labelAfter = null;
-                try { labelAfter = verifyEl != null ? verifyEl.Current.Name : null; } catch { }
-                string afterTier = (meta != null && !string.IsNullOrEmpty(labelAfter)) ? MrTierOfLabel(meta.Surface, meta.HostOrApp, labelAfter) : null;
-                if (RouteSwitchVerified(afterTier, toTier, labelAfter, labelBefore)) { switched = true; break; }
-                long nowT = DateTime.UtcNow.Ticks;
-                if (usedSelect && !usedInvoke && nowT >= invokeAt)
-                {
-                    usedInvoke = true;
-                    object invObj;
-                    try { if (targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out invObj)) ((InvokePattern)invObj).Invoke(); } catch { }
-                }
-                if (nowT >= nextRefind || string.IsNullOrEmpty(labelAfter))
+                string l = null;
+                try { l = verifyEl != null ? verifyEl.Current.Name : null; } catch { }
+                if (DateTime.UtcNow.Ticks >= nextRefind || string.IsNullOrEmpty(l))
                 {
                     AutomationElement fresh = FindModelPickerButton(win);
                     if (fresh != null) { verifyEl = fresh; _mrCachedPicker = fresh; _mrCachedPickerHwnd = pinnedHwnd; }
                     nextRefind = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(250).Ticks;
                 }
-                Thread.Sleep(60);
-            } while (DateTime.UtcNow.Ticks < verifyDeadline);
+                return l;
+            };
+            io.TierOf = delegate(string l) { return meta != null ? MrTierOfLabel(meta.Surface, meta.HostOrApp, l) : null; };
+            io.RetryActivate = delegate
+            {
+                object invObj;
+                try { if (targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out invObj)) ((InvokePattern)invObj).Invoke(); } catch { }
+            };
+            io.ProbeConfirm = delegate
+            {
+                confirmButtons.Clear();
+                confirmAnchor = null;
+                RouteConfirmSeen seen = RouteProbeConfirmUia(win, confirmCfg, confirmButtons, ref confirmAnchor);
+                // A native modal would be its own foreground window of the SAME
+                // process; Claude's is in-page today, but look there too.
+                IntPtr fgNow = GetForegroundWindow();
+                if (seen.Buttons.Count == 0 && !seen.Title && fgNow != pinnedHwnd && fgNow != IntPtr.Zero)
+                {
+                    uint pidA = 0, pidB = 0;
+                    try { GetWindowThreadProcessId(pinnedHwnd, out pidA); GetWindowThreadProcessId(fgNow, out pidB); } catch { }
+                    if (pidA != 0 && pidA == pidB)
+                    {
+                        AutomationElement fgEl = null;
+                        try { fgEl = AutomationElement.FromHandle(fgNow); } catch { }
+                        if (fgEl != null) seen = RouteProbeConfirmUia(fgEl, confirmCfg, confirmButtons, ref confirmAnchor);
+                    }
+                }
+                return seen;
+            };
+            io.InvokeConfirm = delegate(string name)
+            {
+                AutomationElement b;
+                return confirmButtons.TryGetValue(name, out b) && RouteInvokeElement(b);
+            };
+            io.DismissConfirm = delegate
+            {
+                AutomationElement cancel = RouteFindDialogCancel(confirmAnchor, confirmCfg != null ? confirmCfg.CancelName : null);
+                if (!RouteInvokeElement(cancel))
+                {
+                    // Escape only into Claude's own window -- never another app.
+                    uint pidA = 0, pidB = 0;
+                    IntPtr fgNow = GetForegroundWindow();
+                    try { GetWindowThreadProcessId(pinnedHwnd, out pidA); GetWindowThreadProcessId(fgNow, out pidB); } catch { }
+                    if (fgNow == pinnedHwnd || (pidA != 0 && pidA == pidB)) SendKeyPress(VK_ESCAPE);
+                }
+                Thread.Sleep(200);
+            };
+            io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
+            io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+
+            RouteSwitchOutcome waited = RouteAwaitSwitch(io, confirmCfg, labels, toTier, labelBefore, usedSelect, usedInvoke);
+            string labelAfter = waited.LabelAfter;
             TryCollapsePicker(picker);   // best-effort -- selecting usually closes it on its own
-            if (!switched)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "switch_not_verified"); return; }
+            if (!waited.Switched)
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, waited.Reason ?? "switch_not_verified"); return; }
             if (meta != null) MrNoteRouted(meta.ChoiceKey, meta.ConvKey, toTier);
             string effortTo = ModelEffortFromLabel(labelAfter, MODEL_PICKER_NAME_PREFIX_DEFAULT);
 

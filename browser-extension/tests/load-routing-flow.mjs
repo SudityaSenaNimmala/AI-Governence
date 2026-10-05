@@ -45,6 +45,9 @@ function loadBundle() {
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
+/** Return this from `onSwitch` to simulate an unconfirmable "Switch model?" dialog. */
+export const CONFIRM_DECLINED = Symbol('confirm_declined');
+
 /**
  * @param {object} o
  * @param {string} o.host
@@ -124,6 +127,9 @@ export function loadRoutingFlow(o) {
     changeModelInUI: async (label) => {
       env.switchCalls.push(label);
       const next = o.onSwitch ? o.onSwitch(label) : null;
+      // The real changeModelInUI's answer when Claude's "Switch model?" dialog
+      // could not be confirmed (and was dismissed): nothing changed.
+      if (next === CONFIRM_DECLINED) return 'confirm_declined';
       if (next) env.button.textContent = next;
       return !!next;
     },

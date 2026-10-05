@@ -143,13 +143,17 @@ test('desktop route: switch verification is by TIER; an effort-only change is no
 });
 
 test('desktop route SOURCE: verification re-finds the picker button DURING the poll, not once', async () => {
+  // The poll is RouteAwaitSwitch; RunRoute hands it a ReadLabel that re-finds.
   const src = await readFile(ENFORCER, 'utf8');
   const run = stripComments(sliceFn(src, 'static void RunRoute('));
-  const loop = run.slice(run.indexOf('verifyDeadline'));
-  const doBody = loop.slice(loop.indexOf('do'), loop.indexOf('while (DateTime.UtcNow.Ticks < verifyDeadline)'));
-  assert.ok(/FindModelPickerButton\(/.test(doBody),
+  const readLabel = run.slice(run.indexOf('io.ReadLabel = delegate'), run.indexOf('io.TierOf ='));
+  assert.ok(/FindModelPickerButton\(/.test(readLabel),
     'a picker reference fetched once goes stale when Claude Desktop re-renders it; the poll must re-find it');
+  const wait = stripComments(sliceFn(src, 'static RouteSwitchOutcome RouteAwaitSwitch('));
+  const doBody = wait.slice(wait.indexOf('do'), wait.indexOf('while (io.NowMs() < deadline)'));
+  assert.ok(/io\.ReadLabel\(\)/.test(doBody), 'the label is read on every poll tick');
   assert.ok(/RouteSwitchVerified\(/.test(doBody), 'the poll must use the pure, tested verdict');
+  assert.ok(/RouteAwaitSwitch\(io,/.test(run), 'RunRoute must wait through RouteAwaitSwitch');
 });
 
 test('desktop route SOURCE: a Select() that only highlights is followed by Invoke(), and the menu is not collapsed before verification', async () => {
@@ -158,13 +162,14 @@ test('desktop route SOURCE: a Select() that only highlights is followed by Invok
   const src = await readFile(ENFORCER, 'utf8');
   const run = stripComments(sliceFn(src, 'static void RunRoute('));
   const fromSelect = run.slice(run.indexOf('SelectionItemPattern)selObj).Select()'));
-  const loopStart = fromSelect.indexOf('verifyDeadline');
-  const loopEnd = fromSelect.indexOf('while (DateTime.UtcNow.Ticks < verifyDeadline)');
-  const loop = fromSelect.slice(loopStart, loopEnd);
-  assert.ok(/InvokePattern\)invObj\)\.Invoke\(\)/.test(loop), 'the verify poll must retry activation with Invoke()');
-  const beforeLoop = fromSelect.slice(fromSelect.indexOf('select_failed') + 20, loopStart);
-  assert.ok(!/TryCollapsePicker\(picker\)/.test(beforeLoop), 'collapsing before verification closes the menu with nothing chosen');
-  assert.ok(/TryCollapsePicker\(picker\)/.test(fromSelect.slice(loopEnd, fromSelect.indexOf('"switch_not_verified"'))),
+  const retry = fromSelect.slice(fromSelect.indexOf('io.RetryActivate = delegate'), fromSelect.indexOf('io.ProbeConfirm ='));
+  assert.ok(/InvokePattern\)invObj\)\.Invoke\(\)/.test(retry), 'the verify poll must retry activation with Invoke()');
+  const wait = stripComments(sliceFn(src, 'static RouteSwitchOutcome RouteAwaitSwitch('));
+  assert.ok(/io\.RetryActivate\(\)/.test(wait.slice(wait.indexOf('do'), wait.indexOf('while (io.NowMs() < deadline)'))));
+  const awaitAt = fromSelect.indexOf('RouteAwaitSwitch(io,');
+  const beforeWait = fromSelect.slice(fromSelect.indexOf('select_failed') + 20, awaitAt);
+  assert.ok(!/TryCollapsePicker\(picker\)/.test(beforeWait), 'collapsing before verification closes the menu with nothing chosen');
+  assert.ok(/TryCollapsePicker\(picker\)/.test(fromSelect.slice(awaitAt, fromSelect.indexOf('!waited.Switched'))),
     'the picker is collapsed once verification is over');
 });
 
@@ -264,4 +269,142 @@ test('desktop route SOURCE: the desktop arm refreshes the pin on its dedup early
   const arm = stripComments(sliceFn(src, 'static void UpdateModelRouting('));
   assert.ok(/if \(dedupKey == _mrLastObservedKey\) \{ MrRefreshPinOnDedup\(text, composerRid, el, fg\); return; \}/.test(arm),
     'the dedup return must refresh the pin first');
+});
+
+// ── 6. Claude's own "Switch model?" confirmation ────────────────────────────
+//
+// Live 2026-10-05 (Claude Desktop, existing conversation on "Opus 5.5 Medium",
+// "explain what an API is" + Enter): the agent selected Sonnet and Claude put up
+// its OWN modal -- "Switch model?" with "Cancel" and "Switch to Sonnet 5.5"
+// (focused). The route failed switch_not_verified_no_fallback_focus_not_in_composer
+// and the message was never sent. Routing must switch automatically.
+
+test('desktop route: Claude now shows "Opus 5.5" / "Sonnet 5.5" -- tier and effort still read', winOnly, async () => {
+  const rows = await runHarness();
+  const tierOf = (l) => rows.find((r) => r.t === 'tierof' && r.label === l)?.tier;
+  const effortOf = (l) => rows.find((r) => r.t === 'effort' && r.label === l)?.effort;
+  assert.equal(tierOf('Model: Opus 5.5 Medium'), 'premium');
+  assert.equal(tierOf('Opus 5.5 Medium'), 'premium');
+  assert.equal(tierOf('Model: Sonnet 5.5 Medium'), 'standard');
+  assert.equal(tierOf('Model: Sonnet 5.5'), 'standard');
+  assert.equal(tierOf('Model: Sonnet 5.5 High'), 'standard');
+  assert.equal(tierOf('Model: Haiku 4.5'), 'economy');
+  assert.equal(effortOf('Model: Opus 5.5 Medium'), 'Medium', 'the effort suffix must still parse');
+  assert.equal(effortOf('Opus 5.5 Medium'), 'Medium');
+  assert.equal(effortOf('Model: Sonnet 5.5 High'), 'High');
+  assert.equal(effortOf('Model: Sonnet 5.5'), '', '"5.5" is not an effort token');
+});
+
+test('catalog: Claude click labels lead with the 5.5 names, keep the old names and families as fallbacks', async () => {
+  const cat = JSON.parse(await readFile(CATALOG, 'utf8'));
+  for (const entry of [cat.apps.claude_desktop, cat.hosts['claude.ai']]) {
+    assert.deepEqual(entry.tiers.premium.click_labels, ['Opus 5.5', 'Opus 5', 'Opus']);
+    assert.deepEqual(entry.tiers.standard.click_labels, ['Sonnet 5.5', 'Sonnet 5', 'Sonnet']);
+    assert.deepEqual(entry.tiers.economy.click_labels, ['Haiku 4.5', 'Haiku']);
+    assert.equal(entry.confirm_dialog.button_name_prefix, 'Switch to ');
+    assert.equal(entry.confirm_dialog.title_contains, 'Switch model');
+    assert.equal(entry.confirm_dialog.cancel_button_name, 'Cancel');
+  }
+  // No other desktop app declares the dialog: the probe never runs there.
+  for (const [k, v] of Object.entries(cat.apps)) if (k !== 'claude_desktop') assert.equal(v.confirm_dialog, undefined, k);
+});
+
+test('desktop route: the confirm signature comes from the catalog, for claude_desktop only', winOnly, async () => {
+  const rows = await runHarness();
+  present(rows, 'RouteAwaitSwitch');
+  const c = rows.find((r) => r.t === 'cfg' && r.app === 'claude_desktop');
+  assert.equal(c.present, true);
+  assert.equal(c.prefix, 'Switch to ');
+  assert.equal(c.title, 'Switch model');
+  assert.equal(c.cancel, 'Cancel');
+  assert.equal(rows.find((r) => r.t === 'cfg' && r.app === 'chatgpt_desktop').present, false);
+  assert.equal(rows.find((r) => r.t === 'cfg' && r.app === 'browser_claude_ai').present, false,
+    'the desktop enforcer never runs the probe on a browser surface (the extension owns claude.ai)');
+});
+
+test('desktop route: only a "Switch to <TARGET>" button is ever pressed -- never Cancel, never another model', winOnly, async () => {
+  const rows = await runHarness();
+  const m = (c) => one(rows, 'btn', c).match;
+  assert.equal(m('target_55'), true);
+  assert.equal(m('target_family_only'), true);
+  assert.equal(m('lowercase'), true);
+  assert.equal(m('override_label_old'), true, 'an override label "Sonnet 5" still confirms "Switch to Sonnet 5.5" by family');
+  assert.equal(m('other_model'), false);
+  assert.equal(m('cancel'), false);
+  assert.equal(m('no_prefix_boundary'), false);
+  assert.equal(m('bare_prefix'), false);
+});
+
+test('desktop route: the confirm dialog appears -> auto-confirmed -> verified -> ONE routed send', winOnly, async () => {
+  const rows = await runHarness();
+  const a = one(rows, 'await', 'dialog_confirmed');
+  assert.equal(a.switched, true);
+  assert.equal(a.dialogSeen, true);
+  assert.equal(a.confirmInvokes, 1, 'confirmed exactly once');
+  assert.deepEqual(a.invokedNames, ['Switch to Sonnet 5.5'], 'the "Switch to" button, never Cancel');
+  assert.equal(a.dismissals, 0);
+  assert.equal(a.retries, 0, 'the menu item is not re-activated behind the modal');
+  assert.equal(a.sendPath, 'routed');
+  assert.equal(a.labelAfter, 'Model: Sonnet 5.5 Medium');
+
+  // Claude only shows the dialog after the Select()->Invoke() retry: still confirmed.
+  const r = one(rows, 'await', 'dialog_after_retry');
+  assert.equal(r.switched, true);
+  assert.equal(r.retries, 1);
+  assert.equal(r.confirmInvokes, 1);
+  assert.equal(r.sendPath, 'routed');
+});
+
+test('desktop route: no dialog (a new conversation) switches exactly as before', winOnly, async () => {
+  const rows = await runHarness();
+  const a = one(rows, 'await', 'no_dialog_switches');
+  assert.equal(a.switched, true);
+  assert.equal(a.dialogSeen, false);
+  assert.equal(a.confirmInvokes, 0);
+  assert.equal(a.dismissals, 0);
+  assert.ok(a.elapsed < 1000, 'no fixed wait for a dialog that never comes');
+  const n = one(rows, 'await', 'no_dialog_no_switch');
+  assert.equal(n.switched, false);
+  assert.equal(n.reason, 'switch_not_verified');
+  assert.equal(n.dismissals, 0, 'nothing to dismiss: no Escape sent into the app');
+  assert.ok(n.probes <= 12, 'the dialog probe is a tree walk and must be bounded, got ' + n.probes);
+  const x = one(rows, 'await', 'no_cfg_app');
+  assert.equal(x.probes, 0, 'an app without a catalog confirm_dialog is never probed');
+  assert.equal(x.reason, 'switch_not_verified');
+});
+
+test('desktop route: a dialog that cannot be confirmed is dismissed, then ONE unrouted send', winOnly, async () => {
+  const rows = await runHarness();
+  for (const c of ['dialog_never_confirms', 'dialog_wrong_target', 'dialog_title_only', 'late_dialog_dismissed']) {
+    const a = one(rows, 'await', c);
+    assert.equal(a.switched, false, c);
+    assert.equal(a.reason, 'confirm_dialog_not_confirmed', c);
+    assert.equal(a.dismissals, 1, c + ': dismissed exactly once (Cancel, else Escape)');
+    assert.equal(a.dialogOpenAtEnd, false, c + ': the user is never left with the modal up');
+    assert.equal(a.sendPath, 'fallback', c);
+  }
+  const nv = one(rows, 'await', 'dialog_never_confirms');
+  assert.equal(nv.confirmInvokes, 2, 'bounded: two confirm attempts, then give up');
+  assert.ok(nv.elapsed <= 3000, 'bounded wait, got ' + nv.elapsed + 'ms');
+  assert.equal(one(rows, 'await', 'dialog_wrong_target').confirmInvokes, 0, '"Switch to Opus" is never pressed when routing to Sonnet');
+  // An unrelated "Switch to ..." button with no dialog title is not the dialog.
+  const u = one(rows, 'await', 'unrelated_switch_button');
+  assert.equal(u.confirmInvokes, 0);
+  assert.equal(u.dismissals, 0);
+  assert.equal(u.reason, 'switch_not_verified');
+});
+
+test('desktop route SOURCE: the switch wait never sends; RunRoute sends once routed, else via the fallback with the wait\'s reason', async () => {
+  const src = await readFile(ENFORCER, 'utf8');
+  const wait = stripComments(sliceFn(src, 'static RouteSwitchOutcome RouteAwaitSwitch('));
+  assert.ok(!/SendKeyPress\(VK_RETURN\)/.test(wait), 'RouteAwaitSwitch must never press Enter');
+  const run = stripComments(sliceFn(src, 'static void RunRoute('));
+  assert.equal((run.match(/SendKeyPress\(VK_RETURN\)/g) || []).length, 1, 'exactly one routed Enter in RunRoute');
+  assert.ok(/if \(!waited\.Switched\)\s*\{ FallbackSendOrReport\([^;]*waited\.Reason/.test(run),
+    'an unconfirmed switch goes to the fallback (refocus + one Enter) with the wait\'s reason');
+  // Dismissal: Escape only into Claude's own process, and never Enter.
+  const dismiss = run.slice(run.indexOf('io.DismissConfirm = delegate'), run.indexOf('io.NowMs ='));
+  assert.ok(/SendKeyPress\(VK_ESCAPE\)/.test(dismiss));
+  assert.ok(/pidA == pidB/.test(dismiss), 'never send Escape into another app');
+  assert.ok(!/VK_RETURN/.test(dismiss), 'never confirm by pressing Enter on the focused button');
 });

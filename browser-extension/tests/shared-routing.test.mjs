@@ -177,7 +177,12 @@ test('claude.ai labels match the live-measured menu (ai-processes.js claude_web 
   const m = /tierLabels:\s*\{\s*3:\s*'([^']+)',\s*2:\s*'([^']+)',\s*1:\s*'([^']+)'\s*\}[\s\S]{0,1500}?provider: 'anthropic'/.exec(src);
   assert.ok(m, 'claude modelPicker tierLabels not found in ai-processes.js');
   const c = catalog.hosts['claude.ai'].tiers;
-  assert.equal(c.premium.click_labels[0], m[1]);
-  assert.equal(c.standard.click_labels[0], m[2]);
+  // 2026-10-05: Claude now labels Opus/Sonnet "5.5", and the catalog leads with
+  // those names. The 2026-09-22 measured names (ai-processes.js tierLabels) must
+  // still be in the list as fallbacks, so the two sources never disagree.
+  assert.ok(c.premium.click_labels.includes(m[1]), `catalog premium lacks ${m[1]}`);
+  assert.ok(c.standard.click_labels.includes(m[2]), `catalog standard lacks ${m[2]}`);
   assert.equal(c.economy.click_labels[0], m[3]);
+  assert.equal(c.premium.click_labels[0], 'Opus 5.5');
+  assert.equal(c.standard.click_labels[0], 'Sonnet 5.5');
 });

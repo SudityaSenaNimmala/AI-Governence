@@ -1398,11 +1398,30 @@
   async function switchToTier(r) {
     const d = r.decision;
     for (const label of d.click_labels || []) {
-      try { await changeModelInUI(label); } catch {}
+      let res = false;
+      try { res = await changeModelInUI(label); } catch {}
       const after = readPickerState();
       if (after && after.tier === d.target_tier) return { ok: true, label };
+      // Claude put up its "Switch model?" dialog and it could not be confirmed
+      // (it has been dismissed). Trying the next label would only reopen it.
+      if (res === SWITCH_CONFIRM_DECLINED) return { ok: false, label: null, reason: 'confirm_dialog_not_confirmed' };
     }
     return { ok: false, label: null };
+  }
+
+  // Claude's own "Switch model?" confirmation signature for this page, from the
+  // catalog (hosts.<host>.confirm_dialog), or null. Catalog data, not code: only
+  // a host that declares it is ever probed for the dialog (claude.ai today).
+  const SWITCH_CONFIRM_DECLINED = 'confirm_declined';
+  function routingConfirmDialogCfg() {
+    const entry = routingSurface();
+    if (!entry || !ROUTING || !ROUTING.CATALOG) return null;
+    const hosts = ROUTING.CATALOG.hosts || {};
+    let h = hosts[entry.key];
+    if (h && h.alias_of) h = hosts[h.alias_of];
+    const cd = h && h.confirm_dialog;
+    if (!cd || typeof cd.button_name_prefix !== 'string' || !cd.button_name_prefix.trim()) return null;
+    return cd;
   }
 
   /**
@@ -1511,15 +1530,17 @@
     (async () => {
       let tierOk = d.target_tier === d.from_tier;   // effort-only decisions keep the tier
       let label = d.to_label;
+      let failReason = null;
       if (!tierOk) {
         const sw = await switchToTier(r);
         tierOk = sw.ok;
         if (sw.label) label = sw.label;
+        if (sw.reason) failReason = sw.reason;
       }
       let effortTo = null;
       if (tierOk && d.effort) effortTo = await setEffortInUI(r.entry, d.effort);
-      return { tierOk, label, effortTo };
-    })().catch(() => ({ tierOk: false, label: d.to_label, effortTo: null })).then(({ tierOk, label, effortTo }) => {
+      return { tierOk, label, effortTo, failReason };
+    })().catch(() => ({ tierOk: false, label: d.to_label, effortTo: null, failReason: null })).then(({ tierOk, label, effortTo, failReason }) => {
       _weAreRouting = false;
       const st = r.st;
       if (tierOk && st) {
@@ -1535,7 +1556,7 @@
         { ...r, decision: { ...d, to_label: label } },
         {
           result: applied ? 'applied' : 'failed',
-          reason: applied ? d.reason : (tierOk ? 'effort_not_applied' : 'target_item_not_found'),
+          reason: applied ? d.reason : (tierOk ? 'effort_not_applied' : (failReason || 'target_item_not_found')),
           effort_to: effortTo,
           ui_changed: applied,
           len,
@@ -1718,6 +1739,125 @@
     }
     return out;
   }
+
+  // Claude's own "Switch model?" confirmation. Live 2026-10-05 (Claude Desktop,
+  // which renders claude.ai): in an EXISTING conversation, picking another model
+  // does not switch -- Claude opens a modal ("Switch model?" / "...This task is
+  // cached for the current model...") with "Cancel" and "Switch to Sonnet 5.5".
+  // Routing must switch automatically, so after the menu click the dialog is
+  // looked for (bounded) and its "Switch to <target>" button is clicked -- never
+  // Cancel, never a button naming another model. A dialog that cannot be
+  // confirmed is DISMISSED (its Cancel, else Escape) so the paused send goes
+  // out once, unrouted. `cfg` is the catalog's hosts.<host>.confirm_dialog.
+  const SWITCH_CONFIRM_DIALOG_SELECTOR = '[role="dialog"], [role="alertdialog"], dialog';
+
+  // shared/decide-route.js labelMatches(), restated: case-insensitive, at a
+  // token boundary; the char after must not be a letter, digit, '.' or '-'.
+  // So "Sonnet 5" does NOT match "Sonnet 5.5"; "Sonnet 5.5" and "Sonnet" do.
+  function confirmLabelHit(text, label) {
+    const t = String(text || '').toLowerCase();
+    const l = String(label || '').toLowerCase();
+    if (!l || t.length < l.length) return false;
+    const word = (ch) => /[0-9a-z]/i.test(ch);
+    for (let at = t.indexOf(l); at >= 0; at = t.indexOf(l, at + 1)) {
+      const before = at === 0 || !word(t[at - 1]);
+      const nx = t[at + l.length];
+      const after = nx === undefined || !(word(nx) || nx === '.' || nx === '-');
+      if (before && after) return true;
+    }
+    return false;
+  }
+
+  function hasConfirmPrefix(name, prefix) {
+    const n = String(name || '').trim();
+    const pf = String(prefix || '').trim();
+    if (!pf || n.length <= pf.length) return false;
+    return n.slice(0, pf.length).toLowerCase() === pf.toLowerCase() && /\s/.test(n[pf.length]);
+  }
+
+  /** Is this the "Switch to <TARGET>" button? The rest must name one of the
+   *  labels, or its family word ("Sonnet 5.5" -> "Sonnet"). */
+  function confirmButtonMatches(name, prefix, labels) {
+    if (!hasConfirmPrefix(name, prefix)) return false;
+    const rest = String(name).trim().slice(String(prefix).trim().length).trim();
+    if (!rest) return false;
+    for (const l of labels || []) {
+      if (!l) continue;
+      if (confirmLabelHit(rest, l)) return true;
+      const fam = String(l).trim().split(/\s+/)[0];
+      if (/^[A-Za-z]{3,}$/.test(fam) && confirmLabelHit(rest, fam)) return true;
+    }
+    return false;
+  }
+
+  /** The visible confirm dialog: { dialog, confirm, cancel } (confirm null when
+   *  nothing in it names the target), or null when there is none. A dialog with
+   *  neither the title nor a prefix button is not this dialog; one with only an
+   *  unrelated "Switch to ..." button and no title is ignored. */
+  function findSwitchConfirm(cfg, labels) {
+    if (!cfg || !cfg.button_name_prefix) return null;
+    const title = String(cfg.title_contains || '').toLowerCase();
+    const cancelName = String(cfg.cancel_button_name || '').trim().toLowerCase();
+    for (const dlg of document.querySelectorAll(SWITCH_CONFIRM_DIALOG_SELECTOR)) {
+      if (!isVisibleEl(dlg)) continue;
+      const buttons = [];
+      for (const b of dlg.querySelectorAll('button, [role="button"]')) if (isVisibleEl(b)) buttons.push(b);
+      const txt = (b) => (b.textContent || '').trim();
+      const hasTitle = !!title && (dlg.textContent || '').toLowerCase().indexOf(title) >= 0;
+      const confirm = buttons.find((b) => confirmButtonMatches(txt(b), cfg.button_name_prefix, labels)) || null;
+      if (!confirm && !hasTitle) continue;
+      const cancel = (cancelName && buttons.find((b) => txt(b).toLowerCase() === cancelName)) || null;
+      return { dialog: dlg, confirm, cancel };
+    }
+    return null;
+  }
+
+  function dismissSwitchConfirm(found) {
+    if (found && found.cancel) { try { found.cancel.click(); return; } catch {} }
+    if (typeof KeyboardEvent === 'function') {
+      try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true })); } catch {}
+    }
+  }
+
+  /**
+   * After the model menu click: wait (bounded) for EITHER the switch to show or
+   * the confirm dialog to appear, and confirm it. Never sends anything.
+   *   'switched'      the picker switched, no dialog
+   *   'no_dialog'     neither within appearMs (a new conversation; caller verifies)
+   *   'confirmed'     the dialog was confirmed and closed
+   *   'not_confirmed' the dialog could not be confirmed; it has been dismissed
+   */
+  async function confirmModelSwitch(cfg, labels, isSwitched, opts) {
+    const o = opts || {};
+    const appearMs = o.appearMs || 1500, settleMs = o.settleMs || 1500, stepMs = o.stepMs || 100;
+    const reclickMs = o.reclickMs || 600, maxClicks = o.maxClicks || 2;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const switched = () => { try { return !!isSwitched(); } catch { return false; } };
+    const appearBy = Date.now() + appearMs;
+    for (;;) {
+      if (switched()) return 'switched';
+      const found = findSwitchConfirm(cfg, labels);
+      if (found) {
+        if (!found.confirm) { dismissSwitchConfirm(found); return 'not_confirmed'; }
+        let clicks = 0, lastClick = 0;
+        const settleBy = Date.now() + settleMs;
+        for (;;) {
+          const cur = findSwitchConfirm(cfg, labels);
+          if (!cur) return 'confirmed';
+          if (switched()) return 'confirmed';
+          if (!cur.confirm) { dismissSwitchConfirm(cur); return 'not_confirmed'; }
+          if (clicks < maxClicks && (clicks === 0 || Date.now() - lastClick >= reclickMs)) {
+            try { cur.confirm.click(); } catch {}
+            clicks++; lastClick = Date.now();
+          }
+          if (Date.now() >= settleBy) { dismissSwitchConfirm(cur); return 'not_confirmed'; }
+          await sleep(stepMs);
+        }
+      }
+      if (Date.now() >= appearBy) return 'no_dialog';
+      await sleep(stepMs);
+    }
+  }
   // ── end model-menu option lookup ─
 
   async function changeModelInUI(targetModelId) {
@@ -1792,6 +1932,23 @@
       await new Promise(r => setTimeout(r, 100));
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       return false;
+    }
+
+    // Claude's "Switch model?" dialog (existing conversations): confirm it
+    // automatically. Only for a host whose catalog entry declares it.
+    const confirmCfg = routingConfirmDialogCfg();
+    if (confirmCfg) {
+      const outcome = await confirmModelSwitch(confirmCfg, [targetText], () => {
+        _modelBtnCache = null;
+        const b = findModelButton();
+        const t = b ? (b.textContent || '').trim() : '';
+        return !!t && t !== btnText && t.includes(targetText);
+      });
+      if (outcome === 'not_confirmed') {
+        _modelBtnCache = null;
+        clog('[cfai] switch-model confirmation could not be confirmed; dismissed');
+        return SWITCH_CONFIRM_DECLINED;
+      }
     }
 
     // Verify

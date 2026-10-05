@@ -144,7 +144,7 @@ export const MODEL_CATALOG = {
     "claude.ai": {
       "provider": "anthropic",
       "verified": true,
-      "evidence": "agent/src/os_monitor/ai-processes.js claude_web modelPicker, live UIA pass 2026-09-22: button 'Model: Opus 5 High'; items 'Opus 5 For complex tasks', 'Sonnet 5 Most efficient for everyday tasks', 'Haiku 4.5 Fastest for quick answers', 'Effort High', 'More models'.",
+      "evidence": "agent/src/os_monitor/ai-processes.js claude_web modelPicker, live UIA pass 2026-09-22: button 'Model: Opus 5 High'; items 'Opus 5 For complex tasks', 'Sonnet 5 Most efficient for everyday tasks', 'Haiku 4.5 Fastest for quick answers', 'Effort High', 'More models'. 2026-10-05 (Desktop, same UI): labels are now 'Opus 5.5' / 'Sonnet 5.5' (button 'Opus 5.5 Medium'); 'Opus 5' / 'Sonnet 5' and the family names stay as fallbacks.",
       "picker": {
         "name_prefix": "Model:",
         "item_control_types": [
@@ -164,9 +164,17 @@ export const MODEL_CATALOG = {
           "high": "High"
         }
       },
+      "confirm_dialog": {
+        "verified": false,
+        "evidence": "Same dialog as apps.claude_desktop (Claude Desktop renders claude.ai). Live 2026-10-05 on Desktop: Claude showed its own modal titled \"Switch model?\" (\"...This task is cached for the current model...\") with buttons \"Cancel\" and \"Switch to Sonnet 5.5\" (focused). The route stalled with focus in the dialog. New conversations show no dialog. Auto-confirm (content.js confirmModelSwitch) not yet live-verified on claude.ai.",
+        "title_contains": "Switch model",
+        "button_name_prefix": "Switch to ",
+        "cancel_button_name": "Cancel"
+      },
       "tiers": {
         "premium": {
           "click_labels": [
+            "Opus 5.5",
             "Opus 5",
             "Opus"
           ],
@@ -179,6 +187,7 @@ export const MODEL_CATALOG = {
         },
         "standard": {
           "click_labels": [
+            "Sonnet 5.5",
             "Sonnet 5",
             "Sonnet"
           ],
@@ -418,7 +427,7 @@ export const MODEL_CATALOG = {
     "claude_desktop": {
       "provider": "anthropic",
       "verified": true,
-      "evidence": "Live button text 'Model: Sonnet 5 Medium' against Claude Desktop (agent/tests/model-router-config.test.mjs); picker defaults MODEL_PICKER_NAME_PREFIX_DEFAULT / MODEL_PICKER_ITEM_CONTROL_TYPES_DEFAULT in ai-processes.js.",
+      "evidence": "Live button text 'Model: Sonnet 5 Medium' against Claude Desktop (agent/tests/model-router-config.test.mjs); picker defaults MODEL_PICKER_NAME_PREFIX_DEFAULT / MODEL_PICKER_ITEM_CONTROL_TYPES_DEFAULT in ai-processes.js. Live 2026-10-05: button 'Opus 5.5 Medium', target 'Sonnet 5.5'; 'Opus 5' / 'Sonnet 5' and the family names stay as fallbacks.",
       "picker": {
         "name_prefix": "Model:",
         "item_control_types": [
@@ -438,9 +447,17 @@ export const MODEL_CATALOG = {
           "high": "High"
         }
       },
+      "confirm_dialog": {
+        "verified": false,
+        "evidence": "Live 2026-10-05, Claude Desktop, existing conversation on Opus 5.5 Medium, picker switched to Sonnet: Claude showed its own modal titled \"Switch model?\" (\"...This task is cached for the current model...\") with buttons \"Cancel\" and \"Switch to Sonnet 5.5\" (focused). The route stalled with focus in the dialog. New conversations show no dialog. Auto-confirm (enforcer-win.ps1 RouteAwaitSwitch) not yet live-verified.",
+        "title_contains": "Switch model",
+        "button_name_prefix": "Switch to ",
+        "cancel_button_name": "Cancel"
+      },
       "tiers": {
         "premium": {
           "click_labels": [
+            "Opus 5.5",
             "Opus 5",
             "Opus"
           ],
@@ -453,6 +470,7 @@ export const MODEL_CATALOG = {
         },
         "standard": {
           "click_labels": [
+            "Sonnet 5.5",
             "Sonnet 5",
             "Sonnet"
           ],

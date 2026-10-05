@@ -4,12 +4,18 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadRoutingFlow } from './load-routing-flow.mjs';
+import { loadRoutingFlow, CONFIRM_DECLINED } from './load-routing-flow.mjs';
 
 const CLAUDE_PICKER = {
   'Haiku 4.5': 'Haiku 4.5',
   'Sonnet 5': 'Sonnet 5 Medium',
   'Opus 5': 'Opus 5 High',
+};
+// The picker as Claude labels it since 2026-10-05.
+const CLAUDE_PICKER_55 = {
+  'Haiku 4.5': 'Haiku 4.5',
+  'Sonnet 5.5': 'Sonnet 5.5 Medium',
+  'Opus 5.5': 'Opus 5.5 High',
 };
 const claudeSwitch = (label) => CLAUDE_PICKER[label] || null;
 
@@ -48,7 +54,7 @@ test('model_routed carries exactly the contract fields — and no prompt or page
   const ev = flow.env.events.at(-1);
   for (const [k, v] of Object.entries({
     mechanism: 'browser_extension', surface: 'browser', host_or_app: 'claude.ai', provider: 'anthropic',
-    from_tier: 'premium', from_label: 'Opus 5', to_tier: 'economy', to_label: 'Haiku 4.5',
+    from_tier: 'premium', from_label: 'Opus 5.5', to_tier: 'economy', to_label: 'Haiku 4.5',
     model: 'claude-haiku-4-5', complexity: 'simple', rule_id: null, result: 'applied', reason: 'downgrade',
     effort_from: 'high', effort_to: null, len: PROMPT_WITH_SECRET.length,
   })) assert.deepEqual(ev[k], v, `field ${k}`);
@@ -222,4 +228,36 @@ test('a page outside the catalog never routes', () => {
   const { r, paused } = flow.send(SIMPLE);
   assert.equal(r.decision.result, 'unsupported');
   assert.equal(paused, false);
+});
+
+// ── 2026-10-05: "Opus 5.5" / "Sonnet 5.5", and Claude's "Switch model?" dialog ──
+
+const MODERATE = 'explain what an API is';   // the live 2026-10-05 prompt
+
+test('5.5 labels: a moderate prompt on "Opus 5.5 Medium" switches to "Sonnet 5.5" on the first label', async () => {
+  const flow = claude({ buttonText: 'Opus 5.5 Medium', onSwitch: (l) => CLAUDE_PICKER_55[l] || null });
+  assert.equal(flow.readPickerState().tier, 'premium');
+  assert.equal(flow.readPickerState().effort, 'medium', 'the effort suffix still parses');
+  const { r } = flow.send(MODERATE);
+  assert.equal(r.decision.target_tier, 'standard');
+  await flow.settle();
+  assert.deepEqual(flow.env.switchCalls, ['Sonnet 5.5']);
+  const ev = flow.env.events.at(-1);
+  assert.equal(ev.result, 'applied');
+  assert.equal(ev.to_label, 'Sonnet 5.5');
+  assert.equal(ev.from_label, 'Opus 5.5');
+  assert.equal(flow.env.resent.length, 1);
+});
+
+test('an unconfirmable "Switch model?" dialog stops the label loop, is reported, and the prompt goes ONCE', async () => {
+  const flow = claude({ buttonText: 'Opus 5.5 Medium', onSwitch: () => CONFIRM_DECLINED });
+  flow.send(MODERATE);
+  await flow.settle();
+  assert.deepEqual(flow.env.switchCalls, ['Sonnet 5.5'], 'no further labels: each would reopen the dialog');
+  const ev = flow.env.events.at(-1);
+  assert.equal(ev.result, 'failed');
+  assert.equal(ev.reason, 'confirm_dialog_not_confirmed');
+  assert.equal(ev.ui_changed, false);
+  assert.equal(flow.env.resent.length, 1, 'the paused prompt is re-sent exactly once, unrouted');
+  assert.equal(flow.state().lastRoute['claude.ai|anthropic'], undefined);
 });

@@ -38,7 +38,8 @@ function region() {
  */
 export function loadMenuLookup(fakeDocument) {
   const body = 'const document = arguments[0];\n' + region()
-    + '\n  return { findClickableByText, isVisibleEl, visibleMenuOptions, MENU_CONTAINER_SELECTOR };';
+    + '\n  return { findClickableByText, isVisibleEl, visibleMenuOptions, MENU_CONTAINER_SELECTOR,'
+    + ' confirmLabelHit, confirmButtonMatches, findSwitchConfirm, confirmModelSwitch, SWITCH_CONFIRM_DIALOG_SELECTOR };';
   // eslint-disable-next-line no-new-func
   return new Function(body)(fakeDocument);
 }

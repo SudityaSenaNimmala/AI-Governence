@@ -217,4 +217,119 @@ if ($hasRefresh) {
   Emit @{ t = 'refresh'; case = 'unarmed_untouched'; rid = @(GetF '_pendingRouteComposerRid'); armed = [bool](GetF '_pendingRouteArmed') }
 }
 
+# ---- 6. Claude's own "Switch model?" confirmation dialog --------------------
+# Live 2026-10-05: an existing conversation on "Opus 5.5 Medium", picker set to
+# Sonnet -> Claude Desktop showed "Switch model?" with "Cancel" and "Switch to
+# Sonnet 5.5" (focused); the route failed
+# switch_not_verified_no_fallback_focus_not_in_composer and nothing was sent.
+# The REAL RouteAwaitSwitch loop is driven against a scripted dialog and a fake
+# clock; every UIA touch it makes goes through the RouteSwitchIo delegates.
+foreach ($lbl in @('Model: Opus 5.5 Medium', 'Model: Sonnet 5.5 Medium', 'Model: Sonnet 5.5', 'Opus 5.5 Medium', 'Model: Sonnet 5.5 High', 'Model: Haiku 4.5')) {
+  Emit @{ t = 'tierof'; label = $lbl; tier = [string](Call 'MrTierOfLabel' @('desktop_app', 'claude_desktop', $lbl)) }
+  Emit @{ t = 'effort'; label = $lbl; effort = [string](Call 'ModelEffortFromLabel' @($lbl, 'Model:')) }
+}
+
+$hasAwait = (Has 'RouteAwaitSwitch') -and (Has 'RouteConfirmButtonMatches') -and (Has 'MrConfirmDialogCfg')
+Emit @{ t = 'has'; name = 'RouteAwaitSwitch'; present = $hasAwait }
+if ($hasAwait) {
+  $cfg = Call 'MrConfirmDialogCfg' @('desktop_app', 'claude_desktop')
+  $cfgType = $T.GetNestedType('RouteConfirmCfg', $FLAGS)
+  Emit @{ t = 'cfg'; app = 'claude_desktop'; present = ($cfg -ne $null);
+          prefix = $(if ($cfg) { [string]$cfgType.GetField('ButtonPrefix').GetValue($cfg) } else { '' });
+          title = $(if ($cfg) { [string]$cfgType.GetField('TitleContains').GetValue($cfg) } else { '' });
+          cancel = $(if ($cfg) { [string]$cfgType.GetField('CancelName').GetValue($cfg) } else { '' }) }
+  Emit @{ t = 'cfg'; app = 'chatgpt_desktop'; present = ((Call 'MrConfirmDialogCfg' @('desktop_app', 'chatgpt_desktop')) -ne $null) }
+  Emit @{ t = 'cfg'; app = 'browser_claude_ai'; present = ((Call 'MrConfirmDialogCfg' @('browser', 'claude.ai')) -ne $null) }
+
+  $SONNET = New-Object 'System.Collections.Generic.List[string]'
+  foreach ($x in @('Sonnet 5.5', 'Sonnet 5', 'Sonnet')) { $SONNET.Add($x) }
+  $SONNET_OLD = New-Object 'System.Collections.Generic.List[string]'
+  $SONNET_OLD.Add('Sonnet 5')
+  foreach ($c in @(
+      @('target_55',          'Switch to Sonnet 5.5', $SONNET),
+      @('target_family_only', 'Switch to Sonnet',     $SONNET),
+      @('lowercase',          'switch to sonnet 5.5', $SONNET),
+      @('other_model',        'Switch to Opus 5.5',   $SONNET),
+      @('cancel',             'Cancel',               $SONNET),
+      @('no_prefix_boundary', 'Switch toSonnet 5.5',  $SONNET),
+      @('override_label_old', 'Switch to Sonnet 5.5', $SONNET_OLD),
+      @('bare_prefix',        'Switch to ',           $SONNET))) {
+    Emit @{ t = 'btn'; case = $c[0]; match = [bool](Call 'RouteConfirmButtonMatches' @($c[1], 'Switch to ', ([System.Collections.Generic.List[string]]$c[2].psobject.BaseObject))) }
+  }
+
+  $ioType = $T.GetNestedType('RouteSwitchIo', $FLAGS)
+  $seenType = $T.GetNestedType('RouteConfirmSeen', $FLAGS)
+  $outType = $T.GetNestedType('RouteSwitchOutcome', $FLAGS)
+  function SetDelegate($obj, [string]$field, [scriptblock]$sb) {
+    $f = $ioType.GetField($field)
+    $f.SetValue($obj, [System.Management.Automation.LanguagePrimitives]::ConvertTo($sb, $f.FieldType))
+  }
+  function OutF($o, [string]$n) { $outType.GetField($n).GetValue($o) }
+
+  # One scripted Claude Desktop. $script:W is the world the delegates read.
+  function RunWorld([string]$case, [hashtable]$world, $useCfg, [bool]$usedSelect) {
+    $script:W = @{
+      now = 0; label = 'Model: Opus 5.5 Medium'; target = 'Model: Sonnet 5.5 Medium';
+      switchAt = $null; dialogAt = $null; closed = $false; title = $true;
+      buttons = @('Switch to Sonnet 5.5'); confirmWorks = $true; dialogOnRetry = $false;
+      invokes = 0; invokedNames = @(); dismissals = 0; retries = 0; probes = 0
+    }
+    foreach ($k in $world.Keys) { $script:W[$k] = $world[$k] }
+    $io = [Activator]::CreateInstance($ioType, $true)
+    SetDelegate $io 'NowMs' { [long]$script:W.now }
+    SetDelegate $io 'Sleep' { param([int]$ms) $script:W.now += $ms }
+    SetDelegate $io 'ReadLabel' {
+      if ($script:W.switchAt -ne $null -and $script:W.now -ge $script:W.switchAt) { return [string]$script:W.target }
+      return [string]$script:W.label
+    }
+    SetDelegate $io 'TierOf' { param([string]$l) [string](Call 'MrTierOfLabel' @('desktop_app', 'claude_desktop', $l)) }
+    SetDelegate $io 'RetryActivate' {
+      $script:W.retries++
+      if ($script:W.dialogOnRetry) { $script:W.dialogAt = $script:W.now + 200 }
+    }
+    SetDelegate $io 'ProbeConfirm' {
+      $script:W.probes++
+      $s = [Activator]::CreateInstance($seenType, $true)
+      if ($script:W.dialogAt -ne $null -and $script:W.now -ge $script:W.dialogAt -and -not $script:W.closed) {
+        $seenType.GetField('Title').SetValue($s, [bool]$script:W.title)
+        $list = $seenType.GetField('Buttons').GetValue($s)
+        foreach ($b in $script:W.buttons) { $list.Add([string]$b) }
+      }
+      return $s
+    }
+    SetDelegate $io 'InvokeConfirm' {
+      param([string]$name)
+      $script:W.invokes++
+      $script:W.invokedNames += $name
+      if ($script:W.confirmWorks) { $script:W.closed = $true; $script:W.switchAt = $script:W.now + 150 }
+      return $true
+    }
+    SetDelegate $io 'DismissConfirm' { $script:W.dismissals++; $script:W.closed = $true }
+
+    $o = Call 'RouteAwaitSwitch' @($io, $useCfg, ([System.Collections.Generic.List[string]]$SONNET), 'standard', 'Model: Opus 5.5 Medium', $usedSelect, $false)
+    $switched = [bool](OutF $o 'Switched')
+    # What RunRoute does with the outcome: Switched -> its ONE routed Enter;
+    # otherwise FallbackSendOrReport's ONE Enter (with the composer refocused,
+    # possible only because a dialog still up was dismissed first).
+    Emit @{ t = 'await'; case = $case; switched = $switched; reason = [string](OutF $o 'Reason');
+            dialogSeen = [bool](OutF $o 'DialogSeen'); confirmInvokes = [int](OutF $o 'ConfirmInvokes');
+            dismissals = [int](OutF $o 'Dismissals'); retries = [int](OutF $o 'Retries');
+            invokedNames = @($script:W.invokedNames); worldInvokes = $script:W.invokes; worldDismissals = $script:W.dismissals;
+            worldRetries = $script:W.retries; probes = $script:W.probes; elapsed = $script:W.now;
+            dialogOpenAtEnd = ($script:W.dialogAt -ne $null -and -not $script:W.closed);
+            labelAfter = [string](OutF $o 'LabelAfter'); sendPath = $(if ($switched) { 'routed' } else { 'fallback' }) }
+  }
+
+  RunWorld 'no_dialog_switches'      @{ switchAt = 200 }                                    $cfg $true
+  RunWorld 'dialog_confirmed'        @{ dialogAt = 120 }                                    $cfg $true
+  RunWorld 'dialog_after_retry'      @{ dialogOnRetry = $true }                             $cfg $true
+  RunWorld 'dialog_never_confirms'   @{ dialogAt = 120; confirmWorks = $false }             $cfg $true
+  RunWorld 'dialog_wrong_target'     @{ dialogAt = 120; buttons = @('Switch to Opus 5.5') } $cfg $true
+  RunWorld 'dialog_title_only'       @{ dialogAt = 120; buttons = @() }                     $cfg $true
+  RunWorld 'unrelated_switch_button' @{ dialogAt = 0; title = $false; buttons = @('Switch to dark mode') } $cfg $true
+  RunWorld 'no_dialog_no_switch'     @{ }                                                   $cfg $true
+  RunWorld 'late_dialog_dismissed'   @{ dialogAt = 2000 }                                   $cfg $true
+  RunWorld 'no_cfg_app'              @{ dialogAt = 120 }                                    $null $true
+}
+
 Emit @{ t = 'done' }
