@@ -261,3 +261,12 @@ test('an unconfirmable "Switch model?" dialog stops the label loop, is reported,
   assert.equal(flow.env.resent.length, 1, 'the paused prompt is re-sent exactly once, unrouted');
   assert.equal(flow.state().lastRoute['claude.ai|anthropic'], undefined);
 });
+
+test('after the switch (and any confirm dialog) the composer is focused BEFORE the one re-sent Enter', async () => {
+  const flow = claude({ buttonText: 'Opus 5.5 Medium', onSwitch: (l) => CLAUDE_PICKER_55[l] || null });
+  flow.send(MODERATE);
+  await flow.settle();
+  assert.equal(flow.env.resent.length, 1, 'exactly one re-send');
+  assert.deepEqual(flow.env.focusCalls, [0], 'focus() ran once, before the Enter was dispatched');
+  assert.equal(flow.env.events.at(-1).result, 'applied');
+});

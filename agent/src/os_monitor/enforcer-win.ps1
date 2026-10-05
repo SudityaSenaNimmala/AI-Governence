@@ -206,6 +206,10 @@ public static class CfaiEnforcer
     static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")]
     static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")]
+    static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
     [StructLayout(LayoutKind.Sequential)]
     struct POINT { public int X; public int Y; }
     [DllImport("user32.dll")]
@@ -7861,6 +7865,208 @@ public static class CfaiEnforcer
         return false;
     }
 
+    // ── Putting keyboard focus BACK on the composer before the one Enter ────
+    //
+    // Live 2026-10-05 (e32cf4d, Claude Desktop, existing conversation): the
+    // "Switch model?" dialog was auto-confirmed and the model DID switch to
+    // Sonnet 5.5 -- then the route failed
+    // focus_lost_after_switch_no_fallback_focus_not_in_composer and the prompt
+    // sat unsent until the user pressed Enter again. Closing Claude's menu/modal
+    // leaves keyboard focus on the picker trigger, and UIA SetFocus() on a
+    // Chromium contenteditable does not reliably move KEYBOARD focus back.
+    //
+    // So the refocus is a short, bounded loop (ROUTE_REFOCUS_MS): put Claude's
+    // window back in front if a same-process window took it, SetFocus() the
+    // composer, and -- if focus still is not there -- a real click INSIDE the
+    // composer's own rectangle (only when that point belongs to Claude's
+    // window). Each step re-checks FocusedElement through RouteComposerVerdict:
+    // the Enter goes out only once focus is verifiably on the composer holding
+    // EXACTLY the pinned prompt. It stops without sending if another app took
+    // the foreground or the user edited the text.
+    class RouteRefocusIo
+    {
+        public Func<string> WindowState;       // "same" | "same_process" | "other"
+        public Action RestoreForeground;
+        public Func<string> FocusVerdict;      // null = focus is on the composer holding the prompt; else RouteComposerVerdict reason
+        public Func<string> CandidateVerdict;  // null = a composer holding the prompt exists to focus; else "text_changed" / "no_element"
+        public Func<bool> FocusCandidate;      // UIA SetFocus
+        public Func<bool> ClickCandidate;      // a real click inside the composer
+        public Func<long> NowMs;
+        public Action<int> Sleep;
+    }
+
+    class RouteRefocusOutcome
+    {
+        public bool Ok;
+        public string Reason;
+        public int Focuses, Clicks, Restores;
+    }
+
+    const int ROUTE_REFOCUS_MS = 800;
+    const int ROUTE_REFOCUS_STEP_MS = 120;
+
+    static RouteRefocusOutcome RouteRefocusComposer(RouteRefocusIo io)
+    {
+        var o = new RouteRefocusOutcome();
+        long deadline = io.NowMs() + ROUTE_REFOCUS_MS;
+        int attempt = 0;
+        for (;;)
+        {
+            string ws = "other";
+            try { ws = io.WindowState() ?? "other"; } catch { }
+            if (ws == "other") { o.Reason = "focus_changed"; return o; }
+            if (ws == "same_process")
+            {
+                // A same-process window (a native modal) holds the foreground.
+                if (o.Restores >= 2 || io.NowMs() >= deadline) { o.Reason = "focus_changed"; return o; }
+                o.Restores++;
+                try { io.RestoreForeground(); } catch { }
+                io.Sleep(80);
+                continue;
+            }
+            string fv = "no_element";
+            try { fv = io.FocusVerdict(); } catch { }
+            if (string.IsNullOrEmpty(fv)) { o.Ok = true; return o; }   // "" too: a scripted delegate may yield it
+            if (fv == "text_changed") { o.Reason = fv; return o; }
+            string cv = "no_element";
+            try { cv = io.CandidateVerdict(); } catch { }
+            if (!string.IsNullOrEmpty(cv)) { o.Reason = cv; return o; }
+            if (io.NowMs() >= deadline) { o.Reason = fv; return o; }
+            // SetFocus first (cheap, no pointer); then alternate with a click,
+            // which is what actually moves keyboard focus in Chromium.
+            if (attempt % 2 == 0) { o.Focuses++; try { io.FocusCandidate(); } catch { } }
+            else { o.Clicks++; try { io.ClickCandidate(); } catch { } }
+            attempt++;
+            io.Sleep(ROUTE_REFOCUS_STEP_MS);
+        }
+    }
+
+    // The composer by WHAT IT HOLDS: an Edit/Document element in the window whose
+    // text is exactly the pinned prompt. Used when the known reference died in a
+    // re-render.
+    static AutomationElement RouteFindComposerByText(AutomationElement win, string originalText)
+    {
+        if (win == null) return null;
+        string want = NormalizeWs(originalText);
+        if (want.Length == 0) return null;
+        try
+        {
+            var walker = TreeWalker.ControlViewWalker;
+            var stack = new Stack<KeyValuePair<AutomationElement, int>>();
+            stack.Push(new KeyValuePair<AutomationElement, int>(win, 0));
+            while (stack.Count > 0)
+            {
+                var cur = stack.Pop();
+                if (cur.Value > 30) continue;
+                AutomationElement el = cur.Key;
+                try
+                {
+                    ControlType ct = el.Current.ControlType;
+                    if ((ct == ControlType.Edit || ct == ControlType.Document) && RouteElementEditable(el))
+                    {
+                        string t = null;
+                        try { t = ReadText(el); } catch { }
+                        if (NormalizeWs(t) == want) return el;
+                    }
+                }
+                catch { }
+                try
+                {
+                    AutomationElement child = walker.GetFirstChild(el);
+                    while (child != null)
+                    {
+                        stack.Push(new KeyValuePair<AutomationElement, int>(child, cur.Value + 1));
+                        child = walker.GetNextSibling(child);
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    const uint MOUSEEVENTF_LEFTDOWN = 0x0002, MOUSEEVENTF_LEFTUP = 0x0004;
+    const uint GA_ROOT_WINDOW = 2;
+
+    // One left click inside the composer's own rectangle, toward its right end
+    // (empty editor space: the caret lands at a line end, never on a control).
+    // Refused unless the point is in the pinned window. The cursor is put back.
+    static bool RouteClickInto(AutomationElement el, IntPtr pinnedHwnd)
+    {
+        if (el == null) return false;
+        try
+        {
+            System.Windows.Rect r = el.Current.BoundingRectangle;
+            if (r.IsEmpty || r.Width < 4 || r.Height < 4) return false;
+            POINT p;
+            p.X = (int)(r.Right - Math.Min(12.0, r.Width / 4));
+            p.Y = (int)(r.Top + r.Height / 2);
+            IntPtr at = WindowFromPoint(p);
+            if (at == IntPtr.Zero || GetAncestor(at, GA_ROOT_WINDOW) != pinnedHwnd) return false;
+            POINT saved;
+            bool hadPos = GetCursorPos(out saved);
+            SetCursorPos(p.X, p.Y);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(20);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(30);
+            if (hadPos) SetCursorPos(saved.X, saved.Y);
+            return true;
+        }
+        catch { return false; }
+    }
+
+    // The UIA hands of RouteRefocusComposer. Returns the FOCUSED composer
+    // (verified to hold exactly the pinned prompt), or null with the reason.
+    static AutomationElement RouteRefocusUia(IntPtr pinnedHwnd, int[] pinnedRid, AutomationElement knownComposer, string originalText, out string reason)
+    {
+        AutomationElement focused = null;
+        AutomationElement cand = knownComposer;
+        AutomationElement win = null;
+        try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
+        uint pinnedPid = 0;
+        try { GetWindowThreadProcessId(pinnedHwnd, out pinnedPid); } catch { }
+
+        var io = new RouteRefocusIo();
+        io.WindowState = delegate
+        {
+            IntPtr fg = GetForegroundWindow();
+            if (fg == pinnedHwnd) return "same";
+            uint pid = 0;
+            try { GetWindowThreadProcessId(fg, out pid); } catch { }
+            return (fg == IntPtr.Zero || (pid != 0 && pid == pinnedPid)) ? "same_process" : "other";
+        };
+        io.RestoreForeground = delegate { try { SetForegroundWindow(pinnedHwnd); } catch { } };
+        io.FocusVerdict = delegate
+        {
+            string why;
+            AutomationElement el = AcquireRouteComposer(pinnedRid, null, originalText, false, out why);
+            if (el != null) { focused = el; return null; }
+            return why;
+        };
+        io.CandidateVerdict = delegate
+        {
+            string kt = null;
+            bool readable = false;
+            if (cand != null) { try { kt = ReadText(cand); readable = true; } catch { } }
+            if (readable && RouteComposerVerdict(pinnedRid, pinnedRid, originalText, kt, true) == null) return null;
+            // The reference died in a re-render, or reads something else: find
+            // the composer by what it holds before concluding anything.
+            AutomationElement found = RouteFindComposerByText(win, originalText);
+            if (found != null) { cand = found; return null; }
+            return readable ? "text_changed" : "no_element";
+        };
+        io.FocusCandidate = delegate { try { cand.SetFocus(); return true; } catch { return false; } };
+        io.ClickCandidate = delegate { return RouteClickInto(cand, pinnedHwnd); };
+        io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
+        io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+
+        RouteRefocusOutcome o = RouteRefocusComposer(io);
+        reason = o.Ok ? null : (o.Reason ?? "no_element");
+        return o.Ok ? focused : null;
+    }
+
     // Keyboard hook. A plain, user-typed Enter in the route's own window while
     // a route runs is held key-repeat or an impatient second press. It used to
     // set _routeAbort (killing the route between expand and select) and reach
@@ -7959,13 +8165,14 @@ public static class CfaiEnforcer
         // always, whether it works or not.
         ClearPendingRoute();
 
-        if (GetForegroundWindow() != pinnedHwnd) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_focus_changed"); return; }
-
-        // After a failed picker interaction focus is usually in the model menu,
-        // not the composer: put it back (AcquireRouteComposer, refocus) and
-        // re-verify the composer still holds exactly the pinned prompt.
+        // After a failed picker interaction focus is usually in the model menu
+        // (or on a dismissed dialog's trigger), not the composer: put it back --
+        // RouteRefocusUia: SetFocus, then a click inside the composer, bounded
+        // -- and re-verify the composer still holds exactly the pinned prompt.
+        // It refuses on its own when ANOTHER app holds the foreground
+        // (focus_changed) or the user edited the text (text_changed).
         string whyNot;
-        AutomationElement el = AcquireRouteComposer(pinnedComposerRid, knownComposer, originalText, true, out whyNot);
+        AutomationElement el = RouteRefocusUia(pinnedHwnd, pinnedComposerRid, knownComposer, originalText, out whyNot);
         if (el == null) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_" + whyNot); return; }
         // The refocus took time: the window check again, immediately before Enter.
         if (GetForegroundWindow() != pinnedHwnd) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_focus_changed"); return; }
@@ -8226,13 +8433,21 @@ public static class CfaiEnforcer
             // by what it HOLDS (AcquireRouteComposer, refocus), not by
             // RuntimeId alone -- a re-render must not turn a successful switch
             // into a failure.
-            try { composerEl.SetFocus(); } catch { }
-            Thread.Sleep(150);
-
+            // Live (e32cf4d): after a confirmed "Switch model?" dialog, focus
+            // stayed on the picker and a bare SetFocus did not move it -- the
+            // switch landed and the prompt was never sent. RouteRefocusUia
+            // retries SetFocus and a click inside the composer, bounded.
             string afterWhy;
-            AutomationElement composerAfter = AcquireRouteComposer(pinnedComposerRid, composerEl, originalText, true, out afterWhy);
+            AutomationElement composerAfter = RouteRefocusUia(pinnedHwnd, pinnedComposerRid, composerEl, originalText, out afterWhy);
             if (composerAfter == null)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "focus_lost_after_switch"); return; }
+            {
+                // The switch DID happen, so this is not an unrouted send, and
+                // with focus unverifiable no Enter goes anywhere: the prompt
+                // stays visibly in the composer for the user.
+                ClearPendingRoute();
+                EmitRoute(_app, provider, toTier /* now-current */, toTier, toLabel, complexity, "failed", -1, "focus_lost_after_switch_" + afterWhy, effortFrom, effortTo);
+                return;
+            }
 
             if (GetForegroundWindow() != pinnedHwnd)
             { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "focus_changed_before_send"); return; }

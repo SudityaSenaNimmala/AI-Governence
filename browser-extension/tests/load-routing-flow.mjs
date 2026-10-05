@@ -64,6 +64,7 @@ export function loadRoutingFlow(o) {
     toasts: [],
     switchCalls: [],
     resent: [],
+    focusCalls: [],
     paused: 0,
     store: o.store || {},
     storageListeners: [],
@@ -168,7 +169,8 @@ export function loadRoutingFlow(o) {
       stopImmediatePropagation() {},
       stopPropagation() {},
     };
-    const el = { isConnected: true, dispatchEvent: (ev) => env.resent.push(ev) };
+    // `focusCalls` records the order: focus() must land BEFORE the re-sent Enter.
+    const el = { isConnected: true, focus: () => env.focusCalls.push(env.resent.length), dispatchEvent: (ev) => env.resent.push(ev) };
     const paused = r ? api.applyRouteDecision(r, text, e, el) : false;
     return { r, paused };
   };

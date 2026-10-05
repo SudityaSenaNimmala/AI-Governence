@@ -332,4 +332,56 @@ if ($hasAwait) {
   RunWorld 'no_cfg_app'              @{ dialogAt = 120 }                                    $null $true
 }
 
+# ---- 7. focus back on the composer before the ONE Enter ---------------------
+# Live (e32cf4d): the dialog was confirmed and the model switched, then
+# focus_lost_after_switch_no_fallback_focus_not_in_composer -- the prompt was
+# never sent. The REAL RouteRefocusComposer loop, scripted world + fake clock.
+$hasRefocus = Has 'RouteRefocusComposer'
+Emit @{ t = 'has'; name = 'RouteRefocusComposer'; present = $hasRefocus }
+if ($hasRefocus) {
+  $rIoType = $T.GetNestedType('RouteRefocusIo', $FLAGS)
+  $rOutType = $T.GetNestedType('RouteRefocusOutcome', $FLAGS)
+  function SetRDelegate($obj, [string]$field, [scriptblock]$sb) {
+    $f = $rIoType.GetField($field)
+    $f.SetValue($obj, [System.Management.Automation.LanguagePrimitives]::ConvertTo($sb, $f.FieldType))
+  }
+  function RunRefocus([string]$case, [hashtable]$world) {
+    $script:R = @{
+      now = 0; window = 'same'; restoreFixes = $true; focusOk = $false;
+      setFocusWorks = $false; clickWorks = $false; candidate = $null; userEdited = $false;
+      focuses = 0; clicks = 0; restores = 0
+    }
+    foreach ($k in $world.Keys) { $script:R[$k] = $world[$k] }
+    $io = [Activator]::CreateInstance($rIoType, $true)
+    SetRDelegate $io 'NowMs' { [long]$script:R.now }
+    SetRDelegate $io 'Sleep' { param([int]$ms) $script:R.now += $ms }
+    SetRDelegate $io 'WindowState' { [string]$script:R.window }
+    SetRDelegate $io 'RestoreForeground' { $script:R.restores++; if ($script:R.restoreFixes) { $script:R.window = 'same' } }
+    SetRDelegate $io 'FocusVerdict' {
+      if ($script:R.userEdited) { return 'text_changed' }
+      if ($script:R.focusOk) { return $null }
+      return 'focus_not_in_composer'
+    }
+    SetRDelegate $io 'CandidateVerdict' { if ($script:R.candidate) { return [string]$script:R.candidate }; return $null }
+    SetRDelegate $io 'FocusCandidate' { $script:R.focuses++; if ($script:R.setFocusWorks) { $script:R.focusOk = $true }; return $true }
+    SetRDelegate $io 'ClickCandidate' { $script:R.clicks++; if ($script:R.clickWorks) { $script:R.focusOk = $true }; return $true }
+    $o = Call 'RouteRefocusComposer' @($io)
+    $ok = [bool]$rOutType.GetField('Ok').GetValue($o)
+    Emit @{ t = 'refocus'; case = $case; ok = $ok; reason = [string]$rOutType.GetField('Reason').GetValue($o);
+            focuses = $script:R.focuses; clicks = $script:R.clicks; restores = $script:R.restores; elapsed = $script:R.now;
+            # What RunRoute does: ok -> its ONE Enter; otherwise no Enter at all.
+            enters = $(if ($ok) { 1 } else { 0 }) }
+  }
+  RunRefocus 'already_focused'            @{ focusOk = $true }
+  RunRefocus 'focus_in_menu_setfocus_ok'  @{ setFocusWorks = $true }
+  RunRefocus 'setfocus_ignored_click_ok'  @{ clickWorks = $true }
+  RunRefocus 'refocus_never_works'        @{ }
+  RunRefocus 'user_edited'                @{ userEdited = $true }
+  RunRefocus 'composer_text_changed'      @{ candidate = 'text_changed' }
+  RunRefocus 'composer_gone'              @{ candidate = 'no_element' }
+  RunRefocus 'other_app_foreground'       @{ window = 'other'; setFocusWorks = $true }
+  RunRefocus 'same_process_modal'         @{ window = 'same_process'; setFocusWorks = $true }
+  RunRefocus 'same_process_stuck'         @{ window = 'same_process'; restoreFixes = $false; setFocusWorks = $true }
+}
+
 Emit @{ t = 'done' }

@@ -226,12 +226,12 @@ test('desktop route SOURCE: the hook consults RouteHookSwallowsEnter BEFORE sett
 test('desktop route SOURCE: the fallback puts focus back on the composer before deciding, and names its reason honestly', async () => {
   const src = await readFile(ENFORCER, 'utf8');
   const fb = stripComments(sliceFn(src, 'static void FallbackSendOrReport('));
-  assert.ok(/AcquireRouteComposer\(/.test(fb), 'the fallback must re-acquire the composer (refocus), not read FocusedElement as-is');
+  assert.ok(/RouteRefocusUia\(/.test(fb), 'the fallback must put focus back on the composer (RouteRefocusUia), not read FocusedElement as-is');
   assert.ok(!/"_no_fallback_text_changed"/.test(fb),
     'a RuntimeId mismatch / focus in the menu must not be reported as text_changed');
   // Enter is sent only after the composer was re-verified.
   const beforeEnter = fb.slice(0, fb.indexOf('SendKeyPress(VK_RETURN)'));
-  assert.ok(/AcquireRouteComposer\(/.test(beforeEnter));
+  assert.ok(/RouteRefocusUia\(/.test(beforeEnter));
   assert.ok(/GetForegroundWindow\(\) != pinnedHwnd/.test(beforeEnter), 'never send into another window');
   // Exactly one synthetic Enter: no retry.
   assert.equal((fb.match(/SendKeyPress\(VK_RETURN\)/g) || []).length, 1);
@@ -241,7 +241,10 @@ test('desktop route SOURCE: RunRoute pre-flight and post-switch use the verdict,
   const src = await readFile(ENFORCER, 'utf8');
   const run = stripComments(sliceFn(src, 'static void RunRoute('));
   assert.ok(!/RuntimeIdEquals\(/.test(run), 'RunRoute must not decide on RuntimeId alone');
-  assert.ok((run.match(/AcquireRouteComposer\(/g) || []).length >= 2, 'pre-flight AND post-switch re-acquire the composer');
+  assert.ok(/AcquireRouteComposer\(/.test(run), 'pre-flight re-acquires the composer by what it holds');
+  assert.ok(/RouteRefocusUia\(/.test(run.slice(run.indexOf('!waited.Switched'))), 'post-switch puts focus back on the composer');
+  const refocus = stripComments(sliceFn(src, 'static AutomationElement RouteRefocusUia('));
+  assert.ok(/AcquireRouteComposer\(/.test(refocus), 'the refocus verifies focus through the same composer verdict');
 });
 
 // ── 5. the pin follows the composer ─────────────────────────────────────────
@@ -407,4 +410,69 @@ test('desktop route SOURCE: the switch wait never sends; RunRoute sends once rou
   assert.ok(/SendKeyPress\(VK_ESCAPE\)/.test(dismiss));
   assert.ok(/pidA == pidB/.test(dismiss), 'never send Escape into another app');
   assert.ok(!/VK_RETURN/.test(dismiss), 'never confirm by pressing Enter on the focused button');
+});
+
+// ── 7. focus back on the composer, then the ONE Enter ───────────────────────
+//
+// Live (e32cf4d, Claude Desktop, existing conversation, 2026-10-05T15:09:15Z):
+// the "Switch model?" dialog was confirmed and the model switched to Sonnet 5.5,
+// then model_routed failed focus_lost_after_switch_no_fallback_focus_not_in_composer
+// and the prompt was never sent -- the user had to press Enter again. Closing
+// Claude's menu/modal leaves focus on the picker, and a bare UIA SetFocus() did
+// not move keyboard focus back into the Chromium composer.
+
+test('desktop route: verified switch with focus left in the menu -> refocus -> ONE send', winOnly, async () => {
+  const rows = await runHarness();
+  present(rows, 'RouteRefocusComposer');
+  const a = one(rows, 'refocus', 'already_focused');
+  assert.equal(a.ok, true);
+  assert.equal(a.focuses + a.clicks, 0, 'nothing to do when focus is already there');
+  const f = one(rows, 'refocus', 'focus_in_menu_setfocus_ok');
+  assert.equal(f.ok, true);
+  assert.equal(f.focuses, 1);
+  assert.equal(f.enters, 1);
+  // THE LIVE CASE: SetFocus is ignored by Chromium; a click inside the composer works.
+  const c = one(rows, 'refocus', 'setfocus_ignored_click_ok');
+  assert.equal(c.ok, true, 'a SetFocus that does not move keyboard focus must not end the route');
+  assert.equal(c.clicks, 1);
+  assert.equal(c.enters, 1, 'exactly one Enter');
+  const m = one(rows, 'refocus', 'same_process_modal');
+  assert.equal(m.ok, true, 'a same-process window in front is put back, then focus restored');
+  assert.equal(m.restores, 1);
+});
+
+test('desktop route: refocus that cannot be verified -> reported, NO Enter, text left intact', winOnly, async () => {
+  const rows = await runHarness();
+  const n = one(rows, 'refocus', 'refocus_never_works');
+  assert.equal(n.ok, false);
+  assert.equal(n.reason, 'focus_not_in_composer');
+  assert.equal(n.enters, 0, 'never an Enter into the wrong control');
+  assert.ok(n.elapsed <= 1000, 'bounded (~800ms), got ' + n.elapsed);
+  assert.ok(n.focuses >= 1 && n.clicks >= 1, 'both SetFocus and a click were tried');
+  for (const [c, why] of [['user_edited', 'text_changed'], ['composer_text_changed', 'text_changed'],
+    ['composer_gone', 'no_element'], ['other_app_foreground', 'focus_changed'], ['same_process_stuck', 'focus_changed']]) {
+    const r = one(rows, 'refocus', c);
+    assert.equal(r.ok, false, c);
+    assert.equal(r.reason, why, c);
+    assert.equal(r.enters, 0, c);
+  }
+  assert.equal(one(rows, 'refocus', 'user_edited').clicks, 0, 'the user\'s own edit is never clicked over');
+  assert.equal(one(rows, 'refocus', 'other_app_foreground').clicks, 0, 'never click into another app');
+});
+
+test('desktop route SOURCE: post-switch refocus failure reports and sends nothing; success sends exactly once', async () => {
+  const src = await readFile(ENFORCER, 'utf8');
+  const run = stripComments(sliceFn(src, 'static void RunRoute('));
+  const post = run.slice(run.indexOf('RouteRefocusUia('));
+  const failBranch = post.slice(post.indexOf('if (composerAfter == null)'), post.indexOf('if (GetForegroundWindow() != pinnedHwnd)'));
+  assert.ok(/"focus_lost_after_switch_"/.test(failBranch));
+  assert.ok(!/SendKeyPress|FallbackSendOrReport/.test(failBranch), 'the switch happened: no unrouted re-send, no Enter');
+  const enterAt = post.indexOf('SendKeyPress(VK_RETURN)');
+  assert.ok(enterAt > post.indexOf('if (composerAfter == null)'), 'the Enter comes only after the verified refocus');
+  assert.ok(/"ok"/.test(post.slice(enterAt)), 'reported ok (route-event.js maps it to applied) after the send');
+  const loop = stripComments(sliceFn(src, 'static RouteRefocusOutcome RouteRefocusComposer('));
+  const uia = stripComments(sliceFn(src, 'static AutomationElement RouteRefocusUia('));
+  const click = stripComments(sliceFn(src, 'static bool RouteClickInto('));
+  for (const body of [loop, uia, click]) assert.ok(!/VK_RETURN/.test(body), 'refocus never presses Enter');
+  assert.ok(/GetAncestor\(at, GA_ROOT_WINDOW\) != pinnedHwnd/.test(click), 'the click is refused outside Claude\'s window');
 });

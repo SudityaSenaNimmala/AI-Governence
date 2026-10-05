@@ -1568,6 +1568,12 @@
       setTimeout(() => {
         const target = (el && el.isConnected) ? el : findActivePromptInput();
         if (target) {
+          // Closing the picker / Claude's "Switch model?" dialog leaves focus on
+          // the picker button. Put it back on the composer before the re-send
+          // (live, Desktop e32cf4d: the switch landed and the prompt sat unsent).
+          try {
+            if (document.activeElement !== target && typeof target.focus === 'function') target.focus({ preventScroll: true });
+          } catch {}
           target.dispatchEvent(new KeyboardEvent('keydown', {
             key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
             bubbles: true, cancelable: true,
