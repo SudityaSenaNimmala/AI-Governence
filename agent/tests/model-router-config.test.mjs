@@ -178,3 +178,36 @@ test('classify() sanity: the ported lexicon data, scored by hand for one known c
   const architect = cfg.positiveCategories.find((c) => c.name === 'TASK_COMPLEXITY').terms.find((t) => t.term === 'architect*');
   assert.equal(architect.weight, 6, 'ported weight must match what made the real classifier call this complex');
 });
+
+// Classifier 1.4.0: steps 3b (pure arithmetic) and 3c (small talk) reach the
+// desktop enforcer as DATA. 3b had never been ported to C# at all, so "what is
+// 2+2" was simple in the browser and moderate on the desktop.
+test('ARITHMETIC_SHAPE and SMALL_TALK are extracted for the C# scorer', () => {
+  const cfg = buildModelRouterConfig();
+  for (const key of ['wrapper', 'residue', 'hasOperator', 'digit']) {
+    const r = cfg.arithmetic?.[key];
+    assert.ok(r && typeof r.source === 'string', `arithmetic.${key} missing`);
+    assert.doesNotThrow(() => new RegExp(r.source, r.flags));
+  }
+  assert.equal(cfg.arithmetic.wrapper.flags, 'gi');
+  assert.ok(cfg.smallTalk.phrases.includes('good morning'));
+  assert.ok(cfg.smallTalk.phrases.includes('how are you'));
+  assert.ok(cfg.smallTalk.filler.includes('there'));
+  assert.ok(!cfg.smallTalk.phrases.includes('there'), 'filler must never be a small-talk phrase on its own');
+});
+
+// THE LIVE BUG. The packaged agent ships resources/agent/ with no
+// resources/browser-extension/ beside it, so reading only the canonical source
+// fell back to a config with ZERO categories and the enforcer called "hi"
+// 'moderate'. The agent's own generated copy must yield the identical lexicon.
+test('without browser-extension/ the agent copy yields the same lexicon', async () => {
+  const { buildLexiconConfig, _paths } = await import('../src/os_monitor/model-router-config.js');
+  const canonical = buildLexiconConfig();
+  const agentOnly = buildLexiconConfig([_paths.AGENT_COMPLEXITY_JS_PATH]);
+  assert.equal(canonical.lexiconSource, 'canonical');
+  assert.equal(agentOnly.lexiconSource, 'agent_copy');
+  assert.deepEqual({ ...agentOnly, lexiconSource: null }, { ...canonical, lexiconSource: null });
+  const none = buildLexiconConfig(['C:/definitely/not/here/complexity.js']);
+  assert.equal(none.lexiconSource, 'none');
+  assert.deepEqual(none.positiveCategories, []);
+});

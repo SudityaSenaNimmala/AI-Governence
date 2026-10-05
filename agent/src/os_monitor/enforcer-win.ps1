@@ -1683,7 +1683,13 @@ public static class CfaiEnforcer
         // it can never compute a route).
         if (modelRouterEnabled && !string.IsNullOrEmpty(modelRouterConfigJson))
         {
-            try { LoadModelRouterConfig(modelRouterConfigJson); _modelRouterEnabled = true; }
+            try
+            {
+                LoadModelRouterConfig(modelRouterConfigJson); _modelRouterEnabled = true;
+                // Loud, once: every verdict will be 'unknown' (never routed) until
+                // a config with a real lexicon arrives.
+                if (!_mrLexiconLoaded) Emit("error", "", "", "model_router_lexicon_missing", -1, -1, "model router lexicon missing; complexity verdicts are 'unknown'");
+            }
             catch (Exception ex) { Emit("error", "", "", "model_router_config_load_failed", -1, -1, ex.GetType().Name); }
         }
         // IDE panels — same "a bad payload must never take the helper down"
@@ -5176,7 +5182,156 @@ public static class CfaiEnforcer
     static List<TierRule> _mrTierRules = new List<TierRule>();
     static int _mrComplexAt = 6, _mrSimpleAt = -3, _mrStrongWeight = 4, _mrCapPerCategory = 2;
     static int _mrWindowHead = 3000, _mrWindowTail = 1000, _mrMaxTrivialTokens = 4, _mrMaxFillerContentTokens = 2;
-    static readonly Regex _mrLetterRe = new Regex("\\p{L}", RegexOptions.None, REGEX_TIMEOUT);
+    // True only when a REAL lexicon arrived (every category present). The
+    // minimal config model-router-config.js sends when it cannot find the
+    // classifier source has zero categories; scoring that would turn EVERY
+    // prompt into 0 -> 'moderate' and route on it (the live "hi" on Sonnet ->
+    // noop/standard bug). Unloaded -> ClassifyComplexity returns 'unknown',
+    // which decideRoute never routes on — the same rule the desktop injector
+    // and the proxy apply when their classifier is unavailable.
+    static volatile bool _mrLexiconLoaded = false;
+    // Step 3b (pure arithmetic) and 3c (small talk) of complexity.js 1.4.0.
+    // Null when an older config carried no such block: the step is skipped.
+    static Regex _mrArithWrapper, _mrArithResidue, _mrArithHasOp, _mrArithDigit;
+    static Regex _mrSmallTalkRe, _mrSmallTalkFillerRe;
+
+    // ── JS regex semantics in .NET ──────────────────────────────────────────
+    // Every pattern here comes from complexity.js and was written for a JS
+    // engine, where \w \d \b are ASCII-only and \s is a fixed set (Unicode Zs,
+    // \t\n\v\f\r, U+2028, U+2029, U+FEFF). .NET's are Unicode-wide: "\barchitect"
+    // matched "r<e-acute>architecture" in JS and not here, an Arabic-Indic digit
+    // was a .NET \d, NEL (U+0085) was a .NET \s, U+FEFF was not.
+    //
+    // THE SHADOW. Rather than rewriting \b into lookarounds (correct, but slow
+    // enough on a 4 KB window to trip the 25 ms REGEX_TIMEOUT under load), every
+    // pattern runs against MrShadow(sample): a SAME-LENGTH copy in which every
+    // non-ASCII letter / mark / number / connector (and ZWJ, ZWNJ, NEL) is the
+    // inert U+0001 and U+FEFF is a space. On the shadow .NET's native \b \w \d
+    // \s mean exactly what JS's mean, and case-insensitive matching can only
+    // ever touch ASCII letters (JS's /i never folds a non-ASCII letter onto an
+    // ASCII one either). Because the copy is length-preserving, match INDICES
+    // are valid in the original — which is how isSmallTalk's residue keeps the
+    // real characters for its "any letter or digit left?" test.
+    //
+    // MrJsRegexToNet is left with the two operators that differ regardless of
+    // input: JS `$` (no /m) is end-of-input only, and JS `.` also excludes \r,
+    // U+2028 and U+2029. Case-insensitive patterns compile with
+    // IgnoreCase|CultureInvariant (JS's /i is culture-independent).
+    const string JS_WS = "\\t\\n\\v\\f\\r \\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff";
+    static readonly char[] JS_WS_CHARS = new char[] {
+        '\t', '\n', '\v', '\f', '\r', ' ', (char)0x00A0, (char)0x1680,
+        (char)0x2000, (char)0x2001, (char)0x2002, (char)0x2003, (char)0x2004, (char)0x2005, (char)0x2006,
+        (char)0x2007, (char)0x2008, (char)0x2009, (char)0x200A,
+        (char)0x2028, (char)0x2029, (char)0x202F, (char)0x205F, (char)0x3000, (char)0xFEFF };
+    static readonly Regex _mrJsWsRun = new Regex("[" + JS_WS + "]+", RegexOptions.None, REGEX_TIMEOUT);
+    const char MR_SHADOW_CHAR = (char)1;
+
+    static string MrShadow(string s)
+    {
+        var sb = new StringBuilder(s.Length);
+        foreach (char c in s)
+        {
+            if (c < (char)0x80) { sb.Append(c); continue; }
+            if (c == (char)0xFEFF) { sb.Append(' '); continue; }
+            if (c == (char)0x85 || c == (char)0x200C || c == (char)0x200D) { sb.Append(MR_SHADOW_CHAR); continue; }
+            switch (char.GetUnicodeCategory(c))
+            {
+                case System.Globalization.UnicodeCategory.UppercaseLetter:
+                case System.Globalization.UnicodeCategory.LowercaseLetter:
+                case System.Globalization.UnicodeCategory.TitlecaseLetter:
+                case System.Globalization.UnicodeCategory.ModifierLetter:
+                case System.Globalization.UnicodeCategory.OtherLetter:
+                case System.Globalization.UnicodeCategory.NonSpacingMark:
+                case System.Globalization.UnicodeCategory.SpacingCombiningMark:
+                case System.Globalization.UnicodeCategory.EnclosingMark:
+                case System.Globalization.UnicodeCategory.DecimalDigitNumber:
+                case System.Globalization.UnicodeCategory.LetterNumber:
+                case System.Globalization.UnicodeCategory.OtherNumber:
+                case System.Globalization.UnicodeCategory.ConnectorPunctuation:
+                    sb.Append(MR_SHADOW_CHAR); break;
+                default:
+                    sb.Append(c); break;
+            }
+        }
+        return sb.ToString();
+    }
+
+    // String.replace(re, ' ') for a /g regex, run on the shadow, applied to the
+    // ORIGINAL characters (indices align: MrShadow is length-preserving).
+    static string MrReplaceViaShadow(Regex rx, string original, ref int count)
+    {
+        var sb = new StringBuilder(original.Length);
+        int at = 0;
+        foreach (Match m in rx.Matches(MrShadow(original)))
+        {
+            sb.Append(original, at, m.Index - at).Append(' ');
+            at = m.Index + m.Length;
+            count++;
+        }
+        sb.Append(original, at, original.Length - at);
+        return sb.ToString();
+    }
+
+    static string MrJsRegexToNet(string src, bool multiline)
+    {
+        var sb = new StringBuilder();
+        bool inClass = false;
+        for (int i = 0; i < src.Length; i++)
+        {
+            char c = src[i];
+            if (c == '\\' && i + 1 < src.Length) { sb.Append(c).Append(src[++i]); continue; }
+            if (inClass) { if (c == ']') inClass = false; sb.Append(c); continue; }
+            if (c == '[')
+            {
+                inClass = true; sb.Append(c);
+                if (i + 1 < src.Length && src[i + 1] == '^') { sb.Append('^'); i++; }
+                continue;
+            }
+            if (c == '$' && !multiline) { sb.Append("\\z"); continue; }
+            if (c == '.') { sb.Append("[^\\n\\r\\u2028\\u2029]"); continue; }
+            sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
+    static Regex MrJsRegex(string source, string flags)
+    {
+        flags = flags ?? "";
+        bool multiline = flags.IndexOf('m') >= 0;
+        var opts = RegexOptions.None;
+        if (flags.IndexOf('i') >= 0) opts |= RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
+        if (multiline) opts |= RegexOptions.Multiline;
+        string netSource = MrJsRegexToNet(source, multiline);
+        return new Regex(netSource, opts, REGEX_TIMEOUT);
+    }
+
+    // JS String.prototype.trim / split(/\s+/) over the JS whitespace set.
+    static string MrJsTrim(string s) { return s.Trim(JS_WS_CHARS); }
+
+    // JS /\p{L}/u (or /[\p{L}\p{N}]/u) .test(): by CODE POINT, so a letter
+    // outside the BMP counts and a lone surrogate does not.
+    static bool MrHasCodePoint(string s, bool letters, bool numbers)
+    {
+        for (int i = 0; i < s.Length; i++)
+        {
+            if ((letters && char.IsLetter(s, i)) || (numbers && char.IsNumber(s, i))) return true;
+            if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) i++;
+        }
+        return false;
+    }
+
+    // Stable descending sort by key — JS Array.prototype.sort is stable, and
+    // List<T>.Sort is not; alternation order and stem resolution order both
+    // follow it.
+    static List<T> MrStableSortDesc<T>(List<T> items, Func<T, int> key)
+    {
+        var idx = new List<int>();
+        for (int i = 0; i < items.Count; i++) idx.Add(i);
+        idx.Sort((a, b) => { int c = key(items[b]).CompareTo(key(items[a])); return c != 0 ? c : a.CompareTo(b); });
+        var o = new List<T>();
+        foreach (int i in idx) o.Add(items[i]);
+        return o;
+    }
 
     static readonly HashSet<char> _mrRegexSpecial =
         new HashSet<char> { '.', '*', '+', '?', '^', '$', '{', '}', '(', ')', '|', '[', ']', '\\' };
@@ -5217,9 +5372,9 @@ public static class CfaiEnforcer
     static LexCategory CompileLexCategory(string name, List<object> rawTerms, List<object> rawStructural)
     {
         var cat = new LexCategory { Name = name };
-        var ordered = new List<Dictionary<string, object>>();
-        foreach (var raw in rawTerms) ordered.Add((Dictionary<string, object>)raw);
-        ordered.Sort((a, b) => ((string)b["term"]).Length.CompareTo(((string)a["term"]).Length));
+        var unordered = new List<Dictionary<string, object>>();
+        foreach (var raw in rawTerms) unordered.Add((Dictionary<string, object>)raw);
+        var ordered = MrStableSortDesc(unordered, t => ((string)t["term"]).Length);
 
         var sources = new List<string>();
         foreach (var t in ordered)
@@ -5234,7 +5389,9 @@ public static class CfaiEnforcer
                 {
                     Term = term,
                     Weight = weight,
-                    StemMatch = new Regex("^" + stem + "\\w*$", RegexOptions.IgnoreCase, REGEX_TIMEOUT),
+                    // JS: new RegExp('^' + stem + '\\w*$') — no /i; the text
+                    // tested is already lower-cased.
+                    StemMatch = MrJsRegex("^" + stem + "\\w*$", ""),
                 });
             }
             else
@@ -5244,7 +5401,7 @@ public static class CfaiEnforcer
             }
         }
         string combinedSource = string.Join("|", sources);
-        cat.Combined = new Regex(combinedSource, RegexOptions.IgnoreCase, REGEX_TIMEOUT);
+        cat.Combined = MrJsRegex(combinedSource, "gi");
 
         if (rawStructural != null)
         {
@@ -5252,13 +5409,12 @@ public static class CfaiEnforcer
             {
                 var s = (Dictionary<string, object>)raw;
                 string flags = s.ContainsKey("flags") ? (string)s["flags"] : "";
-                RegexOptions opts = (flags != null && flags.IndexOf('i') >= 0) ? RegexOptions.IgnoreCase : RegexOptions.None;
                 string sigSource = (string)s["source"];
                 cat.Structural.Add(new StructSignal
                 {
                     Key = (string)s["key"],
                     Weight = Convert.ToInt32(s["weight"]),
-                    Rx = new Regex(sigSource, opts, REGEX_TIMEOUT),
+                    Rx = MrJsRegex(sigSource, flags),
                 });
             }
         }
@@ -5317,6 +5473,43 @@ public static class CfaiEnforcer
         _mrWindowTail = Convert.ToInt32(thresholds["WINDOW_TAIL"]);
         _mrMaxTrivialTokens = Convert.ToInt32(thresholds["MAX_TRIVIAL_TOKENS"]);
         _mrMaxFillerContentTokens = Convert.ToInt32(thresholds["MAX_FILLER_CONTENT_TOKENS"]);
+
+        // Step 3b — complexity.js's ARITHMETIC_SHAPE, shipped as {source, flags}.
+        Regex aWrap = null, aRes = null, aOp = null, aDig = null;
+        var arith = DrObj(DrGet(root, "arithmetic"));
+        if (arith != null)
+        {
+            Func<string, Regex> rx = key =>
+            {
+                var o = DrObj(DrGet(arith, key));
+                return o == null ? null : MrJsRegex((string)DrGet(o, "source"), (DrGet(o, "flags") as string) ?? "");
+            };
+            aWrap = rx("wrapper"); aRes = rx("residue"); aOp = rx("hasOperator"); aDig = rx("digit");
+            if (aWrap == null || aRes == null || aOp == null || aDig == null) { aWrap = aRes = aOp = aDig = null; }
+        }
+        _mrArithWrapper = aWrap; _mrArithResidue = aRes; _mrArithHasOp = aOp; _mrArithDigit = aDig;
+
+        // Step 3c — SMALL_TALK / SMALL_TALK_FILLER, compiled exactly as
+        // complexity.js does: '\b(?:' + longest-first phraseSource()s + ')\b', /gi.
+        Regex stRe = null, stFill = null;
+        var smallTalk = DrObj(DrGet(root, "smallTalk"));
+        if (smallTalk != null)
+        {
+            Func<object, Regex> alt = raw =>
+            {
+                var list = new List<string>();
+                if (raw != null) foreach (var x in (IEnumerable)raw) { string str = x as string; if (str != null) list.Add(str); }
+                if (list.Count == 0) return null;
+                var parts = new List<string>();
+                foreach (var phrase in MrStableSortDesc(list, w => w.Length)) parts.Add(MrPhraseSource(phrase));
+                return MrJsRegex("\\b(?:" + string.Join("|", parts) + ")\\b", "gi");
+            };
+            stRe = alt(DrGet(smallTalk, "phrases"));
+            stFill = alt(DrGet(smallTalk, "filler"));
+        }
+        _mrSmallTalkRe = stRe; _mrSmallTalkFillerRe = stFill;
+
+        _mrLexiconLoaded = positive.Count > 0 && simpleTask != null && simplicityRequest != null && trivialIntent != null;
 
         var tierRules = new List<TierRule>();
         foreach (var raw in (IEnumerable)root["tierKeywordRules"])
@@ -6448,9 +6641,11 @@ public static class CfaiEnforcer
     static CategoryScore ScoreLexCategory(LexCategory cat, string sample)
     {
         var hits = new Dictionary<string, int>(StringComparer.Ordinal);
+        var order = new List<string>();
         foreach (Match m in cat.Combined.Matches(sample))
         {
-            string matched = Regex.Replace(m.Value.ToLowerInvariant(), "\\s+", " ", RegexOptions.None, REGEX_TIMEOUT);
+            // JS: m[0].toLowerCase().replace(/\s+/g, ' ') — JS whitespace set.
+            string matched = _mrJsWsRun.Replace(m.Value.ToLowerInvariant(), " ");
             string term = null; int weight = 0;
             if (cat.Exact.TryGetValue(matched, out weight)) { term = matched; }
             else
@@ -6461,14 +6656,17 @@ public static class CfaiEnforcer
                 }
             }
             if (term == null || weight == 0 || hits.ContainsKey(term)) continue;
-            hits[term] = weight;
+            hits[term] = weight; order.Add(term);
         }
         foreach (var sig in cat.Structural)
         {
-            if (!hits.ContainsKey(sig.Key) && sig.Rx.IsMatch(sample)) hits[sig.Key] = sig.Weight;
+            if (!hits.ContainsKey(sig.Key) && sig.Rx.IsMatch(sample)) { hits[sig.Key] = sig.Weight; order.Add(sig.Key); }
         }
-        var weights = new List<int>(hits.Values);
-        weights.Sort((a, b) => Math.Abs(b).CompareTo(Math.Abs(a)));
+        // Insertion order, then a STABLE sort by |weight| desc — the JS Map +
+        // Array.prototype.sort it mirrors.
+        var inOrder = new List<int>();
+        foreach (var k in order) inOrder.Add(hits[k]);
+        var weights = MrStableSortDesc(inOrder, w => Math.Abs(w));
         int sum = 0; bool strong = false;
         for (int i = 0; i < weights.Count; i++)
         {
@@ -6478,15 +6676,28 @@ public static class CfaiEnforcer
         return new CategoryScore { Sum = sum, Strong = strong, Hit = hits.Count > 0 };
     }
 
+    static readonly Regex _mrNonWordChars = new Regex("[^a-z0-9']+", RegexOptions.None, REGEX_TIMEOUT);
+
+    // JS String.prototype.toLowerCase, for the only purpose it serves here:
+    // which [a-z0-9'] characters survive. The two non-ASCII code points whose
+    // lower-case form contains ASCII are the KELVIN SIGN (U+212A -> "k") and
+    // CAPITAL I WITH DOT (U+0130 -> "i" + U+0307); .NET Framework's invariant
+    // lower-casing maps neither, so "O<kelvin>ay" was "okay" in JS and not here.
+    static string MrJsLower(string s)
+    {
+        return s.Replace("\u212A", "k").Replace("\u0130", "i\u0307").ToLowerInvariant();
+    }
+
+    // Mirrors tallyTokens(): sample.split(/\s+/) over the JS whitespace set.
     static void MrTallyTokens(string sample, out int tokens, out int trivial, out int content)
     {
         tokens = 0; trivial = 0; content = 0;
-        foreach (var tok in sample.Split((char[])null, StringSplitOptions.RemoveEmptyEntries))
+        foreach (var tok in sample.Split(JS_WS_CHARS, StringSplitOptions.RemoveEmptyEntries))
         {
             tokens++;
-            string word = Regex.Replace(tok.ToLowerInvariant(), "[^a-z0-9']+", "", RegexOptions.None, REGEX_TIMEOUT);
+            string word = _mrNonWordChars.Replace(MrJsLower(tok), "");
             if (word.Length > 0 && _mrTrivialTokens.Contains(word)) trivial++;
-            else if (word.Length > 0 || _mrLetterRe.IsMatch(tok)) content++;
+            else if (word.Length > 0 || MrHasCodePoint(tok, true, false)) content++;
         }
     }
 
@@ -6505,6 +6716,31 @@ public static class CfaiEnforcer
         return trivial > content && content <= _mrMaxFillerContentTokens;
     }
 
+    // Mirrors isPureArithmetic() (step 3b, complexity.js 1.2.0+). Patterns are
+    // complexity.js's ARITHMETIC_SHAPE, shipped as data. This step was MISSING
+    // from the port until 1.4.0, so "what is 2+2" was 'simple' in the browser
+    // and 'moderate' on the desktop.
+    static bool MrIsPureArithmetic(string shadow)
+    {
+        string sample = shadow;   // every pattern below runs on the shadow
+        if (_mrArithDigit == null) return false;
+        if (!_mrArithDigit.IsMatch(sample)) return false;
+        if (!_mrArithHasOp.IsMatch(sample)) return false;
+        string residue = _mrArithWrapper.Replace(sample, " ");
+        return _mrArithResidue.IsMatch(residue);
+    }
+
+    // Mirrors isSmallTalk() (step 3c, complexity.js 1.4.0).
+    static bool MrIsSmallTalk(string sample)
+    {
+        if (_mrSmallTalkRe == null) return false;
+        string s = sample.Replace('\u2018', '\'').Replace('\u2019', '\'').Replace('\u02bc', '\'');
+        int phrases = 0, ignored = 0;
+        string residue = MrReplaceViaShadow(_mrSmallTalkRe, s, ref phrases);
+        if (_mrSmallTalkFillerRe != null) residue = MrReplaceViaShadow(_mrSmallTalkFillerRe, residue, ref ignored);
+        return phrases > 0 && !MrHasCodePoint(residue, true, true);
+    }
+
     // CPU/latency guard only, never a complexity signal — same rule
     // complexity.js's boundWindow() documents. Head + tail, not head alone,
     // because the actual ask is very often the last line under a large paste.
@@ -6514,39 +6750,71 @@ public static class CfaiEnforcer
         return text.Substring(0, _mrWindowHead) + "\n" + text.Substring(text.Length - _mrWindowTail);
     }
 
-    // Mirrors complexity.js's classify(). A classifier fault must never break
-    // anything on the caller's side, and must never silently downgrade a
-    // prompt either — 'moderate' is the safe default on any failure, same as
-    // the empty-text case.
-    static string ClassifyComplexity(string text)
+    // { verdict, rule, score } — the twin of complexity.js's classifyDetailed().
+    // Rule names are the JS ones; HasScore is false where JS reports null.
+    class MrVerdict { public string Verdict; public string Rule; public int Score; public bool HasScore; }
+
+    static MrVerdict MrV(string verdict, string rule) { return new MrVerdict { Verdict = verdict, Rule = rule }; }
+    static MrVerdict MrV(string verdict, string rule, int score) { return new MrVerdict { Verdict = verdict, Rule = rule, Score = score, HasScore = true }; }
+
+    // Mirrors complexity.js's decide(), step for step:
+    //   0  no lexicon loaded              -> 'unknown' (C# only; see _mrLexiconLoaded)
+    //   1  empty                          -> moderate
+    //   2  bound window
+    //   3  all greeting tokens            -> simple
+    //   3b pure arithmetic                -> simple
+    //   3c small talk                     -> simple
+    //   4  score; 5 simplicity request (no strong hit) -> simple; 6 thresholds.
+    // A classifier fault must never break anything on the caller's side, and
+    // must never silently downgrade a prompt either — 'moderate' on any
+    // failure, same as JS's catch.
+    static MrVerdict ClassifyComplexityDetailed(string text)
     {
+        if (!_mrLexiconLoaded) return MrV("unknown", "no_lexicon");
         try
         {
             if (text == null) text = "";
-            string trimmed = text.Trim();
-            if (trimmed.Length == 0) return "moderate";
+            string trimmed = MrJsTrim(text);
+            if (trimmed.Length == 0) return MrV("moderate", "empty");
             string sample = MrBoundWindow(trimmed);
-            if (MrIsAllTrivialTokens(sample)) return "simple";
+            if (MrIsAllTrivialTokens(sample)) return MrV("simple", "greeting");
+            string shadow = MrShadow(sample);
+            if (MrIsPureArithmetic(shadow)) return MrV("simple", "arithmetic");
+            if (MrIsSmallTalk(sample)) return MrV("simple", "small_talk");
 
             int positive = 0; bool strongHit = false;
             foreach (var cat in _mrPositive)
             {
-                var r = ScoreLexCategory(cat, sample);
+                var r = ScoreLexCategory(cat, shadow);
                 positive += r.Sum;
                 if (r.Strong) strongHit = true;
             }
-            var simpleTask = _mrSimpleTask != null ? ScoreLexCategory(_mrSimpleTask, sample) : new CategoryScore();
-            var simplicity = _mrSimplicityRequest != null ? ScoreLexCategory(_mrSimplicityRequest, sample) : new CategoryScore();
-            var trivial = _mrTrivialIntent != null ? ScoreLexCategory(_mrTrivialIntent, sample) : new CategoryScore();
+            var simpleTask = ScoreLexCategory(_mrSimpleTask, shadow);
+            var simplicity = ScoreLexCategory(_mrSimplicityRequest, shadow);
+            var trivial = ScoreLexCategory(_mrTrivialIntent, shadow);
             int negative = simpleTask.Sum + simplicity.Sum + (MrTrivialDominates(sample) ? trivial.Sum : 0);
             int score = positive + negative;
 
-            if (simplicity.Hit && !strongHit) return "simple";
-            if (score >= _mrComplexAt) return "complex";
-            if (score <= _mrSimpleAt) return "simple";
-            return "moderate";
+            if (simplicity.Hit && !strongHit) return MrV("simple", "simplicity_request", score);
+            if (score >= _mrComplexAt) return MrV("complex", "score", score);
+            if (score <= _mrSimpleAt) return MrV("simple", "score", score);
+            return MrV("moderate", "score", score);
         }
-        catch { return "moderate"; }
+        catch { return MrV("moderate", "error"); }
+    }
+
+    static string ClassifyComplexity(string text)
+    {
+        return ClassifyComplexityDetailed(text).Verdict;
+    }
+
+    // For the lockstep harness (agent/tests/complexity-lockstep.test.mjs):
+    // the same three fields complexity.js's classifyDetailed() returns.
+    static string ClassifyComplexityDetailedJson(string text)
+    {
+        var v = ClassifyComplexityDetailed(text);
+        return "{\"verdict\":\"" + v.Verdict + "\",\"rule\":\"" + v.Rule + "\",\"score\":"
+            + (v.HasScore ? v.Score.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null") + "}";
     }
 
     static MrModelInfo DetectModelInfo(string text)

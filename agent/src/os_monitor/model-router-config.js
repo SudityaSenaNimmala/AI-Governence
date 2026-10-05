@@ -49,6 +49,17 @@ const __dirname = (() => {
 })();
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 const COMPLEXITY_JS_PATH = join(REPO_ROOT, 'browser-extension', 'content', 'complexity.js');
+// The agent's OWN generated copy of the same classifier (node
+// scripts/gen-proxy-complexity.mjs; agent/tests/complexity-parity.test.mjs pins
+// it to the canonical file). It ships inside the agent, which the
+// browser-extension/ tree does NOT: the packaged Electron agent lays out
+// resources/agent/ with no resources/browser-extension/ beside it, so reading
+// only COMPLEXITY_JS_PATH there threw ENOENT, the minimal config below went out
+// with ZERO categories, and the enforcer scored every prompt 0 -> 'moderate'
+// ("hi" on Sonnet: noop/already_on_target instead of a route to Haiku). The
+// declarations this module slices are identical in both files.
+const AGENT_COMPLEXITY_JS_PATH = join(__dirname, '..', 'proxy', 'complexity.js');
+const COMPLEXITY_SOURCES = [COMPLEXITY_JS_PATH, AGENT_COMPLEXITY_JS_PATH];
 const CONTENT_JS_PATH = join(REPO_ROOT, 'browser-extension', 'content', 'content.js');
 
 // One entry per positive lexicon category compileCategory() feeds into
@@ -123,6 +134,47 @@ function extractStructuralSignals(source, constName) {
   return entries.map(({ key, weight, re }) => ({
     key, weight, source: re.source, flags: re.flags,
   }));
+}
+
+/**
+ * Slice a `const NAME = { ... };` object literal by brace-depth counting. Used
+ * for ARITHMETIC_SHAPE, whose values are regex literals (no braces in them).
+ */
+function sliceBalancedObject(source, constName) {
+  const declToken = `const ${constName} = {`;
+  const start = source.indexOf(declToken);
+  if (start < 0) throw new Error(`model-router-config: declaration not found in source: ${constName}`);
+  const open = start + declToken.length - 1;
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') {
+      depth--;
+      if (depth === 0) return source.slice(open, i + 1);
+    }
+  }
+  throw new Error(`model-router-config: ${constName} object literal never closes`);
+}
+
+/** ARITHMETIC_SHAPE -> { wrapper: {source, flags}, residue, hasOperator, digit }. */
+function extractArithmeticShape(source) {
+  const shape = evalArrayLiteral(sliceBalancedObject(source, 'ARITHMETIC_SHAPE'));
+  const out = {};
+  for (const key of ['wrapper', 'residue', 'hasOperator', 'digit']) {
+    const re = shape[key];
+    if (!(re instanceof RegExp)) throw new Error(`model-router-config: ARITHMETIC_SHAPE.${key} is not a regex`);
+    out[key] = { source: re.source, flags: re.flags };
+  }
+  return out;
+}
+
+/** A plain string array (SMALL_TALK / SMALL_TALK_FILLER). */
+function extractStringList(source, constName) {
+  const list = evalArrayLiteral(sliceBalancedArray(source, constName));
+  if (!Array.isArray(list) || !list.every((s) => typeof s === 'string')) {
+    throw new Error(`model-router-config: ${constName} is not a string array`);
+  }
+  return list;
 }
 
 function extractThreshold(source, name) {
@@ -265,15 +317,20 @@ export function buildModelRouterConfig() {
 }
 
 /** The lexicon half only — what the build bakes. */
-export function buildLexiconConfig() {
-  let complexitySrc;
-  try {
-    complexitySrc = readFileSync(COMPLEXITY_JS_PATH, 'utf8');
-  } catch {
-    // browser-extension not present — return minimal config so the enforcer
-    // starts without model routing instead of crashing the whole monitor.
+export function buildLexiconConfig(sources = COMPLEXITY_SOURCES) {
+  let complexitySrc = null;
+  let lexiconSource = null;
+  for (const p of sources) {
+    try { complexitySrc = readFileSync(p, 'utf8'); lexiconSource = p === COMPLEXITY_JS_PATH ? 'canonical' : 'agent_copy'; break; } catch { /* next */ }
+  }
+  if (complexitySrc == null) {
+    // Neither copy present — return a config with NO lexicon so the enforcer
+    // starts instead of crashing the whole monitor. The C# side treats an
+    // empty lexicon as "classifier unavailable" and returns 'unknown' (which
+    // decideRoute never routes on), never a guessed 'moderate'.
     return {
       version: 2,
+      lexiconSource: 'none',
       positiveCategories: [], negativeCategories: [],
       thresholds: { COMPLEX_AT: 6, SIMPLE_AT: -3, STRONG_WEIGHT: 4, CAP_PER_CATEGORY: 2, WINDOW_HEAD: 3000, WINDOW_TAIL: 1000, MAX_TRIVIAL_TOKENS: 4, MAX_FILLER_CONTENT_TOKENS: 2 },
       tierKeywordRules: TIER_KEYWORD_RULES,
@@ -298,13 +355,23 @@ export function buildLexiconConfig() {
 
   return {
     version: 2,
+    lexiconSource,
+    classifierVersion: (/const VERSION = '([^']+)';/.exec(complexitySrc) || [])[1] || null,
     positiveCategories,
     negativeCategories,
     thresholds,
+    // Steps 3b and 3c of classify(), as data (classifier 1.4.0).
+    arithmetic: extractArithmeticShape(complexitySrc),
+    smallTalk: {
+      phrases: extractStringList(complexitySrc, 'SMALL_TALK'),
+      filler: extractStringList(complexitySrc, 'SMALL_TALK_FILLER'),
+    },
     tierKeywordRules: TIER_KEYWORD_RULES,
   };
 }
 
 // Exposed for the parity test — reading complexity.js's source path directly
 // keeps that test independent of this module's internal extraction helpers.
-export const _paths = { COMPLEXITY_JS_PATH, CONTENT_JS_PATH };
+export const _paths = { COMPLEXITY_JS_PATH, AGENT_COMPLEXITY_JS_PATH, CONTENT_JS_PATH };
+// Exposed so a test can prove the fallback copy alone yields the same lexicon.
+export const _sources = COMPLEXITY_SOURCES;

@@ -1,7 +1,7 @@
 # Prompt complexity: the rules that decide simple / moderate / complex
 
 **Component:** `browser-extension/content/complexity.js` (`window.__cfaiComplexity`) — the single source of truth
-**Classifier version:** `1.3.0`  ·  **decideRoute version:** `1.0.0` (§7)
+**Classifier version:** `1.4.0`  ·  **decideRoute version:** `1.0.0` (§7)
 **Consumers:** every routing engine (see §0). What a verdict then *does* — which tier, which label, which effort — is decided by the shared `decideRoute` (§7).
 
 This document is the specification of a customer-visible behaviour: it decides which
@@ -25,9 +25,20 @@ must mean the same thing by `simple`.
 | Desktop injector (`agent/src/desktop_injector/`) | Claude Desktop and other Electron apps | `complexity.inline.js`, embedded as text by `hook-template.js` and evaluated in each renderer — generated verbatim copy |
 | Desktop enforcer (C#, `agent/src/os_monitor/enforcer-win.ps1`) — **a shipped engine** | Model pickers driven through Windows UI Automation (Claude Desktop, and web pickers in a browser window) | The scoring ALGORITHM is ported to C#; the lexicon, thresholds and structural signals are shipped to it as data (`CFAI_MODEL_ROUTER_CONFIG`), extracted from the canonical file by `agent/src/os_monitor/model-router-config.js` |
 
-The C# enforcer is not a fourth classifier: it scores the extracted lexicon with a fixed port of `scoreCategory`/`classify`, so a lexicon or weight change reaches it with no C# edit (adding a *category* needs one line in `model-router-config.js`, see §6). The two generated JS artifacts come from the canonical file via
+The C# enforcer is not a fourth classifier: it scores the extracted lexicon with a fixed port of `scoreCategory`/`decide`, so a lexicon or weight change reaches it with no C# edit (adding a *category* needs one line in `model-router-config.js`, see §6). The arithmetic patterns (`ARITHMETIC_SHAPE`) and the small-talk lists (`SMALL_TALK`, `SMALL_TALK_FILLER`) ship to it as data too. The C# side rewrites every JS regex so `\b`, `\w`, `\d` and `\s` keep their JS (ASCII / JS-whitespace) meaning (`MrJsRegexToNet`). The two generated JS artifacts come from the canonical file via
 `node scripts/gen-proxy-complexity.mjs`, and `agent/tests/complexity-parity.test.mjs`
 fails if any path disagrees with the canonical verdict on any prompt in its corpus.
+`agent/tests/complexity-lockstep.test.mjs` does the same for the **compiled C# port**:
+every prompt in `shared/complexity-corpus.json` (100+) must give an identical
+`{ verdict, rule, score }` from `classifyDetailed()` and from `ClassifyComplexityDetailed`.
+
+**Where the desktop lexicon comes from.** `model-router-config.js` reads the canonical
+file first and falls back to the agent's own generated copy (`agent/src/proxy/complexity.js`).
+The packaged agent ships `resources/agent/` with no `browser-extension/` beside it. Before
+1.4.0 it read only the canonical path, so the enforcer got a config with **zero
+categories** and scored every prompt 0 → `moderate`. That is the live "hi on Sonnet →
+noop/standard" bug. If neither copy is readable, the C# classifier returns `unknown`
+(rule `no_lexicon`) and emits `model_router_lexicon_missing` once. `unknown` is never routed.
 
 ### Why this is structured this way
 
@@ -59,7 +70,7 @@ nothing and sent an attachment; in the proxy it means prompt text could not be
 extracted from the request body, which is not the same claim. No complexity
 condition matches `unknown`, so an unreadable body is forwarded untouched rather
 than routed on a guess. The desktop injector does the same when the classifier
-failed to inject.
+failed to inject, and the desktop enforcer does the same when it has no lexicon.
 
 ---
 
@@ -106,6 +117,7 @@ The first rule that fires wins. `classify()` always returns exactly one of
 | 2 | Trim to the analysis window | *(no verdict — bound only)* |
 | 3 | Every meaningful token is a greeting (`hi`, `ok`, `thanks`, `yes`, `no`, `bye`, …) and there are ≤ 4 tokens | **simple** |
 | 3b | Pure arithmetic: strip the question wrapper and only digits/operators remain | **simple** |
+| 3c | Small talk: strip every small-talk phrase and filler word and no letter or digit remains | **simple** |
 | 4 | Score the lexicon (section 3) | *(no verdict — produces a number)* |
 | 5 | The user explicitly asked for a simple answer **and** no strong term (weight ≥ 4) is present | **simple** |
 | 6 | `score ≥ 6` | **complex** |
@@ -131,6 +143,30 @@ declines to have an opinion.
 | `2+2`, `12 x 7`, `what is 15% of 240`, `8÷2` | **simple** | Nothing but digits and operators survive |
 | `explain why 2+2=4 in Peano arithmetic` | moderate | Real words survive the strip → scored normally |
 | `42`, `3.14` | moderate | No operator: an id or an answer, not a question |
+
+### Step 3c: small talk *(1.4.0)*
+
+In 1.3.0 `good morning`, `hello there` and `how are you` came out `moderate`. "good",
+"morning" and "there" are not greeting *tokens*, so step 3 refused them, and the lexicon
+scored them 0. On a premium model that meant a "good morning" was routed down only to
+standard, not to economy.
+
+Step 3c is a **shape** test, like 3b. It removes every `SMALL_TALK` phrase, then every
+`SMALL_TALK_FILLER` word, and asks whether any letter or digit (in any script) remains.
+At least one real small-talk phrase must be present.
+
+- `SMALL_TALK` covers greetings (`hi`, `hello there`, `good morning/afternoon/evening`),
+  "how are you" forms, thanks (`thank you`, `much appreciated`), acknowledgements (`ok`,
+  `got it`, `sounds good`, `no worries`) and goodbyes (`see you later`, `good night`).
+- `SMALL_TALK_FILLER` holds words that only ride along: `there`, `so`, `much`, `team`,
+  `today`, `please`, `claude`, …
+
+| Prompt | Verdict | Why |
+|---|---|---|
+| `good morning`, `how are you doing today?`, `thank you so much`, `hey team` | **simple** | Nothing survives the strip |
+| `hi, please do deep research on EU AI regulation` | complex | "please do deep research on eu ai regulation" survives → scored (`deep research` 6) |
+| `good morning, can you design a distributed cache?` | complex | Real words survive → scored normally |
+| `there`, `team` | moderate | Filler alone is not small talk |
 
 ### Step 5: the explicit-simplicity override
 
@@ -225,6 +261,9 @@ Verified against the shipped classifier.
 | `Prove that the square root of 2 is irrational` | `prove` 4 (reasoning) + `prove that` 3 (research) | **complex** |
 | `Research the history of the printing press` | `research*` 4 alone → below 6 | moderate |
 | `proofread this paragraph` | `proof` is spelled out, never a stem → no hit | moderate |
+| `good morning` | Small talk (step 3c) | **simple** |
+| `how are you doing today?` | Small talk (step 3c) | **simple** |
+| `hi, please do deep research on EU AI regulation` | Words survive 3c; `deep research` 6; greeting does not dominate → no −8 | **complex** |
 
 ---
 
@@ -233,7 +272,7 @@ Verified against the shipped classifier.
 1. **An unrecognised prompt is `moderate`, not `simple`.** Scoring 0 means "no
    opinion", and the classifier will not silently downgrade a model the user chose.
    The practical consequence: **cost savings only occur when a prompt hits one of the
-   negative terms or the arithmetic rule.** These are all `moderate` today:
+   negative terms, the arithmetic rule or the small-talk rule.** These are all `moderate` today:
    `capital of France`, `what time is it in Tokyo`, `who wrote Hamlet`.
 2. **No conversational context.** Only the current prompt is seen, never the thread.
    This is why a bare number is `moderate` — `42` may be answering "how many
@@ -279,8 +318,13 @@ Every change **must**:
    `agent/src/os_monitor/model-router-config.js`, or the C# enforcer never sees it.
 4. Update this document.
 5. Keep `browser-extension/tests/complexity.test.mjs` (the acceptance table where
-   intended behaviour is defined) and `agent/tests/complexity-parity.test.mjs`
-   (which proves all three paths agree) green.
+   intended behaviour is defined), `agent/tests/complexity-parity.test.mjs`
+   (which proves the JS paths agree) and `agent/tests/complexity-lockstep.test.mjs`
+   (which proves the compiled C# port agrees on verdict, rule and score over
+   `shared/complexity-corpus.json`) green. A new **decision step** (like 3b/3c) is
+   the one change that needs a C# edit: port it into `ClassifyComplexityDetailed`
+   in `enforcer-win.ps1`, ship its data through `model-router-config.js`, and add
+   corpus prompts for it. If you skip that, the lockstep test fails.
 
 Per-platform tier labels and admin overrides are separate concerns: see §7 and
 `shared/model-catalog.json`. An admin rule or catalog override changes which tier or

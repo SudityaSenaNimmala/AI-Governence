@@ -99,6 +99,11 @@ const CORPUS = [
   '', '   ', '\n\n',
 ];
 
+// Plus the shared corpus the C# port is held to (complexity-lockstep.test.mjs),
+// so every JS path is checked on exactly the prompts the desktop enforcer is.
+CORPUS.push(...JSON.parse(readFileSync(path.join(repo, 'shared', 'complexity-corpus.json'), 'utf8'))
+  .cases.map((c) => c.text));
+
 test('all three routing paths load the same classifier version', () => {
   assert.equal(typeof canonical.VERSION, 'string');
   assert.equal(inline.VERSION, canonical.VERSION,

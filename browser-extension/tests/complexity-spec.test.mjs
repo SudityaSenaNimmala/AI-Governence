@@ -64,7 +64,8 @@ test('the spec states the analysis window the code uses', () => {
 
 // The category count the spec states. If someone adds or removes a category, the
 // spec's "thirteen compiled categories / ten positive" claim has to move with it
-// (researchDepth, classifier 1.3.0, made it ten).
+// (researchDepth, classifier 1.3.0, made it ten; the 1.4.0 small-talk step is a
+// shape test, not a category, so the counts did not move).
 test('the spec states the real category counts', () => {
   // Count only the entries INSIDE the POSITIVE array — the three negative
   // categories are compiled by the same helper just below it, so a whole-file
@@ -114,6 +115,9 @@ const WORKED_EXAMPLES = [
   ['Prove that the square root of 2 is irrational', 'complex'],
   ['Research the history of the printing press', 'moderate'],
   ['proofread this paragraph', 'moderate'],
+  ['good morning', 'simple'],
+  ['how are you doing today?', 'simple'],
+  ['hi, please do deep research on EU AI regulation', 'complex'],
 ];
 
 test('every worked example in the spec is reproducible', () => {

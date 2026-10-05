@@ -518,7 +518,91 @@ test('researchDepth: the enumerated-parts signal is shape, not length', () => {
 test('researchDepth is wired into the positive categories and the version moved', () => {
   const src = readFileSync(path.join(root, 'content', 'complexity.js'), 'utf8');
   assert.match(src, /compileCategory\('researchDepth', RESEARCH_DEPTH, RESEARCH_STRUCTURE\)/);
-  assert.equal(VERSION, '1.3.0');
+  assert.match(String(VERSION), /^1\.([3-9]|\d{2,})\.\d+$/);
   // `proof*` would eat "proofread" — the spelled-out form is deliberate.
   assert.doesNotMatch(src, /\['proof\*'/);
+});
+
+// ── Small talk (classifier 1.4.0) ───────────────────────────────────────────
+//
+// "good morning", "hello there", "how are you" came out 'moderate' in 1.3.0:
+// "good"/"morning"/"there" are not greeting TOKENS, so the step-3 fast path
+// refused them, nothing in the lexicon scored them, and they fell to the
+// no-opinion fallback — so on a premium model they routed only down to standard.
+// Step 3c is a SHAPE test: strip small-talk phrases and filler, is any word left?
+
+const { classifyDetailed } = loadComplexity();
+
+test('small talk on its own is simple', () => {
+  for (const p of [
+    'good morning', 'Good morning!', 'good afternoon', 'good evening', 'good night',
+    'hello there', 'hey there', 'hey team', 'how are you', 'how are you doing today?',
+    "what's up", 'thank you so much', 'thanks a lot!', 'see you later', 'nice to meet you',
+    'great job, thanks claude', 'no worries', 'sounds good 👍', 'cheers mate',
+  ]) {
+    assert.equal(classify(p), 'simple', `${JSON.stringify(p)} should be simple`);
+  }
+});
+
+test('small talk wrapped around a real ask is judged on the ask', () => {
+  // The reported requirement: a greeting must never make a real task cheap.
+  assert.equal(classify('hi, please do deep research on EU AI regulation'), 'complex');
+  assert.equal(classify('good morning, can you design a distributed cache?'), 'complex');
+  for (const p of [
+    'thanks, now explain how kubernetes networking works',
+    'hello! write a python function to parse CSV',
+    'good morning, what is the capital of France?',
+    'sorry, that is wrong',
+  ]) {
+    assert.notEqual(classify(p), 'simple', `${JSON.stringify(p)} must not be simple`);
+  }
+});
+
+test('filler alone is not small talk — a real small-talk phrase must be present', () => {
+  for (const p of ['there', 'team', 'today', 'please', 'claude']) {
+    assert.notEqual(classifyDetailed(p).rule, 'small_talk', `${JSON.stringify(p)} took the small-talk path`);
+  }
+});
+
+test('small talk is decided by step 3c, before scoring', () => {
+  assert.deepEqual(classifyDetailed('good morning'), { verdict: 'simple', rule: 'small_talk', score: null });
+  assert.deepEqual(classifyDetailed('hi'), { verdict: 'simple', rule: 'greeting', score: null });
+  assert.deepEqual(classifyDetailed('what is 2+2'), { verdict: 'simple', rule: 'arithmetic', score: null });
+  assert.equal(classifyDetailed('architecture').rule, 'score');
+  assert.equal(classifyDetailed('architecture').score, 6);
+});
+
+test('repeating small talk never changes its tier', () => {
+  for (const p of ['good morning', 'how are you', 'thank you so much']) {
+    assert.equal(classify(repeated(p)), classify(p));
+  }
+});
+
+test('classifyDetailed agrees with classify and is total', () => {
+  for (const p of [...VERDICTS.map(([x]) => x), null, undefined, 42, '', 'good morning']) {
+    const d = classifyDetailed(p);
+    assert.equal(d.verdict, classify(p));
+    assert.ok(typeof d.rule === 'string');
+    assert.ok(d.score === null || Number.isInteger(d.score));
+  }
+});
+
+test('VERSION is 1.4.0 (small talk + ARITHMETIC_SHAPE)', () => {
+  assert.equal(VERSION, '1.4.0');
+  const src = readFileSync(path.join(root, 'content', 'complexity.js'), 'utf8');
+  assert.match(src, /const ARITHMETIC_SHAPE = \{/);
+  assert.match(src, /const SMALL_TALK = \[/);
+  assert.match(src, /const SMALL_TALK_FILLER = \[/);
+});
+
+// The shared corpus (shared/complexity-corpus.json) is what the desktop
+// enforcer's C# port is held in lockstep against (agent/tests/complexity-
+// lockstep.test.mjs). Its pinned expectations are product behaviour.
+test('shared corpus: every pinned expectation holds', () => {
+  const corpus = JSON.parse(readFileSync(path.join(root, '..', 'shared', 'complexity-corpus.json'), 'utf8'));
+  assert.ok(corpus.cases.length >= 60);
+  for (const c of corpus.cases) {
+    if (!c.expect) continue;
+    assert.equal(classify(c.text), c.expect, `${c.id} ${JSON.stringify(c.text.slice(0, 60))}`);
+  }
 });
