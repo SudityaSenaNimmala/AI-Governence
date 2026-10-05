@@ -675,8 +675,8 @@ code {
 .block-dialog .btn-tokenize { background: #059669; color: #fff; }
 .block-dialog .btn-tokenize:hover { background: #047857; }
 .block-dialog .btn-tokenize:disabled { opacity: 0.6; cursor: default; }
-.block-dialog .btn-dismiss { background: #4f46e5; color: #fff; box-shadow: none; }
-.block-dialog .btn-dismiss:hover { background: #4338ca; }
+.block-dialog .btn-dismiss { background: #dc2626; color: #fff; box-shadow: none; }
+.block-dialog .btn-dismiss:hover { background: #b91c1c; }
 .block-dialog .btn-request { background: #0044cc; color: #fff; }
 .block-dialog .btn-request:hover { background: #0033aa; }
 .block-dialog .pattern-chips {
