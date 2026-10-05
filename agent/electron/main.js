@@ -79,7 +79,10 @@ function sameAccessRequest(row, toolHost, identity) {
 // ── end access-request identity ──
 
 // ── Icons ──────────────────────────────────────────────────────────────────────
-const ICON_PATH = path.join(__dirname, 'assets', 'icon.png');
+// assets/ is in extraResources (resources/electron/assets/), not in app.asar.
+const ICON_PATH = isDev
+  ? path.join(__dirname, 'assets', 'icon.png')
+  : path.join(process.resourcesPath, 'electron', 'assets', 'icon.png');
 
 function getTrayIcon() {
   const img = nativeImage.createFromPath(ICON_PATH);
@@ -919,6 +922,18 @@ function updateTrayMenu() {
       type: 'checkbox',
       checked: modelRoutingEnabled,
       click: (menuItem) => { toggleModelRouting(menuItem.checked); },
+    },
+    { type: 'separator' },
+    {
+      label: 'Check for Updates',
+      click: () => {
+        // Reset version to force mismatch, then tell the monitor to check now
+        const versionFile = path.join(CRED_DIR, 'agent-version');
+        try { fs.writeFileSync(versionFile, '0000000000000000', 'utf8'); } catch {}
+        if (monitorProcess?.stdin && !monitorProcess.stdin.destroyed) {
+          try { monitorProcess.stdin.write(JSON.stringify({ cmd: 'check-update' }) + '\n'); } catch {}
+        }
+      },
     },
   ]);
   tray.setContextMenu(menu);

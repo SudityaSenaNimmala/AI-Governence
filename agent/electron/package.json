@@ -23,10 +23,7 @@
       "output": "../build/electron-dist"
     },
     "files": [
-      "main.js",
-      "preload.js",
-      "renderer/**/*",
-      "assets/**/*"
+      "main.js"
     ],
     "extraResources": [
       {

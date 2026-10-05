@@ -55,7 +55,7 @@ export function startAutoUpdater({ serverUrl, token, log }) {
   setTimeout(check, 30000); // first check 30s after start (let agent settle)
   const timer = setInterval(check, CHECK_INTERVAL_MS);
 
-  return { stop: () => clearInterval(timer) };
+  return { stop: () => clearInterval(timer), check };
 }
 
 function readCurrentVersion() {

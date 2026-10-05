@@ -95,6 +95,8 @@ process.stdin.on('data', (chunk) => {
       const msg = JSON.parse(line);
       if (msg.cmd === 'tokenize' && msg.block_id) {
         monitor.tokenize(msg.block_id);
+      } else if (msg.cmd === 'check-update' && updater?.check) {
+        updater.check();
       }
     } catch { /* ignore malformed input */ }
   }
