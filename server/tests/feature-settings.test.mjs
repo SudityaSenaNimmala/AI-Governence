@@ -189,7 +189,9 @@ test('?surface trims to what that surface consumes', async () => {
   await withServer(async ({ get }) => {
     const agent = await (await get('?surface=agent')).json();
     assert.deepEqual(Object.keys(agent.features).sort(), keysForSurface('agent').sort());
-    assert.ok(!('model_routing' in agent.features), 'routing is not an agent flag');
+    // The desktop agent routes inside desktop AI apps, so it reads this switch too.
+    assert.ok('model_routing' in agent.features, 'routing must reach the desktop agent');
+    assert.ok(!('m365_agent_label_reader' in agent.features), 'browser-only flags stay off the agent surface');
 
     const ext = await (await get('?surface=extension')).json();
     assert.ok(!('clipboard_monitor' in ext.features), 'the clipboard monitor is agent-only');

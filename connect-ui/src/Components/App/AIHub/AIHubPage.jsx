@@ -3332,12 +3332,30 @@ async function routingFetchWithMeta(path) {
 
 const SEVERITY_OPTIONS = ["critical","high","moderate","low"];
 const COMPLEXITY_OPTIONS = ["simple","moderate","complex"];
-const PROVIDER_OPTIONS = ["openai","anthropic","google","microsoft","perplexity","huggingface"];
+const PROVIDER_OPTIONS = ["openai","anthropic","google","mistral","perplexity","microsoft","huggingface"];
+// Routing schema v2: a rule routes to a TIER; the browser extension / desktop
+// agent resolve the tier to the picker label of the tool in front of them
+// (shared/model-catalog.json). A concrete model id only applies to API-proxy
+// traffic, so these are suggestions for that optional field — kept in step with
+// the current api_ids in shared/model-catalog.json.
+const TIER_OPTIONS = ["economy","standard","premium"];
+const EFFORT_OPTIONS = ["low","medium","high"];
 const MODEL_SUGGESTIONS = {
-  openai:["gpt-4","gpt-4-turbo","gpt-4o","gpt-4o-mini","gpt-4.1","gpt-4.1-mini","gpt-4.1-nano","gpt-3.5-turbo","o1","o1-mini","o3","o3-mini","o4-mini"],
-  anthropic:["claude-opus-4-20250514","claude-sonnet-4-20250514","claude-haiku-4-5-20251001","claude-3-5-sonnet-20241022","claude-3-5-haiku-20241022"],
-  google:["gemini-2.5-pro","gemini-2.5-flash","gemini-2.0-flash","gemini-2.0-pro","gemini-1.5-pro","gemini-1.5-flash"],
+  openai:["gpt-5.6-luna","gpt-5.6-terra","gpt-5.6-sol","gpt-5.4-mini","gpt-5.4","gpt-5.5"],
+  anthropic:["claude-haiku-4-5","claude-sonnet-5","claude-opus-5","claude-sonnet-4-6","claude-opus-4-8"],
+  google:["gemini-3.5-flash-lite","gemini-3.7-flash","gemini-3.1-pro"],
 };
+const tierLabel=t=>t?t.charAt(0).toUpperCase()+t.slice(1):"";
+// "Premium · high effort", plus the per-rule label/model overrides when set.
+function routeToText(action){
+  const a=action||{};
+  if(a.type==="none") return "No change (observe)";
+  const parts=[];
+  if(a.target_tier) parts.push((a.type==="cap_tier"?"At most ":"")+tierLabel(a.target_tier)+(a.effort?` · ${a.effort} effort`:""));
+  if(a.ui_name) parts.push(`"${a.ui_name}"`);
+  if(a.model&&!a.target_tier) parts.push(a.model);
+  return parts.join(" ")||a.model||"—";
+}
 
 function MultiSelect({options,value=[],onChange,label}) {
   return (<div style={{marginBottom:10}}>
@@ -3364,25 +3382,42 @@ function RuleFormModal({rule,onSave,onClose}) {
   const [condModel,setCondModel]=useState((rule?.conditions?.model||[]).join(", "));
   const [condTokensGt,setCondTokensGt]=useState(rule?.conditions?.prompt_tokens_gt??"");
   const [condTokensLt,setCondTokensLt]=useState(rule?.conditions?.prompt_tokens_lt??"");
+  const [actionTier,setActionTier]=useState(rule?.action?.target_tier||"");
+  const [actionEffort,setActionEffort]=useState(rule?.action?.effort||"");
+  const [actionLabel,setActionLabel]=useState(rule?.action?.ui_name||"");
   const [actionModel,setActionModel]=useState(rule?.action?.model||"");
   const [actionHost,setActionHost]=useState(rule?.action?.host||"");
   const [saving,setSaving]=useState(false);
+  // "none" rules (observe only) need no target; everything else needs a tier or,
+  // for API-proxy rules, a model.
+  const actionType=rule?.action?.type||"set_tier";
+  const canSave=!!name.trim()&&(actionType==="none"||!!actionTier||!!actionModel.trim());
 
+  // Start from what the rule ALREADY holds and change only the fields this form
+  // edits. The old form rebuilt conditions/action from scratch, so saving a rule
+  // silently dropped every field it did not render — target tier, effort,
+  // current_tier conditions, endpoint ids.
+  const setOrDelete=(obj,key,val)=>{ if(val===undefined||val===null||val===""||(Array.isArray(val)&&!val.length)) delete obj[key]; else obj[key]=val; };
   const handleSave=async()=>{
-    if(!name.trim()||!actionModel.trim()) return;
+    if(!canSave) return;
     setSaving(true);
-    const conditions={};
-    if(condSensitivity.length) conditions.sensitivity=condSensitivity;
-    if(condComplexity.length) conditions.complexity=condComplexity;
-    if(condProvider.length) conditions.provider=condProvider;
-    if(condModel.trim()) conditions.model=condModel.split(",").map(s=>s.trim()).filter(Boolean);
-    if(condTokensGt!=="") conditions.prompt_tokens_gt=Number(condTokensGt);
-    if(condTokensLt!=="") conditions.prompt_tokens_lt=Number(condTokensLt);
-    const action={model:actionModel.trim()};
-    if(actionHost.trim()) action.host=actionHost.trim();
+    const conditions={...(rule?.conditions||{})};
+    setOrDelete(conditions,"sensitivity",condSensitivity);
+    setOrDelete(conditions,"complexity",condComplexity);
+    setOrDelete(conditions,"provider",condProvider);
+    setOrDelete(conditions,"model",condModel.trim()?condModel.split(",").map(s=>s.trim()).filter(Boolean):null);
+    setOrDelete(conditions,"prompt_tokens_gt",condTokensGt!==""?Number(condTokensGt):null);
+    setOrDelete(conditions,"prompt_tokens_lt",condTokensLt!==""?Number(condTokensLt):null);
+    const action={...(rule?.action||{}),type:actionType};
+    setOrDelete(action,"target_tier",actionTier);
+    setOrDelete(action,"effort",actionEffort);
+    setOrDelete(action,"ui_name",actionLabel.trim());
+    setOrDelete(action,"model",actionModel.trim());
+    setOrDelete(action,"host",actionHost.trim());
+    const body={name,priority:Number(priority),enabled,conditions,action};
     try {
-      if(isEdit) await routingFetch(`/rules/${rule.id}`,{method:"PUT",body:JSON.stringify({name,priority:Number(priority),enabled,conditions,action})});
-      else await routingFetch("/rules",{method:"POST",body:JSON.stringify({name,priority:Number(priority),enabled,conditions,action})});
+      if(isEdit) await routingFetch(`/rules/${rule.id}`,{method:"PUT",body:JSON.stringify(body)});
+      else await routingFetch("/rules",{method:"POST",body:JSON.stringify(body)});
       onSave();
     } catch(e) { alert("Error: "+e.message); }
     setSaving(false);
@@ -3438,12 +3473,35 @@ function RuleFormModal({rule,onSave,onClose}) {
 
       <div style={{background:"#f0f9ff",borderRadius:10,padding:14,marginBottom:18}}>
         <div style={{fontSize:15.2,fontWeight:700,color:"#111827",marginBottom:10}}>Action — Route To</div>
+        <div style={{display:"flex",gap:12,marginBottom:10}}>
+          <div style={{flex:1}}>
+            <label style={{fontSize:14.7,fontWeight:600,color:"#374151"}}>Target Tier{actionType!=="none"&&!actionModel.trim()?" *":""}</label>
+            <select value={actionTier} onChange={e=>setActionTier(e.target.value)}
+              style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:15.2,marginTop:4,boxSizing:"border-box"}}>
+              <option value="">—</option>
+              {TIER_OPTIONS.map(t=><option key={t} value={t}>{tierLabel(t)}</option>)}
+            </select>
+          </div>
+          <div style={{flex:1}}>
+            <label style={{fontSize:14.7,fontWeight:600,color:"#374151"}}>Effort <span style={{fontWeight:400,color:"#9ca3af"}}>(where supported)</span></label>
+            <select value={actionEffort} onChange={e=>setActionEffort(e.target.value)}
+              style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:15.2,marginTop:4,boxSizing:"border-box"}}>
+              <option value="">Leave as is</option>
+              {EFFORT_OPTIONS.map(t=><option key={t} value={t}>{tierLabel(t)}</option>)}
+            </select>
+          </div>
+        </div>
         <div style={{marginBottom:10}}>
-          <label style={{fontSize:14.7,fontWeight:600,color:"#374151"}}>Target Model *</label>
-          <input value={actionModel} onChange={e=>setActionModel(e.target.value)} placeholder="e.g. gpt-4o-mini"
+          <label style={{fontSize:14.7,fontWeight:600,color:"#374151"}}>Picker Label Override <span style={{fontWeight:400,color:"#9ca3af"}}>(optional — the label to click instead of the catalog's)</span></label>
+          <input value={actionLabel} onChange={e=>setActionLabel(e.target.value)} placeholder="e.g. Haiku 4.5"
+            style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:15.2,marginTop:4,boxSizing:"border-box"}}/>
+        </div>
+        <div style={{marginBottom:10}}>
+          <label style={{fontSize:14.7,fontWeight:600,color:"#374151"}}>Target Model <span style={{fontWeight:400,color:"#9ca3af"}}>(optional, API proxy only)</span></label>
+          <input value={actionModel} onChange={e=>setActionModel(e.target.value)} placeholder="e.g. claude-haiku-4-5"
             style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:15.2,marginTop:4,boxSizing:"border-box"}}/>
           <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:6}}>
-            {[...MODEL_SUGGESTIONS.openai.slice(0,4),...MODEL_SUGGESTIONS.anthropic.slice(0,3),...MODEL_SUGGESTIONS.google.slice(0,2)].map(m=>
+            {[...MODEL_SUGGESTIONS.anthropic.slice(0,3),...MODEL_SUGGESTIONS.openai.slice(0,3),...MODEL_SUGGESTIONS.google.slice(0,3)].map(m=>
               <button key={m} type="button" onClick={()=>setActionModel(m)}
                 style={{padding:"2px 8px",borderRadius:5,fontSize:13,border:"1px solid #e5e7eb",background:actionModel===m?"#0044cc14":"#fff",color:actionModel===m?"#0052e0":"#6b7280",cursor:"pointer"}}>{m}</button>
             )}
@@ -3458,8 +3516,8 @@ function RuleFormModal({rule,onSave,onClose}) {
 
       <div style={{display:"flex",justifyContent:"flex-end",gap:10}}>
         <button onClick={onClose} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:15.2}}>Cancel</button>
-        <button onClick={handleSave} disabled={saving||!name.trim()||!actionModel.trim()}
-          style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:15.2,fontWeight:600,opacity:saving||!name.trim()||!actionModel.trim()?0.5:1}}>{saving?"Saving...":isEdit?"Save Changes":"Create Rule"}</button>
+        <button onClick={handleSave} disabled={saving||!canSave}
+          style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:15.2,fontWeight:600,opacity:saving||!canSave?0.5:1}}>{saving?"Saving...":isEdit?"Save Changes":"Create Rule"}</button>
       </div>
     </div>
   </div>);
@@ -3493,7 +3551,10 @@ function ModelRoutingView() {
     // The rules table is what this tab IS, so its failure stays page-level —
     // routed to `err` through soft()'s fallback rather than rendering an empty
     // "No routing rules yet" table, which would read as "nothing is configured".
-    soft(tapMeta(routingFetchWithMeta("/rules"),addMeta),"routing rules",
+    // ?schema=2: the stored rules. Without it the server returns the legacy
+    // projection older clients act on (filled-in picker labels), which this
+    // form would then save back as overrides.
+    soft(tapMeta(routingFetchWithMeta("/rules?schema=2"),addMeta),"routing rules",
       r=>{ if(r===false) setErr("Could not load routing rules. Reload to try again."); else setRules(r); },false,setWarn);
     soft(tapMeta(routingFetchWithMeta("/endpoints"),addMeta),"endpoints",setEndpoints,false,setWarn);
     soft(tapMeta(routingFetchWithMeta("/analytics"),addMeta),"routing analytics",setAnalytics,false,setWarn);
@@ -3611,7 +3672,7 @@ function ModelRoutingView() {
             if(c.prompt_tokens_lt!=null) tags.push("tokens<"+c.prompt_tokens_lt);
             return <div style={{display:"flex",flexWrap:"wrap",gap:3}}>{tags.map(t=><Tag key={t} text={t}/>)}</div>;
           }},
-          {label:"Route To",hint:"The model this rule sends a matching request to instead of the one it originally asked for.",render:r=><Badge text={r.action?.model||"—"} color="#0052e0"/>},
+          {label:"Route To",hint:"The tier (and effort, where the tool supports it) this rule switches a matching prompt to. The extension and desktop agent pick that tier's model in the tool's own picker.",render:r=><Badge text={routeToText(r.action)} color="#0052e0"/>},
           {label:"Status",hint:"Disabled rules are skipped entirely — they never match, even if their conditions would otherwise fire.",render:r=><Badge text={r.enabled?"Active":"Disabled"} color={r.enabled?"#22c55e":"#9ca3af"}/>},
           {label:"Actions",hint:"Edit this rule's conditions, enable/disable it without deleting it, or delete it permanently.",render:r=><div style={{display:"flex",gap:6}}>
             <button onClick={()=>{setEditRule(r);setShowRuleForm(true);}} style={{background:"none",border:"none",cursor:"pointer",color:"#0052e0",fontSize:14.7,fontWeight:600}}>Edit</button>
@@ -3626,10 +3687,9 @@ function ModelRoutingView() {
         <div className="aihub_card" style={{background:"#f0f9ff",border:"1px solid #bfdbfe"}}>
           <h4 style={{margin:"0 0 10px",fontSize:15.8,fontWeight:700,color:"#1e40af"}}>Example Routing Rules</h4>
           <div style={{fontSize:15.2,color:"#374151",lineHeight:1.8}}>
-            <strong>Cost Optimization:</strong> When complexity = "simple" → route to gpt-4o-mini (saves ~66x on token cost)<br/>
-            <strong>Data Protection:</strong> When sensitivity = "critical" or "high" → route to your private Azure endpoint<br/>
-            <strong>Compliance:</strong> When provider = "openai" and model contains "gpt-4" → route to EU-hosted deployment<br/>
-            <strong>Budget Control:</strong> When tokens &gt; 5000 → route to gpt-4o-mini (long prompts get expensive fast)
+            <strong>Cost Optimization:</strong> When complexity = "simple" → route to the Economy tier, low effort<br/>
+            <strong>Quality:</strong> When complexity = "complex" → route to the Premium tier, high effort<br/>
+            <strong>Data Protection:</strong> When sensitivity = "critical" or "high" → route to your private endpoint (API proxy)
           </div>
         </div>
       )}

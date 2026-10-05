@@ -45,6 +45,10 @@ const SETTINGS = 'feature_settings';
 const AUDIT = 'feature_settings_audit';
 const DEPLOYMENTS = 'policy_pack_deployments';
 
+// Exported as resolveFeatures for GET /api/v1/routing/policy, which reports the
+// effective model_routing switch so a client has one document to act on.
+export { resolve as resolveFeatures };
+
 async function resolve(db) {
   const doc = await db.collection(SETTINGS).findOne({ id: DOC_ID });
   const overrides = doc?.features && typeof doc.features === 'object' ? doc.features : {};

@@ -268,13 +268,17 @@ export function mountDlp(app, db) {
             length_bucket: e.length_bucket,
             tab_host: e.tabHost,
           } : e.kind === 'model_routed' ? {
-            routed_model: e.routed_model ?? e.routed_ui_name ?? null,
-            rule_name: e.rule_name ?? null,
-            complexity: e.complexity ?? null,
-            current_tier: e.current_tier ?? null,
-            provider: e.provider ?? null,
-            ui_changed: e.ui_changed ?? null,
-            tab_host: e.tabHost,
+            // Legacy fields (clients that predate routing v2), now type-checked
+            // and capped like everything else.
+            routed_model: cleanMetaString(e.routed_model, 120) ?? cleanMetaString(e.routed_ui_name, 120),
+            rule_name: cleanMetaString(e.rule_name, 200),
+            complexity: ROUTING_COMPLEXITY.has(e.complexity) ? e.complexity : null,
+            current_tier: cleanMetaString(e.current_tier, 40),
+            provider: cleanMetaString(e.provider, 40),
+            ui_changed: typeof e.ui_changed === 'boolean' ? e.ui_changed : null,
+            tab_host: cleanMetaString(e.tabHost, 200) ?? undefined,
+            // Routing v2 fields — see routingMetaFields(). Never content.
+            ...routingMetaFields(e),
           } : {
             matches: e.matches ?? [],
             length_bucket: e.length_bucket,
@@ -338,6 +342,13 @@ export function mountDlp(app, db) {
         ),
         received_at: new Date(),
       };
+      // What a routing event DID, top-level because the Model Routing analytics
+      // filter on it ("Requests Routed" counts only 'applied'). Absent on every
+      // other kind, and on a routing event that reported nothing recognisable.
+      if (e.kind === 'model_routed') {
+        const result = routingResultOf(e);
+        if (result) eventDoc.routing_result = result;
+      }
       if (dedupeKey) {
         await db.collection('dlp_events').updateOne(
           { id: dedupeKey },
@@ -348,7 +359,9 @@ export function mountDlp(app, db) {
         await db.collection('dlp_events').insertOne(eventDoc);
       }
 
-      await insertContent(db, eventId, e);
+      // A routing event is metadata about a model switch; whatever a client
+      // attaches, its prompt text is never stored against it.
+      if (e.kind !== 'model_routed') await insertContent(db, eventId, e);
 
       if (sessionId) {
         await upsertSession(db, {
@@ -1103,6 +1116,66 @@ function cleanMetaString(value, max) {
   const s = value.replace(AGENT_META_STRIP_RE, '').trim();
   if (!s || s.length > max) return null;
   return s;
+}
+
+// ── model_routed metadata (routing v2) ──────────────────────────────────────
+// Every field is an enum, a short identifier, a short display label, or a
+// number — there is deliberately no free-text field, so a routing event cannot
+// carry prompt content. Malformed values are DROPPED (key omitted), never
+// truncated or coerced, matching agentMetaFields().
+const ROUTING_MECHANISMS = new Set(['browser_extension', 'desktop_uia', 'desktop_web_uia', 'proxy']);
+const ROUTING_SURFACES = new Set(['browser', 'desktop_app', 'api_proxy']);
+const ROUTING_TIERS = new Set(['economy', 'standard', 'premium']);
+const ROUTING_EFFORTS = new Set(['low', 'medium', 'high']);
+const ROUTING_COMPLEXITY = new Set(['simple', 'moderate', 'complex']);
+export const ROUTING_RESULTS = new Set([
+  'applied', 'failed', 'noop', 'unsupported', 'suggested', 'observed', 'accepted', 'user_override',
+]);
+const ROUTING_PROVIDER_RE = /^[a-z0-9_.-]{1,40}$/;
+const ROUTING_MODEL_RE = /^[A-Za-z0-9._:/@-]{1,120}$/;
+const ROUTING_ID_RE = /^[A-Za-z0-9_:.-]{1,64}$/;
+const ROUTING_REASON_RE = /^[a-z0-9_.-]{1,64}$/;
+const ROUTING_LEN_MAX = 10_000_000;
+
+export const ROUTING_META_KEYS = [
+  'mechanism', 'surface', 'host_or_app', 'provider', 'from_tier', 'from_label',
+  'to_tier', 'to_label', 'model', 'complexity', 'rule_id', 'result', 'reason',
+  'effort_from', 'effort_to', 'len',
+];
+
+export function routingMetaFields(e) {
+  const out = {};
+  const en = (key, set) => { const v = cleanMetaString(e?.[key], 40); if (v && set.has(v)) out[key] = v; };
+  const re = (key, rx, max) => { const v = cleanMetaString(e?.[key], max); if (v && rx.test(v)) out[key] = v; };
+  const label = (key, max) => { const v = cleanMetaString(e?.[key], max); if (v) out[key] = v; };
+
+  en('mechanism', ROUTING_MECHANISMS);
+  en('surface', ROUTING_SURFACES);
+  label('host_or_app', 200);
+  re('provider', ROUTING_PROVIDER_RE, 40);
+  en('from_tier', ROUTING_TIERS);
+  en('to_tier', ROUTING_TIERS);
+  label('from_label', 80);
+  label('to_label', 80);
+  re('model', ROUTING_MODEL_RE, 120);
+  en('complexity', ROUTING_COMPLEXITY);
+  re('rule_id', ROUTING_ID_RE, 64);
+  en('result', ROUTING_RESULTS);
+  re('reason', ROUTING_REASON_RE, 64);
+  en('effort_from', ROUTING_EFFORTS);
+  en('effort_to', ROUTING_EFFORTS);
+  if (typeof e?.len === 'number' && Number.isFinite(e.len) && e.len >= 0) {
+    out.len = Math.min(Math.round(e.len), ROUTING_LEN_MAX);
+  }
+  return out;
+}
+
+/** The stored routing_result: the validated v2 result, else legacy ui_changed. */
+export function routingResultOf(e) {
+  const r = cleanMetaString(e?.result, 40);
+  if (r && ROUTING_RESULTS.has(r)) return r;
+  if (e?.ui_changed === true) return 'applied';
+  return null;
 }
 
 export function attachmentEnforcementFields(e) {

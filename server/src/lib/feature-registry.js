@@ -36,7 +36,9 @@ export const FEATURE_REGISTRY = [
   F('dlp', 'DLP — scanning + guardrails', ['dashboard', 'extension', 'agent'], FEATURE_GROUPS.ENFORCE),
   F('ai_systems', 'AI Systems — registry + platform blocking', ['dashboard', 'extension'], FEATURE_GROUPS.ENFORCE),
   F('access_requests', 'Access Requests — the request-access gate', ['dashboard', 'extension'], FEATURE_GROUPS.ENFORCE),
-  F('model_routing', 'Model Routing — routing enforcement', ['dashboard', 'extension'], FEATURE_GROUPS.ENFORCE),
+  // 'agent' too: the desktop agent routes inside desktop AI apps (UIA picker
+  // switching) from the same policy, so the fleet switch has to reach it.
+  F('model_routing', 'Model Routing — routing enforcement', ['dashboard', 'extension', 'agent'], FEATURE_GROUPS.ENFORCE),
   F('session_replay', 'Session Replay — recording', ['dashboard', 'extension'], FEATURE_GROUPS.ENFORCE),
   // NEW KEY, and the one that extends per-agent blocking to the BROWSER M365
   // surfaces (Teams web, m365.cloud.microsoft, SharePoint, Office web, Outlook
