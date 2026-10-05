@@ -46,29 +46,6 @@ export function loadDetectModelInfo() {
   return run();
 }
 
-/**
- * TIER_UI_NAME is declared elsewhere in content.js (not inside the pure
- * region above — it sits alongside stateful router code that touches
- * chrome.storage). Rather than widen the slice to pull in that machinery,
- * read the one line we need directly off the source: this is the same
- * technique load-conv-identity.mjs's emittedKinds() uses, and for the same
- * reason — a narrow, source-anchored read is safer than executing code with
- * dependencies a test has no business standing up.
- */
-export function tierUiNameFor(provider) {
-  // Scope to the TIER_UI_NAME declaration specifically — ROUTE_TABLE (dead
-  // code, still present in the file) ALSO has a top-level `google: {...}`
-  // entry, and a bare `google:\s*\{...\}` search would happily match that
-  // one instead if it appears first, silently checking the wrong object.
-  const decl = src.indexOf('const TIER_UI_NAME = {');
-  if (decl < 0) throw new Error('content.js: TIER_UI_NAME declaration not found');
-  const end = src.indexOf('};', decl);
-  if (end < 0) throw new Error('content.js: TIER_UI_NAME declaration never closes');
-  const block = src.slice(decl, end);
-
-  const m = new RegExp(`${provider}:\\s*\\{([^}]*)\\}`).exec(block);
-  if (!m) throw new Error(`content.js: TIER_UI_NAME has no entry for '${provider}'`);
-  const out = {};
-  for (const pair of m[1].matchAll(/(\d)\s*:\s*'([^']+)'/g)) out[Number(pair[1])] = pair[2];
-  return out;
-}
+// tierUiNameFor() was removed with content.js's TIER_UI_NAME table. Which label
+// to click for a tier now comes from the shared catalog (shared/model-catalog.json),
+// pinned by tests/shared-routing.test.mjs.

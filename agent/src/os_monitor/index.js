@@ -43,7 +43,9 @@ import { PromptWatcher } from './prompt-watcher.js';
 import { SyncWatcher } from './sync-watcher.js';
 import { Enforcer } from './enforcer.js';
 import { spawnEnforcerWatchdog } from './enforcer-watchdog.js';
-import { saveCachedRoutingRules } from './model-router-config.js';
+import { RoutingPolicySync } from './routing-policy-sync.js';
+import { readRoutingOwners } from './routing-ownership.js';
+import { modelRoutedFields } from './route-event.js';
 import { Reporter } from './reporter.js';
 // The single-slot offline queue for a Request Access submission, and the poller
 // that drains it. Owned by blocked-agents-sync.js — one path files these, one
@@ -432,15 +434,20 @@ export class OsMonitor extends EventEmitter {
         this.enforcer.updateBlockPatterns(blockPatterns);
       },
     });
-    // ── Routing rules sync ────────────────────────────────────────────────────
-    // Fetches admin-configured model routing rules from the same endpoint the
-    // browser extension uses (/api/v1/routing/rules). When rules change the
-    // enforcer is restarted so the C# ComputeRoute() picks up the new config.
-    this._routingRulesHash = '';
-    this._routingRulesTimer = setInterval(() => this.#refreshRoutingRules(), 60_000);
-    this._routingRulesTimer.unref?.();
-    // First fetch 5s after start (let enforcer settle first).
-    setTimeout(() => this.#refreshRoutingRules(), 5000);
+    // ── Routing policy sync ───────────────────────────────────────────────────
+    // GET /api/v1/routing/policy (machine JWT, ETag) -> the enforcer, pushed over
+    // its stdin when the version moves. Constructed here; its TIMERS live only in
+    // start()/stop() — the constructor used to start a second 60s interval that
+    // start() then orphaned, and stop() could never clear it.
+    this.routingPolicySync = new RoutingPolicySync({
+      serverUrl,
+      getToken: () => this.token,
+      log,
+      onPolicy: (policy, version) => this.enforcer?.updateRouterConfig?.(policy, version),
+    });
+    this._routingRulesTimer = null;
+    this._routingRulesInterval = null;
+    this._routingOwnersTimer = null;
 
     // Fleet-wide feature switches, thrown from the dashboard's Settings page.
     //
@@ -3554,40 +3561,30 @@ export class OsMonitor extends EventEmitter {
       const ai = (web ? { product: web.product, vendor: web.vendor } : null)
         || identifyAiProcess(ev.process)
         || { product: ev.process, vendor: null };
+      // Routing v2 fields (mechanism desktop_uia / desktop_web_uia, surface,
+      // host_or_app, tiers, labels, model, rule_id, result, reason, effort,
+      // len) come from modelRoutedFields() — enums and identifiers only, see
+      // route-event.js. The legacy fields stay for older dashboards.
+      const fields = modelRoutedFields(ev);
       this.reporter.enqueue({
         kind: 'model_routed',
-        mechanism: 'keystroke_route',
         source: 'os_monitor_enforcer',
         service: ai.product,
         vendor: ai.vendor,
         routed_ui_name: ev.to_label || null,
-        complexity: ev.complexity || null,
         current_tier: ev.from_tier || null,
-        provider: ev.provider || null,
-        ui_changed: ev.result === 'ok',
+        ui_changed: fields.result === 'applied',
         // model_routed is one of the three event kinds routes/dlp.js maps
         // tab_host for explicitly, so the browser dimension travels here too.
         ...(ev.browser_host ? { tabHost: ev.browser_host } : {}),
-        // AI-216: THE EFFORT SIDE EFFECT. Switching model on claude.ai also
-        // changes effort (measured: 'Opus 5 High' -> 'Sonnet 5 Medium').
-        // Nothing in this feature SETS effort and the user has accepted the
-        // downgrade -- but if it is not recorded, the cost model prices a
-        // Medium-effort request as High forever with nothing in the data to
-        // show it. That is the specific failure this carries: wrong, and
-        // UNDETECTABLY wrong.
-        //
-        // Omitted entirely when unknown (a label with no recognised token, and
-        // every desktop route), so no pre-existing row gains a null column.
-        //
-        // NOTE FOR THE SERVER SIDE: routes/dlp.js maps `model_routed` through
-        // an explicit per-kind field list, so these two do not reach dlp_events
-        // until that list carries them. They do reach the monitor's own
-        // @@CFAI-ROUTE line today.
-        ...(ev.effort_from ? { effort_from: ev.effort_from } : {}),
-        ...(ev.effort_to ? { effort_to: ev.effort_to } : {}),
+        // AI-216: THE EFFORT SIDE EFFECT. Switching model also changes effort
+        // (measured: 'Opus 5 High' -> 'Sonnet 5 Medium'); effort_from/effort_to
+        // record it so the cost model is not silently wrong. Nothing here SETS
+        // effort — no effort control has had a live pass.
+        ...fields,
       });
-      this.log?.info(`os_monitor: model route ${ev.result} — ${ai.product} ${ev.from_tier}->${ev.to_tier} (${ev.complexity})`);
-      if (ev.result === 'ok' && this.#shouldFire(`route|${ev.process}`)) {
+      this.log?.info(`os_monitor: model route ${fields.result}${ev.reason ? ` (${ev.reason})` : ''} — ${ai.product} ${ev.from_tier}->${ev.to_tier} (${ev.complexity})`);
+      if (fields.result === 'applied' && this.#shouldFire(`route|${ev.process}`)) {
         this.toast.show({
           title: `${ai.product} - model routed`,
           message: `Switched to ${ev.to_label} for this message (${ev.complexity} prompt).`,
@@ -3640,13 +3637,27 @@ export class OsMonitor extends EventEmitter {
     // the same queued file, both POSTed it — and the server filed it twice
     // (seen live: two pending rows for one device + tool, 9ms apart).
 
-    // ── Routing rules sync (60s interval, 5s first check) ─────────────────
-    // Fetches server-defined routing rules and caches them locally so the
-    // enforcer can apply them even when the server is unreachable.
+    // ── Routing policy sync (60s interval, 5s first check) ────────────────
+    // The disk-cached policy goes to the enforcer immediately (it also reached
+    // a fresh helper through CFAI_MODEL_ROUTER_CONFIG); the server is asked 5s
+    // in and every 60s after, with If-None-Match, so an unchanged policy costs
+    // a 304. A version change is PUSHED to the running helper — no respawn.
+    this.routingPolicySync.primeFromCache();
     this._routingRulesTimer = setTimeout(() => {
       this.#refreshRoutingRules();
       this._routingRulesInterval = setInterval(() => this.#refreshRoutingRules(), 60_000);
+      this._routingRulesInterval.unref?.();
     }, 5_000);
+    this._routingRulesTimer.unref?.();
+    // Browsers whose CloudFuze extension routes (the beacon records its
+    // heartbeats): the enforcer's web arm stands down in them. Read every 10s,
+    // well inside the 90s ownership window.
+    const pushOwners = () => {
+      try { this.enforcer?.setRoutingOwners?.(readRoutingOwners()); } catch { /* best effort */ }
+    };
+    pushOwners();
+    this._routingOwnersTimer = setInterval(pushOwners, 10_000);
+    this._routingOwnersTimer.unref?.();
 
     // Kill any orphaned banner processes from a previous agent run
     this._hideBannerProc();
@@ -3781,6 +3792,16 @@ export class OsMonitor extends EventEmitter {
     // release the keyboard hook if this process is hard-killed, so it lives and
     // dies with the enforcer — leaving it running with no hook to reap would have
     // it watching for something that cannot happen.
+    // The fleet `model_routing` switch, straight to the enforcer (a bare on/off
+    // on its stdin; remembered across respawns). The routing policy carries the
+    // same flag as fleet_enabled — either being off stops routing. Only a REAL
+    // fleet answer moves it: the pre-fetch default never switches routing off.
+    // The per-machine tray toggle (CFAI_MODEL_ROUTER_ENABLED) is separate and
+    // untouched: it decides whether the helper routes at all.
+    if (fromFleet && changed.includes('model_routing')) {
+      this.enforcer?.setRoutingFleet?.(want('model_routing'));
+    }
+
     if (changed.includes('agent_enforcer')) {
       // AND, not override: the fleet flag alone is not enough — see
       // #enforcerAllowed. Everything below this line reads the composed value.
@@ -3924,35 +3945,16 @@ export class OsMonitor extends EventEmitter {
     this._spawnUi('block-dialog.ps1', data);
   }
 
-  // ── Routing rules sync ──────────────────────────────────────────────────────
-  // Mirrors the browser extension's service-worker refreshRoutingRules():
-  // fetch /api/v1/routing/rules every 60s, cache to disk, restart the enforcer
-  // when rules change so the C# ComputeRoute() picks up server overrides.
+  // ── Routing policy sync ─────────────────────────────────────────────────────
+  // One poll of GET /api/v1/routing/policy (404 -> the legacy /routing/rules
+  // feed). A changed policy is cached to disk and pushed to the running
+  // enforcer by RoutingPolicySync's onPolicy -> Enforcer.updateRouterConfig.
+  // It used to call updateBlockPatterns(), which returns early when the DLP
+  // patterns are unchanged — so a rules-only change never reached the helper.
   async #refreshRoutingRules() {
-    if (!this.serverUrl) return;
-    try {
-      const res = await fetch(`${this.serverUrl}/api/v1/routing/rules`, {
-        signal: AbortSignal.timeout(10000),
-      });
-      if (!res.ok) return;
-      const rules = await res.json();
-      if (!Array.isArray(rules)) return;
-      // Only enabled rules, sorted by priority (lower = higher priority).
-      const active = rules.filter(r => r.enabled !== false).sort((a, b) => (a.priority || 50) - (b.priority || 50));
-      const hash = JSON.stringify(active);
-      if (hash === this._routingRulesHash) return; // no change
-      this._routingRulesHash = hash;
-      saveCachedRoutingRules(active);
-      this.log?.info?.(`routing-rules: synced ${active.length} rule(s) — restarting enforcer`);
-      // Restart enforcer to pick up new CFAI_MODEL_ROUTER_CONFIG (which
-      // includes serverRules from the cached file). Same pattern as
-      // policySync's onChange → updateBlockPatterns.
-      if (this.enforcerEnabled && this.enforcer) {
-        const blockPatterns = getBlockPatterns();
-        this.enforcer.updateBlockPatterns(blockPatterns);
-      }
-    } catch (err) {
-      this.log?.warn?.(`routing-rules: fetch failed (${err?.message}) — keeping cached rules`);
+    if (!this.serverUrl || !this.isRunning) return;
+    try { await this.routingPolicySync.refresh(); } catch (err) {
+      this.log?.warn?.(`routing-policy: refresh failed (${err?.message}) — keeping the current policy`);
     }
   }
 
@@ -3966,6 +3968,7 @@ export class OsMonitor extends EventEmitter {
     // the process alive forever after stop().
     if (this._routingRulesTimer) { clearTimeout(this._routingRulesTimer); this._routingRulesTimer = null; }
     if (this._routingRulesInterval) { clearInterval(this._routingRulesInterval); this._routingRulesInterval = null; }
+    if (this._routingOwnersTimer) { clearInterval(this._routingOwnersTimer); this._routingOwnersTimer = null; }
     try { this._hideBannerProc(); } catch {}
     this.#stopAttachHoldRefresh();
     if (this.pasteSweepTimer) { clearInterval(this.pasteSweepTimer); this.pasteSweepTimer = null; }

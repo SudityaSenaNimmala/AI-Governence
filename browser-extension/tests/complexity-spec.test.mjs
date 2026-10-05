@@ -62,23 +62,24 @@ test('the spec states the analysis window the code uses', () => {
     `spec must state the ${head}/${tail} character analysis window`);
 });
 
-// The category count the spec corrects. If someone adds or removes a category, the
-// spec's "twelve compiled categories / nine positive" claim has to move with it.
+// The category count the spec states. If someone adds or removes a category, the
+// spec's "thirteen compiled categories / ten positive" claim has to move with it
+// (researchDepth, classifier 1.3.0, made it ten).
 test('the spec states the real category counts', () => {
   // Count only the entries INSIDE the POSITIVE array — the three negative
   // categories are compiled by the same helper just below it, so a whole-file
-  // count of compileCategory( is 12 and says nothing about the split.
+  // count of compileCategory( is 13 and says nothing about the split.
   const from = src.indexOf('const POSITIVE = [');
   assert.ok(from > 0, 'POSITIVE array not found');
   const positiveBlock = src.slice(from, src.indexOf('];', from));
   const positive = (positiveBlock.match(/compileCategory\('/g) || []).length;
   const negatives = ['CAT_SIMPLE_TASK', 'CAT_SIMPLICITY_REQUEST', 'CAT_TRIVIAL_INTENT']
     .filter((n) => src.includes(n)).length;
-  assert.equal(positive, 9, 'positive category count changed — update the spec table');
-  assert.equal(positive + negatives, 12, 'total category count changed — update the spec');
+  assert.equal(positive, 10, 'positive category count changed — update the spec table');
+  assert.equal(positive + negatives, 13, 'total category count changed — update the spec');
   assert.equal(negatives, 3, 'negative category count changed — update the spec table');
-  assert.match(doc, /Twelve compiled categories/i);
-  assert.match(doc, /Nine contribute positively, three negatively/i);
+  assert.match(doc, /Thirteen compiled categories/i);
+  assert.match(doc, /Ten contribute positively, three negatively/i);
 });
 
 // `architect*` at weight 6 is the one term the spec calls out in bold, because it
@@ -108,6 +109,11 @@ const WORKED_EXAMPLES = [
   ['why does this deadlock', 'complex'],
   ["what's our architecture for the billing service?", 'complex'],
   ['design a multi-tenant migration plan with rollback', 'complex'],
+  ['Write a literature review on transformer models', 'complex'],
+  ['research the regulatory history of GDPR fines and cite sources', 'complex'],
+  ['Prove that the square root of 2 is irrational', 'complex'],
+  ['Research the history of the printing press', 'moderate'],
+  ['proofread this paragraph', 'moderate'],
 ];
 
 test('every worked example in the spec is reproducible', () => {

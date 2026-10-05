@@ -38,7 +38,12 @@ const PRICING = [
   // Google, Mistral and Perplexity were absent entirely — every one of those
   // routed models costed zero here.
   { m: /^gemini-3\.7-flash/,       input: 0.75,  output: 3.75,  cached: 0.075 },
-  { m: /^gemini-2\.5-pro/,         input: 1.25,  output: 10.00, cached: 0.125 },
+  // The catalog's economy and premium Gemini (shared/model-catalog.json); same
+  // values as agent/src/server-monitor/pricing.js. Flash-Lite before any
+  // future 3.5-flash row, for the same ordering reason as 2.5 below.
+  { m: /^gemini-3\.5-flash-lite/,  input: 0.30,  output: 2.50,  cached: 0.03 },
+  { m: /^gemini-3\.1-pro/,         input: 2.00,  output: 12.00, cached: 0.20 },
+  { m: /^gemini-2\.5-pro/,        input: 1.25,  output: 10.00, cached: 0.125 },
   { m: /^gemini-2\.5-flash-lite/,  input: 0.10,  output: 0.40,  cached: 0.01 },
   { m: /^gemini-2\.5-flash/,       input: 0.30,  output: 2.50,  cached: 0.03 },
   { m: /^gemini-2\.0-flash/,       input: 0.10,  output: 0.40,  cached: 0.025 },

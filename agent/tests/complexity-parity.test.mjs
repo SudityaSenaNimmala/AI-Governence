@@ -213,17 +213,34 @@ test('classification never throws, on any path', () => {
 import { DEFAULT_RULES } from '../../server/src/seed-routing.js';
 import { MODELS as PRICING_MODELS, priceFor } from '../src/server-monitor/pricing.js';
 
-const ANTHROPIC_TARGETS = DEFAULT_RULES
-  .filter((r) => r.provider === 'anthropic')
-  .map((r) => r.action.model);
+// The seeded rules are routing v2 (server/src/seed-routing.js): each names a
+// provider (conditions.provider) and a TIER (action.target_tier), not a model.
+// The models a tier can mean are the catalog's api_ids for that provider and
+// tier (shared/model-catalog.json); the FIRST is the one decideRoute reports as
+// `model`. These tests used to read the v1 r.provider / r.action.model, which
+// v2 rules no longer have — so they compared `undefined`, and the display test
+// passed vacuously.
+const CATALOG = JSON.parse(readFileSync(path.join(repo, 'shared', 'model-catalog.json'), 'utf8'));
 
-// Every model any seeded rule can route to, across all five providers.
-const ALL_TARGETS = DEFAULT_RULES.map((r) => ({
-  provider: r.provider,
-  model: r.action.model,
-  ui_name: r.action.ui_name,
-  key: r.builtin_key,
-}));
+const ALL_TARGETS = DEFAULT_RULES.flatMap((r) => {
+  const provider = r.conditions.provider[0];
+  const tier = r.action.target_tier;
+  const ids = CATALOG.providers[provider].tiers[tier].api_ids;
+  return ids.map((model, i) => ({ provider, tier, model, primary: i === 0, key: r.builtin_key }));
+});
+// What a route actually reports as `model`: the first api_id per (provider, tier).
+const PRIMARY_TARGETS = ALL_TARGETS.filter((t) => t.primary);
+const ANTHROPIC_TARGETS = [...new Set(ALL_TARGETS.filter((t) => t.provider === 'anthropic').map((t) => t.model))];
+
+test('the seeded rules resolve to real catalog models (the targets below are not vacuous)', () => {
+  assert.equal(DEFAULT_RULES.length, 15, 'five providers x three complexities');
+  for (const r of DEFAULT_RULES) {
+    assert.ok(Array.isArray(r.conditions?.provider) && r.conditions.provider.length === 1, `${r.builtin_key}: one provider`);
+    assert.ok(['economy', 'standard', 'premium'].includes(r.action?.target_tier), `${r.builtin_key}: a tier`);
+  }
+  assert.ok(ALL_TARGETS.length >= 15);
+  assert.ok(ANTHROPIC_TARGETS.includes('claude-opus-5') && ANTHROPIC_TARGETS.includes('claude-haiku-4-5'));
+});
 
 test('every routed model on a desktop-capable provider has a picker label', () => {
   const src = readFileSync(path.join(repo, 'agent', 'src', 'desktop_injector', 'hook-renderer.js'), 'utf8');
@@ -232,7 +249,7 @@ test('every routed model on a desktop-capable provider has a picker label', () =
   // Perplexity have no desktop app it recognises, so they are out of scope here.
   const DESKTOP_PROVIDERS = new Set(['anthropic', 'openai', 'google']);
   const missing = [];
-  for (const { provider, model, key } of ALL_TARGETS) {
+  for (const { provider, model, key } of PRIMARY_TARGETS) {
     if (!DESKTOP_PROVIDERS.has(provider)) continue;
     if (!block.includes(`'${model}'`)) missing.push(`${key} -> ${model}`);
   }

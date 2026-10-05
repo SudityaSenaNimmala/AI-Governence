@@ -371,7 +371,13 @@ test('OsMonitor reports model_routed and relays @@CFAI-ROUTE without dropping co
   const routeHandler = src.match(/this\.enforcer\.on\('route',[\s\S]*?\n\s{4}\}\);/);
   assert.ok(routeHandler, "expected an enforcer.on('route', ...) handler");
   assert.match(routeHandler[0], /kind:\s*'model_routed'/);
-  assert.match(routeHandler[0], /mechanism:\s*'keystroke_route'/);
+  // Routing v2: the mechanism (desktop_uia / desktop_web_uia), surface, result
+  // and the rest come from route-event.js — the server's allowlist rejects the
+  // old 'keystroke_route' value.
+  assert.match(routeHandler[0], /const fields = modelRoutedFields\(ev\);/);
+  assert.match(routeHandler[0], /\.\.\.fields,/);
+  const routeEvent = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'route-event.js'), 'utf8');
+  assert.match(routeEvent, /mechanism: browser \? 'desktop_web_uia' : 'desktop_uia'/);
   // Privacy invariant: no prompt text field anywhere in the reported event.
   assert.equal(/prompt_text|original|masked/.test(routeHandler[0]), false);
 });

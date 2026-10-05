@@ -5138,16 +5138,6 @@ public static class CfaiEnforcer
     class TierRule { public string Provider; public string Tier; public bool IsRegex; public string Keyword; public Regex Rx; }
     class MrModelInfo { public string Provider; public string Tier; }
     class CategoryScore { public int Sum; public bool Strong; public bool Hit; }
-    class RouteDecision { public string ToTier; public string ToLabel; }
-    class ServerRoutingRule
-    {
-        public string Name;
-        public int Priority;
-        public List<string> Providers;    // null = any
-        public List<string> Complexities; // null = any
-        public string UiName;             // what to click in the dropdown
-        public string Model;              // optional: API model name
-    }
 
     // AI-216. Everything a BROWSER route needs that a desktop route does not.
     // Pinned alongside the rest of the decision and handed to RunWebRoute whole,
@@ -5176,13 +5166,10 @@ public static class CfaiEnforcer
     }
 
     static volatile bool _modelRouterEnabled = false;
-    static List<ServerRoutingRule> _mrServerRules = new List<ServerRoutingRule>();
     static List<LexCategory> _mrPositive = new List<LexCategory>();
     static LexCategory _mrSimpleTask, _mrSimplicityRequest, _mrTrivialIntent;
     static HashSet<string> _mrTrivialTokens = new HashSet<string>(StringComparer.Ordinal);
     static List<TierRule> _mrTierRules = new List<TierRule>();
-    static Dictionary<string, Dictionary<int, string>> _mrTierUiNames =
-        new Dictionary<string, Dictionary<int, string>>(StringComparer.OrdinalIgnoreCase);
     static int _mrComplexAt = 6, _mrSimpleAt = -3, _mrStrongWeight = 4, _mrCapPerCategory = 2;
     static int _mrWindowHead = 3000, _mrWindowTail = 1000, _mrMaxTrivialTokens = 4, _mrMaxFillerContentTokens = 2;
     static readonly Regex _mrLetterRe = new Regex("\\p{L}", RegexOptions.None, REGEX_TIMEOUT);
@@ -5349,44 +5336,17 @@ public static class CfaiEnforcer
         }
         _mrTierRules = tierRules;
 
-        var tierUiNames = new Dictionary<string, Dictionary<int, string>>(StringComparer.OrdinalIgnoreCase);
-        var rawTierUiNames = (Dictionary<string, object>)root["tierUiNames"];
-        foreach (var providerKv in rawTierUiNames)
-        {
-            var perTier = new Dictionary<int, string>();
-            foreach (var tierKv in (Dictionary<string, object>)providerKv.Value) perTier[int.Parse(tierKv.Key)] = (string)tierKv.Value;
-            tierUiNames[providerKv.Key] = perTier;
-        }
-        _mrTierUiNames = tierUiNames;
-
-        // Server-managed routing rules — same format as /api/v1/routing/rules.
-        // When present, ComputeRoute() checks these BEFORE the built-in logic,
-        // so admin overrides take precedence.
-        var serverRules = new List<ServerRoutingRule>();
-        if (root.ContainsKey("serverRules") && root["serverRules"] != null)
-        {
-            foreach (var raw in (IEnumerable)root["serverRules"])
-            {
-                var ruleDict = (Dictionary<string, object>)raw;
-                var sr = new ServerRoutingRule();
-                sr.Name = ruleDict.ContainsKey("name") ? (string)ruleDict["name"] : "";
-                sr.Priority = ruleDict.ContainsKey("priority") ? Convert.ToInt32(ruleDict["priority"]) : 50;
-                if (ruleDict.ContainsKey("conditions") && ruleDict["conditions"] != null)
-                {
-                    var cond = (Dictionary<string, object>)ruleDict["conditions"];
-                    sr.Providers = MrStringList(cond, "provider");
-                    sr.Complexities = MrStringList(cond, "complexity");
-                }
-                if (ruleDict.ContainsKey("action") && ruleDict["action"] != null)
-                {
-                    var act = (Dictionary<string, object>)ruleDict["action"];
-                    sr.UiName = act.ContainsKey("ui_name") ? (string)act["ui_name"] : null;
-                    sr.Model = act.ContainsKey("model") ? (string)act["model"] : null;
-                }
-                serverRules.Add(sr);
-            }
-        }
-        _mrServerRules = serverRules;
+        // The shared catalog, the routing policy and the desktop app map -- see
+        // model-router-config.js. The legacy tierUiNames / serverRules fields an
+        // older parent may still send are ignored: labels come from the catalog
+        // and rules from the policy, both read by the decideRoute port.
+        _mrCatalog = DrObj(DrGet(root, "catalog"));
+        object policy = DrGet(root, "policy");
+        _mrPolicy = (policy == null || DrObj(policy) != null || DrIsArr(policy)) ? policy : null;
+        var desktopApps = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var rawApps = DrObj(DrGet(root, "desktopApps"));
+        if (rawApps != null) foreach (var kv in rawApps) { string v = kv.Value as string; if (!string.IsNullOrEmpty(v)) desktopApps[kv.Key] = v; }
+        _mrDesktopApps = desktopApps;
     }
 
     static List<string> MrStringList(Dictionary<string, object> dict, string key)
@@ -5395,6 +5355,1085 @@ public static class CfaiEnforcer
         var result = new List<string>();
         foreach (var item in (IEnumerable)dict[key]) result.Add(((string)item).ToLowerInvariant());
         return result.Count > 0 ? result : null;
+    }
+
+    // ════ decideRoute — THE C# PORT of shared/decide-route.js ═══════════════
+    //
+    // LOCKSTEP, NOT INSPIRED-BY. Every function below is a line-for-line port
+    // of its namesake in shared/decide-route.js (Dr* = the JS name), and
+    // agent/tests/routing-decide-lockstep.test.mjs runs every case in
+    // shared/routing-decision-vectors.json (74 decisions + 24 label reads)
+    // through BOTH and compares all eleven output fields. A behaviour change
+    // there without the same change here fails that test, by design.
+    //
+    // Inputs are exactly what JavaScriptSerializer.DeserializeObject produces
+    // for the same JSON: Dictionary<string, object> for an object, object[]
+    // for an array, int/long/decimal for a number, bool, string, null. JS
+    // truthiness is ported where the source relies on it (=== false, === true,
+    // typeof 'number').
+    //
+    // ONE deliberate narrowing: label lists keep strings only (the JS keeps
+    // whatever the JSON held). A non-string label can never be clicked.
+    //
+    // PRIVACY: nothing here sees prompt text — the classifier runs first and
+    // only its verdict ('simple'/'moderate'/'complex') is passed in.
+
+    static readonly string[] DR_TIERS = new string[] { "economy", "standard", "premium" };
+    static readonly string[] DR_EFFORTS = new string[] { "low", "medium", "high" };
+    static readonly string[] DR_MODES = new string[] { "enforce", "suggest", "observe" };
+    static readonly string[] DR_SURFACES = new string[] { "browser", "desktop_app", "api_proxy" };
+
+    class DrTierEntry
+    {
+        public List<string> ClickLabels = new List<string>();
+        public List<string> ButtonPatterns = new List<string>();
+        public bool Verified;
+    }
+    class DrSurface
+    {
+        public string Key = "", Kind = "", Provider = "";
+        public bool Verified;
+        public Dictionary<string, object> Effort;   // null = { supported: false }
+        public Dictionary<string, DrTierEntry> Tiers = new Dictionary<string, DrTierEntry>(StringComparer.Ordinal);
+    }
+    class DrOverride { public string Provider, HostOrApp, Tier, Label; }
+    class DrPolicy
+    {
+        public List<Dictionary<string, object>> Rules = new List<Dictionary<string, object>>();
+        public List<object> CatalogOverrides = new List<object>();
+        public bool AllowUpgrade = true, RespectUserOverride = true, FleetEnabled = true;
+    }
+    class DrDecision
+    {
+        public string TargetTier, Effort, RuleId, RuleName, Mode, Result, Reason, FromTier, ToLabel, Model;
+        public List<string> ClickLabels = new List<string>();
+    }
+
+    static readonly Dictionary<string, object> DR_EMPTY = new Dictionary<string, object>();
+
+    static Dictionary<string, object> DrObj(object o) { return o as Dictionary<string, object>; }
+    static object DrGet(Dictionary<string, object> d, string k)
+    {
+        object v;
+        return (d != null && d.TryGetValue(k, out v)) ? v : null;
+    }
+    static bool DrIsFalse(object v) { return v is bool && !(bool)v; }
+    static bool DrIsTrue(object v) { return v is bool && (bool)v; }
+    static bool DrIsNum(object v) { return v is int || v is long || v is decimal || v is double || v is float; }
+    static bool DrIsArr(object v) { return v is object[] || v is ArrayList; }
+
+    // lower(): a trimmed, lower-cased string, or "" for anything that is not one.
+    static string DrLower(object v)
+    {
+        string s = v as string;
+        return s != null ? s.Trim().ToLowerInvariant() : "";
+    }
+
+    // asList(): undefined/null -> [], an array -> its items, anything else -> [v].
+    // NOT IEnumerable: a string and a Dictionary are both enumerable in C#.
+    static List<object> DrList(object v)
+    {
+        var o = new List<object>();
+        if (v == null) return o;
+        object[] arr = v as object[];
+        if (arr != null) { o.AddRange(arr); return o; }
+        ArrayList al = v as ArrayList;
+        if (al != null) { foreach (object x in al) o.Add(x); return o; }
+        o.Add(v);
+        return o;
+    }
+
+    static List<string> DrStrings(object v)
+    {
+        var o = new List<string>();
+        foreach (object x in DrList(v)) { string s = x as string; if (s != null) o.Add(s); }
+        return o;
+    }
+
+    static int DrTierRank(string t)
+    {
+        if (t == "economy") return 1;
+        if (t == "standard") return 2;
+        if (t == "premium") return 3;
+        return 0;
+    }
+
+    static string DrNormTier(object t)
+    {
+        if (DrIsNum(t))
+        {
+            double d = Convert.ToDouble(t, System.Globalization.CultureInfo.InvariantCulture);
+            if (d == 1) return "economy";
+            if (d == 2) return "standard";
+            if (d == 3) return "premium";
+            return null;
+        }
+        string s = DrLower(t);
+        return DrTierRank(s) > 0 ? s : null;
+    }
+
+    static string DrNormEffort(object e)
+    {
+        string s = DrLower(e);
+        return Array.IndexOf(DR_EFFORTS, s) >= 0 ? s : null;
+    }
+
+    static string DrNormSurface(object s)
+    {
+        string v = DrLower(s);
+        if (v == "desktop") return "desktop_app";
+        return Array.IndexOf(DR_SURFACES, v) >= 0 ? v : "";
+    }
+
+    static string DrNormHostOrApp(object h)
+    {
+        string v = DrLower(h);
+        return v.StartsWith("www.", StringComparison.Ordinal) ? v.Substring(4) : v;
+    }
+
+    static bool DrIsWordChar(char ch)
+    {
+        return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+    }
+
+    // labelMatches(): case-insensitive, at a token boundary on BOTH sides; the
+    // char after must not be a letter, digit, '.' or '-'. Every occurrence tried.
+    static bool DrLabelMatches(string text, string label)
+    {
+        string t = text ?? "";
+        string l = label ?? "";
+        if (l.Length == 0 || t.Length < l.Length) return false;
+        string tl = t.ToLowerInvariant();
+        string ll = l.ToLowerInvariant();
+        int from = 0;
+        while (from <= tl.Length)
+        {
+            int at = tl.IndexOf(ll, from, StringComparison.Ordinal);
+            if (at < 0) return false;
+            bool okBefore = at == 0 || !DrIsWordChar(t[at - 1]);
+            int after = at + l.Length;
+            bool okAfter = after >= t.Length || !(DrIsWordChar(t[after]) || t[after] == '.' || t[after] == '-');
+            if (okBefore && okAfter) return true;
+            from = at + 1;
+        }
+        return false;
+    }
+
+    static DrTierEntry DrCopyTierEntry(object e)
+    {
+        var src = DrObj(e);
+        return new DrTierEntry
+        {
+            ClickLabels = DrStrings(DrGet(src, "click_labels")),
+            ButtonPatterns = DrStrings(DrGet(src, "button_label_patterns")),
+            Verified = DrIsTrue(DrGet(src, "verified")),
+        };
+    }
+
+    static List<string> DrPrependUnique(List<string> list, string value)
+    {
+        var o = new List<string> { value };
+        foreach (string v in list) if (DrLower(v) != DrLower(value)) o.Add(v);
+        return o;
+    }
+
+    static List<DrOverride> DrOverrideList(DrPolicy pol)
+    {
+        var o = new List<DrOverride>();
+        foreach (object raw in pol.CatalogOverrides)
+        {
+            var d = DrObj(raw);
+            if (d == null) continue;
+            string provider = DrLower(DrGet(d, "provider"));
+            string tier = DrNormTier(DrGet(d, "tier"));
+            string lbl = DrGet(d, "label") as string;
+            string label = lbl != null ? lbl.Trim() : "";
+            if (provider.Length == 0 || tier == null || label.Length == 0) continue;
+            object h = DrGet(d, "host_or_app");
+            string hoa = (h == null || (h is string && (string)h == "")) ? "*" : DrNormHostOrApp(h);
+            o.Add(new DrOverride { Provider = provider, HostOrApp = hoa, Tier = tier, Label = label });
+        }
+        return o;
+    }
+
+    static bool DrHostMatchesKey(string host, string key)
+    {
+        return host == key || (host.Length > key.Length && host.Substring(host.Length - key.Length - 1) == "." + key);
+    }
+
+    static DrSurface DrResolveSurface(Dictionary<string, object> catalog, object surface, object hostOrApp, DrPolicy pol, object providerHint)
+    {
+        var cat = catalog ?? DR_EMPTY;
+        string s = DrNormSurface(surface);
+        string hoa = DrNormHostOrApp(hostOrApp);
+        var overrides = DrOverrideList(pol);
+        string key = "";
+        string kind = "";
+        Dictionary<string, object> baseEntry = null;
+
+        if (s == "browser")
+        {
+            var hosts = DrObj(DrGet(cat, "hosts")) ?? DR_EMPTY;
+            int bestLen = 0;
+            foreach (string k in hosts.Keys)
+            {
+                string kk = DrLower(k);
+                if (DrHostMatchesKey(hoa, kk) && kk.Length > bestLen) { key = kk; bestLen = kk.Length; }
+            }
+            if (key.Length > 0)
+            {
+                kind = "host";
+                baseEntry = DrObj(DrGet(hosts, key));
+                if (baseEntry == null)
+                {
+                    foreach (string k in hosts.Keys) if (DrLower(k) == key) { baseEntry = DrObj(hosts[k]); break; }
+                }
+                if (baseEntry != null)
+                {
+                    string alias = DrGet(baseEntry, "alias_of") as string;
+                    if (!string.IsNullOrEmpty(alias)) baseEntry = DrObj(DrGet(hosts, alias));
+                }
+            }
+        }
+        else if (s == "desktop_app")
+        {
+            var apps = DrObj(DrGet(cat, "apps")) ?? DR_EMPTY;
+            foreach (string k in apps.Keys)
+            {
+                if (DrLower(k) == hoa) { key = DrLower(k); kind = "app"; baseEntry = DrObj(apps[k]); break; }
+            }
+        }
+        else if (s == "api_proxy")
+        {
+            string p = DrLower(providerHint);
+            if (p.Length == 0) return null;
+            return new DrSurface { Key = hoa.Length > 0 ? hoa : "*", Kind = "api", Provider = p, Verified = false, Effort = null };
+        }
+        else
+        {
+            return null;
+        }
+
+        var entry = new DrSurface
+        {
+            Key = key.Length > 0 ? key : hoa,
+            Kind = kind.Length > 0 ? kind : (s == "browser" ? "host" : "app"),
+            Provider = baseEntry != null ? DrLower(DrGet(baseEntry, "provider")) : "",
+            Verified = baseEntry != null && DrIsTrue(DrGet(baseEntry, "verified")),
+            Effort = baseEntry != null ? DrObj(DrGet(baseEntry, "effort")) : null,
+        };
+        var baseTiers = DrObj(DrGet(baseEntry, "tiers"));
+        if (baseTiers != null)
+        {
+            foreach (string t in DR_TIERS)
+            {
+                object te = DrGet(baseTiers, t);
+                if (te != null && !DrIsFalse(te)) entry.Tiers[t] = DrCopyTierEntry(te);
+            }
+        }
+
+        // Overrides: wildcard first, then the exact surface, so the specific one wins.
+        var exact = new List<DrOverride>();
+        var wild = new List<DrOverride>();
+        foreach (var o in overrides)
+        {
+            if (o.HostOrApp == "*") wild.Add(o);
+            else if (o.HostOrApp == hoa || (key.Length > 0 && o.HostOrApp == key)) exact.Add(o);
+        }
+        if (baseEntry == null)
+        {
+            if (exact.Count == 0) return null;
+            entry.Provider = exact[0].Provider;
+        }
+        var all = new List<DrOverride>(wild);
+        all.AddRange(exact);
+        foreach (var o in all)
+        {
+            if (o.Provider != entry.Provider) continue;
+            DrTierEntry te;
+            if (!entry.Tiers.TryGetValue(o.Tier, out te)) te = DrCopyTierEntry(null);
+            te.ClickLabels = new List<string> { o.Label };
+            te.ButtonPatterns = DrPrependUnique(te.ButtonPatterns, o.Label);
+            entry.Tiers[o.Tier] = te;
+        }
+        return entry;
+    }
+
+    // detectTierFromLabel(): longest pattern across ALL tiers first. A STABLE
+    // sort, as Array.prototype.sort is: ties keep tier order, patterns before
+    // click labels. List<T>.Sort is not stable, hence the insertion sort.
+    static string DrDetectTierFromLabel(DrSurface entry, string text)
+    {
+        if (entry == null) return null;
+        var tiers = new List<string>();
+        var pats = new List<string>();
+        foreach (string t in DR_TIERS)
+        {
+            DrTierEntry te;
+            if (!entry.Tiers.TryGetValue(t, out te)) continue;
+            var both = new List<string>(te.ButtonPatterns);
+            both.AddRange(te.ClickLabels);
+            foreach (string p in both)
+            {
+                if (string.IsNullOrEmpty(p)) continue;
+                int i = pats.Count;
+                pats.Add(p); tiers.Add(t);
+                while (i > 0 && pats[i - 1].Length < pats[i].Length)
+                {
+                    string tp = pats[i - 1]; pats[i - 1] = pats[i]; pats[i] = tp;
+                    string tt = tiers[i - 1]; tiers[i - 1] = tiers[i]; tiers[i] = tt;
+                    i--;
+                }
+            }
+        }
+        for (int i = 0; i < pats.Count; i++) if (DrLabelMatches(text, pats[i])) return tiers[i];
+        return null;
+    }
+
+    static Dictionary<string, object> DrProviderTiers(Dictionary<string, object> catalog, string provider)
+    {
+        var p = DrObj(DrGet(DrObj(DrGet(catalog, "providers")), provider ?? ""));
+        return DrObj(DrGet(p, "tiers"));
+    }
+
+    static string DrTierFromApiId(Dictionary<string, object> catalog, string provider, string model)
+    {
+        string m = DrLower(model);
+        var tiers = DrProviderTiers(catalog, provider);
+        if (m.Length == 0 || tiers == null) return null;
+        foreach (string t in DR_TIERS)
+            foreach (object id in DrList(DrGet(DrObj(DrGet(tiers, t)), "api_ids")))
+                if (DrLower(id) == m) return t;
+        return null;
+    }
+
+    static bool DrProviderTierEffortSupported(Dictionary<string, object> catalog, string provider, string tier)
+    {
+        var tiers = DrProviderTiers(catalog, provider);
+        return DrIsTrue(DrGet(DrObj(DrGet(tiers, tier ?? "")), "effort_supported"));
+    }
+
+    static string DrFirstApiId(Dictionary<string, object> catalog, string provider, string tier)
+    {
+        var ids = DrList(DrGet(DrObj(DrGet(DrProviderTiers(catalog, provider), tier ?? "")), "api_ids"));
+        return ids.Count > 0 && ids[0] != null ? Convert.ToString(ids[0], System.Globalization.CultureInfo.InvariantCulture) : null;
+    }
+
+    static DrPolicy DrNormalizePolicy(object policy)
+    {
+        bool isArr = DrIsArr(policy);
+        Dictionary<string, object> p;
+        if (isArr) { p = new Dictionary<string, object>(); p["rules"] = policy; }
+        else p = DrObj(policy) ?? DR_EMPTY;
+        var settings = DrObj(DrGet(p, "settings")) ?? DR_EMPTY;
+        var pol = new DrPolicy
+        {
+            CatalogOverrides = DrList(DrGet(p, "catalog_overrides")),
+            AllowUpgrade = !DrIsFalse(DrGet(settings, "allow_upgrade")),
+            RespectUserOverride = !DrIsFalse(DrGet(settings, "respect_user_override")),
+            FleetEnabled = !DrIsFalse(DrGet(p, "fleet_enabled")),
+        };
+        foreach (object r in DrList(DrGet(p, "rules")))
+        {
+            // typeof r === 'object' admits arrays too; an array rule has no
+            // fields at all, which an empty dictionary reproduces exactly.
+            var d = DrObj(r);
+            if (d != null) pol.Rules.Add(d);
+            else if (DrIsArr(r)) pol.Rules.Add(new Dictionary<string, object>());
+        }
+        return pol;
+    }
+
+    static bool DrIsV2Rule(Dictionary<string, object> rule)
+    {
+        var a = DrObj(DrGet(rule, "action"));
+        return a != null && DrGet(a, "type") is string;
+    }
+
+    static bool DrListIncludes(List<object> list, object value)
+    {
+        string v = DrLower(value);
+        foreach (object x in list) if (DrLower(x) == v) return true;
+        return false;
+    }
+
+    static bool DrScopeTargetMatches(object target, string hoa)
+    {
+        string t = DrNormHostOrApp(target);
+        if (t.Length == 0) return false;
+        if (t == "*") return true;
+        return hoa == t || DrHostMatchesKey(hoa, t);
+    }
+
+    class DrMatchCtx { public string Surface; public object HostOrApp; public string Provider, Complexity, CurrentTier; public object Sensitivity; }
+
+    static bool DrRuleMatches(Dictionary<string, object> rule, DrMatchCtx ctx)
+    {
+        if (rule == null || DrIsFalse(DrGet(rule, "enabled"))) return false;
+        string surface = DrNormSurface(ctx.Surface);
+        string hoa = DrNormHostOrApp(ctx.HostOrApp);
+        var c = DrObj(DrGet(rule, "conditions")) ?? DR_EMPTY;
+
+        var sens = DrList(DrGet(c, "sensitivity"));
+        if (sens.Count > 0)
+        {
+            if (surface != "api_proxy") return false;
+            if (!DrListIncludes(sens, ctx.Sensitivity)) return false;
+        }
+        var prov = DrList(DrGet(c, "provider"));
+        if (prov.Count > 0 && !DrListIncludes(prov, ctx.Provider)) return false;
+        var cx = DrList(DrGet(c, "complexity"));
+        if (cx.Count > 0 && !DrListIncludes(cx, ctx.Complexity)) return false;
+
+        if (DrIsV2Rule(rule))
+        {
+            var ct = DrList(DrGet(c, "current_tier"));
+            if (ct.Count > 0 && !DrListIncludes(ct, ctx.CurrentTier)) return false;
+            var scope = DrObj(DrGet(rule, "scope")) ?? DR_EMPTY;
+            var surfaces = new List<string>();
+            foreach (object x in DrList(DrGet(scope, "surfaces"))) surfaces.Add(DrNormSurface(x));
+            if (surfaces.Count > 0 && !surfaces.Contains(surface)) return false;
+            var targets = DrList(DrGet(scope, "hosts"));
+            targets.AddRange(DrList(DrGet(scope, "apps")));
+            if (targets.Count > 0)
+            {
+                bool any = false;
+                foreach (object t in targets) if (DrScopeTargetMatches(t, hoa)) { any = true; break; }
+                if (!any) return false;
+            }
+        }
+        else
+        {
+            // v1: conditions.host was a substring test in the old extension.
+            var hosts = DrList(DrGet(c, "host"));
+            if (hosts.Count > 0)
+            {
+                bool any = false;
+                foreach (object h in hosts)
+                {
+                    string lh = DrLower(h);
+                    if (lh.Length > 0 && hoa.IndexOf(lh, StringComparison.Ordinal) >= 0) { any = true; break; }
+                }
+                if (!any) return false;
+            }
+        }
+        return true;
+    }
+
+    // orderedRules(): enabled rules by ascending priority (default 50), ties in
+    // document order. The index tie-break makes the comparison total, so the
+    // unstable List.Sort cannot reorder equal elements.
+    static List<Dictionary<string, object>> DrOrderedRules(List<Dictionary<string, object>> rules)
+    {
+        var idx = new List<KeyValuePair<int, Dictionary<string, object>>>();
+        for (int i = 0; i < rules.Count; i++)
+            if (rules[i] != null && !DrIsFalse(DrGet(rules[i], "enabled"))) idx.Add(new KeyValuePair<int, Dictionary<string, object>>(i, rules[i]));
+        idx.Sort((a, b) =>
+        {
+            object pa0 = DrGet(a.Value, "priority"), pb0 = DrGet(b.Value, "priority");
+            double pa = DrIsNum(pa0) ? Convert.ToDouble(pa0, System.Globalization.CultureInfo.InvariantCulture) : 50;
+            double pb = DrIsNum(pb0) ? Convert.ToDouble(pb0, System.Globalization.CultureInfo.InvariantCulture) : 50;
+            if (pa != pb) return pa < pb ? -1 : 1;
+            return a.Key.CompareTo(b.Key);
+        });
+        var o = new List<Dictionary<string, object>>();
+        foreach (var kv in idx) o.Add(kv.Value);
+        return o;
+    }
+
+    static string DrRuleId(Dictionary<string, object> rule)
+    {
+        if (rule == null) return null;
+        object id = DrGet(rule, "id");
+        if (id == null) id = DrGet(rule, "_id");
+        if (id == null) return null;
+        if (id is bool) return (bool)id ? "true" : "false";
+        if (id is decimal || id is double || id is float)
+            return Convert.ToDouble(id, System.Globalization.CultureInfo.InvariantCulture).ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        return Convert.ToString(id, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    static string DrRuleName(Dictionary<string, object> rule)
+    {
+        string n = DrGet(rule, "name") as string;
+        return string.IsNullOrEmpty(n) ? null : n;
+    }
+
+    static DrDecision DrResult(string result, string reason, string fromTier)
+    {
+        return new DrDecision { Result = result, Reason = reason, FromTier = fromTier };
+    }
+
+    // decideRoute(). Fixed order, pinned by the vectors: disabled -> user
+    // override -> surface -> rule/built-in -> cap -> effort -> noop -> label -> mode.
+    static DrDecision DrDecideRoute(Dictionary<string, object> ctx, object policy, Dictionary<string, object> catalog)
+    {
+        var c = ctx ?? DR_EMPTY;
+        var pol = DrNormalizePolicy(policy);
+        string surface = DrNormSurface(DrGet(c, "surface"));
+        string fromTier = DrNormTier(DrGet(c, "current_tier"));
+
+        // 1. disabled
+        if (!pol.FleetEnabled || DrIsFalse(DrGet(c, "fleet_enabled"))) return DrResult("disabled", "fleet_disabled", fromTier);
+        if (DrIsFalse(DrGet(c, "machine_enabled"))) return DrResult("disabled", "machine_disabled", fromTier);
+
+        // 2. the user put it back after we routed — leave this conversation alone
+        if (DrIsTrue(DrGet(c, "user_override")) && pol.RespectUserOverride) return DrResult("user_override", "user_override", fromTier);
+
+        // 3. surface
+        if (surface.Length == 0) return DrResult("unsupported", "unknown_surface", fromTier);
+        var entry = DrResolveSurface(catalog, surface, DrGet(c, "host_or_app"), pol, DrGet(c, "provider"));
+        if (entry == null) return DrResult("unsupported", "unknown_surface", fromTier);
+        string ctxProvider = DrLower(DrGet(c, "provider"));
+        if (ctxProvider.Length > 0 && entry.Provider.Length > 0 && ctxProvider != entry.Provider)
+            return DrResult("unsupported", "provider_mismatch", fromTier);
+        string provider = entry.Provider.Length > 0 ? entry.Provider : ctxProvider;
+        if (fromTier == null) return DrResult("unsupported", "current_tier_unknown", null);
+
+        string complexity = DrLower(DrGet(c, "complexity"));
+        string builtinTier = complexity == "simple" ? "economy" : complexity == "moderate" ? "standard" : complexity == "complex" ? "premium" : null;
+        string builtinEffort = complexity == "simple" ? "low" : complexity == "complex" ? "high" : null;
+        var matchCtx = new DrMatchCtx
+        {
+            Surface = surface, HostOrApp = DrGet(c, "host_or_app"), Provider = provider,
+            Complexity = complexity, CurrentTier = fromTier, Sensitivity = DrGet(c, "sensitivity"),
+        };
+
+        // 4. first matching rule, else built-in
+        Dictionary<string, object> rule = null;
+        foreach (var r in DrOrderedRules(pol.Rules)) { if (DrRuleMatches(r, matchCtx)) { rule = r; break; } }
+
+        string target = builtinTier;
+        string effort = builtinEffort;
+        string mode = "enforce";
+        string ruleLabel = null;
+        bool ruleLabelFirst = true;
+        string model = null;
+
+        if (rule != null)
+        {
+            var a = DrObj(DrGet(rule, "action")) ?? DR_EMPTY;
+            string ui = DrGet(a, "ui_name") as string;
+            ruleLabel = (ui != null && ui.Trim().Length > 0) ? ui.Trim() : null;
+            string mdl = DrGet(a, "model") as string;
+            model = (mdl != null && mdl.Trim().Length > 0) ? mdl.Trim() : null;
+            if (DrIsV2Rule(rule))
+            {
+                string rm = DrGet(rule, "mode") as string;
+                mode = (rm != null && Array.IndexOf(DR_MODES, rm) >= 0) ? rm : "enforce";
+                string type = (string)DrGet(a, "type");
+                string actTier = DrNormTier(DrGet(a, "target_tier"));
+                if (type == "none")
+                {
+                    var n = DrResult("noop", "rule_action_none", fromTier);
+                    n.RuleId = DrRuleId(rule); n.RuleName = DrRuleName(rule); n.Mode = mode;
+                    return n;
+                }
+                if (type == "cap_tier")
+                {
+                    target = (builtinTier != null && actTier != null)
+                        ? (DrTierRank(builtinTier) <= DrTierRank(actTier) ? builtinTier : actTier)
+                        : builtinTier;
+                }
+                else
+                {
+                    target = actTier
+                        ?? (ruleLabel != null ? DrDetectTierFromLabel(entry, ruleLabel) : null)
+                        ?? (model != null ? DrTierFromApiId(catalog, provider, model) : null)
+                        ?? builtinTier;
+                    if (type == "suggest" && mode == "enforce") mode = "suggest";
+                }
+                if (a.ContainsKey("effort")) effort = DrNormEffort(a["effort"]);
+            }
+            else
+            {
+                string labelTier = ruleLabel != null ? DrDetectTierFromLabel(entry, ruleLabel) : null;
+                if (labelTier != null) ruleLabelFirst = false;
+                target = labelTier
+                    ?? (model != null ? DrTierFromApiId(catalog, provider, model) : null)
+                    ?? builtinTier;
+            }
+        }
+
+        string rid = DrRuleId(rule);
+        string rname = rule != null ? DrRuleName(rule) : null;
+
+        if (target == null)
+        {
+            var n = DrResult("noop", "unknown_complexity", fromTier);
+            n.RuleId = rid; n.RuleName = rname; n.Mode = mode;
+            return n;
+        }
+
+        // 5. cap — only when upgrades are switched off
+        bool capped = false;
+        if (!pol.AllowUpgrade)
+        {
+            string ceiling = DrNormTier(DrGet(c, "user_tier")) ?? fromTier;
+            if (DrTierRank(target) > DrTierRank(ceiling)) { target = ceiling; capped = true; }
+        }
+
+        // 6. effort only where it can actually be set
+        bool effortCtl = entry.Effort != null && DrIsTrue(DrGet(entry.Effort, "supported"));
+        bool effortOk = surface == "api_proxy"
+            ? DrProviderTierEffortSupported(catalog, provider, target)
+            : (effortCtl && DrProviderTierEffortSupported(catalog, provider, target));
+        if (!effortOk) effort = null;
+        string currentEffort = DrNormEffort(DrGet(c, "current_effort"));
+
+        // 7. nothing to change
+        bool tierChange = target != fromTier;
+        bool effortChange = effort != null && currentEffort != null && effort != currentEffort;
+        if (!tierChange && !effortChange)
+        {
+            var n = DrResult("noop", capped ? "upgrade_not_allowed" : "already_on_target", fromTier);
+            n.TargetTier = target; n.RuleId = rid; n.RuleName = rname; n.Mode = mode;
+            return n;
+        }
+
+        // 8. label
+        var clickLabels = new List<string>();
+        if (surface != "api_proxy")
+        {
+            DrTierEntry te;
+            var catLabels = entry.Tiers.TryGetValue(target, out te) ? te.ClickLabels : new List<string>();
+            if (ruleLabel == null) clickLabels = new List<string>(catLabels);
+            else if (ruleLabelFirst) clickLabels = DrPrependUnique(catLabels, ruleLabel);
+            else
+            {
+                bool has = false;
+                foreach (string l in catLabels) if (DrLower(l) == DrLower(ruleLabel)) { has = true; break; }
+                clickLabels = new List<string>(catLabels);
+                if (!has) clickLabels.Add(ruleLabel);
+            }
+            if (tierChange && clickLabels.Count == 0)
+            {
+                var n = DrResult("unsupported", "no_label_for_tier", fromTier);
+                n.TargetTier = target; n.RuleId = rid; n.RuleName = rname; n.Mode = mode;
+                return n;
+            }
+        }
+        if (model == null) model = DrFirstApiId(catalog, provider, target);
+
+        // 9. mode
+        return new DrDecision
+        {
+            TargetTier = target,
+            Effort = effort,
+            RuleId = rid,
+            RuleName = rname,
+            Mode = mode,
+            Result = mode == "suggest" ? "suggested" : (mode == "observe" ? "observed" : "routed"),
+            Reason = !tierChange ? "effort_only" : (DrTierRank(target) > DrTierRank(fromTier) ? "upgrade" : "downgrade"),
+            FromTier = fromTier,
+            ToLabel = clickLabels.Count > 0 ? clickLabels[0] : null,
+            ClickLabels = clickLabels,
+            Model = model,
+        };
+    }
+
+    // JSON for the lockstep harness: the decision with exactly the eleven keys
+    // decideRoute() returns. Test-facing; nothing in the enforcer calls it.
+    static string DrDecideRouteJson(string ctxJson, string policyJson, string catalogJson)
+    {
+        var ser = new JavaScriptSerializer();
+        ser.MaxJsonLength = 5 * 1024 * 1024;
+        var ctx = DrObj(string.IsNullOrEmpty(ctxJson) ? null : ser.DeserializeObject(ctxJson));
+        object policy = string.IsNullOrEmpty(policyJson) ? null : ser.DeserializeObject(policyJson);
+        var catalog = DrObj(string.IsNullOrEmpty(catalogJson) ? null : ser.DeserializeObject(catalogJson));
+        var d = DrDecideRoute(ctx, policy, catalog);
+        var o = new Dictionary<string, object>();
+        o["target_tier"] = d.TargetTier; o["effort"] = d.Effort; o["rule_id"] = d.RuleId; o["rule_name"] = d.RuleName;
+        o["mode"] = d.Mode; o["result"] = d.Result; o["reason"] = d.Reason; o["from_tier"] = d.FromTier;
+        o["to_label"] = d.ToLabel; o["click_labels"] = d.ClickLabels.ToArray(); o["model"] = d.Model;
+        return ser.Serialize(o);
+    }
+
+    // Label-reading twin for the harness: resolveSurface + detectTierFromLabel.
+    static string DrDetectTierJson(string surface, string hostOrApp, string policyJson, string catalogJson, string text)
+    {
+        var ser = new JavaScriptSerializer();
+        ser.MaxJsonLength = 5 * 1024 * 1024;
+        object policy = string.IsNullOrEmpty(policyJson) ? null : ser.DeserializeObject(policyJson);
+        var catalog = DrObj(ser.DeserializeObject(catalogJson));
+        var entry = DrResolveSurface(catalog, surface, hostOrApp, DrNormalizePolicy(policy), null);
+        return entry == null ? "<no-surface>" : (DrDetectTierFromLabel(entry, text) ?? "");
+    }
+
+    // ════ The router's live state: catalog, policy, fleet flag, ownership ════
+    //
+    // _mrCatalog is the shared catalog (CFAI_MODEL_ROUTER_CONFIG.catalog) and is
+    // fixed for the helper's life. _mrPolicy is the routing policy document and
+    // is REPLACED WHOLE by {"cmd":"router_policy"} on stdin when the server's
+    // policy version moves -- one reference assignment, never a mutation, so the
+    // poll thread and a route thread always see one consistent policy.
+    static volatile Dictionary<string, object> _mrCatalog = null;
+    static volatile object _mrPolicy = null;
+    // The fleet `model_routing` switch as the agent's FeatureSync last saw it.
+    // The policy document carries its own fleet_enabled; decideRoute honours
+    // either being false.
+    static volatile bool _mrFleetEnabled = true;
+    static Dictionary<string, string> _mrDesktopApps = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+    // Replace the policy from a {"cmd":"router_policy","policy":...} line. The
+    // policy is the v2 document, a legacy v1 rules array, or null; anything else
+    // is refused and the previous policy stays.
+    static bool ApplyRouterPolicyLine(string line)
+    {
+        try
+        {
+            if (line == null || line.Length > 1024 * 1024) return false;
+            var ser = new JavaScriptSerializer();
+            ser.MaxJsonLength = 2 * 1024 * 1024;
+            var cmd = DrObj(ser.DeserializeObject(line));
+            if (cmd == null || !cmd.ContainsKey("policy")) return false;
+            object p = cmd["policy"];
+            if (p != null && DrObj(p) == null && !DrIsArr(p)) return false;
+            _mrPolicy = p;
+            // Every pin and dedup decision was made under the OLD policy.
+            _mrLastObservedKey = "";
+            ClearPendingRoute();
+            ClearRouteNote();
+            return true;
+        }
+        catch { return false; }
+    }
+
+    // ── Extension ownership of a browser ─────────────────────────────────────
+    //
+    // When the CloudFuze browser extension is routing in a browser, it says so
+    // every 30s (POST /cfai/routing-heartbeat on the local beacon) and the agent
+    // relays {"cmd":"routing_owner","process":"chrome","ttl_ms":N} here. Until
+    // that expires, the WEB arm stands down in that browser process -- two
+    // routers driving one picker would fight over it. The DESKTOP-APP arm is
+    // never affected.
+    const long ROUTING_OWNER_MAX_TTL_MS = 120000;
+    static readonly object _routingOwnerLock = new object();
+    static readonly Dictionary<string, long> _routingOwnedUntil = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+
+    static void ApplyRoutingOwner(string process, long ttlMs)
+    {
+        if (string.IsNullOrEmpty(process) || process.Length > 64) return;
+        foreach (char ch in process) if (!(DrIsWordChar(ch) || ch == '_' || ch == '-' || ch == '.')) return;
+        if (ttlMs > ROUTING_OWNER_MAX_TTL_MS) ttlMs = ROUTING_OWNER_MAX_TTL_MS;
+        lock (_routingOwnerLock)
+        {
+            if (ttlMs <= 0) _routingOwnedUntil.Remove(process);
+            else _routingOwnedUntil[process] = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(ttlMs).Ticks;
+        }
+    }
+
+    static bool RoutingOwnedByExtension(string process)
+    {
+        if (string.IsNullOrEmpty(process)) return false;
+        string p = process.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? process.Substring(0, process.Length - 4) : process;
+        lock (_routingOwnerLock)
+        {
+            long until;
+            return _routingOwnedUntil.TryGetValue(p, out until) && DateTime.UtcNow.Ticks < until;
+        }
+    }
+
+    // ── The user's own choice, and "the user put it back" ────────────────────
+    //
+    // Per (app-or-host, provider): the tier the USER last picked. Set ONLY by a
+    // picker change this code did not make -- never by our own routes -- and
+    // seeded by the first reading (whatever was selected before we ever looked
+    // is the user's). It is the ceiling decideRoute caps at when the policy
+    // switches upgrades off.
+    //
+    // Per conversation: the tier we routed to. A user change AWAY from it is a
+    // user override -- routing stands down for that conversation (decideRoute's
+    // respect_user_override) and it is reported once. A conversation is the
+    // (host, navigation generation, window) on the web and the (app, window) on
+    // the desktop, which has no conversation id; there it also lapses after
+    // MR_OVERRIDE_TTL.
+    static readonly object _mrChoiceLock = new object();
+    static readonly Dictionary<string, string> _mrLastSeenTier = new Dictionary<string, string>(StringComparer.Ordinal);
+    static readonly Dictionary<string, string> _mrUserTier = new Dictionary<string, string>(StringComparer.Ordinal);
+    static readonly Dictionary<string, string> _mrOurSwitchTier = new Dictionary<string, string>(StringComparer.Ordinal);
+    static readonly Dictionary<string, long> _mrOurSwitchUntil = new Dictionary<string, long>(StringComparer.Ordinal);
+    static readonly Dictionary<string, string> _mrRoutedTier = new Dictionary<string, string>(StringComparer.Ordinal);
+    static readonly Dictionary<string, long> _mrOverriddenUntil = new Dictionary<string, long>(StringComparer.Ordinal);
+    static readonly long MR_OUR_SWITCH_WINDOW = TimeSpan.FromSeconds(10).Ticks;
+    static readonly long MR_OVERRIDE_TTL = TimeSpan.FromMinutes(30).Ticks;
+
+    // Called by a route thread IMMEDIATELY BEFORE it selects a menu item, so the
+    // resulting picker change is recognised as ours, not the user's.
+    static void MrNoteOurSwitch(string choiceKey, string toTier)
+    {
+        if (string.IsNullOrEmpty(choiceKey) || string.IsNullOrEmpty(toTier)) return;
+        lock (_mrChoiceLock)
+        {
+            _mrOurSwitchTier[choiceKey] = toTier;
+            _mrOurSwitchUntil[choiceKey] = DateTime.UtcNow.Ticks + MR_OUR_SWITCH_WINDOW;
+        }
+    }
+
+    // Called by a route thread once the switch is VERIFIED.
+    static void MrNoteRouted(string choiceKey, string convKey, string toTier)
+    {
+        if (string.IsNullOrEmpty(convKey) || string.IsNullOrEmpty(toTier)) return;
+        lock (_mrChoiceLock)
+        {
+            _mrRoutedTier[convKey] = toTier;
+            if (!string.IsNullOrEmpty(choiceKey)) _mrLastSeenTier[choiceKey] = toTier;
+        }
+    }
+
+    // Poll thread, every tick the picker is read. Returns true exactly once per
+    // conversation: the tick the user moved the picker away from our route.
+    static bool MrTrackPicker(string choiceKey, string convKey, string curTier, out string routedTier)
+    {
+        routedTier = null;
+        if (string.IsNullOrEmpty(choiceKey) || string.IsNullOrEmpty(curTier)) return false;
+        long now = DateTime.UtcNow.Ticks;
+        lock (_mrChoiceLock)
+        {
+            string last;
+            bool had = _mrLastSeenTier.TryGetValue(choiceKey, out last);
+            _mrLastSeenTier[choiceKey] = curTier;
+            if (!had)
+            {
+                if (!_mrUserTier.ContainsKey(choiceKey)) _mrUserTier[choiceKey] = curTier;
+                return false;
+            }
+            if (last == curTier) return false;
+
+            string ours; long until;
+            if (_mrOurSwitchTier.TryGetValue(choiceKey, out ours) && ours == curTier
+                && _mrOurSwitchUntil.TryGetValue(choiceKey, out until) && now < until)
+            {
+                _mrOurSwitchTier.Remove(choiceKey);
+                _mrOurSwitchUntil.Remove(choiceKey);
+                return false;
+            }
+
+            // A change we did not make: the user's.
+            _mrUserTier[choiceKey] = curTier;
+            string routed;
+            if (!string.IsNullOrEmpty(convKey) && _mrRoutedTier.TryGetValue(convKey, out routed) && routed != curTier)
+            {
+                _mrRoutedTier.Remove(convKey);
+                _mrOverriddenUntil[convKey] = now + MR_OVERRIDE_TTL;
+                routedTier = routed;
+                return true;
+            }
+            return false;
+        }
+    }
+
+    // Reported only where decideRoute will act on it: fleet on and the policy
+    // respecting user overrides.
+    static bool MrReportOverride()
+    {
+        var pol = DrNormalizePolicy(_mrPolicy);
+        return _mrFleetEnabled && pol.FleetEnabled && pol.RespectUserOverride;
+    }
+
+    static string MrUserTier(string choiceKey)
+    {
+        lock (_mrChoiceLock) { string t; return _mrUserTier.TryGetValue(choiceKey ?? "", out t) ? t : null; }
+    }
+
+    static bool MrConvOverridden(string convKey)
+    {
+        if (string.IsNullOrEmpty(convKey)) return false;
+        lock (_mrChoiceLock)
+        {
+            long until;
+            if (!_mrOverriddenUntil.TryGetValue(convKey, out until)) return false;
+            if (DateTime.UtcNow.Ticks < until) return true;
+            _mrOverriddenUntil.Remove(convKey);
+            return false;
+        }
+    }
+
+    static string DesktopAppKey(string process)
+    {
+        if (string.IsNullOrEmpty(process)) return null;
+        string p = process.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? process.Substring(0, process.Length - 4) : process;
+        string k;
+        return _mrDesktopApps.TryGetValue(p, out k) ? k : null;
+    }
+
+    // The tier a picker label shows, read through the SHARED CATALOG (with the
+    // policy's overrides). The keyword chain is only the fallback for a label
+    // the catalog cannot read, and only when it names the same provider.
+    static string MrTierOfLabel(string surface, string hostOrApp, string label)
+    {
+        var entry = DrResolveSurface(_mrCatalog, surface, hostOrApp, DrNormalizePolicy(_mrPolicy), null);
+        if (entry == null) return null;
+        string t = DrDetectTierFromLabel(entry, label);
+        if (t != null) return t;
+        var info = DetectModelInfo(label);
+        if (info != null && string.Equals(info.Provider, entry.Provider, StringComparison.OrdinalIgnoreCase)) return info.Tier;
+        return null;
+    }
+
+    static string MrProviderOf(string surface, string hostOrApp)
+    {
+        var entry = DrResolveSurface(_mrCatalog, surface, hostOrApp, DrNormalizePolicy(_mrPolicy), null);
+        return entry != null ? entry.Provider : "";
+    }
+
+    // Whether this surface's effort CONTROL has had a live pass. The catalog
+    // marks claude.ai and Claude Desktop effort supported but unverified, and
+    // this enforcer has no effort setter: effort is READ off the button and
+    // reported (effort_from / effort_to), never set. An effort-only decision is
+    // therefore never armed -- see MrDecideForPin.
+    static bool MrEffortVerified(string surface, string hostOrApp)
+    {
+        var entry = DrResolveSurface(_mrCatalog, surface, hostOrApp, DrNormalizePolicy(_mrPolicy), null);
+        return entry != null && entry.Effort != null && DrIsTrue(DrGet(entry.Effort, "supported")) && DrIsTrue(DrGet(entry.Effort, "verified"));
+    }
+
+    static string MrLowerEffort(string token)
+    {
+        string e = (token ?? "").Trim().ToLowerInvariant();
+        return Array.IndexOf(DR_EFFORTS, e) >= 0 ? e : null;
+    }
+
+    // Everything a pinned route carries beyond tier + label: where it is, which
+    // rule chose it, what to click, and the keys its outcome is recorded under.
+    // Identifiers and catalog values only.
+    class RouteMeta
+    {
+        public string Surface = "", HostOrApp = "", RuleId = "", Model = "", FromLabel = "";
+        public string ChoiceKey = "", ConvKey = "";
+        public List<string> ClickLabels = new List<string>();
+        public bool EffortVerified;
+    }
+
+    static RouteMeta _pendingRouteMeta = null;
+    static volatile RouteMeta _activeRouteMeta = null;
+
+    // The catalog name of a tier on this surface ("Opus 5"), for from_label.
+    static string MrCatalogLabel(string surface, string hostOrApp, string tier)
+    {
+        var entry = DrResolveSurface(_mrCatalog, surface, hostOrApp, DrNormalizePolicy(_mrPolicy), null);
+        DrTierEntry te;
+        if (entry == null || string.IsNullOrEmpty(tier) || !entry.Tiers.TryGetValue(tier, out te) || te.ClickLabels.Count == 0) return "";
+        return te.ClickLabels[0];
+    }
+
+    static string RouteMetaFields(RouteMeta m)
+    {
+        if (m == null) return "";
+        var sb = new StringBuilder();
+        if (!string.IsNullOrEmpty(m.Surface)) sb.Append(",\"surface\":\"").Append(Esc(m.Surface)).Append("\"");
+        if (!string.IsNullOrEmpty(m.HostOrApp)) sb.Append(",\"host_or_app\":\"").Append(Esc(m.HostOrApp)).Append("\"");
+        if (!string.IsNullOrEmpty(m.RuleId)) sb.Append(",\"rule_id\":\"").Append(Esc(m.RuleId)).Append("\"");
+        if (!string.IsNullOrEmpty(m.Model)) sb.Append(",\"model\":\"").Append(Esc(m.Model)).Append("\"");
+        if (!string.IsNullOrEmpty(m.FromLabel)) sb.Append(",\"from_label\":\"").Append(Esc(m.FromLabel)).Append("\"");
+        return sb.ToString();
+    }
+
+    // ── The decision NOTE: a non-routing outcome, reported with the send ────
+    //
+    // A noop / suggested / observed / unsupported decision does not swallow the
+    // Enter, so it has no route thread to report it. The poll thread pre-builds
+    // the event line here and the keyboard hook's CLEAN-SEND branch writes it
+    // out (one Interlocked.Exchange and one write, the same cost as the
+    // "prompt" line it already writes) -- so the event is tied to a prompt that
+    // was actually sent, never to a draft being typed. Identifiers, tiers,
+    // catalog labels and a length only.
+    static string _routeNoteLine = null;
+
+    static void ClearRouteNote() { Interlocked.Exchange(ref _routeNoteLine, null); }
+
+    static void SetRouteNote(RouteMeta m, string process, string provider, DrDecision d, string complexity, int len, string effortFrom)
+    {
+        string json = "{\"kind\":\"route\""
+            + ",\"process\":\"" + Esc(process ?? "") + "\""
+            + BrowserHostField()
+            + ",\"provider\":\"" + Esc(provider ?? "") + "\""
+            + ",\"from_tier\":\"" + Esc(d.FromTier ?? "") + "\""
+            + ",\"to_tier\":\"" + Esc(d.TargetTier ?? "") + "\""
+            + ",\"to_label\":\"" + Esc(d.ToLabel ?? "") + "\""
+            + ",\"complexity\":\"" + Esc(complexity ?? "") + "\""
+            + (!string.IsNullOrEmpty(effortFrom) ? ",\"effort_from\":\"" + Esc(effortFrom) + "\"" : "")
+            + ",\"result\":\"" + Esc(d.Result ?? "") + "\""
+            + ",\"len\":" + len
+            + (!string.IsNullOrEmpty(d.Reason) ? ",\"reason\":\"" + Esc(d.Reason) + "\"" : "")
+            + RouteMetaFields(m)
+            + "}";
+        Interlocked.Exchange(ref _routeNoteLine, json);
+    }
+
+    // Hook thread, clean-send branch only. No UIA, no allocation beyond the
+    // write, no lock but the emit lock every Emit already takes.
+    static void EmitRouteNote()
+    {
+        string line = Interlocked.Exchange(ref _routeNoteLine, null);
+        if (line == null) return;
+        _mrLastObservedKey = "";
+        lock (_emitLock) { Console.Out.WriteLine(line); Console.Out.Flush(); }
+    }
+
+    // A user override, reported ONCE, on the poll thread, the tick it is seen.
+    static void EmitUserOverride(RouteMeta m, string process, string provider, string routedTier, string userTier)
+    {
+        string json = "{\"kind\":\"route\""
+            + ",\"process\":\"" + Esc(process ?? "") + "\""
+            + BrowserHostField()
+            + ",\"provider\":\"" + Esc(provider ?? "") + "\""
+            + ",\"from_tier\":\"" + Esc(routedTier ?? "") + "\""
+            + ",\"to_tier\":\"" + Esc(userTier ?? "") + "\""
+            + ",\"to_label\":\"\""
+            + ",\"complexity\":\"\""
+            + ",\"result\":\"user_override\""
+            + ",\"len\":-1"
+            + ",\"reason\":\"user_override\""
+            + RouteMetaFields(m)
+            + "}";
+        lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
+    }
+
+    // ONE decision for the pin, shared by the desktop and web arms. Runs the
+    // ported decideRoute and then applies the enforcer's own two refinements:
+    //   * an effort-only change is a noop -- there is no effort setter here;
+    //   * the result decides what happens to the pin and the note.
+    // Returns the decision when a route should be ARMED, else null (the pin is
+    // cleared and, where the outcome is reportable, a note is left for the send).
+    static DrDecision MrDecideForPin(RouteMeta meta, string process, string curTier, string complexity, string effortToken, int len)
+    {
+        var ctx = new Dictionary<string, object>();
+        ctx["surface"] = meta.Surface;
+        ctx["host_or_app"] = meta.HostOrApp;
+        ctx["provider"] = null;
+        ctx["current_tier"] = curTier;
+        ctx["user_tier"] = MrUserTier(meta.ChoiceKey);
+        ctx["current_effort"] = MrLowerEffort(effortToken);
+        ctx["user_override"] = MrConvOverridden(meta.ConvKey);
+        ctx["complexity"] = complexity;
+        ctx["fleet_enabled"] = _mrFleetEnabled;
+        ctx["machine_enabled"] = true;
+        var d = DrDecideRoute(ctx, _mrPolicy, _mrCatalog);
+
+        meta.RuleId = d.RuleId ?? "";
+        meta.Model = d.Model ?? "";
+        meta.FromLabel = MrCatalogLabel(meta.Surface, meta.HostOrApp, d.FromTier);
+        meta.ClickLabels = d.ClickLabels;
+        meta.EffortVerified = MrEffortVerified(meta.Surface, meta.HostOrApp);
+        string provider = MrProviderOf(meta.Surface, meta.HostOrApp);
+
+        // An effort-only change has nothing this enforcer may click: no effort
+        // setter exists here, and none of the catalog's effort controls has had
+        // a live pass. Reported as a noop rather than armed.
+        if (d.Result == "routed" && d.Reason == "effort_only")
+        {
+            d = new DrDecision { Result = "noop", Reason = meta.EffortVerified ? "effort_setter_absent" : "effort_unverified", FromTier = d.FromTier, TargetTier = d.TargetTier, RuleId = d.RuleId, Model = d.Model };
+        }
+        if (d.Result == "routed") { ClearRouteNote(); return d; }
+
+        ClearPendingRoute();
+        // disabled: the fleet or machine switch is off -- report nothing at all,
+        // indistinguishable from routing not existing. user_override: already
+        // reported once, the tick it happened.
+        if (d.Result == "disabled" || d.Result == "user_override") { ClearRouteNote(); return null; }
+        SetRouteNote(meta, process, provider, d, complexity, len, effortToken);
+        return null;
     }
 
     // Mirrors complexity.js's scoreCategory(): match the alternation, resolve
@@ -5526,124 +6565,14 @@ public static class CfaiEnforcer
     }
     static string MrTierName(int num) { if (num >= 3) return "premium"; if (num == 2) return "standard"; return "economy"; }
 
-    // In-memory only, per this repo's v1 decision — resets on every helper
-    // restart (a policy update, a settings change). Mirrors content.js's
-    // _userCeiling: "the most expensive model the user manually selected;
-    // routing down never lowers it."
-    static string _mrCeilingProvider = null;
-    static string _mrCeilingTier = null;
-
-    static void UpdateCeiling(MrModelInfo current)
-    {
-        int newNum = MrTierNum(current.Tier);
-        int oldNum = _mrCeilingTier != null ? MrTierNum(_mrCeilingTier) : 0;
-        if (newNum > oldNum || _mrCeilingTier == null || _mrCeilingProvider != current.Provider)
-        {
-            _mrCeilingProvider = current.Provider; _mrCeilingTier = current.Tier;
-        }
-    }
-
-    // Mirrors content.js's smartRoute() tier arithmetic exactly (simple ->
-    // economy; complex -> at least standard, or the ceiling if higher;
-    // moderate -> standard; capped at the ceiling for anything but complex).
-    // THE TIER ARITHMETIC, extracted verbatim so the desktop and web arms can
-    // never drift apart on WHICH tier to route to. They differ only in where the
-    // menu LABEL for that tier comes from: the desktop reads the hand-ported
-    // TIER_UI_NAMES table, a web surface reads its own catalog entry.
-    //
-    // Returns the target tier NUMBER, or the current number when no move is
-    // needed -- the caller compares. Also performs the one-time ceiling seed,
-    // exactly where it happened before.
-    static int ComputeRouteTargetNum(MrModelInfo current, string complexity, out int currentNum)
-    {
-        if (_mrCeilingTier == null) { _mrCeilingProvider = current.Provider; _mrCeilingTier = current.Tier; }
-
-        // ── Built-in routing table (fallback) ─────────────────────────────
-        string ceilingTier = (_mrCeilingProvider == current.Provider) ? _mrCeilingTier : "standard";
-        int ceilingNum = MrTierNum(ceilingTier);
-        currentNum = MrTierNum(current.Tier);
-
-        int targetNum;
-        if (complexity == "simple") targetNum = 1;
-        else if (complexity == "complex") targetNum = Math.Max(ceilingNum, 2);
-        else targetNum = 2;
-        if (complexity != "complex") targetNum = Math.Min(targetNum, Math.Max(ceilingNum, 2));
-        return targetNum;
-    }
-
-    // ── Server rules (admin overrides) ────────────────────────────────────
-    //
-    // Same matching logic as the browser extension's serverRuleFor(): the first
-    // enabled rule whose provider + complexity conditions match wins, and it
-    // names a UI label to click outright rather than a tier to compute.
-    //
-    // LIFTED OUT OF ComputeRouteTargetNum, where the two branches first put it.
-    // That helper returns a tier NUMBER and is shared by the desktop and web
-    // arms precisely so they cannot drift; a server rule is not a tier number,
-    // it is a finished decision, so it has to be answered by the callers that
-    // return RouteDecision. Doing it here rather than in only ComputeRoute also
-    // means an admin override now applies to a WEB surface too, which is what
-    // an admin who wrote the rule would expect -- the desktop-only behaviour
-    // was an artifact of where the check happened to sit.
-    static string ServerRuleUiName(MrModelInfo current, string complexity)
-    {
-        foreach (var sr in _mrServerRules)
-        {
-            if (sr.Providers != null && !sr.Providers.Contains(current.Provider.ToLowerInvariant())) continue;
-            if (sr.Complexities != null && !sr.Complexities.Contains(complexity)) continue;
-            if (!string.IsNullOrEmpty(sr.UiName)) return sr.UiName;
-        }
-        return null;
-    }
-
-    static RouteDecision ComputeRoute(MrModelInfo current, string complexity)
-    {
-        string ruleLabel = ServerRuleUiName(current, complexity);
-        if (!string.IsNullOrEmpty(ruleLabel))
-            return new RouteDecision { ToTier = "server_rule", ToLabel = ruleLabel };
-        int currentNum;
-        int targetNum = ComputeRouteTargetNum(current, complexity, out currentNum);
-        if (targetNum == currentNum) return null;
-        string targetTierName = MrTierName(targetNum);
-        Dictionary<int, string> uiNames;
-        if (!_mrTierUiNames.TryGetValue(current.Provider, out uiNames)) return null;
-        string uiName;
-        if (!uiNames.TryGetValue(targetNum, out uiName)) return null;
-        return new RouteDecision { ToTier = targetTierName, ToLabel = uiName };
-    }
-
-    // AI-216. The same arithmetic, with the label taken from the SURFACE'S OWN
-    // catalog entry rather than from the shared TIER_UI_NAMES table.
-    //
-    // WHY NOT REUSE TIER_UI_NAMES: that table is the browser extension's, keyed
-    // on provider and written for the strings the extension saw ('Opus',
-    // 'Sonnet', 'Haiku'). The measured claude.ai menu carries VERSIONED labels
-    // ('Opus 5', 'Sonnet 5', 'Haiku 4.5'), and the boundary-aware matcher needs
-    // the version to be present -- matching a bare 'Opus' would happily accept
-    // an 'Opus 4.1' the user never chose. Per-surface data is also what lets a
-    // second host with different labels ship without touching code.
-    //
-    // A tier with NO LABEL on this surface returns null: nothing to search the
-    // menu for, so no route is armed. That is an ordinary outcome, not an error
-    // -- model availability is per account.
-    static RouteDecision ComputeWebRoute(MrModelInfo current, string complexity, WebPicker picker)
-    {
-        if (picker == null) return null;
-        // An admin override outranks the built-in table here too -- see
-        // ServerRuleUiName. The label is clicked in the surface's own menu, so
-        // a rule naming a model this surface does not offer simply finds
-        // nothing and no route is armed, which is the same ordinary outcome as
-        // a tier with no label.
-        string ruleLabel = ServerRuleUiName(current, complexity);
-        if (!string.IsNullOrEmpty(ruleLabel))
-            return new RouteDecision { ToTier = "server_rule", ToLabel = ruleLabel };
-        int currentNum;
-        int targetNum = ComputeRouteTargetNum(current, complexity, out currentNum);
-        if (targetNum == currentNum) return null;
-        string uiName = WebPickerTierLabel(picker, targetNum);
-        if (string.IsNullOrEmpty(uiName)) return null;
-        return new RouteDecision { ToTier = MrTierName(targetNum), ToLabel = uiName };
-    }
+    // The old in-memory ceiling ratchet (UpdateCeiling), the hand-ported tier
+    // arithmetic (ComputeRouteTargetNum) and the two label tables it fed
+    // (ComputeRoute / ComputeWebRoute, ServerRuleUiName) are GONE. They returned
+    // a server rule's label before any tier arithmetic -- so a rule naming the
+    // tier the picker was already on still armed a route and opened the picker --
+    // and the ceiling was raised by our OWN routes. Both answers now come from
+    // the decideRoute port above (DrDecideRoute via MrDecideForPin) and the
+    // user-choice tracking beside it (MrTrackPicker).
 
     // ---- AI-216: the model picker's signature, as NAMED DEFAULTS ----------
     //
@@ -5911,6 +6840,7 @@ public static class CfaiEnforcer
             + ",\"result\":\"" + Esc(result) + "\""
             + ",\"len\":" + len
             + (!string.IsNullOrEmpty(reason) ? ",\"reason\":\"" + Esc(reason) + "\"" : "")
+            + RouteMetaFields(_activeRouteMeta)
             + "}";
         lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }
@@ -6005,6 +6935,13 @@ public static class CfaiEnforcer
                 || _fgWebChromeFocused || _fgWebPasswordFocused)
             { ClearPendingRoute(); return; }
 
+            // EXTENSION-OWNED BROWSER. The CloudFuze extension in this browser
+            // has said (routing heartbeat, relayed by the agent) that IT routes
+            // here. Two routers driving one picker would fight, so the web arm
+            // stands down for this browser process until the ownership lapses.
+            // The desktop-app arm below is never affected.
+            if (RoutingOwnedByExtension(_app)) { ClearPendingRoute(); return; }
+
             // The SAME precedence the desktop arm applies, in the same order:
             // a block always wins, and a live Tokenize & Send offer must never
             // be disturbed.
@@ -6044,7 +6981,9 @@ public static class CfaiEnforcer
         if (el == null) return;
         string text = null;
         try { text = ReadText(el); } catch { }
-        if (string.IsNullOrEmpty(text)) return;
+        // An empty composer has nothing to send: drop any note left for a
+        // previous prompt so it cannot ride out on an unrelated Enter.
+        if (string.IsNullOrEmpty(text)) { ClearRouteNote(); return; }
         int[] composerRid = null;
         try { composerRid = el.GetRuntimeId(); } catch { }
         if (composerRid == null) return;
@@ -6064,9 +7003,26 @@ public static class CfaiEnforcer
         try { label = picker.Current.Name; } catch { _mrCachedPicker = null; return; }
         if (string.IsNullOrEmpty(label)) return;
 
-        var current = DetectModelInfo(label);
-        if (current == null) return;
-        UpdateCeiling(current);
+        // WHICH APP, in catalog terms. A process with no catalog app gets
+        // unsupported/unknown_surface from the decision and nothing is armed.
+        string appKey = DesktopAppKey(_app) ?? (_app ?? "");
+        string curTier = MrTierOfLabel("desktop_app", appKey, label);
+        string provider = MrProviderOf("desktop_app", appKey);
+        var meta = new RouteMeta
+        {
+            Surface = "desktop_app",
+            HostOrApp = appKey,
+            ChoiceKey = "desktop_app|" + appKey + "|" + provider,
+            ConvKey = "desktop_app|" + appKey + "|" + fg.ToInt64(),
+        };
+        // Every reading, before the dedup: a picker change the user made must be
+        // seen even when the prompt did not change.
+        string overriddenFrom;
+        if (MrTrackPicker(meta.ChoiceKey, meta.ConvKey, curTier, out overriddenFrom))
+        {
+            ClearPendingRoute();
+            if (MrReportOverride()) EmitUserOverride(meta, _app, provider, overriddenFrom, curTier);
+        }
 
         // Dedup against the poll thread's own ~150ms cadence — nothing about
         // the prompt or the picker changed, so there is nothing new to compute.
@@ -6075,8 +7031,13 @@ public static class CfaiEnforcer
         _mrLastObservedKey = dedupKey;
 
         string complexity = ClassifyComplexity(text);
-        var decision = ComputeRoute(current, complexity);
-        if (decision == null) { ClearPendingRoute(); return; }   // already at the right tier
+        string effortFrom = ModelEffortFromLabel(label, MODEL_PICKER_NAME_PREFIX_DEFAULT);
+        // THE NO-OP FIX. The decision is the shared decideRoute (C# port): a
+        // rule or the built-in table names a TIER, and a tier the picker is
+        // already on is noop/already_on_target -- nothing is armed, so Enter
+        // passes straight through and the picker is never opened.
+        var decision = MrDecideForPin(meta, _app, curTier, complexity, effortFrom, text.Length);
+        if (decision == null) return;
 
         lock (_routeLock)
         {
@@ -6086,18 +7047,19 @@ public static class CfaiEnforcer
             // fire on the very next Enter would make StartRoute silently
             // no-op on the mismatch.
             bool samePrompt = _pendingRouteArmed && _pendingRouteOriginalText == text
-                && string.Equals(_pendingRouteToLabel, decision.ToLabel, StringComparison.Ordinal);
+                && string.Equals(_pendingRouteToLabel, decision.ToLabel ?? "", StringComparison.Ordinal);
             if (!samePrompt) _pendingRouteId = Guid.NewGuid().ToString("N");
             _pendingRouteArmed = true;
-            _pendingRouteFromTier = current.Tier;
-            _pendingRouteToTier = decision.ToTier;
-            _pendingRouteToLabel = decision.ToLabel;
-            _pendingRouteProvider = current.Provider;
+            _pendingRouteFromTier = curTier;
+            _pendingRouteToTier = decision.TargetTier;
+            _pendingRouteToLabel = decision.ToLabel ?? "";
+            _pendingRouteProvider = provider;
             _pendingRouteComplexity = complexity;
             _pendingRouteOriginalText = text;
             _pendingRouteComposerRid = composerRid;
             _pendingRouteHwnd = fg;
             _pendingRouteExpiresAt = DateTime.UtcNow.Ticks + ROUTE_TTL;
+            _pendingRouteMeta = meta;
             // NULL, which is what makes StartRoute dispatch to RunRoute and
             // leaves the desktop route the code it has always been.
             _pendingRouteCtx = null;
@@ -6156,23 +7118,39 @@ public static class CfaiEnforcer
         // both read as economy and a user on Flash could never be routed down.
         // A surface with no button table (claude.ai) resolves 0 here and takes
         // the chain exactly as before.
-        MrModelInfo current;
-        int buttonTierNum = ResolveButtonTier(label, webPicker);
-        if (buttonTierNum > 0)
+        // THE SHARED CATALOG READS THE BUTTON, through the decideRoute port's
+        // own label matcher (longest pattern first, token boundaries on both
+        // sides -- 'Flash' can never swallow 'Flash-Lite'). The surface's
+        // button table (ResolveButtonTier) and the keyword chain are fallbacks
+        // only. On gemini.google.com the chain alone reads 'currently Flash' as
+        // economy, which is exactly the misreading this replaces.
+        string webHost = _fgWebHost ?? "";
+        string curTier = MrTierOfLabel("browser", webHost, label);
+        if (curTier == null)
         {
-            current = new MrModelInfo { Provider = webPicker.Provider, Tier = MrTierName(buttonTierNum) };
+            int buttonTierNum = ResolveButtonTier(label, webPicker);
+            if (buttonTierNum > 0) curTier = MrTierName(buttonTierNum);
         }
-        else
-        {
-            current = DetectModelInfo(label);
-        }
-        if (current == null) { ClearPendingRoute(); return; }
-        // The catalog STATES which provider's tier arithmetic applies here, so a
-        // page that turns out to be showing another vendor's model refuses
-        // rather than routing through the wrong tier table.
-        if (!string.Equals(current.Provider, webPicker.Provider, StringComparison.OrdinalIgnoreCase))
+        // The surface catalog STATES which provider this page is; a shared
+        // catalog that disagrees refuses rather than routing through the wrong
+        // tier table.
+        string provider = MrProviderOf("browser", webHost);
+        if (provider.Length == 0) provider = webPicker.Provider ?? "";
+        if (!string.Equals(provider, webPicker.Provider, StringComparison.OrdinalIgnoreCase))
         { ClearPendingRoute(); return; }
-        UpdateCeiling(current);
+        var meta = new RouteMeta
+        {
+            Surface = "browser",
+            HostOrApp = webHost,
+            ChoiceKey = "browser|" + webHost + "|" + provider,
+            ConvKey = "browser|" + webHost + "|" + _browserNavGen + "|" + fg.ToInt64(),
+        };
+        string overriddenFrom;
+        if (MrTrackPicker(meta.ChoiceKey, meta.ConvKey, curTier, out overriddenFrom))
+        {
+            ClearPendingRoute();
+            if (MrReportOverride()) EmitUserOverride(meta, _app, provider, overriddenFrom, curTier);
+        }
 
         // THE ONE DOOR. Never AutomationElement.FocusedElement -- on a browser
         // that is whatever text box has the caret. The element this returns is
@@ -6213,22 +7191,24 @@ public static class CfaiEnforcer
         _mrLastObservedKey = dedupKey;
 
         string complexity = ClassifyComplexity(text);
-        var decision = ComputeWebRoute(current, complexity, webPicker);
-        // null means EITHER already at the right tier OR this surface lists no
-        // label for the target tier. The second is an ordinary runtime outcome,
-        // not an error: model availability is per account.
-        if (decision == null) { ClearPendingRoute(); return; }
+        string effortFrom = ModelEffortFromLabel(label, webPicker.NamePrefix);
+        // The shared decision (decideRoute port). Anything but 'routed' clears
+        // the pin; noop -- including already-on-target -- arms nothing, so the
+        // picker is never opened for it.
+        var decision = MrDecideForPin(meta, _app, curTier, complexity, effortFrom, text.Length);
+        if (decision == null) return;
 
         lock (_routeLock)
         {
             bool samePrompt = _pendingRouteArmed && _pendingRouteOriginalText == text
-                && string.Equals(_pendingRouteToLabel, decision.ToLabel, StringComparison.Ordinal);
+                && string.Equals(_pendingRouteToLabel, decision.ToLabel ?? "", StringComparison.Ordinal);
             if (!samePrompt) _pendingRouteId = Guid.NewGuid().ToString("N");
             _pendingRouteArmed = true;
-            _pendingRouteFromTier = current.Tier;
-            _pendingRouteToTier = decision.ToTier;
-            _pendingRouteToLabel = decision.ToLabel;
-            _pendingRouteProvider = current.Provider;
+            _pendingRouteFromTier = curTier;
+            _pendingRouteToTier = decision.TargetTier;
+            _pendingRouteToLabel = decision.ToLabel ?? "";
+            _pendingRouteProvider = provider;
+            _pendingRouteMeta = meta;
             _pendingRouteComplexity = complexity;
             _pendingRouteOriginalText = text;
             _pendingRouteComposerRid = composerRid;
@@ -6250,7 +7230,8 @@ public static class CfaiEnforcer
 
     static void ClearPendingRoute()
     {
-        lock (_routeLock) { _pendingRouteId = ""; _pendingRouteArmed = false; _pendingRouteCtx = null; }
+        lock (_routeLock) { _pendingRouteId = ""; _pendingRouteArmed = false; _pendingRouteCtx = null; _pendingRouteMeta = null; }
+        ClearRouteNote();
     }
 
     // Locates every currently-visible model-choice item in the foreground
@@ -6315,6 +7296,20 @@ public static class CfaiEnforcer
             }
         }
         catch { }
+        return null;
+    }
+
+    // The catalog's click labels, most specific first: the first label any
+    // menu item answers to wins. Same first-match item test as before, per label.
+    static AutomationElement FindMenuItemByLabels(AutomationElement win, List<string> labels)
+    {
+        if (win == null || labels == null) return null;
+        foreach (string label in labels)
+        {
+            if (string.IsNullOrEmpty(label)) continue;
+            AutomationElement el = FindMenuItemByLabel(win, label);
+            if (el != null) return el;
+        }
         return null;
     }
 
@@ -6391,7 +7386,7 @@ public static class CfaiEnforcer
         if (_routeInProgress || _rewriteInProgress) { EmitRoute(_app, "", "", "", "", "", "aborted", -1, "route_or_rewrite_already_in_progress"); return; }
         if (string.IsNullOrEmpty(routeId)) return;
         string fromTier, toTier, toLabel, provider, complexity, originalText;
-        int[] composerRid; IntPtr hwnd; long expiresAt; RouteCtx ctx;
+        int[] composerRid; IntPtr hwnd; long expiresAt; RouteCtx ctx; RouteMeta meta;
         lock (_routeLock)
         {
             if (_pendingRouteId != routeId || !_pendingRouteArmed) { EmitRoute(_app, "", "", "", "", "", "aborted", -1, "stale_route_id"); return; }
@@ -6400,11 +7395,15 @@ public static class CfaiEnforcer
             originalText = _pendingRouteOriginalText; composerRid = _pendingRouteComposerRid;
             hwnd = _pendingRouteHwnd; expiresAt = _pendingRouteExpiresAt;
             ctx = _pendingRouteCtx;
+            meta = _pendingRouteMeta;
         }
         if (DateTime.UtcNow.Ticks > expiresAt) { ClearPendingRoute(); EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, "expired", ctx != null ? ctx.EffortFrom : null); return; }
 
         _routeInProgress = true;
         _routeAbort = false;
+        // Read by EmitRoute for the duration of THIS route only (cleared in the
+        // route thread's finally). One route at a time: _routeInProgress.
+        _activeRouteMeta = meta;
         // AI-216. A SINGLE NULL TEST decides which route runs, and the desktop
         // branch is literally the call it always was. The web route is a
         // SEPARATE function rather than a set of `if (isWeb)` branches threaded
@@ -6486,6 +7485,7 @@ public static class CfaiEnforcer
     static void RunRoute(string routeId, string fromTier, string toTier, string toLabel, string provider, string complexity,
         string originalText, int[] pinnedComposerRid, IntPtr pinnedHwnd)
     {
+        RouteMeta meta = _activeRouteMeta;
         try
         {
             // Pre-flight: everything pinned at Enter-press time must still
@@ -6522,9 +7522,21 @@ public static class CfaiEnforcer
             try { labelBefore = picker.Current.Name; } catch { }
             if (string.IsNullOrEmpty(labelBefore))
             { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "picker_unreadable"); return; }
-            var currentCheck = DetectModelInfo(labelBefore);
-            if (currentCheck == null || currentCheck.Tier != fromTier)
+            // Tier read through the SHARED CATALOG (MrTierOfLabel), not the
+            // keyword chain: the label also carries an effort token, and only the
+            // tier decides whether the picker still shows what the pin assumed.
+            string checkTier = meta != null ? MrTierOfLabel(meta.Surface, meta.HostOrApp, labelBefore) : null;
+            if (checkTier == null || checkTier != fromTier)
             { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "model_changed"); return; }
+            // ALREADY THERE: never open the picker for a no-op. The pin is only
+            // armed for a real change, so this is the belt to that braces.
+            if (string.Equals(checkTier, toTier, StringComparison.Ordinal))
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "already_on_target"); return; }
+            string effortFrom = ModelEffortFromLabel(labelBefore, MODEL_PICKER_NAME_PREFIX_DEFAULT);
+            // Most specific first, from the catalog (+ policy overrides / a
+            // rule's own ui_name); the pinned label alone if there is no list.
+            List<string> labels = (meta != null && meta.ClickLabels != null && meta.ClickLabels.Count > 0)
+                ? meta.ClickLabels : new List<string> { toLabel };
 
             object expandObj;
             if (!picker.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out expandObj))
@@ -6540,7 +7552,7 @@ public static class CfaiEnforcer
 
             AutomationElement win = null;
             try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
-            AutomationElement targetItem = win != null ? FindMenuItemByLabel(win, toLabel) : null;
+            AutomationElement targetItem = win != null ? FindMenuItemByLabels(win, labels) : null;
             if (targetItem == null && win != null)
             {
                 // Some tiers only appear behind a "More models" submenu
@@ -6579,7 +7591,7 @@ public static class CfaiEnforcer
                         try { ((ExpandCollapsePattern)mmExpandObj).Expand(); } catch { }
                     }
                     Thread.Sleep(200);
-                    targetItem = FindMenuItemByLabel(win, toLabel);
+                    targetItem = FindMenuItemByLabels(win, labels);
                     if (hadPos) { try { SetCursorPos(savedPos.X, savedPos.Y); } catch { } }
                 }
             }
@@ -6589,6 +7601,9 @@ public static class CfaiEnforcer
             if (_routeAbort || GetForegroundWindow() != pinnedHwnd)
             { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "interrupted_before_select"); return; }
 
+            // Recorded BEFORE the click, so the picker change it causes is known
+            // to be ours and never counted as the user's own choice.
+            if (meta != null) MrNoteOurSwitch(meta.ChoiceKey, toTier);
             bool selected = false;
             object selObj;
             if (targetItem.TryGetCurrentPattern(SelectionItemPattern.Pattern, out selObj))
@@ -6622,11 +7637,20 @@ public static class CfaiEnforcer
             do
             {
                 try { labelAfter = verifyEl.Current.Name; } catch { }
-                if (!string.IsNullOrEmpty(labelAfter) && !string.Equals(labelAfter, labelBefore, StringComparison.Ordinal)) { switched = true; break; }
+                // TIER-BASED where the catalog can read the label: an effort
+                // token changing on its own is not a model switch. A label the
+                // catalog cannot read falls back to the old "it changed" test.
+                if (!string.IsNullOrEmpty(labelAfter))
+                {
+                    string afterTier = meta != null ? MrTierOfLabel(meta.Surface, meta.HostOrApp, labelAfter) : null;
+                    if (afterTier != null ? afterTier == toTier : !string.Equals(labelAfter, labelBefore, StringComparison.Ordinal)) { switched = true; break; }
+                }
                 Thread.Sleep(60);
             } while (DateTime.UtcNow.Ticks < verifyDeadline);
             if (!switched)
             { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "switch_not_verified"); return; }
+            if (meta != null) MrNoteRouted(meta.ChoiceKey, meta.ConvKey, toTier);
+            string effortTo = ModelEffortFromLabel(labelAfter, MODEL_PICKER_NAME_PREFIX_DEFAULT);
 
             // The dropdown interaction moves keyboard focus into the popover
             // and, confirmed live, it does NOT return to the composer on its
@@ -6670,9 +7694,9 @@ public static class CfaiEnforcer
             string postSend = null;
             try { postSend = ReadText(composerAfter); } catch { }
             bool stillThere = NormalizeWs(postSend) == NormalizeWs(originalText);
-            if (stillThere) { EmitRoute(_app, provider, toTier /* now-current */, toTier, toLabel, complexity, "failed", originalText.Length, "not_submitted"); return; }
+            if (stillThere) { EmitRoute(_app, provider, toTier /* now-current */, toTier, toLabel, complexity, "failed", originalText.Length, "not_submitted", effortFrom, effortTo); return; }
 
-            EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "ok", originalText.Length);
+            EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "ok", originalText.Length, null, effortFrom, effortTo);
         }
         catch (Exception)
         {
@@ -6680,6 +7704,7 @@ public static class CfaiEnforcer
         }
         finally
         {
+            _activeRouteMeta = null;
             _routeInProgress = false;
         }
     }
@@ -6738,6 +7763,7 @@ public static class CfaiEnforcer
         string originalText, int[] pinnedComposerRid, IntPtr pinnedHwnd, RouteCtx ctx)
     {
         string effortFrom = (ctx != null ? ctx.EffortFrom : "") ?? "";
+        RouteMeta meta = _activeRouteMeta;
         try
         {
             if (ctx == null || ctx.Picker == null)
@@ -6806,8 +7832,13 @@ public static class CfaiEnforcer
             // DetectModelInfo rather than a string compare: the label also
             // carries an effort token, and an effort change on its own must
             // never read as a model change.
-            var currentCheck = DetectModelInfo(labelBefore);
-            if (currentCheck == null || currentCheck.Tier != fromTier)
+            // The shared catalog reads the tier (MrTierOfLabel); the surface's
+            // own button table is the fallback. The keyword chain alone read
+            // Gemini's 'currently Flash' as economy and refused every route
+            // from the standard tier as model_changed.
+            string checkTier = meta != null ? MrTierOfLabel(meta.Surface, meta.HostOrApp, labelBefore) : null;
+            if (checkTier == null) { int bt = ResolveButtonTier(labelBefore, ctx.Picker); if (bt > 0) checkTier = MrTierName(bt); }
+            if (checkTier == null || checkTier != fromTier)
             { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "model_changed"); return; }
 
             object expandObj;
@@ -6854,8 +7885,20 @@ public static class CfaiEnforcer
             // claude.ai tiers are top-level items, so nothing needs it; if a
             // future surface hides a tier behind a submenu, that tier simply
             // reports target_item_not_found and the prompt sends unrouted.
-            int matchCount;
-            AutomationElement targetItem = FindWebPickerItemUnique(win, toLabel, ctx.Picker.ItemControlTypes, ctx.Picker.ItemSelectedPrefix, out matchCount);
+            // The catalog's labels, most specific first. Each one must still
+            // match EXACTLY ONE item; the first label that does is clicked.
+            int matchCount = 0;
+            bool anyAmbiguous = false;
+            AutomationElement targetItem = null;
+            List<string> labels = (meta != null && meta.ClickLabels != null && meta.ClickLabels.Count > 0)
+                ? meta.ClickLabels : new List<string> { toLabel };
+            foreach (string lbl in labels)
+            {
+                if (string.IsNullOrEmpty(lbl)) continue;
+                targetItem = FindWebPickerItemUnique(win, lbl, ctx.Picker.ItemControlTypes, ctx.Picker.ItemSelectedPrefix, out matchCount);
+                if (targetItem != null) break;
+                if (matchCount >= 2) anyAmbiguous = true;
+            }
             if (targetItem == null)
             {
                 TryCollapsePicker(picker);
@@ -6864,7 +7907,7 @@ public static class CfaiEnforcer
                 // refusal -- never take the first, because there is no evidence
                 // available to break the tie and the cost of guessing wrong is
                 // that the user is served and billed by a model nobody chose.
-                string why = (matchCount >= 2) ? "target_item_ambiguous" : "target_item_not_found";
+                string why = anyAmbiguous ? "target_item_ambiguous" : "target_item_not_found";
                 WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, why);
                 return;
             }
@@ -6872,6 +7915,7 @@ public static class CfaiEnforcer
             if (_routeAbort || GetForegroundWindow() != pinnedHwnd || _browserNavGen != ctx.NavGen)
             { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "interrupted_before_select"); return; }
 
+            if (meta != null) MrNoteOurSwitch(meta.ChoiceKey, toTier);
             bool selected = false;
             object selObj;
             if (targetItem.TryGetCurrentPattern(SelectionItemPattern.Pattern, out selObj))
@@ -6913,8 +7957,9 @@ public static class CfaiEnforcer
                 try { labelAfter = verifyEl.Current.Name; } catch { }
                 if (!string.IsNullOrEmpty(labelAfter))
                 {
-                    var afterInfo = DetectModelInfo(labelAfter);
-                    if (afterInfo != null && string.Equals(afterInfo.Tier, toTier, StringComparison.Ordinal)) { switched = true; break; }
+                    string afterTier = meta != null ? MrTierOfLabel(meta.Surface, meta.HostOrApp, labelAfter) : null;
+                    if (afterTier == null) { int bt = ResolveButtonTier(labelAfter, ctx.Picker); if (bt > 0) afterTier = MrTierName(bt); }
+                    if (afterTier != null && string.Equals(afterTier, toTier, StringComparison.Ordinal)) { switched = true; break; }
                 }
                 if (WebItemIsSelected(targetItem)) { switched = true; break; }
                 Thread.Sleep(60);
@@ -6924,6 +7969,7 @@ public static class CfaiEnforcer
             // Captured AFTER the switch, from the same string the tier came
             // from. "" when the label carried no recognised token.
             effortTo = ModelEffortFromLabel(labelAfter, ctx.Picker.NamePrefix);
+            if (meta != null) MrNoteRouted(meta.ChoiceKey, meta.ConvKey, toTier);
 
             // The dropdown interaction moves keyboard focus into the popover and
             // does not necessarily return it. Ask UIA to put it back on the SAME
@@ -7011,6 +8057,7 @@ public static class CfaiEnforcer
         }
         finally
         {
+            _activeRouteMeta = null;
             _routeInProgress = false;
         }
     }
@@ -7207,6 +8254,18 @@ public static class CfaiEnforcer
     //   {"cmd":"evidence_dlp","state":"on"|"off"}
     //       The fleet `dlp` flag for the AI-evidence routes — see
     //       _evidenceDlpOn. A bare on/off.
+    //
+    //   {"cmd":"router_policy","policy":{...}|[...]|null}
+    //       The routing policy document (GET /api/v1/routing/policy) or the
+    //       legacy rules array. Replaces _mrPolicy whole; it is decision data
+    //       for the decideRoute port and nothing in it is ever typed or sent.
+    //
+    //   {"cmd":"router_fleet","state":"on"|"off"}
+    //       The fleet `model_routing` flag. A bare on/off.
+    //
+    //   {"cmd":"routing_owner","process":"chrome","ttl_ms":N}
+    //       The browser extension routes in that browser; the web arm stands
+    //       down there for ttl_ms (capped at 120s). 0 releases it.
     // ======================= BROWSER SURFACES ==============================
     //
     // "Which HOST is this browser tab on", and blocking a send on it.
@@ -10289,6 +11348,29 @@ public static class CfaiEnforcer
                         if (state == "on") _evidenceDlpOn = true;
                         else if (state == "off") _evidenceDlpOn = false;
                     }
+                    else if (cmd == "router_policy")
+                    {
+                        // The routing policy changed on the server. Replaced
+                        // WHOLE, in place -- no respawn, so keystroke protection
+                        // never drops for a policy edit. Parsed as JSON by
+                        // ApplyRouterPolicyLine; a malformed line keeps the old
+                        // policy.
+                        ApplyRouterPolicyLine(line);
+                    }
+                    else if (cmd == "router_fleet")
+                    {
+                        // The fleet model_routing switch. A bare on/off.
+                        string state = ExtractJsonString(line, "state");
+                        if (state == "on") _mrFleetEnabled = true;
+                        else if (state == "off") { _mrFleetEnabled = false; ClearPendingRoute(); }
+                    }
+                    else if (cmd == "routing_owner")
+                    {
+                        // The browser extension owns routing in this browser
+                        // process for ttl_ms (capped). A process NAME and a
+                        // number, nothing else.
+                        ApplyRoutingOwner(ExtractJsonString(line, "process"), ExtractJsonNumber(line, "ttl_ms", 0));
+                    }
                 }
                 catch { }
             }
@@ -11320,6 +12402,7 @@ public static class CfaiEnforcer
                                 // on Claude Desktop where UIA can't read the composer.
                                 int len = TypedLength();
                                 if (len >= 1) { Emit("prompt", _app, "", "send", len); }
+                                EmitRouteNote();   // a pre-built noop/suggested/observed line, if any
                                 TypedClear(); _blockTyped = false; _typedPatterns = "";
                             }
                         }

@@ -66,6 +66,13 @@ export class Enforcer extends EventEmitter {
     // and every real FeatureSync result after. Passed at spawn so a respawned
     // helper starts in the right state, and pushed live on change.
     this.evidenceDlp = false;
+    // Model routing state the helper is told about on its stdin. Remembered so
+    // a respawned helper is brought back to the same state (the policy also
+    // reaches a fresh spawn through the on-disk cache in CFAI_MODEL_ROUTER_CONFIG).
+    this.routerPolicyVersion = null;   // version of the policy last pushed
+    this.routerPolicy = undefined;      // undefined = never pushed this session
+    this.routingFleet = true;           // the fleet model_routing switch
+    this.routingOwners = new Map();     // browser process -> owned-until (epoch ms)
     this.child = null;
     this.buffer = '';
     this.stopRequested = false;
@@ -203,6 +210,12 @@ export class Enforcer extends EventEmitter {
       this.log?.warn(`enforcer: stdin write failed — ${err?.message || err}`);
     });
 
+    // Bring the fresh helper up to the routing state this session already
+    // knows. Buffered in the pipe until the helper's stdin loop starts.
+    if (this.routerPolicy !== undefined) this.#writeCmd({ cmd: 'router_policy', policy: this.routerPolicy });
+    if (!this.routingFleet) this.#writeCmd({ cmd: 'router_fleet', state: 'off' });
+    this.#pushRoutingOwners();
+
     this.child.stdout.setEncoding('utf8');
     this.child.stdout.on('data', (chunk) => this.#onStdout(chunk));
 
@@ -339,6 +352,67 @@ export class Enforcer extends EventEmitter {
    * pre-existing, row-gated behaviour. A bare on/off on the wire; remembered
    * so a respawn starts in the same state.
    */
+  #writeCmd(cmd) {
+    if (!this.child?.stdin || this.child.stdin.destroyed) return false;
+    try {
+      this.child.stdin.write(JSON.stringify(cmd) + '\n');
+      return true;
+    } catch (err) {
+      this.log?.warn(`enforcer: ${cmd?.cmd} command failed — ${err?.message || err}`);
+      return false;
+    }
+  }
+
+  /**
+   * The routing policy changed (GET /api/v1/routing/policy, or the legacy
+   * /routing/rules array). Pushed to the RUNNING helper over stdin
+   * ({"cmd":"router_policy"}) — no respawn, so keystroke protection never drops
+   * for a policy edit. updateBlockPatterns() could not do this: it early-returns
+   * when the DLP patterns are unchanged, so a rules-only change never reached a
+   * running enforcer.
+   *
+   * A no-op when `version` matches what was last pushed. Returns true when the
+   * policy was accepted for delivery (pushed now, or held for the next spawn).
+   */
+  updateRouterConfig(policy, version = null) {
+    const v = version ?? (policy && !Array.isArray(policy) && policy.version) ?? JSON.stringify(policy ?? null);
+    if (this.routerPolicy !== undefined && v === this.routerPolicyVersion) return false;
+    this.routerPolicy = policy ?? null;
+    this.routerPolicyVersion = v;
+    this.log?.info?.(`enforcer: routing policy ${typeof v === 'string' && v.length < 80 ? v : '(changed)'} — pushed to helper`);
+    this.#writeCmd({ cmd: 'router_policy', policy: this.routerPolicy });
+    return true;
+  }
+
+  /** The fleet `model_routing` switch. A bare on/off; remembered for respawns. */
+  setRoutingFleet(on) {
+    this.routingFleet = on !== false;
+    return this.#writeCmd({ cmd: 'router_fleet', state: this.routingFleet ? 'on' : 'off' });
+  }
+
+  /**
+   * Browsers whose CloudFuze extension currently owns routing: a Map of browser
+   * PROCESS name -> owned-until (epoch ms). The helper's web arm stands down in
+   * those processes until their ttl lapses; a process dropped from the map is
+   * released immediately. Desktop apps are never in it.
+   */
+  setRoutingOwners(owners) {
+    const next = new Map(owners || []);
+    for (const proc of this.routingOwners.keys()) {
+      if (!next.has(proc)) this.#writeCmd({ cmd: 'routing_owner', process: proc, ttl_ms: 0 });
+    }
+    this.routingOwners = next;
+    this.#pushRoutingOwners();
+  }
+
+  #pushRoutingOwners() {
+    const now = Date.now();
+    for (const [proc, until] of this.routingOwners) {
+      const ttl = Math.max(0, Math.min(120_000, Math.round(until - now)));
+      this.#writeCmd({ cmd: 'routing_owner', process: proc, ttl_ms: ttl });
+    }
+  }
+
   setEvidenceDlp(on) {
     this.evidenceDlp = on === true;
     if (!this.child?.stdin || this.child.stdin.destroyed) return false;

@@ -513,6 +513,9 @@
     'gpt-4o-mini':                ['GPT-4o mini', 'GPT-4o Mini'],
     'gpt-4':                      ['GPT-4'],
     'gemini-3.7-flash':           ['Flash', 'Gemini 3.7 Flash', 'Thinking'],
+    // The catalog's premium / economy Gemini (shared/model-catalog.json).
+    'gemini-3.1-pro':             ['3.1 Pro', 'Gemini 3.1 Pro', 'Pro'],
+    'gemini-3.5-flash-lite':      ['3.5 Flash-Lite', 'Flash-Lite', 'Flash Lite'],
     'gemini-2.5-pro':             ['Pro', 'Gemini 2.5 Pro'],
     'gemini-2.5-flash-lite':      ['Flash-Lite', 'Flash Lite', 'Flash'],
     'gemini-2.5-flash':           ['Flash', 'Gemini 2.5 Flash'],

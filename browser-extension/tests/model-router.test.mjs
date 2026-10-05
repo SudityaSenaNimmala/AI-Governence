@@ -13,7 +13,10 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadDetectModelInfo, tierUiNameFor } from './load-model-router.mjs';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { loadDetectModelInfo, contentSource } from './load-model-router.mjs';
 
 const detectModelInfo = loadDetectModelInfo();
 
@@ -46,32 +49,34 @@ test('other providers are untouched by the Gemini fix', () => {
   assert.deepEqual(detectModelInfo('GPT-4'), { provider: 'openai', tier: 'premium' });
 });
 
-// ── the router's other half: TIER_UI_NAME must agree with detectModelInfo ──
+// ── the router's other half: which label to CLICK for a tier ──────────────
 //
-// smartRoute picks a TARGET tier number, then looks up TIER_UI_NAME[provider]
-// [number] to know what to click. If that map disagrees with what
-// detectModelInfo would call the SAME label, the router can point at a label
-// whose own tier isn't what the router thinks it is. This is a genuine
-// round-trip property, not just a snapshot of the current three names.
+// This used to be content.js's TIER_UI_NAME table, round-tripped through
+// detectModelInfo here. It went stale anyway (ChatGPT GPT-4/4o/4o mini, Gemini
+// Flash/Thinking/Pro) while the live pickers moved on, and the keyword chain
+// cannot even tell Gemini's 3.8 Flash from 3.5 Flash-Lite. Click labels and read
+// patterns now live in shared/model-catalog.json and are round-tripped with the
+// shared boundary matcher in tests/shared-routing.test.mjs.
 
-test('TIER_UI_NAME.google round-trips through detectModelInfo for every tier', () => {
-  const uiName = tierUiNameFor('google');
-  const TIER_NAME = { 1: 'economy', 2: 'standard', 3: 'premium' };
-
-  for (const [num, name] of Object.entries(uiName)) {
-    const info = detectModelInfo(name);
-    assert.ok(info, `TIER_UI_NAME.google[${num}] = '${name}' is not recognised by detectModelInfo at all`);
-    assert.equal(info.tier, TIER_NAME[num],
-      `TIER_UI_NAME.google[${num}] = '${name}' but detectModelInfo calls '${name}' tier '${info.tier}' — `
-      + 'the router would ask for one tier and land on another');
+test('content.js no longer carries its own tier/label tables', () => {
+  const src = contentSource();
+  for (const gone of ['const TIER_UI_NAME', 'const ROUTE_TABLE', 'const PLATFORM_TIERS', 'function smartRoute',
+    'function serverRuleFor', 'cfai-route-model', 'cfai.user_ceiling']) {
+    assert.ok(!src.includes(gone), `content.js still contains ${gone}`);
   }
+  assert.ok(src.includes('window.__cfaiRouting'),'routing must come from the shared bundle');
+  assert.ok(src.includes('ROUTING.decideRoute(ctx, routingPolicy())'), 'the send path must call the shared decideRoute');
 });
 
-test('TIER_UI_NAME.google is the current three-tier lineup, not the retired one', () => {
-  const uiName = tierUiNameFor('google');
-  assert.deepEqual(uiName, { 1: 'Flash', 2: 'Thinking', 3: 'Pro' },
-    'Gemini\'s tier ladder changed (Flash/Pro/Ultra -> Flash/Thinking/Pro) — '
-    + 'if this fails because the lineup changed AGAIN, update the map and this pin together');
+test('the shared catalog carries the live-measured Gemini lineup, not the retired one', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const catalog = JSON.parse(readFileSync(path.join(here, '..', '..', 'shared', 'model-catalog.json'), 'utf8'));
+  const g = catalog.hosts['gemini.google.com'].tiers;
+  assert.deepEqual(
+    [g.premium.click_labels[0], g.standard.click_labels[0], g.economy.click_labels[0]],
+    ['3.1 Pro', '3.8 Flash', '3.5 Flash-Lite'],
+    'if this fails because the lineup changed AGAIN, update the catalog and this pin together',
+  );
 });
 
 // ── "mini" must not match inside "Gemini" ────────────────────────────────────

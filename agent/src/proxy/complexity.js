@@ -26,9 +26,10 @@
 //     'moderate'. Length is not difficulty. There is no length input anywhere
 //     in this file.
 //
-// What replaces it: a weighted lexicon of eleven categories (eight positive
+// What replaces it: a weighted lexicon of thirteen categories (ten positive
 // signals, three negative) plus a few structural signals (code fences, stack
-// traces). Score maps to one of exactly three tiers.
+// traces, enumerated multi-part questions). Score maps to one of exactly three
+// tiers.
 //
 // PRIVACY: this file reads prompt text and returns a single enum. It never
 // stores it, never logs it, and deliberately returns no matched terms — those
@@ -46,7 +47,11 @@
 
   // 1.2.0 — added the pure-arithmetic shape test (step 3b). Bumped because this
   // changes verdicts: a bare sum was 'moderate' via the no-opinion fallback.
-  const VERSION = '1.2.0';
+  // 1.3.0 — added the researchDepth category (lexicon + one structural signal):
+  // multi-step reasoning, research, source comparison/evaluation, proofs. Routing
+  // now goes BOTH ways by how demanding a prompt is, so a research-style ask must
+  // reach 'complex' (premium) instead of sitting on the no-opinion 'moderate'.
+  const VERSION = '1.3.0';
 
   // Tier thresholds. Tuned against the acceptance table in tests/complexity.test.mjs.
   const COMPLEX_AT = 6;
@@ -228,6 +233,48 @@
     ['proposal', 2],
   ];
 
+  // Research / reasoning depth (1.3.0). The ask is to INVESTIGATE, not just to
+  // answer: multi-step reasoning, research, comparing or weighing sources and
+  // evidence, proofs. These are the prompts that genuinely need the premium tier,
+  // and before this category most of them ("research the regulatory history of
+  // X and cite sources") matched nothing and fell to 'moderate'.
+  //
+  // Weight 6 is reserved for phrases that name a research DELIVERABLE outright
+  // ("literature review", "meta-analysis", "deep research") — like architect*,
+  // each is enough on its own to clear COMPLEX_AT. Everything else is 2–4, so
+  // reaching complex takes two distinct signals.
+  //
+  // `proof*` is NOT a stem on purpose: it would eat "proofread", which is the
+  // opposite of a demanding ask. `proof`/`proofs` are spelled out.
+  const RESEARCH_DEPTH = [
+    ['deep research', 6],
+    ['literature review*', 6],
+    ['systematic review*', 6],
+    ['meta-analys*', 6], ['meta analys*', 6],
+    ['research*', 4],
+    ['investigat*', 3],
+    ['cite sources', 4], ['cite your sources', 4], ['with citations', 4],
+    ['citations', 3],
+    ['primary sources', 3], ['credible sources', 3],
+    ['evaluate the evidence', 4], ['weigh the evidence', 4],
+    ['evidence', 2],
+    ['counterargument*', 4], ['counter-argument*', 4],
+    ['multi-step', 3], ['multi step', 3], ['multistep', 3],
+    ['reason through', 4], ['chain of reasoning', 4],
+    ['reason about', 3],
+    ['hypothes*', 3],
+    ['proof', 4], ['proofs', 4],
+    ['prove that', 3],
+    ['theorem*', 4],
+    ['lemma', 3],
+    ['synthesi*', 3],
+    ['state of the art', 3], ['state-of-the-art', 3],
+    ['methodolog*', 3],
+    ['critically', 3],
+    ['forecast*', 3],
+    ['nuanced', 2],
+  ];
+
   // Catch-all for real-but-easy asks, so they land above a bare 0 and are
   // distinguishable from "no signal at all". Overlap with the categories above
   // is deliberate and harmless: the per-category cap bounds what any single idea
@@ -292,6 +339,22 @@
     { key: '#error-label', weight: 4, re: /\bError:/ },
   ];
 
+  // A question broken into three or more numbered parts ("1. … 2. … 3. …") is
+  // the shape of a research brief. This is SHAPE, not length: a 30-character
+  // three-part list fires it and a 3000-character paragraph does not.
+  //
+  // Deliberately NOT "three or more question marks". That reads as structure but
+  // is really a repetition count — pasting one question twenty times would add
+  // the signal, breaking the invariant that repeating the same content never
+  // moves a verdict (tests/complexity.test.mjs pins it).
+  //
+  // Kept to constructs .NET's Regex accepts unchanged: the desktop enforcer
+  // compiles these sources from CFAI_MODEL_ROUTER_CONFIG
+  // (agent/src/os_monitor/model-router-config.js).
+  const RESEARCH_STRUCTURE = [
+    { key: '#enumerated-parts', weight: 3, re: /(^|\n)[ \t]*3[.)][ \t]+\S/ },
+  ];
+
   // ── Pure arithmetic ────────────────────────────────────────────────────────
   //
   // "what is 2+2" used to come out 'moderate', and not because anything judged
@@ -331,8 +394,8 @@
   }
 
   // ── Compilation ────────────────────────────────────────────────────────────
-  // One alternation regex per category rather than one regex per term: eleven
-  // matchAll passes over the window instead of ~200 independent scans.
+  // One alternation regex per category rather than one regex per term: one
+  // matchAll pass per category over the window instead of ~250 independent scans.
 
   function escapeRe(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -406,6 +469,7 @@
     compileCategory('debugging', DEBUGGING, STACK_STRUCTURE),
     compileCategory('analysis', ANALYSIS),
     compileCategory('outputComplexity', OUTPUT_COMPLEXITY),
+    compileCategory('researchDepth', RESEARCH_DEPTH, RESEARCH_STRUCTURE),
     compileCategory('shallowTask', SHALLOW_TASK),
   ];
 
@@ -602,7 +666,7 @@
     //     see isPureArithmetic for why this is a shape test, not a length test.
     if (isPureArithmetic(sample)) return 'simple';
 
-    // 4. Weighted, per-category-capped score across all eleven categories.
+    // 4. Weighted, per-category-capped score across every category.
     const { score, simplicityRequestHit, strongHit } = scoreAll(sample);
 
     // 5. Explicit-simplicity override: when the user has literally asked for a

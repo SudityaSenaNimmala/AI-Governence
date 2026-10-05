@@ -26,6 +26,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { MODEL_CATALOG } from './model-catalog.generated.js';
 
 /* global __CFAI_MODEL_ROUTER_CONFIG__ */
 // BAKED AT BUILD TIME for the packaged binary.
@@ -55,12 +56,17 @@ const CONTENT_JS_PATH = join(REPO_ROOT, 'browser-extension', 'content', 'content
 // matches complexity.js's own POSITIVE array (source-of-truth comment there).
 const POSITIVE_CATEGORY_NAMES = [
   'REASONING_DEPTH', 'TASK_COMPLEXITY', 'DOMAIN_EXPERTISE', 'PLANNING',
-  'CODING', 'DEBUGGING', 'ANALYSIS', 'OUTPUT_COMPLEXITY', 'SHALLOW_TASK',
+  'CODING', 'DEBUGGING', 'ANALYSIS', 'OUTPUT_COMPLEXITY', 'RESEARCH_DEPTH', 'SHALLOW_TASK',
 ];
 const NEGATIVE_CATEGORY_NAMES = ['TRIVIAL_INTENT', 'SIMPLE_TASK', 'SIMPLICITY_REQUEST'];
 // Structural-signal categories are attached to specific positive categories
-// in complexity.js (CODE_STRUCTURE -> coding, STACK_STRUCTURE -> debugging).
-const STRUCTURAL_FOR_CATEGORY = { CODING: 'CODE_STRUCTURE', DEBUGGING: 'STACK_STRUCTURE' };
+// in complexity.js (CODE_STRUCTURE -> coding, STACK_STRUCTURE -> debugging,
+// RESEARCH_STRUCTURE -> researchDepth). researchDepth arrived with classifier
+// 1.3.0; the C# scorer is generic over categories and structural lists, so these
+// two table entries are the entire desktop-side change for it.
+const STRUCTURAL_FOR_CATEGORY = {
+  CODING: 'CODE_STRUCTURE', DEBUGGING: 'STACK_STRUCTURE', RESEARCH_DEPTH: 'RESEARCH_STRUCTURE',
+};
 
 const THRESHOLD_NAMES = [
   'COMPLEX_AT', 'SIMPLE_AT', 'STRONG_WEIGHT', 'CAP_PER_CATEGORY',
@@ -174,43 +180,92 @@ export function detectModelInfoFromConfig(text) {
   return null;
 }
 
-// Provider + target tier number -> UI label to search the dropdown for. Kept
-// as a small hand-ported table (same reasoning as TIER_KEYWORD_RULES) since
-// content.js's TIER_UI_NAME sits alongside chrome.storage-touching code that
-// can't be sliced out cleanly; parity checked against tierUiNameFor() in the
-// browser-extension test suite from this repo's test file instead.
-const TIER_UI_NAMES = {
-  anthropic: { 3: 'Opus', 2: 'Sonnet', 1: 'Haiku' },
-  openai: { 3: 'GPT-4', 2: 'GPT-4o', 1: 'GPT-4o mini' },
-  google: { 3: 'Pro', 2: 'Thinking', 1: 'Flash' },
+// ── The shared catalog + the routing policy ──────────────────────────────────
+//
+// WHICH TIER, AND WHAT TO CLICK, is decided by the C# port of
+// shared/decide-route.js inside the enforcer, from two pieces of data shipped
+// here:
+//   * catalog — shared/model-catalog.json, via the GENERATED ES-module copy
+//     model-catalog.generated.js (node scripts/gen-shared-routing.mjs). It used
+//     to be a hand-ported TIER_UI_NAMES table here, which still carried Gemini's
+//     retired 'Flash / Thinking / Pro' lineup; the catalog's measured
+//     '3.5 Flash-Lite / 3.8 Flash / 3.1 Pro' is now the only source.
+//   * policy  — GET /api/v1/routing/policy (or the legacy /routing/rules array),
+//     cached on disk so a respawned helper starts with the last policy it had
+//     even when the server is unreachable. A running helper is updated in place
+//     over its stdin (Enforcer.updateRouterConfig) — no respawn.
+//
+// The keyword chain above (TIER_KEYWORD_RULES) stays only as the FALLBACK for a
+// picker label the catalog cannot read.
+
+/**
+ * Desktop process name (lower-case, as the enforcer's _app carries it) -> the
+ * catalog `apps` key. A process absent here has no catalog entry, so the
+ * enforcer's decision for it is unsupported/unknown_surface and nothing is
+ * routed.
+ */
+export const DESKTOP_APP_KEYS = {
+  claude: 'claude_desktop',
+  chatgpt: 'chatgpt_desktop',
 };
 
-// ── Server routing rules cache ──────────────────────────────────────────────
-const ROUTING_RULES_PATH = join(homedir(), '.cloudfuze-aigov', 'routing-rules.json');
+export const ROUTING_POLICY_PATH = join(homedir(), '.cloudfuze-aigov', 'routing-policy.json');
+// Written by agents that predate the policy endpoint. Read once as a fallback so
+// an upgrade keeps the admin's rules until the first policy fetch lands.
+const LEGACY_ROUTING_RULES_PATH = join(homedir(), '.cloudfuze-aigov', 'routing-rules.json');
 
-export function loadCachedRoutingRules() {
+/**
+ * The cached routing policy: { policy, etag, version, at } or null.
+ * `policy` is the v2 policy document, or a bare v1 rules array (legacy feed).
+ */
+export function loadCachedRoutingPolicy(path = ROUTING_POLICY_PATH) {
   try {
-    if (!existsSync(ROUTING_RULES_PATH)) return [];
-    const raw = readFileSync(ROUTING_RULES_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch { return []; }
+    if (existsSync(path)) {
+      const parsed = JSON.parse(readFileSync(path, 'utf8'));
+      if (parsed && typeof parsed === 'object' && 'policy' in parsed) return parsed;
+    }
+  } catch { /* corrupt cache -> fall through */ }
+  if (path !== ROUTING_POLICY_PATH) return null;
+  try {
+    if (existsSync(LEGACY_ROUTING_RULES_PATH)) {
+      const rules = JSON.parse(readFileSync(LEGACY_ROUTING_RULES_PATH, 'utf8'));
+      if (Array.isArray(rules)) return { policy: rules, etag: null, version: null, at: null, legacy: true };
+    }
+  } catch { /* ignore */ }
+  return null;
 }
 
-export function saveCachedRoutingRules(rules) {
+export function saveCachedRoutingPolicy(entry, path = ROUTING_POLICY_PATH) {
   try {
-    mkdirSync(dirname(ROUTING_RULES_PATH), { recursive: true });
-    writeFileSync(ROUTING_RULES_PATH, JSON.stringify(rules, null, 2), 'utf8');
-  } catch {}
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(entry, null, 2), 'utf8');
+    return true;
+  } catch { return false; }
 }
 
 /**
- * Assemble the full CFAI_MODEL_ROUTER_CONFIG payload. Reads both source
- * files fresh on every call (cheap, and correctness — never staleness —
- * matters here); the enforcer only calls this once per helper spawn.
+ * Assemble the full CFAI_MODEL_ROUTER_CONFIG payload. The lexicon half is baked
+ * into the packaged binary (BAKED) or parsed from complexity.js in a dev run;
+ * the catalog and the cached policy are added at CALL time, never baked — a
+ * baked policy would be the build machine's rules forever.
  */
 export function buildModelRouterConfig() {
-  if (BAKED) return BAKED;
+  const cached = loadCachedRoutingPolicy();
+  const routing = {
+    catalog: MODEL_CATALOG,
+    policy: cached ? cached.policy : null,
+    desktopApps: DESKTOP_APP_KEYS,
+  };
+  if (BAKED) {
+    // Strip the retired fields an older baked build may still carry.
+    const { serverRules: _s, tierUiNames: _t, ...lexicon } = BAKED;
+    return { ...lexicon, ...routing };
+  }
+  return { ...buildLexiconConfig(), ...routing };
+}
+
+/** The lexicon half only — what the build bakes. */
+export function buildLexiconConfig() {
   let complexitySrc;
   try {
     complexitySrc = readFileSync(COMPLEXITY_JS_PATH, 'utf8');
@@ -218,12 +273,10 @@ export function buildModelRouterConfig() {
     // browser-extension not present — return minimal config so the enforcer
     // starts without model routing instead of crashing the whole monitor.
     return {
-      version: 1,
+      version: 2,
       positiveCategories: [], negativeCategories: [],
       thresholds: { COMPLEX_AT: 6, SIMPLE_AT: -3, STRONG_WEIGHT: 4, CAP_PER_CATEGORY: 2, WINDOW_HEAD: 3000, WINDOW_TAIL: 1000, MAX_TRIVIAL_TOKENS: 4, MAX_FILLER_CONTENT_TOKENS: 2 },
       tierKeywordRules: TIER_KEYWORD_RULES,
-      tierUiNames: TIER_UI_NAMES,
-      serverRules: loadCachedRoutingRules(),
     };
   }
 
@@ -244,16 +297,11 @@ export function buildModelRouterConfig() {
   for (const name of THRESHOLD_NAMES) thresholds[name] = extractThreshold(complexitySrc, name);
 
   return {
-    version: 1,
+    version: 2,
     positiveCategories,
     negativeCategories,
     thresholds,
     tierKeywordRules: TIER_KEYWORD_RULES,
-    tierUiNames: TIER_UI_NAMES,
-    // Server-managed routing rules — same format as /api/v1/routing/rules.
-    // Checked by the enforcer's ComputeRoute() before the built-in logic,
-    // so admin overrides take precedence. Empty when no rules configured.
-    serverRules: loadCachedRoutingRules(),
   };
 }
 

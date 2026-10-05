@@ -716,73 +716,20 @@
     }
   });
 
-  // ── Model Routing — rewrite model field in API request body ──────
-  // The content script dispatches 'cfai-route-model' when a routing rule
-  // matches. We store the target model and apply it to the NEXT fetch POST
-  // to an AI host. No DOM scanning, no dropdown interaction — just rewrite
-  // the JSON body before it leaves the browser.
-  let _pendingRoute = null;
+  // ── Model routing: NOT done here ─────────────────────────────────────
+  // This file used to carry a "backup" router: the content script dispatched
+  // 'cfai-route-model' and a second window.fetch wrapper rewrote json.model on the
+  // next chat POST, announcing 'cfai-route-applied' / "ROUTED fetch". It was
+  // removed because it was wrong in every way that mattered:
+  //   * it was broken: its wrapper reassigned `init` and then forwarded the bare
+  //     `arguments` object, which in strict mode is NOT aliased to the named
+  //     parameters — so the rewritten body was dropped and the request went out
+  //     unchanged;
+  //   * where it did run it wrote the picker LABEL ("Haiku") into the API body's
+  //     `model` field, which no provider accepts;
+  //   * its telemetry claimed reroutes that never happened.
+  // Routing is now a verified model-picker switch in content.js, decided by the
+  // shared decideRoute (content/model-routing.js), or a reported failure.
 
-  document.addEventListener('cfai-route-model', (e) => {
-    // Skip if model routing feature is disabled
-    try { const raw=document.documentElement.getAttribute('data-cfai-features'); if(raw){const f=JSON.parse(raw); if(f.model_routing&&f.model_routing.status==='disabled') return;} } catch{}
-    if (e.detail && e.detail.model) {
-      _pendingRoute = { model: e.detail.model, rule_name: e.detail.rule_name || '', ts: Date.now() };
-      console.info('[cfai] routing queued:', _pendingRoute.model, '(' + _pendingRoute.rule_name + ')');
-    }
-  });
-
-  // ── Smart tier detection for fetch-blocker backup routing ──
-  function detectTier(modelId) {
-    const t = (modelId || '').toLowerCase();
-    if (t.includes('opus'))   return { provider: 'anthropic', tier: 'premium' };
-    if (t.includes('sonnet')) return { provider: 'anthropic', tier: 'standard' };
-    if (t.includes('haiku'))  return { provider: 'anthropic', tier: 'economy' };
-    if (t.includes('mini') || t.includes('3.5'))  return { provider: 'openai', tier: 'economy' };
-    if (t.includes('4o') || t.includes('4.1'))    return { provider: 'openai', tier: 'standard' };
-    if (t.includes('gpt-4') || t.includes('o1') || t.includes('o3')) return { provider: 'openai', tier: 'premium' };
-    if (t.includes('flash'))  return { provider: 'google', tier: 'economy' };
-    if (t.includes('pro'))    return { provider: 'google', tier: 'standard' };
-    return null;
-  }
-
-  // FALLBACK_ROUTES was removed here. It was declared and never read — the fetch
-  // wrapper below applies `_pendingRoute` and nothing else — while holding stale
-  // model ids AND a tier mapping that was off by one (it called Sonnet "premium"
-  // and Haiku "standard", and gave Google the same economy model for both tiers).
-  // Dead code with wrong values is worse than no code: the next person to need a
-  // fallback would have wired it up and shipped a silent mis-route. If a fallback
-  // is wanted, derive it from the routing rules the server already sends rather
-  // than a second hardcoded table.
-
-  // Patch the fetch wrapper to apply routing BEFORE sending
-  const _routedFetch = window.fetch;
-  window.fetch = function(input, init) {
-    try {
-      const url = typeof input === 'string' ? input : input instanceof Request ? input.url : String(input || '');
-      const method = init?.method || (input instanceof Request ? input.method : 'GET');
-
-      if (isChatPost(url, method) && typeof init?.body === 'string') {
-        try {
-          const json = JSON.parse(init.body);
-          if (json.model) {
-            // Primary: use pending route from content script
-            if (_pendingRoute && (Date.now() - _pendingRoute.ts) < 5000) {
-              const originalModel = json.model;
-              json.model = _pendingRoute.model;
-              init = { ...init, body: JSON.stringify(json) };
-              console.info('[cfai] ROUTED fetch:', originalModel, '→', json.model);
-              document.dispatchEvent(new CustomEvent('cfai-route-applied', {
-                detail: { from: originalModel, to: json.model, rule: _pendingRoute.rule_name }
-              }));
-              _pendingRoute = null;
-            }
-          }
-        } catch {}
-      }
-    } catch {}
-    return _routedFetch.apply(this, arguments);
-  };
-
-  console.info('[cfai] fetch blocker + smart model router installed — sensitive data will be intercepted, AI responses captured');
+  console.info('[cfai] fetch blocker installed — sensitive data will be intercepted, AI responses captured');
 })();
