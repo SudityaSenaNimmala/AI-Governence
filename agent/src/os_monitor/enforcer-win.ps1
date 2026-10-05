@@ -6860,6 +6860,10 @@ public static class CfaiEnforcer
     static string _pendingRouteFromTier = "", _pendingRouteToTier = "", _pendingRouteToLabel = "", _pendingRouteProvider = "", _pendingRouteComplexity = "";
     static string _pendingRouteOriginalText = "";
     static int[] _pendingRouteComposerRid = null;
+    // DESKTOP only: the live composer reference the poll thread read the pin
+    // from. Lets a failed route put focus BACK on the composer (focus is in the
+    // model menu after any picker interaction) instead of giving up.
+    static AutomationElement _pendingRouteComposerEl = null;
     static IntPtr _pendingRouteHwnd = IntPtr.Zero;
     static long _pendingRouteExpiresAt = 0;
     static readonly long ROUTE_TTL = TimeSpan.FromSeconds(15).Ticks;
@@ -6870,6 +6874,33 @@ public static class CfaiEnforcer
 
     static volatile bool _routeInProgress = false;
     static volatile bool _routeAbort = false;
+    // The window the running route was pinned to. Read by the keyboard hook
+    // (one compare against GetForegroundWindow, no UIA) to decide whether an
+    // Enter pressed DURING a route belongs to it -- see RouteHookSwallowsEnter.
+    static IntPtr _activeRouteHwnd = IntPtr.Zero;
+
+    // Poll thread, on the desktop arm's dedup early-return. Same prompt, same
+    // picker label, so the decision is unchanged -- but the pin must stay FRESH:
+    //   * Claude Desktop re-renders its composer while the prompt sits there,
+    //     so the RuntimeId captured on the first tick dies and Enter used to
+    //     fail 'element_changed';
+    //   * the TTL was set once, so a prompt left untouched for 15s expired and
+    //     its Enter was eaten.
+    // The route id is NOT rotated (StartRoute would no-op on the mismatch), and
+    // nothing is refreshed unless the armed pin is for THIS text in THIS window.
+    static void MrRefreshPinOnDedup(string text, int[] composerRid, AutomationElement el, IntPtr hwnd)
+    {
+        if (composerRid == null || string.IsNullOrEmpty(text)) return;
+        lock (_routeLock)
+        {
+            if (!_pendingRouteArmed || _pendingRouteCtx != null) return;
+            if (!string.Equals(_pendingRouteOriginalText, text, StringComparison.Ordinal)) return;
+            if (_pendingRouteHwnd != hwnd) return;
+            _pendingRouteComposerRid = composerRid;
+            if (el != null) _pendingRouteComposerEl = el;
+            _pendingRouteExpiresAt = DateTime.UtcNow.Ticks + ROUTE_TTL;
+        }
+    }
 
     static void UpdateModelRouting()
     {
@@ -7027,7 +7058,7 @@ public static class CfaiEnforcer
         // Dedup against the poll thread's own ~150ms cadence — nothing about
         // the prompt or the picker changed, so there is nothing new to compute.
         string dedupKey = NormalizeWs(text) + "|" + label;
-        if (dedupKey == _mrLastObservedKey) return;
+        if (dedupKey == _mrLastObservedKey) { MrRefreshPinOnDedup(text, composerRid, el, fg); return; }
         _mrLastObservedKey = dedupKey;
 
         string complexity = ClassifyComplexity(text);
@@ -7060,6 +7091,7 @@ public static class CfaiEnforcer
             _pendingRouteHwnd = fg;
             _pendingRouteExpiresAt = DateTime.UtcNow.Ticks + ROUTE_TTL;
             _pendingRouteMeta = meta;
+            _pendingRouteComposerEl = el;
             // NULL, which is what makes StartRoute dispatch to RunRoute and
             // leaves the desktop route the code it has always been.
             _pendingRouteCtx = null;
@@ -7230,7 +7262,7 @@ public static class CfaiEnforcer
 
     static void ClearPendingRoute()
     {
-        lock (_routeLock) { _pendingRouteId = ""; _pendingRouteArmed = false; _pendingRouteCtx = null; _pendingRouteMeta = null; }
+        lock (_routeLock) { _pendingRouteId = ""; _pendingRouteArmed = false; _pendingRouteCtx = null; _pendingRouteMeta = null; _pendingRouteComposerEl = null; }
         ClearRouteNote();
     }
 
@@ -7378,27 +7410,41 @@ public static class CfaiEnforcer
         catch { }
     }
 
-    static void StartRoute(string routeId)
+    // Hook thread. Returns TRUE when this Enter now belongs to a route (the hook
+    // swallows it; the route thread sends the prompt itself), FALSE when it does
+    // not (the hook lets it through as an ordinary, unrouted send). An Enter is
+    // never swallowed unless something owns re-sending it.
+    static bool StartRoute(string routeId)
     {
-        // Every rejection is reported, mirroring StartRewrite — a swallowed
-        // Enter that produces no visible outcome at all is indistinguishable
-        // from a hang.
-        if (_routeInProgress || _rewriteInProgress) { EmitRoute(_app, "", "", "", "", "", "aborted", -1, "route_or_rewrite_already_in_progress"); return; }
-        if (string.IsNullOrEmpty(routeId)) return;
+        // A second Enter (or Windows key-repeat on a held one) WHILE a route or
+        // rewrite runs: that run owns the prompt and reports its own outcome.
+        // Swallowed so it cannot land in the open model menu (where Enter
+        // activates the highlighted item) or double-send, and SILENT -- this
+        // used to emit an 'aborted' route event with every tier and the
+        // complexity empty, which is the malformed live event.
+        if (_routeInProgress || _rewriteInProgress) return true;
+        if (string.IsNullOrEmpty(routeId)) return false;
         string fromTier, toTier, toLabel, provider, complexity, originalText;
-        int[] composerRid; IntPtr hwnd; long expiresAt; RouteCtx ctx; RouteMeta meta;
+        int[] composerRid; IntPtr hwnd; long expiresAt; RouteCtx ctx; RouteMeta meta; AutomationElement composerEl;
         lock (_routeLock)
         {
-            if (_pendingRouteId != routeId || !_pendingRouteArmed) { EmitRoute(_app, "", "", "", "", "", "aborted", -1, "stale_route_id"); return; }
+            // The pin rotated between the hook's read and here: an internal
+            // race, not a route outcome. The Enter goes through untouched.
+            if (_pendingRouteId != routeId || !_pendingRouteArmed) return false;
             fromTier = _pendingRouteFromTier; toTier = _pendingRouteToTier; toLabel = _pendingRouteToLabel;
             provider = _pendingRouteProvider; complexity = _pendingRouteComplexity;
             originalText = _pendingRouteOriginalText; composerRid = _pendingRouteComposerRid;
             hwnd = _pendingRouteHwnd; expiresAt = _pendingRouteExpiresAt;
             ctx = _pendingRouteCtx;
             meta = _pendingRouteMeta;
+            composerEl = _pendingRouteComposerEl;
         }
-        if (DateTime.UtcNow.Ticks > expiresAt) { ClearPendingRoute(); EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, "expired", ctx != null ? ctx.EffortFrom : null); return; }
+        // Expired: reported, and the Enter is let THROUGH as an ordinary send.
+        // It used to be swallowed here with nothing re-sending it -- the prompt
+        // just sat in the composer until the user pressed Enter again.
+        if (DateTime.UtcNow.Ticks > expiresAt) { ClearPendingRoute(); EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, "expired", ctx != null ? ctx.EffortFrom : null); return false; }
 
+        _activeRouteHwnd = hwnd;
         _routeInProgress = true;
         _routeAbort = false;
         // Read by EmitRoute for the duration of THIS route only (cleared in the
@@ -7421,11 +7467,120 @@ public static class CfaiEnforcer
         }
         else
         {
-            t = new Thread(() => RunRoute(routeId, fromTier, toTier, toLabel, provider, complexity, originalText, composerRid, hwnd));
+            AutomationElement ce = composerEl;
+            t = new Thread(() => RunRoute(routeId, fromTier, toTier, toLabel, provider, complexity, originalText, composerRid, hwnd, ce));
         }
         t.IsBackground = true;
         t.SetApartmentState(ApartmentState.STA);
         t.Start();
+        return true;
+    }
+
+    // ── Desktop route recovery: the PURE verdicts ────────────────────────────
+    // Pure so tests/helpers/desktop-route-recovery-harness.ps1 drives them with
+    // the values the live Claude Desktop run produced; RunRoute and
+    // FallbackSendOrReport only feed them UIA reads.
+
+    // Is the candidate element the user's composer, holding the user's prompt?
+    // null = yes. Otherwise the reason, named for what it actually is:
+    //   text_changed          the SAME element, different text: the user edited
+    //                         (or emptied) the prompt. Never sent, never "fixed".
+    //   focus_not_in_composer focus is on a non-text control -- after any picker
+    //                         interaction it sits in the model menu. Recoverable
+    //                         by putting focus back.
+    //   element_changed       another text box, with other text.
+    //   no_element            nothing identifiable.
+    // A DIFFERENT element holding the SAME prompt (after whitespace / zero-width
+    // normalization) IS the composer: Claude Desktop re-renders it, and its
+    // RuntimeId goes with the re-render. The AutomationId cannot be used to
+    // re-identify it -- on Claude it is a React render counter (see the
+    // modelPicker notes in ai-processes.js). Before this, a RuntimeId mismatch
+    // alone failed the route and was reported as "text_changed".
+    static string RouteComposerVerdict(int[] pinnedRid, int[] curRid, string pinnedText, string curText, bool curEditable)
+    {
+        string want = NormalizeWs(pinnedText);
+        string have = NormalizeWs(curText);
+        bool sameText = want.Length > 0 && have == want;
+        if (curRid != null && RuntimeIdEquals(curRid, pinnedRid)) return sameText ? null : "text_changed";
+        if (!curEditable) return "focus_not_in_composer";
+        if (curRid == null) return "no_element";
+        return sameText ? null : "element_changed";
+    }
+
+    // Did the picker switch to the target? By TIER where the catalog can read
+    // the label (an effort token changing on its own is not a switch); a label
+    // the catalog cannot read falls back to "it changed at all".
+    static bool RouteSwitchVerified(string afterTier, string toTier, string labelAfter, string labelBefore)
+    {
+        if (string.IsNullOrEmpty(labelAfter)) return false;
+        if (afterTier != null) return string.Equals(afterTier, toTier, StringComparison.Ordinal);
+        return !string.Equals(labelAfter, labelBefore, StringComparison.Ordinal);
+    }
+
+    // Keyboard hook. A plain, user-typed Enter in the route's own window while
+    // a route runs is held key-repeat or an impatient second press. It used to
+    // set _routeAbort (killing the route between expand and select) and reach
+    // StartRoute again. Now it is swallowed and does NOT abort; the running
+    // route sends the prompt once. Shift+Enter (a newline -- an edit), any other
+    // key, our own injected Enter, another window, or a rewrite are unchanged.
+    static bool RouteHookSwallowsEnter(int vk, bool ctrl, bool alt, bool shift, bool injected,
+        bool routeInProgress, bool rewriteInProgress, bool fgIsRouteWindow)
+    {
+        return vk == VK_RETURN && !ctrl && !alt && !shift && !injected
+            && routeInProgress && !rewriteInProgress && fgIsRouteWindow;
+    }
+
+    // Can this element hold the prompt? A menu / button / list item never can.
+    static bool RouteElementEditable(AutomationElement el)
+    {
+        if (el == null) return false;
+        try
+        {
+            ControlType ct = el.Current.ControlType;
+            if (ct == ControlType.Button || ct == ControlType.MenuItem || ct == ControlType.RadioButton
+                || ct == ControlType.Menu || ct == ControlType.MenuBar || ct == ControlType.ListItem
+                || ct == ControlType.List || ct == ControlType.CheckBox || ct == ControlType.Hyperlink
+                || ct == ControlType.TabItem || ct == ControlType.Window || ct == ControlType.TitleBar)
+                return false;
+            object p;
+            return el.TryGetCurrentPattern(ValuePattern.Pattern, out p) || el.TryGetCurrentPattern(TextPattern.Pattern, out p);
+        }
+        catch { return false; }
+    }
+
+    // The user's composer, FOCUSED and holding the pinned prompt, or null with
+    // the reason (RouteComposerVerdict's vocabulary). With `refocus`, a focus
+    // that is merely somewhere else in the window (the model menu, a re-render)
+    // is put BACK on the known composer -- but only when that composer still
+    // reads back exactly the pinned prompt, and never for text_changed: an edit
+    // by the user is theirs, not something to route around.
+    static AutomationElement AcquireRouteComposer(int[] pinnedRid, AutomationElement knownComposer, string originalText, bool refocus, out string reason)
+    {
+        reason = "no_element";
+        int attempts = refocus ? 2 : 1;
+        for (int attempt = 0; attempt < attempts; attempt++)
+        {
+            if (attempt == 1)
+            {
+                if (knownComposer == null) break;
+                string kt = null;
+                try { kt = ReadText(knownComposer); } catch { }
+                if (RouteComposerVerdict(pinnedRid, pinnedRid, originalText, kt, true) != null) break;
+                try { knownComposer.SetFocus(); } catch { break; }
+                Thread.Sleep(150);
+            }
+            AutomationElement el = null;
+            try { el = AutomationElement.FocusedElement; } catch { }
+            if (el == null) { reason = "no_element"; continue; }
+            int[] rid = null; string text = null;
+            try { rid = el.GetRuntimeId(); } catch { }
+            try { text = ReadText(el); } catch { }
+            string v = RouteComposerVerdict(pinnedRid, rid, originalText, text, RouteElementEditable(el));
+            if (v == null) return el;
+            reason = v;
+            if (v == "text_changed") return null;
+        }
+        return null;
     }
 
     // The ONLY place model routing ever sends unrouted. Switching models
@@ -7438,8 +7593,17 @@ public static class CfaiEnforcer
     // with nothing having happened. Only a genuine change of focus or
     // content declines the fallback — sending into a window the user has
     // since moved away from would be actively wrong, not just suboptimal.
+    //
+    // THE ENTER IS RE-SENT EXACTLY ONCE on every path except two, where sending
+    // would be wrong rather than merely unrouted: the foreground window changed
+    // (it would go to another app), or the user's own text changed (it is no
+    // longer the message they pressed Enter on -- and it is still visibly in
+    // the composer). Focus parked in the model menu, a re-rendered composer, an
+    // unverified switch or an interrupted one all re-send: focus is put BACK on
+    // the composer first. Before this, focus in the menu meant this function
+    // never sent, and the user had to press Enter a second time.
     static void FallbackSendOrReport(string routeId, string provider, string fromTier, string toTier, string toLabel, string complexity,
-        IntPtr pinnedHwnd, int[] pinnedComposerRid, string originalText, string reason)
+        IntPtr pinnedHwnd, int[] pinnedComposerRid, AutomationElement knownComposer, string originalText, string reason)
     {
         // Clear the pin unconditionally, BEFORE anything else — regardless
         // of whether the fallback send below succeeds. Confirmed live: when
@@ -7453,18 +7617,14 @@ public static class CfaiEnforcer
 
         if (GetForegroundWindow() != pinnedHwnd) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_focus_changed"); return; }
 
-        // After a failed picker interaction, focus may be on the picker
-        // button instead of the composer. Just report the failure and let
-        // the user press Enter again — the next attempt will find the
-        // composer focused (picker closed naturally) and route or send.
-        AutomationElement el;
-        try { el = AutomationElement.FocusedElement; } catch { el = null; }
-        if (el == null) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_no_element"); return; }
-        int[] rid = null; string text = null;
-        try { rid = el.GetRuntimeId(); } catch { }
-        try { text = ReadText(el); } catch { }
-        if (!RuntimeIdEquals(rid, pinnedComposerRid) || NormalizeWs(text) != NormalizeWs(originalText))
-        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_text_changed"); return; }
+        // After a failed picker interaction focus is usually in the model menu,
+        // not the composer: put it back (AcquireRouteComposer, refocus) and
+        // re-verify the composer still holds exactly the pinned prompt.
+        string whyNot;
+        AutomationElement el = AcquireRouteComposer(pinnedComposerRid, knownComposer, originalText, true, out whyNot);
+        if (el == null) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_" + whyNot); return; }
+        // The refocus took time: the window check again, immediately before Enter.
+        if (GetForegroundWindow() != pinnedHwnd) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_focus_changed"); return; }
 
         Emit("prompt", _app, "", "send", originalText.Length);
         TypedClear(); _blockTyped = false; _typedPatterns = ""; _lastBlockFiredTicks = 0;
@@ -7483,9 +7643,13 @@ public static class CfaiEnforcer
     }
 
     static void RunRoute(string routeId, string fromTier, string toTier, string toLabel, string provider, string complexity,
-        string originalText, int[] pinnedComposerRid, IntPtr pinnedHwnd)
+        string originalText, int[] pinnedComposerRid, IntPtr pinnedHwnd, AutomationElement pinnedComposerEl)
     {
         RouteMeta meta = _activeRouteMeta;
+        // The best-known live reference to the user's composer: the poll
+        // thread's, until the pre-flight below confirms the focused one. Every
+        // fallback gets it so it can put focus back before re-sending.
+        AutomationElement knownComposer = pinnedComposerEl;
         try
         {
             // Pre-flight: everything pinned at Enter-press time must still
@@ -7493,45 +7657,41 @@ public static class CfaiEnforcer
             // FallbackSendOrReport's own header for why that is safe for
             // routing specifically, unlike a PII rewrite.
             if (GetForegroundWindow() != pinnedHwnd)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "focus_changed"); return; }
-            AutomationElement composerEl;
-            try { composerEl = AutomationElement.FocusedElement; } catch { composerEl = null; }
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "focus_changed"); return; }
+            // The composer is identified by WHAT IT HOLDS, not by RuntimeId
+            // alone: Claude Desktop re-renders it, and the same composer with
+            // the same prompt used to fail here as 'element_changed'.
+            string preflightWhy;
+            AutomationElement composerEl = AcquireRouteComposer(pinnedComposerRid, knownComposer, originalText, false, out preflightWhy);
             if (composerEl == null)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "no_focused_element"); return; }
-            int[] curRid = null;
-            try { curRid = composerEl.GetRuntimeId(); } catch { }
-            if (!RuntimeIdEquals(curRid, pinnedComposerRid))
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "element_changed"); return; }
-            string curText = null;
-            try { curText = ReadText(composerEl); } catch { }
-            if (NormalizeWs(curText) != NormalizeWs(originalText))
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "text_changed"); return; }
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, preflightWhy); return; }
+            knownComposer = composerEl;
 
             long waitStart = DateTime.UtcNow.Ticks;
             while (Down(VK_CONTROL) || Down(VK_MENU) || Down(VK_SHIFT) || Down(VK_RETURN))
             {
                 if ((DateTime.UtcNow.Ticks - waitStart) > TimeSpan.FromMilliseconds(2500).Ticks)
-                { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "modifiers_stuck"); return; }
+                { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "modifiers_stuck"); return; }
                 Thread.Sleep(20);
             }
 
             AutomationElement picker = _mrCachedPicker;
             if (picker == null || _mrCachedPickerHwnd != pinnedHwnd)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "picker_not_found"); return; }
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "picker_not_found"); return; }
             string labelBefore = null;
             try { labelBefore = picker.Current.Name; } catch { }
             if (string.IsNullOrEmpty(labelBefore))
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "picker_unreadable"); return; }
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "picker_unreadable"); return; }
             // Tier read through the SHARED CATALOG (MrTierOfLabel), not the
             // keyword chain: the label also carries an effort token, and only the
             // tier decides whether the picker still shows what the pin assumed.
             string checkTier = meta != null ? MrTierOfLabel(meta.Surface, meta.HostOrApp, labelBefore) : null;
             if (checkTier == null || checkTier != fromTier)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "model_changed"); return; }
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "model_changed"); return; }
             // ALREADY THERE: never open the picker for a no-op. The pin is only
             // armed for a real change, so this is the belt to that braces.
             if (string.Equals(checkTier, toTier, StringComparison.Ordinal))
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "already_on_target"); return; }
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "already_on_target"); return; }
             string effortFrom = ModelEffortFromLabel(labelBefore, MODEL_PICKER_NAME_PREFIX_DEFAULT);
             // Most specific first, from the catalog (+ policy overrides / a
             // rule's own ui_name); the pinned label alone if there is no list.
@@ -7540,13 +7700,13 @@ public static class CfaiEnforcer
 
             object expandObj;
             if (!picker.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out expandObj))
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "no_expand_pattern"); return; }
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "no_expand_pattern"); return; }
             var expandPattern = (ExpandCollapsePattern)expandObj;
             try { expandPattern.Expand(); }
-            catch { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "expand_failed"); return; }
+            catch { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "expand_failed"); return; }
 
             if (_routeAbort || GetForegroundWindow() != pinnedHwnd)
-            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "interrupted_after_expand"); return; }
+            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "interrupted_after_expand"); return; }
 
             Thread.Sleep(150);   // let the popover render its items
 
@@ -7596,86 +7756,98 @@ public static class CfaiEnforcer
                 }
             }
             if (targetItem == null)
-            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "target_item_not_found"); return; }
+            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "target_item_not_found"); return; }
 
             if (_routeAbort || GetForegroundWindow() != pinnedHwnd)
-            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "interrupted_before_select"); return; }
+            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "interrupted_before_select"); return; }
 
             // Recorded BEFORE the click, so the picker change it causes is known
             // to be ours and never counted as the user's own choice.
             if (meta != null) MrNoteOurSwitch(meta.ChoiceKey, toTier);
-            bool selected = false;
+            // ACTIVATION. SelectionItem.Select() first (the shape the More-models
+            // Haiku switch was live-verified with), then -- if the picker has not
+            // switched shortly after -- Invoke() on the same item, which is
+            // Chromium's default action (a click). Live on Claude Desktop the menu
+            // opened and the model did NOT change: a Select() that returns without
+            // throwing but only HIGHLIGHTS the radio item, followed by the
+            // collapse that used to run 300ms later, closes the menu having chosen
+            // nothing. The picker is therefore NOT collapsed until verification
+            // is over. Activating the same target item twice is idempotent.
+            bool usedSelect = false, usedInvoke = false;
             object selObj;
             if (targetItem.TryGetCurrentPattern(SelectionItemPattern.Pattern, out selObj))
-            { try { ((SelectionItemPattern)selObj).Select(); selected = true; } catch { } }
-            if (!selected && targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out selObj))
-            { try { ((InvokePattern)selObj).Invoke(); selected = true; } catch { } }
-            if (!selected)
-            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "select_failed"); return; }
+            { try { ((SelectionItemPattern)selObj).Select(); usedSelect = true; } catch { } }
+            if (!usedSelect && targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out selObj))
+            { try { ((InvokePattern)selObj).Invoke(); usedInvoke = true; } catch { } }
+            if (!usedSelect && !usedInvoke)
+            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "select_failed"); return; }
 
             // A settle delay before even starting to poll: a NESTED selection
             // (behind "More models") re-renders more of the surrounding menu
             // chrome than a top-level one, and needs more than the roughly
             // 40-80ms a top-level switch settles in.
             Thread.Sleep(300);
-            TryCollapsePicker(picker);   // best-effort — selecting usually closes it on its own
 
-            // Re-find the button FRESH once, rather than trusting the cached
-            // `picker` reference — see FindModelPickerButton's comment for
-            // why a stale reference can silently mask a switch that already
-            // happened. One extra tree walk here, not one per poll: cheap
-            // relative to the rest of this operation, and this thread is
-            // never the one guarding the critical DLP block path.
+            // VERIFY against a FRESH picker button, re-found DURING the poll and
+            // not just once: Claude Desktop re-renders the button when the model
+            // changes, and a reference fetched before that re-render keeps
+            // returning the pre-switch label without ever throwing -- which reads
+            // as switch_not_verified for a switch that happened. A re-find is a
+            // tree walk, so it is throttled (every ~250ms, or when the read
+            // fails); this thread is never the one guarding the DLP block path.
             AutomationElement verifyEl = FindModelPickerButton(win) ?? picker;
-            // Keep the poll thread's cache current too, so the NEXT tick of
-            // UpdateModelRouting doesn't keep reading whatever went stale.
             if (verifyEl != null) { _mrCachedPicker = verifyEl; _mrCachedPickerHwnd = pinnedHwnd; }
 
             string labelAfter = null;
             bool switched = false;
-            long verifyDeadline = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(1500).Ticks;
+            long verifyStart = DateTime.UtcNow.Ticks;
+            long verifyDeadline = verifyStart + TimeSpan.FromMilliseconds(2500).Ticks;
+            long invokeAt = verifyStart + TimeSpan.FromMilliseconds(500).Ticks;
+            long nextRefind = verifyStart + TimeSpan.FromMilliseconds(250).Ticks;
             do
             {
-                try { labelAfter = verifyEl.Current.Name; } catch { }
-                // TIER-BASED where the catalog can read the label: an effort
-                // token changing on its own is not a model switch. A label the
-                // catalog cannot read falls back to the old "it changed" test.
-                if (!string.IsNullOrEmpty(labelAfter))
+                labelAfter = null;
+                try { labelAfter = verifyEl != null ? verifyEl.Current.Name : null; } catch { }
+                string afterTier = (meta != null && !string.IsNullOrEmpty(labelAfter)) ? MrTierOfLabel(meta.Surface, meta.HostOrApp, labelAfter) : null;
+                if (RouteSwitchVerified(afterTier, toTier, labelAfter, labelBefore)) { switched = true; break; }
+                long nowT = DateTime.UtcNow.Ticks;
+                if (usedSelect && !usedInvoke && nowT >= invokeAt)
                 {
-                    string afterTier = meta != null ? MrTierOfLabel(meta.Surface, meta.HostOrApp, labelAfter) : null;
-                    if (afterTier != null ? afterTier == toTier : !string.Equals(labelAfter, labelBefore, StringComparison.Ordinal)) { switched = true; break; }
+                    usedInvoke = true;
+                    object invObj;
+                    try { if (targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out invObj)) ((InvokePattern)invObj).Invoke(); } catch { }
+                }
+                if (nowT >= nextRefind || string.IsNullOrEmpty(labelAfter))
+                {
+                    AutomationElement fresh = FindModelPickerButton(win);
+                    if (fresh != null) { verifyEl = fresh; _mrCachedPicker = fresh; _mrCachedPickerHwnd = pinnedHwnd; }
+                    nextRefind = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(250).Ticks;
                 }
                 Thread.Sleep(60);
             } while (DateTime.UtcNow.Ticks < verifyDeadline);
+            TryCollapsePicker(picker);   // best-effort -- selecting usually closes it on its own
             if (!switched)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "switch_not_verified"); return; }
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "switch_not_verified"); return; }
             if (meta != null) MrNoteRouted(meta.ChoiceKey, meta.ConvKey, toTier);
             string effortTo = ModelEffortFromLabel(labelAfter, MODEL_PICKER_NAME_PREFIX_DEFAULT);
 
             // The dropdown interaction moves keyboard focus into the popover
             // and, confirmed live, it does NOT return to the composer on its
             // own once the menu closes — Chromium keeps focus wherever the
-            // selection landed. Ask UIA to put it back on the SAME element
-            // we pinned before the switch (still a live reference — the
-            // composer itself was never touched by any of this) rather than
-            // assuming it will happen by itself.
+            // selection landed. Put it back on the composer and re-verify it
+            // by what it HOLDS (AcquireRouteComposer, refocus), not by
+            // RuntimeId alone -- a re-render must not turn a successful switch
+            // into a failure.
             try { composerEl.SetFocus(); } catch { }
             Thread.Sleep(150);
 
-            AutomationElement composerAfter;
-            try { composerAfter = AutomationElement.FocusedElement; } catch { composerAfter = null; }
-            int[] afterRid = null; string afterText = null;
-            if (composerAfter != null)
-            {
-                try { afterRid = composerAfter.GetRuntimeId(); } catch { }
-                try { afterText = ReadText(composerAfter); } catch { }
-            }
-            bool composerOk = composerAfter != null && RuntimeIdEquals(afterRid, pinnedComposerRid) && NormalizeWs(afterText) == NormalizeWs(originalText);
-            if (!composerOk)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "focus_lost_after_switch"); return; }
+            string afterWhy;
+            AutomationElement composerAfter = AcquireRouteComposer(pinnedComposerRid, composerEl, originalText, true, out afterWhy);
+            if (composerAfter == null)
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "focus_lost_after_switch"); return; }
 
             if (GetForegroundWindow() != pinnedHwnd)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "focus_changed_before_send"); return; }
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "focus_changed_before_send"); return; }
 
             // Release state before Enter — our own synthetic Enter passes
             // back through this same keyboard hook. See RunRewrite's
@@ -7700,7 +7872,7 @@ public static class CfaiEnforcer
         }
         catch (Exception)
         {
-            FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "exception");
+            FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "exception");
         }
         finally
         {
@@ -12078,6 +12250,12 @@ public static class CfaiEnforcer
                     if (_rewriteInProgress || _routeInProgress)
                     {
                         uint kflags = (uint)Marshal.ReadInt32(lParam, 8);   // KBDLLHOOKSTRUCT.flags
+                        // A held / second Enter in the route's own window:
+                        // swallowed, and NOT an abort -- the running route
+                        // sends the prompt exactly once. No UIA, one Win32 call.
+                        if (RouteHookSwallowsEnter(vk, ctrl, alt, shift, (kflags & LLKHF_INJECTED) != 0,
+                                _routeInProgress, _rewriteInProgress, GetForegroundWindow() == _activeRouteHwnd))
+                            return (IntPtr)1;
                         if ((kflags & LLKHF_INJECTED) == 0)
                         {
                             if (_rewriteInProgress) _rewriteAbort = true;
@@ -12391,8 +12569,10 @@ public static class CfaiEnforcer
                                 lock (_routeLock) { routeId = _pendingRouteId; routeArmed = _pendingRouteArmed; }
                                 if (routeArmed && !string.IsNullOrEmpty(routeId) && !_rewriteInProgress)
                                 {
-                                    StartRoute(routeId);
-                                    return (IntPtr)1;
+                                    // Swallowed ONLY when a route took it (and so
+                                    // owns re-sending it); an expired or stale pin
+                                    // falls through to the ordinary send below.
+                                    if (StartRoute(routeId)) return (IntPtr)1;
                                 }
 
                                 // Clean send — capture the prompt (LENGTH ONLY, no

@@ -1,0 +1,220 @@
+# Harness for the DESKTOP model-route RECOVERY fixes (Claude Desktop, RunRoute).
+#
+# Live evidence it reproduces (Windows, build 8788646, Claude Desktop, v2 policy,
+# a moderate prompt on Opus routed to Sonnet). Every attempt failed:
+#   element_changed_no_fallback_text_changed
+#   route_or_rewrite_already_in_progress   (complexity null, tiers undefined)
+#   interrupted_before_select_no_fallback_text_changed
+#   switch_not_verified_no_fallback_text_changed
+#
+# NOTHING HERE INSTALLS A KEYBOARD HOOK, and nothing here touches a real window.
+# The C# source is lifted out of the .ps1 and compiled on its own, then the
+# REAL functions are driven by reflection -- the same shape and rules as
+# model-routing-harness.ps1 and routing-decide-harness.ps1. The UIA reads RunRoute
+# makes (FocusedElement, the picker's Name) cannot be faked, so the decisions they
+# feed were made PURE and are driven here with the values the live run produced.
+#
+# Output: one NDJSON line per observation (`t` field). Ends with {"t":"done"}.
+param(
+  [Parameter(Mandatory=$true)][string]$Ps1,
+  [Parameter(Mandatory=$true)][string]$Catalog
+)
+
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+$raw = Get-Content -Raw -LiteralPath $Ps1
+$startIdx = $raw.IndexOf("`$source = @'")
+if ($startIdx -lt 0) { throw 'could not find the $source here-string in enforcer-win.ps1' }
+$bodyStart = $raw.IndexOf("`n", $startIdx) + 1
+$endIdx = $raw.IndexOf("`n'@", $bodyStart)
+if ($endIdx -lt 0) { throw 'could not find the end of the $source here-string' }
+$source = $raw.Substring($bodyStart, $endIdx - $bodyStart)
+
+Add-Type -TypeDefinition $source -ReferencedAssemblies @(
+    'System.Windows.Forms','UIAutomationClient','UIAutomationTypes','WindowsBase','System.Web.Extensions'
+) -ErrorAction Stop
+
+$T = [CfaiEnforcer]
+$FLAGS = [System.Reflection.BindingFlags]'NonPublic,Public,Static'
+function GetF([string]$n) { $f = $T.GetField($n, $FLAGS); if (-not $f) { throw "no field $n" }; $f.GetValue($null) }
+function SetF([string]$n, $v) { $f = $T.GetField($n, $FLAGS); if (-not $f) { throw "no field $n" }; $f.SetValue($null, $v) }
+function Has([string]$n) { return [bool]($T.GetMethod($n, $FLAGS)) }
+function Call([string]$n, [object[]]$a = @()) {
+  $m = $T.GetMethod($n, $FLAGS)
+  if (-not $m) { throw "no method $n" }
+  try { return $m.Invoke($null, $a) } catch { throw $_.Exception.InnerException }
+}
+function Emit($obj) { [Console]::Out.WriteLine(($obj | ConvertTo-Json -Compress -Depth 6)); [Console]::Out.Flush() }
+
+# Production code writes its events to Console.Out. Capture them per call so a
+# test can assert on exactly what ONE call emitted.
+function Capture([scriptblock]$body) {
+  $orig = [Console]::Out
+  $sw = New-Object System.IO.StringWriter
+  [Console]::SetOut($sw)
+  $ret = $null
+  try { $ret = & $body } finally { [Console]::SetOut($orig) }
+  $lines = @($sw.ToString() -split "`r?`n" | Where-Object { $_.Trim().StartsWith('{') })
+  return @{ ret = $ret; lines = $lines }
+}
+
+# ---- live router state: the real catalog + a v2 policy ----------------------
+$catalogJson = [System.IO.File]::ReadAllText($Catalog)
+$ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+$ser.MaxJsonLength = 5 * 1024 * 1024
+SetF '_mrCatalog' ($ser.DeserializeObject($catalogJson))
+$apps = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
+$apps['claude'] = 'claude_desktop'
+SetF '_mrDesktopApps' $apps
+[void](Call 'ApplyRouterPolicyLine' @('{"cmd":"router_policy","policy":{"version":"p1","rules":[],"catalog_overrides":[],"settings":{"allow_upgrade":true,"respect_user_override":true},"fleet_enabled":true}}'))
+
+$RID_A = [int[]]@(42, 1001, 7)
+$RID_B = [int[]]@(42, 1001, 9)   # the SAME composer after Claude Desktop re-rendered it
+$PROMPT = 'Compare these two approaches and explain the tradeoffs in detail'
+$ZW = [string][char]0x200B
+$NBSP = [string][char]0x00A0
+
+# ---- 1. the composer verdict -------------------------------------------------
+# RouteComposerVerdict(pinnedRid, curRid, pinnedText, curText, curEditable)
+#   null  -> this IS the user's composer with the user's prompt: proceed/send
+#   else  -> the reason it is not
+$hasVerdict = Has 'RouteComposerVerdict'
+Emit @{ t = 'has'; name = 'RouteComposerVerdict'; present = $hasVerdict }
+if ($hasVerdict) {
+  $cases = @(
+    @('same_element_same_text',      $RID_A, $PROMPT, $true),
+    @('same_element_ws_zw_nbsp',     $RID_A, ("  " + $PROMPT.Replace(' ', $NBSP + ' ') + $ZW + "`r`n"), $true),
+    @('rerendered_same_text',        $RID_B, $PROMPT, $true),
+    @('rerendered_ws_differs',       $RID_B, ($PROMPT.Replace(' ', "`n") + $ZW), $true),
+    @('focus_on_menu_item',          $RID_B, 'Sonnet 5', $false),
+    @('focus_on_menu_item_no_text',  $RID_B, $null, $false),
+    @('user_edited_same_element',    $RID_A, ($PROMPT + ' please'), $true),
+    @('other_textbox_other_text',    $RID_B, 'search chats', $true),
+    @('composer_emptied',            $RID_A, '', $true),
+    @('no_runtime_id',               $null,  $PROMPT, $true)
+  )
+  foreach ($c in $cases) {
+    $v = Call 'RouteComposerVerdict' @($RID_A, $c[1], $PROMPT, $c[2], $c[3])
+    Emit @{ t = 'verdict'; case = $c[0]; reason = [string]$v; ok = ($v -eq $null) }
+  }
+}
+
+# ---- 2. the switch verification ---------------------------------------------
+# What the catalog reads off the REAL Claude Desktop button shapes, including the
+# effort suffix and separators a build might render.
+# (The middle dot is built from its code point: Windows PowerShell 5.1 reads a
+# BOM-less .ps1 as ANSI, which would mangle a literal one.)
+$MIDDOT = [string][char]0x00B7
+foreach ($lbl in @('Model: Sonnet 5 Medium', 'Model: Sonnet 5 High', ('Model: Sonnet 5 ' + $MIDDOT + ' High'),'Model: Sonnet 5, Extended thinking', 'Model: Opus 5 High', 'Model: Haiku 4.5', 'Model: Claude Sonnet 5')) {
+  Emit @{ t = 'tierof'; label = $lbl; tier = [string](Call 'MrTierOfLabel' @('desktop_app', 'claude_desktop', $lbl)) }
+}
+$hasSwitch = Has 'RouteSwitchVerified'
+Emit @{ t = 'has'; name = 'RouteSwitchVerified'; present = $hasSwitch }
+if ($hasSwitch) {
+  # (afterTier, toTier, labelAfter, labelBefore)
+  $sw = @(
+    @('switched_to_target',     'standard', 'standard', 'Model: Sonnet 5 High',  'Model: Opus 5 High'),
+    @('label_unchanged',        'premium',  'standard', 'Model: Opus 5 High',    'Model: Opus 5 High'),
+    @('effort_only_change',     'premium',  'standard', 'Model: Opus 5 Medium',  'Model: Opus 5 High'),
+    @('unreadable_but_changed', $null,      'standard', 'Model: Something new',  'Model: Opus 5 High'),
+    @('unreadable_unchanged',   $null,      'standard', 'Model: Opus 5 High',    'Model: Opus 5 High'),
+    @('empty_label',            $null,      'standard', '',                      'Model: Opus 5 High')
+  )
+  foreach ($c in $sw) {
+    Emit @{ t = 'switch'; case = $c[0]; verified = [bool](Call 'RouteSwitchVerified' @($c[1], $c[2], $c[3], $c[4])) }
+  }
+}
+
+# ---- 3. StartRoute: a second Enter WHILE a route is running -----------------
+# Live: 'route_or_rewrite_already_in_progress' with complexity null and tiers
+# undefined. The in-flight route reports its own outcome; this Enter must be
+# swallowed (the hook keeps it away from an open model menu) and emit NOTHING.
+function ArmPin([string]$id, [long]$expiresAt) {
+  SetF '_pendingRouteId' $id
+  SetF '_pendingRouteArmed' $true
+  SetF '_pendingRouteFromTier' 'premium'
+  SetF '_pendingRouteToTier' 'standard'
+  SetF '_pendingRouteToLabel' 'Sonnet 5'
+  SetF '_pendingRouteProvider' 'anthropic'
+  SetF '_pendingRouteComplexity' 'moderate'
+  SetF '_pendingRouteOriginalText' $PROMPT
+  SetF '_pendingRouteComposerRid' $RID_A
+  SetF '_pendingRouteHwnd' ([IntPtr]::new(0x4242))
+  SetF '_pendingRouteExpiresAt' $expiresAt
+  SetF '_pendingRouteCtx' $null
+}
+$future = [DateTime]::UtcNow.Ticks + [TimeSpan]::FromSeconds(15).Ticks
+$past = [DateTime]::UtcNow.Ticks - [TimeSpan]::FromSeconds(1).Ticks
+
+ArmPin 'route-1' $future
+SetF '_routeInProgress' $true
+$r = Capture { Call 'StartRoute' @('route-1') }
+Emit @{ t = 'start'; case = 'second_enter_in_progress'; ret = [string]$r.ret; events = $r.lines.Count; lines = $r.lines; armedAfter = [bool](GetF '_pendingRouteArmed') }
+SetF '_routeInProgress' $false
+
+# An EXPIRED pin must not eat the Enter: the hook lets it through as an
+# ordinary (unrouted) send. Before the fix StartRoute reported 'expired' and the
+# hook swallowed the Enter anyway -- the user's prompt just sat there.
+ArmPin 'route-2' $past
+$r = Capture { Call 'StartRoute' @('route-2') }
+Emit @{ t = 'start'; case = 'expired_pin'; ret = [string]$r.ret; events = $r.lines.Count; lines = $r.lines; inProgress = [bool](GetF '_routeInProgress') }
+
+# A stale id (the pin rotated between the hook's read and StartRoute) likewise.
+ArmPin 'route-3' $future
+$r = Capture { Call 'StartRoute' @('some-older-id') }
+Emit @{ t = 'start'; case = 'stale_id'; ret = [string]$r.ret; events = $r.lines.Count; inProgress = [bool](GetF '_routeInProgress') }
+SetF '_routeInProgress' $false
+
+# ---- 4. the hook's Enter rule while a route runs -----------------------------
+$hasHook = Has 'RouteHookSwallowsEnter'
+Emit @{ t = 'has'; name = 'RouteHookSwallowsEnter'; present = $hasHook }
+if ($hasHook) {
+  $VK_RETURN = 0x0D
+  # (vk, ctrl, alt, shift, injected, routeInProgress, rewriteInProgress, fgIsRouteWindow)
+  $hk = @(
+    @('repeat_enter_same_window',  $VK_RETURN, $false, $false, $false, $false, $true,  $false, $true),
+    @('our_own_synthetic_enter',   $VK_RETURN, $false, $false, $false, $true,  $true,  $false, $true),
+    @('shift_enter_newline',       $VK_RETURN, $false, $false, $true,  $false, $true,  $false, $true),
+    @('enter_in_another_window',   $VK_RETURN, $false, $false, $false, $false, $true,  $false, $false),
+    @('enter_no_route_running',    $VK_RETURN, $false, $false, $false, $false, $false, $false, $true),
+    @('enter_during_rewrite',      $VK_RETURN, $false, $false, $false, $false, $true,  $true,  $true),
+    @('letter_key_during_route',   0x41,       $false, $false, $false, $false, $true,  $false, $true)
+  )
+  foreach ($c in $hk) {
+    Emit @{ t = 'hook'; case = $c[0]; swallow = [bool](Call 'RouteHookSwallowsEnter' @([int]$c[1], $c[2], $c[3], $c[4], $c[5], $c[6], $c[7], $c[8])) }
+  }
+}
+
+# ---- 5. the pin follows a re-rendered composer -------------------------------
+# The poll thread's dedup (same text + same label -> return) used to keep the
+# RuntimeId captured at the FIRST tick, so a composer Claude Desktop re-rendered
+# while the prompt sat unchanged was pinned under a dead id, and Enter failed
+# 'element_changed'. It also never refreshed the TTL, so a prompt left >15s
+# expired and its Enter was eaten.
+$hasRefresh = Has 'MrRefreshPinOnDedup'
+Emit @{ t = 'has'; name = 'MrRefreshPinOnDedup'; present = $hasRefresh }
+if ($hasRefresh) {
+  $soon = [DateTime]::UtcNow.Ticks + [TimeSpan]::FromSeconds(1).Ticks
+  $HW = [IntPtr]::new(0x4242)
+  ArmPin 'route-4' $soon
+  Call 'MrRefreshPinOnDedup' @($PROMPT, $RID_B, $null, $HW) | Out-Null
+  $rid = GetF '_pendingRouteComposerRid'
+  Emit @{ t = 'refresh'; case = 'same_text_new_rid'; rid = @($rid); ttlExtended = ([long](GetF '_pendingRouteExpiresAt') -gt $soon); id = [string](GetF '_pendingRouteId') }
+
+  ArmPin 'route-5' $soon
+  Call 'MrRefreshPinOnDedup' @(($PROMPT + ' x'), $RID_B, $null, $HW) | Out-Null
+  Emit @{ t = 'refresh'; case = 'different_text_untouched'; rid = @(GetF '_pendingRouteComposerRid'); ttlExtended = ([long](GetF '_pendingRouteExpiresAt') -gt $soon) }
+
+  # Same text, but in ANOTHER window: never carried over.
+  ArmPin 'route-6' $soon
+  Call 'MrRefreshPinOnDedup' @($PROMPT, $RID_B, $null, [IntPtr]::new(0x5151)) | Out-Null
+  Emit @{ t = 'refresh'; case = 'other_window_untouched'; rid = @(GetF '_pendingRouteComposerRid'); ttlExtended = ([long](GetF '_pendingRouteExpiresAt') -gt $soon) }
+
+  SetF '_pendingRouteArmed' $false
+  SetF '_pendingRouteComposerRid' $RID_A
+  Call 'MrRefreshPinOnDedup' @($PROMPT, $RID_B, $null, $HW) | Out-Null
+  Emit @{ t = 'refresh'; case = 'unarmed_untouched'; rid = @(GetF '_pendingRouteComposerRid'); armed = [bool](GetF '_pendingRouteArmed') }
+}
+
+Emit @{ t = 'done' }
