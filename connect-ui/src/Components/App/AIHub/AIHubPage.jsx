@@ -1197,6 +1197,9 @@ function SpendCard({ onClick }) {
   return <StatCard icon={<DollarSign size={18}/>} label="LLM Spend" value={value} hint={hint} color="#22c55e" onClick={onClick}/>;
 }
 
+// How often the Overview reloads itself while the browser tab is visible.
+const OVERVIEW_REFRESH_MS = 30000;
+
 function OverviewView() {
   const nav=useNavigate();
   const [d,setD]=useState(null),[e,setE]=useState(null);
@@ -1213,25 +1216,42 @@ function OverviewView() {
   const [asOf,setAsOf]=useState(null);
   // Null until some leg reports itself cached; see mergeStaleMeta.
   const [staleMeta,setStaleMeta]=useState(null);
+  // AUTO-REFRESH. Every OVERVIEW_REFRESH_MS while the browser tab is visible,
+  // and at once when the admin comes back to it, every tile, the trend and
+  // Needs Attention reload in place — a block, a new system or a new access
+  // request shows up without a page reload. Refreshes are silent: the current
+  // numbers stay on screen while they load, and a failed refresh keeps the last
+  // good value instead of blanking a tile or replacing the page with an error.
+  const [tick,setTick]=useState(0);
+  useEffect(()=>{
+    const bump=()=>{ if(!document.hidden) setTick(t=>t+1); };
+    const t=setInterval(bump,OVERVIEW_REFRESH_MS);
+    document.addEventListener("visibilitychange",bump);
+    return ()=>{ clearInterval(t); document.removeEventListener("visibilitychange",bump); };
+  },[]);
   useEffect(()=>{
     // soft() now lives at module scope (the other tabs need it too) and takes the
     // warning setter as its last argument instead of closing over it.
     const addMeta=m=>setStaleMeta(prev=>mergeStaleMeta(prev,m));
-    tapMeta(apiFetchWithMeta("/overview"),addMeta).then(x=>{setD(x);setAsOf(new Date());}).catch(x=>setE(x.message));
-    soft(tapMeta(apiFetchWithMeta("/registry/summary"),addMeta),"AI systems registry",setReg,false,setWarn);
-    soft(apiFetch("/findings?type=mcp_server&latestOnly=true&limit=500"),"MCP servers",setMcp,false,setWarn);
-    soft(apiFetch("/findings?type=agent_project&latestOnly=true&limit=500"),"agent projects",setProj,false,setWarn);
+    const refresh=tick>0;
+    // First load: the usual soft() (fallback + warning). Refresh: keep what is
+    // on screen if a leg fails.
+    const load=(p,label,setter)=>refresh?p.then(setter).catch(()=>{}):soft(p,label,setter,false,setWarn);
+    tapMeta(apiFetchWithMeta("/overview"),addMeta).then(x=>{setD(x);setAsOf(new Date());}).catch(x=>{ if(!refresh) setE(x.message); });
+    load(tapMeta(apiFetchWithMeta("/registry/summary"),addMeta),"AI systems registry",setReg);
+    load(apiFetch("/findings?type=mcp_server&latestOnly=true&limit=500"),"MCP servers",setMcp);
+    load(apiFetch("/findings?type=agent_project&latestOnly=true&limit=500"),"agent projects",setProj);
     // A genuinely new axis for this tile — everything else in the KPI strip
     // is about WHAT tools exist and how risky they are; this is about WHO.
     // Same endpoint Risk Scores' own summary cards read.
-    soft(tapMeta(apiFetchWithMeta("/risk-scores/summary"),addMeta),"employee risk scores",setRiskSummary,false,setWarn);
+    load(tapMeta(apiFetchWithMeta("/risk-scores/summary"),addMeta),"employee risk scores",setRiskSummary);
     // adminJson, not apiFetch: /access-requests is behind requireAdminAuth, so
     // apiFetch's credential-less GET now 401s and this tile would read "0
     // pending" forever. soft() still handles the no-token build — the count
     // falls back and the warning strip names "access requests" — but with a
     // token the number is real again.
-    soft(adminJson("/access-requests"),"access requests",setReqs,false,setWarn);
-    soft(tapMeta(apiFetchWithMeta("/dlp?severity=critical,high&limit=1"),addMeta),"recent detections",setHiEv,false,setWarn);
+    load(adminJson("/access-requests"),"access requests",setReqs);
+    load(tapMeta(apiFetchWithMeta("/dlp?severity=critical,high&limit=1"),addMeta),"recent detections",setHiEv);
     // Real per-day counts, zero-filled server-side — replaces the old lifetime
     // total (which needed pulling up to 10,000 raw events/files client-side
     // just to produce one number) with the same severity definition, bucketed
@@ -1276,16 +1296,20 @@ function OverviewView() {
       setToolsStatus(st);
       setToolsRisk(rk);
     }).catch(()=>{});
-  },[]);
+  },[tick]);
   // Separate from the page load above so changing the range refetches only the
   // trend. The previous series stays on screen until the new one arrives, and a
-  // response from an earlier selection that lands late is dropped.
+  // response from an earlier selection that lands late is dropped. Also re-runs
+  // on every auto-refresh tick, silently (a failed refresh keeps the old series).
   useEffect(()=>{
     let live=true;
     const addMeta=m=>setStaleMeta(prev=>mergeStaleMeta(prev,m));
-    soft(tapMeta(apiFetchWithMeta(`/dlp/trend?days=${dlpDays}`),addMeta),"DLP event trend",v=>{if(live) setDlpTrend(v);},false,setWarn);
+    const p=tapMeta(apiFetchWithMeta(`/dlp/trend?days=${dlpDays}`),addMeta);
+    const set=v=>{if(live) setDlpTrend(v);};
+    if(tick>0) p.then(set).catch(()=>{});
+    else soft(p,"DLP event trend",set,false,setWarn);
     return ()=>{live=false;};
-  },[dlpDays]);
+  },[dlpDays,tick]);
   if(e) return <Err msg={e}/>;
   if(!d) return <Loading/>;
 
