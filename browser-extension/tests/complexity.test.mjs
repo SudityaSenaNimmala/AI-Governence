@@ -587,12 +587,109 @@ test('classifyDetailed agrees with classify and is total', () => {
   }
 });
 
-test('VERSION is 1.4.0 (small talk + ARITHMETIC_SHAPE)', () => {
-  assert.equal(VERSION, '1.4.0');
+test('VERSION is 1.5.0 (productBuild; small talk + ARITHMETIC_SHAPE kept)', () => {
+  assert.equal(VERSION, '1.5.0');
   const src = readFileSync(path.join(root, 'content', 'complexity.js'), 'utf8');
   assert.match(src, /const ARITHMETIC_SHAPE = \{/);
   assert.match(src, /const SMALL_TALK = \[/);
   assert.match(src, /const SMALL_TALK_FILLER = \[/);
+  assert.match(src, /compileCategory\('productBuild', PRODUCT_BUILD, PRODUCT_BUILD_STRUCTURE\)/);
+});
+
+// ── Whole-product builds (classifier 1.5.0) ────────────────────────────────
+//
+// Live bug: "create a replica of whatsapp" scored 0 -> 'moderate' and was routed
+// to a mid/economy model. A request for an entire product must be 'complex' on
+// its own; a single component must stay 'moderate' — never complex, never simple.
+
+const PRODUCT_BUILD_VERDICTS = [
+  // the reported prompts
+  ['create a replica of whatsapp', 'complex'],
+  ['build a clone of instagram', 'complex'],
+  ['build a full e-commerce website with payments', 'complex'],
+  // every pattern, once
+  ['Create a replica of WhatsApp', 'complex'],
+  ['create a version of youtube', 'complex'],
+  ['build me an uber clone', 'complex'],
+  ['make an airbnb-like app', 'complex'],
+  ['develop a website like amazon', 'complex'],
+  ['build a clone of Acme', 'complex'], // unlisted product, proper noun
+  ['build a clone of twitter/x', 'complex'],
+  ['make a replica of uber in flutter', 'complex'],
+  ['build a full-stack MERN social media app', 'complex'],
+  ['create a scalable, production-ready SaaS platform', 'complex'],
+  ['build the frontend and backend for my startup', 'complex'],
+  ['build a chat app with authentication and real-time messaging', 'complex'],
+  ['can you build a todo app in react with authentication and a database', 'complex'],
+  // single components: at least moderate, never complex
+  ['write a todo app in react', 'moderate'],
+  ['create a login page', 'moderate'],
+  ['create a login page with authentication', 'moderate'],
+  ['write a todo app with a database', 'moderate'],
+  ['build a slack app', 'moderate'],
+  ['build a youtube downloader', 'moderate'],
+  // no build verb -> the rule never fires
+  ['what is a whatsapp', 'moderate'],
+  ['how does instagram make money', 'moderate'],
+  ['what is the difference between frontend and backend', 'moderate'],
+  ['what is a full stack developer', 'moderate'],
+  ['Explain how WhatsApp end-to-end encryption works', 'moderate'],
+  // a build verb, but not a whole product
+  ['make a copy of my gmail signature', 'moderate'],
+  ['make a copy of zoom level', 'moderate'],
+  ['make a full list of apps', 'moderate'],
+  ['make the app full screen', 'moderate'],
+  ['write a complete system prompt for a tutor', 'moderate'],
+  ['how do I clone a github repo', 'moderate'],
+  ['create a replica of the Eiffel tower', 'moderate'],
+  ['write a function to make a copy of the array', 'moderate'],
+];
+
+for (const [prompt, expected] of PRODUCT_BUILD_VERDICTS) {
+  test(`productBuild: ${JSON.stringify(prompt)} -> ${expected}`, () => {
+    assert.equal(classify(prompt), expected);
+  });
+}
+
+test('productBuild: one product-build signal alone reaches COMPLEX_AT', () => {
+  // "build a full e-commerce website with payments" matches nothing else in the
+  // lexicon, so its whole score is the one structural signal.
+  assert.deepEqual(classifyDetailed('build a full e-commerce website with payments'),
+    { verdict: 'complex', rule: 'score', score: 6 });
+});
+
+test('productBuild: asking for a simple explanation does not make a whole product cheap', () => {
+  // weight 6 >= STRONG_WEIGHT vetoes the step-5 override; the -5 still applies.
+  const d = classifyDetailed('explain like im 5 how to build a clone of whatsapp');
+  assert.notEqual(d.verdict, 'simple');
+  assert.equal(d.rule, 'score');
+});
+
+test('productBuild: repeating a prompt never changes its tier', () => {
+  for (const [prompt] of PRODUCT_BUILD_VERDICTS) {
+    assert.equal(classify(repeated(prompt)), classify(prompt), `repetition moved ${JSON.stringify(prompt)}`);
+  }
+});
+
+test('productBuild: the patterns are bounded to one sentence', () => {
+  // The verb and the product sit in different sentences: not a build request.
+  assert.equal(classify('I want to learn. Is whatsapp a clone of something?'), 'moderate');
+});
+
+test('productBuild: the region is self-contained (the desktop enforcer evaluates it in isolation)', () => {
+  const src = readFileSync(path.join(root, 'content', 'complexity.js'), 'utf8');
+  const a = src.indexOf('// <cfai:product-build>');
+  const b = src.indexOf('// </cfai:product-build>');
+  assert.ok(a > 0 && b > a, 'product-build sentinels missing');
+  // eslint-disable-next-line no-new-func
+  const list = new Function(`'use strict';\n${src.slice(a, b)}\nreturn PRODUCT_BUILD_STRUCTURE;`)();
+  assert.equal(list.length, 7);
+  for (const s of list) {
+    assert.equal(s.weight, 6, `${s.key} must reach COMPLEX_AT alone`);
+    // .NET Regex rejects these JS-only constructs; the C# port compiles the sources.
+    assert.doesNotMatch(s.re.source, /\(\?<[=!]|\(\?<[A-Za-z]|\\p\{|\(\?[a-z]+[:)]/, `${s.key} uses a non-portable construct`);
+    assert.ok(!s.re.flags.includes('g'), `${s.key}: a /g regex keeps lastIndex across .test() calls`);
+  }
 });
 
 // The shared corpus (shared/complexity-corpus.json) is what the desktop

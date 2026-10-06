@@ -6711,6 +6711,9 @@ public static class CfaiEnforcer
             if (term == null || weight == 0 || hits.ContainsKey(term)) continue;
             hits[term] = weight; order.Add(term);
         }
+        // Structural signals arrive as {source, flags} data. complexity.js 1.5.0's
+        // PRODUCT_BUILD ("create a replica of whatsapp" -> complex) is seven of
+        // these, incl. one case-SENSITIVE pattern (flags "") — no code change here.
         foreach (var sig in cat.Structural)
         {
             if (!hits.ContainsKey(sig.Key) && sig.Rx.IsMatch(sample)) { hits[sig.Key] = sig.Weight; order.Add(sig.Key); }

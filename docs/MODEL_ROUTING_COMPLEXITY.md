@@ -1,7 +1,7 @@
 # Prompt complexity: the rules that decide simple / moderate / complex
 
 **Component:** `browser-extension/content/complexity.js` (`window.__cfaiComplexity`) — the single source of truth
-**Classifier version:** `1.4.0`  ·  **decideRoute version:** `1.0.0` (§7)
+**Classifier version:** `1.5.0`  ·  **decideRoute version:** `1.0.0` (§7)
 **Consumers:** every routing engine (see §0). What a verdict then *does* — which tier, which label, which effort — is decided by the shared `decideRoute` (§7).
 
 This document is the specification of a customer-visible behaviour: it decides which
@@ -25,7 +25,7 @@ must mean the same thing by `simple`.
 | Desktop injector (`agent/src/desktop_injector/`) | Claude Desktop and other Electron apps | `complexity.inline.js`, embedded as text by `hook-template.js` and evaluated in each renderer — generated verbatim copy |
 | Desktop enforcer (C#, `agent/src/os_monitor/enforcer-win.ps1`) — **a shipped engine** | Model pickers driven through Windows UI Automation (Claude Desktop, and web pickers in a browser window) | The scoring ALGORITHM is ported to C#; the lexicon, thresholds and structural signals are shipped to it as data (`CFAI_MODEL_ROUTER_CONFIG`), extracted from the canonical file by `agent/src/os_monitor/model-router-config.js` |
 
-The C# enforcer is not a fourth classifier: it scores the extracted lexicon with a fixed port of `scoreCategory`/`decide`, so a lexicon or weight change reaches it with no C# edit (adding a *category* needs one line in `model-router-config.js`, see §6). The arithmetic patterns (`ARITHMETIC_SHAPE`) and the small-talk lists (`SMALL_TALK`, `SMALL_TALK_FILLER`) ship to it as data too. The C# side rewrites every JS regex so `\b`, `\w`, `\d` and `\s` keep their JS (ASCII / JS-whitespace) meaning (`MrJsRegexToNet`). The two generated JS artifacts come from the canonical file via
+The C# enforcer is not a fourth classifier: it scores the extracted lexicon with a fixed port of `scoreCategory`/`decide`, so a lexicon or weight change reaches it with no C# edit (adding a *category* needs one line in `model-router-config.js`, see §6). The arithmetic patterns (`ARITHMETIC_SHAPE`) and the small-talk lists (`SMALL_TALK`, `SMALL_TALK_FILLER`) ship to it as data too, and so do the whole-product build patterns (`PRODUCT_BUILD_STRUCTURE`, 1.5.0): `model-router-config.js` compiles them by evaluating the self-contained `// <cfai:product-build>` region of the classifier source in isolation and ships `{source, flags}`. The C# scorer is generic over categories and structural lists, so 1.5.0 needed no C# code change — only data. The C# side rewrites every JS regex so `\b`, `\w`, `\d` and `\s` keep their JS (ASCII / JS-whitespace) meaning (`MrJsRegexToNet`). The two generated JS artifacts come from the canonical file via
 `node scripts/gen-proxy-complexity.mjs`, and `agent/tests/complexity-parity.test.mjs`
 fails if any path disagrees with the canonical verdict on any prompt in its corpus.
 `agent/tests/complexity-lockstep.test.mjs` does the same for the **compiled C# port**:
@@ -178,10 +178,10 @@ At least one real small-talk phrase must be present.
 
 ## 3. The score
 
-Thirteen compiled categories. Ten contribute positively, three negatively.
+Fourteen compiled categories. Eleven contribute positively, three negatively.
 
-> `shallowTask` is scored *positively* at +1 — it is counted among the ten positive
-> categories. `researchDepth` (added in 1.3.0) is the tenth.
+> `shallowTask` is scored *positively* at +1 — it is counted among the eleven positive
+> categories. `researchDepth` (added in 1.3.0) is the tenth, `productBuild` (1.5.0) the eleventh.
 
 ### Per-category cap
 
@@ -214,6 +214,7 @@ genuinely hard in three different dimensions. Inflections of one lexicon entry
 | `analysis` | 2–3 | `analy*`, `audit(s)/auditing`, `benchmark*` (3); `assess`, `critique`, `profile`, `correlate`, `interpret` (2) |
 | `outputComplexity` | 2–3 | `production-ready`, `deep dive` (3); `comprehensive`, `thorough`, `detailed`, `in-depth`, `walkthrough`, `write a report`, `spec`, `proposal` (2) |
 | `researchDepth` *(1.3.0)* | 2–6 | **`deep research`, `literature review*`, `systematic review*`, `meta-analys*` (6)** — like `architect*`, each clears COMPLEX_AT alone; `research*`, `cite sources`, `with citations`, `evaluate/weigh the evidence`, `counterargument*`, `reason through`, `chain of reasoning`, `proof(s)`, `theorem*` (4); `investigat*`, `citations`, `primary/credible sources`, `multi-step`, `reason about`, `hypothes*`, `prove that`, `lemma`, `synthesi*`, `state of the art`, `methodolog*`, `critically`, `forecast*` (3); `evidence`, `nuanced` (2). **Plus structural:** a third numbered part at line start, `3.`/`3)` (3) — a multi-part brief |
+| `productBuild` *(1.5.0)* | 2–6 | `full-stack`/`full stack`/`fullstack`, `clone of`, `replica of` (2) — weak corroboration only. **Plus structural, each weight 6, so any one reaches COMPLEX_AT alone.** Every pattern needs a build verb (build / create / make / develop / implement / design / code / write / clone / want / need) earlier in the **same sentence**: `#product-clone` *clone / replica / copy / version of* a known product (WhatsApp, Instagram, Uber, Airbnb, Netflix, YouTube, Twitter, Slack, Spotify, Amazon, TikTok, Zoom, Discord, Notion, Gmail, LinkedIn, Swiggy, Zomato, …) not followed by a part-word (`level`, `signature`, `repo`, `page`, …); `#product-suffix` *a WhatsApp clone*, *an Airbnb-like app*; `#product-like` *a website like Amazon*; `#product-clone-name` *clone of* + a Capitalised name (case-sensitive: "clone of Acme"); `#whole-app` *full / complete / entire / end-to-end / production-ready / scalable / full-stack / fully functional* + at most three non-preposition words + *app / application / website / platform / system / SaaS / marketplace / e-commerce / online store / social network / MVP*; `#full-stack-scope` frontend **and** backend; `#feature-scope` an app / website / platform *with* two features (auth, login, payments, checkout, real-time, chat, database, notifications, search, cart, …) |
 | `shallowTask` | +1 | `fix`, `error`, `exception`, `code`, `function`, `summar*`, `write a haiku/poem/story/email`. **Positive, not negative** — these indicate work, just not hard work |
 
 ### Negative categories
@@ -231,7 +232,7 @@ tokens **and** at most 2 real content words ride along. Otherwise
 "hi, can you design a distributed cache?" would collect −8 from `hi` and be
 downgraded — it is a distributed-systems question with a greeting bolted on.
 
-Final score = (sum of all ten positive categories, each capped at 2 terms)
+Final score = (sum of all eleven positive categories, each capped at 2 terms)
 \+ `simpleTask` + `simplicityRequest` + (`trivialIntent` if greetings dominate).
 
 ---
@@ -264,6 +265,11 @@ Verified against the shipped classifier.
 | `good morning` | Small talk (step 3c) | **simple** |
 | `how are you doing today?` | Small talk (step 3c) | **simple** |
 | `hi, please do deep research on EU AI regulation` | Words survive 3c; `deep research` 6; greeting does not dominate → no −8 | **complex** |
+| `create a replica of whatsapp` | `#product-clone` 6 + `replica of` 2 = 8 | **complex** |
+| `build a full e-commerce website with payments` | `#whole-app` 6 | **complex** |
+| `write a todo app in react` | No product, no whole-app modifier, one component → 0 | moderate |
+| `create a login page` | A page is not a product noun → 0 | moderate |
+| `how does instagram make money` | No build-verb + clone / like / whole-app shape → 0 | moderate |
 
 ---
 
@@ -288,7 +294,15 @@ Verified against the shipped classifier.
    `allow_upgrade` off caps every route at the tier the *user* last chose themselves
    (§7.4). If the user switches the model back after a route, that conversation is
    left alone (`respect_user_override`, default on).
-7. **No question-count signal.** Three or more question marks look like research
+7. **Whole-product builds are a phrase shape, not comprehension (1.5.0).** The
+   product list is finite: an unlisted product is caught only as "clone of" + a
+   Capitalised name, so a lower-case unlisted name stays `moderate`. A verb and a
+   product in different sentences never combine. "create a replica of the Eiffel
+   tower" is `moderate` (`replica` needs a listed product; only `clone` takes an
+   arbitrary proper noun). A single component ("create a login page", "write a
+   todo app in react") is `moderate`; the same todo app "with authentication and a
+   database" is two features and is `complex`.
+8. **No question-count signal.** Three or more question marks look like research
    structure but are really a repetition count; only a numbered third part (`3.`) is
    read as a multi-part brief.
 
@@ -316,6 +330,9 @@ Every change **must**:
    A **new category** also needs its name (and any structural list) added to
    `POSITIVE_CATEGORY_NAMES` / `STRUCTURAL_FOR_CATEGORY` in
    `agent/src/os_monitor/model-router-config.js`, or the C# enforcer never sees it.
+   A structural list that is *built* rather than written as literals (like
+   `PRODUCT_BUILD_STRUCTURE`) lives in a self-contained `// <cfai:tag>` region and
+   is registered in `STRUCTURAL_REGIONS` there.
 4. Update this document.
 5. Keep `browser-extension/tests/complexity.test.mjs` (the acceptance table where
    intended behaviour is defined), `agent/tests/complexity-parity.test.mjs`

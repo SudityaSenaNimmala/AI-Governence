@@ -108,7 +108,7 @@ test('the shared corpus is substantial and covers the reported prompts', () => {
   const ids = CORPUS.cases.map((c) => c.id);
   assert.equal(new Set(ids).size, ids.length, 'corpus ids must be unique');
   const groups = new Set(CORPUS.cases.map((c) => c.group));
-  for (const g of ['greeting', 'mixed', 'arithmetic', 'research', 'code', 'long', 'edge']) {
+  for (const g of ['greeting', 'mixed', 'arithmetic', 'research', 'code', 'long', 'edge', 'product_build']) {
     assert.ok(groups.has(g), `corpus group ${g} missing`);
   }
 });
