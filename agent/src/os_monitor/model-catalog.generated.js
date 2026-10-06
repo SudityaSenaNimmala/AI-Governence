@@ -262,7 +262,7 @@ export const MODEL_CATALOG = {
     "gemini.google.com": {
       "provider": "google",
       "verified": true,
-      "evidence": "agent/src/os_monitor/ai-processes.js gemini_web modelPicker, live pass 2026-09-22: button 'Open mode picker, currently Pro'; items '3.5 Flash-Lite Fastest answers', '3.8 Flash All-around help New', 'Selected 3.1 Pro Advanced reasoning', 'Extended thinking Complex problem solving'. 'Extended thinking' is an effort-like axis, never a tier.",
+      "evidence": "agent/src/os_monitor/ai-processes.js gemini_web modelPicker, live pass 2026-09-22, re-checked 2026-10-06 (menu now '3.5 Flash-Lite Fastest answers', '3.6 Flash All-around help', '3.1 Pro Advanced reasoning'; button shows short name e.g. 'Flash-Lite'): button 'Open mode picker, currently Pro'; items '3.5 Flash-Lite Fastest answers', '3.8 Flash All-around help New', 'Selected 3.1 Pro Advanced reasoning', 'Extended thinking Complex problem solving'. 'Extended thinking' is an effort-like axis, never a tier.",
       "picker": {
         "name_prefix": "Open mode picker,",
         "item_control_types": [
@@ -289,10 +289,13 @@ export const MODEL_CATALOG = {
         },
         "standard": {
           "click_labels": [
-            "3.8 Flash"
+            "3.6 Flash",
+            "3.8 Flash",
+            "Flash"
           ],
           "button_label_patterns": [
             "Flash",
+            "3.6 Flash",
             "3.8 Flash",
             "Thinking"
           ],
@@ -334,7 +337,9 @@ export const MODEL_CATALOG = {
         },
         "standard": {
           "click_labels": [
-            "3.8 Flash"
+            "3.6 Flash",
+            "3.8 Flash",
+            "Flash"
           ],
           "button_label_patterns": [
             "Flash"

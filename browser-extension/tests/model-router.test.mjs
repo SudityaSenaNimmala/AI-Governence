@@ -74,7 +74,7 @@ test('the shared catalog carries the live-measured Gemini lineup, not the retire
   const g = catalog.hosts['gemini.google.com'].tiers;
   assert.deepEqual(
     [g.premium.click_labels[0], g.standard.click_labels[0], g.economy.click_labels[0]],
-    ['3.1 Pro', '3.8 Flash', '3.5 Flash-Lite'],
+    ['3.1 Pro', '3.6 Flash', '3.5 Flash-Lite'],
     'if this fails because the lineup changed AGAIN, update the catalog and this pin together',
   );
 });
