@@ -1559,14 +1559,27 @@ function AgentsView() {
   // disappearing from the inventory.
   const UNKNOWN_USER="Unknown";
   const machineById=new Map((Array.isArray(machines)?machines:[]).map(m=>[m.id,m]));
-  const userKey=r=>{const m=machineById.get(r.machine_id); return m?.user||m?.hostname||UNKNOWN_USER;};
-  // A filter key is a person only when it came from a machine's user — a hostname
-  // fallback is shown exactly as enrolled.
-  const machineUsers=new Set([...machineById.values()].map(m=>m?.user).filter(Boolean));
-  const userKeyLabel=u=>machineUsers.has(u)?formatPersonName(u):u;
+  // WHO a finding belongs to, from what was actually recorded: the OS account in
+  // the finding's own path (C:\Users\<name>\…, /Users/<name>/…, /home/<name>/…)
+  // first, then the machine's enrolled user, then its hostname. A machine record
+  // still carrying an old demo persona (James Carter / Emily Rodriguez / Sarah
+  // Mitchell) never names a row — the path shows the real account.
+  const DEMO_PERSONA=/^(james\s*carter|emily\s*rodriguez|sarah\s*mitchell)$/i;
+  const pathUser=r=>{
+    const p=String(r.payload?.path||r.payload?.configPath||"");
+    const m=p.match(/^[A-Za-z]:[\\/]Users[\\/]([^\\/]+)[\\/]/i)||p.match(/^\/(?:Users|home)\/([^/]+)\//);
+    const u=m?.[1];
+    return u&&!/^(public|default|all users|shared)$/i.test(u)?u:null;
+  };
+  const machineUser=m=>m?.user&&!DEMO_PERSONA.test(m.user)?m.user:null;
+  const userKey=r=>{const m=machineById.get(r.machine_id); return pathUser(r)||machineUser(m)||m?.hostname||UNKNOWN_USER;};
+  // A filter key is a person when it came from a recorded OS account (path or
+  // machine user) — a hostname fallback is shown exactly as enrolled.
+  const personKeys=new Set([...mcpAll,...projectsAll].map(r=>pathUser(r)||machineUser(machineById.get(r.machine_id))).filter(Boolean));
+  const userKeyLabel=u=>personKeys.has(u)?formatPersonName(u):u;
   const renderUser=r=>{
     const m=machineById.get(r.machine_id);
-    const label=formatPersonName(m?.user)||m?.hostname;
+    const label=formatPersonName(pathUser(r)||machineUser(m))||m?.hostname;
     if(label) return <div className="aihub_text_primary">{label}</div>;
     // Unresolved: name the bucket, then the raw id so the row is still traceable.
     return <><div className="aihub_text_muted">{UNKNOWN_USER}</div><Mono>{(r.machine_id||"").slice(0,10)||"—"}</Mono></>;
