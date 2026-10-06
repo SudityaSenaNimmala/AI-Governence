@@ -7164,8 +7164,14 @@ public static class CfaiEnforcer
     // UNDETECTABLY: a Medium-effort request would be priced as High forever
     // with nothing in the data to show it.
     static void EmitRoute(string process, string provider, string fromTier, string toTier, string toLabel, string complexity, string result, int len, string reason = null,
-        string effortFrom = null, string effortTo = null)
+        string effortFrom = null, string effortTo = null, RouteMeta metaOverride = null)
     {
+        // ONE event per route run. On a route thread the first report wins and
+        // any later one is dropped -- including everything a route thread says
+        // after its watchdog already reported for it (watchdog_timeout_*).
+        RouteRun run = _tsRun;
+        if (run != null && Interlocked.Exchange(ref run.Emitted, 1) == 1) return;
+        RouteMeta meta = metaOverride ?? (run != null ? run.Meta : null) ?? _activeRouteMeta;
         string json = "{\"kind\":\"route\""
             + ",\"process\":\"" + Esc(process ?? "") + "\""
             + BrowserHostField()
@@ -7179,7 +7185,7 @@ public static class CfaiEnforcer
             + ",\"result\":\"" + Esc(result) + "\""
             + ",\"len\":" + len
             + (!string.IsNullOrEmpty(reason) ? ",\"reason\":\"" + Esc(reason) + "\"" : "")
-            + RouteMetaFields(_activeRouteMeta)
+            + RouteMetaFields(meta)
             + "}";
         lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }
@@ -7761,7 +7767,9 @@ public static class CfaiEnforcer
         // activates the highlighted item) or double-send, and SILENT -- this
         // used to emit an 'aborted' route event with every tier and the
         // complexity empty, which is the malformed live event.
-        if (_routeInProgress || _rewriteInProgress) return true;
+        // RouteInProgressLive, not the bare flag: a route past every bound is
+        // released here rather than swallowing this Enter too.
+        if (RouteInProgressLive() || _rewriteInProgress) return true;
         if (string.IsNullOrEmpty(routeId)) return false;
         string fromTier, toTier, toLabel, provider, complexity, originalText;
         int[] composerRid; IntPtr hwnd; long expiresAt; RouteCtx ctx; RouteMeta meta; AutomationElement composerEl;
@@ -7784,6 +7792,9 @@ public static class CfaiEnforcer
         if (DateTime.UtcNow.Ticks > expiresAt) { ClearPendingRoute(); EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, "expired", ctx != null ? ctx.EffortFrom : null); return false; }
 
         _activeRouteHwnd = hwnd;
+        // The start time FIRST: RouteInProgressLive must never judge this route
+        // by the previous route's clock.
+        Interlocked.Exchange(ref _routeStartedMs, RouteNowMs());
         _routeInProgress = true;
         _routeAbort = false;
         // Read by EmitRoute for the duration of THIS route only (cleared in the
@@ -7798,20 +7809,37 @@ public static class CfaiEnforcer
         // is some structural duplication between the two, which is visible and
         // reviewable; the alternative cost was a silent regression in the one
         // surface this feature already ships on.
-        Thread t;
+        //
+        // Every route runs as a RouteRun under a hard watchdog (RouteWatchdog):
+        // whatever happens on the route thread, the Enter is released, the menu
+        // closed and one event reported within _routeWatchdogMs.
+        var run = new RouteRun
+        {
+            Gen = Interlocked.Increment(ref _routeGenCounter),
+            Hwnd = hwnd, Ctx = ctx, Meta = meta,
+            Provider = provider ?? "", FromTier = fromTier ?? "", ToTier = toTier ?? "", ToLabel = toLabel ?? "",
+            Complexity = complexity ?? "", EffortFrom = ctx != null ? (ctx.EffortFrom ?? "") : "",
+            OriginalText = originalText ?? "", ComposerRid = composerRid,
+            Composer = ctx != null ? null : composerEl,
+            StartedMs = RouteNowMs(),
+        };
+        Action body;
         if (ctx != null)
         {
             RouteCtx c = ctx;
-            t = new Thread(() => RunWebRoute(routeId, fromTier, toTier, toLabel, provider, complexity, originalText, composerRid, hwnd, c));
+            body = () => RunWebRoute(routeId, fromTier, toTier, toLabel, provider, complexity, originalText, composerRid, hwnd, c);
         }
         else
         {
             AutomationElement ce = composerEl;
-            t = new Thread(() => RunRoute(routeId, fromTier, toTier, toLabel, provider, complexity, originalText, composerRid, hwnd, ce));
+            body = () => RunRoute(routeId, fromTier, toTier, toLabel, provider, complexity, originalText, composerRid, hwnd, ce);
         }
-        t.IsBackground = true;
-        t.SetApartmentState(ApartmentState.STA);
-        t.Start();
+        if (!StartRouteThread(run, body))
+        {
+            // No thread, no route: the Enter goes through untouched, unrouted.
+            ClearPendingRoute();
+            return false;
+        }
         return true;
     }
 
@@ -8350,27 +8378,64 @@ public static class CfaiEnforcer
     // One left click inside the composer's own rectangle, toward its right end
     // (empty editor space: the caret lands at a line end, never on a control).
     // Refused unless the point is in the pinned window. The cursor is put back.
+    //
+    // GEMINI ROOT CAUSE (2026-10-06 "not_submitted", the menu left open): the
+    // point used to be FIXED at 12px in from the right edge. Gemini's mode
+    // picker sits at the composer's right, inside that rectangle, so the
+    // "refocus" click opened the model menu. Now each candidate point
+    // (RouteClickCandidates) is hit-tested first and clicked only when the
+    // element there is the composer (or inside it, or one of its two nearest
+    // ancestors) -- never a button, menu item or overlay on top of it. No
+    // acceptable point -> no click (SetFocus alone, and the gate decides).
     static bool RouteClickInto(AutomationElement el, IntPtr pinnedHwnd)
     {
-        if (el == null) return false;
+        if (el == null || !RouteOwned()) return false;
         try
         {
             System.Windows.Rect r = el.Current.BoundingRectangle;
             if (r.IsEmpty || r.Width < 4 || r.Height < 4) return false;
-            POINT p;
-            p.X = (int)(r.Right - Math.Min(12.0, r.Width / 4));
-            p.Y = (int)(r.Top + r.Height / 2);
-            IntPtr at = WindowFromPoint(p);
-            if (at == IntPtr.Zero || GetAncestor(at, GA_ROOT_WINDOW) != pinnedHwnd) return false;
-            POINT saved;
-            bool hadPos = GetCursorPos(out saved);
-            SetCursorPos(p.X, p.Y);
-            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
-            Thread.Sleep(20);
-            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
-            Thread.Sleep(30);
-            if (hadPos) SetCursorPos(saved.X, saved.Y);
-            return true;
+            int[] rid = null;
+            try { rid = el.GetRuntimeId(); } catch { }
+            if (rid == null) return false;
+            var walker = TreeWalker.ControlViewWalker;
+            var ancestors = new List<int[]>();
+            try
+            {
+                AutomationElement up = walker.GetParent(el);
+                for (int i = 0; i < 2 && up != null; i++)
+                {
+                    try { ancestors.Add(up.GetRuntimeId()); } catch { }
+                    up = walker.GetParent(up);
+                }
+            }
+            catch { }
+            foreach (POINT p in RouteClickCandidates(r.Left, r.Top, r.Width, r.Height))
+            {
+                IntPtr at = WindowFromPoint(p);
+                if (at == IntPtr.Zero || GetAncestor(at, GA_ROOT_WINDOW) != pinnedHwnd) continue;
+                AutomationElement hit = null;
+                try { hit = AutomationElement.FromPoint(new System.Windows.Point(p.X, p.Y)); } catch { }
+                if (hit == null) continue;
+                var chain = new List<int[]>();
+                AutomationElement h = hit;
+                for (int i = 0; i < 6 && h != null; i++)
+                {
+                    try { chain.Add(h.GetRuntimeId()); } catch { chain.Add(null); }
+                    try { h = walker.GetParent(h); } catch { h = null; }
+                }
+                if (!RouteHitIsComposer(chain, rid, ancestors)) continue;
+                if (!RouteOwned()) return false;
+                POINT saved;
+                bool hadPos = GetCursorPos(out saved);
+                SetCursorPos(p.X, p.Y);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+                Thread.Sleep(20);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                Thread.Sleep(30);
+                if (hadPos) SetCursorPos(saved.X, saved.Y);
+                return true;
+            }
+            return false;
         }
         catch { return false; }
     }
@@ -8415,10 +8480,10 @@ public static class CfaiEnforcer
             if (found != null) { cand = found; return null; }
             return readable ? "text_changed" : "no_element";
         };
-        io.FocusCandidate = delegate { try { cand.SetFocus(); return true; } catch { return false; } };
+        io.FocusCandidate = delegate { if (!RouteOwned()) return false; try { cand.SetFocus(); return true; } catch { return false; } };
         io.ClickCandidate = delegate { return RouteClickInto(cand, pinnedHwnd); };
         io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
-        io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+        io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
 
         RouteRefocusOutcome o = RouteRefocusComposer(io);
         reason = o.Ok ? null : (o.Reason ?? "no_element");
@@ -8436,6 +8501,662 @@ public static class CfaiEnforcer
     {
         return vk == VK_RETURN && !ctrl && !alt && !shift && !injected
             && routeInProgress && !rewriteInProgress && fgIsRouteWindow;
+    }
+
+    // ════ STUCK IS IMPOSSIBLE: the route run, its claims, and the watchdog ═══
+    //
+    // Live 2026-10-06 (agent 35d74860): "sometimes the model routing gets stuck
+    // -- it just opens the model window but doesn't change, and gets stuck
+    // there." Telemetry: gemini.google.com failed complex 3.5 Flash-Lite -> 3.1
+    // Pro "not_submitted", and earlier interrupted_after_expand_no_fallback_
+    // navigated. Every route attempt now ends in the same INVARIANT, whatever
+    // happens inside it -- a UIA call that never returns, an exception, a menu
+    // that will not close:
+    //   (a) no model menu / submenu / confirm dialog left open (collapse, or
+    //       Escape into the PINNED window only, while a menu is seen open);
+    //   (b) the prompt is sent EXACTLY ONCE (routed or unrouted), or -- when a
+    //       send is not safe (the user edited, the window/page changed, the
+    //       route's state is unknown) -- left intact in the composer with focus
+    //       put back on it;
+    //   (c) ONE route event with a precise reason.
+    //
+    // HOW. Every route runs as a RouteRun. Two atomic claims decide who owns
+    // what, so the route thread and the watchdog can never both act:
+    //   Claim   OPEN -> SENDING (the route thread, immediately before its one
+    //           Enter: from then on it owns the outcome) or OPEN -> WATCHDOG (the
+    //           watchdog, at the deadline: from then on the route thread may not
+    //           send, click, Escape or report anything -- RouteOwned() and
+    //           RouteCheckpoint() refuse, and RouteClaimSend() fails).
+    //   Emitted 0 -> 1 by whichever reports first; EmitRoute drops the rest.
+    // The watchdog ALSO releases the swallowed Enter (_routeInProgress) before it
+    // touches UIA at all, so a route thread that is hung inside a UIA call can
+    // never leave the user's Enter key dead. The hook carries its own staleness
+    // test (RouteInProgressLive) in case the watchdog thread itself never ran.
+    class RouteRun
+    {
+        public int Gen;
+        public IntPtr Hwnd;
+        public RouteCtx Ctx;
+        public RouteMeta Meta;
+        public string Provider = "", FromTier = "", ToTier = "", ToLabel = "", Complexity = "", EffortFrom = "";
+        public string OriginalText = "";
+        public int[] ComposerRid;
+        public AutomationElement Composer;
+        public long StartedMs;
+        public int Claim;              // ROUTE_CLAIM_*
+        public int Emitted;            // 1 once the route's ONE event is out
+        public int Resends;            // at most 1, and only on positive evidence the Enter went to the picker
+        public volatile string Stage = "start";
+        public volatile bool Finished;
+    }
+
+    const int ROUTE_CLAIM_OPEN = 0, ROUTE_CLAIM_SENDING = 1, ROUTE_CLAIM_WATCHDOG = 2;
+    // The hard end-to-end bound on one route, from the swallowed Enter to the
+    // ONE send (the post-send read-back runs after the send claim and is not
+    // bounded by it). A field, not a const, only so the harness can shorten it.
+    static int _routeWatchdogMs = 6000;
+    // After the route thread claimed its send, how much longer the watchdog
+    // waits for it to report before reporting "send_unverified_watchdog" itself.
+    static int _routeWatchdogEmitGraceMs = 3000;
+    // The hook's own backstop: a route "in progress" this long past the
+    // watchdog deadline is stale, whatever its thread is doing.
+    const int ROUTE_HOOK_STALE_GRACE_MS = 1500;
+
+    [ThreadStatic] static RouteRun _tsRun;
+    static readonly object _routeRunLock = new object();
+    static RouteRun _activeRun = null;
+    static int _routeGenCounter = 0;
+    static long _routeStartedMs = 0;
+
+    // Thrown on the route thread by RouteCheckpoint once the watchdog owns the
+    // route. Caught (silently -- the watchdog reports) by RunRoute/RunWebRoute.
+    class RouteAbandonedException : Exception { }
+
+    static long RouteNowMs() { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; }
+
+    static bool RouteSafeBool(Func<bool> f)
+    {
+        try { return f != null && f(); } catch { return false; }
+    }
+
+    // May THIS thread still act on the page for its route? Always true off a
+    // route thread (the watchdog's own cleanup, the harness).
+    static bool RouteOwned()
+    {
+        RouteRun r = _tsRun;
+        return r == null || Thread.VolatileRead(ref r.Claim) != ROUTE_CLAIM_WATCHDOG;
+    }
+
+    // Names the stage the route is in (for the watchdog's reason) and stops the
+    // route thread dead once the watchdog has taken the route over.
+    static void RouteCheckpoint(string stage)
+    {
+        RouteRun r = _tsRun;
+        if (r == null) return;
+        if (stage != null) r.Stage = stage;
+        if (Thread.VolatileRead(ref r.Claim) == ROUTE_CLAIM_WATCHDOG) throw new RouteAbandonedException();
+    }
+
+    // THE one-send claim. True exactly once per route, and never after the
+    // watchdog took it over. Off a route thread (legacy/harness callers) it is
+    // always true -- they have no watchdog to race.
+    static bool RouteClaimSend()
+    {
+        RouteRun r = _tsRun;
+        if (r == null) return true;
+        r.Stage = "send";
+        return Interlocked.CompareExchange(ref r.Claim, ROUTE_CLAIM_SENDING, ROUTE_CLAIM_OPEN) == ROUTE_CLAIM_OPEN;
+    }
+
+    // The ONE re-send RouteAfterEnter may make, and only for a route that owns
+    // its send. Never off a route thread.
+    static bool RouteClaimResend()
+    {
+        RouteRun r = _tsRun;
+        if (r == null) return false;
+        if (Thread.VolatileRead(ref r.Claim) != ROUTE_CLAIM_SENDING) return false;
+        return Interlocked.Increment(ref r.Resends) == 1;
+    }
+
+    // Releases the globals the route holds (the swallowed Enter above all) --
+    // but only if THIS run still owns them: a route released by its watchdog
+    // must not, when its thread finally returns, release a NEWER route. null =
+    // the legacy unconditional release.
+    static void RouteRelease(RouteRun run)
+    {
+        lock (_routeRunLock)
+        {
+            if (run != null && _activeRun != null && _activeRun != run) return;
+            _activeRun = null;
+            _activeRouteMeta = null;
+            _routeInProgress = false;
+        }
+    }
+
+    // Pure. Has a route that started at startedMs outlived every bound?
+    static bool RouteStale(long nowMs, long startedMs)
+    {
+        return startedMs > 0 && nowMs - startedMs > _routeWatchdogMs + ROUTE_HOOK_STALE_GRACE_MS;
+    }
+
+    // What the keyboard hook and StartRoute read instead of _routeInProgress: a
+    // route that is stale is released HERE, so even a watchdog thread that never
+    // ran cannot leave Enter swallowed forever. One field read and a clock read
+    // on the hook thread; no UIA.
+    static bool RouteInProgressLive()
+    {
+        if (!_routeInProgress) return false;
+        if (!RouteStale(RouteNowMs(), Interlocked.Read(ref _routeStartedMs))) return true;
+        RouteRun r = _activeRun;
+        if (r != null) Interlocked.CompareExchange(ref r.Claim, ROUTE_CLAIM_WATCHDOG, ROUTE_CLAIM_OPEN);
+        RouteRelease(r);
+        return false;
+    }
+
+    // The route thread's body wrapper: the run is this thread's, an exception
+    // that escapes the route is reported (once) instead of killing the process,
+    // and the globals are released however the body ends.
+    static void RouteThreadBody(RouteRun run, Action body)
+    {
+        _tsRun = run;
+        try { body(); }
+        catch (Exception)
+        {
+            try
+            {
+                if (Thread.VolatileRead(ref run.Claim) != ROUTE_CLAIM_WATCHDOG)
+                {
+                    ClearPendingRoute();
+                    EmitRoute(_app, run.Provider, run.FromTier, run.ToTier, run.ToLabel, run.Complexity, "failed", -1, "exception_unhandled_" + (run.Stage ?? "unknown"), run.EffortFrom);
+                }
+            }
+            catch { }
+        }
+        finally
+        {
+            run.Finished = true;
+            RouteRelease(run);
+            _tsRun = null;
+        }
+    }
+
+    // Starts the route thread and its watchdog. False when the thread could not
+    // be started at all -- the caller then lets the Enter through, unrouted.
+    static bool StartRouteThread(RouteRun run, Action body)
+    {
+        lock (_routeRunLock) { _activeRun = run; }
+        Interlocked.Exchange(ref _routeStartedMs, run.StartedMs);
+        try
+        {
+            Thread t = new Thread(() => RouteThreadBody(run, body));
+            t.IsBackground = true;
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+        }
+        catch
+        {
+            run.Finished = true;
+            RouteRelease(run);
+            return false;
+        }
+        try
+        {
+            Thread w = new Thread(() => RouteWatchdog(run));
+            w.IsBackground = true;
+            w.Start();
+        }
+        catch { }   // RouteInProgressLive is the backstop
+        return true;
+    }
+
+    static void RouteWatchdog(RouteRun run)
+    {
+        try
+        {
+            long deadline = run.StartedMs + _routeWatchdogMs;
+            while (!run.Finished)
+            {
+                long left = deadline - RouteNowMs();
+                if (left <= 0) break;
+                Thread.Sleep((int)Math.Min(left, 50));
+            }
+            if (!run.Finished) RouteWatchdogFire(run);
+        }
+        catch { }
+    }
+
+    // The deadline passed and the route has not finished.
+    static void RouteWatchdogFire(RouteRun run)
+    {
+        int prev = Interlocked.CompareExchange(ref run.Claim, ROUTE_CLAIM_WATCHDOG, ROUTE_CLAIM_OPEN);
+        string stage = run.Stage ?? "unknown";
+        // FIRST, before any UIA call (which could hang exactly like the route's
+        // did): the Enter key is the user's again.
+        if (prev == ROUTE_CLAIM_OPEN) _routeAbort = true;
+        RouteRelease(run);
+        if (prev == ROUTE_CLAIM_OPEN)
+        {
+            // The route never sent. Its state is unknown, so the watchdog does
+            // not send either: the prompt stays in the composer (b), the menu is
+            // closed and focus put back on the composer on a thread of its own (a).
+            ClearPendingRoute();
+            if (Interlocked.Exchange(ref run.Emitted, 1) == 0)
+                EmitRoute(_app, run.Provider, run.FromTier, run.ToTier, run.ToLabel, run.Complexity, "failed", -1, "watchdog_timeout_" + stage, run.EffortFrom, null, run.Meta);
+            try
+            {
+                Thread c = new Thread(() => RouteWatchdogCleanup(run));
+                c.IsBackground = true;
+                c.SetApartmentState(ApartmentState.STA);
+                c.Start();
+            }
+            catch { }
+            return;
+        }
+        // The route thread claimed its send and owns the report. If it never
+        // gets to make it (hung in the post-send read-back), report for it.
+        long graceEnd = RouteNowMs() + _routeWatchdogEmitGraceMs;
+        while (!run.Finished && RouteNowMs() < graceEnd) Thread.Sleep(50);
+        if (!run.Finished && Interlocked.Exchange(ref run.Emitted, 1) == 0)
+            EmitRoute(_app, run.Provider, run.FromTier, run.ToTier, run.ToLabel, run.Complexity, "failed", -1, "send_unverified_watchdog_" + stage, run.EffortFrom, null, run.Meta);
+    }
+
+    // The watchdog's cleanup. Never an Enter. Only ever into the PINNED window
+    // (WebCollapseMenuUia / DesktopCollapseMenuUia press Escape only while that
+    // window is in front and a model menu is verifiably showing).
+    static void RouteWatchdogCleanup(RouteRun run)
+    {
+        try
+        {
+            if (GetForegroundWindow() != run.Hwnd) return;
+            if (run.Ctx != null) WebCollapseMenuUia(run.Hwnd, run.Ctx);
+            else DesktopCollapseMenuUia(run.Hwnd, run.Meta);
+            string why;
+            if (run.Ctx != null) WebRefocusUia(run.Hwnd, run.ComposerRid, run.Composer, run.OriginalText, out why);
+            else RouteRefocusUia(run.Hwnd, run.ComposerRid, run.Composer, run.OriginalText, out why);
+        }
+        catch { }
+    }
+
+    // ── The pre-Enter FOCUS GATE ────────────────────────────────────────────
+    //
+    // ROOT CAUSE of the Gemini "not_submitted" (07:24:11Z, 3.5 Flash-Lite ->
+    // 3.1 Pro). The switch landed (the label read back Pro), the menu read as
+    // closed, focus read as on the composer -- and the ONE Enter did not send.
+    // Two defects, both on the path between "focus verified" and "Enter":
+    //   1. The refocus click went to RouteClickInto's fixed point -- 12px in from
+    //      the composer's RIGHT edge. Gemini puts its mode picker ("Flash-Lite
+    //      v") at the composer's right, so that click OPENED THE MODEL MENU (the
+    //      menu the user saw, "stuck there"). A following SetFocus then put UIA
+    //      focus back on the composer, the check passed, nobody looked at the
+    //      menu again, and the Enter went into a page with that menu open.
+    //   2. The check was a single read. Angular Material hands focus back to
+    //      the menu TRIGGER when its menu closes; a read taken before that
+    //      settles says "composer", and the Enter then lands on the trigger --
+    //      which opens the menu again instead of sending.
+    // So immediately before every route Enter (routed or fallback, web and
+    // desktop) this gate requires: the pinned window in front, NO model menu
+    // showing, and focus on the composer holding exactly the prompt -- twice,
+    // ROUTE_GATE_SETTLE_MS apart, with the menu re-checked in between. A menu
+    // is collapsed, focus is put back (RouteClickInto now only clicks a point
+    // whose hit-test IS the composer), a page dialog that took focus (a Pro
+    // upsell / usage-limit notice on a free account) gets one Escape into the
+    // pinned window. Bounded: ROUTE_GATE_MAX_ROUNDS.
+    class RouteGateIo
+    {
+        public Func<bool> WindowOk;          // pinned window in front (web: and same page + host)
+        public Func<bool> MenuOpen;          // a model menu / submenu showing
+        public Func<string> CollapseMenu;    // null = closed; else why not
+        public Func<string> FocusVerdict;    // null = focus on the composer holding exactly the prompt
+        public Func<bool> DialogHoldsFocus;  // a page dialog has keyboard focus
+        public Action DismissDialog;         // ONE Escape into the pinned window
+        public Func<string> Refocus;         // null = focus put back; else RouteRefocusComposer's reason
+        public Action<int> Sleep;
+    }
+
+    class RouteGateOutcome
+    {
+        public bool Ok;
+        public string Reason;
+        public int Collapses, Refocuses, Dismissals, Checks;
+    }
+
+    const int ROUTE_GATE_SETTLE_MS = 150;
+    const int ROUTE_GATE_MAX_ROUNDS = 3;
+
+    static string RouteGateVerdict(RouteGateIo io)
+    {
+        string v;
+        try { v = io.FocusVerdict(); } catch { return "no_element"; }
+        return string.IsNullOrEmpty(v) ? null : v;   // "" too: a scripted delegate may yield it
+    }
+
+    // A failed gate still never leaves a menu showing.
+    static RouteGateOutcome RouteGateFail(RouteGateIo io, RouteGateOutcome o, string reason)
+    {
+        o.Ok = false;
+        o.Reason = reason;
+        if (reason != "menu_still_open" && RouteSafeBool(io.WindowOk) && RouteSafeBool(io.MenuOpen))
+        {
+            o.Collapses++;
+            try { io.CollapseMenu(); } catch { }
+        }
+        return o;
+    }
+
+    static RouteGateOutcome RouteFocusGate(RouteGateIo io)
+    {
+        var o = new RouteGateOutcome();
+        for (int round = 0; round < ROUTE_GATE_MAX_ROUNDS; round++)
+        {
+            if (!RouteSafeBool(io.WindowOk)) return RouteGateFail(io, o, "focus_changed");
+            if (RouteSafeBool(io.MenuOpen))
+            {
+                o.Collapses++;
+                string cw;
+                try { cw = io.CollapseMenu(); } catch { cw = "menu_still_open"; }
+                if (!string.IsNullOrEmpty(cw)) return RouteGateFail(io, o, cw);
+            }
+            string v = RouteGateVerdict(io);
+            if (v == null)
+            {
+                // Looks right. Let a menu's focus hand-back settle, then look again.
+                io.Sleep(ROUTE_GATE_SETTLE_MS);
+                o.Checks++;
+                if (!RouteSafeBool(io.WindowOk)) return RouteGateFail(io, o, "focus_changed");
+                if (RouteSafeBool(io.MenuOpen)) continue;   // something reopened it: collapse, next round
+                v = RouteGateVerdict(io);
+                if (v == null) { o.Ok = true; return o; }
+            }
+            if (v == "text_changed") return RouteGateFail(io, o, v);
+            if (round == ROUTE_GATE_MAX_ROUNDS - 1) return RouteGateFail(io, o, v);
+            if (o.Dismissals == 0 && RouteSafeBool(io.DialogHoldsFocus))
+            {
+                o.Dismissals++;
+                try { io.DismissDialog(); } catch { }
+                io.Sleep(120);
+            }
+            o.Refocuses++;
+            string rw;
+            try { rw = io.Refocus(); } catch { rw = "no_element"; }
+            if (string.IsNullOrEmpty(rw)) rw = null;
+            if (rw == "text_changed" || rw == "focus_changed" || rw == "no_element") return RouteGateFail(io, o, rw);
+            // Anything else: verify again from the top -- including a menu the
+            // refocus itself may have opened.
+        }
+        return RouteGateFail(io, o, "focus_unstable");
+    }
+
+    // ── After the ONE Enter ─────────────────────────────────────────────────
+    //
+    // Pure. Did it send, and if not, where did the Enter go? null = sent.
+    //   menu_reopened          a model menu is showing: the Enter went to the
+    //                          picker trigger (Material's focus hand-back) and
+    //                          opened it. POSITIVE evidence nothing was sent.
+    //   focus_not_in_composer  focus is somewhere else in the page
+    //   in_composer            the page took the Enter and did not send (a
+    //                          disabled send while the model loads, a limit
+    //                          or upsell notice)
+    static string RoutePostSendVerdict(bool stillThere, bool menuOpen, bool focusInComposer)
+    {
+        if (!stillThere) return null;
+        if (menuOpen) return "menu_reopened";
+        if (!focusInComposer) return "focus_not_in_composer";
+        return "in_composer";
+    }
+
+    // The ONE re-send: only on positive evidence the first Enter never reached
+    // the composer, and only once. Every other "not submitted" is reported and
+    // left in the composer -- a send that only LOOKS unsent must never become two.
+    static bool RouteResendAllowed(string verdict, int resendsSoFar)
+    {
+        return verdict == "menu_reopened" && resendsSoFar == 0;
+    }
+
+    class RouteAfterEnterIo
+    {
+        public Func<bool> StillThere;        // the composer still holds exactly the prompt
+        public Func<bool> MenuOpen;
+        public Func<bool> FocusInComposer;
+        public Func<string> CollapseMenu;    // null = closed
+        public Func<RouteGateOutcome> Gate;  // the pre-Enter gate, re-run before a re-send
+        public Func<bool> ClaimResend;
+        public Action SendEnter;
+        public Action RestoreFocus;          // focus back on the composer -- never an Enter
+        public Action<int> Sleep;
+        public int VerifyMs;
+    }
+
+    class RouteAfterEnterOutcome
+    {
+        public bool Submitted;
+        public string Verdict;               // null when Submitted
+        public int Resends;
+        public bool MenuLeftOpen;
+    }
+
+    static RouteAfterEnterOutcome RouteAfterEnter(RouteAfterEnterIo io)
+    {
+        var o = new RouteAfterEnterOutcome();
+        for (int pass = 0; pass < 2; pass++)
+        {
+            io.Sleep(io.VerifyMs);
+            if (!RouteSafeBool(io.StillThere)) { o.Submitted = true; return o; }
+            bool menu = RouteSafeBool(io.MenuOpen);
+            bool inComposer = !menu && RouteSafeBool(io.FocusInComposer);
+            string v = RoutePostSendVerdict(true, menu, inComposer);
+            if (menu)
+            {
+                string cw;
+                try { cw = io.CollapseMenu(); } catch { cw = "menu_still_open"; }
+                if (!string.IsNullOrEmpty(cw)) { o.MenuLeftOpen = true; o.Verdict = v + "_" + cw; return o; }
+            }
+            if (pass == 0 && RouteResendAllowed(v, o.Resends) && RouteSafeBool(io.ClaimResend))
+            {
+                RouteGateOutcome g = null;
+                try { g = io.Gate(); } catch { }
+                if (g == null || !g.Ok) { o.Verdict = v + "_resend_" + (g != null ? (g.Reason ?? "gate") : "gate"); return o; }
+                o.Resends++;
+                try { io.SendEnter(); } catch { }
+                continue;
+            }
+            o.Verdict = pass == 0 ? v : v + "_after_resend";
+            if (!inComposer) { try { io.RestoreFocus(); } catch { } }
+            return o;
+        }
+        return o;
+    }
+
+    // ── A click that can only land on the composer ──────────────────────────
+    //
+    // The candidate points inside the composer's rectangle, in order: the right
+    // end (the shape the Claude Desktop refocus was live-verified with), the
+    // left end (Gemini's mode picker sits at the right), the middle. Each is
+    // clicked ONLY if a hit-test at that point resolves to the composer itself,
+    // something inside it, or one of its two nearest ancestors -- never a
+    // button, a menu item or an overlay sitting on top of it.
+    static List<POINT> RouteClickCandidates(double left, double top, double width, double height)
+    {
+        var pts = new List<POINT>();
+        if (width < 4 || height < 4) return pts;
+        double inset = Math.Min(12.0, width / 4);
+        int midY = (int)(top + height / 2);
+        POINT a; a.X = (int)(left + width - inset); a.Y = midY; pts.Add(a);
+        POINT b; b.X = (int)(left + inset); b.Y = midY; pts.Add(b);
+        POINT c; c.X = (int)(left + width / 2); c.Y = midY; pts.Add(c);
+        return pts;
+    }
+
+    // Pure. hitChain = the hit element's RuntimeId, then its ancestors' (nearest
+    // first); composerAncestors = the composer's nearest ancestors' RuntimeIds.
+    static bool RouteHitIsComposer(List<int[]> hitChain, int[] composerRid, List<int[]> composerAncestors)
+    {
+        if (hitChain == null || hitChain.Count == 0 || composerRid == null) return false;
+        foreach (int[] rid in hitChain) if (rid != null && RuntimeIdEquals(rid, composerRid)) return true;
+        int[] hit = hitChain[0];
+        if (hit != null && composerAncestors != null)
+            foreach (int[] an in composerAncestors) if (an != null && RuntimeIdEquals(an, hit)) return true;
+        return false;
+    }
+
+    // Is keyboard focus inside a page DIALOG (role dialog / alertdialog) in the
+    // pinned window? Names are never read -- only control types.
+    static bool RouteFocusInPageDialog(IntPtr pinnedHwnd)
+    {
+        try
+        {
+            if (GetForegroundWindow() != pinnedHwnd) return false;
+            AutomationElement f = AutomationElement.FocusedElement;
+            var walker = TreeWalker.ControlViewWalker;
+            for (int up = 0; up < 12 && f != null; up++)
+            {
+                int h = 0;
+                try { h = f.Current.NativeWindowHandle; } catch { }
+                if (h != 0 && new IntPtr(h) == pinnedHwnd) return false;   // reached the window itself
+                string lct = "";
+                try { lct = f.Current.LocalizedControlType ?? ""; } catch { }
+                if (lct.IndexOf("dialog", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+                f = walker.GetParent(f);
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    // Is a model menu showing in this window? The menu's ITEMS -- elements of
+    // the given item control types whose Name (selection prefix stripped)
+    // starts at the boundary with a catalog click label, or "More models" --
+    // exist in the UIA tree only while it is open. Names are compared, never kept.
+    static bool RouteMenuLooksOpenUia(AutomationElement win, string itemTypes, string selectedPrefix, List<string> itemLabels)
+    {
+        if (win == null || string.IsNullOrEmpty(itemTypes)) return false;
+        try
+        {
+            var walker = TreeWalker.ControlViewWalker;
+            var stack = new Stack<KeyValuePair<AutomationElement, int>>();
+            stack.Push(new KeyValuePair<AutomationElement, int>(win, 0));
+            while (stack.Count > 0)
+            {
+                var cur = stack.Pop();
+                if (cur.Value > 30) continue;
+                AutomationElement el = cur.Key;
+                try
+                {
+                    if (MrItemTypeAllowed(el.Current.ControlType, itemTypes) && !el.Current.IsOffscreen)
+                    {
+                        string name = null;
+                        try { name = StripSelectedPrefix(el.Current.Name, selectedPrefix); } catch { }
+                        if (!string.IsNullOrEmpty(name))
+                        {
+                            if (ModelItemNameMatches(name, ROUTE_MORE_MODELS_LABEL)) return true;
+                            if (itemLabels != null)
+                                foreach (string l in itemLabels)
+                                    if (!string.IsNullOrEmpty(l) && ModelItemNameMatches(name, l)) return true;
+                        }
+                    }
+                }
+                catch { }
+                try
+                {
+                    AutomationElement child = walker.GetFirstChild(el);
+                    while (child != null)
+                    {
+                        stack.Push(new KeyValuePair<AutomationElement, int>(child, cur.Value + 1));
+                        child = walker.GetNextSibling(child);
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    // The desktop arm's menu check and collapse (Claude Desktop): the same
+    // RouteCollapseMenu loop the web arm runs, with the desktop item types and
+    // the app's catalog labels. Escape only into the pinned window.
+    static bool DesktopMenuLooksOpen(AutomationElement win, RouteMeta meta)
+    {
+        List<string> labels = MrAllClickLabels("desktop_app", meta != null ? meta.HostOrApp : "");
+        return RouteMenuLooksOpenUia(win, MODEL_PICKER_ITEM_CONTROL_TYPES_DEFAULT, "", labels);
+    }
+
+    static string DesktopCollapseMenuUia(IntPtr pinnedHwnd, RouteMeta meta)
+    {
+        AutomationElement win = null;
+        try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
+        if (win == null) return null;
+        var io = new RouteCollapseIo();
+        io.MenuOpen = delegate { return DesktopMenuLooksOpen(win, meta); };
+        io.CollapsePattern = delegate
+        {
+            AutomationElement p = (_mrCachedPicker != null && _mrCachedPickerHwnd == pinnedHwnd) ? _mrCachedPicker : FindModelPickerButton(win);
+            if (p != null) TryCollapsePicker(p);
+        };
+        io.WindowOk = delegate { return GetForegroundWindow() == pinnedHwnd; };
+        io.SendEscape = delegate { if (RouteOwned() && GetForegroundWindow() == pinnedHwnd) SendKeyPress(VK_ESCAPE); };
+        io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
+        RouteCollapseOutcome o = RouteCollapseMenu(io);
+        return o.Closed ? null : (o.Reason ?? "menu_still_open");
+    }
+
+    // The desktop arm's gate hands.
+    static RouteGateOutcome DesktopGateUia(IntPtr pinnedHwnd, int[] pinnedRid, AutomationElement knownComposer, string originalText, RouteMeta meta)
+    {
+        AutomationElement win = null;
+        try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
+        var io = new RouteGateIo();
+        io.WindowOk = delegate { return GetForegroundWindow() == pinnedHwnd; };
+        io.MenuOpen = delegate { return DesktopMenuLooksOpen(win, meta); };
+        io.CollapseMenu = delegate { return DesktopCollapseMenuUia(pinnedHwnd, meta); };
+        io.FocusVerdict = delegate
+        {
+            string why;
+            return AcquireRouteComposer(pinnedRid, null, originalText, false, out why) != null ? null : why;
+        };
+        io.DialogHoldsFocus = delegate { return RouteFocusInPageDialog(pinnedHwnd); };
+        io.DismissDialog = delegate { if (RouteOwned() && GetForegroundWindow() == pinnedHwnd) SendKeyPress(VK_ESCAPE); };
+        io.Refocus = delegate
+        {
+            string why;
+            RouteRefocusUia(pinnedHwnd, pinnedRid, knownComposer, originalText, out why);
+            return why;
+        };
+        io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
+        return RouteFocusGate(io);
+    }
+
+    // The desktop arm's after-Enter hands. `composer` is the element that held
+    // the prompt when the Enter went out.
+    static RouteAfterEnterOutcome DesktopAfterEnterUia(IntPtr pinnedHwnd, int[] pinnedRid, AutomationElement composer, string originalText, RouteMeta meta)
+    {
+        AutomationElement win = null;
+        try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
+        var io = new RouteAfterEnterIo();
+        io.VerifyMs = 200;   // the desktop arm's post-send window, unchanged
+        io.StillThere = delegate
+        {
+            string t = null;
+            try { t = ReadText(composer); } catch { }
+            return NormalizeWs(t) == NormalizeWs(originalText);
+        };
+        io.MenuOpen = delegate { return DesktopMenuLooksOpen(win, meta); };
+        io.FocusInComposer = delegate
+        {
+            string why;
+            return AcquireRouteComposer(pinnedRid, null, originalText, false, out why) != null;
+        };
+        io.CollapseMenu = delegate { return DesktopCollapseMenuUia(pinnedHwnd, meta); };
+        io.Gate = delegate { return DesktopGateUia(pinnedHwnd, pinnedRid, composer, originalText, meta); };
+        io.ClaimResend = delegate { return RouteClaimResend(); };
+        io.SendEnter = delegate { SendKeyPress(VK_RETURN); };
+        io.RestoreFocus = delegate
+        {
+            if (GetForegroundWindow() != pinnedHwnd) return;
+            string why;
+            RouteRefocusUia(pinnedHwnd, pinnedRid, composer, originalText, out why);
+        };
+        io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+        return RouteAfterEnter(io);
     }
 
     // Can this element hold the prompt? A menu / button / list item never can.
@@ -8522,6 +9243,12 @@ public static class CfaiEnforcer
         // in a loop with nothing else happening. One attempt per Enter,
         // always, whether it works or not.
         ClearPendingRoute();
+        RouteCheckpoint("fallback");
+        RouteMeta meta = _tsRun != null ? _tsRun.Meta : _activeRouteMeta;
+
+        // NEVER LEAVE THE MENU OPEN (invariant a), whatever happens next. Escape
+        // goes only into the pinned window, and only while a model menu is seen.
+        string menuWhy = DesktopCollapseMenuUia(pinnedHwnd, meta);
 
         // After a failed picker interaction focus is usually in the model menu
         // (or on a dismissed dialog's trigger), not the composer: put it back --
@@ -8532,8 +9259,15 @@ public static class CfaiEnforcer
         string whyNot;
         AutomationElement el = RouteRefocusUia(pinnedHwnd, pinnedComposerRid, knownComposer, originalText, out whyNot);
         if (el == null) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_" + whyNot); return; }
-        // The refocus took time: the window check again, immediately before Enter.
+        if (menuWhy != null && menuWhy != "focus_changed") { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_" + menuWhy); return; }
+        // The pre-Enter gate: window in front, no menu, focus STABLY on the
+        // composer holding exactly the prompt -- immediately before the Enter.
+        RouteGateOutcome gate = DesktopGateUia(pinnedHwnd, pinnedComposerRid, el, originalText, meta);
+        if (!gate.Ok) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_" + gate.Reason); return; }
+        // The gate took time: the window check again, immediately before Enter.
         if (GetForegroundWindow() != pinnedHwnd) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_focus_changed"); return; }
+        // Exactly one send per route: lost only to the watchdog, which then owns the report.
+        if (!RouteClaimSend()) return;
 
         Emit("prompt", _app, "", "send", originalText.Length);
         TypedClear(); _blockTyped = false; _typedPatterns = ""; _lastBlockFiredTicks = 0;
@@ -8542,25 +9276,23 @@ public static class CfaiEnforcer
         _mrLastObservedKey = "";
 
         SendKeyPress(VK_RETURN);
-        Thread.Sleep(200);
-        string postSend = null;
-        try { postSend = ReadText(el); } catch { }
-        bool stillThere = NormalizeWs(postSend) == NormalizeWs(originalText);
-        if (stillThere) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_fallback_not_submitted"); return; }
+        RouteAfterEnterOutcome after = DesktopAfterEnterUia(pinnedHwnd, pinnedComposerRid, el, originalText, meta);
+        if (!after.Submitted) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_fallback_not_submitted_" + after.Verdict); return; }
 
-        EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "sent_unrouted", originalText.Length, reason);
+        EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "sent_unrouted", originalText.Length, after.Resends > 0 ? reason + "_resent" : reason);
     }
 
     static void RunRoute(string routeId, string fromTier, string toTier, string toLabel, string provider, string complexity,
         string originalText, int[] pinnedComposerRid, IntPtr pinnedHwnd, AutomationElement pinnedComposerEl)
     {
-        RouteMeta meta = _activeRouteMeta;
+        RouteMeta meta = _tsRun != null ? _tsRun.Meta : _activeRouteMeta;
         // The best-known live reference to the user's composer: the poll
         // thread's, until the pre-flight below confirms the focused one. Every
         // fallback gets it so it can put focus back before re-sending.
         AutomationElement knownComposer = pinnedComposerEl;
         try
         {
+            RouteCheckpoint("preflight");
             // Pre-flight: everything pinned at Enter-press time must still
             // hold. Any mismatch here still tries the fallback send — see
             // FallbackSendOrReport's own header for why that is safe for
@@ -8575,6 +9307,7 @@ public static class CfaiEnforcer
             if (composerEl == null)
             { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, preflightWhy); return; }
             knownComposer = composerEl;
+            if (_tsRun != null) _tsRun.Composer = composerEl;
 
             long waitStart = DateTime.UtcNow.Ticks;
             while (Down(VK_CONTROL) || Down(VK_MENU) || Down(VK_SHIFT) || Down(VK_RETURN))
@@ -8607,6 +9340,7 @@ public static class CfaiEnforcer
             List<string> labels = (meta != null && meta.ClickLabels != null && meta.ClickLabels.Count > 0)
                 ? meta.ClickLabels : new List<string> { toLabel };
 
+            RouteCheckpoint("expand");
             object expandObj;
             if (!picker.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out expandObj))
             { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "no_expand_pattern"); return; }
@@ -8618,6 +9352,7 @@ public static class CfaiEnforcer
             { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "interrupted_after_expand"); return; }
 
             Thread.Sleep(150);   // let the popover render its items
+            RouteCheckpoint("find_item");
 
             AutomationElement win = null;
             try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
@@ -8682,6 +9417,7 @@ public static class CfaiEnforcer
             // collapse that used to run 300ms later, closes the menu having chosen
             // nothing. The picker is therefore NOT collapsed until verification
             // is over. Activating the same target item twice is idempotent.
+            RouteCheckpoint("select");
             bool usedSelect = false, usedInvoke = false;
             object selObj;
             if (targetItem.TryGetCurrentPattern(SelectionItemPattern.Pattern, out selObj))
@@ -8774,8 +9510,9 @@ public static class CfaiEnforcer
                 Thread.Sleep(200);
             };
             io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
-            io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+            io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
 
+            RouteCheckpoint("await_switch");
             RouteSwitchOutcome waited = RouteAwaitSwitch(io, confirmCfg, labels, toTier, labelBefore, usedSelect, usedInvoke);
             string labelAfter = waited.LabelAfter;
             TryCollapsePicker(picker);   // best-effort -- selecting usually closes it on its own
@@ -8795,6 +9532,7 @@ public static class CfaiEnforcer
             // stayed on the picker and a bare SetFocus did not move it -- the
             // switch landed and the prompt was never sent. RouteRefocusUia
             // retries SetFocus and a click inside the composer, bounded.
+            RouteCheckpoint("refocus");
             string afterWhy;
             AutomationElement composerAfter = RouteRefocusUia(pinnedHwnd, pinnedComposerRid, composerEl, originalText, out afterWhy);
             if (composerAfter == null)
@@ -8810,6 +9548,21 @@ public static class CfaiEnforcer
             if (GetForegroundWindow() != pinnedHwnd)
             { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "focus_changed_before_send"); return; }
 
+            // The pre-Enter gate (see RouteFocusGate): no menu showing, focus
+            // STABLY on the composer holding exactly the prompt. The switch DID
+            // happen, so a gate that cannot be satisfied is not an unrouted
+            // send: no Enter, the prompt stays visibly in the composer.
+            RouteCheckpoint("gate");
+            RouteGateOutcome gate = DesktopGateUia(pinnedHwnd, pinnedComposerRid, composerAfter, originalText, meta);
+            if (!gate.Ok)
+            {
+                ClearPendingRoute();
+                EmitRoute(_app, provider, toTier /* now-current */, toTier, toLabel, complexity, "failed", -1, "focus_lost_after_switch_" + gate.Reason, effortFrom, effortTo);
+                return;
+            }
+            // Exactly one send per route: lost only to the watchdog, which then owns the report.
+            if (!RouteClaimSend()) return;
+
             // Release state before Enter — our own synthetic Enter passes
             // back through this same keyboard hook. See RunRewrite's
             // identical comment for the full reasoning, including why
@@ -8823,13 +9576,18 @@ public static class CfaiEnforcer
 
             SendKeyPress(VK_RETURN);
 
-            Thread.Sleep(200);
-            string postSend = null;
-            try { postSend = ReadText(composerAfter); } catch { }
-            bool stillThere = NormalizeWs(postSend) == NormalizeWs(originalText);
-            if (stillThere) { EmitRoute(_app, provider, toTier /* now-current */, toTier, toLabel, complexity, "failed", originalText.Length, "not_submitted", effortFrom, effortTo); return; }
+            // Did it send? If the Enter verifiably went to the picker (its menu
+            // is showing), the menu is closed and the Enter re-sent ONCE;
+            // otherwise a menu is closed and focus put back, never a second Enter.
+            RouteAfterEnterOutcome after = DesktopAfterEnterUia(pinnedHwnd, pinnedComposerRid, composerAfter, originalText, meta);
+            if (!after.Submitted) { EmitRoute(_app, provider, toTier /* now-current */, toTier, toLabel, complexity, "failed", originalText.Length, "not_submitted_" + after.Verdict, effortFrom, effortTo); return; }
 
-            EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "ok", originalText.Length, null, effortFrom, effortTo);
+            EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "ok", originalText.Length, after.Resends > 0 ? "resent_after_menu_reopened" : null, effortFrom, effortTo);
+        }
+        catch (RouteAbandonedException)
+        {
+            // The watchdog owns this route: it has reported, released the Enter,
+            // and closes the menu / puts focus back on its own thread.
         }
         catch (Exception)
         {
@@ -8837,8 +9595,9 @@ public static class CfaiEnforcer
         }
         finally
         {
-            _activeRouteMeta = null;
-            _routeInProgress = false;
+            // Only this run's globals: a route its watchdog already released
+            // must not release a NEWER route when its thread finally returns.
+            RouteRelease(_tsRun);
         }
     }
 
@@ -8925,46 +9684,7 @@ public static class CfaiEnforcer
     static bool WebMenuLooksOpen(AutomationElement win, WebPicker wp, List<string> itemLabels)
     {
         if (win == null || wp == null || string.IsNullOrEmpty(wp.ItemControlTypes)) return false;
-        try
-        {
-            var walker = TreeWalker.ControlViewWalker;
-            var stack = new Stack<KeyValuePair<AutomationElement, int>>();
-            stack.Push(new KeyValuePair<AutomationElement, int>(win, 0));
-            while (stack.Count > 0)
-            {
-                var cur = stack.Pop();
-                if (cur.Value > 30) continue;
-                AutomationElement el = cur.Key;
-                try
-                {
-                    if (MrItemTypeAllowed(el.Current.ControlType, wp.ItemControlTypes) && !el.Current.IsOffscreen)
-                    {
-                        string name = null;
-                        try { name = StripSelectedPrefix(el.Current.Name, wp.ItemSelectedPrefix); } catch { }
-                        if (!string.IsNullOrEmpty(name))
-                        {
-                            if (ModelItemNameMatches(name, ROUTE_MORE_MODELS_LABEL)) return true;
-                            if (itemLabels != null)
-                                foreach (string l in itemLabels)
-                                    if (!string.IsNullOrEmpty(l) && ModelItemNameMatches(name, l)) return true;
-                        }
-                    }
-                }
-                catch { }
-                try
-                {
-                    AutomationElement child = walker.GetFirstChild(el);
-                    while (child != null)
-                    {
-                        stack.Push(new KeyValuePair<AutomationElement, int>(child, cur.Value + 1));
-                        child = walker.GetNextSibling(child);
-                    }
-                }
-                catch { }
-            }
-        }
-        catch { }
-        return false;
+        return RouteMenuLooksOpenUia(win, wp.ItemControlTypes, wp.ItemSelectedPrefix, itemLabels);
     }
 
     // The UIA hands of RouteCollapseMenu for a browser. Returns null when no
@@ -8988,7 +9708,7 @@ public static class CfaiEnforcer
         // Into the pinned BROWSER window only -- never another window, not even
         // another window of the same browser process.
         io.SendEscape = delegate { if (GetForegroundWindow() == pinnedHwnd) SendKeyPress(VK_ESCAPE); };
-        io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+        io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
         RouteCollapseOutcome o = RouteCollapseMenu(io);
         return o.Closed ? null : (o.Reason ?? "menu_still_open");
     }
@@ -9114,10 +9834,10 @@ public static class CfaiEnforcer
             try { t = ReadText(cand); } catch { return "no_element"; }
             return NormalizeWs(t) == NormalizeWs(originalText) ? null : "text_changed";
         };
-        io.FocusCandidate = delegate { try { cand.SetFocus(); return true; } catch { return false; } };
+        io.FocusCandidate = delegate { if (!RouteOwned()) return false; try { cand.SetFocus(); return true; } catch { return false; } };
         io.ClickCandidate = delegate { return RouteClickInto(cand, pinnedHwnd); };
         io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
-        io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+        io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
         RouteRefocusOutcome o = RouteRefocusComposer(io);
         reason = o.Ok ? null : (o.Reason ?? "no_element");
         return o.Ok ? cand : null;
@@ -9184,10 +9904,11 @@ public static class CfaiEnforcer
         string originalText, int[] pinnedComposerRid, IntPtr pinnedHwnd, RouteCtx ctx)
     {
         string effortFrom = (ctx != null ? ctx.EffortFrom : "") ?? "";
-        RouteMeta meta = _activeRouteMeta;
+        RouteMeta meta = _tsRun != null ? _tsRun.Meta : _activeRouteMeta;
         AutomationElement composerEl = null;
         try
         {
+            RouteCheckpoint("preflight");
             if (ctx == null || ctx.Picker == null)
             { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, "", "exception"); return; }
 
@@ -9208,6 +9929,7 @@ public static class CfaiEnforcer
             // browser that is whatever text box has the caret, which is the
             // whole defect this ticket's design note is about.
             composerEl = CachedWebComposer();
+            if (_tsRun != null) _tsRun.Composer = composerEl;
             if (composerEl == null)
             { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, "", "composer_lost"); return; }
             int[] curRid = null;
@@ -9264,6 +9986,7 @@ public static class CfaiEnforcer
             { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "already_on_target", composerEl); return; }
             string surfaceHost = meta != null ? meta.HostOrApp : (ctx.Host ?? "");
 
+            RouteCheckpoint("expand");
             object expandObj;
             if (!picker.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out expandObj))
             { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "no_expand_pattern", composerEl); return; }
@@ -9278,6 +10001,7 @@ public static class CfaiEnforcer
             { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "interrupted_after_expand", composerEl); return; }
 
             Thread.Sleep(150);   // let the popover render its items
+            RouteCheckpoint("find_item");
 
             // ── PRE-SWITCH CONFIRMATION of the pinned from_tier ─────────────
             //
@@ -9337,6 +10061,7 @@ public static class CfaiEnforcer
             // item inside RouteAwaitSwitch. The menu is NOT collapsed until the
             // wait is over -- collapsing right after a Select() that only
             // highlighted closes the menu having chosen nothing.
+            RouteCheckpoint("select");
             bool usedSelect = false, usedInvoke = false;
             object selObj;
             if (targetItem.TryGetCurrentPattern(SelectionItemPattern.Pattern, out selObj))
@@ -9416,8 +10141,9 @@ public static class CfaiEnforcer
                 Thread.Sleep(200);
             };
             io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
-            io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+            io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
 
+            RouteCheckpoint("await_switch");
             RouteSwitchOutcome waited = RouteAwaitSwitch(io, confirmCfg, labels, toTier, labelBefore, usedSelect, usedInvoke);
             string labelAfter = waited.LabelAfter;
             TryCollapsePicker(picker);   // best-effort -- selecting usually closes it on its own
@@ -9430,6 +10156,7 @@ public static class CfaiEnforcer
 
             // ── The switch landed. Never leave a menu showing: a submenu or the
             // menu itself still open would take the Enter. ─────────────────
+            RouteCheckpoint("collapse");
             string menuWhy = WebCollapseMenuUia(pinnedHwnd, ctx);
             if (menuWhy != null)
             {
@@ -9469,6 +10196,7 @@ public static class CfaiEnforcer
                 // keyboard focus BACK on the composer -- the desktop arm's
                 // bounded SetFocus-then-click loop, verified each step -- and
                 // only then send, exactly once.
+                RouteCheckpoint("refocus");
                 string afterWhy;
                 AutomationElement focused = WebRefocusUia(pinnedHwnd, pinnedComposerRid, composerEl, originalText, out afterWhy);
                 if (focused == null)
@@ -9506,6 +10234,7 @@ public static class CfaiEnforcer
             // not fit the write budget, so reaching here means the retype was
             // always affordable -- "we never swallow an Enter for a prompt we
             // could not put back."
+            RouteCheckpoint("restore");
             try { composerEl.SetFocus(); } catch { }
             Thread.Sleep(150);
             if (!WebFocusIsInComposer(pinnedComposerRid)) { RouteClickInto(composerEl, pinnedHwnd); Thread.Sleep(120); }
@@ -9524,6 +10253,11 @@ public static class CfaiEnforcer
             }
             WebSendAndReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, composerEl, originalText, effortFrom, effortTo, "restored");
         }
+        catch (RouteAbandonedException)
+        {
+            // The watchdog owns this route: it has reported, released the Enter,
+            // and closes the menu / puts focus back on its own thread.
+        }
         catch (Exception)
         {
             // NO FALLBACK SEND from an exception on the web path, unlike the
@@ -9531,14 +10265,24 @@ public static class CfaiEnforcer
             // state the page is in, and a synthetic Enter into an unknown state
             // is how a prompt lands in the wrong conversation. The text stays in
             // the composer; the user presses Enter again. A model menu we may
-            // have opened is still closed first.
+            // have opened is still closed first, and focus is put BACK on the
+            // composer (never an Enter) so that one keypress is all it takes.
             try { WebCollapseMenuUia(pinnedHwnd, ctx); } catch { }
+            try
+            {
+                if (GetForegroundWindow() == pinnedHwnd && RouteOwned())
+                {
+                    string ignored;
+                    WebRefocusUia(pinnedHwnd, pinnedComposerRid, composerEl, originalText, out ignored);
+                }
+            }
+            catch { }
             WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, "", "exception");
         }
         finally
         {
-            _activeRouteMeta = null;
-            _routeInProgress = false;
+            // Only this run's globals (see RunRoute's finally).
+            RouteRelease(_tsRun);
         }
     }
 
@@ -9579,20 +10323,30 @@ public static class CfaiEnforcer
         // Cleared unconditionally and FIRST, whether or not the send below
         // works: one attempt per Enter, always.
         ClearPendingRoute();
-
-        if (GetForegroundWindow() != pinnedHwnd)
-        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_focus_changed", effortFrom); return; }
-        if (ctx != null && _browserNavGen != ctx.NavGen)
-        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_navigated", effortFrom); return; }
-        if (ctx != null && !string.Equals(_fgWebHost ?? "", ctx.Host ?? "", StringComparison.Ordinal))
-        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_host_changed", effortFrom); return; }
+        RouteCheckpoint("fallback");
 
         // NEVER LEAVE THE MENU OPEN, AND NEVER PRESS ENTER INTO IT. Live
         // (1307630, claude.ai): ExpandCollapse.Collapse() left the model menu
         // showing, the Enter below landed in it, and the prompt sat unsent
         // (from_tier_not_confirmed_fallback_not_submitted). A menu that cannot
         // be closed means no Enter at all.
+        //
+        // FIRST, before the window / page checks below. Live 2026-10-06
+        // (gemini, interrupted_after_expand_no_fallback_navigated): the
+        // no-fallback exits used to return BEFORE this line, leaving the menu
+        // open on the user's screen -- "it just opens the model window and gets
+        // stuck there". WebCollapseMenuUia only presses Escape while the PINNED
+        // window is in front and a model menu is seen, so it is safe to run
+        // whatever the checks below then decide.
         string menuWhy = WebCollapseMenuUia(pinnedHwnd, ctx);
+
+        if (GetForegroundWindow() != pinnedHwnd)
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_focus_changed", effortFrom); return; }
+        if (ctx != null && _browserNavGen != ctx.NavGen)
+        { WebRestoreFocusNoSend(pinnedHwnd, pinnedComposerRid, knownComposer, originalText); EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_navigated", effortFrom); return; }
+        if (ctx != null && !string.Equals(_fgWebHost ?? "", ctx.Host ?? "", StringComparison.Ordinal))
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_host_changed", effortFrom); return; }
+
         if (menuWhy != null)
         { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_" + menuWhy, effortFrom); return; }
 
@@ -9612,11 +10366,19 @@ public static class CfaiEnforcer
         AutomationElement el = WebRefocusUia(pinnedHwnd, pinnedComposerRid, known, originalText, out whyNot);
         if (el == null)
         { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_" + whyNot, effortFrom); return; }
-        // The refocus took time: the window and page checks again, immediately before Enter.
+        // The pre-Enter gate (RouteFocusGate): no menu showing and focus
+        // STABLY on the composer holding exactly the prompt, re-checked after
+        // a menu's focus hand-back has had time to land.
+        RouteGateOutcome gate = WebGateUia(ctx, pinnedHwnd, pinnedComposerRid, el, originalText);
+        if (!gate.Ok)
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_" + gate.Reason, effortFrom); return; }
+        // The gate took time: the window and page checks again, immediately before Enter.
         if (GetForegroundWindow() != pinnedHwnd)
         { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_focus_changed", effortFrom); return; }
         if (ctx != null && _browserNavGen != ctx.NavGen)
         { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_navigated", effortFrom); return; }
+        // Exactly one send per route: lost only to the watchdog, which then owns the report.
+        if (!RouteClaimSend()) return;
 
         Emit("prompt", _app, "", "send", originalText.Length);
         TypedClear(); _blockTyped = false; _typedPatterns = ""; _lastBlockFiredTicks = 0;
@@ -9625,15 +10387,14 @@ public static class CfaiEnforcer
         _mrLastObservedKey = "";
 
         SendKeyPress(VK_RETURN);
-        Thread.Sleep(PostSendVerifyMsFor());
-        string postSend = null;
-        try { postSend = ReadText(el); } catch { }
-        bool stillThere = NormalizeWs(postSend) == NormalizeWs(originalText);
-        // NO RETRY. A send that reports "not submitted" may still have landed,
-        // and pressing Enter again is how one prompt becomes two.
-        if (stillThere) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_fallback_not_submitted", effortFrom); return; }
+        // Did it send? NO RETRY on a send that merely LOOKS unsent -- that is how
+        // one prompt becomes two. The one exception (RouteAfterEnter): the menu
+        // is showing again, i.e. the Enter verifiably went to the picker, not
+        // the composer -- then the menu is closed and the Enter re-sent ONCE.
+        RouteAfterEnterOutcome after = WebAfterEnterUia(ctx, pinnedHwnd, pinnedComposerRid, el, originalText);
+        if (!after.Submitted) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_fallback_not_submitted_" + after.Verdict, effortFrom); return; }
 
-        EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "sent_unrouted", originalText.Length, reason, effortFrom);
+        EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "sent_unrouted", originalText.Length, after.Resends > 0 ? reason + "_resent" : reason, effortFrom);
     }
 
     // The switch worked and the composer holds exactly the pinned prompt. Send.
@@ -9649,6 +10410,25 @@ public static class CfaiEnforcer
         if (ctx != null && _browserNavGen != ctx.NavGen)
         { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, effortTo, "navigated"); return; }
 
+        // THE GEMINI not_submitted FIX (see RouteFocusGate): immediately before
+        // the Enter, no model menu showing and focus STABLY on the composer
+        // holding exactly the prompt. The switch DID happen, so a gate that
+        // cannot be satisfied is not an unrouted send: no Enter, the prompt
+        // stays visibly in the composer, the menu is closed.
+        RouteCheckpoint("gate");
+        int[] pinnedRid = null;
+        try { pinnedRid = composerEl.GetRuntimeId(); } catch { }
+        if (pinnedRid == null && _tsRun != null) pinnedRid = _tsRun.ComposerRid;
+        RouteGateOutcome gate = WebGateUia(ctx, pinnedHwnd, pinnedRid, composerEl, originalText);
+        if (!gate.Ok)
+        { WebRouteFailed(provider, toTier /* now-current */, toTier, toLabel, complexity, effortFrom, effortTo, "focus_lost_after_switch_" + gate.Reason); return; }
+        if (GetForegroundWindow() != pinnedHwnd)
+        { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, effortTo, "focus_changed"); return; }
+        if (ctx != null && _browserNavGen != ctx.NavGen)
+        { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, effortTo, "navigated"); return; }
+        // Exactly one send per route: lost only to the watchdog, which then owns the report.
+        if (!RouteClaimSend()) return;
+
         // Release state before Enter -- our own synthetic Enter passes back
         // through this same keyboard hook. Same clearing RunRewrite and RunRoute
         // do, and for the same reasons.
@@ -9660,20 +10440,107 @@ public static class CfaiEnforcer
         _mrLastObservedKey = "";
 
         SendKeyPress(VK_RETURN);
-        // The per-surface post-send window. Every web surface asks for the
-        // 1500ms ceiling rather than the 200ms default: a Chromium composer's
-        // "I am empty now" has to cross an accessibility serialization hop
-        // before UIA can report it, and a shorter window reads back the
-        // pre-send text and calls a successful send a failure.
-        Thread.Sleep(PostSendVerifyMsFor());
-        string postSend = null;
-        try { postSend = ReadText(composerEl); } catch { }
-        bool stillThere = NormalizeWs(postSend) == NormalizeWs(originalText);
-        // NO RETRY, NO RETYPE. See the failure invariant's rule 3.
-        if (stillThere)
-        { EmitRoute(_app, provider, toTier /* now-current */, toTier, toLabel, complexity, "failed", originalText.Length, "not_submitted", effortFrom, effortTo); return; }
+        // The per-surface post-send window (WebAfterEnterUia). Every web surface
+        // asks for the 1500ms ceiling rather than the 200ms default: a Chromium
+        // composer's "I am empty now" has to cross an accessibility
+        // serialization hop before UIA can report it, and a shorter window reads
+        // back the pre-send text and calls a successful send a failure.
+        //
+        // NO RETYPE, and no retry on a send that merely LOOKS unsent (rule 3).
+        // The one exception lives in RouteAfterEnter: a model menu showing again
+        // is positive evidence the Enter went to the picker, not the composer
+        // -- the menu is closed and the Enter re-sent ONCE through the same gate.
+        RouteAfterEnterOutcome after = WebAfterEnterUia(ctx, pinnedHwnd, pinnedRid, composerEl, originalText);
+        if (!after.Submitted)
+        { EmitRoute(_app, provider, toTier /* now-current */, toTier, toLabel, complexity, "failed", originalText.Length, "not_submitted_" + after.Verdict, effortFrom, effortTo); return; }
 
-        EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "ok", originalText.Length, okReason, effortFrom, effortTo);
+        string why = okReason;
+        if (after.Resends > 0) why = string.IsNullOrEmpty(okReason) ? "resent_after_menu_reopened" : okReason + "_resent";
+        EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "ok", originalText.Length, why, effortFrom, effortTo);
+    }
+
+    // The web arm's gate hands (RouteFocusGate). Same window / page / host
+    // rule as every other web check; the composer through the one door only.
+    static RouteGateOutcome WebGateUia(RouteCtx ctx, IntPtr pinnedHwnd, int[] pinnedRid, AutomationElement composerEl, string originalText)
+    {
+        AutomationElement win = null;
+        try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
+        List<string> labels = MrAllClickLabels("browser", ctx != null ? (ctx.Host ?? "") : "");
+        WebPicker wp = ctx != null ? ctx.Picker : null;
+        AutomationElement cand = composerEl;
+        var io = new RouteGateIo();
+        io.WindowOk = delegate
+        {
+            if (GetForegroundWindow() != pinnedHwnd) return false;
+            if (ctx != null && _browserNavGen != ctx.NavGen) return false;
+            if (ctx != null && !string.Equals(_fgWebHost ?? "", ctx.Host ?? "", StringComparison.Ordinal)) return false;
+            return true;
+        };
+        io.MenuOpen = delegate { return WebMenuLooksOpen(win, wp, labels); };
+        io.CollapseMenu = delegate { return WebCollapseMenuUia(pinnedHwnd, ctx); };
+        io.FocusVerdict = delegate
+        {
+            if (!WebFocusIsInComposer(pinnedRid)) return "focus_not_in_composer";
+            string t = null;
+            try { t = ReadText(cand); } catch { return "no_element"; }
+            return NormalizeWs(t) == NormalizeWs(originalText) ? null : "text_changed";
+        };
+        io.DialogHoldsFocus = delegate { return RouteFocusInPageDialog(pinnedHwnd); };
+        io.DismissDialog = delegate { if (RouteOwned() && GetForegroundWindow() == pinnedHwnd) SendKeyPress(VK_ESCAPE); };
+        io.Refocus = delegate
+        {
+            string why;
+            AutomationElement el = WebRefocusUia(pinnedHwnd, pinnedRid, cand, originalText, out why);
+            if (el != null) cand = el;
+            return why;
+        };
+        io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
+        return RouteFocusGate(io);
+    }
+
+    // The web arm's after-Enter hands (RouteAfterEnter).
+    static RouteAfterEnterOutcome WebAfterEnterUia(RouteCtx ctx, IntPtr pinnedHwnd, int[] pinnedRid, AutomationElement composerEl, string originalText)
+    {
+        AutomationElement win = null;
+        try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
+        List<string> labels = MrAllClickLabels("browser", ctx != null ? (ctx.Host ?? "") : "");
+        WebPicker wp = ctx != null ? ctx.Picker : null;
+        var io = new RouteAfterEnterIo();
+        io.VerifyMs = PostSendVerifyMsFor();
+        io.StillThere = delegate
+        {
+            string t = null;
+            try { t = ReadText(composerEl); } catch { }
+            return NormalizeWs(t) == NormalizeWs(originalText);
+        };
+        io.MenuOpen = delegate { return GetForegroundWindow() == pinnedHwnd && WebMenuLooksOpen(win, wp, labels); };
+        io.FocusInComposer = delegate { return WebFocusIsInComposer(pinnedRid); };
+        io.CollapseMenu = delegate { return WebCollapseMenuUia(pinnedHwnd, ctx); };
+        io.Gate = delegate { return WebGateUia(ctx, pinnedHwnd, pinnedRid, composerEl, originalText); };
+        io.ClaimResend = delegate
+        {
+            // A re-send is only ever into the SAME page it was pinned to.
+            if (GetForegroundWindow() != pinnedHwnd) return false;
+            if (ctx != null && _browserNavGen != ctx.NavGen) return false;
+            return RouteClaimResend();
+        };
+        io.SendEnter = delegate { SendKeyPress(VK_RETURN); };
+        io.RestoreFocus = delegate { WebRestoreFocusNoSend(pinnedHwnd, pinnedRid, composerEl, originalText); };
+        io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+        return RouteAfterEnter(io);
+    }
+
+    // Focus back on the composer holding exactly the pinned prompt -- NEVER an
+    // Enter. For every path that ends with the prompt left in the composer.
+    static void WebRestoreFocusNoSend(IntPtr pinnedHwnd, int[] pinnedRid, AutomationElement composerEl, string originalText)
+    {
+        try
+        {
+            if (GetForegroundWindow() != pinnedHwnd || !RouteOwned()) return;
+            string ignored;
+            WebRefocusUia(pinnedHwnd, pinnedRid, composerEl, originalText, out ignored);
+        }
+        catch { }
     }
 
     // Retype the prompt into an empty composer and verify it landed EXACTLY.
@@ -13599,8 +14466,12 @@ public static class CfaiEnforcer
                         // A held / second Enter in the route's own window:
                         // swallowed, and NOT an abort -- the running route
                         // sends the prompt exactly once. No UIA, one Win32 call.
+                        // RouteInProgressLive: a route past its watchdog
+                        // deadline (+ grace) is released right here, so a
+                        // route thread that died or hung can never keep
+                        // eating the user's Enter.
                         if (RouteHookSwallowsEnter(vk, ctrl, alt, shift, (kflags & LLKHF_INJECTED) != 0,
-                                _routeInProgress, _rewriteInProgress, GetForegroundWindow() == _activeRouteHwnd))
+                                RouteInProgressLive(), _rewriteInProgress, GetForegroundWindow() == _activeRouteHwnd))
                             return (IntPtr)1;
                         if ((kflags & LLKHF_INJECTED) == 0)
                         {

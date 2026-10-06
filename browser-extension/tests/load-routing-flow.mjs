@@ -57,6 +57,14 @@ export const CONFIRM_DECLINED = Symbol('confirm_declined');
  * @param {object} [o.store]           shared chrome.storage.local contents (pass the same object to share)
  * @param {boolean} [o.featureOn]
  * @param {object} [o.effortMenu]      { levels: { High:'Opus 5 High', ... } } — enables the Effort submenu fake
+ * @param {boolean} [o.hang]           changeModelInUI never settles (a picker that hangs)
+ * @param {boolean} [o.throws]         changeModelInUI throws
+ * @param {number} [o.watchdogMs]      ROUTE_WATCHDOG_MS for this flow (default 6000, real time)
+ * @param {'send'|'nothing'|'menu'} [o.enterDoes]   what our re-sent Enter does (default 'send':
+ *                                     the composer empties; 'menu': it opens the picker's menu)
+ * @param {'send'|'nothing'|null} [o.sendButton]    the composer's send button, or null for none
+ * @param {boolean} [o.menuLeftOpen]   a switch that lands but leaves its menu showing
+ * @param {(el:object)=>void} [o.beforeResend]      runs just before the re-send (user edits, navigation)
  */
 export function loadRoutingFlow(o) {
   const env = {
@@ -71,7 +79,12 @@ export function loadRoutingFlow(o) {
     location: { hostname: o.host, pathname: o.pathname || '/' },
     button: { textContent: o.buttonText, click() { env.menuState = 'root'; } },
     menuState: null,
+    menuCloses: 0,
+    buttonClicks: 0,
+    sent: 0,                 // how many times the PROMPT actually went out
+    programmatic: 0,
   };
+  const WATCHDOG_MS = o.watchdogMs || 6000;
 
   const chrome = {
     storage: {
@@ -127,13 +140,26 @@ export function loadRoutingFlow(o) {
     emit: (ev) => env.events.push(ev),
     changeModelInUI: async (label) => {
       env.switchCalls.push(label);
+      env.menuState = 'root';                       // the picker is open while it switches
+      if (o.hang) return new Promise(() => {});     // never settles
+      if (o.throws) throw new Error('picker exploded');
       const next = o.onSwitch ? o.onSwitch(label) : null;
       // The real changeModelInUI's answer when Claude's "Switch model?" dialog
       // could not be confirmed (and was dismissed): nothing changed.
-      if (next === CONFIRM_DECLINED) return 'confirm_declined';
+      if (next === CONFIRM_DECLINED) { env.menuState = null; return 'confirm_declined'; }
       if (next) env.button.textContent = next;
+      if (!o.menuLeftOpen) env.menuState = null;
+      // Whatever the user does WHILE the picker switches (edits, navigates).
+      if (o.beforeResend && env.composer) o.beforeResend(env.composer, env);
       return !!next;
     },
+    // The real ones live outside the routing region; these fakes keep their contract.
+    closeOpenMenus: async () => { if (env.menuState) { env.menuState = null; env.menuCloses++; } return true; },
+    readInputText: (el) => (el ? String(el.innerText == null ? '' : el.innerText) : ''),
+    findSendButtonForInput: () => (o.sendButton ? env.sendButtonEl : null),
+    markProgrammaticSend: () => { env.programmatic++; },
+    ROUTE_WATCHDOG_MS: WATCHDOG_MS,
+    ROUTE_RESEND_VERIFY_MS: 800,
     MENU_CONTAINER_SELECTOR: 'MENU',
     isVisibleEl: () => true,
     waitForEl: async (get) => {
@@ -145,7 +171,8 @@ export function loadRoutingFlow(o) {
     document,
     KeyboardEvent: class { constructor(type, init) { this.type = type; Object.assign(this, init); } },
     setInterval: () => 0,                         // the poller is driven by hand: observePicker()
-    setTimeout: (fn) => setTimeout(fn, 0),        // collapse the 200/400/500 ms waits
+    // Collapse the 200/400/500/800 ms waits; the watchdog alone keeps its real delay.
+    setTimeout: (fn, ms) => setTimeout(fn, ms === WATCHDOG_MS ? ms : 0),
   };
 
   const names = Object.keys(deps);
@@ -170,11 +197,28 @@ export function loadRoutingFlow(o) {
       stopPropagation() {},
     };
     // `focusCalls` records the order: focus() must land BEFORE the re-sent Enter.
-    const el = { isConnected: true, focus: () => env.focusCalls.push(env.resent.length), dispatchEvent: (ev) => env.resent.push(ev) };
+    // The composer holds the prompt; a send empties it.
+    const el = {
+      isConnected: true,
+      innerText: text,
+      focus: () => env.focusCalls.push(env.resent.length),
+      dispatchEvent: (ev) => {
+        env.resent.push(ev);
+        const does = o.enterDoes || 'send';
+        if (does === 'send') { el.innerText = ''; env.sent++; } else if (does === 'menu') env.menuState = 'root';
+      },
+    };
+    env.composer = el;
+    env.sendButtonEl = {
+      click() {
+        env.buttonClicks++;
+        if (o.sendButton === 'send') { el.innerText = ''; env.sent++; }
+      },
+    };
     const paused = r ? api.applyRouteDecision(r, text, e, el) : false;
     return { r, paused };
   };
-  api.settle = async () => { for (let i = 0; i < 40; i++) await tick(); };
+  api.settle = async () => { for (let i = 0; i < 80; i++) await tick(); };
   api.env = env;
   return api;
 }

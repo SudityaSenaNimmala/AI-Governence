@@ -421,12 +421,16 @@ click_labels, model }`, where `result` is one of `routed` | `suggested` | `obser
   reads back the target tier, sets effort through claude.ai's *Effort* submenu when
   the decision carries one (not yet live-verified; the effort actually showing
   afterwards is what is reported), then re-sends. **There is no fetch-level
-  fallback** — the old `fetch-blocker.js` body rewrite was removed.
+  fallback** — the old `fetch-blocker.js` body rewrite was removed. The whole
+  attempt runs under a 6 s watchdog and ends in the §7.7 invariant.
 * Event `model_routed` — no prompt text, no raw page text: `mechanism: 'browser_extension'`,
   `surface: 'browser'`, `host_or_app`, `provider`, `from_tier`, `from_label` (catalog
   name), `to_tier`, `to_label`, `model`, `complexity`, `rule_id`, `result`
   (`applied` | `failed` | `suggested` | `observed` | `unsupported` | `user_override`),
-  `reason`, `effort_from`, `effort_to`, `len`; plus legacy `routed_model`, `rule_name`,
+  `reason`, `effort_from`, `effort_to`, `len`, `send` (`enter` | `button` |
+  `not_submitted` | `unsafe_<why>` — how the paused prompt went out; the server
+  allowlist does not keep it yet, so an unsent prompt is ALSO reported as
+  `result: failed` with that value as the reason); plus legacy `routed_model`, `rule_name`,
   `current_tier`, `ui_changed`.
 * Ownership heartbeat: when the desktop agent's identity beacon answers, the worker
   POSTs `{ browser, ext_version, routing_owner: true, nonce, instance_id, ts }` to
@@ -440,3 +444,55 @@ Edit `shared/model-catalog.json` or `shared/decide-route.js`, run
 `node scripts/gen-shared-routing.mjs`, update the vectors if behaviour changed on
 purpose, and keep `browser-extension/tests/shared-routing.test.mjs` green. A changed
 vector is a behaviour change for the desktop enforcer too.
+
+### 7.7 A route can never get stuck *(2026-10-06)*
+
+Live report: "it just opens the model window but doesn't change, and gets stuck
+there" (Gemini in a browser, desktop agent web arm, `not_submitted`). Every route
+attempt, on every engine — the desktop agent's app arm (Claude Desktop) and web arm
+(`RunRoute` / `RunWebRoute` in `enforcer-win.ps1`) and the extension
+(`applyRouteDecision` in `content.js`) — ends in the same invariant, including
+on exceptions and timeouts:
+
+1. **No model menu, submenu or confirm dialog left open.** Collapse, else Escape —
+   only into the pinned window, only while a menu is verifiably showing.
+2. **The prompt is sent exactly once** (routed or unrouted) **or, when sending is
+   not safe** (the user edited it, the window / page / conversation changed, the
+   route's state is unknown), **left intact in the composer with focus on it.**
+3. **One route event with a precise reason.**
+
+How:
+
+* **Watchdog, 6 s end to end.** Desktop: each route is a `RouteRun` with two atomic
+  claims — the route thread claims the send right before its one Enter; the
+  watchdog claims the route at the deadline. Whoever claims first owns the outcome;
+  the other can no longer send, click, Escape or report. The watchdog releases the
+  swallowed Enter *before* touching UIA, reports `watchdog_timeout_<stage>`, then
+  closes the menu and puts focus back on the composer on its own thread — never an
+  Enter. The keyboard hook has its own backstop (`RouteInProgressLive`): a route
+  past the deadline + 1.5 s is released by the hook itself. Extension: a
+  `Promise.race` against the same 6 s; a timed-out switch is cancelled at its next
+  step and the paused prompt goes out once, unrouted (`watchdog_timeout`).
+* **Pre-Enter gate** (`RouteFocusGate`): the pinned window in front, no menu
+  showing, focus on the composer holding exactly the prompt — read twice, 150 ms
+  apart, because Angular Material hands focus back to the menu trigger when its
+  menu closes, and an Enter then lands on the trigger and reopens the menu. A page
+  dialog holding focus (a Pro upsell / usage-limit notice) gets one Escape.
+* **The refocus click is hit-tested** (`RouteClickInto`): a point is clicked only
+  if the element there is the composer, inside it, or one of its two nearest
+  ancestors. The old fixed point 12 px in from the composer's right edge was
+  Gemini's mode picker — the refocus click itself opened the model menu.
+* **After the Enter** (`RouteAfterEnter`): sent → done. A model menu showing again
+  is positive evidence the Enter went to the picker, not the composer: the menu is
+  closed and the Enter re-sent **once**, through the gate. Anything else that only
+  *looks* unsent is reported (`not_submitted_in_composer`,
+  `not_submitted_focus_not_in_composer`, …) and never retried. Extension: the DOM
+  read has no accessibility lag, so a prompt still in the composer 800 ms after our
+  Enter was not sent; the composer's own send button is then clicked once.
+* **Escape that Gemini actually sees** (extension `closeOpenMenus`): dispatched from
+  the focused element so it bubbles through `body` (Angular CDK) to `document`
+  (Radix), with `keyCode` 27, plus a click on the CDK backdrop. An Escape dispatched
+  *at* `document` never reaches `body`, so Gemini's menu used to stay open.
+
+Pinned by `agent/tests/enforcer-route-watchdog.test.mjs` and
+`browser-extension/tests/routing-watchdog.test.mjs`.

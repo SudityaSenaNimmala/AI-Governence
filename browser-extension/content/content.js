@@ -1084,6 +1084,16 @@
 
   // ── Model Routing ──────────────────────────────────────────────────
   let _skipRouting = false;
+  // The hard end-to-end bound on one route (applyRouteDecision): pause -> switch
+  // -> the ONE send. Same 6s as the desktop agent's watchdog (enforcer-win.ps1
+  // _routeWatchdogMs). Past it the switch is abandoned, any model menu is
+  // closed and the paused prompt is sent once, unrouted -- never left paused.
+  const ROUTE_WATCHDOG_MS = 6000;
+  // How long after our re-sent Enter the composer must have let go of the
+  // prompt. A DOM read has no accessibility hop to wait for (unlike the
+  // desktop agent's UIA read-back), so a prompt still sitting there exactly
+  // after this long was NOT sent.
+  const ROUTE_RESEND_VERIFY_MS = 800;
 
   // ── Smart Model Router — tier-based, works across all providers ──────
   //
@@ -1195,6 +1205,14 @@
   let _routingUserChoice = {};
   let _routingLastRoute = {};
   let _weAreRouting = false;      // true while OUR code is driving the picker
+  let _routeCancelGen = 0;        // bumped when a route's watchdog fires (see applyRouteDecision)
+  /** A cancellation check for the picker-driving code (changeModelInUI): true
+   *  once the route that started it was abandoned by its watchdog, so a switch
+   *  that wakes up late stops at its next step instead of clicking on. */
+  function routeCancelToken() {
+    const gen = _routeCancelGen;
+    return () => gen !== _routeCancelGen;
+  }
   let _routeExpect = null;        // { key, tier, at } — what we last switched this tab to
   let _pickerLastSeen = null;     // { key, tier } — last tier the poller observed
   const _overrideConvs = new Set();        // conversation keys the user took back from us
@@ -1388,6 +1406,9 @@
       rule_name: d.rule_name,
       current_tier: d.from_tier,
       ui_changed: extra.ui_changed === undefined ? null : extra.ui_changed,
+      // How the paused prompt went out (finishRoutedSend): 'enter' | 'button' |
+      // 'not_submitted' | 'unsafe_<why>'. An enum, never content.
+      send: extra.send === undefined ? null : extra.send,
     };
     // `kind` first and literal: tests/load-conv-identity.mjs scans emit() calls for it.
     emit({ kind: 'model_routed', ...fields });
@@ -1438,10 +1459,10 @@
     const want = String(cfg.levels[level]);
     const btn = getModelButton();
     if (!btn) return null;
-    const closeMenus = async () => {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      await new Promise((res) => setTimeout(res, 100));
-    };
+    // closeOpenMenus: Escape from the focused element (so it bubbles through
+    // body, where Angular CDK listens, to document, where Radix listens), and
+    // only while a menu is actually showing.
+    const closeMenus = async () => { await closeOpenMenus(); };
     try {
       btn.click();
       const opener = await waitForEl(() => {
@@ -1526,8 +1547,21 @@
     if (e) { e.preventDefault(); e.stopImmediatePropagation(); if (typeof e.stopPropagation === 'function') e.stopPropagation(); }
     clog('[cfai] ROUTE:', d.from_tier, '→', d.target_tier, d.effort ? '(effort ' + d.effort + ')' : '', d.reason);
 
+    // ── STUCK IS IMPOSSIBLE ─────────────────────────────────────────────────
+    // Live 2026-10-06 (desktop agent, same flow): "it just opens the model
+    // window but doesn't change, and gets stuck there." The extension now ends
+    // EVERY route attempt -- switched, failed, threw, or past the watchdog --
+    // in the same invariant as the desktop agent:
+    //   (a) no model menu left open (closeOpenMenus);
+    //   (b) the paused prompt sent exactly once (finishRoutedSend: our Enter,
+    //       verified, and the composer's own send button only if the Enter
+    //       verifiably did not send), or -- when that is not safe (the user
+    //       edited the text, the conversation changed) -- left in the composer
+    //       with focus on it;
+    //   (c) one model_routed event, carrying `send` (how it went out).
     _weAreRouting = true;
-    (async () => {
+    const run = { conv: routingConvKey() };
+    const work = (async () => {
       let tierOk = d.target_tier === d.from_tier;   // effort-only decisions keep the tier
       let label = d.to_label;
       let failReason = null;
@@ -1540,7 +1574,22 @@
       let effortTo = null;
       if (tierOk && d.effort) effortTo = await setEffortInUI(r.entry, d.effort);
       return { tierOk, label, effortTo, failReason };
-    })().catch(() => ({ tierOk: false, label: d.to_label, effortTo: null, failReason: null })).then(({ tierOk, label, effortTo, failReason }) => {
+    })().catch(() => ({ tierOk: false, label: d.to_label, effortTo: null, failReason: 'exception' }));
+    // THE WATCHDOG. A switch that never settles (a picker that hangs, a promise
+    // that never resolves) must not keep the user's prompt paused: past
+    // ROUTE_WATCHDOG_MS it is abandoned (routeCancelToken stops it at its next
+    // step) and the prompt goes out once, unrouted.
+    let watchdogTimer = null;
+    const watchdog = new Promise((res) => {
+      watchdogTimer = setTimeout(() => res({ timedOut: true }), ROUTE_WATCHDOG_MS);
+    });
+    Promise.race([work, watchdog]).then(async (out) => {
+      try { clearTimeout(watchdogTimer); } catch {}
+      const timedOut = !!(out && out.timedOut);
+      if (timedOut) _routeCancelGen++;
+      const { tierOk, label, effortTo, failReason } = timedOut
+        ? { tierOk: false, label: d.to_label, effortTo: null, failReason: 'watchdog_timeout' }
+        : out;
       _weAreRouting = false;
       const st = r.st;
       if (tierOk && st) {
@@ -1552,37 +1601,91 @@
       const effortApplied = !!d.effort && effortTo === d.effort;
       const applied = tierOk && (d.target_tier !== d.from_tier || effortApplied);
       if (applied) showRoutingToast(canonicalLabel(r.entry, d.from_tier), label, d.rule_name);
+
+      // (a) Never leave a menu showing -- a switch that clicked its item but
+      // left the menu up, an Effort submenu, an abandoned switch.
+      try { await closeOpenMenus(); } catch {}
+      // (b) The ONE send.
+      let send = 'unsafe_exception';
+      try { send = await finishRoutedSend(el, text, run); } catch {}
+      // (c) The ONE event. A route whose prompt did NOT go out is a failed
+      // route whatever the picker did -- the stuck case must be visible in the
+      // data (the server's allowlist keeps result/reason; `send` is extra).
+      const sent = send === 'enter' || send === 'button';
+      const baseFail = tierOk ? 'effort_not_applied' : (failReason || 'target_item_not_found');
       emitModelRouted(
         { ...r, decision: { ...d, to_label: label } },
         {
-          result: applied ? 'applied' : 'failed',
-          reason: applied ? d.reason : (tierOk ? 'effort_not_applied' : (failReason || 'target_item_not_found')),
+          result: applied && sent ? 'applied' : 'failed',
+          reason: applied ? (sent ? d.reason : send) : (sent ? baseFail : baseFail + '_' + send),
           effort_to: effortTo,
           ui_changed: applied,
           len,
+          send,
         },
       );
-
-      // Re-trigger the send
-      _skipRouting = true;
-      setTimeout(() => {
-        const target = (el && el.isConnected) ? el : findActivePromptInput();
-        if (target) {
-          // Closing the picker / Claude's "Switch model?" dialog leaves focus on
-          // the picker button. Put it back on the composer before the re-send
-          // (live, Desktop e32cf4d: the switch landed and the prompt sat unsent).
-          try {
-            if (document.activeElement !== target && typeof target.focus === 'function') target.focus({ preventScroll: true });
-          } catch {}
-          target.dispatchEvent(new KeyboardEvent('keydown', {
-            key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
-            bubbles: true, cancelable: true,
-          }));
-        }
-        setTimeout(() => { _skipRouting = false; }, 500);
-      }, 200);
     });
     return true;
+  }
+
+  // Whitespace-insensitive equality for the composer's text, the same
+  // normalisation the desktop agent's NormalizeWs applies.
+  function sameComposerText(a, b) {
+    const n = (s) => String(s == null ? '' : s).replace(/[​-‍﻿]/g, '').replace(/\s+/g, ' ').trim();
+    return n(a) === n(b);
+  }
+
+  /**
+   * Re-send the paused prompt EXACTLY ONCE, or leave it where it is.
+   * Returns how it went (model_routed.send):
+   *   'enter'          our re-sent Enter took it
+   *   'button'         our Enter did not (the composer still held exactly the
+   *                    prompt ROUTE_RESEND_VERIFY_MS later -- a DOM read, no lag),
+   *                    so the composer's own send button was clicked, once
+   *   'not_submitted'  neither took it; the prompt stays, focused
+   *   'unsafe_*'       nothing was sent: no composer, the conversation changed,
+   *                    or the text is no longer what the user sent
+   */
+  async function finishRoutedSend(el, text, run) {
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+    const focusOn = (t) => {
+      // Closing the picker / Claude's "Switch model?" dialog leaves focus on
+      // the picker button. Put it back on the composer before the re-send
+      // (live, Desktop e32cf4d: the switch landed and the prompt sat unsent).
+      try {
+        if (document.activeElement !== t && typeof t.focus === 'function') t.focus({ preventScroll: true });
+      } catch {}
+    };
+    _skipRouting = true;
+    try {
+      await sleep(200);
+      const target = (el && el.isConnected) ? el : findActivePromptInput();
+      if (!target) return 'unsafe_no_composer';
+      if (routingConvKey() !== run.conv) return 'unsafe_navigated';
+      if (!sameComposerText(readInputText(target), text)) { focusOn(target); return 'unsafe_text_changed'; }
+      focusOn(target);
+      target.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+        bubbles: true, cancelable: true,
+      }));
+      await sleep(ROUTE_RESEND_VERIFY_MS);
+      if (!target.isConnected || !sameComposerText(readInputText(target), text)) return 'enter';
+      // Not sent. A menu our Enter opened (focus was on the picker) goes first.
+      try { await closeOpenMenus(); } catch {}
+      if (routingConvKey() !== run.conv) return 'unsafe_navigated';
+      const btn = findSendButtonForInput(target);
+      if (!btn) { focusOn(target); return 'not_submitted'; }
+      // Our own layers already logged this prompt on the Enter above: the
+      // click is ours, not a second user send.
+      markProgrammaticSend();
+      try { btn.click(); } catch {}
+      await sleep(ROUTE_RESEND_VERIFY_MS);
+      if (!target.isConnected || !sameComposerText(readInputText(target), text)) return 'button';
+      focusOn(target);
+      return 'not_submitted';
+    } finally {
+      setTimeout(() => { _skipRouting = false; }, 500);
+    }
   }
   // ── end model routing ─
 
@@ -1864,11 +1967,52 @@
       await sleep(stepMs);
     }
   }
+  // A model menu showing right now? Menu-shaped containers only (role menu /
+  // listbox, Angular Material's panel) -- never a dialog or a [popover] the
+  // page keeps around -- and never one of our own nodes.
+  const OPEN_MENU_SELECTOR = '[role="menu"], [role="listbox"], .mat-mdc-menu-panel';
+  function anyModelMenuOpen() {
+    try {
+      for (const m of document.querySelectorAll(OPEN_MENU_SELECTOR)) {
+        if (isVisibleEl(m) && !isCfaiOwnNode(m)) return true;
+      }
+    } catch {}
+    return false;
+  }
+
+  /**
+   * Close every model menu that is showing. Escape is dispatched from the
+   * FOCUSED element so it bubbles through body (Angular CDK's overlay keyboard
+   * dispatcher -- Gemini) and document (Radix -- claude.ai), carrying keyCode
+   * 27 for listeners that still read it; a still-open Angular menu then gets a
+   * click on its transparent backdrop. Bounded (3 rounds); nothing is pressed
+   * when no menu is showing. Resolves true when none is left.
+   */
+  async function closeOpenMenus() {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    for (let i = 0; i < 3 && anyModelMenuOpen(); i++) {
+      const t = document.activeElement || document.body || document;
+      const init = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true };
+      try { t.dispatchEvent(new KeyboardEvent('keydown', init)); } catch {}
+      try { t.dispatchEvent(new KeyboardEvent('keyup', init)); } catch {}
+      await sleep(120);
+      if (!anyModelMenuOpen()) break;
+      let backdrop = null;
+      try { backdrop = Array.from(document.querySelectorAll('.cdk-overlay-backdrop')).find((b) => isVisibleEl(b)) || null; } catch {}
+      if (backdrop) { try { backdrop.click(); } catch {} await sleep(120); }
+    }
+    return !anyModelMenuOpen();
+  }
   // ── end model-menu option lookup ─
 
   async function changeModelInUI(targetModelId) {
     const btn = getModelButton();
     if (!btn) { console.warn('[cfai] model button not found'); return false; }
+    // The route that started this switch may be abandoned by its watchdog
+    // (applyRouteDecision) while we wait on the page: stop at the next step,
+    // close what we opened, click nothing more.
+    const cancelled = routeCancelToken();
+    const abandon = async () => { try { await closeOpenMenus(); } catch {} return false; };
 
     const btnText = (btn.textContent || '').trim();
     const targetText = targetModelId;
@@ -1885,6 +2029,7 @@
     // model name, so it is itself a tempting shortest-match and clicking it just
     // closes the menu again.
     let targetEl = await waitForEl(() => findClickableByText(targetText, { exclude: btn }));
+    if (cancelled()) return abandon();
 
     if (!targetEl) {
       // Strategy A: look for "More models" sub-menu (Claude pattern)
@@ -1893,6 +2038,7 @@
         clog('[cfai] step 2a: clicking "More models"');
         moreEl.click();
         targetEl = await waitForEl(() => findClickableByText(targetText, { exclude: btn }));
+        if (cancelled()) return abandon();
       }
     }
 
@@ -1904,6 +2050,7 @@
           clog('[cfai] step 2b: clicking "' + altText + '"');
           altEl.click();
           targetEl = await waitForEl(() => findClickableByText(targetText, { exclude: btn }));
+          if (cancelled()) return abandon();
           if (targetEl) break;
         }
       }
@@ -1921,6 +2068,7 @@
       }
     }
 
+    if (targetEl && cancelled()) return abandon();
     if (targetEl) {
       clog('[cfai] clicking target:', (targetEl.textContent || '').trim().slice(0, 40));
       targetEl.click();
@@ -1933,10 +2081,10 @@
         + (offered.length
           ? 'open menu offered: ' + offered.join(' | ')
           : 'no open menu found — the model button click did not open a picker'));
-      // Close any open menus
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      await new Promise(r => setTimeout(r, 100));
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      // Close any open menus. NOT a bare document.dispatchEvent(Escape): an
+      // event dispatched AT document never passes through body, where Angular
+      // CDK (Gemini) listens -- Gemini's menu stayed open on every miss.
+      await closeOpenMenus();
       return false;
     }
 
@@ -1962,6 +2110,9 @@
     _modelBtnCache = null;
     const newBtn = findModelButton();
     const newText = newBtn ? (newBtn.textContent || '').trim() : '';
+    // An item click that switched the model but left its menu (or a submenu)
+    // showing must not leave it there: the re-sent Enter would land in it.
+    if (anyModelMenuOpen()) await closeOpenMenus();
     if (newText.includes(targetText)) {
       clog('[cfai] ✓ model changed:', btnText, '→', newText);
       return true;

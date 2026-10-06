@@ -104,3 +104,10 @@ test('an explicit v2 result wins over legacy ui_changed', async () => {
     assert.equal(db._rows('dlp_events')[0].routing_result, 'user_override');
   });
 });
+
+test('model_routed keeps the send outcome code (and drops anything that is not a code)', async () => {
+  const { routingMetaFields } = await import('../src/routes/dlp.js');
+  assert.equal(routingMetaFields({ send: 'enter' }).send, 'enter');
+  assert.equal(routingMetaFields({ send: 'unsafe_text_changed' }).send, 'unsafe_text_changed');
+  assert.equal('send' in routingMetaFields({ send: 'Hello world, my SSN is…' }), false);
+});
