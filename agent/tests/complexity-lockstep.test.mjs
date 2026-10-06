@@ -161,6 +161,40 @@ test('an EMPTY lexicon classifies everything as unknown — never a routable gue
   for (const v of verdicts) assert.deepEqual(v, { verdict: 'unknown', rule: 'no_lexicon', score: null });
 });
 
+// REGRESSION: long-086/087/088 came back { moderate, error } from C# on a loaded
+// machine. Every lexicon scan ran under the DLP scanner's 25 ms wall-clock
+// REGEX_TIMEOUT; a ~4 KB window takes several ms per scan idle, so CPU
+// contention tripped RegexMatchTimeoutException into the catch-all. A timeout
+// must now be 'unknown' / 'timeout' (never routed), and the classifier's own
+// limit must leave a wide margin.
+test('REGRESSION: a classifier timeout is unknown/timeout, never moderate/error', SKIP, async () => {
+  const lines = await runHarness();
+  const probe = new Map(lines.filter((l) => l.t === 'classify' && l.config === 'budget0').map((l) => [l.id, JSON.parse(l.json)]));
+  assert.equal(probe.size, CORPUS.cases.length, 'harness did not run the zero-budget probe');
+  for (const id of ['long-086', 'long-087', 'long-088']) {
+    assert.deepEqual(probe.get(id), { verdict: 'unknown', rule: 'timeout', score: null }, id);
+  }
+  for (const c of CORPUS.cases) {
+    const v = probe.get(c.id);
+    assert.notEqual(v.rule, 'error', `${c.id} hit the catch-all under the zero budget`);
+    if (v.rule !== 'timeout') assert.deepEqual(v, canonical.classifyDetailed(c.text), `${c.id} pre-budget steps must still match JS`);
+  }
+});
+
+test('REGRESSION: the C# classifier does not run under the 25 ms DLP regex timeout', () => {
+  const src = readFileSync(ENFORCER, 'utf8');
+  const m = src.match(/static readonly TimeSpan MR_REGEX_TIMEOUT = TimeSpan\.FromMilliseconds\((\d+)\);/);
+  assert.ok(m, 'MR_REGEX_TIMEOUT must exist');
+  assert.ok(Number(m[1]) >= 250, `MR_REGEX_TIMEOUT ${m[1]} ms leaves no margin over a ~6 ms scan under load`);
+  const body = src.slice(src.indexOf('static Regex MrJsRegex('), src.indexOf('static string MrJsTrim('));
+  assert.match(body, /new Regex\(netSource, opts, MR_REGEX_TIMEOUT\)/);
+  for (const field of ['_mrJsWsRun', '_mrNonWordChars']) {
+    assert.match(src, new RegExp(`static readonly Regex ${field} = new Regex\\([^;]*MR_REGEX_TIMEOUT\\);`), field);
+  }
+  // Declared above the first static Regex initializer that reads it.
+  assert.ok(src.indexOf('static readonly TimeSpan MR_REGEX_TIMEOUT') < src.indexOf('static readonly Regex _mrJsWsRun'));
+});
+
 test('corpus expectations hold for the canonical classifier', () => {
   for (const c of CORPUS.cases) {
     if (!c.expect) continue;

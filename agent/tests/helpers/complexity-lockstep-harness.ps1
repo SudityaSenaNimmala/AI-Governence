@@ -55,6 +55,7 @@ foreach ($line in [System.IO.File]::ReadAllLines($Cases, $utf8)) {
   $prompts += ,@($c.id, $utf8.GetString([Convert]::FromBase64String($c.b64)))
 }
 
+$lastLoaded = $null
 foreach ($line in [System.IO.File]::ReadAllLines($Configs, $utf8)) {
   if (-not $line.Trim()) { continue }
   $cfg = $line | ConvertFrom-Json
@@ -64,6 +65,24 @@ foreach ($line in [System.IO.File]::ReadAllLines($Configs, $utf8)) {
     $json = [string](Call 'ClassifyComplexityDetailedJson' @(,[string]$p[1]))
     Emit @{ t = 'classify'; config = $cfg.name; id = $p[0]; json = $json }
   }
+  if ([bool](GetF '_mrLexiconLoaded')) { $lastLoaded = $cfg }
+}
+
+# TIMEOUT PROBE. With the per-classify budget forced to zero, every prompt
+# that gets past the greeting step must come back 'unknown' / 'timeout' --
+# never a routable guess and never 'moderate'/'error'. Emitted as config
+# 'budget0' so the lockstep assertions above never see it.
+if ($lastLoaded) {
+  [void](Call 'LoadModelRouterConfig' @([System.IO.File]::ReadAllText($lastLoaded.path, $utf8)))
+  $budget = $T.GetField('_mrClassifyBudgetTicks', $FLAGS)
+  $saved = $budget.GetValue($null)
+  $budget.SetValue($null, [long]0)
+  try {
+    foreach ($p in $prompts) {
+      $json = [string](Call 'ClassifyComplexityDetailedJson' @(,[string]$p[1]))
+      Emit @{ t = 'classify'; config = 'budget0'; id = $p[0]; json = $json }
+    }
+  } finally { $budget.SetValue($null, $saved) }
 }
 
 Emit @{ t = 'done' }
